@@ -82,20 +82,26 @@ pub async fn prepare(
     }
     let args: HashMap<String, serde_json::Value> =
         serde_json::from_str(&call.function.arguments).map_err(|_| "invalid command arguments")?;
-    let mut request = match call.function.name.as_str() {
+    let (mut request, checkout) = match call.function.name.as_str() {
         "shell" => crate::tools::shell_approval_request(ccx, &args).await?,
         _ => crate::tools::process_approval_request(ccx, &args).await?,
     };
     freeze(&mut request)?;
-    descriptor(&request, reason).map(Some)
+    let mut approval = descriptor(&request, reason)?;
+    if let Some(checkout) = &checkout {
+        checkout.revalidate(ccx, &args, &request).await?;
+        checkout.bind_approval(&mut approval, &request)?;
+    }
+    Ok(Some(approval))
 }
 
-pub async fn enforce(
+pub(crate) async fn enforce(
     ccx: &Arc<Mutex<AtCommandsContext>>,
     call_id: &str,
     tool_name: &str,
     args: &HashMap<String, serde_json::Value>,
     request: &mut ExecSpawnRequest,
+    checkout: Option<&crate::tools::command_checkout::ValidatedCommandCheckout>,
 ) -> Result<(), String> {
     let (approval, app) = {
         let mut context = ccx.lock().await;
@@ -150,7 +156,11 @@ pub async fn enforce(
         return Err("command approval belongs to a stale child attempt".into());
     }
     freeze(request)?;
-    if descriptor(request, &execution.reason)? != execution {
+    let mut current = descriptor(request, &execution.reason)?;
+    if let Some(checkout) = checkout {
+        checkout.bind_approval(&mut current, request)?;
+    }
+    if current != execution {
         return Err("approved command, working directory, environment or privilege changed; request approval again".into());
     }
     Ok(())
@@ -268,17 +278,22 @@ mod tests {
                 attempted.command = "echo changed".into();
             }
             assert_eq!(
-                enforce(&ccx, call, "shell", &HashMap::new(), &mut attempted)
+                enforce(&ccx, call, "shell", &HashMap::new(), &mut attempted, None)
                     .await
                     .is_ok(),
                 !change
             );
-            assert!(
-                enforce(&ccx, call, "shell", &HashMap::new(), &mut request.clone())
-                    .await
-                    .unwrap_err()
-                    .contains("already been used")
-            );
+            assert!(enforce(
+                &ccx,
+                call,
+                "shell",
+                &HashMap::new(),
+                &mut request.clone(),
+                None
+            )
+            .await
+            .unwrap_err()
+            .contains("already been used"));
         }
     }
 }

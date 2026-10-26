@@ -1,6 +1,6 @@
 //! One bounded read projection for model tools, HTTP and the Work panel.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -185,19 +185,258 @@ fn caller_relative_paths(caller: &WorkCaller, selected: &[PathBuf]) -> Vec<PathB
         .collect()
 }
 
-fn fingerprint(
-    rows: &[WorkRow],
-    roots: &[WorkRootRef],
-    detail: Option<&WorkRow>,
-    degraded: &[String],
-) -> Result<String, WorkError> {
-    let stable = |row: &WorkRow| row.clone();
+#[derive(Clone, Debug, Default, Serialize)]
+pub(super) struct WorkSnapshot {
+    pub rows: Vec<WorkRow>,
+    pub roots: Vec<WorkRootRef>,
+    pub detail: Option<WorkRow>,
+    pub degraded: Vec<String>,
+    pub advisory: BTreeSet<String>,
+    pub file_provenance: Vec<super::file_provenance::ProvenanceEntry>,
+    pub wait_graph: Option<super::deadlock::WaitGraphView>,
+    pub selected_paths: Vec<PathBuf>,
+    pub guard_rows: Vec<WorkRow>,
+}
+
+impl WorkSnapshot {
+    pub fn total(&self) -> usize {
+        if self.rows.is_empty() {
+            self.roots.len()
+        } else {
+            self.rows.len()
+        }
+    }
+
+    pub fn units(&self) -> usize {
+        self.rows
+            .len()
+            .saturating_add(self.roots.len())
+            .saturating_add(usize::from(self.detail.is_some()))
+            .saturating_add(self.advisory.len())
+            .saturating_add(self.selected_paths.len())
+            .saturating_add(self.file_provenance.len())
+            .saturating_add(self.guard_rows.len())
+            .saturating_add(
+                self.wait_graph
+                    .as_ref()
+                    .map_or(0, |g| g.nodes.len().saturating_add(g.edges.len())),
+            )
+            .saturating_add(
+                self.rows
+                    .iter()
+                    .chain(self.detail.iter())
+                    .chain(self.guard_rows.iter())
+                    .fold(0usize, |n, row| n.saturating_add(row.source_records.len())),
+            )
+    }
+
+    pub fn signature(&self, binding: &ViewBinding) -> Result<(String, usize), WorkError> {
+        use sha2::{Digest, Sha256};
+        struct Counter {
+            bytes: usize,
+            hash: Sha256,
+        }
+        impl std::io::Write for Counter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.bytes = self
+                    .bytes
+                    .checked_add(bytes.len())
+                    .ok_or_else(|| std::io::Error::other("snapshot size overflow"))?;
+                self.hash.update(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut output = Counter {
+            bytes: 0,
+            hash: Sha256::new(),
+        };
+        serde_json::to_writer(&mut output, &(binding, self))
+            .map_err(|_| WorkError::unavailable())?;
+        for row in self
+            .rows
+            .iter()
+            .chain(self.detail.iter())
+            .chain(self.guard_rows.iter())
+        {
+            serde_json::to_writer(
+                &mut output,
+                &(
+                    &row.source_records,
+                    row.provenance_complete,
+                    row.metadata.source_revision,
+                ),
+            )
+            .map_err(|_| WorkError::unavailable())?;
+        }
+        Ok((hex::encode(output.hash.finalize()), output.bytes))
+    }
+
+    pub fn slice(&self, offset: usize, end: usize) -> Self {
+        let rows = self
+            .rows
+            .iter()
+            .skip(offset)
+            .take(end - offset)
+            .cloned()
+            .collect::<Vec<_>>();
+        let used: HashSet<_> = rows.iter().map(|r| &r.root.id).collect();
+        let roots = if self.rows.is_empty() {
+            self.roots
+                .iter()
+                .skip(offset)
+                .take(end - offset)
+                .cloned()
+                .collect()
+        } else {
+            self.roots
+                .iter()
+                .filter(|r| used.contains(&r.id))
+                .cloned()
+                .collect()
+        };
+        Self {
+            advisory: self
+                .advisory
+                .iter()
+                .filter(|key| rows.iter().any(|r| r.key.to_string() == **key))
+                .cloned()
+                .collect(),
+            rows,
+            roots,
+            detail: self.detail.clone(),
+            degraded: self.degraded.clone(),
+            file_provenance: self.file_provenance.clone(),
+            wait_graph: self.wait_graph.clone(),
+            selected_paths: self.selected_paths.clone(),
+            guard_rows: self.guard_rows.clone(),
+        }
+    }
+}
+
+fn row_scope(row: &WorkRow) -> Result<String, WorkError> {
     digest(&(
-        rows.iter().map(stable).collect::<Vec<_>>(),
-        roots,
-        detail.map(stable),
-        degraded,
+        &row.key,
+        row.kind,
+        &row.chat_id,
+        &row.parent_chat_id,
+        &row.root_chat_id,
+        &row.metadata.run,
+        &row.metadata.task_id,
+        &row.metadata.card_id,
+        &row.root.id,
+        &row.root.project,
+        &row.root.path,
+        &row.root.source_path,
     ))
+}
+
+fn revalidate_snapshot(
+    app: &AppState,
+    caller: &WorkCaller,
+    disclosure: &str,
+    catalog: &WorkCatalog,
+    provenance: &[super::file_provenance::ProvenanceEntry],
+    snapshot: &WorkSnapshot,
+) -> Result<(), WorkError> {
+    for row in snapshot
+        .rows
+        .iter()
+        .chain(snapshot.detail.iter())
+        .chain(snapshot.guard_rows.iter())
+    {
+        let current = catalog
+            .get(&row.key.to_string())
+            .ok_or_else(WorkError::cursor_expired)?;
+        if row_scope(row)? != row_scope(current)?
+            || current.metadata.source_revision < row.metadata.source_revision
+            || !row
+                .source_records
+                .iter()
+                .all(|record| current.source_records.contains(record))
+        {
+            return Err(WorkError::cursor_expired());
+        }
+    }
+    for root in &snapshot.roots {
+        let current = catalog
+            .roots
+            .by_id
+            .get(&root.id)
+            .ok_or_else(WorkError::cursor_expired)?;
+        if root.project != current.project
+            || root.path != current.path
+            || root.source_path != current.source_path
+        {
+            return Err(WorkError::cursor_expired());
+        }
+    }
+    if !snapshot
+        .file_provenance
+        .iter()
+        .all(|entry| provenance.contains(entry))
+    {
+        return Err(WorkError::cursor_expired());
+    }
+    for path in &snapshot.selected_paths {
+        if resolve_path(path.to_str().ok_or_else(WorkError::scope_denied)?, caller)? != *path {
+            return Err(WorkError::scope_denied());
+        }
+    }
+    if let Some(model) = &caller.model {
+        if privacy_guard::policy_key(&app.gcx, model)? != disclosure {
+            return Err(WorkError::policy_unavailable());
+        }
+        let mut audit = snapshot
+            .rows
+            .iter()
+            .chain(snapshot.detail.iter())
+            .chain(snapshot.guard_rows.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        for row in &mut audit {
+            row.observed_files
+                .extend(row.source_records.iter().map(|r| r.path.clone()));
+        }
+        let expected = audit.len();
+        if privacy_guard::clear_rows(&app.gcx, audit, model)?.len() != expected
+            || privacy_guard::clear_roots(&app.gcx, snapshot.roots.clone(), model)?.len()
+                != snapshot.roots.len()
+            || super::file_provenance::clear_for_model(
+                &app.gcx,
+                Some(model),
+                snapshot.file_provenance.clone(),
+            )?
+            .len()
+                != snapshot.file_provenance.len()
+        {
+            return Err(WorkError::cursor_expired());
+        }
+        let selected = snapshot
+            .selected_paths
+            .iter()
+            .map(|path| WorkRootRef {
+                id: String::new(),
+                kind: super::types::WorkRootKind::Project,
+                path: Some(path.to_string_lossy().into_owned()),
+                branch: None,
+                project: catalog.project.clone(),
+                source_path: None,
+                presence: Default::default(),
+            })
+            .collect();
+        if privacy_guard::clear_roots(&app.gcx, selected, model)?.len()
+            != snapshot.selected_paths.len()
+        {
+            return Err(WorkError::not_visible());
+        }
+        if privacy_guard::policy_key(&app.gcx, model)? != disclosure {
+            return Err(WorkError::policy_unavailable());
+        }
+    }
+    Ok(())
 }
 
 fn page(
@@ -205,78 +444,89 @@ fn page(
     caller: &WorkCaller,
     disclosure: String,
     request: &WorkOverviewRequest,
-    mut rows: Vec<WorkRow>,
-    roots: Vec<WorkRootRef>,
+    mut snapshot: WorkSnapshot,
     filter: String,
-    detail: Option<&WorkRow>,
-    degraded: Vec<String>,
-) -> Result<WorkOverview, WorkError> {
+    catalog: &WorkCatalog,
+) -> Result<(WorkOverview, WorkSnapshot), WorkError> {
     let settings = crate::file_activity::settings();
-    rows.sort_by_key(|row| (std::cmp::Reverse(row.updated_at_ms), row.key.to_string()));
-    let fingerprint = fingerprint(&rows, &roots, detail, &degraded)?;
+    snapshot
+        .rows
+        .sort_by_key(|row| (std::cmp::Reverse(row.updated_at_ms), row.key.to_string()));
+    snapshot.roots.sort_by(|a, b| a.id.cmp(&b.id));
     let binding = ViewBinding {
         project: super::roots::project_identity(&caller.source_root),
         principal: caller.principal.clone(),
-        disclosure,
+        disclosure: disclosure.clone(),
         filter,
     };
-    let total = if rows.is_empty() {
-        roots.len()
-    } else {
-        rows.len()
-    };
-    let page_unit = if rows.is_empty() && !roots.is_empty() {
-        "worktrees"
-    } else {
-        "work"
-    };
-    let window = app.work_views.page(
+    let provenance = snapshot.file_provenance.clone();
+    let frozen = app.work_views.frozen_page(
         binding,
-        fingerprint,
-        total,
+        snapshot,
         request.rows.unwrap_or(settings.overview_default_rows),
         request.cursor.as_deref(),
         &settings,
         now_ms(),
+        |saved| revalidate_snapshot(app, caller, &disclosure, catalog, &provenance, saved),
     )?;
-    // The roots-only inventory uses the same bounded paging, not an unbounded
-    // side channel attached to a one-row response.
-    let roots = if rows.is_empty() {
-        roots
-            .into_iter()
-            .skip(window.offset)
-            .take(window.end - window.offset)
-            .collect()
+    let window = frozen.window;
+    let snapshot = frozen.snapshot;
+    let page_unit = if snapshot.rows.is_empty() && !snapshot.roots.is_empty() {
+        "worktrees"
     } else {
-        let used: HashSet<_> = rows[window.offset.min(rows.len())..window.end.min(rows.len())]
-            .iter()
-            .map(|r| &r.root.id)
-            .collect();
-        roots.into_iter().filter(|r| used.contains(&r.id)).collect()
+        "work"
     };
-    let page = rows
-        .into_iter()
-        .skip(window.offset)
-        .take(window.end - window.offset)
-        .collect::<Vec<_>>();
-    Ok(WorkOverview {
-        snapshot_id: window.snapshot_id,
-        seq: window.seq,
-        project: super::roots::project_identity(&caller.source_root),
-        coverage: "partial".into(),
-        page_unit: page_unit.into(),
-        scope: request.scope,
-        root: request.root.clone(),
-        generated_at_ms: now_ms(),
-        returned: window.end - window.offset,
-        rows: page,
-        total,
-        truncated: window.next_cursor.is_some(),
-        next_cursor: window.next_cursor,
-        roots,
-        withheld_rows: 0,
-        degraded,
-    })
+    let mut records = Vec::new();
+    if caller.model.is_some() {
+        let paths = snapshot.selected_paths.iter().cloned().chain(
+            snapshot
+                .file_provenance
+                .iter()
+                .map(|entry| PathBuf::from(&entry.path)),
+        );
+        records = crate::privacy::records::declared_file_records(&app.gcx, paths)
+            .map_err(|_| WorkError::policy_unavailable())?;
+        records.extend(
+            snapshot
+                .guard_rows
+                .iter()
+                .flat_map(|row| row.source_records.clone()),
+        );
+        if privacy_guard::policy_key(
+            &app.gcx,
+            caller
+                .model
+                .as_ref()
+                .ok_or_else(WorkError::policy_unavailable)?,
+        )? != disclosure
+        {
+            return Err(WorkError::policy_unavailable());
+        }
+    }
+    Ok((
+        WorkOverview {
+            snapshot_id: window.snapshot_id,
+            seq: window.seq,
+            project: super::roots::project_identity(&caller.source_root),
+            coverage: "partial".into(),
+            page_unit: page_unit.into(),
+            scope: request.scope,
+            root: request.root.clone(),
+            generated_at_ms: now_ms(),
+            snapshot_observed_at_ms: frozen.observed_at,
+            snapshot_stale: frozen.stale,
+            rows: snapshot.rows.clone(),
+            total: frozen.total,
+            returned: window.end - window.offset,
+            truncated: window.next_cursor.is_some(),
+            next_cursor: window.next_cursor,
+            roots: snapshot.roots.clone(),
+            withheld_rows: 0,
+            degraded: snapshot.degraded.clone(),
+            source_records: records,
+        },
+        snapshot,
+    ))
 }
 
 pub async fn overview(
@@ -333,12 +583,17 @@ pub async fn overview(
         caller,
         disclosure,
         &request,
-        rows,
-        roots,
+        WorkSnapshot {
+            rows,
+            roots,
+            selected_paths: selected.into_iter().collect(),
+            degraded: catalog.degraded.clone(),
+            ..Default::default()
+        },
         digest(&(&filter, &request.root, &caller.checkout_root))?,
-        None,
-        catalog.degraded,
+        &catalog,
     )
+    .map(|(page, _)| page)
 }
 
 pub async fn inspect(
@@ -389,7 +644,7 @@ pub async fn inspect(
                         return true;
                     }
                     if logical_path_matches(r, caller, &relative) {
-                        advisory.insert(r.key.clone());
+                        advisory.insert(r.key.to_string());
                         return true;
                     }
                     false
@@ -416,7 +671,7 @@ pub async fn inspect(
         }
         InspectSelector::WaitGraph {} => Vec::new(),
     };
-    let wait_graph = match &request.selector {
+    let mut wait_graph = match &request.selector {
         InspectSelector::WaitGraph {} => Some(super::deadlock::visible_view(
             app,
             &catalog
@@ -427,29 +682,25 @@ pub async fn inspect(
         )),
         _ => None,
     };
+    let guard_rows = if let Some(graph) = &mut wait_graph {
+        if caller.model.is_some() {
+            graph.withheld_nodes = 0;
+        }
+        graph.nodes.sort_by_key(|node| node.run.to_string());
+        catalog
+            .all_rows()
+            .into_iter()
+            .filter(|row| graph.nodes.iter().any(|node| node.run.work == row.key))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let overview_request = WorkOverviewRequest {
         cursor: request.cursor.clone(),
         rows: request.limit,
         ..Default::default()
     };
     let filter = digest(&(&request.selector, request.limit, &caller.checkout_root))?;
-    let page = page(
-        app,
-        caller,
-        disclosure,
-        &overview_request,
-        rows,
-        roots,
-        filter,
-        row.as_ref(),
-        catalog.degraded,
-    )?;
-    let integration_overlaps = page
-        .rows
-        .iter()
-        .filter(|row| advisory.contains(&row.key))
-        .map(|row| row.key.to_string())
-        .collect();
     let file_keys: Vec<String> = paths
         .iter()
         .map(|path| crate::file_activity::resolve_key(path).0)
@@ -459,12 +710,31 @@ pub async fn inspect(
         caller.model.as_ref(),
         super::file_provenance::entries_for_files(&file_keys).await,
     )?;
+    let (page, snapshot) = page(
+        app,
+        caller,
+        disclosure,
+        &overview_request,
+        WorkSnapshot {
+            rows,
+            roots,
+            detail: row,
+            degraded: catalog.degraded.clone(),
+            advisory: advisory.into_iter().collect(),
+            wait_graph,
+            file_provenance,
+            selected_paths: paths,
+            guard_rows,
+        },
+        filter,
+        &catalog,
+    )?;
     Ok(Inspection {
         selector: request.selector,
-        row,
-        integration_overlaps,
-        wait_graph,
-        file_provenance,
+        row: snapshot.detail,
+        integration_overlaps: snapshot.advisory.into_iter().collect(),
+        wait_graph: snapshot.wait_graph,
+        file_provenance: snapshot.file_provenance,
         page,
     })
 }
@@ -487,6 +757,9 @@ pub fn attach_provenance(
         .map(PathBuf::from);
     let roots = crate::privacy::records::declared_file_records(&app.gcx, paths)
         .map_err(|_| WorkError::policy_unavailable())?;
-    crate::privacy::records::merge_records(message, records.chain(roots));
+    crate::privacy::records::merge_records(
+        message,
+        records.chain(roots).chain(page.source_records.clone()),
+    );
     Ok(())
 }

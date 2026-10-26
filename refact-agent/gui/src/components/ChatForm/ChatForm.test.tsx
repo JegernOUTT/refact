@@ -9,6 +9,12 @@ import { render, waitFor } from "../../utils/test-utils";
 import { ChatForm, ChatFormProps } from "./ChatForm";
 import { createDefaultChatState } from "../../utils/test-utils";
 import { applyChatEvent } from "../../features/Chat/Thread";
+import type {
+  ChatMessage,
+  ChatMessages,
+  GoalSnapshot,
+} from "../../services/refact/types";
+import type { ChatEventEnvelope } from "../../services/refact/chatSubscription";
 
 import {
   server,
@@ -119,6 +125,86 @@ function pasteFile(
     },
   });
 }
+
+function rebuiltReport(payloadMessages: ChatMessages): ChatMessage {
+  return {
+    role: "compression_report",
+    content: "Context rebuilt",
+    message_id: "report-1",
+    compression_report: {
+      kind: "reconstructed_history",
+      schema_version: 1,
+      payload: { messages: payloadMessages },
+    },
+  } as unknown as ChatMessage;
+}
+
+const blockedContextMessages: ChatMessages = [
+  { role: "user", content: "original", message_id: "orig-1" },
+  rebuiltReport([
+    { role: "user", content: "one", message_id: "dup" },
+    { role: "assistant", content: "two", message_id: "dup" },
+  ]),
+];
+
+const validRebuiltMessages: ChatMessages = [
+  { role: "user", content: "original", message_id: "orig-1" },
+  rebuiltReport([
+    { role: "user", content: "one", message_id: "p-1" },
+    { role: "assistant", content: "two", message_id: "p-2" },
+  ]),
+];
+
+function rebuiltSnapshot(
+  chatId: string,
+  messages: ChatMessages,
+): ChatEventEnvelope {
+  return {
+    chat_id: chatId,
+    seq: "0",
+    type: "snapshot",
+    thread: {
+      id: chatId,
+      title: "Rebuilt",
+      model: "openai/gpt-4o",
+      mode: "AGENT",
+      tool_use: "agent",
+      boost_reasoning: false,
+      context_tokens_cap: null,
+      include_project_info: true,
+      checkpoints_enabled: true,
+      is_title_generated: false,
+    },
+    runtime: {
+      state: "idle",
+      paused: false,
+      error: null,
+      queue_size: 0,
+      pause_reasons: [],
+      queued_items: [],
+    },
+    messages,
+    background_agents: [],
+  };
+}
+
+const pausedGoal: GoalSnapshot = {
+  owner: { kind: "task", id: "task-1" },
+  content: "Finish the plan",
+  version: 1,
+  active: false,
+  status: "paused",
+  budget: { cooldown_ms: 0, no_progress_token_threshold: 0 },
+  progress: {
+    turns_used: 0,
+    tokens_used: 0,
+    started_at_ms: 0,
+    no_progress_turns: 0,
+    last_nudge_at_ms: 0,
+  },
+  attempts: [],
+  events: [],
+};
 
 server.use(...handlers);
 
@@ -832,6 +918,106 @@ describe("ChatForm", () => {
     );
     expect(css).not.toMatch(/^\s*\.controlsSwapItem > span\s*\{/m);
     expect(css).not.toMatch(/^\.topStatusControls > span,/m);
+  });
+
+  test("context rebuild gate disables send, explains why, keeps the draft and wires the rebuild action", async () => {
+    const fakeOnSubmit = vi.fn();
+    const previewRequests: { path: string; body: unknown }[] = [];
+    server.use(
+      http.post(
+        "*/v1/chats/:id/trajectory/llm-compress/preview",
+        async ({ request }) => {
+          previewRequests.push({
+            path: new URL(request.url).pathname,
+            body: await request.json(),
+          });
+          return HttpResponse.json({
+            eligible: true,
+            trajectory_version: 3,
+            source_messages: 2,
+            approximate_source_tokens: 120,
+          });
+        },
+      ),
+    );
+
+    const chat = chatStateWithThread({
+      model: "openai/gpt-4o",
+      messages: blockedContextMessages,
+    });
+    const threadId = chat.current_thread_id;
+    const { user, store } = render(<App onSubmit={fakeOnSubmit} />, {
+      preloadedState: { chat, ...engineConfigState },
+    });
+
+    const textarea = screen.getByTestId("chat-form-textarea");
+    const form = textarea.closest("form");
+    expect(form?.className).toContain("chatFormCollapsed");
+    expect(
+      screen.getByText(
+        "This chat's rebuilt context could not be read. Rebuild the context to continue.",
+      ),
+    ).toBeInTheDocument();
+    const rebuildButton = screen.getByRole("button", {
+      name: "Rebuild context",
+    });
+    expect(rebuildButton).toBeEnabled();
+
+    await user.type(textarea, "keep this draft");
+    expect(screen.getByLabelText("Send message")).toBeDisabled();
+    await user.keyboard("{Enter}");
+    expect(fakeOnSubmit).not.toHaveBeenCalled();
+    expect(textarea).toHaveValue("keep this draft");
+
+    await user.click(rebuildButton);
+    await screen.findByText(/Rebuilds the active conversation context/);
+    const previewButton = screen.getByRole("button", { name: "Preview" });
+    await waitFor(() => expect(previewButton).toBeEnabled());
+    await user.click(previewButton);
+    await waitFor(() => expect(previewRequests).toHaveLength(1));
+    expect(previewRequests[0]).toEqual({
+      path: `/v1/chats/${threadId}/trajectory/llm-compress/preview`,
+      body: { options: {} },
+    });
+    expect(textarea).toHaveValue("keep this draft");
+
+    store.dispatch(
+      applyChatEvent(rebuiltSnapshot(threadId, validRebuiltMessages)),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByLabelText("Send message")).toBeEnabled(),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Rebuild context" }),
+    ).not.toBeInTheDocument();
+    expect(textarea).toHaveValue("keep this draft");
+    await user.click(screen.getByLabelText("Send message"));
+    expect(fakeOnSubmit).toHaveBeenCalledWith(
+      "keep this draft\n",
+      "after_flow",
+    );
+  });
+
+  test("a paused goal does not disable manual sends", async () => {
+    const fakeOnSubmit = vi.fn();
+    const chat = chatStateWithThread({
+      model: "openai/gpt-4o",
+      messages: [{ role: "user", content: "earlier" }],
+      goal: pausedGoal,
+    });
+    const { user } = render(<App onSubmit={fakeOnSubmit} />, {
+      preloadedState: { chat, ...engineConfigState },
+    });
+
+    const textarea = screen.getByTestId("chat-form-textarea");
+    await user.type(textarea, "manual nudge");
+    expect(screen.getByLabelText("Send message")).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "Rebuild context" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByLabelText("Send message"));
+    expect(fakeOnSubmit).toHaveBeenCalledWith("manual nudge\n", "after_flow");
   });
 
   test.each([

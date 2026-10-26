@@ -235,6 +235,27 @@ pub async fn handle_v1_chat_subscribe(
     if let Err(error) = crate::agents::delivery::recover_runner_deliveries(&app, &chat_id).await {
         tracing::warn!(%chat_id, %error, "runner delivery recovery failed");
     }
+    let (needs_task_goal, version) = {
+        let session = session_arc.lock().await;
+        (
+            session.task_goal_messages.is_none(),
+            session.trajectory_version,
+        )
+    };
+    if needs_task_goal {
+        if let Err(error) =
+            crate::tasks::goal::hydrate_session_task_goal(app.gcx.clone(), &session_arc).await
+        {
+            tracing::warn!(%chat_id, %error, "Task goal hydration before snapshot refused");
+        } else if session_arc.lock().await.trajectory_version != version {
+            super::trajectories::maybe_save_trajectory_with_intent(
+                app.clone(),
+                session_arc.clone(),
+                TrajectoryCommitIntent::Required,
+            )
+            .await;
+        }
+    }
     spawn_pending_background_agent_flush(app.clone(), chat_id.clone());
     let session = session_arc.lock().await;
     let mut rx = session.subscribe();

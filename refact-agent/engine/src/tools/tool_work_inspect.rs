@@ -51,16 +51,31 @@ impl Tool for ToolWorkInspect {
         let caller = scope::model_caller(&app, &chat_id, &model)
             .await
             .map_err(|e| e.to_string())?;
+        let worktree_id = match &request.selector {
+            service::InspectSelector::Worktree { worktree_id } => Some(worktree_id.clone()),
+            _ => None,
+        };
         let inspection = service::inspect(&app, &caller, request)
             .await
             .map_err(|e| e.to_string())?;
+        let receipt = if let Some(worktree_id) = worktree_id {
+            super::command_checkout::inspection_receipt(&ccx, &worktree_id).await
+        } else {
+            None
+        };
+        let content = if let Some((selector, _)) = &receipt {
+            let mut response = serde_json::to_value(&inspection)
+                .map_err(|_| WorkError::unavailable().to_string())?;
+            response["command_checkout"] = json!(selector);
+            serde_json::to_string(&response)
+        } else {
+            serde_json::to_string(&inspection)
+        }
+        .map_err(|_| WorkError::unavailable().to_string())?;
         let mut message = ChatMessage {
             role: "tool".into(),
             tool_call_id: tool_call_id.clone(),
-            content: ChatContent::SimpleText(
-                serde_json::to_string(&inspection)
-                    .map_err(|_| WorkError::unavailable().to_string())?,
-            ),
+            content: ChatContent::SimpleText(content),
             ..Default::default()
         };
         service::attach_provenance(
@@ -70,6 +85,9 @@ impl Tool for ToolWorkInspect {
             inspection.row.as_ref(),
         )
         .map_err(|e| e.to_string())?;
+        if let Some((_, records)) = receipt {
+            crate::privacy::records::merge_records(&mut message, records);
+        }
         Ok((false, vec![ContextEnum::ChatMessage(message)]))
     }
     fn tool_depends_on(&self) -> Vec<String> {

@@ -1491,7 +1491,7 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let workspace_root = workspace.path().canonicalize().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![workspace_root];
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![workspace_root.clone()];
         let (defaults_root, _) = crate::caps::project_model_defaults_state(gcx.clone()).await;
         {
             let mut caps = crate::caps::CodeAssistantCaps::default();
@@ -1516,6 +1516,15 @@ mod tests {
                 .as_secs();
         }
         let app = crate::app_state::AppState::from_gcx(gcx).await;
+        let mut parent = crate::chat::types::ChatSession::new(request.parent_chat_id.clone());
+        parent.work_project_root = Some(workspace_root);
+        parent.thread.model = request.model.clone();
+        parent.thread.mode = "agent".into();
+        parent.active_command.allowed_tools = guard.tools.clone();
+        app.chat.sessions.write().await.insert(
+            request.parent_chat_id.clone(),
+            std::sync::Arc::new(tokio::sync::Mutex::new(parent)),
+        );
         let entered = std::sync::Arc::new(tokio::sync::Notify::new());
         let useful = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let release = std::sync::Arc::new(tokio::sync::Notify::new());

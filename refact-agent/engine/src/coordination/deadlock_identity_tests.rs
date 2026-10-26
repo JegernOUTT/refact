@@ -142,6 +142,10 @@ pub(super) async fn app_with_workspace() -> (crate::app_state::AppState, tempfil
         "wait-root".to_string(),
         Arc::new(Mutex::new(ChatSession::new("wait-root".to_string()))),
     );
+    app.chat.sessions.read().await["wait-root"]
+        .lock()
+        .await
+        .work_project_root = Some(workspace);
     (app, temp)
 }
 

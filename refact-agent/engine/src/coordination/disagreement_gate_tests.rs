@@ -13,7 +13,7 @@ use super::disagreement::{completion_gate_blocks, ledger_for};
 use crate::app_state::AppState;
 use crate::chat::evidence::EvidenceVerdict;
 use crate::caps::{BaseModelRecord, ChatModelRecord, CodeAssistantCaps};
-use crate::chat::verifier::{verify_card, VerifyCardRequest};
+use crate::chat::verifier::{verify_card_as_planner, VerifyCardRequest};
 use crate::llm::WireFormat;
 use crate::tasks::storage;
 use crate::tasks::types::{
@@ -300,8 +300,14 @@ async fn verify_card_with_open_disagreement_does_not_pass() {
     let app = prepare_verify_card(&root, &cache, &endpoint).await;
     file_disagreement(&app, "verify-open").await;
     let _strict = override_settings(true, true);
-    let strict = verify_card(
-        app.gcx.clone(),
+    let strict = verify_card_as_planner(
+        crate::chat::verifier::tests::register_candidate(
+            app.gcx.clone(),
+            TASK_ID,
+            CARD_ID,
+            "test/disagreement-verifier",
+        )
+        .await,
         VerifyCardRequest {
             task_id: TASK_ID.to_string(),
             card_id: CARD_ID.to_string(),
@@ -344,8 +350,14 @@ async fn verify_card_with_open_disagreement_does_not_pass() {
     let (endpoint, hits, server) = start_review_server().await;
     let app = prepare_verify_card(&root, &cache, &endpoint).await;
     let _permissive = override_settings(true, false);
-    let permissive = verify_card(
-        app.gcx.clone(),
+    let permissive = verify_card_as_planner(
+        crate::chat::verifier::tests::register_candidate(
+            app.gcx.clone(),
+            TASK_ID,
+            CARD_ID,
+            "test/disagreement-verifier",
+        )
+        .await,
         VerifyCardRequest {
             task_id: TASK_ID.to_string(),
             card_id: CARD_ID.to_string(),

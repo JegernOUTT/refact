@@ -323,11 +323,7 @@ pub(crate) async fn recover_run_config(
             parent.thread.clone(),
         )
     };
-    let root = source
-        .or(crate::files_correction::get_active_project_path(app.gcx.clone()).await)
-        .ok_or("parent project scope unavailable")?
-        .canonicalize()
-        .map_err(|_| "parent project unavailable")?;
+    let root = trusted_project_root(app, source).await?;
     let limits = crate::runtime_settings::coordination_for_project(&root).await?;
     let saved: DurableRunConfig = app
         .agents
@@ -376,6 +372,10 @@ pub(crate) async fn recover_run_config(
         return Err(
             "persisted run does not match accepted child identity or current limits".into(),
         );
+    }
+    validate_stopped_cap(&record, &config)?;
+    if config.worktree.is_none() {
+        validate_unscoped_project(app, &root).await?;
     }
     let isolated_worktree = match (&seed.worktree_mode, &config.worktree) {
         (SpawnWorktreeMode::Isolated { auto_merge }, Some(meta)) => Some(SpawnedWorktree {
@@ -443,6 +443,123 @@ fn tools_within_ceiling(
     }
 }
 
+fn validate_stopped_cap(record: &BackgroundAgent, config: &SubchatConfig) -> Result<(), String> {
+    let cap = record
+        .error
+        .as_deref()
+        .and_then(crate::agents::types::CapStop::from_error);
+    if cap.as_ref().is_some_and(|cap| {
+        config.max_steps != cap.limit
+            || cap.used < cap.limit
+            || (cap.run_generation != 0 && cap.run_generation != record.run_generation)
+    }) {
+        return Err("saved child configuration does not match the stopped run".into());
+    }
+    Ok(())
+}
+
+fn validate_recovery_trajectory(
+    record: &BackgroundAgent,
+    config: &SubchatConfig,
+    replace_worktree: bool,
+    trajectory: &crate::chat::trajectories::LoadedTrajectory,
+) -> Result<(), String> {
+    if Some(&trajectory.thread.id) != record.child_chat_id.as_ref()
+        || trajectory.thread.parent_id.as_deref() != Some(record.parent_chat_id.as_str())
+        || trajectory.thread.root_chat_id != config.root_chat_id
+        || (trajectory
+            .thread
+            .worktree
+            .as_ref()
+            .map(|w| (&w.id, &w.root))
+            != config.worktree.as_ref().map(|w| (&w.id, &w.root))
+            && !(replace_worktree && trajectory.thread.worktree.is_none()))
+    {
+        return Err("saved trajectory identity does not match this child".into());
+    }
+    if let Some(cap) = record
+        .error
+        .as_deref()
+        .and_then(crate::agents::types::CapStop::from_error)
+    {
+        let saved =
+            crate::subchat::previous_agent_cap(&trajectory.messages, Some(&record.agent_id));
+        if saved.as_ref() != Some(&cap) && !(saved.is_none() && cap.run_generation == 0) {
+            return Err("saved trajectory does not contain the matching stopped attempt".into());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn recovery_unavailable_reason(
+    app: &AppState,
+    record: &BackgroundAgent,
+    run: &RecoveredRun,
+) -> Option<String> {
+    let Some(child) = record.child_chat_id.as_deref() else {
+        return Some("child trajectory unavailable".into());
+    };
+    if app.agent_executions.get(child).is_some() || app.agent_executions.task_active(child) {
+        return Some("previous child execution is still active".into());
+    }
+    let Some(trajectory) =
+        crate::chat::trajectories::load_trajectory_for_chat(app.gcx.clone(), child).await
+    else {
+        return Some("saved child trajectory is unavailable".into());
+    };
+    if let Err(error) =
+        validate_recovery_trajectory(record, &run.config, run.replace_worktree, &trajectory)
+    {
+        return Some(error);
+    }
+    let cap = record
+        .error
+        .as_deref()
+        .and_then(crate::agents::types::CapStop::from_error);
+    let used = cap.as_ref().map_or(record.step_count as usize, |cap| {
+        cap.used.max(record.step_count as usize)
+    });
+    remaining_goal_steps(&trajectory, used, usize::MAX).err()
+}
+
+fn remaining_goal_steps(
+    trajectory: &crate::chat::trajectories::LoadedTrajectory,
+    used_steps: usize,
+    mut remaining: usize,
+) -> Result<usize, String> {
+    let projected_goal = crate::chat::goal_snapshot_from_messages(&trajectory.messages, None);
+    for goal in trajectory.goal.iter().chain(projected_goal.iter()) {
+        if matches!(
+            goal.status,
+            crate::chat::types::GoalStatus::Paused | crate::chat::types::GoalStatus::Stopped
+        ) {
+            return Err("child goal is explicitly paused or stopped; resume its goal through the authorized user control first".into());
+        }
+        if refact_chat_api::goal_budget_exhaustion_status(
+            &goal.budget,
+            &goal.progress,
+            chrono::Utc::now().timestamp_millis().max(0) as u64,
+        )
+        .is_some()
+        {
+            return Err(
+                "explicit goal budget is exhausted; a step override cannot widen it".into(),
+            );
+        }
+        if let Some(limit) = goal.budget.max_turns.filter(|limit| *limit > 0) {
+            let used = used_steps.max(goal.progress.turns_used as usize);
+            if used >= limit as usize {
+                return Err(
+                    "explicit goal turn budget is exhausted; a step override cannot widen it"
+                        .into(),
+                );
+            }
+            remaining = remaining.min(limit as usize - used);
+        }
+    }
+    Ok(remaining)
+}
+
 fn launch_digest(payload: &refact_agents_core::storage::AcceptedLaunchPayload) -> String {
     use sha2::Digest;
     hex::encode(sha2::Sha256::digest(payload.as_bytes()))
@@ -507,15 +624,47 @@ async fn validate_launch_request(app: &AppState, req: &SpawnRequest) -> Result<P
             ));
         }
     }
-    let project_root = req
-        .parent_worktree
-        .as_ref()
-        .map(|w| w.source_workspace_root.clone())
-        .or(crate::files_correction::get_active_project_path(app.gcx.clone()).await)
-        .ok_or_else(|| "No active project folder found for background agent".to_string())?;
-    project_root
-        .canonicalize()
-        .map_err(|error| error.to_string())
+    let parent = app
+        .chat
+        .sessions
+        .read()
+        .await
+        .get(&req.parent_chat_id)
+        .cloned()
+        .ok_or("parent session unavailable")?;
+    let source = crate::coordination::scope::session_source_root(&*parent.lock().await);
+    let root = trusted_project_root(app, source).await?;
+    if req.parent_worktree.as_ref().is_some_and(|worktree| {
+        worktree.source_workspace_root.canonicalize().ok().as_ref() != Some(&root)
+    }) {
+        return Err("requested parent checkout does not match trusted project scope".into());
+    }
+    if req.parent_worktree.is_none() {
+        validate_unscoped_project(app, &root).await?;
+    }
+    Ok(root)
+}
+
+async fn validate_unscoped_project(app: &AppState, root: &Path) -> Result<(), String> {
+    if crate::files_correction::get_active_project_path(app.gcx.clone())
+        .await
+        .and_then(|path| path.canonicalize().ok())
+        .as_deref()
+        != Some(root)
+    {
+        return Err("original unscoped child workspace is no longer active".into());
+    }
+    Ok(())
+}
+
+async fn trusted_project_root(app: &AppState, source: Option<PathBuf>) -> Result<PathBuf, String> {
+    let source = source.ok_or("parent project scope unavailable")?;
+    crate::coordination::roots::resolve_source_workspace_root(
+        app.gcx.clone(),
+        Some(source.to_str().ok_or("parent project scope is invalid")?),
+    )
+    .await
+    .map_err(|_| "parent project scope is not available or authorized".to_string())
 }
 
 pub async fn preview_launch(app: &AppState, req: &SpawnRequest) -> Result<LaunchEffective, String> {
@@ -1015,6 +1164,7 @@ async fn prepare_and_run(
         app.clone(),
         &prepared.worktree_mode,
         prepared.config.worktree.as_ref(),
+        &prepared.project_root,
         &child_chat_id,
         &child_uuid,
         req.native_supervision_guard.is_some(),
@@ -1359,6 +1509,22 @@ mod accepted_launch_tests {
         }));
         let mut req = super::super::tests::subagent_spawn_request("narrow-parent", "src/a.rs");
         req.tools = None;
+        parent.lock().await.work_project_root = None;
+        assert!(validate_launch_request(&app, &req).await.is_err());
+        let foreign = tempfile::tempdir().unwrap();
+        parent.lock().await.work_project_root = Some(foreign.path().into());
+        assert!(validate_launch_request(&app, &req).await.is_err());
+        let private_root = foreign.path().join("private-parent-root-not-present");
+        assert!(private_root.is_absolute());
+        assert!(!private_root.exists());
+        parent.lock().await.work_project_root = Some(private_root.clone());
+        let error = preview_launch(&app, &req)
+            .await
+            .err()
+            .expect("invalid scope must deny preview");
+        assert_eq!(error, "parent project scope is not available or authorized");
+        assert!(!error.contains(private_root.to_str().unwrap()));
+        parent.lock().await.work_project_root = Some(root.clone());
         let handle = spawn_background_agent(app.clone(), req).await.unwrap();
         assert!(captured.lock().unwrap().is_none());
         assert!(!app
@@ -1375,6 +1541,15 @@ mod accepted_launch_tests {
         let seed: PreparedLaunch = bytes.decode().unwrap();
         assert!(seed.config.tools.allows_tool("shell"));
         assert!(!seed.config.tools.allows_tool("tasks_set"));
+        let req = super::super::tests::subagent_spawn_request("narrow-parent", "src/a.rs");
+        for source in [None, Some(foreign.path().to_path_buf())] {
+            parent.lock().await.work_project_root = source;
+            let mut queued: PreparedLaunch = bytes.decode().unwrap();
+            assert!(revalidate_prepared_launch(&app, &req, &mut queued)
+                .await
+                .is_err());
+        }
+        parent.lock().await.work_project_root = Some(root);
         parent.lock().await.active_command.allowed_tools = vec!["cat".into(), "tasks_set".into()];
         drop(blocker);
         let record = tokio::time::timeout(Duration::from_secs(5), handle.completion_rx)
@@ -1401,6 +1576,21 @@ mod accepted_launch_tests {
         assert!(!recovered.authority_migrated);
         assert!(!recovered.config.tools.allows_tool("shell"));
         assert!(!recovered.config.tools.allows_tool("tasks_set"));
+        parent.lock().await.work_project_root = None;
+        assert!(recover_run_config(&app, "narrow-parent", &handle.agent_id)
+            .await
+            .is_err());
+        parent.lock().await.work_project_root = Some(foreign.path().into());
+        assert!(recover_run_config(&app, "narrow-parent", &handle.agent_id)
+            .await
+            .is_err());
+        parent.lock().await.work_project_root = Some(private_root.clone());
+        let error = recover_run_config(&app, "narrow-parent", &handle.agent_id)
+            .await
+            .err()
+            .expect("invalid scope must deny recovery");
+        assert_eq!(error, "parent project scope is not available or authorized");
+        assert!(!error.contains(private_root.to_str().unwrap()));
         app.agent_executions.shutdown().await;
     }
 
@@ -1699,17 +1889,13 @@ async fn revalidate_prepared_launch(
     req: &SpawnRequest,
     prepared: &mut PreparedLaunch,
 ) -> Result<(), String> {
-    let source = match &prepared.config.worktree {
-        Some(worktree) => {
-            if !worktree.root.is_dir() {
-                return Err("accepted parent checkout is unavailable".into());
-            }
-            Some(worktree.source_workspace_root.clone())
-        }
-        None => crate::files_correction::get_active_project_path(app.gcx.clone()).await,
-    };
-    if source.and_then(|path| path.canonicalize().ok()).as_ref() != Some(&prepared.project_root) {
-        return Err("accepted launch project changed while queued".into());
+    if prepared
+        .config
+        .worktree
+        .as_ref()
+        .is_some_and(|worktree| !worktree.root.is_dir())
+    {
+        return Err("accepted parent checkout is unavailable".into());
     }
     let parent = app
         .chat
@@ -1717,16 +1903,23 @@ async fn revalidate_prepared_launch(
         .read()
         .await
         .get(&req.parent_chat_id)
-        .cloned();
-    if let Some(parent) = parent {
+        .cloned()
+        .ok_or("parent session unavailable")?;
+    {
         let parent = parent.lock().await;
         if crate::coordination::scope::session_source_root(&parent)
-            .is_some_and(|root| root.canonicalize().ok().as_ref() != Some(&prepared.project_root))
+            .and_then(|root| root.canonicalize().ok())
+            .as_ref()
+            != Some(&prepared.project_root)
             || parent.thread.worktree.as_ref().map(|w| (&w.id, &w.root))
                 != prepared.config.worktree.as_ref().map(|w| (&w.id, &w.root))
         {
             return Err("accepted parent scope changed while queued".into());
         }
+    }
+    trusted_project_root(app, Some(prepared.project_root.clone())).await?;
+    if prepared.config.worktree.is_none() {
+        validate_unscoped_project(app, &prepared.project_root).await?;
     }
     narrow_parent_approval(app, req, &mut prepared.config).await;
     let ceiling = super::tool_authority::current_ceiling(
@@ -1892,11 +2085,6 @@ pub(super) async fn resume_agent_inner(
         || config.background_agent_id.as_deref() != Some(agent_id)
         || config.parent_id.as_deref() != Some(parent_chat_id)
         || config.root_chat_id != old.parent_root_chat_id
-        || cap.as_ref().is_some_and(|cap| {
-            config.max_steps != cap.limit
-                || cap.used < cap.limit
-                || (cap.run_generation != 0 && cap.run_generation != old.run_generation)
-        })
         || config.subchat_depth == 0
         || config.subchat_depth >= limits.max_subchat_depth
     {
@@ -1932,72 +2120,14 @@ pub(super) async fn resume_agent_inner(
         crate::chat::trajectories::load_trajectory_for_chat(app.gcx.clone(), &child_chat_id)
             .await
             .ok_or_else(|| "saved child trajectory is unavailable".to_string())?;
-    if trajectory.thread.id != child_chat_id
-        || trajectory.thread.parent_id.as_deref() != Some(parent_chat_id)
-        || trajectory.thread.root_chat_id != config.root_chat_id
-        || trajectory
-            .thread
-            .worktree
-            .as_ref()
-            .map(|w| (&w.id, &w.root))
-            != config.worktree.as_ref().map(|w| (&w.id, &w.root))
-            && !(replace_worktree && trajectory.thread.worktree.is_none())
-    {
-        return Err("saved trajectory identity does not match this child".into());
-    }
+    validate_recovery_trajectory(&old, &config, replace_worktree, &trajectory)?;
     config.autonomous_no_confirm &= trajectory.thread.autonomous_no_confirm;
     config.auto_approve_editing_tools &= trajectory.thread.auto_approve_editing_tools;
     config.auto_approve_dangerous_commands &= trajectory.thread.auto_approve_dangerous_commands;
     let mut trajectory_revision = resume_trajectory_revision(&trajectory)?;
     let mut messages = trajectory.messages.clone();
     reconcile_resume_tool_pairs(&mut messages, reconcile_incomplete)?;
-    let saved_cap = messages.iter().rev().find_map(|message| {
-        let event = message.extra.get("event")?;
-        if message.role != "event" || event.get("source")?.as_str()? != "agents.cap_stop" {
-            return None;
-        }
-        let payload = event.get("payload")?;
-        if payload.get("agent_id")?.as_str()? != agent_id {
-            return None;
-        }
-        serde_json::from_value::<CapStop>(payload.get("cap_stop")?.clone()).ok()
-    });
-    if let Some(cap) = &cap {
-        if saved_cap.as_ref() != Some(cap) && !(saved_cap.is_none() && cap.run_generation == 0) {
-            return Err("saved trajectory does not contain the matching stopped attempt".into());
-        }
-    }
-    let mut remaining = max_steps - used_steps;
-    let projected_goal = crate::chat::goal_snapshot_from_messages(&messages, None);
-    for goal in trajectory.goal.iter().chain(projected_goal.iter()) {
-        if matches!(
-            goal.status,
-            crate::chat::types::GoalStatus::Paused | crate::chat::types::GoalStatus::Stopped
-        ) {
-            return Err("child goal is explicitly paused or stopped; resume its goal through the authorized user control first".into());
-        }
-        if refact_chat_api::goal_budget_exhaustion_status(
-            &goal.budget,
-            &goal.progress,
-            chrono::Utc::now().timestamp_millis().max(0) as u64,
-        )
-        .is_some()
-        {
-            return Err(
-                "explicit goal budget is exhausted; a step override cannot widen it".into(),
-            );
-        }
-        if let Some(limit) = goal.budget.max_turns.filter(|limit| *limit > 0) {
-            let used = used_steps.max(goal.progress.turns_used as usize);
-            if used >= limit as usize {
-                return Err(
-                    "explicit goal turn budget is exhausted; a step override cannot widen it"
-                        .into(),
-                );
-            }
-            remaining = remaining.min(limit as usize - used);
-        }
-    }
+    let remaining = remaining_goal_steps(&trajectory, used_steps, max_steps - used_steps)?;
     let project_root = config
         .worktree
         .as_ref()
@@ -2007,15 +2137,6 @@ pub(super) async fn resume_agent_inner(
     let project_root = project_root
         .canonicalize()
         .map_err(|error| format!("original child project unavailable: {error}"))?;
-    if config.worktree.is_none()
-        && crate::files_correction::get_active_project_path(app.gcx.clone())
-            .await
-            .and_then(|path| path.canonicalize().ok())
-            .as_ref()
-            != Some(&project_root)
-    {
-        return Err("original unscoped child workspace is no longer active".into());
-    }
     let parent = app
         .chat
         .sessions
@@ -2119,6 +2240,7 @@ pub(super) async fn resume_agent_inner(
                 &trajectory,
                 &trajectory.messages,
                 &config,
+                &project_root,
                 live_session.as_ref(),
                 live_revision.as_deref(),
                 false,
@@ -2325,6 +2447,7 @@ pub(super) async fn resume_agent_inner(
                     &trajectory,
                     &messages,
                     &config,
+                    &project_root,
                     live_session.as_ref(),
                     live_revision.as_deref(),
                     true,
@@ -2544,6 +2667,7 @@ async fn install_resumed_session(
     trajectory: &crate::chat::trajectories::LoadedTrajectory,
     messages: &[ChatMessage],
     config: &SubchatConfig,
+    source: &Path,
     expected_session: Option<&Arc<AMutex<crate::chat::types::ChatSession>>>,
     expected_revision: Option<&str>,
     start: bool,
@@ -2558,6 +2682,12 @@ async fn install_resumed_session(
         if Some(resume_session_revision(&session)?.as_str()) != expected_revision {
             return Err("child session was edited while resume was queued".into());
         }
+        if crate::coordination::scope::session_source_root(&session)
+            .is_some_and(|saved| saved.canonicalize().ok().as_deref() != Some(source))
+        {
+            return Err("saved child session does not match accepted project scope".into());
+        }
+        session.work_project_root = Some(source.to_path_buf());
         session.thread.autonomous_no_confirm &= config.autonomous_no_confirm;
         session.thread.auto_approve_editing_tools &= config.auto_approve_editing_tools;
         session.thread.auto_approve_dangerous_commands &= config.auto_approve_dangerous_commands;
@@ -2586,6 +2716,7 @@ async fn install_resumed_session(
             trajectory.waiting_for_card_ids.clone(),
             trajectory.goal.clone(),
         );
+        session.work_project_root = Some(source.to_path_buf());
         session.set_goal_ledger(trajectory.goal_ledger.clone());
         session.goal_verification_blocked_until_ms = trajectory.goal_verification_blocked_until_ms;
         session.pending_deliveries = trajectory.pending_deliveries.clone().into();
@@ -2976,10 +3107,18 @@ async fn run_background_subchat_inner(
             if config.stateful {
                 if let Some(chat_id) = config.chat_id.as_deref() {
                     let app = AppState::from_gcx(gcx.clone()).await;
+                    let source = config
+                        .background_agent_id
+                        .as_deref()
+                        .and_then(|agent_id| app.agent_executions.saved_scope(agent_id));
                     crate::subchat::install_stateful_subchat_session(
-                        &app, chat_id, &config, &messages,
+                        &app,
+                        chat_id,
+                        &config,
+                        &messages,
+                        source.as_deref(),
                     )
-                    .await;
+                    .await?;
                 }
             }
             return runner(gcx, messages, config).await;
@@ -3088,6 +3227,7 @@ async fn create_spawn_worktree(
     app: AppState,
     mode: &SpawnWorktreeMode,
     parent_worktree: Option<&WorktreeMeta>,
+    accepted_root: &Path,
     child_chat_id: &str,
     child_uuid: &Uuid,
     supervised: bool,
@@ -3105,9 +3245,7 @@ async fn create_spawn_worktree(
     };
     let source_workspace_root = match parent_worktree {
         Some(parent) => parent.source_workspace_root.clone(),
-        None => crate::files_correction::get_active_project_path(app.gcx.clone())
-            .await
-            .ok_or_else(|| "No active project folder found for isolated subagent".to_string())?,
+        None => accepted_root.to_path_buf(),
     };
     let (base_branch, base_commit) = match parent_worktree {
         Some(parent) => {

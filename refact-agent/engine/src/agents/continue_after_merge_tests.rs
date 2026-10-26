@@ -358,3 +358,191 @@ async fn resumed_generation_with_existing_worktree_is_merged() {
     assert!(!fixture.source.join("B.txt").exists());
     fixture.app.agent_executions.shutdown().await;
 }
+
+#[tokio::test]
+#[serial_test::serial(test_runner)]
+async fn completed_child_continuation_lifetime_and_recovery() {
+    for finite_goal in [false, true] {
+        let fixture = fixture(false).await;
+        let _runner = install_test_runner(Arc::new(move |gcx, mut messages, config| {
+            Box::pin(async move {
+                let app = AppState::from_gcx(gcx.clone()).await;
+                let child = config.chat_id.as_ref().unwrap();
+                let agent = config.background_agent_id.as_ref().unwrap();
+                let record = app.agents.get_any(agent).await.unwrap();
+                let session = app.chat.sessions.read().await.get(child).cloned().unwrap();
+                assert_eq!(
+                    session.lock().await.work_project_root,
+                    app.agent_executions.saved_scope(agent)
+                );
+                assert!(config.worktree.is_none());
+                let error = if record.run_generation == 2 {
+                    assert_eq!(config.max_steps, 1);
+                    let stop =
+                        crate::subchat::agent_step_cap(&messages, Some(agent), config.max_steps);
+                    assert_eq!((stop.used, stop.limit, stop.run_generation), (6, 6, 2));
+                    assert_eq!(stop.parent_can_raise_steps(), !finite_goal);
+                    let error = stop.as_error().unwrap();
+                    config.step_progress.as_ref().unwrap()(crate::subchat::SubchatProgress::Step(
+                        1,
+                    ));
+                    messages.push(crate::chat::internal_roles::event(
+                        crate::chat::internal_roles::EventSubkind::SystemNotice,
+                        "agents.cap_stop",
+                        serde_json::json!({"agent_id": agent, "cap_stop": stop}),
+                        "cap reached",
+                    ));
+                    Some(error)
+                } else {
+                    config.step_progress.as_ref().unwrap()(crate::subchat::SubchatProgress::Step(
+                        if record.run_generation == 1 { 5 } else { 1 },
+                    ));
+                    messages.push(ChatMessage::new(
+                        "assistant".into(),
+                        "generation done".into(),
+                    ));
+                    None
+                };
+                let thread = session.lock().await.thread.clone();
+                crate::chat::trajectories::save_trajectory_as(gcx, &thread, &messages).await;
+                crate::subchat::mirror_subchat_messages_into_session(&app, child, &messages).await;
+                crate::subchat::finish_stateful_subchat_session(&app, child, &config).await;
+                crate::chat::trajectories::flush_trajectory_for_session(app.clone(), session)
+                    .await
+                    .unwrap();
+                if let Some(error) = error {
+                    return Err(error);
+                }
+                Ok(SubchatResult {
+                    messages,
+                    chat_id: config.chat_id,
+                    metering: Default::default(),
+                    aborted: false,
+                })
+            })
+        }));
+        let mut request = spawn_request(PARENT, BgAgentKind::Subagent);
+        request.max_steps = 6;
+        if finite_goal {
+            request.goal = Some(crate::agents::spawn::SpawnGoal {
+                content: "finite task".into(),
+                criteria: Vec::new(),
+                budget: Some(crate::chat::types::GoalBudget {
+                    max_turns: Some(6),
+                    explicit: true,
+                    ..Default::default()
+                }),
+            });
+        }
+        let first = await_completion(
+            spawn_background_agent(fixture.app.clone(), request)
+                .await
+                .unwrap(),
+        )
+        .await;
+        let first = settled(&fixture.app, &first).await;
+        assert_eq!(first.step_count, 5);
+        fixture
+            .app
+            .chat
+            .sessions
+            .write()
+            .await
+            .remove(first.child_chat_id.as_ref().unwrap());
+        let stopped = continue_child(&fixture.app, &first).await;
+        assert_eq!(stopped.status, BgAgentStatus::Failed);
+        assert_eq!(stopped.step_count, 6);
+        assert_eq!(stopped.run_generation, 2);
+        let ccx = Arc::new(Mutex::new(
+            crate::at_commands::at_commands::AtCommandsContext::new_from_app(
+                fixture.app.clone(),
+                4096,
+                1,
+                false,
+                Vec::new(),
+                PARENT.into(),
+                None,
+                "openai/gpt-4o".into(),
+                None,
+                None,
+            )
+            .await,
+        ));
+        let inspect = std::collections::HashMap::from([
+            ("agent_id".into(), serde_json::json!(stopped.agent_id)),
+            ("action".into(), serde_json::json!("inspect")),
+        ]);
+        let (_, contexts) = crate::tools::tool_background_agents::agent_lifecycle_execute(
+            ccx.clone(),
+            &"inspect".into(),
+            &inspect,
+        )
+        .await
+        .unwrap();
+        let crate::call_validation::ContextEnum::ChatMessage(message) = &contexts[0] else {
+            panic!("tool message")
+        };
+        let receipt: serde_json::Value =
+            serde_json::from_str(&message.content.content_text_only()).unwrap();
+        assert_eq!(receipt["can_raise_and_resume"], !finite_goal);
+        assert_eq!(receipt["resume_configuration_available"], true);
+        let path = fixture
+            .cache
+            .join(".refact/background_agents/runs")
+            .join(format!("{}.2.json", stopped.agent_id));
+        let original = std::fs::read(&path).unwrap();
+        for (pointer, value) in [
+            ("/config/max_steps", serde_json::json!(1)),
+            ("/run_generation", serde_json::json!(1)),
+        ] {
+            let mut corrupt: serde_json::Value = serde_json::from_slice(&original).unwrap();
+            *corrupt.pointer_mut(pointer).unwrap() = value;
+            std::fs::write(&path, serde_json::to_vec(&corrupt).unwrap()).unwrap();
+            let (_, contexts) = crate::tools::tool_background_agents::agent_lifecycle_execute(
+                ccx.clone(),
+                &"inspect-corrupt".into(),
+                &inspect,
+            )
+            .await
+            .unwrap();
+            let crate::call_validation::ContextEnum::ChatMessage(message) = &contexts[0] else {
+                panic!("tool message")
+            };
+            let receipt: serde_json::Value =
+                serde_json::from_str(&message.content.content_text_only()).unwrap();
+            assert_eq!(receipt["can_raise_and_resume"], false);
+            assert_eq!(receipt["can_resume"], false);
+            assert!(receipt["recovery_unavailable_reason"].as_str().is_some());
+            assert_eq!(
+                fixture.app.agents.get_any(&stopped.agent_id).await.unwrap(),
+                stopped
+            );
+        }
+        std::fs::write(&path, original).unwrap();
+        let raised = resume_agent(
+            fixture.app.clone(),
+            PARENT,
+            &stopped.agent_id,
+            Some(7),
+            stopped.change_seq,
+            None,
+            false,
+        )
+        .await;
+        if finite_goal {
+            assert!(raised
+                .unwrap_err()
+                .contains("only a resumable child max_steps cap can be raised"));
+            assert_eq!(
+                fixture.app.agents.get_any(&stopped.agent_id).await.unwrap(),
+                stopped
+            );
+        } else {
+            let completed = settled(&fixture.app, &raised.unwrap()).await;
+            assert_eq!(completed.status, BgAgentStatus::Completed);
+            assert_eq!(completed.step_count, 7);
+            assert_eq!(completed.run_generation, 3);
+        }
+        fixture.app.agent_executions.shutdown().await;
+    }
+}

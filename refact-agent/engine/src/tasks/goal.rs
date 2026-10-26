@@ -256,6 +256,78 @@ async fn write_record(path: &std::path::Path, record: &TaskGoalRecord) -> Result
     .map(|_| ())
 }
 
+fn recover_replayed_controls(
+    session: &mut crate::chat::types::ChatSession,
+    controls: &[ChatMessage],
+) -> Result<bool, String> {
+    use refact_core::active_context::{
+        active_context, is_reconstruction_report, make_reconstruction_report,
+        parse_reconstruction_report, ActiveContextError, ReconstructionMetadata,
+    };
+
+    if !matches!(
+        active_context(&session.messages),
+        Err(ActiveContextError::InvalidPayload(ref reason))
+            if reason == "duplicate active message ID"
+    ) {
+        return Ok(false);
+    }
+    let Some(index) = session.messages.iter().rposition(is_reconstruction_report) else {
+        return Ok(false);
+    };
+    let report = match parse_reconstruction_report(&session.messages[index]) {
+        Ok(report) => report,
+        Err(_) => return Ok(false),
+    };
+    let normalize = |message: &ChatMessage| -> Result<serde_json::Value, String> {
+        let mut message = message.clone();
+        message.extra.remove("delivery");
+        serde_json::to_value(message).map_err(|error| error.to_string())
+    };
+    let canonical = controls
+        .iter()
+        .filter(|message| control_message(message))
+        .map(|message| Ok((message.message_id.clone(), normalize(message)?)))
+        .collect::<Result<std::collections::HashMap<_, _>, String>>()?;
+    let mut seen = std::collections::HashMap::<String, usize>::new();
+    let mut recovered: Vec<ChatMessage> = Vec::new();
+    for message in report
+        .payload
+        .messages
+        .iter()
+        .chain(session.messages[index + 1..].iter())
+    {
+        if let Some(previous) = seen.get(&message.message_id) {
+            let Some(expected) = canonical.get(&message.message_id) else {
+                return Ok(false);
+            };
+            if !control_message(message)
+                || !control_message(&recovered[*previous])
+                || normalize(message)? != *expected
+                || normalize(&recovered[*previous])? != *expected
+            {
+                return Ok(false);
+            }
+        } else {
+            seen.insert(message.message_id.clone(), recovered.len());
+            recovered.push(message.clone());
+        }
+    }
+    let report = match make_reconstruction_report(
+        recovered,
+        ReconstructionMetadata {
+            source_version: Some(session.trajectory_version),
+            trigger: Some("canonical_control_recovery".into()),
+            ..Default::default()
+        },
+    ) {
+        Ok(report) => report,
+        Err(_) => return Ok(false),
+    };
+    session.add_message(report);
+    Ok(true)
+}
+
 pub async fn commit_task_goal(
     gcx: Arc<GlobalContext>,
     task_id: &str,
@@ -317,6 +389,7 @@ pub async fn hydrate_session_task_goal(
         .require_owner(&session.chat_id)?;
     let record = resolve_task_goal_locked(gcx, &task_id, guard.dir()).await?;
     if let Some(record) = record {
+        recover_replayed_controls(&mut session, &record.messages)?;
         if session.task_goal_messages.is_some()
             && session.goal.as_ref().is_some_and(|goal| {
                 goal.revision == record.revision
@@ -541,4 +614,173 @@ pub async fn attach_planner_goal(
     commit_task_goal(gcx, task_id, chat_id, 0, messages, ledger)
         .await
         .map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_state::AppState;
+    use crate::chat::types::ChatSession;
+    use refact_chat_api::{GoalStatus, TaskMeta};
+    use refact_core::active_context::{
+        active_context, make_reconstruction_report, ReconstructionMetadata,
+    };
+    use tokio::sync::Mutex;
+
+    fn replayed_session(chat_id: &str) -> (ChatSession, Vec<ChatMessage>) {
+        let mut goal = crate::chat::internal_roles::goal(
+            "task_planner",
+            1,
+            "keep approved outcome",
+            None,
+            true,
+            Default::default(),
+        );
+        goal.message_id = "legacy-plan-goal-existing".into();
+        goal.extra["goal"]["status"] = serde_json::json!("paused");
+        let mut user = ChatMessage::new("user".into(), "retain conversation".into());
+        user.message_id = "conversation-user".into();
+        let report =
+            make_reconstruction_report(vec![user, goal.clone()], ReconstructionMetadata::default())
+                .unwrap();
+        let mut replay = goal.clone();
+        replay.extra.insert(
+            "delivery".into(),
+            serde_json::json!({"source":"tool.update_goal"}),
+        );
+        let mut session = ChatSession::new(chat_id.into());
+        session.messages = vec![report, replay];
+        (session, vec![goal])
+    }
+
+    async fn task_fixture() -> (tempfile::TempDir, AppState, String, String) {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            temp.path().join("cache"),
+            temp.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+        let task = super::super::storage::create_task(gcx.clone(), "recovery task")
+            .await
+            .unwrap();
+        let chat_id = format!("planner-{}-2", task.id);
+        super::super::storage::update_board_atomic(gcx.clone(), &task.id, |board| {
+            board.authorize_owner(&chat_id)
+        })
+        .await
+        .unwrap();
+        (temp, AppState::from_gcx(gcx).await, task.id, chat_id)
+    }
+
+    #[tokio::test]
+    async fn opening_replayed_planner_recovers_without_losing_archive_or_resuming_goal() {
+        let (_temp, app, task_id, chat_id) = task_fixture().await;
+        let (mut session, controls) = replayed_session(&chat_id);
+        session.thread.task_meta = Some(TaskMeta {
+            task_id: task_id.clone(),
+            role: "planner".into(),
+            planner_chat_id: Some(chat_id.clone()),
+            ..Default::default()
+        });
+        let record = commit_task_goal(app.gcx.clone(), &task_id, &chat_id, 0, controls, vec![])
+            .await
+            .unwrap();
+        session.set_goal_projection(record.snapshot(&task_id));
+        let archive = serde_json::to_value(&session.messages).unwrap();
+        assert!(active_context(&session.messages).is_err());
+        let snapshot = crate::chat::trajectories::trajectory_snapshot_from_session(&session);
+        crate::chat::trajectories::save_trajectory_snapshot(app.gcx.clone(), snapshot)
+            .await
+            .unwrap();
+
+        let restored = crate::chat::get_or_create_session_with_trajectory(
+            app.clone(),
+            &app.chat.sessions,
+            &chat_id,
+        )
+        .await;
+        let restored_guard = restored.lock().await;
+        let context = active_context(&restored_guard.snapshot_messages())
+            .expect("opening must recover the invalid planner before publishing its snapshot");
+        assert_eq!(
+            serde_json::to_value(&restored_guard.messages[..2]).unwrap(),
+            archive
+        );
+        assert_eq!(restored_guard.messages.len(), 3);
+        assert_eq!(context.messages.len(), 2);
+        assert_eq!(
+            context.messages[0].content.content_text_only(),
+            "retain conversation"
+        );
+        assert_eq!(
+            context.messages[1].content.content_text_only(),
+            "keep approved outcome"
+        );
+        let goal = restored_guard.goal.as_ref().unwrap();
+        assert!(goal.active);
+        assert_eq!(goal.status, GoalStatus::Paused);
+        assert_eq!(goal.revision, record.revision);
+        drop(restored_guard);
+        hydrate_session_task_goal(app.gcx.clone(), &restored)
+            .await
+            .unwrap();
+        assert_eq!(restored.lock().await.messages.len(), 3);
+        assert_eq!(
+            resolve_task_goal(app.gcx.clone(), &task_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .revision,
+            record.revision
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_recovery_refuses_nonowner_and_foreign_duplicate_without_mutation() {
+        let (_temp, app, task_id, owner) = task_fixture().await;
+        let (mut session, controls) = replayed_session("old-planner");
+        session.thread.task_meta = Some(TaskMeta {
+            task_id: task_id.clone(),
+            role: "planner".into(),
+            planner_chat_id: Some("old-planner".into()),
+            ..Default::default()
+        });
+        commit_task_goal(
+            app.gcx.clone(),
+            &task_id,
+            &owner,
+            0,
+            controls.clone(),
+            vec![],
+        )
+        .await
+        .unwrap();
+        let original = serde_json::to_value(&session.messages).unwrap();
+        let session = Arc::new(Mutex::new(session));
+        assert!(hydrate_session_task_goal(app.gcx.clone(), &session)
+            .await
+            .unwrap_err()
+            .contains("owning planner"));
+        assert_eq!(
+            serde_json::to_value(&session.lock().await.messages).unwrap(),
+            original
+        );
+        let (mut corrupted, corrupted_controls) = replayed_session(&owner);
+        corrupted.messages[1].role = "user".into();
+        let original = serde_json::to_value(&corrupted.messages).unwrap();
+        assert!(!recover_replayed_controls(&mut corrupted, &corrupted_controls).unwrap());
+        assert!(active_context(&corrupted.messages).is_err());
+        assert_eq!(serde_json::to_value(&corrupted.messages).unwrap(), original);
+        let (mut conflicting, conflicting_controls) = replayed_session(&owner);
+        conflicting.messages[1].content =
+            crate::call_validation::ChatContent::SimpleText("conflicting outcome".into());
+        let original = serde_json::to_value(&conflicting.messages).unwrap();
+        assert!(!recover_replayed_controls(&mut conflicting, &conflicting_controls).unwrap());
+        assert!(active_context(&conflicting.messages).is_err());
+        assert_eq!(
+            serde_json::to_value(&conflicting.messages).unwrap(),
+            original
+        );
+    }
 }

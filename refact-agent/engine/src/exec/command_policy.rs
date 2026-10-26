@@ -126,6 +126,34 @@ pub async fn build_exec_request(
     gcx: Arc<GlobalContext>,
     input: CommandPolicyInput<'_>,
 ) -> Result<ExecRequestPolicy, ExecPolicyError> {
+    build_exec_request_with_roots(gcx, input, None).await
+}
+
+pub(crate) async fn build_verifier_exec_request(
+    gcx: Arc<GlobalContext>,
+    input: CommandPolicyInput<'_>,
+    candidate: &crate::tools::command_checkout::ValidatedCommandCheckout,
+) -> Result<ExecRequestPolicy, ExecPolicyError> {
+    if input.source != ExecSource::Verifier
+        || input.escalation.is_some()
+        || input
+            .cwd
+            .as_deref()
+            .is_none_or(|cwd| !cwd.starts_with(candidate.root()))
+    {
+        return Err(policy_input_error(
+            "invalid verifier candidate command",
+            input.source,
+        ));
+    }
+    build_exec_request_with_roots(gcx, input, Some(vec![candidate.root().to_path_buf()])).await
+}
+
+async fn build_exec_request_with_roots(
+    gcx: Arc<GlobalContext>,
+    input: CommandPolicyInput<'_>,
+    workspace_roots: Option<Vec<PathBuf>>,
+) -> Result<ExecRequestPolicy, ExecPolicyError> {
     let command = match input.command {
         CommandKind::Shell(command) => {
             if command.trim().is_empty() {
@@ -144,12 +172,13 @@ pub async fn build_exec_request(
         requested_sandbox_mode(input.chat_mode.as_deref(), input.escalation.as_ref());
     let baseline_sandbox_mode = requested_sandbox_mode(input.chat_mode.as_deref(), None);
     let status = refact_sandbox::sandbox_status();
-    let roots = gcx
-        .documents_state
-        .workspace_folders
-        .lock()
-        .unwrap()
-        .clone();
+    let roots = workspace_roots.unwrap_or_else(|| {
+        gcx.documents_state
+            .workspace_folders
+            .lock()
+            .unwrap()
+            .clone()
+    });
     let cwd = input.cwd.clone().unwrap_or_else(|| {
         roots
             .first()

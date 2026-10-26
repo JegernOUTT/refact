@@ -56,6 +56,177 @@
       "author": "background_agent:bgagent-554f1e1c-8256-47ec-9314-88906f435e1a",
       "reviewer": "background_agent:bgagent-a9823438-01c3-4a60-a7eb-cfbe624a989c",
       "review_evidence": "Independent shipping lock/recheck/Starting-reuse/ready-API review and complete old/new test diff plus exact current-source Cargo pass; accepts only corrected ordinary harness contract, not a claimed executed duplicate-spawn mutant."
+    },
+    {
+      "fingerprint": "eddcc3b045297ded3d65c2353e06cb52fa27a3bedd2ad3facd6d7c269a3e7ef5",
+      "occurrences": 1,
+      "failure_mode": "Updating a goal re-emits legacy canonical controls already carried by rebuilt context.",
+      "importance": "Recover a stuck planner while retaining canonical ownership, paused state and complete archived conversation.",
+      "nearest_retained": {
+        "fingerprint": "652d8f9bd7c7a379e9f1b0502fe0241366a7d04fea76fa89d700a927a27ed857",
+        "why_insufficient": "Existing update_goal test appends to a raw transcript; it cannot detect replay of controls stored only in a reconstruction payload."
+      },
+      "oracle": "Exactly one new goal_delta carrying the new outcome is emitted, not previously imported legacy controls.",
+      "prerequisites": "A real imported legacy plan produces nonempty goal controls, stored inside a valid reconstruction report and installed as task goal controls.",
+      "shipping_implementation": "chat::goal_role::prepare_goal_update and production legacy-plan import/active-context projection",
+      "determinism": "In-process local fixtures and temporary directories only, stable message IDs, no sleeps, credentials, running daemon or external service.",
+      "layer": "Engine library regression",
+      "why_cheapest": "Lowest layer exercising the actual source producer.",
+      "meaningful_cases": 1,
+      "critical": true,
+      "criticality_reason": "Canonical task ownership and durable conversation integrity are critical; executed production-mutant failure and restored pass are recorded.",
+      "removed_coverage": "None.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "refact-agent/engine/src/chat/goal_role.rs",
+        "before_fix": {
+          "reference": "mutant:remove producer known-context IDs and disable canonical replay recovery",
+          "fingerprint": "7418243ac2b15483df9d7224a00932bde775a3c617f5f89da405f43cd37b1b98"
+        },
+        "intended_diagnostic": "existing canonical controls were replayed: left 3 right 1",
+        "failing": {
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "refact-lsp",
+            "--lib",
+            "replay",
+            "--",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/planner-recovery-mutant.log"
+        },
+        "passing": {
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "refact-lsp",
+            "--lib"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/planner-recovery-rust-final.log:3659 passed 0 failed 11 ignored; .refact/planner-recovery-restored.log final focused pass after temporary mutants restored"
+        }
+      },
+      "author": "chat:2f94f8e0-9e9c-408c-a1d8-41d7858da746",
+      "reviewer": "background_agent:bgagent-8c2d7d13-a8d7-4a36-91bf-74495ed6c6e3",
+      "review_evidence": "Independent semantic review subchat-6f8421d2-1dbb-424c-901c-b9aff86faef0 final report; inspected final Rust diff and executed negative/restored logs. Earlier independent reviews ca819700-ac2c-4173-a402-7cfc2e4d0b9c and eaa44de5-2937-453d-a880-c8f290ea5726; discovered persistence race fixed before final approval."
+    },
+    {
+      "fingerprint": "1f854211b5ad8699bb5f25c85772d231225754d6c439f517f74f0c9e848d052f",
+      "occurrences": 1,
+      "failure_mode": "Opening the owning planner leaves payload-versus-suffix canonical control replays blocking all generation.",
+      "importance": "Recover a stuck planner while retaining canonical ownership, paused state and complete archived conversation.",
+      "nearest_retained": {
+        "fingerprint": "98d02a6fda4aae6fd8c9d5127d1193cc0a3d0c9451c74e88c684067a1540f052",
+        "why_insufficient": "Existing legacy reconstruction opening only compacts privacy metadata, not duplicate controls or planner authorization."
+      },
+      "oracle": "Opening actual persisted invalid task planner yields valid initial snapshot, original message archive unchanged, one added boundary, unchanged paused active goal and canonical revision, idempotent rehydrate.",
+      "prerequisites": "Isolated temporary workspace/task with a real board owner and installed canonical paused goal; report payload and suffix share a control ID differing only by delivery metadata.",
+      "shipping_implementation": "tasks::goal::{hydrate_session_task_goal,recover_replayed_controls}, chat::session_runtime::get_or_create_session_with_trajectory and core active_context",
+      "determinism": "In-process local fixtures and temporary directories only, stable message IDs, no sleeps, credentials, running daemon or external service.",
+      "layer": "Engine library regression",
+      "why_cheapest": "One focused local engine task fixture exercises owner authorization and reconstruction without provider or browser setup.",
+      "meaningful_cases": 1,
+      "critical": true,
+      "criticality_reason": "Canonical task ownership and durable conversation integrity are critical; executed production-mutant failure and restored pass are recorded.",
+      "removed_coverage": "None.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "refact-agent/engine/src/tasks/goal.rs",
+        "before_fix": {
+          "reference": "mutant:remove producer known-context IDs and disable canonical replay recovery",
+          "fingerprint": "7418243ac2b15483df9d7224a00932bde775a3c617f5f89da405f43cd37b1b98"
+        },
+        "intended_diagnostic": "opening must recover the invalid planner before publishing its snapshot: duplicate active message ID",
+        "failing": {
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "refact-lsp",
+            "--lib",
+            "replay",
+            "--",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/planner-recovery-mutant.log"
+        },
+        "passing": {
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "refact-lsp",
+            "--lib"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/planner-recovery-rust-final.log:3659 passed 0 failed 11 ignored; .refact/planner-recovery-restored.log final focused pass after temporary mutants restored"
+        }
+      },
+      "author": "chat:2f94f8e0-9e9c-408c-a1d8-41d7858da746",
+      "reviewer": "background_agent:bgagent-8c2d7d13-a8d7-4a36-91bf-74495ed6c6e3",
+      "review_evidence": "Independent semantic review subchat-6f8421d2-1dbb-424c-901c-b9aff86faef0 final report; inspected final Rust diff and executed negative/restored logs. Earlier independent reviews ca819700-ac2c-4173-a402-7cfc2e4d0b9c and eaa44de5-2937-453d-a880-c8f290ea5726; discovered persistence race fixed before final approval."
+    },
+    {
+      "fingerprint": "7b7d51c8f28a018a113b432cf2c05bf397a2461fcde8eb4ac6831becadbe5e85",
+      "occurrences": 1,
+      "failure_mode": "Canonical duplicate recovery accepts conflicting control content or a non-owner.",
+      "importance": "Recover a stuck planner while retaining canonical ownership, paused state and complete archived conversation.",
+      "nearest_retained": {
+        "fingerprint": "98d02a6fda4aae6fd8c9d5127d1193cc0a3d0c9451c74e88c684067a1540f052",
+        "why_insufficient": "Existing legacy reconstruction opening only compacts privacy metadata, not duplicate controls or planner authorization."
+      },
+      "oracle": "Nonowner hydration rejects and preserves original messages; wrong-role and same-role conflicting-content duplicates are refused, remain invalid and leave archive unchanged.",
+      "prerequisites": "Isolated temporary workspace/task with a real board owner and installed canonical paused goal; report payload and suffix share a control ID differing only by delivery metadata.",
+      "shipping_implementation": "tasks::goal::{hydrate_session_task_goal,recover_replayed_controls}, chat::session_runtime::get_or_create_session_with_trajectory and core active_context",
+      "determinism": "In-process local fixtures and temporary directories only, stable message IDs, no sleeps, credentials, running daemon or external service.",
+      "layer": "Engine library regression",
+      "why_cheapest": "One focused local engine task fixture exercises owner authorization and reconstruction without provider or browser setup.",
+      "meaningful_cases": 3,
+      "critical": true,
+      "criticality_reason": "Canonical task ownership and durable conversation integrity are critical; executed production-mutant failure and restored pass are recorded.",
+      "removed_coverage": "None.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "refact-agent/engine/src/tasks/goal.rs",
+        "before_fix": {
+          "reference": "mutant:omit canonical content equality during recovery",
+          "fingerprint": "79770e06adf52ceede5b10d74c0fa09945b11c03a36ba539642090e085967865"
+        },
+        "intended_diagnostic": "conflicting-content refusal assertion",
+        "failing": {
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "refact-lsp",
+            "--lib",
+            "replay_recovery_refuses",
+            "--",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/planner-recovery-safety-mutant.log"
+        },
+        "passing": {
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "refact-lsp",
+            "--lib"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/planner-recovery-rust-final.log:3659 passed 0 failed 11 ignored; .refact/planner-recovery-restored.log final focused pass after temporary mutants restored"
+        }
+      },
+      "author": "chat:2f94f8e0-9e9c-408c-a1d8-41d7858da746",
+      "reviewer": "background_agent:bgagent-8c2d7d13-a8d7-4a36-91bf-74495ed6c6e3",
+      "review_evidence": "Independent semantic review subchat-6f8421d2-1dbb-424c-901c-b9aff86faef0 final report; inspected final Rust diff and executed negative/restored logs. Earlier independent reviews ca819700-ac2c-4173-a402-7cfc2e4d0b9c and eaa44de5-2937-453d-a880-c8f290ea5726; discovered persistence race fixed before final approval."
     }
   ],
   "classifications": [
@@ -4637,26 +4808,26 @@
     },
     {
       "path": "refact-agent/engine/src/chat/session_runtime.rs",
-      "before_sha256": "ed32b6bbfab762d80b87a18e6daa056ca5a819dad0d0430f066c9189c67668a6",
-      "after_sha256": "1e797d9d93afcfe307c115d3da13aeb3675a710fb1282c0475e11d108d21816e",
+      "before_sha256": "1e797d9d93afcfe307c115d3da13aeb3675a710fb1282c0475e11d108d21816e",
+      "after_sha256": "c8f8db503daf57705b22c8a0dbb44f0a7cbe241ebfc94cdb076acb589b996c3f",
       "affected_tests": [
-        "16c74c41fc0f212da468ece4202ab5b43b5eba0fc769e657d6b409aaf8b4b207",
-        "25a986245310debc62fadf12ddfa4642493bbb6602733f092d808908a66e9f75",
+        "98d02a6fda4aae6fd8c9d5127d1193cc0a3d0c9451c74e88c684067a1540f052",
         "3530bd0060aa0c7f42b86a6984a5f4295065d46519dcaa620547cb4e7926044d",
         "8922d7c081e31b24f30597182f78fd0443029abb3060053714148aa0f42efa77",
+        "16c74c41fc0f212da468ece4202ab5b43b5eba0fc769e657d6b409aaf8b4b207",
         "90a86f85db7547aed34cba69e833b05734bdb83f0d3b8034377aca18429877c0",
-        "988b7c08acc84756a99c9a602cf24902a4291d589eb108eec7ab3438caaf3541",
-        "98d02a6fda4aae6fd8c9d5127d1193cc0a3d0c9451c74e88c684067a1540f052",
-        "a6ea9d4470718973d9a573008163f85be47cbc0d95839ef27c0b316c34efdeac",
-        "ad06a49323adf25f9d2c613bf1a0e85b1cbf9dbc3c8e8d4ad9480bcd5061ad26",
         "b079b26b450c0484463727e42d1706fbb4ad2f42bc2bebbb1363d8a4c46cdf85",
-        "d137f477ef48053025230d3c15bbb0644551d8cf8bffb0bcf01b8b82a6287a7a"
+        "988b7c08acc84756a99c9a602cf24902a4291d589eb108eec7ab3438caaf3541",
+        "d137f477ef48053025230d3c15bbb0644551d8cf8bffb0bcf01b8b82a6287a7a",
+        "a6ea9d4470718973d9a573008163f85be47cbc0d95839ef27c0b316c34efdeac",
+        "25a986245310debc62fadf12ddfa4642493bbb6602733f092d808908a66e9f75",
+        "ad06a49323adf25f9d2c613bf1a0e85b1cbf9dbc3c8e8d4ad9480bcd5061ad26"
       ],
-      "impact": "refact-agent/engine/src/chat/session_runtime.rs: canonical non-test residue changes remove 623 tokens and add 0 tokens. Cleanup evidence identifies unused import: `SessionState`; make_assistant_with_tool_calls; make_pause_reason; make_tool_result; default_openai_settings; assert_openai_tool_results_follow_assistant; HashSet. 12787→6186 global lexical definitions includes intentional coverage loss from case deletions; this support record does not claim strict duplication.",
-      "execution_context": "Same physical Rust path; no retained fingerprint/context relocation relative pinned main. Test-only ownership: inline cfg(test) modules or explicitly cfg(test) helper items; tests/ and *_tests.rs are test harness/module support. Removed dead helper/import/module scaffolding has no surviving intended executing consumer; conservative affected mapping lists surviving same-file tests for dependency review, not a claim all call deleted helpers. See exact residue token hunks and cleanup evidence references.",
-      "author": "support-impact-author-bgagent-1fd43f09",
-      "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
-      "review_evidence": "Independent source/hash review: refact-agent/engine/src/chat/session_runtime.rs: reviewed removal of {'names': ['unused import: `SessionState`'], 'diagnostic_indices': [229], 'before_byte_span': [25390, 25404], 'removed_text': ', SessionState', 'evidence': 'rustc unused_imports MachineApplicable deletion; import in cfg(test) scope or test-only file'}, make_assistant_with_tool_calls, make_pause_reason, make_tool_result, default_openai_settings, assert_openai_tool_results_follow_assistant, HashSet within explicit cfg(test) items/modules. 11 actual same-path retained cases keep complete attributed canonical body and enclosing-context hash against pinned MAIN. Conservative affected map contains exactly those current fingerprints."
+      "impact": "Production support now recognizes active canonical IDs and performs owner-checked append-only recovery before load/subscription snapshots. Existing lifecycle/command fixtures retain their original semantics; new recovery tests exercise the changed behavior.",
+      "execution_context": "No test-only hook, feature gate or shared fixture rewrite; default library execution remains enabled. Full engine library suite3659 passed,0failed,11ignored.",
+      "author": "chat:2f94f8e0-9e9c-408c-a1d8-41d7858da746",
+      "reviewer": "background_agent:bgagent-8c2d7d13-a8d7-4a36-91bf-74495ed6c6e3",
+      "review_evidence": "Independent semantic review subchat-6f8421d2-1dbb-424c-901c-b9aff86faef0 final report; inspected final Rust diff and executed negative/restored logs. Earlier independent reviews ca819700-ac2c-4173-a402-7cfc2e4d0b9c and eaa44de5-2937-453d-a880-c8f290ea5726; discovered persistence race fixed before final approval."
     },
     {
       "path": "refact-agent/engine/src/chat/trajectory_index.rs",
@@ -7113,6 +7284,50 @@
       "author": "background_agent:bgagent-554f1e1c-8256-47ec-9314-88906f435e1a",
       "reviewer": "background_agent:bgagent-a9823438-01c3-4a60-a7eb-cfbe624a989c",
       "review_evidence": "Exact raw main/current hashes derived independently with scanner and git show pinned base; bounded semantic review and both current-source focused Cargo targets passed. Approval scope and limits in integration-fixes-independent.json."
+    },
+    {
+      "path": "refact-agent/engine/src/chat/goal_role.rs",
+      "before_sha256": "787ab718921fa13b6fd03c5a656de3ff3a1005c0f97929e9ba0760299ffac2fa",
+      "after_sha256": "93ce4221cf6dadb81181cfa9a97b45cd3456fb3c17b50e76e29f3a84eda9041d",
+      "affected_tests": [
+        "eddcc3b045297ded3d65c2353e06cb52fa27a3bedd2ad3facd6d7c269a3e7ef5"
+      ],
+      "impact": "Production support now recognizes active canonical IDs and performs owner-checked append-only recovery before load/subscription snapshots. Existing lifecycle/command fixtures retain their original semantics; new recovery tests exercise the changed behavior.",
+      "execution_context": "No test-only hook, feature gate or shared fixture rewrite; default library execution remains enabled. Full engine library suite3659 passed,0failed,11ignored.",
+      "author": "chat:2f94f8e0-9e9c-408c-a1d8-41d7858da746",
+      "reviewer": "background_agent:bgagent-8c2d7d13-a8d7-4a36-91bf-74495ed6c6e3",
+      "review_evidence": "Independent semantic review subchat-6f8421d2-1dbb-424c-901c-b9aff86faef0 final report; inspected final Rust diff and executed negative/restored logs. Earlier independent reviews ca819700-ac2c-4173-a402-7cfc2e4d0b9c and eaa44de5-2937-453d-a880-c8f290ea5726; discovered persistence race fixed before final approval."
+    },
+    {
+      "path": "refact-agent/engine/src/tasks/goal.rs",
+      "before_sha256": "16047622f6ea0a1777289820d18da64f9a12c2353ddd551db8d7af48d480a2d5",
+      "after_sha256": "60fc4755e8c06082481ea380d3d155dd855df6aefc834c84610747ac3cc61f45",
+      "affected_tests": [
+        "1f854211b5ad8699bb5f25c85772d231225754d6c439f517f74f0c9e848d052f",
+        "7b7d51c8f28a018a113b432cf2c05bf397a2461fcde8eb4ac6831becadbe5e85"
+      ],
+      "impact": "Production support now recognizes active canonical IDs and performs owner-checked append-only recovery before load/subscription snapshots. Existing lifecycle/command fixtures retain their original semantics; new recovery tests exercise the changed behavior.",
+      "execution_context": "No test-only hook, feature gate or shared fixture rewrite; default library execution remains enabled. Full engine library suite3659 passed,0failed,11ignored.",
+      "author": "chat:2f94f8e0-9e9c-408c-a1d8-41d7858da746",
+      "reviewer": "background_agent:bgagent-8c2d7d13-a8d7-4a36-91bf-74495ed6c6e3",
+      "review_evidence": "Independent semantic review subchat-6f8421d2-1dbb-424c-901c-b9aff86faef0 final report; inspected final Rust diff and executed negative/restored logs. Earlier independent reviews ca819700-ac2c-4173-a402-7cfc2e4d0b9c and eaa44de5-2937-453d-a880-c8f290ea5726; discovered persistence race fixed before final approval."
+    },
+    {
+      "path": "refact-agent/engine/src/chat/handlers.rs",
+      "before_sha256": "b8f14371e9eb93427677ee8a98d22468b2eb00b5c84490b18a23ff94dc389f01",
+      "after_sha256": "a7073c528c75165f08e05ccb45742a6da7d0a5c23150c4326232e247faaa98e1",
+      "affected_tests": [
+        "045b047799a45b3d9d905932432b6a7cb2db4431f1b154efcd4dd082955c7f4a",
+        "0a297ef72006041819ece43813cdd84d52f91bd4fc3e582e34ad40eeb20e6b62",
+        "9b0bf2890ddb27a574857eed9900d29b63de0313cfcf533df38768a480cb0b0b",
+        "9a41df2c472766afc26af573c0bc3f379e88dc6df45a31b55fe3547740e887e0",
+        "e179d5a56fd9d96b574f15f04d07094eaf294d640d0cf4015b1c4d557b1adf75"
+      ],
+      "impact": "Production support now recognizes active canonical IDs and performs owner-checked append-only recovery before load/subscription snapshots. Existing lifecycle/command fixtures retain their original semantics; new recovery tests exercise the changed behavior.",
+      "execution_context": "No test-only hook, feature gate or shared fixture rewrite; default library execution remains enabled. Full engine library suite3659 passed,0failed,11ignored.",
+      "author": "chat:2f94f8e0-9e9c-408c-a1d8-41d7858da746",
+      "reviewer": "background_agent:bgagent-8c2d7d13-a8d7-4a36-91bf-74495ed6c6e3",
+      "review_evidence": "Independent semantic review subchat-6f8421d2-1dbb-424c-901c-b9aff86faef0 final report; inspected final Rust diff and executed negative/restored logs. Earlier independent reviews ca819700-ac2c-4173-a402-7cfc2e4d0b9c and eaa44de5-2937-453d-a880-c8f290ea5726; discovered persistence race fixed before final approval."
     }
   ]
 }

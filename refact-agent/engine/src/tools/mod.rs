@@ -1,3 +1,4 @@
+pub(crate) mod command_checkout;
 pub(crate) mod native_enrichment;
 pub(crate) mod planner_delivery;
 pub mod review_agents;

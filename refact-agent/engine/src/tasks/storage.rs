@@ -960,6 +960,200 @@ pub async fn discover_board_authority(
     })
 }
 
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct DiscoveredClaim {
+    pub claimant_chat_id: String,
+    pub claimed_at: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct DiscoveredOverride {
+    pub overridden_by: String,
+    pub overridden_at: String,
+    pub unsatisfied: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct ModelBoardAuthority {
+    pub task_id: String,
+    pub rev: u64,
+    pub owner_chat_id: Option<String>,
+    pub reviewer_chat_ids: Vec<String>,
+    pub review_policy: BoardReviewPolicy,
+    pub claims: std::collections::BTreeMap<String, DiscoveredClaim>,
+    pub dependency_overrides: std::collections::BTreeMap<String, DiscoveredOverride>,
+}
+
+struct DiscoveryAudit(Vec<refact_privacy::FileRecord>);
+
+impl refact_privacy::PrivacyAudited for DiscoveryAudit {
+    fn privacy_records(
+        &self,
+    ) -> Result<Vec<(usize, refact_privacy::FileRecord)>, refact_privacy::PrivacyAuditError> {
+        Ok(self.0.iter().cloned().enumerate().collect())
+    }
+}
+
+pub(crate) async fn discover_model_cards(
+    gcx: &Arc<GlobalContext>,
+    caller: &crate::coordination::scope::WorkCaller,
+) -> Result<(Vec<DiscoveredCard>, Vec<refact_privacy::FileRecord>, bool), WorkError> {
+    let model = caller
+        .model
+        .as_ref()
+        .ok_or_else(WorkError::policy_unavailable)?;
+    let before = crate::coordination::privacy_guard::policy_key(gcx, model)?;
+    let (mut rows, unavailable) = gcx.work_boards.rows(&caller.source_root).await;
+    for row in &mut rows {
+        let task_id = row
+            .metadata
+            .task_id
+            .as_deref()
+            .ok_or_else(WorkError::not_visible)?;
+        validate_task_id(task_id).map_err(|_| WorkError::not_visible())?;
+        row.declared_files.push(
+            caller
+                .source_root
+                .join(".refact/tasks")
+                .join(task_id)
+                .join("board.yaml")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        row.declared_files
+            .extend(row.source_records.iter().map(|record| record.path.clone()));
+    }
+    let rows = crate::coordination::privacy_guard::clear_rows(gcx, rows, model)?;
+    let mut records = Vec::new();
+    let mut cards = Vec::new();
+    for row in rows {
+        records.extend(row.source_records);
+        if let (Some(task_id), Some(card_id)) = (row.metadata.task_id, row.metadata.card_id) {
+            cards.push(DiscoveredCard {
+                task_id,
+                card_id,
+                title: row.title,
+                column: row.metadata.runtime_status,
+                agent_chat_id: row.chat_id,
+            });
+        }
+    }
+    cards.sort_by(|a, b| {
+        a.task_id
+            .cmp(&b.task_id)
+            .then_with(|| a.card_id.cmp(&b.card_id))
+    });
+    cards.dedup_by(|a, b| a.task_id == b.task_id && a.card_id == b.card_id);
+    if crate::coordination::privacy_guard::policy_key(gcx, model)? != before {
+        return Err(WorkError::policy_unavailable());
+    }
+    Ok((cards, records, unavailable))
+}
+
+pub(crate) async fn discover_model_authority(
+    gcx: &Arc<GlobalContext>,
+    caller: &crate::coordination::scope::WorkCaller,
+    task_id: &str,
+) -> Result<(ModelBoardAuthority, Vec<refact_privacy::FileRecord>), WorkError> {
+    validate_task_id(task_id).map_err(|_| WorkError::not_visible())?;
+    let model = caller
+        .model
+        .as_ref()
+        .ok_or_else(WorkError::policy_unavailable)?;
+    let before = crate::coordination::privacy_guard::policy_key(gcx, model)?;
+    let path = caller
+        .source_root
+        .join(".refact/tasks")
+        .join(task_id)
+        .join("board.yaml");
+    for directory in [path.parent(), path.parent().and_then(Path::parent)]
+        .into_iter()
+        .flatten()
+    {
+        let metadata = fs::symlink_metadata(directory)
+            .await
+            .map_err(|_| WorkError::not_visible())?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(WorkError::not_visible());
+        }
+    }
+    let body = crate::coordination::board_bootstrap::read_bounded(
+        &path,
+        &caller.source_root,
+        crate::file_activity::settings().max_work_history_bytes,
+    )
+    .await
+    .map_err(|_| WorkError::not_visible())?;
+    let value: serde_yaml::Value =
+        serde_yaml::from_str(&body).map_err(|_| WorkError::not_visible())?;
+    let board: TaskBoard =
+        serde_yaml::from_value(value.clone()).map_err(|_| WorkError::not_visible())?;
+    let provenance: BoardProvenance = value
+        .get("work_provenance")
+        .and_then(|value| serde_yaml::from_value(value.clone()).ok())
+        .ok_or_else(WorkError::not_visible)?;
+    let settings = crate::file_activity::settings();
+    if !provenance.authority_valid_for(&board, &settings)
+        || board_rows::rows_from_board(&caller.source_root, task_id, &board, &provenance, &settings)
+            .is_none()
+    {
+        return Err(WorkError::not_visible());
+    }
+    let mut records = crate::privacy::records::declared_file_records(
+        gcx,
+        std::iter::once(path).chain(
+            provenance
+                .records
+                .iter()
+                .map(|record| PathBuf::from(&record.path)),
+        ),
+    )
+    .map_err(|_| WorkError::policy_unavailable())?;
+    records.extend(provenance.records);
+    crate::privacy::destinations::clear_for_model(gcx, DiscoveryAudit(records.clone()), model)
+        .map_err(|_| WorkError::not_visible())?;
+    if crate::coordination::privacy_guard::policy_key(gcx, model)? != before {
+        return Err(WorkError::policy_unavailable());
+    }
+    Ok((
+        ModelBoardAuthority {
+            task_id: task_id.to_string(),
+            rev: board.rev,
+            owner_chat_id: board.owner_chat_id,
+            reviewer_chat_ids: board.reviewer_chat_ids,
+            review_policy: board.review_policy,
+            claims: board
+                .card_claims
+                .into_iter()
+                .map(|(id, claim)| {
+                    (
+                        id,
+                        DiscoveredClaim {
+                            claimant_chat_id: claim.claimant_chat_id,
+                            claimed_at: claim.claimed_at,
+                        },
+                    )
+                })
+                .collect(),
+            dependency_overrides: board
+                .dependency_overrides
+                .into_iter()
+                .map(|(id, value)| {
+                    (
+                        id,
+                        DiscoveredOverride {
+                            overridden_by: value.overridden_by,
+                            overridden_at: value.overridden_at,
+                            unsatisfied: value.unsatisfied,
+                        },
+                    )
+                })
+                .collect(),
+        },
+        records,
+    ))
+}
+
 pub async fn board_allows_self_review(
     gcx: Arc<GlobalContext>,
     task_id: &str,

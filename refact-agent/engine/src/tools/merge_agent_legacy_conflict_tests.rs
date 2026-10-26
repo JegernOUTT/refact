@@ -89,6 +89,13 @@ impl Fixture {
                 "instructions": "",
                 "created_at": chrono::Utc::now().to_rfc3339(),
                 "final_report": "done",
+                "verifier_report": {
+                    "passed": true, "classification": "passed", "recommendation": "merge",
+                    "command_results": [{
+                        "command": "fixture verification", "exit_code": 0,
+                        "passed": true, "outcome": "passed"
+                    }]
+                },
                 "agent_branch": AGENT,
                 "agent_worktree": agent,
                 "base_branch": target_branch,

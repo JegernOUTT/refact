@@ -1,15 +1,14 @@
-//! Opaque, bounded, visibility-bound pagination. Stores offsets, never private
-//! rows or transcripts. Every continuation revalidates the current projection.
-
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
 use refact_work_core::CoordinationSettings;
+use serde::Serialize;
 use uuid::Uuid;
 
 use super::error::WorkError;
+use super::service::WorkSnapshot;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ViewBinding {
     pub project: String,
     pub principal: String,
@@ -22,6 +21,16 @@ struct View {
     fingerprint: String,
     generation: u64,
     accessed_at: u64,
+    snapshots: BTreeMap<u64, FrozenView>,
+}
+
+struct FrozenView {
+    snapshot: WorkSnapshot,
+    fingerprint: String,
+    observed_at: u64,
+    expires_at: u64,
+    units: usize,
+    bytes: usize,
 }
 
 struct Cursor {
@@ -49,6 +58,14 @@ pub struct PageWindow {
     pub next_cursor: Option<String>,
 }
 
+pub(super) struct FrozenPage {
+    pub window: PageWindow,
+    pub snapshot: WorkSnapshot,
+    pub total: usize,
+    pub observed_at: u64,
+    pub stale: bool,
+}
+
 impl WorkViews {
     pub fn beginning_cursor(
         &self,
@@ -59,13 +76,20 @@ impl WorkViews {
         let settings = crate::file_activity::settings();
         settings.validate().map_err(|_| WorkError::unavailable())?;
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        let binding = state
+        state.prune_snapshots(&settings, now_ms);
+        let view = state
             .views
             .get(snapshot_id)
-            .filter(|view| view.generation == seq)
-            .ok_or_else(WorkError::cursor_expired)?
-            .binding
-            .clone();
+            .filter(|view| {
+                view.snapshots.contains_key(&seq)
+                    || (view.snapshots.is_empty() && view.generation == seq)
+            })
+            .ok_or_else(WorkError::cursor_expired)?;
+        let binding = view.binding.clone();
+        let expires_at = view.snapshots.get(&seq).map_or_else(
+            || now_ms.saturating_add(settings.work_cursor_ttl_secs.saturating_mul(1000)),
+            |snapshot| snapshot.expires_at,
+        );
         if let Some((token, _)) = state.cursors.iter().find(|(_, cursor)| {
             cursor.view_id == snapshot_id
                 && cursor.generation == seq
@@ -91,8 +115,7 @@ impl WorkViews {
                 view_id: snapshot_id.into(),
                 generation: seq,
                 offset: 0,
-                expires_at: now_ms
-                    .saturating_add(settings.work_cursor_ttl_secs.saturating_mul(1000)),
+                expires_at,
             },
         );
         Ok(token)
@@ -174,6 +197,7 @@ impl WorkViews {
                         fingerprint: fingerprint.clone(),
                         generation: 1,
                         accessed_at: now_ms,
+                        snapshots: BTreeMap::new(),
                     },
                 );
                 id
@@ -246,6 +270,272 @@ impl WorkViews {
     }
 }
 
+impl WorkViews {
+    pub(super) fn frozen_page(
+        &self,
+        binding: ViewBinding,
+        current: WorkSnapshot,
+        limit: usize,
+        cursor: Option<&str>,
+        settings: &CoordinationSettings,
+        now_ms: u64,
+        revalidate: impl FnOnce(&WorkSnapshot) -> Result<(), WorkError>,
+    ) -> Result<FrozenPage, WorkError> {
+        settings.validate().map_err(|_| WorkError::unavailable())?;
+        if limit == 0 || limit > settings.overview_max_rows {
+            return Err(WorkError::invalid(
+                "limit is outside the configured page range",
+            ));
+        }
+        let (fingerprint, bytes) = current.signature(&binding)?;
+        let units = current.units();
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        state.prune_snapshots(settings, now_ms);
+        let (view_id, seq, offset) = match cursor {
+            Some(token) => {
+                if !token.starts_with("w1.") || Uuid::parse_str(&token[3..]).is_err() {
+                    return Err(WorkError::invalid_cursor());
+                }
+                let saved = state
+                    .cursors
+                    .get(token)
+                    .ok_or_else(WorkError::cursor_expired)?;
+                if saved.binding != binding {
+                    return Err(WorkError::invalid_cursor());
+                }
+                if now_ms >= saved.expires_at {
+                    return Err(WorkError::cursor_expired());
+                }
+                (saved.view_id.clone(), saved.generation, saved.offset)
+            }
+            None => {
+                if units > settings.max_work_history_rows || bytes > settings.max_work_history_bytes
+                {
+                    return Err(WorkError::unavailable());
+                }
+                let existing = state
+                    .views
+                    .iter()
+                    .find(|(_, view)| view.binding == binding && !view.snapshots.is_empty())
+                    .map(|(id, view)| (id.clone(), view.generation));
+                let (id, mut seq) = existing
+                    .clone()
+                    .unwrap_or_else(|| (Uuid::new_v4().to_string(), 0));
+                let unchanged = state
+                    .views
+                    .get(&id)
+                    .and_then(|v| v.snapshots.get(&seq))
+                    .is_some_and(|s| s.fingerprint == fingerprint);
+                if !unchanged {
+                    seq = seq.checked_add(1).ok_or_else(WorkError::unavailable)?;
+                    state.reserve_snapshot(settings, units, bytes, &id)?;
+                    let view = state.views.entry(id.clone()).or_insert_with(|| View {
+                        binding: binding.clone(),
+                        fingerprint: String::new(),
+                        generation: seq,
+                        accessed_at: now_ms,
+                        snapshots: BTreeMap::new(),
+                    });
+                    view.generation = seq;
+                    view.snapshots.insert(
+                        seq,
+                        FrozenView {
+                            snapshot: current,
+                            fingerprint: fingerprint.clone(),
+                            observed_at: now_ms,
+                            expires_at: now_ms
+                                .saturating_add(settings.work_cursor_ttl_secs.saturating_mul(1000)),
+                            units,
+                            bytes,
+                        },
+                    );
+                }
+                (id, seq, 0)
+            }
+        };
+        let saved = state
+            .views
+            .get(&view_id)
+            .and_then(|view| view.snapshots.get(&seq))
+            .ok_or_else(WorkError::cursor_expired)?;
+        if let Err(error) = revalidate(&saved.snapshot) {
+            state.remove_snapshot(&view_id, seq);
+            return Err(error);
+        }
+        let total = saved.snapshot.total();
+        if offset > total {
+            return Err(WorkError::cursor_expired());
+        }
+        let end = offset.saturating_add(limit).min(total);
+        let snapshot = saved.snapshot.slice(offset, end);
+        let observed_at = saved.observed_at;
+        let expires_at = saved.expires_at;
+        let stale = saved.fingerprint != fingerprint;
+        state
+            .views
+            .get_mut(&view_id)
+            .ok_or_else(WorkError::cursor_expired)?
+            .accessed_at = now_ms;
+        let next_cursor = if end < total {
+            let existing = state
+                .cursors
+                .iter()
+                .find(|(_, c)| {
+                    c.view_id == view_id
+                        && c.generation == seq
+                        && c.offset == end
+                        && now_ms < c.expires_at
+                })
+                .map(|(token, _)| token.clone());
+            Some(match existing {
+                Some(token) => token,
+                None => {
+                    while state.cursors.len() >= settings.max_work_cursors {
+                        let oldest = state
+                            .cursors
+                            .iter()
+                            .min_by_key(|(token, c)| (c.expires_at, *token))
+                            .map(|(token, _)| token.clone())
+                            .ok_or_else(WorkError::unavailable)?;
+                        state.cursors.remove(&oldest);
+                    }
+                    let token = format!("w1.{}", Uuid::new_v4());
+                    state.cursors.insert(
+                        token.clone(),
+                        Cursor {
+                            binding,
+                            view_id: view_id.clone(),
+                            generation: seq,
+                            offset: end,
+                            expires_at,
+                        },
+                    );
+                    token
+                }
+            })
+        } else {
+            None
+        };
+        Ok(FrozenPage {
+            window: PageWindow {
+                snapshot_id: view_id,
+                seq,
+                offset,
+                end,
+                next_cursor,
+            },
+            snapshot,
+            total,
+            observed_at,
+            stale,
+        })
+    }
+}
+
+impl State {
+    fn remove_snapshot(&mut self, id: &str, seq: u64) {
+        if let Some(view) = self.views.get_mut(id) {
+            view.snapshots.remove(&seq);
+            if view.snapshots.is_empty() {
+                self.views.remove(id);
+            }
+        }
+        self.cursors
+            .retain(|_, c| c.view_id != id || c.generation != seq);
+    }
+
+    fn snapshot_usage(&self) -> (usize, usize, usize) {
+        self.views.values().flat_map(|v| v.snapshots.values()).fold(
+            (0usize, 0usize, 0usize),
+            |(count, units, bytes), s| {
+                (
+                    count.saturating_add(1),
+                    units.saturating_add(s.units),
+                    bytes.saturating_add(s.bytes),
+                )
+            },
+        )
+    }
+
+    fn evict_snapshot(&mut self) -> Result<(), WorkError> {
+        let (id, seq) = self
+            .views
+            .iter()
+            .flat_map(|(id, v)| {
+                v.snapshots
+                    .iter()
+                    .map(move |(seq, s)| (s.observed_at, id.clone(), *seq))
+            })
+            .min()
+            .map(|(_, id, seq)| (id, seq))
+            .ok_or_else(WorkError::unavailable)?;
+        self.remove_snapshot(&id, seq);
+        Ok(())
+    }
+
+    fn prune_snapshots(&mut self, settings: &CoordinationSettings, now_ms: u64) {
+        let expired: Vec<_> = self
+            .views
+            .iter()
+            .flat_map(|(id, v)| {
+                v.snapshots
+                    .iter()
+                    .filter(move |(_, s)| {
+                        now_ms >= s.expires_at
+                            || now_ms.saturating_sub(s.observed_at)
+                                >= settings.work_cursor_ttl_secs.saturating_mul(1000)
+                    })
+                    .map(move |(seq, _)| (id.clone(), *seq))
+            })
+            .collect();
+        for (id, seq) in expired {
+            self.remove_snapshot(&id, seq);
+        }
+        self.cursors.retain(|_, c| now_ms < c.expires_at);
+        while {
+            let (count, units, bytes) = self.snapshot_usage();
+            count > settings.max_work_views
+                || units > settings.max_work_history_rows
+                || bytes > settings.max_work_history_bytes
+        } {
+            if self.evict_snapshot().is_err() {
+                break;
+            }
+        }
+    }
+
+    fn reserve_snapshot(
+        &mut self,
+        settings: &CoordinationSettings,
+        units: usize,
+        bytes: usize,
+        view_id: &str,
+    ) -> Result<(), WorkError> {
+        if units > settings.max_work_history_rows || bytes > settings.max_work_history_bytes {
+            return Err(WorkError::unavailable());
+        }
+        while {
+            let (count, used_units, used_bytes) = self.snapshot_usage();
+            count >= settings.max_work_views
+                || used_units.saturating_add(units) > settings.max_work_history_rows
+                || used_bytes.saturating_add(bytes) > settings.max_work_history_bytes
+        } {
+            self.evict_snapshot()?;
+        }
+        while !self.views.contains_key(view_id) && self.views.len() >= settings.max_work_views {
+            let id = self
+                .views
+                .iter()
+                .min_by_key(|(id, v)| (v.accessed_at, *id))
+                .map(|(id, _)| id.clone())
+                .ok_or_else(WorkError::unavailable)?;
+            self.views.remove(&id);
+            self.cursors.retain(|_, c| c.view_id != id);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +546,256 @@ mod tests {
             principal: "chat:c".into(),
             disclosure: "policy:model".into(),
             filter: "all".into(),
+        }
+    }
+
+    fn snapshot(label: &str) -> WorkSnapshot {
+        WorkSnapshot {
+            roots: (0..3)
+                .map(|id| super::super::types::WorkRootRef {
+                    id: format!("{label}-{id}"),
+                    kind: super::super::types::WorkRootKind::Project,
+                    path: None,
+                    branch: None,
+                    project: "p".into(),
+                    source_path: None,
+                    presence: Default::default(),
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn frozen_inventory_retries_and_capsule_beginning_survive_new_generations() {
+        let views = WorkViews::default();
+        let settings = CoordinationSettings::default();
+        let first = views
+            .frozen_page(binding(), snapshot("a"), 1, None, &settings, 10, |_| Ok(()))
+            .unwrap();
+        let second = views
+            .frozen_page(
+                binding(),
+                snapshot("changed"),
+                1,
+                first.window.next_cursor.as_deref(),
+                &settings,
+                11,
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(second.snapshot.roots[0].id, "a-1");
+        assert!(second.stale);
+        let fresh = views
+            .frozen_page(
+                binding(),
+                snapshot("changed"),
+                1,
+                None,
+                &settings,
+                12,
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(fresh.window.snapshot_id, first.window.snapshot_id);
+        assert_eq!(fresh.window.seq, first.window.seq + 1);
+        let retry = views
+            .frozen_page(
+                binding(),
+                snapshot("changed"),
+                1,
+                first.window.next_cursor.as_deref(),
+                &settings,
+                13,
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(retry.snapshot.roots, second.snapshot.roots);
+        assert_eq!(retry.window.next_cursor, second.window.next_cursor);
+        let token = views
+            .beginning_cursor(&first.window.snapshot_id, first.window.seq, 14)
+            .unwrap();
+        assert_eq!(
+            views
+                .beginning_cursor(&first.window.snapshot_id, first.window.seq, 15)
+                .unwrap(),
+            token
+        );
+        let beginning = views
+            .frozen_page(
+                binding(),
+                snapshot("changed"),
+                1,
+                Some(&token),
+                &settings,
+                16,
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(beginning.snapshot.roots[0].id, "a-0");
+        assert_eq!(beginning.observed_at, 10);
+        for which in 0..4 {
+            let mut other = binding();
+            match which {
+                0 => other.project = "other".into(),
+                1 => other.principal = "other".into(),
+                2 => other.disclosure = "other".into(),
+                _ => other.filter = "other".into(),
+            }
+            assert_eq!(
+                views
+                    .frozen_page(
+                        other,
+                        snapshot("a"),
+                        1,
+                        Some(&token),
+                        &settings,
+                        17,
+                        |_| Ok(())
+                    )
+                    .err()
+                    .unwrap()
+                    .code,
+                "invalid_cursor"
+            );
+        }
+        assert_eq!(
+            views
+                .frozen_page(
+                    binding(),
+                    snapshot("a"),
+                    1,
+                    Some(&token),
+                    &settings,
+                    18,
+                    |_| Err(WorkError::cursor_expired())
+                )
+                .err()
+                .unwrap()
+                .code,
+            "cursor_expired"
+        );
+        assert_eq!(
+            views
+                .frozen_page(
+                    binding(),
+                    snapshot("a"),
+                    1,
+                    Some(&token),
+                    &settings,
+                    19,
+                    |_| Ok(())
+                )
+                .err()
+                .unwrap()
+                .code,
+            "cursor_expired"
+        );
+    }
+
+    #[test]
+    fn frozen_snapshots_have_absolute_ttl_and_aggregate_row_byte_and_view_bounds() {
+        let settings = CoordinationSettings {
+            work_cursor_ttl_secs: 1,
+            ..Default::default()
+        };
+        let views = WorkViews::default();
+        let first = views
+            .frozen_page(binding(), snapshot("a"), 1, None, &settings, 0, |_| Ok(()))
+            .unwrap();
+        let next = views
+            .frozen_page(
+                binding(),
+                snapshot("a"),
+                1,
+                first.window.next_cursor.as_deref(),
+                &settings,
+                900,
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(
+            views
+                .frozen_page(
+                    binding(),
+                    snapshot("a"),
+                    1,
+                    next.window.next_cursor.as_deref(),
+                    &settings,
+                    1000,
+                    |_| Ok(())
+                )
+                .err()
+                .unwrap()
+                .code,
+            "cursor_expired"
+        );
+        assert_eq!(views.0.lock().unwrap().snapshot_usage(), (0, 0, 0));
+        let bytes = snapshot("a").signature(&binding()).unwrap().1;
+        for settings in [
+            CoordinationSettings {
+                max_work_history_rows: 3,
+                ..Default::default()
+            },
+            CoordinationSettings {
+                max_work_history_bytes: bytes,
+                ..Default::default()
+            },
+            CoordinationSettings {
+                max_work_views: 1,
+                ..Default::default()
+            },
+        ] {
+            let views = WorkViews::default();
+            let first = views
+                .frozen_page(binding(), snapshot("a"), 1, None, &settings, 0, |_| Ok(()))
+                .unwrap();
+            let next = views
+                .frozen_page(binding(), snapshot("b"), 1, None, &settings, 1, |_| Ok(()))
+                .unwrap();
+            assert_eq!(next.window.seq, first.window.seq + 1);
+            assert_eq!(
+                views
+                    .frozen_page(
+                        binding(),
+                        snapshot("b"),
+                        1,
+                        first.window.next_cursor.as_deref(),
+                        &settings,
+                        2,
+                        |_| Ok(())
+                    )
+                    .err()
+                    .unwrap()
+                    .code,
+                "cursor_expired"
+            );
+            let state = views.0.lock().unwrap();
+            let (count, rows, bytes) = state.snapshot_usage();
+            assert!(count <= settings.max_work_views);
+            assert!(rows <= settings.max_work_history_rows);
+            assert!(bytes <= settings.max_work_history_bytes);
+        }
+        for settings in [
+            CoordinationSettings {
+                max_work_history_rows: 2,
+                ..Default::default()
+            },
+            CoordinationSettings {
+                max_work_history_bytes: bytes - 1,
+                ..Default::default()
+            },
+        ] {
+            let views = WorkViews::default();
+            assert_eq!(
+                views
+                    .frozen_page(binding(), snapshot("a"), 1, None, &settings, 0, |_| Ok(()))
+                    .err()
+                    .unwrap()
+                    .code,
+                "unavailable"
+            );
+            assert!(views.0.lock().unwrap().views.is_empty());
         }
     }
 

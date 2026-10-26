@@ -799,6 +799,10 @@ fn gate_reason(
     let detail = detail.map(str::trim).filter(|detail| !detail.is_empty());
     let head = match verdict {
         EvidenceVerdict::Failed => format!("Verification command failed: {}", command),
+        EvidenceVerdict::Blocked if record.exit_code.is_some() => format!(
+            "Verification command attempted; evidence blocked: {}",
+            command
+        ),
         EvidenceVerdict::Blocked => format!("not run: Verification command blocked: {}", command),
         EvidenceVerdict::Unavailable => {
             format!("not run: Verification evidence unavailable: {}", command)

@@ -455,6 +455,7 @@ impl PipelineReviewer {
             // Stamped per stage by `monitor_ctx`; the pipeline-level ctx is
             // not itself the liveness source.
             activity: None,
+            review_scope: None,
         };
         let stage_events_seen = Arc::new(AtomicU64::new(0));
         let stage_drain = drain_stage_progress(stage_events, stage_events_seen.clone());
@@ -500,6 +501,7 @@ impl GoalReviewer for PipelineReviewer {
             self.cfg.clone(),
             request.into_review_args(),
             &mut self.metering,
+            None,
         )
         .await
     }

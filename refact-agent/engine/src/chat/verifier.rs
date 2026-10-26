@@ -10,19 +10,19 @@ use serde_json::{json, Value};
 
 use crate::chat::evidence::{
     completion_decision, evaluate_gates, EvidenceContext, EvidenceDefaults, EvidenceRecord,
-    EvidenceService, GateOutcome, SystemEvidenceRunner,
+    EvidenceService, GateOutcome,
 };
 use crate::chat::evidence_revision::supersede_stale;
 use crate::chat::internal_roles::{event, EventSubkind};
-use crate::chat::verifier_diff::{
-    git_changed_files_summary, git_head_commit, resolve_verifier_diff_base,
-};
+use crate::chat::verifier_diff::{git_changed_files_summary, resolve_verifier_diff_base};
 use crate::chat::verify_cmd::VerifyCommandPolicy;
 use crate::chat::verify_cmd::instruction_skip_notes;
+use crate::app_state::AppState;
+use crate::at_commands::at_commands::AtCommandsContext;
+use crate::tools::command_checkout::{self, ValidatedCommandCheckout};
 use crate::exec::command_policy::{build_exec_request, CommandKind, CommandPolicyInput, ExecSource};
 use crate::exec::{ExecOutputStream, ExecStatus};
 use crate::global_context::{try_load_caps_quickly_if_not_present, GlobalContext};
-use crate::worktrees::service::WorktreeService;
 use crate::tasks::storage;
 use crate::tasks::types::{
     BoardCard, StatusUpdate, VerificationOutcome, VerificationResult, VerifierReport,
@@ -35,11 +35,14 @@ const MAX_OUTPUT_CAPTURE_BYTES: usize = 512 * 1024;
 const MAX_DIFF_LINES: usize = 200;
 const VERIFIER_SOURCE: &str = "chat.verifier";
 const STALE_VERIFIER_WRITE: &str = "stale verifier write";
+const CONFIGURATION_RETRY: &str = "verification configuration snapshot advanced";
+const CONFIGURATION_ATTEMPTS: usize = 3;
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct ExpectedCardState {
     pub board_rev: u64,
     card_fingerprint: Value,
+    verification: Option<VerificationSnapshot>,
 }
 
 impl ExpectedCardState {
@@ -47,6 +50,7 @@ impl ExpectedCardState {
         Self {
             board_rev,
             card_fingerprint: verifier_card_fingerprint(card),
+            verification: None,
         }
     }
 
@@ -57,6 +61,171 @@ impl ExpectedCardState {
     pub fn matches_board_card(&self, board_rev: u64, card: &BoardCard) -> bool {
         board_rev >= self.board_rev && self.matches_card(card)
     }
+
+    pub(crate) fn from_finished_card(
+        gcx: &GlobalContext,
+        board_rev: u64,
+        card: &BoardCard,
+        owner: Option<&str>,
+        fence: Option<FinishVerificationFence>,
+    ) -> Self {
+        let mut expected = Self::from_card(board_rev, card);
+        if let Some(fence) = fence {
+            if fence.snapshot.owner.as_deref() == owner
+                && finish_candidate_matches(card, &fence.snapshot)
+                && policy_settings_fingerprint(gcx)
+                    .is_ok_and(|current| current == fence.snapshot.configuration.policy_settings)
+            {
+                expected.verification = Some(fence.snapshot);
+            }
+        }
+        expected
+    }
+}
+
+pub(crate) struct FinishVerificationFence {
+    snapshot: VerificationSnapshot,
+    configuration: ConfigurationSnapshot,
+    card: ExpectedCardState,
+}
+
+impl FinishVerificationFence {
+    pub(crate) fn is_current(
+        &self,
+        gcx: &GlobalContext,
+        board: &crate::tasks::types::TaskBoard,
+    ) -> bool {
+        board
+            .get_card(
+                self.snapshot
+                    .worktree_meta
+                    .card_id
+                    .as_deref()
+                    .unwrap_or_default(),
+            )
+            .is_some_and(|card| self.card.matches_board_card(board.rev, card))
+            && self.configuration.ensure_current(gcx).is_ok()
+            && self.snapshot.matches(gcx, board, &self.configuration)
+    }
+}
+
+fn finish_candidate_matches(card: &BoardCard, snapshot: &VerificationSnapshot) -> bool {
+    let meta = &snapshot.worktree_meta;
+    card.column == "done"
+        && card.assignee == meta.agent_id
+        && card.agent_worktree_name.as_deref() == Some(meta.id.as_str())
+        && card.agent_worktree.as_deref().map(Path::new) == Some(meta.root.as_path())
+        && card.agent_branch == meta.branch
+        && card.agent_chat_id.as_ref().is_some_and(|chat| {
+            snapshot.references.iter().any(|reference| {
+                reference.kind == "task_agent"
+                    && reference.chat_id.as_ref() == Some(chat)
+                    && reference.agent_id == meta.agent_id
+                    && reference.card_id == meta.card_id
+                    && reference.task_id == meta.task_id
+            })
+        })
+        && command_checkout::selected_winner_matches(card)
+        && card.team_members.is_empty()
+}
+
+pub(crate) async fn capture_finish_verification(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    card_id: &str,
+    owner: &str,
+    chat_id: &str,
+    worktree: &crate::worktrees::types::WorktreeMeta,
+) -> Result<FinishVerificationFence, String> {
+    let source = dunce::canonicalize(&worktree.source_workspace_root)
+        .map_err(|_| "verification source unavailable")?;
+    let (board, _) = command_checkout::read_board(&source, task_id).await?;
+    board.require_owner(owner)?;
+    let card = board
+        .get_card(card_id)
+        .ok_or("verification card unavailable")?;
+    let identity = if let Some(variants) = &card.ab_variants {
+        variants
+            .variant_key_for_chat_id(chat_id)
+            .and_then(|key| variants.variant(key))
+            .is_some_and(|variant| {
+                worktree.agent_id.as_deref() == Some(variant.agent_id.as_str())
+                    && variant.worktree_name.as_deref() == Some(worktree.id.as_str())
+                    && Path::new(&variant.worktree) == worktree.root.as_path()
+                    && variant.branch == worktree.branch
+            })
+    } else {
+        card.agent_chat_id.as_deref() == Some(chat_id)
+            && card.assignee == worktree.agent_id
+            && card.agent_worktree_name.as_deref() == Some(worktree.id.as_str())
+            && card.agent_worktree.as_deref().map(Path::new) == Some(worktree.root.as_path())
+            && card.agent_branch == worktree.branch
+    };
+    if !identity
+        || worktree.kind != "task_agent"
+        || !worktree.enforce
+        || worktree.task_id.as_deref() != Some(task_id)
+        || worktree.card_id.as_deref() != Some(card_id)
+        || worktree.source_workspace_root != source
+        || !card.team_members.is_empty()
+    {
+        return Err(stale_verifier_error(task_id, card_id));
+    }
+    let service = crate::worktrees::service::WorktreeService::new_async(
+        gcx.cache_dir.clone(),
+        source.clone(),
+    )
+    .await?;
+    let view = service.get_worktree(&worktree.id).await?;
+    if view.meta != *worktree
+        || view.status.conflicted
+        || !view.status.path_exists
+        || !view.status.is_git_worktree
+        || view.status.error.is_some()
+        || view.status.branch != worktree.branch
+        || dunce::canonicalize(&worktree.root).ok().as_ref() != Some(&worktree.root)
+        || !view.references.iter().any(|reference| {
+            reference.kind == "task_agent"
+                && reference.chat_id.as_deref() == Some(chat_id)
+                && reference.agent_id == worktree.agent_id
+                && reference.card_id == worktree.card_id
+                && reference.task_id == worktree.task_id
+        })
+    {
+        return Err(stale_verifier_error(task_id, card_id));
+    }
+    let head = view
+        .status
+        .head_commit
+        .ok_or("verification candidate head unavailable")?;
+    let snapshot = VerificationSnapshot::capture_registered(
+        &gcx,
+        source,
+        worktree,
+        &view.references,
+        &head,
+        task_id,
+        card_id,
+        &board,
+    )
+    .await?;
+    let mut snapshot = snapshot;
+    snapshot.runtime = Some((
+        chat_id.into(),
+        gcx.agent_executions
+            .get(chat_id)
+            .map(|run| run.admission_generation()),
+    ));
+    let configuration = ConfigurationSnapshot::capture(&gcx).await?;
+    configuration.ensure_current(&gcx)?;
+    if !snapshot.matches(&gcx, &board, &configuration) {
+        return Err(stale_verifier_error(task_id, card_id));
+    }
+    Ok(FinishVerificationFence {
+        snapshot,
+        configuration,
+        card: ExpectedCardState::from_card(board.rev, card),
+    })
 }
 
 pub async fn load_expected_card_state(
@@ -96,6 +265,10 @@ fn verifier_card_fingerprint(card: &BoardCard) -> Value {
         "team_members": &card.team_members,
         "target_files": &card.target_files,
         "scope_guard_mode": &card.scope_guard_mode,
+        "paused_at": &card.paused_at,
+        "paused_by": &card.paused_by,
+        "deliverable": &card.deliverable,
+        "verification": &card.verification,
     })
 }
 
@@ -115,6 +288,662 @@ pub struct VerifyCardRequest {
     pub task_id: String,
     pub card_id: String,
     pub expected_state: Option<ExpectedCardState>,
+}
+
+#[derive(Clone)]
+pub(crate) struct RuntimeVerifierActor {
+    task_id: String,
+    card_id: String,
+    owner: String,
+    source: PathBuf,
+    expected: ExpectedCardState,
+    chat_id: String,
+    worktree: crate::worktrees::types::WorktreeMeta,
+    session: Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
+    abort: Arc<std::sync::atomic::AtomicBool>,
+    admission_generation: Option<u64>,
+    terminal_version: Option<u64>,
+    scheduled_head: String,
+}
+
+impl RuntimeVerifierActor {
+    pub(crate) fn task_id(&self) -> &str {
+        &self.task_id
+    }
+    pub(crate) fn card_id(&self) -> &str {
+        &self.card_id
+    }
+    pub(crate) fn owner(&self) -> &str {
+        &self.owner
+    }
+    pub(crate) fn source(&self) -> &Path {
+        &self.source
+    }
+    pub(crate) fn expected(&self) -> &ExpectedCardState {
+        &self.expected
+    }
+
+    async fn after_finish(app: &AppState, request: &VerifyCardRequest) -> Result<Self, String> {
+        let expected = request
+            .expected_state
+            .clone()
+            .ok_or("runtime verifier requires finish snapshot")?;
+        let board = storage::load_board(app.gcx.clone(), &request.task_id).await?;
+        let card = board
+            .get_card(&request.card_id)
+            .ok_or("finished card unavailable")?;
+        if !expected.matches_board_card(board.rev, card)
+            || card.column != "done"
+            || !command_checkout::selected_winner_matches(card)
+            || !card.team_members.is_empty()
+        {
+            return Err(stale_verifier_error(&request.task_id, &request.card_id));
+        }
+        let chat_id = card
+            .agent_chat_id
+            .clone()
+            .ok_or("finished agent unavailable")?;
+        let session = app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get(&chat_id)
+            .cloned()
+            .ok_or("finished session unavailable")?;
+        let (source, worktree, abort) = {
+            let session = session.lock().await;
+            (
+                crate::coordination::scope::session_source_root(&session)
+                    .ok_or("finished source unavailable")?,
+                session
+                    .thread
+                    .worktree
+                    .clone()
+                    .ok_or("finished worktree unavailable")?,
+                session.abort_flag.clone(),
+            )
+        };
+        let source = dunce::canonicalize(source).map_err(|e| e.to_string())?;
+        let service = crate::worktrees::service::WorktreeService::new_async(
+            app.gcx.cache_dir.clone(),
+            source.clone(),
+        )
+        .await?;
+        let view = service.get_worktree(&worktree.id).await?;
+        if view.meta != worktree {
+            return Err(stale_verifier_error(&request.task_id, &request.card_id));
+        }
+        let scheduled_head = view
+            .status
+            .head_commit
+            .ok_or("finished candidate head unavailable")?;
+        let actor = Self {
+            task_id: request.task_id.clone(),
+            card_id: request.card_id.clone(),
+            owner: board
+                .owner_chat_id
+                .clone()
+                .ok_or("finished owner unavailable")?,
+            source,
+            expected,
+            chat_id: chat_id.clone(),
+            worktree,
+            session,
+            abort,
+            admission_generation: app
+                .agent_executions
+                .get(&chat_id)
+                .map(|run| run.admission_generation()),
+            terminal_version: None,
+            scheduled_head,
+        };
+        actor.ensure_current(app, true).await?;
+        Ok(actor)
+    }
+
+    pub(crate) async fn ensure_current(
+        &self,
+        app: &AppState,
+        finishing: bool,
+    ) -> Result<(), String> {
+        let stale = || stale_verifier_error(&self.task_id, &self.card_id);
+        if app.runtime.shutdown_flag.load(Ordering::Relaxed) {
+            return Err(stale());
+        }
+        let live = app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get(&self.chat_id)
+            .cloned()
+            .ok_or_else(stale)?;
+        if !Arc::ptr_eq(&live, &self.session) {
+            return Err(stale());
+        }
+        if let Some(run) = app.agent_executions.get(&self.chat_id) {
+            if Some(run.admission_generation()) != self.admission_generation || run.is_cancelled() {
+                return Err(stale());
+            }
+        }
+        {
+            let session = live.lock().await;
+            let task = session.thread.task_meta.as_ref().ok_or_else(stale)?;
+            let state_ok = session.runtime.state == refact_runtime_api::SessionState::Completed
+                || (finishing
+                    && session.runtime.state == refact_runtime_api::SessionState::ExecutingTools
+                    && session
+                        .messages
+                        .iter()
+                        .rev()
+                        .find(|message| message.role == "assistant")
+                        .and_then(|message| message.tool_calls.as_ref())
+                        .is_some_and(|calls| {
+                            calls.len() == 1 && calls[0].function.name == "agent_finish"
+                        }));
+            if !state_ok
+                || session.closed
+                || session.runtime.paused
+                || !session.runtime.pause_reasons.is_empty()
+                || session.user_interrupt_flag.load(Ordering::Relaxed)
+                || !session.command_queue.is_empty()
+                || !Arc::ptr_eq(&self.abort, &session.abort_flag)
+                || self
+                    .terminal_version
+                    .is_some_and(|version| session.trajectory_version != version)
+                || task.role != "agents"
+                || task.task_id != self.task_id
+                || task.card_id.as_deref() != Some(&self.card_id)
+                || task.agent_id != self.worktree.agent_id
+                || task.planner_chat_id.as_deref() != Some(&self.owner)
+                || session.thread.parent_id.as_deref() != Some(&self.owner)
+                || session.thread.root_chat_id.as_deref() != Some(&self.owner)
+                || session.thread.link_type.as_deref() != Some("task_agent")
+                || session.thread.worktree.as_ref() != Some(&self.worktree)
+                || crate::coordination::scope::session_source_root(&session).as_deref()
+                    != Some(&self.source)
+            {
+                return Err(stale());
+            }
+        }
+        let (board, _) = command_checkout::read_board(&self.source, &self.task_id).await?;
+        board.require_owner(&self.owner).map_err(|_| stale())?;
+        let card = board.get_card(&self.card_id).ok_or_else(stale)?;
+        if !self.expected.matches_board_card(board.rev, card)
+            || card.column != "done"
+            || card.agent_chat_id.as_deref() != Some(&self.chat_id)
+            || card.assignee != self.worktree.agent_id
+            || card.agent_worktree_name.as_deref() != Some(&self.worktree.id)
+            || card.agent_worktree.as_deref().map(Path::new) != Some(self.worktree.root.as_path())
+            || !command_checkout::selected_winner_matches(card)
+            || !card.team_members.is_empty()
+        {
+            return Err(stale());
+        }
+        if crate::chat::verifier_diff::git_head_commit(&self.worktree.root)
+            .await
+            .as_deref()
+            != Some(self.scheduled_head.as_str())
+        {
+            return Err(stale());
+        }
+        Ok(())
+    }
+
+    async fn wait_completed(&mut self, app: &AppState) -> Result<(), String> {
+        let mut events = self.session.lock().await.event_tx.subscribe();
+        let mut shutdown_check = tokio::time::interval(Duration::from_secs(1));
+        let wait = async {
+            loop {
+                self.ensure_current(app, true).await?;
+                {
+                    let session = self.session.lock().await;
+                    if session.runtime.state == refact_runtime_api::SessionState::Completed {
+                        self.terminal_version = Some(session.trajectory_version);
+                        break;
+                    }
+                }
+                tokio::select! {
+                    event = events.recv() => {
+                        if matches!(event, Err(tokio::sync::broadcast::error::RecvError::Closed)) {
+                            return Err("finished session events closed".to_string());
+                        }
+                    }
+                    _ = shutdown_check.tick() => {
+                        if app.runtime.shutdown_flag.load(Ordering::Relaxed) {
+                            return Err("verifier shutdown".to_string());
+                        }
+                    }
+                }
+            }
+            self.ensure_current(app, false).await
+        };
+        tokio::time::timeout(DRAIN_TIMEOUT, wait)
+            .await
+            .map_err(|_| "finish boundary unavailable before verifier deadline".to_string())?
+    }
+}
+
+#[derive(Clone)]
+enum VerifierActor {
+    Planner(Arc<tokio::sync::Mutex<AtCommandsContext>>),
+    Finished(RuntimeVerifierActor),
+}
+
+struct CardEvidenceRunner {
+    gcx: Arc<GlobalContext>,
+    actor: VerifierActor,
+    request: VerifyCardRequest,
+    candidate: ValidatedCommandCheckout,
+    expected: ExpectedCardState,
+    output_records: std::sync::Mutex<crate::coordination::provenance::WorkProvenance>,
+}
+
+impl CardEvidenceRunner {
+    async fn model(&self) -> Result<String, String> {
+        match &self.actor {
+            VerifierActor::Planner(ccx) => Ok(ccx.lock().await.current_model.clone()),
+            VerifierActor::Finished(_) => resolve_verifier_model(self.gcx.clone()).await,
+        }
+    }
+
+    async fn abort_flag(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        match &self.actor {
+            VerifierActor::Planner(ccx) => ccx.lock().await.abort_flag.clone(),
+            VerifierActor::Finished(actor) => {
+                actor.session.lock().await.user_interrupt_flag.clone()
+            }
+        }
+    }
+
+    async fn revalidate(&self) -> Result<(), String> {
+        for _ in 0..CONFIGURATION_ATTEMPTS {
+            let result = self.revalidate_once().await;
+            if result
+                .as_ref()
+                .is_err_and(|error| error == CONFIGURATION_RETRY)
+            {
+                continue;
+            }
+            return result;
+        }
+        Err("verification configuration remained unavailable".into())
+    }
+
+    async fn revalidate_once(&self) -> Result<(), String> {
+        let app = AppState::from_gcx(self.gcx.clone()).await;
+        let current = match &self.actor {
+            VerifierActor::Planner(ccx) => {
+                command_checkout::resolve_planner_verifier(
+                    ccx,
+                    &self.request.task_id,
+                    &self.request.card_id,
+                )
+                .await?
+            }
+            VerifierActor::Finished(actor) => {
+                command_checkout::resolve_finished_verifier(&app, actor).await?
+            }
+        };
+        let board = storage::load_board(self.gcx.clone(), &self.request.task_id).await?;
+        let card = board
+            .get_card(&self.request.card_id)
+            .ok_or("verification card unavailable")?;
+        let configuration = ConfigurationSnapshot::capture(&self.gcx).await?;
+        configuration.ensure_current(&self.gcx)?;
+        let matches = self.candidate.same_candidate(&current)
+            && self.expected.matches_board_card(board.rev, card)
+            && self
+                .expected
+                .verification
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.matches(&self.gcx, &board, &configuration));
+        configuration.ensure_current(&self.gcx)?;
+        if !matches {
+            return Err(stale_verifier_error(
+                &self.request.task_id,
+                &self.request.card_id,
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::chat::evidence::EvidenceRunner for CardEvidenceRunner {
+    async fn run(
+        &mut self,
+        worktree: &Path,
+        spec: &crate::chat::evidence::VerificationSpec,
+    ) -> VerificationResult {
+        run_verification_argv_scoped(
+            self.gcx.clone(),
+            worktree,
+            &spec.command,
+            spec.cwd.clone(),
+            spec.env.clone(),
+            spec.argv.clone(),
+            Duration::from_secs(spec.timeout_secs),
+            DRAIN_TIMEOUT,
+            Some(self),
+        )
+        .await
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct VerificationSnapshot {
+    owner: Option<String>,
+    board_contract: Value,
+    task_contract: Value,
+    task_meta_path: PathBuf,
+    source: PathBuf,
+    root: PathBuf,
+    head: String,
+    files: Vec<(PathBuf, Option<String>)>,
+    registry_path: PathBuf,
+    worktree_meta: crate::worktrees::types::WorktreeMeta,
+    references: Vec<crate::worktrees::types::WorktreeReference>,
+    configuration: ConfigurationContent,
+    runtime: Option<(String, Option<u64>)>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ConfigurationContent {
+    caps: Value,
+    models: String,
+    policy_settings: Value,
+}
+
+struct ConfigurationSnapshot {
+    content: ConfigurationContent,
+    capabilities_generation: u64,
+}
+
+impl ConfigurationSnapshot {
+    async fn capture(gcx: &GlobalContext) -> Result<Self, String> {
+        let (caps, capabilities_generation) = {
+            let state = gcx.caps_state.read().await;
+            (
+                state.caps.clone(),
+                gcx.tool_catalog_generations
+                    .capabilities
+                    .load(Ordering::SeqCst),
+            )
+        };
+        let models = caps
+            .as_ref()
+            .map(|caps| {
+                let models = caps
+                    .chat_models
+                    .iter()
+                    .map(|(id, model)| (format!("chat:{id}"), &model.base))
+                    .chain(
+                        caps.completion_models
+                            .iter()
+                            .map(|(id, model)| (format!("completion:{id}"), &model.base)),
+                    )
+                    .chain(std::iter::once((
+                        "embedding".into(),
+                        &caps.embedding_model.base,
+                    )));
+                let models = models.map(|(id, base)| (id, json!({
+                "endpoint":base.endpoint, "style":base.endpoint_style,
+                "wire":base.wire_format, "key":base.api_key, "credential":base.credential,
+                "auth":base.auth_token, "tokenizer_key":base.tokenizer_api_key,
+                "headers":base.extra_headers, "similar":base.similar_models,
+            }))).collect::<std::collections::BTreeMap<_, _>>();
+                serde_json::to_vec(&models).map(|bytes| crate::file_activity::digest_bytes(&bytes))
+            })
+            .transpose()
+            .map_err(|_| "verification model configuration unavailable")?
+            .unwrap_or_default();
+        let caps = serde_json::to_value((
+            &caps,
+            caps.as_ref().map(|caps| &caps.model_caps),
+            caps.as_ref().map(|caps| &caps.user_defaults),
+            caps.as_ref().map(|caps| &caps.provider_base_names),
+            caps.as_ref().map(|caps| {
+                caps.chat_models
+                    .iter()
+                    .map(|(id, model)| {
+                        (
+                            id,
+                            (
+                                &model.scratchpad,
+                                &model.scratchpad_patch,
+                                &model.live_fields,
+                            ),
+                        )
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>()
+            }),
+        ))
+        .map_err(|_| "verification model configuration unavailable")?;
+        Ok(Self {
+            content: ConfigurationContent {
+                caps,
+                models,
+                policy_settings: policy_settings_fingerprint(gcx)?,
+            },
+            capabilities_generation,
+        })
+    }
+
+    fn ensure_current(&self, gcx: &GlobalContext) -> Result<(), String> {
+        if gcx
+            .tool_catalog_generations
+            .capabilities
+            .load(Ordering::SeqCst)
+            != self.capabilities_generation
+        {
+            return Err(CONFIGURATION_RETRY.into());
+        }
+        Ok(())
+    }
+}
+
+fn policy_settings_fingerprint(gcx: &GlobalContext) -> Result<Value, String> {
+    let privacy = gcx
+        .privacy_policy_load
+        .read()
+        .map_err(|_| "verification privacy policy unavailable")?;
+    serde_json::to_value((
+        &privacy.policy,
+        &privacy.error,
+        crate::runtime_settings::current(),
+    ))
+    .map_err(|_| "verification configuration unavailable".into())
+}
+
+fn task_contract(path: &Path) -> Result<Value, String> {
+    let bytes = bounded_file_bytes(path)?.ok_or("verification task metadata unavailable")?;
+    let meta: crate::tasks::types::TaskMeta =
+        serde_yaml::from_slice(&bytes).map_err(|_| "verification task metadata invalid")?;
+    Ok(json!({"id":meta.id,"base_commit":meta.base_commit,"base_branch":meta.base_branch}))
+}
+
+fn board_contract(board: &crate::tasks::types::TaskBoard) -> Value {
+    json!({"review_policy":board.review_policy})
+}
+
+impl VerificationSnapshot {
+    async fn capture(
+        gcx: &GlobalContext,
+        source: PathBuf,
+        candidate: &ValidatedCommandCheckout,
+        task_id: &str,
+        card_id: &str,
+        board: &crate::tasks::types::TaskBoard,
+    ) -> Result<Self, String> {
+        Self::capture_registered(
+            gcx,
+            source,
+            candidate.metadata(),
+            candidate.references(),
+            candidate.head(),
+            task_id,
+            card_id,
+            board,
+        )
+        .await
+    }
+
+    async fn capture_registered(
+        gcx: &GlobalContext,
+        source: PathBuf,
+        meta: &crate::worktrees::types::WorktreeMeta,
+        references: &[crate::worktrees::types::WorktreeReference],
+        head: &str,
+        task_id: &str,
+        card_id: &str,
+        board: &crate::tasks::types::TaskBoard,
+    ) -> Result<Self, String> {
+        if head.len() != 40
+            || !head
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+        {
+            return Err("verification candidate head unavailable".into());
+        }
+        let task_dir = source.join(".refact/tasks").join(task_id);
+        let paths = [
+            task_dir.join("assignments").join(format!("{card_id}.json")),
+            crate::tools::shell_gate::policy_path(&source),
+        ];
+        let registry_path =
+            crate::worktrees::service::WorktreeService::new(gcx.cache_dir.clone(), source.clone())?
+                .registry_path();
+        let files = paths
+            .into_iter()
+            .map(|path| {
+                let digest = bounded_file_digest(&path)?;
+                Ok((path, digest))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(Self {
+            owner: board.owner_chat_id.clone(),
+            board_contract: board_contract(board),
+            task_contract: task_contract(&task_dir.join("meta.yaml"))?,
+            task_meta_path: task_dir.join("meta.yaml"),
+            source,
+            root: meta.root.clone(),
+            head: head.into(),
+            files,
+            registry_path,
+            worktree_meta: meta.clone(),
+            references: references.to_vec(),
+            configuration: ConfigurationSnapshot::capture(gcx).await?.content,
+            runtime: None,
+        })
+    }
+
+    fn source_is_current(&self, gcx: &GlobalContext) -> bool {
+        let raw = gcx
+            .documents_state
+            .workspace_folders
+            .lock()
+            .unwrap()
+            .clone();
+        crate::files_correction::project_dirs_for_unscoped_paths(&gcx.cache_dir, &raw)
+            .into_iter()
+            .find_map(|root| {
+                let source = dunce::canonicalize(root).ok()?;
+                let task_id = self.worktree_meta.task_id.as_ref()?;
+                source
+                    .join(".refact/tasks")
+                    .join(task_id)
+                    .is_dir()
+                    .then_some(source)
+            })
+            .is_some_and(|source| source == self.source)
+    }
+
+    fn matches(
+        &self,
+        gcx: &GlobalContext,
+        board: &crate::tasks::types::TaskBoard,
+        configuration: &ConfigurationSnapshot,
+    ) -> bool {
+        board.owner_chat_id == self.owner
+            && self.runtime.as_ref().is_none_or(|(chat, generation)| {
+                gcx.agent_executions.get(chat).is_none_or(|run| {
+                    Some(run.admission_generation()) == *generation && !run.is_cancelled()
+                })
+            })
+            && board_contract(board) == self.board_contract
+            && task_contract(&self.task_meta_path)
+                .is_ok_and(|current| current == self.task_contract)
+            && dunce::canonicalize(&self.source).is_ok_and(|source| source == self.source)
+            && dunce::canonicalize(&self.root).is_ok_and(|root| root == self.root)
+            && self.source_is_current(gcx)
+            && git2::Repository::open(&self.root).is_ok_and(|repo| {
+                repo.head()
+                    .is_ok_and(|head| head.shorthand() == self.worktree_meta.branch.as_deref())
+            })
+            && git2::Repository::open(&self.root)
+                .ok()
+                .and_then(|repo| repo.head().ok()?.target().map(|id| id.to_string()))
+                .as_deref()
+                == Some(self.head.as_str())
+            && self.files.iter().all(|(path, digest)| {
+                bounded_file_digest(path).is_ok_and(|current| current == *digest)
+            })
+            && selected_registry_matches(&self.registry_path, &self.worktree_meta, &self.references)
+            && configuration.content == self.configuration
+            && policy_settings_fingerprint(gcx)
+                .is_ok_and(|current| current == self.configuration.policy_settings)
+    }
+}
+
+fn bounded_file_bytes(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    use std::io::Read;
+    if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err("verification input alias refused".into());
+    }
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("verification input unavailable".into()),
+    };
+    let cap = crate::file_activity::settings().max_work_history_bytes;
+    let mut bytes = Vec::new();
+    file.take(cap as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "verification input unreadable")?;
+    if bytes.len() > cap {
+        return Err("verification input exceeds bound".into());
+    }
+    Ok(Some(bytes))
+}
+
+fn bounded_file_digest(path: &Path) -> Result<Option<String>, String> {
+    bounded_file_bytes(path)
+        .map(|bytes| bytes.map(|bytes| crate::file_activity::digest_bytes(&bytes)))
+}
+
+fn selected_registry_matches(
+    path: &Path,
+    expected: &crate::worktrees::types::WorktreeMeta,
+    references: &[crate::worktrees::types::WorktreeReference],
+) -> bool {
+    bounded_file_bytes(path)
+        .ok()
+        .flatten()
+        .and_then(|bytes| {
+            serde_json::from_slice::<crate::worktrees::types::WorktreeRegistry>(&bytes).ok()
+        })
+        .is_some_and(|registry| {
+            registry.source_workspace_root == expected.source_workspace_root
+                && registry
+                    .records
+                    .iter()
+                    .find(|record| record.meta.id == expected.id)
+                    .is_some_and(|record| {
+                        record.meta == *expected && record.references == references
+                    })
+        })
 }
 
 async fn check_cwd_in_worktree(worktree: &Path, effective_cwd: &Path) -> Result<(), String> {
@@ -169,10 +998,44 @@ pub async fn store_verifier_report(
     report: VerifierReport,
     evidence_spec_ids: Vec<String>,
 ) -> Result<bool, String> {
+    for _ in 0..CONFIGURATION_ATTEMPTS {
+        let configuration = ConfigurationSnapshot::capture(&gcx).await?;
+        let result = store_verifier_report_with_configuration(
+            gcx.clone(),
+            task_id,
+            card_id,
+            expected_state,
+            report.clone(),
+            evidence_spec_ids.clone(),
+            configuration,
+        )
+        .await;
+        if result
+            .as_ref()
+            .is_err_and(|error| error == CONFIGURATION_RETRY)
+        {
+            continue;
+        }
+        return result;
+    }
+    Err("verification configuration remained unavailable".into())
+}
+
+async fn store_verifier_report_with_configuration(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    card_id: &str,
+    expected_state: Option<&ExpectedCardState>,
+    report: VerifierReport,
+    evidence_spec_ids: Vec<String>,
+    configuration: ConfigurationSnapshot,
+) -> Result<bool, String> {
     let card_id = card_id.to_string();
     let task_id_owned = task_id.to_string();
     let expected_state = expected_state.cloned();
+    let snapshot_gcx = gcx.clone();
     match storage::update_board_atomic(gcx, task_id, move |board| {
+        configuration.ensure_current(&snapshot_gcx)?;
         let board_rev = board.rev;
         let Some(card) = board.get_card(&card_id) else {
             if expected_state.is_some() {
@@ -181,10 +1044,17 @@ pub async fn store_verifier_report(
             return Err(format!("Card {} not found", card_id));
         };
         if let Some(expected) = expected_state.as_ref() {
-            if !expected.matches_board_card(board_rev, card) {
+            let matches = expected.matches_board_card(board_rev, card)
+                && expected
+                    .verification
+                    .as_ref()
+                    .is_none_or(|snapshot| snapshot.matches(&snapshot_gcx, board, &configuration));
+            configuration.ensure_current(&snapshot_gcx)?;
+            if !matches {
                 return Err(stale_verifier_error(&task_id_owned, &card_id));
             }
         }
+        configuration.ensure_current(&snapshot_gcx)?;
         board.review_attestations.remove(&card_id);
         let card = board
             .get_card_mut(&card_id)
@@ -209,10 +1079,11 @@ pub async fn store_verifier_report(
     }
 }
 
-pub async fn schedule_card_verifier(gcx: Arc<GlobalContext>, request: VerifyCardRequest) {
+async fn schedule_card_verifier(gcx: Arc<GlobalContext>, request: VerifyCardRequest) {
     if gcx.shutdown_flag.load(Ordering::SeqCst) {
         return;
     }
+    let app = AppState::from_gcx(gcx.clone()).await;
     let task_gcx = gcx.clone();
     let mut tasks = gcx.card_verifier_tasks.lock().await;
     while let Some(result) = tasks.try_join_next() {
@@ -224,28 +1095,32 @@ pub async fn schedule_card_verifier(gcx: Arc<GlobalContext>, request: VerifyCard
         return;
     }
     tasks.spawn(async move {
-        if let Err(error) = verify_card(task_gcx.clone(), request.clone()).await {
-            if is_stale_verifier_error(&error) {
-                tracing::info!("{}", error);
-                return;
+        let result = match RuntimeVerifierActor::after_finish(&app, &request).await {
+            Ok(mut actor) => match actor.wait_completed(&app).await {
+                Ok(()) => Ok(actor),
+                Err(error) => Err(actor
+                    .ensure_current(&app, true)
+                    .await
+                    .err()
+                    .unwrap_or(error)),
+            },
+            Err(error) => Err(error),
+        };
+        let result = match result {
+            Ok(actor) => verify_card(task_gcx, request, VerifierActor::Finished(actor)).await,
+            Err(error) => {
+                settle_verifier_failure(
+                    task_gcx,
+                    &request,
+                    request.expected_state.as_ref(),
+                    Vec::new(),
+                    error,
+                )
+                .await
             }
-            let report = unavailable_verifier_report(error);
-            if let Err(store_error) = store_verifier_report(
-                task_gcx,
-                &request.task_id,
-                &request.card_id,
-                request.expected_state.as_ref(),
-                report,
-                Vec::new(),
-            )
-            .await
-            {
-                tracing::warn!(
-                    "failed to store verifier launch-failure report for card {}: {}",
-                    request.card_id,
-                    store_error
-                );
-            }
+        };
+        if let Err(error) = result {
+            tracing::warn!("card verification not committed: {error}");
         }
     });
 }
@@ -279,11 +1154,124 @@ pub async fn schedule_card_verifier_after_finish(
     .await;
 }
 
-pub async fn verify_card(
-    gcx: Arc<GlobalContext>,
+pub(crate) async fn verify_card_as_planner(
+    ccx: Arc<tokio::sync::Mutex<AtCommandsContext>>,
     request: VerifyCardRequest,
 ) -> Result<VerifierReport, String> {
-    let task_meta = storage::load_task_meta(gcx.clone(), &request.task_id).await?;
+    let gcx = ccx.lock().await.app.gcx.clone();
+    verify_card(gcx, request, VerifierActor::Planner(ccx)).await
+}
+
+async fn verify_card(
+    gcx: Arc<GlobalContext>,
+    request: VerifyCardRequest,
+    actor: VerifierActor,
+) -> Result<VerifierReport, String> {
+    let mut expected = request.expected_state.clone();
+    let mut attempted = Vec::new();
+    let mut settled = None;
+    match verify_card_inner(
+        gcx.clone(),
+        &request,
+        actor.clone(),
+        &mut expected,
+        &mut attempted,
+        &mut settled,
+    )
+    .await
+    {
+        Ok(report) => Ok(report),
+        Err(error) => {
+            if is_stale_verifier_error(&error) {
+                return Err(error);
+            }
+            if let VerifierActor::Finished(actor) = &actor {
+                actor
+                    .ensure_current(&AppState::from_gcx(gcx.clone()).await, false)
+                    .await?;
+            }
+            if let Some(report) = settled.filter(|report: &VerifierReport| {
+                report.classification == VerifierReportClassification::VerificationFailed
+            }) {
+                if let Some(expected) = expected
+                    .as_ref()
+                    .filter(|state| state.verification.is_some())
+                {
+                    if store_verifier_report(
+                        gcx.clone(),
+                        &request.task_id,
+                        &request.card_id,
+                        Some(expected),
+                        report.clone(),
+                        Vec::new(),
+                    )
+                    .await?
+                    {
+                        return Ok(report);
+                    }
+                    return Err(stale_verifier_error(&request.task_id, &request.card_id));
+                }
+                return Err(error);
+            }
+            settle_verifier_failure(gcx, &request, expected.as_ref(), attempted, error).await
+        }
+    }
+}
+
+async fn settle_verifier_failure(
+    gcx: Arc<GlobalContext>,
+    request: &VerifyCardRequest,
+    expected: Option<&ExpectedCardState>,
+    command_results: Vec<VerificationResult>,
+    error: String,
+) -> Result<VerifierReport, String> {
+    if is_stale_verifier_error(&error) {
+        return Err(error);
+    }
+    let expected = expected
+        .filter(|expected| expected.verification.is_some())
+        .ok_or_else(|| {
+            format!("verification unavailable without original finish fence: {error}")
+        })?;
+    let failed = command_results
+        .iter()
+        .any(|result| result.outcome == VerificationOutcome::CommandFailed);
+    let report = VerifierReport {
+        passed: false,
+        command_results,
+        concerns: vec![format!(
+            "Verification infrastructure unavailable; human review required: {error}"
+        )],
+        recommendation: if failed { "fix-needed" } else { "human-review" }.into(),
+        classification: if failed {
+            VerifierReportClassification::VerificationFailed
+        } else {
+            VerifierReportClassification::Unavailable
+        },
+    };
+    if !store_verifier_report(
+        gcx,
+        &request.task_id,
+        &request.card_id,
+        Some(expected),
+        report.clone(),
+        Vec::new(),
+    )
+    .await?
+    {
+        return Err(stale_verifier_error(&request.task_id, &request.card_id));
+    }
+    Ok(report)
+}
+
+async fn verify_card_inner(
+    gcx: Arc<GlobalContext>,
+    request: &VerifyCardRequest,
+    actor: VerifierActor,
+    attempt_expected: &mut Option<ExpectedCardState>,
+    attempted: &mut Vec<VerificationResult>,
+    settled: &mut Option<VerifierReport>,
+) -> Result<VerifierReport, String> {
     let board = storage::load_board(gcx.clone(), &request.task_id).await?;
     let card = board
         .get_card(&request.card_id)
@@ -294,29 +1282,55 @@ pub async fn verify_card(
             return Err(stale_verifier_error(&request.task_id, &request.card_id));
         }
     }
-    let worktree = card
-        .agent_worktree
-        .as_ref()
-        .map(PathBuf::from)
-        .ok_or_else(|| format!("Card {} has no agent worktree", card.id))?;
-    if !tokio::fs::metadata(&worktree)
-        .await
-        .is_ok_and(|metadata| metadata.is_dir())
+    let app = AppState::from_gcx(gcx.clone()).await;
+    let candidate = match &actor {
+        VerifierActor::Planner(ccx) => {
+            command_checkout::resolve_planner_verifier(ccx, &request.task_id, &request.card_id)
+                .await?
+        }
+        VerifierActor::Finished(actor) => {
+            command_checkout::resolve_finished_verifier(&app, actor).await?
+        }
+    };
+    let worktree = candidate.root().to_path_buf();
+    let source = candidate.metadata().source_workspace_root.clone();
+    let expected_dir = source.join(".refact/tasks").join(&request.task_id);
+    if dunce::canonicalize(storage::find_task_dir(gcx.clone(), &request.task_id).await?)
+        .map_err(|e| e.to_string())?
+        != expected_dir
     {
-        return Err(format!(
-            "Card {} worktree '{}' does not exist",
-            card.id,
-            worktree.display()
-        ));
+        return Err(stale_verifier_error(&request.task_id, &request.card_id));
     }
+    let mut expected = request
+        .expected_state
+        .clone()
+        .unwrap_or_else(|| ExpectedCardState::from_card(board.rev, &card));
+    if expected.verification.is_none() {
+        if matches!(&actor, VerifierActor::Finished(_)) {
+            return Err("verification unavailable without original finish fence".into());
+        }
+        expected.verification = Some(
+            VerificationSnapshot::capture(
+                &gcx,
+                source,
+                &candidate,
+                &request.task_id,
+                &request.card_id,
+                &board,
+            )
+            .await?,
+        );
+    }
+    *attempt_expected = Some(expected.clone());
 
+    let task_meta = storage::load_task_meta(gcx.clone(), &request.task_id).await?;
     let defaults = EvidenceDefaults::from_settings();
     let assignment =
         crate::tasks::assignment::load_assignment(gcx.clone(), &request.task_id, &card.id).await?;
     let specs =
         crate::tasks::assignment::specs_for_validation(assignment.as_ref(), &card, &defaults);
     let skipped_instruction_notes = instruction_skip_notes(&card.instructions);
-    let commit = git_head_commit(&worktree).await;
+    let commit = Some(candidate.head().to_string());
     let service = EvidenceService::new(
         VerifyCommandPolicy::load(gcx.clone()).await,
         EvidenceContext {
@@ -325,7 +1339,15 @@ pub async fn verify_card(
             scope: card.id.clone(),
         },
     );
-    let mut runner = SystemEvidenceRunner { gcx: gcx.clone() };
+    let mut runner = CardEvidenceRunner {
+        gcx: gcx.clone(),
+        actor,
+        request: request.clone(),
+        candidate,
+        expected,
+        output_records: std::sync::Mutex::new(Default::default()),
+    };
+    runner.revalidate().await?;
     let cache = crate::chat::evidence_cache::evidence_cache();
     {
         let mut guard = cache.lock().await;
@@ -342,15 +1364,19 @@ pub async fn verify_card(
         cache,
         specs.clone(),
         &mut runner,
-        crate::chat::evidence_cache::CacheMode::Replay,
+        crate::chat::evidence_cache::CacheMode::Revalidate,
     )
     .await;
+    *attempted = evidence
+        .iter()
+        .map(EvidenceRecord::to_verification_result)
+        .collect();
+    runner.revalidate().await?;
     let evidence = supersede_stale(&worktree, commit.as_deref(), &specs, evidence).await;
     let command_results = evidence
         .iter()
         .map(EvidenceRecord::to_verification_result)
         .collect::<Vec<_>>();
-    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
     let mut gates = evaluate_gates(&specs, &evidence);
     for note in skipped_instruction_notes
         .iter()
@@ -415,29 +1441,10 @@ pub async fn verify_card(
         );
     }
 
-    // Gates decide before any model is consulted: a blocked gate means the judge
-    // never runs, so no amount of model confidence can turn it into a pass.
     let (review_unavailable, review_has_concerns, review_error) = if gates.judge_allowed() {
-        let worktree_base = if let Some(worktree_id) = card.agent_worktree_name.as_deref() {
-            let project_root = crate::files_correction::get_project_dirs(gcx.clone())
-                .await
-                .into_iter()
-                .next();
-            if let Some(project_root) = project_root {
-                match WorktreeService::new_async(gcx.cache_dir.clone(), project_root).await {
-                    Ok(service) => service
-                        .get_worktree(worktree_id)
-                        .await
-                        .ok()
-                        .map(|view| (view.meta.base_commit, view.meta.base_branch)),
-                    Err(_) => None,
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        runner.revalidate().await?;
+        let meta = runner.candidate.metadata();
+        let worktree_base = Some((meta.base_commit.clone(), meta.base_branch.clone()));
         let card_pair_present = card.base_commit.is_some() || card.base_branch.is_some();
         let (base_commit, base_branch) = if card_pair_present {
             (card.base_commit.clone(), card.base_branch.clone())
@@ -455,7 +1462,35 @@ pub async fn verify_card(
             .await
             .unwrap_or_else(|error| format!("diff unavailable: {}", error));
         let prompt = verifier_prompt(&card, &command_results, &diff);
-        let review = run_verifier_review(gcx.clone(), prompt, card.agent_chat_id.as_deref()).await;
+        let mut paths = vec![
+            worktree.clone(),
+            runner
+                .candidate
+                .metadata()
+                .source_workspace_root
+                .join(".refact/tasks")
+                .join(&request.task_id)
+                .join("board.yaml"),
+        ];
+        paths.extend(
+            diff.lines()
+                .skip(2)
+                .filter(|line| !line.starts_with('('))
+                .map(|line| worktree.join(line)),
+        );
+        let mut records = crate::privacy::records::declared_file_records(&gcx, paths)
+            .map_err(|_| "verification review provenance unavailable")?;
+        let (observed, complete) = runner
+            .output_records
+            .lock()
+            .map_err(|_| "verification provenance unavailable")?
+            .snapshot(0, &crate::file_activity::settings());
+        if !complete {
+            return Err("verification provenance bound exceeded".into());
+        }
+        records.extend(observed);
+        let review =
+            run_verifier_review(gcx.clone(), prompt, card.agent_chat_id.as_deref(), records).await;
         let review_unavailable = review.is_err();
         let review_error = review.as_ref().err().cloned();
         let model_concerns = review.unwrap_or_else(|error| {
@@ -502,11 +1537,13 @@ pub async fn verify_card(
         recommendation,
         classification,
     };
+    *settled = Some(report.clone());
+    runner.revalidate().await?;
     let stored = store_verifier_report(
         gcx,
         &request.task_id,
         &request.card_id,
-        request.expected_state.as_ref(),
+        Some(&runner.expected),
         report.clone(),
         specs.iter().map(|spec| spec.spec_id.clone()).collect(),
     )
@@ -699,6 +1736,57 @@ pub(crate) async fn run_verification_argv_impl(
     timeout: Duration,
     drain_timeout: Duration,
 ) -> VerificationResult {
+    run_verification_argv_scoped(
+        gcx,
+        worktree,
+        command,
+        cwd,
+        env,
+        argv,
+        timeout,
+        drain_timeout,
+        None,
+    )
+    .await
+}
+
+struct VerifierOutputAudit(crate::call_validation::ChatMessage);
+
+impl refact_privacy::PrivacyAudited for VerifierOutputAudit {
+    fn privacy_records(
+        &self,
+    ) -> Result<Vec<(usize, refact_privacy::FileRecord)>, refact_privacy::PrivacyAuditError> {
+        refact_privacy::records_from_messages(std::slice::from_ref(&self.0))
+    }
+}
+
+fn unrun_verification(
+    command: &str,
+    reason: String,
+    outcome: VerificationOutcome,
+) -> VerificationResult {
+    VerificationResult {
+        command: command.into(),
+        exit_code: None,
+        passed: false,
+        output_tail: reason,
+        outcome,
+        from_cache: false,
+        executed_at: None,
+    }
+}
+
+async fn run_verification_argv_scoped(
+    gcx: Arc<GlobalContext>,
+    worktree: &Path,
+    command: &str,
+    cwd: Option<PathBuf>,
+    env: Vec<(String, String)>,
+    argv: Vec<String>,
+    timeout: Duration,
+    drain_timeout: Duration,
+    runner: Option<&CardEvidenceRunner>,
+) -> VerificationResult {
     if argv.is_empty() {
         return VerificationResult {
             command: command.to_string(),
@@ -722,6 +1810,44 @@ pub(crate) async fn run_verification_argv_impl(
             executed_at: None,
         };
     }
+    let effective_cwd = if runner.is_some() {
+        match tokio::fs::canonicalize(&effective_cwd).await {
+            Ok(cwd) if cwd.starts_with(worktree) => dunce::simplified(&cwd).to_path_buf(),
+            _ => {
+                return unrun_verification(
+                    command,
+                    "candidate cwd is unavailable or escaped".into(),
+                    VerificationOutcome::Rejected,
+                )
+            }
+        }
+    } else {
+        effective_cwd
+    };
+    if let Some(runner) = runner {
+        if let Err(error) = runner.revalidate().await {
+            return unrun_verification(command, error, VerificationOutcome::Rejected);
+        }
+        if let Err(error) = runner.revalidate().await {
+            return unrun_verification(command, error, VerificationOutcome::Rejected);
+        }
+        let policy = crate::tools::shell_gate::load_policy(gcx.clone()).await;
+        let gate = crate::tools::shell_gate::evaluate(
+            command,
+            &policy,
+            &crate::tools::shell_gate::GateContext {
+                workspace_roots: vec![runner.candidate.root().to_path_buf()],
+                needs_confirmation: false,
+            },
+        );
+        if gate.decision.result != refact_tool_api::MatchConfirmDenyResult::PASS {
+            return unrun_verification(
+                command,
+                format!("not run: {}", gate.reason),
+                VerificationOutcome::PolicyDenied,
+            );
+        }
+    }
     let verifier_env = env.into_iter().collect::<HashMap<_, _>>();
     let command_name = argv.first().map(String::as_str).unwrap_or_default();
     let skip_gui_build = if command_name == "cargo" {
@@ -729,23 +1855,29 @@ pub(crate) async fn run_verification_argv_impl(
     } else {
         None
     };
-    let request = match build_exec_request(
-        gcx.clone(),
-        CommandPolicyInput {
-            source: ExecSource::Verifier,
-            command: CommandKind::Argv(&argv),
-            cwd: Some(effective_cwd),
-            env: verifier_command_env(
-                command_name,
-                verifier_env.into_iter().collect(),
-                skip_gui_build.as_deref(),
-            ),
-            chat_mode: None,
-            escalation: None,
-        },
-    )
-    .await
-    {
+    let input = CommandPolicyInput {
+        source: ExecSource::Verifier,
+        command: CommandKind::Argv(&argv),
+        cwd: Some(effective_cwd.clone()),
+        env: verifier_command_env(
+            command_name,
+            verifier_env.into_iter().collect(),
+            skip_gui_build.as_deref(),
+        ),
+        chat_mode: None,
+        escalation: None,
+    };
+    let policy = if let Some(runner) = runner {
+        crate::exec::command_policy::build_verifier_exec_request(
+            gcx.clone(),
+            input,
+            &runner.candidate,
+        )
+        .await
+    } else {
+        build_exec_request(gcx.clone(), input).await
+    };
+    let mut request = match policy {
         Ok(policy) => policy
             .request
             .with_timeout(timeout)
@@ -763,6 +1895,29 @@ pub(crate) async fn run_verification_argv_impl(
             };
         }
     };
+    if let Some(runner) = runner {
+        request = request
+            .with_abort_flag(runner.abort_flag().await)
+            .with_observe(true)
+            .with_owner(crate::exec::ExecOwnerMeta {
+                workspace: Some(runner.candidate.root().to_path_buf()),
+                ..Default::default()
+            });
+        if let Err(error) = runner.revalidate().await {
+            return unrun_verification(command, error, VerificationOutcome::Rejected);
+        }
+        if check_cwd_in_worktree(worktree, &effective_cwd)
+            .await
+            .is_err()
+        {
+            return unrun_verification(
+                command,
+                "candidate cwd changed before spawn".into(),
+                VerificationOutcome::Rejected,
+            );
+        }
+    }
+    let executed_at = Utc::now().to_rfc3339();
     let result = match gcx.exec_registry.spawn(request).await {
         Ok(result) => result,
         Err(error) => {
@@ -790,6 +1945,89 @@ pub(crate) async fn run_verification_argv_impl(
         }
     }
     let mut output = format!("{stdout}{stderr}");
+    if let Some(runner) = runner {
+        let clearance = async {
+            let model = runner
+                .model()
+                .await
+                .map_err(|_| "verification destination unavailable")?;
+            let destination = crate::privacy::records::provider_destination(&model);
+            let mut message = crate::call_validation::ChatMessage {
+                role: "tool".into(),
+                content: crate::call_validation::ChatContent::SimpleText(output.clone()),
+                ..Default::default()
+            };
+            let decision = crate::privacy::records::apply_shell_observation(
+                &gcx,
+                command,
+                &effective_cwd,
+                &destination,
+                result.observation.clone(),
+                &crate::privacy::records::new_derived_privacy_zones(),
+                &mut message,
+            )
+            .await
+            .map_err(|_| "verification output privacy check unavailable")?;
+            if !matches!(decision, crate::privacy::records::ShellReadDecision::Pass) {
+                return Err(
+                    "verification output requires privacy approval or is withheld".to_string(),
+                );
+            }
+            let caps = try_load_caps_quickly_if_not_present(gcx.clone(), 0)
+                .await
+                .map_err(|_| "verification destination unavailable")?;
+            let record = crate::caps::resolve_chat_model(caps, &model)
+                .map_err(|_| "verification destination unavailable")?;
+            crate::privacy::destinations::clear_for_model(
+                &gcx,
+                VerifierOutputAudit(message.clone()),
+                &record.base,
+            )
+            .map_err(|_| "verification output is not cleared for destination")?;
+            if let Ok(review_model) = resolve_verifier_model(gcx.clone()).await {
+                let caps = try_load_caps_quickly_if_not_present(gcx.clone(), 0)
+                    .await
+                    .map_err(|_| "verification review destination unavailable")?;
+                let review_record = crate::caps::resolve_chat_model(caps, &review_model)
+                    .map_err(|_| "verification review destination unavailable")?;
+                crate::privacy::destinations::clear_for_model(
+                    &gcx,
+                    VerifierOutputAudit(message.clone()),
+                    &review_record.base,
+                )
+                .map_err(|_| "verification output is not cleared for review destination")?;
+            }
+            let settings = crate::file_activity::settings();
+            let mut provenance = runner
+                .output_records
+                .lock()
+                .map_err(|_| "verification provenance unavailable")?;
+            provenance.observe(&message, 0, &settings);
+            if !provenance.snapshot(0, &settings).1 {
+                return Err("verification provenance bound exceeded".to_string());
+            }
+            Ok::<_, String>(message.content.content_text_only())
+        }
+        .await;
+        match clearance {
+            Ok(cleared) => output = cleared,
+            Err(error) => {
+                let exit_code = match &result.snapshot.status {
+                    ExecStatus::Exited { exit_code } => *exit_code,
+                    _ => None,
+                };
+                return VerificationResult {
+                    command: command.into(),
+                    exit_code,
+                    passed: false,
+                    output_tail: format!("command attempted; output withheld: {error}"),
+                    outcome: VerificationOutcome::PolicyDenied,
+                    from_cache: false,
+                    executed_at: Some(executed_at.clone()),
+                };
+            }
+        }
+    }
     let (exit_code, passed, outcome) = match &result.snapshot.status {
         ExecStatus::Exited { exit_code } => (
             *exit_code,
@@ -831,7 +2069,7 @@ pub(crate) async fn run_verification_argv_impl(
         output_tail: tail_chars(&output, MAX_OUTPUT_TAIL_CHARS),
         outcome,
         from_cache: false,
-        executed_at: None,
+        executed_at: Some(executed_at),
     }
 }
 
@@ -851,6 +2089,7 @@ async fn run_verifier_review(
     gcx: Arc<GlobalContext>,
     prompt: String,
     parent_chat_id: Option<&str>,
+    records: Vec<refact_privacy::FileRecord>,
 ) -> Result<Vec<String>, String> {
     let model = resolve_verifier_model(gcx.clone()).await?;
     let config = crate::subchat::SubchatConfig {
@@ -890,13 +2129,14 @@ async fn run_verifier_review(
         step_progress: None,
         trace_parent: crate::subchat::TraceParent::from_parts(parent_chat_id, None),
     };
-    let messages = vec![event(
+    let mut message = event(
         EventSubkind::VerifierReport,
         VERIFIER_SOURCE,
         json!({ "kind": "verifier_review_prompt" }),
         prompt,
-    )];
-    let result = crate::subchat::run_subchat(gcx, messages, config).await?;
+    );
+    crate::privacy::records::merge_records(&mut message, records);
+    let result = crate::subchat::run_subchat(gcx, vec![message], config).await?;
     let answer = result
         .messages
         .iter()
@@ -950,10 +2190,135 @@ fn tail_chars(text: &str, max_chars: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::chat::evidence::{gate_outcome_for_verdicts, specs_from_card, EvidenceVerdict};
     use crate::tasks::types::{FinalReport, ScopeGuardMode, TaskBoard, TaskMeta, TaskStatus};
+
+    pub(crate) async fn register_candidate(
+        gcx: Arc<GlobalContext>,
+        task_id: &str,
+        card_id: &str,
+        model: &str,
+    ) -> Arc<tokio::sync::Mutex<AtCommandsContext>> {
+        use crate::chat::types::{ChatSession, TaskMeta as ThreadTaskMeta};
+        let source = crate::files_correction::get_project_dirs(gcx.clone())
+            .await
+            .remove(0);
+        crate::privacy::save_privacy_policy(gcx.clone(), Default::default())
+            .await
+            .unwrap();
+        let service =
+            crate::worktrees::service::WorktreeService::new(gcx.cache_dir.clone(), source.clone())
+                .unwrap();
+        let view = service
+            .create_worktree(crate::worktrees::types::CreateWorktreeRequest {
+                kind: Some("task_agent".into()),
+                task_id: Some(task_id.into()),
+                card_id: Some(card_id.into()),
+                agent_id: Some("worker".into()),
+                chat_id: Some("worker-chat".into()),
+                branch: Some(format!(
+                    "refact/task/{task_id}/card/{card_id}/{}",
+                    uuid::Uuid::new_v4()
+                )),
+                base_branch: Some("main".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .worktree;
+        let mut board = storage::load_board(gcx.clone(), task_id).await.unwrap();
+        board.owner_chat_id = Some("planner".into());
+        let card = board.get_card_mut(card_id).unwrap();
+        card.assignee = Some("worker".into());
+        card.agent_chat_id = Some("worker-chat".into());
+        card.agent_worktree = Some(view.meta.root.to_string_lossy().into_owned());
+        card.agent_worktree_name = Some(view.meta.id.clone());
+        card.agent_branch = view.meta.branch.clone();
+        storage::save_board(gcx.clone(), task_id, &board)
+            .await
+            .unwrap();
+        let app = AppState::from_gcx(gcx.clone()).await;
+        let task = ThreadTaskMeta {
+            task_id: task_id.into(),
+            role: "planner".into(),
+            ..Default::default()
+        };
+        let mut parent = ChatSession::new("planner".into());
+        parent.thread.task_meta = Some(task.clone());
+        parent.thread.mode = "task_planner".into();
+        parent.thread.model = model.into();
+        parent.work_project_root = Some(source);
+        let mut child = ChatSession::new("worker-chat".into());
+        child.thread = crate::tools::tool_task_spawn_agent::build_agent_thread_params(
+            "worker-chat",
+            "Verifier fixture",
+            model,
+            task_id,
+            "worker",
+            card_id,
+            "planner",
+            view.meta,
+        );
+        child.runtime.state = refact_runtime_api::SessionState::Completed;
+        {
+            let mut sessions = app.chat.sessions.write().await;
+            sessions.insert("planner".into(), Arc::new(tokio::sync::Mutex::new(parent)));
+            sessions.insert(
+                "worker-chat".into(),
+                Arc::new(tokio::sync::Mutex::new(child)),
+            );
+        }
+        let (defaults_root, _) = crate::caps::project_model_defaults_state(gcx.clone()).await;
+        {
+            let mut state = gcx.caps_state.write().await;
+            let mut caps = state.caps.as_deref().cloned().unwrap_or_default();
+            caps.chat_models.entry(model.into()).or_insert_with(|| {
+                Arc::new(crate::caps::ChatModelRecord {
+                    base: crate::caps::BaseModelRecord {
+                        id: model.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+            });
+            state.caps = Some(Arc::new(caps));
+            state.loaded_project_root = Some(defaults_root);
+            state.last_attempted_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+        }
+        Arc::new(tokio::sync::Mutex::new(
+            AtCommandsContext::new_from_app(
+                app,
+                4096,
+                20,
+                false,
+                vec![],
+                "planner".into(),
+                None,
+                model.into(),
+                Some(task),
+                None,
+            )
+            .await,
+        ))
+    }
+
+    pub(crate) fn init_repo(root: &Path) {
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.name", "Test"],
+            vec!["config", "user.email", "test@example.com"],
+        ] {
+            crate::worktrees::git::run_git(root, &args).unwrap();
+        }
+        std::fs::write(root.join("tracked"), "base").unwrap();
+        crate::worktrees::git::run_git(root, &["add", "tracked"]).unwrap();
+        crate::worktrees::git::run_git(root, &["commit", "-m", "base"]).unwrap();
+    }
 
     fn card(instructions: &str) -> BoardCard {
         BoardCard {
@@ -1128,24 +2493,70 @@ mod tests {
     #[tokio::test]
     async fn store_verifier_report_lands_when_expected_card_state_matches() {
         let temp = tempfile::tempdir().unwrap();
+        init_repo(temp.path());
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let mut card = card("## Acceptance Criteria\n- Verify: `cargo test verifier`");
         card.id = "T-1".to_string();
         write_task(temp.path(), gcx.clone(), card).await;
-        let expected = load_expected_card_state(gcx.clone(), "task-1", "T-1")
+        let ccx = register_candidate(gcx.clone(), "task-1", "T-1", "model").await;
+        let candidate = command_checkout::resolve_planner_verifier(&ccx, "task-1", "T-1")
+            .await
+            .unwrap();
+        let mut expected = load_expected_card_state(gcx.clone(), "task-1", "T-1")
             .await
             .unwrap();
 
-        let stored = store_verifier_report(
+        let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        expected.verification = Some(
+            VerificationSnapshot::capture(
+                &gcx,
+                temp.path().to_path_buf(),
+                &candidate,
+                "task-1",
+                "T-1",
+                &board,
+            )
+            .await
+            .unwrap(),
+        );
+        let meta_before = fs::read(temp.path().join(".refact/tasks/task-1/meta.yaml")).unwrap();
+        storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+            let mut other = board.get_card("T-1").unwrap().clone();
+            other.id = "T-2".into();
+            other.column = "planned".into();
+            other.assignee = None;
+            other.agent_chat_id = None;
+            other.agent_worktree = None;
+            other.agent_worktree_name = None;
+            other.agent_branch = None;
+            board.cards.push(other);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let meta = storage::update_task_stats(gcx.clone(), "task-1")
+            .await
+            .unwrap();
+        assert_eq!(meta.cards_total, 2);
+        assert_ne!(
+            fs::read(temp.path().join(".refact/tasks/task-1/meta.yaml")).unwrap(),
+            meta_before
+        );
+        let mut caps = gcx.caps_state.write().await;
+        caps.caps = Some(Arc::new(caps.caps.as_deref().unwrap().clone()));
+        gcx.tool_catalog_generations.advance_capabilities();
+        let pending = store_verifier_report(
             gcx.clone(),
             "task-1",
             "T-1",
             Some(&expected),
             verifier_report(true),
             Vec::new(),
-        )
-        .await
-        .unwrap();
+        );
+        tokio::pin!(pending);
+        assert!(futures::poll!(&mut pending).is_pending());
+        drop(caps);
+        let stored = pending.await.unwrap();
 
         assert!(stored);
         let board = storage::load_board(gcx, "task-1").await.unwrap();
@@ -1160,15 +2571,33 @@ mod tests {
     #[tokio::test]
     async fn store_verifier_report_noops_when_card_restarted() {
         let temp = tempfile::tempdir().unwrap();
+        init_repo(temp.path());
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let mut card = card("## Acceptance Criteria\n- Verify: `cargo test verifier`");
         card.id = "T-1".to_string();
         card.agent_chat_id = Some("agent-old".to_string());
         write_task(temp.path(), gcx.clone(), card).await;
-        let expected = load_expected_card_state(gcx.clone(), "task-1", "T-1")
+        let ccx = register_candidate(gcx.clone(), "task-1", "T-1", "model").await;
+        let candidate = command_checkout::resolve_planner_verifier(&ccx, "task-1", "T-1")
+            .await
+            .unwrap();
+        let mut expected = load_expected_card_state(gcx.clone(), "task-1", "T-1")
             .await
             .unwrap();
 
+        let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        expected.verification = Some(
+            VerificationSnapshot::capture(
+                &gcx,
+                temp.path().to_path_buf(),
+                &candidate,
+                "task-1",
+                "T-1",
+                &board,
+            )
+            .await
+            .unwrap(),
+        );
         storage::update_board_atomic(gcx.clone(), "task-1", |board| {
             let card = board.get_card_mut("T-1").unwrap();
             card.column = "doing".to_string();
@@ -1193,6 +2622,22 @@ mod tests {
         .unwrap();
 
         assert!(!stored);
+        let request = VerifyCardRequest {
+            task_id: "task-1".into(),
+            card_id: "T-1".into(),
+            expected_state: Some(expected.clone()),
+        };
+        assert!(is_stale_verifier_error(
+            &settle_verifier_failure(
+                gcx.clone(),
+                &request,
+                Some(&expected),
+                Vec::new(),
+                "finished session unavailable".into(),
+            )
+            .await
+            .unwrap_err()
+        ));
         let board = storage::load_board(gcx, "task-1").await.unwrap();
         let card = board.get_card("T-1").unwrap();
         assert!(card.verifier_report.is_none());
@@ -1203,6 +2648,7 @@ mod tests {
     #[tokio::test]
     async fn store_verifier_report_noops_when_card_cleaned_up_after_merge() {
         let temp = tempfile::tempdir().unwrap();
+        init_repo(temp.path());
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let mut card = card("## Acceptance Criteria\n- Verify: `cargo test verifier`");
         card.id = "T-1".to_string();
@@ -1210,10 +2656,27 @@ mod tests {
         card.agent_worktree = Some(temp.path().join("agent").to_string_lossy().to_string());
         card.agent_worktree_name = Some("wt-1".to_string());
         write_task(temp.path(), gcx.clone(), card).await;
-        let expected = load_expected_card_state(gcx.clone(), "task-1", "T-1")
+        let ccx = register_candidate(gcx.clone(), "task-1", "T-1", "model").await;
+        let candidate = command_checkout::resolve_planner_verifier(&ccx, "task-1", "T-1")
+            .await
+            .unwrap();
+        let mut expected = load_expected_card_state(gcx.clone(), "task-1", "T-1")
             .await
             .unwrap();
 
+        let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        expected.verification = Some(
+            VerificationSnapshot::capture(
+                &gcx,
+                temp.path().to_path_buf(),
+                &candidate,
+                "task-1",
+                "T-1",
+                &board,
+            )
+            .await
+            .unwrap(),
+        );
         storage::update_board_atomic(gcx.clone(), "task-1", |board| {
             let card = board.get_card_mut("T-1").unwrap();
             card.agent_branch = None;
@@ -1236,6 +2699,22 @@ mod tests {
         .unwrap();
 
         assert!(!stored);
+        let request = VerifyCardRequest {
+            task_id: "task-1".into(),
+            card_id: "T-1".into(),
+            expected_state: Some(expected.clone()),
+        };
+        assert!(is_stale_verifier_error(
+            &settle_verifier_failure(
+                gcx.clone(),
+                &request,
+                Some(&expected),
+                Vec::new(),
+                "finish boundary unavailable".into(),
+            )
+            .await
+            .unwrap_err()
+        ));
         let board = storage::load_board(gcx, "task-1").await.unwrap();
         let card = board.get_card("T-1").unwrap();
         assert!(card.verifier_report.is_none());
@@ -1246,24 +2725,89 @@ mod tests {
     #[tokio::test]
     async fn store_verifier_report_noops_when_report_already_changed() {
         let temp = tempfile::tempdir().unwrap();
+        init_repo(temp.path());
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let mut card = card("## Acceptance Criteria\n- Verify: `cargo test verifier`");
         card.id = "T-1".to_string();
         write_task(temp.path(), gcx.clone(), card).await;
-        let expected = load_expected_card_state(gcx.clone(), "task-1", "T-1")
+        let ccx = register_candidate(gcx.clone(), "task-1", "T-1", "model").await;
+        let candidate = command_checkout::resolve_planner_verifier(&ccx, "task-1", "T-1")
+            .await
+            .unwrap();
+        let mut expected = load_expected_card_state(gcx.clone(), "task-1", "T-1")
             .await
             .unwrap();
 
-        store_verifier_report(
-            gcx.clone(),
-            "task-1",
-            "T-1",
-            None,
-            verifier_report(true),
-            Vec::new(),
+        let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        expected.verification = Some(
+            VerificationSnapshot::capture(
+                &gcx,
+                temp.path().to_path_buf(),
+                &candidate,
+                "task-1",
+                "T-1",
+                &board,
+            )
+            .await
+            .unwrap(),
+        );
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let pending = async {
+            started.send(()).unwrap();
+            released.await.unwrap();
+            store_verifier_report(
+                gcx.clone(),
+                "task-1",
+                "T-1",
+                Some(&expected),
+                verifier_report(false),
+                Vec::new(),
+            )
+            .await
+            .unwrap()
+        };
+        tokio::pin!(pending);
+        assert!(futures::poll!(&mut pending).is_pending());
+        waiting.await.unwrap();
+        let before = candidate.head().to_string();
+        crate::worktrees::git::run_git(
+            candidate.root(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "new candidate",
+            ],
         )
+        .unwrap();
+        assert_ne!(
+            crate::chat::verifier_diff::git_head_commit(candidate.root())
+                .await
+                .unwrap(),
+            before
+        );
+        let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        let configuration = ConfigurationSnapshot::capture(&gcx).await.unwrap();
+        assert!(!expected
+            .verification
+            .as_ref()
+            .unwrap()
+            .matches(&gcx, &board, &configuration));
+        storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+            let card = board.get_card_mut("T-1").unwrap();
+            card.verification.push(json!({"changed":"spec"}));
+            card.verifier_report = Some(verifier_report(true));
+            Ok(())
+        })
         .await
         .unwrap();
+        release.send(()).unwrap();
+        assert!(!pending.await);
 
         let stored = store_verifier_report(
             gcx.clone(),
@@ -1277,7 +2821,7 @@ mod tests {
         .unwrap();
 
         assert!(!stored);
-        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
         let card = board.get_card("T-1").unwrap();
         assert!(card.verifier_report.as_ref().unwrap().passed);
     }
@@ -1361,22 +2905,154 @@ mod tests {
 
     #[tokio::test]
     async fn agent_finish_spawns_verifier_through_helper() {
-        let mut card = card("");
-        card.id = "T-missing".to_string();
-        let expected_state = ExpectedCardState::from_card(0, &card);
+        let temp = tempfile::tempdir().unwrap();
+        init_repo(temp.path());
         let gcx = crate::global_context::tests::make_test_gcx().await;
-
+        let mut card = card("");
+        card.id = "T-1".into();
+        write_task(temp.path(), gcx.clone(), card).await;
+        register_candidate(gcx.clone(), "task-1", "T-1", "model").await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+        let child = app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get("worker-chat")
+            .cloned()
+            .unwrap();
+        child.lock().await.abort_flag.store(true, Ordering::Relaxed);
+        let worktree = child.lock().await.thread.worktree.clone().unwrap();
+        let fence = capture_finish_verification(
+            gcx.clone(),
+            "task-1",
+            "T-1",
+            "planner",
+            "worker-chat",
+            &worktree,
+        )
+        .await
+        .unwrap();
+        let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        assert!(fence.is_current(&gcx, &board));
+        let expected_state = ExpectedCardState::from_finished_card(
+            &gcx,
+            board.rev,
+            board.get_card("T-1").unwrap(),
+            board.owner_chat_id.as_deref(),
+            Some(fence),
+        );
+        assert!(expected_state.verification.is_some());
+        let request = VerifyCardRequest {
+            task_id: "task-1".into(),
+            card_id: "T-1".into(),
+            expected_state: Some(expected_state.clone()),
+        };
+        let mut actor = RuntimeVerifierActor::after_finish(&app, &request)
+            .await
+            .unwrap();
+        actor.wait_completed(&app).await.unwrap();
+        let candidate = command_checkout::resolve_finished_verifier(&app, &actor)
+            .await
+            .unwrap();
+        assert_eq!(candidate.metadata(), &actor.worktree);
         schedule_card_verifier_after_finish(
             gcx.clone(),
-            "missing-task".to_string(),
-            "T-missing".to_string(),
-            expected_state,
+            "task-1".into(),
+            "T-1".into(),
+            expected_state.clone(),
         )
         .await;
-
-        assert_eq!(gcx.card_verifier_tasks.lock().await.len(), 1);
-        shutdown_card_verifiers(gcx.clone()).await;
+        let mut tasks = gcx.card_verifier_tasks.lock().await;
+        assert_eq!(tasks.len(), 1);
+        tokio::time::timeout(Duration::from_secs(10), tasks.join_next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        drop(tasks);
         assert!(gcx.card_verifier_tasks.lock().await.is_empty());
+        let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        let report = board
+            .get_card("T-1")
+            .unwrap()
+            .verifier_report
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            report.classification,
+            VerifierReportClassification::Unavailable
+        );
+        assert_eq!(
+            report.concerns,
+            vec!["not run: No verification commands found in planner instructions"]
+        );
+        assert!(report.command_results.is_empty());
+
+        let mut expected = expected_state;
+        expected.card_fingerprint = verifier_card_fingerprint(board.get_card("T-1").unwrap());
+        let configuration = ConfigurationSnapshot::capture(&gcx).await.unwrap();
+        let mut changed_caps = gcx.caps_state.write().await;
+        let mut caps = changed_caps.caps.as_deref().unwrap().clone();
+        caps.defaults.chat_light_model = "changed-model".into();
+        changed_caps.caps = Some(Arc::new(caps));
+        gcx.tool_catalog_generations.advance_capabilities();
+        drop(changed_caps);
+        assert_eq!(
+            configuration.ensure_current(&gcx).unwrap_err(),
+            CONFIGURATION_RETRY
+        );
+        let changed = ConfigurationSnapshot::capture(&gcx).await.unwrap();
+        assert!(!expected
+            .verification
+            .as_ref()
+            .unwrap()
+            .matches(&gcx, &board, &changed));
+        assert!(!store_verifier_report(
+            gcx.clone(),
+            "task-1",
+            "T-1",
+            Some(&expected),
+            verifier_report(true),
+            Vec::new(),
+        )
+        .await
+        .unwrap());
+        let mut state = gcx.caps_state.write().await;
+        let mut caps = state.caps.as_deref().unwrap().clone();
+        caps.defaults.chat_light_model.clear();
+        state.caps = Some(Arc::new(caps));
+        drop(state);
+        gcx.tool_catalog_generations.advance_capabilities();
+        app.chat
+            .sessions
+            .write()
+            .await
+            .remove("worker-chat")
+            .unwrap();
+        schedule_card_verifier_after_finish(gcx.clone(), "task-1".into(), "T-1".into(), expected)
+            .await;
+        let mut tasks = gcx.card_verifier_tasks.lock().await;
+        tokio::time::timeout(Duration::from_secs(10), tasks.join_next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        drop(tasks);
+        let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        let report = board
+            .get_card("T-1")
+            .unwrap()
+            .verifier_report
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            report.classification,
+            VerifierReportClassification::Unavailable
+        );
+        assert_eq!(report.concerns, vec!["Verification infrastructure unavailable; human review required: finished session unavailable"]);
+        assert!(report.command_results.is_empty());
+        assert!(!report.passed);
     }
 
     #[tokio::test]

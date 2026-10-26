@@ -2002,7 +2002,12 @@ pub async fn run_subchat(
     }
     let app = AppState::from_gcx(gcx.clone()).await;
     if config.stateful {
-        install_stateful_subchat_session(&app, &chat_id, &config, &messages).await;
+        let source = config
+            .background_agent_id
+            .as_deref()
+            .and_then(|agent_id| app.agent_executions.saved_scope(agent_id));
+        install_stateful_subchat_session(&app, &chat_id, &config, &messages, source.as_deref())
+            .await?;
     }
     let ccx = Arc::new(AMutex::new(
         AtCommandsContext::new_with_abort(
@@ -2149,7 +2154,23 @@ pub(crate) async fn install_stateful_subchat_session(
     chat_id: &str,
     config: &SubchatConfig,
     messages: &[ChatMessage],
-) {
+    accepted_source: Option<&std::path::Path>,
+) -> Result<(), String> {
+    let source = match accepted_source {
+        Some(source) => Some(
+            crate::coordination::roots::resolve_source_workspace_root(
+                app.gcx.clone(),
+                Some(source.to_str().ok_or("accepted project scope is invalid")?),
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    if let (Some(source), Some(worktree)) = (&source, &config.worktree) {
+        if worktree.source_workspace_root.canonicalize().ok().as_ref() != Some(source) {
+            return Err("child worktree does not match accepted project scope".into());
+        }
+    }
     let thread = stateful_thread_from_config(chat_id, config);
     let session_arc = {
         let mut sessions = app.chat.sessions.write().await;
@@ -2170,10 +2191,19 @@ pub(crate) async fn install_stateful_subchat_session(
             session
         }
     };
+    let mut session = session_arc.lock().await;
+    if let Some(source) = source {
+        if crate::coordination::scope::session_source_root(&session)
+            .is_some_and(|saved| saved.canonicalize().ok().as_ref() != Some(&source))
+        {
+            return Err("saved child session does not match accepted project scope".into());
+        }
+        session.work_project_root = Some(source);
+    }
     if config.background_agent_id.is_some() {
-        let mut session = session_arc.lock().await;
         session.set_runtime_state(crate::chat::types::SessionState::Generating, None);
     }
+    Ok(())
 }
 
 pub(crate) async fn finish_stateful_subchat_session(
@@ -2521,7 +2551,10 @@ fn agent_resume_boundary(messages: &[ChatMessage], agent_id: Option<&str>) -> Op
             return None;
         }
         let event = message.extra.get("event")?;
-        if event.get("source")?.as_str()? != "agents.resume" {
+        if !matches!(
+            event.get("source")?.as_str()?,
+            "agents.resume" | "agents.continued_turn"
+        ) {
             return None;
         }
         let payload = event.get("payload")?;
@@ -2535,7 +2568,7 @@ fn agent_resume_boundary(messages: &[ChatMessage], agent_id: Option<&str>) -> Op
     })
 }
 
-fn previous_agent_cap(
+pub(crate) fn previous_agent_cap(
     messages: &[ChatMessage],
     agent_id: Option<&str>,
 ) -> Option<crate::agents::types::CapStop> {
@@ -2554,6 +2587,43 @@ fn previous_agent_cap(
         }
         serde_json::from_value(payload.get("cap_stop")?.clone()).ok()
     })
+}
+
+pub(crate) fn agent_step_cap(
+    messages: &[ChatMessage],
+    agent_id: Option<&str>,
+    remaining: usize,
+) -> crate::agents::types::CapStop {
+    let previous = previous_agent_cap(messages, agent_id);
+    let boundary = agent_resume_boundary(messages, agent_id);
+    let steps_before = boundary.map_or_else(
+        || previous.as_ref().map_or(0, |stop| stop.used),
+        |(steps, _)| steps,
+    );
+    let total = steps_before.saturating_add(remaining);
+    let goal_limit = crate::chat::goal_snapshot_from_messages(messages, None)
+        .and_then(|goal| goal.budget.max_turns)
+        .filter(|limit| *limit > 0);
+    let goal_cap = goal_limit.is_some_and(|limit| total as u64 >= u64::from(limit));
+    crate::agents::types::CapStop {
+        key: if goal_cap {
+            refact_work_core::CapKind::GoalTurns
+        } else {
+            refact_work_core::CapKind::Steps
+        },
+        scope: refact_work_core::CapScope::Child,
+        limit: total,
+        used: total,
+        resumable: !goal_cap,
+        run_generation: boundary.map_or_else(
+            || {
+                previous
+                    .as_ref()
+                    .map_or(1, |stop| stop.run_generation.saturating_add(1))
+            },
+            |(_, generation)| generation,
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -2585,6 +2655,48 @@ mod cap_history_tests {
         let mut historical_text = message;
         historical_text.role = "user".into();
         assert!(previous_agent_cap(&[historical_text], Some("child")).is_none());
+        for source in ["agents.resume", "agents.continued_turn"] {
+            let boundary = |agent: &str, steps: usize, generation: u64| {
+                event(
+                    EventSubkind::SystemNotice,
+                    source,
+                    json!({"agent_id": agent, "steps_before": steps, "run_generation": generation}),
+                    "continue",
+                )
+            };
+            let mut messages = vec![
+                boundary("child", 2, 1),
+                boundary("child", 5, 2),
+                boundary("other", 99, 9),
+            ];
+            assert_eq!(
+                agent_resume_boundary(&messages, Some("child")),
+                Some((5, 2))
+            );
+            assert!(agent_resume_boundary(&messages, None).is_none());
+            let step_stop = agent_step_cap(&messages, Some("child"), 1);
+            assert_eq!(
+                (step_stop.limit, step_stop.used, step_stop.run_generation),
+                (6, 6, 2)
+            );
+            assert!(step_stop.parent_can_raise_steps());
+            messages.push(crate::chat::internal_roles::goal(
+                "agent",
+                1,
+                "finite",
+                None,
+                true,
+                crate::chat::types::GoalBudget {
+                    max_turns: Some(6),
+                    explicit: true,
+                    ..Default::default()
+                },
+            ));
+            let goal_stop = agent_step_cap(&messages, Some("child"), 1);
+            assert_eq!(goal_stop.key, refact_work_core::CapKind::GoalTurns);
+            assert!(!goal_stop.resumable);
+            assert!(!goal_stop.parent_can_raise_steps());
+        }
     }
 }
 
@@ -2599,12 +2711,6 @@ async fn run_subchat_loop(
     let mut context_limit_compact_count = 0usize;
     let mut empty_choice_retry_count = 0usize;
     let mut supervised_cost = 0.0_f64;
-    let previous_cap = previous_agent_cap(&messages, config.background_agent_id.as_deref());
-    let resume_boundary = agent_resume_boundary(&messages, config.background_agent_id.as_deref());
-    let steps_before = resume_boundary.map_or_else(
-        || previous_cap.as_ref().map_or(0, |stop| stop.used),
-        |(steps, _)| steps,
-    );
     for step in 0..config.max_steps {
         if is_aborted(&config.abort_flag) {
             if config.soft_abort {
@@ -2787,30 +2893,12 @@ async fn run_subchat_loop(
         && !has_final_answer(&messages)
         && !is_aborted(&config.abort_flag)
     {
-        let total_steps = steps_before.saturating_add(config.max_steps);
-        let goal_limit = crate::chat::goal_snapshot_from_messages(&messages, None)
-            .and_then(|goal| goal.budget.max_turns)
-            .filter(|limit| *limit > 0);
-        let is_goal_cap = goal_limit.is_some_and(|limit| total_steps as u64 >= u64::from(limit));
-        let stop = crate::agents::types::CapStop {
-            key: if is_goal_cap {
-                refact_work_core::CapKind::GoalTurns
-            } else {
-                refact_work_core::CapKind::Steps
-            },
-            scope: refact_work_core::CapScope::Child,
-            limit: total_steps,
-            used: total_steps,
-            resumable: !is_goal_cap,
-            run_generation: resume_boundary.map_or_else(
-                || {
-                    previous_cap
-                        .as_ref()
-                        .map_or(1, |stop| stop.run_generation.saturating_add(1))
-                },
-                |(_, generation)| generation,
-            ),
-        };
+        let stop = agent_step_cap(
+            &messages,
+            config.background_agent_id.as_deref(),
+            config.max_steps,
+        );
+        let is_goal_cap = stop.key == refact_work_core::CapKind::GoalTurns;
         let error = stop.as_error().map_err(|error| error.to_string())?;
         messages.push(crate::chat::internal_roles::event(
             crate::chat::internal_roles::EventSubkind::SystemNotice,

@@ -1356,38 +1356,76 @@ impl Tool for ToolTaskBoardDiscover {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let gcx = ccx.lock().await.app.gcx.clone();
+        let (app, chat_id, model_id) = {
+            let ccx = ccx.lock().await;
+            (
+                ccx.app.clone(),
+                ccx.chat_id.clone(),
+                ccx.current_model.clone(),
+            )
+        };
+        let caller = crate::coordination::scope::model_caller(&app, &chat_id, &model_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let model = caller.model.as_ref().ok_or_else(|| {
+            crate::coordination::error::WorkError::policy_unavailable().to_string()
+        })?;
+        let policy = crate::coordination::privacy_guard::policy_key(&app.gcx, model)
+            .map_err(|error| error.to_string())?;
         let task_id = args
             .get("task_id")
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty());
 
-        let result = match task_id {
+        let (result, records) = match task_id {
             Some(task_id) => {
-                serde_yaml::to_string(&storage::discover_board_authority(gcx, task_id).await?)
-                    .map_err(|e| e.to_string())?
+                let (authority, records) =
+                    storage::discover_model_authority(&app.gcx, &caller, task_id)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                (
+                    serde_yaml::to_string(&authority)
+                        .map_err(|_| "Board discovery unavailable".to_string())?,
+                    records,
+                )
             }
             None => {
-                let (cards, projection_unavailable) = storage::discover_project_cards(gcx).await?;
-                serde_yaml::to_string(&json!({
-                    "projection_unavailable": projection_unavailable,
-                    "cards": cards,
-                }))
-                .map_err(|e| e.to_string())?
+                let (cards, records, projection_unavailable) =
+                    storage::discover_model_cards(&app.gcx, &caller)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                (
+                    serde_yaml::to_string(&json!({
+                        "coverage": "partial",
+                        "projection_unavailable": projection_unavailable,
+                        "cards": cards,
+                    }))
+                    .map_err(|_| "Board discovery unavailable".to_string())?,
+                    records,
+                )
             }
         };
 
-        Ok((
-            false,
-            vec![ContextEnum::ChatMessage(ChatMessage {
-                role: "tool".to_string(),
-                content: ChatContent::SimpleText(result),
-                tool_calls: None,
-                tool_call_id: tool_call_id.clone(),
-                ..Default::default()
-            })],
-        ))
+        let current = crate::coordination::scope::model_caller(&app, &chat_id, &model_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        if current.source_root != caller.source_root
+            || current.principal != caller.principal
+            || crate::coordination::privacy_guard::policy_key(&app.gcx, model)
+                .map_err(|error| error.to_string())?
+                != policy
+        {
+            return Err(crate::coordination::error::WorkError::policy_unavailable().to_string());
+        }
+        let mut message = ChatMessage {
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText(result),
+            tool_call_id: tool_call_id.clone(),
+            ..Default::default()
+        };
+        crate::privacy::records::merge_records(&mut message, records);
+        Ok((false, vec![ContextEnum::ChatMessage(message)]))
     }
 
     fn tool_depends_on(&self) -> Vec<String> {
@@ -1401,7 +1439,7 @@ impl Tool for ToolTaskBoardDiscover {
             source: make_source(),
             experimental: false,
             allow_parallel: true,
-            description: "Read-only discovery of the tasks and cards in this project and their claim state. Without task_id it reads the published board projection; with task_id it reports that board's owner, reviewers, review policy, claims and dependency overrides. Metadata only — it grants no control over what it lists.".to_string(),
+            description: "Read-only, privacy-cleared discovery in this chat's trusted project. Without task_id it reads the published board projection with partial coverage; with task_id it reports visible owner, reviewers, review policy, claimant/times and dependency override state, never retry keys or free-text reasons. Guessed IDs grant no visibility or control.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1693,7 +1731,7 @@ mod tests {
             cards: vec![card("T-1", "Claimable", "planned", "P1", vec![])],
             ..Default::default()
         };
-        let (gcx, _temp) = setup_task(board).await;
+        let (gcx, temp) = setup_task(board).await;
         let holder = chat_ccx(gcx.clone(), "agent-one").await;
         let observer = chat_ccx(gcx.clone(), "agent-two").await;
         ToolTaskBoardClaimCard::new()
@@ -1705,20 +1743,170 @@ mod tests {
             .await
             .unwrap();
 
-        let discovered = tool_text(
+        let source_path = temp.path().join("source.rs");
+        let mut board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        board.owner_chat_id = Some("owner-chat".into());
+        board.reviewer_chat_ids = vec!["reviewer-chat".into()];
+        board
+            .record_dependency_override(
+                "T-1",
+                "owner-chat",
+                "private free-text reason",
+                "t0".into(),
+            )
+            .unwrap();
+        let records =
+            crate::privacy::records::declared_file_records(&gcx, [source_path.clone()]).unwrap();
+        let provenance =
+            crate::coordination::board_rows::write_provenance(&board, None, Some((records, true)));
+        let mut value = serde_yaml::to_value(&board).unwrap();
+        value.as_mapping_mut().unwrap().insert(
+            "work_provenance".into(),
+            serde_yaml::to_value(&provenance).unwrap(),
+        );
+        tokio::fs::write(
+            temp.path().join(".refact/tasks/task-1/board.yaml"),
+            serde_yaml::to_string(&value).unwrap(),
+        )
+        .await
+        .unwrap();
+        gcx.work_boards.publish(
+            &temp.path().join(".refact/tasks/task-1"),
+            Some((&board, &provenance)),
+        );
+        let (root, _) = crate::caps::project_model_defaults_state(gcx.clone()).await;
+        let mut caps = crate::caps::CodeAssistantCaps::default();
+        caps.chat_models.insert(
+            "test/model".into(),
+            Arc::new(crate::caps::ChatModelRecord {
+                base: crate::caps::BaseModelRecord {
+                    id: "test/model".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        );
+        {
+            let mut state = gcx.caps_state.write().await;
+            state.caps = Some(Arc::new(caps));
+            state.loaded_project_root = Some(root);
+            state.last_attempted_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+        }
+        let mut session = crate::chat::types::ChatSession::new("agent-two".into());
+        session.thread.model = "test/model".into();
+        session.work_project_root = Some(temp.path().into());
+        let session = Arc::new(AMutex::new(session));
+        gcx.chat_sessions
+            .write()
+            .await
+            .insert("agent-two".into(), session.clone());
+        observer.lock().await.current_model = "test/model".into();
+        let contexts = ToolTaskBoardDiscover::new()
+            .tool_execute(
+                observer.clone(),
+                &"call".to_string(),
+                &HashMap::from([("task_id".to_string(), json!("task-1"))]),
+            )
+            .await
+            .unwrap()
+            .1;
+        let message = match &contexts[0] {
+            ContextEnum::ChatMessage(message) => message,
+            _ => panic!("expected message"),
+        };
+        assert!(message.extra.get("privacy").is_some());
+        assert!(
+            refact_privacy::records_from_messages(std::slice::from_ref(message))
+                .unwrap()
+                .iter()
+                .any(|(_, record)| record.path == source_path.to_string_lossy())
+        );
+        let discovered = tool_text(contexts);
+
+        assert!(discovered.contains("T-1"));
+        assert!(discovered.contains("agent-one"));
+        assert!(discovered.contains("owner-chat"));
+        assert!(discovered.contains("reviewer-chat"));
+        assert!(!discovered.contains("idempotency_key"));
+        assert!(!discovered.contains("private free-text reason"));
+        assert!(!discovered.contains("reason:"));
+        let visible = tool_text(
             ToolTaskBoardDiscover::new()
-                .tool_execute(
-                    observer.clone(),
-                    &"call".to_string(),
-                    &HashMap::from([("task_id".to_string(), json!("task-1"))]),
-                )
+                .tool_execute(observer.clone(), &"visible".into(), &HashMap::new())
                 .await
                 .unwrap()
                 .1,
         );
-
-        assert!(discovered.contains("T-1"));
-        assert!(discovered.contains("agent-one"));
+        assert!(visible.contains("Claimable"));
+        assert!(visible.contains("T-1"));
+        let original_policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
+        gcx.privacy_policy_load.write().unwrap().policy = Arc::new(refact_privacy::PrivacyPolicy {
+            zones: vec![refact_privacy::Zone {
+                name: "guarded".into(),
+                patterns: vec![source_path.to_string_lossy().into_owned()],
+                send_to: vec![],
+                on_shell_read: refact_privacy::ShellBehavior::Withhold,
+            }],
+            ..Default::default()
+        });
+        let hidden = tool_text(
+            ToolTaskBoardDiscover::new()
+                .tool_execute(observer.clone(), &"hidden".into(), &HashMap::new())
+                .await
+                .unwrap()
+                .1,
+        );
+        assert!(!hidden.contains("Claimable"));
+        assert!(!hidden.contains("T-1"));
+        assert!(!hidden.contains("withheld"));
+        assert!(!hidden.contains("guarded"));
+        assert!(hidden.contains("projection_unavailable: false"));
+        let authority_args = HashMap::from([("task_id".into(), json!("task-1"))]);
+        let hidden_authority = ToolTaskBoardDiscover::new()
+            .tool_execute(observer.clone(), &"hidden".into(), &authority_args)
+            .await
+            .unwrap_err();
+        assert!(hidden_authority.contains("not_found_or_not_visible"));
+        assert!(!hidden_authority.contains("source.rs"));
+        assert_eq!(
+            storage::discover_board_authority(gcx.clone(), "task-1")
+                .await
+                .unwrap()
+                .dependency_overrides["T-1"]
+                .reason,
+            "private free-text reason"
+        );
+        gcx.privacy_policy_load.write().unwrap().policy = original_policy;
+        observer.lock().await.current_model = "unknown/model".into();
+        assert!(ToolTaskBoardDiscover::new()
+            .tool_execute(observer.clone(), &"unknown".into(), &HashMap::new())
+            .await
+            .unwrap_err()
+            .contains("policy_unavailable"));
+        observer.lock().await.current_model = "test/model".into();
+        session.lock().await.work_project_root = None;
+        assert!(ToolTaskBoardDiscover::new()
+            .tool_execute(observer.clone(), &"scope".into(), &authority_args)
+            .await
+            .unwrap_err()
+            .contains("scope_denied"));
+        let foreign = tempfile::tempdir().unwrap();
+        session.lock().await.work_project_root = Some(foreign.path().into());
+        assert!(ToolTaskBoardDiscover::new()
+            .tool_execute(observer.clone(), &"foreign".into(), &authority_args)
+            .await
+            .is_err());
+        session.lock().await.work_project_root = Some(temp.path().into());
+        gcx.privacy_policy_load.write().unwrap().error = Some("unavailable".into());
+        assert!(ToolTaskBoardDiscover::new()
+            .tool_execute(observer.clone(), &"policy".into(), &HashMap::new())
+            .await
+            .unwrap_err()
+            .contains("policy_unavailable"));
+        gcx.privacy_policy_load.write().unwrap().error = None;
         let denied = ToolTaskBoardClaimCard::new()
             .tool_execute(
                 observer,

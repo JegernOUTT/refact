@@ -846,6 +846,7 @@ impl Tool for ToolTaskAgentFinish {
             ));
         }
         let thread_worktree = ccx.lock().await.execution_scope_worktree();
+        let verifier_worktree = thread_worktree.clone();
         let ab_variant_key = if let Some(variants) = card_pre.ab_variants.as_ref() {
             let variant_key = variants
                 .variant_key_for_chat_id(&finish_chat_id)
@@ -908,6 +909,23 @@ impl Tool for ToolTaskAgentFinish {
             None
         };
 
+        let verifier_fence = if success && ab_variant_key.is_none() {
+            if let (Some(owner), Some(worktree)) = (planner_chat_id.as_deref(), verifier_worktree.as_ref()) {
+                match crate::chat::verifier::capture_finish_verification(
+                    gcx.clone(), &task_id, &card_id, owner, &finish_chat_id, worktree,
+                ).await {
+                    Ok(fence) => Some(fence),
+                    Err(_) => {
+                        tracing::warn!("finish verification fence unavailable; completion remains unverified");
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let card_id_owned = card_id.clone();
         let report_clone = report.clone();
         let success_clone = success;
@@ -915,9 +933,12 @@ impl Tool for ToolTaskAgentFinish {
 
         let finish_agent_id_for_update = finish_agent_id.clone();
         let ab_variant_key_for_update = ab_variant_key.clone();
+        let verifier_gcx = gcx.clone();
         let (board, (card_title, all_finished, verifier_expected_state, finished_ab_variant)) =
             storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
                 let next_board_rev = board.rev + 1;
+                let owner = board.owner_chat_id.clone();
+                let verifier_fence = verifier_fence.filter(|fence| fence.is_current(&verifier_gcx, board));
                 let card = board
                     .get_card_mut(&card_id_owned)
                     .ok_or(format!("Card {} not found in task", card_id_owned))?;
@@ -967,7 +988,9 @@ impl Tool for ToolTaskAgentFinish {
                 let card_title = card.title.clone();
 
                 mark_finished_card(card, success_clone, &report_clone, commit_hash.as_deref());
-                let verifier_expected_state = ExpectedCardState::from_card(next_board_rev, card);
+                let verifier_expected_state = ExpectedCardState::from_finished_card(
+                    &verifier_gcx, next_board_rev, card, owner.as_deref(), verifier_fence,
+                );
                 let instructions = card.instructions.clone();
 
                 board.record_card_outcome(

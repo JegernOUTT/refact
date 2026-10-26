@@ -98,7 +98,7 @@ pub async fn load_privacy_if_needed(gcx: Arc<GlobalContext>) -> Arc<PrivacySetti
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let (config_dir, privacy_yaml, previous_settings, previous_load) = {
+    let (config_dir, privacy_yaml, previous_load) = {
         let previous_settings = gcx.privacy_settings.read().unwrap().clone();
         let should_reload = previous_settings.loaded_ts + PRIVACY_TOO_OLD.as_secs() <= current_time;
         if !should_reload {
@@ -107,7 +107,6 @@ pub async fn load_privacy_if_needed(gcx: Arc<GlobalContext>) -> Arc<PrivacySetti
         (
             gcx.config_dir.clone(),
             gcx.cmdline.privacy_yaml.clone(),
-            previous_settings,
             gcx.privacy_policy_load.read().unwrap().clone(),
         )
     };
@@ -123,13 +122,27 @@ pub async fn load_privacy_if_needed(gcx: Arc<GlobalContext>) -> Arc<PrivacySetti
 
     if let Some(error_message) = &loaded.error {
         error!("{error_message}");
-        *gcx.privacy_policy_load.write().unwrap() = loaded;
-        return previous_settings;
     }
+    install_policy_load(&gcx, loaded, current_time)
+}
 
-    let policy_changed = previous_load.policy != loaded.policy;
+fn install_policy_load(
+    gcx: &GlobalContext,
+    mut loaded: PolicyLoad,
+    current_time: u64,
+) -> Arc<PrivacySettings> {
+    let mut current = gcx.privacy_policy_load.write().unwrap();
+    if loaded.error.is_some() {
+        loaded.policy = current.policy.clone();
+        *current = loaded;
+        return gcx.privacy_settings.read().unwrap().clone();
+    }
+    let policy_changed = current.policy != loaded.policy;
+    if !policy_changed {
+        loaded.policy = current.policy.clone();
+    }
     let new_privacy_settings = Arc::new(legacy_settings(&loaded.policy, current_time));
-    *gcx.privacy_policy_load.write().unwrap() = loaded;
+    *current = loaded;
     *gcx.privacy_settings.write().unwrap() = new_privacy_settings.clone();
     if policy_changed {
         gcx.tool_catalog_generations.advance_privacy();
@@ -169,17 +182,14 @@ pub async fn save_privacy_policy(
     let project_paths = project_privacy_paths(get_project_dirs(gcx.clone()).await);
     let loaded = refact_privacy::load_policy(&path, &project_paths, Some(&previous_load)).await;
     if loaded.error.is_some() {
-        *gcx.privacy_policy_load.write().unwrap() = loaded;
+        install_policy_load(&gcx, loaded, 0);
         return Ok(());
     }
     let current_time = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_err(|error| format!("system clock error: {error}"))?
         .as_secs();
-    let settings = Arc::new(legacy_settings(&loaded.policy, current_time));
-    *gcx.privacy_policy_load.write().unwrap() = loaded;
-    *gcx.privacy_settings.write().unwrap() = settings;
-    gcx.tool_catalog_generations.advance_privacy();
+    install_policy_load(&gcx, loaded, current_time);
     Ok(())
 }
 
@@ -326,6 +336,99 @@ pub(crate) fn check_file_privacy_for_read_preparation(
 mod tests {
     use super::*;
     use std::{path::PathBuf, sync::Arc};
+
+    #[tokio::test]
+    async fn equal_refresh_and_save_preserve_installed_policy_identity() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        save_privacy_policy(gcx.clone(), PrivacyPolicy::default())
+            .await
+            .unwrap();
+        let installed = gcx.privacy_policy_load.read().unwrap().policy.clone();
+        let generation = gcx
+            .tool_catalog_generations
+            .privacy
+            .load(std::sync::atomic::Ordering::SeqCst);
+        *gcx.privacy_settings.write().unwrap() = Arc::new(legacy_settings(&installed, 0));
+        load_privacy_if_needed(gcx.clone()).await;
+        assert!(Arc::ptr_eq(
+            &installed,
+            &gcx.privacy_policy_load.read().unwrap().policy
+        ));
+        save_privacy_policy(gcx.clone(), installed.as_ref().clone())
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &installed,
+            &gcx.privacy_policy_load.read().unwrap().policy
+        ));
+        assert_eq!(
+            gcx.tool_catalog_generations
+                .privacy
+                .load(std::sync::atomic::Ordering::SeqCst),
+            generation
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_install_compares_current_state_and_preserves_failed_load_diagnostics() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let first = gcx.privacy_policy_load.read().unwrap().clone();
+        let changed = PolicyLoad {
+            policy: Arc::new(PrivacyPolicy {
+                blocked: vec!["private.txt".into()],
+                ..Default::default()
+            }),
+            error: None,
+            source_paths: vec!["current.yaml".into()],
+        };
+        install_policy_load(&gcx, changed.clone(), 10);
+        let same_content = PolicyLoad {
+            policy: Arc::new(changed.policy.as_ref().clone()),
+            source_paths: vec!["refreshed.yaml".into()],
+            ..changed.clone()
+        };
+        let settings = install_policy_load(&gcx, same_content, 11);
+        {
+            let current = gcx.privacy_policy_load.read().unwrap();
+            assert!(Arc::ptr_eq(&changed.policy, &current.policy));
+            assert_eq!(current.source_paths, vec![PathBuf::from("refreshed.yaml")]);
+        }
+        let failed = PolicyLoad {
+            error: Some("failed to read stale.yaml".into()),
+            source_paths: vec!["stale.yaml".into()],
+            ..first.clone()
+        };
+        assert!(Arc::ptr_eq(
+            &settings,
+            &install_policy_load(&gcx, failed, 12)
+        ));
+        {
+            let current = gcx.privacy_policy_load.read().unwrap();
+            assert!(Arc::ptr_eq(&changed.policy, &current.policy));
+            assert_eq!(current.error.as_deref(), Some("failed to read stale.yaml"));
+            assert_eq!(current.source_paths, vec![PathBuf::from("stale.yaml")]);
+        }
+        install_policy_load(
+            &gcx,
+            PolicyLoad {
+                policy: Arc::new(first.policy.as_ref().clone()),
+                ..first.clone()
+            },
+            13,
+        );
+        let returned = gcx.privacy_policy_load.read().unwrap();
+        assert_eq!(returned.policy, first.policy);
+        assert!(!Arc::ptr_eq(&returned.policy, &first.policy));
+        assert!(!Arc::ptr_eq(&returned.policy, &changed.policy));
+        assert!(returned.error.is_none());
+        assert_eq!(returned.source_paths, first.source_paths);
+        assert_eq!(
+            gcx.tool_catalog_generations
+                .privacy
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+    }
 
     #[test]
     fn test_privacy_patterns() {

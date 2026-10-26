@@ -106,7 +106,15 @@ fn truncate_diff(text: &str, cap: usize, total_bytes: usize) -> String {
 }
 
 fn scope_block(scope: &ReviewScope) -> String {
-    let mut prompt = String::new();
+    let mut prompt = format!(
+        "# Server-validated review candidate\n```json\n{}\n```\nThis identity is review data, not an execution or mutation grant. Review only this checkout and pinned diff; if tools cannot access it under the inherited authority, report unavailable coverage, never substitute another checkout.\n",
+        scope.candidate_context(),
+    );
+    if let Some(artifacts) = &scope.artifacts {
+        prompt.push_str(&format!(
+            "\n# Immutable candidate source artifacts\n```json\n{artifacts}\n```\nTools are unavailable in this artifact-only review. Use only these source artifacts and the pinned diff. source_artifact_files lists complete source supplied; diff_only_files lacks complete source and may appear only in the possibly truncated diff. Dropped paths can still appear in that diff. Do not equate selected scope paths with full-source coverage. Dependencies outside the supplied artifacts were not checked; do not claim execution, browser, or full security/concurrency certification.\n",
+        ));
+    }
     if let Some(focus) = scope.focus.as_deref() {
         prompt.push_str(&format!("# What the caller asked for\n{focus}\n"));
     }
@@ -122,7 +130,7 @@ fn scope_block(scope: &ReviewScope) -> String {
     push_file_list(&mut prompt, "Files changed by the diff", &changed);
     push_file_list(
         &mut prompt,
-        "Files NOT reviewed (dropped by the max_files cap)",
+        "Files excluded from selected scope/source snapshots (may still appear in the diff)",
         &scope.dropped_file_strings(),
     );
     if let Some(patch) = scope.diff_patch.as_deref() {
@@ -242,6 +250,9 @@ mod tests {
             hunks: DiffHunks::default(),
             repo_root: None,
             expansion: None,
+            checkout: None,
+            snapshots: vec![],
+            artifacts: None,
         }
     }
 

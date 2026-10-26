@@ -34,6 +34,7 @@ use crate::postprocessing::pp_command_output::{
 };
 use crate::privacy::{check_file_privacy, load_privacy_if_needed, FilePrivacyLevel};
 use crate::tools::file_edit::auxiliary::{active_execution_scope, scoped_path_warnings};
+use crate::tools::command_checkout::{self, ValidatedCommandCheckout};
 use crate::tools::shell_gate;
 use crate::tools::tools_description::{
     json_schema_from_params, MatchConfirmDeny, Tool, ToolDesc, ToolSource, ToolSourceType,
@@ -50,6 +51,20 @@ const TTY_DESCRIPTION: &str = "If true, run the command attached to a pseudo-ter
 static PATH_ENRICHMENT_CACHE: LazyLock<
     Mutex<HashMap<(String, u64, u64), crate::exec::path_enrichment::CollectedPathEnrichment>>,
 > = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+tokio::task_local! {
+    static CHECKOUT_BEFORE_SPAWN: std::cell::RefCell<Option<Box<dyn FnOnce() + Send>>>;
+}
+
+#[cfg(test)]
+fn checkout_before_spawn() {
+    let _ = CHECKOUT_BEFORE_SPAWN.try_with(|hook| {
+        if let Some(change) = hook.borrow_mut().take() {
+            change();
+        }
+    });
+}
 
 async fn read_disk_log_tail(path: &std::path::Path) -> Result<(String, bool), String> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -135,7 +150,13 @@ struct ProcessStartArgs {
 pub(crate) async fn approval_request(
     ccx: &Arc<AMutex<AtCommandsContext>>,
     args: &HashMap<String, Value>,
-) -> Result<crate::exec::ExecSpawnRequest, String> {
+) -> Result<
+    (
+        crate::exec::ExecSpawnRequest,
+        Option<ValidatedCommandCheckout>,
+    ),
+    String,
+> {
     let (gcx, scope, chat_id) = {
         let context = ccx.lock().await;
         (
@@ -144,7 +165,8 @@ pub(crate) async fn approval_request(
             context.chat_id.clone(),
         )
     };
-    let parsed = parse_start_args(gcx.clone(), args, scope.as_ref()).await?;
+    let checkout = command_checkout::resolve(ccx, args).await?;
+    let parsed = parse_start_args(gcx.clone(), args, scope.as_ref(), checkout.as_ref()).await?;
     let mut errors = Vec::new();
     let env = crate::integrations::setting_up_integrations::get_vars_for_replacements(
         gcx.clone(),
@@ -152,7 +174,7 @@ pub(crate) async fn approval_request(
     )
     .await;
     let chat_mode = chat_mode_for_exec(gcx.clone(), &chat_id).await;
-    build_exec_request(
+    let policy = build_exec_request(
         gcx,
         CommandPolicyInput {
             source: ExecSource::ProcessTool,
@@ -164,8 +186,25 @@ pub(crate) async fn approval_request(
         },
     )
     .await
-    .map(|policy| policy.request)
-    .map_err(|error| error.message)
+    .map_err(|error| error.message)?;
+    let mut request = policy.request;
+    if checkout.is_some() {
+        let tty = parsed.tty.unwrap_or(refact_exec::default_tty());
+        request.mode = parsed.mode;
+        request = request
+            .with_tty(tty)
+            .with_transcript_limit(PROCESS_TRANSCRIPT_MAX_BYTES);
+        if tty {
+            request = request.with_pty_size(TOOL_PTY_ROWS, TOOL_PTY_COLS);
+        }
+        if let Some(wait) = parsed.startup_wait {
+            request = request.with_startup_wait(wait);
+        }
+        if let Some(readiness) = parsed.readiness {
+            request = request.with_readiness(readiness);
+        }
+    }
+    Ok((request, checkout))
 }
 
 struct ShellServiceAliasArgs {
@@ -216,7 +255,14 @@ impl Tool for ToolProcessStart {
             observe_reason.guarded_zones,
             observe_reason.derived_labels
         );
-        let parsed = parse_start_args(gcx.clone(), args, execution_scope.as_ref()).await?;
+        let checkout = command_checkout::resolve(&ccx, args).await?;
+        let parsed = parse_start_args(
+            gcx.clone(),
+            args,
+            execution_scope.as_ref(),
+            checkout.as_ref(),
+        )
+        .await?;
         let mut error_log = Vec::new();
         let env_variables =
             crate::integrations::setting_up_integrations::get_vars_for_replacements(
@@ -224,11 +270,15 @@ impl Tool for ToolProcessStart {
                 &mut error_log,
             )
             .await;
-        let workspace = match parsed.workdir.clone() {
-            Some(workdir) => workspace_containing_path(gcx.clone(), &workdir)
-                .await
-                .or_else(|| Some(normalize_workspace_path(&workdir))),
-            None => process_workspace(gcx.clone(), execution_scope.as_ref()).await,
+        let workspace = if let Some(checkout) = &checkout {
+            Some(checkout.root().to_path_buf())
+        } else {
+            match parsed.workdir.clone() {
+                Some(workdir) => workspace_containing_path(gcx.clone(), &workdir)
+                    .await
+                    .or_else(|| Some(normalize_workspace_path(&workdir))),
+                None => process_workspace(gcx.clone(), execution_scope.as_ref()).await,
+            }
         };
         if parsed.mode == ExecMode::Service && parsed.service_name.is_none() {
             return Err("service mode requires service_name".to_string());
@@ -311,8 +361,14 @@ impl Tool for ToolProcessStart {
             "process_start",
             args,
             &mut request,
+            checkout.as_ref(),
         )
         .await?;
+        if let Some(checkout) = &checkout {
+            #[cfg(test)]
+            checkout_before_spawn();
+            checkout.revalidate(&ccx, args, &request).await?;
+        }
         let result = exec_registry.spawn(request).await?;
         let read = exec_registry
             .read(&result.snapshot.meta.process_id, 0, None)
@@ -396,9 +452,12 @@ impl Tool for ToolProcessStart {
             let ccx_lock = ccx.lock().await;
             (ccx_lock.app.gcx.clone(), ccx_lock.execution_scope.clone())
         };
-        Ok(parse_start_args(gcx, args, execution_scope.as_ref())
-            .await?
-            .command)
+        let checkout = command_checkout::resolve(&ccx, args).await?;
+        Ok(
+            parse_start_args(gcx, args, execution_scope.as_ref(), checkout.as_ref())
+                .await?
+                .command,
+        )
     }
 
     async fn match_against_confirm_deny(
@@ -1082,6 +1141,7 @@ fn process_start_input_schema() -> Value {
         ],
         &["command", "description"],
     );
+    schema["properties"]["checkout"] = command_checkout::input_schema();
     schema["properties"]["tty"] = json!({
         "type": "boolean",
         "default": refact_exec::default_tty(),
@@ -1305,6 +1365,7 @@ async fn parse_start_args(
     gcx: Arc<GlobalContext>,
     args: &HashMap<String, Value>,
     execution_scope: Option<&ExecutionScope>,
+    checkout: Option<&ValidatedCommandCheckout>,
 ) -> Result<ProcessStartArgs, String> {
     let command = parse_required_string(args, "command")?;
     let mode = parse_start_mode(args)?;
@@ -1313,8 +1374,14 @@ async fn parse_start_args(
         "description is required and must be a non-empty single concise sentence".to_string()
     })?;
     let raw_workdir = parse_optional_string(args, "workdir")?;
-    let (workdir, scope_warnings) =
-        resolve_process_workdir(gcx, raw_workdir.as_deref(), execution_scope).await?;
+    let (workdir, scope_warnings) = if let Some(checkout) = checkout {
+        (Some(checkout.cwd().to_path_buf()), Vec::new())
+    } else {
+        if args.contains_key("checkout") {
+            return Err("command checkout requires validated authority".into());
+        }
+        resolve_process_workdir(gcx, raw_workdir.as_deref(), execution_scope).await?
+    };
     let startup_wait = parse_optional_u64(args, "startup_wait_ms")?.map(Duration::from_millis);
     let wait_port = parse_optional_u16(args, "startup_wait_port")?;
     let wait_keyword = parse_optional_string(args, "startup_wait_keyword")?;
@@ -1872,6 +1939,10 @@ fn format_read_sections(
                 &collect_stream(&read.chunks, ExecOutputStream::Stderr),
                 output_filter,
             );
+            let combined = collect_stream(&read.chunks, ExecOutputStream::Combined);
+            if !combined.is_empty() {
+                append_section(&mut out, "combined", &combined, output_filter);
+            }
         }
     }
     out.push_str(&format!(
@@ -2268,6 +2339,8 @@ mod tests {
             make_args_map(vec![
                 ("command", json!("stty size; sleep 30")),
                 ("description", json!("Report background terminal size")),
+                ("startup_wait_ms", json!(2000)),
+                ("startup_wait_keyword", json!("32 120")),
             ]),
         )
         .await
@@ -2275,6 +2348,42 @@ mod tests {
         let background_id = process_id(&background);
         wait_for_output(gcx.clone(), &background_id, "32 120").await;
         assert_eq!(exec(&background)["tty"], refact_exec::default_tty());
+        assert!(text(&background).contains("\ncombined:\n32 120\n"));
+        let transcript = gcx.exec_registry.read(&background_id, 0, None).await;
+        assert!(!transcript.chunks.is_empty());
+        assert!(transcript
+            .chunks
+            .iter()
+            .all(|chunk| chunk.stream == ExecOutputStream::Combined));
+        let mut read = ToolProcessRead {
+            config_path: String::new(),
+        };
+        let output = run_tool(
+            &mut read,
+            ccx.clone(),
+            make_args_map(vec![
+                ("process_id", json!(background_id.as_str())),
+                ("stream", json!("all")),
+                ("output_limit", json!("all")),
+            ]),
+        )
+        .await
+        .unwrap();
+        assert!(text(&output).contains("\ncombined:\n32 120\n"));
+        let waited = run_process_wait(
+            ccx.clone(),
+            make_args_map(vec![
+                ("process_id", json!(background_id.as_str())),
+                ("timeout_ms", json!(0)),
+            ]),
+        )
+        .await
+        .unwrap();
+        let waited: Value = serde_json::from_str(&text(&waited)).unwrap();
+        assert!(waited["evidence"]
+            .as_str()
+            .unwrap()
+            .contains("\ncombined:\n32 120\n"));
         gcx.exec_registry.kill(&background_id).await.unwrap();
 
         let service = run_tool(
@@ -2814,6 +2923,703 @@ mod tests {
         assert!(kill.confirm_deny_rules().is_none());
     }
 
+    struct CheckoutFixture {
+        _temp: tempfile::TempDir,
+        app: AppState,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        source: PathBuf,
+        root: PathBuf,
+        selector: Value,
+    }
+
+    impl CheckoutFixture {
+        async fn new() -> Self {
+            use crate::caps::{BaseModelRecord, ChatModelRecord, CodeAssistantCaps};
+            use crate::chat::types::{ChatSession, TaskMeta};
+            use crate::worktrees::types::CreateWorktreeRequest;
+            let temp = tempfile::tempdir().unwrap();
+            let source = temp.path().join("repo");
+            std::fs::create_dir(&source).unwrap();
+            let git = |args: &[&str]| crate::worktrees::git::run_git(&source, args).unwrap();
+            git(&["init"]);
+            git(&["checkout", "-b", "main"]);
+            git(&["config", "user.name", "Test User"]);
+            git(&["config", "user.email", "test@example.com"]);
+            std::fs::write(source.join("file"), "base").unwrap();
+            git(&["add", "file"]);
+            git(&["commit", "-m", "base"]);
+            let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+                temp.path().join("cache"),
+                temp.path().join("config"),
+            )
+            .await;
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
+            crate::privacy::save_privacy_policy(gcx.clone(), Default::default())
+                .await
+                .unwrap();
+            let service = crate::worktrees::service::WorktreeService::new(
+                gcx.cache_dir.clone(),
+                source.clone(),
+            )
+            .unwrap();
+            let view = service
+                .create_worktree(CreateWorktreeRequest {
+                    kind: Some("task_agent".into()),
+                    task_id: Some("task".into()),
+                    card_id: Some("T-1".into()),
+                    agent_id: Some("worker".into()),
+                    chat_id: Some("worker-chat".into()),
+                    branch: Some("refact/task/task/card/T-1/worker".into()),
+                    base_branch: Some("main".into()),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .worktree;
+            let root = view.meta.root.clone();
+            std::fs::create_dir(root.join("child")).unwrap();
+            let board: crate::tasks::types::TaskBoard = serde_json::from_value(json!({
+                "rev":7,"owner_chat_id":"planner","cards":[{
+                    "id":"T-1","title":"Checkout","column":"done","created_at":"now",
+                    "assignee":"worker","agent_chat_id":"worker-chat",
+                    "agent_worktree":root,"agent_worktree_name":view.meta.id,
+                    "agent_branch":view.meta.branch
+                }]
+            }))
+            .unwrap();
+            let task_dir = source.join(".refact/tasks/task");
+            std::fs::create_dir_all(&task_dir).unwrap();
+            std::fs::write(
+                task_dir.join("board.yaml"),
+                serde_yaml::to_string(&board).unwrap(),
+            )
+            .unwrap();
+            let task = TaskMeta {
+                task_id: "task".into(),
+                role: "planner".into(),
+                ..Default::default()
+            };
+            let app = AppState::from_gcx(gcx.clone()).await;
+            let mut parent = ChatSession::new("planner".into());
+            parent.thread.task_meta = Some(task.clone());
+            parent.thread.mode = "task_planner".into();
+            parent.thread.model = "model".into();
+            parent.work_project_root = Some(source.clone());
+            let mut child = ChatSession::new("worker-chat".into());
+            child.thread = crate::tools::tool_task_spawn_agent::build_agent_thread_params(
+                "worker-chat",
+                "Checkout",
+                "model",
+                "task",
+                "worker",
+                "T-1",
+                "planner",
+                view.meta.clone(),
+            );
+            child.runtime.state = refact_runtime_api::SessionState::Completed;
+            child
+                .queue_processor_running
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            {
+                let mut sessions = app.chat.sessions.write().await;
+                sessions.insert("planner".into(), Arc::new(AMutex::new(parent)));
+                sessions.insert("worker-chat".into(), Arc::new(AMutex::new(child)));
+            }
+            let (defaults_root, _) = crate::caps::project_model_defaults_state(gcx.clone()).await;
+            let mut caps = CodeAssistantCaps::default();
+            caps.chat_models.insert(
+                "model".into(),
+                Arc::new(ChatModelRecord {
+                    base: BaseModelRecord {
+                        id: "model".into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            );
+            {
+                let mut state = gcx.caps_state.write().await;
+                state.caps = Some(Arc::new(caps));
+                state.loaded_project_root = Some(defaults_root);
+                state.last_attempted_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+            }
+            let ccx = Arc::new(AMutex::new(
+                AtCommandsContext::new_from_app(
+                    app.clone(),
+                    4096,
+                    20,
+                    false,
+                    vec![],
+                    "planner".into(),
+                    None,
+                    "model".into(),
+                    Some(task),
+                    None,
+                )
+                .await,
+            ));
+            let selector = json!({
+                "kind":"task_card","card_id":"T-1","expected_board_rev":7,
+                "expected_agent_chat_id":"worker-chat","expected_worktree_id":view.meta.id,
+                "expected_head":view.status.head_commit,"expected_cwd":root,
+            });
+            Self {
+                _temp: temp,
+                app,
+                ccx,
+                source,
+                root,
+                selector,
+            }
+        }
+
+        fn command_args(&self) -> HashMap<String, Value> {
+            make_args_map(vec![
+                (
+                    "command",
+                    json!(if cfg!(windows) {
+                        "[Console]::Out.Write((Get-Location).Path)"
+                    } else {
+                        "pwd -P"
+                    }),
+                ),
+                ("description", json!("Report checkout cwd")),
+                ("checkout", self.selector.clone()),
+                ("tty", json!(false)),
+            ])
+        }
+
+        async fn change_board(&self, change: impl FnOnce(&mut crate::tasks::types::TaskBoard)) {
+            let path = self.source.join(".refact/tasks/task/board.yaml");
+            let mut board = serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            change(&mut board);
+            std::fs::write(path, serde_yaml::to_string(&board).unwrap()).unwrap();
+        }
+
+        async fn assert_refused(&self, args: HashMap<String, Value>) {
+            let mut tool = ToolProcessStart {
+                config_path: String::new(),
+            };
+            let error = tool
+                .tool_execute(self.ccx.clone(), &"denied".into(), &args)
+                .await
+                .unwrap_err();
+            assert_eq!(error, "command checkout is unavailable, unauthorized or changed; request a fresh checkout target");
+            assert!(self
+                .app
+                .runtime
+                .exec_registry
+                .list(Default::default())
+                .await
+                .is_empty());
+        }
+
+        async fn assert_refused_before_spawn(
+            &self,
+            args: HashMap<String, Value>,
+            change: impl FnOnce() + Send + 'static,
+        ) {
+            let (request, candidate) = approval_request(&self.ccx, &args).await.unwrap();
+            let candidate = candidate.unwrap();
+            assert_eq!(candidate.root(), self.root);
+            assert_eq!(Some(candidate.cwd()), request.cwd.as_deref());
+            assert!(self
+                .app
+                .runtime
+                .exec_registry
+                .list(Default::default())
+                .await
+                .is_empty());
+            let reached = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let changed = reached.clone();
+            CHECKOUT_BEFORE_SPAWN
+                .scope(
+                    std::cell::RefCell::new(Some(Box::new(move || {
+                        change();
+                        changed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }))),
+                    self.assert_refused(args),
+                )
+                .await;
+            assert_eq!(reached.load(std::sync::atomic::Ordering::Relaxed), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn command_checkout_process_confirmation_approval_and_spawn_preserve_child_cwd() {
+        let fixture = CheckoutFixture::new().await;
+        let mut args = fixture.command_args();
+        args.insert("workdir".into(), json!("child"));
+        args.insert("needs_confirmation".into(), json!(true));
+        args.get_mut("checkout").unwrap()["expected_cwd"] = json!(fixture.root.join("child"));
+        let mut start = ToolProcessStart {
+            config_path: String::new(),
+        };
+        let matched = start
+            .match_against_confirm_deny(fixture.ccx.clone(), &args)
+            .await
+            .unwrap();
+        assert_eq!(matched.command, args["command"].as_str().unwrap());
+        assert_eq!(
+            matched.result,
+            crate::tools::tools_description::MatchConfirmDenyResult::CONFIRMATION
+        );
+        let call: crate::call_validation::ChatToolCall = serde_json::from_value(json!({
+            "id":"tool_call", "type":"function",
+            "function":{"name":"process_start", "arguments":serde_json::to_string(&args).unwrap()}
+        }))
+        .unwrap();
+        let approved = crate::agents::command_approval::prepare(&fixture.ccx, &call, "cwd parity")
+            .await
+            .unwrap()
+            .unwrap();
+        let (mut request, candidate) = approval_request(&fixture.ccx, &args).await.unwrap();
+        crate::agents::command_approval::freeze(&mut request).unwrap();
+        assert_eq!(approved.cwd, fixture.root.join("child").to_str().unwrap());
+        assert_ne!(
+            approved.fingerprint,
+            crate::agents::command_approval::descriptor(&request, "cwd parity")
+                .unwrap()
+                .fingerprint
+        );
+        let mut changed = request.clone();
+        changed.cwd = Some(fixture.root.clone());
+        assert!(candidate
+            .as_ref()
+            .unwrap()
+            .bind_approval(&mut approved.clone(), &changed)
+            .is_err());
+        assert_eq!(
+            request.cwd.as_deref(),
+            Some(fixture.root.join("child").as_path())
+        );
+        let candidate = candidate.unwrap();
+        assert_eq!(candidate.cwd(), request.cwd.as_deref().unwrap());
+        {
+            use crate::http::routers::v1::buddy_native_approvals::{
+                handle_approval_response, handle_current_approvals, NativeApprovalRequest,
+            };
+            let session = fixture.app.chat.sessions.read().await["planner"].clone();
+            let mut session = session.lock().await;
+            session
+                .queue_processor_running
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            session.add_message(ChatMessage {
+                role: "assistant".into(),
+                tool_calls: Some(vec![call.clone()]),
+                ..Default::default()
+            });
+            let index = session.messages.len() - 1;
+            session.set_paused_with_reasons_and_auto_approved(
+                vec![crate::chat::types::PauseReason {
+                    reason_type: "confirmation".into(),
+                    tool_name: "process_start".into(),
+                    command: matched.command,
+                    rule: matched.rule,
+                    tool_call_id: call.id.clone(),
+                    integr_config_path: None,
+                }],
+                vec![],
+                Some(index),
+            );
+            drop(session);
+            let snapshot = serde_json::to_value(
+                handle_current_approvals(axum::extract::State(fixture.app.clone()))
+                    .await
+                    .unwrap()
+                    .0,
+            )
+            .unwrap();
+            let pending = snapshot["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|session| session["chat_id"] == "planner")
+                .unwrap();
+            assert_eq!(pending["tools"][0]["tool_call_id"], call.id);
+            let respond = || async {
+                let response: NativeApprovalRequest = serde_json::from_value(json!({
+                    "project_root":snapshot["project_root"],
+                    "engine_identity":snapshot["engine_identity"],
+                    "source_version":pending["source_version"],
+                    "client_request_id":"checkout-confirmation",
+                    "response":{"kind":"tool", "tool_call_id":call.id, "accepted":true}
+                }))
+                .unwrap();
+                handle_approval_response(
+                    axum::extract::State(fixture.app.clone()),
+                    axum::extract::Path("planner".into()),
+                    axum::Json(response),
+                )
+                .await
+            };
+            let mut changed_args = args.clone();
+            changed_args.insert("tty".into(), json!(true));
+            let session = fixture.app.chat.sessions.read().await["planner"].clone();
+            let mut session = session.lock().await;
+            session.messages[index].tool_calls.as_mut().unwrap()[0]
+                .function
+                .arguments = serde_json::to_string(&changed_args).unwrap();
+            drop(session);
+            let error = respond().await.unwrap_err();
+            assert_eq!(error.status_code, hyper::StatusCode::CONFLICT);
+            assert_eq!(
+                error.message,
+                "Native approval source changed; refresh before responding"
+            );
+            let mut removed_checkout = args.clone();
+            removed_checkout.remove("checkout");
+            let session = fixture.app.chat.sessions.read().await["planner"].clone();
+            let mut session = session.lock().await;
+            assert!(session.command_queue.is_empty());
+            session.messages[index].tool_calls.as_mut().unwrap()[0]
+                .function
+                .arguments = serde_json::to_string(&removed_checkout).unwrap();
+            drop(session);
+            let error = respond().await.unwrap_err();
+            assert_eq!(error.status_code, hyper::StatusCode::CONFLICT);
+            assert_eq!(
+                error.message,
+                "Native approval source changed; refresh before responding"
+            );
+            assert!(fixture
+                .app
+                .runtime
+                .exec_registry
+                .list(Default::default())
+                .await
+                .is_empty());
+            let session = fixture.app.chat.sessions.read().await["planner"].clone();
+            let mut session = session.lock().await;
+            assert!(session.command_queue.is_empty());
+            session.messages[index].tool_calls.as_mut().unwrap()[0] = call.clone();
+            drop(session);
+            assert_eq!(
+                respond().await.unwrap().status(),
+                hyper::StatusCode::ACCEPTED
+            );
+            let session = fixture.app.chat.sessions.read().await["planner"].clone();
+            let mut session = session.lock().await;
+            let queued = session.command_queue.pop_front().unwrap();
+            assert_eq!(
+                queued.native_approval_guard.unwrap().source_version,
+                pending["source_version"].as_str().unwrap()
+            );
+            let crate::chat::types::ChatCommand::ToolDecision {
+                tool_call_id,
+                accepted,
+            } = queued.command
+            else {
+                panic!("expected native tool decision");
+            };
+            assert_eq!(tool_call_id, call.id);
+            assert!(accepted);
+            let decision =
+                session.process_tool_decisions(&[crate::chat::types::ToolDecisionItem {
+                    tool_call_id,
+                    accepted,
+                }]);
+            assert_eq!(decision.accepted_ids, vec![call.id]);
+            assert!(decision.denied_ids.is_empty());
+            session.set_runtime_state(refact_runtime_api::SessionState::Idle, None);
+            session
+                .queue_processor_running
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+        assert!(fixture.ccx.lock().await.approved_executions.is_empty());
+        let message = run_tool(&mut start, fixture.ccx.clone(), args)
+            .await
+            .unwrap();
+        let id = process_id(&message);
+        let completed = fixture.app.runtime.exec_registry.wait(&id).await.unwrap();
+        let output = fixture.app.runtime.exec_registry.read(&id, 0, None).await;
+        assert_eq!(completed.meta.cwd, request.cwd);
+        assert_eq!(
+            collect_combined(&output.chunks).trim(),
+            candidate.cwd().to_str().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn command_checkout_shell_confirmation_and_execution_use_same_root() {
+        let fixture = CheckoutFixture::new().await;
+        let args = fixture.command_args();
+        let mut inspect = crate::tools::tool_work_inspect::ToolWorkInspect {
+            config_path: String::new(),
+        };
+        let receipt = run_tool(
+            &mut inspect,
+            fixture.ccx.clone(),
+            make_args_map(vec![(
+                "selector",
+                json!({"kind":"worktree", "worktree_id":fixture.selector["expected_worktree_id"]}),
+            )]),
+        )
+        .await
+        .unwrap();
+        let response: Value = serde_json::from_str(&text(&receipt)).unwrap();
+        assert_eq!(response["command_checkout"], fixture.selector);
+        let records = receipt.extra["privacy"]["files"].as_array().unwrap();
+        assert!(records.iter().any(|record| {
+            record["path"] == json!(fixture.root) && record["attribution"] == "declared"
+        }));
+        assert!(records.iter().any(|record| {
+            record["path"] == json!(fixture.source.join(".refact/tasks/task/board.yaml"))
+                && record["attribution"] == "declared"
+        }));
+        let candidate =
+            crate::tools::command_checkout::resolve_planner_verifier(&fixture.ccx, "task", "T-1")
+                .await
+                .unwrap();
+        let argv = vec!["git".to_string(), "status".to_string()];
+        let policy = crate::exec::command_policy::build_verifier_exec_request(
+            fixture.app.gcx.clone(),
+            crate::exec::command_policy::CommandPolicyInput {
+                source: crate::exec::command_policy::ExecSource::Verifier,
+                command: crate::exec::command_policy::CommandKind::Argv(&argv),
+                cwd: Some(fixture.root.join("child")),
+                env: HashMap::new(),
+                chat_mode: None,
+                escalation: None,
+            },
+            &candidate,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            policy.request.cwd.as_deref(),
+            Some(fixture.root.join("child").as_path())
+        );
+        assert_eq!(policy.request.audit.as_ref().unwrap().source, "verifier");
+        let mut shell = crate::tools::tool_shell::ToolShell::default();
+        let matched = shell
+            .match_against_confirm_deny(fixture.ccx.clone(), &args)
+            .await
+            .unwrap();
+        assert_eq!(matched.command, args["command"].as_str().unwrap());
+        let (request, _) = crate::tools::shell_approval_request(&fixture.ccx, &args)
+            .await
+            .unwrap();
+        let message = run_tool(&mut shell, fixture.ccx.clone(), args)
+            .await
+            .unwrap();
+        assert_eq!(exec(&message)["cwd"], json!(request.cwd));
+        assert_eq!(exec(&message)["cwd"], json!(fixture.root));
+        assert!(text(&message).contains(fixture.root.to_str().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn command_checkout_stale_board_after_confirmation_has_no_spawn() {
+        let fixture = CheckoutFixture::new().await;
+        let args = fixture.command_args();
+        let start = ToolProcessStart {
+            config_path: String::new(),
+        };
+        start
+            .match_against_confirm_deny(fixture.ccx.clone(), &args)
+            .await
+            .unwrap();
+        let path = fixture.source.join(".refact/tasks/task/board.yaml");
+        fixture
+            .assert_refused_before_spawn(args, move || {
+                let mut board: crate::tasks::types::TaskBoard =
+                    serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+                board.rev += 1;
+                std::fs::write(path, serde_yaml::to_string(&board).unwrap()).unwrap();
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn command_checkout_owner_change_after_preparation_has_no_spawn() {
+        let fixture = CheckoutFixture::new().await;
+        let args = fixture.command_args();
+        approval_request(&fixture.ccx, &args).await.unwrap();
+        fixture
+            .change_board(|board| board.owner_chat_id = Some("peer".into()))
+            .await;
+        fixture.assert_refused(args).await;
+    }
+
+    #[tokio::test]
+    async fn command_checkout_current_agent_replacement_has_no_spawn() {
+        let fixture = CheckoutFixture::new().await;
+        fixture
+            .change_board(|board| board.cards[0].agent_chat_id = Some("new-attempt".into()))
+            .await;
+        fixture.assert_refused(fixture.command_args()).await;
+    }
+
+    #[tokio::test]
+    async fn command_checkout_head_change_after_preparation_has_no_spawn() {
+        let fixture = CheckoutFixture::new().await;
+        let args = fixture.command_args();
+        let root = fixture.root.clone();
+        fixture
+            .assert_refused_before_spawn(args, move || {
+                std::fs::write(root.join("file"), "changed").unwrap();
+                crate::worktrees::git::run_git(&root, &["add", "file"]).unwrap();
+                crate::worktrees::git::run_git(&root, &["commit", "-m", "new-head"]).unwrap();
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn command_checkout_wrong_registered_identity_has_no_spawn() {
+        let fixture = CheckoutFixture::new().await;
+        let mut args = fixture.command_args();
+        args.get_mut("checkout").unwrap()["expected_worktree_id"] = json!("different-worktree");
+        fixture.assert_refused(args).await;
+    }
+
+    #[tokio::test]
+    async fn command_checkout_peer_planner_cannot_borrow_owner_target() {
+        let fixture = CheckoutFixture::new().await;
+        let owner = fixture
+            .app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get("planner")
+            .cloned()
+            .unwrap();
+        let mut peer = crate::chat::types::ChatSession::new("peer".into());
+        peer.thread = owner.lock().await.thread.clone();
+        peer.work_project_root = Some(fixture.source.clone());
+        fixture
+            .app
+            .chat
+            .sessions
+            .write()
+            .await
+            .insert("peer".into(), Arc::new(AMutex::new(peer)));
+        fixture.ccx.lock().await.chat_id = "peer".into();
+        let mut inspect = crate::tools::tool_work_inspect::ToolWorkInspect {
+            config_path: String::new(),
+        };
+        let inspected = run_tool(
+            &mut inspect,
+            fixture.ccx.clone(),
+            make_args_map(vec![(
+                "selector",
+                json!({"kind":"worktree", "worktree_id":fixture.selector["expected_worktree_id"]}),
+            )]),
+        )
+        .await
+        .unwrap();
+        let response: Value = serde_json::from_str(&text(&inspected)).unwrap();
+        assert!(response.get("command_checkout").is_none());
+        let hidden = run_tool(
+            &mut inspect,
+            fixture.ccx.clone(),
+            make_args_map(vec![(
+                "selector",
+                json!({"kind":"worktree", "worktree_id":"unknown-worktree"}),
+            )]),
+        )
+        .await
+        .unwrap_err();
+        let error: Value = serde_json::from_str(&hidden).unwrap();
+        assert_eq!(error["code"], "not_found_or_not_visible");
+        assert_eq!(error["message"], "work not found or not visible");
+        assert_eq!(error["retryable"], false);
+        assert!(!error["request_id"].as_str().unwrap().is_empty());
+        assert_eq!(error.as_object().unwrap().len(), 4);
+        fixture.assert_refused(fixture.command_args()).await;
+    }
+
+    #[tokio::test]
+    async fn command_checkout_foreign_bound_task_has_no_spawn() {
+        let fixture = CheckoutFixture::new().await;
+        fixture.ccx.lock().await.task_meta.as_mut().unwrap().task_id = "foreign-task".into();
+        fixture.assert_refused(fixture.command_args()).await;
+    }
+
+    #[tokio::test]
+    async fn command_checkout_live_agent_cannot_be_controlled_by_done_board() {
+        let fixture = CheckoutFixture::new().await;
+        let session = fixture
+            .app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get("worker-chat")
+            .cloned()
+            .unwrap();
+        session.lock().await.runtime.state = refact_runtime_api::SessionState::Generating;
+        fixture.assert_refused(fixture.command_args()).await;
+    }
+
+    #[tokio::test]
+    async fn command_checkout_registered_path_without_selector_stays_denied() {
+        let fixture = CheckoutFixture::new().await;
+        let mut args = fixture.command_args();
+        args.remove("checkout");
+        args.insert("workdir".into(), json!(fixture.root));
+        let mut start = ToolProcessStart {
+            config_path: String::new(),
+        };
+        assert!(start
+            .tool_execute(fixture.ccx.clone(), &"raw".into(), &args)
+            .await
+            .is_err());
+        assert!(fixture
+            .app
+            .runtime
+            .exec_registry
+            .list(Default::default())
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn command_checkout_source_alias_and_traversal_are_not_permissions() {
+        let fixture = CheckoutFixture::new().await;
+        let mut args = fixture.command_args();
+        args.insert("workdir".into(), json!(fixture.source));
+        fixture.assert_refused(args).await;
+        let mut traversal = fixture.command_args();
+        traversal.insert("workdir".into(), json!("child/.."));
+        fixture.assert_refused(traversal).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_checkout_symlink_retarget_after_confirmation_refuses_spawn() {
+        let fixture = CheckoutFixture::new().await;
+        let alias = fixture.root.join("alias");
+        std::os::unix::fs::symlink(fixture.root.join("child"), &alias).unwrap();
+        let mut args = fixture.command_args();
+        args.insert("workdir".into(), json!("alias"));
+        args.get_mut("checkout").unwrap()["expected_cwd"] = json!(fixture.root.join("child"));
+        let source = fixture.source.clone();
+        fixture
+            .assert_refused_before_spawn(args, move || {
+                std::fs::remove_file(&alias).unwrap();
+                std::os::unix::fs::symlink(&source, &alias).unwrap();
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn command_checkout_cancelled_prepared_command_refuses_spawn() {
+        let fixture = CheckoutFixture::new().await;
+        let args = fixture.command_args();
+        approval_request(&fixture.ccx, &args).await.unwrap();
+        fixture
+            .ccx
+            .lock()
+            .await
+            .abort_flag
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        fixture.assert_refused(args).await;
+    }
+
     #[tokio::test]
     async fn tool_process_start_confirmation_matches_command_text() {
         let (_gcx, ccx) = test_ccx().await;
@@ -2985,6 +3791,87 @@ mod tests {
             .await
             .unwrap();
         gcx.exec_registry.mark_started(&process_id).await.unwrap();
+        gcx.exec_registry
+            .append_output(&process_id, ExecOutputStream::Stdout, "alpha\n".to_string())
+            .await
+            .unwrap();
+        gcx.exec_registry
+            .append_output(
+                &process_id,
+                ExecOutputStream::Stderr,
+                "needle\n".to_string(),
+            )
+            .await
+            .unwrap();
+        gcx.exec_registry
+            .append_output(&process_id, ExecOutputStream::Stdout, "omega\n".to_string())
+            .await
+            .unwrap();
+
+        let mut read = ToolProcessRead {
+            config_path: String::new(),
+        };
+        let pipes = run_tool(
+            &mut read,
+            ccx.clone(),
+            make_args_map(vec![
+                ("process_id", json!(process_id.as_str())),
+                ("stream", json!("all")),
+                ("output_limit", json!("all")),
+            ]),
+        )
+        .await
+        .unwrap();
+        let body = text(&pipes);
+        assert!(body.contains("\nstdout:\nalpha\nomega\n"));
+        assert!(body.contains("\nstderr:\nneedle\n"));
+        assert!(!body.contains("\ncombined:\n"));
+        for line in ["alpha\n", "needle\n", "omega\n"] {
+            assert_eq!(body.matches(line).count(), 1);
+        }
+
+        let pty_text = "\u{1b}[31mpty-needle\u{1b}[0m\r\nskip-pty\nlast-pty\n";
+        gcx.exec_registry
+            .append_output(&process_id, ExecOutputStream::Combined, pty_text.into())
+            .await
+            .unwrap();
+        let transcript = gcx.exec_registry.read(&process_id, 3, None).await;
+        assert_eq!(
+            collect_stream(&transcript.chunks, ExecOutputStream::Combined),
+            pty_text
+        );
+        assert_eq!(collect_combined(&transcript.chunks), pty_text);
+        for selection in [
+            ProcessStreamSelection::All,
+            ProcessStreamSelection::Combined,
+        ] {
+            assert!(
+                format_read_sections(&transcript, selection, &OutputFilter::no_limits())
+                    .contains(pty_text)
+            );
+        }
+        let filtered = run_tool(
+            &mut read,
+            ccx.clone(),
+            make_args_map(vec![
+                ("process_id", json!(process_id.as_str())),
+                ("since_seq", json!(3)),
+                ("stream", json!("all")),
+                ("output_filter", json!("pty-needle")),
+                ("output_limit", json!("1")),
+            ]),
+        )
+        .await
+        .unwrap();
+        let body = text(&filtered);
+        assert!(body.contains("\ncombined:\n"));
+        assert!(body.contains("\u{1b}[31mpty-needle\u{1b}[0m"));
+        for excluded in ["alpha", "omega", "skip-pty", "last-pty"] {
+            assert!(!body.contains(excluded));
+        }
+        assert_eq!(exec(&filtered)["transcript"]["since_seq"], 3);
+        assert_eq!(exec(&filtered)["transcript"]["next_seq"], 4);
+        assert_eq!(exec(&filtered)["stream"], "all");
 
         let marker = "DISK_TAIL_MARKER";
         let mut data = String::from(marker);
@@ -2999,9 +3886,6 @@ mod tests {
             "disk log should be created after spill threshold"
         );
 
-        let mut read = ToolProcessRead {
-            config_path: String::new(),
-        };
         let message = run_tool(
             &mut read,
             ccx,

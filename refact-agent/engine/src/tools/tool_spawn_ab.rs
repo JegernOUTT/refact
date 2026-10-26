@@ -792,9 +792,52 @@ async fn promote_ab_winner_if_current(
     let winner_owned = winner.to_string();
     let winner_for_board = winner_variant;
     let winner_finish_for_board = winner_finish;
+    let verifier_fence = if winner_finish_for_board.success {
+        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let session = app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get(&winner_for_board.chat_id)
+            .cloned();
+        let worktree = if let Some(session) = session {
+            session.lock().await.thread.worktree.clone()
+        } else {
+            None
+        };
+        let board = storage::load_board(gcx.clone(), task_id).await?;
+        if let (Some(owner), Some(worktree)) = (board.owner_chat_id.as_deref(), worktree.as_ref()) {
+            match crate::chat::verifier::capture_finish_verification(
+                gcx.clone(),
+                task_id,
+                card_id,
+                owner,
+                &winner_for_board.chat_id,
+                worktree,
+            )
+            .await
+            {
+                Ok(fence) => Some(fence),
+                Err(_) => {
+                    tracing::warn!(
+                        "winner verification fence unavailable; completion remains unverified"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let verifier_gcx = gcx.clone();
     let result = storage::update_board_atomic(gcx, task_id, move |board| {
         let board_rev = board.rev;
         let next_board_rev = board.rev + 1;
+        let owner = board.owner_chat_id.clone();
+        let verifier_fence = verifier_fence.filter(|fence| fence.is_current(&verifier_gcx, board));
         let card = board
             .get_card_mut(&card_id_owned)
             .ok_or(format!("Card {} not found", card_id_owned))?;
@@ -853,7 +896,13 @@ async fn promote_ab_winner_if_current(
             timestamp: Utc::now().to_rfc3339(),
             message: format!("A/B winner: {}; loser cleanup pending", winner_owned),
         });
-        Ok(ExpectedCardState::from_card(next_board_rev, card))
+        Ok(ExpectedCardState::from_finished_card(
+            &verifier_gcx,
+            next_board_rev,
+            card,
+            owner.as_deref(),
+            verifier_fence,
+        ))
     })
     .await;
     match result {

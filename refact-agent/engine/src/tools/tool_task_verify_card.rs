@@ -7,7 +7,7 @@ use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
-use crate::chat::verifier::{verify_card, VerifyCardRequest};
+use crate::chat::verifier::{verify_card_as_planner, VerifyCardRequest};
 use crate::tools::task_tool_helpers::require_bound_planner_task;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
@@ -83,9 +83,8 @@ impl Tool for ToolTaskVerifyCard {
         let task_id = require_bound_planner_task(&ccx, args)
             .await
             .map_err(verify_card_task_scope_error)?;
-        let gcx = ccx.lock().await.app.gcx.clone();
-        let report = verify_card(
-            gcx,
+        let report = verify_card_as_planner(
+            ccx,
             VerifyCardRequest {
                 task_id,
                 card_id: card_id.clone(),
@@ -207,11 +206,20 @@ mod tests {
         ]);
 
         let err = ToolTaskVerifyCard::new()
-            .tool_execute(ccx, &"call".to_string(), &args)
+            .tool_execute(ccx.clone(), &"call".to_string(), &args)
             .await
             .unwrap_err();
 
         assert!(err.contains("does not match bound task_id"));
+        assert!(ccx
+            .lock()
+            .await
+            .app
+            .runtime
+            .exec_registry
+            .list(Default::default())
+            .await
+            .is_empty());
     }
 
     #[cfg(unix)]
@@ -256,12 +264,38 @@ mod tests {
         )
         .await
         .unwrap();
-        let ccx = task_ccx(
-            gcx.clone(),
-            Some(thread_task_meta("planner")),
-            "planner-task-1-1",
-        )
-        .await;
+        crate::chat::verifier::tests::init_repo(temp.path());
+        let ccx =
+            crate::chat::verifier::tests::register_candidate(gcx.clone(), "task-1", "T-1", "model")
+                .await;
+        let accepted_board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        let candidate_path = accepted_board
+            .get_card("T-1")
+            .unwrap()
+            .agent_worktree
+            .clone();
+        storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+            board.get_card_mut("T-1").unwrap().agent_worktree =
+                Some(temp.path().to_string_lossy().into_owned());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(ToolTaskVerifyCard::new()
+            .tool_execute(
+                ccx.clone(),
+                &"refused".into(),
+                &HashMap::from([("card_id".into(), json!("T-1"))])
+            )
+            .await
+            .is_err());
+        assert!(gcx.exec_registry.list(Default::default()).await.is_empty());
+        storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+            board.get_card_mut("T-1").unwrap().agent_worktree = candidate_path;
+            Ok(())
+        })
+        .await
+        .unwrap();
         ToolTaskVerifyCard::new()
             .tool_execute(
                 ccx,
@@ -340,12 +374,10 @@ mod tests {
         )
         .await
         .unwrap();
-        let ccx = task_ccx(
-            gcx.clone(),
-            Some(thread_task_meta("planner")),
-            "planner-task-1-1",
-        )
-        .await;
+        crate::chat::verifier::tests::init_repo(temp.path());
+        let ccx =
+            crate::chat::verifier::tests::register_candidate(gcx.clone(), "task-1", "T-1", "model")
+                .await;
         ToolTaskVerifyCard::new()
             .tool_execute(
                 ccx,
@@ -378,10 +410,13 @@ mod tests {
     async fn task_verify_card_non_planner_role_rejected() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let ccx = task_ccx(gcx, Some(thread_task_meta("agents")), "agent-chat").await;
-        let args = HashMap::from([("card_id".to_string(), json!("T-1"))]);
+        let args = HashMap::from([
+            ("card_id".to_string(), json!("T-1")),
+            ("agent_worktree".into(), json!("/foreign/checkout")),
+        ]);
 
         let err = ToolTaskVerifyCard::new()
-            .tool_execute(ccx, &"call".to_string(), &args)
+            .tool_execute(ccx.clone(), &"call".to_string(), &args)
             .await
             .unwrap_err();
 

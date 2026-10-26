@@ -35,6 +35,7 @@ use crate::postprocessing::pp_command_output::{
 };
 use crate::privacy::{check_file_privacy, load_privacy_if_needed, FilePrivacyLevel};
 use crate::tools::file_edit::auxiliary::{active_execution_scope, scoped_path_warnings};
+use crate::tools::command_checkout::{self, ValidatedCommandCheckout};
 use crate::tools::shell_gate;
 use crate::tools::tools_description::{
     json_schema_from_params, MatchConfirmDeny, Tool, ToolDesc, ToolSource, ToolSourceType,
@@ -79,7 +80,13 @@ struct ParsedShellArgs {
 pub(crate) async fn approval_request(
     ccx: &Arc<AMutex<AtCommandsContext>>,
     args: &HashMap<String, Value>,
-) -> Result<crate::exec::ExecSpawnRequest, String> {
+) -> Result<
+    (
+        crate::exec::ExecSpawnRequest,
+        Option<ValidatedCommandCheckout>,
+    ),
+    String,
+> {
     let (gcx, scope, chat_id) = {
         let context = ccx.lock().await;
         (
@@ -89,9 +96,18 @@ pub(crate) async fn approval_request(
         )
     };
     let policy = shell_gate::load_policy(gcx.clone()).await;
+    let policy_timeout = policy.execution.foreground_timeout_secs;
     let mut filter = OutputFilter::default();
     filter.limit_lines = policy.execution.output_limit_lines;
-    let parsed = parse_args_with_filter(gcx.clone(), args, &filter, scope.as_ref()).await?;
+    let checkout = command_checkout::resolve(ccx, args).await?;
+    let parsed = parse_args_with_filter(
+        gcx.clone(),
+        args,
+        &filter,
+        scope.as_ref(),
+        checkout.as_ref(),
+    )
+    .await?;
     let cwd = parsed
         .workdir
         .or(get_active_project_path(gcx.clone()).await);
@@ -102,7 +118,7 @@ pub(crate) async fn approval_request(
     )
     .await;
     let chat_mode = chat_mode_for_exec(gcx.clone(), &chat_id).await;
-    build_exec_request(
+    let policy = build_exec_request(
         gcx,
         CommandPolicyInput {
             source: ExecSource::ShellTool,
@@ -114,8 +130,30 @@ pub(crate) async fn approval_request(
         },
     )
     .await
-    .map(|policy| policy.request)
-    .map_err(|error| error.message)
+    .map_err(|error| error.message)?;
+    let mut request = policy.request;
+    if checkout.is_some() {
+        request.mode = if parsed.run_in_background {
+            crate::exec::ExecMode::Background
+        } else {
+            crate::exec::ExecMode::Foreground
+        };
+        let tty = parsed
+            .tty
+            .unwrap_or(parsed.run_in_background && refact_exec::default_tty());
+        request = request
+            .with_tty(tty)
+            .with_transcript_limit(SHELL_TRANSCRIPT_MAX_BYTES);
+        if tty {
+            request = request.with_pty_size(TOOL_PTY_ROWS, TOOL_PTY_COLS);
+        }
+        if !parsed.run_in_background {
+            request = request.with_timeout(Duration::from_secs(
+                parsed.timeout.unwrap_or(policy_timeout),
+            ));
+        }
+    }
+    Ok((request, checkout))
 }
 
 #[async_trait]
@@ -162,9 +200,15 @@ impl Tool for ToolShell {
             .execution
             .output_limit_lines
             .saturating_mul(200);
-        let parsed =
-            parse_args_with_filter(gcx.clone(), args, &default_filter, execution_scope.as_ref())
-                .await?;
+        let checkout = command_checkout::resolve(&ccx, args).await?;
+        let parsed = parse_args_with_filter(
+            gcx.clone(),
+            args,
+            &default_filter,
+            execution_scope.as_ref(),
+            checkout.as_ref(),
+        )
+        .await?;
         let timeout = parsed
             .timeout
             .unwrap_or(shell_policy.execution.foreground_timeout_secs);
@@ -181,8 +225,11 @@ impl Tool for ToolShell {
             Some(workdir) => Some(workdir),
             None => get_active_project_path(gcx.clone()).await,
         };
-        let workspace =
-            shell_owner_workspace(gcx.clone(), execution_scope.as_ref(), cwd.as_ref()).await;
+        let workspace = if let Some(checkout) = &checkout {
+            Some(checkout.root().to_path_buf())
+        } else {
+            shell_owner_workspace(gcx.clone(), execution_scope.as_ref(), cwd.as_ref()).await
+        };
         let short_description =
             sanitize_short_description(parsed.description.as_deref().unwrap_or_default());
         let owner = ExecOwnerMeta {
@@ -271,6 +318,7 @@ impl Tool for ToolShell {
             "shell",
             args,
             &mut request,
+            checkout.as_ref(),
         )
         .await
         {
@@ -279,6 +327,15 @@ impl Tool for ToolShell {
                 let _ = progress_task.await;
             }
             return Err(error);
+        }
+        if let Some(checkout) = &checkout {
+            if let Err(error) = checkout.revalidate(&ccx, args, &request).await {
+                drop(request);
+                if let Some(progress_task) = progress_task {
+                    let _ = progress_task.await;
+                }
+                return Err(error);
+            }
         }
         let result = match exec_registry.spawn(request).await {
             Ok(result) => result,
@@ -446,7 +503,16 @@ impl Tool for ToolShell {
             let cgcx = ccx.lock().await;
             (cgcx.app.gcx.clone(), cgcx.execution_scope.clone())
         };
-        let (command, _) = parse_args(gcx, args, execution_scope.as_ref()).await?;
+        let checkout = command_checkout::resolve(&ccx, args).await?;
+        let parsed = parse_args_with_filter(
+            gcx,
+            args,
+            &OutputFilter::default(),
+            execution_scope.as_ref(),
+            checkout.as_ref(),
+        )
+        .await?;
+        let command = parsed.command;
         Ok(command)
     }
 
@@ -519,6 +585,7 @@ fn shell_input_schema() -> Value {
         ],
         &["command", "description"],
     );
+    schema["properties"]["checkout"] = command_checkout::input_schema();
     schema["properties"]["timeout"] = json!({
         "oneOf": [
             {"type": "integer"},
@@ -856,21 +923,12 @@ async fn attach_exec_path_references(
     );
 }
 
-async fn parse_args(
-    gcx: Arc<GlobalContext>,
-    args: &HashMap<String, Value>,
-    execution_scope: Option<&ExecutionScope>,
-) -> Result<(String, Option<PathBuf>), String> {
-    let parsed =
-        parse_args_with_filter(gcx, args, &OutputFilter::default(), execution_scope).await?;
-    Ok((parsed.command, parsed.workdir))
-}
-
 async fn parse_args_with_filter(
     gcx: Arc<GlobalContext>,
     args: &HashMap<String, Value>,
     config_filter: &OutputFilter,
     execution_scope: Option<&ExecutionScope>,
+    checkout: Option<&ValidatedCommandCheckout>,
 ) -> Result<ParsedShellArgs, String> {
     let command = match args.get("command") {
         Some(Value::String(s)) => {
@@ -889,8 +947,14 @@ async fn parse_args_with_filter(
         Some(v) => return Err(format!("argument `workdir` is not a string: {:?}", v)),
         None => None,
     };
-    let (workdir, scope_warnings) =
-        resolve_shell_workdir(gcx.clone(), raw_workdir, execution_scope).await?;
+    let (workdir, scope_warnings) = if let Some(checkout) = checkout {
+        (Some(checkout.cwd().to_path_buf()), Vec::new())
+    } else {
+        if args.contains_key("checkout") {
+            return Err("command checkout requires validated authority".into());
+        }
+        resolve_shell_workdir(gcx.clone(), raw_workdir, execution_scope).await?
+    };
 
     let has_filter_override =
         args.get("output_filter").is_some() || args.get("output_limit").is_some();

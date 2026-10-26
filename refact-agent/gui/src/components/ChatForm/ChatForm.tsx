@@ -118,6 +118,7 @@ import { MicrophoneButton, MicrophoneButtonRef } from "./MicrophoneButton";
 import { useAttachedImages } from "../../hooks/useAttachedImages";
 import {
   selectChatErrorById,
+  selectContextRebuildMessageById,
   selectContextRebuildRequiredById,
   selectHasMessagesById,
   selectIsStreamingById,
@@ -183,6 +184,9 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   );
   const contextRebuildRequired = useAppSelector((state) =>
     selectContextRebuildRequiredById(state, chatId),
+  );
+  const contextRebuildMessage = useAppSelector((state) =>
+    selectContextRebuildMessageById(state, chatId),
   );
   const isBuddyChat = useAppSelector((state) =>
     selectIsBuddyChat(state, chatId),
@@ -678,6 +682,29 @@ export const ChatForm: React.FC<ChatFormProps> = ({
           Oops, seems that connection was lost... Check your internet connection
         </Callout>
       )}
+      {contextRebuildRequired && (
+        <Flex
+          role="status"
+          align="center"
+          justify="between"
+          gap="2"
+          wrap="wrap"
+          px="3"
+          py="2"
+          data-composer-no-expand="true"
+        >
+          <Text size="2">
+            {contextRebuildMessage ??
+              "Rebuild the context to continue generating."}
+          </Text>
+          <TrajectoryButton
+            label="Rebuild context"
+            initialTab="llm-compress"
+            chatId={chatId}
+            disabled={isBuddyChat}
+          />
+        </Flex>
+      )}
 
       <div className={styles.composerStack}>
         {helpInfo && <ComposerHelp>{helpInfo}</ComposerHelp>}
@@ -914,7 +941,12 @@ export const ChatForm: React.FC<ChatFormProps> = ({
               </div>
               <span data-composer-no-expand="true">
                 <UnifiedSendButton
-                  disabled={isVoiceActive || !isOnline || allDisabled}
+                  disabled={
+                    isVoiceActive ||
+                    !isOnline ||
+                    allDisabled ||
+                    contextRebuildRequired
+                  }
                   isStreaming={isStreaming || isWaiting}
                   hasText={
                     value.trim().length > 0 ||

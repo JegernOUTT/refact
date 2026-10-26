@@ -292,6 +292,8 @@ pub struct ReviewDiffSummary {
     pub head: Option<String>,
     pub changed_files: usize,
     pub hunks: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

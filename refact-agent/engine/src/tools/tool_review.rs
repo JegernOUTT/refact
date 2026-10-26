@@ -12,6 +12,7 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::global_context::GlobalContext;
 use crate::postprocessing::pp_command_output::OutputFilter;
+use crate::tools::command_checkout::{self, ValidatedCommandCheckout};
 use crate::tools::review_agents::config::{
     load_review_config, slot_model_id, stage_subchat_spec, ReviewConfig,
 };
@@ -25,12 +26,14 @@ use crate::tools::review_agents::{
 };
 use crate::tools::review_evidence::verify_evidence;
 use crate::tools::review_merge::{merge_findings, rank_findings};
-use crate::tools::review_scope::{build_review_scope, DiffAttribution, ReviewScope, ScopeRequest};
+use crate::tools::review_scope::{
+    build_review_scope, resolve_review_files, DiffAttribution, ReviewScope, ScopeRequest,
+    TARGET_REFUSED,
+};
 use crate::tools::review_types::{
     Dispute, ReviewDepth, ReviewFinding, ReviewOutcome, ReviewReport, ReviewSeverity, ScopeMode,
     StageRun, StageStatusKind,
 };
-use crate::tools::subagent_phases::resolve_gathered_file_path;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::worktrees::scope::ExecutionScope;
 
@@ -93,6 +96,24 @@ fn positive_number(args: &HashMap<String, Value>, key: &str) -> Result<Option<u6
 }
 
 fn parse_args(args: &HashMap<String, Value>) -> Result<ReviewArgs, String> {
+    if let Some(files) = args.get("files") {
+        if !files.as_array().is_some_and(|files| {
+            files.iter().all(|file| {
+                file.as_str().is_some_and(|file| {
+                    !file.trim().is_empty() && !file.chars().any(char::is_control)
+                })
+            })
+        }) {
+            return Err(TARGET_REFUSED.into());
+        }
+    }
+    if args.get("base").is_some_and(|base| {
+        !base
+            .as_str()
+            .is_some_and(|base| !base.trim().is_empty() && !base.chars().any(char::is_control))
+    }) {
+        return Err("review base is unavailable or invalid".into());
+    }
     let files = string_list(args, "files");
     let base = optional_string(args, "base");
     let depth = match optional_string(args, "depth") {
@@ -106,7 +127,9 @@ fn parse_args(args: &HashMap<String, Value>) -> Result<ReviewArgs, String> {
         Some(value) => ScopeMode::parse(&value).ok_or_else(|| {
             format!("invalid scope_mode '{value}', expected: strict, adjacent, broad")
         })?,
-        None if !files.is_empty() || base.is_some() => ScopeMode::Strict,
+        None if !files.is_empty() || base.is_some() || args.contains_key("checkout") => {
+            ScopeMode::Strict
+        }
         None => ScopeMode::Broad,
     };
     let stages = {
@@ -143,6 +166,85 @@ fn parse_args(args: &HashMap<String, Value>) -> Result<ReviewArgs, String> {
         variants: variants.map(|value| value as usize),
         browser_scenario,
     })
+}
+
+pub(crate) struct ReviewCheckout {
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    args: HashMap<String, Value>,
+    candidate: ValidatedCommandCheckout,
+}
+
+impl ReviewCheckout {
+    async fn ensure_current(&self) -> Result<(), String> {
+        let current = command_checkout::resolve(&self.ccx, &self.args)
+            .await
+            .map_err(|_| TARGET_REFUSED)?
+            .ok_or(TARGET_REFUSED)?;
+        if !self.candidate.same_candidate(&current) || current.cwd() != current.root() {
+            return Err(TARGET_REFUSED.into());
+        }
+        Ok(())
+    }
+}
+
+struct ReviewExecutor {
+    inner: SubchatExecutor,
+    gcx: Arc<GlobalContext>,
+    scope: Arc<ReviewScope>,
+    checkout: Option<ReviewCheckout>,
+}
+
+impl ReviewExecutor {
+    async fn ensure_current(&self) -> Result<(), String> {
+        if let Some(checkout) = &self.checkout {
+            checkout.ensure_current().await?;
+        }
+        self.scope.ensure_current(self.gcx.clone()).await
+    }
+}
+
+#[async_trait]
+impl StageExecutor for ReviewExecutor {
+    async fn execute(
+        &self,
+        job: StageJob,
+        activity: Arc<std::sync::atomic::AtomicU64>,
+    ) -> crate::tools::review_agents::runner::StageProduct {
+        let label = job.label.clone();
+        if self.ensure_current().await.is_err() {
+            return crate::tools::review_agents::runner::StageProduct {
+                run: StageRun::failed(&label, None, 0, TARGET_REFUSED),
+                findings: vec![],
+                verdicts: vec![],
+                metering: Default::default(),
+                raw: None,
+            };
+        }
+        let mut product = self.inner.execute(job, activity).await;
+        if self.ensure_current().await.is_err() {
+            product.run.status = StageStatusKind::Failed;
+            product.run.reason = Some(TARGET_REFUSED.into());
+            product.findings.clear();
+            product.verdicts.clear();
+            product.run.findings = 0;
+        }
+        product
+    }
+
+    async fn finish(&self, trace: &str, run: &StageRun) {
+        self.inner.finish(trace, run).await;
+    }
+
+    fn abort_flag(&self) -> Option<Arc<AtomicBool>> {
+        self.inner.abort_flag()
+    }
+}
+
+fn artifact_stage(id: &str) -> bool {
+    matches!(
+        id,
+        "diff" | "spec" | "security" | "simplicity" | "concurrency" | "adversarial"
+    )
 }
 
 fn format_duration(duration_ms: u64) -> String {
@@ -423,7 +525,7 @@ pub fn render_review_markdown(report: &ReviewReport) -> String {
         ReviewOutcome::Inconclusive => " ⚠️ INCONCLUSIVE",
     };
     let mut header = format!(
-        "## Review{badge} · {} file(s) requested → {} reviewed ({}",
+        "## Review{badge} · {} file(s) requested → {} selected scope paths ({}",
         scope.requested_files, scope.reviewed_files, scope.mode
     );
     if let Some(expansion) = scope.expansion.as_deref() {
@@ -447,6 +549,18 @@ pub fn render_review_markdown(report: &ReviewReport) -> String {
     ));
 
     let mut output = header;
+    output.push_str("\n\nSelected scope paths are not a full-source read count; stage coverage records actual inspection.");
+    if let Some(coverage) = report
+        .diff
+        .candidate
+        .as_ref()
+        .and_then(|candidate| candidate.get("source_artifact_coverage"))
+        .filter(|coverage| coverage.is_object())
+    {
+        output.push_str(&format!(
+            "\n\n### Source artifact coverage\n```json\n{coverage}\n```\nDiff-only paths may appear in the supplied, possibly truncated diff; their complete source was not supplied. Omitted dependencies and runtime behavior remain unreviewed. This is not full certification."
+        ));
+    }
     output.push_str("\n\nStages: ");
     output.push_str(
         &report
@@ -538,7 +652,7 @@ pub fn render_review_markdown(report: &ReviewReport) -> String {
     }
     if !scope.dropped_files.is_empty() {
         output.push_str(&format!(
-            "\n\n{} file(s) were not reviewed (max_files cap); the full list is in the machine-readable report.",
+            "\n\n{} file(s) were excluded from selected scope/source snapshots (max_files cap), but may appear in the diff; the full list is in the machine-readable report.",
             scope.dropped_files.len()
         ));
     }
@@ -588,26 +702,25 @@ fn review_refs(report: &ReviewReport, roots: &[PathBuf]) -> (Value, bool) {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_review(
     gcx: Arc<GlobalContext>,
-    ctx: StageCtx,
+    mut ctx: StageCtx,
     cfg: ReviewConfig,
     args: ReviewArgs,
     metering: &mut serde_json::Map<String, Value>,
+    checkout: Option<ReviewCheckout>,
 ) -> Result<ReviewReport, String> {
     let started = now_ms();
     let execution_scope = ctx.worktree.as_ref().map(ExecutionScope::from_worktree);
-    let mut requested = Vec::new();
-    for file in &args.files {
-        if let Some(path) =
-            resolve_gathered_file_path(gcx.clone(), execution_scope.as_ref(), file).await
-        {
-            if !requested.contains(&path) {
-                requested.push(path);
-            }
-        }
-    }
+    let selected_root = checkout.as_ref().map(|target| target.candidate.root());
+    let (repo_root, requested) = resolve_review_files(
+        gcx.clone(),
+        execution_scope.as_ref(),
+        selected_root,
+        &args.files,
+    )
+    .await?;
     let requested_count = requested.len();
 
-    let scope = build_review_scope(
+    let mut scope = build_review_scope(
         gcx.clone(),
         ScopeRequest {
             requested,
@@ -616,9 +729,49 @@ pub(crate) async fn run_review(
             focus: args.what_to_check.clone(),
             plan: args.plan.clone(),
             max_files: cfg.settings.max_files,
+            repo_root: repo_root.or_else(|| {
+                execution_scope
+                    .as_ref()
+                    .filter(|scope| scope.is_enforced())
+                    .map(|scope| scope.effective_root().to_path_buf())
+            }),
+            expected_head: checkout
+                .as_ref()
+                .map(|target| target.candidate.head().to_string()),
+            checkout: checkout
+                .as_ref()
+                .and_then(|target| target.args.get("checkout").cloned()),
         },
     )
-    .await;
+    .await?;
+    let inherited_root = match execution_scope.as_ref() {
+        Some(scope) => Some(scope.effective_root().to_path_buf()),
+        None => crate::files_correction::get_project_dirs(gcx.clone())
+            .await
+            .first()
+            .cloned(),
+    };
+    let artifact_only = checkout.as_ref().is_some_and(|target| {
+        inherited_root
+            .as_ref()
+            .and_then(|root| std::fs::canonicalize(root).ok())
+            .map(|root| dunce::simplified(&root).to_path_buf())
+            .as_deref()
+            != Some(target.candidate.root())
+    });
+    if artifact_only {
+        if args.browser_scenario.is_some()
+            || args
+                .stages
+                .as_ref()
+                .is_some_and(|stages| stages.iter().any(|stage| !artifact_stage(stage)))
+        {
+            return Err("requested review stage requires unavailable candidate tools".into());
+        }
+        scope.load_artifacts(gcx.clone()).await?;
+    }
+    let scope = Arc::new(scope);
+    ctx.review_scope = Some(scope.clone());
 
     let depth = cfg.settings.depth_or_default(args.depth);
     let catalog = load_stage_catalog(gcx.clone()).await;
@@ -635,6 +788,19 @@ pub(crate) async fn run_review(
         args.browser_scenario.as_deref(),
     );
 
+    if artifact_only {
+        selection.scheduled.retain(|spec| {
+            if artifact_stage(&spec.id) && !spec.writes_allowed {
+                true
+            } else {
+                selection.skipped.push((
+                    spec.id.clone(),
+                    "candidate tools unavailable in artifact-only review".into(),
+                ));
+                false
+            }
+        });
+    }
     let mut stage_rows: Vec<StageRun> = selection
         .skipped
         .iter()
@@ -675,7 +841,13 @@ pub(crate) async fn run_review(
             .map(PathBuf::as_path),
         &ctx.review_id,
     );
-    let executor: Arc<dyn StageExecutor> = Arc::new(SubchatExecutor::new(gcx.clone(), ctx.clone()));
+    let executor = Arc::new(ReviewExecutor {
+        inner: SubchatExecutor::new(gcx.clone(), ctx.clone()),
+        gcx: gcx.clone(),
+        scope: scope.clone(),
+        checkout,
+    });
+    executor.ensure_current().await?;
 
     let mut findings: Vec<ReviewFinding> = Vec::new();
     let mut scratch_written = false;
@@ -774,7 +946,25 @@ pub(crate) async fn run_review(
             .filter(|_| scratch_written)
             .map(|dir| dir.to_string_lossy().to_string()),
     };
+    if executor.ensure_current().await.is_err() {
+        report
+            .stages
+            .push(StageRun::failed("candidate", None, 0, TARGET_REFUSED));
+        report.findings.clear();
+    }
+    if artifact_only {
+        report.stages.push(StageRun::failed(
+            "artifact_coverage", None, 0,
+            "artifact-only review: tools and omitted dependencies were not checked; not full certification",
+        ));
+    }
     report.outcome = report.derive_outcome();
+    metering.insert(
+        "privacy".into(),
+        json!({"files": crate::privacy::records::declared_file_records(
+        &gcx, scope.disclosed_paths(),
+    ).map_err(|_| TARGET_REFUSED)?}),
+    );
     Ok(report)
 }
 
@@ -801,8 +991,9 @@ impl Tool for ToolCodeReview {
                     "files": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Optional. Files to review. When given, scope_mode defaults to strict."
+                        "description": "Optional. Exact files in the authorized review checkout. Every path must resolve; no fuzzy matching or checkout remapping. When given, scope_mode defaults to strict."
                     },
+                    "checkout": command_checkout::input_schema(),
                     "base": {
                         "type": "string",
                         "description": "Optional. Git ref to diff against; the review uses the merge-base of this ref and HEAD. Defaults to the upstream or main branch."
@@ -857,7 +1048,19 @@ impl Tool for ToolCodeReview {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let args = parse_args(args)?;
+        let parsed = parse_args(args)?;
+        let checkout = command_checkout::resolve(&ccx, args)
+            .await
+            .map_err(|_| TARGET_REFUSED)?;
+        let checkout = match checkout {
+            Some(candidate) if candidate.cwd() == candidate.root() => Some(ReviewCheckout {
+                ccx: ccx.clone(),
+                args: HashMap::from([("checkout".into(), args["checkout"].clone())]),
+                candidate,
+            }),
+            Some(_) => return Err(TARGET_REFUSED.into()),
+            None => None,
+        };
         let (gcx, ctx) = {
             let ccx_lock = ccx.lock().await;
             let gcx = ccx_lock.app.gcx.clone();
@@ -872,6 +1075,7 @@ impl Tool for ToolCodeReview {
                 chat_id: ccx_lock.chat_id.clone(),
                 root_chat_id: ccx_lock.root_chat_id.clone(),
                 activity: None,
+                review_scope: None,
             };
             (gcx, ctx)
         };
@@ -879,7 +1083,7 @@ impl Tool for ToolCodeReview {
         let cfg = load_review_config(gcx.clone()).await?;
         let guardrails = cfg.guardrails_prompt.clone();
         let mut metering = serde_json::Map::new();
-        let report = run_review(gcx.clone(), ctx, cfg, args, &mut metering).await?;
+        let report = run_review(gcx.clone(), ctx, cfg, parsed, &mut metering, checkout).await?;
         let markdown = render_review_markdown(&report);
 
         metering.insert(
@@ -979,6 +1183,7 @@ mod tests {
                 head: Some("HEAD".to_string()),
                 changed_files: 7,
                 hunks: 31,
+                candidate: None,
             },
             stages,
             findings,
@@ -1002,6 +1207,10 @@ mod tests {
         assert_eq!(bare.scope_mode, ScopeMode::Broad);
         assert_eq!(bare.stages, None);
         assert_eq!(bare.variants, None);
+        assert!(parse_args(&args_map(vec![("files", json!(["src/lib.rs", ""]))])).is_err());
+        assert!(parse_args(&args_map(vec![("files", json!(["src/lib.rs", 7]))])).is_err());
+        assert!(parse_args(&args_map(vec![("base", json!(" "))])).is_err());
+        assert!(parse_args(&args_map(vec![("base", json!(false))])).is_err());
     }
 
     #[test]

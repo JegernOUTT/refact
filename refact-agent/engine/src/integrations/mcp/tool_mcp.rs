@@ -164,6 +164,46 @@ fn mcp_metadata_name_is_safe(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
 
+const MAX_MCP_FAILURE_BYTES: usize = 1024;
+
+fn mcp_failure_name(value: &str) -> &str {
+    if mcp_metadata_name_is_safe(value)
+        && refact_core::string_utils::redact_sensitive(value) == value
+    {
+        value
+    } else {
+        "[REDACTED]"
+    }
+}
+
+fn mcp_call_failure_receipt(
+    config_path: &str,
+    tool_name: &str,
+    error: &rmcp::service::ServiceError,
+) -> String {
+    let server = super::mcp_interactions::server_name_from_config_path(config_path);
+    let server = mcp_failure_name(&server);
+    let tool = mcp_failure_name(tool_name);
+    let cause = match error {
+        rmcp::service::ServiceError::TransportClosed => "Transport closed".to_string(),
+        rmcp::service::ServiceError::TransportSend(_) => "Transport send failed".to_string(),
+        rmcp::service::ServiceError::McpError(_) => "MCP protocol error".to_string(),
+        rmcp::service::ServiceError::UnexpectedResponse => "Unexpected MCP response".to_string(),
+        rmcp::service::ServiceError::Cancelled { .. } => "MCP request cancelled".to_string(),
+        rmcp::service::ServiceError::Timeout { timeout } => {
+            format!("Request timed out after {}s", timeout.as_secs())
+        }
+        _ => "Unclassified MCP service failure".to_string(),
+    };
+    let receipt = format!(
+        "MCP call failed (server '{server}', tool '{tool}'): {cause}. \
+         Opaque error details withheld. External outcome is unknown; this is not a confirmed success. \
+         No automatic replay or reconnect was attempted by this call. Check the MCP integration status and \
+         reconnect it if needed. Verify external effects before explicitly deciding whether to retry."
+    );
+    refact_core::string_utils::safe_truncate(&receipt, MAX_MCP_FAILURE_BYTES).to_string()
+}
+
 pub struct ToolMCP {
     /// Model-facing tool name, precomputed with collision disambiguation in
     /// `mcp_integr_tools` (see `mcp_naming::disambiguate_model_tool_names`).
@@ -507,7 +547,8 @@ impl Tool for ToolMCP {
                 ContextEnum::ChatMessage(message)
             }
             Err(e) => {
-                let error_msg = format!("Failed to call tool: {:?}", e);
+                let error_msg =
+                    mcp_call_failure_receipt(&self.config_path, &self.mcp_tool.name, &e);
                 tracing::error!("{}", error_msg);
                 add_log_entry(session_logs.clone(), error_msg.clone()).await;
                 {
@@ -524,7 +565,7 @@ impl Tool for ToolMCP {
                     )
                     .await;
                 }
-                return Err(e.to_string());
+                return Err(error_msg);
             }
         };
 
@@ -682,6 +723,212 @@ mod tests {
             mcp_tool,
             request_timeout: 30,
             auto_approve: false,
+        }
+    }
+
+    #[test]
+    fn mcp_failure_receipt_withholds_opaque_details_and_unsafe_identity() {
+        use rmcp::service::ServiceError;
+
+        let private = "https://private.example.test/path?token=abc123 MY_ENV=hidden /opt/private/config server-stderr";
+        let errors = [
+            (ServiceError::TransportClosed, "Transport closed"),
+            (
+                ServiceError::TransportSend(rmcp::transport::DynamicTransportError::from_parts(
+                    private.to_string(),
+                    std::any::TypeId::of::<std::io::Error>(),
+                    Box::new(std::io::Error::new(std::io::ErrorKind::BrokenPipe, private)),
+                )),
+                "Transport send failed",
+            ),
+            (ServiceError::UnexpectedResponse, "Unexpected MCP response"),
+            (
+                ServiceError::Timeout {
+                    timeout: Duration::from_secs(u64::MAX),
+                },
+                "Request timed out",
+            ),
+            (
+                ServiceError::Cancelled {
+                    reason: Some(private.repeat(10_000)),
+                },
+                "MCP request cancelled",
+            ),
+            (
+                ServiceError::McpError(rmcp::ErrorData::internal_error(
+                    private.repeat(10_000),
+                    Some(json!({"env": private, "stderr": private})),
+                )),
+                "MCP protocol error",
+            ),
+        ];
+        for (error, cause) in errors {
+            let receipt = mcp_call_failure_receipt(
+                "/opt/private/mcp_stdio_sk-serversecret123.yaml",
+                "ghp_toolsecret1234567890",
+                &error,
+            );
+            assert!(receipt.contains("server '[REDACTED]', tool '[REDACTED]'"));
+            assert!(receipt.contains(cause));
+            assert!(receipt.contains("Opaque error details withheld"));
+            assert!(receipt.contains("External outcome is unknown"));
+            assert!(receipt.len() <= MAX_MCP_FAILURE_BYTES);
+            for secret in [
+                "private",
+                "abc123",
+                "MY_ENV",
+                "hidden",
+                "server-stderr",
+                "serversecret",
+                "toolsecret",
+            ] {
+                assert!(!receipt.contains(secret), "leaked {secret}: {receipt}");
+            }
+        }
+        for name in [
+            "token=hidden",
+            "https://private.test",
+            "/opt/private",
+            "bad\nname",
+        ] {
+            assert_eq!(mcp_failure_name(name), "[REDACTED]");
+        }
+        assert_eq!(mcp_failure_name(&"a".repeat(129)), "[REDACTED]");
+        let receipt = mcp_call_failure_receipt(
+            &format!("/opt/private/mcp_stdio_{}.yaml", "a".repeat(128)),
+            &"b".repeat(128),
+            &ServiceError::Timeout {
+                timeout: Duration::from_secs(u64::MAX),
+            },
+        );
+        assert!(receipt.len() <= MAX_MCP_FAILURE_BYTES);
+        assert!(receipt.ends_with("whether to retry."));
+    }
+
+    #[tokio::test]
+    async fn mcp_wrapper_closed_peer_and_secret_error_receipts() {
+        use super::super::session_mcp::{McpClientHandler, SessionMCP};
+        use crate::integrations::sessions::IntegrationSession;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        for (fail_closed, expected_cause) in
+            [(true, "Transport closed"), (false, "MCP protocol error")]
+        {
+            let gcx = crate::global_context::tests::make_test_gcx().await;
+            set_policy(&gcx, Vec::new());
+            let mut tool = make_tool_mcp(json!({"type": "object"}));
+            tool.config_path = "/opt/private/mcp_stdio_local_fixture.yaml".into();
+            tool.request_timeout = 2;
+            let mut session = SessionMCP::detached(&tool.config_path);
+            session.connection_status = MCPConnectionStatus::Connected;
+            session.mcp_client = Some(tool.mcp_client.clone());
+            let logs = session.logs.clone();
+            let metrics = session.metrics.clone();
+            let session: Arc<AMutex<Box<dyn IntegrationSession>>> =
+                Arc::new(AMutex::new(Box::new(session)));
+            gcx.integration_sessions
+                .lock()
+                .await
+                .insert(tool.config_path.clone(), session.clone());
+            let handler = McpClientHandler {
+                restricted: true,
+                peer_arc: Arc::new(AMutex::new(None)),
+                session_arc: session,
+                logs: logs.clone(),
+                debug_name: "local_fixture".into(),
+                request_timeout: 2,
+                gcx: Arc::downgrade(&gcx),
+                tool_refresh_handle: Arc::new(AMutex::new(None)),
+                resource_refresh_handle: Arc::new(AMutex::new(None)),
+                prompt_refresh_handle: Arc::new(AMutex::new(None)),
+            };
+            let (client_io, server_io) = tokio::io::duplex(16384);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let server_calls = calls.clone();
+            let fixture = tokio::spawn(async move {
+                let (read, mut write) = tokio::io::split(server_io);
+                let mut lines = BufReader::new(read).lines();
+                while let Some(line) = lines.next_line().await.unwrap() {
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    let response = match request["method"].as_str() {
+                        Some("initialize") => {
+                            json!({"jsonrpc":"2.0","id":request["id"],"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"local_fixture","version":"1"}}})
+                        }
+                        Some("tools/call") => {
+                            server_calls.fetch_add(1, Ordering::Relaxed);
+                            if fail_closed {
+                                break;
+                            }
+                            json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32603,"message":"Transport closed https://private.example.test?token=abc123 MY_ENV=hidden /opt/private/config server-stderr","data":{"token":"private-token"}}})
+                        }
+                        _ => continue,
+                    };
+                    write
+                        .write_all(format!("{response}\n").as_bytes())
+                        .await
+                        .unwrap();
+                }
+            });
+            let client = timeout(
+                Duration::from_secs(2),
+                rmcp::serve_client(handler, client_io),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            *tool.mcp_client.lock().await = Some(client);
+            let ccx = AtCommandsContext::new_with_abort(
+                crate::app_state::AppState::from_gcx(gcx.clone()).await,
+                4096,
+                20,
+                false,
+                Vec::new(),
+                "mcp-wrapper-fixture".into(),
+                None,
+                "model".into(),
+                None,
+                None,
+                None,
+            )
+            .await;
+            let result = timeout(
+                Duration::from_secs(3),
+                tool.tool_execute(Arc::new(AMutex::new(ccx)), &"call".into(), &HashMap::new()),
+            )
+            .await
+            .unwrap();
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("MCP failure must not be accepted as success"),
+            };
+            assert!(error.contains("server 'local_fixture', tool 'test_tool'"));
+            assert!(error.contains(expected_cause));
+            assert!(error.contains("External outcome is unknown"));
+            assert!(error.contains("No automatic replay or reconnect was attempted by this call"));
+            assert!(error.contains("Check the MCP integration status"));
+            assert!(error.ends_with("whether to retry."));
+            assert!(error.len() <= MAX_MCP_FAILURE_BYTES);
+            let rendered_logs = serde_json::to_string(&*logs.lock().await).unwrap();
+            assert!(rendered_logs.contains(&error));
+            for secret in ["private", "abc123", "MY_ENV", "hidden", "server-stderr"] {
+                assert!(!error.contains(secret));
+                assert!(!rendered_logs.contains(secret));
+            }
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+            {
+                let recorded = metrics.lock().await;
+                assert_eq!(recorded.metrics.failed_calls, 1);
+                assert_eq!(recorded.metrics.successful_calls, 0);
+                assert_eq!(recorded.metrics.reconnect_count, 0);
+            }
+            let client = tool.mcp_client.lock().await.take().unwrap();
+            let _ = timeout(Duration::from_secs(2), client.cancel())
+                .await
+                .unwrap();
+            timeout(Duration::from_secs(2), fixture)
+                .await
+                .unwrap()
+                .unwrap();
         }
     }
 

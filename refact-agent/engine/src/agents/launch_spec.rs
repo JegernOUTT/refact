@@ -1192,6 +1192,18 @@ mod tests {
             ..Default::default()
         };
         assert!(clear_current_context(&gcx, std::slice::from_ref(&message), &model).is_ok());
+        crate::privacy::save_privacy_policy(gcx.clone(), refact_privacy::PrivacyPolicy::default())
+            .await
+            .unwrap();
+        let installed = gcx.privacy_policy_load.read().unwrap().policy.clone();
+        crate::privacy::save_privacy_policy(gcx.clone(), installed.as_ref().clone())
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &installed,
+            &gcx.privacy_policy_load.read().unwrap().policy
+        ));
+        assert!(clear_current_context(&gcx, std::slice::from_ref(&message), &model).is_ok());
         gcx.privacy_policy_load.write().unwrap().policy = Arc::new(refact_privacy::PrivacyPolicy {
             blocked: vec!["context.txt".into()],
             ..Default::default()
@@ -1405,7 +1417,7 @@ mod tests {
             id: "test/parent".into(),
             ..Default::default()
         };
-        let scope = LaunchScope {
+        let mut scope = LaunchScope {
             caller: WorkCaller {
                 source_root: root.path().into(),
                 checkout_root: root.path().into(),
@@ -1420,6 +1432,11 @@ mod tests {
             limits: Default::default(),
         };
         assert!(clear_current_context(&gcx, &parent, &model).is_ok());
+        assert!(scope.clear(&gcx, &parent).is_err());
+        scope.caller.model = Some(scope.child_model.clone());
+        scope.child_model = model;
+        assert!(clear_current_context(&gcx, &parent, &scope.child_model).is_ok());
+        assert!(scope.clear(&gcx, &parent).is_err());
         let result = resolve_scoped_launch_spec(
             gcx,
             &LaunchSpec {

@@ -104,6 +104,16 @@ pub fn resolve_scope_path(scope: &ReviewScope, candidate: &str) -> Option<PathBu
         return None;
     }
     let direct = PathBuf::from(candidate);
+    if let Some(root) = scope.repo_root.as_ref() {
+        let path = if direct.is_absolute() {
+            direct
+        } else {
+            root.join(direct)
+        };
+        let canonical = std::fs::canonicalize(&path).ok()?;
+        let canonical = dunce::simplified(&canonical).to_path_buf();
+        return (canonical.starts_with(root) && canonical.is_file()).then_some(canonical);
+    }
     if direct.is_absolute() && direct.exists() {
         return Some(direct);
     }
@@ -186,6 +196,9 @@ mod tests {
             hunks: DiffHunks::default(),
             repo_root: Some(root.to_path_buf()),
             expansion: None,
+            checkout: None,
+            snapshots: vec![],
+            artifacts: None,
         }
     }
 

@@ -421,6 +421,19 @@ pub async fn get_or_create_session_with_trajectory(
                 session.complete_trajectory_commit(repaired_version);
             }
         }
+        let version = session_arc.lock().await.trajectory_version;
+        match crate::tasks::goal::hydrate_session_task_goal(gcx.clone(), &session_arc).await {
+            Ok(()) if session_arc.lock().await.trajectory_version != version => {
+                super::trajectories::maybe_save_trajectory_with_intent(
+                    app.clone(),
+                    session_arc.clone(),
+                    TrajectoryCommitIntent::Required,
+                )
+                .await;
+            }
+            Ok(()) => {}
+            Err(error) => warn!(%chat_id, %error, "Task goal hydration on open refused"),
+        }
         compact_reconstruction_privacy_on_open(app.clone(), session_arc.clone()).await;
     }
 

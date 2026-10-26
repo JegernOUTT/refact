@@ -7,6 +7,32 @@ use crate::tasks::types::TaskBoard;
 use super::board_rows::{BoardProvenance, rows_from_board};
 use super::types::WorkRow;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BoardIndexFailure {
+    Read,
+    Parse,
+    UnsafePath,
+    RowLimit,
+    ByteLimit,
+    ProjectionLimit,
+    Capacity,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct BoardIndexHealth {
+    pub coverage: &'static str,
+    pub unavailable: bool,
+    pub reason: Option<BoardIndexFailure>,
+    pub retry: &'static str,
+    pub retry_after_ms: Option<u64>,
+}
+
+pub(crate) struct BoardIndexSnapshot {
+    pub rows: Vec<WorkRow>,
+    pub health: BoardIndexHealth,
+}
+
 #[derive(Default)]
 pub struct WorkBoardIndex {
     projects: Mutex<BTreeMap<PathBuf, Arc<Project>>>,
@@ -26,6 +52,10 @@ struct State {
     initialized: bool,
     bootstrapping: bool,
     attempted_limits: (usize, usize),
+    failure: Option<super::board_bootstrap::BootstrapFailure>,
+    retry_attempt: u32,
+    retry_at: Option<std::time::Instant>,
+    check_at: Option<std::time::Instant>,
 }
 
 struct Entry {
@@ -95,8 +125,22 @@ impl WorkBoardIndex {
     }
 
     pub async fn rows(&self, root: &Path) -> (Vec<WorkRow>, bool) {
+        let snapshot = self.snapshot(root).await;
+        (snapshot.rows, snapshot.health.unavailable)
+    }
+
+    pub(crate) async fn snapshot(&self, root: &Path) -> BoardIndexSnapshot {
         let Some(project) = self.project(root) else {
-            return (vec![], true);
+            return BoardIndexSnapshot {
+                rows: vec![],
+                health: BoardIndexHealth {
+                    coverage: "partial",
+                    unavailable: true,
+                    reason: Some(BoardIndexFailure::Capacity),
+                    retry: "capacity_change",
+                    retry_after_ms: None,
+                },
+            };
         };
         let gate = project.bootstrap_gate.lock().await;
         let settings = crate::file_activity::settings();
@@ -104,10 +148,39 @@ impl WorkBoardIndex {
             settings.max_work_history_rows,
             settings.max_work_history_bytes,
         );
+        let now = std::time::Instant::now();
+        let source = {
+            let state = project.state.lock().unwrap_or_else(|e| e.into_inner());
+            state
+                .failure
+                .as_ref()
+                .filter(|_| state.check_at.is_none_or(|at| now >= at))
+                .map(|failure| (failure.source.clone(), failure.stamp.clone()))
+        };
+        let changed = match source {
+            Some((path, stamp)) => {
+                let changed = super::board_bootstrap::source_stamp(&path).await != stamp;
+                project
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .check_at = Some(now + std::time::Duration::from_secs(1));
+                changed
+            }
+            None => false,
+        };
         let bootstrap = {
             let mut state = project.state.lock().unwrap_or_else(|e| e.into_inner());
-            let needed =
-                !state.initialized || (state.is_unavailable() && state.attempted_limits != limits);
+            let retry = state.failure.as_ref().is_some_and(|failure| {
+                changed
+                    || (matches!(
+                        failure.reason,
+                        BoardIndexFailure::Read | BoardIndexFailure::Parse
+                    ) && state.retry_at.is_some_and(|at| now >= at))
+            });
+            let needed = !state.initialized
+                || (state.is_unavailable() && state.attempted_limits != limits)
+                || retry;
             state.bootstrapping = needed;
             if needed {
                 state
@@ -122,9 +195,10 @@ impl WorkBoardIndex {
                 project: &project,
                 committed: false,
             };
-            let (loaded, unavailable) = super::board_bootstrap::load(root).await;
+            let (loaded, failure) = super::board_bootstrap::load(root).await;
             let mut state = project.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.bootstrap(loaded, unavailable, &settings);
+            state.bootstrap(loaded, failure.is_some(), &settings);
+            state.record_failure(failure, std::time::Instant::now());
             state.attempted_limits = limits;
             state.initialized = true;
             state.bootstrapping = false;
@@ -136,11 +210,15 @@ impl WorkBoardIndex {
         drop(gate);
         let state = project.state.lock().unwrap_or_else(|e| e.into_inner());
         let settings = crate::file_activity::settings();
+        let health = state.health(&settings, std::time::Instant::now());
         if state.is_unavailable() || !state.within_limits(&settings) {
-            return (vec![], true);
+            return BoardIndexSnapshot {
+                rows: vec![],
+                health,
+            };
         }
-        (
-            state
+        BoardIndexSnapshot {
+            rows: state
                 .entries
                 .values()
                 .flat_map(|entry| entry.rows.clone())
@@ -158,12 +236,68 @@ impl WorkBoardIndex {
                     row
                 })
                 .collect(),
-            false,
-        )
+            health,
+        }
     }
 }
 
 impl State {
+    fn record_failure(
+        &mut self,
+        failure: Option<super::board_bootstrap::BootstrapFailure>,
+        now: std::time::Instant,
+    ) {
+        if failure.is_some() {
+            self.retry_attempt = self.retry_attempt.saturating_add(1).min(7);
+            let seconds = (1u64 << self.retry_attempt.saturating_sub(1)).min(60);
+            self.retry_at = Some(now + std::time::Duration::from_secs(seconds));
+            self.check_at = Some(now + std::time::Duration::from_secs(1));
+        } else {
+            self.retry_attempt = 0;
+            self.retry_at = None;
+            self.check_at = None;
+        }
+        self.failure = failure;
+    }
+
+    fn health(
+        &self,
+        settings: &refact_work_core::CoordinationSettings,
+        now: std::time::Instant,
+    ) -> BoardIndexHealth {
+        let unavailable = self.is_unavailable() || !self.within_limits(settings);
+        let reason = self
+            .failure
+            .as_ref()
+            .map(|failure| failure.reason)
+            .or_else(|| unavailable.then_some(BoardIndexFailure::ProjectionLimit));
+        let timed = matches!(
+            reason,
+            Some(BoardIndexFailure::Read | BoardIndexFailure::Parse)
+        );
+        BoardIndexHealth {
+            coverage: "partial",
+            unavailable,
+            reason,
+            retry: if timed {
+                "backoff_or_source_change"
+            } else if unavailable {
+                "source_or_limits_change"
+            } else {
+                "none"
+            },
+            retry_after_ms: timed
+                .then(|| {
+                    self.retry_at.map(|at| {
+                        at.saturating_duration_since(now)
+                            .as_millis()
+                            .min(u64::MAX as u128) as u64
+                    })
+                })
+                .flatten(),
+        }
+    }
+
     fn is_unavailable(&self) -> bool {
         self.unavailable || self.entries.values().any(|entry| entry.failed)
     }
@@ -416,5 +550,96 @@ mod tests {
         index.publish(&path, Some((&board(), &BoardProvenance::default())));
         assert!(!index.rows(root.path()).await.1);
         assert_eq!(index.rows(root.path()).await.0.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn repaired_bootstrap_retries_with_backoff_or_source_change_and_stops_scanning_when_healthy(
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(".refact/tasks/task-a");
+        tokio::fs::create_dir_all(&path).await.unwrap();
+        tokio::fs::write(path.join("board.yaml"), "cards: [")
+            .await
+            .unwrap();
+        let index = WorkBoardIndex::default();
+        let first = index.snapshot(root.path()).await;
+        assert!(first.rows.is_empty());
+        assert_eq!(first.health.reason, Some(BoardIndexFailure::Parse));
+        assert_eq!(first.health.retry, "backoff_or_source_change");
+        assert!(first.health.retry_after_ms.unwrap() <= 1000);
+        let project = index.project(root.path()).unwrap();
+        assert!(index.rows(root.path()).await.1);
+        assert_eq!(project.state.lock().unwrap().retry_attempt, 1);
+        for _ in 0..10 {
+            project.state.lock().unwrap().retry_at = Some(std::time::Instant::now());
+            assert!(index.rows(root.path()).await.1);
+        }
+        {
+            let state = project.state.lock().unwrap();
+            assert_eq!(state.retry_attempt, 7);
+            assert!(
+                state
+                    .health(&crate::file_activity::settings(), std::time::Instant::now())
+                    .retry_after_ms
+                    .unwrap()
+                    <= 60_000
+            );
+        }
+        let board_path = path.join("board.yaml");
+        tokio::fs::remove_file(&board_path).await.unwrap();
+        tokio::fs::create_dir(&board_path).await.unwrap();
+        let before = super::super::board_bootstrap::source_stamp(&board_path).await;
+        let repaired_body = serde_yaml::to_string(&board()).unwrap();
+        let repair_path = board_path.clone();
+        project.state.lock().unwrap().retry_at = Some(std::time::Instant::now());
+        let failed_during_repair = super::super::board_bootstrap::BEFORE_FAILURE_RETURN
+            .scope(
+                Box::new(move |failure| {
+                    assert_eq!(failure.reason, BoardIndexFailure::UnsafePath);
+                    assert_eq!(failure.source, repair_path);
+                    std::fs::remove_dir(&repair_path).unwrap();
+                    std::fs::write(&repair_path, &repaired_body).unwrap();
+                }),
+                index.snapshot(root.path()),
+            )
+            .await;
+        assert_eq!(
+            failed_during_repair.health.reason,
+            Some(BoardIndexFailure::UnsafePath)
+        );
+        assert_eq!(failed_during_repair.health.retry, "source_or_limits_change");
+        assert_eq!(failed_during_repair.health.retry_after_ms, None);
+        assert_eq!(
+            project
+                .state
+                .lock()
+                .unwrap()
+                .failure
+                .as_ref()
+                .unwrap()
+                .stamp,
+            before
+        );
+        assert_ne!(
+            super::super::board_bootstrap::source_stamp(&board_path).await,
+            before
+        );
+        project.state.lock().unwrap().retry_at = None;
+        project.state.lock().unwrap().check_at = Some(std::time::Instant::now());
+        let repaired = index.snapshot(root.path()).await;
+        assert!(!repaired.health.unavailable);
+        assert_eq!(repaired.rows.len(), 1);
+        assert_eq!(repaired.health.reason, None);
+        assert_eq!(repaired.health.retry, "none");
+        tokio::fs::write(path.join("board.yaml"), "cards: [")
+            .await
+            .unwrap();
+        let cached = index.snapshot(root.path()).await;
+        assert!(!cached.health.unavailable);
+        assert_eq!(cached.rows.len(), 1);
+        assert_eq!(project.state.lock().unwrap().retry_attempt, 0);
+        let health = serde_json::to_string(&first.health).unwrap();
+        assert!(!health.contains("task-a"));
+        assert!(!health.contains(&root.path().to_string_lossy().to_string()));
     }
 }

@@ -30,6 +30,25 @@ pub(crate) struct RepoFixture {
     pub(crate) parent_worktree: WorktreeMeta,
 }
 
+impl RepoFixture {
+    async fn install_parent(&self, request: &SpawnRequest) {
+        let mut parent = crate::chat::types::ChatSession::new(request.parent_chat_id.clone());
+        parent.work_project_root = Some(self.source.clone());
+        parent.thread.model = request.model.clone();
+        parent.thread.mode = "agent".into();
+        parent.thread.worktree = request.parent_worktree.clone();
+        parent.set_runtime_state(SessionState::Generating, None);
+        assert!(self
+            .app
+            .chat
+            .sessions
+            .write()
+            .await
+            .insert(request.parent_chat_id.clone(), Arc::new(Mutex::new(parent)),)
+            .is_none());
+    }
+}
+
 fn run_git(cwd: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .args(args)
@@ -376,6 +395,7 @@ async fn spawned_subchat_approval_defaults_never_exceed_parent_authority() {
     ] {
         if let Some((autonomous, editing, dangerous)) = authority {
             let mut parent = crate::chat::types::ChatSession::new(parent_id.into());
+            parent.work_project_root = Some(fixture.source.clone());
             parent.thread.autonomous_no_confirm = autonomous;
             parent.thread.auto_approve_editing_tools = editing;
             parent.thread.auto_approve_dangerous_commands = dangerous;
@@ -387,15 +407,20 @@ async fn spawned_subchat_approval_defaults_never_exceed_parent_authority() {
                 .await
                 .insert(parent_id.into(), Arc::new(Mutex::new(parent)));
         }
-        let completed = await_completion(
-            crate::agents::spawn::spawn_background_agent(
-                fixture.app.clone(),
-                spawn_request(parent_id, BgAgentKind::Subagent),
-            )
-            .await
-            .expect("spawn test subagent"),
+        let launched = crate::agents::spawn::spawn_background_agent(
+            fixture.app.clone(),
+            spawn_request(parent_id, BgAgentKind::Subagent),
         )
         .await;
+        if authority.is_none() {
+            assert!(launched
+                .err()
+                .unwrap()
+                .contains("parent session unavailable"));
+            assert!(observed.lock().await.is_none());
+            continue;
+        }
+        let completed = await_completion(launched.expect("spawn test subagent")).await;
         assert_eq!(completed.status, BgAgentStatus::Completed);
         assert_eq!(*observed.lock().await, Some(expected), "{parent_id}");
     }
@@ -417,6 +442,7 @@ async fn isolated_auto_merge_merges_changes_and_cleans_worktree() {
     let mut request = spawn_request("parent-auto-merge", BgAgentKind::Subagent);
     request.parent_worktree = Some(fixture.parent_worktree.clone());
     request.worktree_mode = SpawnWorktreeMode::Isolated { auto_merge: true };
+    fixture.install_parent(&request).await;
 
     let completed = await_completion(
         crate::agents::spawn::spawn_background_agent(fixture.app.clone(), request)
@@ -465,6 +491,7 @@ async fn nested_isolated_auto_merge_runs_inside_parent_worktree() {
     let mut request = spawn_request("parent-nested-auto-merge", BgAgentKind::Subagent);
     request.parent_worktree = Some(parent_worktree.clone());
     request.worktree_mode = SpawnWorktreeMode::Isolated { auto_merge: true };
+    fixture.install_parent(&request).await;
 
     let completed = await_completion(
         crate::agents::spawn::spawn_background_agent(fixture.app.clone(), request)
@@ -503,6 +530,7 @@ async fn isolated_auto_merge_conflict_preserves_worktree_and_summary() {
     let mut request = spawn_request("parent-auto-conflict", BgAgentKind::Subagent);
     request.parent_worktree = Some(fixture.parent_worktree.clone());
     request.worktree_mode = SpawnWorktreeMode::Isolated { auto_merge: true };
+    fixture.install_parent(&request).await;
 
     let completed = await_completion(
         crate::agents::spawn::spawn_background_agent(fixture.app.clone(), request)

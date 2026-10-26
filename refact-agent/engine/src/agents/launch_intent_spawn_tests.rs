@@ -62,6 +62,10 @@ async fn fixture(parent_id: &str, coordination: bool) -> Fixture {
             parent_id.to_string(),
         ))),
     );
+    app.chat.sessions.read().await[parent_id]
+        .lock()
+        .await
+        .work_project_root = Some(root.clone());
     let store = if coordination {
         let mut settings = crate::file_activity::settings();
         settings.enabled = true;

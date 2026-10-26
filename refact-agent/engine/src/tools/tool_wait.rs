@@ -20,21 +20,22 @@ impl Tool for ToolWait {
             .cloned()
             .unwrap_or_default();
         task_properties.insert("kind".into(), json!({"const":"task_agents"}));
+        let mut push_schema = refact_core::chat_types::PushMode::schema();
+        push_schema["description"] = json!("Duration targets only. When tick notices should land: preempt (interrupt the current answer), append (default, at the next safe message boundary), when_idle (after the whole turn finishes).");
         ToolDesc {
             name:"wait".into(), display_name:"Wait".into(),
             source:ToolSource {source_type:ToolSourceType::Builtin,config_path:self.config_path.clone()},
             experimental:false, allow_parallel:true,
-            description:"Wait for a duration, process, any one authorized child agent, or park the task planner awaiting matching agents. Interruption never cancels the target. Duration ticks are enqueued after the wait tool result. Task agent timeout is 30–1800 seconds in milliseconds.".into(),
+            description:"Wait for a duration, process, any one authorized child agent, or park the task planner awaiting matching agents. Duration targets require a nonblank target.description (at most 80 trimmed characters); the legacy top-level description remains accepted for duration only. Omit description for non-duration targets. Interruption never cancels the target. Duration ticks are enqueued after the wait tool result. Task agent timeout is 30–1800 seconds in milliseconds.".into(),
             input_schema:json!({"type":"object","additionalProperties":false,"properties":{
                 "target":{"oneOf":[
-                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"duration"},"duration_ms":{"type":"integer","minimum":100,"maximum":3600000},"tick_interval_ms":{"type":"integer","minimum":5000}},"required":["kind","duration_ms"]},
+                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"duration"},"duration_ms":{"type":"integer","minimum":100,"maximum":3600000},"tick_interval_ms":{"type":"integer","minimum":5000},"description":{"type":"string","minLength":1,"maxLength":80,"pattern":"\\S","description":"Required nonblank reason for this duration wait, at most 80 trimmed characters."}},"required":["kind","duration_ms","description"]},
                     {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"process"},"process_id":{"type":"string","minLength":1}},"required":["kind","process_id"]},
                     {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"agents"},"agent_ids":{"type":"array","minItems":1,"maxItems":128,"items":{"type":"string","minLength":1}}},"required":["kind","agent_ids"]},
                     {"type":"object","additionalProperties":false,"properties":task_properties,"required":["kind"]}
                 ]},
-                "description":{"type":"string","minLength":1,"maxLength":80},
-                "timeout_ms":{"type":"integer","minimum":0},
-                "push":refact_core::chat_types::PushMode::schema()
+                "timeout_ms":{"type":"integer","minimum":0,"description":"Optional timeout for non-duration targets only. Task agents require 30000–1800000 ms in whole seconds."},
+                "push":push_schema
             },"required":["target"]}), output_schema:None,annotations:None,
         }
     }
@@ -44,65 +45,7 @@ impl Tool for ToolWait {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        for key in args.keys() {
-            if !matches!(
-                key.as_str(),
-                "target" | "description" | "timeout_ms" | "push"
-            ) {
-                return Err(format!("Unknown argument '{key}'"));
-            }
-        }
-        let target = args
-            .get("target")
-            .and_then(Value::as_object)
-            .ok_or("target must be an object")?;
-        let kind = target
-            .get("kind")
-            .and_then(Value::as_str)
-            .ok_or("target.kind is required")?;
-        let fields: &[&str] = match kind {
-            "duration" => &["kind", "duration_ms", "tick_interval_ms"],
-            "process" => &["kind", "process_id"],
-            "agents" => &["kind", "agent_ids"],
-            "task_agents" => &[
-                "kind",
-                "task_id",
-                "card_ids",
-                "status_filter",
-                "format",
-                "priority_filter",
-                "min_age_minutes",
-                "sort",
-                "limit",
-                "offset",
-                "since_seq",
-                "group_by",
-            ],
-            _ => {
-                return Err("target.kind must be duration, process, agents, or task_agents".into())
-            }
-        };
-        for key in target.keys() {
-            if !fields.contains(&key.as_str()) {
-                return Err(format!("'{key}' is not applicable to {kind}"));
-            }
-        }
-        if kind == "duration" && args.contains_key("timeout_ms") {
-            return Err("timeout_ms is not applicable to duration".into());
-        }
-        if kind != "duration" && (args.contains_key("description") || args.contains_key("push")) {
-            return Err("description and push apply only to duration".into());
-        }
-        let mut operation: HashMap<String, Value> = target
-            .iter()
-            .filter(|(k, _)| k.as_str() != "kind")
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        for key in ["description", "push", "timeout_ms"] {
-            if let Some(value) = args.get(key) {
-                operation.insert(key.into(), value.clone());
-            }
-        }
+        let (kind, mut operation) = parse_wait_request(args)?;
         match kind {
             "duration" => {
                 super::tool_sleep::execute_duration_wait(ccx, tool_call_id, &operation).await
@@ -139,5 +82,209 @@ impl Tool for ToolWait {
     }
     fn has_config_path(&self) -> Option<String> {
         Some(self.config_path.clone())
+    }
+}
+
+fn parse_wait_request(
+    args: &HashMap<String, Value>,
+) -> Result<(&str, HashMap<String, Value>), String> {
+    for key in args.keys() {
+        if !matches!(
+            key.as_str(),
+            "target" | "description" | "timeout_ms" | "push"
+        ) {
+            return Err(format!("Unknown argument '{key}'"));
+        }
+    }
+    let target = args
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or("target must be an object")?;
+    let kind = target
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or("target.kind is required")?;
+    let fields: &[&str] = match kind {
+        "duration" => &["kind", "duration_ms", "tick_interval_ms", "description"],
+        "process" => &["kind", "process_id"],
+        "agents" => &["kind", "agent_ids"],
+        "task_agents" => &[
+            "kind",
+            "task_id",
+            "card_ids",
+            "status_filter",
+            "format",
+            "priority_filter",
+            "min_age_minutes",
+            "sort",
+            "limit",
+            "offset",
+            "since_seq",
+            "group_by",
+        ],
+        _ => return Err("target.kind must be duration, process, agents, or task_agents".into()),
+    };
+    for key in target.keys() {
+        if !fields.contains(&key.as_str()) {
+            return Err(format!("'{key}' is not applicable to {kind}"));
+        }
+    }
+    if kind == "duration" && args.contains_key("timeout_ms") {
+        return Err("timeout_ms is not applicable to duration".into());
+    }
+    if kind != "duration" && (args.contains_key("description") || args.contains_key("push")) {
+        return Err("description and push apply only to duration".into());
+    }
+    let mut operation: HashMap<String, Value> = target
+        .iter()
+        .filter(|(k, _)| k.as_str() != "kind")
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    if kind == "duration" {
+        let nested = target.get("description");
+        let legacy = args.get("description");
+        for value in [nested, legacy].into_iter().flatten() {
+            if !value.is_string() {
+                return Err("description must be a string".into());
+            }
+        }
+        if let (Some(nested), Some(legacy)) = (nested, legacy) {
+            if nested.as_str().map(str::trim) != legacy.as_str().map(str::trim) {
+                return Err("Conflicting target.description and top-level description".into());
+            }
+        }
+        let description = nested
+            .or(legacy)
+            .and_then(Value::as_str)
+            .ok_or("Missing required argument 'description'")?
+            .trim();
+        if description.is_empty() {
+            return Err("description must be a non-empty string".into());
+        }
+        operation.insert("description".into(), json!(description));
+    }
+    for key in ["push", "timeout_ms"] {
+        if let Some(value) = args.get(key) {
+            operation.insert(key.into(), value.clone());
+        }
+    }
+    Ok((kind, operation))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_wait_request_contract() {
+        let schema = ToolWait {
+            config_path: String::new(),
+        }
+        .tool_description()
+        .input_schema;
+        assert_eq!(schema["required"], json!(["target"]));
+        assert!(schema["properties"].get("description").is_none());
+        let variants = schema["properties"]["target"]["oneOf"].as_array().unwrap();
+        assert_eq!(
+            variants[0]["required"],
+            json!(["kind", "duration_ms", "description"])
+        );
+        let description = &variants[0]["properties"]["description"];
+        assert_eq!(description["pattern"], "\\S");
+        assert_eq!(description["minLength"], 1);
+        assert_eq!(description["maxLength"], 80);
+        let nonblank = regex::Regex::new(description["pattern"].as_str().unwrap()).unwrap();
+        for (value, valid) in [("", false), (" \t\n", false), ("wait", true)] {
+            assert_eq!(nonblank.is_match(value), valid);
+        }
+        for variant in &variants[1..] {
+            assert!(variant["properties"].get("description").is_none());
+            assert_eq!(variant["additionalProperties"], false);
+        }
+        for (nested, legacy, expected) in [
+            (Some(json!(" wait ")), None, Ok("wait")),
+            (None, Some(json!(" wait ")), Ok("wait")),
+            (Some(json!(" wait ")), Some(json!("wait")), Ok("wait")),
+            (None, None, Err("Missing required argument 'description'")),
+            (
+                Some(json!("")),
+                None,
+                Err("description must be a non-empty string"),
+            ),
+            (
+                Some(json!(" \t\n")),
+                None,
+                Err("description must be a non-empty string"),
+            ),
+            (
+                None,
+                Some(json!(" \t\n")),
+                Err("description must be a non-empty string"),
+            ),
+            (Some(json!(7)), None, Err("description must be a string")),
+            (
+                None,
+                Some(json!(false)),
+                Err("description must be a string"),
+            ),
+            (
+                Some(json!("wait")),
+                Some(json!(null)),
+                Err("description must be a string"),
+            ),
+            (
+                Some(json!("wait")),
+                Some(json!("other")),
+                Err("Conflicting target.description and top-level description"),
+            ),
+        ] {
+            let mut target = json!({"kind":"duration", "duration_ms":100});
+            if let Some(nested) = nested {
+                target["description"] = nested;
+            }
+            let mut args = HashMap::from([("target".into(), target)]);
+            if let Some(legacy) = legacy {
+                args.insert("description".into(), legacy);
+            }
+            let actual = parse_wait_request(&args).map(|(kind, operation)| {
+                assert_eq!(kind, "duration");
+                operation["description"].as_str().unwrap().to_string()
+            });
+            assert_eq!(
+                actual.as_ref().map(String::as_str).map_err(String::as_str),
+                expected
+            );
+        }
+        for target in [
+            json!({"kind":"process", "process_id":"exec_test"}),
+            json!({"kind":"agents", "agent_ids":["child"]}),
+            json!({"kind":"task_agents"}),
+        ] {
+            let mut args = HashMap::from([("target".into(), target)]);
+            args.insert("timeout_ms".into(), json!(30_000));
+            let (_, operation) = parse_wait_request(&args).unwrap();
+            assert!(!operation.contains_key("description"));
+            assert_eq!(operation["timeout_ms"], 30_000);
+            args.insert("push".into(), json!("append"));
+            assert!(parse_wait_request(&args).is_err());
+            args.remove("push");
+            args.insert("description".into(), json!("wait"));
+            assert!(parse_wait_request(&args).is_err());
+            args.remove("description");
+            args.get_mut("target").unwrap()["description"] = json!("wait");
+            assert!(parse_wait_request(&args).is_err());
+        }
+        let mut args = HashMap::from([
+            (
+                "target".into(),
+                json!({"kind":"duration", "duration_ms":100, "tick_interval_ms":5000, "description":"wait"}),
+            ),
+            ("push".into(), json!("when_idle")),
+        ]);
+        let (_, operation) = parse_wait_request(&args).unwrap();
+        assert_eq!(operation["tick_interval_ms"], 5000);
+        assert_eq!(operation["push"], "when_idle");
+        args.insert("timeout_ms".into(), json!(100));
+        assert!(parse_wait_request(&args).is_err());
     }
 }

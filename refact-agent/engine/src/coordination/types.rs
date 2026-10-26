@@ -509,6 +509,10 @@ pub struct WorkOverview {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<String>,
     pub generated_at_ms: u64,
+    #[serde(default)]
+    pub snapshot_observed_at_ms: u64,
+    #[serde(default)]
+    pub snapshot_stale: bool,
     pub rows: Vec<WorkRow>,
     /// Rows matching the filters before paging.
     pub total: usize,
@@ -523,6 +527,8 @@ pub struct WorkOverview {
     /// Non-fatal problems (locked sessions, unresolvable roots).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub degraded: Vec<String>,
+    #[serde(skip)]
+    pub(crate) source_records: Vec<refact_privacy::FileRecord>,
 }
 
 /// Tagged selector for `work_inspect`.

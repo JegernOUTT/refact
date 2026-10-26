@@ -10,9 +10,15 @@ pub(crate) struct BoardProvenance {
     pub digest: String,
     pub records: Vec<refact_privacy::FileRecord>,
     pub complete: bool,
+    #[serde(default)]
+    pub authority_version: u32,
 }
 
 impl BoardProvenance {
+    pub fn authority_valid_for(&self, board: &TaskBoard, settings: &CoordinationSettings) -> bool {
+        self.authority_version == 1 && self.valid_for(board, settings)
+    }
+
     pub fn valid_for(&self, board: &TaskBoard, settings: &CoordinationSettings) -> bool {
         self.complete
             && self.records.len() <= settings.max_work_provenance_records
@@ -42,9 +48,12 @@ pub(crate) fn write_provenance(
             .map(|(_, provenance)| provenance.records.clone())
             .unwrap_or_default(),
         complete: previous.is_none_or(|(board, provenance)| provenance.valid_for(board, &settings)),
+        authority_version: previous.map_or(1, |(_, provenance)| provenance.authority_version),
     };
-    let old_disclosure = previous.map(|(board, _)| disclosure_fingerprint(board));
-    if old_disclosure.as_ref() != Some(&disclosure_fingerprint(board)) && !board.cards.is_empty() {
+    let old_disclosure = previous
+        .map(|(board, _)| disclosure_fingerprint(board))
+        .unwrap_or_else(|| disclosure_fingerprint(&TaskBoard::default()));
+    if old_disclosure != disclosure_fingerprint(board) {
         match source {
             Some((records, complete)) => {
                 provenance.records.extend(records);
@@ -105,6 +114,20 @@ fn disclosure_fingerprint(board: &TaskBoard) -> String {
         digest.update((value.len() as u64).to_le_bytes());
         digest.update(value.as_bytes());
     };
+    field(
+        &serde_json::json!({
+            "owner_chat_id": board.owner_chat_id,
+            "reviewer_chat_ids": board.reviewer_chat_ids,
+            "review_policy": board.review_policy,
+            "claims": board.card_claims.iter().map(|(id, claim)| {
+                (id, &claim.claimant_chat_id, &claim.claimed_at)
+            }).collect::<Vec<_>>(),
+            "dependency_overrides": board.dependency_overrides.iter().map(|(id, value)| {
+                (id, &value.overridden_by, &value.overridden_at, &value.unsatisfied)
+            }).collect::<Vec<_>>(),
+        })
+        .to_string(),
+    );
     for card in &board.cards {
         for value in [&card.id, &card.title, &card.column, &card.created_at] {
             field(value);
@@ -345,6 +368,46 @@ pub(super) mod tests {
         assert!(
             !write_provenance(&changed, Some((&board, &legacy)), Some((vec![], true))).complete
         );
+        let mut legacy = source.clone();
+        legacy.authority_version = 0;
+        assert!(legacy.valid_for(&board, &settings));
+        assert!(!legacy.authority_valid_for(&board, &settings));
+        assert!(
+            !write_provenance(&board, Some((&board, &legacy)), Some((vec![], true)))
+                .authority_valid_for(&board, &settings)
+        );
+        assert!(source.authority_valid_for(&board, &settings));
+        for field in [
+            "owner_chat_id",
+            "reviewer_chat_ids",
+            "review_policy",
+            "card_claims",
+            "dependency_overrides",
+        ] {
+            let mut value = serde_json::to_value(&board).unwrap();
+            value[field] = match field {
+                "owner_chat_id" => json!("private-owner"),
+                "reviewer_chat_ids" => json!(["private-reviewer"]),
+                "review_policy" => json!("independent_required"),
+                "card_claims" => {
+                    json!({"card-a":{"claimant_chat_id":"private-holder","idempotency_key":"secret","claimed_at":"t0"}})
+                }
+                _ => {
+                    json!({"card-a":{"overridden_by":"private-owner","reason":"secret","overridden_at":"t0","unsatisfied":["hidden-card"]}})
+                }
+            };
+            let changed: TaskBoard = serde_json::from_value(value).unwrap();
+            assert!(
+                !write_provenance(&changed, Some((&board, &source)), None).complete,
+                "{field}"
+            );
+        }
+        let mut empty = TaskBoard::default();
+        let empty_source = write_provenance(&empty, None, None);
+        assert!(empty_source.complete);
+        let previous = empty.clone();
+        empty.owner_chat_id = Some("private-owner".into());
+        assert!(!write_provenance(&empty, Some((&previous, &empty_source)), None).complete);
     }
 
     #[test]

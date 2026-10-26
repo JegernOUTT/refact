@@ -1199,9 +1199,15 @@ pub(crate) async fn agent_lifecycle_execute(
             LifecycleOutcome::Queued
         }
     };
-    let recovered = crate::agents::spawn::recover_run_config(&app, &chat_id, &agent_id)
-        .await
-        .ok();
+    let recovery = crate::agents::spawn::recover_run_config(&app, &chat_id, &agent_id).await;
+    let mut recovery_unavailable_reason = recovery.as_ref().err().cloned();
+    let recovered = recovery.ok();
+    if record.status.is_terminal() {
+        if let Some(run) = &recovered {
+            recovery_unavailable_reason =
+                crate::agents::spawn::recovery_unavailable_reason(&app, &record, run).await;
+        }
+    }
     let max_steps = recovered.as_ref().map(|run| run.config.max_steps);
     let tool_authority = recovered.as_ref().map(|run| {
         json!({
@@ -1209,7 +1215,7 @@ pub(crate) async fn agent_lifecycle_execute(
             "migrated_from_legacy_all": run.authority_migrated,
         })
     });
-    let cap_stop = if record.status == BgAgentStatus::Failed {
+    let cap_stop = if record.status.is_terminal() {
         record
             .error
             .as_deref()
@@ -1226,7 +1232,8 @@ pub(crate) async fn agent_lifecycle_execute(
     } else {
         None
     };
-    let steps_left = scope_available
+    let recovery_available = scope_available && recovery_unavailable_reason.is_none();
+    let steps_left = recovery_available
         && max_steps.is_some_and(|limit| limit > record.step_count as usize)
         && cap_stop.is_none();
     Ok(tool_message(tool_call_id, json!({
@@ -1247,10 +1254,13 @@ pub(crate) async fn agent_lifecycle_execute(
             "can_close": !record.status.is_terminal(),
             "can_resume": steps_left && record.status.is_terminal() && record.status != BgAgentStatus::Completed,
             "can_continue": steps_left && record.status == BgAgentStatus::Completed,
-            "can_raise_and_resume": scope_available && cap_stop.as_ref().is_some_and(|stop| stop.parent_can_raise_steps()),
+            "can_raise_and_resume": recovery_available && record.status == BgAgentStatus::Failed
+                && cap_stop.as_ref().is_some_and(|stop| stop.parent_can_raise_steps()
+                    && settings_ceiling.is_some_and(|ceiling| ceiling > stop.used.max(record.step_count as usize).max(stop.limit))),
             "max_steps": max_steps,
             "settings_subagent_max_steps_ceiling": settings_ceiling,
             "resume_configuration_available": max_steps.is_some(),
+            "recovery_unavailable_reason": recovery_unavailable_reason,
             "tool_authority": tool_authority,
             "original_scope_available": scope_available,
         }).to_string()))
@@ -2087,6 +2097,13 @@ mod tests {
             config_path: String::new(),
         }
         .tool_description();
+        assert_eq!(desc.name, "wait");
+        assert_eq!(desc.input_schema["required"], json!(["target"]));
+        assert!(desc.input_schema["properties"].get("description").is_none());
+        assert_eq!(
+            desc.input_schema["properties"]["target"]["oneOf"][0]["required"],
+            json!(["kind", "duration_ms", "description"])
+        );
         assert!(
             crate::chat::tools::is_recognized_runner_wait_name(&desc.name),
             "agent_wait must park the runner's execution permit instead of holding it"

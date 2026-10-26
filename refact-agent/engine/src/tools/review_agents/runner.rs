@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use serde_json::Value;
+use refact_privacy::PrivacyAudited;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex as AMutex;
 
@@ -61,6 +62,7 @@ pub struct StageCtx {
     pub chat_id: String,
     pub root_chat_id: String,
     pub activity: Option<Arc<AtomicU64>>,
+    pub review_scope: Option<Arc<crate::tools::review_scope::ReviewScope>>,
 }
 
 pub struct StageJob {
@@ -172,6 +174,10 @@ async fn run_stage_inner(gcx: Arc<GlobalContext>, ctx: StageCtx, job: StageJob) 
     let label = job.label.clone();
     let mut metering = serde_json::Map::new();
     let worktree = inherited_worktree(&ctx);
+    let artifact_only = ctx
+        .review_scope
+        .as_ref()
+        .is_some_and(|scope| scope.artifacts.is_some());
 
     let trace_chat_id = job.trace_chat_id.clone();
     let attribution = format!("review_{}", job.spec.id);
@@ -185,7 +191,11 @@ async fn run_stage_inner(gcx: Arc<GlobalContext>, ctx: StageCtx, job: StageJob) 
         Some(ctx.chat_id.clone()),
         Some("review_stage".to_string()),
         Some(ctx.root_chat_id.clone()),
-        Some(job.spec.tools()),
+        Some(if artifact_only {
+            vec![]
+        } else {
+            job.spec.tools()
+        }),
         job.max_steps,
         false,
         "agent".to_string(),
@@ -211,15 +221,56 @@ async fn run_stage_inner(gcx: Arc<GlobalContext>, ctx: StageCtx, job: StageJob) 
     config.soft_abort = true;
     config.activity_stamp = ctx.activity.clone();
 
-    let messages = vec![
+    let mut messages = vec![
         ChatMessage {
             role: "system".to_string(),
-            content: ChatContent::SimpleText(REVIEW_SYSTEM_PROMPT.to_string()),
+            content: ChatContent::SimpleText(if artifact_only {
+                format!("{REVIEW_SYSTEM_PROMPT}\nThis run is artifact-only. No tools or commands are available. Inspect only the immutable supplied source artifacts; omitted dependencies and runtime behavior are unreviewed.")
+            } else {
+                REVIEW_SYSTEM_PROMPT.to_string()
+            }),
             ..Default::default()
         },
         ChatMessage::new("user".to_string(), job.prompt.clone()),
     ];
+    if let Some(scope) = ctx.review_scope.as_ref() {
+        if scope.ensure_current(gcx.clone()).await.is_err() {
+            return StageProduct::empty(StageRun::failed(
+                &label,
+                Some(model),
+                0,
+                crate::tools::review_scope::TARGET_REFUSED,
+            ));
+        }
+        let records =
+            match crate::privacy::records::declared_file_records(&gcx, scope.disclosed_paths()) {
+                Ok(records) => records,
+                Err(_) => {
+                    return StageProduct::empty(StageRun::failed(
+                        &label,
+                        Some(model),
+                        0,
+                        crate::tools::review_scope::TARGET_REFUSED,
+                    ))
+                }
+            };
+        for message in &mut messages {
+            message
+                .extra
+                .insert("review_candidate".into(), scope.candidate_context());
+            crate::privacy::records::merge_records(message, records.clone());
+        }
+    }
 
+    if clear_stage_messages(&gcx, &messages, &model).await.is_err() {
+        return StageProduct::empty(StageRun::failed(
+            &label,
+            Some(model),
+            0,
+            crate::tools::review_scope::TARGET_REFUSED,
+        ));
+    }
+    let repair_config = config.clone();
     let result = match run_subchat(gcx.clone(), messages, config).await {
         Ok(result) => result,
         Err(error) => {
@@ -249,27 +300,57 @@ async fn run_stage_inner(gcx: Arc<GlobalContext>, ctx: StageCtx, job: StageJob) 
             Err(format!("output_contract: {first_error}"))
         }
         Err(first_error) => {
+            if let Some(scope) = ctx.review_scope.as_ref() {
+                if scope.ensure_current(gcx.clone()).await.is_err() {
+                    return StageProduct::empty(StageRun::failed(
+                        &label,
+                        Some(model),
+                        0,
+                        crate::tools::review_scope::TARGET_REFUSED,
+                    ));
+                }
+            }
             tracing::info!("review: {label} broke the output contract ({first_error}), repairing");
             let mut retry_messages = result.messages.clone();
             retry_messages.push(ChatMessage::new(
                 "user".to_string(),
                 format!("{REPAIR_PROMPT} {first_error}"),
             ));
-            match run_subchat_once_with_explicit_params(
-                gcx.clone(),
-                &attribution,
-                &job.subchat,
-                retry_messages,
-                ctx.tool_call_id.clone(),
-                ctx.subchat_tx.clone(),
-                job.abort.clone(),
-                ctx.depth,
-                ctx.task_meta.clone(),
-                ctx.worktree.clone(),
-                TraceParent::rooted(&ctx.chat_id, &ctx.root_chat_id),
-            )
-            .await
+            if clear_stage_messages(&gcx, &retry_messages, &model)
+                .await
+                .is_err()
             {
+                return StageProduct::empty(StageRun::failed(
+                    &label,
+                    Some(model),
+                    0,
+                    crate::tools::review_scope::TARGET_REFUSED,
+                ));
+            }
+            let retry = if artifact_only {
+                let mut config = repair_config.clone();
+                config.max_steps = 1;
+                config.tools = crate::subchat::ToolsPolicy::None;
+                config.stateful = false;
+                config.chat_id = None;
+                run_subchat(gcx.clone(), retry_messages, config).await
+            } else {
+                run_subchat_once_with_explicit_params(
+                    gcx.clone(),
+                    &attribution,
+                    &job.subchat,
+                    retry_messages,
+                    ctx.tool_call_id.clone(),
+                    ctx.subchat_tx.clone(),
+                    job.abort.clone(),
+                    ctx.depth,
+                    ctx.task_meta.clone(),
+                    ctx.worktree.clone(),
+                    TraceParent::rooted(&ctx.chat_id, &ctx.root_chat_id),
+                )
+                .await
+            };
+            match retry {
                 Ok(retry) => {
                     merge_metering(&mut metering, retry.metering.clone());
                     let retry_text = get_last_assistant_content(&retry.messages);
@@ -310,6 +391,39 @@ async fn run_stage_inner(gcx: Arc<GlobalContext>, ctx: StageCtx, job: StageJob) 
             product
         }
     }
+}
+
+struct StagePrivacy(Vec<(usize, refact_privacy::FileRecord)>);
+
+impl PrivacyAudited for StagePrivacy {
+    fn privacy_records(
+        &self,
+    ) -> Result<Vec<(usize, refact_privacy::FileRecord)>, refact_privacy::PrivacyAuditError> {
+        Ok(self.0.clone())
+    }
+}
+
+async fn clear_stage_messages(
+    gcx: &Arc<GlobalContext>,
+    messages: &[ChatMessage],
+    model: &str,
+) -> Result<(), String> {
+    let refused = crate::tools::review_scope::TARGET_REFUSED;
+    let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0)
+        .await
+        .map_err(|_| refused)?;
+    let model = crate::caps::resolve_chat_model(caps, model).map_err(|_| refused)?;
+    let before =
+        crate::coordination::privacy_guard::policy_key(gcx, &model.base).map_err(|_| refused)?;
+    let records = refact_privacy::records_from_messages(messages).map_err(|_| refused)?;
+    crate::privacy::destinations::clear_for_model(gcx, StagePrivacy(records), &model.base)
+        .map_err(|_| refused)?;
+    if crate::coordination::privacy_guard::policy_key(gcx, &model.base).map_err(|_| refused)?
+        != before
+    {
+        return Err(refused.into());
+    }
+    Ok(())
 }
 
 enum Parsed {
@@ -443,6 +557,7 @@ pub(super) mod tests {
             chat_id: "chat".to_string(),
             root_chat_id: "chat".to_string(),
             activity: None,
+            review_scope: None,
         }
     }
 }

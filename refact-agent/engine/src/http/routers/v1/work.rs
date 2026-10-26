@@ -125,18 +125,33 @@ fn overview_request(query: &WorkQuery) -> Result<WorkOverviewRequest, WorkError>
 
 type ExtractedQuery = Result<Query<WorkQuery>, axum::extract::rejection::QueryRejection>;
 
+#[derive(serde::Serialize)]
+pub struct WorkListResponse {
+    #[serde(flatten)]
+    overview: crate::coordination::types::WorkOverview,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    board_index_health: Option<crate::coordination::board_index::BoardIndexHealth>,
+}
+
 pub async fn list(
     State(app): State<AppState>,
     peer: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
     query: ExtractedQuery,
-) -> Result<Json<crate::coordination::types::WorkOverview>, WorkError> {
+) -> Result<Json<WorkListResponse>, WorkError> {
     authorize(&app, &headers, peer.map(|p| p.0))?;
     let Query(query) = query.map_err(|_| WorkError::invalid("invalid Work query"))?;
     let caller = caller(&app, &query).await?;
-    Ok(Json(
-        service::overview(&app, &caller, overview_request(&query)?).await?,
-    ))
+    let overview = service::overview(&app, &caller, overview_request(&query)?).await?;
+    let board_index_health = if query.chat_id.is_none() {
+        Some(app.work_boards.snapshot(&caller.source_root).await.health)
+    } else {
+        None
+    };
+    Ok(Json(WorkListResponse {
+        overview,
+        board_index_health,
+    }))
 }
 
 /// Deletion control for recorded file provenance: forget one authorized path,
@@ -317,17 +332,31 @@ mod tests {
 
     #[tokio::test]
     async fn auth_and_trusted_scope_are_checked_before_discovery() {
-        let (app, _dir) = app(Some("work-test-token")).await;
+        let (app, dir) = app(Some("work-test-token")).await;
+        let board_path = dir.path().join(".refact/tasks/private-task/board.yaml");
+        std::fs::create_dir_all(board_path.parent().unwrap()).unwrap();
+        std::fs::write(&board_path, "cards: [").unwrap();
         for token in [None, Some("wrong")] {
             let (status, body) = request(app.clone(), "/work", token, "127.0.0.1:7").await;
             assert_eq!(status, StatusCode::UNAUTHORIZED);
             assert_eq!(body["code"], "unauthorized");
             assert!(body.get("rows").is_none());
+            assert!(body.get("board_index_health").is_none());
         }
         let (status, body) =
             request(app.clone(), "/work", Some("work-test-token"), "127.0.0.1:7").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["coverage"], "partial");
+        let health = &body["board_index_health"];
+        assert_eq!(health["coverage"], "partial");
+        assert_eq!(health["unavailable"], true);
+        assert_eq!(health["reason"], "parse");
+        assert_eq!(health["retry"], "backoff_or_source_change");
+        assert!(health["retry_after_ms"].as_u64().unwrap() <= 1000);
+        assert_eq!(health.as_object().unwrap().len(), 5);
+        let health = health.to_string();
+        assert!(!health.contains("private-task"));
+        assert!(!health.contains(dir.path().to_str().unwrap()));
         for uri in [
             "/work?source_workspace_root=/private",
             "/work?root=foreign",
@@ -357,6 +386,15 @@ mod tests {
     #[tokio::test]
     async fn gui_route_and_model_tool_agree_on_the_same_projection() {
         let (app, dir) = app(Some("work-test-token")).await;
+        let board_path = dir
+            .path()
+            .join(".refact/tasks/hidden-board-source/board.yaml");
+        std::fs::create_dir_all(board_path.parent().unwrap()).unwrap();
+        std::fs::write(&board_path, "cards: [").unwrap();
+        assert_eq!(
+            app.work_boards.snapshot(dir.path()).await.health.reason,
+            Some(crate::coordination::board_index::BoardIndexFailure::Parse)
+        );
         {
             let (project_root, _) =
                 crate::caps::project_model_defaults_state(app.gcx.clone()).await;
@@ -430,6 +468,12 @@ mod tests {
         };
         let tool: serde_json::Value =
             serde_json::from_str(&message.content.content_text_only()).unwrap();
+        assert!(gui.get("board_index_health").is_none());
+        assert!(tool.get("board_index_health").is_none());
+        assert!(gui.get("degraded").is_none());
+        assert!(tool.get("degraded").is_none());
+        assert!(!gui.to_string().contains("hidden-board-source"));
+        assert!(!tool.to_string().contains("hidden-board-source"));
         let ids = |page: &serde_json::Value| {
             let mut ids: Vec<String> = page["rows"]
                 .as_array()

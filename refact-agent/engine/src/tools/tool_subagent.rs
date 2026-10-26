@@ -464,11 +464,25 @@ impl Tool for ToolSubagent {
             completion_push: args.completion_push,
         };
         if args.preview_only {
-            let effective = crate::agents::spawn::preview_launch(&app, &req).await;
+            let effective = crate::agents::spawn::preview_launch(&app, &req)
+                .await
+                .and_then(|effective| {
+                    if let Some(resolved) = resolved_launch
+                        .as_ref()
+                        .filter(|resolved| !resolved.skipped.is_empty())
+                    {
+                        return Err(format!(
+                            "launch context could not be fully resolved: {} skipped/withheld entries",
+                            resolved.skipped.len()
+                        ));
+                    }
+                    Ok(effective)
+                });
             let mut preview = build_launch_preview_tool_result(
                 &args,
                 resolved_launch.as_ref(),
                 resolved_profile.as_ref(),
+                effective.as_ref().map_err(String::as_str),
                 tool_call_id,
             );
             if let ContextEnum::ChatMessage(message) = &mut preview {
@@ -485,15 +499,26 @@ impl Tool for ToolSubagent {
                 }
                 match effective {
                     Ok(effective) => {
+                        let tools = match &effective.tools {
+                            crate::subchat::ToolsPolicy::Only(tools)
+                            | crate::subchat::ToolsPolicy::Supervised { tools, .. } => {
+                                tools.clone()
+                            }
+                            crate::subchat::ToolsPolicy::None => Vec::new(),
+                            crate::subchat::ToolsPolicy::All => {
+                                return Err("concrete child authority unavailable".into())
+                            }
+                        };
+                        message.extra.insert("effective_tools".into(), json!(tools));
+                        message
+                            .extra
+                            .insert("effective_model".into(), json!(effective.model));
                         message
                             .extra
                             .insert("effective_launch".into(), json!(effective));
                     }
                     Err(error) => {
                         message.extra.insert("launch_blocked".into(), json!(error));
-                        if let ChatContent::SimpleText(text) = &mut message.content {
-                            text.push_str(&format!("\n\n## Launch Blocked\n- {error}"));
-                        }
                     }
                 }
             }
@@ -569,7 +594,6 @@ impl Tool for ToolSubagent {
                 crate::privacy::records::carry_records_into(message, &parent_messages)
                     .map_err(|_| "launch parent provenance unavailable")?;
                 scope.clear(&gcx, std::slice::from_ref(message))?;
-                message.extra.insert("effective_model".into(), json!(model));
                 message.extra.insert(
                     "launch_limits".into(),
                     json!({
@@ -1160,12 +1184,22 @@ fn build_launch_preview_tool_result(
     args: &SubagentArgs,
     resolved: Option<&ResolvedLaunchContext>,
     profile: Option<&crate::agents::profile::ResolvedProfile>,
+    effective: Result<&crate::agents::spawn::LaunchEffective, &str>,
     tool_call_id: &str,
 ) -> ContextEnum {
     let mut lines = vec![
         "# Launch Preview (no child spawned)".to_string(),
         String::new(),
-        format!("- task: {}", truncate_chars(&args.task, 200)),
+        "## Requested Configuration (not applied authority)".to_string(),
+        format!("- task: {}", preview_value(&args.task)),
+        format!(
+            "- model_name: {}",
+            preview_value(args.model_name.as_deref().unwrap_or("(not specified)"))
+        ),
+        format!(
+            "- model_type: {}",
+            preview_value(args.model_type.as_deref().unwrap_or("(not specified)"))
+        ),
         format!(
             "- worktree_mode: {}",
             match &args.worktree_mode {
@@ -1178,10 +1212,66 @@ fn build_launch_preview_tool_result(
             "- tools: {}",
             args.tools
                 .as_ref()
-                .map(|t| t.join(", "))
-                .unwrap_or_else(|| "(inherit all)".to_string())
+                .map(|tools| preview_names(tools))
+                .unwrap_or_else(|| "inherit within caller/profile ceiling".to_string())
+        ),
+        format!(
+            "- goal_budget: {}",
+            args.goal
+                .as_ref()
+                .and_then(|goal| goal.budget.as_ref())
+                .map(|budget| preview_value(&json!(budget).to_string()))
+                .unwrap_or_else(|| "(not specified)".to_string())
         ),
     ];
+    lines.push(String::new());
+    match effective {
+        Ok(effective) => {
+            let tools = match &effective.tools {
+                crate::subchat::ToolsPolicy::None => "none (0)".to_string(),
+                crate::subchat::ToolsPolicy::Only(tools)
+                | crate::subchat::ToolsPolicy::Supervised { tools, .. } => preview_names(tools),
+                crate::subchat::ToolsPolicy::All => "unresolved authority".to_string(),
+            };
+            lines.extend([
+                "## Applied Launch (prepared; not dispatched)".to_string(),
+                format!("- model: {}", preview_value(&effective.model)),
+                format!("- mode: {}", preview_value(&effective.mode)),
+                format!("- tools: {tools}"),
+                format!(
+                    "- worktree_mode: {}",
+                    preview_value(&effective.worktree_mode)
+                ),
+                format!("- max_steps: {}", effective.max_steps),
+                "- goal_budget: not part of the applied snapshot".to_string(),
+                format!("- subchat_depth: {}", effective.subchat_depth),
+                format!("- stateful: {}", effective.stateful),
+                format!(
+                    "- autonomous_no_confirm: {}",
+                    effective.autonomous_no_confirm
+                ),
+                format!(
+                    "- auto_approve_editing_tools: {}",
+                    effective.auto_approve_editing_tools
+                ),
+                format!(
+                    "- auto_approve_dangerous_commands: {}",
+                    effective.auto_approve_dangerous_commands
+                ),
+                format!("- prepared_messages: {}", effective.messages),
+                format!(
+                    "- accepted_bytes: {} / {}",
+                    effective.accepted_bytes, effective.accepted_byte_limit
+                ),
+            ]);
+        }
+        Err(error) => lines.extend([
+            "## Launch Blocked".to_string(),
+            format!("- {}", preview_value(error)),
+            "- applied_launch: unavailable; requested settings are not applied authority"
+                .to_string(),
+        ]),
+    }
     match profile {
         None => lines.push("- profile: (none; run-only configuration)".to_string()),
         Some(profile) => {
@@ -1189,18 +1279,19 @@ fn build_launch_preview_tool_result(
             lines.push("## Profile Provenance".to_string());
             lines.push(format!(
                 "- profile: {} (revision {})",
-                profile.name, profile.revision
+                preview_value(&profile.name),
+                profile.revision
             ));
             lines.push(format!(
                 "- contributed: {}",
-                label_or_dash(&profile.provenance.contributed)
+                preview_names(&profile.provenance.contributed)
             ));
             lines.push(format!(
                 "- narrowed by this run: {}",
-                label_or_dash(&profile.provenance.narrowed)
+                preview_names(&profile.provenance.narrowed)
             ));
-            for note in &profile.provenance.notes {
-                lines.push(format!("- note: {note}"));
+            for note in profile.provenance.notes.iter().take(20) {
+                lines.push(format!("- note: {}", preview_value(note)));
             }
         }
     }
@@ -1276,12 +1367,30 @@ fn build_launch_preview_tool_result(
     tool_message(lines.join("\n"), tool_call_id, extra)
 }
 
-fn label_or_dash(values: &[String]) -> String {
-    if values.is_empty() {
-        "-".to_string()
-    } else {
-        values.join(", ")
+fn preview_value(value: &str) -> String {
+    let mut chars = value.trim().chars();
+    let mut text = chars
+        .by_ref()
+        .take(256)
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>();
+    if chars.next().is_some() {
+        text.push_str("… [truncated]");
     }
+    text
+}
+
+fn preview_names(values: &[String]) -> String {
+    let mut names = values
+        .iter()
+        .take(20)
+        .map(|value| preview_value(value))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if values.len() > 20 {
+        names.push_str(" … [truncated]");
+    }
+    format!("{} ({})", names, values.len())
 }
 
 fn tool_message(content: String, tool_call_id: &str, extra: Map<String, Value>) -> ContextEnum {
@@ -1493,6 +1602,16 @@ mod tests {
             .unwrap()
             .expect("subagent must be publicly reachable");
         let message = preview.messages.first().unwrap();
+        let text = message.content.content_text_only();
+        let applied = text.split("## Applied Launch").nth(1).unwrap();
+        assert!(text.contains("## Requested Configuration (not applied authority)"));
+        assert!(text.contains("inherit within caller/profile ceiling"));
+        assert!(applied.contains("- model: test/default"));
+        assert!(applied.contains("- worktree_mode: inherit"));
+        assert!(applied.contains("- max_steps: "));
+        assert!(applied.contains("- accepted_bytes: "));
+        assert!(!text.contains("- project_root:"));
+        assert!(!text.contains("(inherit all)"));
         assert!(message
             .content
             .content_text_only()
@@ -1550,13 +1669,20 @@ mod tests {
             .content
             .content_text_only()
             .contains("## Launch Blocked"));
+        assert!(!blocked.messages[0]
+            .content
+            .content_text_only()
+            .contains("## Applied Launch"));
         ccx.lock().await.subchat_depth = saved_depth;
         assert!(app.agents.list_all().await.is_empty());
+        assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
         let settings_path = crate::runtime_settings::project_coordination_path(workspace.path());
         std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
         std::fs::write(&settings_path, "launch_source_bytes: 1\n").unwrap();
         let bounded = execute(request.clone()).await.unwrap().unwrap();
         assert_eq!(bounded.messages[0].extra["skipped_count"], 1);
+        assert!(bounded.messages[0].extra.get("launch_blocked").is_some());
+        assert!(bounded.messages[0].extra.get("effective_launch").is_none());
         assert_eq!(
             bounded.messages[0].extra["launch_limits"]["source_bytes"],
             1
@@ -1890,12 +2016,31 @@ mod tests {
         parent.lock().await.active_command.allowed_tools = vec!["cat".into()];
         let mut request = args();
         request.insert("profile".into(), json!("reviewer"));
+        request.insert("model_name".into(), json!("test/light"));
+        request.insert("model_type".into(), json!("thinking"));
+        request.insert(
+            "goal".into(),
+            json!({"content":"Review", "budget":{"max_turns":3}}),
+        );
         request.insert("action".into(), json!("preview"));
         let narrowed = run_subagent(&app, &ccx, "narrowed", request.clone())
             .await
             .unwrap();
         let message = &narrowed[0];
         assert_eq!(message.extra["effective_tools"], json!(["cat"]));
+        let text = message.content.content_text_only();
+        let applied = text
+            .split("## Applied Launch")
+            .nth(1)
+            .unwrap()
+            .split("## Profile Provenance")
+            .next()
+            .unwrap();
+        assert!(applied.contains("- tools: cat (1)"));
+        assert!(text.contains("- model_type: thinking"));
+        assert!(applied.contains("- model: test/light"));
+        assert!(applied.contains("- max_steps: 3"));
+        assert!(!applied.contains("shell"));
         let notes = message.extra["profile"]["provenance"]["notes"]
             .as_array()
             .unwrap();
@@ -1912,6 +2057,9 @@ mod tests {
         assert!(error.contains("cannot widen"), "{error}");
         assert!(app.agents.list_all().await.is_empty());
         assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
+        assert!(preview_value(&"x".repeat(300)).ends_with("[truncated]"));
+        assert!(!preview_value("first\nsecond").contains('\n'));
+        assert!(preview_names(&vec!["cat".into(); 21]).ends_with("[truncated] (21)"));
     }
 
     #[test]
@@ -2514,12 +2662,14 @@ mod tests {
     #[serial(test_runner)]
     #[tokio::test]
     async fn omitted_tools_cannot_add_force_tools_outside_parent_mode() {
-        let (ccx, _workspace) = test_context("restricted-parent").await;
+        let (ccx, workspace) = test_context("restricted-parent").await;
         let app = ccx.lock().await.app.clone();
         let parent_session = Arc::new(AMutex::new(crate::chat::types::ChatSession::new(
             "restricted-parent".to_string(),
         )));
         parent_session.lock().await.thread.mode = "NO_TOOLS".to_string();
+        parent_session.lock().await.work_project_root =
+            Some(workspace.path().canonicalize().unwrap());
         app.chat
             .sessions
             .write()

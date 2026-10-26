@@ -1702,7 +1702,29 @@ mod tests {
     async fn stateful_child_session_restores_identity_for_parent_tools() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let app = AppState::from_gcx(gcx.clone()).await;
-        let (_workspace, _parent_session) = parent_delivery_fixture(&app, "parent").await;
+        let (workspace, _parent_session) = parent_delivery_fixture(&app, "parent").await;
+        let root = workspace.path().canonicalize().unwrap();
+        let (defaults_root, _) = crate::caps::project_model_defaults_state(gcx.clone()).await;
+        let mut caps = crate::caps::CodeAssistantCaps::default();
+        caps.chat_models.insert(
+            "test/model".into(),
+            Arc::new(crate::caps::ChatModelRecord {
+                base: crate::caps::BaseModelRecord {
+                    id: "test/model".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        );
+        {
+            let mut state = gcx.caps_state.write().await;
+            state.caps = Some(Arc::new(caps));
+            state.loaded_project_root = Some(defaults_root);
+            state.last_attempted_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+        }
         let child = create(&app, "parent", "child").await;
         app.agents
             .mark_running(&child.agent_id, "subchat-child-chat".to_string())
@@ -1745,8 +1767,51 @@ mod tests {
             step_progress: None,
             trace_parent: crate::subchat::TraceParent::rooted("parent", "parent"),
         };
-        crate::subchat::install_stateful_subchat_session(&app, "subchat-child-chat", &config, &[])
-            .await;
+        crate::subchat::install_stateful_subchat_session(
+            &app,
+            "subchat-child-chat",
+            &config,
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::coordination::scope::model_caller(&app, "subchat-child-chat", "test/model")
+                .await
+                .err()
+                .unwrap()
+                .code,
+            "scope_denied"
+        );
+        let foreign = tempfile::tempdir().unwrap();
+        assert!(crate::subchat::install_stateful_subchat_session(
+            &app,
+            "subchat-child-chat",
+            &config,
+            &[],
+            Some(foreign.path())
+        )
+        .await
+        .is_err());
+        app.agent_executions
+            .remember_scope(&child.agent_id, root.clone());
+        let accepted = app.agent_executions.saved_scope(&child.agent_id).unwrap();
+        crate::subchat::install_stateful_subchat_session(
+            &app,
+            "subchat-child-chat",
+            &config,
+            &[],
+            Some(&accepted),
+        )
+        .await
+        .unwrap();
+        let caller =
+            crate::coordination::scope::model_caller(&app, "subchat-child-chat", "test/model")
+                .await
+                .unwrap();
+        assert_eq!(caller.source_root, root);
+        assert_eq!(caller.checkout_root, root);
         let thread = app
             .chat
             .sessions
@@ -1821,6 +1886,53 @@ mod tests {
             ccx.lock().await.background_agent_id.as_deref(),
             Some(child.agent_id.as_str())
         );
+        let caller =
+            crate::coordination::scope::model_caller(&app, "subchat-child-chat", "test/model")
+                .await
+                .unwrap();
+        assert_eq!(caller.source_root, root);
+        crate::tools::tool_work_overview::ToolWorkOverview {
+            config_path: String::new(),
+        }
+        .tool_execute(
+            ccx.clone(),
+            &"overview".into(),
+            &args(&[("scope", json!("project"))]),
+        )
+        .await
+        .unwrap();
+        crate::tools::tool_work_inspect::ToolWorkInspect {
+            config_path: String::new(),
+        }
+        .tool_execute(
+            ccx.clone(),
+            &"inspect".into(),
+            &args(&[("selector", json!({"kind":"project_worktrees"}))]),
+        )
+        .await
+        .unwrap();
+        let loaded =
+            crate::chat::trajectories::load_trajectory_for_chat(gcx.clone(), "subchat-child-chat")
+                .await
+                .unwrap();
+        assert!(
+            crate::coordination::scope::restored_source_root(&app, &loaded.source_path)
+                .await
+                .is_some()
+        );
+        let unrelated = tempfile::tempdir().unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![unrelated.path().into()];
+        assert!(
+            crate::coordination::scope::restored_source_root(&app, &loaded.source_path)
+                .await
+                .is_none()
+        );
+        assert!(
+            crate::coordination::scope::model_caller(&app, "subchat-child-chat", "test/model")
+                .await
+                .is_err()
+        );
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![workspace.path().into()];
         let mut progress = ToolProgressReport {
             config_path: String::new(),
         };

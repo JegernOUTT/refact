@@ -614,7 +614,13 @@ pub(crate) fn ensure_verifier_allows_merge(
     force: bool,
 ) -> Result<Option<String>, String> {
     let Some(report) = card.verifier_report.as_ref() else {
-        return Ok(None);
+        let concern =
+            "Verification evidence is unavailable: no verifier report was recorded".to_string();
+        return if force {
+            Ok(Some(verifier_force_warning(&card.id, &[concern])))
+        } else {
+            Err(format!("Card {} needs human review: no verifier report was recorded; wait for verification or retry with force=true to explicitly accept missing evidence", card.id))
+        };
     };
     use crate::tasks::types::{VerificationOutcome, VerifierReportClassification};
 
@@ -2297,7 +2303,19 @@ mod worktree_merge_tool_tests {
             comments: vec![],
             final_report: Some("done".to_string()),
             final_report_structured: None,
-            verifier_report: None,
+            verifier_report: Some(VerifierReport {
+                passed: true,
+                concerns: Vec::new(),
+                recommendation: "merge".into(),
+                classification: crate::tasks::types::VerifierReportClassification::Passed,
+                command_results: vec![crate::tasks::types::VerificationResult {
+                    command: "fixture verification".into(),
+                    exit_code: Some(0),
+                    passed: true,
+                    outcome: VerificationOutcome::Passed,
+                    ..Default::default()
+                }],
+            }),
             created_at: chrono::Utc::now().to_rfc3339(),
             started_at: None,
             last_heartbeat_at: None,
@@ -2605,6 +2623,14 @@ mod worktree_merge_tool_tests {
         };
 
         let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.verifier_report = None;
+        assert!(ensure_verifier_allows_merge(&card, false)
+            .unwrap_err()
+            .contains("no verifier report"));
+        assert!(ensure_verifier_allows_merge(&card, true)
+            .unwrap()
+            .unwrap()
+            .contains("no verifier report"));
         card.verifier_report = Some(VerifierReport {
             passed: true,
             concerns: Vec::new(),

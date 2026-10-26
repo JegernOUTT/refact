@@ -23,7 +23,7 @@ impl SealReason {
                 run_generation,
                 ..
             } => format!(
-                "This background agent finished (status: {status}, generation {run_generation}). Its worktree may have been merged or removed. To continue, ask its parent to call agent_resume with action=continue; to start new work, spawn a new agent."
+                "This background agent finished (status: {status}, generation {run_generation}). Its worktree may have been merged or removed. To continue, ask its parent to call agent_lifecycle with action=continue; to start new work, spawn a new agent."
             ),
             Self::TaskCardLeftDoing {
                 task_id,

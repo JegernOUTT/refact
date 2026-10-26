@@ -1,12 +1,116 @@
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::process::Command;
 use tokio::sync::Mutex as AMutex;
 
 use crate::global_context::GlobalContext;
 use crate::tools::review_types::{ReviewDiffSummary, ReviewScopeSummary, ScopeMode};
+use crate::worktrees::scope::ExecutionScope;
+
+pub(crate) const TARGET_REFUSED: &str =
+    "review target is unavailable, unauthorized or changed; request a fresh review target";
+
+const SOURCE_LIMIT_REFUSED: &str = "review source snapshot exceeds configured limits; narrow the review scope or adjust max_files, max_file_size and review_diff_char_cap";
+
+#[derive(Clone, Copy)]
+struct SourceLimits {
+    file_bytes: usize,
+    total_bytes: usize,
+}
+
+impl SourceLimits {
+    fn current() -> Self {
+        let settings = crate::runtime_settings::current();
+        Self {
+            file_bytes: settings.max_file_size.min(settings.review_diff_char_cap),
+            total_bytes: settings.review_diff_char_cap,
+        }
+    }
+}
+
+pub(crate) async fn resolve_review_files(
+    gcx: Arc<GlobalContext>,
+    execution_scope: Option<&ExecutionScope>,
+    selected_root: Option<&Path>,
+    files: &[String],
+) -> Result<(Option<PathBuf>, Vec<PathBuf>), String> {
+    let roots = match selected_root {
+        Some(root) => vec![root.to_path_buf()],
+        None => match execution_scope.filter(|scope| scope.is_enforced()) {
+            Some(scope) => {
+                scope.ensure_active_root().map_err(|_| TARGET_REFUSED)?;
+                vec![scope.effective_root().to_path_buf()]
+            }
+            None => crate::files_correction::get_project_dirs(gcx.clone()).await,
+        },
+    };
+    if files.is_empty() {
+        return Ok((selected_root.map(Path::to_path_buf), Vec::new()));
+    }
+    let mut authorized = Vec::new();
+    for root in roots {
+        let root = tokio::fs::canonicalize(root)
+            .await
+            .map_err(|_| TARGET_REFUSED)?;
+        authorized.push(dunce::simplified(&root).to_path_buf());
+    }
+    let mut requested = Vec::new();
+    let mut repo_root = None;
+    for file in files {
+        let raw = Path::new(file);
+        let candidates = if raw.is_absolute() {
+            vec![raw.to_path_buf()]
+        } else {
+            authorized.iter().map(|root| root.join(raw)).collect()
+        };
+        let mut matches = Vec::new();
+        for path in candidates {
+            let Ok(path) = tokio::fs::canonicalize(path).await else {
+                continue;
+            };
+            let path = dunce::simplified(&path).to_path_buf();
+            if path.is_file()
+                && authorized.iter().any(|root| path.starts_with(root))
+                && !matches.contains(&path)
+            {
+                matches.push(path);
+            }
+        }
+        if matches.len() != 1 {
+            return Err(TARGET_REFUSED.into());
+        }
+        let path = matches.remove(0);
+        crate::files_in_workspace::check_file_privacy_for_model_context(gcx.clone(), &path)
+            .await
+            .map_err(|_| TARGET_REFUSED)?;
+        let root = discover_root(&path).ok_or(TARGET_REFUSED)?;
+        if repo_root.as_ref().is_some_and(|expected| expected != &root)
+            || selected_root.is_some_and(|expected| expected != root)
+            || !authorized
+                .iter()
+                .any(|authorized| discover_root(authorized).as_ref() == Some(&root))
+        {
+            return Err(TARGET_REFUSED.into());
+        }
+        repo_root = Some(root);
+        if !requested.contains(&path) {
+            requested.push(path);
+        }
+    }
+    Ok((repo_root, requested))
+}
+
+fn discover_root(path: &Path) -> Option<PathBuf> {
+    let path = if path.is_file() { path.parent()? } else { path };
+    let repo = refact_worktrees::git::discover_repo(path).ok()?;
+    let root = refact_worktrees::git::repo_root(&repo).ok()?;
+    Some(dunce::simplified(&std::fs::canonicalize(root).ok()?).to_path_buf())
+}
 
 const ADJACENT_EXPANSION_CAP: usize = 40;
 
@@ -151,10 +255,204 @@ pub struct ReviewScope {
     pub hunks: DiffHunks,
     pub repo_root: Option<PathBuf>,
     pub expansion: Option<String>,
+    pub checkout: Option<Value>,
+    pub snapshots: Vec<(PathBuf, Option<String>)>,
+    pub artifacts: Option<Value>,
 }
 
 impl ReviewScope {
+    pub fn candidate_context(&self) -> Value {
+        json!({
+            "repo_root": self.repo_root,
+            "base": self.base,
+            "head": self.head,
+            "requested_paths": self.requested,
+            "checkout": self.checkout,
+            "file_snapshots": self.snapshots,
+            "mode": if self.artifacts.is_some() { "artifact_only" } else { "inherited_tools" },
+            "artifact_limits": self.artifacts.as_ref().map(|artifacts| &artifacts["limits"]),
+            "source_artifact_coverage": self.artifacts.as_ref().map(|artifacts| &artifacts["coverage"]),
+            "reviewed_files_basis": "selected scope paths, not proof of full-source inspection; see stage coverage and source_artifact_coverage",
+            "omitted_dependencies": self.artifacts.is_some(),
+        })
+    }
+
+    pub fn disclosed_paths(&self) -> Vec<PathBuf> {
+        let mut seen = HashSet::new();
+        self.requested
+            .iter()
+            .chain(self.files.iter())
+            .chain(self.dropped_files.iter())
+            .chain(self.changed_files.iter())
+            .chain(self.snapshots.iter().map(|(path, _)| path))
+            .filter(|path| seen.insert((*path).clone()))
+            .cloned()
+            .collect()
+    }
+
+    async fn authorize_paths(&self, gcx: Arc<GlobalContext>) -> Result<(), String> {
+        for path in self.disclosed_paths() {
+            if self
+                .repo_root
+                .as_ref()
+                .is_some_and(|root| !path.starts_with(root))
+            {
+                return Err(TARGET_REFUSED.into());
+            }
+            crate::files_in_workspace::check_file_privacy_for_model_context(gcx.clone(), &path)
+                .await
+                .map_err(|_| TARGET_REFUSED)?;
+            canonical_source_path(&path).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn load_artifacts(&mut self, gcx: Arc<GlobalContext>) -> Result<(), String> {
+        self.load_artifacts_with_limits(gcx, SourceLimits::current())
+            .await
+    }
+
+    async fn load_artifacts_with_limits(
+        &mut self,
+        gcx: Arc<GlobalContext>,
+        limits: SourceLimits,
+    ) -> Result<(), String> {
+        if self.requested.is_empty() {
+            return Err("artifact-only review requires explicit candidate files".into());
+        }
+        self.ensure_current_with_limits(gcx.clone(), limits).await?;
+        let mut remaining = limits.total_bytes;
+        let mut artifacts = Vec::new();
+        let mut supplied = Vec::new();
+        let mut missing = Vec::new();
+        for path in &self.files {
+            let Some(bytes) = read_source(gcx.clone(), path, limits, &mut remaining).await? else {
+                if self.requested.contains(path) {
+                    return Err(TARGET_REFUSED.into());
+                }
+                missing.push(path.clone());
+                continue;
+            };
+            let digest = format!("{:x}", Sha256::digest(&bytes));
+            if !self
+                .snapshots
+                .iter()
+                .any(|(known, expected)| known == path && expected.as_ref() == Some(&digest))
+            {
+                return Err(TARGET_REFUSED.into());
+            }
+            let content = String::from_utf8(bytes).map_err(|_| TARGET_REFUSED)?;
+            supplied.push(path.clone());
+            artifacts.push(
+                json!({"path": path, "head": self.head, "sha256": digest, "content": content}),
+            );
+        }
+        let diff_only: Vec<_> = self
+            .changed_files
+            .iter()
+            .filter(|path| !supplied.contains(path))
+            .cloned()
+            .collect();
+        let omitted: Vec<_> = self
+            .disclosed_paths()
+            .into_iter()
+            .filter(|path| !supplied.contains(path))
+            .collect();
+        self.artifacts = Some(json!({
+            "limits": {
+                "total_bytes": limits.total_bytes, "file_bytes": limits.file_bytes,
+                "source_files": self.files.len(),
+                "max_read_bytes_per_pass": limits.total_bytes.saturating_add(1),
+                "max_file_read_bytes": limits.file_bytes.saturating_add(1),
+                "read_probe_bytes": 1,
+                "applies_to": "source snapshot, artifact load and revalidation bodies only; legacy git diff capture is separate",
+            },
+            "files": artifacts,
+            "coverage": {
+                "source_artifact_files": supplied,
+                "source_artifact_basis": "complete contents supplied for every selected existing scope file; this is input coverage, not proof the stage inspected it",
+                "diff_only_files": diff_only,
+                "diff_only_basis": "changed paths without a source artifact; the supplied diff may be truncated and is not full-source coverage",
+                "omitted_source_files": omitted,
+                "dropped_scope_files": self.dropped_files,
+                "missing_source_files": missing,
+                "omitted_dependencies": true,
+            },
+            "omitted_files": omitted,
+            "omitted_dependencies": true,
+            "tools_available": false,
+        }));
+        self.ensure_current_with_limits(gcx, limits).await
+    }
+
+    pub async fn ensure_current(&self, gcx: Arc<GlobalContext>) -> Result<(), String> {
+        self.ensure_current_with_limits(gcx, SourceLimits::current())
+            .await
+    }
+
+    async fn ensure_current_with_limits(
+        &self,
+        gcx: Arc<GlobalContext>,
+        limits: SourceLimits,
+    ) -> Result<(), String> {
+        if let Some(root) = self.repo_root.as_ref() {
+            if discover_root(root).as_ref() != Some(root)
+                || git_output(root, &["rev-parse", "--verify", "HEAD"]).await != self.head
+            {
+                return Err(TARGET_REFUSED.into());
+            }
+        }
+        self.authorize_paths(gcx.clone()).await?;
+        if self.snapshots.len() != self.files.len()
+            || self.requested.iter().any(|path| !self.files.contains(path))
+            || self.requested.iter().any(|path| {
+                !self
+                    .snapshots
+                    .iter()
+                    .any(|(known, digest)| known == path && digest.is_some())
+            })
+        {
+            return Err(TARGET_REFUSED.into());
+        }
+        let mut remaining = limits.total_bytes;
+        for (path, expected) in &self.snapshots {
+            if !self.files.contains(path)
+                || snapshot(gcx.clone(), path, limits, &mut remaining).await? != *expected
+            {
+                return Err(TARGET_REFUSED.into());
+            }
+        }
+        if let (Some(root), Some(base)) = (&self.repo_root, &self.base) {
+            let diff = refact_worktrees::git::diff_for_path(
+                root,
+                Some(base),
+                None,
+                max_diff_patch_bytes(),
+            )
+            .map_err(|_| TARGET_REFUSED)?;
+            let mut changed = Vec::new();
+            for file in diff.files {
+                let path =
+                    crate::files_correction::canonicalize_normalized_path(root.join(file.path));
+                if !changed.contains(&path) {
+                    changed.push(path);
+                }
+            }
+            if changed != self.changed_files
+                || (!diff.patch.trim().is_empty()).then_some(diff.patch) != self.diff_patch
+            {
+                return Err(TARGET_REFUSED.into());
+            }
+        }
+        Ok(())
+    }
+
     pub fn in_scope(&self, file: &str) -> bool {
+        if let Some(root) = &self.repo_root {
+            if Path::new(file).is_absolute() && !Path::new(file).starts_with(root) {
+                return false;
+            }
+        }
         if self.mode == ScopeMode::Broad || self.files.is_empty() {
             return true;
         }
@@ -196,6 +494,7 @@ impl ReviewScope {
             head: self.head.clone(),
             changed_files: self.changed_files.len(),
             hunks: self.hunks.hunk_count(),
+            candidate: Some(self.candidate_context()),
         }
     }
 }
@@ -207,6 +506,9 @@ pub struct ScopeRequest {
     pub focus: Option<String>,
     pub plan: Option<String>,
     pub max_files: usize,
+    pub repo_root: Option<PathBuf>,
+    pub expected_head: Option<String>,
+    pub checkout: Option<Value>,
 }
 
 fn repo_root_for_scope(gcx: &GlobalContext, paths: &[PathBuf]) -> Option<PathBuf> {
@@ -243,10 +545,17 @@ async fn git_output(root: &Path, args: &[&str]) -> Option<String> {
 
 pub async fn resolve_base(root: &Path, requested: Option<&str>) -> Option<String> {
     if let Some(requested) = requested.map(str::trim).filter(|v| !v.is_empty()) {
-        if let Some(base) = git_output(root, &["merge-base", requested, "HEAD"]).await {
-            return Some(base);
-        }
-        return git_output(root, &["rev-parse", requested]).await;
+        let commit = git_output(
+            root,
+            &[
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                &format!("{requested}^{{commit}}"),
+            ],
+        )
+        .await?;
+        return git_output(root, &["merge-base", &commit, "HEAD"]).await;
     }
     for candidate in [
         "HEAD@{upstream}",
@@ -297,7 +606,90 @@ async fn adjacent_expansion(
     (expanded, note)
 }
 
-pub async fn build_review_scope(gcx: Arc<GlobalContext>, request: ScopeRequest) -> ReviewScope {
+async fn canonical_source_path(path: &Path) -> Result<bool, String> {
+    match tokio::fs::canonicalize(path).await {
+        Ok(canonical) if dunce::simplified(&canonical) == path => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        _ => Err(TARGET_REFUSED.into()),
+    }
+}
+
+fn read_bounded_source(source: impl Read, limit: usize) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    source
+        .take(limit.saturating_add(1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| TARGET_REFUSED)?;
+    if bytes.len() > limit {
+        return Err(SOURCE_LIMIT_REFUSED.into());
+    }
+    Ok(bytes)
+}
+
+async fn read_source(
+    gcx: Arc<GlobalContext>,
+    path: &PathBuf,
+    limits: SourceLimits,
+    remaining: &mut usize,
+) -> Result<Option<Vec<u8>>, String> {
+    crate::files_in_workspace::check_file_privacy_for_model_context(gcx, path)
+        .await
+        .map_err(|_| TARGET_REFUSED)?;
+    if !canonical_source_path(path).await? {
+        return Ok(None);
+    }
+    if !tokio::fs::symlink_metadata(path)
+        .await
+        .map_err(|_| TARGET_REFUSED)?
+        .is_file()
+    {
+        return Err(TARGET_REFUSED.into());
+    }
+    let limit = limits.file_bytes.min(*remaining);
+    let source_path = path.clone();
+    let bytes = tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(source_path).map_err(|_| TARGET_REFUSED)?;
+        let metadata = file.metadata().map_err(|_| TARGET_REFUSED)?;
+        if !metadata.is_file() {
+            return Err(TARGET_REFUSED.into());
+        }
+        if metadata.len() > limit as u64 {
+            return Err(SOURCE_LIMIT_REFUSED.into());
+        }
+        read_bounded_source(file, limit)
+    })
+    .await
+    .map_err(|_| TARGET_REFUSED)??;
+    if !canonical_source_path(path).await? {
+        return Err(TARGET_REFUSED.into());
+    }
+    *remaining -= bytes.len();
+    Ok(Some(bytes))
+}
+
+async fn snapshot(
+    gcx: Arc<GlobalContext>,
+    path: &PathBuf,
+    limits: SourceLimits,
+    remaining: &mut usize,
+) -> Result<Option<String>, String> {
+    Ok(read_source(gcx, path, limits, remaining)
+        .await?
+        .map(|bytes| format!("{:x}", Sha256::digest(bytes))))
+}
+
+pub async fn build_review_scope(
+    gcx: Arc<GlobalContext>,
+    request: ScopeRequest,
+) -> Result<ReviewScope, String> {
+    build_review_scope_with_limits(gcx, request, SourceLimits::current()).await
+}
+
+async fn build_review_scope_with_limits(
+    gcx: Arc<GlobalContext>,
+    request: ScopeRequest,
+    limits: SourceLimits,
+) -> Result<ReviewScope, String> {
     let ScopeRequest {
         requested,
         mode,
@@ -305,14 +697,38 @@ pub async fn build_review_scope(gcx: Arc<GlobalContext>, request: ScopeRequest) 
         focus,
         plan,
         max_files,
+        repo_root,
+        expected_head,
+        checkout,
     } = request;
     let max_files = max_files.max(1);
-    let repo_root = repo_root_for_scope(gcx.as_ref(), &requested);
+    if requested.len() > max_files {
+        return Err(SOURCE_LIMIT_REFUSED.into());
+    }
+    let explicit_base = base.is_some();
+    if base.as_ref().is_some_and(|base| base.trim().is_empty()) {
+        return Err("review base is unavailable or invalid".into());
+    }
+    let repo_root = repo_root
+        .or_else(|| repo_root_for_scope(gcx.as_ref(), &requested))
+        .and_then(|root| discover_root(&root));
+    if (!requested.is_empty() || explicit_base || expected_head.is_some()) && repo_root.is_none() {
+        return Err(TARGET_REFUSED.into());
+    }
 
     let (base, head, changed_files, diff_patch, patch_total_bytes) = match repo_root.as_ref() {
         Some(root) => {
             let base = resolve_base(root, base.as_deref()).await;
-            let head = git_output(root, &["rev-parse", "--short", "HEAD"]).await;
+            if explicit_base && base.is_none() {
+                return Err("review base is unavailable or invalid".into());
+            }
+            let head = git_output(root, &["rev-parse", "--verify", "HEAD"]).await;
+            if expected_head
+                .as_ref()
+                .is_some_and(|expected| head.as_ref() != Some(expected))
+            {
+                return Err(TARGET_REFUSED.into());
+            }
             let max_patch_bytes = max_diff_patch_bytes();
             match base.as_ref().and_then(|base| {
                 refact_worktrees::git::diff_for_path(root, Some(base), None, max_patch_bytes).ok()
@@ -332,6 +748,9 @@ pub async fn build_review_scope(gcx: Arc<GlobalContext>, request: ScopeRequest) 
                     let total = diff.patch_total_bytes.max(diff.patch_shown_bytes);
                     let patch = (!diff.patch.trim().is_empty()).then_some(diff.patch);
                     (base, head, changed, patch, total)
+                }
+                None if !requested.is_empty() || explicit_base || expected_head.is_some() => {
+                    return Err(TARGET_REFUSED.into());
                 }
                 None => (base, head, Vec::new(), None, 0),
             }
@@ -375,12 +794,12 @@ pub async fn build_review_scope(gcx: Arc<GlobalContext>, request: ScopeRequest) 
         dropped_files = files.split_off(max_files);
         let dropped = dropped_files.len();
         expansion = Some(match expansion {
-            Some(note) => format!("{note}, truncated to {max_files} files, {dropped} not reviewed"),
-            None => format!("truncated to {max_files} files, {dropped} not reviewed"),
+            Some(note) => format!("{note}, truncated to {max_files} scope files; {dropped} excluded from source snapshots but may appear in the diff"),
+            None => format!("truncated to {max_files} scope files; {dropped} excluded from source snapshots but may appear in the diff"),
         });
     }
 
-    ReviewScope {
+    let mut scope = ReviewScope {
         mode,
         requested,
         files,
@@ -399,7 +818,21 @@ pub async fn build_review_scope(gcx: Arc<GlobalContext>, request: ScopeRequest) 
         hunks,
         repo_root,
         expansion,
+        checkout,
+        snapshots: Vec::new(),
+        artifacts: None,
+    };
+    scope.authorize_paths(gcx.clone()).await?;
+    let mut remaining = limits.total_bytes;
+    for path in &scope.files {
+        let digest = snapshot(gcx.clone(), path, limits, &mut remaining).await?;
+        if digest.is_none() && scope.requested.contains(path) {
+            return Err(TARGET_REFUSED.into());
+        }
+        scope.snapshots.push((path.clone(), digest));
     }
+    scope.ensure_current_with_limits(gcx, limits).await?;
+    Ok(scope)
 }
 
 pub struct DiffAttribution {
@@ -553,6 +986,9 @@ mod tests {
             hunks: DiffHunks::parse("--- a/moved.rs\n+++ b/moved.rs\n@@ -0,0 +1,1 @@\n+alpha\n"),
             repo_root: Some(temp.path().to_path_buf()),
             expansion: None,
+            checkout: None,
+            snapshots: vec![],
+            artifacts: None,
         };
         let attribution = DiffAttribution::new(&scope);
 
@@ -565,27 +1001,263 @@ mod tests {
     async fn review_scope_strict_keeps_requested_files_and_flags_outsiders() {
         let temp = tempfile::tempdir().unwrap();
         init_repo(temp.path());
+        let foreign = tempfile::tempdir().unwrap();
+        init_repo(foreign.path());
+        let root = dunce::simplified(&temp.path().canonicalize().unwrap()).to_path_buf();
+        let foreign_root = dunce::simplified(&foreign.path().canonicalize().unwrap()).to_path_buf();
+        let base = run_git(&root, &["rev-parse", "HEAD"]);
+        std::fs::write(root.join("base.txt"), "candidate\n").unwrap();
+        run_git(&root, &["commit", "-am", "candidate"]);
+        let head = run_git(&root, &["rev-parse", "HEAD"]);
+        std::fs::write(foreign_root.join("base.txt"), "foreign provider\n").unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
-        let requested = vec![temp.path().join("base.txt")];
-
-        let scope = build_review_scope(
-            gcx,
-            ScopeRequest {
-                requested: requested.clone(),
-                mode: ScopeMode::Strict,
-                base: None,
-                focus: Some("  safety  ".to_string()),
-                plan: None,
-                max_files: 10,
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![foreign_root.clone()];
+        *gcx.privacy_settings.write().unwrap() = Arc::new(crate::privacy::PrivacySettings {
+            privacy_rules: crate::privacy::FilePrivacySettings {
+                only_send_to_servers_I_control: vec![],
+                blocked: vec!["*.blocked".into()],
             },
-        )
-        .await;
-
+            loaded_ts: u64::MAX / 2,
+        });
+        std::fs::write(root.join("private.blocked"), "private\n").unwrap();
+        let requested = vec![root.join("base.txt")];
+        let files = vec![requested[0].to_string_lossy().into_owned()];
+        assert_eq!(
+            resolve_review_files(gcx.clone(), None, None, &files)
+                .await
+                .unwrap_err(),
+            TARGET_REFUSED,
+        );
+        let (repo_root, resolved) = resolve_review_files(gcx.clone(), None, Some(&root), &files)
+            .await
+            .unwrap();
+        assert_eq!(resolved, requested);
+        assert_eq!(repo_root, Some(root.clone()));
+        let partial = vec![
+            files[0].clone(),
+            root.join("missing.txt").to_string_lossy().into_owned(),
+        ];
+        assert_eq!(
+            resolve_review_files(gcx.clone(), None, Some(&root), &partial)
+                .await
+                .unwrap_err(),
+            TARGET_REFUSED,
+        );
+        assert_eq!(
+            resolve_review_files(gcx.clone(), None, Some(&root), &["private.blocked".into()])
+                .await
+                .unwrap_err(),
+            TARGET_REFUSED,
+        );
+        std::fs::remove_file(root.join("private.blocked")).unwrap();
+        let request = |base: Option<String>| ScopeRequest {
+            requested: requested.clone(),
+            mode: ScopeMode::Strict,
+            base,
+            focus: Some("  safety  ".to_string()),
+            plan: None,
+            max_files: 10,
+            repo_root: Some(root.clone()),
+            expected_head: Some(head.clone()),
+            checkout: None,
+        };
+        assert_eq!(
+            build_review_scope(gcx.clone(), request(Some("missing-base".into())))
+                .await
+                .unwrap_err(),
+            "review base is unavailable or invalid",
+        );
+        let scope = build_review_scope(gcx.clone(), request(Some(base.clone())))
+            .await
+            .unwrap();
         assert_eq!(scope.requested, requested);
-        assert!(scope.in_scope(&temp.path().join("base.txt").to_string_lossy()));
+        assert!(scope.in_scope(&root.join("base.txt").to_string_lossy()));
+        assert!(!scope.in_scope(&foreign_root.join("base.txt").to_string_lossy()));
         assert!(!scope.in_scope("src/elsewhere.rs"));
         assert_eq!(scope.focus.as_deref(), Some("safety"));
-        assert!(scope.base.is_some());
+        assert_eq!(scope.diff_summary().base, Some(base.clone()));
+        assert_eq!(scope.diff_summary().head, Some(head.clone()));
+        assert!(scope.diff_patch.as_deref().unwrap().contains("+candidate"));
+        assert!(!scope
+            .diff_patch
+            .as_deref()
+            .unwrap()
+            .contains("foreign provider"));
+        let identity = scope.candidate_context();
+        let catalog = crate::tools::review_agents::stages::embedded_catalog();
+        assert!(!catalog.is_empty());
+        for stage in &catalog {
+            let prompt =
+                crate::tools::review_agents::prompts::build_stage_prompt(stage, &scope, None);
+            assert!(prompt.contains(&identity.to_string()));
+        }
+        let adversarial = catalog
+            .iter()
+            .find(|stage| stage.id == "adversarial")
+            .unwrap();
+        assert!(
+            crate::tools::review_agents::prompts::build_adversarial_prompt(
+                adversarial,
+                &scope,
+                &[]
+            )
+            .contains(&identity.to_string())
+        );
+        assert_eq!(scope.diff_summary().candidate, Some(identity));
+        scope.ensure_current(gcx.clone()).await.unwrap();
+        std::fs::write(root.join("base.txt"), "changed during review\n").unwrap();
+        assert_eq!(
+            scope.ensure_current(gcx.clone()).await.unwrap_err(),
+            TARGET_REFUSED
+        );
+        std::fs::write(root.join("base.txt"), "candidate\n").unwrap();
+        let peer = root.join("peer.txt");
+        std::fs::write(&peer, "oversize peer body\n").unwrap();
+        let limits = SourceLimits {
+            file_bytes: 16,
+            total_bytes: 16,
+        };
+        let mut capped_request = request(Some(base.clone()));
+        capped_request.max_files = 1;
+        let mut capped = build_review_scope_with_limits(gcx.clone(), capped_request, limits)
+            .await
+            .unwrap();
+        assert_eq!(capped.files, requested);
+        assert_eq!(capped.dropped_files, vec![peer.clone()]);
+        assert_eq!(capped.snapshots, scope.snapshots);
+        assert!(capped.changed_files.contains(&peer));
+        assert!(capped
+            .diff_patch
+            .as_deref()
+            .unwrap()
+            .contains("+oversize peer body"));
+        capped
+            .load_artifacts_with_limits(gcx.clone(), limits)
+            .await
+            .unwrap();
+        let artifacts = capped.artifacts.as_ref().unwrap();
+        assert_eq!(
+            artifacts["coverage"]["source_artifact_files"],
+            json!(requested)
+        );
+        assert_eq!(artifacts["coverage"]["diff_only_files"], json!([peer]));
+        assert_eq!(artifacts["coverage"]["omitted_source_files"], json!([peer]));
+        assert_eq!(artifacts["files"][0]["content"], "candidate\n");
+        assert_eq!(artifacts["files"].as_array().unwrap().len(), 1);
+        let records =
+            crate::privacy::records::declared_file_records(&gcx, capped.disclosed_paths()).unwrap();
+        assert_eq!(records.len(), 2);
+        assert!(records
+            .iter()
+            .any(|record| record.path == peer.to_string_lossy().as_ref()));
+        assert_eq!(
+            capped.candidate_context()["source_artifact_coverage"],
+            artifacts["coverage"]
+        );
+        let prompt =
+            crate::tools::review_agents::prompts::build_stage_prompt(&catalog[0], &capped, None);
+        assert!(prompt.contains(&artifacts.to_string()));
+        assert_eq!(
+            build_review_scope_with_limits(gcx.clone(), request(Some(base.clone())), limits)
+                .await
+                .unwrap_err(),
+            SOURCE_LIMIT_REFUSED,
+        );
+        let mut explicit_overflow = request(Some(base.clone()));
+        explicit_overflow.max_files = 1;
+        explicit_overflow.requested.push(peer.clone());
+        assert_eq!(
+            build_review_scope_with_limits(gcx.clone(), explicit_overflow, limits)
+                .await
+                .unwrap_err(),
+            SOURCE_LIMIT_REFUSED,
+        );
+        std::fs::write(&peer, "peer body\n").unwrap();
+        assert_eq!(
+            build_review_scope_with_limits(gcx.clone(), request(Some(base.clone())), limits)
+                .await
+                .unwrap_err(),
+            SOURCE_LIMIT_REFUSED,
+        );
+        let fitting = SourceLimits {
+            file_bytes: 16,
+            total_bytes: 20,
+        };
+        let mut complete =
+            build_review_scope_with_limits(gcx.clone(), request(Some(base.clone())), fitting)
+                .await
+                .unwrap();
+        complete
+            .load_artifacts_with_limits(gcx.clone(), fitting)
+            .await
+            .unwrap();
+        let coverage = &complete.artifacts.as_ref().unwrap()["coverage"];
+        assert_eq!(
+            coverage["source_artifact_files"],
+            json!([requested[0], peer])
+        );
+        assert_eq!(coverage["diff_only_files"], json!([]));
+        assert_eq!(coverage["omitted_source_files"], json!([]));
+        std::fs::write(root.join("base.txt"), "source grows past its cap\n").unwrap();
+        assert_eq!(
+            capped
+                .ensure_current_with_limits(gcx.clone(), limits)
+                .await
+                .unwrap_err(),
+            SOURCE_LIMIT_REFUSED,
+        );
+        let mut growing = std::fs::File::open(&peer).unwrap();
+        let original_len = growing.metadata().unwrap().len() as usize;
+        assert_eq!(original_len, 10);
+        {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&peer)
+                .unwrap()
+                .write_all(b"appended after metadata\n")
+                .unwrap();
+        }
+        assert_eq!(
+            read_bounded_source(&mut growing, original_len).unwrap_err(),
+            SOURCE_LIMIT_REFUSED
+        );
+        use std::io::Seek;
+        assert_eq!(growing.stream_position().unwrap(), original_len as u64 + 1);
+        std::fs::write(root.join("base.txt"), "candidate\n").unwrap();
+        std::fs::write(root.join("private.blocked"), "present private body\n").unwrap();
+        assert_eq!(
+            capped
+                .ensure_current_with_limits(gcx.clone(), limits)
+                .await
+                .unwrap_err(),
+            TARGET_REFUSED,
+        );
+        let mut private_request = request(Some(base.clone()));
+        private_request.max_files = 1;
+        assert_eq!(
+            build_review_scope_with_limits(gcx.clone(), private_request, limits)
+                .await
+                .unwrap_err(),
+            TARGET_REFUSED,
+        );
+        let default_scope = build_review_scope(
+            gcx,
+            ScopeRequest {
+                requested: vec![],
+                mode: ScopeMode::Broad,
+                base: None,
+                focus: None,
+                plan: None,
+                max_files: 10,
+                repo_root: None,
+                expected_head: None,
+                checkout: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(default_scope.repo_root, Some(foreign_root));
+        assert!(default_scope.requested.is_empty());
     }
 }

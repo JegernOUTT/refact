@@ -465,7 +465,10 @@ pub async fn gate_tool_call(
             ccx_lock.chat_id.clone(),
         )
     };
-    let workspace_roots = if let Some(scope) = active_execution_scope(execution_scope.as_ref()) {
+    let checkout = crate::tools::command_checkout::resolve(&ccx, args).await?;
+    let workspace_roots = if let Some(checkout) = &checkout {
+        vec![checkout.root().to_path_buf()]
+    } else if let Some(scope) = active_execution_scope(execution_scope.as_ref()) {
         vec![scope.effective_root().to_path_buf()]
     } else {
         get_unscoped_project_dirs(gcx.clone()).await

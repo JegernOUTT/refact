@@ -110,6 +110,7 @@ pub(super) async fn app_with_parent_session(
     let session = Arc::new(tokio::sync::Mutex::new(ChatSession::new(
         parent_chat_id.to_string(),
     )));
+    session.lock().await.work_project_root = Some(workspace.path().canonicalize().unwrap());
     app.chat
         .sessions
         .write()

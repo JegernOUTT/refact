@@ -111,9 +111,13 @@ pub fn prepare_goal_update(
     let projection = session.try_accepted_control_projection()?;
     let base = refact_chat_api::goal_role::current_base_goal(&projection)
         .ok_or("no goal to update; call set_goal first")?;
+    let active = refact_core::active_context::active_context(&session.messages)
+        .map_err(|error| error.to_string())?;
     let known = session
         .messages
         .iter()
+        .chain(active.messages.iter())
+        .chain(session.task_goal_messages.iter().flatten())
         .chain(session.post_tool_side_effects.iter())
         .chain(
             session
@@ -198,4 +202,34 @@ pub fn goal_revision(session: &crate::chat::types::ChatSession) -> u64 {
         .try_accepted_control_projection()
         .map(|p| goal_revision_from_messages(&p.messages))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat::types::ChatSession;
+    use refact_core::active_context::{make_reconstruction_report, ReconstructionMetadata};
+
+    #[test]
+    fn rebuilt_legacy_goal_update_does_not_replay_imported_controls() {
+        let mut session = ChatSession::new("planner-update".into());
+        let plan = crate::chat::internal_roles::plan("task_planner", 1, "approved plan", None);
+        let controls = import_legacy_plan(&[plan]);
+        assert!(controls.iter().any(|message| message.role == "goal"));
+        session.messages =
+            vec![
+                make_reconstruction_report(controls.clone(), ReconstructionMetadata::default())
+                    .unwrap(),
+            ];
+        session.task_goal_messages = Some(controls);
+        let updates =
+            prepare_goal_update(&session, Some("new outcome"), None, "tool.update_goal").unwrap();
+        assert_eq!(
+            updates.len(),
+            1,
+            "existing canonical controls were replayed"
+        );
+        assert_eq!(updates[0].content.content_text_only(), "new outcome");
+        assert_eq!(updates[0].extra["event"]["subkind"], "goal_delta");
+    }
 }
