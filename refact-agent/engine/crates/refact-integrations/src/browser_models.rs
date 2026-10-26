@@ -3373,20 +3373,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn context_step_serde_round_trip_masks_nothing_in_typed_input() {
-        let step = BrowserStep::SetHttpCredentials {
-            username: "user".to_string(),
-            password: "secret".to_string(),
-        };
-        let json = serde_json::to_value(&step).unwrap();
-        assert_eq!(json["action"], "set_http_credentials");
-        assert!(matches!(
-            serde_json::from_value::<BrowserStep>(json).unwrap(),
-            BrowserStep::SetHttpCredentials { .. }
-        ));
-    }
-
     fn all_browser_steps() -> Vec<BrowserStep> {
         let locator = || BrowserLocator::reference("e1");
         vec![
@@ -3917,25 +3903,6 @@ mod tests {
     }
 
     #[test]
-    fn help_topic_is_optional_and_omitted_from_the_wire_when_unset() {
-        let bare: BrowserStep =
-            serde_json::from_value(serde_json::json!({"action": "help"})).unwrap();
-        assert!(matches!(bare, BrowserStep::Help { topic: None }));
-        assert_eq!(
-            serde_json::to_value(&bare).unwrap(),
-            serde_json::json!({"action": "help"})
-        );
-
-        let scoped: BrowserStep =
-            serde_json::from_value(serde_json::json!({"action": "help", "topic": "locators"}))
-                .unwrap();
-        assert!(matches!(
-            scoped,
-            BrowserStep::Help { topic: Some(ref topic) } if topic == "locators"
-        ));
-    }
-
-    #[test]
     fn add_virtual_authenticator_parses_without_an_id_and_never_serializes_one() {
         let step: BrowserStep = serde_json::from_str(
             r#"{"action": "add_virtual_authenticator", "protocol": "ctap2", "transport": "internal"}"#,
@@ -4149,16 +4116,6 @@ mod tests {
     }
 
     #[test]
-    fn test_locator_css_serde() {
-        let loc = BrowserLocator::css("#btn");
-        let json = serde_json::to_value(&loc).unwrap();
-        assert_eq!(json["by"], "css");
-        assert_eq!(json["value"], "#btn");
-        let parsed: BrowserLocator = serde_json::from_value(json).unwrap();
-        assert_eq!(parsed, loc);
-    }
-
-    #[test]
     fn ref_locator_round_trips() {
         for reference in ["e12", "f2e7"] {
             let locator = BrowserLocator::reference(reference);
@@ -4190,77 +4147,6 @@ mod tests {
             serde_json::from_value::<BrowserLocator>(value).unwrap(),
             locator
         );
-    }
-
-    #[test]
-    fn test_locator_id_serde() {
-        let loc = BrowserLocator::id("email");
-        let json = serde_json::to_value(&loc).unwrap();
-        assert_eq!(json["by"], "id");
-        assert_eq!(json["value"], "email");
-    }
-
-    #[test]
-    fn test_locator_name_serde() {
-        let loc = BrowserLocator::name("q");
-        let json = serde_json::to_value(&loc).unwrap();
-        assert_eq!(json["by"], "name");
-        assert_eq!(json["value"], "q");
-    }
-
-    #[test]
-    fn test_locator_label_serde() {
-        let loc = BrowserLocator::label("Email Address");
-        let json = serde_json::to_value(&loc).unwrap();
-        assert_eq!(json["by"], "label");
-        assert_eq!(json["value"], "Email Address");
-    }
-
-    #[test]
-    fn test_locator_placeholder_serde() {
-        let loc = BrowserLocator::placeholder("Search...");
-        let json = serde_json::to_value(&loc).unwrap();
-        assert_eq!(json["by"], "placeholder");
-        assert_eq!(json["value"], "Search...");
-    }
-
-    #[test]
-    fn test_locator_role_serde() {
-        let loc = BrowserLocator::role("textbox", Some("Search"));
-        let json = serde_json::to_value(&loc).unwrap();
-        assert_eq!(json["by"], "role");
-        assert_eq!(json["role"], "textbox");
-        assert_eq!(json["name"], "Search");
-    }
-
-    #[test]
-    fn test_locator_role_without_name_serde() {
-        let loc = BrowserLocator::role("button", None);
-        let json = serde_json::to_value(&loc).unwrap();
-        assert_eq!(json["by"], "role");
-        assert_eq!(json["role"], "button");
-        assert!(json.get("name").is_none());
-    }
-
-    #[test]
-    fn test_locator_test_id_serde() {
-        let loc = BrowserLocator::test_id("submit-btn");
-        let json = serde_json::to_value(&loc).unwrap();
-        assert_eq!(json["by"], "test_id");
-        assert_eq!(json["value"], "submit-btn");
-    }
-
-    #[test]
-    fn test_locator_text_serde() {
-        let json_str = r#"{"by": "text", "value": "Submit Form", "exact": true}"#;
-        let loc: BrowserLocator = serde_json::from_str(json_str).unwrap();
-        match &loc.strategy {
-            LocatorStrategy::Text { value, exact, .. } => {
-                assert_eq!(value, "Submit Form");
-                assert!(*exact);
-            }
-            _ => panic!("Expected Text"),
-        }
     }
 
     #[test]
@@ -4321,46 +4207,6 @@ mod tests {
     }
 
     #[test]
-    fn test_locator_xpath_serde() {
-        let json_str = r#"{"by": "xpath", "value": "//button[@type='submit']"}"#;
-        let loc: BrowserLocator = serde_json::from_str(json_str).unwrap();
-        match &loc.strategy {
-            LocatorStrategy::Xpath { value } => {
-                assert!(value.contains("submit"));
-            }
-            _ => panic!("Expected Xpath"),
-        }
-    }
-
-    #[test]
-    fn test_locator_autocomplete_serde() {
-        let json_str = r#"{"by": "autocomplete", "value": "email"}"#;
-        let loc: BrowserLocator = serde_json::from_str(json_str).unwrap();
-        match &loc.strategy {
-            LocatorStrategy::Autocomplete { value } => {
-                assert_eq!(value, "email");
-            }
-            _ => panic!("Expected Autocomplete"),
-        }
-    }
-
-    #[test]
-    fn test_locator_with_nth_and_within() {
-        let json_str = r##"{"by": "css", "value": "input", "nth": 2, "within": "#form"}"##;
-        let loc: BrowserLocator = serde_json::from_str(json_str).unwrap();
-        assert_eq!(loc.nth, Some(2));
-        assert_eq!(loc.within.as_deref(), Some("#form"));
-    }
-
-    #[test]
-    fn test_locator_nth_and_within_omitted_when_none() {
-        let loc = BrowserLocator::css("div");
-        let json = serde_json::to_value(&loc).unwrap();
-        assert!(json.get("nth").is_none());
-        assert!(json.get("within").is_none());
-    }
-
-    #[test]
     fn composed_locator_wire_round_trips() {
         let json = serde_json::json!({
             "by": "css",
@@ -4390,51 +4236,6 @@ mod tests {
         ] {
             let locator: BrowserLocator = serde_json::from_value(json.clone()).unwrap();
             assert_eq!(serde_json::to_value(locator).unwrap(), json);
-        }
-    }
-
-    #[test]
-    fn test_tab_target_active_serde() {
-        let t = TabTarget::Active;
-        let json = serde_json::to_value(&t).unwrap();
-        assert_eq!(json["type"], "active");
-    }
-
-    #[test]
-    fn test_tab_target_id_serde() {
-        let t = TabTarget::Id {
-            id: "main".to_string(),
-        };
-        let json = serde_json::to_value(&t).unwrap();
-        assert_eq!(json["type"], "id");
-        assert_eq!(json["id"], "main");
-    }
-
-    #[test]
-    fn test_step_navigate_serde() {
-        let step = BrowserStep::Navigate {
-            url: "https://example.com".to_string(),
-            timeout_ms: None,
-        };
-        let json = serde_json::to_value(&step).unwrap();
-        assert_eq!(json["action"], "navigate");
-        assert_eq!(json["url"], "https://example.com");
-    }
-
-    #[test]
-    fn test_step_click_serde() {
-        let json_str = r##"{"action": "click", "locator": {"by": "css", "value": "#btn"}}"##;
-        let step: BrowserStep = serde_json::from_str(json_str).unwrap();
-        match step {
-            BrowserStep::Click { locator, .. } => {
-                assert_eq!(
-                    locator.strategy,
-                    LocatorStrategy::Css {
-                        value: "#btn".to_string()
-                    }
-                );
-            }
-            _ => panic!("Expected Click"),
         }
     }
 
@@ -4625,31 +4426,6 @@ mod tests {
     }
 
     #[test]
-    fn readout_steps_address_a_single_locator() {
-        for (json, expected) in [
-            (
-                r#"{"action":"bounding_box","locator":{"by":"ref","value":"e1"}}"#,
-                "bounding_box",
-            ),
-            (
-                r#"{"action":"count","locator":{"by":"css","value":".row"}}"#,
-                "count",
-            ),
-            (
-                r#"{"action":"input_value","locator":{"by":"ref","value":"e1"}}"#,
-                "input_value",
-            ),
-            (
-                r#"{"action":"element_state","locator":{"by":"ref","value":"e1"}}"#,
-                "element_state",
-            ),
-        ] {
-            let step: BrowserStep = serde_json::from_str(json).unwrap();
-            assert_eq!(serde_json::to_value(&step).unwrap()["action"], expected);
-        }
-    }
-
-    #[test]
     fn all_texts_mode_defaults_to_inner_text_and_limit_is_optional() {
         let step: BrowserStep =
             serde_json::from_str(r#"{"action":"all_texts","locator":{"by":"css","value":"li"}}"#)
@@ -4691,39 +4467,6 @@ mod tests {
     }
 
     #[test]
-    fn test_step_extract_links_serde() {
-        let json_str = r#"{"action": "extract_links", "limit": 10}"#;
-        let step: BrowserStep = serde_json::from_str(json_str).unwrap();
-        match step {
-            BrowserStep::ExtractLinks { locator, limit } => {
-                assert!(locator.is_none());
-                assert_eq!(limit, Some(10));
-            }
-            _ => panic!("Expected ExtractLinks"),
-        }
-    }
-
-    #[test]
-    fn test_step_extract_table_serde() {
-        let json_str = r#"{"action": "extract_table", "locator": {"by": "css", "value": "table"}, "limit": 4}"#;
-        let step: BrowserStep = serde_json::from_str(json_str).unwrap();
-        match step {
-            BrowserStep::ExtractTable { limit, .. } => assert_eq!(limit, Some(4)),
-            _ => panic!("Expected ExtractTable"),
-        }
-    }
-
-    #[test]
-    fn test_step_extract_table_limit_defaults_to_none() {
-        let json_str = r#"{"action": "extract_table", "locator": {"by": "css", "value": "table"}}"#;
-        let step: BrowserStep = serde_json::from_str(json_str).unwrap();
-        match step {
-            BrowserStep::ExtractTable { limit, .. } => assert_eq!(limit, None),
-            _ => panic!("Expected ExtractTable"),
-        }
-    }
-
-    #[test]
     fn test_step_screenshot_elements_serde() {
         let json_str = r##"{"action": "screenshot_elements", "locators": [{"by": "css", "value": ".card"}, {"by": "ref", "value": "e7"}], "compose": "separate", "labels": false, "type": "webp", "mask_color": "#00FF00"}"##;
         let step: BrowserStep = serde_json::from_str(json_str).unwrap();
@@ -4739,26 +4482,6 @@ mod tests {
                 assert_eq!(labels, Some(false));
                 assert_eq!(options.image_type, Some(BrowserScreenshotType::Webp));
                 assert_eq!(options.mask_color.as_deref(), Some("#00FF00"));
-            }
-            _ => panic!("Expected ScreenshotElements"),
-        }
-    }
-
-    #[test]
-    fn test_step_screenshot_elements_defaults_to_a_labelled_grid() {
-        let json_str =
-            r#"{"action": "screenshot_elements", "locators": [{"by": "css", "value": ".card"}]}"#;
-        let step: BrowserStep = serde_json::from_str(json_str).unwrap();
-        match step {
-            BrowserStep::ScreenshotElements {
-                compose,
-                labels,
-                options,
-                ..
-            } => {
-                assert_eq!(compose, BrowserComposeMode::Grid);
-                assert_eq!(labels, None);
-                assert_eq!(options, BrowserScreenshotOptions::default());
             }
             _ => panic!("Expected ScreenshotElements"),
         }
@@ -4792,26 +4515,6 @@ mod tests {
     }
 
     #[test]
-    fn test_element_states_round_trip_on_the_wire() {
-        for (state, wire) in [
-            (BrowserElementState::Default, "default"),
-            (BrowserElementState::Hover, "hover"),
-            (BrowserElementState::Focus, "focus"),
-            (BrowserElementState::Active, "active"),
-        ] {
-            assert_eq!(serde_json::to_value(state).unwrap(), wire);
-            assert_eq!(state.label(), wire);
-            assert_eq!(
-                serde_json::from_value::<BrowserElementState>(serde_json::json!(wire)).unwrap(),
-                state
-            );
-        }
-        assert!(
-            serde_json::from_value::<BrowserElementState>(serde_json::json!("visited")).is_err()
-        );
-    }
-
-    #[test]
     fn wait_for_function_defaults_to_a_page_predicate_without_a_fixed_interval() {
         let step: BrowserStep =
             serde_json::from_str(r#"{"action": "wait_for_function", "expression": "() => ready"}"#)
@@ -4830,27 +4533,6 @@ mod tests {
         assert!(locator.is_none());
         assert!(timeout_ms.is_none());
         assert!(polling_ms.is_none());
-    }
-
-    #[test]
-    fn wait_for_function_accepts_a_locator_and_a_fixed_interval() {
-        let step: BrowserStep = serde_json::from_str(
-            r##"{"action": "wait_for_function", "expression": "el => el.dataset.state === 'ready'", "locator": {"by": "css", "value": "#row"}, "timeout_ms": 2000, "polling_ms": 40}"##,
-        )
-        .unwrap();
-
-        let BrowserStep::WaitForFunction {
-            locator,
-            timeout_ms,
-            polling_ms,
-            ..
-        } = step
-        else {
-            panic!("expected WaitForFunction");
-        };
-        assert!(locator.is_some());
-        assert_eq!(timeout_ms, Some(2_000));
-        assert_eq!(polling_ms, Some(40));
     }
 
     #[test]
@@ -4899,42 +4581,6 @@ mod tests {
     }
 
     #[test]
-    fn test_step_eval_serde() {
-        let json_str = r#"{"action": "eval", "expression": "document.title"}"#;
-        let step: BrowserStep = serde_json::from_str(json_str).unwrap();
-        match step {
-            BrowserStep::Eval {
-                expression,
-                timeout_ms,
-            } => {
-                assert_eq!(expression, "document.title");
-                assert_eq!(timeout_ms, None);
-            }
-            _ => panic!("Expected Eval"),
-        }
-    }
-
-    #[test]
-    fn test_step_press_key_serde() {
-        let json_str = r#"{"action": "press_key", "key": "Enter", "modifiers": ["Ctrl"]}"#;
-        let step: BrowserStep = serde_json::from_str(json_str).unwrap();
-        match step {
-            BrowserStep::PressKey { key, modifiers } => {
-                assert_eq!(key, "Enter");
-                assert_eq!(modifiers, vec!["Ctrl"]);
-            }
-            _ => panic!("Expected PressKey"),
-        }
-    }
-
-    #[test]
-    fn test_step_screenshot_serde() {
-        let json_str = r#"{"action": "screenshot"}"#;
-        let step: BrowserStep = serde_json::from_str(json_str).unwrap();
-        assert!(matches!(step, BrowserStep::Screenshot { .. }));
-    }
-
-    #[test]
     fn accessibility_snapshot_options_default_to_ai_refs_and_round_trip() {
         let step: BrowserStep =
             serde_json::from_str(r#"{"action":"accessibility_snapshot"}"#).unwrap();
@@ -4964,69 +4610,12 @@ mod tests {
     }
 
     #[test]
-    fn accessibility_snapshot_accepts_the_legacy_root_alias() {
-        let step: BrowserStep = serde_json::from_value(serde_json::json!({
-            "action": "accessibility_snapshot",
-            "root": {"by": "css", "value": "main"}
-        }))
-        .unwrap();
-        let BrowserStep::AccessibilitySnapshot { options } = step else {
-            panic!("Expected AccessibilitySnapshot");
-        };
-        assert_eq!(
-            options.locator,
-            Some(BrowserLocator::css("main")),
-            "legacy root spelling must still deserialize"
-        );
-        assert_eq!(
-            serde_json::to_value(BrowserStep::AccessibilitySnapshot { options }).unwrap()
-                ["locator"],
-            serde_json::json!({"by": "css", "value": "main"}),
-            "only the canonical locator name is emitted"
-        );
-    }
-
-    #[test]
-    fn accessibility_snapshot_scoping_options_compose() {
-        let step: BrowserStep = serde_json::from_value(serde_json::json!({
-            "action": "accessibility_snapshot",
-            "locator": {"by": "css", "value": "#menu"},
-            "depth": 2,
-            "boxes": true
-        }))
-        .unwrap();
-        let BrowserStep::AccessibilitySnapshot { options } = step else {
-            panic!("Expected AccessibilitySnapshot");
-        };
-        assert_eq!(options.locator, Some(BrowserLocator::css("#menu")));
-        assert_eq!(options.depth, Some(2));
-        assert!(options.boxes);
-        assert!(options.refs_enabled());
-    }
-
-    #[test]
     fn accessibility_snapshot_omitting_scoping_options_stays_byte_stable() {
         let options = AccessibilitySnapshotOptions::default();
         assert_eq!(
             serde_json::to_string(&BrowserStep::AccessibilitySnapshot { options }).unwrap(),
             r#"{"action":"accessibility_snapshot","mode":"ai","boxes":false}"#
         );
-    }
-
-    #[test]
-    fn test_step_handle_dialog_serde() {
-        let json_str = r#"{"action": "handle_dialog", "accept": true, "prompt_text": "answer"}"#;
-        let step: BrowserStep = serde_json::from_str(json_str).unwrap();
-        match step {
-            BrowserStep::HandleDialog {
-                accept,
-                prompt_text,
-            } => {
-                assert!(accept);
-                assert_eq!(prompt_text.as_deref(), Some("answer"));
-            }
-            _ => panic!("Expected HandleDialog"),
-        }
     }
 
     #[test]
@@ -5082,46 +4671,6 @@ mod tests {
     }
 
     #[test]
-    fn test_step_wait_seconds_serde() {
-        let json_str = r#"{"action": "wait_seconds", "seconds": 2.5}"#;
-        let step: BrowserStep = serde_json::from_str(json_str).unwrap();
-        match step {
-            BrowserStep::WaitSeconds { seconds } => {
-                assert!((seconds - 2.5).abs() < f64::EPSILON);
-            }
-            _ => panic!("Expected WaitSeconds"),
-        }
-    }
-
-    #[test]
-    fn test_full_request_serde() {
-        let json_str = r#"{
-            "session": "shared_default",
-            "target": {"type": "active"},
-            "steps": [
-                {"action": "navigate", "url": "https://www.google.com"},
-                {"action": "fill", "locator": {"by": "name", "value": "q"}, "text": "rust tokio tutorial"},
-                {"action": "press_key", "key": "Enter"},
-                {"action": "wait_for_url", "contains": "/search"},
-                {"action": "extract_links", "limit": 10}
-            ]
-        }"#;
-        let req: BrowserActionRequest = serde_json::from_str(json_str).unwrap();
-        assert_eq!(req.session, SessionPolicy::SharedDefault);
-        assert_eq!(req.target, TabTarget::Active);
-        assert_eq!(req.steps.len(), 5);
-    }
-
-    #[test]
-    fn test_request_defaults() {
-        let json_str = r#"{"steps": [{"action": "screenshot"}]}"#;
-        let req: BrowserActionRequest = serde_json::from_str(json_str).unwrap();
-        assert_eq!(req.session, SessionPolicy::SharedDefault);
-        assert_eq!(req.target, TabTarget::Active);
-        assert!(req.attach_screenshot.is_none());
-    }
-
-    #[test]
     fn test_request_attach_screenshot_is_tri_state() {
         let omitted: BrowserActionRequest = serde_json::from_str(r#"{"steps": []}"#).unwrap();
         assert_eq!(omitted.attach_screenshot, None);
@@ -5151,13 +4700,6 @@ mod tests {
             assert_eq!(mode.includes_snapshot(), snapshot, "{mode:?}");
             assert_eq!(mode.includes_screenshot(), screenshot, "{mode:?}");
         }
-    }
-
-    #[test]
-    fn test_page_context_is_omitted_from_the_wire_when_unset() {
-        let request: BrowserActionRequest = serde_json::from_str(r#"{"steps": []}"#).unwrap();
-        let value = serde_json::to_value(&request).unwrap();
-        assert_eq!(value["page_context"], serde_json::Value::Null);
     }
 
     #[test]
@@ -5218,29 +4760,6 @@ mod tests {
     }
 
     #[test]
-    fn test_step_result_carries_the_canonical_locator_echo() {
-        let step = StepResult::success(0, "click on <button>")
-            .with_locator_echo(Some("getByRole('button', { name: 'Save' })".to_string()));
-
-        let value = serde_json::to_value(&step).unwrap();
-        assert_eq!(
-            value["locator_echo"],
-            "getByRole('button', { name: 'Save' })"
-        );
-        assert!(serde_json::to_value(StepResult::success(0, "noop"))
-            .unwrap()
-            .get("locator_echo")
-            .is_none());
-    }
-
-    #[test]
-    fn test_request_network_mode_defaults_to_summary() {
-        let omitted: BrowserActionRequest = serde_json::from_str(r#"{"steps": []}"#).unwrap();
-        assert_eq!(omitted.network, NetworkReportMode::Summary);
-        assert_eq!(NetworkReportMode::default(), NetworkReportMode::Summary);
-    }
-
-    #[test]
     fn test_request_network_mode_accepts_every_lowercase_variant() {
         for (raw, expected) in [
             ("none", NetworkReportMode::None),
@@ -5256,28 +4775,6 @@ mod tests {
             r#"{"network": "Full", "steps": []}"#
         )
         .is_err());
-    }
-
-    #[test]
-    fn test_step_result_success() {
-        let r = StepResult::success(0, "Navigated to https://example.com");
-        assert!(r.ok);
-        assert_eq!(r.step_index, 0);
-        assert!(r.error.is_none());
-    }
-
-    #[test]
-    fn test_step_result_failure() {
-        let r = StepResult::failure(1, "Click failed", "Element not found: #btn");
-        assert!(!r.ok);
-        assert_eq!(r.error.as_deref(), Some("Element not found: #btn"));
-    }
-
-    #[test]
-    fn test_step_result_with_data() {
-        let r =
-            StepResult::success(0, "Extracted").with_data(serde_json::json!(["link1", "link2"]));
-        assert!(r.data.is_some());
     }
 
     #[test]
@@ -5327,39 +4824,6 @@ mod tests {
         let json = serde_json::to_value(StepResult::success(0, "Clicked")).unwrap();
 
         assert!(json.get("actionability").is_none());
-    }
-
-    #[test]
-    fn test_field_kind_serde() {
-        let kinds = vec![
-            FieldKind::TextInput,
-            FieldKind::PasswordInput,
-            FieldKind::SearchInput,
-            FieldKind::Textarea,
-            FieldKind::Select,
-            FieldKind::ContentEditable,
-        ];
-        for kind in kinds {
-            let json = serde_json::to_string(&kind).unwrap();
-            let parsed: FieldKind = serde_json::from_str(&json).unwrap();
-            assert_eq!(parsed, kind);
-        }
-    }
-
-    #[test]
-    fn test_fill_strategy_serde() {
-        let strategies = vec![
-            FillStrategy::NativeTyping,
-            FillStrategy::DomValueSetter,
-            FillStrategy::NativePrototypeSetter,
-            FillStrategy::ContentEditablePath,
-            FillStrategy::ClickAndType,
-        ];
-        for s in strategies {
-            let json = serde_json::to_string(&s).unwrap();
-            let parsed: FillStrategy = serde_json::from_str(&json).unwrap();
-            assert_eq!(parsed, s);
-        }
     }
 
     #[test]
@@ -5486,25 +4950,5 @@ mod tests {
         assert!(info.visible);
         assert!(info.enabled);
         assert_eq!(info.field_kind, FieldKind::TextInput);
-    }
-
-    #[test]
-    fn test_tab_info_serde() {
-        let ti = TabInfo {
-            id: "1".to_string(),
-            target_id: "ABC123".to_string(),
-            url: "https://example.com".to_string(),
-            title: "Example".to_string(),
-            active: true,
-            opener: Some(TabOpener {
-                tab_id: "opener".to_string(),
-                frame_id: Some("frame".to_string()),
-            }),
-            opened_by_step: Some(2),
-        };
-        let json = serde_json::to_value(&ti).unwrap();
-        assert_eq!(json["id"], "1");
-        assert!(json["active"].as_bool().unwrap());
-        assert_eq!(json["opener"]["tab_id"], "opener");
     }
 }

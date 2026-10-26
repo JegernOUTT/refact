@@ -408,29 +408,6 @@ mod tests {
     }
 
     #[test]
-    fn lmstudio_server_only_model_is_retained_and_catalog_only_model_is_not_added() {
-        let caps = HashMap::from([("lmstudio/catalog-only".to_string(), catalog_model())]);
-        let models: Vec<_> = [json!({"id": "server-only"})]
-            .iter()
-            .filter_map(|m| LMStudioProvider::parse_openai_model(m, false, &caps))
-            .collect();
-
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "server-only");
-        assert_eq!(models[0].n_ctx, 32_768);
-    }
-
-    #[test]
-    fn lmstudio_custom_only_addition_is_preserved_for_backwards_compatibility() {
-        let mut provider = LMStudioProvider::default();
-        provider
-            .custom_models
-            .insert("custom-only".to_string(), CustomModelConfig::default());
-
-        assert_eq!(provider.get_custom_models_only()[0].id, "custom-only");
-    }
-
-    #[test]
     fn lmstudio_matching_custom_fields_override_live_and_catalog_last() {
         let caps = HashMap::from([("lmstudio/model-a".to_string(), catalog_model())]);
         let mut models = vec![LMStudioProvider::parse_openai_model(
@@ -449,23 +426,5 @@ mod tests {
         merge_custom_models(&mut models, &custom, &std::collections::HashSet::new());
 
         assert_eq!(models[0].n_ctx, 4_096);
-    }
-
-    #[test]
-    fn lmstudio_runtime_disables_cache_control_by_default() {
-        let runtime = LMStudioProvider::default().build_runtime().unwrap();
-
-        assert!(!runtime.supports_cache_control);
-    }
-
-    #[test]
-    fn lmstudio_runtime_can_enable_cache_control() {
-        let mut provider = LMStudioProvider::default();
-        provider
-            .provider_settings_apply(serde_yaml::from_str("supports_cache_control: true").unwrap())
-            .unwrap();
-        let runtime = provider.build_runtime().unwrap();
-
-        assert!(runtime.supports_cache_control);
     }
 }

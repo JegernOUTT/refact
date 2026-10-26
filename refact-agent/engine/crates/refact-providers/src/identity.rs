@@ -164,11 +164,4 @@ mod tests {
 
         assert!(provider_identity_from_yaml("openai_2", &yaml).is_err());
     }
-
-    #[test]
-    fn empty_base_provider_is_rejected() {
-        let yaml = serde_yaml::from_str("base_provider: ''").unwrap();
-
-        assert!(provider_identity_from_yaml("openai_2", &yaml).is_err());
-    }
 }

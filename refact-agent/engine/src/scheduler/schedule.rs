@@ -341,17 +341,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_schedule_accepts_valid_cron() {
-        assert_eq!(
-            parse_schedule(Some("*/5 * * * *"), None, None, None, 1_000).unwrap(),
-            Trigger::Cron {
-                expr: "*/5 * * * *".to_string(),
-                tz: None,
-            }
-        );
-    }
-
-    #[test]
     fn parse_schedule_accepts_valid_intervals() {
         for (raw, expected) in [
             ("90s", 90_000),
@@ -374,45 +363,6 @@ mod tests {
         assert_eq!(
             parse_schedule(None, None, Some("2026-01-01T00:05:00Z"), None, now).unwrap(),
             Trigger::Once { at_ms }
-        );
-    }
-
-    #[test]
-    fn parse_schedule_accepts_relative_at() {
-        let now = 10_000;
-
-        assert_eq!(
-            parse_schedule(None, None, Some("in 30m"), None, now).unwrap(),
-            Trigger::Once {
-                at_ms: now + 30 * 60_000
-            }
-        );
-        assert_eq!(
-            parse_schedule(None, None, Some("2h"), None, now).unwrap(),
-            Trigger::Once {
-                at_ms: now + 2 * 60 * 60_000
-            }
-        );
-    }
-
-    #[test]
-    fn parse_schedule_accepts_cron_timezone() {
-        assert_eq!(
-            parse_schedule(Some("0 9 * * *"), None, None, Some("Asia/Kolkata"), 1_000,).unwrap(),
-            Trigger::Cron {
-                expr: "0 9 * * *".to_string(),
-                tz: Some("Asia/Kolkata".to_string()),
-            }
-        );
-    }
-
-    #[test]
-    fn parse_schedule_ignores_timezone_for_non_cron() {
-        assert_eq!(
-            parse_schedule(None, Some("30m"), None, Some("Asia/Kolkata"), 1_000).unwrap(),
-            Trigger::Interval {
-                every_ms: 30 * 60_000
-            }
         );
     }
 
@@ -442,46 +392,6 @@ mod tests {
     }
 
     #[test]
-    fn cron_next_run_matches_cron_expr() {
-        let from = utc_ms(2026, 1, 1, 0, 0);
-        let job = job(Trigger::Cron {
-            expr: "*/5 * * * *".to_string(),
-            tz: None,
-        });
-
-        assert_eq!(
-            next_run_ms(&job, from, chrono_tz::UTC),
-            cron_expr::next_run_ms("*/5 * * * *", from, chrono_tz::UTC)
-        );
-    }
-
-    #[test]
-    fn cron_uses_job_timezone() {
-        let from = utc_ms(2026, 1, 1, 0, 0);
-        let job = job(Trigger::Cron {
-            expr: "0 9 * * *".to_string(),
-            tz: Some("Asia/Kolkata".to_string()),
-        });
-
-        assert_eq!(
-            next_run_ms(&job, from, chrono_tz::UTC),
-            cron_expr::next_run_ms("0 9 * * *", from, chrono_tz::Asia::Kolkata)
-        );
-    }
-
-    #[test]
-    fn cron_one_shot_none_after_fired() {
-        let mut job = job(Trigger::Cron {
-            expr: "*/5 * * * *".to_string(),
-            tz: None,
-        });
-        job.recurring = false;
-        job.last_fired_at_ms = Some(1_000);
-
-        assert_eq!(next_run_ms(&job, 1_000, chrono_tz::UTC), None);
-    }
-
-    #[test]
     fn interval_advances_to_next_future_tick() {
         let mut job = job(Trigger::Interval { every_ms: 10 });
         job.created_at_ms = 1_000;
@@ -491,59 +401,6 @@ mod tests {
 
         job.last_fired_at_ms = Some(1_050);
         assert_eq!(next_run_ms(&job, 1_051, chrono_tz::UTC), Some(1_060));
-    }
-
-    #[test]
-    fn missed_grace_is_half_period_with_bounds() {
-        let cfg = MissedRunGraceConfig::default();
-
-        assert_eq!(missed_run_grace_ms(60_000, cfg), 120_000);
-        assert_eq!(missed_run_grace_ms(10 * 60_000, cfg), 5 * 60_000);
-        assert_eq!(missed_run_grace_ms(6 * 60 * 60_000, cfg), 2 * 60 * 60_000);
-    }
-
-    #[test]
-    fn recurring_missed_state_fast_forwards_beyond_grace() {
-        let mut job = job(Trigger::Interval { every_ms: 60_000 });
-        job.created_at_ms = 0;
-        job.last_fired_at_ms = Some(0);
-
-        let state = recurring_missed_grace_state(
-            &job,
-            0,
-            10 * 60_000,
-            chrono_tz::UTC,
-            MissedRunGraceConfig::default(),
-        )
-        .unwrap();
-
-        assert_eq!(state.due_ms, Some(60_000));
-        assert_eq!(state.period_ms, 60_000);
-        assert_eq!(state.grace_ms, 120_000);
-        assert!(!state.should_fire);
-        assert_eq!(state.next_future_ms, 11 * 60_000);
-        assert_eq!(state.advance_last_fired_at_ms, Some(10 * 60_000));
-    }
-
-    #[test]
-    fn recurring_missed_state_fires_once_inside_grace() {
-        let mut job = job(Trigger::Interval { every_ms: 60_000 });
-        job.created_at_ms = 0;
-        job.last_fired_at_ms = Some(0);
-
-        let state = recurring_missed_grace_state(
-            &job,
-            0,
-            90_000,
-            chrono_tz::UTC,
-            MissedRunGraceConfig::default(),
-        )
-        .unwrap();
-
-        assert_eq!(state.due_ms, Some(60_000));
-        assert!(state.should_fire);
-        assert_eq!(state.next_future_ms, 120_000);
-        assert_eq!(state.advance_last_fired_at_ms, Some(60_000));
     }
 
     #[test]

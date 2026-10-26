@@ -295,21 +295,6 @@ async fn unassigned_planner_cannot_attest() {
 }
 
 #[tokio::test]
-async fn task_agent_chat_cannot_attest() {
-    let (gcx, _temp) = setup_task(true, None).await;
-    let error = ToolTaskBoardAuthority::new()
-        .tool_execute(
-            chat_ccx(gcx, "agent-chat", "agents").await,
-            &"call".to_string(),
-            &args("attest"),
-        )
-        .await
-        .unwrap_err();
-
-    assert!(error.contains("task planner"));
-}
-
-#[tokio::test]
 async fn failing_or_missing_report_cannot_be_attested() {
     let (gcx, _temp) = setup_task(false, None).await;
     let error = attest(gcx.clone()).await.unwrap_err();

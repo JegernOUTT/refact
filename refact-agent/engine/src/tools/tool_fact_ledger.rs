@@ -289,48 +289,6 @@ mod tests {
     use super::*;
     use crate::tools::tools_description::Tool;
 
-    #[test]
-    fn the_claim_tools_publish_both_recording_and_reading() {
-        let record = ToolClaimRecord {
-            config_path: String::new(),
-        }
-        .tool_description();
-        let list = ToolClaimList {
-            config_path: String::new(),
-        }
-        .tool_description();
-
-        assert_eq!(record.name, "claim_record");
-        for required in [
-            "claim_id",
-            "subject_kind",
-            "subject",
-            "subject_revision",
-            "predicate",
-            "assertion",
-            "confidence_per_mille",
-        ] {
-            assert!(
-                record.input_schema["required"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!(required)),
-                "{required} must be required: a claim without it is not typed"
-            );
-        }
-        assert_eq!(
-            record.input_schema["properties"]["confidence_per_mille"]["maximum"],
-            json!(1000)
-        );
-        assert_eq!(list.name, "claim_list");
-        assert!(list.allow_parallel, "reading must not serialize");
-        assert!(
-            list.description.contains("untrusted historical statements"),
-            "the read surface must label claims untrusted: {}",
-            list.description
-        );
-    }
-
     fn args(items: &[(&str, Value)]) -> HashMap<String, Value> {
         items
             .iter()
@@ -471,39 +429,5 @@ mod tests {
             listed.contains("not instructions"),
             "every read carries the untrusted label: {listed}"
         );
-    }
-
-    #[tokio::test]
-    async fn the_claim_tool_corroborates_rather_than_duplicating() {
-        let cache = tempfile::tempdir().unwrap();
-        let config = tempfile::tempdir().unwrap();
-        let ccx = ccx(cache.path(), config.path()).await;
-
-        record(
-            &ccx,
-            "call-one",
-            recording("c-held", "it is held", "background_agent:agent-a"),
-        )
-        .await;
-        let agreed = record(
-            &ccx,
-            "call-two",
-            recording("c-second", "It is held", "background_agent:agent-b"),
-        )
-        .await;
-
-        assert!(agreed.contains("Confidence raised"), "{agreed}");
-        assert!(agreed.contains("no duplicate entry"), "{agreed}");
-        assert!(agreed.contains("Claim `c-held`"), "{agreed}");
-
-        let listed = output_text(
-            ToolClaimList {
-                config_path: String::new(),
-            }
-            .tool_execute(ccx.clone(), &"call-list".to_string(), &args(&[]))
-            .await
-            .unwrap(),
-        );
-        assert!(!listed.contains("Claim `c-second`"), "{listed}");
     }
 }

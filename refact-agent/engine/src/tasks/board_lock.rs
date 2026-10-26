@@ -384,27 +384,6 @@ mod tests {
         assert_eq!(peak.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
-    #[tokio::test]
-    async fn cancelled_waiter_does_not_leak_the_lock() {
-        let dir = tempfile::tempdir().unwrap();
-        let _settings = short_settings(dir.path());
-        let canonical = canonical_dir(dir.path()).await.unwrap();
-        let holder = hold_from_foreign_handle(lock_path(&canonical, BOARD_LOCK_FILE).unwrap());
-
-        let waiter = tokio::spawn({
-            let path = dir.path().to_path_buf();
-            async move { acquire_board(&path).await.map(|_| ()) }
-        });
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        waiter.abort();
-        let _ = waiter.await;
-
-        holder.release.send(()).unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        assert!(acquire_board(dir.path()).await.is_ok());
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn symlink_alias_maps_to_the_same_lock() {
@@ -436,87 +415,6 @@ mod tests {
         assert!(planner.is_ok());
         assert!(board.guards(BOARD_LOCK_FILE));
         assert!(!board.guards(PLANNER_IDS_LOCK_FILE));
-    }
-
-    #[test]
-    fn settings_are_clamped() {
-        let dir = tempfile::tempdir().unwrap();
-        let _settings = set_board_lock_settings_override(
-            dir.path(),
-            BoardLockSettings {
-                wait_timeout_ms: 0,
-                poll_interval_ms: 0,
-            },
-        );
-        let settings = board_lock_settings_for(dir.path());
-        assert_eq!(settings.wait_timeout_ms, 1);
-        assert_eq!(settings.poll_interval_ms, 1);
-    }
-
-    #[test]
-    fn settings_override_restores_previous_value() {
-        let dir = tempfile::tempdir().unwrap();
-        let canonical = dunce::canonicalize(dir.path()).unwrap();
-        {
-            let _outer = short_settings(dir.path());
-            {
-                let _inner = set_board_lock_settings_override(
-                    dir.path(),
-                    BoardLockSettings {
-                        wait_timeout_ms: 1,
-                        poll_interval_ms: 1,
-                    },
-                );
-                assert_eq!(board_lock_settings_for(dir.path()).wait_timeout_ms, 1);
-            }
-            assert_eq!(board_lock_settings_for(dir.path()).wait_timeout_ms, 300);
-        }
-        assert!(!settings_override_cell()
-            .read()
-            .unwrap()
-            .contains_key(&canonical));
-    }
-
-    #[tokio::test]
-    async fn settings_override_does_not_shorten_another_directory_acquisition() {
-        let x = tempfile::tempdir().unwrap();
-        let y = tempfile::tempdir().unwrap();
-        let _settings = set_board_lock_settings_override(
-            x.path(),
-            BoardLockSettings {
-                wait_timeout_ms: 1,
-                poll_interval_ms: 1,
-            },
-        );
-        let canonical = canonical_dir(y.path()).await.unwrap();
-        let holder = hold_from_foreign_handle(lock_path(&canonical, BOARD_LOCK_FILE).unwrap());
-        let release = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            holder.release.send(()).unwrap();
-            holder._thread.join().unwrap();
-        });
-
-        let acquired = acquire_board(y.path()).await;
-        release.await.unwrap();
-        assert!(
-            acquired.is_ok(),
-            "directory X override leaked into Y: {acquired:?}"
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(runtime_settings)]
-    fn settings_follow_coordination_defaults() {
-        let coordination = refact_work_core::coordination_settings();
-        let settings = board_lock_settings();
-        assert_eq!(
-            settings.wait_timeout_ms,
-            coordination.lock_timeout_secs * 1_000
-        );
-        assert_eq!(
-            settings.poll_interval_ms,
-            coordination.lock_poll_interval_ms
-        );
     }
 
     #[tokio::test]

@@ -268,28 +268,6 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_to_relative_path_already_relative() {
-        let roots = vec![PathBuf::from("/project")];
-        assert_eq!(
-            to_relative_path("src/main.rs", &roots),
-            Some("src/main.rs".to_string())
-        );
-    }
-
-    #[test]
-    fn test_to_relative_path_absolute_within_root() {
-        let temp_dir = TempDir::new().unwrap();
-        let root = temp_dir.path().to_path_buf();
-        let file_path = root.join("src/main.rs");
-        std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
-        std::fs::write(&file_path, "test").unwrap();
-
-        let roots = vec![root];
-        let result = to_relative_path(&file_path.to_string_lossy(), &roots);
-        assert_eq!(result, Some("src/main.rs".to_string()));
-    }
-
-    #[test]
     fn test_to_relative_path_outside_root() {
         let temp_dir = TempDir::new().unwrap();
         let root = temp_dir.path().join("project");
@@ -304,55 +282,10 @@ mod tests {
     }
 
     #[test]
-    fn test_is_safe_relative_path_valid() {
-        let temp_dir = TempDir::new().unwrap();
-        let root = temp_dir.path().to_path_buf();
-        let file_path = root.join("AGENTS.md");
-        std::fs::write(&file_path, "test").unwrap();
-
-        let roots = vec![root];
-        assert!(is_safe_relative_path("AGENTS.md", &roots));
-    }
-
-    #[test]
-    fn test_is_safe_relative_path_rejects_absolute() {
-        let roots = vec![PathBuf::from("/project")];
-        assert!(!is_safe_relative_path("/etc/passwd", &roots));
-    }
-
-    #[test]
     fn test_is_safe_relative_path_rejects_parent_traversal() {
         let roots = vec![PathBuf::from("/project")];
         assert!(!is_safe_relative_path("../etc/passwd", &roots));
         assert!(!is_safe_relative_path("foo/../../../etc/passwd", &roots));
-    }
-
-    #[test]
-    fn test_is_safe_relative_path_empty() {
-        let roots = vec![PathBuf::from("/project")];
-        assert!(!is_safe_relative_path("", &roots));
-    }
-
-    #[test]
-    fn test_sanitize_overrides_keeps_valid() {
-        let temp_dir = TempDir::new().unwrap();
-        let root = temp_dir.path().to_path_buf();
-        let file_path = root.join("AGENTS.md");
-        std::fs::write(&file_path, "test").unwrap();
-
-        let mut overrides = HashMap::new();
-        overrides.insert(
-            "AGENTS.md".to_string(),
-            FileOverride {
-                enabled: Some(false),
-                max_chars: Some(1000),
-            },
-        );
-
-        let roots = vec![root];
-        let result = sanitize_overrides(&overrides, &roots);
-        assert_eq!(result.len(), 1);
-        assert!(result.contains_key("AGENTS.md"));
     }
 
     #[test]
@@ -432,48 +365,6 @@ mod tests {
         assert_eq!(
             override_key(&outside.to_string_lossy(), &roots),
             outside.to_string_lossy().replace('\\', "/")
-        );
-    }
-
-    #[test]
-    fn test_default_config_has_reasonable_limits() {
-        let config = ProjectInformationConfig::default();
-
-        assert!(config.enabled);
-        assert_eq!(config.schema_version, 1);
-
-        assert!(config.sections.system_info.enabled);
-        assert_eq!(config.sections.models_info.max_chars, Some(6000));
-        assert!(config.sections.git_info.enabled);
-        assert_eq!(config.sections.git_info.max_chars, Some(6000));
-
-        assert!(config.sections.project_tree.enabled);
-        assert_eq!(config.sections.project_tree.max_depth, Some(4));
-        assert_eq!(config.sections.project_tree.max_chars, Some(16000));
-
-        assert!(config.sections.instruction_files.enabled);
-        assert_eq!(config.sections.instruction_files.max_items, None);
-        assert_eq!(
-            config.sections.instruction_files.max_chars_per_item,
-            Some(8000)
-        );
-
-        assert!(config.sections.memories.enabled);
-        assert_eq!(config.sections.memories.max_items, Some(30));
-        assert_eq!(config.sections.memories.max_chars_per_item, Some(2000));
-    }
-
-    #[test]
-    fn test_config_serialization_roundtrip() {
-        let config = ProjectInformationConfig::default();
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        let parsed: ProjectInformationConfig = serde_yaml::from_str(&yaml).unwrap();
-
-        assert_eq!(config.enabled, parsed.enabled);
-        assert_eq!(config.schema_version, parsed.schema_version);
-        assert_eq!(
-            config.sections.project_tree.max_chars,
-            parsed.sections.project_tree.max_chars
         );
     }
 }

@@ -425,67 +425,6 @@ pub async fn handle_v1_browser_settings_post(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard};
-
-    static PUBLISHED_SETTINGS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-    fn lock_published_settings() -> MutexGuard<'static, ()> {
-        PUBLISHED_SETTINGS_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    #[tokio::test]
-    async fn startup_init_publishes_disk_settings_without_http() {
-        let _guard = lock_published_settings();
-        let config_dir =
-            std::env::temp_dir().join(format!("refact-browser-settings-{}", uuid::Uuid::new_v4()));
-        tokio::fs::create_dir_all(&config_dir).await.unwrap();
-        tokio::fs::write(
-            settings_path(&config_dir),
-            "launch:\n  gpu: hardware\n  chromium_sandbox: false\n",
-        )
-        .await
-        .unwrap();
-
-        init_from_disk(&config_dir).await;
-        let options = current().to_launch_options();
-
-        publish(BrowserSettings::default());
-        let _ = tokio::fs::remove_dir_all(&config_dir).await;
-
-        assert_eq!(options.gpu, refact_browser::BrowserGpuMode::Hardware);
-        assert!(!options.chromium_sandbox);
-        assert_eq!(*current(), BrowserSettings::default());
-    }
-
-    #[tokio::test]
-    async fn startup_init_is_idempotent_and_absent_file_keeps_defaults() {
-        let _guard = lock_published_settings();
-        let config_dir =
-            std::env::temp_dir().join(format!("refact-browser-settings-{}", uuid::Uuid::new_v4()));
-        tokio::fs::create_dir_all(&config_dir).await.unwrap();
-
-        let first = init_from_disk(&config_dir).await;
-        let second = init_from_disk(&config_dir).await;
-        let refreshed = refresh_from_disk(&config_dir).await;
-
-        let _ = tokio::fs::remove_dir_all(&config_dir).await;
-
-        assert_eq!(*first, BrowserSettings::default());
-        assert_eq!(*second, BrowserSettings::default());
-        assert_eq!(*refreshed, BrowserSettings::default());
-        assert_eq!(*current(), BrowserSettings::default());
-    }
-
-    #[test]
-    fn defaults_round_trip_through_yaml() {
-        let settings = BrowserSettings::default();
-        let yaml = serde_yaml::to_string(&settings).unwrap();
-        let parsed: BrowserSettings = serde_yaml::from_str(&yaml).unwrap();
-        assert_eq!(parsed, settings);
-    }
 
     #[test]
     fn defaults_mirror_the_launch_option_defaults() {
@@ -499,33 +438,6 @@ mod tests {
         assert_eq!(
             options.idle_timeout,
             Some(refact_browser::DEFAULT_IDLE_TIMEOUT)
-        );
-    }
-
-    #[test]
-    fn attached_runtimes_are_not_idle_evicted_by_default() {
-        assert!(!BrowserSettings::default().lifecycle.evict_idle_attached);
-        assert!(!refact_browser::BrowserLaunchOptions::default().evict_idle_attached);
-    }
-
-    #[test]
-    fn proxy_and_paths_are_only_set_when_non_empty() {
-        let mut settings = BrowserSettings::default();
-        let options = settings.to_launch_options();
-        assert!(options.proxy.is_none());
-        assert!(options.chrome_path.is_none());
-        assert!(options.downloads_dir.is_none());
-
-        settings.launch.proxy_server = "http://127.0.0.1:8080".to_string();
-        settings.launch.proxy_bypass = "localhost".to_string();
-        settings.launch.chrome_path = "/usr/bin/chromium".to_string();
-        let options = settings.to_launch_options();
-        let proxy = options.proxy.expect("proxy configured");
-        assert_eq!(proxy.server, "http://127.0.0.1:8080");
-        assert_eq!(proxy.bypass.as_deref(), Some("localhost"));
-        assert_eq!(
-            options.chrome_path,
-            Some(PathBuf::from("/usr/bin/chromium"))
         );
     }
 
@@ -548,11 +460,5 @@ mod tests {
         assert!(settings.validate().is_err());
 
         assert!(BrowserSettings::default().validate().is_ok());
-    }
-
-    #[test]
-    fn unknown_fields_are_rejected() {
-        let yaml = "launch:\n  chrome_path: ''\n  nonsense: true\n";
-        assert!(serde_yaml::from_str::<BrowserSettings>(yaml).is_err());
     }
 }

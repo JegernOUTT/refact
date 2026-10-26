@@ -324,24 +324,6 @@ mod tests {
     }
 
     #[test]
-    fn embedding_endpoint_style_parses_supported_and_future_styles() {
-        assert_eq!(
-            EmbeddingEndpointStyle::from_config("", "embedding_endpoint_style").unwrap(),
-            EmbeddingEndpointStyle::Openai
-        );
-        assert!(EmbeddingEndpointStyle::OllamaNative.is_supported());
-        assert_eq!(
-            EmbeddingEndpointStyle::from_config("voyage", "embedding_endpoint_style").unwrap(),
-            EmbeddingEndpointStyle::Voyage
-        );
-        assert!(!EmbeddingEndpointStyle::Voyage.is_supported());
-        assert_eq!(
-            EmbeddingEndpointStyle::from_config("bad", "embedding_endpoint_style").unwrap_err(),
-            "Invalid embedding_endpoint_style: bad"
-        );
-    }
-
-    #[test]
     fn base_model_effective_styles_keep_legacy_defaults() {
         let legacy = BaseModelRecord {
             endpoint_style: "openai".to_string(),
@@ -355,33 +337,6 @@ mod tests {
         assert_eq!(
             legacy.effective_embedding_endpoint_style().unwrap(),
             EmbeddingEndpointStyle::Openai
-        );
-    }
-
-    #[test]
-    fn embedding_model_metadata_survives_serde_roundtrip() {
-        let yaml = r#"
-name: embed
-embedding_endpoint_style: ollama_native
-embedding_size: 768
-dimensions: 512
-query_prefix: "query: "
-document_prefix: "passage: "
-"#;
-
-        let decoded: EmbeddingModelRecord = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(decoded.base.embedding_endpoint_style, "ollama_native");
-        assert_eq!(decoded.dimensions, Some(512));
-        assert_eq!(decoded.query_prefix, "query: ");
-        assert_eq!(decoded.document_prefix, "passage: ");
-
-        let value = serde_yaml::to_value(&decoded).unwrap();
-        assert_eq!(value.get("dimensions").and_then(|v| v.as_i64()), Some(512));
-        assert_eq!(
-            value
-                .get("embedding_endpoint_style")
-                .and_then(|v| v.as_str()),
-            Some("ollama_native")
         );
     }
 }

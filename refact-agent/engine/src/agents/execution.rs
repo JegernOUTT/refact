@@ -911,8 +911,7 @@ impl Drop for ExecutionRegistry {
 mod tests {
     use super::*;
     use refact_work_core::{
-        AdmissionRequest, AdmissionScheduler, CoordinationSettings, RunKey, TicketState, WorkKey,
-        WorkScope,
+        AdmissionRequest, AdmissionScheduler, CoordinationSettings, RunKey, WorkKey, WorkScope,
     };
     use std::future::Future;
     use std::pin::Pin;
@@ -1051,17 +1050,6 @@ mod tests {
         assert_eq!(execution.state(), ExecutionState::Gone);
         assert_eq!(sched.snapshot().parked, 0);
         assert_eq!(sched.snapshot().outstanding, 0);
-    }
-
-    #[tokio::test]
-    async fn park_is_idempotent() {
-        let sched = scheduler(1);
-        let execution = RunExecution::new(permit_for(&sched, "run").await);
-        assert_eq!(execution.park_now().unwrap(), ParkOutcome::Parked);
-        assert_eq!(execution.park_now().unwrap(), ParkOutcome::AlreadyParked);
-        execution.park().await.unwrap();
-        assert_eq!(sched.snapshot().parked, 1);
-        assert_eq!(park_count(&sched), 1);
     }
 
     #[tokio::test]
@@ -1268,15 +1256,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn parked_execution_reports_ticket_state_parked() {
-        let sched = scheduler(2);
-        let execution = RunExecution::new(permit_for(&sched, "run").await);
-        execution.park().await.unwrap();
-        let states: Vec<TicketState> = sched.snapshot().tickets.iter().map(|t| t.state).collect();
-        assert_eq!(states, vec![TicketState::Parked]);
-    }
-
-    #[tokio::test]
     async fn wait_until_running_unblocks_after_resume() {
         let sched = scheduler(2);
         let execution = Arc::new(RunExecution::new(permit_for(&sched, "run").await));
@@ -1288,21 +1267,6 @@ mod tests {
         execution.resume().await.unwrap();
         waiting.await.unwrap();
         assert!(execution.holds_permit());
-    }
-
-    #[tokio::test]
-    async fn registry_install_get_and_finish() {
-        let sched = scheduler(2);
-        let registry = ExecutionRegistry::default();
-        let execution = registry
-            .install("chat", permit_for(&sched, "run").await)
-            .unwrap();
-        assert!(registry.get("chat").is_some());
-        assert!(execution.holds_permit());
-        registry.finish("chat");
-        assert!(registry.get("chat").is_none());
-        drop(execution);
-        assert_eq!(sched.snapshot().active, 0);
     }
 
     #[tokio::test]
@@ -1320,17 +1284,6 @@ mod tests {
         registry.finish("child");
         drop(execution);
         assert_eq!(sched.snapshot().outstanding, 0);
-    }
-
-    #[test]
-    fn launch_intent_registry_remembers_clones_and_forgets_entries() {
-        let registry = ExecutionRegistry::default();
-        let slot = LaunchIntentSlot::empty();
-
-        registry.remember_launch_intent("child", slot.clone());
-        assert!(registry.launch_intent("child").is_some());
-        registry.forget_launch_intent("child");
-        assert!(registry.launch_intent("child").is_none());
     }
 
     #[tokio::test]

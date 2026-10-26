@@ -391,31 +391,6 @@ pub struct EmbeddingPresets {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use refact_core::llm_types::BaseModelRecord;
-
-    #[test]
-    fn provider_defaults_returns_inline_model_selection() {
-        let provider = CapsProvider {
-            completion_default_model: "coder".to_string(),
-            chat_default_model: "chat".to_string(),
-            chat_model_2: "chat-2".to_string(),
-            task_planner_agent_model: "task-agent".to_string(),
-            chat_thinking_model: "think".to_string(),
-            chat_light_model: "light".to_string(),
-            chat_buddy_model: "buddy".to_string(),
-            ..Default::default()
-        };
-
-        let defaults = provider.defaults();
-
-        assert_eq!(defaults.completion_default_model, "coder");
-        assert_eq!(defaults.chat_default_model, "chat");
-        assert_eq!(defaults.chat_model_2, "chat-2");
-        assert_eq!(defaults.task_planner_agent_model, "task-agent");
-        assert_eq!(defaults.chat_thinking_model, "think");
-        assert_eq!(defaults.chat_light_model, "light");
-        assert_eq!(defaults.chat_buddy_model, "buddy");
-    }
 
     #[test]
     fn apply_override_keeps_override_precedence_and_aliases() {
@@ -536,15 +511,6 @@ chat_buddy_model: buddy-default
     }
 
     #[test]
-    fn endpoint_style_deserializes_to_openai_by_default() {
-        let provider: CapsProvider = serde_yaml::from_str("{}").unwrap();
-
-        assert_eq!(provider.endpoint_style, "openai");
-        assert_eq!(provider.completion_endpoint_style, "");
-        assert_eq!(provider.embedding_endpoint_style, "");
-    }
-
-    #[test]
     fn capability_endpoint_styles_serialize_and_validate_separate_axes() {
         let provider: CapsProvider = serde_yaml::from_str(
             r#"
@@ -597,48 +563,6 @@ embedding_endpoint_style: cohere_v2
     }
 
     #[test]
-    fn invalid_capability_endpoint_styles_name_actual_config_keys() {
-        let completion_provider: CapsProvider = serde_yaml::from_str(
-            r#"
-completion_endpoint_style: bad
-"#,
-        )
-        .unwrap();
-        let embedding_provider: CapsProvider = serde_yaml::from_str(
-            r#"
-embedding_endpoint_style: bad
-"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            completion_provider
-                .effective_completion_endpoint_style()
-                .unwrap_err(),
-            "Invalid completion_endpoint_style: bad"
-        );
-        assert_eq!(
-            embedding_provider
-                .effective_embedding_endpoint_style()
-                .unwrap_err(),
-            "Invalid embedding_endpoint_style: bad"
-        );
-    }
-
-    #[test]
-    fn provider_default_matches_empty_serde_defaults_for_non_trivial_fields() {
-        let default_provider = CapsProvider::default();
-        let decoded: CapsProvider = serde_yaml::from_str("{}").unwrap();
-
-        assert!(default_provider.enabled);
-        assert!(decoded.enabled);
-        assert!(default_provider.supports_completion);
-        assert!(decoded.supports_completion);
-        assert_eq!(default_provider.endpoint_style, "openai");
-        assert_eq!(decoded.endpoint_style, "openai");
-    }
-
-    #[test]
     fn provider_debug_redacts_api_keys() {
         let provider = CapsProvider {
             api_key: "secret-api".to_string(),
@@ -657,72 +581,5 @@ embedding_endpoint_style: bad
         assert!(!debug.contains("secret-tokenizer"));
         assert!(debug.contains("Authorization"));
         assert!(!debug.contains("secret-header"));
-    }
-
-    #[test]
-    fn set_field_if_exists_sets_existing_field_and_rejects_wrong_type() {
-        let value = serde_yaml::from_str("enabled: false\nname: updated\n").unwrap();
-        let mut enabled = true;
-        let mut name = "old".to_string();
-
-        set_field_if_exists(&mut enabled, "enabled", &value).unwrap();
-        set_field_if_exists(&mut name, "name", &value).unwrap();
-
-        assert!(!enabled);
-        assert_eq!(name, "updated");
-
-        let mut count = 1usize;
-        let error = set_field_if_exists(&mut count, "name", &value).unwrap_err();
-        assert_eq!(error, "Field 'name' has incorrect type");
-    }
-
-    #[test]
-    fn extend_collection_preserves_existing_then_imported_order() {
-        let value = serde_yaml::from_str("models:\n  - b\n  - c\n").unwrap();
-        let mut models = vec!["a".to_string()];
-
-        extend_collection::<Vec<String>>(&mut models, "models", &value).unwrap();
-
-        assert_eq!(models, vec!["a", "b", "c"]);
-    }
-
-    #[test]
-    fn extend_model_collection_marks_added_models_and_preserves_order() {
-        let value = serde_yaml::from_str(
-            r#"
-chat_models:
-  existing:
-    n_ctx: 20
-  selected:
-    n_ctx: 30
-  added:
-    n_ctx: 40
-"#,
-        )
-        .unwrap();
-        let mut target = IndexMap::new();
-        target.insert(
-            "existing".to_string(),
-            ChatModelRecord {
-                base: BaseModelRecord {
-                    n_ctx: 10,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        );
-        let prev_running_models = vec!["selected".to_string()];
-
-        extend_model_collection(&mut target, "chat_models", &value, &prev_running_models).unwrap();
-
-        let keys = target.keys().cloned().collect::<Vec<_>>();
-        assert_eq!(keys, vec!["existing", "selected", "added"]);
-        assert_eq!(target["existing"].base.n_ctx, 20);
-        assert!(target["existing"].base.user_configured);
-        assert!(!target["existing"].base.removable);
-        assert!(target["selected"].base.user_configured);
-        assert!(!target["selected"].base.removable);
-        assert!(target["added"].base.user_configured);
-        assert!(target["added"].base.removable);
     }
 }

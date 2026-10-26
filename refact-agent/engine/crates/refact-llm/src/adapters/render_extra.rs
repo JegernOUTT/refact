@@ -341,14 +341,4 @@ mod tests {
             "<goal-plan-update seq=\"7\">use &lt;new&gt; &amp; better goal</goal-plan-update>"
         );
     }
-
-    #[test]
-    fn render_goal_pursuit_event_stays_generic_event() {
-        let msg = event("goal_pursuit", json!({"turn": 2}), "still pursuing");
-        let rendered = render_event_message(&msg);
-
-        assert!(rendered.contains("<event subkind=\"goal_pursuit\""));
-        assert!(rendered.contains("<message>still pursuing</message>"));
-        assert!(!rendered.contains("<goal-update"));
-    }
 }

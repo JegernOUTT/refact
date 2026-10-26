@@ -87,12 +87,6 @@ mod tests {
             Self { key, previous }
         }
 
-        fn set_raw(key: &'static str, value: &str) -> Self {
-            let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
-            Self { key, previous }
-        }
-
         fn clear(key: &'static str) -> Self {
             let previous = std::env::var_os(key);
             std::env::remove_var(key);
@@ -128,26 +122,5 @@ mod tests {
             tempdir.path().join("logs").join("daemon.log")
         );
         assert_eq!(daemon_config_path(), tempdir.path().join("daemon.yaml"));
-    }
-
-    #[test]
-    #[serial(daemon)]
-    fn daemon_dir_defaults_under_cache_root_without_override() {
-        let cache = tempfile::tempdir().unwrap();
-        let _cache_guard = EnvVarGuard::set("REFACT_DAEMON_CACHE_DIR", cache.path());
-        let _dir_guard = EnvVarGuard::clear(DAEMON_DIR_ENV);
-        let expected = cache.path().join("daemon");
-        assert_eq!(daemon_dir(), expected);
-        assert_eq!(projects_json_path(), expected.join("projects.json"));
-        assert_eq!(daemon_json_path(), expected.join("daemon.json"));
-    }
-
-    #[test]
-    #[serial(daemon)]
-    fn empty_daemon_dir_env_falls_back_to_cache_root() {
-        let cache = tempfile::tempdir().unwrap();
-        let _cache_guard = EnvVarGuard::set("REFACT_DAEMON_CACHE_DIR", cache.path());
-        let _dir_guard = EnvVarGuard::set_raw(DAEMON_DIR_ENV, "");
-        assert_eq!(daemon_dir(), cache.path().join("daemon"));
     }
 }

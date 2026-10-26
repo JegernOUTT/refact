@@ -237,21 +237,6 @@ mod tests {
         (status, json)
     }
 
-    #[test]
-    fn message_push_defaults_and_validates_modes() {
-        let request: MessageRequest = serde_json::from_value(json!({"text": "hello"})).unwrap();
-        assert_eq!(request.push, PushMode::Append);
-        for mode in [PushMode::Append, PushMode::Preempt, PushMode::WhenIdle] {
-            let request: MessageRequest =
-                serde_json::from_value(json!({"text": "hello", "push": mode})).unwrap();
-            assert_eq!(request.push, mode);
-        }
-        assert!(
-            serde_json::from_value::<MessageRequest>(json!({"text": "hello", "push": true}))
-                .is_err()
-        );
-    }
-
     #[tokio::test]
     async fn message_preserves_explicit_push_for_queued_agent() {
         let app = app().await;

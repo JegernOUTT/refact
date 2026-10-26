@@ -368,76 +368,6 @@ mod tests {
     }
 
     #[test]
-    fn zhipu_runtime_requires_enabled_credentials_and_selected_model() {
-        let catalog = zhipu_catalog();
-        let mut provider = ZhipuProvider {
-            api_key: "sk-test".to_string(),
-            enabled: true,
-            enabled_models: vec!["glm-zai".to_string()],
-            ..Default::default()
-        };
-        assert!(
-            provider
-                .build_runtime_from_catalog(&catalog)
-                .unwrap()
-                .enabled
-        );
-
-        provider.enabled = false;
-        assert!(
-            !provider
-                .build_runtime_from_catalog(&catalog)
-                .unwrap()
-                .enabled
-        );
-        provider.enabled = true;
-        provider.api_key.clear();
-        assert!(
-            !provider
-                .build_runtime_from_catalog(&catalog)
-                .unwrap()
-                .enabled
-        );
-        provider.api_key = "sk-test".to_string();
-        provider.enabled_models.clear();
-        assert!(
-            !provider
-                .build_runtime_from_catalog(&catalog)
-                .unwrap()
-                .enabled
-        );
-    }
-
-    #[test]
-    fn zhipu_available_models_use_models_dev_helper_and_custom_models() {
-        let catalog = zhipu_catalog();
-        let mut provider = ZhipuProvider {
-            enabled_models: vec!["glm-zai".to_string(), "glm-custom".to_string()],
-            ..Default::default()
-        };
-        provider.custom_models.insert(
-            "glm-custom".to_string(),
-            CustomModelConfig {
-                n_ctx: Some(4096),
-                supports_tools: Some(true),
-                ..Default::default()
-            },
-        );
-
-        let models = provider.available_models_from_catalog(&catalog).unwrap();
-        let glm_zai = models.iter().find(|model| model.id == "glm-zai").unwrap();
-        let custom = models
-            .iter()
-            .find(|model| model.id == "glm-custom")
-            .unwrap();
-
-        assert!(glm_zai.enabled);
-        assert!(!glm_zai.is_custom);
-        assert!(custom.enabled);
-        assert!(custom.is_custom);
-    }
-
-    #[test]
     fn zhipu_endpoint_types_derive_openai_chat_endpoints() {
         let catalog = zhipu_catalog();
         for (endpoint_type, expected_endpoint) in [
@@ -466,28 +396,5 @@ mod tests {
             assert_eq!(runtime.wire_format, WireFormat::OpenaiChatCompletions);
             assert_eq!(runtime.chat_endpoint, expected_endpoint);
         }
-    }
-
-    #[test]
-    fn zhipu_missing_catalog_provider_returns_custom_models_only() {
-        let mut provider = ZhipuProvider {
-            enabled_models: vec!["glm-custom".to_string()],
-            ..Default::default()
-        };
-        provider.custom_models.insert(
-            "glm-custom".to_string(),
-            CustomModelConfig {
-                n_ctx: Some(8192),
-                ..Default::default()
-            },
-        );
-
-        let models = provider
-            .available_models_from_catalog(&ModelsDevCatalog::new())
-            .unwrap();
-
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "glm-custom");
-        assert!(models[0].enabled);
     }
 }

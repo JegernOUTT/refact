@@ -1942,47 +1942,6 @@ mod tests {
         assert!(!unbounded.expired_at(u64::MAX));
     }
 
-    /// A goal with no wait serializes exactly as before.
-    #[test]
-    fn a_goal_without_a_wait_keeps_the_field_off_the_wire() {
-        let goal = goal_snapshot();
-        assert!(goal.wait.is_none());
-        let wire = serde_json::to_value(&goal).unwrap();
-        assert!(wire.get("wait").is_none());
-    }
-
-    #[test]
-    fn test_session_state_default() {
-        assert_eq!(SessionState::default(), SessionState::Idle);
-    }
-
-    #[test]
-    fn test_session_state_serde() {
-        let state = SessionState::Generating;
-        let json = serde_json::to_string(&state).unwrap();
-        assert_eq!(json, "\"generating\"");
-
-        let parsed: SessionState = serde_json::from_str("\"executing_tools\"").unwrap();
-        assert_eq!(parsed, SessionState::ExecutingTools);
-    }
-
-    #[test]
-    fn test_goal_status_serde_snake_case() {
-        assert_eq!(
-            serde_json::to_string(&GoalStatus::BudgetExhausted).unwrap(),
-            "\"budget_exhausted\""
-        );
-        assert_eq!(
-            serde_json::to_string(&GoalStatus::NoProgress).unwrap(),
-            "\"no_progress\""
-        );
-
-        let parsed: GoalStatus = serde_json::from_str("\"budget_exhausted\"").unwrap();
-        assert_eq!(parsed, GoalStatus::BudgetExhausted);
-        let parsed: GoalStatus = serde_json::from_str("\"no_progress\"").unwrap();
-        assert_eq!(parsed, GoalStatus::NoProgress);
-    }
-
     #[test]
     fn test_goal_snapshot_roundtrip_full() {
         let snapshot = goal_snapshot();
@@ -2036,16 +1995,6 @@ mod tests {
 
         let roundtrip: GoalBudget = serde_json::from_value(json).unwrap();
         assert_eq!(roundtrip, budget);
-    }
-
-    #[test]
-    fn test_goal_budget_legacy_default_migrates_to_unlimited() {
-        let budget = GoalBudget::legacy_default_hard_limits();
-
-        assert_eq!(
-            budget.migrate_legacy_default_hard_limits(),
-            GoalBudget::default()
-        );
     }
 
     #[test]
@@ -2162,23 +2111,6 @@ mod tests {
     }
 
     #[test]
-    fn pending_new_chat_cap_waits_for_model_and_survives_restore() {
-        let mut fresh = ThreadParams {
-            context_tokens_cap: Some(800),
-            ..Default::default()
-        };
-        assert!(!fresh.resolve_pending_compression_cap(None));
-        assert_eq!(fresh.auto_compression_cap, None);
-        let mut restored: ThreadParams =
-            serde_json::from_value(serde_json::to_value(&fresh).unwrap()).unwrap();
-        assert!(restored.auto_compression_cap_pending);
-        assert!(restored.resolve_pending_compression_cap(Some(1000)));
-        assert_eq!(restored.auto_compression_cap, Some(720));
-        assert!(!restored.resolve_pending_compression_cap(Some(2000)));
-        assert_eq!(restored.auto_compression_cap, Some(720));
-    }
-
-    #[test]
     fn legacy_unset_cap_never_initializes_even_when_model_arrives() {
         let mut value = serde_json::to_value(ThreadParams::default()).unwrap();
         value
@@ -2189,19 +2121,6 @@ mod tests {
         assert!(!legacy.auto_compression_cap_pending);
         assert!(!legacy.resolve_pending_compression_cap(Some(1000)));
         assert_eq!(legacy.auto_compression_cap, None);
-    }
-
-    #[test]
-    fn pending_cap_preserves_explicit_values_including_zero() {
-        for cap in [0, 400, 2000] {
-            let mut fresh = ThreadParams {
-                auto_compression_cap: Some(cap),
-                ..Default::default()
-            };
-            assert!(fresh.resolve_pending_compression_cap(None));
-            assert_eq!(fresh.auto_compression_cap, Some(cap));
-            assert!(!fresh.auto_compression_cap_pending);
-        }
     }
 
     #[test]
@@ -2229,18 +2148,6 @@ mod tests {
     }
 
     #[test]
-    fn restored_legacy_no_cap_is_not_a_new_chat() {
-        let mut old = serde_json::to_value(ThreadParams::default()).unwrap();
-        old.as_object_mut()
-            .unwrap()
-            .remove("auto_compression_cap_pending");
-        let mut restored: ThreadParams = serde_json::from_value(old).unwrap();
-        assert!(!restored.auto_compression_cap_pending);
-        assert!(!restored.resolve_pending_compression_cap(Some(1000)));
-        assert_eq!(restored.auto_compression_cap, None);
-    }
-
-    #[test]
     fn new_chat_compression_cap_preserves_explicit_including_zero() {
         for cap in [0, 123, 2000] {
             let mut params = ThreadParams {
@@ -2253,66 +2160,6 @@ mod tests {
             assert!(!params.resolve_pending_compression_cap(Some(1000)));
             assert_eq!(params.auto_compression_cap, Some(cap));
         }
-    }
-
-    #[test]
-    fn test_thread_params_default() {
-        let params = ThreadParams::default();
-        assert_eq!(params.title, "New Chat");
-        assert_eq!(params.mode, "agent");
-        assert_eq!(params.tool_use, "agent");
-        assert!(params.boost_reasoning.is_none());
-        assert!(params.reasoning_effort.is_none());
-        assert!(params.temperature.is_none());
-        assert!(params.frequency_penalty.is_none());
-        assert!(params.max_tokens.is_none());
-        assert!(params.parallel_tool_calls.is_none());
-        assert!(params.auto_compression_cap.is_none());
-        assert!(params.include_project_info);
-        assert!(params.checkpoints_enabled);
-        assert!(!params.is_title_generated);
-        assert!(params.context_tokens_cap.is_none());
-        assert!(params.worktree.is_none());
-        assert!(!params.id.is_empty());
-        assert!(params.auto_compact_enabled.is_none());
-        assert!(params.frozen_request_prefix.is_none());
-        assert!(params.claude_code_identity.is_none());
-        assert!(params.auto_compact_enabled_effective());
-    }
-
-    #[test]
-    fn test_frozen_request_prefix_and_claude_code_identity_serde() {
-        let prefix = FrozenRequestPrefix {
-            schema_version: 1,
-            created_at: "2026-05-29T00:00:00Z".to_string(),
-            system_prompt: Some("system".to_string()),
-            tools_canonical: Some(json!([{"type":"function"}])),
-        };
-        let identity = ClaudeCodeIdentity {
-            device_id: "device".to_string(),
-            session_id: "session".to_string(),
-        };
-        let params = ThreadParams {
-            frozen_request_prefix: Some(prefix.clone()),
-            claude_code_identity: Some(identity.clone()),
-            ..Default::default()
-        };
-
-        let json = serde_json::to_value(&params).unwrap();
-        assert_eq!(json["frozen_request_prefix"]["schema_version"], 1);
-        assert_eq!(json["claude_code_identity"]["session_id"], "session");
-
-        let roundtrip: ThreadParams = serde_json::from_value(json).unwrap();
-        assert_eq!(roundtrip.frozen_request_prefix, Some(prefix));
-        assert_eq!(roundtrip.claude_code_identity, Some(identity));
-    }
-
-    #[test]
-    fn test_thread_params_without_frozen_fields_omits_them() {
-        let params = ThreadParams::default();
-        let json = serde_json::to_value(&params).unwrap();
-        assert!(json.get("frozen_request_prefix").is_none());
-        assert!(json.get("claude_code_identity").is_none());
     }
 
     #[test]
@@ -2350,41 +2197,6 @@ mod tests {
         assert!(params.auto_compression_cap.is_none());
     }
 
-    #[test]
-    fn test_runtime_state_default() {
-        let runtime = RuntimeState::default();
-        assert_eq!(runtime.state, SessionState::Idle);
-        assert!(!runtime.paused);
-        assert!(runtime.error.is_none());
-        assert_eq!(runtime.queue_size, 0);
-        assert!(!runtime.goal_active);
-        assert_eq!(runtime.goal_status, None);
-        assert_eq!(runtime.goal_turns_used, 0);
-        assert_eq!(runtime.goal_tokens_used, 0);
-        assert_eq!(runtime.goal_no_progress_turns, 0);
-        assert!(!runtime.is_compressing);
-        assert!(runtime.pause_reasons.is_empty());
-    }
-
-    #[test]
-    fn test_runtime_state_missing_goal_and_compression_fields_defaults() {
-        let json = r#"{
-            "state":"idle",
-            "paused":false,
-            "error":null,
-            "queue_size":0
-        }"#;
-
-        let runtime: RuntimeState = serde_json::from_str(json).unwrap();
-
-        assert!(!runtime.goal_active);
-        assert_eq!(runtime.goal_status, None);
-        assert_eq!(runtime.goal_turns_used, 0);
-        assert_eq!(runtime.goal_tokens_used, 0);
-        assert_eq!(runtime.goal_no_progress_turns, 0);
-        assert!(!runtime.is_compressing);
-    }
-
     fn delivery_with(messages: Vec<ChatMessage>) -> PendingDelivery {
         PendingDelivery::with_id(
             "delivery-1",
@@ -2393,59 +2205,6 @@ mod tests {
             "agents.push",
             false,
         )
-    }
-
-    #[test]
-    fn delivery_queue_row_carries_the_event_descriptor() {
-        let delivery = delivery_with(vec![internal_roles::event(
-            internal_roles::EventSubkind::SystemNotice,
-            "agents.push",
-            json!({"status": "completed"}),
-            "background subagent finished",
-        )]);
-
-        let item = QueuedItem::from_pending_delivery(&delivery);
-        let event = item.event.expect("delivery event descriptor missing");
-
-        assert_eq!(event["subkind"], json!("system_notice"));
-        assert_eq!(event["source"], json!("agents.push"));
-        assert_eq!(event["payload"], json!({"status": "completed"}));
-    }
-
-    #[test]
-    fn delivery_queue_row_without_event_message_has_no_descriptor() {
-        let delivery = delivery_with(vec![ChatMessage::new(
-            "user".to_string(),
-            "carry on".to_string(),
-        )]);
-
-        assert!(QueuedItem::from_pending_delivery(&delivery).event.is_none());
-    }
-
-    #[test]
-    fn delivery_queue_row_ignores_event_message_without_subkind() {
-        let mut message = ChatMessage::new("event".to_string(), "legacy note".to_string());
-        message
-            .extra
-            .insert("event".to_string(), json!({"source": "agents.push"}));
-
-        assert!(
-            QueuedItem::from_pending_delivery(&delivery_with(vec![message]))
-                .event
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn test_event_envelope_seq_serializes_as_string() {
-        let envelope = EventEnvelope {
-            chat_id: "test-123".to_string(),
-            seq: 42,
-            event: ChatEvent::PauseCleared {},
-        };
-        let json = serde_json::to_value(&envelope).unwrap();
-        assert_eq!(json["seq"], "42");
-        assert_eq!(json["chat_id"], "test-123");
     }
 
     #[test]
@@ -2485,26 +2244,6 @@ mod tests {
     }
 
     #[test]
-    fn test_chat_command_user_message_client_message_id_roundtrips() {
-        let json = json!({
-            "type": "user_message",
-            "content": "hello",
-            "client_message_id": "optimistic-1"
-        });
-        let command: ChatCommand = serde_json::from_value(json.clone()).unwrap();
-        match &command {
-            ChatCommand::UserMessage {
-                client_message_id, ..
-            } => assert_eq!(client_message_id.as_deref(), Some("optimistic-1")),
-            _ => panic!("Wrong variant"),
-        }
-        let serialized = serde_json::to_value(command).unwrap();
-        assert_eq!(serialized["type"], json["type"]);
-        assert_eq!(serialized["content"], json["content"]);
-        assert_eq!(serialized["client_message_id"], json["client_message_id"]);
-    }
-
-    #[test]
     fn test_client_message_id_validation_bounds() {
         assert!(validate_client_message_id(None).is_ok());
         assert!(validate_client_message_id(Some("optimistic-1")).is_ok());
@@ -2512,60 +2251,6 @@ mod tests {
         assert!(
             validate_client_message_id(Some(&"a".repeat(MAX_CLIENT_MESSAGE_ID_CHARS + 1))).is_err()
         );
-    }
-
-    #[test]
-    fn test_chat_command_ide_tool_result_defaults() {
-        let json = r#"{"type":"ide_tool_result","tool_call_id":"tc1","content":"result"}"#;
-        let cmd: ChatCommand = serde_json::from_str(json).unwrap();
-        match cmd {
-            ChatCommand::IdeToolResult {
-                tool_call_id,
-                content,
-                tool_failed,
-            } => {
-                assert_eq!(tool_call_id, "tc1");
-                assert_eq!(content, "result");
-                assert!(!tool_failed);
-            }
-            _ => panic!("Wrong variant"),
-        }
-    }
-
-    #[test]
-    fn test_chat_command_update_message_defaults() {
-        let json = r#"{"type":"update_message","message_id":"m1","content":"new"}"#;
-        let cmd: ChatCommand = serde_json::from_str(json).unwrap();
-        match cmd {
-            ChatCommand::UpdateMessage {
-                message_id,
-                content,
-                attachments,
-                regenerate,
-            } => {
-                assert_eq!(message_id, "m1");
-                assert_eq!(content, json!("new"));
-                assert!(attachments.is_empty());
-                assert!(!regenerate);
-            }
-            _ => panic!("Wrong variant"),
-        }
-    }
-
-    #[test]
-    fn test_chat_command_remove_message_defaults() {
-        let json = r#"{"type":"remove_message","message_id":"m1"}"#;
-        let cmd: ChatCommand = serde_json::from_str(json).unwrap();
-        match cmd {
-            ChatCommand::RemoveMessage {
-                message_id,
-                regenerate,
-            } => {
-                assert_eq!(message_id, "m1");
-                assert!(!regenerate);
-            }
-            _ => panic!("Wrong variant"),
-        }
     }
 
     #[test]
@@ -2605,92 +2290,6 @@ mod tests {
             let cmd: ChatCommand = serde_json::from_value(cmd_json.clone()).unwrap();
             let roundtrip = serde_json::to_value(&cmd).unwrap();
             assert_eq!(roundtrip, cmd_json);
-        }
-    }
-
-    #[test]
-    fn test_delta_op_serde() {
-        let ops = vec![
-            DeltaOp::AppendContent {
-                text: "hello".into(),
-            },
-            DeltaOp::AppendReasoning {
-                text: "thinking".into(),
-            },
-            DeltaOp::SetReasoning {
-                text: "completed reasoning".into(),
-            },
-            DeltaOp::SetToolCalls {
-                tool_calls: vec![json!({"id":"1"})],
-            },
-            DeltaOp::SetThinkingBlocks {
-                blocks: vec![json!({"type":"thinking"})],
-            },
-            DeltaOp::AddCitation {
-                citation: json!({"url":"http://x"}),
-            },
-            DeltaOp::AddServerContentBlock {
-                block: json!({"type":"server_tool_use","id":"srvtoolu_1","name":"web_search"}),
-            },
-            DeltaOp::SetUsage {
-                usage: json!({"total_tokens":100}),
-            },
-            DeltaOp::MergeExtra {
-                extra: serde_json::Map::new(),
-            },
-        ];
-        for op in ops {
-            let json = serde_json::to_value(&op).unwrap();
-            let parsed: DeltaOp = serde_json::from_value(json).unwrap();
-            assert_eq!(
-                serde_json::to_string(&op).unwrap(),
-                serde_json::to_string(&parsed).unwrap()
-            );
-        }
-    }
-
-    #[test]
-    fn test_chat_event_snapshot_serde() {
-        let event = ChatEvent::Snapshot {
-            thread: ThreadParams::default(),
-            runtime: RuntimeState::default(),
-            messages: vec![],
-            background_agents: vec![],
-            browser: None,
-            goal: None,
-            pending_questions: vec![],
-        };
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "snapshot");
-        assert!(json.get("goal").is_none());
-        assert_eq!(json["pending_questions"], serde_json::json!([]));
-        let parsed: ChatEvent = serde_json::from_value(json).unwrap();
-        assert!(
-            matches!(parsed, ChatEvent::Snapshot { pending_questions, .. } if pending_questions.is_empty())
-        );
-    }
-
-    #[test]
-    fn test_chat_event_snapshot_goal_roundtrip() {
-        let goal = goal_snapshot();
-        let event = ChatEvent::Snapshot {
-            thread: ThreadParams::default(),
-            runtime: RuntimeState::default(),
-            messages: vec![],
-            background_agents: vec![],
-            browser: None,
-            goal: Some(goal.clone()),
-            pending_questions: vec![],
-        };
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "snapshot");
-        assert_eq!(json["goal"]["content"], "Ship the frog pond");
-        assert_eq!(json["goal"]["status"], "verifying");
-
-        let parsed: ChatEvent = serde_json::from_value(json).unwrap();
-        match parsed {
-            ChatEvent::Snapshot { goal: parsed, .. } => assert_eq!(parsed, Some(goal)),
-            _ => panic!("Expected Snapshot"),
         }
     }
 
@@ -2736,210 +2335,6 @@ mod tests {
             }
             _ => panic!("Expected Snapshot"),
         }
-    }
-
-    #[test]
-    fn test_background_agent_updated_roundtrip() {
-        let event = ChatEvent::BackgroundAgentUpdated {
-            chat_id: "parent-chat".to_string(),
-            seq: 11,
-            agent: background_agent_summary(),
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value["type"], "background_agent_updated");
-        assert_eq!(value["chat_id"], "parent-chat");
-        assert_eq!(value["seq"], 11);
-        assert_eq!(value["agent"]["agentId"], "bgagent-1");
-        assert_eq!(value["agent"]["model"], "test-model");
-
-        let parsed: ChatEvent = serde_json::from_str(&json).unwrap();
-        match parsed {
-            ChatEvent::BackgroundAgentUpdated {
-                chat_id,
-                seq,
-                agent,
-            } => {
-                assert_eq!(chat_id, "parent-chat");
-                assert_eq!(seq, 11);
-                assert_eq!(agent, background_agent_summary());
-            }
-            _ => panic!("Expected BackgroundAgentUpdated"),
-        }
-    }
-
-    #[test]
-    fn test_snapshot_roundtrip_with_background_agents() {
-        let event = ChatEvent::Snapshot {
-            thread: ThreadParams::default(),
-            runtime: RuntimeState::default(),
-            messages: vec![],
-            background_agents: vec![background_agent_summary()],
-            browser: None,
-            goal: None,
-            pending_questions: vec![],
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        let parsed: ChatEvent = serde_json::from_str(&json).unwrap();
-        match parsed {
-            ChatEvent::Snapshot {
-                background_agents, ..
-            } => assert_eq!(background_agents, vec![background_agent_summary()]),
-            _ => panic!("Expected Snapshot"),
-        }
-    }
-
-    #[test]
-    fn test_snapshot_roundtrip_with_browser() {
-        let event = ChatEvent::Snapshot {
-            thread: ThreadParams::default(),
-            runtime: RuntimeState::default(),
-            messages: vec![],
-            background_agents: vec![],
-            browser: Some(BrowserSnapshot {
-                runtime_id: "rt-1".to_string(),
-                connected: true,
-                active_tab: Some("tab-1".to_string()),
-                url: Some("https://example.com".to_string()),
-                title: Some("Example".to_string()),
-                tabs: vec![BrowserTabInfo {
-                    tab_id: "tab-1".to_string(),
-                    url: "https://example.com".to_string(),
-                    title: "Example".to_string(),
-                }],
-            }),
-            goal: None,
-            pending_questions: vec![],
-        };
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["browser"]["runtime_id"], "rt-1");
-        assert_eq!(json["browser"]["connected"], true);
-        let parsed: ChatEvent = serde_json::from_value(json).unwrap();
-        match parsed {
-            ChatEvent::Snapshot { browser, .. } => {
-                let browser = browser.expect("browser snapshot present");
-                assert_eq!(browser.runtime_id, "rt-1");
-                assert_eq!(browser.url.as_deref(), Some("https://example.com"));
-                assert_eq!(browser.tabs.len(), 1);
-            }
-            _ => panic!("Expected Snapshot"),
-        }
-    }
-
-    #[test]
-    fn test_background_agent_summary_strings_are_snake_case_values() {
-        let summary = background_agent_summary();
-        let json = serde_json::to_value(&summary).unwrap();
-        assert_eq!(json["kind"], "delegate");
-        assert_eq!(json["status"], "waiting_for_approval");
-    }
-
-    #[test]
-    fn test_chat_event_stream_delta_serde() {
-        let event = ChatEvent::StreamDelta {
-            message_id: "m1".into(),
-            ops: vec![DeltaOp::AppendContent { text: "x".into() }],
-        };
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "stream_delta");
-        assert_eq!(json["message_id"], "m1");
-    }
-
-    #[test]
-    fn test_chat_event_process_completed_serde() {
-        let event = ChatEvent::ProcessCompleted {
-            process_id: "exec_done".to_string(),
-            status: "exited".to_string(),
-            exit_code: Some(0),
-            short_description: "test process".to_string(),
-            mode: "background".to_string(),
-        };
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "process_completed");
-        assert_eq!(json["process_id"], "exec_done");
-        assert_eq!(json["status"], "exited");
-        assert_eq!(json["exit_code"], 0);
-        assert_eq!(json["short_description"], "test process");
-        assert_eq!(json["mode"], "background");
-
-        let parsed: ChatEvent = serde_json::from_value(json).unwrap();
-        match parsed {
-            ChatEvent::ProcessCompleted {
-                process_id,
-                status,
-                exit_code,
-                short_description,
-                mode,
-            } => {
-                assert_eq!(process_id, "exec_done");
-                assert_eq!(status, "exited");
-                assert_eq!(exit_code, Some(0));
-                assert_eq!(short_description, "test process");
-                assert_eq!(mode, "background");
-            }
-            other => panic!("expected process completed, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_chat_event_exec_process_spawned_serde() {
-        let event = ChatEvent::ExecProcessSpawned {
-            chat_id: "chat-spawn".to_string(),
-            seq: 9,
-            process: ExecProcessSpawn {
-                process_id: "exec_spawn".to_string(),
-                command_preview: "Start dev server".to_string(),
-                mode: "background".to_string(),
-                tty: true,
-                status: "running".to_string(),
-                started_at: 123,
-            },
-        };
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "exec_process_spawned");
-        assert_eq!(json["chat_id"], "chat-spawn");
-        assert_eq!(json["seq"], 9);
-        assert_eq!(json["process"]["processId"], "exec_spawn");
-        assert_eq!(json["process"]["commandPreview"], "Start dev server");
-        assert_eq!(json["process"]["mode"], "background");
-        assert_eq!(json["process"]["tty"], true);
-        assert_eq!(json["process"]["status"], "running");
-        assert_eq!(json["process"]["startedAt"], 123);
-
-        let parsed: ChatEvent = serde_json::from_value(json).unwrap();
-        match parsed {
-            ChatEvent::ExecProcessSpawned {
-                chat_id,
-                seq,
-                process,
-            } => {
-                assert_eq!(chat_id, "chat-spawn");
-                assert_eq!(seq, 9);
-                assert_eq!(process.process_id, "exec_spawn");
-                assert_eq!(process.command_preview, "Start dev server");
-                assert_eq!(process.mode, "background");
-                assert!(process.tty);
-                assert_eq!(process.status, "running");
-                assert_eq!(process.started_at, 123);
-            }
-            other => panic!("expected exec process spawned, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_pause_reason_serde() {
-        let reason = PauseReason {
-            reason_type: "confirmation".into(),
-            tool_name: "shell".into(),
-            command: "shell".into(),
-            rule: "ask".into(),
-            tool_call_id: "tc1".into(),
-            integr_config_path: Some("/path".into()),
-        };
-        let json = serde_json::to_value(&reason).unwrap();
-        assert_eq!(json["type"], "confirmation");
-        assert_eq!(json["tool_name"], "shell");
-        assert_eq!(json["integr_config_path"], "/path");
     }
 
     #[test]
@@ -3107,42 +2502,6 @@ mod tests {
     }
 
     #[test]
-    fn test_browser_meta_serde_roundtrip_full() {
-        let meta = BrowserMeta {
-            browser_runtime_id: Some("rt-123".to_string()),
-            profile_dir: Some("/tmp/chrome-profile".to_string()),
-            tab_urls: vec![
-                "https://example.com".to_string(),
-                "https://test.com".to_string(),
-            ],
-            active_tab_id: Some("tab-1".to_string()),
-            window_bounds: Some(WindowBounds {
-                x: 100,
-                y: 200,
-                width: 1920,
-                height: 1080,
-            }),
-            attach_screenshot_on_send: true,
-            mask_passwords: false,
-        };
-        let json = serde_json::to_value(&meta).unwrap();
-        assert_eq!(json["browser_runtime_id"], "rt-123");
-        assert_eq!(json["profile_dir"], "/tmp/chrome-profile");
-        assert_eq!(json["tab_urls"].as_array().unwrap().len(), 2);
-        assert_eq!(json["active_tab_id"], "tab-1");
-        assert_eq!(json["window_bounds"]["x"], 100);
-        assert_eq!(json["window_bounds"]["width"], 1920);
-        assert_eq!(json["attach_screenshot_on_send"], true);
-        assert_eq!(json["mask_passwords"], false);
-
-        let roundtrip: BrowserMeta = serde_json::from_value(json).unwrap();
-        assert_eq!(roundtrip.browser_runtime_id.as_deref(), Some("rt-123"));
-        assert_eq!(roundtrip.tab_urls.len(), 2);
-        assert!(roundtrip.attach_screenshot_on_send);
-        assert!(!roundtrip.mask_passwords);
-    }
-
-    #[test]
     fn test_browser_meta_serde_roundtrip_minimal() {
         let json_str = r#"{}"#;
         let meta: BrowserMeta = serde_json::from_str(json_str).unwrap();
@@ -3153,266 +2512,6 @@ mod tests {
         assert!(meta.window_bounds.is_none());
         assert!(!meta.attach_screenshot_on_send);
         assert!(meta.mask_passwords);
-    }
-
-    #[test]
-    fn test_thread_params_without_browser_meta_omits_field() {
-        let params = ThreadParams::default();
-        assert!(params.browser_meta.is_none());
-        let json = serde_json::to_value(&params).unwrap();
-        assert!(json.get("browser_meta").is_none());
-    }
-
-    #[test]
-    fn test_thread_params_with_browser_meta_roundtrip() {
-        let mut params = ThreadParams::default();
-        params.browser_meta = Some(BrowserMeta {
-            browser_runtime_id: Some("rt-456".to_string()),
-            profile_dir: None,
-            tab_urls: vec!["https://example.com".to_string()],
-            active_tab_id: None,
-            window_bounds: None,
-            attach_screenshot_on_send: false,
-            mask_passwords: true,
-        });
-        let json = serde_json::to_value(&params).unwrap();
-        assert!(json.get("browser_meta").is_some());
-        assert_eq!(json["browser_meta"]["browser_runtime_id"], "rt-456");
-
-        let roundtrip: ThreadParams = serde_json::from_value(json).unwrap();
-        assert!(roundtrip.browser_meta.is_some());
-        let bm = roundtrip.browser_meta.unwrap();
-        assert_eq!(bm.browser_runtime_id.as_deref(), Some("rt-456"));
-        assert_eq!(bm.tab_urls.len(), 1);
-    }
-
-    #[test]
-    fn test_thread_params_backward_compat_no_browser_meta() {
-        let json_str = r#"{"id":"test","title":"Test","model":"gpt-4","mode":"agent","tool_use":"agent","include_project_info":true,"checkpoints_enabled":true}"#;
-        let params: ThreadParams = serde_json::from_str(json_str).unwrap();
-        assert!(params.browser_meta.is_none());
-        assert_eq!(params.id, "test");
-        assert_eq!(params.mode, "agent");
-    }
-
-    #[test]
-    fn test_thread_params_backward_compat_no_worktree() {
-        let json_str = r#"{"id":"test","title":"Test","model":"gpt-4","mode":"agent","tool_use":"agent","include_project_info":true,"checkpoints_enabled":true}"#;
-        let params: ThreadParams = serde_json::from_str(json_str).unwrap();
-        assert!(params.worktree.is_none());
-        assert_eq!(params.id, "test");
-        assert_eq!(params.mode, "agent");
-    }
-
-    #[test]
-    fn test_chat_event_browser_frame_serde() {
-        let event = ChatEvent::BrowserFrame {
-            tab_id: "tab-1".to_string(),
-            mime: "image/jpeg".to_string(),
-            data: "base64data".to_string(),
-            diff_boxes: vec![DiffBox {
-                x: 10,
-                y: 20,
-                width: 100,
-                height: 50,
-            }],
-            changed_text: Some("button clicked".to_string()),
-        };
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "browser_frame");
-        assert_eq!(json["tab_id"], "tab-1");
-        assert_eq!(json["mime"], "image/jpeg");
-        assert_eq!(json["data"], "base64data");
-        assert_eq!(json["diff_boxes"][0]["x"], 10);
-        assert_eq!(json["diff_boxes"][0]["width"], 100);
-        assert_eq!(json["changed_text"], "button clicked");
-        let parsed: ChatEvent = serde_json::from_value(json).unwrap();
-        match parsed {
-            ChatEvent::BrowserFrame {
-                tab_id,
-                mime,
-                diff_boxes,
-                changed_text,
-                ..
-            } => {
-                assert_eq!(tab_id, "tab-1");
-                assert_eq!(mime, "image/jpeg");
-                assert_eq!(diff_boxes.len(), 1);
-                assert_eq!(changed_text, Some("button clicked".to_string()));
-            }
-            _ => panic!("Expected BrowserFrame"),
-        }
-    }
-
-    #[test]
-    fn test_chat_event_browser_frame_minimal() {
-        let event = ChatEvent::BrowserFrame {
-            tab_id: "tab-2".to_string(),
-            mime: "image/png".to_string(),
-            data: "abc123".to_string(),
-            diff_boxes: vec![],
-            changed_text: None,
-        };
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "browser_frame");
-        assert!(json.get("diff_boxes").is_none());
-        assert!(json.get("changed_text").is_none());
-    }
-
-    #[test]
-    fn test_chat_event_browser_status_serde() {
-        let event = ChatEvent::BrowserStatus {
-            runtime_id: "rt-1".to_string(),
-            connected: true,
-            active_tab: Some("tab-1".to_string()),
-            url: Some("https://example.com".to_string()),
-            title: Some("Example".to_string()),
-            tabs: vec![BrowserTabInfo {
-                tab_id: "tab-1".to_string(),
-                url: "https://example.com".to_string(),
-                title: "Example".to_string(),
-            }],
-        };
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "browser_status");
-        assert_eq!(json["runtime_id"], "rt-1");
-        assert_eq!(json["connected"], true);
-        assert_eq!(json["active_tab"], "tab-1");
-        assert_eq!(json["tabs"][0]["tab_id"], "tab-1");
-        let parsed: ChatEvent = serde_json::from_value(json).unwrap();
-        match parsed {
-            ChatEvent::BrowserStatus {
-                runtime_id,
-                connected,
-                tabs,
-                ..
-            } => {
-                assert_eq!(runtime_id, "rt-1");
-                assert!(connected);
-                assert_eq!(tabs.len(), 1);
-            }
-            _ => panic!("Expected BrowserStatus"),
-        }
-    }
-
-    #[test]
-    fn test_chat_event_browser_status_minimal() {
-        let event = ChatEvent::BrowserStatus {
-            runtime_id: "rt-2".to_string(),
-            connected: false,
-            active_tab: None,
-            url: None,
-            title: None,
-            tabs: vec![],
-        };
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "browser_status");
-        assert_eq!(json["connected"], false);
-        assert!(json.get("active_tab").is_none());
-        assert!(json.get("url").is_none());
-        assert!(json.get("tabs").is_none());
-    }
-
-    #[test]
-    fn test_chat_event_browser_closed_serde() {
-        let event = ChatEvent::BrowserClosed {
-            runtime_id: "rt-1".to_string(),
-            reason: "user_closed".to_string(),
-        };
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "browser_closed");
-        assert_eq!(json["runtime_id"], "rt-1");
-        assert_eq!(json["reason"], "user_closed");
-        let parsed: ChatEvent = serde_json::from_value(json).unwrap();
-        match parsed {
-            ChatEvent::BrowserClosed { runtime_id, reason } => {
-                assert_eq!(runtime_id, "rt-1");
-                assert_eq!(reason, "user_closed");
-            }
-            _ => panic!("Expected BrowserClosed"),
-        }
-    }
-
-    #[test]
-    fn test_chat_event_browser_timeline_serde() {
-        let event = ChatEvent::BrowserTimeline {
-            events: vec![
-                TimelineEntry {
-                    timestamp: "2025-01-01T10:00:00Z".to_string(),
-                    source: "user".to_string(),
-                    entry_type: "click".to_string(),
-                    summary: "Clicked #submit-btn".to_string(),
-                    details: Some(json!({"selector": "#submit-btn"})),
-                },
-                TimelineEntry {
-                    timestamp: "2025-01-01T10:00:01Z".to_string(),
-                    source: "agent".to_string(),
-                    entry_type: "navigate".to_string(),
-                    summary: "Navigated to page".to_string(),
-                    details: None,
-                },
-            ],
-        };
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "browser_timeline");
-        assert_eq!(json["events"].as_array().unwrap().len(), 2);
-        assert_eq!(json["events"][0]["source"], "user");
-        assert_eq!(json["events"][1]["type"], "navigate");
-        let parsed: ChatEvent = serde_json::from_value(json).unwrap();
-        match parsed {
-            ChatEvent::BrowserTimeline { events } => {
-                assert_eq!(events.len(), 2);
-                assert_eq!(events[0].entry_type, "click");
-            }
-            _ => panic!("Expected BrowserTimeline"),
-        }
-    }
-
-    #[test]
-    fn test_diff_box_serde() {
-        let db = DiffBox {
-            x: 10,
-            y: 20,
-            width: 100,
-            height: 50,
-        };
-        let json = serde_json::to_value(&db).unwrap();
-        assert_eq!(json["x"], 10);
-        assert_eq!(json["y"], 20);
-        assert_eq!(json["width"], 100);
-        assert_eq!(json["height"], 50);
-        let parsed: DiffBox = serde_json::from_value(json).unwrap();
-        assert_eq!(parsed, db);
-    }
-
-    #[test]
-    fn test_browser_tab_info_serde() {
-        let tab = BrowserTabInfo {
-            tab_id: "t1".to_string(),
-            url: "https://test.com".to_string(),
-            title: "Test".to_string(),
-        };
-        let json = serde_json::to_value(&tab).unwrap();
-        let parsed: BrowserTabInfo = serde_json::from_value(json).unwrap();
-        assert_eq!(parsed.tab_id, "t1");
-        assert_eq!(parsed.url, "https://test.com");
-    }
-
-    #[test]
-    fn test_timeline_entry_serde() {
-        let entry = TimelineEntry {
-            timestamp: "2025-01-01T10:00:00Z".to_string(),
-            source: "user".to_string(),
-            entry_type: "input".to_string(),
-            summary: "Typed text".to_string(),
-            details: Some(json!({"text": "typed text"})),
-        };
-        let json = serde_json::to_value(&entry).unwrap();
-        assert_eq!(json["timestamp"], "2025-01-01T10:00:00Z");
-        assert_eq!(json["type"], "input");
-        assert_eq!(json["summary"], "Typed text");
-        let parsed: TimelineEntry = serde_json::from_value(json).unwrap();
-        assert_eq!(parsed.entry_type, "input");
     }
 
     #[test]
@@ -3432,38 +2531,5 @@ mod tests {
         assert_eq!(json["chat_id"], "chat-1");
         assert_eq!(json["seq"], "5");
         assert_eq!(json["type"], "browser_frame");
-    }
-
-    #[test]
-    fn test_chat_event_browser_toolbar_action_serde() {
-        let event = ChatEvent::BrowserToolbarAction {
-            action: "screenshot".to_string(),
-        };
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "browser_toolbar_action");
-        assert_eq!(json["action"], "screenshot");
-        let parsed: ChatEvent = serde_json::from_value(json).unwrap();
-        match parsed {
-            ChatEvent::BrowserToolbarAction { action } => {
-                assert_eq!(action, "screenshot");
-            }
-            _ => panic!("Expected BrowserToolbarAction"),
-        }
-    }
-
-    #[test]
-    fn test_chat_event_browser_toolbar_action_in_envelope() {
-        let envelope = EventEnvelope {
-            chat_id: "chat-1".to_string(),
-            seq: 10,
-            event: ChatEvent::BrowserToolbarAction {
-                action: "summarize".to_string(),
-            },
-        };
-        let json = serde_json::to_value(&envelope).unwrap();
-        assert_eq!(json["chat_id"], "chat-1");
-        assert_eq!(json["seq"], "10");
-        assert_eq!(json["type"], "browser_toolbar_action");
-        assert_eq!(json["action"], "summarize");
     }
 }

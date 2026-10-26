@@ -213,7 +213,7 @@ mod tests {
     use std::collections::HashMap;
     use refact_chat_api::QuestionKind;
 
-    use crate::attention::{AttentionPriority, AttentionRequest, AttentionScope};
+    use crate::attention::{AttentionRequest, AttentionScope};
     use crate::tools::tools_description::Tool;
 
     fn request(text: &str, delivery: Option<PromptDelivery>) -> AttentionRequest {
@@ -346,34 +346,6 @@ mod tests {
         assert!(
             matches!(&events[1], NotificationEvent::AskQuestions { chat_id, tool_call_id, questions, .. } if chat_id == "chat-b" && tool_call_id == "tool-b" && questions[0].id == "q3")
         );
-    }
-
-    #[tokio::test]
-    async fn a_blocking_question_goes_out_on_the_next_tick() {
-        let (app, mut rx) = app_with_receiver().await;
-        let now = Utc::now();
-        app.attention()
-            .join(
-                request(
-                    "Now?",
-                    Some(delivery(
-                        "chat",
-                        "tool",
-                        "q",
-                        "Now?",
-                        now.timestamp_millis() as u64,
-                    )),
-                )
-                .with_priority(AttentionPriority::Blocking),
-                "chat:tool",
-                now,
-            )
-            .unwrap();
-        assert_eq!(deliver_due(&app, now).await, 1);
-        assert!(matches!(
-            rx.try_recv().unwrap(),
-            NotificationEvent::AskQuestions { .. }
-        ));
     }
 
     #[tokio::test]

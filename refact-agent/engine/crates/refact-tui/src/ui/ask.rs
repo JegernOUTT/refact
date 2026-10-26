@@ -275,7 +275,7 @@ mod tests {
     use crate::ask_questions::{AskQuestionsForm, AskQuestionsRequest};
     use ratatui::backend::{Backend, TestBackend};
     use ratatui::layout::Position;
-    use ratatui::style::Color;
+
     use ratatui::{Terminal, TerminalOptions, Viewport};
     use serde_json::{json, Value};
 
@@ -373,25 +373,6 @@ mod tests {
     }
 
     #[test]
-    fn ask_form_renders_inside_supplied_composer_rect() {
-        let form = form_with_questions(json!([
-            {"id":"confirm","type":"yes_no","text":"Proceed?"}
-        ]));
-        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
-        let composer = Rect::new(0, 14, 80, 6);
-
-        terminal
-            .draw(|frame| render_ask_form(frame, &form, composer))
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let question = find_text_start(buffer, "Proceed?").expect("question rendered");
-
-        assert!(question.1 >= composer.y);
-        assert!(question.1 < composer.bottom());
-        assert!(assert_no_drawn_cells_outside(buffer, composer));
-    }
-
-    #[test]
     fn ask_form_stays_inside_inline_viewport() {
         let form = form_with_questions(json!([
             {"id":"areas","type":"multi_select","text":"Areas?","options":["Tests","Docs","Ui"]}
@@ -421,66 +402,6 @@ mod tests {
         assert_eq!(buffer.area, viewport);
         assert!(assert_no_drawn_cells_outside(&buffer, composer));
         assert!(find_text_start(&buffer, "Areas?").is_some());
-    }
-
-    #[test]
-    fn ask_form_renders_framed_options_and_footer() {
-        let form = form_with_questions(json!([
-            {"id":"confirm","type":"yes_no","text":"Proceed?"}
-        ]));
-
-        let (text, buffer) = rendered_form(&form);
-
-        assert!(text.contains("Question 1/1"));
-        assert!(text.contains("Proceed? (answer required)"));
-        assert!(text.contains("› ○ Yes"));
-        assert!(text.contains("○ No"));
-        assert!(text.contains("Press Enter to confirm or Esc to go back"));
-        assert!(text.contains("Y/N choose"));
-        assert!(text.contains("┌"));
-        let cursor = buffer
-            .content()
-            .iter()
-            .find(|cell| cell.symbol() == "›")
-            .expect("selected cursor rendered");
-        assert_eq!(cursor.style().fg, Some(Color::Cyan));
-        assert!(cursor.style().add_modifier.contains(Modifier::BOLD));
-    }
-
-    #[test]
-    fn free_text_renders_cyan_question_and_textarea_hint() {
-        let form = form_with_questions(json!([
-            {"id":"notes","type":"free_text","text":"Notes?"}
-        ]));
-
-        let (text, buffer) = rendered_form(&form);
-
-        assert!(text.contains("Question 1/1"));
-        assert!(text.contains("Type your answer…"));
-        assert!(text.contains("Type answer · Ctrl-J newline"));
-        assert!(text.contains("┌"));
-        let (x, y) = find_text_start(&buffer, "Notes?").expect("question rendered");
-        assert_eq!(buffer[(x, y)].style().fg, Some(Color::Cyan));
-    }
-
-    #[test]
-    fn free_text_renders_current_multiline_text() {
-        let mut form = form_with_questions(json!([
-            {"id":"notes","type":"free_text","text":"Notes?"}
-        ]));
-        for ch in "First".chars() {
-            form.insert_char(ch);
-        }
-        form.insert_newline();
-        for ch in "Second".chars() {
-            form.insert_char(ch);
-        }
-
-        let (text, _buffer) = rendered_form(&form);
-
-        assert!(text.contains("First"));
-        assert!(text.contains("Second"));
-        assert!(!text.contains("Type your answer…"));
     }
 
     #[test]

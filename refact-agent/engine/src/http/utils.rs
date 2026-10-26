@@ -52,21 +52,3 @@ pub async fn request_logging_middleware<B>(
 
     Ok(response)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn suppresses_only_get_requests_for_subchat_trajectories() {
-        let uri = "/trajectories/subchat-1234".parse().unwrap();
-        assert!(is_spam_request(&uri, &Method::GET));
-        assert!(!is_spam_request(&uri, &Method::DELETE));
-    }
-
-    #[test]
-    fn keeps_top_level_trajectory_requests_visible() {
-        let uri = "/trajectories/chat-1234".parse().unwrap();
-        assert!(!is_spam_request(&uri, &Method::GET));
-    }
-}

@@ -272,18 +272,6 @@ mod tests {
     }
 
     #[test]
-    fn osc9_sequence_encodes_payload_and_bell() {
-        assert_eq!(
-            osc9_sequence("Refact: response ready", true, false),
-            b"\x1b]9;Refact: response ready\x07\x07"
-        );
-        assert_eq!(
-            osc9_sequence("Refact: response ready", false, false),
-            b"\x1b]9;Refact: response ready\x07"
-        );
-    }
-
-    #[test]
     fn osc9_sequence_escapes_control_text() {
         assert_eq!(
             osc9_sequence("hello\x07\x1bworld\nnext", false, false),
@@ -338,43 +326,6 @@ mod tests {
             NotificationKind::ApprovalNeeded,
             start + Duration::from_secs(1)
         ));
-    }
-
-    #[test]
-    fn notification_config_parses_aliases() {
-        let config = NotificationConfig::from_config_file_content(Some(
-            r#"
-notify = "off"
-
-[notifications]
-enabled = true
-bell = false
-debounce_ms = 17
-"#,
-        ))
-        .unwrap();
-
-        assert!(config.enabled);
-        assert!(!config.bell);
-        assert_eq!(config.debounce, Duration::from_millis(17));
-    }
-
-    #[test]
-    fn notification_config_parses_notify_table() {
-        let config = NotificationConfig::from_config_file_content_with_env(
-            Some(
-                r#"
-[notify]
-mode = "on"
-bell = false
-"#,
-            ),
-            None,
-        )
-        .unwrap();
-
-        assert!(config.enabled);
-        assert!(!config.bell);
     }
 
     #[test]

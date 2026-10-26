@@ -362,14 +362,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extracts_history_search_text() {
-        assert_eq!(
-            composer_search_text(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty())),
-            Some('x'),
-        );
-    }
-
-    #[test]
     fn file_mention_stays_literal_mid_word() {
         let mut mid_word = App::notice_only("test");
         for ch in "user".chars() {

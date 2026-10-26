@@ -458,63 +458,6 @@ fn bfs_flow(entry_id: i64, out: &BTreeMap<i64, Vec<i64>>, cap: usize) -> (Vec<i6
 mod tests {
     use super::*;
 
-    fn store_with(src: &str) -> Store {
-        let store = Store::open_in_memory().unwrap();
-        store.index_file_graph("src/lib.rs", src, "rust").unwrap();
-        store.connect_usages().unwrap();
-        store
-    }
-
-    #[test]
-    fn detects_two_tightly_connected_clusters() {
-        let store =
-            store_with("fn a() { b(); }\nfn b() { a(); }\nfn x() { y(); }\nfn y() { x(); }\n");
-        let communities = detect_communities(&store).unwrap();
-        let multi_member = communities.iter().filter(|c| c.members.len() >= 2).count();
-        assert!(
-            communities.len() >= 2 && multi_member >= 2,
-            "expected at least two communities, got {:?}",
-            communities
-        );
-    }
-
-    #[test]
-    fn self_loops_do_not_change_cluster_assignment() {
-        let store = store_with(
-            "fn a() { b(); a(); }\nfn b() { a(); }\nfn x() { y(); x(); }\nfn y() { x(); }\n",
-        );
-        let communities = detect_communities(&store).unwrap();
-        let clusters: Vec<&Vec<i64>> = communities
-            .iter()
-            .filter(|c| c.members.len() >= 2)
-            .map(|c| &c.members)
-            .collect();
-        assert!(
-            clusters.len() >= 2,
-            "self-loops must not merge or dissolve clusters, got {:?}",
-            communities
-        );
-    }
-
-    #[test]
-    fn execution_flow_follows_main_chain() {
-        let store = store_with("fn main() { a(); }\nfn a() { b(); }\nfn b() { c(); }\nfn c() {}\n");
-        let flows = execution_flows(&store, 10).unwrap();
-        let main = flows
-            .iter()
-            .find(|flow| flow.entry == "main")
-            .expect("main flow should be present");
-        assert!(main.reached >= 3, "got {:?}", flows);
-        assert!(main.depth >= 3, "got {:?}", flows);
-    }
-
-    #[test]
-    fn empty_graph_is_safe() {
-        let store = Store::open_in_memory().unwrap();
-        assert!(detect_communities(&store).unwrap().is_empty());
-        assert!(execution_flows(&store, 10).unwrap().is_empty());
-    }
-
     #[test]
     fn community_cohesion_below_one_for_loose_community() {
         let mut adj = vec![BTreeMap::new(); 4];

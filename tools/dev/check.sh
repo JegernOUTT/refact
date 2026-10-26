@@ -35,8 +35,7 @@ else
 fi
 
 if [ -z "${components// }" ]; then
-  echo "✓ No relevant components changed — nothing to check."
-  exit 0
+  echo "No component checks selected; Rust test policy still applies."
 fi
 
 echo "▶ Checking components: $components"
@@ -73,13 +72,21 @@ advise() {
   echo
 }
 
+if test_base="$(git merge-base HEAD "${BASE_REF:-origin/main}")"; then
+  run policy "Rust test admission and budget" "$repo_root" python3 tools/dev/test_budget.py check --base "$test_base"
+else
+  results="${results}\n  ❌ FAIL  policy: comparison base is unavailable"
+  overall=1
+fi
+run policy "Rust test checker self-tests" "$repo_root" python3 -m unittest discover -s tools/dev -p test_test_budget.py
+
 for comp in $components; do
   case "$comp" in
     engine)
       advise engine "fn size report (advisory)" refact-agent/engine python3 tools/fn_size_report.py
       run engine "cargo fmt --check" refact-agent/engine cargo fmt --check
       run engine "cargo check"       refact-agent/engine cargo check
-      run engine "cargo test --lib"  refact-agent/engine cargo test --lib
+      run engine "cargo test --lib"  refact-agent/engine env RUST_MIN_STACK=16777216 cargo test --lib
       run engine "cargo test --doc"  refact-agent/engine cargo test --doc
       ;;
     gui)

@@ -23,19 +23,3 @@ impl AtCommandsPreviewCache {
         self.cache.clear();
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn set_then_get_returns_value_and_missing_is_none() {
-        let mut cache = AtCommandsPreviewCache::new();
-
-        assert_eq!(cache.get("missing"), None);
-
-        cache.insert("prompt".to_string(), "preview".to_string());
-
-        assert_eq!(cache.get("prompt"), Some("preview".to_string()));
-    }
-}

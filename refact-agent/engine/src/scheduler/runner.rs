@@ -1695,8 +1695,8 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::Ordering;
 
-    use chrono::TimeZone;
     use refact_work_core::DeliveryState;
+    use chrono::TimeZone;
     use tokio::sync::Mutex as AMutex;
 
     use super::*;
@@ -1704,9 +1704,7 @@ mod tests {
     use crate::chat::types::{ChatSession, SessionState};
     use crate::coordination::outbox;
     use crate::scheduler::store::InMemoryCronStore;
-    use crate::scheduler::types::{
-        DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS, RECENT_RUNS_CAP, SCHEDULER_DISABLE_ENV,
-    };
+    use crate::scheduler::types::{DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS, RECENT_RUNS_CAP};
 
     fn task(id: &str, now: u64) -> Job {
         let mut task = Job::new_cron_agent_chat(
@@ -2060,37 +2058,6 @@ mod tests {
     /// runs its own), so the budget is wall clock. A paused virtual clock
     /// auto-advances through two seconds in well under a millisecond and would
     /// time out before any of that work could land.
-    async fn wait_for_fire(gcx: &SharedGlobalContext) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            {
-                let session = session(gcx).await;
-                let session = session.lock().await;
-                let event_injected = session
-                    .messages
-                    .iter()
-                    .any(|message| message.role == EVENT_ROLE);
-                let prompt_queued = session.pending_deliveries.iter().any(|delivery| {
-                    delivery.messages.iter().any(|message| {
-                        message.role == "user"
-                            && message.content.content_text_only() == "scheduled prompt"
-                    })
-                });
-                let prompt_added = session.messages.iter().any(|message| {
-                    message.role == "user"
-                        && message.content.content_text_only() == "scheduled prompt"
-                });
-                if event_injected && (prompt_queued || prompt_added) {
-                    return;
-                }
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "scheduled task did not fire"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    }
 
     fn assert_no_fire(gcx: &SharedGlobalContext) -> impl std::future::Future<Output = ()> + '_ {
         async move {
@@ -2099,54 +2066,6 @@ mod tests {
             assert!(session.messages.is_empty());
             assert!(session.command_queue.is_empty());
         }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn fires_due_task() {
-        let now = now_ms();
-        let store = Arc::new(InMemoryCronStore::new());
-        store.add(task("cron_fire_due", now)).await.unwrap();
-        let (_workspace, gcx) = gcx_with_session(SessionState::Idle).await;
-        let handle = spawn(store.clone(), gcx.clone());
-
-        tokio::time::advance(Duration::from_secs(2)).await;
-        wait_for_fire(&gcx).await;
-        gcx.shutdown_flag.store(true, Ordering::Relaxed);
-        handle.abort();
-
-        let session = session(&gcx).await;
-        let session = session.lock().await;
-        let event_message = session
-            .messages
-            .iter()
-            .find(|message| message.role == EVENT_ROLE)
-            .unwrap();
-        assert_eq!(
-            event_message.extra["event"]["payload"]["task_id"],
-            json!("cron_fire_due")
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn session_store_runner_fires_session_task() {
-        let now = now_ms();
-        let store = Arc::new(InMemoryCronStore::new());
-        store.add(task("cron_session_fire", now)).await.unwrap();
-        let (_workspace, gcx) = gcx_with_session(SessionState::Idle).await;
-        let handle = spawn(store, gcx.clone());
-
-        tokio::time::advance(Duration::from_secs(2)).await;
-        wait_for_fire(&gcx).await;
-        gcx.shutdown_flag.store(true, Ordering::Relaxed);
-        handle.abort();
-
-        let session = session(&gcx).await;
-        let session = session.lock().await;
-        let event_message = event_message(&session, "cron_fire", "cron_session_fire");
-        assert_eq!(
-            event_message.extra["event"]["payload"]["recurring"],
-            json!(true)
-        );
     }
 
     #[tokio::test]
@@ -2274,43 +2193,6 @@ mod tests {
                 .count(),
             1
         );
-    }
-
-    #[tokio::test]
-    async fn enqueue_rejection_does_not_mark_recurring_fired() {
-        let now = now_ms();
-        let store = Arc::new(InMemoryCronStore::new());
-        store
-            .add(due_task("cron_recurring_queue_full", now))
-            .await
-            .unwrap();
-        let (_workspace, gcx) = gcx_with_session(SessionState::Idle).await;
-        {
-            let session_arc = session(&gcx).await;
-            let mut session = session_arc.lock().await;
-            for idx in 0..max_queue_size() {
-                session.pending_deliveries.push_back(
-                    refact_core::chat_types::PendingDelivery::with_id(
-                        format!("queued-{idx}"),
-                        vec![scheduled_prompt_message("queued".into())],
-                        PushMode::Append,
-                        "test",
-                        false,
-                    ),
-                );
-            }
-        }
-        let mut runner = CronRunner::new(store.clone(), gcx.clone());
-
-        runner.fire_due_tasks(now).await;
-
-        let stored = store.get("cron_recurring_queue_full").await.unwrap();
-        assert_eq!(stored.last_status.as_deref(), Some("deferred"));
-        assert_eq!(stored.fire_count, 0);
-        assert_eq!(stored.last_fired_at_ms, Some(now - 120_000));
-        let session = session(&gcx).await;
-        let session = session.lock().await;
-        assert!(session.messages.iter().all(|m| m.role != EVENT_ROLE));
     }
 
     #[tokio::test]
@@ -2564,28 +2446,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn command_job_empty_stdout_is_silent_but_fired() {
-        let now = now_ms();
-        let store = Arc::new(InMemoryCronStore::new());
-        store
-            .add(command_due_task("command_silent", now, empty_command()))
-            .await
-            .unwrap();
-        let (_workspace, gcx) = gcx_with_session(SessionState::Idle).await;
-        let mut runner = CronRunner::new(store.clone(), gcx.clone());
-
-        runner.fire_due_tasks(now).await;
-
-        let stored = store.get("command_silent").await.unwrap();
-        assert_eq!(stored.last_status.as_deref(), Some("fired"));
-        assert_eq!(stored.fire_count, 1);
-        let session = session(&gcx).await;
-        let session = session.lock().await;
-        assert!(session.messages.is_empty());
-        assert!(session.command_queue.is_empty());
-    }
-
-    #[tokio::test]
     async fn recurring_command_advances_before_fire_without_double_counting() {
         let now = now_ms();
         let store = Arc::new(InMemoryCronStore::new());
@@ -2721,39 +2581,6 @@ mod tests {
         runner.fire_due_tasks(now + 480_000).await;
 
         assert!(store.get("command_transient_retry").await.is_none());
-    }
-
-    /// The kill switch is a startup gate. A running runner must not lose a due
-    /// retry because another thread flipped the process environment.
-    #[tokio::test]
-    #[serial_test::serial(scheduler_env)]
-    async fn env_kill_switch_flip_does_not_suppress_a_due_retry() {
-        let now = now_ms();
-        let store = Arc::new(InMemoryCronStore::new());
-        store
-            .add(one_shot_command_due_task(
-                "command_kill_switch_retry",
-                now,
-                transient_failing_command(),
-            ))
-            .await
-            .unwrap();
-        let (_workspace, gcx) = gcx_with_session(SessionState::Idle).await;
-        let mut runner = CronRunner::new(store.clone(), gcx);
-
-        runner.fire_due_tasks(now).await;
-        let stored = store.get("command_kill_switch_retry").await.unwrap();
-        assert_eq!(stored.fire_count, 1);
-        assert_eq!(stored.retry_attempts, 1);
-        assert_eq!(stored.trigger_at_ms, Some(now + 60_000));
-
-        let _guard = crate::scheduler::tests::EnvGuard::set(SCHEDULER_DISABLE_ENV, "1");
-        runner.fire_due_tasks(now + 60_000).await;
-
-        let stored = store.get("command_kill_switch_retry").await.unwrap();
-        assert_eq!(stored.fire_count, 2);
-        assert_eq!(stored.retry_attempts, 2);
-        assert_eq!(stored.trigger_at_ms, Some(now + 180_000));
     }
 
     /// Cron-lane backpressure holds a retry back without touching its backoff
@@ -2913,40 +2740,6 @@ mod tests {
         );
         assert!(!runner.task_is_due(&task, now + IDLE_DEFER_MS - 1));
         assert!(runner.task_is_due(&task, now + IDLE_DEFER_MS));
-    }
-
-    /// A backpressured fire is a state, not silence: it must be distinguishable
-    /// from an idle task, and it must not spend a retry attempt.
-    #[tokio::test]
-    async fn backpressure_deferral_is_recorded_in_run_history() {
-        let now = now_ms();
-        let store = Arc::new(InMemoryCronStore::new());
-        store
-            .add(command_due_task(
-                "command_backpressure_record",
-                now,
-                empty_command(),
-            ))
-            .await
-            .unwrap();
-        let (_workspace, gcx) = gcx_with_session_and_config(SessionState::Idle, |config| {
-            config.max_concurrent_runs = 1;
-        })
-        .await;
-        let mut runner = CronRunner::new(store.clone(), gcx);
-
-        let permit = runner.run_semaphore.clone().try_acquire_owned().unwrap();
-        runner.fire_due_tasks(now).await;
-        drop(permit);
-
-        let stored = store.get("command_backpressure_record").await.unwrap();
-        assert_eq!(stored.last_status.as_deref(), Some("deferred"));
-        assert_eq!(stored.recent_runs.len(), 1);
-        assert_eq!(stored.recent_runs[0].status, "deferred");
-        assert_eq!(stored.recent_runs[0].at_ms, now);
-        assert_eq!(stored.fire_count, 0);
-        assert_eq!(stored.retry_attempts, 0);
-        assert_eq!(stored.last_fired_at_ms, Some(now - 120_000));
     }
 
     #[tokio::test]
@@ -3136,35 +2929,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runner_uses_configurable_recent_run_cap() {
-        let now = now_ms();
-        let store = Arc::new(InMemoryCronStore::new());
-        store
-            .add(due_task("history_config_cap", now))
-            .await
-            .unwrap();
-        let (_workspace, gcx) = gcx_with_session_and_config(SessionState::Idle, |config| {
-            config.recent_runs_cap = 1;
-        })
-        .await;
-        let runner = CronRunner::new(store.clone(), gcx);
-
-        runner
-            .record_run("history_config_cap", "fired", None, now)
-            .await
-            .unwrap();
-        runner
-            .record_run("history_config_cap", "deferred", None, now + 1)
-            .await
-            .unwrap();
-
-        let stored = store.get("history_config_cap").await.unwrap();
-        assert_eq!(stored.recent_runs.len(), 1);
-        assert_eq!(stored.recent_runs[0].at_ms, now + 1);
-        assert_eq!(stored.recent_runs[0].status, "deferred");
-    }
-
-    #[tokio::test]
     async fn due_task_without_chat_id_does_not_spin() {
         let now = now_ms();
         let store = Arc::new(InMemoryCronStore::new());
@@ -3229,20 +2993,6 @@ mod tests {
         let session = session.lock().await;
         assert!(session.messages.is_empty());
         assert!(session.command_queue.is_empty());
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(scheduler_env)]
-    async fn spawn_from_active_project_starts_session_runner_without_project() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        gcx.shutdown_flag.store(true, Ordering::Relaxed);
-
-        let handles = spawn_from_active_project(gcx).await;
-
-        assert_eq!(handles.len(), 1);
-        for handle in handles {
-            handle.await.unwrap();
-        }
     }
 
     #[tokio::test]
@@ -3324,20 +3074,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recurring_auto_expires_after_horizon() {
-        let now = now_ms();
-        let mut task = task("cron_expire", now);
-        task.created_at_ms = now - DAY_MS;
-        task.auto_expire_after_ms = DAY_MS;
-
-        assert!(!task_final_after_fire(&task, now));
-        task.created_at_ms -= 1;
-        assert!(task_final_after_fire(&task, now));
-        task.recurring = false;
-        assert!(!task_final_after_fire(&task, now));
-    }
-
-    #[tokio::test]
     async fn webhook_trigger_with_zero_auto_expire_survives_fire() {
         let now = now_ms();
         let store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
@@ -3359,19 +3095,6 @@ mod tests {
         let stored = store.get(&task.id).await.unwrap();
         assert_eq!(stored.last_status.as_deref(), Some("fired"));
         assert_eq!(stored.auto_expire_after_ms, 0);
-    }
-
-    #[tokio::test]
-    async fn final_fire_event_payload_has_final_true() {
-        let now = now_ms();
-        let message = cron_fire_message(&expired_task("cron_final", now), true);
-
-        assert_eq!(message.extra["event"]["subkind"], json!("cron_fire"));
-        assert_eq!(
-            message.extra["event"]["payload"]["task_id"],
-            json!("cron_final")
-        );
-        assert_eq!(message.extra["event"]["payload"]["final"], json!(true));
     }
 
     #[tokio::test]

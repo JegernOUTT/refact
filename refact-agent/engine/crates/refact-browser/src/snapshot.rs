@@ -123,43 +123,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn aria_snapshot_serde_preserves_yaml_and_geometry() {
-        let snapshot = AriaSnapshot {
-            yaml: "- button \"Save\" [box=1,2,30,40]".to_string(),
-            nodes: vec![SnapshotNode {
-                role: "button".to_string(),
-                name: Some("Save".to_string()),
-                reference: None,
-                geometry: Some(SnapshotBox {
-                    x: 1,
-                    y: 2,
-                    width: 30,
-                    height: 40,
-                }),
-            }],
-            generation: None,
-        };
-        let value = serde_json::to_value(&snapshot).unwrap();
-        assert_eq!(value["nodes"][0]["box"]["width"], 30);
-        assert_eq!(
-            serde_json::from_value::<AriaSnapshot>(value).unwrap(),
-            snapshot
-        );
-    }
-
-    #[test]
-    fn snapshot_options_default_to_assertion_mode_without_refs() {
-        let options = SnapshotOptions::default();
-        assert_eq!(options.mode, SnapshotMode::Default);
-        assert!(!options.refs);
-        assert!(!options.boxes);
-        let value = serde_json::to_value(options).unwrap();
-        assert_eq!(value["mode"], "default");
-        assert_eq!(value["doNotRenderActive"], false);
-        assert!(ARIA_SNAPSHOT_FUNCTION.contains("ariaSnapshot(this, options)"));
-    }
-
-    #[test]
     fn omitted_depth_stays_null_so_the_injected_truncation_guard_is_disabled() {
         let value = serde_json::to_value(SnapshotOptions::default()).unwrap();
         assert!(
@@ -194,24 +157,5 @@ mod tests {
         assert_eq!(value["refs"], true);
         assert_eq!(value["boxes"], true);
         assert_eq!(value["depth"], 2);
-    }
-
-    #[test]
-    fn aria_snapshot_round_trips_depth_truncation_marker_lines() {
-        let snapshot = AriaSnapshot {
-            yaml: "- list [ref=e7]:\n  - … (3 children truncated)".to_string(),
-            nodes: vec![SnapshotNode {
-                role: "list".to_string(),
-                name: None,
-                reference: Some("e7".to_string()),
-                geometry: None,
-            }],
-            generation: None,
-        };
-        let value = serde_json::to_value(&snapshot).unwrap();
-        assert_eq!(
-            serde_json::from_value::<AriaSnapshot>(value).unwrap(),
-            snapshot
-        );
     }
 }

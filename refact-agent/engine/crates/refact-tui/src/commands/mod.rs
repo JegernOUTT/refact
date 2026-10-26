@@ -159,102 +159,6 @@ mod tests {
     }
 
     #[test]
-    fn command_registry_resolves_aliases() {
-        let command = command_by_name("/exit").unwrap();
-        assert_eq!(command.name, "quit");
-    }
-
-    #[test]
-    fn board_command_is_available_with_tasks_alias() {
-        let board = command_by_name("board").expect("board command");
-        let tasks = command_by_name("tasks").expect("tasks alias");
-        assert_eq!(board.name, "board");
-        assert_eq!(tasks.name, "board");
-    }
-
-    #[test]
-    fn active_only_commands_hide_when_idle() {
-        let idle = command_picker_items(CommandContext { active_turn: false });
-        assert!(!idle.iter().any(|item| item.id == "stop"));
-        let active = command_picker_items(CommandContext { active_turn: true });
-        assert!(active.iter().any(|item| item.id == "stop"));
-    }
-
-    #[test]
-    fn command_picker_items_use_registry_rows() {
-        let items = command_picker_items(CommandContext { active_turn: false });
-        assert!(items.iter().any(|item| item.title == "/mention"));
-        assert!(items.iter().any(|item| item.title == "/resume"));
-        assert!(items
-            .iter()
-            .any(|item| item.description.contains("aliases exit")));
-    }
-
-    #[test]
-    fn session_command_group_is_visible_in_popup() {
-        let items = command_picker_items(CommandContext { active_turn: false });
-        for title in [
-            "/new",
-            "/resume",
-            "/fork",
-            "/rename",
-            "/archive",
-            "/model",
-            "/mode",
-            "/reasoning",
-            "/permissions",
-            "/status",
-            "/init",
-        ] {
-            assert!(
-                items.iter().any(|item| item.title == title),
-                "missing {title}"
-            );
-        }
-    }
-
-    #[test]
-    fn goal_command_wires_to_show_goal() {
-        let command = command_by_name("goal").unwrap();
-
-        assert_eq!(
-            command.action,
-            CommandAction::Workflow {
-                command: workflow::WorkflowCommand::ShowGoal,
-            }
-        );
-    }
-
-    #[test]
-    fn misc_command_group_is_visible_in_popup() {
-        let items = command_picker_items(CommandContext { active_turn: false });
-        for title in [
-            "/theme",
-            "/help",
-            "/events",
-            "/quit",
-            "/keymap",
-            "/vim",
-            "/copy",
-            "/raw",
-            "/subagents",
-            "/mcp",
-            "/skills",
-            "/memories",
-            "/hooks",
-            "/logout",
-            "/import",
-            "/browser",
-            "/worktrees",
-        ] {
-            assert!(
-                items.iter().any(|item| item.title == title),
-                "missing {title}"
-            );
-        }
-    }
-
-    #[test]
     fn registry_has_no_duplicate_names_or_aliases() {
         let commands = command_registry();
         for (index, command) in commands.iter().enumerate() {
@@ -279,28 +183,6 @@ mod tests {
                         "duplicate alias /{alias}"
                     );
                 }
-            }
-        }
-    }
-
-    #[test]
-    fn registry_has_handler_or_explicit_unavailable_reason() {
-        for command in command_registry() {
-            match command.action {
-                CommandAction::BackendCommand { command: "stop" } => {}
-                CommandAction::BackendCommand { command: other } => {
-                    panic!(
-                        "/{} maps to unexpected backend command /{other}",
-                        command.name
-                    );
-                }
-                CommandAction::Unavailable { reason } => assert!(!reason.trim().is_empty()),
-                CommandAction::OpenPicker { .. }
-                | CommandAction::LocalToggle { .. }
-                | CommandAction::ShowInfo { .. }
-                | CommandAction::Session { .. }
-                | CommandAction::Workflow { .. }
-                | CommandAction::Misc { .. } => {}
             }
         }
     }

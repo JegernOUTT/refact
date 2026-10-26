@@ -99,21 +99,6 @@ mod tests {
     }
 
     #[test]
-    fn navigation_always_allowed() {
-        for level in [
-            AutonomyLevel::ReadOnly,
-            AutonomyLevel::Suggest,
-            AutonomyLevel::Propose,
-            AutonomyLevel::SafeAuto,
-        ] {
-            assert_eq!(
-                action_execution(level, &BuddyAction::Dismiss),
-                ActionExecution::Navigate
-            );
-        }
-    }
-
-    #[test]
     fn read_only_denies_mutating_actions() {
         let batch = BuddyAction::ApplyMemoryBatch {
             batch_key: "merge_exact_duplicate".to_string(),

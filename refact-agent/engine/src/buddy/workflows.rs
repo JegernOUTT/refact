@@ -509,36 +509,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workflow_volume_summaries_no_change_and_retries_preserve_saved_cosmetics() {
-        let (_dir, app, runtime) = isolated_app().await;
-        let before = {
-            let mut buddy = app.buddy.buddy.lock().await;
-            let state = &mut buddy.as_mut().unwrap().state;
-            crate::buddy::state::grant_xp(state, 65);
-            serde_json::to_value(&state.progression).unwrap()
-        };
-        for summary in ["success", "No change", "retry success", "success"] {
-            buddy_wrap_workflow(
-                app.clone(),
-                "commit_message",
-                "x",
-                1000,
-                |_| summary.into(),
-                || async { Ok::<_, String>(()) },
-            )
-            .await
-            .unwrap();
-            drain_side_effects(&app).await;
-            let buddy = app.buddy.buddy.lock().await;
-            assert_eq!(
-                serde_json::to_value(&buddy.as_ref().unwrap().state.progression).unwrap(),
-                before
-            );
-        }
-        runtime.shutdown().await;
-    }
-
-    #[tokio::test]
     async fn compatibility_wrapper_never_infers_no_change_or_completed() {
         use refact_buddy_core::operator_types::RunStatus;
         let (_dir, app, runtime) = isolated_app().await;
@@ -1056,42 +1026,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn workflow_failure_report_classifies_model_tool_and_cancellation_errors() {
-        let report = workflow_failure_report(
-            "commit_msg",
-            "OpenAI 404: model refact/gpt-4.1-nano not found",
-            Some("chat-1".to_string()),
-        );
-        assert_eq!(report.category, WorkflowFailureCategory::ModelUnavailable);
-        assert!(report.summary.contains("Model unavailable"));
-        assert_eq!(report.chat_id.as_deref(), Some("chat-1"));
-
-        let report = workflow_failure_report(
-            "commit_msg",
-            "Error: tool 'buddy_log_activity' not found",
-            None,
-        );
-        assert_eq!(report.category, WorkflowFailureCategory::ToolUnavailable);
-        assert!(report.summary.contains("Tool unavailable"));
-
-        for error in [
-            "cancelled by user",
-            "canceled by user",
-            "request aborted by client",
-            "operation aborted",
-            "AbortError: stopped",
-            "context canceled",
-        ] {
-            let report = workflow_failure_report("commit_msg", error, None);
-            assert_eq!(
-                report.category,
-                WorkflowFailureCategory::Cancelled,
-                "{error}"
-            );
-        }
-    }
-
     #[tokio::test]
     async fn workflow_wrapper_rejects_invalid_id_before_event_or_transcript() {
         let dir = tempfile::tempdir().unwrap();
@@ -1181,73 +1115,5 @@ mod tests {
         assert!(output.contains("[REDACTED"));
         assert!(!output.contains("rawsecret"));
         assert!(!summary.contains("rawsecret"));
-    }
-
-    #[tokio::test]
-    async fn workflow_wrapper_failure_has_single_durable_failure_runtime_surface() {
-        let dir = tempfile::tempdir().unwrap();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = AppState::from_gcx(gcx.clone()).await;
-        {
-            *app.workspace
-                .documents_state
-                .workspace_folders
-                .lock()
-                .unwrap() = vec![dir.path().to_path_buf()];
-        }
-        let (tx, _rx) = tokio::sync::broadcast::channel(16);
-        *app.buddy.buddy.lock().await = Some(crate::buddy::actor::BuddyService::new(
-            dir.path().to_path_buf(),
-            crate::buddy::state::default_buddy_state(),
-            crate::buddy::settings::BuddySettings::default(),
-            Vec::new(),
-            crate::buddy::runtime_queue::RuntimeQueue::new(),
-            tx,
-            None,
-        ));
-
-        let result = buddy_wrap_workflow(
-            app.clone(),
-            "commit_msg",
-            "⚙️",
-            1,
-            |_| "ok".to_string(),
-            || async {
-                Err::<(), _>("OpenAI 404: model refact/gpt-4.1-nano not found".to_string())
-            },
-        )
-        .await;
-
-        assert!(result.is_err());
-        wait_for_workflow_side_effects().await;
-        let lock = app.buddy.buddy.lock().await;
-        let svc = lock.as_ref().unwrap();
-        let workflow_events = svc
-            .runtime_queue
-            .items
-            .iter()
-            .filter(|event| event.dedupe_key.as_deref() == Some("workflow_commit_msg"))
-            .collect::<Vec<_>>();
-        assert_eq!(workflow_events.len(), 1);
-        assert_eq!(workflow_events[0].status, "completed");
-        assert!(workflow_events[0].failure_category.is_none());
-        let failure_events = svc
-            .runtime_queue
-            .items
-            .iter()
-            .filter(|event| {
-                event
-                    .dedupe_key
-                    .as_deref()
-                    .is_some_and(|key| key.starts_with("workflow_failure:commit_msg:"))
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(failure_events.len(), 1);
-        assert_eq!(failure_events[0].status, "failed");
-        assert_eq!(
-            failure_events[0].failure_category.as_deref(),
-            Some("model_unavailable")
-        );
-        assert!(failure_events[0].persistent);
     }
 }

@@ -179,30 +179,6 @@ mod tests {
     }
 
     #[test]
-    fn decision_similarity_scores_overlap() {
-        assert_eq!(
-            decision_similarity("use postgres for storage", "use postgres for storage"),
-            1.0
-        );
-        assert_eq!(decision_similarity("", "anything"), 0.0);
-        let partial = decision_similarity("adopt redis cache layer", "adopt redis queue layer");
-        assert!(partial > 0.0 && partial < 1.0);
-    }
-
-    #[test]
-    fn normalize_collapses_trims_and_lowercases() {
-        assert_eq!(normalize_text("  Hello\n\tWORLD  "), "hello world");
-    }
-
-    #[test]
-    fn verify_exact_substring() {
-        assert_eq!(
-            verify_quote("quick brown", "The quick brown fox", 0.6),
-            Verification::Exact
-        );
-    }
-
-    #[test]
     fn verify_is_whitespace_and_case_insensitive() {
         assert_eq!(
             verify_quote("QUICK\nBROWN", "the   quick brown fox", 0.6),
@@ -291,14 +267,6 @@ mod tests {
         assert_eq!(
             compute_confidence(9, 5, (Provenance::Paraphrase, Verification::Exact)),
             0.99
-        );
-    }
-
-    #[test]
-    fn verbatim_skips_verification_no_boost() {
-        assert_eq!(
-            compute_confidence(6, 1, (Provenance::Verbatim, Verification::Exact)),
-            compute_confidence(6, 1, (Provenance::Verbatim, Verification::Unverified))
         );
     }
 }

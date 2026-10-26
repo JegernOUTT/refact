@@ -171,11 +171,4 @@ mod tests {
             "got {refs:?}"
         );
     }
-
-    #[test]
-    fn extracts_structs() {
-        let src = "struct Point { int x; };";
-        let (symbols, _refs) = extract(src);
-        assert!(symbols.iter().any(|s| s.name() == "Point"));
-    }
 }

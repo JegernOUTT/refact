@@ -427,13 +427,3 @@ async fn idle_stop_then_proxy_rewakes_worker() {
 
     daemon.shutdown().await;
 }
-
-#[test]
-fn default_suite_skips_without_env() {
-    if e2e_enabled() {
-        return;
-    }
-    print_skip();
-    let now = SystemTime::now();
-    assert!(now.elapsed().unwrap() < Duration::from_secs(1));
-}

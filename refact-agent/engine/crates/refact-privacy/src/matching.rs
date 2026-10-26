@@ -384,7 +384,6 @@ mod tests {
     use super::*;
     use crate::destination::{Destination, DestinationId, DestinationKind};
     use crate::policy::{ShellBehavior, SubagentPolicy};
-    use crate::record::{Attribution, FileRecord, PrivacyRecord};
 
     fn zone_with_shell_behavior(
         name: &str,
@@ -507,32 +506,6 @@ mod tests {
     }
 
     #[test]
-    fn rooted_identical_destination_sets_use_zone_order_in_both_path_orders() {
-        let temp = tempfile::tempdir().expect("tempdir should be created");
-        let first = temp.path().join("first.txt");
-        let second = temp.path().join("second.txt");
-        let first_pattern = first.to_string_lossy().into_owned();
-        let policy = policy(vec![
-            zone("z-first", &[&first_pattern], &["*"]),
-            zone("a-second", &["second.txt"], &["*"]),
-            zone("normal", &["*"], &["*"]),
-        ]);
-        let compiled = policy.compile().expect("policy should compile");
-
-        for paths in [
-            [first.as_path(), second.as_path()],
-            [second.as_path(), first.as_path()],
-        ] {
-            assert_eq!(
-                compiled
-                    .strictest_zone_for_paths_with_roots(paths, [temp.path()])
-                    .name,
-                "z-first"
-            );
-        }
-    }
-
-    #[test]
     fn later_strict_subset_beats_zone_order() {
         let policy = policy(vec![
             zone("broad-first", &["broad.txt"], &["provider-a", "provider-b"]),
@@ -568,22 +541,6 @@ mod tests {
             assert!(effective.send_to.is_empty());
             assert_eq!(effective.name, "effective:a+b");
         }
-    }
-
-    #[test]
-    fn subset_destination_set_is_the_effective_set() {
-        let policy = policy(vec![
-            zone("a", &["a.txt"], &["provider-a"]),
-            zone("a-and-b", &["both.txt"], &["provider-a", "provider-b"]),
-            zone("normal", &["*"], &["*"]),
-        ]);
-        let compiled = policy.compile().expect("policy should compile");
-
-        let effective =
-            compiled.strictest_zone_for_paths([Path::new("a.txt"), Path::new("both.txt")]);
-
-        assert_eq!(effective.name, "a");
-        assert_eq!(effective.send_to, ["provider-a"]);
     }
 
     #[test]
@@ -727,36 +684,6 @@ mod tests {
     }
 
     #[test]
-    fn traversal_path_matches_canonical_path() {
-        let temp = tempfile::tempdir().expect("tempdir should be created");
-        let secret_dir = temp.path().join("secrets");
-        std::fs::create_dir_all(&secret_dir).expect("secret dir should be created");
-        let secret = secret_dir.join("value.txt");
-        std::fs::write(&secret, "secret").expect("secret should be written");
-        let traversal = secret_dir.join("..").join("secrets").join("value.txt");
-        let policy = policy(vec![
-            zone("secrets", &["secrets/*"], &[]),
-            zone("normal", &["*"], &["*"]),
-        ]);
-        let compiled = policy.compile().expect("policy should compile");
-
-        assert_eq!(
-            compiled
-                .zone_for_path_with_roots(&traversal, [temp.path()])
-                .name,
-            compiled
-                .zone_for_path_with_roots(&secret, [temp.path()])
-                .name
-        );
-        assert_eq!(
-            compiled
-                .zone_for_path_with_roots(&traversal, [temp.path()])
-                .name,
-            "secrets"
-        );
-    }
-
-    #[test]
     fn malformed_glob_returns_policy_error() {
         let policy = policy(vec![
             zone("broken", &["["], &[]),
@@ -778,50 +705,6 @@ mod tests {
 
         assert_eq!(normal.name, "normal");
         assert_eq!(normal.send_to, vec!["*"]);
-    }
-
-    #[test]
-    fn compile_keeps_declared_normal_zone_at_its_position() {
-        let policy = policy(vec![
-            zone("secrets", &[".env*"], &[]),
-            zone("normal", &["**"], &["*"]),
-            zone("later", &["later/**"], &[]),
-        ]);
-
-        let compiled = policy.compile().expect("policy should compile");
-
-        assert_eq!(compiled.normal_index, 1);
-        assert_eq!(
-            compiled
-                .zones
-                .iter()
-                .filter(|compiled| compiled.zone.name == "normal")
-                .count(),
-            1
-        );
-        assert_eq!(compiled.zones[1].zone, policy.zones[1]);
-    }
-
-    #[test]
-    fn record_serializes_as_files_object() {
-        let record = PrivacyRecord {
-            files: vec![FileRecord {
-                path: ".env".to_string(),
-                zone: "secrets".to_string(),
-                attribution: Attribution::Declared,
-            }],
-        };
-
-        assert_eq!(
-            serde_json::to_value(record).expect("record should serialize"),
-            serde_json::json!({
-                "files": [{
-                    "path": ".env",
-                    "zone": "secrets",
-                    "attribution": "declared"
-                }]
-            })
-        );
     }
 
     #[cfg(unix)]

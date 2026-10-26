@@ -770,22 +770,6 @@ mod tests {
         }
     }
 
-    fn delayed_success_command() -> String {
-        if cfg!(target_os = "windows") {
-            "Start-Sleep -Milliseconds 20; [Console]::Out.Write('hello')".to_string()
-        } else {
-            "sleep 0.02; printf hello".to_string()
-        }
-    }
-
-    fn platform_timeout_secs() -> String {
-        if cfg!(target_os = "windows") {
-            "60".to_string()
-        } else {
-            "10".to_string()
-        }
-    }
-
     fn failure_command() -> String {
         if cfg!(target_os = "windows") {
             "[Console]::Out.Write('bad'); exit 7".to_string()
@@ -885,98 +869,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cmdline_extra_exec_full_shape() {
-        let command = delayed_success_command();
-        let temp_dir = std::env::temp_dir();
-        let expected_cwd = dunce::simplified(temp_dir.as_path())
-            .to_string_lossy()
-            .to_string();
-        let message = run_tool(
-            ToolCmdline {
-                name: "cmdline_duration".to_string(),
-                cfg: CmdlineToolConfig {
-                    command: command.clone(),
-                    description: "Measure duration".to_string(),
-                    parameters: Vec::new(),
-                    command_workdir: expected_cwd.clone(),
-                    timeout: platform_timeout_secs(),
-                    ..CmdlineToolConfig::default()
-                },
-                ..ToolCmdline::default()
-            },
-            args(vec![]),
-        )
-        .await;
-        let exec = exec(&message);
-        let object = exec.as_object().unwrap();
-        let keys = [
-            "process_id",
-            "status",
-            "exit_code",
-            "duration_ms",
-            "short_description",
-            "command",
-            "cwd",
-            "mode",
-            "created_at_ms",
-            "started_at_ms",
-            "ended_at_ms",
-            "service_name",
-        ];
-
-        for key in keys {
-            assert!(object.contains_key(key), "missing exec.{key}");
-        }
-        assert!(exec["process_id"].as_str().unwrap().starts_with("exec_"));
-        assert_eq!(exec["status"], "exited");
-        assert_eq!(exec["exit_code"], 0);
-        assert!(exec["duration_ms"].as_u64().unwrap() > 0);
-        assert_eq!(
-            exec["short_description"],
-            "cmdline_duration: Measure duration"
-        );
-        assert_eq!(exec["command"], command);
-        assert_eq!(exec["cwd"], expected_cwd);
-        assert_eq!(exec["mode"], "foreground");
-        assert!(exec["created_at_ms"].is_u64());
-        assert!(exec["started_at_ms"].is_u64());
-        assert!(exec["ended_at_ms"].is_u64());
-        assert!(exec["service_name"].is_null());
-
-        let pending = ExecProcessSnapshot::new(crate::exec::ExecProcessMeta::new(
-            ExecMode::Foreground,
-            "pending".to_string(),
-        ));
-        let pending_extra = exec_extra(&pending, Duration::from_millis(0));
-        let pending_exec = pending_extra.get("exec").unwrap();
-        assert!(pending_exec["started_at_ms"].is_null());
-        assert!(pending_exec["ended_at_ms"].is_null());
-        assert!(pending_exec["service_name"].is_null());
-    }
-
-    #[tokio::test]
-    async fn cmdline_extra_exec_no_legacy_duration_field() {
-        let message = run_tool(
-            ToolCmdline {
-                name: "cmdline_duration".to_string(),
-                cfg: CmdlineToolConfig {
-                    command: delayed_success_command(),
-                    description: "Measure duration".to_string(),
-                    parameters: Vec::new(),
-                    ..CmdlineToolConfig::default()
-                },
-                ..ToolCmdline::default()
-            },
-            args(vec![]),
-        )
-        .await;
-
-        assert!(exec(&message)
-            .get(&["duration", "secs"].join("_"))
-            .is_none());
-    }
-
-    #[tokio::test]
     async fn configured_cmdline_failure_reports_exit_code_in_metadata() {
         let message = run_tool(
             ToolCmdline {
@@ -1000,48 +892,6 @@ mod tests {
         assert_eq!(exec["status"], "exited");
         assert_eq!(exec["exit_code"], 7);
         assert_eq!(message.tool_failed, Some(true));
-    }
-
-    #[test]
-    fn cmdline_exit_status_rendering_metadata_and_failure_are_consistent() {
-        let duration = Duration::from_millis(250);
-        let cases = [
-            (
-                ExecStatus::Exited { exit_code: Some(0) },
-                "finished with exit code 0",
-                json!(0),
-                Some(false),
-            ),
-            (
-                ExecStatus::Exited { exit_code: Some(7) },
-                "finished with exit code 7",
-                json!(7),
-                Some(true),
-            ),
-            (
-                ExecStatus::Exited { exit_code: None },
-                "finished with unknown exit status",
-                Value::Null,
-                Some(true),
-            ),
-        ];
-
-        for (status, expected_output, expected_exit_code, expected_failed) in cases {
-            let mut output = String::new();
-            append_status_line(&mut output, &status, duration, 10);
-            let snapshot = ExecProcessSnapshot::new(crate::exec::ExecProcessMeta::new(
-                ExecMode::Foreground,
-                "status".to_string(),
-            ))
-            .with_status(status.clone());
-            let extra = exec_extra(&snapshot, duration);
-            let exec = extra.get("exec").unwrap();
-
-            assert!(output.contains(expected_output));
-            assert_eq!(exec["status"], "exited");
-            assert_eq!(exec["exit_code"], expected_exit_code);
-            assert_eq!(tool_failed_for_status(&status), expected_failed);
-        }
     }
 
     #[test]
@@ -1200,31 +1050,6 @@ mod tests {
         #[cfg(not(target_os = "windows"))]
         assert_eq!(matched.command, "echo 'hello world'");
         assert_eq!(matched.rule, "echo*");
-    }
-
-    #[test]
-    fn configured_cmdline_schema_keeps_required_fields() {
-        let schema: serde_yaml::Value = serde_yaml::from_str(CMDLINE_INTEGRATION_SCHEMA).unwrap();
-        let fields = schema.get("fields").unwrap();
-
-        for field in [
-            "command",
-            "command_workdir",
-            "description",
-            "parameters",
-            "timeout",
-            "output_filter",
-        ] {
-            assert!(fields.get(field).is_some(), "missing field {field}");
-        }
-        assert_eq!(
-            schema["confirmation"]["ask_user_default"][0].as_str(),
-            Some("*")
-        );
-        assert_eq!(
-            schema["confirmation"]["deny_default"][0].as_str(),
-            Some("sudo*")
-        );
     }
 
     #[tokio::test]

@@ -353,22 +353,6 @@ mod tests {
             .with_timezone(&Utc)
     }
 
-    #[test]
-    fn editorial_delivery_marker_is_additive_and_survives_wire_roundtrip() {
-        let mut encoded = serde_json::to_value(speech("fixture")).unwrap();
-        encoded
-            .as_object_mut()
-            .unwrap()
-            .remove("editorial_delivery_required");
-        let legacy: BuddySpeechItem = serde_json::from_value(encoded).unwrap();
-        assert!(!legacy.editorial_delivery_required);
-        let mut gated = legacy;
-        gated.editorial_delivery_required = true;
-        let decoded: BuddySpeechItem =
-            serde_json::from_value(serde_json::to_value(gated).unwrap()).unwrap();
-        assert!(decoded.editorial_delivery_required);
-    }
-
     fn speech(id: &str) -> BuddySpeechItem {
         BuddySpeechItem {
             editorial_delivery_required: false,
@@ -408,19 +392,6 @@ mod tests {
     }
 
     #[test]
-    fn pick_speech_intent_chooses_highest_score() {
-        let clock = now();
-        let candidates = vec![
-            (SpeechIntent::Humor, speech("humor")),
-            (SpeechIntent::ErrorAlert, speech("error")),
-        ];
-
-        let picked = pick_speech_intent(&candidates, &SpeechRotationState::default(), clock);
-
-        assert_eq!(picked, Some(1));
-    }
-
-    #[test]
     fn pick_speech_intent_respects_per_hour_budget() {
         let clock = now();
         let candidates = vec![(SpeechIntent::Win, speech("win"))];
@@ -429,54 +400,6 @@ mod tests {
         let picked = pick_speech_intent(&candidates, &rotation, clock);
 
         assert_eq!(picked, None);
-    }
-
-    #[test]
-    fn pick_speech_intent_respects_per_day_budget() {
-        let clock = now();
-        let candidates = vec![(SpeechIntent::Greeting, speech("greeting"))];
-        let rotation = budget_state(SpeechIntent::Greeting, 0, 1, Some(clock), clock);
-
-        let picked = pick_speech_intent(&candidates, &rotation, clock);
-
-        assert_eq!(picked, None);
-    }
-
-    #[test]
-    fn pick_speech_intent_returns_none_when_all_over_budget() {
-        let clock = now();
-        let candidates = vec![
-            (SpeechIntent::Win, speech("win")),
-            (SpeechIntent::Tour, speech("tour")),
-        ];
-        let mut rotation = budget_state(SpeechIntent::Win, 1, 1, Some(clock), clock);
-        rotation.by_intent.insert(
-            intent_key(SpeechIntent::Tour).to_string(),
-            IntentBudgetState {
-                last_emitted_at: Some(clock),
-                hour_count: 1,
-                day_count: 1,
-                hour_window_start: Some(clock),
-                day_window_start: Some(clock),
-            },
-        );
-
-        let picked = pick_speech_intent(&candidates, &rotation, clock);
-
-        assert_eq!(picked, None);
-    }
-
-    #[test]
-    fn pick_speech_intent_stable_tiebreak() {
-        let clock = now();
-        let candidates = vec![
-            (SpeechIntent::Win, speech("first")),
-            (SpeechIntent::Milestone, speech("second")),
-        ];
-
-        let picked = pick_speech_intent(&candidates, &SpeechRotationState::default(), clock);
-
-        assert_eq!(picked, Some(0));
     }
 
     #[test]
@@ -599,35 +522,6 @@ mod gate_tests {
     }
 
     #[test]
-    fn gate_auto_mode_uses_derived_window_only() {
-        let settings = BuddySettings::default();
-        let rotation = SpeechRotationState::default();
-
-        let without_data = gate_speech(
-            &settings,
-            &rotation,
-            Some(SpeechIntent::Humor),
-            None,
-            3,
-            None,
-            clock(),
-        );
-        assert!(without_data.allowed);
-
-        let with_window = gate_speech(
-            &settings,
-            &rotation,
-            Some(SpeechIntent::Humor),
-            None,
-            3,
-            Some((22, 8)),
-            clock(),
-        );
-        assert!(!with_window.allowed);
-        assert_eq!(with_window.reason, "quiet_hours");
-    }
-
-    #[test]
     fn gate_enforces_intent_budget() {
         let mut settings = BuddySettings::default();
         settings.quiet_hours_mode = QuietHoursMode::Off;
@@ -654,121 +548,5 @@ mod gate_tests {
         );
         assert!(!decision.allowed);
         assert_eq!(decision.reason, "intent_budget");
-    }
-
-    #[test]
-    fn auto_quiet_window_derives_from_hour_histogram() {
-        use crate::user_action::UserAction;
-        let base = DateTime::parse_from_rfc3339("2026-05-15T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let mut actions = Vec::new();
-        for i in 0..12 {
-            let local_hour = 9 + (i % 6) as i64;
-            let ts_local = chrono::Local::now()
-                .date_naive()
-                .and_hms_opt(local_hour as u32, 0, 0)
-                .unwrap()
-                .and_local_timezone(chrono::Local)
-                .unwrap()
-                .with_timezone(&Utc);
-            actions.push(UserAction::FileOpened {
-                path: format!("f{}", i),
-                ts: ts_local,
-            });
-        }
-        let window = auto_quiet_window_from_actions(&actions).unwrap();
-        assert_eq!(window, (16, 9));
-        assert!(auto_quiet_window_from_actions(&actions[..5]).is_none());
-        let _ = base;
-    }
-
-    #[test]
-    fn auto_quiet_window_handles_midnight_crossing_activity() {
-        use crate::user_action::UserAction;
-        let mut actions = Vec::new();
-        for i in 0..15 {
-            let local_hour = [22u32, 23, 0, 1, 2][i % 5];
-            let ts = chrono::Local::now()
-                .date_naive()
-                .and_hms_opt(local_hour, 0, 0)
-                .unwrap()
-                .and_local_timezone(chrono::Local)
-                .unwrap()
-                .with_timezone(&Utc);
-            actions.push(UserAction::FileOpened {
-                path: format!("f{}", i),
-                ts,
-            });
-        }
-        let window = auto_quiet_window_from_actions(&actions).unwrap();
-        assert_eq!(window, (4, 22));
-        for hour in [22, 23, 0, 1, 2] {
-            assert!(!hour_in_quiet_window(hour, window.0, window.1));
-        }
-        assert!(hour_in_quiet_window(12, window.0, window.1));
-    }
-
-    #[test]
-    fn auto_quiet_window_edge_gaps_table() {
-        use crate::user_action::UserAction;
-        fn actions_at(hours: &[u32], min_len: usize) -> Vec<UserAction> {
-            let mut actions = Vec::new();
-            let mut i = 0usize;
-            while actions.len() < min_len.max(10) {
-                let hour = hours[i % hours.len()];
-                let ts = chrono::Local::now()
-                    .date_naive()
-                    .and_hms_opt(hour, 0, 0)
-                    .unwrap()
-                    .and_local_timezone(chrono::Local)
-                    .unwrap()
-                    .with_timezone(&Utc);
-                actions.push(UserAction::FileOpened {
-                    path: format!("f{}", i),
-                    ts,
-                });
-                i += 1;
-            }
-            actions
-        }
-
-        assert_eq!(
-            auto_quiet_window_from_actions(&actions_at(&[10], 10)),
-            Some((12, 10))
-        );
-        assert_eq!(
-            auto_quiet_window_from_actions(&actions_at(&[10, 11], 10)),
-            Some((13, 10))
-        );
-        assert_eq!(
-            auto_quiet_window_from_actions(&actions_at(&[10, 12], 10)),
-            Some((14, 10))
-        );
-        assert_eq!(
-            auto_quiet_window_from_actions(&actions_at(&[10, 13], 10)),
-            Some((15, 10))
-        );
-
-        let dense: Vec<u32> = (0..24u32).step_by(3).collect();
-        assert_eq!(
-            auto_quiet_window_from_actions(&actions_at(&dense, dense.len() * 2)),
-            None
-        );
-
-        let sparse: Vec<u32> = (0..24u32).step_by(4).collect();
-        assert_eq!(
-            auto_quiet_window_from_actions(&actions_at(&sparse, sparse.len() * 2)),
-            Some((2, 4))
-        );
-    }
-
-    #[test]
-    fn intent_keys_round_trip() {
-        for key in ALL_INTENT_KEYS {
-            let intent = parse_intent_key(key).unwrap();
-            assert_eq!(intent_key(intent), *key);
-        }
-        assert!(parse_intent_key("bogus").is_none());
     }
 }

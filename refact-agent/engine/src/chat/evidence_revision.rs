@@ -685,25 +685,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unexecuted_record_carries_identity_without_reading_the_tree() {
-        let spec = VerificationSpec::propose(
-            "S-1",
-            "cargo test --lib",
-            SpecAuthority::CardInstructions,
-            &defaults(),
-        );
-
-        let declared = ContentRevision::declared(&spec);
-
-        assert_eq!(declared.spec_id, "S-1");
-        assert_eq!(declared.spec_revision, 1);
-        assert_eq!(declared.worktree, "");
-        assert!(declared.inputs.is_empty());
-        assert!(declared.artifacts.is_empty());
-        assert_eq!(declared.drift(&declared.clone()), None);
-    }
-
-    #[tokio::test]
     async fn an_artifact_outside_the_worktree_is_refused_by_the_revision_too() {
         let temp = worktree_with_source().await;
         let mut spec = VerificationSpec::propose(

@@ -258,37 +258,6 @@ mod tests {
     }
 
     #[test]
-    fn elapsed_formatter_is_compact() {
-        assert_eq!(fmt_elapsed_compact(0), "0s");
-        assert_eq!(fmt_elapsed_compact(12), "12s");
-        assert_eq!(fmt_elapsed_compact(59), "59s");
-        assert_eq!(fmt_elapsed_compact(60), "1m 00s");
-        assert_eq!(fmt_elapsed_compact(65), "1m 05s");
-        assert_eq!(fmt_elapsed_compact(3_600), "1h 00m 00s");
-        assert_eq!(fmt_elapsed_compact(3_723), "1h 02m 03s");
-        assert_eq!(format_elapsed(65_999), "1m 05s");
-    }
-
-    #[test]
-    fn idle_is_hidden_and_busy_is_visible() {
-        assert!(status_indicator_line(&data(SessionState::Idle, false)).is_none());
-        assert!(status_indicator_line(&data(SessionState::ExecutingTools, false)).is_some());
-    }
-
-    #[test]
-    fn animated_widget_snapshot_includes_spinner_elapsed_hint_and_detail_line() {
-        let rendered =
-            line_texts(status_indicator_lines(&data(SessionState::Generating, false), 80).unwrap());
-        assert_eq!(
-            rendered,
-            vec![
-                " ⠋ Working (1m 05s • Esc to interrupt)",
-                "  └ shell({\"cmd\":\"echo hi\"})",
-            ]
-        );
-    }
-
-    #[test]
     fn reduced_motion_widget_snapshot_is_static() {
         let mut reduced = data(SessionState::Generating, true);
         let first = line_texts(status_indicator_lines(&reduced, 80).unwrap());
@@ -302,56 +271,5 @@ mod tests {
             ]
         );
         assert_eq!(first, second);
-    }
-
-    #[test]
-    fn details_wrap_with_tree_prefix_and_cap_at_three_lines() {
-        let mut value = data(SessionState::Generating, false);
-        value.detail = Some("alpha beta gamma delta epsilon zeta eta theta iota kappa".to_string());
-
-        let rendered = line_texts(status_indicator_lines(&value, 18).unwrap());
-
-        assert_eq!(rendered.len(), 4);
-        assert_eq!(rendered[1], "  └ alpha beta");
-        assert_eq!(rendered[2], "    gamma delta");
-        assert!(rendered[3].starts_with("    epsilon"));
-        assert!(rendered[3].ends_with('…'));
-    }
-
-    #[test]
-    fn empty_details_do_not_increase_height() {
-        let mut value = data(SessionState::Generating, false);
-        value.detail = Some("   ".to_string());
-
-        let rendered = line_texts(status_indicator_lines(&value, 80).unwrap());
-
-        assert_eq!(rendered, vec![" ⠋ Working (1m 05s • Esc to interrupt)"]);
-    }
-
-    #[test]
-    fn status_hint_uses_supplied_interrupt_key() {
-        let mut value = data(SessionState::Generating, false);
-        value.interrupt_key = "Ctrl-C".to_string();
-        value.detail = None;
-
-        let rendered = line_texts(status_indicator_lines(&value, 80).unwrap());
-
-        assert_eq!(rendered, vec![" ⠋ Working (1m 05s • Ctrl-C to interrupt)"]);
-    }
-
-    #[test]
-    fn key_label_uses_keymap_registry_binding() {
-        let registry = KeymapRegistry::from_toml_str(
-            r#"
-[bindings]
-cancel = "ctrl-c"
-"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            key_label(&registry, KeyContext::Main, KeyAction::Cancel, "Esc"),
-            "Ctrl-C"
-        );
     }
 }

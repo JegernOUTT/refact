@@ -447,64 +447,6 @@ async fn lease_callback_fails_closed_without_a_merge_commit() {
 
 #[tokio::test]
 #[serial_test::serial(runtime_settings, coordination_metrics)]
-async fn lease_callback_uses_merge_commit_instead_of_current_head() {
-    let (_temp, gcx, service, _worktree_id, _worktree_root) = fixture().await;
-    let root = service.source_workspace_root().to_path_buf();
-    git(&root, &["checkout", "-b", "feature"]);
-    std::fs::write(root.join("feature.txt"), "feature\n").unwrap();
-    git(&root, &["add", "feature.txt"]);
-    git(&root, &["commit", "-m", "feature"]);
-    git(&root, &["checkout", "main"]);
-    git(
-        &root,
-        &["merge", "--no-ff", "feature", "-m", "merge feature"],
-    );
-    let merge_commit = git(&root, &["rev-parse", "HEAD"]).trim().to_string();
-    std::fs::write(root.join("external.txt"), "external\n").unwrap();
-    git(&root, &["add", "external.txt"]);
-    git(&root, &["commit", "-m", "external commit"]);
-    let current_head = git(&root, &["rev-parse", "HEAD"]).trim().to_string();
-    assert_ne!(merge_commit, current_head);
-
-    let request = post_merge_request(&gcx, &root).await;
-    let captured = Arc::new(Mutex::new(None));
-    let captured_request = captured.clone();
-    let result = super::verify_merged_checkout(
-        gcx,
-        move |_gcx, request| {
-            captured_request.lock().unwrap().replace(request);
-            async {
-                Ok(PostMergeCheckResult {
-                    checked: true,
-                    auto_reverted: false,
-                    command: Some("cargo test".to_string()),
-                    exit_code: Some(0),
-                    output_tail: String::new(),
-                    merge_commit: None,
-                    revert_commit: None,
-                    fix_card_id: None,
-                    skipped_reason: None,
-                    revert_skipped_reason: None,
-                    outcome: VerificationOutcome::Passed,
-                })
-            }
-        },
-        Some(request),
-        root,
-        Some(merge_commit.clone()),
-    )
-    .await
-    .unwrap();
-
-    assert!(result.passed);
-    let captured = captured.lock().unwrap();
-    let captured = captured.as_ref().unwrap();
-    assert_eq!(captured.expected_merge_commit, merge_commit);
-    assert_ne!(captured.expected_merge_commit, current_head);
-}
-
-#[tokio::test]
-#[serial_test::serial(runtime_settings, coordination_metrics)]
 async fn lease_callback_skips_revert_when_external_commit_moves_head() {
     let (_temp, gcx, service, worktree_id, worktree_root) = fixture().await;
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;

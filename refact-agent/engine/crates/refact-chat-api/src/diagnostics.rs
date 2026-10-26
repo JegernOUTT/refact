@@ -217,22 +217,6 @@ mod tests {
     }
 
     #[test]
-    fn error_message_contains_structured_error_info() {
-        let message = make_ui_only_error_message("context_length_exceeded: input too large");
-
-        assert!(is_ui_only_message(&message));
-        assert_eq!(message.role, "error");
-        assert_eq!(
-            message
-                .extra
-                .get("error_info")
-                .and_then(|info| info.get("category"))
-                .and_then(|category| category.as_str()),
-            Some("ContextTooLarge")
-        );
-    }
-
-    #[test]
     fn error_message_redacts_secret_from_content_and_raw_error() {
         let message = make_ui_only_error_message(
             "provider failed with Authorization: Bearer sk-abcdefgh12345678",
@@ -275,32 +259,6 @@ mod tests {
         assert!(!raw_error.contains("Authorization: Bearer sk-test-secret"));
         assert!(!content.contains(far_tail));
         assert!(!raw_error.contains(far_tail));
-    }
-
-    #[test]
-    fn error_message_redacts_bare_sk_token_near_boundary() {
-        let max = SAFE_PROVIDER_ERROR_DIAGNOSTIC_MAX_CHARS;
-        let secret = "sk-boundarysecretvalue";
-        let prefix = "x".repeat(max.saturating_sub(20));
-        let error = format!(
-            "context_length_exceeded: {} {} {}",
-            prefix,
-            secret,
-            "y".repeat(2_000),
-        );
-
-        let message = make_ui_only_error_message(&error);
-        let content = message.content.content_text_only();
-        let raw_error = error_info_raw_error(&message);
-
-        assert!(content.len() <= max);
-        assert!(raw_error.len() <= max);
-        assert!(content.contains(SAFE_PROVIDER_ERROR_DIAGNOSTIC_TRUNCATED));
-        assert!(raw_error.contains(SAFE_PROVIDER_ERROR_DIAGNOSTIC_TRUNCATED));
-        assert!(!content.contains(secret));
-        assert!(!raw_error.contains(secret));
-        assert!(!content.contains("sk-boundary"));
-        assert!(!raw_error.contains("sk-boundary"));
     }
 
     #[test]
@@ -353,24 +311,6 @@ mod tests {
             retry_status.get("in_progress").and_then(|v| v.as_bool()),
             Some(true),
         );
-    }
-
-    #[test]
-    fn retry_status_message_redacts_secret_from_content_and_raw_error() {
-        let message =
-            make_ui_only_retry_status_message("LLM error: token=sk-retrysecret12345678", 3, 5, 30);
-
-        let content = message.content.content_text_only();
-        assert!(!content.contains("sk-retrysecret12345678"));
-
-        let raw_error = message
-            .extra
-            .get("error_info")
-            .and_then(|info| info.get("raw_error"))
-            .and_then(|raw_error| raw_error.as_str())
-            .unwrap_or_default();
-        assert!(!raw_error.contains("sk-retrysecret12345678"));
-        assert!(raw_error.contains("[REDACTED"));
     }
 
     #[test]

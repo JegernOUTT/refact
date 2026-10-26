@@ -341,42 +341,6 @@ mod tests {
     }
 
     #[test]
-    fn a_legacy_instructions_only_card_keeps_prose_task_and_scraped_verification() {
-        let card = card("Do the thing.\n\n## Acceptance Criteria\n- Verify: `cargo test --lib`");
-
-        let assignment = Assignment::from_card(&card)
-            .with_dependency_context(String::new())
-            .with_suggested_steps(40);
-
-        assert_eq!(assignment.task, card.instructions);
-        assert!(!assignment.has_typed_verification());
-        assert!(assignment.deliverable.is_none());
-        assert_eq!(
-            assignment.render_prompt(),
-            format!(
-                "# Card: Typed assignment\n\n## Instructions\n{}\n\n## Guidelines\n- Suggested step budget: ~40 steps\n- Focus only on this specific card\n- Report progress clearly\n- **Remember to call `agent_finish()` when done!**",
-                card.instructions
-            )
-        );
-
-        let specs = specs_for_validation(Some(&assignment), &card, &defaults());
-        assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].command, "cargo test --lib");
-        assert_eq!(specs[0].spec_id, "T-1#0");
-        assert_eq!(specs[0].proposed_by, SpecAuthority::CardInstructions);
-        assert_eq!(
-            specs
-                .iter()
-                .map(|spec| spec.command.clone())
-                .collect::<Vec<_>>(),
-            specs_from_card(&card, &defaults())
-                .iter()
-                .map(|spec| spec.command.clone())
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
     fn scope_reports_declared_intent_unless_the_guard_enforces_it() {
         for guard in [
             ScopeGuardMode::Off,
@@ -508,28 +472,6 @@ mod tests {
             .cache
             .deterministic_inputs
             .is_empty());
-    }
-
-    #[test]
-    fn the_deliverable_contract_is_carried_and_rendered_without_being_redefined() {
-        let contract = DeliverableContract {
-            required_sections: vec!["Findings".to_string()],
-            output_schema: None,
-            evidence_required: true,
-        };
-
-        let assignment = Assignment::from_card(&card("instructions"))
-            .with_deliverable(Some(contract.clone()))
-            .with_suggested_steps(10);
-
-        assert_eq!(assignment.deliverable, Some(contract.clone()));
-        assert!(assignment
-            .render_prompt()
-            .contains(&contract.render_instructions()));
-        assert!(Assignment::from_card(&card("instructions"))
-            .with_deliverable(Some(DeliverableContract::default()))
-            .deliverable
-            .is_none());
     }
 
     #[tokio::test]

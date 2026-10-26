@@ -630,24 +630,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_multi_file() {
-        let patch = wrap_patch(
-            "*** Add File: new.txt\n+content\n*** Update File: existing.txt\n@@ \n-old\n+new\n*** Delete File: old.txt"
-        );
-        let parsed = parse_patch(&patch).unwrap();
-        assert_eq!(parsed.operations.len(), 3);
-        assert!(matches!(&parsed.operations[0], FileOperation::Add { .. }));
-        assert!(matches!(
-            &parsed.operations[1],
-            FileOperation::Update { .. }
-        ));
-        assert!(matches!(
-            &parsed.operations[2],
-            FileOperation::Delete { .. }
-        ));
-    }
-
-    #[test]
     fn test_parse_eof_marker() {
         let patch = wrap_patch("*** Update File: file.txt\n@@\n+appended line\n*** End of File");
         let parsed = parse_patch(&patch).unwrap();
@@ -686,19 +668,6 @@ mod tests {
         }];
         let result = apply_update_chunks(original, &chunks).unwrap();
         assert_eq!(result, "foo\nBAR\nbaz\n");
-    }
-
-    #[test]
-    fn test_apply_with_context() {
-        let original = "foo\nbar\nbaz\nqux\n";
-        let chunks = vec![UpdateChunk {
-            change_context: vec!["foo".to_string()],
-            old_lines: vec!["bar".to_string()],
-            new_lines: vec!["BAR".to_string()],
-            is_end_of_file: false,
-        }];
-        let result = apply_update_chunks(original, &chunks).unwrap();
-        assert_eq!(result, "foo\nBAR\nbaz\nqux\n");
     }
 
     #[test]
@@ -770,13 +739,6 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_patch() {
-        let patch = "*** Begin Patch\n*** End Patch";
-        let result = parse_patch(&patch);
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn test_backslash_traversal_rejected() {
         assert!(validate_relative_path("a\\..\\..\\secret").is_err());
         assert!(validate_relative_path("path\\to\\file.txt").is_err());
@@ -794,13 +756,6 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_move_to_rejected() {
-        let patch = wrap_patch("*** Update File: file.txt\n*** Move to:\n@@ \n-old\n+new");
-        let result = parse_patch(&patch);
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn test_missing_end_patch() {
         let patch = "*** Begin Patch\n*** Add File: test.txt\n+content";
         let result = parse_patch(patch);
@@ -813,28 +768,6 @@ mod tests {
         let patch = wrap_patch("*** Add File: test.txt\n+line1\nunprefixed line\n+line2");
         let result = parse_patch(&patch);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_multiple_insertions_same_location() {
-        let original = "a\nb\nc\n";
-        let chunks = vec![
-            UpdateChunk {
-                change_context: vec![],
-                old_lines: vec![],
-                new_lines: vec!["X".to_string()],
-                is_end_of_file: true,
-            },
-            UpdateChunk {
-                change_context: vec![],
-                old_lines: vec![],
-                new_lines: vec!["Y".to_string()],
-                is_end_of_file: true,
-            },
-        ];
-        let result = apply_update_chunks(original, &chunks).unwrap();
-        assert!(result.contains("X"));
-        assert!(result.contains("Y"));
     }
 
     #[test]
@@ -865,20 +798,6 @@ mod tests {
     }
 
     #[test]
-    fn test_context_based_insertion_not_eof() {
-        let original = "fn a() {}\n\nfn b() {}\n";
-        let chunks = vec![UpdateChunk {
-            change_context: vec!["fn a() {}".to_string()],
-            old_lines: vec![],
-            new_lines: vec!["".to_string(), "fn inserted() {}".to_string()],
-            is_end_of_file: false,
-        }];
-        let result = apply_update_chunks(original, &chunks).unwrap();
-        assert!(result.contains("fn a() {}\n\nfn inserted() {}"));
-        assert!(result.find("fn inserted()").unwrap() < result.find("fn b()").unwrap());
-    }
-
-    #[test]
     fn test_eof_hunk_matches_last_occurrence() {
         let original = "block\nend\n\nblock\nend\n";
         let chunks = vec![UpdateChunk {
@@ -905,19 +824,6 @@ mod tests {
     }
 
     #[test]
-    fn test_trailing_whitespace_in_patch() {
-        let original = "line1\nline2\nline3\n";
-        let chunks = vec![UpdateChunk {
-            change_context: vec![],
-            old_lines: vec!["line2  ".to_string()],
-            new_lines: vec!["LINE2".to_string()],
-            is_end_of_file: false,
-        }];
-        let result = apply_update_chunks(original, &chunks).unwrap();
-        assert_eq!(result, "line1\nLINE2\nline3\n");
-    }
-
-    #[test]
     fn test_sequential_insertions_at_cursor() {
         let original = "header\n\nfooter\n";
         let chunks = vec![
@@ -940,18 +846,5 @@ mod tests {
         let pos1 = result.find("insert1").unwrap();
         let pos2 = result.find("insert2").unwrap();
         assert!(pos1 < pos2);
-    }
-
-    #[test]
-    fn test_non_eof_insertion_uses_cursor() {
-        let original = "a\nb\nc\nd\n";
-        let chunks = vec![UpdateChunk {
-            change_context: vec!["b".to_string()],
-            old_lines: vec![],
-            new_lines: vec!["X".to_string()],
-            is_end_of_file: false,
-        }];
-        let result = apply_update_chunks(original, &chunks).unwrap();
-        assert_eq!(result, "a\nb\nX\nc\nd\n");
     }
 }

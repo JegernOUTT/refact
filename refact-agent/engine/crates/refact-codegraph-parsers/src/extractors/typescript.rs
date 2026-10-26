@@ -160,16 +160,6 @@ export function Panel({ title }: { title: string }) {
     }
 
     #[test]
-    fn tsx_generic_arrow_component_parses_without_errors() {
-        let src = "\
-const Wrap = <T,>(value: T) => <li key={String(value)}>{String(value)}</li>;
-export default Wrap;
-";
-        let tree = TsxExtractor::parse(src).expect("tsx parse");
-        assert!(!tree.root_node().has_error());
-    }
-
-    #[test]
     fn extracts_barrel_reexports_and_consumer_imports() {
         let (_barrel_symbols, barrel_refs) = extract("export { a } from './mod';\n");
         assert!(

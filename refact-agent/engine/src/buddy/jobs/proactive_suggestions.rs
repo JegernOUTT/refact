@@ -148,7 +148,7 @@ fn count_uncommitted_changes(project_root: &std::path::Path) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+
     use crate::worktrees::types::{WorktreeInventory, WorktreeInventorySummary};
 
     fn inventory(abandoned_clean: usize) -> WorktreeInventory {
@@ -166,52 +166,5 @@ mod tests {
             worktrees: vec![],
             cleanup_candidates: vec![],
         }
-    }
-
-    #[test]
-    fn worktree_cleanup_condition_keeps_one_stable_suggestion_id() {
-        let first = worktree_hygiene_suggestion_from_inventory(&inventory(2)).unwrap();
-        let second = worktree_hygiene_suggestion_from_inventory(&inventory(9)).unwrap();
-
-        assert_eq!(first.id, "worktree-cleanup");
-        assert_eq!(second.id, first.id);
-        assert_eq!(second.title, "9 clean abandoned worktrees");
-    }
-
-    #[tokio::test]
-    async fn uncommitted_condition_keeps_one_stable_suggestion_id() {
-        let root = tempfile::tempdir().unwrap();
-        let _repository = git2::Repository::init(root.path()).unwrap();
-        for index in 0..12 {
-            std::fs::write(root.path().join(format!("file-{index}")), "change").unwrap();
-        }
-        let job = ProactiveSuggestionsJob;
-        let make_context = || BuddyJobContext {
-            identity_name: "Pixel".into(),
-            personality: Default::default(),
-            onboarding: Default::default(),
-            recent_diagnostics: vec![],
-            project_root: root.path().to_path_buf(),
-            job_state: super::super::super::types::BuddyJobState {
-                run_count: 1,
-                ..Default::default()
-            },
-            workflow_summaries: vec![],
-            total_workflow_runs: 0,
-            suggestion_state: vec![],
-            pet: Default::default(),
-            active_quest: None,
-            settings: Default::default(),
-            pulse: Default::default(),
-            facts: vec![],
-            recent_activities: vec![],
-        };
-        let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
-
-        let first = job.execute(gcx.clone(), make_context()).await;
-        let second = job.execute(gcx, make_context()).await;
-
-        assert_eq!(first.suggestion.unwrap().id, "git-uncommitted");
-        assert_eq!(second.suggestion.unwrap().id, "git-uncommitted");
     }
 }

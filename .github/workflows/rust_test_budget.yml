@@ -1,0 +1,53 @@
+name: Rust test admission
+
+on:
+  pull_request_target:
+    branches:
+      - main
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-test-admission-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  admission:
+    name: Rust test budget and admission (trusted base)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted policy
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+
+      - name: Checkout proposed sources as data
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch comparison revision
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REPOSITORY: ${{ github.repository }}
+        run: git -C candidate fetch --no-tags "https://github.com/${BASE_REPOSITORY}.git" "$BASE_SHA"
+
+      - name: Test trusted checker
+        working-directory: trusted
+        run: python3 -I -m unittest discover -s tools/dev -p test_test_budget.py
+
+      - name: Enforce trusted policy on proposed sources
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          comparison_base="$(git -C candidate merge-base "$BASE_SHA" HEAD)"
+          python3 -I trusted/tools/dev/test_budget.py --repo "$GITHUB_WORKSPACE/candidate" check --base "$comparison_base"

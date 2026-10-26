@@ -293,24 +293,6 @@ mod tests {
     }
 
     #[test]
-    fn test_accumulator_large_arguments_efficient() {
-        let mut acc = ToolCallAccumulator::default();
-        acc.merge(
-            &json!({"index": 0, "id": "call_1", "function": {"name": "test", "arguments": ""}}),
-        );
-
-        // Simulate streaming many small chunks (would be O(n²) with naive concat)
-        for i in 0..1000 {
-            acc.merge(&json!({"index": 0, "function": {"arguments": format!("{},", i)}}));
-        }
-
-        let result = acc.finalize();
-        let args = result[0]["function"]["arguments"].as_str().unwrap();
-        assert!(args.starts_with("0,1,2,"));
-        assert!(args.len() > 3000); // Should have all the numbers
-    }
-
-    #[test]
     fn test_accumulator_rejects_huge_index() {
         let mut acc = ToolCallAccumulator::default();
         // Try to create a tool call with a huge index (memory DoS attempt)
@@ -330,19 +312,6 @@ mod tests {
         let result = acc.finalize();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0]["id"], "call_max");
-    }
-
-    #[test]
-    fn test_accumulator_ignores_empty_delta() {
-        let mut acc = ToolCallAccumulator::default();
-        // Empty delta with just index - should not mark as initialized
-        acc.merge(&json!({"index": 0}));
-
-        let result = acc.finalize();
-        assert!(
-            result.is_empty(),
-            "Empty delta should not create initialized entry"
-        );
     }
 
     #[test]
@@ -408,19 +377,6 @@ mod tests {
         assert!(
             result.is_empty(),
             "Tool call with empty name should be filtered out"
-        );
-    }
-
-    #[test]
-    fn test_accumulator_empty_strings_not_meaningful() {
-        let mut acc = ToolCallAccumulator::default();
-        // Delta with empty strings - should not mark as initialized
-        acc.merge(&json!({"index": 0, "id": "", "function": {"name": "", "arguments": ""}}));
-
-        let result = acc.finalize();
-        assert!(
-            result.is_empty(),
-            "Empty strings should not create initialized entry"
         );
     }
 

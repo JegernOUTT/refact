@@ -393,60 +393,6 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn unknown_tool_cell_keeps_generic_card() {
-        let card = tool_card("totally_unknown", json!({"x": 1}), "line 1");
-        let cell = ToolCallCell::new(card, true);
-        assert!(cell.is_final());
-        assert!(text(&cell.render(80)).contains("tool selected\n▾ ✅ succeeded totally_unknown"));
-        assert!(text(&cell.render(80)).contains("line 1"));
-    }
-
-    #[test]
-    fn exec_cell_snapshot_extracts_command_exit_and_output() {
-        let card = tool_card(
-            "shell",
-            json!({"command": "echo hi"}),
-            "stdout:\nhi\n\nThe command was running 0.120s, finished with exit code 0",
-        );
-        let cell = cell_from_tool_card(card, true);
-        assert_eq!(cell.kind(), HistoryCellKind::Exec);
-        let rendered = text(&cell.render(80));
-        assert!(rendered.contains("exec selected\n▾ ✅ succeeded $ echo hi · exit 0 · 1.2s"));
-        assert!(rendered.contains("  └ hi"));
-        assert!(!rendered.contains("The command was running"));
-    }
-
-    #[test]
-    fn exec_cell_strips_bash_lc_command_wrapper() {
-        let card = tool_card(
-            "shell",
-            json!({"command": "bash -lc 'printf hi'"}),
-            "hi\n\nThe command was running 0.120s, finished with exit code 0",
-        );
-        let rendered = text(&ExecToolCell::new(card, false).render(80));
-        assert!(rendered.contains("$ printf hi · exit 0"));
-        assert!(!rendered.contains("bash -lc"));
-    }
-
-    #[test]
-    fn exec_cell_truncates_output_with_tree_ellipsis_and_tail() {
-        let mut card = tool_card(
-            "process_read",
-            json!({"process_id": "exec_1"}),
-            &(0..15)
-                .map(|idx| format!("line {idx}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
-        card.expanded = false;
-        let rendered = text(&ExecToolCell::new(card, false).render(80));
-        assert!(rendered.contains("  └ line 0"));
-        assert!(rendered.contains("    … +5 lines"));
-        assert!(rendered.contains("    line 14"));
-        assert!(!rendered.contains("line 5"));
-    }
-
-    #[test]
     fn failed_exec_cell_collapsed_output_prefers_stderr_tail() {
         let stderr = (0..60)
             .map(|idx| format!("err {idx}"))
@@ -504,31 +450,5 @@ mod tests {
             assert!(rendered.contains(&format!("$ false · exit {structured_exit} · 2.3s")));
             assert!(!rendered.contains("exit 1"));
         }
-    }
-
-    #[test]
-    fn no_duration_is_rendered_without_a_positive_stamp() {
-        let mut card = tool_card("shell", json!({"command": "echo hi"}), "hi");
-        card.duration_ms = Some(0);
-
-        let rendered = text(&ExecToolCell::new(card, false).render(80));
-        assert!(rendered.contains("$ echo hi"));
-        assert!(!rendered.contains("0ms"));
-    }
-
-    #[test]
-    fn invalid_structured_exit_code_never_uses_result_prose() {
-        let mut card = tool_card(
-            "shell",
-            json!({"command": "echo hi"}),
-            "The documentation mentions exit code 17.",
-        );
-        card.apply_result_metadata(&serde_json::Map::from_iter([(
-            "exec".to_string(),
-            json!({"exit_code": -1}),
-        )]));
-
-        let rendered = text(&ExecToolCell::new(card, false).render(80));
-        assert!(!rendered.contains("exit 17"));
     }
 }

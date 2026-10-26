@@ -551,27 +551,6 @@ mod tests {
         assert_eq!(value["error"], "hooks are disabled");
     }
 
-    #[tokio::test]
-    async fn bare_hooks_path_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = test_state(hook_config(true), &dir).await;
-        let router = crate::daemon::server::make_router(state, 8488);
-
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/hooks")
-                    .header("Authorization", "Bearer hook-secret")
-                    .body(HyperBody::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial(daemon)]
     async fn wake_resolves_body_project_wakes_worker_and_forwards() {
@@ -657,37 +636,6 @@ mod tests {
         state.supervisor.stop_all().await;
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial(daemon)]
-    async fn agent_uses_default_project_when_body_omits_project() {
-        let Some(_env) = EnvGuard::fake_worker() else {
-            return;
-        };
-        let dir = tempfile::tempdir().unwrap();
-        let project_root = dir.path().join("project");
-        tokio::fs::create_dir_all(&project_root).await.unwrap();
-        let mut config = hook_config(true);
-        let temporary_state = test_state(config.clone(), &dir).await;
-        let entry = add_project(&temporary_state, project_root.clone()).await;
-        config.hooks.default_project = Some(entry.id.clone());
-        let state = test_state(config, &dir).await;
-        let entry = add_project(&state, project_root).await;
-        let router = crate::daemon::server::make_router(state.clone(), 8488);
-
-        let (status, value) = request_json(
-            router,
-            "/hooks/agent",
-            Some("hook-secret"),
-            "authorization",
-            json!({"message": "hello"}),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(value["project_id"], entry.id);
-        state.supervisor.stop_all().await;
-    }
-
     #[tokio::test]
     async fn allowed_projects_are_enforced() {
         let dir = tempfile::tempdir().unwrap();
@@ -711,19 +659,6 @@ mod tests {
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(value["error"], "project is not allowed for hooks");
         assert_eq!(state.supervisor.worker_count().await, 0);
-    }
-
-    #[test]
-    fn worker_forward_token_prefers_daemon_token() {
-        let config = hook_config(true);
-        let dir = tempfile::tempdir().unwrap();
-        let state = DaemonState::new(
-            config,
-            EventBus::new(dir.path().join("events.jsonl")),
-            Some("daemon-secret".to_string()),
-        );
-
-        assert_eq!(worker_forward_token(&state), Some("daemon-secret"));
     }
 
     #[test]

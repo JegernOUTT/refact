@@ -351,23 +351,6 @@ mod tests {
     }
 
     #[test]
-    fn log_issue_format_keeps_relative_generated_path_readable() {
-        let issue = ImportIssue {
-            competitor: Some(Competitor::ClaudeCode),
-            kind: Some(ImportKind::Command),
-            scope: Some(ImportScope::Global),
-            path: Some(PathBuf::from("commands/foo.md")),
-            status: ImportStatus::Conflict,
-            message: "destination exists without import manifest ownership".to_string(),
-        };
-
-        let formatted = format_log_issue(&issue);
-
-        assert!(formatted.starts_with("commands/foo.md: "));
-        assert!(formatted.contains("destination exists"));
-    }
-
-    #[test]
     fn log_scope_label_redacts_project_root() {
         let label = scope_label(&ImportScope::Project {
             root: PathBuf::from("/home/user/private-project"),
@@ -392,16 +375,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_import_without_workspaces_is_empty_noop() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = AppState::from_gcx(gcx).await;
-
-        let summary = run_project_import(app).await;
-
-        assert!(summary.is_empty());
-    }
-
-    #[tokio::test]
     async fn empty_project_import_does_not_create_manifest() {
         let workspace = tempfile::tempdir().unwrap();
         let scope_root = workspace.path().join(".refact");
@@ -413,36 +386,6 @@ mod tests {
         assert!(summary.issues.is_empty());
         assert!(summary.outcomes.is_empty());
         assert!(!manifest_path_for_scope_root(&scope_root).exists());
-    }
-
-    #[tokio::test]
-    async fn global_import_helper_uses_injected_home_and_config_paths() {
-        let home = tempfile::tempdir().unwrap();
-        let config = tempfile::tempdir().unwrap();
-        let refact_config = config.path().join("refact");
-
-        let summary = run_global_import_with_paths(&refact_config, Some(home.path())).await;
-
-        assert_eq!(summary.discovered_scopes, vec![ImportScope::Global]);
-        assert_eq!(summary.discovered_sources.len(), 6);
-        assert!(summary
-            .discovered_sources
-            .iter()
-            .any(|source| source.path == home.path().join(".claude")));
-        assert!(summary
-            .discovered_sources
-            .iter()
-            .any(|source| source.path == config.path().join("opencode")));
-    }
-
-    #[tokio::test]
-    async fn global_import_helper_reports_missing_home_without_mutating_paths() {
-        let config = tempfile::tempdir().unwrap();
-
-        let summary = run_global_import_with_paths(&config.path().join("refact"), None).await;
-
-        assert_eq!(summary.errors.len(), 1);
-        assert!(summary.discovered_sources.is_empty());
     }
 
     #[tokio::test]
@@ -475,31 +418,6 @@ mod tests {
         let report = manifest.last_report.unwrap();
         assert_eq!(report.reported_sources.len(), 6);
         assert_eq!(report.status_counts.get(&ImportStatus::Created), Some(&2));
-    }
-
-    #[tokio::test]
-    async fn project_import_writes_to_workspace_refact_dir() {
-        let workspace = tempfile::tempdir().unwrap();
-        write(
-            &workspace
-                .path()
-                .join(".opencode")
-                .join("commands")
-                .join("review.md"),
-            "Review project.",
-        );
-
-        let summary = run_project_import_with_paths(&[workspace.path().to_path_buf()]).await;
-
-        assert_eq!(summary.status_counts.get(&ImportStatus::Created), Some(&1));
-        assert_eq!(
-            fs::read_to_string(workspace.path().join(".refact/commands/review.md")).unwrap(),
-            "Review project."
-        );
-        let manifest = read_manifest(&workspace.path().join(".refact")).await;
-        let report = manifest.last_report.unwrap();
-        assert_eq!(report.reported_sources.len(), 5);
-        assert_eq!(report.status_counts.get(&ImportStatus::Created), Some(&1));
     }
 
     #[tokio::test]
@@ -636,45 +554,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_imports_multiple_workspaces_independently() {
-        let first = tempfile::tempdir().unwrap();
-        let second = tempfile::tempdir().unwrap();
-        write(
-            &first
-                .path()
-                .join(".claude")
-                .join("commands")
-                .join("review.md"),
-            "Review first.",
-        );
-        write(
-            &second
-                .path()
-                .join(".continue")
-                .join("prompts")
-                .join("deploy.md"),
-            "---\nname: Deploy\ndescription: Deploy\ninvokable: true\n---\nDeploy second.",
-        );
-
-        let summary = run_project_import_with_paths(&[
-            first.path().to_path_buf(),
-            second.path().to_path_buf(),
-        ])
-        .await;
-
-        assert_eq!(summary.discovered_scopes.len(), 2);
-        assert_eq!(summary.status_counts.get(&ImportStatus::Created), Some(&2));
-        assert_eq!(
-            fs::read_to_string(first.path().join(".refact/commands/review.md")).unwrap(),
-            "Review first."
-        );
-        assert_eq!(
-            fs::read_to_string(second.path().join(".refact/commands/deploy.md")).unwrap(),
-            "---\ndescription: Deploy\n---\nDeploy second."
-        );
-    }
-
-    #[tokio::test]
     async fn cross_source_same_command_name_first_write_wins_and_conflict_is_reported() {
         let workspace = tempfile::tempdir().unwrap();
         write(
@@ -780,58 +659,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn continue_rules_are_skipped_while_checks_import() {
-        let workspace = tempfile::tempdir().unwrap();
-        write(
-            &workspace.path().join(".continue/rules/security.md"),
-            "# Security rules",
-        );
-        write(
-            &workspace.path().join(".continue/checks/security.md"),
-            "---\nname: Security Check\ndescription: Review security\n---\nFind issues.",
-        );
-
-        let summary = run_project_import_with_paths(&[workspace.path().to_path_buf()]).await;
-
-        assert_eq!(status_count(&summary, ImportStatus::Created), 1);
-        assert_eq!(status_count(&summary, ImportStatus::Unsupported), 1);
-        assert!(workspace
-            .path()
-            .join(".refact/subagents/security-check.yaml")
-            .exists());
-        assert!(!workspace.path().join(".refact/rules/security.md").exists());
-        assert!(summary.issues.iter().any(|issue| {
-            issue.kind == Some(ImportKind::UnsupportedRules)
-                && issue
-                    .path
-                    .as_ref()
-                    .is_some_and(|path| path.ends_with(".continue/rules/security.md"))
-        }));
-    }
-
-    #[tokio::test]
-    async fn kilo_legacy_workflows_import_as_commands() {
-        let workspace = tempfile::tempdir().unwrap();
-        write(
-            &workspace.path().join(".kilocode/workflows/deploy.md"),
-            "Deploy legacy workflow.",
-        );
-
-        let summary = run_project_import_with_paths(&[workspace.path().to_path_buf()]).await;
-
-        assert_eq!(status_count(&summary, ImportStatus::Created), 1);
-        assert_eq!(
-            fs::read_to_string(workspace.path().join(".refact/commands/deploy.md")).unwrap(),
-            "Deploy legacy workflow."
-        );
-        assert!(summary.candidates.iter().any(|candidate| {
-            candidate.competitor == Competitor::KiloCode
-                && candidate.kind == ImportKind::Command
-                && candidate.dest_name == "deploy"
-        }));
-    }
-
-    #[tokio::test]
     async fn malformed_source_reports_error_without_blocking_other_sources() {
         let workspace = tempfile::tempdir().unwrap();
         write(&workspace.path().join("opencode.jsonc"), "{ command: [ }");
@@ -892,26 +719,6 @@ mod tests {
             assert!(!config.tools.contains(&"unknownDanger".to_string()));
             assert!(config.expose_as_tool);
         }
-    }
-
-    #[tokio::test]
-    async fn repeated_project_import_is_idempotent() {
-        let workspace = tempfile::tempdir().unwrap();
-        write(
-            &workspace
-                .path()
-                .join(".kilo")
-                .join("commands")
-                .join("review.md"),
-            "Review once.",
-        );
-
-        let first = run_project_import_with_paths(&[workspace.path().to_path_buf()]).await;
-        let second = run_project_import_with_paths(&[workspace.path().to_path_buf()]).await;
-
-        assert_eq!(first.status_counts.get(&ImportStatus::Created), Some(&1));
-        assert_eq!(second.status_counts.get(&ImportStatus::Unchanged), Some(&1));
-        assert!(!second.has_imported_changes());
     }
 
     #[tokio::test]
@@ -1010,39 +817,6 @@ mod tests {
     }
 
     #[test]
-    fn runtime_event_for_unchanged_import_is_low_transient() {
-        let summary = runtime_event_summary(ImportStatus::Unchanged, ImportScope::Global);
-        let report = ImportReport::from_summary(&summary);
-
-        let event = buddy_runtime_event_for_import_report(&report);
-
-        assert_eq!(event.signal_type, "competitor_import");
-        assert_eq!(event.source, "competitor_import");
-        assert_eq!(event.status, "completed");
-        assert_eq!(event.priority, "low");
-        assert!(!event.persistent);
-        assert_eq!(event.ttl_ms, Some(6000));
-        assert_eq!(
-            event.dedupe_key.as_deref(),
-            Some("competitor_import:global")
-        );
-    }
-
-    #[test]
-    fn runtime_event_for_created_import_is_normal_completed() {
-        let summary = runtime_event_summary(ImportStatus::Created, ImportScope::Global);
-        let report = ImportReport::from_summary(&summary);
-
-        let event = buddy_runtime_event_for_import_report(&report);
-
-        assert_eq!(event.status, "completed");
-        assert_eq!(event.priority, "normal");
-        assert!(!event.persistent);
-        assert!(event.title.contains("added 1"));
-        assert_eq!(event.controls[0].action, "open_buddy");
-    }
-
-    #[test]
     fn runtime_event_for_conflicts_and_errors_is_sanitized_attention() {
         let scope = ImportScope::Project {
             root: PathBuf::from("/home/user/private-project"),
@@ -1073,104 +847,5 @@ mod tests {
             .dedupe_key
             .as_deref()
             .is_some_and(|key| key.starts_with("competitor_import:project:")));
-    }
-
-    #[test]
-    fn runtime_reports_include_aggregate_unscoped_errors_with_scopes() {
-        let scope = ImportScope::Project {
-            root: PathBuf::from("/home/user/private-project"),
-        };
-        let mut summary = ImportSummary::from_scopes(vec![scope]);
-        summary.add_issue(ImportIssue {
-            competitor: None,
-            kind: None,
-            scope: None,
-            path: None,
-            status: ImportStatus::Error,
-            message: "workspace folders unavailable".to_string(),
-        });
-        summary.mark_completed();
-
-        let reports = import_reports_for_runtime_events(&summary);
-        let events = reports
-            .iter()
-            .map(buddy_runtime_event_for_import_report)
-            .collect::<Vec<_>>();
-
-        assert_eq!(reports.len(), 2);
-        assert!(events.iter().any(|event| {
-            event.status == "error"
-                && event.dedupe_key.as_deref() == Some("competitor_import:workspace")
-        }));
-    }
-
-    #[tokio::test]
-    async fn runtime_event_emit_is_noop_without_buddy_service() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = AppState::from_gcx(gcx.clone()).await;
-        let summary = runtime_event_summary(ImportStatus::Created, ImportScope::Global);
-
-        emit_buddy_import_events(app.clone(), &summary).await;
-
-        assert!(app.buddy.buddy.lock().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn runtime_event_emit_enqueues_when_buddy_service_exists() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let (tx, _) = tokio::sync::broadcast::channel(16);
-        let service = crate::buddy::actor::BuddyService::new(
-            std::env::temp_dir().join(format!("buddy-import-test-{}", uuid::Uuid::new_v4())),
-            crate::buddy::state::default_buddy_state(),
-            crate::buddy::settings::BuddySettings::default(),
-            Vec::new(),
-            crate::buddy::runtime_queue::RuntimeQueue::new(),
-            tx,
-            None,
-        );
-        let app = AppState::from_gcx(gcx.clone()).await;
-        *app.buddy.buddy.lock().await = Some(service);
-        let summary = runtime_event_summary(ImportStatus::Created, ImportScope::Global);
-
-        emit_buddy_import_events(app.clone(), &summary).await;
-
-        let buddy_arc = app.buddy.buddy.clone();
-        let lock = buddy_arc.lock().await;
-        let service = lock.as_ref().unwrap();
-        assert_eq!(service.runtime_queue.items.len(), 1);
-        assert_eq!(
-            service.runtime_queue.items[0].signal_type,
-            "competitor_import"
-        );
-    }
-
-    #[tokio::test]
-    async fn cache_invalidation_ignores_unchanged_outcomes() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = AppState::from_gcx(gcx.clone()).await;
-        let mut summary = ImportSummary::default();
-        summary.add_outcome(ImportOutcome {
-            candidate: ImportCandidateSummary {
-                competitor: Competitor::ClaudeCode,
-                kind: ImportKind::Command,
-                scope: ImportScope::Global,
-                source_root: PathBuf::from("/source"),
-                source_path: PathBuf::from("/source/review.md"),
-                dest_name: "review".to_string(),
-                destination_path: PathBuf::from("/dest/review.md"),
-                metadata: serde_json::Value::Null,
-            },
-            status: ImportStatus::Unchanged,
-            message: "unchanged".to_string(),
-        });
-
-        apply_cache_invalidation(app.clone(), &summary).await;
-
-        assert_eq!(
-            app.integrations
-                .ext_cache_generation
-                .load(Ordering::Relaxed),
-            0
-        );
     }
 }

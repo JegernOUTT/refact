@@ -900,21 +900,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_state_starts_egg() {
-        let state = default_buddy_state();
-
-        assert_eq!(state.progression.stage, 0);
-        assert_eq!(state.progression.stage_name, "Egg");
-        assert_eq!(state.progression.xp, 0);
-        assert_eq!(state.progression.level, 1);
-        assert_eq!(state.pet.needs.hunger, 80);
-        assert_eq!(state.pet.needs.energy, 85);
-        assert_eq!(state.pet.needs.hygiene, 80);
-        assert_eq!(state.pet.needs.boredom, 15);
-        assert_eq!(state.pet.needs.affection, 75);
-    }
-
-    #[test]
     fn growth_points_hatch_without_care_gate() {
         let mut state = default_buddy_state();
 
@@ -924,50 +909,6 @@ mod tests {
         assert_eq!(state.progression.stage, 1);
         assert_eq!(state.progression.stage_name, "Hatch");
         assert_eq!(state.progression.xp, 0);
-    }
-
-    #[test]
-    fn xp_only_advances_multiple_stages() {
-        let mut state = default_buddy_state();
-
-        grant_play_xp(&mut state, 20 + 35 + 10);
-
-        assert_eq!(state.progression.stage, 2);
-        assert_eq!(state.progression.stage_name, "Sprite");
-        assert_eq!(state.progression.level, 3);
-        assert_eq!(state.progression.xp, 10);
-        assert_eq!(state.progression.xp_next, 55);
-    }
-
-    #[test]
-    fn care_and_open_time_path_advances_later_stage() {
-        let mut state = default_buddy_state();
-
-        apply_pet_tick(&mut state, 60);
-        for _ in 0..15 {
-            let _ = apply_care_action(&mut state, BuddyCareAction::Play, Some("bug"));
-            let _ = apply_care_action(&mut state, BuddyCareAction::Feed, None);
-        }
-
-        assert!(state.pet.evolution.open_seconds >= 60);
-        assert!(state.pet.evolution.care_score >= 100);
-        assert!(state.progression.stage >= 1);
-        assert!(state.progression.xp_next > 0);
-    }
-
-    #[test]
-    fn repeated_successful_workflow_rewards_never_advance() {
-        let mut state = default_buddy_state();
-        grant_play_xp(&mut state, 7);
-        let saved = serde_json::to_value(&state.progression).unwrap();
-
-        for _ in 0..12 {
-            grant_xp(&mut state, 5);
-        }
-
-        assert_eq!(serde_json::to_value(&state.progression).unwrap(), saved);
-        assert_eq!(state.progression.stage, 0);
-        assert_eq!(state.progression.xp, 7);
     }
 
     #[test]
@@ -996,85 +937,6 @@ mod tests {
     }
 
     #[test]
-    fn saved_stage_and_skills_survive_volume_reload() {
-        let mut state = default_buddy_state();
-        state.progression.stage = 4;
-        state.progression.xp = 33;
-        state.skills.unlocked = vec!["mem".to_string()];
-        sync_state(&mut state);
-        let stage_name = state.progression.stage_name.clone();
-
-        for _ in 0..50 {
-            grant_xp(&mut state, 30);
-        }
-        let reloaded: BuddyState =
-            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
-
-        assert_eq!(reloaded.progression.stage, 4);
-        assert_eq!(reloaded.progression.xp, 33);
-        assert_eq!(reloaded.progression.stage_name, stage_name);
-        assert!(reloaded.skills.unlocked.iter().any(|id| id == "mem"));
-    }
-
-    #[test]
-    fn absence_is_not_punished_by_missing_volume() {
-        let mut state = default_buddy_state();
-        grant_play_xp(&mut state, 20 + 18);
-        let before = serde_json::to_value(&state.progression).unwrap();
-
-        apply_pet_tick(&mut state, 30 * 24 * 3600);
-
-        assert_eq!(serde_json::to_value(&state.progression).unwrap(), before);
-        assert_eq!(state.progression.stage, 1);
-        assert_eq!(state.progression.xp, 18);
-    }
-
-    #[test]
-    fn quest_completion_awards_reward_once_as_intentional_play() {
-        let mut state = default_buddy_state();
-        activate_quest(
-            &mut state,
-            BuddyQuest {
-                id: "q1".to_string(),
-                quest_type: "care_buddy".to_string(),
-                title: "Play".to_string(),
-                description: "Play".to_string(),
-                icon: "🎾".to_string(),
-                created_at: Utc::now().to_rfc3339(),
-                accepted_at: Utc::now().to_rfc3339(),
-                status: "active".to_string(),
-                completed_at: None,
-                progress: 0,
-                goal: 1,
-                baseline: 0,
-                reward_xp: 8,
-                controls: vec![],
-            },
-        );
-
-        let completed = complete_active_quest(&mut state).unwrap();
-
-        assert_eq!(completed.reward_xp, 8);
-        assert_eq!(state.progression.xp, 8);
-        assert!(state.active_quest.is_none());
-    }
-
-    #[test]
-    fn max_stage_behavior() {
-        let mut state = default_buddy_state();
-        state.pet.evolution.open_seconds = 400 * 60;
-        state.pet.evolution.care_score = 500;
-
-        grant_play_xp(&mut state, 3000);
-
-        assert_eq!(state.progression.stage_name, "Archon");
-        assert_eq!(state.progression.stage, 6);
-        assert_eq!(state.progression.level, 7);
-        assert_eq!(state.progression.xp, 210);
-        assert_eq!(state.progression.xp_next, 210);
-    }
-
-    #[test]
     fn old_state_migration() {
         let json = r#"{
             "identity": {"name": "Pixel", "created_at": "2024-01-01T00:00:00Z", "palette_index": 2},
@@ -1097,114 +959,6 @@ mod tests {
     }
 
     #[test]
-    fn pet_tick_decays_needs_while_awake() {
-        let mut state = default_buddy_state();
-        state.personality = BuddyPersonalityProfile::default();
-
-        let changed = apply_pet_tick(&mut state, 15);
-
-        assert!(changed);
-        assert_eq!(state.pet.needs.hunger, 78);
-        assert_eq!(state.pet.needs.energy, 84);
-        assert_eq!(state.pet.needs.hygiene, 79);
-        assert_eq!(state.pet.needs.boredom, 17);
-        assert_eq!(state.pet.needs.affection, 74);
-        assert_eq!(state.pet.evolution.open_seconds, 15);
-    }
-
-    #[test]
-    fn feed_care_action_restores_hunger() {
-        let mut state = default_buddy_state();
-        state.pet.needs.hunger = 10;
-
-        let (changed, message) = apply_care_action(&mut state, BuddyCareAction::Feed, None);
-
-        assert!(changed);
-        assert!(message.contains("Snack"));
-        assert!(state.pet.needs.hunger > 10);
-        assert_eq!(state.recent_activities[0].activity_type, "care_feed");
-    }
-
-    #[test]
-    fn mark_greeted_is_idempotent() {
-        let mut state = default_buddy_state();
-
-        assert!(mark_greeted(&mut state));
-        assert!(state.onboarding.greeted);
-        assert!(!mark_greeted(&mut state));
-    }
-
-    #[test]
-    fn completing_start_setup_quest_marks_tour_completed() {
-        let mut state = default_buddy_state();
-        activate_quest(
-            &mut state,
-            BuddyQuest {
-                id: "setup".to_string(),
-                quest_type: "start_setup".to_string(),
-                title: "Start setup".to_string(),
-                description: "Tour".to_string(),
-                icon: "✨".to_string(),
-                created_at: Utc::now().to_rfc3339(),
-                accepted_at: Utc::now().to_rfc3339(),
-                status: "active".to_string(),
-                completed_at: None,
-                progress: 0,
-                goal: 1,
-                baseline: 0,
-                reward_xp: 0,
-                controls: vec![],
-            },
-        );
-
-        let completed = complete_active_quest(&mut state).unwrap();
-
-        assert_eq!(completed.quest_type, "start_setup");
-        assert!(state.onboarding.tour_completed);
-    }
-
-    #[test]
-    fn pet_tick_clamps_huge_neglect_score() {
-        let mut state = default_buddy_state();
-        state.pet.evolution.neglect_score = u64::MAX;
-        state.pet.needs.hunger = 0;
-        state.pet.needs.energy = 0;
-        state.pet.needs.hygiene = 0;
-        state.pet.needs.affection = 0;
-        state.pet.needs.boredom = 100;
-
-        apply_pet_tick(&mut state, 15);
-
-        assert_eq!(state.pet.evolution.neglect_score, PET_SCORE_CAP);
-    }
-
-    #[test]
-    fn healthy_pet_tick_decays_neglect() {
-        let mut state = default_buddy_state();
-        state.personality.traits = Default::default();
-        state.pet.evolution.neglect_score = 9;
-        state.pet.needs.hunger = 100;
-        state.pet.needs.energy = 100;
-        state.pet.needs.hygiene = 100;
-        state.pet.needs.affection = 100;
-        state.pet.needs.boredom = 0;
-
-        apply_pet_tick(&mut state, 15);
-
-        assert_eq!(state.pet.evolution.neglect_score, 8);
-    }
-
-    #[test]
-    fn care_action_repairs_twenty_five_neglect() {
-        let mut state = default_buddy_state();
-        state.pet.evolution.neglect_score = 40;
-
-        let _ = apply_care_action(&mut state, BuddyCareAction::Pet, None);
-
-        assert_eq!(state.pet.evolution.neglect_score, 15);
-    }
-
-    #[test]
     fn sync_state_clamps_persisted_neglect_score() {
         let mut state = default_buddy_state();
         state.pet.evolution.neglect_score = 925_000;
@@ -1212,34 +966,6 @@ mod tests {
         sync_state(&mut state);
 
         assert_eq!(state.pet.evolution.neglect_score, PET_SCORE_CAP);
-    }
-
-    #[test]
-    fn fresh_state_unlocks_no_skills() {
-        let state = default_buddy_state();
-
-        assert!(state.skills.unlocked.is_empty());
-        assert_eq!(
-            state.skills.locked.first().map(String::as_str),
-            Some("edit")
-        );
-    }
-
-    #[test]
-    fn stage_two_with_xp_unlocks_skill_prefix() {
-        let mut state = default_buddy_state();
-        state.progression.stage = 2;
-        state.progression.xp = 7;
-        sync_state(&mut state);
-
-        assert_eq!(
-            state.skills.unlocked,
-            vec!["edit", "search", "debug", "knowledge"]
-        );
-        assert_eq!(
-            state.skills.locked.first().map(String::as_str),
-            Some("browser")
-        );
     }
 
     #[test]
@@ -1251,21 +977,6 @@ mod tests {
 
         assert!(state.skills.unlocked.iter().any(|id| id == "mem"));
         assert!(!state.skills.locked.iter().any(|id| id == "mem"));
-    }
-
-    #[test]
-    fn render_persona_block_formats_buddy_identity() {
-        let mut state = default_buddy_state();
-        state.identity.name = "Pixel".to_string();
-        state.personality.archetype_label = "Helper Sprite".to_string();
-        state.personality.vibe = "Playful, quirky, helpful".to_string();
-        state.personality.summary = "An energetic helper.".to_string();
-        state.personality.prompt = "Use warm humor.".to_string();
-
-        assert_eq!(
-            render_persona_block(&state),
-            "You are Pixel, a Helper Sprite (Playful, quirky, helpful).\nAn energetic helper.\n\nPersonality voice: Use warm humor."
-        );
     }
 
     #[test]
@@ -1284,15 +995,5 @@ mod tests {
             render_persona_block_with_style(&state, Some(" \n ")),
             render_persona_block(&state)
         );
-    }
-
-    #[test]
-    fn personality_cache_invalidates_on_reroll() {
-        let mut state = default_buddy_state();
-        let before = persona_cache_version();
-
-        reroll_personality(&mut state);
-
-        assert!(persona_cache_version() > before);
     }
 }

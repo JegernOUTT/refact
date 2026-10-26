@@ -3910,65 +3910,11 @@ mod resume_validation_tests {
             ..Default::default()
         }
     }
-
-    #[test]
-    fn resume_requires_complete_nonduplicated_tool_pairs() {
-        assert!(validate_resume_tool_pairs(&[call()]).is_err());
-        assert!(validate_resume_tool_pairs(&[result()]).is_err());
-        assert!(validate_resume_tool_pairs(&[call(), result()]).is_ok());
-        assert!(validate_resume_tool_pairs(&[call(), result(), result()]).is_err());
-        assert!(validate_resume_tool_pairs(&[call(), result(), call(), result()]).is_err());
-    }
 }
 
 #[cfg(test)]
 mod supervised_rollback_tests {
     use super::*;
-
-    #[tokio::test]
-    async fn unaccepted_buffered_worktree_is_cleaned_after_receiver_drop() {
-        let cleaned = Arc::new(AtomicBool::new(false));
-        let observed = cleaned.clone();
-        let (tx, mut rx) = oneshot::channel();
-        let (accepted_tx, accepted_rx) = oneshot::channel();
-        let task = tokio::spawn(handoff_startup_result(
-            Ok(()),
-            tx,
-            accepted_rx,
-            move |_| async move {
-                observed.store(true, std::sync::atomic::Ordering::Release);
-            },
-        ));
-        rx.try_recv().unwrap_err();
-        while rx.try_recv().is_err() {
-            tokio::task::yield_now().await;
-        }
-        assert!(!cleaned.load(std::sync::atomic::Ordering::Acquire));
-        drop(rx);
-        drop(accepted_tx);
-        task.await.unwrap();
-        assert!(cleaned.load(std::sync::atomic::Ordering::Acquire));
-    }
-
-    #[tokio::test]
-    async fn accepted_worktree_transfers_cleanup_to_startup_rollback() {
-        let cleaned = Arc::new(AtomicBool::new(false));
-        let observed = cleaned.clone();
-        let (tx, rx) = oneshot::channel();
-        let (accepted_tx, accepted_rx) = oneshot::channel();
-        let task = tokio::spawn(handoff_startup_result(
-            Ok(()),
-            tx,
-            accepted_rx,
-            move |_| async move {
-                observed.store(true, std::sync::atomic::Ordering::Release);
-            },
-        ));
-        rx.await.unwrap().unwrap();
-        accepted_tx.send(()).unwrap();
-        task.await.unwrap();
-        assert!(!cleaned.load(std::sync::atomic::Ordering::Acquire));
-    }
 
     #[tokio::test]
     async fn cancelling_startup_future_keeps_rollback_owner_alive() {

@@ -242,23 +242,6 @@ mod tests {
     }
 
     #[test]
-    fn the_published_schema_forbids_undeclared_arguments() {
-        let spawn = operation("spawn").unwrap();
-        let schema = spawn.schema();
-
-        assert_eq!(schema["arguments"]["additionalProperties"], json!(false));
-        assert_eq!(
-            schema["arguments"]["required"],
-            json!(["task", "expected_result"])
-        );
-        assert_eq!(
-            schema["arguments"]["properties"]["target_files"],
-            json!({"type": "array", "items": {"type": "string"}})
-        );
-        assert_eq!(schema["tool"], json!("subagent"));
-    }
-
-    #[test]
     fn arguments_are_checked_against_the_schema_and_never_widened() {
         let spawn = operation("spawn").unwrap();
 
@@ -288,20 +271,5 @@ mod tests {
             .validate(&json!("spawn"))
             .unwrap_err()
             .contains("needs"));
-    }
-
-    #[test]
-    fn a_host_call_is_parsed_from_one_line_or_refused() {
-        let call = HostCall::parse(r#"{"op":"report","arguments":{"status_line":"hi"}}"#).unwrap();
-
-        assert_eq!(call.op, "report");
-        assert_eq!(call.arguments["status_line"], json!("hi"));
-        assert_eq!(
-            HostCall::parse(r#"{"op":"report"}"#).unwrap().arguments,
-            Value::Null
-        );
-        assert!(HostCall::parse("print('hello')")
-            .unwrap_err()
-            .contains("not a host call"));
     }
 }

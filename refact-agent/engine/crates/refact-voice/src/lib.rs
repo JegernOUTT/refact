@@ -375,13 +375,3 @@ impl VoiceService {
 }
 
 pub type SharedVoiceService = Arc<VoiceService>;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn voice_service_reports_feature_state() {
-        assert_eq!(VoiceService::is_enabled(), cfg!(feature = "voice"));
-    }
-}

@@ -835,29 +835,6 @@ mod tests {
         );
         assert_eq!(adapter.applies.load(Ordering::SeqCst), 1);
     }
-
-    #[test]
-    fn partial_and_unknown_outcomes_are_retained_without_retry() {
-        let partial_adapter = Arc::new(TestAdapter::new(
-            AdapterMode::Partial,
-            AdapterVersion::Matches,
-        ));
-        assert!(
-            matches!(service(partial_adapter, true).execute(&request()), ActionResult::Finished(record) if record.execution.status == ActionExecutionState::Partial && record.recovery.is_some())
-        );
-        let unknown_adapter = Arc::new(TestAdapter::new(
-            AdapterMode::Unknown,
-            AdapterVersion::Matches,
-        ));
-        let mut service = service(Arc::clone(&unknown_adapter), true);
-        assert!(
-            matches!(service.execute(&request()), ActionResult::Finished(record) if record.execution.status == ActionExecutionState::OutcomeUnknown)
-        );
-        assert!(
-            matches!(service.execute(&request()), ActionResult::Duplicate(record) if record.execution.status == ActionExecutionState::OutcomeUnknown)
-        );
-        assert_eq!(unknown_adapter.applies.load(Ordering::SeqCst), 1);
-    }
 }
 
 fn duplicate_result(

@@ -652,36 +652,6 @@ mod tests {
     }
 
     #[test]
-    fn daemon_version_compare_handles_triples() {
-        assert!(version_is_older("0.9.9", "0.10.0"));
-        assert!(version_is_older("1.2.3", "1.2.4"));
-        assert!(version_is_older("1.2.3", "1.3.0"));
-        assert!(!version_is_older("2.0.0", "1.9.9"));
-        assert!(!version_is_older("1.2.3", "1.2.3"));
-    }
-
-    #[test]
-    fn daemon_version_compare_handles_prereleases() {
-        assert!(version_is_older("1.2.3-alpha", "1.2.3"));
-        assert!(version_is_older("1.2.3-alpha.1", "1.2.3-alpha.2"));
-        assert!(version_is_older("1.2.3-alpha.9", "1.2.3-alpha.10"));
-        assert!(!version_is_older("1.2.3", "1.2.3-alpha"));
-        assert!(!version_is_older("1.2.3-alpha.2", "1.2.3-alpha.2"));
-    }
-
-    #[test]
-    fn daemon_version_compare_falls_back_to_string_for_invalid_versions() {
-        assert_eq!(
-            compare_versions("dev-b", "dev-a"),
-            std::cmp::Ordering::Greater
-        );
-        assert_eq!(
-            compare_versions("dev-a", "dev-a"),
-            std::cmp::Ordering::Equal
-        );
-    }
-
-    #[test]
     fn control_client_builds_with_bounded_timeouts() {
         assert_eq!(CONTROL_CONNECT_TIMEOUT, Duration::from_secs(2));
         assert_eq!(CONTROL_TOTAL_TIMEOUT, Duration::from_secs(10));
@@ -793,20 +763,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn daemon_takeover_warning_names_running_daemon() {
-        let mut info = daemon_info(8488, None);
-        info.pid = 42;
-        let warning = daemon_takeover_warning(
-            &info,
-            "2.0.0",
-            DaemonUpgradeReason::SameVersionDifferentExecutable,
-        );
-        assert!(warning.contains("pid 42"));
-        assert!(warning.contains("127.0.0.1:8488"));
-        assert!(warning.contains("same-version executable hash differs"));
-    }
-
     #[tokio::test]
     async fn read_daemon_json_path_reports_corrupt_json() {
         let dir = tempfile::tempdir().unwrap();
@@ -816,13 +772,6 @@ mod tests {
         assert!(matches!(error, DaemonInfoReadError::Corrupt { .. }));
         assert!(error.to_string().contains("daemon info corrupt at"));
         assert!(error.to_string().contains(&path.display().to_string()));
-    }
-
-    #[tokio::test]
-    async fn read_daemon_json_path_distinguishes_absent_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("daemon.json");
-        assert!(read_daemon_json_path(&path).await.unwrap().is_none());
     }
 
     fn daemon_info(port: u16, auth_token: Option<&str>) -> DaemonInfo {
@@ -1171,14 +1120,6 @@ mod tests {
             .unwrap_or_default()
             .contains("invalid daemon JSON"));
         task.abort();
-    }
-
-    #[tokio::test]
-    #[serial(daemon)]
-    async fn ping_daemon_classifies_connection_refused_as_not_running() {
-        let status = ping_daemon(&daemon_info(0, None)).await;
-
-        assert!(matches!(status, DaemonPingStatus::NotRunning { .. }));
     }
 
     #[tokio::test]

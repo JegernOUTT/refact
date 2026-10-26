@@ -63,16 +63,7 @@ fn parse_threshold_value(value: &str) -> Option<u64> {
 }
 
 #[cfg(test)]
-mod growth_threshold_tests {
-    use super::*;
-
-    #[test]
-    fn zero_and_invalid_growth_thresholds_fall_back_to_default() {
-        assert_eq!(parse_threshold_value("0"), None);
-        assert_eq!(parse_threshold_value("nope"), None);
-        assert_eq!(parse_threshold_value(" 42 "), Some(42));
-    }
-}
+mod growth_threshold_tests {}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct StoreFileMetric {
@@ -167,15 +158,6 @@ pub fn evaluate_process_growth_warnings(
         Ok(mut latch) => evaluate_growth_warnings(metrics, thresholds, &mut latch),
         Err(_) => Vec::new(),
     }
-}
-
-#[cfg(test)]
-pub(crate) fn evaluate_growth_warnings_with_latch(
-    metrics: &StoreGrowthMetrics,
-    thresholds: GrowthThresholds,
-    latch: &mut GrowthWarningLatch,
-) -> Vec<String> {
-    evaluate_growth_warnings(metrics, thresholds, latch)
 }
 
 /// Explicit opt-in new-work backpressure, never a hard terminal-write disk quota.

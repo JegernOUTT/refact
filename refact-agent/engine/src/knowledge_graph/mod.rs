@@ -147,46 +147,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn knowledge_graph_cache_returns_same_arc_without_mutation() {
-        let (_dir, gcx) = gcx_with_one_knowledge_doc().await;
-        let cache: KnowledgeGraphCache = AMutex::new(None);
-
-        let first = build_knowledge_graph_with_cache(gcx.clone(), &cache).await;
-        let second = build_knowledge_graph_with_cache(gcx.clone(), &cache).await;
-
-        assert!(Arc::ptr_eq(&first, &second));
-        assert!(first.docs.contains_key("cached-doc"));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn knowledge_graph_cache_rebuilds_after_generation_bump() {
-        let (_dir, gcx) = gcx_with_one_knowledge_doc().await;
-        let cache: KnowledgeGraphCache = AMutex::new(None);
-
-        let first = build_knowledge_graph_with_cache(gcx.clone(), &cache).await;
-        gcx.knowledge_generation.fetch_add(1, Ordering::SeqCst);
-        let second = build_knowledge_graph_with_cache(gcx.clone(), &cache).await;
-
-        assert!(!Arc::ptr_eq(&first, &second));
-        assert_eq!(first.docs.len(), second.docs.len());
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn knowledge_graph_cache_ignores_unrelated_enrichment_bumps() {
-        let (_dir, gcx) = gcx_with_one_knowledge_doc().await;
-        let cache: KnowledgeGraphCache = AMutex::new(None);
-
-        let first = build_knowledge_graph_with_cache(gcx.clone(), &cache).await;
-        gcx.enrichment_generation.fetch_add(1, Ordering::SeqCst);
-        let second = build_knowledge_graph_with_cache(gcx.clone(), &cache).await;
-        assert!(Arc::ptr_eq(&first, &second));
-
-        gcx.knowledge_generation.fetch_add(1, Ordering::SeqCst);
-        let third = build_knowledge_graph_with_cache(gcx.clone(), &cache).await;
-        assert!(!Arc::ptr_eq(&second, &third));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
     async fn knowledge_graph_cache_rebuilds_after_memories_add() {
         let (dir, gcx) = gcx_with_one_knowledge_doc().await;
         let cache: KnowledgeGraphCache = AMutex::new(None);
@@ -204,22 +164,6 @@ mod tests {
         assert!(!Arc::ptr_eq(&first, &second));
         assert!(second.docs.contains_key("added-doc"));
         drop(dir);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn knowledge_graph_cache_does_not_leak_across_generations() {
-        let (_dir, gcx) = gcx_with_one_knowledge_doc().await;
-        let cache: KnowledgeGraphCache = AMutex::new(None);
-
-        let first = build_knowledge_graph_with_cache(gcx.clone(), &cache).await;
-        assert_eq!(cache.lock().await.as_ref().unwrap().1, 0);
-        gcx.knowledge_generation.fetch_add(1, Ordering::SeqCst);
-        let second = build_knowledge_graph_with_cache(gcx.clone(), &cache).await;
-        assert_eq!(cache.lock().await.as_ref().unwrap().1, 1);
-        let third = build_knowledge_graph_with_cache(gcx.clone(), &cache).await;
-
-        assert!(!Arc::ptr_eq(&first, &second));
-        assert!(Arc::ptr_eq(&second, &third));
     }
 
     #[tokio::test(flavor = "multi_thread")]

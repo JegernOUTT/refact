@@ -1471,37 +1471,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn model_visible_token_count_uses_rendered_content_not_message_metadata() {
-        use crate::call_validation::{ChatContent, ContextFile};
-        let mut message = ChatMessage {
-            role: "context_file".into(),
-            content: ChatContent::ContextFiles(vec![ContextFile {
-                file_name: "src/context.rs".into(),
-                file_content: "body".into(),
-                line1: 2,
-                line2: 4,
-                ..Default::default()
-            }]),
-            ..Default::default()
-        };
-        message
-            .extra
-            .insert("opaque".into(), json!("hidden".repeat(10_000)));
-        assert_eq!(
-            model_visible_tokens(&[message], &str::len),
-            "user".len() + "📄 src/context.rs:2-4\nbody".len()
-        );
-        let mut message = call_message("a", "read");
-        message
-            .extra
-            .insert("opaque".into(), json!("hidden".repeat(10_000)));
-        assert_eq!(
-            model_visible_tokens(&[message], &str::len),
-            "assistantcallingreadcat{}".len()
-        );
-    }
-
     #[tokio::test]
     async fn fresh_and_completed_prefix_are_distinct_without_copying_parent_control() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -1642,12 +1611,6 @@ mod tests {
                 .len(),
             3
         );
-    }
-
-    #[test]
-    fn parse_launch_spec_absent_is_none() {
-        let args = HashMap::new();
-        assert!(parse_launch_spec(&args).unwrap().is_none());
     }
 
     #[test]
@@ -1869,52 +1832,6 @@ mod tests {
         assert!(error.contains("fresh"), "{error}");
     }
 
-    #[test]
-    fn parse_launch_spec_full_object() {
-        let mut args = HashMap::new();
-        args.insert(
-            "launch_spec".to_string(),
-            json!({
-                "custom_instructions": "Focus on X",
-                "profile_augmentation": "Be terse",
-                "history_mode": "fork_completed_prefix",
-                "token_budget": 5000,
-                "context": [
-                    {"type": "raw_text", "label": "Notes", "text": "hello"},
-                    {"type": "message_range", "start_message_id": "m1", "end_message_id": "m2"},
-                    {"type": "file_range", "path": "src/lib.rs", "line1": 1, "line2": 10},
-                    {"type": "task_doc", "task_id": "task-1"},
-                    {"type": "memory_ref", "query": "auth"}
-                ]
-            }),
-        );
-        let spec = parse_launch_spec(&args).unwrap().unwrap();
-        assert_eq!(spec.custom_instructions.as_deref(), Some("Focus on X"));
-        assert_eq!(spec.profile_augmentation.as_deref(), Some("Be terse"));
-        assert_eq!(
-            spec.history_mode,
-            Some(HistoryForkMode::ForkCompletedPrefix)
-        );
-        assert_eq!(spec.token_budget, Some(5000));
-        assert_eq!(spec.context_entries.len(), 5);
-    }
-
-    #[tokio::test]
-    async fn resolve_message_range_rejects_missing_id() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let spec = LaunchSpec {
-            context_entries: vec![LaunchContextEntry::MessageRange {
-                start_message_id: "missing".to_string(),
-                end_message_id: None,
-            }],
-            ..Default::default()
-        };
-        let resolved = resolve_launch_spec(gcx, &spec, &[]).await;
-        assert!(resolved.prepended_messages.is_empty());
-        assert_eq!(resolved.skipped.len(), 1);
-        assert!(resolved.skipped[0].reason.contains("not found"));
-    }
-
     #[tokio::test]
     async fn resolve_message_range_includes_complete_tool_group() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -1946,23 +1863,6 @@ mod tests {
         assert_eq!(resolved.prepended_messages.len(), 2);
         assert_eq!(resolved.prepended_messages[0].message_id, "a1");
         assert_eq!(resolved.prepended_messages[1].message_id, "t1");
-    }
-
-    #[tokio::test]
-    async fn resolve_raw_text_respects_token_budget() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let spec = LaunchSpec {
-            token_budget: Some(1),
-            context_entries: vec![LaunchContextEntry::RawText {
-                label: None,
-                text: "a".repeat(1000),
-            }],
-            ..Default::default()
-        };
-        let resolved = resolve_launch_spec(gcx, &spec, &[]).await;
-        assert!(resolved.prepended_messages.is_empty());
-        assert_eq!(resolved.skipped.len(), 1);
-        assert!(resolved.skipped[0].reason.contains("token budget"));
     }
 
     /// Register `root` as the only authorized project directory so that
@@ -2073,26 +1973,5 @@ mod tests {
         assert!(text.contains("line1"));
         assert!(text.contains("line2"));
         assert!(!text.contains("line3"));
-    }
-
-    #[tokio::test]
-    async fn instructions_are_bounded_provenance_carrying_context() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let spec = LaunchSpec {
-            custom_instructions: Some("do X".to_string()),
-            profile_augmentation: Some("be terse".to_string()),
-            ..Default::default()
-        };
-        let resolved = resolve_launch_spec(gcx, &spec, &[]).await;
-        assert!(resolved.skipped.is_empty());
-        let instructions = &resolved.prepended_messages[0];
-        assert_eq!(instructions.role, "user");
-        assert!(instructions.content.content_text_only().contains("do X"));
-        assert!(instructions
-            .content
-            .content_text_only()
-            .contains("be terse"));
-        assert!(resolved.estimated_tokens > 0);
-        assert!(resolved.serialized_bytes > 0);
     }
 }

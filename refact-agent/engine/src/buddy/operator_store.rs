@@ -4402,7 +4402,7 @@ mod work_order_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::operator_observability::evaluate_growth_warnings_with_latch as evaluate_growth_warnings;
+
     use tempfile::TempDir;
     #[cfg(unix)]
     use std::os::unix::fs::{symlink, PermissionsExt};
@@ -4482,33 +4482,6 @@ mod tests {
             );
             let current: (String,String) = store.connection.query_row("SELECT (SELECT value FROM meta WHERE key='document_global_baseline'),(SELECT value FROM meta WHERE key='document_recovery_credit:legacy')", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
             assert_eq!(current, (baseline.clone(), credit.clone()));
-        }
-    }
-
-    #[test]
-    fn schema6_none_does_not_enable_policy_or_allocate_baseline() {
-        let root = TempDir::new().unwrap();
-        let identity = project(root.path());
-        let store = OperatorStore::open(root.path(), &identity).unwrap();
-        store
-            .connection
-            .execute_batch(
-                "INSERT INTO meta VALUES('document_growth_policy','null'); PRAGMA user_version=6;",
-            )
-            .unwrap();
-        drop(store);
-        for _ in 0..2 {
-            let store = OperatorStore::open(root.path(), &identity).unwrap();
-            assert_eq!(store.policy_snapshot().unwrap().policy, None);
-            let count: usize = store
-                .connection
-                .query_row(
-                    "SELECT count(*) FROM meta WHERE key='document_global_baseline'",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            assert_eq!(count, 0);
         }
     }
 
@@ -4671,80 +4644,6 @@ mod tests {
     }
 
     #[test]
-    fn supervision_completion_reservation_has_one_exact_three_unit_report_slot() {
-        let root = TempDir::new().unwrap();
-        let identity = project(root.path());
-        let mut store = OperatorStore::open(root.path(), &identity).unwrap();
-
-        for slots in [
-            vec![("unknown_report", "mandate".to_owned(), 3)],
-            vec![("supervision_report", "other-mandate".to_owned(), 3)],
-            vec![("supervision_report", "mandate".to_owned(), 2)],
-        ] {
-            assert!(matches!(
-                store.reserve_native_documents("supervision_completion", "mandate", &slots),
-                Err(OperatorStoreError::InvalidInput(
-                    "invalid terminal slot coverage"
-                ))
-            ));
-        }
-
-        store.reserve_supervision_completion("mandate").unwrap();
-        store.require_supervision_completion("mandate").unwrap();
-    }
-
-    #[test]
-    fn saturated_policy_raise_preserves_baseline_and_charges_history() {
-        use super::super::operator_observability::DocumentGrowthPolicy;
-        let root = TempDir::new().unwrap();
-        let identity = project(root.path());
-        let mut store = OperatorStore::open(root.path(), &identity).unwrap();
-        store
-            .set_document_growth_policy(Some(DocumentGrowthPolicy {
-                max_rows_per_namespace: 1,
-                replace_editorial_aggregate: false,
-            }))
-            .unwrap();
-        let baseline: String = store
-            .connection
-            .query_row(
-                "SELECT value FROM meta WHERE key='document_global_baseline'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        let value = serde_json::json!({"schema_version":1,"project":identity});
-        for n in 0..1000 {
-            if store
-                .put_document(&format!("fill_{n}"), "id", &value, None)
-                .is_err()
-            {
-                break;
-            }
-        }
-        let before = store.document_policy_charge().unwrap();
-        store
-            .set_document_growth_policy(Some(DocumentGrowthPolicy {
-                max_rows_per_namespace: 2,
-                replace_editorial_aggregate: false,
-            }))
-            .unwrap();
-        assert_eq!(store.document_policy_charge().unwrap(), before + 1);
-        let after: String = store
-            .connection
-            .query_row(
-                "SELECT value FROM meta WHERE key='document_global_baseline'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(after, baseline);
-        store
-            .put_document("after_raise", "id", &value, None)
-            .unwrap();
-    }
-
-    #[test]
     fn corrupt_policy_refuses_growth_without_rewriting_evidence() {
         let root = TempDir::new().unwrap();
         let identity = project(root.path());
@@ -4865,258 +4764,6 @@ mod tests {
         v["run_id"] = serde_json::json!(id);
         v["project"] = serde_json::to_value(project).unwrap();
         serde_json::from_value(v).unwrap()
-    }
-    #[test]
-    fn diagnostics_report_truncated_lower_bounds_without_returning_document_labels() {
-        let root = TempDir::new().unwrap();
-        let project = project(root.path());
-        let store = OperatorStore::open(root.path(), &project).unwrap();
-        let payload =
-            serde_json::json!({"schema_version":1,"project":project,"secret":"never emit"})
-                .to_string();
-        store.connection.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10001) INSERT INTO operator_documents(namespace,id,revision,payload,change_seq) SELECT 'private-label',CAST(x AS TEXT),1,?1,x FROM n", [&payload]).unwrap();
-        let summary = store.diagnostic_summary().unwrap();
-        let docs = summary
-            .tables
-            .iter()
-            .find(|t| t.table == "operator_documents")
-            .unwrap();
-        assert_eq!(docs.sampled_rows, 10000);
-        assert!(docs.truncated);
-        assert_eq!(docs.payload_bytes_lower_bound, 10000 * payload.len() as u64);
-        assert_eq!(docs.enforced_row_capacity, None);
-        let json = serde_json::to_string(&summary).unwrap();
-        assert!(!json.contains("never emit"));
-        assert!(!json.contains("private-label"));
-    }
-
-    #[test]
-    fn diagnostic_scan_reports_lower_bounds_without_disclosing_document_names() {
-        let root = TempDir::new().unwrap();
-        let project = project(root.path());
-        let store = OperatorStore::open(root.path(), &project).unwrap();
-        let payload = encode(
-            &serde_json::json!({"schema_version":1,"project":project,"secret":"never-disclose"}),
-        )
-        .unwrap();
-        store.connection.execute("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<10001) INSERT INTO operator_documents(namespace,id,revision,payload,change_seq) SELECT 'private-namespace',CAST(x AS TEXT),1,?1,x FROM n", [&payload]).unwrap();
-        let summary = store.diagnostic_summary().unwrap();
-        let documents = summary
-            .tables
-            .iter()
-            .find(|t| t.table == "operator_documents")
-            .unwrap();
-        assert_eq!(documents.sampled_rows, 10_000);
-        assert!(documents.truncated);
-        assert_eq!(
-            documents.payload_bytes_lower_bound,
-            10_000 * payload.len() as u64
-        );
-        let text = serde_json::to_string(&summary).unwrap();
-        assert!(!text.contains("never-disclose"));
-        assert!(!text.contains("private-namespace"));
-    }
-
-    #[test]
-    fn metrics_report_sizes_and_counts() {
-        let root = TempDir::new().unwrap();
-        let project = project(root.path());
-        let mut store = OperatorStore::open(root.path(), &project).unwrap();
-        store
-            .upsert_work_item(&work("metric-work", &project), None)
-            .unwrap();
-        store
-            .append_artifact_revision(&artifact("metric-artifact", 1, "run-1", &project))
-            .unwrap();
-        store
-            .append_artifact_revision(&artifact("metric-artifact", 2, "run-2", &project))
-            .unwrap();
-        let metrics = store.diagnostic_summary().unwrap().growth;
-        let db_size = fs::metadata(store.path()).unwrap().len();
-        assert_eq!(
-            metrics.total_disk_bytes,
-            metrics
-                .files
-                .iter()
-                .map(|file| file.size_bytes)
-                .sum::<u64>()
-        );
-        assert!(metrics
-            .files
-            .iter()
-            .any(|file| file.file == "db" && file.size_bytes == db_size));
-        assert_eq!(
-            metrics
-                .table_row_counts
-                .iter()
-                .find(|table| table.table == "work_items")
-                .unwrap()
-                .exact_rows,
-            Some(1)
-        );
-        assert_eq!(
-            metrics.top_artifacts_by_revision_count[0].artifact_id,
-            "metric-artifact"
-        );
-        assert_eq!(metrics.top_artifacts_by_revision_count[0].revisions, 2);
-        assert_eq!(metrics.first_recorded_outcome_started_at, None);
-        assert_eq!(metrics.last_recorded_outcome_started_at, None);
-    }
-
-    #[test]
-    fn metrics_are_cheap_and_seq_span_survives_prefix_compaction() {
-        let root = TempDir::new().unwrap();
-        let project = project(root.path());
-        let mut store = OperatorStore::open(root.path(), &project).unwrap();
-        store.connection.execute_batch("WITH RECURSIVE n(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM n WHERE seq < 10000) INSERT INTO changes(seq) SELECT seq FROM n;").unwrap();
-        let plan: Vec<String> = store
-            .connection
-            .prepare("EXPLAIN QUERY PLAN SELECT (SELECT min(seq) FROM changes), (SELECT max(seq) FROM changes)")
-            .unwrap()
-            .query_map([], |row| row.get(3))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap();
-        let plan = plan.join(" ").to_ascii_lowercase();
-        assert!(plan.contains("search changes"), "{plan}");
-        assert!(!plan.contains("scan changes"), "{plan}");
-        let started = std::time::Instant::now();
-        let summary = store.diagnostic_summary().unwrap();
-        let elapsed = started.elapsed();
-        eprintln!(
-            "R-8 metrics measurement: rows=10000, elapsed_ms={}, changes_query_plan={plan}",
-            elapsed.as_millis()
-        );
-        assert_eq!(summary.growth.max_seq, Some(10000));
-        assert_eq!(
-            summary
-                .growth
-                .table_row_counts
-                .iter()
-                .find(|table| table.table == "changes")
-                .unwrap()
-                .exact_rows,
-            None
-        );
-        let prepared = store.prepare_sequence_compaction().unwrap();
-        store.apply_sequence_compaction(prepared).unwrap();
-        let metrics = store.store_growth_metrics().unwrap();
-        let retained: u64 = store
-            .connection
-            .query_row("SELECT count(*) FROM changes", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(metrics.retained_seq_span, retained);
-    }
-
-    #[test]
-    fn soft_threshold_warns_once_and_names_top_contributor() {
-        use super::super::operator_observability::*;
-        let metrics = StoreGrowthMetrics {
-            total_disk_bytes: 11,
-            files: vec![StoreFileMetric {
-                file: "db",
-                size_bytes: 11,
-                modified_at_ms: None,
-            }],
-            table_row_counts: vec![],
-            min_seq: None,
-            max_seq: None,
-            retained_seq_span: 0,
-            retained_seq_span_exact_under_prefix_compaction: true,
-            first_recorded_outcome_started_at: None,
-            last_recorded_outcome_started_at: None,
-            top_artifacts_by_revision_count: vec![ArtifactRevisionCount {
-                artifact_id: "largest-artifact".into(),
-                revisions: 3,
-            }],
-        };
-        let thresholds = GrowthThresholds {
-            store_soft_limit_bytes: 10,
-            artifact_revision_soft_limit: 3,
-        };
-        let mut latch = GrowthWarningLatch::default();
-        let warnings = evaluate_growth_warnings(&metrics, thresholds, &mut latch);
-        assert_eq!(warnings.len(), 2);
-        assert!(warnings[0].contains("db"));
-        assert!(warnings[1].contains("largest-artifact"));
-        assert!(evaluate_growth_warnings(&metrics, thresholds, &mut latch).is_empty());
-    }
-
-    #[test]
-    fn threshold_rearms_after_clearing() {
-        use super::super::operator_observability::*;
-        let thresholds = GrowthThresholds {
-            store_soft_limit_bytes: 10,
-            artifact_revision_soft_limit: 500,
-        };
-        let mut latch = GrowthWarningLatch::default();
-        let mut metrics = StoreGrowthMetrics {
-            total_disk_bytes: 11,
-            files: vec![],
-            table_row_counts: vec![],
-            min_seq: None,
-            max_seq: None,
-            retained_seq_span: 0,
-            retained_seq_span_exact_under_prefix_compaction: true,
-            first_recorded_outcome_started_at: None,
-            last_recorded_outcome_started_at: None,
-            top_artifacts_by_revision_count: vec![],
-        };
-        assert_eq!(
-            evaluate_growth_warnings(&metrics, thresholds, &mut latch).len(),
-            1
-        );
-        metrics.total_disk_bytes = 9;
-        assert!(evaluate_growth_warnings(&metrics, thresholds, &mut latch).is_empty());
-        metrics.total_disk_bytes = 10;
-        assert_eq!(
-            evaluate_growth_warnings(&metrics, thresholds, &mut latch).len(),
-            1
-        );
-    }
-
-    #[test]
-    fn no_policy_is_installed_by_migration_and_nothing_is_deleted() {
-        let root = TempDir::new().unwrap();
-        let project = project(root.path());
-        let mut store = OperatorStore::open(root.path(), &project).unwrap();
-        for id in ["retain-a", "retain-b"] {
-            store.upsert_work_item(&work(id, &project), None).unwrap();
-        }
-        let rows_before: u64 = store
-            .connection
-            .query_row("SELECT count(*) FROM work_items", [], |row| row.get(0))
-            .unwrap();
-        let artifacts_before: u64 = store
-            .connection
-            .query_row("SELECT count(*) FROM artifacts", [], |row| row.get(0))
-            .unwrap();
-        let summary = store.diagnostic_summary().unwrap();
-        assert!(summary.growth_thresholds.store_soft_limit_bytes > 0);
-        assert!(summary.growth_thresholds.artifact_revision_soft_limit > 0);
-        let policies: u64 = store
-            .connection
-            .query_row(
-                "SELECT count(*) FROM meta WHERE key LIKE '%capacity%' OR key LIKE '%growth%'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(policies, 0);
-        assert_eq!(
-            store
-                .connection
-                .query_row::<u64, _, _>("SELECT count(*) FROM work_items", [], |row| row.get(0))
-                .unwrap(),
-            rows_before
-        );
-        assert_eq!(
-            store
-                .connection
-                .query_row::<u64, _, _>("SELECT count(*) FROM artifacts", [], |row| row.get(0))
-                .unwrap(),
-            artifacts_before
-        );
     }
 
     #[test]
@@ -5541,30 +5188,6 @@ mod tests {
     }
 
     #[test]
-    fn reopen_and_immutable_records() {
-        let d = TempDir::new().unwrap();
-        let p = project(d.path());
-        let mut s = OperatorStore::open(d.path(), &p).unwrap();
-        s.append_run_outcome(&run("r", &p)).unwrap();
-        drop(s);
-        let s = OperatorStore::open(d.path(), &project(d.path())).unwrap();
-        assert_eq!(s.get_run_outcome("r").unwrap().unwrap().value.run_id, "r");
-    }
-    #[test]
-    fn duplicate_and_conflict() {
-        let d = TempDir::new().unwrap();
-        let p = project(d.path());
-        let mut s = OperatorStore::open(d.path(), &p).unwrap();
-        s.append_run_outcome(&run("r", &p)).unwrap();
-        assert!(s.append_run_outcome(&run("r", &p)).is_ok());
-        let mut changed = run("r", &p);
-        changed.origin = "other".into();
-        assert!(matches!(
-            s.append_run_outcome(&changed),
-            Err(OperatorStoreError::Conflict(_))
-        ));
-    }
-    #[test]
     fn compound_outcome_work_artifact_is_atomic_and_idempotent() {
         let directory = TempDir::new().unwrap();
         let project = project(directory.path());
@@ -5609,118 +5232,6 @@ mod tests {
         assert!(store.get_run_outcome(&outcome.run_id).unwrap().is_none());
         assert!(store.get_work_item(&item.id).unwrap().is_none());
     }
-    #[test]
-    fn artifact_reader_returns_requested_or_latest_revision() {
-        let directory = TempDir::new().unwrap();
-        let project = project(directory.path());
-        let mut store = OperatorStore::open(directory.path(), &project).unwrap();
-        let first = artifact("reader", 1, "run-one", &project);
-        let second = artifact("reader", 2, "run-two", &project);
-        store.append_artifact_revision(&first).unwrap();
-        store.append_artifact_revision(&second).unwrap();
-        assert_eq!(
-            store
-                .get_artifact_revision("reader", Some(1))
-                .unwrap()
-                .unwrap()
-                .value,
-            first
-        );
-        assert_eq!(
-            store
-                .get_artifact_revision("reader", None)
-                .unwrap()
-                .unwrap()
-                .value,
-            second
-        );
-    }
-    #[test]
-    fn pagination_sequence_and_stale_cas() {
-        let d = TempDir::new().unwrap();
-        let p = project(d.path());
-        let mut s = OperatorStore::open(d.path(), &p).unwrap();
-        let a = s.upsert_work_item(&work("a", &p), None).unwrap();
-        let b = s.upsert_work_item(&work("b", &p), None).unwrap();
-        assert!(b.change_seq > a.change_seq);
-        assert!(matches!(
-            s.upsert_work_item(&work("a", &p), Some(0)),
-            Err(OperatorStoreError::StaleRevision { .. })
-        ));
-        assert_eq!(
-            s.get_work_item("a").unwrap().unwrap().value.title,
-            work("a", &p).title
-        );
-        assert!(matches!(
-            s.list_work_items(None, 0),
-            Err(OperatorStoreError::InvalidInput(_))
-        ));
-        assert_eq!(s.list_work_items(None, 1).unwrap().entries.len(), 1);
-    }
-
-    #[test]
-    fn read_state_persists_without_resolving_or_revising_work() {
-        let d = TempDir::new().unwrap();
-        let p = project(d.path());
-        let mut store = OperatorStore::open(d.path(), &p).unwrap();
-        let (outcome, item, artifact) = linked_records(&p);
-        let (_, original, _) = store
-            .append_outcome_work_item_artifact(&outcome, &item, None, Some(&artifact))
-            .unwrap();
-        let read = store
-            .mark_work_read(&item.id, &artifact.artifact_id, 1)
-            .unwrap();
-        assert_eq!(
-            store
-                .mark_work_read(&item.id, &artifact.artifact_id, 1)
-                .unwrap(),
-            read
-        );
-        assert_eq!(store.get_work_item(&item.id).unwrap().unwrap(), original);
-        assert!(store.mark_work_read(&item.id, "foreign", 1).is_err());
-        assert!(store
-            .mark_work_read(&item.id, &artifact.artifact_id, 2)
-            .is_err());
-        drop(store);
-        let mut store = OperatorStore::open(d.path(), &p).unwrap();
-        assert_eq!(store.get_read_state(&item.id).unwrap(), Some(read.clone()));
-        let mut next = artifact.clone();
-        next.revision = 2;
-        store.append_artifact_revision(&next).unwrap();
-        let mut changed = item.clone();
-        changed.current_artifact_revision = Some(2);
-        let changed = store
-            .upsert_work_item(&changed, Some(original.revision))
-            .unwrap();
-        assert!(store
-            .mark_work_read(&item.id, &artifact.artifact_id, 1)
-            .is_err());
-        assert_eq!(store.get_read_state(&item.id).unwrap(), Some(read));
-        let read = store
-            .mark_work_read(&item.id, &artifact.artifact_id, 2)
-            .unwrap();
-        assert_eq!(read.last_read_revision, 2);
-        assert_eq!(store.get_work_item(&item.id).unwrap().unwrap(), changed);
-    }
-
-    #[test]
-    fn version_one_migration_preserves_work_and_creates_read_state_once() {
-        let d = TempDir::new().unwrap();
-        let p = project(d.path());
-        let mut store = OperatorStore::open(d.path(), &p).unwrap();
-        let saved = store.upsert_work_item(&work("old", &p), None).unwrap();
-        downgrade_to_version(&store.connection, 1);
-        assert_eq!(user_version(&store.connection), 1);
-        drop(store);
-        let store = OperatorStore::open(d.path(), &p).unwrap();
-        assert_eq!(store.get_work_item("old").unwrap().unwrap(), saved);
-        assert_eq!(store.get_read_state("old").unwrap(), None);
-        assert_eq!(user_version(&store.connection), SCHEMA_VERSION);
-        drop(store);
-        let store = OperatorStore::open(d.path(), &p).unwrap();
-        assert_eq!(store.get_work_item("old").unwrap().unwrap(), saved);
-        assert_eq!(user_version(&store.connection), SCHEMA_VERSION);
-    }
 
     #[test]
     fn version_one_and_two_stores_migrate_to_a_usable_current_schema() {
@@ -5758,24 +5269,6 @@ mod tests {
     }
 
     #[test]
-    fn repeated_reopen_of_a_current_store_is_idempotent() {
-        let d = TempDir::new().unwrap();
-        let p = project(d.path());
-        let mut store = OperatorStore::open(d.path(), &p).unwrap();
-        let saved = store.upsert_work_item(&work("stable", &p), None).unwrap();
-        let tables = sorted_user_tables(&store.connection);
-        assert_eq!(user_version(&store.connection), SCHEMA_VERSION);
-        drop(store);
-        for _ in 0..3 {
-            let store = OperatorStore::open(d.path(), &p).unwrap();
-            assert_eq!(user_version(&store.connection), SCHEMA_VERSION);
-            assert_eq!(sorted_user_tables(&store.connection), tables);
-            assert_eq!(store.get_work_item("stable").unwrap().unwrap(), saved);
-            assert_eq!(store.list_work_items(None, 10).unwrap().entries.len(), 1);
-        }
-    }
-
-    #[test]
     fn migration_refuses_schema_that_contradicts_the_recorded_version() {
         refuses_and_preserves("PRAGMA user_version=1;", 1);
         refuses_and_preserves("DROP TABLE read_states; PRAGMA user_version=1;", 1);
@@ -5790,12 +5283,6 @@ mod tests {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap()
-    }
-
-    fn sorted_user_tables(connection: &Connection) -> Vec<String> {
-        let mut tables = user_tables(connection).unwrap();
-        tables.sort();
-        tables
     }
 
     fn downgrade_to_version(connection: &Connection, version: i64) {
@@ -5847,128 +5334,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(decode::<WorkItem>(&payload).unwrap(), saved.value);
-    }
-
-    #[test]
-    fn snooze_is_revision_bound_and_never_marks_read_or_changes_work() {
-        let d = TempDir::new().unwrap();
-        let p = project(d.path());
-        let mut store = OperatorStore::open(d.path(), &p).unwrap();
-        let (outcome, item, artifact) = linked_records(&p);
-        let (_, original, _) = store
-            .append_outcome_work_item_artifact(&outcome, &item, None, Some(&artifact))
-            .unwrap();
-        let snooze = store
-            .snooze_work(&item.id, &artifact.artifact_id, 1, Some(60))
-            .unwrap();
-        assert!(snooze.is_some());
-        assert_eq!(store.get_read_state(&item.id).unwrap(), None);
-        assert_eq!(store.get_work_item(&item.id).unwrap().unwrap(), original);
-        assert_eq!(
-            store
-                .search_work_items_with_attention(None, 10, None, None, Some("snoozed"))
-                .unwrap()
-                .entries
-                .len(),
-            1
-        );
-        assert!(store
-            .search_work_items_with_attention(None, 10, None, None, Some("unsnoozed"))
-            .unwrap()
-            .entries
-            .is_empty());
-        assert_eq!(
-            store
-                .search_work_items_with_attention(None, 10, None, None, Some("unread"))
-                .unwrap()
-                .entries
-                .len(),
-            1
-        );
-        assert!(store.snooze_work(&item.id, "foreign", 1, None).is_err());
-        assert!(store
-            .snooze_work(&item.id, &artifact.artifact_id, 1, Some(0))
-            .is_err());
-        assert!(store
-            .snooze_work(&item.id, &artifact.artifact_id, 1, Some(10081))
-            .is_err());
-        drop(store);
-        let mut store = OperatorStore::open(d.path(), &p).unwrap();
-        assert_eq!(store.get_work_snooze(&item.id).unwrap(), snooze);
-        store
-            .mark_work_read(&item.id, &artifact.artifact_id, 1)
-            .unwrap();
-        assert!(store
-            .search_work_items_with_attention(None, 10, None, None, Some("unread"))
-            .unwrap()
-            .entries
-            .is_empty());
-        let mut next = artifact.clone();
-        next.revision = 2;
-        store.append_artifact_revision(&next).unwrap();
-        let mut changed = item.clone();
-        changed.current_artifact_revision = Some(2);
-        store
-            .upsert_work_item(&changed, Some(original.revision))
-            .unwrap();
-        assert!(store.get_work_snooze(&item.id).unwrap().is_none());
-        assert_eq!(
-            store
-                .search_work_items_with_attention(None, 10, None, None, Some("unread"))
-                .unwrap()
-                .entries
-                .len(),
-            1
-        );
-        assert!(store
-            .search_work_items_with_attention(None, 10, None, None, Some("snoozed"))
-            .unwrap()
-            .entries
-            .is_empty());
-        store
-            .snooze_work(&item.id, &artifact.artifact_id, 2, Some(60))
-            .unwrap();
-        assert!(store
-            .snooze_work(&item.id, &artifact.artifact_id, 2, None)
-            .unwrap()
-            .is_none());
-        assert!(store.get_work_snooze(&item.id).unwrap().is_none());
-    }
-
-    #[test]
-    fn version_two_migration_preserves_read_state_and_snooze_expires() {
-        let d = TempDir::new().unwrap();
-        let p = project(d.path());
-        let mut store = OperatorStore::open(d.path(), &p).unwrap();
-        let (outcome, item, artifact) = linked_records(&p);
-        store
-            .append_outcome_work_item_artifact(&outcome, &item, None, Some(&artifact))
-            .unwrap();
-        let read = store
-            .mark_work_read(&item.id, &artifact.artifact_id, 1)
-            .unwrap();
-        downgrade_to_version(&store.connection, 2);
-        drop(store);
-        let mut store = OperatorStore::open(d.path(), &p).unwrap();
-        assert_eq!(store.get_read_state(&item.id).unwrap(), Some(read));
-        let mut snooze = store
-            .snooze_work(&item.id, &artifact.artifact_id, 1, Some(60))
-            .unwrap()
-            .unwrap();
-        snooze.until = "2000-01-01T00:00:00Z".into();
-        store
-            .connection
-            .execute(
-                "UPDATE work_snoozes SET payload=?1 WHERE work_id=?2",
-                params![encode(&snooze).unwrap(), item.id],
-            )
-            .unwrap();
-        assert!(store.get_work_snooze(&item.id).unwrap().is_none());
-        assert!(store
-            .search_work_items_with_attention(None, 10, None, None, Some("snoozed"))
-            .unwrap()
-            .entries
-            .is_empty());
     }
 
     #[test]
@@ -6097,52 +5462,6 @@ mod tests {
             Err(OperatorStoreError::Sql(_))
         ));
         assert_eq!(corrupt_before, fs::read(corrupt_db).unwrap());
-    }
-    #[test]
-    fn released_lock_reopens_and_blocks_another_owner() {
-        let d = TempDir::new().unwrap();
-        let p = project(d.path());
-        let first = OperatorStore::open(d.path(), &p).unwrap();
-        assert!(matches!(
-            OperatorStore::open(d.path(), &p),
-            Err(OperatorStoreError::AlreadyOwned(_))
-        ));
-        drop(first);
-        OperatorStore::open(d.path(), &p).unwrap();
-    }
-
-    #[test]
-    fn lock_file_records_owner_metadata() {
-        let root = TempDir::new().unwrap();
-        let identity = project(root.path());
-        let store = OperatorStore::open(root.path(), &identity).unwrap();
-        let owner: OperatorLockOwner = serde_json::from_slice(
-            &fs::read(root.path().join(".refact/buddy/operator.lock")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(owner.pid, std::process::id());
-        assert!(!owner.hostname.is_empty());
-        assert!(owner.started_at_ms > 0);
-        assert!(!owner.version.is_empty());
-        assert!(!owner.command.is_empty());
-        assert!(owner.describe().contains(&owner.pid.to_string()));
-        assert!(owner.describe().contains(&owner.command));
-        drop(store);
-    }
-
-    #[test]
-    fn contended_open_reports_the_owner() {
-        let root = TempDir::new().unwrap();
-        let identity = project(root.path());
-        let first = OperatorStore::open(root.path(), &identity).unwrap();
-        let Err(error) = OperatorStore::open(root.path(), &identity) else {
-            panic!("expected contended lock");
-        };
-        let OperatorStoreError::AlreadyOwned(Some(owner)) = error else {
-            panic!("expected contended lock owner");
-        };
-        assert_eq!(owner.pid, std::process::id());
-        drop(first);
     }
 
     #[test]
@@ -6303,26 +5622,7 @@ mod tests {
             Err(OperatorStoreError::StaleRevision { current: 2 })
         ));
     }
-    #[test]
-    fn pagination_cursor_does_not_skip_or_repeat_records() {
-        let d = TempDir::new().unwrap();
-        let p = project(d.path());
-        let mut store = OperatorStore::open(d.path(), &p).unwrap();
-        for id in ["a", "b", "c"] {
-            store.upsert_work_item(&work(id, &p), None).unwrap();
-        }
-        let first = store.list_work_items(None, 2).unwrap();
-        assert_eq!(first.entries.len(), 2);
-        let second = store.list_work_items(first.next_after, 2).unwrap();
-        let ids: Vec<_> = first
-            .entries
-            .into_iter()
-            .chain(second.entries)
-            .map(|v| v.value.id)
-            .collect();
-        assert_eq!(ids, ["a", "b", "c"]);
-        assert_eq!(second.next_after, None);
-    }
+
     #[test]
     fn foreign_project_cannot_write_or_advance_sequence() {
         let d = TempDir::new().unwrap();

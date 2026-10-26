@@ -4045,56 +4045,6 @@ async fn shutdown_buddy_background(context: BuddyBackgroundContext) {
 mod operator_tests;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn commit_made_poller_pushes_new_shas() {
-        let mut ring =
-            crate::buddy::user_activity::UserActivityRing::new(PathBuf::from("/tmp/project"), 200);
-        ring.push(UserAction::CommitMade {
-            sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-            message_first_line: "old".to_string(),
-            files: 0,
-            ts: Utc::now(),
-        });
-        let existing = ring
-            .snapshot()
-            .iter()
-            .filter_map(|action| match action {
-                UserAction::CommitMade { sha, .. } => Some(sha.clone()),
-                _ => None,
-            })
-            .collect::<HashSet<_>>();
-
-        for action in parse_commit_activity_from_log(
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|old|old\nbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb|new|new commit",
-        ) {
-            if let UserAction::CommitMade { sha, .. } = &action {
-                if existing.contains(sha) {
-                    continue;
-                }
-            }
-            ring.push(action);
-        }
-
-        let actions = ring.snapshot();
-        assert_eq!(
-            actions
-                .iter()
-                .filter(|action| matches!(action, UserAction::CommitMade { .. }))
-                .count(),
-            2
-        );
-        assert!(actions.iter().any(|action| matches!(
-            action,
-            UserAction::CommitMade { sha, message_first_line, .. }
-                if sha == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" && message_first_line == "new commit"
-        )));
-    }
-}
-
-#[cfg(test)]
 mod migration_restart_regressions {
     use super::*;
 

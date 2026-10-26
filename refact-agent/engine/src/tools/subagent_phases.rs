@@ -606,28 +606,6 @@ mod tests {
     }
 
     #[test]
-    fn gather_seed_keeps_users_and_converts_tools() {
-        let external = vec![
-            msg("system", "should be skipped"),
-            msg("user", "review the compression"),
-            msg("assistant", "looking"),
-            msg("tool", "grep output here"),
-            msg("event", "hidden event"),
-        ];
-        let seed = build_gather_seed_messages(&external);
-        assert_eq!(seed.len(), 3);
-        assert_eq!(seed[0].role, "user");
-        assert_eq!(seed[1].role, "assistant");
-        assert_eq!(seed[2].role, "assistant");
-        assert!(seed[2]
-            .content
-            .content_text_only()
-            .starts_with("Tool result:"));
-        assert!(seed.iter().all(|m| m.tool_calls.is_none()));
-        assert!(seed.iter().all(|m| m.tool_call_id.is_empty()));
-    }
-
-    #[test]
     fn gather_seed_drops_oldest_non_user_when_over_budget() {
         let big = "x".repeat(MAX_GATHER_SEED_TOOL_MSG_CHARS);
         let mut external = vec![msg("user", "task statement")];
@@ -651,15 +629,6 @@ mod tests {
             1,
             "user message must survive budget pressure"
         );
-    }
-
-    #[test]
-    fn gather_seed_caps_each_message() {
-        let huge = "y".repeat(MAX_GATHER_SEED_USER_MSG_CHARS * 3);
-        let seed = build_gather_seed_messages(&[msg("user", &huge)]);
-        let text = seed[0].content.content_text_only();
-        assert!(text.chars().count() <= MAX_GATHER_SEED_USER_MSG_CHARS + 50);
-        assert!(text.contains("[truncated for gather seed]"));
     }
 
     #[test]

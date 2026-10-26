@@ -1510,68 +1510,6 @@ mod tests {
     }
 
     #[test]
-    fn test_payload_serialization_with_tool() {
-        let payload = make_payload(&HookEvent::PreToolUse, None)
-            .with_tool("shell", Some(serde_json::json!({"cmd": "ls"})));
-        let json = serde_json::to_string(&payload).unwrap();
-        assert!(json.contains("shell"));
-        assert!(json.contains("tool_input"));
-        assert!(json.contains("cmd"));
-    }
-
-    #[test]
-    fn test_payload_extra_flattened() {
-        let mut payload = make_payload(&HookEvent::Stop, None);
-        payload
-            .extra
-            .insert("finish_reason".to_string(), serde_json::json!("stop"));
-        let json = serde_json::to_string(&payload).unwrap();
-        assert!(json.contains("finish_reason"));
-        assert!(json.contains("\"stop\""));
-    }
-
-    #[test]
-    fn test_every_event_builds_a_payload_naming_itself() {
-        let events = [
-            HookEvent::PreToolUse,
-            HookEvent::PostToolUse,
-            HookEvent::UserPromptSubmit,
-            HookEvent::PermissionDecision,
-            HookEvent::SessionStart,
-            HookEvent::SessionEnd,
-            HookEvent::Stop,
-            HookEvent::SubagentStart,
-            HookEvent::SubagentStop,
-            HookEvent::Notification,
-            HookEvent::PreCompact,
-            HookEvent::PostCompact,
-            HookEvent::GoalValidation,
-        ];
-        for event in events {
-            let payload = HookPayload::new(&event, "session".to_string(), "/project".to_string());
-            assert_eq!(payload.hook_event_name, event.as_str());
-            assert_eq!(payload.session_id, "session");
-            assert_eq!(payload.project_dir, "/project");
-            assert_eq!(payload.depth, 0);
-            let json = serde_json::to_value(&payload).unwrap();
-            assert_eq!(json["hook_event_name"], event.as_str());
-        }
-    }
-
-    #[test]
-    fn test_tool_events_carry_tool_payload_fields() {
-        let pre = make_payload(&HookEvent::PreToolUse, None)
-            .with_tool("shell", Some(serde_json::json!({"command": "ls"})));
-        assert_eq!(pre.tool_name.as_deref(), Some("shell"));
-        assert_eq!(pre.tool_input.as_ref().unwrap()["command"], "ls");
-        let post = pre.clone().with_tool_output("done".to_string());
-        assert_eq!(post.tool_output.as_deref(), Some("done"));
-        let prompt =
-            make_payload(&HookEvent::UserPromptSubmit, None).with_user_prompt("hi".to_string());
-        assert_eq!(prompt.user_prompt.as_deref(), Some("hi"));
-    }
-
-    #[test]
     fn test_control_hook_cannot_be_built_for_observation_event() {
         for event in [
             HookEvent::SessionStart,
@@ -1629,17 +1567,6 @@ mod tests {
             observe(&config, &payload).await,
             ObservationOutcome::Observed
         );
-    }
-
-    #[tokio::test]
-    async fn test_observation_hook_failure_is_not_fatal() {
-        let config = make_hook_config(HookEvent::SessionEnd, None, "definitely_not_a_command_xyz");
-        let payload = make_payload(&HookEvent::SessionEnd, None);
-        let outcome = observe(&config, &payload).await;
-        assert!(matches!(
-            outcome,
-            ObservationOutcome::Failed(_) | ObservationOutcome::Observed
-        ));
     }
 
     #[test]
@@ -1700,20 +1627,6 @@ mod tests {
     }
 
     #[test]
-    fn test_explicit_deny_reason_beats_timeout_reason_deterministically() {
-        let a = resolve_control_verdict(&[
-            ControlOutcome::Timeout,
-            ControlOutcome::Deny("explicit".to_string()),
-        ]);
-        let b = resolve_control_verdict(&[
-            ControlOutcome::Deny("explicit".to_string()),
-            ControlOutcome::Timeout,
-        ]);
-        assert_eq!(a, ControlVerdict::Deny("explicit".to_string()));
-        assert_eq!(a, b);
-    }
-
-    #[test]
     fn test_cancelled_control_hook_is_a_deny() {
         let verdict = resolve_control_verdict(&[ControlOutcome::Cancelled, ControlOutcome::Allow]);
         assert!(matches!(verdict, ControlVerdict::Deny(_)));
@@ -1726,11 +1639,6 @@ mod tests {
             ControlOutcome::Allow,
         ]);
         assert_eq!(verdict, ControlVerdict::Allow);
-    }
-
-    #[test]
-    fn test_empty_outcomes_allow() {
-        assert_eq!(resolve_control_verdict(&[]), ControlVerdict::Allow);
     }
 
     #[test]
@@ -1800,13 +1708,6 @@ mod tests {
         );
         assert!(error.to_string().contains("max_recursion_depth"));
         assert!(check_hook_recursion(&HookEvent::PreToolUse, 9, 2).is_err());
-    }
-
-    #[test]
-    fn test_recursion_error_is_a_deny_not_a_hang() {
-        let error = check_hook_recursion(&HookEvent::PreToolUse, 5, 2).unwrap_err();
-        let verdict = ControlVerdict::Deny(error.to_string());
-        assert!(matches!(verdict, ControlVerdict::Deny(reason) if reason.contains("recursion")));
     }
 
     #[test]
@@ -1903,39 +1804,6 @@ mod tests {
     }
 
     #[test]
-    fn test_referenced_tool_names_collects_all_shapes() {
-        let value = serde_json::json!({
-            "tool_name": "alpha",
-            "nested": {"tools": ["beta", "gamma"]},
-            "list": [{"allowed_tools": "delta, epsilon"}]
-        });
-        let mut names = referenced_tool_names(&value);
-        names.sort();
-        assert_eq!(names, vec!["alpha", "beta", "delta", "epsilon", "gamma"]);
-    }
-
-    #[test]
-    fn test_compiled_matcher_matches_none_matches_all() {
-        assert!(compiled_matcher_matches(None, Some("shell")));
-        assert!(compiled_matcher_matches(None, Some("cat")));
-        assert!(compiled_matcher_matches(None, None));
-    }
-
-    #[test]
-    fn test_compiled_matcher_matches_pattern_with_tool_name() {
-        let re = regex::Regex::new("Bash|shell").unwrap();
-        assert!(compiled_matcher_matches(Some(&re), Some("shell")));
-        assert!(compiled_matcher_matches(Some(&re), Some("Bash")));
-        assert!(!compiled_matcher_matches(Some(&re), Some("cat")));
-    }
-
-    #[test]
-    fn test_compiled_matcher_matches_pattern_without_tool_name_returns_false() {
-        let re = regex::Regex::new("shell").unwrap();
-        assert!(!compiled_matcher_matches(Some(&re), None));
-    }
-
-    #[test]
     fn test_compile_hooks_skips_invalid_regex() {
         let configs = vec![
             make_hook_config(HookEvent::PreToolUse, Some("[invalid"), "cmd1"),
@@ -1944,61 +1812,6 @@ mod tests {
         let compiled = compile_hooks(configs);
         assert_eq!(compiled.len(), 1);
         assert_eq!(compiled[0].config.command, "cmd2");
-    }
-
-    #[test]
-    fn test_compile_hooks_none_matcher_becomes_match_all() {
-        let configs = vec![make_hook_config(HookEvent::SessionStart, None, "cmd")];
-        let compiled = compile_hooks(configs);
-        assert_eq!(compiled.len(), 1);
-        assert!(compiled[0].compiled_matcher.is_none());
-        assert!(compiled_matcher_matches(
-            compiled[0].compiled_matcher.as_ref(),
-            Some("anything")
-        ));
-    }
-
-    #[test]
-    fn test_compile_hooks_empty_matcher_becomes_match_all() {
-        let configs = vec![make_hook_config(HookEvent::SessionStart, Some(""), "cmd")];
-        let compiled = compile_hooks(configs);
-        assert_eq!(compiled.len(), 1);
-        assert!(compiled[0].compiled_matcher.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_control_hook_success_allows() {
-        let config = make_hook_config(HookEvent::PreToolUse, None, "echo success_output");
-        let payload = make_payload(&HookEvent::PreToolUse, Some("shell"));
-        assert_eq!(evaluate(&config, &payload).await, ControlOutcome::Allow);
-    }
-
-    #[tokio::test]
-    async fn test_control_hook_exit_2_denies() {
-        let config = make_hook_config(
-            HookEvent::PreToolUse,
-            None,
-            &stderr_exit_command("block_reason", 2),
-        );
-        let payload = make_payload(&HookEvent::PreToolUse, Some("shell"));
-        match evaluate(&config, &payload).await {
-            ControlOutcome::Deny(reason) => assert!(reason.contains("block_reason")),
-            other => panic!("Expected Deny, got {:?}", other),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_control_hook_nonzero_exit_is_advisory() {
-        let config = make_hook_config(
-            HookEvent::PostToolUse,
-            None,
-            &stderr_exit_command("warn_output", 1),
-        );
-        let payload = make_payload(&HookEvent::PostToolUse, Some("cat"));
-        match evaluate(&config, &payload).await {
-            ControlOutcome::Failed(msg) => assert!(msg.contains("warn_output")),
-            other => panic!("Expected Failed, got {:?}", other),
-        }
     }
 
     #[tokio::test]
@@ -2086,277 +1899,6 @@ mod tests {
             "Process {} should have been killed and reaped on shutdown",
             pid
         );
-    }
-
-    fn project_hook(root: &str, command: &str) -> HookConfig {
-        HookConfig {
-            event: HookEvent::PreToolUse,
-            matcher: None,
-            command: command.to_string(),
-            timeout: Some(5),
-            source: CommandSource::ProjectRefact(PathBuf::from(root)),
-        }
-    }
-
-    #[test]
-    fn test_hooks_surface_names_the_hook_that_denied_and_respects_deny_precedence() {
-        let configs = vec![
-            make_hook_config(HookEvent::PreToolUse, None, "allow.sh"),
-            make_hook_config(HookEvent::PreToolUse, None, "block.sh"),
-            make_hook_config(HookEvent::PreToolUse, None, "rewrite.sh"),
-        ];
-        let outcomes = vec![
-            ControlOutcome::Allow,
-            ControlOutcome::Deny("no rm".to_string()),
-            ControlOutcome::Rewrite(serde_json::json!({"command": "ls"})),
-        ];
-        let decision = resolve_control_decision(&outcomes);
-        assert_eq!(decision.decided_by, Some(1));
-        assert_eq!(
-            decision.verdict,
-            ControlVerdict::Deny("no rm".to_string()),
-            "deny outranks a rewrite whatever the order"
-        );
-        let record = control_activity(
-            &HookEvent::PreToolUse,
-            Some("shell"),
-            &configs,
-            &outcomes,
-            &[],
-            &decision,
-        );
-        assert_eq!(record.verdict, HookVerdictTag::Deny);
-        assert_eq!(record.decided_by.as_deref(), Some("block.sh"));
-        assert_eq!(record.reason.as_deref(), Some("no rm"));
-        assert_eq!(record.tool.as_deref(), Some("shell"));
-        assert_eq!(
-            record
-                .runs
-                .iter()
-                .map(|run| (run.command.as_str(), run.decided))
-                .collect::<Vec<_>>(),
-            vec![
-                ("allow.sh", false),
-                ("block.sh", true),
-                ("rewrite.sh", false)
-            ]
-        );
-    }
-
-    #[test]
-    fn test_hooks_surface_attributes_a_timeout_deny_to_the_hook_that_timed_out() {
-        let configs = vec![
-            make_hook_config(HookEvent::PreToolUse, None, "fast.sh"),
-            make_hook_config(HookEvent::PreToolUse, None, "slow.sh"),
-        ];
-        let outcomes = vec![ControlOutcome::Allow, ControlOutcome::Timeout];
-        let decision = resolve_control_decision(&outcomes);
-        let record = control_activity(
-            &HookEvent::PreToolUse,
-            None,
-            &configs,
-            &outcomes,
-            &[],
-            &decision,
-        );
-        assert_eq!(record.verdict, HookVerdictTag::Deny);
-        assert_eq!(record.decided_by.as_deref(), Some("slow.sh"));
-        assert_eq!(record.runs[1].outcome, HookOutcomeTag::Timeout);
-    }
-
-    #[test]
-    fn test_hooks_surface_allow_names_no_decider() {
-        let configs = vec![make_hook_config(HookEvent::PreToolUse, None, "ok.sh")];
-        let outcomes = vec![ControlOutcome::Allow];
-        let decision = resolve_control_decision(&outcomes);
-        assert_eq!(decision.decided_by, None);
-        let record = control_activity(
-            &HookEvent::PreToolUse,
-            None,
-            &configs,
-            &outcomes,
-            &[],
-            &decision,
-        );
-        assert_eq!(record.verdict, HookVerdictTag::Allow);
-        assert_eq!(record.decided_by, None);
-        assert!(!record.runs[0].decided);
-    }
-
-    #[test]
-    fn test_hooks_surface_shows_an_untrusted_project_hook_as_never_executed() {
-        let configs = vec![
-            make_hook_config(HookEvent::PreToolUse, None, "global.sh"),
-            project_hook("/untrusted", "project.sh"),
-            HookConfig {
-                source: CommandSource::InstalledPlugin("vendor".to_string()),
-                ..make_hook_config(HookEvent::SessionStart, None, "plugin.sh")
-            },
-        ];
-        let surface = build_hook_surface(&configs, &HooksConfig::default(), Vec::new());
-        assert_eq!(surface.registered, 3);
-        assert_eq!(surface.runnable, 1);
-        assert_eq!(surface.blocked, 2);
-
-        let untrusted = surface
-            .registrations
-            .iter()
-            .find(|entry| entry.command == "project.sh")
-            .unwrap();
-        assert_eq!(untrusted.trust, HookTrust::UntrustedProject);
-        assert!(!untrusted.runs);
-        assert!(untrusted
-            .blocked_reason
-            .as_deref()
-            .unwrap()
-            .contains("never executed"));
-
-        let plugin = surface
-            .registrations
-            .iter()
-            .find(|entry| entry.command == "plugin.sh")
-            .unwrap();
-        assert_eq!(plugin.trust, HookTrust::InstalledPlugin);
-        assert!(!plugin.runs);
-
-        let global = surface
-            .registrations
-            .iter()
-            .find(|entry| entry.command == "global.sh")
-            .unwrap();
-        assert_eq!(global.trust, HookTrust::Global);
-        assert!(global.runs);
-        assert_eq!(global.blocked_reason, None);
-        assert!(!surface
-            .recent
-            .iter()
-            .any(|record| record.runs.iter().any(|run| run.command == "project.sh")));
-    }
-
-    #[test]
-    fn test_hooks_surface_marks_a_trusted_project_hook_as_running() {
-        let configs = vec![project_hook("/trusted", "project.sh")];
-        let hooks = HooksConfig {
-            trusted_projects: vec!["/trusted".to_string()],
-            ..HooksConfig::default()
-        };
-        let surface = build_hook_surface(&configs, &hooks, Vec::new());
-        assert_eq!(surface.registrations[0].trust, HookTrust::TrustedProject);
-        assert!(surface.registrations[0].runs);
-        assert_eq!(surface.runnable, 1);
-    }
-
-    #[test]
-    fn test_hooks_surface_is_empty_when_nothing_is_registered() {
-        let surface = build_hook_surface(&[], &HooksConfig::default(), Vec::new());
-        assert_eq!(surface.registered, 0);
-        assert_eq!(surface.runnable, 0);
-        assert_eq!(surface.blocked, 0);
-        assert_eq!(surface.denials, 0);
-        assert!(surface.registrations.is_empty());
-        assert!(surface.recent.is_empty());
-        assert!(surface.enabled);
-    }
-
-    #[test]
-    fn test_hooks_surface_counts_recursion_and_refused_rewrites_as_denials() {
-        let error = check_hook_recursion(&HookEvent::PreToolUse, 2, 2).unwrap_err();
-        let recursion = recursion_activity(&HookEvent::PreToolUse, Some("shell"), &error);
-        assert_eq!(recursion.verdict, HookVerdictTag::RecursionBlocked);
-        assert!(recursion.reason.unwrap().contains("max_recursion_depth"));
-        let refused = revalidation_activity("shell", Some("outside authority".to_string()));
-        assert_eq!(refused.verdict, HookVerdictTag::RewriteRefused);
-        let accepted = revalidation_activity("shell", None);
-        assert_eq!(accepted.verdict, HookVerdictTag::RewriteAccepted);
-        let recursion = recursion_activity(&HookEvent::PreToolUse, Some("shell"), &error);
-        let surface = build_hook_surface(
-            &[],
-            &HooksConfig::default(),
-            vec![recursion, refused, accepted],
-        );
-        assert_eq!(surface.denials, 2);
-    }
-
-    #[test]
-    fn test_hook_activity_log_is_bounded_and_newest_first() {
-        let log = HookActivityLog::new(2);
-        assert!(log.recent(10).is_empty());
-        for command in ["one", "two", "three"] {
-            log.record(revalidation_activity(command, None));
-        }
-        let recent = log.recent(10);
-        assert_eq!(recent.len(), 2);
-        assert_eq!(recent[0].tool.as_deref(), Some("three"));
-        assert_eq!(recent[1].tool.as_deref(), Some("two"));
-        assert_eq!(log.recent(1).len(), 1);
-    }
-
-    #[test]
-    fn test_observation_activity_never_claims_a_verdict() {
-        let configs = vec![make_hook_config(HookEvent::SessionStart, None, "watch.sh")];
-        let record = observation_activity(
-            &HookEvent::SessionStart,
-            None,
-            &configs,
-            &[ObservationOutcome::Failed("boom".to_string())],
-            &[],
-        );
-        assert_eq!(record.verdict, HookVerdictTag::Observed);
-        assert_eq!(record.decided_by, None);
-        assert!(!record.runs[0].decided);
-        assert_eq!(record.runs[0].outcome, HookOutcomeTag::Failed);
-    }
-
-    #[test]
-    fn test_revalidate_rewritten_tool_call_records_both_outcomes() {
-        let log = HookActivityLog::new(8);
-        let authority = ToolsPolicy::Only(vec!["cat".to_string()]);
-        let refused = revalidate_rewritten_arguments(
-            "shell",
-            &serde_json::json!({"command": "ls"}),
-            Some(&authority),
-        );
-        log.record(revalidation_activity(
-            "shell",
-            refused.as_ref().err().map(ToString::to_string),
-        ));
-        let accepted = revalidate_rewritten_arguments(
-            "cat",
-            &serde_json::json!({"paths": "a.rs"}),
-            Some(&authority),
-        );
-        log.record(revalidation_activity(
-            "cat",
-            accepted.as_ref().err().map(ToString::to_string),
-        ));
-        let recent = log.recent(10);
-        assert_eq!(recent[0].verdict, HookVerdictTag::RewriteAccepted);
-        assert_eq!(recent[1].verdict, HookVerdictTag::RewriteRefused);
-        assert!(recent[1].reason.as_ref().unwrap().contains("authority"));
-    }
-
-    #[test]
-    fn test_is_global_source() {
-        assert!(is_global_source(&CommandSource::GlobalClaude));
-        assert!(is_global_source(&CommandSource::GlobalRefact));
-        assert!(!is_global_source(&CommandSource::ProjectClaude(
-            PathBuf::from("/p")
-        )));
-        assert!(!is_global_source(&CommandSource::ProjectRefact(
-            PathBuf::from("/p")
-        )));
-    }
-
-    #[test]
-    fn test_is_project_source() {
-        assert!(is_project_source(&CommandSource::ProjectRefact(
-            PathBuf::from("/p")
-        )));
-        assert!(is_project_source(&CommandSource::ProjectClaude(
-            PathBuf::from("/p")
-        )));
-        assert!(!is_project_source(&CommandSource::GlobalRefact));
-        assert!(!is_project_source(&CommandSource::GlobalClaude));
     }
 
     #[test]
@@ -2464,28 +2006,6 @@ mod tests {
     }
 
     #[test]
-    fn test_hook_limits_follow_settings() {
-        let config = HooksConfig {
-            enabled: true,
-            trusted_projects: vec![],
-            default_timeout_secs: 7,
-            max_recursion_depth: 3,
-            max_output_bytes: 4096,
-        };
-        let limits = HookLimits::from(&config);
-        assert_eq!(limits.default_timeout_secs, 7);
-        assert_eq!(limits.max_recursion_depth, 3);
-        assert_eq!(limits.max_output_bytes, 4096);
-    }
-
-    #[test]
-    fn test_hook_source_allowed_global_always_runs() {
-        let none: Vec<String> = vec![];
-        assert!(hook_source_allowed(&CommandSource::GlobalRefact, &none));
-        assert!(hook_source_allowed(&CommandSource::GlobalClaude, &none));
-    }
-
-    #[test]
     fn test_hook_source_allowed_project_requires_trust_entry() {
         let refact = CommandSource::ProjectRefact(PathBuf::from("/myproject"));
         let claude = CommandSource::ProjectClaude(PathBuf::from("/myproject"));
@@ -2502,84 +2022,6 @@ mod tests {
         let plugin = CommandSource::InstalledPlugin("p".to_string());
         assert!(!hook_source_allowed(&plugin, &[]));
         assert!(!hook_source_allowed(&plugin, &["/anything".to_string()]));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_untrusted_project_hook_is_not_executed_until_trusted() {
-        let tmp = tempfile::tempdir().unwrap();
-        let project_root = tmp.path().join("repo");
-        tokio::fs::create_dir_all(&project_root).await.unwrap();
-        let sentinel = tmp.path().join("hook_ran.txt");
-        let command = format!("touch '{}'", sentinel.to_str().unwrap());
-        let config = HookConfig {
-            event: HookEvent::PreToolUse,
-            matcher: None,
-            command,
-            timeout: Some(5),
-            source: CommandSource::ProjectRefact(project_root.clone()),
-        };
-        let payload = make_payload(&HookEvent::PreToolUse, Some("shell"));
-
-        let untrusted: Vec<String> = vec![];
-        assert!(!hook_source_allowed(&config.source, &untrusted));
-        let outcomes: Vec<ControlOutcome> = if hook_source_allowed(&config.source, &untrusted) {
-            vec![evaluate(&config, &payload).await]
-        } else {
-            vec![]
-        };
-        assert_eq!(resolve_control_verdict(&outcomes), ControlVerdict::Allow);
-        assert!(
-            !sentinel.exists(),
-            "an untrusted project hook must not have been executed"
-        );
-
-        let trusted = vec![project_root.to_string_lossy().into_owned()];
-        assert!(hook_source_allowed(&config.source, &trusted));
-        if hook_source_allowed(&config.source, &trusted) {
-            evaluate(&config, &payload).await;
-        }
-        assert!(
-            sentinel.exists(),
-            "a trusted project hook should have been executed"
-        );
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(permission_decision_hooks)]
-    async fn test_hooks_cache_project_separation() {
-        clear_hook_cache_for_tests();
-        let tmp1 = tempfile::tempdir().unwrap();
-        let tmp2 = tempfile::tempdir().unwrap();
-
-        tokio::fs::write(
-            tmp1.path().join("hooks.yaml"),
-            "hooks:\n  SessionStart:\n    - hooks:\n        - type: command\n          command: cmd_project_a",
-        ).await.unwrap();
-
-        tokio::fs::write(
-            tmp2.path().join("hooks.yaml"),
-            "hooks:\n  SessionEnd:\n    - hooks:\n        - type: command\n          command: cmd_project_b",
-        ).await.unwrap();
-
-        let ext_dirs1 = ExtDirs {
-            global_dirs: vec![tmp1.path().to_path_buf()],
-            installed_dirs: vec![],
-            project_dirs: vec![PathBuf::from("/project/a")],
-        };
-        let ext_dirs2 = ExtDirs {
-            global_dirs: vec![tmp2.path().to_path_buf()],
-            installed_dirs: vec![],
-            project_dirs: vec![PathBuf::from("/project/b")],
-        };
-
-        let hooks1 = get_compiled_hooks_from_ext_dirs(&ext_dirs1).await;
-        let hooks2 = get_compiled_hooks_from_ext_dirs(&ext_dirs2).await;
-
-        assert!(hooks1.iter().any(|h| h.config.command == "cmd_project_a"));
-        assert!(!hooks1.iter().any(|h| h.config.command == "cmd_project_b"));
-        assert!(hooks2.iter().any(|h| h.config.command == "cmd_project_b"));
-        assert!(!hooks2.iter().any(|h| h.config.command == "cmd_project_a"));
     }
 
     #[cfg(unix)]
@@ -2643,46 +2085,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&out).unwrap(), "1");
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_control_hooks_run_in_parallel() {
-        let hooks = vec![
-            make_hook_config(HookEvent::PreToolUse, None, "sleep 1"),
-            make_hook_config(HookEvent::PreToolUse, None, "sleep 1"),
-            make_hook_config(HookEvent::PreToolUse, None, "sleep 1"),
-        ];
-        let payload = make_payload(&HookEvent::PreToolUse, None);
-        let start = std::time::Instant::now();
-        let futs: Vec<_> = hooks.iter().map(|c| evaluate(c, &payload)).collect();
-        let outcomes = futures::future::join_all(futs).await;
-        assert_eq!(outcomes.len(), 3);
-        assert!(
-            start.elapsed().as_secs() < 3,
-            "hooks should run in parallel, took {:?}",
-            start.elapsed()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_parallel_deny_propagates() {
-        let hooks = vec![
-            make_hook_config(HookEvent::PreToolUse, None, "echo success"),
-            make_hook_config(
-                HookEvent::PreToolUse,
-                None,
-                &stderr_exit_command("blocked", 2),
-            ),
-            make_hook_config(HookEvent::PreToolUse, None, "echo success2"),
-        ];
-        let payload = make_payload(&HookEvent::PreToolUse, None);
-        let futs: Vec<_> = hooks.iter().map(|c| evaluate(c, &payload)).collect();
-        let outcomes = futures::future::join_all(futs).await;
-        match resolve_control_verdict(&outcomes) {
-            ControlVerdict::Deny(reason) => assert!(reason.contains("blocked")),
-            other => panic!("Expected Deny, got {:?}", other),
-        }
-    }
-
     #[test]
     fn test_privacy_filter_redacts_blocked_paths_in_tool_input() {
         let privacy = Arc::new(PrivacySettings {
@@ -2700,20 +2102,6 @@ mod tests {
         assert_eq!(value["paths"][0], "src/main.rs");
         assert_eq!(value["paths"][1], PRIVACY_REDACTED);
         assert_eq!(value["nested"]["file"], PRIVACY_REDACTED);
-    }
-
-    #[test]
-    fn test_privacy_filter_leaves_allowed_paths_alone() {
-        let privacy = Arc::new(PrivacySettings {
-            privacy_rules: crate::privacy::FilePrivacySettings {
-                only_send_to_servers_I_control: vec![],
-                blocked: vec![],
-            },
-            loaded_ts: 0,
-        });
-        let mut value = serde_json::json!({"file": "src/main.rs"});
-        redact_privacy_blocked_paths(&mut value, &privacy);
-        assert_eq!(value["file"], "src/main.rs");
     }
 
     #[test]

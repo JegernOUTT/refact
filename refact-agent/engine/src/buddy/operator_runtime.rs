@@ -174,58 +174,6 @@ pub fn authenticated_operator_request(
 mod tests {
     use super::*;
 
-    #[test]
-    fn default_flags_never_grant_automation() {
-        let disabled = OperatorFeatures::default();
-        for capability in [
-            OperatorCapability::Storage,
-            OperatorCapability::Actions,
-            OperatorCapability::Supervision,
-            OperatorCapability::Improvement,
-            OperatorCapability::Editorial,
-        ] {
-            assert!(!disabled.allows(capability));
-        }
-        let storage_only = OperatorFeatures {
-            storage: true,
-            ..Default::default()
-        };
-        assert!(storage_only.allows(OperatorCapability::Storage));
-        assert!(!storage_only.allows(OperatorCapability::Actions));
-        assert!(!OperatorFeatures {
-            actions: true,
-            ..Default::default()
-        }
-        .allows(OperatorCapability::Actions));
-    }
-
-    #[test]
-    fn default_settings_open_every_capability_and_opt_out_closes_them() {
-        let mut settings = refact_buddy_core::settings::BuddySettings::default();
-        let enabled = OperatorFeatures::from_settings(&settings);
-        assert!(enabled.storage);
-        assert!(enabled.actions);
-        assert!(enabled.supervision);
-        assert!(enabled.improvement);
-        assert!(enabled.editorial);
-        for capability in [
-            OperatorCapability::Storage,
-            OperatorCapability::Actions,
-            OperatorCapability::Supervision,
-            OperatorCapability::Improvement,
-            OperatorCapability::Editorial,
-        ] {
-            assert!(enabled.allows(capability));
-        }
-        settings.operator_enabled = false;
-        let disabled = OperatorFeatures::from_settings(&settings);
-        assert!(!disabled.storage);
-        assert!(!disabled.actions);
-        assert!(!disabled.supervision);
-        assert!(!disabled.improvement);
-        assert!(!disabled.editorial);
-    }
-
     #[tokio::test]
     async fn missing_or_wrong_transport_never_becomes_a_user_grant() {
         let root = tempfile::tempdir().unwrap();

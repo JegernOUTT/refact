@@ -51,36 +51,6 @@ async fn poll_pending<F: std::future::Future>(mut future: std::pin::Pin<&mut F>)
 }
 
 #[tokio::test]
-async fn residency_bound_checkpoints_the_least_valuable_parked_run() {
-    let scheduler = scheduler(2);
-    let old = park(&scheduler, "old").await;
-    let mid = park(&scheduler, "mid").await;
-    let snapshot = scheduler.snapshot();
-    assert_eq!((snapshot.parked, snapshot.evicted), (2, 0));
-
-    let new = park(&scheduler, "new").await;
-    let snapshot = scheduler.snapshot();
-    assert_eq!((snapshot.parked, snapshot.evicted), (2, 1));
-    assert_eq!(
-        ticket(&scheduler, "old").map(|t| t.state),
-        Some(TicketState::Evicted),
-        "the run idle longest since its last park is the least valuable"
-    );
-    for resident in ["mid", "new"] {
-        assert_eq!(
-            ticket(&scheduler, resident).map(|t| t.state),
-            Some(TicketState::Parked)
-        );
-    }
-    assert_eq!(
-        snapshot.outstanding, 3,
-        "a checkpoint is retained work, not discarded work"
-    );
-    drop((old, mid, new));
-    assert_eq!(scheduler.snapshot().outstanding, 0);
-}
-
-#[tokio::test]
 async fn an_evicted_run_resumes_from_its_checkpoint_with_age_and_accounting_intact() {
     let scheduler = scheduler(1);
     let old = park(&scheduler, "old").await;

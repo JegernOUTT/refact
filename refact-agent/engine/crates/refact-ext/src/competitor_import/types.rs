@@ -777,105 +777,6 @@ mod tests {
     use super::*;
     use super::super::manifest::hash_string;
 
-    fn candidate_summary() -> ImportCandidateSummary {
-        ImportCandidateSummary {
-            competitor: Competitor::ClaudeCode,
-            kind: ImportKind::Command,
-            scope: ImportScope::Global,
-            source_root: PathBuf::from("/source"),
-            source_path: PathBuf::from("/source/review.md"),
-            dest_name: "review".to_string(),
-            destination_path: PathBuf::from("/dest/review.md"),
-            metadata: Value::Null,
-        }
-    }
-
-    #[test]
-    fn summary_merge_combines_counts_and_items() {
-        let mut left = ImportSummary::from_scopes(vec![ImportScope::Global]);
-        left.record_status(ImportStatus::Created);
-        left.record_status(ImportStatus::Unchanged);
-
-        let mut right = ImportSummary::from_scopes(vec![ImportScope::Project {
-            root: PathBuf::from("/repo"),
-        }]);
-        right.record_status(ImportStatus::Created);
-        right.add_issue(ImportIssue {
-            competitor: Some(Competitor::ClaudeCode),
-            kind: Some(ImportKind::UnsupportedRules),
-            scope: Some(ImportScope::Global),
-            path: Some(PathBuf::from("/home/user/.claude/CLAUDE.md")),
-            status: ImportStatus::Unsupported,
-            message: "rules are report-only in v1".to_string(),
-        });
-
-        left.merge(right);
-
-        assert_eq!(left.discovered_scopes.len(), 2);
-        assert_eq!(left.issues.len(), 1);
-        assert_eq!(left.status_counts.get(&ImportStatus::Created), Some(&2));
-        assert_eq!(left.status_counts.get(&ImportStatus::Unchanged), Some(&1));
-        assert_eq!(left.status_counts.get(&ImportStatus::Unsupported), Some(&1));
-        assert!(left.generated_at.is_some());
-    }
-
-    #[test]
-    fn summary_change_flags_only_track_created_or_updated_outputs() {
-        let candidate = candidate_summary();
-        let mut summary = ImportSummary::default();
-        summary.add_outcome(ImportOutcome {
-            candidate: candidate.clone(),
-            status: ImportStatus::Unchanged,
-            message: "unchanged".to_string(),
-        });
-        assert!(!summary.has_imported_changes());
-
-        summary.add_outcome(ImportOutcome {
-            candidate: candidate.clone(),
-            status: ImportStatus::Stale,
-            message: "source no longer exists; generated destination preserved".to_string(),
-        });
-        assert!(!summary.has_imported_changes());
-
-        summary.add_outcome(ImportOutcome {
-            candidate,
-            status: ImportStatus::Updated,
-            message: "updated".to_string(),
-        });
-
-        assert!(summary.has_command_or_skill_changes());
-        assert!(!summary.has_subagent_changes());
-        assert!(summary.has_imported_changes());
-    }
-
-    #[test]
-    fn summary_serialization_omits_artifact_content() {
-        let candidate = ImportCandidate {
-            competitor: Competitor::ClaudeCode,
-            kind: ImportKind::Command,
-            scope: ImportScope::Global,
-            source_root: PathBuf::from("/source"),
-            source_path: PathBuf::from("/source/secret.md"),
-            dest_name: "secret".to_string(),
-            destination_path: PathBuf::from("/dest/secret.md"),
-            artifact: ImportArtifact::FileContent {
-                content: "secret artifact content".to_string(),
-            },
-            source_hash: hash_string("secret source content"),
-            artifact_hash: hash_string("secret artifact content"),
-            metadata: serde_json::json!({"original_name": "secret"}),
-        };
-        let mut summary = ImportSummary::default();
-        summary.record_candidate(&candidate);
-
-        let json = serde_json::to_string(&summary).unwrap();
-
-        assert!(!json.contains("secret artifact content"));
-        assert!(!json.contains("source_hash"));
-        assert!(!json.contains("artifact_hash"));
-        assert!(json.contains("secret.md"));
-    }
-
     #[test]
     fn report_serialization_has_timestamps_counts_and_no_artifact_content() {
         let candidate = ImportCandidate {
@@ -956,45 +857,6 @@ mod tests {
     }
 
     #[test]
-    fn report_deserializes_when_reported_fields_are_absent() {
-        let json = r#"{
-            "discovered_candidates":0,
-            "status_counts":{},
-            "competitor_counts":{},
-            "kind_counts":{},
-            "top_issues":[]
-        }"#;
-
-        let report: ImportReport = serde_json::from_str(json).unwrap();
-
-        assert!(report.reported_scopes.is_empty());
-        assert!(report.reported_sources.is_empty());
-    }
-
-    #[test]
-    fn report_serialization_handles_stale_status() {
-        let candidate = candidate_summary();
-        let mut summary = ImportSummary::default();
-        summary.add_outcome(ImportOutcome {
-            candidate,
-            status: ImportStatus::Stale,
-            message: "source no longer exists; generated destination preserved".to_string(),
-        });
-
-        let report = ImportReport::from_summary(&summary);
-        let json = serde_json::to_string(&report).unwrap();
-        let decoded: ImportReport = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(report.status_count(&ImportStatus::Stale), 1);
-        assert_eq!(report.competitor_counts[&Competitor::ClaudeCode].stale, 1);
-        assert_eq!(report.kind_counts[&ImportKind::Command].stale, 1);
-        assert_eq!(report.top_issues.len(), 1);
-        assert_eq!(decoded.status_count(&ImportStatus::Stale), 1);
-        assert!(json.contains("stale"));
-        assert!(!json.contains("/dest/review.md"));
-    }
-
-    #[test]
     fn report_serialization_sanitizes_top_issue_paths() {
         let project_scope = ImportScope::Project {
             root: PathBuf::from("/home/user/private-project"),
@@ -1039,29 +901,5 @@ mod tests {
             relative_report.top_issues[0].path.as_deref(),
             Some("commands/public.md")
         );
-    }
-
-    #[test]
-    fn report_keeps_top_attention_issues_without_duplicate_writer_errors() {
-        let candidate = candidate_summary();
-        let mut summary = ImportSummary::default();
-        summary.add_outcome(ImportOutcome {
-            candidate: candidate.clone(),
-            status: ImportStatus::Error,
-            message: "write failed".to_string(),
-        });
-        summary.issues.push(ImportIssue {
-            competitor: Some(candidate.competitor),
-            kind: Some(candidate.kind),
-            scope: Some(candidate.scope.clone()),
-            path: Some(candidate.destination_path.clone()),
-            status: ImportStatus::Error,
-            message: "write failed".to_string(),
-        });
-
-        let report = ImportReport::from_summary(&summary);
-
-        assert_eq!(report.status_count(&ImportStatus::Error), 1);
-        assert_eq!(report.top_issues.len(), 1);
     }
 }

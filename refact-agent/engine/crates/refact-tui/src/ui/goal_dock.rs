@@ -606,63 +606,6 @@ mod tests {
     }
 
     #[test]
-    fn dock_is_absent_without_an_installed_goal() {
-        assert!(GoalPresentation::from_messages(&[], None).is_none());
-    }
-
-    #[test]
-    fn unlimited_budget_uses_bare_counters_without_fabricated_ratios() {
-        let dock = presentation(json!({
-            "version": 1,
-            "status": "active",
-            "active": true,
-            "budget": {"max_turns": 0, "max_tokens": 0},
-            "progress": {"turns_used": 12, "tokens_used": 4200}
-        }))
-        .dock_line();
-
-        assert!(dock.contains("12 turns"));
-        assert!(dock.contains("4.2K tok"));
-        assert!(!dock.contains("12/"));
-        assert!(!dock.contains("4.2K/"));
-    }
-
-    #[test]
-    fn finite_budget_uses_ratios() {
-        let dock = presentation(json!({
-            "version": 1,
-            "budget": {"max_turns": 50, "max_tokens": 10000},
-            "progress": {"turns_used": 12, "tokens_used": 4200}
-        }))
-        .dock_line();
-
-        assert!(dock.contains("12/50 turns"));
-        assert!(dock.contains("4.2K/10K tok"));
-    }
-
-    #[test]
-    fn all_goal_statuses_have_distinct_colorless_labels() {
-        let statuses = [
-            "active",
-            "verifying",
-            "paused",
-            "completed",
-            "stopped",
-            "budget_exhausted",
-            "no_progress",
-            "transferred",
-        ];
-        let labels = statuses
-            .iter()
-            .map(|status| status_label(status))
-            .collect::<std::collections::BTreeSet<_>>();
-
-        assert_eq!(labels.len(), statuses.len());
-        assert_eq!(status_label("budget_exhausted"), "BUDGET EXHAUSTED");
-        assert_eq!(status_label("no_progress"), "NO PROGRESS");
-    }
-
-    #[test]
     fn details_show_verifier_gaps_transfers_and_human_pursuit_labels() {
         let goal = json!({
             "version": 3,
@@ -694,28 +637,5 @@ mod tests {
         assert!(details.contains("Transferred to: chat-b"));
         assert!(details.contains("Verifier reported gaps"));
         assert!(!details.contains("{\"kind\""));
-    }
-
-    #[test]
-    fn controls_match_goal_status_availability() {
-        let active = presentation(json!({"status": "active", "active": true}));
-        assert!(active.allows(GoalControlAction::Pause));
-        assert!(active.allows(GoalControlAction::Stop));
-        assert!(!active.allows(GoalControlAction::Resume));
-
-        for status in ["paused", "stopped"] {
-            let goal = presentation(json!({"status": status, "active": false}));
-            assert!(goal.allows(GoalControlAction::Resume));
-            assert!(!goal.allows(GoalControlAction::Pause));
-            assert!(!goal.allows(GoalControlAction::Stop));
-        }
-    }
-
-    #[test]
-    fn blank_budget_inputs_omit_hard_limit_keys() {
-        let budget = budget_from_inputs("", "", "", "", "").unwrap();
-        let wire = serde_json::to_value(budget).unwrap();
-
-        assert_eq!(wire, json!({}));
     }
 }

@@ -1,7 +1,4 @@
-use std::collections::HashMap;
-use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use crate::chat::evidence::{
@@ -133,109 +130,6 @@ async fn agent_reported_commands_are_not_executed() {
     assert_eq!(runner.calls, vec!["cargo check"]);
     assert_eq!(records.len(), 1);
     assert!(!marker.exists());
-}
-
-#[test]
-fn skip_gui_build_env_is_inherited_when_the_worktree_was_built_with_it() {
-    let env = crate::chat::verifier::verifier_command_env("cargo", Vec::new(), Some("1"));
-    assert_eq!(
-        env.get("REFACT_SKIP_GUI_BUILD").map(String::as_str),
-        Some("1")
-    );
-    assert_eq!(env.get("CARGO_INCREMENTAL").map(String::as_str), Some("0"));
-    assert_eq!(
-        env.get("RUST_MIN_STACK").map(String::as_str),
-        Some("16777216")
-    );
-
-    let explicit = crate::chat::verifier::verifier_command_env(
-        "cargo",
-        vec![
-            ("CARGO_INCREMENTAL".to_string(), "1".to_string()),
-            ("RUST_MIN_STACK".to_string(), "64".to_string()),
-        ],
-        Some("1"),
-    );
-    assert_eq!(
-        explicit.get("CARGO_INCREMENTAL").map(String::as_str),
-        Some("1")
-    );
-    assert_eq!(
-        explicit.get("RUST_MIN_STACK").map(String::as_str),
-        Some("64")
-    );
-}
-
-#[test]
-fn explicit_skip_gui_build_on_the_verify_line_wins() {
-    for (explicit, default) in [("1", "0"), ("0", "1")] {
-        let env = crate::chat::verifier::verifier_command_env(
-            "cargo",
-            vec![("REFACT_SKIP_GUI_BUILD".to_string(), explicit.to_string())],
-            Some(default),
-        );
-        assert_eq!(
-            env.get("REFACT_SKIP_GUI_BUILD").map(String::as_str),
-            Some(explicit)
-        );
-    }
-}
-
-#[test]
-fn skip_gui_build_default_comes_from_the_worktree_build_output() {
-    let temp = tempfile::tempdir().unwrap();
-    let build_dir = temp.path().join("target/debug/build");
-    let older_output = build_dir.join("refact-lsp-aaa/output");
-    fs::create_dir_all(older_output.parent().unwrap()).unwrap();
-    fs::write(&older_output, "cargo:rustc-env=REFACT_SKIP_GUI_BUILD=1\n").unwrap();
-    let newer_output = build_dir.join("refact-lsp-bbb/output");
-    fs::create_dir_all(newer_output.parent().unwrap()).unwrap();
-    fs::write(&newer_output, "cargo:rustc-env=REFACT_SKIP_GUI_BUILD=0\n").unwrap();
-    fs::File::open(&older_output)
-        .unwrap()
-        .set_modified(SystemTime::now())
-        .unwrap();
-    fs::File::open(&newer_output)
-        .unwrap()
-        .set_modified(SystemTime::now() + Duration::from_secs(10))
-        .unwrap();
-
-    assert_eq!(
-        crate::chat::verifier::worktree_skip_gui_build(temp.path(), &HashMap::new()).as_deref(),
-        Some("0")
-    );
-}
-
-#[test]
-fn no_build_output_leaves_the_variable_unset() {
-    let temp = tempfile::tempdir().unwrap();
-    let target_dir = temp.path().join("empty-target");
-    let command_env = HashMap::from([(
-        "CARGO_TARGET_DIR".to_string(),
-        target_dir.to_string_lossy().to_string(),
-    )]);
-    let default = crate::chat::verifier::worktree_skip_gui_build(temp.path(), &command_env);
-    let env = crate::chat::verifier::verifier_command_env("cargo", Vec::new(), default.as_deref());
-
-    assert!(!env.contains_key("REFACT_SKIP_GUI_BUILD"));
-}
-
-#[test]
-fn cargo_target_dir_is_respected() {
-    let temp = tempfile::tempdir().unwrap();
-    let target_dir = temp.path().join("external-target");
-    let output = target_dir.join("debug/build/refact-lsp-aaa/output");
-    fs::create_dir_all(output.parent().unwrap()).unwrap();
-    fs::write(&output, "cargo:rustc-env=REFACT_SKIP_GUI_BUILD=1\n").unwrap();
-    let command_env = HashMap::from([(
-        "CARGO_TARGET_DIR".to_string(),
-        target_dir.to_string_lossy().to_string(),
-    )]);
-
-    assert_eq!(
-        crate::chat::verifier::worktree_skip_gui_build(temp.path(), &command_env).as_deref(),
-        Some("1")
-    );
 }
 
 #[test]

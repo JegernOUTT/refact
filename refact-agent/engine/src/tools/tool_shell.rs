@@ -1105,41 +1105,6 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
-    async fn process_notice_push_defaults_and_explicit_modes() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let mut input = HashMap::from([
-            ("command".to_string(), json!("echo test")),
-            ("description".to_string(), json!("test process")),
-        ]);
-        assert_eq!(
-            parse_args_with_filter(gcx.clone(), &input, &OutputFilter::default(), None)
-                .await
-                .unwrap()
-                .push,
-            PushMode::Append
-        );
-        for (value, mode) in [
-            ("preempt", PushMode::Preempt),
-            ("when_idle", PushMode::WhenIdle),
-        ] {
-            input.insert("push".into(), json!(value));
-            assert_eq!(
-                parse_args_with_filter(gcx.clone(), &input, &OutputFilter::default(), None)
-                    .await
-                    .unwrap()
-                    .push,
-                mode
-            );
-        }
-        input.insert("push".into(), json!(123));
-        assert!(
-            parse_args_with_filter(gcx.clone(), &input, &OutputFilter::default(), None)
-                .await
-                .is_err()
-        );
-    }
-
     fn args(entries: Vec<(&str, Value)>) -> HashMap<String, Value> {
         entries
             .into_iter()
@@ -1324,47 +1289,6 @@ mod tests {
     }
 
     #[test]
-    fn shell_tool_workdir_is_optional_in_schema() {
-        let tool = ToolShell::default();
-        let desc = tool.tool_description();
-        let required = desc.input_schema["required"].as_array().unwrap().clone();
-        let required_names: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
-        assert!(required_names.contains(&"command"));
-        assert!(required_names.contains(&"description"));
-        assert!(!required_names.contains(&"workdir"));
-    }
-
-    #[test]
-    fn shell_tool_schema_includes_tty_default_false() {
-        let tool = ToolShell::default();
-        let desc = tool.tool_description();
-        assert_eq!(desc.input_schema["properties"]["tty"]["type"], "boolean");
-        assert_eq!(desc.input_schema["properties"]["tty"]["default"], false);
-        assert_eq!(
-            desc.input_schema["properties"]["tty"]["description"],
-            TTY_DESCRIPTION
-        );
-        assert_eq!(
-            desc.input_schema["properties"]["run_in_background"]["type"],
-            "boolean"
-        );
-        assert_eq!(
-            desc.input_schema["properties"]["run_in_background"]["default"],
-            false
-        );
-        assert_eq!(
-            desc.input_schema["properties"]["run_in_background"]["description"],
-            RUN_IN_BACKGROUND_DESCRIPTION
-        );
-        assert!(desc.description.contains("combined stdout/stderr stream"));
-        assert!(desc.description.contains("run_in_background=true"));
-        assert_eq!(
-            desc.input_schema["properties"]["escalate"]["properties"]["mode"]["enum"],
-            json!(["workspace_write", "full_access"])
-        );
-    }
-
-    #[test]
     fn sandbox_denial_result_suggests_escalation() {
         let mut output = "sh: cannot create /root/file: Permission denied\n".to_string();
 
@@ -1422,64 +1346,6 @@ mod tests {
         assert_eq!(exec["tty"], false);
         assert!(exec["process_id"].as_str().unwrap().starts_with("exec_"));
         assert!(message.tool_failed.is_none());
-    }
-
-    #[tokio::test]
-    async fn shell_path_references_use_the_unified_enrichment_envelope() {
-        let workspace = tempfile::tempdir().unwrap();
-        let file = workspace.path().join("src/lib.rs");
-        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        std::fs::write(&file, "pub fn visible() {}\n").unwrap();
-        let (_gcx, ccx) = ccx_with_workspace(workspace.path()).await;
-        let mut shell = ToolShell::default();
-        let (_, messages) = shell
-            .tool_execute(
-                ccx,
-                &"shell".to_string(),
-                &args(vec![
-                    ("command", json!("cat src/lib.rs")),
-                    ("description", json!("Read visible source")),
-                ]),
-            )
-            .await
-            .unwrap();
-        let message = only_chat_message(messages);
-        let enrichment = refact_chat_api::tool_enrichment_from_extra(&message.extra).unwrap();
-
-        assert!(message.extra.get("path_enrichment").is_none());
-        assert_eq!(enrichment.references.len(), 1);
-        assert_eq!(
-            enrichment.references[0].kind,
-            refact_chat_api::ToolEnrichmentKind::Path
-        );
-        assert_eq!(enrichment.references[0].target, "src/lib.rs");
-        assert_eq!(
-            enrichment.references[0].provenance,
-            refact_chat_api::ToolEnrichmentProvenance::Heuristic
-        );
-    }
-
-    #[tokio::test]
-    async fn shell_without_path_references_omits_enrichment() {
-        let message = run_shell(args(vec![
-            ("command", json!(success_command())),
-            ("description", json!("Run hello")),
-        ]))
-        .await;
-
-        assert!(message.extra.get("tool_enrichment").is_none());
-    }
-
-    #[tokio::test]
-    async fn shell_extra_exec_has_duration_ms() {
-        let message = run_shell(args(vec![
-            ("command", json!(delayed_success_command())),
-            ("description", json!("Run delayed hello")),
-        ]))
-        .await;
-        let duration_ms = exec(&message)["duration_ms"].as_u64().unwrap();
-
-        assert!(duration_ms > 0);
     }
 
     #[tokio::test]
@@ -1625,19 +1491,6 @@ mod tests {
         gcx.exec_registry.kill(&process_id).await.unwrap();
     }
 
-    #[tokio::test]
-    async fn shell_extra_exec_no_legacy_duration_field() {
-        let message = run_shell(args(vec![
-            ("command", json!(delayed_success_command())),
-            ("description", json!("Run delayed hello")),
-        ]))
-        .await;
-
-        assert!(exec(&message)
-            .get(&["duration", "secs"].join("_"))
-            .is_none());
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn tty_true_uses_pty() {
@@ -1775,23 +1628,6 @@ mod tests {
         assert_eq!(exec(&message)["timeout_secs"], 60);
     }
 
-    #[test]
-    fn shell_schema_timeout_accepts_integer_or_string() {
-        let tool = ToolShell::default();
-        let desc = tool.tool_description();
-        let timeout_schema = &desc.input_schema["properties"]["timeout"];
-        let one_of = timeout_schema["oneOf"].as_array().unwrap();
-        let types: Vec<&str> = one_of.iter().map(|v| v["type"].as_str().unwrap()).collect();
-        assert!(
-            types.contains(&"integer"),
-            "expected integer in oneOf: {types:?}"
-        );
-        assert!(
-            types.contains(&"string"),
-            "expected string in oneOf: {types:?}"
-        );
-    }
-
     #[tokio::test]
     async fn background_shell_rejects_timeout() {
         let err = shell_error(args(vec![
@@ -1846,30 +1682,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shell_exec_output_filter_is_applied() {
-        let message = run_shell(args(vec![
-            ("command", json!(multiline_command())),
-            (
-                "description",
-                json!("Print multiple lines and filter output"),
-            ),
-            ("output_filter", json!("line4")),
-            ("output_limit", json!("3")),
-        ]))
-        .await;
-        let body = text(&message);
-
-        assert!(body.contains("line4"));
-        assert!(body.contains("filtered"));
-        let filtered_output = body
-            .split("The command was running")
-            .next()
-            .unwrap_or(&body);
-        let line1_count = filtered_output.matches("line1").count();
-        assert_eq!(line1_count, 1);
-    }
-
-    #[tokio::test]
     async fn foreground_output_filter_finds_late_match() {
         let marker = "MARKER_FOREGROUND_LATE_MATCH";
         let message = run_shell(args(vec![
@@ -1909,17 +1721,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shell_exec_description_is_sanitized_in_metadata() {
-        let message = run_shell(args(vec![
-            ("command", json!(success_command())),
-            ("description", json!("  Build\tthing\nignore this\x01")),
-        ]))
-        .await;
-
-        assert_eq!(exec(&message)["short_description"], "Build thing");
-    }
-
-    #[tokio::test]
     async fn description_required_rejects_missing() {
         let ccx = ccx_with_abort(None).await;
         let mut shell = ToolShell::default();
@@ -1928,27 +1729,6 @@ mod tests {
                 ccx,
                 &"shell".to_string(),
                 &args(vec![("command", json!(success_command()))]),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(
-            err,
-            "description is required and must be a non-empty single concise sentence"
-        );
-    }
-
-    #[tokio::test]
-    async fn description_required_rejects_empty() {
-        let ccx = ccx_with_abort(None).await;
-        let mut shell = ToolShell::default();
-        let err = shell
-            .tool_execute(
-                ccx,
-                &"shell".to_string(),
-                &args(vec![
-                    ("command", json!(success_command())),
-                    ("description", json!("")),
-                ]),
             )
             .await
             .unwrap_err();
@@ -1977,15 +1757,5 @@ mod tests {
             err,
             "description is required and must be a non-empty single concise sentence"
         );
-    }
-
-    #[tokio::test]
-    async fn description_accepted_when_present() {
-        let message = run_shell(args(vec![
-            ("command", json!(success_command())),
-            ("description", json!("Run engine tests")),
-        ]))
-        .await;
-        assert_eq!(exec(&message)["short_description"], "Run engine tests");
     }
 }

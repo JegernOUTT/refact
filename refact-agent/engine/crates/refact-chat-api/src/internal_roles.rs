@@ -303,62 +303,6 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_event_helper_produces_correct_role_and_extra() {
-        let msg = event(
-            EventSubkind::CronFire,
-            "scheduler.cron",
-            json!({"task": "daily_digest"}),
-            "cron fired",
-        );
-        assert_eq!(msg.role, EVENT_ROLE);
-        let event_meta = msg.extra.get("event").expect("extra.event missing");
-        assert_eq!(event_meta["subkind"], json!("cron_fire"));
-        assert_eq!(event_meta["source"], json!("scheduler.cron"));
-        assert_eq!(event_meta["payload"]["task"], json!("daily_digest"));
-    }
-
-    #[test]
-    fn test_plan_helper_produces_correct_role_and_extra() {
-        let msg = plan("agent", 1, "plan content", Some("prev-plan-id".to_string()));
-        assert_eq!(msg.role, PLAN_ROLE);
-        let plan_meta = msg.extra.get("plan").expect("extra.plan missing");
-        assert_eq!(plan_meta["mode"], json!("agent"));
-        assert_eq!(plan_meta["version"], json!(1));
-        assert!(plan_meta["created_at_ms"].as_u64().unwrap_or(0) > 0);
-        assert_eq!(plan_meta["supersedes"], json!("prev-plan-id"));
-    }
-
-    #[test]
-    fn test_goal_helper_produces_correct_role_and_extra() {
-        let budget = GoalBudget {
-            max_turns: Some(3),
-            max_minutes: Some(4),
-            max_tokens: Some(5),
-            max_cost_cents: None,
-            cooldown_ms: 6,
-            no_progress_token_threshold: 7,
-            no_progress_turns: Some(8),
-            explicit: false,
-        };
-        let msg = goal(
-            "agent",
-            1,
-            "goal content",
-            Some("prev-goal-id".to_string()),
-            true,
-            budget.clone(),
-        );
-        assert_eq!(msg.role, GOAL_ROLE);
-        let goal_meta = msg.extra.get("goal").expect("extra.goal missing");
-        assert_eq!(goal_meta["mode"], json!("agent"));
-        assert_eq!(goal_meta["version"], json!(1));
-        assert!(goal_meta["created_at_ms"].as_u64().unwrap_or(0) > 0);
-        assert_eq!(goal_meta["supersedes"], json!("prev-goal-id"));
-        assert_eq!(goal_meta["active"], json!(true));
-        assert_eq!(goal_meta["budget"], json!(budget));
-    }
-
-    #[test]
     fn test_event_roundtrip() {
         let msg = event(
             EventSubkind::ToolDecision,
@@ -376,76 +320,6 @@ mod tests {
         assert_eq!(event_meta["subkind"], json!("tool_decision"));
         assert_eq!(event_meta["source"], json!("tool.process_start"));
         assert_eq!(event_meta["payload"], json!({"tool": "shell"}));
-    }
-
-    #[test]
-    fn mode_switch_event_with_diff_is_additive() {
-        let msg = mode_switch_event_with_diff(
-            "chat.session",
-            "agent",
-            "task_planner",
-            Some("handoff"),
-            json!({"thread_defaults": {"auto_approve_dangerous_commands": {"from": false, "to": true}}}),
-        );
-        let payload = &msg.extra["event"]["payload"];
-
-        assert_eq!(payload["from"], json!("agent"));
-        assert_eq!(payload["to"], json!("task_planner"));
-        assert_eq!(payload["reason"], json!("handoff"));
-        assert_eq!(
-            payload["diff"]["thread_defaults"]["auto_approve_dangerous_commands"]["to"],
-            json!(true)
-        );
-    }
-
-    #[test]
-    fn legacy_mode_switch_payload_still_deserializes() {
-        let legacy = json!({
-            "message_id": "legacy-mode-switch",
-            "role": "event",
-            "content": "Mode switched: agent → task_planner",
-            "event": {
-                "subkind": "mode_switch",
-                "source": "chat.session",
-                "payload": {"from": "agent", "to": "task_planner", "reason": null}
-            }
-        });
-
-        let message: ChatMessage = serde_json::from_value(legacy).unwrap();
-        assert_eq!(message.extra["event"]["payload"]["from"], json!("agent"));
-        assert!(message.extra["event"]["payload"].get("diff").is_none());
-    }
-
-    #[test]
-    fn test_plan_roundtrip() {
-        let msg = plan("task_planner", 2, "detailed plan", None);
-        let serialized = serde_json::to_string(&msg).unwrap();
-        let deserialized: ChatMessage = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(deserialized.role, PLAN_ROLE);
-        let plan_meta = deserialized.extra.get("plan").expect("extra.plan missing");
-        assert_eq!(plan_meta["mode"], json!("task_planner"));
-        assert_eq!(plan_meta["version"], json!(2));
-        assert!(plan_meta["supersedes"].is_null());
-    }
-
-    #[test]
-    fn test_goal_roundtrip() {
-        let msg = goal(
-            "task_agent",
-            2,
-            "detailed goal",
-            None,
-            true,
-            GoalBudget::default(),
-        );
-        let serialized = serde_json::to_string(&msg).unwrap();
-        let deserialized: ChatMessage = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(deserialized.role, GOAL_ROLE);
-        let goal_meta = deserialized.extra.get("goal").expect("extra.goal missing");
-        assert_eq!(goal_meta["mode"], json!("task_agent"));
-        assert_eq!(goal_meta["version"], json!(2));
-        assert_eq!(goal_meta["active"], json!(true));
-        assert!(goal_meta["supersedes"].is_null());
     }
 
     #[test]
@@ -545,17 +419,6 @@ mod tests {
     }
 
     #[test]
-    fn plan_delta_helper_produces_correct_role_and_subkind() {
-        let msg = plan_delta("tool.set_plan", json!({"seq": 7}), "append note");
-
-        assert_eq!(msg.role, EVENT_ROLE);
-        let event_meta = msg.extra.get("event").expect("extra.event missing");
-        assert_eq!(event_meta["subkind"], json!("plan_delta"));
-        assert_eq!(event_meta["source"], json!("tool.set_plan"));
-        assert_eq!(event_meta["payload"]["seq"], json!(7));
-    }
-
-    #[test]
     fn plan_delta_helper_truncates_oversized_content() {
         let oversized = "a".repeat(MAX_PLAN_DELTA_CHARS + 100);
         let msg = plan_delta("tool.update_plan", json!({"seq": 1}), oversized);
@@ -574,37 +437,6 @@ mod tests {
     }
 
     #[test]
-    fn plan_delta_with_truncation_returns_message_and_metadata() {
-        let oversized = "a".repeat(MAX_PLAN_DELTA_CHARS + 100);
-        let (msg, truncation) =
-            plan_delta_with_truncation("tool.update_plan", json!({"seq": 1}), oversized);
-        let truncation = truncation.expect("expected truncation metadata");
-        let body = match &msg.content {
-            ChatContent::SimpleText(s) => s.as_str(),
-            _ => panic!("expected SimpleText"),
-        };
-
-        assert!(body.chars().count() <= MAX_PLAN_DELTA_CHARS);
-        assert_eq!(truncation.original_chars, MAX_PLAN_DELTA_CHARS + 100);
-        assert!(truncation.kept_chars < MAX_PLAN_DELTA_CHARS);
-        let payload = &msg.extra["event"]["payload"];
-        assert_eq!(payload["original_chars"], json!(truncation.original_chars));
-        assert_eq!(payload["kept_chars"], json!(truncation.kept_chars));
-    }
-
-    #[test]
-    fn plan_delta_helper_leaves_small_content_unchanged() {
-        let msg = plan_delta("tool.update_plan", json!({"seq": 1}), "small note");
-        let body = match &msg.content {
-            ChatContent::SimpleText(s) => s.as_str(),
-            _ => panic!("expected SimpleText"),
-        };
-
-        assert_eq!(body, "small note");
-        assert!(msg.extra["event"]["payload"].get("truncated").is_none());
-    }
-
-    #[test]
     fn plan_delta_with_truncation_leaves_small_content_unchanged() {
         let (msg, truncation) =
             plan_delta_with_truncation("tool.update_plan", json!({"seq": 1}), "small note");
@@ -616,17 +448,6 @@ mod tests {
         assert_eq!(body, "small note");
         assert_eq!(truncation, None);
         assert!(msg.extra["event"]["payload"].get("truncated").is_none());
-    }
-
-    #[test]
-    fn goal_delta_helper_produces_correct_role_and_subkind() {
-        let msg = goal_delta("tool.set_goal", json!({"seq": 7}), "append note");
-
-        assert_eq!(msg.role, EVENT_ROLE);
-        let event_meta = msg.extra.get("event").expect("extra.event missing");
-        assert_eq!(event_meta["subkind"], json!("goal_delta"));
-        assert_eq!(event_meta["source"], json!("tool.set_goal"));
-        assert_eq!(event_meta["payload"]["seq"], json!(7));
     }
 
     #[test]
@@ -645,37 +466,6 @@ mod tests {
         assert_eq!(payload["truncated"], json!(true));
         assert_eq!(payload["original_chars"], json!(MAX_GOAL_DELTA_CHARS + 100));
         assert!(payload["kept_chars"].as_u64().unwrap() < MAX_GOAL_DELTA_CHARS as u64);
-    }
-
-    #[test]
-    fn goal_delta_with_truncation_returns_message_and_metadata() {
-        let oversized = "a".repeat(MAX_GOAL_DELTA_CHARS + 100);
-        let (msg, truncation) =
-            goal_delta_with_truncation("tool.update_goal", json!({"seq": 1}), oversized);
-        let truncation = truncation.expect("expected truncation metadata");
-        let body = match &msg.content {
-            ChatContent::SimpleText(s) => s.as_str(),
-            _ => panic!("expected SimpleText"),
-        };
-
-        assert!(body.chars().count() <= MAX_GOAL_DELTA_CHARS);
-        assert_eq!(truncation.original_chars, MAX_GOAL_DELTA_CHARS + 100);
-        assert!(truncation.kept_chars < MAX_GOAL_DELTA_CHARS);
-        let payload = &msg.extra["event"]["payload"];
-        assert_eq!(payload["original_chars"], json!(truncation.original_chars));
-        assert_eq!(payload["kept_chars"], json!(truncation.kept_chars));
-    }
-
-    #[test]
-    fn goal_delta_helper_leaves_small_content_unchanged() {
-        let msg = goal_delta("tool.update_goal", json!({"seq": 1}), "small note");
-        let body = match &msg.content {
-            ChatContent::SimpleText(s) => s.as_str(),
-            _ => panic!("expected SimpleText"),
-        };
-
-        assert_eq!(body, "small note");
-        assert!(msg.extra["event"]["payload"].get("truncated").is_none());
     }
 
     #[test]

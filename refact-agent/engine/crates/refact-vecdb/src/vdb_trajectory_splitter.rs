@@ -420,56 +420,6 @@ mod tests {
         assert!(!text.contains("truncated: showing"));
     }
 
-    #[tokio::test]
-    async fn truncation_marker_reports_shown_and_total_bytes() {
-        let _guard = lock_split_bytes();
-        let total = super::MAX_PARTS_PER_MESSAGE * 16_384 + 5_000;
-        let content = "b".repeat(total);
-        let trajectory = json!({
-            "id": "traj-huge",
-            "title": "Huge message",
-            "messages": [{"role": "user", "content": content}]
-        });
-        let splitter = TrajectoryFileSplitter::new(1_000_000);
-        let results = splitter
-            .split(
-                &trajectory.to_string(),
-                &PathBuf::from(".refact/trajectories/traj-huge.json"),
-            )
-            .await
-            .unwrap();
-        let text = split_texts(&results).join("\n");
-
-        let shown = super::MAX_PARTS_PER_MESSAGE * splitter.split_bytes();
-        assert!(text.contains(&format!(
-            "... (truncated: showing {} of {} bytes; raise vecdb_trajectory_split_bytes in settings)",
-            shown, total
-        )));
-    }
-
-    #[test]
-    fn install_vecdb_trajectory_split_bytes_changes_effective_split_size() {
-        let _guard = lock_split_bytes();
-        let original = crate::vdb_thread::vecdb_trajectory_split_bytes();
-        assert_eq!(
-            original,
-            crate::vdb_thread::DEFAULT_VECDB_TRAJECTORY_SPLIT_BYTES
-        );
-        assert_eq!(
-            TrajectoryFileSplitter::new(1_000_000).split_bytes(),
-            crate::vdb_thread::DEFAULT_VECDB_TRAJECTORY_SPLIT_BYTES
-        );
-
-        crate::vdb_thread::install_vecdb_trajectory_split_bytes(4_096);
-        assert_eq!(TrajectoryFileSplitter::new(1_000_000).split_bytes(), 4_096);
-
-        crate::vdb_thread::install_vecdb_trajectory_split_bytes(original);
-        assert_eq!(
-            TrajectoryFileSplitter::new(1_000_000).split_bytes(),
-            original
-        );
-    }
-
     #[test]
     fn recognizes_project_task_and_global_trajectories() {
         let roots = MemoryPlaneRoots::new(

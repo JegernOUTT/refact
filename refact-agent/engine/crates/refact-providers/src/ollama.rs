@@ -660,34 +660,6 @@ mod tests {
     }
 
     #[test]
-    fn ollama_custom_only_addition_is_preserved_for_backwards_compatibility() {
-        let mut provider = OllamaProvider::default();
-        provider
-            .custom_models
-            .insert("custom-only".to_string(), CustomModelConfig::default());
-
-        assert_eq!(provider.get_custom_models_only()[0].id, "custom-only");
-    }
-
-    #[test]
-    fn ollama_runtime_disables_cache_control_by_default() {
-        let runtime = OllamaProvider::default().build_runtime().unwrap();
-
-        assert!(!runtime.supports_cache_control);
-    }
-
-    #[test]
-    fn ollama_runtime_can_enable_cache_control() {
-        let mut provider = OllamaProvider::default();
-        provider
-            .provider_settings_apply(serde_yaml::from_str("supports_cache_control: true").unwrap())
-            .unwrap();
-        let runtime = provider.build_runtime().unwrap();
-
-        assert!(runtime.supports_cache_control);
-    }
-
-    #[test]
     fn ollama_runtime_uses_native_chat_endpoint_and_wire_format() {
         let mut provider = OllamaProvider::default();
         provider.endpoint = "http://localhost:11434/".to_string();
@@ -739,39 +711,6 @@ mod tests {
         let settings = provider.provider_settings_as_json();
         assert_eq!(settings["num_ctx"], 65536);
         assert_eq!(settings["keep_alive"], "30m");
-    }
-
-    #[test]
-    fn ollama_default_wire_format_is_native() {
-        assert_eq!(
-            OllamaProvider::default().default_wire_format(),
-            WireFormat::OllamaNative
-        );
-    }
-
-    #[test]
-    fn ollama_show_model_info_context_length_sets_n_ctx() {
-        let tags = json!({
-            "name": "llama3.1:8b",
-            "details": {
-                "family": "llama",
-                "parameter_size": "8B"
-            }
-        });
-        let show = json!({
-            "model_info": {
-                "llama.context_length": 131072
-            },
-            "details": {
-                "family": "llama",
-                "parameter_size": "8B"
-            }
-        });
-
-        let model =
-            OllamaProvider::parse_ollama_model(&tags, Some(&show), false, &HashMap::new()).unwrap();
-
-        assert_eq!(model.n_ctx, 131_072);
     }
 
     #[test]

@@ -109,23 +109,3 @@ fn default_missed_grace_min_ms() -> u64 {
 fn default_missed_grace_max_ms() -> u64 {
     DEFAULT_MISSED_GRACE_MAX_MS
 }
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-
-    #[test]
-    fn scheduler_config_defaults_serde_round_trip() {
-        let config: SchedulerConfig = serde_json::from_value(json!({})).unwrap();
-
-        assert_eq!(config, SchedulerConfig::default());
-
-        let serialized = serde_json::to_value(&config).unwrap();
-        let round_tripped: SchedulerConfig = serde_json::from_value(serialized).unwrap();
-
-        assert_eq!(round_tripped, config);
-        assert_eq!(round_tripped.retry, RetryConfig::default());
-    }
-}

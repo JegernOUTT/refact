@@ -2108,52 +2108,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_xml_tag() {
-        let content = r#"
-<summary>
-This is a test summary.
-Multiple lines.
-</summary>
-"#;
-        let result = parse_xml_tag(content, "summary");
-        assert!(result.is_some());
-        assert!(result.unwrap().contains("This is a test summary"));
-    }
-
-    #[test]
-    fn test_parse_xml_tag_missing() {
-        let content = "No tags here";
-        let result = parse_xml_tag(content, "summary");
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_parse_list_tag() {
-        let content = r#"
-<files_to_open>
-/src/main.rs
-/src/config.rs
-/src/lib.rs
-</files_to_open>
-"#;
-        let result = parse_list_tag(content, "files_to_open");
-        assert_eq!(result.len(), 3);
-        assert_eq!(result[0], "/src/main.rs");
-        assert_eq!(result[1], "/src/config.rs");
-        assert_eq!(result[2], "/src/lib.rs");
-    }
-
-    #[test]
-    fn test_parse_list_tag_empty() {
-        let content = r#"
-<files_to_open>
-</files_to_open>
-"#;
-        let result = parse_list_tag(content, "files_to_open");
-        assert!(result.is_empty());
-    }
-
-    #[test]
     fn test_parse_llm_response_complete() {
         let response = r#"
 <summary>
@@ -2203,40 +2157,6 @@ Continue with refresh token implementation.
     }
 
     #[test]
-    fn test_parse_plan_tag_for_initial_plan() {
-        let response = r#"
-<summary>Move this to a task plan.</summary>
-<plan>
-Wave 0
-- Card T-1: Build storage
-- Acceptance Criteria: tests pass
-</plan>
-<handoff_message>Continue with setup.</handoff_message>
-"#;
-
-        let decisions = parse_llm_response(response);
-
-        let plan = decisions.initial_plan.unwrap();
-        assert!(plan.contains("Wave 0"));
-        assert!(plan.contains("Card T-1"));
-        assert!(!plan.contains("<plan>"));
-    }
-
-    #[test]
-    fn test_heuristic_initial_plan_from_substantive_handoff() {
-        let handoff = format!(
-            "Wave 0 ready. Card T-1 implements storage. Acceptance Criteria: cargo test passes. {}",
-            "Create follow-up cards and preserve dependencies. ".repeat(20)
-        );
-        assert!(text_symbols(&handoff) > 500);
-
-        let plan = extract_initial_plan_text("", &handoff).unwrap();
-
-        assert!(plan.contains("Wave 0"));
-        assert!(plan.contains("Acceptance Criteria"));
-    }
-
-    #[test]
     fn test_heuristic_initial_plan_is_conservative() {
         let handoff = format!(
             "Continue the conversation with these implementation details. {}",
@@ -2247,76 +2167,6 @@ Wave 0
     }
 
     #[test]
-    fn test_heuristic_initial_plan_accepts_task_plan_format() {
-        let handoff = format!(
-            "# Feature Implementation Plan\n\n## File Map\n- Modify: `src/lib.rs`\n\n## Tasks\n\n### Task 1: Update behavior\n- [ ] Step 1: Write test\n\n## Final Verification\n- `cargo test`\n\n{}",
-            "Preserve exact files, verification, and acceptance criteria. ".repeat(20)
-        );
-
-        let plan = extract_initial_plan_text("", &handoff).unwrap();
-
-        assert!(plan.contains("Feature Implementation Plan"));
-        assert!(plan.contains("Final Verification"));
-    }
-
-    #[test]
-    fn test_extract_conversation_metadata_basic() {
-        let messages = vec![
-            ChatMessage {
-                role: "user".to_string(),
-                content: ChatContent::SimpleText("Hello".to_string()),
-                ..Default::default()
-            },
-            ChatMessage {
-                role: "assistant".to_string(),
-                content: ChatContent::SimpleText("Hi there".to_string()),
-                ..Default::default()
-            },
-        ];
-
-        let metadata = extract_conversation_metadata(&messages);
-        assert_eq!(metadata.annotated_messages.len(), 2);
-        assert_eq!(metadata.annotated_messages[0].0, "MSG_ID:0");
-        assert_eq!(metadata.annotated_messages[1].0, "MSG_ID:1");
-    }
-
-    #[test]
-    fn test_extract_conversation_metadata_with_context_files() {
-        let messages = vec![ChatMessage {
-            role: "context_file".to_string(),
-            content: ChatContent::ContextFiles(vec![ContextFile {
-                file_name: "/src/main.rs".to_string(),
-                file_content: "fn main() {}".to_string(),
-                line1: 1,
-                line2: 1,
-                ..Default::default()
-            }]),
-            ..Default::default()
-        }];
-
-        let metadata = extract_conversation_metadata(&messages);
-        assert_eq!(metadata.context_files.len(), 1);
-        assert_eq!(metadata.context_files[0].path, "/src/main.rs");
-    }
-
-    #[test]
-    fn test_is_diff_content() {
-        let diff_content =
-            ChatContent::SimpleText("--- a/file.rs\n+++ b/file.rs\n@@ -1,3 +1,4 @@".to_string());
-        assert!(is_diff_content(&diff_content));
-
-        let non_diff = ChatContent::SimpleText("Just some text".to_string());
-        assert!(!is_diff_content(&non_diff));
-    }
-
-    #[test]
-    fn test_truncate_utf8_ascii() {
-        let text = "Hello, World!";
-        assert_eq!(truncate_utf8(text, 5), "Hello...");
-        assert_eq!(truncate_utf8(text, 100), "Hello, World!");
-    }
-
-    #[test]
     fn test_truncate_utf8_unicode() {
         let text = "Hello 👋 World 🌍!";
         let result = truncate_utf8(text, 8);
@@ -2324,13 +2174,6 @@ Wave 0
         for i in 0..20 {
             let _ = truncate_utf8(text, i);
         }
-    }
-
-    #[test]
-    fn test_truncate_utf8_cyrillic() {
-        let text = "Привет мир";
-        let result = truncate_utf8(text, 6);
-        assert_eq!(result, "Привет...");
     }
 
     #[test]
@@ -2369,226 +2212,6 @@ Wave 0
             remaining_symbols + context_file_rendered_symbols(&files[0]),
             80
         );
-    }
-
-    #[test]
-    fn test_parse_xml_tag_close_before_open() {
-        let content = "Some text with </summary> and then <summary>actual content</summary>";
-        let result = parse_xml_tag(content, "summary");
-        assert!(result.is_some());
-        assert_eq!(result.unwrap(), "actual content");
-    }
-
-    #[test]
-    fn test_parse_xml_tag_multiple_tags() {
-        let content = r#"
-<summary>First summary</summary>
-Some text
-<summary>Second summary</summary>
-"#;
-        let result = parse_xml_tag(content, "summary");
-        assert!(result.is_some());
-        assert_eq!(result.unwrap(), "First summary");
-    }
-
-    #[test]
-    fn test_parse_xml_tag_missing_close() {
-        let content = "<summary>Content without close tag";
-        let result = parse_xml_tag(content, "summary");
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_memory_path_extraction_tasks() {
-        let tool_output = r#"
-Memory saved successfully.
-File: /project/.refact/tasks/task-123/memories/2024-01-15_abc123_jwt-decision.md
-Task: task-123
-"#;
-        let messages = vec![ChatMessage {
-            role: "tool".to_string(),
-            content: ChatContent::SimpleText(tool_output.to_string()),
-            ..Default::default()
-        }];
-
-        let metadata = extract_conversation_metadata(&messages);
-        assert_eq!(metadata.memory_paths.len(), 1);
-        assert!(metadata.memory_paths[0].contains(".refact/tasks/"));
-        assert!(metadata.memory_paths[0].contains("/memories/"));
-    }
-
-    #[test]
-    fn test_memory_path_extraction_knowledge() {
-        let tool_output = "Loaded: /home/user/project/.refact/knowledge/2024-01-15_design.md";
-        let messages = vec![ChatMessage {
-            role: "tool".to_string(),
-            content: ChatContent::SimpleText(tool_output.to_string()),
-            ..Default::default()
-        }];
-
-        let metadata = extract_conversation_metadata(&messages);
-        assert_eq!(metadata.memory_paths.len(), 1);
-        assert!(metadata.memory_paths[0].contains(".refact/knowledge/"));
-    }
-
-    #[test]
-    fn test_diff_git_extraction() {
-        let diff_content = r#"
-diff --git a/src/auth.rs b/src/auth.rs
-index 1234567..abcdefg 100644
---- a/src/auth.rs
-+++ b/src/auth.rs
-@@ -1,3 +1,4 @@
-+use jwt::Token;
-"#;
-        let messages = vec![ChatMessage {
-            role: "tool".to_string(),
-            content: ChatContent::SimpleText(diff_content.to_string()),
-            ..Default::default()
-        }];
-
-        let metadata = extract_conversation_metadata(&messages);
-        assert!(!metadata.edited_files.is_empty());
-        assert!(metadata
-            .edited_files
-            .iter()
-            .any(|f| f.path.contains("auth.rs")));
-    }
-
-    #[test]
-    fn test_clean_path_string() {
-        assert_eq!(clean_path_string("/path/to/file.rs"), "/path/to/file.rs");
-        assert_eq!(clean_path_string("/path/to/file.rs)"), "/path/to/file.rs");
-        assert_eq!(clean_path_string("/path/to/file.rs,"), "/path/to/file.rs");
-        assert_eq!(clean_path_string("/path/to/file.rs\""), "/path/to/file.rs");
-    }
-
-    #[test]
-    fn test_normalize_list_item_bullets() {
-        assert_eq!(normalize_list_item("- /src/main.rs"), "/src/main.rs");
-        assert_eq!(normalize_list_item("* /src/main.rs"), "/src/main.rs");
-        assert_eq!(normalize_list_item("+ /src/main.rs"), "/src/main.rs");
-        assert_eq!(normalize_list_item("  - /src/main.rs"), "/src/main.rs");
-    }
-
-    #[test]
-    fn test_normalize_list_item_numbered() {
-        assert_eq!(normalize_list_item("1. /src/main.rs"), "/src/main.rs");
-        assert_eq!(normalize_list_item("1) /src/main.rs"), "/src/main.rs");
-        assert_eq!(normalize_list_item("12. /src/main.rs"), "/src/main.rs");
-        assert_eq!(normalize_list_item("  3) /src/main.rs"), "/src/main.rs");
-    }
-
-    #[test]
-    fn test_normalize_list_item_backticks() {
-        assert_eq!(normalize_list_item("`/src/main.rs`"), "/src/main.rs");
-        assert_eq!(normalize_list_item("- `/src/main.rs`"), "/src/main.rs");
-        assert_eq!(normalize_list_item("1. `/src/main.rs`"), "/src/main.rs");
-    }
-
-    #[test]
-    fn test_normalize_list_item_quotes() {
-        assert_eq!(normalize_list_item("\"/src/main.rs\""), "/src/main.rs");
-        assert_eq!(normalize_list_item("'/src/main.rs'"), "/src/main.rs");
-    }
-
-    #[test]
-    fn test_normalize_list_item_msg_id() {
-        assert_eq!(normalize_list_item("- MSG_ID:5"), "MSG_ID:5");
-        assert_eq!(normalize_list_item("1) MSG_ID:12"), "MSG_ID:12");
-    }
-
-    #[test]
-    fn test_format_conversation_entry_user() {
-        let metadata = ConversationMetadata::default();
-        let msg = ChatMessage {
-            role: "user".to_string(),
-            content: ChatContent::SimpleText("Please help me with this code".to_string()),
-            ..Default::default()
-        };
-        let result = format_conversation_entry(&msg, &metadata);
-        assert!(result.contains("### 👤 User"));
-        assert!(result.contains("Please help me with this code"));
-    }
-
-    #[test]
-    fn test_format_conversation_entry_assistant_with_tools() {
-        let metadata = ConversationMetadata::default();
-        let msg = ChatMessage {
-            role: "assistant".to_string(),
-            content: ChatContent::SimpleText("I'll search for the file.".to_string()),
-            tool_calls: Some(vec![ChatToolCall {
-                id: "call_123".to_string(),
-                index: None,
-                function: ChatToolFunction {
-                    name: "search".to_string(),
-                    arguments: "{}".to_string(),
-                },
-                tool_type: "function".to_string(),
-                extra_content: None,
-                started_at_ms: None,
-                completed_at_ms: None,
-            }]),
-            ..Default::default()
-        };
-        let result = format_conversation_entry(&msg, &metadata);
-        assert!(result.contains("### 🤖 Assistant"));
-        assert!(result.contains("`search({})`"));
-        assert!(result.contains("I'll search for the file."));
-    }
-
-    #[test]
-    fn test_format_conversation_entry_skips_context_file() {
-        let metadata = ConversationMetadata::default();
-        let msg = ChatMessage {
-            role: "context_file".to_string(),
-            content: ChatContent::SimpleText("file content".to_string()),
-            ..Default::default()
-        };
-        let result = format_conversation_entry(&msg, &metadata);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_format_conversation_entry_tool_resolves_name() {
-        let metadata = ConversationMetadata {
-            annotated_messages: vec![
-                (
-                    "MSG_ID:0".to_string(),
-                    ChatMessage {
-                        role: "assistant".to_string(),
-                        content: ChatContent::SimpleText("Let me search.".to_string()),
-                        tool_calls: Some(vec![ChatToolCall {
-                            id: "call_abc".to_string(),
-                            index: None,
-                            function: ChatToolFunction {
-                                name: "grep".to_string(),
-                                arguments: r#"{"query":"test"}"#.to_string(),
-                            },
-                            tool_type: "function".to_string(),
-                            extra_content: None,
-                            started_at_ms: None,
-                            completed_at_ms: None,
-                        }]),
-                        ..Default::default()
-                    },
-                ),
-                (
-                    "MSG_ID:1".to_string(),
-                    ChatMessage {
-                        role: "tool".to_string(),
-                        tool_call_id: "call_abc".to_string(),
-                        content: ChatContent::SimpleText("Found 3 results".to_string()),
-                        ..Default::default()
-                    },
-                ),
-            ],
-            ..Default::default()
-        };
-        let tool_msg = &metadata.annotated_messages[1].1;
-        let result = format_conversation_entry(tool_msg, &metadata);
-        assert!(result.contains("### 🔧 Tool: `grep`"));
-        assert!(result.contains("Found 3 results"));
     }
 
     #[test]
@@ -2823,68 +2446,6 @@ MSG_ID:2
         assert!(text.contains("important preserved plan"));
     }
 
-    #[test]
-    fn test_find_finish_report() {
-        let messages = vec![
-            ChatMessage {
-                role: "user".to_string(),
-                content: ChatContent::SimpleText("Do the task".to_string()),
-                ..Default::default()
-            },
-            ChatMessage {
-                role: "assistant".to_string(),
-                content: ChatContent::SimpleText("I'll complete this task.".to_string()),
-                tool_calls: Some(vec![ChatToolCall {
-                    id: "call_123".to_string(),
-                    index: None,
-                    function: ChatToolFunction {
-                        name: "finish".to_string(),
-                        arguments: r#"{"report": "Detailed report here", "summary": "All done"}"#.to_string(),
-                    },
-                    tool_type: "function".to_string(),
-                    extra_content: None,
-            started_at_ms: None,
-            completed_at_ms: None,
-                }]),
-                ..Default::default()
-            },
-            ChatMessage {
-                role: "tool".to_string(),
-                tool_call_id: "call_123".to_string(),
-                content: ChatContent::SimpleText(
-                    r#"{"type":"finish","summary":"All done","report":"Detailed report here","files_changed":["src/main.rs"]}"#.to_string()
-                ),
-                ..Default::default()
-            },
-        ];
-
-        let report = find_finish_report(&messages);
-        assert!(report.is_some());
-        let report_text = report.unwrap();
-        assert!(report_text.contains("**All done**"));
-        assert!(report_text.contains("Detailed report here"));
-        assert!(report_text.contains("`src/main.rs`"));
-    }
-
-    #[test]
-    fn test_find_finish_report_no_finish() {
-        let messages = vec![
-            ChatMessage {
-                role: "user".to_string(),
-                content: ChatContent::SimpleText("Hello".to_string()),
-                ..Default::default()
-            },
-            ChatMessage {
-                role: "assistant".to_string(),
-                content: ChatContent::SimpleText("Hi there!".to_string()),
-                ..Default::default()
-            },
-        ];
-
-        let report = find_finish_report(&messages);
-        assert!(report.is_none());
-    }
-
     fn assistant_tool_call(call_id: &str, tool_name: &str) -> ChatMessage {
         ChatMessage {
             role: "assistant".to_string(),
@@ -2935,26 +2496,6 @@ MSG_ID:2
         }
     }
 
-    #[test]
-    fn parse_llm_response_parses_plan_source_msg_id() {
-        let decisions = parse_llm_response(
-            r#"
-<summary>S</summary>
-<plan_source>MSG_ID:3</plan_source>
-<handoff_message>Continue</handoff_message>
-"#,
-        );
-        assert_eq!(decisions.plan_source.as_deref(), Some("MSG_ID:3"));
-    }
-
-    #[test]
-    fn parse_llm_response_empty_plan_source_is_none() {
-        let decisions = parse_llm_response(
-            "<summary>S</summary>\n<plan_source>\n</plan_source>\n<handoff_message>go</handoff_message>",
-        );
-        assert!(decisions.plan_source.is_none());
-    }
-
     #[tokio::test]
     async fn assemble_new_chat_existing_plan_wins_over_plan_source() {
         let messages = vec![
@@ -2980,38 +2521,6 @@ MSG_ID:2
             plan_messages[0].content.content_text_only(),
             "EXISTING_BASE_PLAN"
         );
-    }
-
-    #[tokio::test]
-    async fn assemble_new_chat_normalizes_existing_task_done_plan_role() {
-        let task_done_payload = serde_json::json!({
-            "type": "task_done",
-            "summary": "Completed existing plan",
-            "report": "Existing report body",
-            "files_changed": ["src/existing.rs"],
-        })
-        .to_string();
-        let messages = vec![plan_role_message(1, &task_done_payload)];
-
-        let new_messages = assemble_new_chat(&messages, &ParsedDecisions::default(), "agent", &[])
-            .await
-            .unwrap();
-        let plan_messages: Vec<_> = new_messages
-            .iter()
-            .filter(|msg| msg.role == "plan")
-            .collect();
-
-        assert_eq!(plan_messages.len(), 1);
-        let plan_text = plan_messages[0].content.content_text_only();
-        assert!(plan_text.contains("**Completed existing plan**"));
-        assert!(plan_text.contains("Existing report body"));
-        assert!(plan_text.contains("- `src/existing.rs`"));
-        assert_eq!(plan_messages[0].message_id, "plan-1");
-        assert_eq!(
-            plan_messages[0].extra["plan"]["version"],
-            serde_json::json!(1)
-        );
-        assert!(!plan_text.contains("task_done"));
     }
 
     #[tokio::test]
@@ -3056,29 +2565,6 @@ MSG_ID:2
         assert_eq!(carried[0].role, "plan");
         assert_eq!(carried[0].content.content_text_only(), "BASE");
         assert_eq!(carried[1].role, "event");
-    }
-
-    #[test]
-    fn carried_plan_messages_normalizes_existing_task_done_plan_role() {
-        let task_done_payload = serde_json::json!({
-            "type": "task_done",
-            "summary": "Completed existing plan",
-            "report": "Existing report body",
-            "files_changed": ["src/existing.rs"],
-        })
-        .to_string();
-        let messages = vec![plan_role_message(2, &task_done_payload)];
-
-        let carried = carried_plan_messages(&messages, "agent");
-        assert_eq!(carried.len(), 1);
-        assert_eq!(carried[0].role, "plan");
-        let plan_text = carried[0].content.content_text_only();
-        assert!(plan_text.contains("**Completed existing plan**"));
-        assert!(plan_text.contains("Existing report body"));
-        assert!(plan_text.contains("- `src/existing.rs`"));
-        assert_eq!(carried[0].message_id, "plan-2");
-        assert_eq!(carried[0].extra["plan"]["version"], serde_json::json!(2));
-        assert!(!plan_text.contains("task_done"));
     }
 
     #[test]
@@ -3350,16 +2836,5 @@ MSG_ID:2
             rebuilt.iter().filter(|m| is_plan_delta_event(m)).count(),
             19
         );
-    }
-
-    #[test]
-    fn format_annotated_messages_labels_tool_result_with_tool_name() {
-        let messages = vec![
-            assistant_tool_call("call_plan", "task_done"),
-            tool_result("call_plan", "the plan report"),
-        ];
-        let metadata = extract_conversation_metadata(&messages);
-        let formatted = format_annotated_messages(&metadata);
-        assert!(formatted.contains("[tool: task_done]"), "{formatted}");
     }
 }

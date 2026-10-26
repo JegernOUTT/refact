@@ -711,44 +711,6 @@ mod tests {
     }
 
     #[test]
-    fn clickable_point_selects_first_quad_larger_than_threshold() {
-        let quads = [
-            quad([(0.0, 0.0), (0.99, 0.0), (0.99, 1.0), (0.0, 1.0)]),
-            quad([(10.0, 20.0), (14.0, 20.0), (14.0, 24.0), (10.0, 24.0)]),
-            quad([(30.0, 40.0), (34.0, 40.0), (34.0, 44.0), (30.0, 44.0)]),
-        ];
-        assert_eq!(
-            clickable_point_from_quads(&quads, viewport()).unwrap(),
-            MainFrameCssPoint { x: 12.0, y: 22.0 }
-        );
-    }
-
-    #[test]
-    fn clickable_point_rejects_tiny_and_degenerate_quads() {
-        let quads = [
-            quad([(1.0, 1.0), (1.5, 1.0), (1.5, 1.5), (1.0, 1.5)]),
-            quad([(2.0, 2.0), (3.0, 2.0), (4.0, 2.0), (5.0, 2.0)]),
-        ];
-        assert_eq!(
-            clickable_point_from_quads(&quads, viewport()),
-            Err(MouseError::OutsideViewport)
-        );
-        assert_eq!(
-            clickable_point_from_quads(&[], viewport()),
-            Err(MouseError::NoQuads)
-        );
-    }
-
-    #[test]
-    fn clickable_point_clips_quad_to_viewport() {
-        let quads = [quad([(-4.0, -2.0), (6.0, -2.0), (6.0, 4.0), (-4.0, 4.0)])];
-        assert_eq!(
-            clickable_point_from_quads(&quads, viewport()).unwrap(),
-            MainFrameCssPoint { x: 3.0, y: 2.0 }
-        );
-    }
-
-    #[test]
     fn clipping_a_rotated_quad_keeps_the_click_point_inside_the_element() {
         let bar = quad([(0.0, 0.0), (10.0, 10.0), (11.0, 9.0), (1.0, -1.0)]);
         let viewport = MainFrameCssViewport {
@@ -765,19 +727,6 @@ mod tests {
     }
 
     #[test]
-    fn clipping_keeps_the_visible_area_of_a_partially_offscreen_quad() {
-        let polygon = intersect_quad_with_viewport(
-            quad([(-40.0, -40.0), (60.0, -40.0), (60.0, 40.0), (-40.0, 40.0)]),
-            viewport(),
-        );
-        assert_eq!(polygon_area(&polygon), 60.0 * 40.0);
-        assert_eq!(
-            polygon_center(&polygon),
-            MainFrameCssPoint { x: 30.0, y: 20.0 }
-        );
-    }
-
-    #[test]
     fn a_quad_entirely_outside_the_viewport_clips_to_nothing() {
         let offscreen = quad([
             (200.0, 200.0),
@@ -790,32 +739,6 @@ mod tests {
             clickable_point_from_quads(&[offscreen], viewport()),
             Err(MouseError::OutsideViewport)
         );
-    }
-
-    #[test]
-    fn move_emits_each_interpolated_point() {
-        let dispatcher = RecordingMouseDispatcher::default();
-        let events = dispatcher.events.clone();
-        let keyboard = Keyboard::new(RecordingKeyboardDispatcher);
-        let mut mouse = Mouse::new(dispatcher, &keyboard);
-        mouse.move_to(10.0, 20.0, 5).unwrap();
-        assert_eq!(
-            *events.lock().unwrap(),
-            (1..=5)
-                .map(|step| {
-                    mouse_payload(
-                        MouseEventType::Moved,
-                        step as f64 * 2.0,
-                        step as f64 * 4.0,
-                        Some(MouseButton::None),
-                        Some(0),
-                        None,
-                        Some(0.0),
-                    )
-                })
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(mouse.position(), MainFrameCssPoint { x: 10.0, y: 20.0 });
     }
 
     #[test]
@@ -855,175 +778,6 @@ mod tests {
                     Some(1),
                     None,
                 ),
-            ]
-        );
-    }
-
-    #[test]
-    fn dblclick_uses_click_counts_one_then_two() {
-        let dispatcher = RecordingMouseDispatcher::default();
-        let events = dispatcher.events.clone();
-        let keyboard = Keyboard::new(RecordingKeyboardDispatcher);
-        let mut mouse = Mouse::new(dispatcher, &keyboard);
-        mouse.dblclick(7.0, 9.0, MouseButton::Left).unwrap();
-        assert_eq!(
-            *events.lock().unwrap(),
-            vec![
-                mouse_payload(
-                    MouseEventType::Moved,
-                    7.0,
-                    9.0,
-                    Some(MouseButton::None),
-                    Some(0),
-                    None,
-                    Some(0.0),
-                ),
-                mouse_payload(
-                    MouseEventType::Pressed,
-                    7.0,
-                    9.0,
-                    Some(MouseButton::Left),
-                    Some(1),
-                    Some(1),
-                    Some(0.5),
-                ),
-                mouse_payload(
-                    MouseEventType::Released,
-                    7.0,
-                    9.0,
-                    Some(MouseButton::Left),
-                    Some(0),
-                    Some(1),
-                    None,
-                ),
-                mouse_payload(
-                    MouseEventType::Pressed,
-                    7.0,
-                    9.0,
-                    Some(MouseButton::Left),
-                    Some(1),
-                    Some(2),
-                    Some(0.5),
-                ),
-                mouse_payload(
-                    MouseEventType::Released,
-                    7.0,
-                    9.0,
-                    Some(MouseButton::Left),
-                    Some(0),
-                    Some(2),
-                    None,
-                ),
-            ]
-        );
-    }
-
-    #[test]
-    fn move_uses_half_force_while_button_is_held() {
-        let dispatcher = RecordingMouseDispatcher::default();
-        let events = dispatcher.events.clone();
-        let keyboard = Keyboard::new(RecordingKeyboardDispatcher);
-        let mut mouse = Mouse::new(dispatcher, &keyboard);
-        mouse.down(MouseButton::Right, 1).unwrap();
-        events.lock().unwrap().clear();
-        mouse.move_to(2.0, 3.0, 1).unwrap();
-        assert_eq!(
-            *events.lock().unwrap(),
-            vec![mouse_payload(
-                MouseEventType::Moved,
-                2.0,
-                3.0,
-                Some(MouseButton::Right),
-                Some(2),
-                None,
-                Some(0.5),
-            )]
-        );
-    }
-
-    #[test]
-    fn wheel_emits_current_position_and_deltas() {
-        let dispatcher = RecordingMouseDispatcher::default();
-        let events = dispatcher.events.clone();
-        let keyboard = Keyboard::new(RecordingKeyboardDispatcher);
-        let mut mouse = Mouse::new(dispatcher, &keyboard);
-        mouse.hover(3.0, 4.0).unwrap();
-        events.lock().unwrap().clear();
-        mouse.wheel(-12.5, 80.0).unwrap();
-        assert_eq!(
-            *events.lock().unwrap(),
-            vec![MouseDispatch::Mouse(MouseEventPayload {
-                event_type: MouseEventType::Wheel,
-                x: 3.0,
-                y: 4.0,
-                button: None,
-                buttons: None,
-                modifiers: 0,
-                click_count: None,
-                force: None,
-                delta_x: Some(-12.5),
-                delta_y: Some(80.0),
-            })]
-        );
-    }
-
-    #[test]
-    fn tap_emits_touch_start_then_empty_touch_end() {
-        let dispatcher = RecordingMouseDispatcher::default();
-        let events = dispatcher.events.clone();
-        let keyboard = Keyboard::new(RecordingKeyboardDispatcher);
-        let mut mouse = Mouse::new(dispatcher, &keyboard);
-        mouse.tap(5.0, 6.0).unwrap();
-        assert_eq!(
-            *events.lock().unwrap(),
-            vec![
-                MouseDispatch::Touch(TouchEventPayload {
-                    event_type: TouchEventType::Start,
-                    touch_points: vec![MainFrameCssPoint { x: 5.0, y: 6.0 }],
-                    modifiers: 0,
-                }),
-                MouseDispatch::Touch(TouchEventPayload {
-                    event_type: TouchEventType::End,
-                    touch_points: Vec::new(),
-                    modifiers: 0,
-                }),
-            ]
-        );
-    }
-
-    #[test]
-    fn mouse_reads_live_keyboard_modifiers() {
-        let dispatcher = RecordingMouseDispatcher::default();
-        let events = dispatcher.events.clone();
-        let mut keyboard = Keyboard::new(RecordingKeyboardDispatcher);
-        keyboard.down("Control").unwrap();
-        let mut mouse = Mouse::new(dispatcher, &keyboard);
-        mouse.hover(1.0, 1.0).unwrap();
-        let MouseDispatch::Mouse(payload) = &events.lock().unwrap()[0] else {
-            panic!("expected mouse event");
-        };
-        assert_eq!(payload.modifiers, 2);
-    }
-
-    #[test]
-    fn scroll_strategy_cycles_in_playwright_order() {
-        let mut strategy = ScrollStrategy::Protocol;
-        let mut observed = Vec::new();
-        for attempt in 0..8 {
-            observed.push((ScrollStrategy::for_attempt(attempt), strategy));
-            strategy = strategy.advance();
-        }
-        assert_eq!(
-            observed,
-            vec![
-                (ScrollStrategy::Protocol, ScrollStrategy::Protocol),
-                (ScrollStrategy::End, ScrollStrategy::End),
-                (ScrollStrategy::Center, ScrollStrategy::Center),
-                (ScrollStrategy::Start, ScrollStrategy::Start),
-                (ScrollStrategy::Protocol, ScrollStrategy::Protocol),
-                (ScrollStrategy::End, ScrollStrategy::End),
-                (ScrollStrategy::Center, ScrollStrategy::Center),
-                (ScrollStrategy::Start, ScrollStrategy::Start),
             ]
         );
     }

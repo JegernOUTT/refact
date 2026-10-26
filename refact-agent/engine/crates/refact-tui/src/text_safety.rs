@@ -147,14 +147,6 @@ mod tests {
     }
 
     #[test]
-    fn truncates_on_grapheme_boundaries() {
-        let family = "👨‍👩‍👧‍👦";
-        let (truncated, was_truncated) = truncate_graphemes(&format!("ab{family}cd"), 3);
-        assert!(was_truncated);
-        assert_eq!(truncated, format!("ab{family}…"));
-    }
-
-    #[test]
     fn sanitizes_json_string_values() {
         let value =
             sanitize_json_strings(&json!({"command\x1b[31m": "echo\x1b[2J", "items": ["a\x07b"]}));

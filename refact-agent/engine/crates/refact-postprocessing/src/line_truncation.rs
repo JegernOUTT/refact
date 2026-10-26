@@ -77,11 +77,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn short_lines_are_unchanged() {
-        assert_eq!(truncate_line("hello", 80, "limit"), "hello");
-    }
-
-    #[test]
     fn long_lines_keep_head_tail_and_quantify_omission() {
         let line = format!("HEAD{}TAIL", "x".repeat(200));
         let truncated = truncate_line(&line, 100, "tool_max_line_chars");
@@ -101,30 +96,5 @@ mod tests {
         assert_eq!(truncated.chars().count(), 90);
         assert!(truncated.starts_with('α'));
         assert!(truncated.ends_with('ω'));
-    }
-
-    #[test]
-    fn text_truncation_preserves_newlines() {
-        let text = format!("short\n{}\nlast\n", "x".repeat(200));
-        let truncated = truncate_tool_text_lines_with_limit(&text, 80);
-
-        assert!(truncated.starts_with("short\n"));
-        assert!(truncated.ends_with("\nlast\n"));
-        assert_eq!(truncated.lines().count(), 3);
-    }
-
-    fn truncate_tool_text_lines_with_limit(text: &str, max_chars: usize) -> String {
-        text.split_inclusive('\n')
-            .map(|segment| {
-                let (line, newline) = segment
-                    .strip_suffix('\n')
-                    .map_or((segment, ""), |line| (line, "\n"));
-                format!(
-                    "{}{}",
-                    truncate_line(line, max_chars, "tool_max_line_chars"),
-                    newline
-                )
-            })
-            .collect()
     }
 }

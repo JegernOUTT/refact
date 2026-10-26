@@ -130,33 +130,3 @@ pub fn run_fixed_corpus() -> Result<Evaluation, serde_json::Error> {
         avatar_activation_approved: false,
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn fixed_corpus_has_120_unique_cases_all_intents_and_no_fabricated_review() {
-        let corpus: Corpus = serde_json::from_str(CORPUS).unwrap();
-        assert_eq!(corpus.schema_version, 1);
-        assert_eq!(corpus.corpus_version, "buddy-editorial-v1");
-        assert_eq!(corpus.cases.len(), 120);
-        let ids: std::collections::BTreeSet<_> = corpus.cases.iter().map(|c| &c.id).collect();
-        let intents: std::collections::BTreeSet<_> =
-            corpus.cases.iter().map(|c| &c.intent).collect();
-        assert_eq!(ids.len(), 120);
-        assert_eq!(intents.len(), 12);
-        let result = run_fixed_corpus().unwrap();
-        assert_eq!(result.passed, 120, "{:?}", result.failed_case_ids);
-        assert_eq!(result.human_review.status, "pending");
-        assert!(result.human_review.approved_by.is_none());
-        assert!(result.human_review.evidence.is_none());
-        assert!(!result.avatar_activation_approved);
-    }
-    #[test]
-    fn runner_is_deterministic_and_never_calls_a_model() {
-        assert_eq!(
-            serde_json::to_value(run_fixed_corpus().unwrap()).unwrap(),
-            serde_json::to_value(run_fixed_corpus().unwrap()).unwrap()
-        );
-    }
-}

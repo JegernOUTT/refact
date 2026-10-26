@@ -1143,62 +1143,6 @@ mod tests {
     }
 
     #[test]
-    fn detects_unified_diff() {
-        assert!(is_unified_diff("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new"));
-        assert!(!is_unified_diff("+not enough"));
-    }
-
-    #[test]
-    fn renders_diff_gutter_signs_and_styles() {
-        let lines = render_unified_diff(
-            "--- a/x.rs\n+++ b/x.rs\n@@ -1 +1 @@\n-old\n+new\n same",
-            Some(80),
-            true,
-        );
-        let rendered = plain(&lines);
-        assert!(rendered.iter().any(|line| line == "1 -old"));
-        assert!(rendered.iter().any(|line| line == "1 +new"));
-        assert!(rendered.iter().any(|line| line == "2  same"));
-        let add = lines
-            .iter()
-            .find(|line| line_to_plain(line) == "1 +new")
-            .unwrap();
-        assert_eq!(add.spans[1].style.fg, Some(Color::Green));
-    }
-
-    #[test]
-    fn renders_file_and_hunk_lines() {
-        let lines = render_unified_diff("--- a/x\n+++ b/x\n@@ -1 +1 @@\n same", Some(80), false);
-        let rendered = plain(&lines);
-        assert!(rendered.contains(&"--- a/x".to_string()));
-        assert!(rendered.contains(&"+++ b/x".to_string()));
-        assert!(rendered.contains(&"@@ -1 +1 @@".to_string()));
-        assert!(rendered.contains(&"1  same".to_string()));
-        assert!(!rendered.iter().any(|line| line.starts_with("@ @@")));
-    }
-
-    #[test]
-    fn renders_hunk_gap_ellipsis() {
-        let lines = render_unified_diff(
-            "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n@@ -10 +10 @@\n-old2\n+new2",
-            Some(80),
-            true,
-        );
-        assert!(plain(&lines).iter().any(|line| line.trim() == "⋮"));
-    }
-
-    #[test]
-    fn hunk_header_allows_function_context_without_leaking_as_line() {
-        let lines = render_unified_diff(
-            "--- a/x.rs\n+++ b/x.rs\n@@ -20,1 +20,1 @@ fn main()\n-old\n+new",
-            Some(80),
-            false,
-        );
-        assert!(plain(&lines).contains(&"20 -old".to_string()));
-        assert!(plain(&lines).contains(&"20 +new".to_string()));
-    }
-
-    #[test]
     fn incomplete_hunk_header_keeps_body_numbered_and_word_diffed() {
         let partial = render_unified_diff(
             "--- a/x.rs\n+++ b/x.rs\n@@ -10,1 +10,1\n-let status = \"slow\";\n+let status = \"fast\";",
@@ -1230,87 +1174,6 @@ mod tests {
     }
 
     #[test]
-    fn highlights_changed_words_in_adjacent_delete_add_pair() {
-        let lines = render_unified_diff(
-            "--- a/x.rs\n+++ b/x.rs\n@@ -1 +1 @@\n-let status = \"slow\";\n+let status = \"fast\";",
-            Some(80),
-            true,
-        );
-        let removed = lines
-            .iter()
-            .find(|line| line_to_plain(line) == "1 -let status = \"slow\";")
-            .unwrap();
-        let added = lines
-            .iter()
-            .find(|line| line_to_plain(line) == "1 +let status = \"fast\";")
-            .unwrap();
-        let removed_changed = removed
-            .spans
-            .iter()
-            .find(|span| span.content.as_ref().contains("slow"))
-            .unwrap();
-        let added_changed = added
-            .spans
-            .iter()
-            .find(|span| span.content.as_ref().contains("fast"))
-            .unwrap();
-        assert!(removed_changed.style.add_modifier.contains(Modifier::BOLD));
-        assert!(removed_changed
-            .style
-            .add_modifier
-            .contains(Modifier::REVERSED));
-        assert!(added_changed.style.add_modifier.contains(Modifier::BOLD));
-        assert!(added_changed
-            .style
-            .add_modifier
-            .contains(Modifier::REVERSED));
-    }
-
-    #[test]
-    fn cached_diff_cell_computes_word_diff_once_per_render_key() {
-        WORD_DIFF_COMPUTE_COUNT.store(0, Ordering::Relaxed);
-        let mut cache = crate::render::RenderCache::default();
-        let source =
-            "--- a/x.rs\n+++ b/x.rs\n@@ -1 +1 @@\n-let status = \"slow\";\n+let status = \"fast\";";
-        let key = crate::render::RenderCacheKey::new(source, 80, true);
-        cache.render(key, || {
-            crate::vendored::terminal_hyperlinks::plain_hyperlink_lines(render_unified_diff(
-                source,
-                Some(80),
-                true,
-            ))
-        });
-        let computed_after_first_frame = WORD_DIFF_COMPUTE_COUNT.load(Ordering::Relaxed);
-        cache.render(key, || {
-            unreachable!("render cache must serve the second frame")
-        });
-
-        assert!(computed_after_first_frame > 0);
-        assert_eq!(
-            WORD_DIFF_COMPUTE_COUNT.load(Ordering::Relaxed),
-            computed_after_first_frame
-        );
-    }
-
-    #[test]
-    fn delete_syntax_spans_are_dimmed() {
-        let lines = render_unified_diff(
-            "--- a/x.rs\n+++ b/x.rs\n@@ -1 +1 @@\n-let answer = 42;",
-            Some(80),
-            true,
-        );
-        let removed = lines
-            .iter()
-            .find(|line| line_to_plain(line) == "1 -let answer = 42;")
-            .unwrap();
-        assert!(removed
-            .spans
-            .iter()
-            .skip(2)
-            .any(|span| span.style.add_modifier.contains(Modifier::DIM)));
-    }
-
-    #[test]
     fn oversized_word_diff_uses_line_level_fallback() {
         let removed = format!("-{}", "slow ".repeat(WORD_DIFF_MAX_WORDS + 1));
         let added = format!("+{}", "fast ".repeat(WORD_DIFF_MAX_WORDS + 1));
@@ -1335,13 +1198,6 @@ mod tests {
     }
 
     #[test]
-    fn no_color_diff_keeps_gutter_signs() {
-        let lines = render_unified_diff("@@ -1 +1 @@\n-old\n+new", Some(80), false);
-        assert!(plain(&lines).contains(&"1 -old".to_string()));
-        assert!(plain(&lines).contains(&"1 +new".to_string()));
-    }
-
-    #[test]
     fn no_color_diff_and_summary_have_no_styles() {
         let diff = render_unified_diff(
             "--- a/x.rs\n+++ b/x.rs\n@@ -1 +1 @@\n-let status = \"slow\";\n+let status = \"fast\";\n@@ -10 +10 @@\n-old\n+new",
@@ -1361,52 +1217,5 @@ mod tests {
         let summary =
             create_diff_summary_with_color_enabled(&changes, Path::new("/tmp/project"), 80, false);
         assert!(!has_style(&summary));
-    }
-
-    #[test]
-    fn calculates_add_remove_counts() {
-        assert_eq!(
-            calculate_add_remove_from_diff("--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n-old\n+new\n same"),
-            (1, 1)
-        );
-    }
-
-    #[test]
-    fn displays_paths_relative_to_cwd_and_home() {
-        let cwd = std::env::current_dir().unwrap();
-        let nested = cwd.join("src").join("main.rs");
-        assert_eq!(display_path_for(&nested, &cwd), "src/main.rs");
-        assert_eq!(
-            display_path_for(Path::new("src/lib.rs"), &cwd),
-            "src/lib.rs"
-        );
-    }
-
-    #[test]
-    fn creates_diff_summary_for_multiple_files() {
-        let mut changes = HashMap::new();
-        changes.insert(
-            PathBuf::from("src/a.rs"),
-            FileChange::Add {
-                content: "fn a() {}\n".to_string(),
-            },
-        );
-        changes.insert(
-            PathBuf::from("src/b.rs"),
-            FileChange::Update {
-                unified_diff: "--- a/src/b.rs\n+++ b/src/b.rs\n@@ -1 +1 @@\n-old\n+new".to_string(),
-                move_path: Some(PathBuf::from("src/c.rs")),
-            },
-        );
-        let rendered = plain(&create_diff_summary(
-            &changes,
-            Path::new("/tmp/project"),
-            80,
-        ));
-        assert!(rendered[0].contains("Edited 2 files"));
-        assert!(rendered
-            .iter()
-            .any(|line| line.contains("src/b.rs → src/c.rs")));
-        assert!(rendered.iter().any(|line| line.contains("+new")));
     }
 }

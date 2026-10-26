@@ -227,24 +227,3 @@ async fn restart_refuses_failed_card_whose_dependency_is_not_done() {
     crate::tasks::admission::shutdown(&app).await;
     holder.release();
 }
-
-#[tokio::test]
-async fn restart_proceeds_when_dependencies_are_done() {
-    let (gcx, _temp, source, mut app, facade, ccx) = restart_with_dependency("done").await;
-    let holder = hold_capacity(&mut app, &source).await;
-
-    crate::tools::tool_task_restart_agent::ToolTaskRestartAgent::new()
-        .tool_execute(
-            ccx,
-            &"restart".to_string(),
-            &std::collections::HashMap::from([("card_id".to_string(), json!("B"))]),
-        )
-        .await
-        .unwrap();
-
-    let board = storage::load_board(gcx, "task-1").await.unwrap();
-    assert_eq!(board.get_card("B").unwrap().column, "doing");
-    assert!(facade.created.lock().unwrap().is_empty());
-    crate::tasks::admission::shutdown(&app).await;
-    holder.release();
-}

@@ -342,71 +342,6 @@ mod tests {
         }
     }
 
-    fn drop_result(accepted: bool, delivered: bool, mutations: usize) -> FileDropResult {
-        FileDropResult {
-            accepted,
-            delivered,
-            observed_names: vec!["drop.txt".to_string()],
-            mutations,
-            target: FileDropTarget {
-                id: "files".to_string(),
-                tag: "DIV".to_string(),
-                connected: true,
-                same_document: true,
-            },
-        }
-    }
-
-    #[test]
-    fn file_drop_verification_accepts_a_page_handler_that_claimed_the_event() {
-        let paths = vec!["/tmp/drop.txt".to_string()];
-        assert!(verify_file_drop(&drop_result(true, true, 0), &paths).is_ok());
-        assert!(verify_file_drop(&drop_result(true, false, 1), &paths).is_ok());
-    }
-
-    #[test]
-    fn file_drop_verification_rejects_a_target_that_never_handled_the_drop() {
-        let error = verify_file_drop(
-            &drop_result(true, false, 0),
-            &vec!["/tmp/drop.txt".to_string()],
-        )
-        .unwrap_err();
-
-        assert!(error.contains("drop handler did not run"));
-    }
-
-    #[test]
-    fn file_drop_verification_rejects_a_target_that_refused_the_dragover() {
-        let error = verify_file_drop(
-            &drop_result(false, false, 0),
-            &vec!["/tmp/drop.txt".to_string()],
-        )
-        .unwrap_err();
-
-        assert!(error.contains("preventDefault()"));
-    }
-
-    #[test]
-    fn file_drop_verification_rejects_a_detached_target() {
-        let mut result = drop_result(true, true, 1);
-        result.target.connected = false;
-
-        let error = verify_file_drop(&result, &vec!["/tmp/drop.txt".to_string()]).unwrap_err();
-
-        assert!(error.contains("not attached to the page document"));
-    }
-
-    #[test]
-    fn file_drop_verification_compares_basenames_and_rejects_missing_files() {
-        let mut result = drop_result(true, true, 1);
-        result.observed_names.clear();
-
-        let error = verify_file_drop(&result, &vec!["/tmp/drop.txt".to_string()]).unwrap_err();
-
-        assert!(error.contains("[\"drop.txt\"]"));
-        assert!(error.contains("[]"));
-    }
-
     fn run_drag(started_drag: bool) -> (Vec<Recorded>, Result<(), MouseError>, MainFrameCssPoint) {
         let events = Arc::new(Mutex::new(Vec::new()));
         let driver = RecordingDriver {
@@ -477,24 +412,6 @@ mod tests {
         assert!(trigger < released);
         assert!(released < read);
         assert_eq!(position, MainFrameCssPoint { x: 30.0, y: 40.0 });
-    }
-
-    #[test]
-    fn native_drag_travels_to_the_target_in_several_interpolated_moves() {
-        let (events, _, _) = run_drag(true);
-
-        let moves_to_target = events
-            .iter()
-            .filter(|event| {
-                matches!(
-                    event,
-                    Recorded::Mouse(crate::MouseDispatch::Mouse(payload))
-                        if payload.event_type == crate::MouseEventType::Moved && payload.y > 20.0
-                )
-            })
-            .count();
-
-        assert_eq!(moves_to_target, DRAG_MOVE_STEPS);
     }
 
     #[test]

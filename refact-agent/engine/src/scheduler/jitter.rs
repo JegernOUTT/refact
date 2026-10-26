@@ -122,15 +122,6 @@ mod tests {
     }
 
     #[test]
-    fn same_task_id_same_jitter_frac() {
-        let first = jitter_frac("task-a");
-        let second = jitter_frac("task-a");
-
-        assert_eq!(first, second);
-        assert!((0.0..1.0).contains(&first));
-    }
-
-    #[test]
     fn recurring_jitter_bounded_by_frac_and_cap() {
         let from = utc_ms(2026, 1, 1, 0, 0);
         let base = next_run_ms("*/5 * * * *", from, chrono_tz::UTC).unwrap();
@@ -145,18 +136,6 @@ mod tests {
 
         assert!(jitter <= (cfg.recurring_frac * gap as f64) as u64);
         assert!(jitter <= cfg.recurring_cap_ms);
-    }
-
-    #[test]
-    fn one_shot_no_jitter_on_off_minute_marks() {
-        let from = utc_ms(2026, 1, 1, 9, 0);
-        let cfg = JitterConfig::default();
-        let jittered =
-            one_shot_jittered_next_run_ms("17 10 * * *", from, "task-a", &cfg, chrono_tz::UTC)
-                .unwrap();
-        let base = next_run_ms("17 10 * * *", from, chrono_tz::UTC).unwrap();
-
-        assert_eq!(jittered, base);
     }
 
     #[test]

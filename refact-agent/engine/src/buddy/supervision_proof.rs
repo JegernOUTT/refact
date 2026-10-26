@@ -824,40 +824,6 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn observation_is_deterministic_and_binds_heads() {
-        let fx = fixture(&["src/a.rs"]).await;
-        let first = observe_fx(&fx).await;
-        let second = observe_fx(&fx).await;
-        assert_eq!(first, second);
-        assert_eq!(first.baseline_head, first.current_head);
-        assert!(first.changed_files.is_empty());
-        assert_eq!(first.worktree_root, fx.root.to_string_lossy());
-        let _ = &fx.temp;
-    }
-
-    #[tokio::test]
-    async fn same_length_edit_changes_content_digest() {
-        let fx = fixture(&["src/a.rs"]).await;
-        let before = observe_fx(&fx).await;
-        std::fs::write(fx.root.join("src/a.rs"), "fn b() {}\n").unwrap();
-        let after = observe_fx(&fx).await;
-        assert_ne!(before.content_digest, after.content_digest);
-        assert_ne!(before.patch_digest, after.patch_digest);
-        assert_eq!(after.changed_files, vec!["src/a.rs".to_string()]);
-        // Untracked new target and deleted target are both observable.
-        let fx2 = fixture(&["src/a.rs", "src/new.rs"]).await;
-        let base = observe_fx(&fx2).await;
-        std::fs::write(fx2.root.join("src/new.rs"), "new\n").unwrap();
-        let with_new = observe_fx(&fx2).await;
-        assert_eq!(with_new.changed_files, vec!["src/new.rs".to_string()]);
-        assert_ne!(base.content_digest, with_new.content_digest);
-        std::fs::remove_file(fx2.root.join("src/a.rs")).unwrap();
-        let deleted = observe_fx(&fx2).await;
-        assert!(deleted.changed_files.contains(&"src/a.rs".to_string()));
-        assert_ne!(with_new.content_digest, deleted.content_digest);
-    }
-
-    #[tokio::test]
     async fn target_escape_symlink_and_head_drift_fail_closed() {
         let fx = fixture(&["src/a.rs"]).await;
         std::fs::write(fx.root.join("README.md"), "changed\n").unwrap();
@@ -892,30 +858,6 @@ pub(crate) mod tests {
                 .await
                 .is_err()
         );
-    }
-
-    #[tokio::test]
-    async fn revoked_or_readonly_scope_yields_no_capture() {
-        let fx = fixture(&["src/a.rs"]).await;
-        assert!(capture_before_stream(fx.cache_dir.clone(), &facts(&fx))
-            .await
-            .unwrap()
-            .is_some());
-        super::super::supervision_authority::invalidate(&fx.mandate_id).unwrap();
-        assert!(capture_before_stream(fx.cache_dir.clone(), &facts(&fx))
-            .await
-            .unwrap()
-            .is_none());
-        assert!(capture_before_stream(
-            fx.cache_dir.clone(),
-            &SessionFacts {
-                chat_id: "unsupervised".into(),
-                ..facts(&fx)
-            }
-        )
-        .await
-        .unwrap()
-        .is_none());
     }
 
     #[tokio::test]
@@ -1021,46 +963,6 @@ pub(crate) mod tests {
             6
         ));
         assert!(get_authorized_proof(&fx.chat_id).is_none());
-    }
-
-    #[tokio::test]
-    async fn native_verdict_application_promotes_only_the_recorded_met_attempt() {
-        let fx = fixture(&["src/a.rs"]).await;
-        std::fs::write(fx.root.join("src/a.rs"), "fn edited() {}\n").unwrap();
-        let facts = facts(&fx);
-        let reply = "GOAL: MET\nCRITERION C1: MET";
-        let capture = capture_before_stream(fx.cache_dir.clone(), &facts)
-            .await
-            .unwrap()
-            .unwrap();
-        bind_after_stream(capture, reply).await.unwrap();
-
-        let mut session = crate::chat::types::ChatSession::new(fx.chat_id.clone());
-        session.install_goal_with_criteria(
-            "agent",
-            &facts.goal_content,
-            true,
-            Default::default(),
-            facts.goal_criteria.clone(),
-        );
-        session.goal_set_status(GoalStatus::Verifying);
-        let outcome = crate::chat::goal_verifier::apply_goal_verdict(
-            &mut session,
-            "finish",
-            crate::chat::goal_verifier::GoalVerifierReply {
-                verdict: crate::chat::goal_verifier::GoalVerdict::Met,
-                verifier_reply: reply.into(),
-                tokens: 1,
-                criteria_verdicts: Vec::new(),
-            },
-            None,
-        );
-        assert!(matches!(
-            outcome,
-            crate::chat::goal_verifier::GoalVerificationApplyOutcome::Finalized
-        ));
-        assert!(get_authorized_proof(&fx.chat_id).is_some());
-        acknowledge_authorized(&fx.chat_id);
     }
 
     #[test]

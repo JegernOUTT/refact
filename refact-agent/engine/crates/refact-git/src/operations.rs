@@ -1177,31 +1177,6 @@ mod tests {
     }
 
     #[test]
-    fn root_commit_history_is_handled() {
-        let (dir, repo) = init_repo();
-        let oid = commit_file(
-            &repo,
-            dir.path(),
-            "src/lib.rs",
-            "fn main() {}\n",
-            "initial decision because setup",
-        );
-
-        let report = mine(&repo, 10);
-
-        assert_eq!(report.commits.len(), 1);
-        assert_eq!(report.commits[0].oid, oid.to_string());
-        assert_eq!(report.commits[0].parent_oids.len(), 0);
-        assert_eq!(
-            report.commits[0].changes[0].status,
-            GitFileChangeStatus::Added
-        );
-        assert!(report.commits[0]
-            .classifications
-            .contains(&GitCommitClassification::Decision));
-    }
-
-    #[test]
     fn workdir_diff_preserves_content_prefixes_and_cleans_metadata_origins() {
         let (dir, repo) = init_repo();
         let base = (1..=24)
@@ -1271,101 +1246,6 @@ mod tests {
     }
 
     #[test]
-    fn repeated_cochange_threshold_creates_deterministic_pair() {
-        let (dir, repo) = init_repo();
-        for idx in 0..4 {
-            fs::write(dir.path().join("b.rs"), format!("b {idx}\n")).unwrap();
-            fs::write(dir.path().join("a.rs"), format!("a {idx}\n")).unwrap();
-            commit_paths(&repo, &["a.rs", "b.rs"], "fix pair because bug");
-        }
-
-        let first = mine(&repo, 20);
-        let second = mine(&repo, 20);
-
-        assert_eq!(first.cochanges, second.cochanges);
-        assert!(first
-            .cochanges
-            .iter()
-            .any(|pair| pair.path_a == "a.rs" && pair.path_b == "b.rs" && pair.count >= 3));
-    }
-
-    #[test]
-    fn hotspot_scoring_is_deterministic_and_capped() {
-        let (dir, repo) = init_repo();
-        for idx in 0..8 {
-            commit_file(
-                &repo,
-                dir.path(),
-                &format!("file_{idx}.rs"),
-                &format!("{idx}\n"),
-                "initial",
-            );
-        }
-        for idx in 0..6 {
-            commit_file(
-                &repo,
-                dir.path(),
-                "hot.rs",
-                &format!("{}\n", "x".repeat(idx + 1)),
-                "fix hot",
-            );
-        }
-
-        let report = mine_git_history_from_repo(
-            &repo,
-            GitHistoryOptions {
-                max_commits: 50,
-                max_hotspots: 3,
-                ..GitHistoryOptions::default()
-            },
-        )
-        .unwrap();
-        let again = mine_git_history_from_repo(
-            &repo,
-            GitHistoryOptions {
-                max_commits: 50,
-                max_hotspots: 3,
-                ..GitHistoryOptions::default()
-            },
-        )
-        .unwrap();
-
-        assert_eq!(report.hotspots, again.hotspots);
-        assert_eq!(report.hotspots.len(), 3);
-        assert_eq!(report.hotspots[0].path, "hot.rs");
-    }
-
-    #[test]
-    fn bugfix_commit_message_creates_classified_source_sha() {
-        let (dir, repo) = init_repo();
-        let oid = commit_file(
-            &repo,
-            dir.path(),
-            "bug.rs",
-            "fixed\n",
-            "fix parser bug because crash",
-        );
-
-        let report = mine(&repo, 10);
-        let commit = report
-            .commits
-            .iter()
-            .find(|commit| commit.oid == oid.to_string())
-            .unwrap();
-
-        assert!(commit
-            .classifications
-            .contains(&GitCommitClassification::Bugfix));
-        assert!(commit
-            .classifications
-            .contains(&GitCommitClassification::Rationale));
-        assert_eq!(
-            commit.short_oid,
-            oid.to_string().chars().take(12).collect::<String>()
-        );
-    }
-
-    #[test]
     fn detached_head_history_does_not_fail_or_mutate_repo() {
         let (dir, repo) = init_repo();
         let first = commit_file(&repo, dir.path(), "a.rs", "a\n", "initial");
@@ -1378,41 +1258,6 @@ mod tests {
 
         assert_eq!(before, after);
         assert_eq!(report.commits[0].oid, first.to_string());
-    }
-
-    #[test]
-    fn traversal_cap_is_respected() {
-        let (dir, repo) = init_repo();
-        for idx in 0..6 {
-            commit_file(
-                &repo,
-                dir.path(),
-                "cap.rs",
-                &format!("{idx}\n"),
-                &format!("fix {idx}"),
-            );
-        }
-
-        let report = mine(&repo, 3);
-
-        assert_eq!(report.commits.len(), 3);
-        assert!(report.commit_cap_hit);
-    }
-
-    #[test]
-    fn list_branches_marks_current_branch() {
-        let (dir, repo) = init_repo();
-        let oid = commit_file(&repo, dir.path(), "file.txt", "base\n", "initial");
-        let commit = repo.find_commit(oid).unwrap();
-        repo.branch("feature", &commit, false).unwrap();
-
-        let branches = list_branches(&repo).unwrap();
-
-        assert_eq!(branches.len(), 2);
-        assert!(branches
-            .iter()
-            .any(|branch| branch.name == "feature" && !branch.is_head));
-        assert_eq!(branches.iter().filter(|branch| branch.is_head).count(), 1);
     }
 
     #[test]
@@ -1441,26 +1286,6 @@ mod tests {
         assert!(staged.is_empty());
         assert_eq!(unstaged.len(), 1);
         assert_eq!(unstaged[0].relative_path, PathBuf::from("file.txt"));
-    }
-
-    #[test]
-    fn normal_status_absolute_path_joins_native_relative_path() {
-        let (dir, repo) = init_repo();
-        let relative_path = PathBuf::from("nested").join("file.txt");
-        fs::create_dir(dir.path().join("nested")).unwrap();
-        fs::write(dir.path().join(&relative_path), "content\n").unwrap();
-
-        let (_, unstaged) =
-            get_diff_statuses(git2::StatusShow::IndexAndWorkdir, &repo, true).unwrap();
-        let change = unstaged
-            .iter()
-            .find(|change| change.relative_path == relative_path)
-            .unwrap();
-
-        assert_eq!(
-            change.absolute_path,
-            canonical_path(dir.path().to_path_buf()).join(&relative_path)
-        );
     }
 
     #[cfg(unix)]

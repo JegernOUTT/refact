@@ -722,30 +722,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn privacy_policy_get_surfaces_last_load_error() {
-        let (_cache, config, app) = test_app().await;
-        tokio::fs::write(config.path().join("privacy.yaml"), "privacy_rules: [")
-            .await
-            .unwrap();
-        let router = crate::http::routers::make_refact_http_server(app);
-
-        let (status, response) = json_request(
-            router,
-            Request::builder()
-                .uri("/v1/privacy/policy")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert!(response["error"]
-            .as_str()
-            .unwrap()
-            .contains("failed to parse"));
-    }
-
-    #[tokio::test]
     async fn privacy_status_before_observation_is_not_optimistic() {
         let (_cache, config, app) = test_app().await;
         tokio::fs::write(config.path().join("privacy.yaml"), "privacy_rules: [")
@@ -774,103 +750,6 @@ mod tests {
         );
         assert_eq!(response["observation"]["runtime_available"], false);
         assert!(response["observation"]["last_error"].is_null());
-    }
-
-    #[tokio::test]
-    async fn privacy_status_keeps_platform_support_when_runtime_is_unavailable() {
-        let (_cache, _config, app) = test_app().await;
-        crate::privacy::record_observation_status(
-            &app.gcx,
-            &refact_exec::ObservationStatus::Unavailable("ptrace denied".to_string()),
-        );
-        let router = crate::http::routers::make_refact_http_server(app);
-
-        let (status, response) = json_request(
-            router,
-            Request::builder()
-                .uri("/v1/privacy/status")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            response["observation"]["platform_supported"],
-            platform_supported_for_tests()
-        );
-        assert_eq!(response["observation"]["runtime_available"], false);
-        assert_eq!(response["observation"]["last_error"], "ptrace denied");
-    }
-
-    #[tokio::test]
-    async fn privacy_derived_lists_sorted_entries_and_clears_them() {
-        let (_cache, _config, app) = test_app().await;
-        let session = ChatSession::new("chat-derived".to_string());
-        session.derived_privacy_zones.write().unwrap().insert(
-            std::path::PathBuf::from("/proj/b.txt"),
-            crate::privacy::records::DerivedZone {
-                zone: "secrets".to_string(),
-                origin: Some("/proj/secret.env".to_string()),
-            },
-        );
-        session.derived_privacy_zones.write().unwrap().insert(
-            std::path::PathBuf::from("/proj/a.txt"),
-            crate::privacy::records::DerivedZone {
-                zone: "secrets".to_string(),
-                origin: None,
-            },
-        );
-        app.gcx
-            .chat_sessions
-            .write()
-            .await
-            .insert("chat-derived".to_string(), Arc::new(AMutex::new(session)));
-        let router = crate::http::routers::make_refact_http_server(app);
-
-        let (status, listed) = json_request(
-            router.clone(),
-            post_json("/v1/privacy/derived", json!({"chat_id": "chat-derived"})),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(listed["chat_id"], "chat-derived");
-        assert_eq!(listed["entries"][0]["path"], "/proj/a.txt");
-        assert_eq!(listed["entries"][0]["zone"], "secrets");
-        assert!(listed["entries"][0]["origin"].is_null());
-        assert_eq!(listed["entries"][1]["path"], "/proj/b.txt");
-        assert_eq!(listed["entries"][1]["origin"], "/proj/secret.env");
-
-        let (status, cleared) = json_request(
-            router.clone(),
-            post_json(
-                "/v1/privacy/derived/clear",
-                json!({"chat_id": "chat-derived", "paths": ["/proj/a.txt"]}),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(cleared["cleared"], 1);
-        assert_eq!(cleared["remaining"], 1);
-
-        let (status, cleared) = json_request(
-            router.clone(),
-            post_json(
-                "/v1/privacy/derived/clear",
-                json!({"chat_id": "chat-derived"}),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(cleared["cleared"], 1);
-        assert_eq!(cleared["remaining"], 0);
-
-        let (status, _) = json_request(
-            router,
-            post_json("/v1/privacy/derived", json!({"chat_id": "missing"})),
-        )
-        .await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

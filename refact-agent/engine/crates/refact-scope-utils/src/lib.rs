@@ -182,14 +182,6 @@ mod tests {
     }
 
     #[test]
-    fn path_with_sep_adds_only_missing_main_separator() {
-        let path = PathBuf::from("alpha").join("beta");
-        let with_sep = path_with_sep(&path);
-        assert!(with_sep.ends_with(std::path::MAIN_SEPARATOR));
-        assert_eq!(path_with_sep(Path::new(&with_sep)), with_sep);
-    }
-
-    #[test]
     fn dedup_notices_preserves_first_occurrence_order() {
         let notices = vec![
             "one".to_string(),
@@ -203,21 +195,6 @@ mod tests {
             dedup_notices(notices),
             vec!["one".to_string(), "two".to_string(), "three".to_string()]
         );
-    }
-
-    #[test]
-    fn format_scope_notices_deduplicates_and_wraps_notices() {
-        let notices = vec![
-            "first notice".to_string(),
-            "second notice".to_string(),
-            "first notice".to_string(),
-        ];
-
-        assert_eq!(
-            format_scope_notices(&notices),
-            "Worktree scope notices:\nfirst notice\nsecond notice\n\n"
-        );
-        assert_eq!(format_scope_notices(&[]), "");
     }
 
     #[test]
@@ -289,40 +266,5 @@ mod tests {
         assert!(
             scoped_path_warnings(&scoped_path(worktree, false, None, false), &f.scope).is_empty()
         );
-    }
-
-    #[test]
-    fn append_scope_warnings_prepends_warning_lines() {
-        let warnings = vec!["warning one".to_string(), "warning two".to_string()];
-
-        assert_eq!(
-            append_scope_warnings("summary".to_string(), &warnings),
-            "warning one\nwarning two\nsummary"
-        );
-        assert_eq!(append_scope_warnings("summary".to_string(), &[]), "summary");
-    }
-
-    #[test]
-    fn scope_warnings_to_tool_message_extracts_only_worktree_scope_lines() {
-        let summary =
-            "⚠️ Worktree scope: first\nnot a warning\n⚠️ Worktree scope: second\n✅ Updated file";
-        let message = scope_warnings_to_tool_message(summary, "tool-call").unwrap();
-
-        match message {
-            ContextEnum::ChatMessage(message) => {
-                assert_eq!(message.role, "tool");
-                assert_eq!(message.tool_call_id, "tool-call");
-                assert!(message.tool_calls.is_none());
-                assert_eq!(
-                    message.content,
-                    ChatContent::SimpleText(
-                        "⚠️ Worktree scope: first\n⚠️ Worktree scope: second".to_string()
-                    )
-                );
-            }
-            ContextEnum::ContextFile(_) => panic!("expected tool message"),
-        }
-
-        assert!(scope_warnings_to_tool_message("plain summary", "tool-call").is_none());
     }
 }

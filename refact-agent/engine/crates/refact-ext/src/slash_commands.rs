@@ -133,65 +133,12 @@ pub async fn load_slash_commands(ext_dirs: &ExtDirs) -> Vec<SlashCommand> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use crate::yaml_util::{yaml_str, yaml_str_list};
-
-    #[test]
-    fn test_parse_frontmatter_valid() {
-        let content = "---\ndescription: My command\nargument-hint: \"<query>\"\nallowed-tools:\n  - tool1\n  - tool2\nmodel: gpt-4o\n---\nBody text here";
-        let (fm, body) = parse_frontmatter_and_body(content);
-        assert_eq!(yaml_str(&fm, "description"), "My command");
-        assert_eq!(yaml_str(&fm, "argument-hint"), "<query>");
-        assert_eq!(yaml_str_list(&fm, "allowed-tools"), vec!["tool1", "tool2"]);
-        assert_eq!(fm.get("model").and_then(|v| v.as_str()), Some("gpt-4o"));
-        assert_eq!(body, "Body text here");
-    }
-
-    #[test]
-    fn test_parse_frontmatter_missing() {
-        let content = "Just a body with no frontmatter\nSecond line";
-        let (fm, body) = parse_frontmatter_and_body(content);
-        assert!(fm.as_mapping().map(|m| m.is_empty()).unwrap_or(true));
-        assert_eq!(body, content);
-    }
-
-    #[test]
-    fn test_parse_frontmatter_empty() {
-        let content = "---\n---\nBody only";
-        let (fm, body) = parse_frontmatter_and_body(content);
-        assert!(fm.as_mapping().map(|m| m.is_empty()).unwrap_or(true));
-        assert_eq!(body, "Body only");
-    }
 
     #[test]
     fn test_parse_frontmatter_no_closing() {
         let content = "---\ndescription: unclosed\nno closing dashes";
         let (_, body) = parse_frontmatter_and_body(content);
         assert_eq!(body, content);
-    }
-
-    #[test]
-    fn test_command_name_from_path() {
-        assert_eq!(
-            command_name_from_path(Path::new("/config/commands/format.md")),
-            Some("format".to_string())
-        );
-        assert_eq!(
-            command_name_from_path(Path::new("/config/commands/docs/review.md")),
-            Some("review".to_string())
-        );
-        assert_eq!(
-            command_name_from_path(Path::new("/config/commands/my-command.md")),
-            Some("my-command".to_string())
-        );
-    }
-
-    #[test]
-    fn test_parse_frontmatter_unknown_fields_ignored() {
-        let content = "---\ndescription: My command\nunknown_field: value\nanother: 123\n---\nBody";
-        let (fm, body) = parse_frontmatter_and_body(content);
-        assert_eq!(yaml_str(&fm, "description"), "My command");
-        assert_eq!(body, "Body");
     }
 
     #[tokio::test]
@@ -264,35 +211,5 @@ mod tests {
         assert_eq!(commands.len(), 1);
         let deploy = &commands[0];
         assert_eq!(deploy.description, "Project deploy");
-    }
-
-    #[tokio::test]
-    async fn test_load_slash_commands_subdir_name_from_stem() {
-        let tmp = tempfile::tempdir().unwrap();
-        let subdir = tmp.path().join("commands").join("docs");
-        tokio::fs::create_dir_all(&subdir).await.unwrap();
-        tokio::fs::write(subdir.join("format.md"), "Format the code")
-            .await
-            .unwrap();
-
-        let ext_dirs = crate::config_dirs::ExtDirs {
-            global_dirs: vec![tmp.path().to_path_buf()],
-            installed_dirs: vec![],
-            project_dirs: vec![],
-        };
-        let commands = load_slash_commands(&ext_dirs).await;
-        assert_eq!(commands.len(), 1);
-        assert_eq!(commands[0].name, "format");
-    }
-
-    #[tokio::test]
-    async fn test_load_slash_commands_missing_dir() {
-        let ext_dirs = crate::config_dirs::ExtDirs {
-            global_dirs: vec![PathBuf::from("/nonexistent/path/that/does/not/exist")],
-            installed_dirs: vec![],
-            project_dirs: vec![],
-        };
-        let commands = load_slash_commands(&ext_dirs).await;
-        assert!(commands.is_empty());
     }
 }

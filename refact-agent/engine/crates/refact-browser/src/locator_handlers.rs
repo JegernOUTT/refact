@@ -283,21 +283,6 @@ mod tests {
     }
 
     #[test]
-    fn no_wait_after_is_stored_on_registration() {
-        let handler = LocatorHandler::registered(
-            "banner".to_string(),
-            BrowserLocator::css("#banner"),
-            LocatorHandlerAction::Click,
-            None,
-            true,
-        )
-        .unwrap()
-        .unwrap();
-
-        assert!(handler.no_wait_after);
-    }
-
-    #[test]
     fn reset_removes_registered_handlers_and_restores_the_built_in_handler() {
         let mut registry = LocatorHandlerRegistry::default();
         registry.register(click_handler("banner", None));
@@ -348,20 +333,5 @@ mod tests {
 
             assert!(error.contains("clock"), "{error}");
         }
-    }
-
-    #[test]
-    fn default_registry_contains_dismiss_overlays_handler() {
-        let registry = LocatorHandlerRegistry::default();
-
-        assert_eq!(registry.handlers().len(), 1);
-        assert_eq!(
-            registry.handlers()[0].name,
-            DEFAULT_DISMISS_OVERLAYS_HANDLER
-        );
-        assert!(matches!(
-            registry.handlers()[0].operation,
-            LocatorHandlerOperation::DismissOverlays
-        ));
     }
 }

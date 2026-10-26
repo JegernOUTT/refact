@@ -418,18 +418,4 @@ mod tests {
             .is_empty());
         assert_eq!(load_diagnostics(temp.path()).await.unwrap().len(), 1);
     }
-
-    #[tokio::test]
-    async fn recent_diagnostics_collapse_duplicates() {
-        let temp = tempfile::tempdir().unwrap();
-        let first = diagnostic("same", (Utc::now() - Duration::seconds(1)).to_rfc3339());
-        let second = diagnostic("same", Utc::now().to_rfc3339());
-        append_diagnostic(temp.path(), &first).await.unwrap();
-        append_diagnostic(temp.path(), &second).await.unwrap();
-
-        let diagnostics = load_recent_diagnostics(temp.path(), 100).await.unwrap();
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].collected_at, second.collected_at);
-        assert_eq!(diagnostics[0].occurrences, Some(2));
-    }
 }

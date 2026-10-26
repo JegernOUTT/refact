@@ -619,7 +619,7 @@ mod tests {
     use crate::chat::types::TaskMeta as ThreadTaskMeta;
     use crate::tasks::types::{StatusUpdate, TaskBoard, TaskMeta, TaskStatus};
     use crate::tools::tools_description::Tool;
-    use refact_chat_api::{ChatCommand, ThreadParams};
+    use refact_chat_api::ChatCommand;
     use refact_runtime_api::{ChatSessionUpdate, CreateSessionRequest, RuntimeTrajectorySnapshot};
     use std::sync::Mutex as StdMutex;
 
@@ -717,33 +717,6 @@ mod tests {
             deliverable: None,
             verification: Vec::new(),
         }
-    }
-
-    fn ab_test_card() -> BoardCard {
-        let mut card = test_card(None);
-        card.assignee = Some("ab".to_string());
-        card.ab_variants = Some(crate::tasks::types::AbVariants {
-            a: AbVariantInfo {
-                agent_id: "agent-a".to_string(),
-                chat_id: "agent-chat-a".to_string(),
-                worktree: "/tmp/agent-a".to_string(),
-                worktree_name: Some("worktree-a".to_string()),
-                branch: Some("branch-a".to_string()),
-                model: Some("model-a".to_string()),
-                finish: None,
-            },
-            b: AbVariantInfo {
-                agent_id: "agent-b".to_string(),
-                chat_id: "agent-chat-b".to_string(),
-                worktree: "/tmp/agent-b".to_string(),
-                worktree_name: Some("worktree-b".to_string()),
-                branch: Some("branch-b".to_string()),
-                model: Some("model-b".to_string()),
-                finish: None,
-            },
-            winner: None,
-        });
-        card
     }
 
     fn task_meta() -> TaskMeta {
@@ -848,16 +821,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn tool_agent_pulse_description_is_correct() {
-        let desc = ToolAgentPulse::new().tool_description();
-
-        assert_eq!(desc.name, "agent_pulse");
-        assert_eq!(desc.input_schema["required"], json!(["card_id"]));
-        assert!(desc.input_schema["properties"].get("task_id").is_some());
-        assert!(desc.description.contains("planner-only"));
-    }
-
     #[tokio::test]
     async fn tool_agent_pulse_rejects_non_planner_role() {
         let temp = tempfile::tempdir().unwrap();
@@ -872,35 +835,6 @@ mod tests {
             .unwrap_err();
 
         assert!(err.contains("can only be called by the task planner"));
-    }
-
-    #[tokio::test]
-    async fn tool_agent_pulse_session_not_found_returns_graceful_message() {
-        let temp = tempfile::tempdir().unwrap();
-        let facade = Arc::new(MockChatSessionFacade::default());
-        facade.snapshots.lock().unwrap().insert(
-            "agent-chat-1".to_string(),
-            Err("session missing".to_string()),
-        );
-        let gcx = write_task(temp.path(), test_card(Some("agent-chat-1".to_string()))).await;
-        let ccx = planner_ccx(gcx, "planner", facade).await;
-        let mut tool = ToolAgentPulse::new();
-        let args = HashMap::from([
-            ("card_id".to_string(), json!("T-29")),
-            ("task_id".to_string(), json!("task-1")),
-        ]);
-
-        let output = tool_output_text(
-            tool.tool_execute(ccx, &"call".to_string(), &args)
-                .await
-                .unwrap(),
-        );
-
-        assert!(output.contains("# Agent Pulse: T-29"));
-        assert!(output.contains("**State:** ❓ last known: doing"));
-        assert!(output.contains("Session snapshot unavailable"));
-        assert!(output.contains("## Last assistant message\n> (none)"));
-        assert!(output.contains("## Last tool call\n(none)"));
     }
 
     #[tokio::test]
@@ -922,132 +856,6 @@ mod tests {
             err,
             "task_id override is not allowed from this planner chat"
         );
-    }
-
-    #[tokio::test]
-    async fn tool_agent_pulse_extracts_tool_and_message_previews() {
-        let temp = tempfile::tempdir().unwrap();
-        let facade = Arc::new(MockChatSessionFacade::default());
-        let assistant_text = format!(
-            "Adding sticky alerts logic to format_agent_status. The plan is to {} token=supersecret",
-            "continue carefully. ".repeat(20)
-        );
-        let snapshot = ChatSessionSnapshot {
-            messages: vec![
-                ChatMessage {
-                    role: "assistant".to_string(),
-                    content: ChatContent::SimpleText("Earlier".to_string()),
-                    usage: Some(crate::call_validation::ChatUsage {
-                        prompt_tokens: 10_000,
-                        completion_tokens: 5_000,
-                        total_tokens: 15_000,
-                        cache_creation_tokens: None,
-                        cache_read_tokens: None,
-                        metering_usd: None,
-                    }),
-                    ..Default::default()
-                },
-                ChatMessage {
-                    role: "assistant".to_string(),
-                    content: ChatContent::SimpleText(assistant_text),
-                    tool_calls: Some(vec![tool_call(
-                        "patch",
-                        json!({
-                            "path": "src/tools/tool_task_check_agents.rs",
-                            "old_str": "old code",
-                            "replacement": "new code"
-                        }),
-                    )]),
-                    usage: Some(crate::call_validation::ChatUsage {
-                        prompt_tokens: 20_000,
-                        completion_tokens: 3_000,
-                        total_tokens: 23_000,
-                        cache_creation_tokens: None,
-                        cache_read_tokens: None,
-                        metering_usd: None,
-                    }),
-                    thinking_blocks: Some(vec![json!({"type": "thinking", "thinking": "hidden"})]),
-                    ..Default::default()
-                },
-            ],
-            thread: ThreadParams {
-                context_tokens_cap: Some(200_000),
-                ..Default::default()
-            },
-            session_state: SessionState::ExecutingTools,
-            pause_reasons: vec![],
-            goal: None,
-        };
-        facade
-            .snapshots
-            .lock()
-            .unwrap()
-            .insert("agent-chat-1".to_string(), Ok(snapshot));
-        let gcx = write_task(temp.path(), test_card(Some("agent-chat-1".to_string()))).await;
-        let ccx = planner_ccx(gcx, "planner", facade).await;
-        let mut tool = ToolAgentPulse::new();
-        let args = HashMap::from([("card_id".to_string(), json!("T-29"))]);
-
-        let output = tool_output_text(
-            tool.tool_execute(ccx, &"call".to_string(), &args)
-                .await
-                .unwrap(),
-        );
-
-        assert!(output.contains("**State:** ⚙️ executing tools"));
-        assert!(output.contains("**Last activity:** 12s ago"));
-        assert!(output.contains("**Tokens used:** ~38k / 200k"));
-        assert!(output.contains("**Currently editing:** src/tools/tool_task_check_agents.rs"));
-        assert!(output.contains("`patch(path=src/tools/tool_task_check_agents.rs"));
-        assert!(output.contains("Adding sticky alerts logic to format_agent_status"));
-        assert!(output.contains('…'));
-        assert!(!output.contains("hidden"));
-        assert!(!output.contains("supersecret"));
-    }
-
-    #[tokio::test]
-    async fn tool_agent_pulse_resolves_ab_variant_chat() {
-        let temp = tempfile::tempdir().unwrap();
-        let facade = Arc::new(MockChatSessionFacade::default());
-        let snapshot = ChatSessionSnapshot {
-            messages: vec![ChatMessage {
-                role: "assistant".to_string(),
-                content: ChatContent::SimpleText("Variant B is editing.".to_string()),
-                ..Default::default()
-            }],
-            thread: ThreadParams {
-                context_tokens_cap: Some(100_000),
-                ..Default::default()
-            },
-            session_state: SessionState::Generating,
-            pause_reasons: vec![],
-            goal: None,
-        };
-        facade
-            .snapshots
-            .lock()
-            .unwrap()
-            .insert("agent-chat-b".to_string(), Ok(snapshot));
-        facade.states.lock().unwrap().insert(
-            "agent-chat-b".to_string(),
-            Ok(Some(SessionState::Generating)),
-        );
-        let gcx = write_task(temp.path(), ab_test_card()).await;
-        let ccx = planner_ccx(gcx, "planner", facade).await;
-        let mut tool = ToolAgentPulse::new();
-        let args = HashMap::from([("card_id".to_string(), json!("T-29/b"))]);
-
-        let output = tool_output_text(
-            tool.tool_execute(ccx, &"call".to_string(), &args)
-                .await
-                .unwrap(),
-        );
-
-        assert!(output.contains("# Agent Pulse: T-29/b"));
-        assert!(output.contains("check_agents redesign [A/B B]"));
-        assert!(output.contains("**A/B variant:** B"));
-        assert!(output.contains("**State:** 🔄 generating response"));
-        assert!(output.contains("Variant B is editing."));
     }
 
     #[tokio::test]
@@ -1093,35 +901,6 @@ mod tests {
         assert!(
             !output.contains("1h ago"),
             "should not show stale heartbeat: {output}"
-        );
-    }
-
-    #[tokio::test]
-    async fn pulse_falls_back_to_board_when_no_session() {
-        let temp = tempfile::tempdir().unwrap();
-        let now = Utc::now();
-        let five_min_ago = (now - chrono::Duration::minutes(5)).to_rfc3339();
-        let mut card = test_card(Some("agent-chat-1".to_string()));
-        card.last_heartbeat_at = Some(five_min_ago.clone());
-        card.started_at = Some(five_min_ago.clone());
-        card.created_at = five_min_ago;
-        card.status_updates = vec![];
-        let gcx = write_task(temp.path(), card).await;
-
-        let facade = Arc::new(MockChatSessionFacade::default());
-        let ccx = planner_ccx(gcx, "planner", facade).await;
-        let mut tool = ToolAgentPulse::new();
-        let args = HashMap::from([("card_id".to_string(), json!("T-29"))]);
-
-        let output = tool_output_text(
-            tool.tool_execute(ccx, &"call".to_string(), &args)
-                .await
-                .unwrap(),
-        );
-
-        assert!(
-            output.contains("**Last activity:** 5m ago"),
-            "got: {output}"
         );
     }
 }

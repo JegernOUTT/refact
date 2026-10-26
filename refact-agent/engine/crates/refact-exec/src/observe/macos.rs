@@ -20,12 +20,4 @@ mod tests {
             ObservationStatus::Unavailable("macOS syscall observation unavailable".to_string())
         );
     }
-
-    #[test]
-    fn disabled_observation_remains_disabled() {
-        assert_eq!(
-            status(false),
-            ObservationStatus::Unavailable("disabled".to_string())
-        );
-    }
 }

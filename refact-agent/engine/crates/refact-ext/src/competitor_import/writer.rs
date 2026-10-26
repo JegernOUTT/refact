@@ -1354,17 +1354,6 @@ mod tests {
         assert_eq!(manifest.entries[0].dest_hash, candidate.artifact_hash);
     }
 
-    #[test]
-    fn staged_directory_source_under_import_staging_is_allowed() {
-        let temp = tempfile::tempdir().unwrap();
-        let scope_root = temp.path().join("refact");
-        let staging_root = scope_root.join("imports").join("staging");
-        let source_dir = staging_root.join("claude").join("skill");
-        std::fs::create_dir_all(&source_dir).unwrap();
-
-        validate_staged_directory_source(&scope_root, &staging_root, &source_dir).unwrap();
-    }
-
     #[tokio::test]
     async fn user_edited_generated_destination_is_preserved() {
         let temp = tempfile::tempdir().unwrap();

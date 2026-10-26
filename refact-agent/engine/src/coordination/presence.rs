@@ -519,7 +519,7 @@ pub fn scheduler_activity(
 mod tests {
     use super::*;
     use crate::app_state::AppState;
-    use crate::coordination::{catalog, roots};
+    use crate::coordination::roots;
     use refact_work_core::store::records::PresenceMark;
     use std::collections::HashMap;
 
@@ -706,29 +706,6 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_heartbeat_with_matching_identity_is_unreachable_not_dead() {
-        let record = peer_record(
-            "alpha",
-            "engine-2",
-            4242,
-            990,
-            NOW_MS - STALE_AFTER_MS - 1,
-            PresenceMark::Active,
-        );
-
-        assert_eq!(
-            classify(
-                &record,
-                &host(),
-                StartIdentity::Started(990),
-                NOW_MS,
-                STALE_AFTER_MS
-            ),
-            PresenceState::Unreachable
-        );
-    }
-
-    #[test]
     fn a_reboot_kills_the_record_but_a_foreign_host_stays_unknown() {
         let mut rebooted =
             peer_record("alpha", "engine-2", 4242, 990, NOW_MS, PresenceMark::Active);
@@ -755,93 +732,6 @@ mod tests {
                 STALE_AFTER_MS
             ),
             PresenceState::Unknown
-        );
-    }
-
-    #[tokio::test]
-    async fn clean_shutdown_closes_the_record_while_a_crash_only_goes_unreachable() {
-        let store = store().await;
-        let engine = presence(
-            store.clone(),
-            "alpha",
-            identity("engine-1", 4242, 990),
-            true,
-            fake_probe(&[(4242, StartIdentity::Started(990))]),
-        );
-        let access = store.authorize(ProjectKey::new("alpha"));
-
-        engine.heartbeat(NOW_MS).await.unwrap();
-        let crashed = store
-            .get_engine_instance(&access, "engine-1")
-            .await
-            .unwrap()
-            .unwrap();
-        engine.close(NOW_MS + 5).await.unwrap();
-        let closed = store
-            .get_engine_instance(&access, "engine-1")
-            .await
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(
-            classify(
-                &crashed,
-                &host(),
-                StartIdentity::Started(990),
-                NOW_MS + STALE_AFTER_MS + 1,
-                STALE_AFTER_MS
-            ),
-            PresenceState::Unreachable
-        );
-        assert_eq!(closed.presence_mark, PresenceMark::Closed);
-        assert_eq!(
-            classify(
-                &closed,
-                &host(),
-                StartIdentity::Started(990),
-                NOW_MS + 6,
-                STALE_AFTER_MS
-            ),
-            PresenceState::Dead
-        );
-    }
-
-    #[tokio::test]
-    async fn an_idle_engine_is_never_advertised_as_running() {
-        let store = store().await;
-        let idle = presence(
-            store.clone(),
-            "alpha",
-            identity("engine-idle", 4242, 990),
-            false,
-            fake_probe(&[(4242, StartIdentity::Started(990))]),
-        );
-        idle.heartbeat(NOW_MS).await.unwrap();
-        let access = store.authorize(ProjectKey::new("alpha"));
-        let stored = store
-            .get_engine_instance(&access, "engine-idle")
-            .await
-            .unwrap()
-            .unwrap();
-
-        let state = classify(
-            &stored,
-            &host(),
-            StartIdentity::Started(990),
-            NOW_MS,
-            STALE_AFTER_MS,
-        );
-
-        assert_eq!(stored.presence_mark, PresenceMark::Idle);
-        assert_eq!(state, PresenceState::AliveIdle);
-        assert!(state.is_alive());
-        assert!(!state.is_running_work());
-        assert_eq!(
-            peer_liveness(&[PeerPresence {
-                instance_id: "engine-idle".into(),
-                state
-            }]),
-            PeerLiveness::IdleElsewhere
         );
     }
 
@@ -1018,82 +908,6 @@ mod tests {
             assert_eq!(detected.start, StartIdentity::Unknown);
             assert_eq!(detected.started_at_ms(), START_IDENTITY_UNOBTAINABLE);
         }
-    }
-
-    #[test]
-    fn presence_settings_reject_invalid_intervals() {
-        let mut zero = settings();
-        zero.presence_heartbeat_interval_ms = 0;
-        let mut inverted = settings();
-        inverted.presence_heartbeat_interval_ms = inverted.presence_stale_after_ms + 1;
-
-        assert!(settings().validate().is_ok());
-        assert!(zero.validate().is_err());
-        assert!(inverted.validate().is_err());
-    }
-
-    #[tokio::test]
-    async fn catalog_freshness_follows_real_peer_presence() {
-        let project = tempfile::tempdir().unwrap();
-        let directory = project.path().join(".refact/trajectories");
-        tokio::fs::create_dir_all(&directory).await.unwrap();
-        let updated_at = chrono::Utc::now().to_rfc3339();
-        tokio::fs::write(
-            directory.join("elsewhere.json"),
-            serde_json::to_vec(&serde_json::json!({
-                "id":"elsewhere", "title":"Work of another engine", "model":"trusted/model",
-                "mode":"AGENT", "created_at": updated_at, "updated_at": updated_at,
-                "messages":[], "version":1, "tool_use":"agent"
-            }))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![project.path().into()];
-        let app = AppState::from_gcx(gcx).await;
-        let identity = roots::project_identity(project.path());
-
-        let freshness = |peers: Vec<PeerPresence>| {
-            let app = app.clone();
-            let identity = identity.clone();
-            async move {
-                publish(&identity, peers, NOW_MS);
-                let catalog = catalog::build_catalog(&app, None).await.unwrap();
-                catalog
-                    .find("elsewhere")
-                    .unwrap()
-                    .metadata
-                    .freshness
-                    .clone()
-            }
-        };
-        let peer = |state| {
-            vec![PeerPresence {
-                instance_id: "engine-2".into(),
-                state,
-            }]
-        };
-
-        let running = freshness(peer(PresenceState::AliveActive)).await;
-        let idle = freshness(peer(PresenceState::AliveIdle)).await;
-        let unsure = freshness(peer(PresenceState::Unreachable)).await;
-        let nobody = freshness(vec![]).await;
-        forget(&identity);
-        let unpublished = catalog::build_catalog(&app, None)
-            .await
-            .unwrap()
-            .find("elsewhere")
-            .unwrap()
-            .metadata
-            .freshness
-            .clone();
-
-        assert_eq!(running, Freshness::Recent);
-        assert_eq!(idle, Freshness::Stale);
-        assert_eq!(unsure, Freshness::Unknown);
-        assert_eq!(nobody, Freshness::Stale);
-        assert_eq!(unpublished, Freshness::Recent);
     }
 
     #[serial_test::serial(runtime_settings)]

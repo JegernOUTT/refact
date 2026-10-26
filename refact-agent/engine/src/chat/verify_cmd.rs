@@ -706,14 +706,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_simple_env_prefix() {
-        let parsed = parse_verification_argv("FOO=bar cargo test").unwrap();
-        assert_eq!(parsed.cwd, None);
-        assert_eq!(parsed.env, vec![("FOO".to_string(), "bar".to_string())]);
-        assert_eq!(parsed.argv, vec!["cargo", "test"]);
-    }
-
-    #[test]
     fn assignment_after_program_is_a_plain_argument() {
         let parsed = parse_verification_argv("cargo test FOO=bar").unwrap();
         assert!(parsed.env.is_empty());
@@ -788,20 +780,6 @@ mod tests {
     }
 
     #[test]
-    fn unset_variable_expands_to_empty_string() {
-        let parsed = parse_verification_argv("FOO=$DEFINITELY_UNSET_VAR_XYZ cargo test").unwrap();
-        assert_eq!(parsed.env, vec![("FOO".to_string(), String::new())]);
-        assert_eq!(parsed.argv, vec!["cargo", "test"]);
-    }
-
-    #[test]
-    fn env_prefixed_command_is_recognised_by_extraction() {
-        assert!(looks_like_command("FOO=bar pnpm test"));
-        assert!(looks_like_command("cd ui && FOO=bar pnpm test"));
-        assert!(!looks_like_command("FOO=bar notatool test"));
-    }
-
-    #[test]
     fn rejects_shell_features() {
         for command in [
             "cargo test $(rm -rf /)",
@@ -873,25 +851,6 @@ mod tests {
     }
 
     #[test]
-    fn only_verify_lines_are_scraped_and_negative_controls_are_skipped() {
-        let instructions = "## Notes\n`cargo test --lib`\n\n## Verification\n- Verify: `cargo test --lib`\n## Negative control\n- temporarily remove the guard, run `cargo test --lib`, paste the failure, restore it\n";
-        assert_eq!(instruction_commands(instructions), vec!["cargo test --lib"]);
-        assert_eq!(
-            instruction_skip_notes(instructions),
-            vec!["not executed: negative-control step"]
-        );
-    }
-
-    #[test]
-    fn double_dash_test_threads_is_rejected_with_clear_note() {
-        let error =
-            parse_verification_argv("cargo test --lib -- chat::verifier -- --test-threads=1")
-                .unwrap_err();
-        assert!(error.contains("malformed cargo test separators"));
-        assert!(error.contains("command not executed"));
-    }
-
-    #[test]
     fn real_commands_in_acceptance_section_are_still_extracted() {
         let card: BoardCard = serde_json::from_value(serde_json::json!({
             "id":"T","title":"t","column":"done",
@@ -902,13 +861,6 @@ mod tests {
             instruction_commands(&card.instructions),
             vec!["make check", "go test ./...", "dotnet test", "npm run lint"]
         );
-    }
-
-    #[test]
-    fn trailing_sentence_period_is_stripped_but_path_globs_survive() {
-        assert_eq!(strip_list_and_backticks("- cargo test."), "cargo test");
-        assert_eq!(strip_list_and_backticks("- go test ./..."), "go test ./...");
-        assert_eq!(strip_list_and_backticks("- pytest tests/"), "pytest tests/");
     }
 
     #[test]

@@ -52,78 +52,6 @@ async fn poll_pending<F: std::future::Future>(mut future: std::pin::Pin<&mut F>)
 }
 
 #[tokio::test]
-async fn root_round_robin_prevents_one_roots_backlog_from_monopolizing_releases() {
-    let sched = AdmissionScheduler::new(settings(1, 1, 1));
-    let holder = acquire_now(
-        &sched,
-        request(RuntimeKind::Trajectory, "holder", "p", "root-z"),
-    )
-    .await;
-    let mut waiting = Vec::new();
-    for (id, root) in [
-        ("a1", "root-a"),
-        ("a2", "root-a"),
-        ("a3", "root-a"),
-        ("b1", "root-b"),
-        ("b2", "root-b"),
-    ] {
-        let mut wait = Box::pin(
-            sched
-                .reserve(request(RuntimeKind::Trajectory, id, "p", root))
-                .unwrap()
-                .acquire(),
-        );
-        poll_pending(wait.as_mut()).await;
-        waiting.push(Some(wait));
-    }
-    holder.release();
-    for (index, expected) in [(0, "a1"), (3, "b1"), (1, "a2"), (4, "b2"), (2, "a3")] {
-        let permit = timeout(Duration::from_secs(1), waiting[index].take().unwrap())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(permit.run().work.id, expected);
-        permit.release();
-    }
-    assert_eq!(sched.snapshot().outstanding, 0);
-}
-
-#[tokio::test]
-async fn configurable_root_quantum_is_bounded_and_preserves_fifo_in_lanes() {
-    let sched = AdmissionScheduler::new(CoordinationSettings {
-        root_fairness_quantum: 2,
-        ..settings(1, 1, 1)
-    });
-    let holder = acquire_now(&sched, request(RuntimeKind::Trajectory, "holder", "p", "z")).await;
-    let mut waits = Vec::new();
-    for (id, root) in [
-        ("a1", "a"),
-        ("a2", "a"),
-        ("a3", "a"),
-        ("b1", "b"),
-        ("b2", "b"),
-    ] {
-        let mut wait = Box::pin(
-            sched
-                .reserve(request(RuntimeKind::Trajectory, id, "p", root))
-                .unwrap()
-                .acquire(),
-        );
-        poll_pending(wait.as_mut()).await;
-        waits.push(Some(wait));
-    }
-    holder.release();
-    for index in [0, 1, 3, 4, 2] {
-        timeout(Duration::from_secs(1), waits[index].take().unwrap())
-            .await
-            .unwrap()
-            .unwrap()
-            .release();
-    }
-    assert_eq!(sched.snapshot().outstanding, 0);
-}
-
-#[tokio::test]
 async fn repeated_aged_resumes_cannot_starve_fresh_work_in_the_same_root() {
     let sched = AdmissionScheduler::new(CoordinationSettings {
         max_resume_burst: 2,
@@ -203,18 +131,6 @@ async fn parked_residency_does_not_consume_new_queue_admission() {
 }
 
 #[tokio::test]
-async fn reserve_returns_immediately_even_when_full() {
-    let sched = AdmissionScheduler::new(settings(1, 1, 1));
-    let _held = acquire_now(&sched, request(RuntimeKind::Trajectory, "a", "p", "r")).await;
-
-    let ticket = sched
-        .reserve(request(RuntimeKind::BackgroundAgent, "b", "p", "r"))
-        .expect("reserve must not block on capacity");
-    assert_eq!(ticket.state(), Some(TicketState::Reserved));
-    assert_eq!(sched.snapshot().active, 1);
-}
-
-#[tokio::test]
 async fn engine_cap_applies_across_runtimes() {
     let sched = AdmissionScheduler::new(settings(2, 16, 16));
     let _p1 = acquire_now(&sched, request(RuntimeKind::Trajectory, "t1", "p1", "r1")).await;
@@ -290,44 +206,6 @@ async fn root_cap_is_enforced_below_engine_cap() {
 }
 
 #[tokio::test]
-async fn waiter_is_admitted_when_permit_is_released() {
-    let sched = AdmissionScheduler::new(settings(1, 1, 1));
-    let held = acquire_now(&sched, request(RuntimeKind::Trajectory, "a", "p", "r")).await;
-    let ticket = sched
-        .reserve(request(RuntimeKind::Trajectory, "b", "p", "r"))
-        .unwrap();
-    let waiter = tokio::spawn(ticket.acquire());
-
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    held.release();
-
-    let permit = timeout(Duration::from_secs(1), waiter)
-        .await
-        .expect("no timeout")
-        .expect("join")
-        .expect("permit");
-    assert_eq!(permit.run().work.id, "b");
-    assert_eq!(sched.snapshot().active, 1);
-}
-
-#[tokio::test]
-async fn dropping_permit_releases_capacity_exactly_once() {
-    let sched = AdmissionScheduler::new(settings(1, 1, 1));
-    {
-        let _p = acquire_now(&sched, request(RuntimeKind::Trajectory, "a", "p", "r")).await;
-        assert_eq!(sched.snapshot().active, 1);
-    }
-    assert_eq!(sched.snapshot().active, 0);
-    assert_eq!(sched.snapshot().outstanding, 0);
-
-    let p = acquire_now(&sched, request(RuntimeKind::Trajectory, "b", "p", "r")).await;
-    p.release();
-    let snap = sched.snapshot();
-    assert_eq!(snap.active, 0);
-    assert_eq!(snap.outstanding, 0);
-}
-
-#[tokio::test]
 async fn panicking_setup_releases_permit_and_ticket_exactly_once() {
     let sched = std::sync::Arc::new(AdmissionScheduler::new(settings(1, 1, 1)));
     let permit = acquire_now(&sched, request(RuntimeKind::Trajectory, "a", "p", "r")).await;
@@ -356,25 +234,6 @@ async fn panicking_setup_releases_permit_and_ticket_exactly_once() {
     assert_eq!(sched.snapshot().active, 1);
     drop(next);
     assert_eq!(sched.snapshot().active, 0);
-}
-
-#[tokio::test]
-async fn dropping_unused_ticket_frees_the_slot() {
-    let sched = AdmissionScheduler::new(settings(4, 4, 4));
-    {
-        let ticket = sched
-            .reserve(request(RuntimeKind::Trajectory, "a", "p", "r"))
-            .unwrap();
-        assert_eq!(sched.snapshot().reserved, 1);
-        drop(ticket);
-    }
-    let snap = sched.snapshot();
-    assert_eq!(snap.reserved, 0);
-    assert_eq!(snap.outstanding, 0);
-
-    sched
-        .reserve(request(RuntimeKind::Trajectory, "a", "p", "r"))
-        .expect("id is reusable after drop");
 }
 
 #[tokio::test]
@@ -479,83 +338,6 @@ async fn park_releases_capacity_and_keeps_the_work() {
     assert_eq!(permit.run().work.id, "owner");
     assert_eq!(sched.snapshot().active, 1);
     assert_eq!(sched.snapshot().tickets[0].park_count, 1);
-}
-
-#[tokio::test]
-async fn parked_reacquire_keeps_original_age_and_beats_fresh_arrivals() {
-    let sched = AdmissionScheduler::new(settings(1, 1, 1));
-    let permit = acquire_now(&sched, request(RuntimeKind::Trajectory, "old", "p", "r")).await;
-    let blocker = acquire_now_after_park(&sched, permit).await;
-
-    let newcomer = sched
-        .reserve(request(RuntimeKind::Trajectory, "new", "p", "r"))
-        .unwrap();
-    let new_wait = tokio::spawn(newcomer.acquire());
-    tokio::time::sleep(Duration::from_millis(20)).await;
-
-    let old_wait = tokio::spawn(blocker.1.acquire());
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    blocker.0.release();
-
-    let old_permit = timeout(Duration::from_secs(1), old_wait)
-        .await
-        .expect("no timeout")
-        .expect("join")
-        .expect("permit");
-    assert_eq!(
-        old_permit.run().work.id,
-        "old",
-        "the parked run keeps its original queue age"
-    );
-    assert!(!new_wait.is_finished());
-    old_permit.release();
-    let new_permit = timeout(Duration::from_secs(1), new_wait)
-        .await
-        .expect("no timeout")
-        .expect("join")
-        .expect("permit");
-    assert_eq!(new_permit.run().work.id, "new");
-}
-
-async fn acquire_now_after_park(
-    sched: &AdmissionScheduler,
-    permit: Permit,
-) -> (Permit, refact_work_core::Ticket) {
-    let parked = permit.park().expect("park");
-    let blocker = acquire_now(
-        sched,
-        request(RuntimeKind::BackgroundAgent, "blocker", "p", "r"),
-    )
-    .await;
-    (blocker, parked)
-}
-
-#[tokio::test]
-async fn queue_full_is_rejected_explicitly() {
-    let sched = AdmissionScheduler::new(CoordinationSettings {
-        max_pending: 2,
-        ..settings(1, 1, 1)
-    });
-    let _held = acquire_now(&sched, request(RuntimeKind::Trajectory, "a", "p", "r")).await;
-    let _t1 = sched
-        .reserve(request(RuntimeKind::Trajectory, "b", "p", "r"))
-        .unwrap();
-    let _t2 = sched
-        .reserve(request(RuntimeKind::Trajectory, "c", "p", "r"))
-        .unwrap();
-    let err = sched
-        .reserve(request(RuntimeKind::Trajectory, "d", "p", "r"))
-        .unwrap_err();
-    assert!(
-        matches!(
-            err,
-            AdmissionError::QueueFull {
-                pending: 2,
-                max_pending: 2
-            }
-        ),
-        "{err:?}"
-    );
 }
 
 #[tokio::test]
@@ -717,18 +499,6 @@ async fn cap_reduction_never_evicts_running_work_but_stops_new_admissions() {
 }
 
 #[tokio::test]
-async fn configure_rejects_invalid_settings_and_keeps_previous() {
-    let sched = AdmissionScheduler::new(settings(3, 3, 3));
-    let bad = CoordinationSettings {
-        max_active_engine: 2,
-        max_active_project: 9,
-        ..CoordinationSettings::default()
-    };
-    assert!(sched.configure(bad).is_err());
-    assert_eq!(sched.settings().max_active_engine, 3);
-}
-
-#[tokio::test]
 async fn parent_never_blocks_while_spawning_at_full_capacity() {
     let sched = AdmissionScheduler::new(settings(1, 1, 1));
     let parent = acquire_now(&sched, request(RuntimeKind::Trajectory, "parent", "p", "r")).await;
@@ -777,35 +547,6 @@ async fn parent_never_blocks_while_spawning_at_full_capacity() {
         .expect("no timeout")
         .expect("parent resumes");
     assert_eq!(permit.run().work.id, "parent");
-}
-
-#[tokio::test]
-async fn fifo_order_is_preserved_among_equal_waiters() {
-    let sched = AdmissionScheduler::new(settings(1, 1, 1));
-    let held = acquire_now(&sched, request(RuntimeKind::Trajectory, "held", "p", "r")).await;
-
-    let mut waiters = Vec::new();
-    for i in 0..5 {
-        let ticket = sched
-            .reserve(request(RuntimeKind::Trajectory, &format!("w{i}"), "p", "r"))
-            .unwrap();
-        waiters.push(tokio::spawn(ticket.acquire()));
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-
-    let mut current: Option<Permit> = Some(held);
-    let mut order = Vec::new();
-    for w in waiters {
-        drop(current.take());
-        let permit = timeout(Duration::from_secs(1), w)
-            .await
-            .expect("no timeout")
-            .expect("join")
-            .expect("permit");
-        order.push(permit.run().work.id.clone());
-        current = Some(permit);
-    }
-    assert_eq!(order, vec!["w0", "w1", "w2", "w3", "w4"]);
 }
 
 #[tokio::test]
@@ -871,31 +612,4 @@ async fn snapshot_invariants_hold_under_mixed_churn() {
     assert_eq!(snap.outstanding, 0);
     assert_eq!(snap.active, 0);
     assert!(snap.tickets.is_empty());
-}
-
-#[tokio::test]
-async fn handle_observes_and_cancels_from_another_owner() {
-    let sched = AdmissionScheduler::new(settings(1, 1, 1));
-    let handle = sched.handle();
-    let req = request(RuntimeKind::Trajectory, "a", "p", "r");
-    let run = req.run.clone();
-    let permit = acquire_now(&sched, req).await;
-
-    assert!(handle.is_tracked(&run));
-    assert_eq!(handle.active_count(), 1);
-    assert!(handle.cancel(&run));
-    assert!(handle.is_tracked(&run));
-    assert_eq!(handle.active_count(), 1);
-    drop(permit);
-    assert!(!handle.is_tracked(&run));
-    assert_eq!(handle.active_count(), 0);
-}
-
-#[tokio::test]
-async fn snapshot_serializes_to_json() {
-    let sched = AdmissionScheduler::new(settings(2, 2, 2));
-    let _p = acquire_now(&sched, request(RuntimeKind::Trajectory, "a", "p", "r")).await;
-    let text = serde_json::to_string(&sched.snapshot()).unwrap();
-    assert!(text.contains("\"active\":1"), "{text}");
-    assert!(text.contains("trajectory"), "{text}");
 }

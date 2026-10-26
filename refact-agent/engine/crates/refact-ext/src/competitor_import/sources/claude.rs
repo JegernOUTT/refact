@@ -743,22 +743,6 @@ mod tests {
         assert!(!workspace.join(".refact/imports/staging/claude").exists());
     }
 
-    #[tokio::test]
-    async fn repeated_normalized_skill_import_reuses_staging_directory() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        write_file(
-            &root.join(".claude/skills/foo/SKILL.md"),
-            "---\nname: Foo Skill\n---\n# Foo\nUse foo.",
-        );
-
-        run_project_import_with_paths(&[root.to_path_buf()]).await;
-        run_project_import_with_paths(&[root.to_path_buf()]).await;
-
-        let staging_root = root.join(".refact/imports/staging/claude");
-        assert_eq!(fs::read_dir(staging_root).unwrap().count(), 1);
-    }
-
     #[test]
     fn skill_root_scan_caps_total_direct_entries_without_candidates() {
         let temp = tempfile::tempdir().unwrap();

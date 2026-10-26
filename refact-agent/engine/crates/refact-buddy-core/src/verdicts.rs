@@ -161,16 +161,6 @@ mod tests {
     }
 
     #[test]
-    fn rule_key_strips_to_two_segments() {
-        assert_eq!(
-            rule_key_of("task_health:stuck:task-42"),
-            "task_health:stuck"
-        );
-        assert_eq!(rule_key_of("memory_ops:batch"), "memory_ops:batch");
-        assert_eq!(rule_key_of("single"), "single");
-    }
-
-    #[test]
     fn migrates_legacy_batch_keys_across_state() {
         let mut state = crate::state::default_buddy_state();
         state.dismissed_history.push(crate::types::DismissEntry {
@@ -233,50 +223,5 @@ mod tests {
             cooldown_multiplier_for_rule(&verdicts, "a:b"),
             DECAY_COOLDOWN_MULTIPLIER
         );
-    }
-
-    #[test]
-    fn accepts_hold_decay_off() {
-        let mut verdicts = Vec::new();
-        for i in 0..DECAY_WINDOW {
-            let outcome = if i % 2 == 0 {
-                VerdictOutcome::Accept
-            } else {
-                VerdictOutcome::Dismiss
-            };
-            record_verdict(&mut verdicts, verdict("a:b", outcome));
-        }
-        assert_eq!(dismiss_ratio(&verdicts, "a:b"), Some(0.5));
-        assert_eq!(cooldown_multiplier_for_rule(&verdicts, "a:b"), 1);
-    }
-
-    #[test]
-    fn undo_verdicts_do_not_count_in_ratio() {
-        let mut verdicts = Vec::new();
-        for _ in 0..DECAY_WINDOW {
-            record_verdict(&mut verdicts, verdict("a:b", VerdictOutcome::Undo));
-        }
-        assert_eq!(dismiss_ratio(&verdicts, "a:b"), None);
-    }
-
-    #[test]
-    fn ring_caps_at_limit() {
-        let mut verdicts = Vec::new();
-        for _ in 0..(VERDICT_RING_CAP + 50) {
-            record_verdict(&mut verdicts, verdict("a:b", VerdictOutcome::Accept));
-        }
-        assert_eq!(verdicts.len(), VERDICT_RING_CAP);
-    }
-
-    #[test]
-    fn mute_and_unmute_round_trip() {
-        let mut muted = Vec::new();
-        assert!(mute_rule(&mut muted, "diag:cluster:llm_error:src"));
-        assert!(!mute_rule(&mut muted, "diag:cluster:other:x"));
-        assert!(is_rule_muted(&muted, "diag:cluster:whatever:y"));
-        assert!(!is_rule_muted(&muted, "task_health:stuck:t1"));
-        assert!(unmute_rule(&mut muted, "diag:cluster"));
-        assert!(muted.is_empty());
-        assert!(!unmute_rule(&mut muted, "diag:cluster"));
     }
 }

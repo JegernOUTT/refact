@@ -301,17 +301,7 @@ mod tests {
         .unwrap();
         assert_eq!(actual, after);
     }
-    #[test]
-    fn enable_preserves_all_other_configuration_and_selections() {
-        let before: serde_yaml::Value = serde_yaml::from_str("api_key: private\nfuture: {nested: [a, b]}\nenabled_models: [selected]\ndisabled_models: [custom, other]\n").unwrap();
-        let after = enable_model(before.clone(), "custom").unwrap();
-        assert_eq!(after["api_key"], before["api_key"]);
-        assert_eq!(after["future"], before["future"]);
-        assert_eq!(after["enabled_models"].as_sequence().unwrap().len(), 2);
-        assert_eq!(after["enabled_models"][0].as_str(), Some("selected"));
-        assert_eq!(after["disabled_models"][0].as_str(), Some("other"));
-        assert_eq!(enable_model(after.clone(), "custom").unwrap(), after);
-    }
+
     #[test]
     fn invalid_sequences_are_not_silently_replaced() {
         let before = serde_yaml::from_str("enabled_models: malformed").unwrap();

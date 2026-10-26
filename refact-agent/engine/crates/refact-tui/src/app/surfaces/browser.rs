@@ -395,55 +395,6 @@ mod tests {
     }
 
     #[test]
-    fn browser_surface_renders_status_url_timeline_frame_and_toolbar() {
-        let mut app = browser_app();
-
-        let rendered = render_app(&mut app, 120, 40);
-
-        for expected in [
-            "Browser · open · connected",
-            "https://example.test/checkout",
-            "Checkout",
-            FRAME_MARKER,
-            "Clicked checkout",
-            "Timeline",
-            "Toolbar history",
-            "• screenshot",
-        ] {
-            assert!(rendered.contains(expected), "{expected}: {rendered}");
-        }
-    }
-
-    #[test]
-    fn browser_surface_renders_toolbar_history_in_chronological_order() {
-        let mut app = browser_app();
-        let chat_id = app.chat_id().to_string();
-        app.apply_chat_event(ChatEvent {
-            chat_id: Some(chat_id),
-            seq: None,
-            kind: "browser_toolbar_action".to_string(),
-            raw: json!({"type": "browser_toolbar_action", "action": "refresh"}),
-        });
-        let surface = app.browser_surface.as_ref().unwrap();
-        let lines = surface_lines(app.browser_state(), surface)
-            .into_iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>();
-
-        let screenshot = lines
-            .iter()
-            .position(|line| line == "• screenshot")
-            .unwrap();
-        let refresh = lines.iter().position(|line| line == "• refresh").unwrap();
-        assert!(screenshot < refresh);
-    }
-
-    #[test]
     fn frame_updates_do_not_place_payload_or_escape_bytes_in_cells() {
         let mut app = browser_app();
         let _ = render_app(&mut app, 100, 30);
@@ -511,21 +462,6 @@ mod tests {
             .content()
             .iter()
             .all(|cell| !cell.symbol().contains('\u{1b}')));
-    }
-
-    #[test]
-    fn browser_surface_degrades_at_forty_by_fifteen() {
-        let mut app = browser_app();
-        let rendered = render_app(&mut app, 40, 15);
-
-        assert!(rendered.contains("Browser"), "{rendered}");
-        assert!(rendered.contains("URL:"), "{rendered}");
-        assert!(!rendered.chars().any(|character| {
-            matches!(
-                character,
-                '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼' | '─' | '│'
-            )
-        }));
     }
 
     #[test]

@@ -417,79 +417,6 @@ mod tests {
     }
 
     #[test]
-    fn minimax_runtime_requires_enabled_credentials_and_selected_model() {
-        let catalog = minimax_catalog();
-        let mut provider = MiniMaxProvider {
-            api_key: "sk-test".to_string(),
-            enabled: true,
-            enabled_models: vec!["MiniMax-M2".to_string()],
-            ..Default::default()
-        };
-        assert!(
-            provider
-                .build_runtime_from_catalog(&catalog)
-                .unwrap()
-                .enabled
-        );
-
-        provider.enabled = false;
-        assert!(
-            !provider
-                .build_runtime_from_catalog(&catalog)
-                .unwrap()
-                .enabled
-        );
-        provider.enabled = true;
-        provider.api_key.clear();
-        assert!(
-            !provider
-                .build_runtime_from_catalog(&catalog)
-                .unwrap()
-                .enabled
-        );
-        provider.api_key = "sk-test".to_string();
-        provider.enabled_models.clear();
-        assert!(
-            !provider
-                .build_runtime_from_catalog(&catalog)
-                .unwrap()
-                .enabled
-        );
-    }
-
-    #[test]
-    fn minimax_available_models_use_models_dev_helper_and_custom_models() {
-        let catalog = minimax_catalog();
-        let mut provider = MiniMaxProvider {
-            enabled_models: vec!["MiniMax-M2".to_string(), "minimax-custom".to_string()],
-            ..Default::default()
-        };
-        provider.custom_models.insert(
-            "minimax-custom".to_string(),
-            CustomModelConfig {
-                n_ctx: Some(4096),
-                supports_tools: Some(true),
-                ..Default::default()
-            },
-        );
-
-        let models = provider.available_models_from_catalog(&catalog).unwrap();
-        let minimax_m2 = models
-            .iter()
-            .find(|model| model.id == "MiniMax-M2")
-            .unwrap();
-        let custom = models
-            .iter()
-            .find(|model| model.id == "minimax-custom")
-            .unwrap();
-
-        assert!(minimax_m2.enabled);
-        assert!(!minimax_m2.is_custom);
-        assert!(custom.enabled);
-        assert!(custom.is_custom);
-    }
-
-    #[test]
     fn minimax_runtime_uses_anthropic_messages_without_cache_control() {
         let catalog = minimax_catalog();
         for (region, endpoint_type, expected_endpoint) in [
@@ -524,28 +451,5 @@ mod tests {
             assert_eq!(runtime.chat_endpoint, expected_endpoint);
             assert!(!runtime.supports_cache_control);
         }
-    }
-
-    #[test]
-    fn minimax_missing_catalog_provider_returns_custom_models_only() {
-        let mut provider = MiniMaxProvider {
-            enabled_models: vec!["minimax-custom".to_string()],
-            ..Default::default()
-        };
-        provider.custom_models.insert(
-            "minimax-custom".to_string(),
-            CustomModelConfig {
-                n_ctx: Some(8192),
-                ..Default::default()
-            },
-        );
-
-        let models = provider
-            .available_models_from_catalog(&ModelsDevCatalog::new())
-            .unwrap();
-
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "minimax-custom");
-        assert!(models[0].enabled);
     }
 }

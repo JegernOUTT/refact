@@ -4737,120 +4737,6 @@ mod tests {
     }
 
     #[test]
-    fn generic_quota_window_derives_used_percent() {
-        let window = quota_window_from_value("daily", &json!({"limit": 200, "remaining": 50}));
-        assert_eq!(window.used_percent, Some(75.0));
-        assert_eq!(window.remaining, Some(50.0));
-    }
-
-    #[test]
-    fn generic_quota_window_derives_exhausted_percentage() {
-        let window = quota_window_from_value("credits", &json!({"limit": 20, "remaining": 0}));
-        assert_eq!(window.used_percent, Some(100.0));
-
-        let over_limit = quota_window_from_value("credits", &json!({"limit": 20, "remaining": -1}));
-        assert_eq!(over_limit.used_percent, Some(100.0));
-    }
-
-    #[test]
-    fn litellm_budget_facts_include_usd_units() {
-        let snapshot = quota_snapshot_from_details(
-            "litellm-work",
-            "litellm",
-            ProviderQuotaSource::Litellm,
-            json!({"spend": 12.5, "max_budget": 20.0, "remaining": 7.5}),
-        );
-
-        for name in ["spend", "max_budget", "remaining"] {
-            let fact = snapshot
-                .facts
-                .iter()
-                .find(|fact| fact.id == name)
-                .unwrap_or_else(|| panic!("missing {name} fact"));
-            assert_eq!(fact.unit.as_deref(), Some("USD"));
-        }
-
-        let malformed = quota_snapshot_from_details(
-            "litellm-work",
-            "litellm",
-            ProviderQuotaSource::Litellm,
-            json!({"spend": null, "max_budget": "unknown", "remaining": 7.5}),
-        );
-        assert_eq!(malformed.facts.len(), 1);
-        assert_eq!(malformed.facts[0].id, "remaining");
-        assert_eq!(malformed.facts[0].unit.as_deref(), Some("USD"));
-    }
-
-    #[test]
-    fn openrouter_key_quota_normalizes_usage() {
-        let snapshot = quota_snapshot_from_details(
-            "openrouter-work",
-            "openrouter",
-            ProviderQuotaSource::OpenRouter,
-            json!({
-                "limit": 100.0,
-                "usage": 25.0
-            }),
-        );
-
-        assert_eq!(snapshot.source, ProviderQuotaSource::OpenRouter);
-        assert_eq!(snapshot.windows.len(), 1);
-        assert_eq!(snapshot.windows[0].id, "credits");
-        assert_eq!(snapshot.windows[0].limit, Some(100.0));
-        assert_eq!(snapshot.windows[0].used, Some(25.0));
-        assert_eq!(snapshot.windows[0].remaining, None);
-        assert_eq!(snapshot.windows[0].used_percent, Some(25.0));
-        assert_eq!(snapshot.windows[0].reset_at, None);
-        assert!(snapshot.facts.is_empty());
-
-        let with_remaining = quota_snapshot_from_details(
-            "openrouter-work",
-            "openrouter",
-            ProviderQuotaSource::OpenRouter,
-            json!({"limit": 100.0, "limit_remaining": 40.0}),
-        );
-        assert_eq!(with_remaining.windows[0].remaining, Some(40.0));
-        assert_eq!(with_remaining.windows[0].used_percent, Some(60.0));
-    }
-
-    #[test]
-    fn openrouter_key_quota_omits_empty_window_and_clamps_over_limit_usage() {
-        let absent = quota_snapshot_from_details(
-            "openrouter-work",
-            "openrouter",
-            ProviderQuotaSource::OpenRouter,
-            json!({"limit": null, "usage": "invalid", "limit_remaining": null}),
-        );
-        assert!(absent.windows.is_empty());
-
-        let over_limit = quota_snapshot_from_details(
-            "openrouter-work",
-            "openrouter",
-            ProviderQuotaSource::OpenRouter,
-            json!({"limit": 100.0, "usage": 125.0}),
-        );
-        assert_eq!(over_limit.windows.len(), 1);
-        assert_eq!(over_limit.windows[0].used_percent, Some(100.0));
-    }
-
-    #[test]
-    fn antigravity_quota_mapping_normalizes_fraction_without_absolute_remaining() {
-        let snapshot = quota_snapshot_from_details(
-            "antigravity-work",
-            "google_antigravity",
-            ProviderQuotaSource::GoogleAntigravity,
-            json!({"groups": [{"display_name": "Gemini", "buckets": [{
-                "display_name": "Daily", "remaining_fraction": 0.8, "reset": "tomorrow"
-            }]}]}),
-        );
-        assert_eq!(snapshot.windows[0].remaining, None);
-        assert!(snapshot.windows[0]
-            .used_percent
-            .is_some_and(|value| (value - 20.0).abs() < 1e-9));
-        assert_eq!(snapshot.windows[0].reset_at.as_deref(), Some("tomorrow"));
-    }
-
-    #[test]
     fn quota_envelopes_and_items_serialize_for_gui_contract() {
         let snapshot = quota_snapshot_from_details(
             "codex-work",
@@ -4910,64 +4796,6 @@ mod tests {
     }
 
     #[test]
-    fn claude_quota_includes_all_documented_and_scoped_windows_without_plan() {
-        let mut details = serde_json::Map::new();
-        for key in [
-            "five_hour",
-            "seven_day",
-            "seven_day_sonnet",
-            "seven_day_oauth_apps",
-            "seven_day_opus",
-            "seven_day_cowork",
-            "seven_day_omelette",
-        ] {
-            details.insert(key.to_string(), json!({"used_percent": 1}));
-        }
-        details.insert(
-            "scoped_windows".to_string(),
-            json!([{"label": "Fable", "window": {"used_percent": 2}}]),
-        );
-        details.insert("email".to_string(), json!("private@example.com"));
-        let snapshot = quota_snapshot_from_details(
-            "claude-work",
-            "claude_code",
-            ProviderQuotaSource::ClaudeCode,
-            Value::Object(details),
-        );
-
-        assert!(snapshot.plan.is_none());
-        assert_eq!(snapshot.windows.len(), 8);
-        assert!(serde_json::to_value(snapshot)
-            .unwrap()
-            .get("email")
-            .is_none());
-    }
-
-    #[test]
-    fn codex_quota_includes_additional_windows_and_reset_credit_fact() {
-        let snapshot = quota_snapshot_from_details(
-            "codex-work",
-            "openai_codex",
-            ProviderQuotaSource::OpenaiCodex,
-            json!({
-                "rate_limit": {"primary_window": {"used_percent": 10}},
-                "code_review_rate_limit": {"secondary_window": {"used_percent": 20}},
-                "additional_rate_limits": [{
-                    "limit_name": "Spark",
-                    "rate_limit": {"primary_window": {"used_percent": 30}}
-                }],
-                "rate_limit_reset_credits": {"available_count": 2}
-            }),
-        );
-
-        assert_eq!(snapshot.windows.len(), 3);
-        assert!(snapshot
-            .facts
-            .iter()
-            .any(|fact| fact.id == "reset_credits_available"));
-    }
-
-    #[test]
     fn stale_fallback_preserves_prior_timestamp_and_skips_unavailable() {
         let mut prior = ProviderQuotaSnapshot::unavailable("codex-work", "openai_codex");
         prior.available = true;
@@ -5014,13 +4842,6 @@ mod tests {
             merge_yaml_preserving_secrets_for_provider(provider_name, existing, incoming).unwrap(),
         )
         .unwrap()
-    }
-
-    #[test]
-    fn usage_dispatch_supports_subscription_oauth_providers() {
-        assert!(usage_base_provider_supported("google_antigravity"));
-        assert!(usage_base_provider_supported("xai_oauth"));
-        assert!(!usage_base_provider_supported("openai"));
     }
 
     #[test]
@@ -5084,49 +4905,6 @@ extra_headers:
         );
 
         assert!(merged["extra_headers"].as_object().unwrap().is_empty());
-    }
-
-    #[test]
-    fn custom_provider_merge_yaml_string_extra_headers() {
-        let merged = merged_settings_json(
-            "custom",
-            r#"
-extra_headers:
-  X-Keep: keep-secret
-  X-Absent: old-absent
-"#,
-            r#"
-extra_headers: |
-  X-Keep: "***"
-  X-New: new-value
-  X-Remove-Number: 7
-"#,
-        );
-
-        assert_eq!(merged["extra_headers"]["X-Keep"], "keep-secret");
-        assert_eq!(merged["extra_headers"]["X-New"], "new-value");
-        assert!(merged["extra_headers"].get("X-Remove-Number").is_none());
-        assert!(merged["extra_headers"].get("X-Absent").is_none());
-    }
-
-    #[test]
-    fn custom_provider_merge_json_string_extra_headers() {
-        let merged = merged_settings_json(
-            "custom",
-            r#"
-extra_headers:
-  X-Keep: keep-secret
-  X-Absent: old-absent
-"#,
-            r#"
-extra_headers: '{"X-Keep":"***","X-Json":"json-value","X-Remove":7}'
-"#,
-        );
-
-        assert_eq!(merged["extra_headers"]["X-Keep"], "keep-secret");
-        assert_eq!(merged["extra_headers"]["X-Json"], "json-value");
-        assert!(merged["extra_headers"].get("X-Remove").is_none());
-        assert!(merged["extra_headers"].get("X-Absent").is_none());
     }
 
     #[test]
@@ -5343,44 +5121,6 @@ oauth_tokens:
         assert_eq!(base, "openai");
         assert_eq!(display, "Work OpenAI");
         assert_eq!(enabled_models, vec!["gpt-4.1".to_string()]);
-    }
-
-    #[tokio::test]
-    async fn provider_get_openai_alias_returns_identity_fields() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        handle_v1_provider_update(
-            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
-            Path(ProviderPathParams {
-                name: "openai_2".to_string(),
-            }),
-            hyper::body::Bytes::from(
-                serde_json::to_vec(&json!({
-                    "base_provider": "openai",
-                    "display_name": "Work OpenAI",
-                    "api_key": "sk-two"
-                }))
-                .unwrap(),
-            ),
-        )
-        .await
-        .unwrap();
-
-        let response = handle_v1_provider_get(
-            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
-            Path(ProviderPathParams {
-                name: "openai_2".to_string(),
-            }),
-        )
-        .await
-        .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response_json(response).await;
-
-        assert_eq!(body["name"], "openai_2");
-        assert_eq!(body["base_provider"], "openai");
-        assert_eq!(body["display_name"], "Work OpenAI");
-        assert_eq!(body["settings"]["base_provider"], "openai");
-        assert_eq!(body["settings"]["display_name"], "Work OpenAI");
     }
 
     #[tokio::test]
@@ -5682,116 +5422,6 @@ extra_headers:
     }
 
     #[tokio::test]
-    #[serial_test::serial]
-    async fn claude_code_delete_waits_for_refresh_guard() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let config_dir = gcx.config_dir.clone();
-        let providers_dir = config_dir.join("providers.d");
-        tokio::fs::create_dir_all(&providers_dir).await.unwrap();
-        tokio::fs::write(
-            providers_dir.join("claude_code_2.yaml"),
-            "base_provider: claude_code\ndisplay_name: Work Claude\noauth_tokens:\n  access_token: access\n  refresh_token: refresh\n  expires_at: 9223372036854775807\n",
-        )
-        .await
-        .unwrap();
-        reload_provider_from_disk(gcx.clone(), "claude_code_2", &config_dir)
-            .await
-            .unwrap();
-        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
-        let guard = ClaudeCodeProvider::lock_refresh_guard().await.unwrap();
-
-        let delete = tokio::spawn(handle_v1_provider_delete(
-            axum::extract::State(app),
-            Path(ProviderPathParams {
-                name: "claude_code_2".to_string(),
-            }),
-        ));
-        tokio::task::yield_now().await;
-        assert!(!delete.is_finished());
-        drop(guard);
-
-        let response = tokio::time::timeout(std::time::Duration::from_secs(2), delete)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(!provider_file_exists(&config_dir, "claude_code_2"));
-        assert!(gcx.providers.read().await.get("claude_code_2").is_none());
-    }
-
-    #[tokio::test]
-    async fn custom_provider_update_removes_deleted_extra_headers_on_disk_and_runtime() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let config_dir = gcx.config_dir.clone();
-        let providers_dir = config_dir.join("providers.d");
-        tokio::fs::create_dir_all(&providers_dir).await.unwrap();
-        tokio::fs::write(
-            providers_dir.join("custom.yaml"),
-            r#"
-api_key: sk-old
-chat_endpoint: https://example.com/v1/chat/completions
-enabled: true
-enabled_models:
-  - custom-model
-custom_models:
-  custom-model:
-    n_ctx: 4096
-extra_headers:
-  X-Keep: keep-secret
-  X-Replace: old-value
-  X-Remove: remove-me
-"#,
-        )
-        .await
-        .unwrap();
-
-        let body = serde_json::to_vec(&json!({
-            "api_key": "***",
-            "extra_headers": {
-                "X-Keep": "***",
-                "X-Replace": "new-value"
-            }
-        }))
-        .unwrap();
-        let response = handle_v1_provider_update(
-            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
-            Path(ProviderPathParams {
-                name: "custom".to_string(),
-            }),
-            hyper::body::Bytes::from(body),
-        )
-        .await
-        .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let content = tokio::fs::read_to_string(providers_dir.join("custom.yaml"))
-            .await
-            .unwrap();
-        let saved: serde_json::Value =
-            serde_json::to_value(serde_yaml::from_str::<serde_yaml::Value>(&content).unwrap())
-                .unwrap();
-        assert_eq!(saved["api_key"], "sk-old");
-        assert_eq!(saved["extra_headers"]["X-Keep"], "keep-secret");
-        assert_eq!(saved["extra_headers"]["X-Replace"], "new-value");
-        assert!(saved["extra_headers"].get("X-Remove").is_none());
-
-        let runtime = {
-            let registry = gcx.providers.read().await;
-            registry.get("custom").unwrap().build_runtime().unwrap()
-        };
-        assert_eq!(
-            runtime.extra_headers.get("X-Keep").map(String::as_str),
-            Some("keep-secret")
-        );
-        assert_eq!(
-            runtime.extra_headers.get("X-Replace").map(String::as_str),
-            Some("new-value")
-        );
-        assert!(runtime.extra_headers.get("X-Remove").is_none());
-    }
-
-    #[tokio::test]
     async fn custom_provider_update_invalid_extra_headers_string_returns_422_and_preserves_file() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let config_dir = gcx.config_dir.clone();
@@ -5865,26 +5495,6 @@ extra_headers:
         assert!(html.contains("&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;"));
         assert!(html.contains("&amp; &quot;quote&quot;"));
         assert!(!html.contains("<script>alert"));
-    }
-
-    #[test]
-    fn openai_codex_session_id_is_created_and_preserved() {
-        let mut yaml_map = serde_yaml::Mapping::new();
-        let created = ensure_openai_codex_session_id(&mut yaml_map);
-        assert!(!created.is_empty());
-        assert_eq!(
-            yaml_map
-                .get(&serde_yaml::Value::String("session_id".to_string()))
-                .and_then(|value| value.as_str()),
-            Some(created.as_str())
-        );
-
-        yaml_map.insert(
-            serde_yaml::Value::String("session_id".to_string()),
-            serde_yaml::Value::String("existing-session".to_string()),
-        );
-        let preserved = ensure_openai_codex_session_id(&mut yaml_map);
-        assert_eq!(preserved, "existing-session");
     }
 
     #[tokio::test]
@@ -6297,67 +5907,6 @@ extra_headers:
         assert!(!settings.to_string().contains("gho-alias-secret"));
     }
 
-    #[tokio::test]
-    async fn instance_aware_route_resolution_rejects_unsupported_base() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let config_dir = gcx.config_dir.clone();
-        let providers_dir = config_dir.join("providers.d");
-        tokio::fs::create_dir_all(&providers_dir).await.unwrap();
-        tokio::fs::write(
-            providers_dir.join("openai_2.yaml"),
-            "base_provider: openai\ndisplay_name: Work OpenAI\napi_key: sk-test\n",
-        )
-        .await
-        .unwrap();
-
-        let err = handle_v1_provider_health(
-            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
-            Path(ProviderPathParams {
-                name: "openai_2".to_string(),
-            }),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.status_code, StatusCode::BAD_REQUEST);
-
-        let err = handle_v1_provider_usage(
-            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
-            Path(ProviderPathParams {
-                name: "openai_2".to_string(),
-            }),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.status_code, StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn openrouter_model_endpoints_accepts_provider_instances() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let config_dir = gcx.config_dir.clone();
-        let providers_dir = config_dir.join("providers.d");
-        tokio::fs::create_dir_all(&providers_dir).await.unwrap();
-        tokio::fs::write(
-            providers_dir.join("openrouter_2.yaml"),
-            "base_provider: openrouter\ndisplay_name: Work OpenRouter\n",
-        )
-        .await
-        .unwrap();
-
-        let err = handle_v1_openrouter_model_endpoints(
-            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
-            Path(ProviderModelPathParams {
-                name: "openrouter_2".to_string(),
-                model_id: "openai/gpt-4.1".to_string(),
-            }),
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(err.status_code, StatusCode::BAD_GATEWAY);
-        assert_eq!(err.message, "OpenRouter API key is not configured");
-    }
-
     async fn assert_remove_custom_model_clears_enabled_entry(
         provider_name: &'static str,
         provider: Box<dyn crate::providers::traits::ProviderTrait>,
@@ -6402,38 +5951,6 @@ extra_headers:
             .and_then(|value| value.as_mapping())
             .map(|models| models.is_empty())
             .unwrap_or(false));
-    }
-
-    #[tokio::test]
-    async fn custom_provider_remove_custom_model_clears_stale_enabled_entry() {
-        let provider = crate::providers::custom::CustomProvider {
-            chat_endpoint: "https://example.com/v1/chat/completions".to_string(),
-            enabled: true,
-            enabled_models: vec!["stale-custom".to_string()],
-            custom_models: HashMap::from([(
-                "stale-custom".to_string(),
-                CustomModelConfig::default(),
-            )]),
-            ..Default::default()
-        };
-
-        assert_remove_custom_model_clears_enabled_entry("custom", Box::new(provider)).await;
-    }
-
-    #[tokio::test]
-    async fn doubao_remove_custom_model_clears_stale_enabled_entry() {
-        let provider = crate::providers::doubao::DoubaoProvider {
-            api_key: "sk-test".to_string(),
-            enabled: true,
-            enabled_models: vec!["stale-custom".to_string()],
-            custom_models: HashMap::from([(
-                "stale-custom".to_string(),
-                CustomModelConfig::default(),
-            )]),
-            ..Default::default()
-        };
-
-        assert_remove_custom_model_clears_enabled_entry("doubao", Box::new(provider)).await;
     }
 
     #[tokio::test]

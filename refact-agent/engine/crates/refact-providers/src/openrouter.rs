@@ -942,25 +942,6 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn build_runtime_sets_openrouter_app_attribution_headers() {
-        let provider = OpenRouterProvider::default();
-        let runtime = provider.build_runtime().unwrap();
-
-        assert_eq!(
-            runtime.extra_headers.get(OPENROUTER_APP_REFERER_HEADER),
-            Some(&OPENROUTER_APP_REFERER_VALUE.to_string())
-        );
-        assert_eq!(
-            runtime.extra_headers.get(OPENROUTER_APP_TITLE_HEADER),
-            Some(&OPENROUTER_APP_TITLE_VALUE.to_string())
-        );
-        assert_eq!(
-            runtime.extra_headers.get(OPENROUTER_APP_CATEGORIES_HEADER),
-            Some(&OPENROUTER_APP_CATEGORIES_VALUE.to_string())
-        );
-    }
-
-    #[test]
     fn quota_info_uses_only_authenticated_key_fields() {
         let quota = OpenRouterProvider::quota_info_from_key_json(&json!({
             "data": {

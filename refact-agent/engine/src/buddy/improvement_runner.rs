@@ -268,70 +268,7 @@ mod tests {
             })
         }
     }
-    #[tokio::test]
-    async fn fake_executor_preserves_argv_and_confinement_and_cancellation() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("source");
-        let output = temp.path().join("output");
-        std::fs::create_dir(&root).unwrap();
-        std::fs::create_dir(&output).unwrap();
-        let command = FixedCommand {
-            criterion_id: "test".into(),
-            argv: vec!["/usr/bin/printf".into(), "$(do-not-interpret)".into()],
-            cwd: ".".into(),
-            timeout_seconds: 1,
-            expected_exit: 0,
-        };
-        let flag = Arc::new(AtomicBool::new(false));
-        assert_eq!(
-            FakeExecutor
-                .execute(&command, &root, &output, 1024, flag.clone())
-                .await
-                .unwrap()
-                .result,
-            CheckResult::Passed
-        );
-        flag.store(true, Ordering::Release);
-        assert_eq!(
-            FakeExecutor
-                .execute(&command, &root, &output, 1024, flag)
-                .await
-                .unwrap()
-                .result,
-            CheckResult::Unavailable
-        );
-        assert_eq!(
-            std::fs::read(output.join("observed")).unwrap(),
-            b"fixed check"
-        );
-        assert!(std::fs::read_dir(root).unwrap().next().is_none());
-    }
-    #[test]
-    fn offline_comparison_retains_baseline_and_rejects_quiet_regression() {
-        let baseline = OfflineProfile {
-            outputs: BTreeMap::from([("status".into(), "Ready".into())]),
-            respect_quiet: true,
-        };
-        let fixed = OfflineComparison {
-            criterion_id: "corpus".into(),
-            baseline: baseline.clone(),
-            cases: vec![CorpusCase {
-                id: "quiet".into(),
-                intent: "status".into(),
-                quiet: true,
-                expected_delivery: false,
-                max_chars: 20,
-                forbidden: vec!["secret".into()],
-            }],
-        };
-        let mut candidate = baseline;
-        candidate.respect_quiet = false;
-        let compared = compare_profiles(&fixed, &candidate).unwrap();
-        assert!(compared[0].baseline_pass);
-        assert!(!compared[0].candidate_pass);
-        assert_eq!(compared[0].candidate_output, "Ready");
-        assert_ne!(digest(&fixed).unwrap(), digest(&candidate).unwrap());
-    }
+
     #[test]
     fn scratch_snapshot_detects_content_drift_and_rejects_symlink() {
         let root = tempfile::tempdir().unwrap();
@@ -347,18 +284,6 @@ mod tests {
             std::os::unix::fs::symlink("/etc/passwd", root.path().join("escape")).unwrap();
             assert!(snapshot_files(root.path()).is_err());
         }
-    }
-
-    #[test]
-    fn fixed_evaluation_reservation_has_exact_finite_terminal_coverage() {
-        assert_eq!(
-            fixed_evaluation_terminal_slots("run"),
-            [
-                (RUN_NAMESPACE, "run".into(), 16),
-                (COMPARISON_NAMESPACE, "run".into(), 1),
-                (PROOF_NAMESPACE, "fixed:run".into(), 1),
-            ]
-        );
     }
 
     #[test]

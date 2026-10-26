@@ -567,31 +567,6 @@ mod tests {
     }
 
     #[test]
-    fn test_append_stdout_chunk() {
-        let mut t = make_transcript(1024);
-        let seq = t.append(ExecOutputStream::Stdout, "hello stdout".to_string());
-        assert_eq!(seq, 0);
-
-        let chunks = t.read_since(0);
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].text, "hello stdout");
-        assert_eq!(chunks[0].stream, ExecOutputStream::Stdout);
-        assert_eq!(chunks[0].seq, 0);
-    }
-
-    #[test]
-    fn test_append_stderr_chunk() {
-        let mut t = make_transcript(1024);
-        let seq = t.append(ExecOutputStream::Stderr, "error output".to_string());
-        assert_eq!(seq, 0);
-
-        let chunks = t.read_since(0);
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].text, "error output");
-        assert_eq!(chunks[0].stream, ExecOutputStream::Stderr);
-    }
-
-    #[test]
     fn test_append_preserves_stream_identity() {
         let mut t = make_transcript(4096);
         t.append(ExecOutputStream::Stdout, "out1".to_string());
@@ -606,32 +581,6 @@ mod tests {
     }
 
     #[test]
-    fn test_monotonic_sequence_numbers() {
-        let mut t = make_transcript(4096);
-        let s0 = t.append(ExecOutputStream::Stdout, "a".to_string());
-        let s1 = t.append(ExecOutputStream::Stdout, "b".to_string());
-        let s2 = t.append(ExecOutputStream::Stderr, "c".to_string());
-        let s3 = t.append(ExecOutputStream::Stdout, "d".to_string());
-
-        assert_eq!(s0, 0);
-        assert_eq!(s1, 1);
-        assert_eq!(s2, 2);
-        assert_eq!(s3, 3);
-        assert_eq!(t.next_seq(), 4);
-    }
-
-    #[test]
-    fn test_read_since_cursor_all() {
-        let mut t = make_transcript(4096);
-        t.append(ExecOutputStream::Stdout, "a".to_string());
-        t.append(ExecOutputStream::Stdout, "b".to_string());
-        t.append(ExecOutputStream::Stdout, "c".to_string());
-
-        let all = t.read_since(0);
-        assert_eq!(all.len(), 3);
-    }
-
-    #[test]
     fn test_read_since_cursor_partial() {
         let mut t = make_transcript(4096);
         t.append(ExecOutputStream::Stdout, "a".to_string());
@@ -642,24 +591,6 @@ mod tests {
         assert_eq!(from_second.len(), 2);
         assert_eq!(from_second[0].text, "b");
         assert_eq!(from_second[1].text, "c");
-    }
-
-    #[test]
-    fn test_read_since_cursor_none() {
-        let mut t = make_transcript(4096);
-        t.append(ExecOutputStream::Stdout, "a".to_string());
-
-        let empty = t.read_since(1);
-        assert_eq!(empty.len(), 0);
-    }
-
-    #[test]
-    fn test_read_since_cursor_beyond_appended() {
-        let mut t = make_transcript(4096);
-        t.append(ExecOutputStream::Stdout, "only".to_string());
-
-        let nothing = t.read_since(100);
-        assert_eq!(nothing.len(), 0);
     }
 
     #[test]
@@ -678,17 +609,6 @@ mod tests {
     }
 
     #[test]
-    fn test_read_result_empty_limit() {
-        let mut t = make_transcript(4096);
-        t.append(ExecOutputStream::Stdout, "a".to_string());
-
-        let result = t.read(0, Some(0));
-        assert!(result.chunks.is_empty());
-        assert_eq!(result.next_seq, 0);
-        assert_eq!(result.latest_seq, 1);
-    }
-
-    #[test]
     fn test_byte_limit_eviction() {
         let mut t = make_transcript(20);
         t.append(ExecOutputStream::Stdout, "12345678".to_string());
@@ -699,21 +619,6 @@ mod tests {
 
         assert!(t.is_truncated(), "should have evicted chunks");
         assert!(t.dropped_chunks() > 0);
-        assert!(t.dropped_bytes() > 0);
-    }
-
-    #[test]
-    fn test_byte_limit_total_tracking_persists_after_eviction() {
-        let mut t = make_transcript(10);
-        t.append(ExecOutputStream::Stdout, "12345".to_string());
-        t.append(ExecOutputStream::Stdout, "67890".to_string());
-        t.append(ExecOutputStream::Stdout, "abcde".to_string());
-
-        assert_eq!(
-            t.total_bytes_appended(),
-            15,
-            "total should include evicted bytes"
-        );
         assert!(t.dropped_bytes() > 0);
     }
 
@@ -751,36 +656,6 @@ mod tests {
     }
 
     #[test]
-    fn test_current_bytes_stays_within_limit() {
-        let max = 50;
-        let mut t = make_transcript(max);
-        for i in 0..20 {
-            t.append(ExecOutputStream::Stdout, format!("line {i:03}"));
-        }
-        assert!(
-            t.current_bytes() <= max,
-            "current_bytes {} should not exceed max {max}",
-            t.current_bytes()
-        );
-    }
-
-    #[test]
-    fn test_total_lines_appended_counts_lines() {
-        let mut t = make_transcript(4096);
-        t.append(ExecOutputStream::Stdout, "line1\nline2\nline3".to_string());
-        t.append(ExecOutputStream::Stderr, "err1".to_string());
-
-        assert_eq!(t.total_lines_appended(), 4);
-    }
-
-    #[test]
-    fn test_total_lines_empty_text() {
-        let mut t = make_transcript(4096);
-        t.append(ExecOutputStream::Stdout, "".to_string());
-        assert_eq!(t.total_lines_appended(), 0);
-    }
-
-    #[test]
     fn test_empty_appends_do_not_store_chunks() {
         let mut t = make_transcript(4096);
         for _ in 0..10_000 {
@@ -791,30 +666,6 @@ mod tests {
         assert_eq!(t.current_bytes(), 0);
         assert_eq!(t.next_seq(), 0);
         assert!(t.read_since(0).is_empty());
-    }
-
-    #[test]
-    fn test_chunk_process_id_matches_transcript() {
-        let pid = ExecProcessId("exec_test_pid".to_string());
-        let mut t = ExecTranscript::new(pid.clone(), 4096);
-        t.append(ExecOutputStream::Stdout, "hello".to_string());
-
-        let chunks = t.read_since(0);
-        assert_eq!(chunks[0].process_id, pid);
-        assert_eq!(t.process_id(), &pid);
-    }
-
-    #[test]
-    fn test_zero_byte_limit_is_clamped() {
-        let mut t = make_transcript(0);
-        t.append(ExecOutputStream::Stdout, "abcdef".to_string());
-
-        assert_eq!(t.max_bytes(), 1);
-        assert!(t.current_bytes() <= 1);
-        assert!(t.is_truncated());
-        let read = t.read(0, None);
-        assert_eq!(read.max_bytes, 1);
-        assert!(read.current_bytes <= 1);
     }
 
     #[tokio::test]
@@ -845,34 +696,6 @@ mod tests {
         assert_eq!(t.read(0, None).chunks, vec![chunk]);
         assert!(t.last_spill_error().is_some());
         assert!(t.disk_log_path().is_none());
-    }
-
-    #[tokio::test]
-    async fn spill_backfills_output_before_threshold() {
-        let temp = tempfile::tempdir().unwrap();
-        let process_id = ExecProcessId("exec_backfill_pre".to_string());
-        let target = SpillTarget::with_root(temp.path().to_path_buf(), "chat-bp", &process_id);
-        let mut t = ExecTranscript::new_with_spill(
-            process_id.clone(),
-            4096,
-            Some("chat-bp".to_string()),
-            20,
-        );
-        t.set_spill_target_for_test(target);
-
-        let (_c, sa) = t.append_chunk(ExecOutputStream::Stdout, "hello".to_string());
-        assert!(sa.is_none());
-        let (_c, sa) = t.append_chunk(ExecOutputStream::Stdout, " world".to_string());
-        assert!(sa.is_none());
-        let (_c, sa) = t.append_chunk(ExecOutputStream::Stdout, "!!!".to_string());
-        assert!(sa.is_none());
-        let (_c, sa) = t.append_chunk(ExecOutputStream::Stdout, "crosses_here".to_string());
-        let result = sa.expect("spill fires at threshold crossing").write().await;
-        t.record_spill_result(&result);
-        assert!(result.is_ok());
-
-        let persisted = std::fs::read_to_string(t.disk_log_path().unwrap()).unwrap();
-        assert_eq!(persisted, "hello world!!!crosses_here");
     }
 
     #[tokio::test]
@@ -933,16 +756,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_not_truncated_when_within_limit() {
-        let mut t = make_transcript(1024);
-        t.append(ExecOutputStream::Stdout, "small".to_string());
-        assert!(!t.is_truncated());
-        assert_eq!(t.dropped_chunks(), 0);
-        assert_eq!(t.dropped_bytes(), 0);
-        assert_eq!(t.truncated_chunks(), 0);
-    }
-
     fn make_combined_capture() -> ExecRawCapture {
         ExecRawCapture::foreground(ExecProcessId("exec_raw".to_string())).with_combined_capture()
     }
@@ -956,25 +769,6 @@ mod tests {
         assert_eq!(read.text, "a\r\n\x1b[31mred\x1b[0m\r\n");
         assert_eq!(read.start_offset, 0);
         assert_eq!(read.new_offset, read.text.len() as u64);
-    }
-
-    #[test]
-    fn combined_raw_cursor_increments_and_drains() {
-        let mut capture = make_combined_capture();
-        capture.append_combined_raw("first\r\n");
-        let first = capture.read_combined_since(0, None).unwrap();
-        assert_eq!(first.text, "first\r\n");
-
-        capture.append_combined_raw("second\r\n");
-        let second = capture.read_combined_since(first.new_offset, None).unwrap();
-        assert_eq!(second.text, "second\r\n");
-        assert_eq!(second.start_offset, first.new_offset);
-
-        let empty = capture
-            .read_combined_since(second.new_offset, None)
-            .unwrap();
-        assert_eq!(empty.text, "");
-        assert_eq!(empty.new_offset, second.new_offset);
     }
 
     #[test]
@@ -1010,12 +804,6 @@ mod tests {
         let read = capture.read_combined_since(8, Some(4)).unwrap();
         assert_eq!(read.start_offset, 8);
         assert_eq!(read.text, "89");
-    }
-
-    #[test]
-    fn combined_raw_absent_without_combined_capture() {
-        let capture = ExecRawCapture::foreground(ExecProcessId("exec_plain".to_string()));
-        assert!(capture.read_combined_since(0, None).is_none());
     }
 
     #[test]

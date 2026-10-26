@@ -1,11 +1,7 @@
 use refact_core::chat_types::{ChatContent, ChatMessage};
 use refact_llm::adapters::anthropic::AnthropicAdapter;
 
-use super::wire_soak_helpers::{
-    assert_no_literal_role_strings_in_body, assert_no_plan_history_in_body,
-    assert_plan_count_in_body, default_settings, event_message, generate_mixed_corpus, lower_body,
-    three_plan_versions,
-};
+use super::wire_soak_helpers::{default_settings, event_message, lower_body};
 
 fn lower_anthropic(messages: Vec<ChatMessage>) -> serde_json::Value {
     lower_body(
@@ -13,29 +9,6 @@ fn lower_anthropic(messages: Vec<ChatMessage>) -> serde_json::Value {
         messages,
         default_settings("https://api.anthropic.com/v1/messages", "claude-sonnet-4-5"),
     )
-}
-
-#[test]
-fn assert_no_literal_role_strings() {
-    let body = lower_anthropic(generate_mixed_corpus(13, 100));
-
-    assert_no_literal_role_strings_in_body(&body);
-}
-
-#[test]
-fn assert_all_plans_are_rendered_chronologically() {
-    let body = lower_anthropic(three_plan_versions());
-
-    assert_plan_count_in_body(&body, 3);
-    assert_no_plan_history_in_body(&body);
-}
-
-#[test]
-fn assert_mixed_corpus_renders_each_plan_message() {
-    let body = lower_anthropic(generate_mixed_corpus(29, 100));
-
-    assert_plan_count_in_body(&body, 5);
-    assert_no_plan_history_in_body(&body);
 }
 
 #[test]

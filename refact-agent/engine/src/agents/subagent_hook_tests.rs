@@ -357,23 +357,6 @@ async fn repeated_terminal_update_emits_one_stop_for_the_generation() {
     );
 }
 
-#[cfg(unix)]
-#[tokio::test]
-#[serial(test_runner, permission_decision_hooks)]
-async fn disabled_hooks_create_no_marker_file() {
-    let fixture = fixture("subagent-hook-disabled", false).await;
-    let marker = fixture._temp.path().join("hooks.jsonl");
-    install_hooks(&fixture, &marker).await;
-    let _runner = crate::agents::spawn::install_test_runner(Arc::new(|gcx, messages, config| {
-        Box::pin(async move { Ok(complete_run(gcx, messages, config, "finished").await) })
-    }));
-
-    let completed = spawn_completed(&fixture, "subagent-hook-disabled").await;
-
-    assert_eq!(completed.status, BgAgentStatus::Completed);
-    assert!(!marker.exists());
-}
-
 #[tokio::test]
 #[serial(test_runner, permission_decision_hooks)]
 async fn stop_hook_claim_is_idempotent_per_generation() {

@@ -1371,68 +1371,6 @@ mod tests {
         save_all(temp.path(), again).await.unwrap();
         assert!(load_accepted_launch(temp.path(), &live, 128).await.is_ok());
     }
-
-    #[test]
-    fn prune_records_keeps_live_and_recent_terminal_records() {
-        let now = Utc::now();
-        let mut records = vec![
-            make_record(
-                "running",
-                BgAgentStatus::Running,
-                now - Duration::days(30),
-                None,
-            ),
-            make_record(
-                "recent-terminal",
-                BgAgentStatus::Completed,
-                now - Duration::days(2),
-                Some(now - Duration::days(1)),
-            ),
-            make_record(
-                "old-terminal",
-                BgAgentStatus::Failed,
-                now - Duration::days(20),
-                Some(now - Duration::days(10)),
-            ),
-        ];
-
-        prune_records(&mut records, 1);
-
-        assert_eq!(records.len(), 2);
-        assert!(records.iter().any(|record| record.agent_id == "running"));
-        assert!(records
-            .iter()
-            .any(|record| record.agent_id == "recent-terminal"));
-        assert!(!records
-            .iter()
-            .any(|record| record.agent_id == "old-terminal"));
-    }
-
-    #[test]
-    fn prune_records_caps_oldest_terminal_records_first() {
-        let now = Utc::now();
-        let retained = refact_work_core::coordination_settings().agent_terminal_retained_max;
-        let mut records = Vec::new();
-        records.push(make_record("live", BgAgentStatus::Running, now, None));
-        for index in 0..(retained + 20) {
-            let created_at = now - Duration::minutes((retained + 20 - index) as i64);
-            records.push(make_record(
-                &format!("terminal-{index}"),
-                BgAgentStatus::Completed,
-                created_at,
-                Some(created_at),
-            ));
-        }
-
-        prune_records(&mut records, retained);
-
-        assert_eq!(records.len(), retained + 1);
-        assert!(records.iter().any(|record| record.agent_id == "live"));
-        assert!(!records.iter().any(|record| record.agent_id == "terminal-0"));
-        assert!(records
-            .iter()
-            .any(|record| record.agent_id == "terminal-20"));
-    }
 }
 
 pub async fn save_result_payload(

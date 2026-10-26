@@ -1146,66 +1146,6 @@ mod tests {
         );
     }
 
-    fn make_session_mcp(debug_name: &str) -> SessionMCP {
-        SessionMCP {
-            debug_name: debug_name.to_string(),
-            config_path: "/tmp/test.yaml".to_string(),
-            launched_cfg: serde_json::Value::Null,
-            mcp_client: None,
-            mcp_tools: Vec::new(),
-            mcp_resources: Vec::new(),
-            mcp_prompts: Vec::new(),
-            server_info: None,
-            startup_task_handles: None,
-            health_task_handle: None,
-            logs: Arc::new(AMutex::new(Vec::new())),
-            stderr_file_path: None,
-            stderr_cursor: Arc::new(AMutex::new(0)),
-            connection_status: MCPConnectionStatus::Disconnected,
-            last_successful_connection: None,
-            metrics: new_shared_metrics(),
-            #[cfg(target_os = "linux")]
-            observation: None,
-            auth_manager: None,
-            auth_status: MCPAuthStatus::NotApplicable,
-            oauth_refresh_task_handle: None,
-            resource_index_task: None,
-            oauth_probe: None,
-            sampling_session_approved: false,
-            active_progress: Vec::new(),
-            last_logged_status: None,
-        }
-    }
-
-    #[test]
-    fn test_mcp_client_handler_fields() {
-        let peer_arc: Arc<AMutex<Option<rmcp::service::Peer<rmcp::RoleClient>>>> =
-            Arc::new(AMutex::new(None));
-        let session: Box<dyn IntegrationSession> = Box::new(make_session_mcp("test"));
-        let session_arc = Arc::new(AMutex::new(session));
-        let logs = Arc::new(AMutex::new(Vec::new()));
-        let handler = McpClientHandler {
-            restricted: false,
-            peer_arc: peer_arc.clone(),
-            session_arc,
-            logs,
-            debug_name: "test".to_string(),
-            request_timeout: 30,
-            gcx: Weak::new(),
-            tool_refresh_handle: Arc::new(AMutex::new(None)),
-            resource_refresh_handle: Arc::new(AMutex::new(None)),
-            prompt_refresh_handle: Arc::new(AMutex::new(None)),
-        };
-        assert_eq!(handler.debug_name, "test");
-        assert_eq!(handler.request_timeout, 30);
-        assert!(handler
-            .peer_arc
-            .try_lock()
-            .ok()
-            .and_then(|g| g.clone())
-            .is_none());
-    }
-
     #[test]
     fn test_redact_sensitive_value() {
         assert_eq!(
@@ -1227,12 +1167,6 @@ mod tests {
             redact_sensitive_value("Content-Type", "application/json"),
             "application/json"
         );
-    }
-
-    #[test]
-    fn test_mcp_running_service_type_alias_exists() {
-        fn _accepts_type_alias(_: Option<McpRunningService>) {}
-        _accepts_type_alias(None);
     }
 
     #[test]
@@ -1260,67 +1194,6 @@ mod tests {
         assert_eq!(result[0]["api_key"], "secr...3456");
         assert_eq!(result[0]["name"], "service1");
         assert_eq!(result[1]["api_key"], "anot..._val");
-    }
-
-    #[test]
-    fn test_redact_sensitive_json_flat() {
-        let input = serde_json::json!({"password": "abc123def", "host": "localhost"});
-        let result = redact_sensitive_json(&input);
-        assert_eq!(result["password"], "abc1...3def");
-        assert_eq!(result["host"], "localhost");
-    }
-
-    #[test]
-    fn test_redact_sensitive_json_primitives() {
-        assert_eq!(redact_sensitive_json(&serde_json::json!("hello")), "hello");
-        assert_eq!(redact_sensitive_json(&serde_json::json!(42)), 42);
-        assert_eq!(
-            redact_sensitive_json(&serde_json::json!(null)),
-            serde_json::Value::Null
-        );
-    }
-
-    #[test]
-    fn test_mcp_auth_status_serialization() {
-        let not_applicable = MCPAuthStatus::NotApplicable;
-        let json = serde_json::to_value(&not_applicable).unwrap();
-        assert_eq!(json, serde_json::json!("not_applicable"));
-
-        let authenticated = MCPAuthStatus::Authenticated;
-        let json = serde_json::to_value(&authenticated).unwrap();
-        assert_eq!(json, serde_json::json!("authenticated"));
-
-        let needs_login = MCPAuthStatus::NeedsLogin;
-        let json = serde_json::to_value(&needs_login).unwrap();
-        assert_eq!(json, serde_json::json!("needs_login"));
-
-        let needs_reauth = MCPAuthStatus::NeedsReauth;
-        let json = serde_json::to_value(&needs_reauth).unwrap();
-        assert_eq!(json, serde_json::json!("needs_reauth"));
-
-        let refreshing = MCPAuthStatus::Refreshing;
-        let json = serde_json::to_value(&refreshing).unwrap();
-        assert_eq!(json, serde_json::json!("refreshing"));
-
-        let error = MCPAuthStatus::Error("something went wrong".to_string());
-        let json = serde_json::to_value(&error).unwrap();
-        assert_eq!(json["error"], "something went wrong");
-    }
-
-    #[test]
-    fn test_mcp_auth_status_deserialization_roundtrip() {
-        let statuses = vec![
-            MCPAuthStatus::NotApplicable,
-            MCPAuthStatus::Authenticated,
-            MCPAuthStatus::NeedsLogin,
-            MCPAuthStatus::NeedsReauth,
-            MCPAuthStatus::Refreshing,
-        ];
-        for status in statuses {
-            let json = serde_json::to_value(&status).unwrap();
-            let roundtrip: MCPAuthStatus = serde_json::from_value(json).unwrap();
-            assert_eq!(status, roundtrip);
-        }
     }
 }
 

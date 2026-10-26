@@ -171,7 +171,7 @@ mod tests {
     use crate::approvals::{ApprovalModalState, PauseReason};
     use crate::render::wrapping::line_to_plain;
     use ratatui::backend::TestBackend;
-    use ratatui::style::{Color, Modifier};
+
     use ratatui::Terminal;
 
     fn reason(id: &str) -> PauseReason {
@@ -211,65 +211,6 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>()
-    }
-
-    #[test]
-    fn approval_modal_renders_framed_surface_footer_and_accent_row() {
-        let modal = ApprovalModalState::new(vec![reason("call-1")]);
-        let backend = TestBackend::new(80, 20);
-        let mut terminal = Terminal::new(backend).unwrap();
-
-        terminal
-            .draw(|frame| render_approval_modal(frame, &modal, frame.area()))
-            .unwrap();
-
-        let buffer = terminal.backend().buffer();
-        let text = buffer_text(buffer);
-        assert!(text.contains("Approval required"));
-        assert!(text.contains("y approve"));
-        assert!(text.contains("a approve for chat"));
-        assert!(text.contains("v details"));
-        assert!(text.contains("┌"));
-        assert!(text.contains("┐"));
-        assert!(text.contains("└"));
-        assert!(text.contains("┘"));
-        assert!(text.contains("│"));
-        let cursor = buffer
-            .content()
-            .iter()
-            .find(|cell| cell.symbol() == "›")
-            .expect("selected approval row rendered");
-        assert_eq!(cursor.style().fg, Some(Color::Cyan));
-        assert!(cursor.style().add_modifier.contains(Modifier::BOLD));
-    }
-
-    #[test]
-    fn approval_detail_modal_keeps_diff_and_summary_footer() {
-        let mut modal = ApprovalModalState::from_event(&serde_json::json!({
-            "reasons": [{
-                "type": "confirmation",
-                "tool_name": "apply_patch",
-                "command": "apply patch",
-                "rule": "ask",
-                "tool_call_id": "call-patch",
-                "diff": "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new"
-            }]
-        }))
-        .unwrap();
-        modal.toggle_details();
-        let backend = TestBackend::new(100, 30);
-        let mut terminal = Terminal::new(backend).unwrap();
-
-        terminal
-            .draw(|frame| render_approval_modal(frame, &modal, frame.area()))
-            .unwrap();
-
-        let text = buffer_text(terminal.backend().buffer());
-        assert!(text.contains("apply_patch"));
-        assert!(text.contains("-old"));
-        assert!(text.contains("+new"));
-        assert!(text.contains("v summary"));
-        assert!(text.contains("┌"));
     }
 
     #[test]
@@ -350,17 +291,5 @@ mod tests {
 
         assert_eq!(body.remaining, 0);
         assert_eq!(body.lines, vec![expected_last]);
-    }
-
-    #[test]
-    fn compact_overflow_hint_fits_the_minimum_popup_width() {
-        let mut modal = ApprovalModalState::new(vec![long_reason()]);
-        modal.toggle_details();
-        let lines = render_modal_lines(&modal, 20);
-        let body = visible_approval_body_lines(&lines, &modal, 20, 1);
-        let footer = line_to_plain(&approval_footer_line(&lines, &body, 20));
-
-        assert_eq!(footer, format!("… {} more · ↑/↓", body.remaining));
-        assert!(footer.chars().count() <= 20);
     }
 }

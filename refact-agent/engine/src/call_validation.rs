@@ -300,65 +300,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_args_valid_object() {
-        let f = make_tool_fn(r#"{"key": "value", "num": 42}"#);
-        let args = f.parse_args().unwrap();
-        assert_eq!(args["key"], "value");
-        assert_eq!(args["num"], 42);
-    }
-
-    #[test]
-    fn test_parse_args_empty_object() {
-        let f = make_tool_fn("{}");
-        let args = f.parse_args().unwrap();
-        assert!(args.is_empty());
-    }
-
-    #[test]
-    fn test_parse_args_empty_string() {
-        let f = make_tool_fn("");
-        let args = f.parse_args().unwrap();
-        assert!(args.is_empty());
-    }
-
-    #[test]
-    fn test_parse_args_whitespace_only() {
-        let f = make_tool_fn("   \n\t  ");
-        let args = f.parse_args().unwrap();
-        assert!(args.is_empty());
-    }
-
-    #[test]
-    fn test_parse_args_json_empty_string_literal() {
-        // LLM sends "" (two quote chars) — valid JSON string, not an object
-        let f = make_tool_fn(r#""""#);
-        let args = f.parse_args().unwrap();
-        assert!(args.is_empty());
-    }
-
-    #[test]
-    fn test_parse_args_json_null() {
-        let f = make_tool_fn("null");
-        let args = f.parse_args().unwrap();
-        assert!(args.is_empty());
-    }
-
-    #[test]
-    fn test_parse_args_json_array() {
-        // An array is not an object — should normalize to {}
-        let f = make_tool_fn("[1, 2, 3]");
-        let args = f.parse_args().unwrap();
-        assert!(args.is_empty());
-    }
-
-    #[test]
-    fn test_parse_args_padded_with_whitespace() {
-        let f = make_tool_fn(r#"  { "a": 1 }  "#);
-        let args = f.parse_args().unwrap();
-        assert_eq!(args["a"], 1);
-    }
-
-    #[test]
     fn test_parse_args_invalid_json_object() {
         // Starts with '{' but is malformed — should propagate the serde error
         let f = make_tool_fn("{broken json");

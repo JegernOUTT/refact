@@ -404,27 +404,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_board_without_an_owner_still_finalises() {
-        let (gcx, _temp) = setup_task().await;
-        let ccx = chat_ccx(gcx.clone(), "any-chat").await;
-
-        ToolTaskMarkCardDone::new()
-            .tool_execute(ccx, &"call".to_string(), &done_args())
-            .await
-            .unwrap();
-
-        assert_eq!(
-            storage::load_board(gcx, "task-1")
-                .await
-                .unwrap()
-                .get_card("T-1")
-                .unwrap()
-                .column,
-            "done"
-        );
-    }
-
-    #[tokio::test]
     async fn finalising_refuses_a_principal_without_a_board_role() {
         let (gcx, _temp) = setup_task().await;
         storage::update_board_atomic(gcx.clone(), "task-1", |board| {

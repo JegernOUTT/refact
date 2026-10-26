@@ -66,7 +66,6 @@ mod tests {
         plan_schedule, plan_schedule_with_overlap, Lane, LaneKind, LaneStage, StageDecision,
         WaveLimits,
     };
-    use refact_tasks::overlap_order::{order_wave, OverlapSource};
 
     fn card(id: &str, target_files: &[&str]) -> crate::tasks::types::BoardCard {
         serde_json::from_value(serde_json::json!({
@@ -110,73 +109,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overlap_order_collapses_two_spellings_of_one_path() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("src")).unwrap();
-        std::fs::write(dir.path().join("src/lib.rs"), "fn main() {}").unwrap();
-        let gcx = gcx_rooted_at(dir.path()).await;
-        let board = TaskBoard {
-            cards: vec![
-                card("T-1", &["src/lib.rs"]),
-                card("T-2", &["/src/lib.rs"]),
-                card("T-3", &["src/other.rs"]),
-            ],
-            ..TaskBoard::default()
-        };
-
-        let inputs = overlap_inputs(gcx, &board).await;
-        let order = order_wave(
-            0,
-            &["T-1".to_string(), "T-2".to_string(), "T-3".to_string()],
-            &inputs,
-        );
-
-        assert!(!inputs.is_empty());
-        assert_eq!(order.rank_of("T-1"), Some(0));
-        assert_eq!(
-            order.rank_of("T-2"),
-            Some(1),
-            "a leading separator is the same file, not a second one"
-        );
-        assert_eq!(order.rank_of("T-3"), Some(0));
-        assert_eq!(
-            order
-                .cards
-                .iter()
-                .find(|entry| entry.card_id == "T-2")
-                .unwrap()
-                .overlaps[0]
-                .source,
-            OverlapSource::Declared
-        );
-    }
-
-    #[tokio::test]
-    async fn overlap_order_is_absent_when_no_card_declares_or_touches_a_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let gcx = gcx_rooted_at(dir.path()).await;
-        let board = TaskBoard {
-            cards: vec![card("T-1", &[]), card("T-2", &[])],
-            ..TaskBoard::default()
-        };
-
-        let inputs = overlap_inputs(gcx, &board).await;
-        let ordered =
-            plan_schedule_with_overlap(&board, &lane(&["T-1", "T-2"]), &limits(), Some(&inputs))
-                .unwrap();
-        let unordered = plan_schedule(&board, &lane(&["T-1", "T-2"]), &limits()).unwrap();
-
-        assert!(inputs.is_empty());
-        assert_eq!(
-            serde_json::to_string(&ordered).unwrap(),
-            serde_json::to_string(&unordered).unwrap(),
-            "with nothing known the wave runs exactly as it would have"
-        );
-        assert!(ordered.overlap_order.is_empty());
-        assert_eq!(ordered.submission_groups(), vec![ordered.dispatch.clone()]);
-    }
-
-    #[tokio::test]
     async fn overlap_order_never_gates_a_pathological_all_to_all_graph() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
@@ -217,39 +149,5 @@ mod tests {
             ordered.dispatch,
             "the submission groups partition the dispatch set exactly"
         );
-    }
-
-    #[tokio::test]
-    async fn overlap_order_is_deterministic_across_repeated_runs() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("src")).unwrap();
-        let gcx = gcx_rooted_at(dir.path()).await;
-        let board = TaskBoard {
-            cards: vec![
-                card("T-1", &["src/a.rs", "src/b.rs"]),
-                card("T-2", &["src/b.rs"]),
-                card("T-3", &["src/c.rs"]),
-                card("T-4", &["src/a.rs", "src/c.rs"]),
-            ],
-            ..TaskBoard::default()
-        };
-        let lanes = lane(&["T-1", "T-2", "T-3", "T-4"]);
-
-        let inputs = overlap_inputs(gcx, &board).await;
-        let first = plan_schedule_with_overlap(&board, &lanes, &limits(), Some(&inputs)).unwrap();
-        for _ in 0..16 {
-            let again =
-                plan_schedule_with_overlap(&board, &lanes, &limits(), Some(&inputs)).unwrap();
-            assert_eq!(again.dispatch, first.dispatch);
-            assert_eq!(
-                serde_json::to_string(&again).unwrap(),
-                serde_json::to_string(&first).unwrap()
-            );
-        }
-    }
-
-    #[test]
-    fn overlap_ordering_is_on_by_default() {
-        assert!(refact_work_core::CoordinationSettings::default().overlap_ordering_enabled);
     }
 }

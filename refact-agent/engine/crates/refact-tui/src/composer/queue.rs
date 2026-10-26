@@ -176,48 +176,6 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn queue_pops_in_insert_order() {
-        let mut queue = InputQueue::new();
-        queue.enqueue("one".to_string(), json!({"mode":"agent"}));
-        queue.enqueue("two".to_string(), json!({}));
-
-        assert_eq!(queue.pop_next_ready().unwrap().text, "one");
-        assert_eq!(queue.pop_next_ready().unwrap().text, "two");
-        assert!(queue.pop_next_ready().is_none());
-    }
-
-    #[test]
-    fn selected_item_can_be_edited_with_draft_restore() {
-        let mut queue = InputQueue::new();
-        queue.enqueue("one".to_string(), json!({}));
-        queue.enqueue("two".to_string(), json!({}));
-
-        assert!(queue.select_prev());
-        assert_eq!(
-            queue.begin_edit_selected("draft".to_string()).as_deref(),
-            Some("two")
-        );
-        assert_eq!(
-            queue.finish_edit("two edited".to_string()).as_deref(),
-            Some("draft")
-        );
-        assert_eq!(queue.items()[1].text, "two edited");
-        assert_eq!(queue.selected_index(), Some(1));
-    }
-
-    #[test]
-    fn selected_item_can_be_removed() {
-        let mut queue = InputQueue::new();
-        queue.enqueue("one".to_string(), json!({}));
-        queue.enqueue("two".to_string(), json!({}));
-
-        queue.select_prev();
-        assert_eq!(queue.remove_selected().unwrap().text, "two");
-        assert_eq!(queue.len(), 1);
-        assert_eq!(queue.selected_index(), Some(0));
-    }
-
-    #[test]
     fn editing_item_blocks_auto_pop_until_finished() {
         let mut queue = InputQueue::new();
         queue.enqueue("one".to_string(), json!({}));

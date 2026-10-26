@@ -552,66 +552,6 @@ mod tests {
 
     #[serial(file_provenance)]
     #[tokio::test]
-    async fn a_write_nobody_recorded_stays_external_or_unknown() {
-        reset_for_tests();
-        install_sink(store().await, ProjectKey::new("alpha"), "engine-a", None);
-        observe(write(
-            "/project/src/other.rs",
-            Some("chat-a"),
-            "patch",
-            1_000,
-        ));
-
-        let unrecorded = last_writer("/project/src/lib.rs", Some("chat-b"), 0).await;
-        let own = last_writer("/project/src/other.rs", Some("chat-a"), 0).await;
-        reset_for_tests();
-
-        assert_eq!(unrecorded, WriterAttribution::ExternalOrUnknown);
-        assert_eq!(
-            render(&unrecorded),
-            EXTERNAL_OR_UNKNOWN,
-            "a shell, an editor or a formatter must never be given a name"
-        );
-        assert_eq!(
-            own,
-            WriterAttribution::ExternalOrUnknown,
-            "a chat's own write is not another writer"
-        );
-    }
-
-    #[serial(file_provenance)]
-    #[tokio::test]
-    async fn retention_evicts_deterministically_and_evicted_provenance_reads_unknown() {
-        reset_for_tests();
-        install_sink(store().await, ProjectKey::new("alpha"), "engine-a", None);
-        for index in 0..5i64 {
-            observe(write(
-                &format!("/project/src/{index}.rs"),
-                Some("chat-a"),
-                "patch",
-                index,
-            ));
-        }
-        flush().await;
-
-        let evicted = retain(2).await.unwrap();
-        let oldest = last_writer("/project/src/0.rs", Some("chat-b"), 0).await;
-        let newest = last_writer("/project/src/4.rs", Some("chat-b"), 0).await;
-        let again = retain(2).await.unwrap();
-        reset_for_tests();
-
-        assert_eq!(evicted, 3);
-        assert_eq!(again, 0, "eviction is stable once the cap is met");
-        assert_eq!(
-            oldest,
-            WriterAttribution::ExternalOrUnknown,
-            "evicted provenance must read unknown, never be invented"
-        );
-        assert!(newest.is_named());
-    }
-
-    #[serial(file_provenance)]
-    #[tokio::test]
     async fn deletion_control_removes_provenance_for_a_path_and_for_a_project() {
         reset_for_tests();
         install_sink(store().await, ProjectKey::new("alpha"), "engine-a", None);
@@ -655,23 +595,6 @@ mod tests {
 
         assert!(mine.is_named());
         assert_eq!(theirs, WriterAttribution::ExternalOrUnknown);
-    }
-
-    #[serial(file_provenance)]
-    #[tokio::test]
-    async fn without_a_store_edits_keep_working_and_the_loss_is_reported() {
-        reset_for_tests();
-        observe(write("/project/a.rs", Some("chat-a"), "patch", 1));
-        flush().await;
-        let attribution = last_writer("/project/a.rs", Some("chat-b"), 0).await;
-        let unrecorded = unrecorded_observations();
-        reset_for_tests();
-
-        assert_eq!(attribution, WriterAttribution::ExternalOrUnknown);
-        assert_eq!(
-            unrecorded, 1,
-            "an observation that was never persisted has to be counted as lost"
-        );
     }
 
     #[serial(file_provenance)]

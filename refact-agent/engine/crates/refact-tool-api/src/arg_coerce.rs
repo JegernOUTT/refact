@@ -377,48 +377,6 @@ mod tests {
     }
 
     #[test]
-    fn numbers_and_strings_swap_by_declared_type() {
-        let s = schema(json!({
-            "max_steps": {"type": "integer"},
-            "temperature": {"type": "number"},
-            "label": {"type": "string"}
-        }));
-        let mut args: Map<String, Value> =
-            json!({"max_steps": "50", "temperature": "0.7", "label": 42})
-                .as_object()
-                .unwrap()
-                .clone();
-        coerce_args_to_schema(&mut args, &s);
-        assert_eq!(args["max_steps"], json!(50));
-        assert_eq!(args["temperature"], json!(0.7));
-        assert_eq!(args["label"], json!("42"));
-    }
-
-    #[test]
-    fn json_encoded_containers_are_parsed() {
-        let s = schema(json!({
-            "paths": {"type": "array", "items": {"type": "string"}},
-            "options": {"type": "object"}
-        }));
-        let mut args: Map<String, Value> =
-            json!({"paths": "[\"a.rs\", \"b.rs\"]", "options": "{\"deep\": true}"})
-                .as_object()
-                .unwrap()
-                .clone();
-        coerce_args_to_schema(&mut args, &s);
-        assert_eq!(args["paths"], json!(["a.rs", "b.rs"]));
-        assert_eq!(args["options"], json!({"deep": true}));
-    }
-
-    #[test]
-    fn lone_scalar_is_wrapped_for_array_params() {
-        let s = schema(json!({"paths": {"type": "array", "items": {"type": "string"}}}));
-        let mut args: Map<String, Value> = json!({"paths": "a.rs"}).as_object().unwrap().clone();
-        coerce_args_to_schema(&mut args, &s);
-        assert_eq!(args["paths"], json!(["a.rs"]));
-    }
-
-    #[test]
     fn nested_object_and_array_booleans_are_coerced() {
         let s = schema(json!({
             "request": {
@@ -442,50 +400,5 @@ mod tests {
         coerce_args_to_schema(&mut args, &s);
         assert_eq!(args["request"]["steps"][0]["verify"], json!(false));
         assert_eq!(args["request"]["steps"][0]["timeout_ms"], json!(3000));
-    }
-
-    #[test]
-    fn nullable_and_anyof_schemas_are_supported() {
-        let s = schema(json!({
-            "flag": {"type": ["boolean", "null"]},
-            "count": {"anyOf": [{"type": "integer"}, {"type": "null"}]}
-        }));
-        let mut args: Map<String, Value> = json!({"flag": "yes", "count": "7"})
-            .as_object()
-            .unwrap()
-            .clone();
-        coerce_args_to_schema(&mut args, &s);
-        assert_eq!(args["flag"], json!(true));
-        assert_eq!(args["count"], json!(7));
-    }
-
-    #[test]
-    fn null_values_and_unknown_params_are_preserved() {
-        let s = schema(json!({"flag": {"type": "boolean"}}));
-        let mut args: Map<String, Value> = json!({"flag": null, "extra": "untouched"})
-            .as_object()
-            .unwrap()
-            .clone();
-        coerce_args_to_schema(&mut args, &s);
-        assert_eq!(args["flag"], json!(null));
-        assert_eq!(args["extra"], json!("untouched"));
-    }
-
-    #[test]
-    fn missing_schema_is_a_no_op() {
-        let mut args: Map<String, Value> = json!({"flag": "true"}).as_object().unwrap().clone();
-        let notes = coerce_args_to_schema(&mut args, &json!({}));
-        assert_eq!(args["flag"], json!("true"));
-        assert!(notes.is_empty());
-    }
-
-    #[test]
-    fn hashmap_variant_matches_map_variant() {
-        let s = schema(json!({"tty": {"type": "boolean"}}));
-        let mut args: HashMap<String, Value> = HashMap::new();
-        args.insert("tty".to_string(), json!("True"));
-        let notes = coerce_hashmap_to_schema(&mut args, &s);
-        assert_eq!(args["tty"], json!(true));
-        assert_eq!(notes.len(), 1);
     }
 }

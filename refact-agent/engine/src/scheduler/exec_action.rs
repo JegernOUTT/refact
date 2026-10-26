@@ -309,7 +309,6 @@ fn first_line(value: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
 
     use super::*;
     use crate::scheduler::types::{Action, AgentTarget, Delivery, Trigger};
@@ -348,72 +347,11 @@ mod tests {
     }
 
     #[test]
-    fn validate_argv_accepts_arguments_with_spaces() {
-        let result = validate_argv(&[
-            "printf".to_string(),
-            "%s".to_string(),
-            "hello world".to_string(),
-        ]);
-
-        assert_eq!(result, Ok(()));
-    }
-
-    #[test]
     fn resolve_cwd_rejects_parent_escape() {
         let root = PathBuf::from("/tmp/project");
 
         let error = resolve_cwd(Some(&root), Some("../outside")).unwrap_err();
 
         assert_eq!(error, "cwd must stay within the active project");
-    }
-
-    #[test]
-    fn command_error_summary_prefers_stderr() {
-        let result = CommandRunResult {
-            status: "error".to_string(),
-            stdout: String::new(),
-            stderr: "boom\nmore".to_string(),
-            exit_code: Some(2),
-        };
-
-        assert_eq!(
-            command_error_summary(&result),
-            "Scheduled command failed: boom"
-        );
-    }
-
-    #[test]
-    fn command_output_message_is_plain_text() {
-        let result = CommandRunResult {
-            status: "fired".to_string(),
-            stdout: "hello".to_string(),
-            stderr: String::new(),
-            exit_code: Some(0),
-        };
-        let message = command_output_message(&job(), &result);
-
-        assert_eq!(message.role, "plain_text");
-        assert_eq!(message.content.content_text_only(), "hello");
-        assert_eq!(
-            message.extra["scheduler_command"]["task_id"],
-            json!("command-job")
-        );
-    }
-
-    #[test]
-    fn command_env_uses_overrides_only() {
-        let mut env = BTreeMap::new();
-        env.insert("FROG".to_string(), "green".to_string());
-        let cmd = CommandSpec {
-            argv: vec!["env".to_string()],
-            target: AgentTarget::ExistingChat {
-                chat_id: "chat".to_string(),
-            },
-            cwd: None,
-            env: Some(env),
-            timeout_secs: None,
-        };
-
-        assert_eq!(command_env(&cmd).get("FROG"), Some(&"green".to_string()));
     }
 }

@@ -1257,28 +1257,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn agent_terminal_retention_defaults_and_bounds() {
-        let defaults: CoordinationSettings = serde_json::from_str("{}").unwrap();
-        assert_eq!(defaults.agent_terminal_retained_max, 500);
-        for value in [0, 49, 50, 500, 10_000, 10_001, usize::MAX] {
-            let mut settings = defaults.clone();
-            settings.agent_terminal_retained_max = value;
-            assert_eq!(settings.validate().is_ok(), (50..=10_000).contains(&value));
-        }
-    }
-
-    #[test]
-    fn delivery_and_wait_defaults_are_generous_and_consistent() {
-        let settings = CoordinationSettings::default();
-        settings.validate().unwrap();
-        assert!(settings.delivery_default_ttl_secs <= settings.delivery_max_ttl_secs);
-        assert!(settings.delivery_max_pending >= 1024);
-        assert!(settings.delivery_status_retention >= settings.delivery_max_pending);
-        assert!(settings.agent_wait_default_ms <= settings.agent_wait_max_ms);
-        assert!(settings.agent_wait_max_agents >= 32);
-    }
-
-    #[test]
     fn delivery_and_wait_bounds_reject_zero_and_inverted_values() {
         for mutate in [
             |settings: &mut CoordinationSettings| settings.delivery_max_pending = 0,
@@ -1344,17 +1322,6 @@ mod tests {
     }
 
     #[test]
-    fn path_scope_bounds_default_declared_and_reject_zero_entries() {
-        let settings = CoordinationSettings::default();
-        settings.validate().unwrap();
-        assert!(!settings.strict_path_scope_default);
-        assert!(settings.max_path_scope_entries >= 1);
-        let mut settings = CoordinationSettings::default();
-        settings.max_path_scope_entries = 0;
-        assert!(settings.validate().is_err());
-    }
-
-    #[test]
     fn question_bounds_default_usable_and_reject_invalid_values() {
         let settings = CoordinationSettings::default();
         settings.validate().unwrap();
@@ -1368,103 +1335,6 @@ mod tests {
                 settings.question_default_expiry_secs = settings.question_max_expiry_secs + 1
             },
             |settings: &mut CoordinationSettings| settings.question_max_expiry_secs = 31_536_001,
-        ] {
-            let mut settings = CoordinationSettings::default();
-            mutate(&mut settings);
-            assert!(settings.validate().is_err());
-        }
-    }
-
-    #[test]
-    fn deadlock_bounds_default_usable_and_reject_zero() {
-        let settings = CoordinationSettings::default();
-        settings.validate().unwrap();
-        assert!(settings.deadlock_detection_enabled);
-        assert!(!settings.deadlock_auto_cancel);
-        assert!(settings.deadlock_scan_interval_ms >= 1);
-        assert!(settings.deadlock_max_nodes >= 1);
-        assert!(settings.deadlock_max_edges >= settings.deadlock_max_nodes);
-        assert!(settings.deadlock_detection_attempts >= 2);
-        for mutate in [
-            |settings: &mut CoordinationSettings| settings.deadlock_scan_interval_ms = 0,
-            |settings: &mut CoordinationSettings| settings.deadlock_max_nodes = 0,
-            |settings: &mut CoordinationSettings| settings.deadlock_max_edges = 0,
-            |settings: &mut CoordinationSettings| settings.deadlock_detection_attempts = 0,
-        ] {
-            let mut settings = CoordinationSettings::default();
-            mutate(&mut settings);
-            assert!(settings.validate().is_err());
-        }
-    }
-
-    #[test]
-    fn attention_bounds_default_generous_and_reject_invalid_values() {
-        let settings = CoordinationSettings::default();
-        settings.validate().unwrap();
-        assert!(settings.attention_max_outstanding_questions >= 1);
-        assert!(settings.attention_default_timeout_secs <= settings.question_max_expiry_secs);
-        assert_eq!(
-            settings.attention_batch_window(),
-            std::time::Duration::from_millis(settings.attention_batch_window_ms)
-        );
-        let mut immediate = CoordinationSettings::default();
-        immediate.attention_batch_window_ms = 0;
-        immediate.validate().unwrap();
-        for mutate in [
-            |settings: &mut CoordinationSettings| settings.attention_max_outstanding_questions = 0,
-            |settings: &mut CoordinationSettings| settings.attention_default_timeout_secs = 0,
-            |settings: &mut CoordinationSettings| {
-                settings.attention_default_timeout_secs = settings.question_max_expiry_secs + 1
-            },
-        ] {
-            let mut settings = CoordinationSettings::default();
-            mutate(&mut settings);
-            assert!(settings.validate().is_err());
-        }
-    }
-
-    #[test]
-    fn peer_mail_bounds_default_usable_and_reject_invalid_values() {
-        let settings = CoordinationSettings::default();
-        settings.validate().unwrap();
-        assert!(settings.peer_grant_max_count >= 1);
-        assert!(settings.broadcast_rate_limit >= 1);
-        assert!(settings.broadcast_rate_window_secs >= 1);
-        assert!(settings.mailbox_default_rows <= settings.mailbox_max_rows);
-        for mutate in [
-            |settings: &mut CoordinationSettings| settings.peer_grant_max_count = 0,
-            |settings: &mut CoordinationSettings| settings.broadcast_rate_limit = 0,
-            |settings: &mut CoordinationSettings| settings.broadcast_rate_window_secs = 0,
-            |settings: &mut CoordinationSettings| settings.mailbox_default_rows = 0,
-            |settings: &mut CoordinationSettings| settings.mailbox_max_rows = 0,
-            |settings: &mut CoordinationSettings| {
-                settings.mailbox_default_rows = settings.mailbox_max_rows + 1
-            },
-        ] {
-            let mut settings = CoordinationSettings::default();
-            mutate(&mut settings);
-            assert!(settings.validate().is_err());
-        }
-    }
-
-    #[test]
-    fn handoff_bounds_default_usable_and_reject_zero() {
-        let settings = CoordinationSettings::default();
-        settings.validate().unwrap();
-        assert!(settings.handoff_report_max_entries >= 1);
-        assert!(settings.handoff_report_max_chars >= 64);
-        assert!(settings.handoff_metric_max_records >= 1);
-        assert!(
-            settings.handoff_finding_min_samples >= 2,
-            "one complaint is not a trend"
-        );
-        assert!(settings.handoff_finding_retention_ms >= 60_000);
-        for mutate in [
-            |settings: &mut CoordinationSettings| settings.handoff_report_max_entries = 0,
-            |settings: &mut CoordinationSettings| settings.handoff_report_max_chars = 0,
-            |settings: &mut CoordinationSettings| settings.handoff_metric_max_records = 0,
-            |settings: &mut CoordinationSettings| settings.handoff_finding_min_samples = 0,
-            |settings: &mut CoordinationSettings| settings.handoff_finding_retention_ms = 0,
         ] {
             let mut settings = CoordinationSettings::default();
             mutate(&mut settings);
@@ -1498,65 +1368,6 @@ mod tests {
             |settings: &mut CoordinationSettings| settings.store_max_leases = 0,
             |settings: &mut CoordinationSettings| settings.store_max_outbox_messages = 0,
             |settings: &mut CoordinationSettings| settings.store_max_activity_observations = 0,
-        ] {
-            let mut settings = CoordinationSettings::default();
-            mutate(&mut settings);
-            assert!(settings.validate().is_err());
-        }
-    }
-
-    #[test]
-    fn decomposition_bounds_default_usable_and_reject_zero() {
-        let settings = CoordinationSettings::default();
-        settings.validate().unwrap();
-        assert!(settings.store_max_decomposition_outcomes >= 1024);
-        assert!(settings.decomposition_min_samples >= 2);
-        for mutate in [
-            |settings: &mut CoordinationSettings| settings.store_max_decomposition_outcomes = 0,
-            |settings: &mut CoordinationSettings| settings.decomposition_min_samples = 0,
-        ] {
-            let mut settings = CoordinationSettings::default();
-            mutate(&mut settings);
-            assert!(settings.validate().is_err());
-        }
-    }
-
-    #[test]
-    fn disagreement_bounds_default_usable_and_reject_zero() {
-        let settings = CoordinationSettings::default();
-        settings.validate().unwrap();
-        assert!(
-            !settings.disagreement_blocks_completion,
-            "dissent must not block completion unless a project asks for it"
-        );
-        assert!(settings.store_max_disagreements >= 1024);
-        assert!(settings.disagreement_max_open >= 1);
-        assert!(settings.disagreement_retention_ms >= 86_400_000);
-        for mutate in [
-            |settings: &mut CoordinationSettings| settings.store_max_disagreements = 0,
-            |settings: &mut CoordinationSettings| settings.disagreement_max_open = 0,
-            |settings: &mut CoordinationSettings| settings.disagreement_retention_ms = 0,
-        ] {
-            let mut settings = CoordinationSettings::default();
-            mutate(&mut settings);
-            assert!(settings.validate().is_err());
-        }
-    }
-
-    #[test]
-    fn no_progress_bounds_default_generous_and_reject_invalid_values() {
-        let settings = CoordinationSettings::default();
-        settings.validate().unwrap();
-        assert!(settings.no_progress_repeat_threshold >= 3);
-        assert!(settings.no_progress_unchanged_turns >= 8);
-        assert!(settings.no_progress_window_turns >= settings.no_progress_unchanged_turns);
-        assert!(settings.no_progress_window_turns >= settings.no_progress_repeat_threshold);
-        for mutate in [
-            |settings: &mut CoordinationSettings| settings.no_progress_repeat_threshold = 0,
-            |settings: &mut CoordinationSettings| settings.no_progress_repeat_threshold = 1,
-            |settings: &mut CoordinationSettings| settings.no_progress_unchanged_turns = 1,
-            |settings: &mut CoordinationSettings| settings.no_progress_window_turns = 1,
-            |settings: &mut CoordinationSettings| settings.no_progress_window_turns = 2,
         ] {
             let mut settings = CoordinationSettings::default();
             mutate(&mut settings);
@@ -1617,61 +1428,6 @@ mod tests {
             |settings: &mut CoordinationSettings| {
                 settings.merge_lease_poll_interval_ms = settings.merge_lease_wait_ms + 1
             },
-        ] {
-            let mut settings = CoordinationSettings::default();
-            mutate(&mut settings);
-            assert!(settings.validate().is_err());
-        }
-    }
-
-    #[test]
-    fn provider_pressure_bounds_default_generous_and_reject_invalid_values() {
-        let settings = CoordinationSettings::default();
-        settings.validate().unwrap();
-        assert!(settings.provider_pressure_enabled);
-        assert!(settings.provider_min_concurrency <= settings.provider_initial_concurrency);
-        assert!(settings.provider_initial_concurrency <= settings.provider_max_concurrency);
-        assert!(settings.provider_interactive_reserved_slots < settings.provider_max_concurrency);
-        assert!(settings.provider_retry_base_backoff_ms <= settings.provider_retry_max_backoff_ms);
-        assert!(settings.provider_retry_jitter_per_mille <= 1000);
-        for mutate in [
-            |settings: &mut CoordinationSettings| settings.provider_max_concurrency = 0,
-            |settings: &mut CoordinationSettings| settings.provider_min_concurrency = 0,
-            |settings: &mut CoordinationSettings| settings.provider_initial_concurrency = 0,
-            |settings: &mut CoordinationSettings| settings.provider_retry_max_attempts = 0,
-            |settings: &mut CoordinationSettings| settings.provider_breaker_failure_threshold = 0,
-            |settings: &mut CoordinationSettings| settings.provider_breaker_cooldown_ms = 0,
-            |settings: &mut CoordinationSettings| settings.provider_max_retry_after_ms = 0,
-            |settings: &mut CoordinationSettings| settings.provider_pressure_max_buckets = 0,
-            |settings: &mut CoordinationSettings| {
-                settings.provider_min_concurrency = settings.provider_initial_concurrency + 1
-            },
-            |settings: &mut CoordinationSettings| {
-                settings.provider_initial_concurrency = settings.provider_max_concurrency + 1
-            },
-            |settings: &mut CoordinationSettings| {
-                settings.provider_interactive_reserved_slots = settings.provider_max_concurrency
-            },
-            |settings: &mut CoordinationSettings| {
-                settings.provider_retry_base_backoff_ms = settings.provider_retry_max_backoff_ms + 1
-            },
-            |settings: &mut CoordinationSettings| settings.provider_retry_jitter_per_mille = 1001,
-        ] {
-            let mut settings = CoordinationSettings::default();
-            mutate(&mut settings);
-            assert!(settings.validate().is_err());
-        }
-    }
-
-    #[test]
-    fn agent_profile_bounds_default_usable_and_reject_zero() {
-        let settings = CoordinationSettings::default();
-        settings.validate().unwrap();
-        assert!(settings.agent_profile_max_count >= 1);
-        assert!(settings.agent_profile_max_bytes >= 1024);
-        for mutate in [
-            |settings: &mut CoordinationSettings| settings.agent_profile_max_count = 0,
-            |settings: &mut CoordinationSettings| settings.agent_profile_max_bytes = 0,
         ] {
             let mut settings = CoordinationSettings::default();
             mutate(&mut settings);

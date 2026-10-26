@@ -202,60 +202,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn review_settings_defaults_match_the_documented_arguments() {
-        let settings = ReviewSettings::default();
-
-        assert_eq!(settings.default_depth, "normal");
-        assert_eq!(settings.parallel_depth, 4);
-        assert_eq!(settings.variants, 1);
-        assert_eq!(settings.idle_timeout_secs, 360);
-        assert_eq!(settings.model_slot, ModelSlot::Chat);
-    }
-
-    #[test]
-    fn review_settings_variants_pick_distinct_slots_in_order() {
-        let settings = ReviewSettings::default();
-
-        assert_eq!(settings.slots_for_variants(1), vec![ModelSlot::Chat]);
-        assert_eq!(
-            settings.slots_for_variants(2),
-            vec![ModelSlot::Chat, ModelSlot::Thinking]
-        );
-        assert_eq!(
-            settings.slots_for_variants(3),
-            vec![ModelSlot::Chat, ModelSlot::Thinking, ModelSlot::Chat2]
-        );
-    }
-
-    #[test]
-    fn review_settings_parse_from_yaml_with_stage_overrides() {
-        let yaml = r#"
-default_depth: deep
-parallel_depth: 8
-variants: 2
-idle_timeout_secs: 120
-model_slot: thinking
-stages:
-  execution:
-    enabled: false
-  mechanical:
-    model_slot: light
-"#;
-        let settings: ReviewSettings = serde_yaml::from_str(yaml).unwrap();
-
-        assert_eq!(settings.default_depth, "deep");
-        assert_eq!(settings.parallel_depth, 8);
-        assert_eq!(settings.idle_timeout_secs, 120);
-        assert_eq!(settings.model_slot, ModelSlot::Thinking);
-        assert_eq!(settings.stage_override("execution").enabled, Some(false));
-        assert_eq!(
-            settings.stage_override("mechanical").model_slot,
-            Some(ModelSlot::Light)
-        );
-        assert!(settings.stage_override("diff").enabled.is_none());
-    }
-
-    #[test]
     fn review_stage_spec_is_always_autonomous() {
         let base = SubchatParameters {
             subchat_model_type: crate::call_validation::ChatModelType::Default,

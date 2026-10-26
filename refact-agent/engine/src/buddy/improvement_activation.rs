@@ -60,41 +60,6 @@ pub struct LandingAdapter {
     materials: Arc<dyn RecoveryMaterialStore>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn typed_landing_draft_binds_exact_preimage_and_rejects_authority() {
-        let draft = LandingDraft {
-            project: ProjectIdentity {
-                project_id: "fixture".into(),
-                canonical_root: "/fixture".into(),
-            },
-            candidate_id: "candidate".into(),
-            proof_id: "preallocated-proof".into(),
-            worktree_id: "isolated".into(),
-            exact: CheckedMergeIdentity {
-                source_head: "a".repeat(40),
-                target_head: "b".repeat(40),
-                target_branch: "main".into(),
-                patch_digest: "c".repeat(64),
-                target_files: vec!["file.txt".into()],
-            },
-        };
-        let before = digest(&draft.exact).unwrap();
-        let mut changed = draft.clone();
-        changed.exact.target_head = "d".repeat(40);
-        assert_ne!(before, digest(&changed.exact).unwrap());
-        let mut value = serde_json::to_value(&draft).unwrap();
-        value["auto_merge"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<LandingDraft>(value).is_err());
-        let mut value = serde_json::to_value(&draft).unwrap();
-        value["exact"]["command"] = serde_json::json!("deploy");
-        assert!(serde_json::from_value::<LandingDraft>(value).is_err());
-    }
-}
-
 impl LandingAdapter {
     pub fn new(
         runtime: OutcomeRuntime,

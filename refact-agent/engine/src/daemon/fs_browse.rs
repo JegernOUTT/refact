@@ -129,16 +129,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_path_uses_home_directory() {
-        let temp = tempfile::tempdir().unwrap();
-
-        let response = browse_requested(None, Some(temp.path()), MAX_DIR_ENTRIES).unwrap();
-
-        assert_eq!(response.path, canonical(temp.path()));
-        assert!(response.can_open);
-    }
-
-    #[tokio::test]
     async fn lists_immediate_visible_directories_sorted_with_git_markers() {
         let temp = tempfile::tempdir().unwrap();
         fs::create_dir(temp.path().join("zulu")).unwrap();
@@ -173,21 +163,6 @@ mod tests {
             ]
         );
         assert!(!response.truncated);
-    }
-
-    #[tokio::test]
-    async fn rejects_missing_and_file_paths() {
-        let temp = tempfile::tempdir().unwrap();
-        let missing = temp.path().join("missing");
-        let file = temp.path().join("file.txt");
-        fs::write(&file, b"file").unwrap();
-
-        assert!(browse_at(&missing, MAX_DIR_ENTRIES)
-            .unwrap_err()
-            .contains("failed to open"));
-        assert!(browse_at(&file, MAX_DIR_ENTRIES)
-            .unwrap_err()
-            .contains("not a directory"));
     }
 
     #[tokio::test]

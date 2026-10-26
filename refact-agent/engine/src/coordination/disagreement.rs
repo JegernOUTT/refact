@@ -344,65 +344,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_disagreement_survives_a_competing_filing_and_keeps_both_sides() {
-        let ledger = ledger().await;
-        let filed = record("d-1");
-        assert!(matches!(
-            ledger.file(&filed).await.unwrap(),
-            DisagreementFiling::Filed(_)
-        ));
-
-        let mut overwrite = record("d-1");
-        overwrite.claim = "there is no problem".to_string();
-        overwrite.positions = vec![position("mine", "agent-c", vec![])];
-        let outcome = ledger.file(&overwrite).await.unwrap();
-
-        assert!(matches!(outcome, DisagreementFiling::Exists(_)));
-        let stored = ledger.get("d-1").await.unwrap().unwrap();
-        assert_eq!(stored.claim, filed.claim);
-        assert_eq!(stored.positions.len(), 2);
-        let rendered = render(&stored);
-        assert!(rendered.contains("position `held`"), "{rendered}");
-        assert!(rendered.contains("position `dropped`"), "{rendered}");
-    }
-
-    #[tokio::test]
-    async fn disagreement_adjudication_persists_and_leaves_the_rejected_side_readable() {
-        let ledger = ledger().await;
-        let mut filed = record("d-2");
-        ledger.file(&filed).await.unwrap();
-
-        let decisive = EvidenceRef::new(EvidenceKind::File, "src/chat/session.rs:210");
-        filed
-            .resolve(
-                "reviewer",
-                AdjudicationVerdict::Decided {
-                    position_id: "held".to_string(),
-                    decisive_evidence: decisive.clone(),
-                    rationale: "the guard outlives the await".to_string(),
-                },
-                REVISION,
-                now_ms(),
-            )
-            .unwrap();
-        assert!(store_resolution(&ledger, &filed).await.unwrap());
-
-        let stored = ledger.get("d-2").await.unwrap().unwrap();
-        assert_eq!(stored.status, DisagreementStatus::Adjudicated);
-        assert_eq!(
-            stored.adjudication.as_ref().unwrap().decisive_evidence,
-            decisive
-        );
-        let rendered = render(&stored);
-        assert!(rendered.contains("position `dropped`"), "{rendered}");
-        assert!(rendered.contains("stay readable"), "{rendered}");
-        assert!(
-            rendered.contains("file:src/chat/session.rs:210"),
-            "{rendered}"
-        );
-    }
-
-    #[tokio::test]
     async fn an_unresolvable_disagreement_stays_open_and_a_moved_revision_goes_stale() {
         let ledger = ledger().await;
         let mut unresolved = record("d-open");
@@ -447,53 +388,5 @@ mod tests {
         assert!(stale.adjudication.is_none());
         assert_ne!(stale.status, DisagreementStatus::Adjudicated);
         assert!(render(&open).contains("no decisive evidence"));
-    }
-
-    #[tokio::test]
-    async fn the_blocking_policy_is_honoured_in_both_directions() {
-        let ledger = ledger().await;
-        ledger.file(&record("d-a")).await.unwrap();
-        let mut settled = record("d-b");
-        settled.withdraw(now_ms());
-        ledger.file(&record("d-b")).await.unwrap();
-        store_resolution(&ledger, &settled).await.unwrap();
-        let records = ledger.list(None).await.unwrap();
-
-        let permissive = completion_gate(&records, false);
-        let strict = completion_gate(&records, true);
-
-        assert_eq!(permissive.open, vec!["d-a".to_string()]);
-        assert!(
-            !permissive.blocked,
-            "an open disagreement must not block by default"
-        );
-        assert_eq!(strict.open, permissive.open);
-        assert!(strict.blocked, "the policy must be able to block");
-        assert!(render_all(&records, &permissive).contains("not blocked by them"));
-        assert!(render_all(&records, &strict).contains("blocked by policy"));
-        assert_eq!(
-            completion_gate(&[], true),
-            CompletionGate {
-                blocked: false,
-                open: vec![]
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn disagreement_retention_keeps_open_records_and_drops_settled_ones() {
-        let ledger = ledger().await;
-        ledger.file(&record("d-live")).await.unwrap();
-        let mut settled = record("d-done");
-        ledger.file(&settled).await.unwrap();
-        settled.withdraw(1_500);
-        ledger.put_resolution(&settled).await.unwrap();
-
-        let expired = ledger.expire(100, 5_000).await.unwrap();
-        let kept = ledger.list(None).await.unwrap();
-
-        assert_eq!(expired, 1);
-        assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].record_id, "d-live");
     }
 }

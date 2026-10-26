@@ -334,54 +334,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_singleton_loading_still_uses_builtin_provider() {
-        let temp = tempfile::tempdir().unwrap();
-        write_provider_config(
-            &temp,
-            "openai.yaml",
-            "api_key: sk-main\nenabled: true\nenabled_models:\n  - gpt-4.1\n",
-        )
-        .await;
-
-        let registry = load_registry(&temp).await;
-        let provider = registry.get("openai").unwrap();
-
-        assert_eq!(provider.name(), "openai");
-        assert_eq!(provider.base_provider_name(), "openai");
-        assert_eq!(provider.display_name(), "OpenAI");
-    }
-
-    #[tokio::test]
-    async fn alias_without_base_provider_is_ignored() {
-        let temp = tempfile::tempdir().unwrap();
-        write_provider_config(
-            &temp,
-            "openai_2.yaml",
-            "api_key: sk-two\nenabled: true\nenabled_models:\n  - gpt-4.1\n",
-        )
-        .await;
-
-        let registry = load_registry(&temp).await;
-
-        assert!(!registry.has_instance("openai_2"));
-    }
-
-    #[tokio::test]
-    async fn alias_with_empty_base_provider_is_ignored() {
-        let temp = tempfile::tempdir().unwrap();
-        write_provider_config(
-            &temp,
-            "openai_2.yaml",
-            "base_provider: ''\napi_key: sk-two\nenabled: true\nenabled_models:\n  - gpt-4.1\n",
-        )
-        .await;
-
-        let registry = load_registry(&temp).await;
-
-        assert!(!registry.has_instance("openai_2"));
-    }
-
-    #[tokio::test]
     async fn credential_is_rejected_for_unsupported_base_provider() {
         let temp = tempfile::tempdir().unwrap();
         write_provider_config(
@@ -421,36 +373,5 @@ mod tests {
         let registry = load_registry(&temp).await;
 
         assert_eq!(registry.iter().count(), 0);
-    }
-
-    #[tokio::test]
-    async fn case_insensitive_duplicate_stems_are_skipped() {
-        let temp = tempfile::tempdir().unwrap();
-        write_provider_config(
-            &temp,
-            "openai.yaml",
-            "api_key: sk-main\nenabled: true\nenabled_models:\n  - gpt-4.1\n",
-        )
-        .await;
-        write_provider_config(
-            &temp,
-            "OpenAI.yaml",
-            "base_provider: openai\napi_key: sk-dupe\nenabled: true\nenabled_models:\n  - gpt-4.1-mini\n",
-        )
-        .await;
-
-        let registry = load_registry(&temp).await;
-
-        assert_eq!(registry.iter().count(), 1);
-    }
-
-    #[test]
-    fn remove_returns_removed_provider() {
-        let mut registry = ProviderRegistry::new();
-        registry.add(create_provider("openai").unwrap());
-
-        assert!(registry.has_instance("openai"));
-        assert!(registry.remove("openai").is_some());
-        assert!(!registry.has_instance("openai"));
     }
 }

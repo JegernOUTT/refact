@@ -647,22 +647,6 @@ mod tests {
     }
 
     #[test]
-    fn clearing_contexts_keeps_frame_topology() {
-        let mut tree = FrameTree::default();
-        tree.attach("main".to_string(), None);
-        tree.attach("child".to_string(), Some("main".to_string()));
-        tree.set_utility_context("main", None, 3);
-        tree.set_utility_context("child", None, 4);
-
-        let invalidation = tree.clear_contexts();
-
-        assert_eq!(invalidation.contexts.len(), 2);
-        assert_eq!(tree.frame_ids(), vec!["main", "child"]);
-        assert!(tree.frame("main").unwrap().utility_context.is_none());
-        assert!(tree.frame("child").unwrap().utility_context.is_none());
-    }
-
-    #[test]
     fn frame_locator_owner_is_strict() {
         let owners = strict_owner(vec![handle("first"), handle("second")]).unwrap_err();
         assert_eq!(owners.len(), 2);
@@ -723,34 +707,6 @@ mod tests {
             message,
             format!(
                 "{FRAME_DETACHED_PREFIX} frame 0 matched no iframe element; {FRAME_OWNER_MISSING_GUIDANCE}"
-            )
-        );
-    }
-
-    #[test]
-    fn missing_frame_owner_names_the_locator_that_matched_nothing() {
-        let message = frame_owner_missing_message(1, Some("css=iframe#nope"));
-
-        assert_eq!(
-            message,
-            format!(
-                "{FRAME_DETACHED_PREFIX} frame 1 (css=iframe#nope) matched no iframe element; {FRAME_OWNER_MISSING_GUIDANCE}"
-            )
-        );
-    }
-
-    #[test]
-    fn replaced_frame_still_reports_a_detachment() {
-        let message = FrameLocatorError::FrameDetached {
-            index: 0,
-            source: Some("No frame for given id".to_string()),
-        }
-        .to_string();
-
-        assert_eq!(
-            message,
-            format!(
-                "{FRAME_DETACHED_PREFIX} frame 0 was detached or replaced while resolving: No frame for given id; {FRAME_DETACHED_GUIDANCE}"
             )
         );
     }

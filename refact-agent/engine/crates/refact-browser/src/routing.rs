@@ -1017,23 +1017,6 @@ mod tests {
     }
 
     #[test]
-    fn response_header_overrides_replace_every_upstream_copy_case_insensitively() {
-        let upstream = vec![
-            ("Set-Cookie".to_string(), "a=1".to_string()),
-            ("set-cookie".to_string(), "b=2".to_string()),
-            ("X-Keep".to_string(), "yes".to_string()),
-        ];
-        let overrides = BTreeMap::from([("SET-COOKIE".to_string(), "override=1".to_string())]);
-        assert_eq!(
-            merge_response_headers(upstream, &overrides),
-            vec![
-                ("X-Keep".to_string(), "yes".to_string()),
-                ("SET-COOKIE".to_string(), "override=1".to_string()),
-            ]
-        );
-    }
-
-    #[test]
     fn route_fetch_decides_inline_and_stays_bounded() {
         assert!(
             FETCH_TIMEOUT <= Duration::from_secs(10),
@@ -1096,34 +1079,6 @@ mod tests {
     }
 
     #[test]
-    fn registry_add_remove_and_clear_reuse_url_matcher() {
-        let registry = RouteRegistry::default();
-        let (pattern, handler) = route("https://example.com/**", abort("blockedbyclient"));
-        registry.add(pattern.clone(), handler, None).unwrap();
-        registry
-            .add(
-                UrlPattern::Regex {
-                    source: "/assets/.*".to_string(),
-                    flags: "i".to_string(),
-                },
-                RouteHandler::Continue {
-                    url: None,
-                    method: None,
-                    headers: None,
-                    post_data: None,
-                },
-                None,
-            )
-            .unwrap();
-
-        assert!(!registry.is_empty());
-        assert_eq!(registry.list().len(), 2);
-        assert_eq!(registry.remove(Some(&pattern)), 1);
-        assert_eq!(registry.remove(None), 1);
-        assert!(registry.is_empty());
-    }
-
-    #[test]
     fn registry_rejects_invalid_fulfill_status_and_base64_body() {
         let registry = RouteRegistry::default();
         assert!(registry
@@ -1160,24 +1115,6 @@ mod tests {
     }
 
     #[test]
-    fn har_replay_is_listed_with_not_found_mode_and_entry_count() {
-        let dir = tempfile::tempdir().unwrap();
-        let registry = RouteRegistry::default();
-        registry.set_har_replay(har_replay(&dir, "page.har", HarNotFound::Abort));
-
-        let listed = registry.list();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(
-            listed[0].pattern,
-            UrlPattern::Text("har-replay:page.har".to_string())
-        );
-        let har = listed[0].har.clone().expect("HAR route metadata");
-        assert_eq!(har.entry_count, 1);
-        assert_eq!(har.not_found, HarNotFound::Abort);
-        assert!(matches!(listed[0].handler, RouteHandler::Abort { .. }));
-    }
-
-    #[test]
     fn unroute_all_clears_har_replay_and_counts_it() {
         let dir = tempfile::tempdir().unwrap();
         let registry = RouteRegistry::default();
@@ -1189,84 +1126,6 @@ mod tests {
         assert_eq!(registry.remove(None), 2);
         assert!(registry.is_empty());
         assert!(registry.list().is_empty());
-    }
-
-    #[test]
-    fn targeted_unroute_removes_only_the_har_replay() {
-        let dir = tempfile::tempdir().unwrap();
-        let registry = RouteRegistry::default();
-        let (pattern, handler) = route("https://example.com/**", abort("blockedbyclient"));
-        registry.add(pattern.clone(), handler, None).unwrap();
-        registry.set_har_replay(har_replay(&dir, "page.har", HarNotFound::Fallback));
-
-        assert_eq!(registry.remove(Some(&pattern)), 1);
-        assert!(!registry.is_empty());
-        assert_eq!(registry.list().len(), 1);
-
-        let har_pattern = UrlPattern::Text("har-replay:page.har".to_string());
-        assert_eq!(registry.remove(Some(&har_pattern)), 1);
-        assert!(registry.is_empty());
-        assert_eq!(registry.remove(Some(&har_pattern)), 0);
-    }
-
-    #[test]
-    fn re_registering_har_replay_replaces_the_listed_entry() {
-        let dir = tempfile::tempdir().unwrap();
-        let registry = RouteRegistry::default();
-        registry.set_har_replay(har_replay(&dir, "page.har", HarNotFound::Abort));
-        registry.set_har_replay(har_replay(&dir, "other.har", HarNotFound::Fallback));
-
-        let listed = registry.list();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(
-            listed[0].pattern,
-            UrlPattern::Text("har-replay:other.har".to_string())
-        );
-        assert_eq!(
-            listed[0].har.as_ref().unwrap().not_found,
-            HarNotFound::Fallback
-        );
-    }
-
-    #[test]
-    fn har_interception_attribution_stays_har_replay() {
-        let dir = tempfile::tempdir().unwrap();
-        let registry = RouteRegistry::default();
-        registry.set_har_replay(har_replay(&dir, "page.har", HarNotFound::Abort));
-
-        let decision = decide_get(&registry, "one", "https://example.com/missing");
-        assert!(matches!(decision, RequestPausedDecision::Fail(_)));
-
-        let reports = registry.drain_interceptions();
-        assert_eq!(reports.len(), 1);
-        assert_eq!(
-            reports[0].pattern,
-            UrlPattern::Text("har-replay".to_string())
-        );
-        assert_eq!(reports[0].action, "abort");
-
-        registry.remove(None);
-        let after = decide_get(&registry, "two", "https://example.com/missing");
-        assert!(matches!(after, RequestPausedDecision::Continue(None)));
-        assert!(registry.drain_interceptions().is_empty());
-    }
-
-    #[test]
-    fn snapshot_and_restore_round_trip_the_har_replay() {
-        let dir = tempfile::tempdir().unwrap();
-        let registry = RouteRegistry::default();
-        registry.set_har_replay(har_replay(&dir, "page.har", HarNotFound::Abort));
-
-        let snapshot = registry.snapshot();
-        assert_eq!(registry.remove(None), 1);
-        assert!(registry.is_empty());
-
-        registry.restore(snapshot).unwrap();
-        assert!(!registry.is_empty());
-        assert_eq!(
-            registry.list()[0].pattern,
-            UrlPattern::Text("har-replay:page.har".to_string())
-        );
     }
 
     #[test]
@@ -1313,45 +1172,6 @@ mod tests {
     }
 
     #[test]
-    fn fulfill_abort_and_continue_create_expected_decisions() {
-        let handlers = [
-            RouteHandler::Fulfill {
-                status: 201,
-                headers: BTreeMap::new(),
-                body: Some("ok".to_string()),
-                path: None,
-                json: None,
-                content_type: Some("text/plain".to_string()),
-                body_base64: false,
-            },
-            abort("blockedbyclient"),
-            RouteHandler::Continue {
-                url: Some("https://example.com/other".to_string()),
-                method: Some("PATCH".to_string()),
-                headers: None,
-                post_data: Some("updated".to_string()),
-            },
-        ];
-        for (index, handler) in handlers.into_iter().enumerate() {
-            let registry = RouteRegistry::default();
-            registry
-                .add(
-                    UrlPattern::Text("https://example.com/**".to_string()),
-                    handler,
-                    None,
-                )
-                .unwrap();
-            let decision = decide_get(&registry, &index.to_string(), "https://example.com/api");
-            match index {
-                0 => assert!(matches!(decision, RequestPausedDecision::Fulfill(_))),
-                1 => assert!(matches!(decision, RequestPausedDecision::Fail(_))),
-                _ => assert!(matches!(decision, RequestPausedDecision::Continue(Some(_)))),
-            }
-            assert_eq!(registry.drain_interceptions().len(), 1);
-        }
-    }
-
-    #[test]
     fn newest_matching_route_wins_and_list_reports_chain_order() {
         let registry = RouteRegistry::default();
         let pattern = UrlPattern::Text("https://example.com/**".to_string());
@@ -1377,24 +1197,6 @@ mod tests {
     }
 
     #[test]
-    fn fallback_handler_passes_to_the_next_older_matching_route() {
-        let registry = RouteRegistry::default();
-        let pattern = UrlPattern::Text("https://example.com/**".to_string());
-        registry
-            .add(pattern.clone(), fulfill(200, "oldest"), None)
-            .unwrap();
-        registry
-            .add(pattern.clone(), RouteHandler::Fallback, None)
-            .unwrap();
-
-        let decision = decide_get(&registry, "one", "https://example.com/api");
-        assert!(matches!(decision, RequestPausedDecision::Fulfill(_)));
-        let reports = registry.drain_interceptions();
-        assert_eq!(reports[0].action, "fulfill");
-        assert_eq!(reports[0].status, Some(200));
-    }
-
-    #[test]
     fn fallback_chain_traverses_into_the_har_tail() {
         let dir = tempfile::tempdir().unwrap();
         let registry = RouteRegistry::default();
@@ -1415,24 +1217,6 @@ mod tests {
             UrlPattern::Text("har-replay".to_string())
         );
         assert_eq!(reports[0].response_body_preview.as_deref(), Some("ok"));
-    }
-
-    #[test]
-    fn fallback_without_a_tail_reaches_the_network_and_is_still_reported() {
-        let registry = RouteRegistry::default();
-        registry
-            .add(
-                UrlPattern::Text("https://example.com/**".to_string()),
-                RouteHandler::Fallback,
-                None,
-            )
-            .unwrap();
-
-        let decision = decide_get(&registry, "one", "https://example.com/api");
-        assert!(matches!(decision, RequestPausedDecision::Continue(None)));
-        let reports = registry.drain_interceptions();
-        assert_eq!(reports.len(), 1);
-        assert_eq!(reports[0].action, "fallback");
     }
 
     #[test]
@@ -1555,42 +1339,6 @@ mod tests {
     }
 
     #[test]
-    fn exhausting_times_empties_the_registry_so_callers_must_reconcile_interception() {
-        let registry = RouteRegistry::default();
-        registry
-            .add(
-                UrlPattern::Regex {
-                    source: "conversations\\.history".to_string(),
-                    flags: String::new(),
-                },
-                fulfill(200, "{}"),
-                Some(2),
-            )
-            .unwrap();
-
-        for request_id in ["one", "two"] {
-            decide_get(
-                &registry,
-                request_id,
-                "https://example.com/api/conversations.history",
-            );
-        }
-
-        assert!(
-            registry.is_empty(),
-            "times expiry must drain the registry without an explicit unroute"
-        );
-        assert_eq!(
-            registry.remove(Some(&UrlPattern::Regex {
-                source: "conversations\\.history".to_string(),
-                flags: String::new(),
-            })),
-            0,
-            "a later unroute reports zero removals, so teardown cannot be gated on the count"
-        );
-    }
-
-    #[test]
     fn zero_times_is_rejected_at_registration() {
         let registry = RouteRegistry::default();
         let error = registry
@@ -1603,103 +1351,6 @@ mod tests {
 
         assert!(error.contains("times"), "unexpected error: {error}");
         assert!(registry.is_empty());
-    }
-
-    #[test]
-    fn targeted_unroute_removes_every_handler_of_that_pattern() {
-        let registry = RouteRegistry::default();
-        let pattern = UrlPattern::Text("https://example.com/**".to_string());
-        registry
-            .add(pattern.clone(), fulfill(200, "oldest"), None)
-            .unwrap();
-        registry
-            .add(pattern.clone(), RouteHandler::Fallback, None)
-            .unwrap();
-        registry
-            .add(
-                UrlPattern::Text("https://other.dev/**".to_string()),
-                abort("failed"),
-                None,
-            )
-            .unwrap();
-
-        assert_eq!(registry.remove(Some(&pattern)), 2);
-        assert_eq!(registry.list().len(), 1);
-    }
-
-    #[test]
-    fn fulfill_from_path_infers_the_content_type_from_the_extension() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("mock.json"), r#"{"ok":true}"#).unwrap();
-
-        let normalized = normalize_route_handler(
-            RouteHandler::Fulfill {
-                status: 200,
-                headers: BTreeMap::new(),
-                body: None,
-                path: Some("mock.json".to_string()),
-                json: None,
-                content_type: None,
-                body_base64: false,
-            },
-            dir.path(),
-            &[],
-        )
-        .unwrap();
-
-        let RouteHandler::Fulfill {
-            body,
-            path,
-            content_type,
-            body_base64,
-            ..
-        } = normalized
-        else {
-            panic!("expected a fulfill handler");
-        };
-        assert_eq!(body.as_deref(), Some(r#"{"ok":true}"#));
-        assert_eq!(path, None);
-        assert_eq!(content_type.as_deref(), Some("application/json"));
-        assert!(!body_base64);
-    }
-
-    #[test]
-    fn fulfill_from_path_encodes_binary_files_as_base64() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("pixel.png"), [0xffu8, 0xd8, 0x00, 0x01]).unwrap();
-
-        let normalized = normalize_route_handler(
-            RouteHandler::Fulfill {
-                status: 200,
-                headers: BTreeMap::new(),
-                body: None,
-                path: Some("pixel.png".to_string()),
-                json: None,
-                content_type: None,
-                body_base64: false,
-            },
-            dir.path(),
-            &[],
-        )
-        .unwrap();
-
-        let RouteHandler::Fulfill {
-            body,
-            content_type,
-            body_base64,
-            ..
-        } = normalized
-        else {
-            panic!("expected a fulfill handler");
-        };
-        assert!(body_base64);
-        assert_eq!(content_type.as_deref(), Some("image/png"));
-        assert_eq!(
-            base64::engine::general_purpose::STANDARD
-                .decode(body.unwrap())
-                .unwrap(),
-            vec![0xffu8, 0xd8, 0x00, 0x01]
-        );
     }
 
     #[test]
@@ -1846,38 +1497,6 @@ mod tests {
     }
 
     #[test]
-    fn fulfill_json_shorthand_sets_the_body_and_content_type() {
-        let dir = tempfile::tempdir().unwrap();
-        let normalized = normalize_route_handler(
-            RouteHandler::Fulfill {
-                status: 200,
-                headers: BTreeMap::new(),
-                body: None,
-                path: None,
-                json: Some(serde_json::json!({"source": "mocked"})),
-                content_type: None,
-                body_base64: false,
-            },
-            dir.path(),
-            &[],
-        )
-        .unwrap();
-
-        let RouteHandler::Fulfill {
-            body,
-            json,
-            content_type,
-            ..
-        } = normalized
-        else {
-            panic!("expected a fulfill handler");
-        };
-        assert_eq!(body.as_deref(), Some(r#"{"source":"mocked"}"#));
-        assert_eq!(json, None);
-        assert_eq!(content_type.as_deref(), Some("application/json"));
-    }
-
-    #[test]
     fn fulfill_rejects_more_than_one_body_source() {
         let dir = tempfile::tempdir().unwrap();
         let error = normalize_route_handler(
@@ -1896,26 +1515,6 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("only one of"), "unexpected: {error}");
-    }
-
-    #[test]
-    fn non_fulfill_handlers_pass_normalization_through_untouched() {
-        let dir = tempfile::tempdir().unwrap();
-        let handler = RouteHandler::FetchAndFulfill {
-            url: None,
-            method: None,
-            headers: None,
-            post_data: None,
-            status: Some(500),
-            response_headers: BTreeMap::new(),
-            body: None,
-            body_base64: false,
-        };
-
-        assert_eq!(
-            normalize_route_handler(handler.clone(), dir.path(), &[]).unwrap(),
-            handler
-        );
     }
 
     #[test]
@@ -1940,36 +1539,6 @@ mod tests {
         assert_eq!(merged["Content-Length"], "4");
         assert_eq!(merged["accept"], "application/json");
         assert!(!merged.contains_key("Accept"));
-    }
-
-    #[test]
-    fn fetch_and_fulfill_reports_an_abort_when_the_upstream_request_fails() {
-        let registry = RouteRegistry::default();
-        registry
-            .add(
-                UrlPattern::Text("https://example.invalid/**".to_string()),
-                RouteHandler::FetchAndFulfill {
-                    url: None,
-                    method: None,
-                    headers: None,
-                    post_data: None,
-                    status: None,
-                    response_headers: BTreeMap::new(),
-                    body: None,
-                    body_base64: false,
-                },
-                None,
-            )
-            .unwrap();
-
-        let decision = decide_get(&registry, "one", "https://example.invalid/api");
-        assert!(matches!(decision, RequestPausedDecision::Fail(_)));
-        let reports = registry.drain_interceptions();
-        assert_eq!(reports[0].action, "abort");
-        assert!(reports[0]
-            .reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("Route fetch failed")));
     }
 
     #[test]

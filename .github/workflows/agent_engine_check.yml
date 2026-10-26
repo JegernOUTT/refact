@@ -7,6 +7,10 @@ on:
     paths:
       - "refact-agent/engine/**"
       - ".github/workflows/agent_engine_check.yml"
+      - "tools/dev/test_budget.py"
+      - "tools/dev/test_test_budget.py"
+      - "tools/dev/test_admissions.json"
+      - "docs/rust-test-policy.md"
   push:
     branches:
       - main
@@ -15,6 +19,10 @@ on:
     paths:
       - "refact-agent/engine/**"
       - ".github/workflows/agent_engine_check.yml"
+      - "tools/dev/test_budget.py"
+      - "tools/dev/test_test_budget.py"
+      - "tools/dev/test_admissions.json"
+      - "docs/rust-test-policy.md"
   workflow_dispatch:
 
 concurrency:
@@ -45,6 +53,11 @@ jobs:
       - name: Ensure Python is available
         run: python3 --version
 
+      - name: Check Rust test inventory and budget
+        run: |
+          python3 ../../tools/dev/test_budget.py check
+          python3 -m unittest discover -s ../../tools/dev -p test_test_budget.py
+
       - name: Install build tools
         run: |
           sudo apt-get update
@@ -60,15 +73,21 @@ jobs:
           cache-bin: false
 
       - name: Run workspace library tests
+        env:
+          RUST_MIN_STACK: "16777216"
         run: cargo test --workspace --profile ci-test --lib
 
       - name: Run workspace integration tests
+        env:
+          RUST_MIN_STACK: "16777216"
         run: cargo test --workspace --profile ci-test --test '*'
 
       - name: Build refact daemon binary
         run: cargo build --bin refact --profile ci-test
 
       - name: Run daemon E2E suite
+        env:
+          RUST_MIN_STACK: "16777216"
         run: "REFACT_DAEMON_E2E=1 PYTHON3=python3 cargo test --profile ci-test --test it -- daemon_e2e:: --nocapture --test-threads=1"
 
       - name: Run workspace documentation tests
@@ -126,6 +145,7 @@ jobs:
       - name: Run workspace library tests (Windows)
         if: startsWith(matrix.os, 'windows')
         env:
+          RUST_MIN_STACK: "16777216"
           REFACT_GUI_DIR: ${{ github.workspace }}\refact-agent\gui
         shell: bash
         run: cargo test --workspace --exclude refact-tui --profile ci-test --lib --target ${{ matrix.target }}
@@ -133,18 +153,21 @@ jobs:
       - name: Run workspace library tests (macOS)
         if: startsWith(matrix.os, 'macos')
         env:
+          RUST_MIN_STACK: "16777216"
           OPENSSL_STATIC: "1"
         run: cargo test --workspace --exclude refact-lsp --profile ci-test --lib --target ${{ matrix.target }}
 
       - name: Run workspace library tests (Linux ARM)
         if: startsWith(matrix.os, 'ubuntu')
         env:
+          RUST_MIN_STACK: "16777216"
           OPENSSL_STATIC: "1"
         run: cargo test --workspace --exclude refact-lsp --profile ci-test --lib --target ${{ matrix.target }}
 
       - name: Run workspace integration tests (Windows)
         if: startsWith(matrix.os, 'windows')
         env:
+          RUST_MIN_STACK: "16777216"
           REFACT_GUI_DIR: ${{ github.workspace }}\refact-agent\gui
         shell: bash
         run: cargo test --workspace --exclude refact-tui --profile ci-test --test '*' --target ${{ matrix.target }}
@@ -152,11 +175,13 @@ jobs:
       - name: Run workspace integration tests (macOS)
         if: startsWith(matrix.os, 'macos')
         env:
+          RUST_MIN_STACK: "16777216"
           OPENSSL_STATIC: "1"
         run: cargo test --workspace --exclude refact-lsp --profile ci-test --test '*' --target ${{ matrix.target }}
 
       - name: Run workspace integration tests (Linux ARM)
         if: startsWith(matrix.os, 'ubuntu')
         env:
+          RUST_MIN_STACK: "16777216"
           OPENSSL_STATIC: "1"
         run: cargo test --workspace --exclude refact-lsp --profile ci-test --test '*' --target ${{ matrix.target }}

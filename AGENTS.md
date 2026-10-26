@@ -28,6 +28,18 @@ Sub-project `AGENTS.md` files contain detailed architecture, patterns, and check
 
 **Always verify your changes compile and pass tests before finishing.** Both engine and GUI builds are heavy — plan accordingly.
 
+### Rust test admission
+
+Follow `docs/rust-test-policy.md` for new tests, materially changed tests and test-support changes.
+Require distinct important failure detection, actual shipping logic, a discriminating oracle,
+non-vacuous deterministic setup and the cheapest sufficient layer. Critical security, privacy,
+persistence, concurrency and lifecycle contracts require an executed before-fix/mutant failure
+and restored passing evidence. Independent semantic review is mandatory; count/schema checks
+cannot authenticate evidence or reviewer independence. Record fingerprint-bound admissions and
+support impacts in `tools/dev/test_admissions.json`. Run `python3 tools/dev/test_budget.py check
+--base <trusted-base-ref>` and its focused Python self-tests. The physical ceiling is 6,400,
+including ignored, gated, orphan and doc cases. Do not game it with tables, generators or gating.
+
 ### Engine (`refact-agent/engine/`)
 
 ```bash

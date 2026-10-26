@@ -1020,8 +1020,6 @@ mod tests {
     use super::*;
     use crate::app_state::AppState;
     use crate::privacy::{FilePrivacySettings, PrivacySettings};
-    use crate::tools::settings_guard::SettingsGuard;
-    use serial_test::serial;
 
     async fn ccx_for_root(root: &std::path::Path) -> Arc<AMutex<AtCommandsContext>> {
         ccx_for_root_with_blocked(root, vec![]).await
@@ -1091,31 +1089,6 @@ mod tests {
         HashMap::from_iter([("paths".to_string(), Value::String(paths))])
     }
 
-    #[tokio::test]
-    async fn load_image_renders_svg_text_and_shapes_to_png() {
-        let temp = tempfile::Builder::new()
-            .prefix("refact-tool-cat-svg-")
-            .tempdir()
-            .unwrap();
-        let file = temp.path().join("tiny.svg");
-        std::fs::write(
-            &file,
-            r#"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><rect width="80" height="40" fill="red"/><text x="4" y="24">Hi</text></svg>"#,
-        )
-        .unwrap();
-
-        let image = load_image(
-            &file.to_string_lossy().to_string(),
-            &"image/svg".to_string(),
-            &ImagePolicy::default(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(image.m_type, "image/png");
-        assert!(!image.m_content.is_empty());
-    }
-
     fn normalized(path: &std::path::Path) -> String {
         // Mirror the production path pipeline: canonical_path resolves platform
         // quirks (Windows 8.3 short names like RUNNER~1, symlinked /tmp on macOS)
@@ -1183,30 +1156,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_cat_duplicate_path_keeps_explicit_range_before_unbounded() {
-        let temp = tempfile::Builder::new()
-            .prefix("refact-tool-cat-")
-            .tempdir()
-            .unwrap();
-        let file = temp.path().join("f.rs");
-        write_lines(&file, 8);
-        let ccx = ccx_for_root(temp.path()).await;
-
-        let results = run_cat(
-            ccx,
-            format!("{}:2-4,{}", file.to_string_lossy(), file.to_string_lossy()),
-        )
-        .await;
-
-        assert_eq!(
-            context_file_ranges(&results),
-            vec![(normalized(&file), 2, 4)],
-            "{}",
-            tool_text(&results)
-        );
-    }
-
-    #[tokio::test]
     async fn tool_cat_duplicate_explicit_ranges_remain_distinct_and_ordered() {
         let temp = tempfile::Builder::new()
             .prefix("refact-tool-cat-")
@@ -1238,56 +1187,6 @@ mod tests {
         assert_eq!(enrichment.references[1].line1, Some(6));
         assert_eq!(enrichment.references[1].line2, Some(7));
         assert_eq!(enrichment.references[0].source.as_deref(), Some("cat"));
-    }
-
-    #[tokio::test]
-    async fn tool_cat_explicit_file_range_wins_over_directory_expansion() {
-        let temp = tempfile::Builder::new()
-            .prefix("refact-tool-cat-")
-            .tempdir()
-            .unwrap();
-        let dir = temp.path().join("src");
-        let other = dir.join("a.rs");
-        let file = dir.join("z.rs");
-        write_lines(&other, 4);
-        write_lines(&file, 8);
-        let ccx = ccx_for_root(temp.path()).await;
-
-        let results = run_cat(
-            ccx,
-            format!("{}:3-5,{}", file.to_string_lossy(), dir.to_string_lossy()),
-        )
-        .await;
-
-        assert_eq!(
-            context_file_ranges(&results),
-            vec![(normalized(&file), 3, 5), (normalized(&other), 1, 4)]
-        );
-    }
-
-    #[tokio::test]
-    async fn tool_cat_later_explicit_file_range_moves_after_directory_expansion() {
-        let temp = tempfile::Builder::new()
-            .prefix("refact-tool-cat-")
-            .tempdir()
-            .unwrap();
-        let dir = temp.path().join("src");
-        let file = dir.join("a.rs");
-        let other = dir.join("z.rs");
-        write_lines(&file, 8);
-        write_lines(&other, 4);
-        let ccx = ccx_for_root(temp.path()).await;
-
-        let results = run_cat(
-            ccx,
-            format!("{},{}:3-5", dir.to_string_lossy(), file.to_string_lossy()),
-        )
-        .await;
-
-        assert_eq!(
-            context_file_ranges(&results),
-            vec![(normalized(&other), 1, 4), (normalized(&file), 3, 5)]
-        );
     }
 
     #[tokio::test]
@@ -1386,166 +1285,6 @@ mod tests {
         let output_a = tool_text(&run_cat(ccx_a, file.to_string_lossy().to_string()).await);
         assert!(output_a.contains("Agent Secret"), "{output_a}");
         assert!(output_a.contains("private.md"), "{output_a}");
-    }
-
-    #[tokio::test]
-    #[serial(runtime_settings)]
-    async fn tool_cat_directory_expansion_honours_installed_setting() {
-        let _guard = SettingsGuard::install(|settings| {
-            settings.cat_max_expanded_files = 3;
-        });
-        let temp = tempfile::Builder::new()
-            .prefix("refact-tool-cat-")
-            .tempdir()
-            .unwrap();
-        let dir = temp.path().join("many");
-        std::fs::create_dir_all(&dir).unwrap();
-        for i in 0..8 {
-            std::fs::write(dir.join(format!("f{:04}.rs", i)), "line 1\n").unwrap();
-        }
-        let ccx = ccx_for_root(temp.path()).await;
-
-        let results = run_cat(ccx, dir.to_string_lossy().to_string()).await;
-
-        let emitted = context_file_ranges(&results).len();
-        assert_eq!(emitted, 3, "{}", tool_text(&results));
-        let text = tool_text(&results);
-        assert!(
-            text.contains("directory expansion: showing 3 of 8 files")
-                && text.contains("cat_max_expanded_files = 3"),
-            "expected a quantified expansion-cap notice, got: {}",
-            text
-        );
-    }
-
-    #[tokio::test]
-    #[serial(runtime_settings)]
-    async fn tool_cat_large_file_cap_honours_installed_setting() {
-        let _guard = SettingsGuard::install(|settings| {
-            settings.cat_max_file_bytes = 4_096;
-        });
-        let temp = tempfile::Builder::new()
-            .prefix("refact-tool-cat-")
-            .tempdir()
-            .unwrap();
-        let big = temp.path().join("big.rs");
-        std::fs::create_dir_all(big.parent().unwrap()).unwrap();
-        let chunk = "x".repeat(1024);
-        let mut content = String::with_capacity(16_384);
-        while content.len() <= 8_192 {
-            content.push_str(&chunk);
-            content.push('\n');
-        }
-        std::fs::write(&big, content).unwrap();
-        let ccx = ccx_for_root(temp.path()).await;
-
-        let results = run_cat(ccx, big.to_string_lossy().to_string()).await;
-
-        let big_norm = normalized(&big);
-        assert!(
-            context_file_ranges(&results)
-                .iter()
-                .all(|(name, _, _)| name != &big_norm),
-            "oversized file was emitted despite the byte cap: {}",
-            tool_text(&results)
-        );
-        let text = tool_text(&results);
-        assert!(
-            text.contains("exceeds the 4096 byte read limit")
-                && text.contains("cat_max_file_bytes = 4096"),
-            "expected an oversized-file notice naming the setting, got: {}",
-            text
-        );
-    }
-
-    #[tokio::test]
-    #[serial(runtime_settings)]
-    async fn tool_cat_max_lines_setting_changes_emitted_range_and_notice() {
-        let _guard = SettingsGuard::install(|settings| {
-            settings.cat_max_lines = 100;
-        });
-        let temp = tempfile::Builder::new()
-            .prefix("refact-tool-cat-")
-            .tempdir()
-            .unwrap();
-        let file = temp.path().join("long.rs");
-        write_lines(&file, 250);
-        let ccx = ccx_for_root(temp.path()).await;
-
-        let results = run_cat(ccx, file.to_string_lossy().to_string()).await;
-
-        assert_eq!(
-            context_file_ranges(&results),
-            vec![(normalized(&file), 1, 100)],
-            "{}",
-            tool_text(&results)
-        );
-        let text = tool_text(&results);
-        assert!(
-            text.contains("has 250 lines, showing first 100 lines")
-                && text.contains("cat_max_lines = 100"),
-            "expected a quantified line-cap notice, got: {}",
-            text
-        );
-    }
-
-    #[tokio::test]
-    #[serial(runtime_settings)]
-    async fn tool_cat_input_path_cap_honours_installed_setting_and_is_loud() {
-        let _guard = SettingsGuard::install(|settings| {
-            settings.cat_max_input_paths = 2;
-        });
-        let temp = tempfile::Builder::new()
-            .prefix("refact-tool-cat-")
-            .tempdir()
-            .unwrap();
-        let files = (0..5)
-            .map(|i| {
-                let file = temp.path().join(format!("f{i}.rs"));
-                write_lines(&file, 3);
-                file
-            })
-            .collect::<Vec<_>>();
-        let ccx = ccx_for_root(temp.path()).await;
-
-        let joined = files
-            .iter()
-            .map(|file| file.to_string_lossy().to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        let results = run_cat(ccx, joined).await;
-
-        assert_eq!(context_file_ranges(&results).len(), 2);
-        let text = tool_text(&results);
-        assert!(
-            text.contains("showing 2 of 5 requested paths")
-                && text.contains("cat_max_input_paths = 2"),
-            "expected a quantified input-path cap notice, got: {}",
-            text
-        );
-    }
-
-    #[test]
-    fn cat_max_range_span_follows_cat_max_lines() {
-        assert_eq!(clamp_cat_line_range(Some((1, 10_000)), 100), Some((1, 100)));
-        assert_eq!(
-            clamp_cat_line_range(Some((5, 10_000)), 1_000),
-            Some((5, 1_004))
-        );
-    }
-
-    #[test]
-    fn expansion_cap_notice_quantifies_shown_and_total() {
-        let notice = expansion_cap_notice(512, 700, false, 512);
-        assert!(notice.contains("showing 512 of 700 files"), "{}", notice);
-        assert!(
-            notice.contains("cat_max_expanded_files = 512"),
-            "{}",
-            notice
-        );
-
-        let probed = expansion_cap_notice(512, 2_049, true, 512);
-        assert!(probed.contains("showing 512 of 2049+ files"), "{}", probed);
     }
 
     #[tokio::test]

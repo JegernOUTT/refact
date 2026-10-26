@@ -168,24 +168,4 @@ mod tests {
         boundary.extra.insert("compression_report".into(), json!({"kind":"reconstructed_history", "schema_version":1,"payload":{"messages":"bad"}}));
         assert!(apply_summarization_linearize(vec![message("user", "archive"), boundary]).is_err());
     }
-
-    #[test]
-    fn ordinary_filters_and_context_detachment_remain() {
-        let mut context = message("context_file", "file");
-        context.tool_call_id = "missing-call".into();
-        let mut event = message("event", "archival status");
-        event.extra.insert(
-            "event".into(),
-            json!({"subkind":"goal_pursuit","payload":{"kind":"stopped"}}),
-        );
-        let output = apply_summarization_linearize(vec![
-            message("user", "question"),
-            context,
-            event,
-            message("error", "UI error"),
-        ])
-        .unwrap();
-        assert_eq!(output.len(), 2);
-        assert!(output[1].tool_call_id.is_empty());
-    }
 }

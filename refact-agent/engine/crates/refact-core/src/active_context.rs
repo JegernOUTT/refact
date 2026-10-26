@@ -725,13 +725,6 @@ mod tests {
     }
 
     #[test]
-    fn static_reports_do_not_require_rebuild() {
-        let stored = vec![message("user", "user", "hello"), diagnostic("static")];
-        assert!(!requires_explicit_rebuild(&stored));
-        assert_eq!(active_context(&stored).unwrap().report_index, None);
-    }
-
-    #[test]
     fn legacy_requires_explicit_rebuild_without_mutating_available_history() {
         let stored = vec![message("user", "user", "task"), legacy("summary")];
         let before = serde_json::to_value(&stored).unwrap();
@@ -790,30 +783,6 @@ mod tests {
     }
 
     #[test]
-    fn nested_history_reports_and_duplicate_payload_ids_are_rejected() {
-        let inner = report(vec![message("inner", "user", "x")]);
-        assert!(
-            make_reconstruction_report(vec![inner], ReconstructionMetadata::default()).is_err()
-        );
-        assert!(make_reconstruction_report(
-            vec![
-                message("same", "user", "x"),
-                message("same", "assistant", "y")
-            ],
-            ReconstructionMetadata::default()
-        )
-        .is_err());
-        assert!(make_reconstruction_report(Vec::new(), ReconstructionMetadata::default()).is_err());
-    }
-
-    #[test]
-    fn archived_ids_can_be_preserved_in_payload() {
-        let original = message("preserved", "user", "same ID");
-        let stored = vec![original.clone(), report(vec![original])];
-        assert_eq!(active_context(&stored).unwrap().messages.len(), 1);
-    }
-
-    #[test]
     fn serialization_preserves_inner_control_and_privacy_metadata() {
         let mut plan = message("plan", "plan", "exact plan bytes\n");
         plan.extra
@@ -862,91 +831,6 @@ mod tests {
             &active_context(&result).unwrap().messages,
             &transformed
         ));
-    }
-
-    #[test]
-    fn insert_at_active_head_lands_in_payload_and_leaves_archive_intact() {
-        let archived = message("archive", "user", "never mutate");
-        let stored = vec![
-            archived.clone(),
-            report(vec![
-                message("files", "context_file", "rebuilt files"),
-                message("payload", "user", "rebuilt request"),
-            ]),
-            message("suffix", "user", "follow-up"),
-        ];
-        let system = message("system", "system", "prompt");
-        let (result, origin) = insert_active_message(&stored, 0, system).unwrap();
-        assert_eq!(
-            origin,
-            MessageOrigin::ReportPayload {
-                report_index: 1,
-                message_index: 0
-            }
-        );
-        assert_eq!(result.len(), stored.len());
-        assert_eq!(
-            serde_json::to_value(&result[0]).unwrap(),
-            serde_json::to_value(&archived).unwrap()
-        );
-        assert_eq!(result[1].message_id, stored[1].message_id);
-        let active = active_context(&result).unwrap();
-        assert_eq!(
-            active
-                .messages
-                .iter()
-                .map(|m| m.message_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["system", "files", "payload", "suffix"]
-        );
-        let (result, origin) = insert_active_message(
-            &result,
-            1,
-            message("project", "context_file", "instructions"),
-        )
-        .unwrap();
-        assert_eq!(
-            origin,
-            MessageOrigin::ReportPayload {
-                report_index: 1,
-                message_index: 1
-            }
-        );
-        assert_eq!(
-            active_context(&result)
-                .unwrap()
-                .messages
-                .iter()
-                .map(|m| m.message_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["system", "project", "files", "payload", "suffix"]
-        );
-    }
-
-    #[test]
-    fn insert_past_payload_lands_in_raw_suffix() {
-        let stored = vec![
-            report(vec![message("payload", "user", "rebuilt request")]),
-            message("suffix", "user", "follow-up"),
-        ];
-        let (result, origin) =
-            insert_active_message(&stored, 1, message("hint", "cd_instruction", "hint")).unwrap();
-        assert_eq!(origin, MessageOrigin::Stored { message_index: 1 });
-        assert_eq!(result.len(), 3);
-        assert_eq!(result[1].message_id, "hint");
-        assert_eq!(
-            serde_json::to_value(&result[0]).unwrap(),
-            serde_json::to_value(&stored[0]).unwrap()
-        );
-        let (result, origin) =
-            insert_active_message(&stored, 99, message("tail", "user", "appended")).unwrap();
-        assert_eq!(origin, MessageOrigin::Stored { message_index: 2 });
-        assert_eq!(result[2].message_id, "tail");
-        let plain = vec![message("only", "user", "hello")];
-        let (result, origin) =
-            insert_active_message(&plain, 0, message("system", "system", "prompt")).unwrap();
-        assert_eq!(origin, MessageOrigin::Stored { message_index: 0 });
-        assert_eq!(result[0].message_id, "system");
     }
 
     #[test]

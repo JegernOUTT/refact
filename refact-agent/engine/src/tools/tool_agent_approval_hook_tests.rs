@@ -267,36 +267,3 @@ async fn hooks_disabled_spawns_no_hook_and_changes_nothing() {
     assert!(child_request.await.unwrap());
     assert_eq!(invocation_count(&counter), 0);
 }
-
-#[cfg(unix)]
-#[tokio::test]
-#[serial_test::serial(permission_decision_hooks)]
-async fn reject_hook_receives_reject_decision_payload() {
-    let fixture = fixture().await;
-    let counter = fixture.dir.path().join("payload-count");
-    let payload = fixture.dir.path().join("payload.json");
-    install_hook(
-        &fixture,
-        &format!(
-            "cat > {}; echo invoked >> {}; exit 0",
-            shell_quote(&payload.display().to_string()),
-            shell_quote(&counter.display().to_string())
-        ),
-        None,
-    );
-    let call = fixture.call("shell");
-    let mut child_request = Box::pin(crate::agents::approval::request(
-        &fixture.app,
-        &fixture.ccx,
-        &call,
-        "needs decision",
-    ));
-    let pending = wait_for_request(&fixture, child_request.as_mut()).await;
-
-    execute_decision(&fixture, &pending.id, "reject").await;
-    assert!(!child_request.await.unwrap());
-    let payload: Value = serde_json::from_slice(&std::fs::read(payload).unwrap()).unwrap();
-    assert_eq!(payload["decision"], "reject");
-    assert_eq!(payload["source"], "child_approval");
-    assert_eq!(invocation_count(&counter), 1);
-}

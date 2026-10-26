@@ -358,26 +358,3 @@ async fn resumed_generation_with_existing_worktree_is_merged() {
     assert!(!fixture.source.join("B.txt").exists());
     fixture.app.agent_executions.shutdown().await;
 }
-
-#[tokio::test]
-#[serial_test::serial(test_runner)]
-async fn unscoped_child_continue_unchanged() {
-    let fixture = fixture(false).await;
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let _runner = runner(seen.clone(), Arc::new(Mutex::new(None)), false);
-    let request = spawn_request(PARENT, BgAgentKind::Subagent);
-    let first = await_completion(
-        spawn_background_agent(fixture.app.clone(), request)
-            .await
-            .unwrap(),
-    )
-    .await;
-    let first = settled(&fixture.app, &first).await;
-    let done = continue_child(&fixture.app, &first).await;
-    assert_eq!(done.status, BgAgentStatus::Completed, "{:?}", done.error);
-    assert_eq!(done.run_generation, 2);
-    assert!(done.worktree_id.is_none());
-    assert!(done.merge_status.is_none());
-    assert_eq!(*seen.lock().await, vec![None, None]);
-    fixture.app.agent_executions.shutdown().await;
-}

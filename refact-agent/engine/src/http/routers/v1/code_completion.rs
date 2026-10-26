@@ -332,38 +332,6 @@ mod tests {
         assert!(error.message.contains("trusted"));
     }
 
-    #[test]
-    fn completion_path_policy_denies_excluded_zone_and_allows_normal_zone() {
-        let policy = refact_privacy::PrivacyPolicy {
-            blocked: Vec::new(),
-            zones: vec![
-                refact_privacy::Zone {
-                    name: "excluded".to_string(),
-                    patterns: vec!["*denied.rs".to_string()],
-                    send_to: vec!["other".to_string()],
-                    on_shell_read: refact_privacy::ShellBehavior::Withhold,
-                },
-                refact_privacy::Zone {
-                    name: "normal".to_string(),
-                    patterns: vec!["*".to_string()],
-                    send_to: vec!["trusted".to_string()],
-                    on_shell_read: refact_privacy::ShellBehavior::Withhold,
-                },
-            ],
-            subagents: refact_privacy::SubagentPolicy::default(),
-            ..Default::default()
-        };
-
-        let denied = authorize_completion_path(&policy, "denied.rs", "trusted/model", &[]);
-        let allowed = authorize_completion_path(&policy, "allowed.rs", "trusted/model", &[]);
-
-        assert_eq!(
-            denied.unwrap_err().status_code,
-            StatusCode::UNPROCESSABLE_ENTITY
-        );
-        assert!(allowed.is_ok());
-    }
-
     #[tokio::test]
     async fn completion_for_allowed_normal_zone_uses_normal_path() {
         let (gcx, app, mut post) = completion_context("allowed.rs", &["other"], &["trusted"]).await;

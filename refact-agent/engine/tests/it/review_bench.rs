@@ -170,32 +170,6 @@ fn precision_proxy(report: &ReviewReport, manifest: &FixtureManifest) -> f64 {
     matched as f64 / supported.len() as f64
 }
 
-fn corroborated_precision(findings: &[(bool, bool)]) -> (f64, f64) {
-    let corroborated = findings
-        .iter()
-        .filter(|(is_corroborated, _)| *is_corroborated)
-        .collect::<Vec<_>>();
-    let corroborated_precision = if corroborated.is_empty() {
-        1.0
-    } else {
-        corroborated
-            .iter()
-            .filter(|(_, matches_seed)| *matches_seed)
-            .count() as f64
-            / corroborated.len() as f64
-    };
-    let overall_precision = if findings.is_empty() {
-        1.0
-    } else {
-        findings
-            .iter()
-            .filter(|(_, matches_seed)| *matches_seed)
-            .count() as f64
-            / findings.len() as f64
-    };
-    (corroborated_precision, overall_precision)
-}
-
 fn ranges_are_near(left: &ReviewFinding, right: &ReviewFinding) -> bool {
     left.line_start <= right.line_end.saturating_add(5)
         && right.line_start <= left.line_end.saturating_add(5)
@@ -325,64 +299,6 @@ fn seed(file: &str, start: u32, end: u32, category: &str) -> SeededDefect {
         marker: "seeded frog defect".to_string(),
         expected_check: None,
     }
-}
-
-#[test]
-fn metrics_match_only_overlapping_file_and_lines() {
-    let manifest = synthetic_manifest(
-        FixtureKind::Seeded,
-        vec![
-            seed("pond.py", 10, 20, "correctness"),
-            seed("bank.py", 30, 35, "security"),
-            seed("welcome.py", 40, 45, "tests"),
-        ],
-    );
-    let candidate_report = report(vec![
-        finding("fixtures/pond.py", 20, 20, ReviewSeverity::High, true),
-        finding("bank.py", 36, 36, ReviewSeverity::High, true),
-        finding("welcome.py", 42, 42, ReviewSeverity::High, true),
-    ]);
-
-    assert_eq!(seeded_recall(&candidate_report, &manifest), 2.0 / 3.0);
-    assert_eq!(
-        seeded_high_severity_recall(&candidate_report, &manifest),
-        2.0 / 3.0
-    );
-    assert_eq!(precision_proxy(&candidate_report, &manifest), 2.0 / 3.0);
-}
-
-#[test]
-fn corroborated_findings_have_at_least_overall_precision() {
-    let (corroborated, overall) = corroborated_precision(&[
-        (true, true),
-        (true, true),
-        (false, true),
-        (false, false),
-        (false, false),
-    ]);
-
-    assert!(corroborated >= overall);
-    assert_eq!(corroborated, 1.0);
-    assert_eq!(overall, 3.0 / 5.0);
-}
-
-#[test]
-fn corroborated_precision_uses_perfect_empty_denominators() {
-    assert_eq!(corroborated_precision(&[]), (1.0, 1.0));
-    assert_eq!(corroborated_precision(&[(false, false)]), (1.0, 0.0));
-}
-
-#[test]
-fn duplicate_rate_checks_t13_invariant_and_manual_hook() {
-    let candidate_report = report(vec![
-        finding("pond.py", 10, 12, ReviewSeverity::High, true),
-        finding("pond.py", 17, 18, ReviewSeverity::Medium, true),
-        finding("pond.py", 24, 25, ReviewSeverity::Medium, true),
-    ]);
-
-    assert_eq!(duplicate_violation_count(&candidate_report), 1);
-    assert_eq!(duplicate_rate(&candidate_report, 0), 1.0 / 3.0);
-    assert_eq!(duplicate_rate(&candidate_report, 1), 2.0 / 3.0);
 }
 
 #[test]

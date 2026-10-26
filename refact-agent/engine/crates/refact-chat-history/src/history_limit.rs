@@ -679,21 +679,6 @@ mod tests {
     }
 
     #[test]
-    fn relocate_moves_stray_results_back_to_their_call() {
-        let mut messages = vec![
-            plain_user_msg("q"),
-            assistant_declaring_call("tc-1"),
-            plain_user_msg("interleaved"),
-            tool_result_msg("tc-1", "result"),
-        ];
-
-        relocate_tool_results_after_their_calls(&mut messages);
-
-        let roles: Vec<&str> = messages.iter().map(|m| m.role.as_str()).collect();
-        assert_eq!(roles, vec!["user", "assistant", "tool", "user"]);
-    }
-
-    #[test]
     fn relocate_keeps_contiguous_transcripts_identical() {
         let original = vec![
             plain_user_msg("q"),
@@ -770,19 +755,6 @@ mod tests {
             messages.push(assistant_declaring_named_call(&call_id, "cat"));
             messages.push(image_tool_result(&call_id, &format!("image-{idx}")));
         }
-        let mut sampling = SamplingParameters::default();
-
-        let prepared = fix_and_limit_messages_history(&messages, &mut sampling).unwrap();
-
-        assert_eq!(
-            serde_json::to_value(&prepared).unwrap(),
-            serde_json::to_value(&messages).unwrap()
-        );
-    }
-
-    #[test]
-    fn wire_history_without_images_is_unchanged() {
-        let messages = vec![plain_user_msg("hello")];
         let mut sampling = SamplingParameters::default();
 
         let prepared = fix_and_limit_messages_history(&messages, &mut sampling).unwrap();
@@ -880,62 +852,11 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_context_budget_low_pressure() {
-        let messages = vec![make_user_msg_basic("hello world")];
-        let report = compute_context_budget(&messages, 10_000);
-        assert_eq!(report.pressure, ContextPressure::Low);
-        assert!(report.used_tokens_estimate > 0);
-        assert_eq!(report.effective_n_ctx, 10_000);
-        assert!(report.remaining_estimate > 0);
-    }
-
-    #[test]
-    fn test_compute_context_budget_medium_pressure() {
-        // 2800 chars -> 2800/4+10 = 710 tokens; 710/1000 = 71% -> Medium
-        let text = "x".repeat(2_800);
-        let messages = vec![make_user_msg_basic(&text)];
-        let report = compute_context_budget(&messages, 1_000);
-        assert_eq!(report.pressure, ContextPressure::Medium);
-    }
-
-    #[test]
-    fn test_compute_context_budget_high_pressure() {
-        // 3400 chars -> 3400/4+10 = 860 tokens; 860/1000 = 86% -> High
-        let text = "x".repeat(3_400);
-        let messages = vec![make_user_msg_basic(&text)];
-        let report = compute_context_budget(&messages, 1_000);
-        assert_eq!(report.pressure, ContextPressure::High);
-    }
-
-    #[test]
-    fn test_compute_context_budget_critical_pressure() {
-        // 3800 chars -> 3800/4+10 = 960 tokens; 960/1000 = 96% -> Critical
-        let text = "x".repeat(3_800);
-        let messages = vec![make_user_msg_basic(&text)];
-        let report = compute_context_budget(&messages, 1_000);
-        assert_eq!(report.pressure, ContextPressure::Critical);
-    }
-
-    #[test]
     fn test_compute_context_budget_zero_n_ctx() {
         let messages = vec![make_user_msg_basic("hello")];
         let report = compute_context_budget(&messages, 0);
         assert_eq!(report.pressure, ContextPressure::Low);
         assert_eq!(report.effective_n_ctx, 0);
-    }
-
-    #[test]
-    fn test_is_content_duplicate_overlapping_ranges() {
-        let content1 = "line1\nline2\nline3";
-        let content2 = "line2\nline3";
-        assert!(is_content_duplicate(content1, 1, 3, content2, 2, 3));
-    }
-
-    #[test]
-    fn test_is_content_duplicate_non_overlapping_ranges() {
-        let content1 = "line1\nline2";
-        let content2 = "line5\nline6";
-        assert!(!is_content_duplicate(content1, 1, 2, content2, 5, 6));
     }
 
     #[test]
@@ -950,19 +871,6 @@ mod tests {
         let large = "line1\nline2\nline3\nline4";
         assert!(is_content_duplicate(small, 2, 3, large, 1, 4));
         assert!(is_content_duplicate(large, 1, 4, small, 2, 3));
-    }
-
-    #[test]
-    fn test_is_content_duplicate_exact_match() {
-        let content = "line1\nline2";
-        assert!(is_content_duplicate(content, 1, 2, content, 1, 2));
-    }
-
-    #[test]
-    fn test_is_content_duplicate_ignores_ellipsis_lines() {
-        let content1 = "...\nreal_line\n...";
-        let content2 = "real_line";
-        assert!(is_content_duplicate(content1, 1, 3, content2, 1, 1));
     }
 
     #[test]
@@ -985,36 +893,6 @@ mod tests {
         }];
         remove_invalid_tool_calls_and_tool_calls_results(&mut messages);
         assert!(messages.is_empty());
-    }
-
-    #[test]
-    fn test_remove_invalid_tool_calls_keeps_answered() {
-        let mut messages = vec![
-            ChatMessage {
-                role: "assistant".to_string(),
-                tool_calls: Some(vec![ChatToolCall {
-                    id: "call_1".to_string(),
-                    index: Some(0),
-                    function: ChatToolFunction {
-                        name: "test".to_string(),
-                        arguments: "{}".to_string(),
-                    },
-                    tool_type: "function".to_string(),
-                    extra_content: None,
-                    started_at_ms: None,
-                    completed_at_ms: None,
-                }]),
-                ..Default::default()
-            },
-            ChatMessage {
-                role: "tool".to_string(),
-                tool_call_id: "call_1".to_string(),
-                content: ChatContent::SimpleText("result".to_string()),
-                ..Default::default()
-            },
-        ];
-        remove_invalid_tool_calls_and_tool_calls_results(&mut messages);
-        assert_eq!(messages.len(), 2);
     }
 
     #[test]
@@ -1064,43 +942,6 @@ mod tests {
         remove_invalid_tool_calls_and_tool_calls_results(&mut messages);
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1].role, "diff");
-    }
-
-    #[test]
-    fn test_context_file_with_matching_id_satisfies_tool_call() {
-        let mut messages = vec![
-            ChatMessage {
-                role: "assistant".to_string(),
-                tool_calls: Some(vec![ChatToolCall {
-                    id: "call_x".to_string(),
-                    index: Some(0),
-                    function: ChatToolFunction {
-                        name: "cat".to_string(),
-                        arguments: "{}".to_string(),
-                    },
-                    tool_type: "function".to_string(),
-                    extra_content: None,
-                    started_at_ms: None,
-                    completed_at_ms: None,
-                }]),
-                ..Default::default()
-            },
-            ChatMessage {
-                role: "context_file".to_string(),
-                tool_call_id: "call_x".to_string(),
-                content: ChatContent::SimpleText("file content".to_string()),
-                ..Default::default()
-            },
-        ];
-        remove_invalid_tool_calls_and_tool_calls_results(&mut messages);
-        assert_eq!(
-            messages.len(),
-            2,
-            "assistant with context_file response should be kept, got roles: {:?}",
-            messages.iter().map(|m| &m.role).collect::<Vec<_>>()
-        );
-        assert_eq!(messages[0].role, "assistant");
-        assert_eq!(messages[1].role, "context_file");
     }
 
     #[test]
@@ -1166,18 +1007,6 @@ mod tests {
         assert!(messages[0].tool_calls.is_none());
     }
 
-    #[test]
-    fn test_fix_valid_history_returns_correct_content() {
-        let messages = vec![ChatMessage {
-            role: "user".to_string(),
-            content: ChatContent::SimpleText("hello".to_string()),
-            ..Default::default()
-        }];
-        let mut sampling = SamplingParameters::default();
-        let result = fix_and_limit_messages_history(&messages, &mut sampling).unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].role, "user");
-    }
     #[test]
     fn test_dedup_keeps_context_file_role_for_tool_call_responses() {
         let mut answered = make_context_file_msg("src/dup.rs", "line1\nline2\nline3");

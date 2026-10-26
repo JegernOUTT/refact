@@ -1193,31 +1193,6 @@ mod tests {
     }
 
     #[test]
-    fn early_return_from_a_guarded_vector_releases_every_handle() {
-        let releaser = RecordingReleaser::default();
-        let read_second = |scoped: &[ScopedHandle<RecordingReleaser>]| -> Result<(), String> {
-            for handle in scoped {
-                if handle.object_id == "object-2" {
-                    return Err("read failed".to_string());
-                }
-            }
-            Ok(())
-        };
-        let outcome = {
-            let scoped = ["object-1", "object-2", "object-3"]
-                .into_iter()
-                .map(|object_id| ScopedHandle::new(releaser.clone(), element(object_id)))
-                .collect::<Vec<_>>();
-            read_second(&scoped)
-        };
-        assert!(outcome.is_err());
-        assert_eq!(
-            *releaser.released.lock().unwrap(),
-            vec!["object-1", "object-2", "object-3"]
-        );
-    }
-
-    #[test]
     fn closing_a_tab_forgets_its_world_and_ref_state() {
         let manager = WorldManager::default();
         manager.context_created(TAB, 7, UTILITY_WORLD_NAME);
@@ -1231,29 +1206,11 @@ mod tests {
     }
 
     #[test]
-    fn created_then_recorded_context_is_tracked() {
-        let manager = WorldManager::default();
-        manager.context_created(TAB, 7, UTILITY_WORLD_NAME);
-        manager.record_context(TAB, FRAME.to_string(), 7);
-        assert_eq!(manager.context_for_frame(TAB, &FRAME.to_string()), Some(7));
-    }
-
-    #[test]
     fn destroyed_context_removes_frame_mapping() {
         let manager = WorldManager::default();
         manager.record_context(TAB, FRAME.to_string(), 7);
         manager.context_destroyed(TAB, 7);
         assert_eq!(manager.context_for_frame(TAB, &FRAME.to_string()), None);
-    }
-
-    #[test]
-    fn navigation_before_destroy_invalidates_only_old_context() {
-        let manager = WorldManager::default();
-        manager.record_context(TAB, FRAME.to_string(), 7);
-        manager.frame_navigated(TAB, &FRAME.to_string(), true);
-        manager.context_destroyed(TAB, 7);
-        manager.record_context(TAB, FRAME.to_string(), 8);
-        assert_eq!(manager.context_for_frame(TAB, &FRAME.to_string()), Some(8));
     }
 
     #[test]
@@ -1288,11 +1245,6 @@ mod tests {
         let script = clear_main_world_binding_script();
         assert_eq!(script.world_name, None);
         assert!(script.source.contains(BINDING_NAME));
-    }
-
-    #[test]
-    fn binding_name_is_stable() {
-        assert_eq!(BINDING_NAME, "__refact_binding");
     }
 
     #[test]

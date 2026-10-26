@@ -233,6 +233,22 @@ Run focused checks for the area you changed before opening a PR.
 
 ### Engine Checks
 
+Rust tests follow the [strict admission and suite-budget policy](docs/rust-test-policy.md).
+New or materially changed cases require a distinct important failure, a discriminating oracle,
+non-vacuous fixtures, the cheapest sufficient layer and independent semantic review. Critical
+contracts require an executed failure witness. The 6,400-case ceiling includes ignored, gated,
+documentation and disconnected tests; packing the same scenarios into tables is not a reduction.
+
+From the repository root, run the structural checks against the intended comparison base:
+
+```bash
+python3 tools/dev/test_budget.py check --base origin/main
+python3 -m unittest discover -s tools/dev -p test_test_budget.py
+```
+
+Record admissions and test-support impacts in `tools/dev/test_admissions.json`. Passing the
+checker validates structure, not the truth of the witness or the independence of approval.
+
 ```bash
 cd refact-agent/engine
 cargo check

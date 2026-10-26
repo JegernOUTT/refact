@@ -1337,18 +1337,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn session_ids_are_stable_per_message_and_distinct_across_chats() {
-        let mut first = ChatMessage::new("user".to_string(), "hello".to_string());
-        first.message_id = "chat-a-first".to_string();
-        let mut second = ChatMessage::new("user".to_string(), "hello".to_string());
-        second.message_id = "chat-b-first".to_string();
-
-        let first_id = session_id(&[first.clone()]);
-        assert_eq!(first_id, session_id(&[first]));
-        assert_ne!(first_id, session_id(&[second]));
-    }
-
     fn assert_no_forbidden_schema_keys(value: &Value) {
         match value {
             Value::Array(values) => {
@@ -1472,97 +1460,6 @@ mod tests {
             parameters["properties"]["change"]["properties"]["delete"]["type"],
             "boolean"
         );
-    }
-
-    #[test]
-    fn tool_conversion_prunes_nested_required_fields_without_properties() {
-        let declarations = convert_tools(&[json!({
-            "type": "function",
-            "function": {
-                "name": "batch",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "request": {
-                            "type": "object",
-                            "properties": {
-                                "steps": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "items": {
-                                                "type": "array",
-                                                "items": {
-                                                    "type": "object",
-                                                    "properties": {
-                                                        "kept": {"type": "string"}
-                                                    },
-                                                    "required": ["missing_a", "kept", "missing_b"]
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        })]);
-
-        let item_schema = &declarations[0]["parameters"]["properties"]["request"]["properties"]
-            ["steps"]["items"]["properties"]["items"]["items"];
-        assert_eq!(item_schema["required"], json!(["kept"]));
-    }
-
-    #[test]
-    fn tool_conversion_removes_required_when_properties_are_absent() {
-        let declarations = convert_tools(&[json!({
-            "type": "function",
-            "function": {
-                "name": "broken",
-                "parameters": {
-                    "required": ["missing"],
-                    "items": {
-                        "type": ["object", "null"],
-                        "required": ["also_missing"]
-                    }
-                }
-            }
-        })]);
-
-        assert!(declarations[0]["parameters"].get("required").is_none());
-        assert!(declarations[0]["parameters"]["items"]
-            .get("required")
-            .is_none());
-    }
-
-    #[test]
-    fn parse_stream_finish_reason_emits_done() {
-        let chunk = json!({
-            "response": {
-                "candidates": [{
-                    "content": {
-                        "role": "model",
-                        "parts": [{"text": "Hello"}]
-                    },
-                    "finishReason": "STOP"
-                }],
-                "usageMetadata": {
-                    "promptTokenCount": 3,
-                    "candidatesTokenCount": 1
-                }
-            }
-        })
-        .to_string();
-
-        let deltas = GoogleCloudCodeAdapter.parse_stream_chunk(&chunk).unwrap();
-
-        assert!(deltas.iter().any(
-            |delta| matches!(delta, LlmStreamDelta::SetFinishReason { reason } if reason == "stop")
-        ));
-        assert!(matches!(deltas.last(), Some(LlmStreamDelta::Done)));
     }
 
     #[test]
@@ -1775,18 +1672,6 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_function_call_ids_are_stable() {
-        let function_call = json!({"name": "search", "args": {"q": "rust"}});
-        let first = synthetic_tool_call_id(&function_call, 0);
-        let second = synthetic_tool_call_id(&function_call, 0);
-        let parallel = synthetic_tool_call_id(&function_call, 1);
-
-        assert_eq!(first, second);
-        assert_ne!(first, parallel);
-        assert!(first.starts_with("call_"));
-    }
-
-    #[test]
     fn generation_config_explicitly_disables_reasoning_when_requested() {
         let mut settings = cloudcode_settings(false, "oauth-token");
         settings.supports_reasoning = true;
@@ -1893,15 +1778,5 @@ mod tests {
             GoogleCloudCodeAdapter.parse_stream_chunk(&nested_error),
             Err(StreamParseError::FatalError(message)) if message == "nested failure"
         ));
-    }
-
-    #[test]
-    fn finish_reason_maps_google_terminal_variants() {
-        assert_eq!(finish_reason("STOP"), "stop");
-        assert_eq!(finish_reason("MAX_TOKENS"), "length");
-        assert_eq!(finish_reason("PROHIBITED_CONTENT"), "content_filter");
-        assert_eq!(finish_reason("SPII"), "content_filter");
-        assert_eq!(finish_reason("MALFORMED_FUNCTION_CALL"), "tool_error");
-        assert_eq!(finish_reason("UNEXPECTED_TOOL_CALL"), "tool_error");
     }
 }

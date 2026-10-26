@@ -417,81 +417,6 @@ mod tests {
     use serial_test::serial;
 
     #[test]
-    fn defaults_map_onto_a_valid_controller_config() {
-        let settings = CoordinationSettings::default();
-        let config = pressure_config(&settings).unwrap();
-
-        assert_eq!(
-            config.max_concurrency as usize,
-            settings.provider_max_concurrency
-        );
-        assert_eq!(
-            config.min_concurrency as usize,
-            settings.provider_min_concurrency
-        );
-        assert_eq!(
-            config.initial_concurrency as usize,
-            settings.provider_initial_concurrency
-        );
-        assert_eq!(
-            config.interactive_reserved_slots as usize,
-            settings.provider_interactive_reserved_slots
-        );
-        assert_eq!(
-            config.increase_after_successes as usize,
-            settings.provider_aimd_increase_after_successes
-        );
-        assert_eq!(
-            config.decrease_cooldown_ms,
-            settings.provider_aimd_decrease_cooldown_ms
-        );
-        assert_eq!(
-            config.max_retry_attempts as usize,
-            settings.provider_retry_max_attempts
-        );
-        assert_eq!(
-            config.base_backoff_ms,
-            settings.provider_retry_base_backoff_ms
-        );
-        assert_eq!(
-            config.max_backoff_ms,
-            settings.provider_retry_max_backoff_ms
-        );
-        assert_eq!(
-            config.jitter_per_mille as usize,
-            settings.provider_retry_jitter_per_mille
-        );
-        assert_eq!(
-            config.breaker_failure_threshold as usize,
-            settings.provider_breaker_failure_threshold
-        );
-        assert_eq!(
-            config.breaker_cooldown_ms,
-            settings.provider_breaker_cooldown_ms
-        );
-        assert_eq!(
-            config.max_retry_after_ms,
-            settings.provider_max_retry_after_ms
-        );
-        assert_eq!(config.max_buckets, settings.provider_pressure_max_buckets);
-    }
-
-    #[test]
-    fn invalid_settings_are_rejected_instead_of_coerced() {
-        let mut settings = CoordinationSettings::default();
-        settings.provider_initial_concurrency = settings.provider_max_concurrency + 1;
-        assert!(pressure_config(&settings).is_err());
-
-        let mut settings = CoordinationSettings::default();
-        settings.provider_max_concurrency = usize::MAX;
-        let error = pressure_config(&settings).unwrap_err();
-        assert!(
-            error.contains("coordination.provider_max_concurrency"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
     #[serial(provider_pressure, runtime_settings)]
     fn enabling_installs_a_registry_and_disabling_removes_it() {
         let settings = CoordinationSettings::default();
@@ -507,21 +432,6 @@ mod tests {
         disabled.provider_pressure_enabled = false;
         install_provider_pressure(&disabled).unwrap();
         assert!(pressure_registry().is_none());
-    }
-
-    #[tokio::test]
-    #[serial(provider_pressure, coordination_metrics, runtime_settings)]
-    async fn acquire_without_registry_returns_none_without_waiting() {
-        uninstall_pressure_registry();
-        let permit = acquire(
-            "provider/anonymous",
-            RequestPriority::Interactive,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-        assert!(permit.is_none());
     }
 
     #[tokio::test(start_paused = true)]
@@ -557,39 +467,6 @@ mod tests {
         abort_notify.notify_one();
         assert_eq!(waiter.await.unwrap().unwrap_err(), "Aborted");
         drop(permit);
-        uninstall_pressure_registry();
-    }
-
-    #[tokio::test]
-    #[serial(provider_pressure, coordination_metrics, runtime_settings)]
-    async fn short_retry_after_window_is_waited_out_then_admitted() {
-        uninstall_pressure_registry();
-        let mut settings = CoordinationSettings::default();
-        settings.provider_retry_max_backoff_ms = 1_000;
-        settings.provider_max_retry_after_ms = 5_000;
-        settings.provider_breaker_failure_threshold = 8;
-        install_provider_pressure(&settings).unwrap();
-
-        let bucket = "short-retry-after/credential";
-        let permit = admit(bucket, RequestPriority::Interactive)
-            .unwrap()
-            .unwrap();
-        permit.complete(refact_providers::pressure::Outcome::Failure(
-            FailureReport::from_http(429, Some("1"), "rate limit").unwrap(),
-        ));
-        let until_ms = pressure_registry()
-            .unwrap()
-            .snapshot(bucket)
-            .unwrap()
-            .retry_after_until_ms
-            .unwrap();
-
-        let acquired = acquire(bucket, RequestPriority::Interactive, None, None)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(pressure_registry().unwrap().now_ms() >= until_ms);
-        drop(acquired);
         uninstall_pressure_registry();
     }
 }

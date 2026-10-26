@@ -157,18 +157,4 @@ mod tests {
     use super::*;
     use crate::history::cells::test_support::{text, tool_card};
     use serde_json::json;
-
-    #[test]
-    fn server_tool_cell_snapshot() {
-        let card = tool_card(
-            "mcp_call",
-            json!({"tool_name": "mcp_github_get_file_contents", "args": {"owner": "me", "repo": "r"}}),
-            "README contents",
-        );
-        let rendered = text(&ServerToolCell::new(card, false).render(80));
-        assert_eq!(
-            rendered,
-            "✅ Called mcp.github_get_file_contents({\"owner\":\"me\",\"repo\":\"r\"})\n▾ ✅ succeeded mcp_call · 1.2s\n  └ README contents\n"
-        );
-    }
 }

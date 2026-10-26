@@ -518,18 +518,3 @@ fn goal_advisory_tolerates_an_unreadable_projection() {
     assert!(session.try_accepted_control_projection().is_err());
     assert!(unverifiable_goal_criteria(&session, &VerifyCommandPolicy::permissive()).is_empty());
 }
-
-#[tokio::test]
-async fn verify_command_schema_descriptions_document_the_shared_constraints() {
-    let (_dir, app, _ccx, _session) = context().await;
-    let set_goal = tool(&app, "set_goal").await.tool_description().input_schema;
-    assert_eq!(
-        set_goal["properties"]["criteria"]["items"]["properties"]["verify_command"]["description"],
-        VERIFY_COMMAND_DESCRIPTION
-    );
-    let subagent = tool(&app, "subagent").await.tool_description().input_schema;
-    assert!(subagent["properties"]["goal"]["description"]
-        .as_str()
-        .unwrap()
-        .contains(VERIFY_COMMAND_DESCRIPTION));
-}

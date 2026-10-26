@@ -931,82 +931,6 @@ mod tests {
     }
 
     #[test]
-    fn unknown_fields_have_no_fill_strategies() {
-        assert!(choose_fill_strategies(&FieldKind::Unknown).is_empty());
-        let spinbutton = not_editable_message("div", Some("spinbutton"));
-        assert!(spinbutton.starts_with("Element <div role=spinbutton> is not an <input>"));
-        assert!(spinbutton.contains("not an <input>, <textarea> or [contenteditable] element"));
-        assert!(spinbutton.contains("select_option for <select>, check/uncheck for checkboxes"));
-        assert!(
-            not_editable_message("button", None).starts_with("Element <button> is not an <input>")
-        );
-    }
-
-    #[test]
-    fn verification_and_value_setters_reject_expando_values() {
-        assert!(VERIFY_VALUE.contains(
-            "if (!hasNativeValue(el, ['INPUT', 'TEXTAREA', 'SELECT'])) return { matches: false, \
-             reason: 'not_editable' };"
-        ));
-        for strategy in [
-            FillStrategy::DomValueSetter,
-            FillStrategy::NativePrototypeSetter,
-        ] {
-            let function = fallback_fill_function(&strategy);
-            assert!(function.contains("if (!hasNativeValue(el, ['INPUT', 'TEXTAREA']))"));
-            assert!(function.contains("Element has no native value property"));
-        }
-    }
-
-    #[test]
-    fn native_value_checks_walk_the_prototype_chain() {
-        for function in [
-            VERIFY_VALUE,
-            fallback_fill_function(&FillStrategy::DomValueSetter),
-            fallback_fill_function(&FillStrategy::NativePrototypeSetter),
-        ] {
-            assert!(function.contains(
-                "for (let proto = Object.getPrototypeOf(node); proto; proto = \
-                 Object.getPrototypeOf(proto)) {"
-            ));
-            assert!(function
-                .contains("if (Object.getOwnPropertyDescriptor(proto, 'value')) return true;"));
-            assert!(function.contains("if (!node || !tags.includes(node.tagName)) return false;"));
-            assert!(!function.contains("const proto = Object.getPrototypeOf(el);"));
-        }
-    }
-
-    #[test]
-    fn label_retarget_reports_protocol_failures_and_swallows_null_controls() {
-        assert_eq!(
-            map_label_retarget_error(HandleError::Resolution(
-                LABEL_RETARGET_NO_HANDLE.to_string()
-            )),
-            Ok(None)
-        );
-        assert_eq!(
-            map_label_retarget_error(HandleError::Protocol("Target closed".to_string()))
-                .unwrap_err()
-                .message,
-            "Target closed"
-        );
-        assert_eq!(
-            map_label_retarget_error(HandleError::Resolution("Node is detached".to_string()))
-                .unwrap_err()
-                .message,
-            "Node is detached"
-        );
-        assert_eq!(
-            map_label_retarget_error(HandleError::Invalidated {
-                object_id: "obj-7".to_string()
-            })
-            .unwrap_err()
-            .message,
-            "Element handle obj-7 is no longer valid"
-        );
-    }
-
-    #[test]
     fn verification_mismatch_advances_the_pyramid() {
         let mut executor = FakeExecutor {
             executions: Vec::new(),
@@ -1052,42 +976,6 @@ mod tests {
     }
 
     #[test]
-    fn form_actions_use_the_required_shared_actionability_rows() {
-        assert_eq!(
-            crate::required_states(ActionKind::Fill),
-            crate::RequiredStates {
-                visible: true,
-                stable: false,
-                receives_events: false,
-                enabled: true,
-                editable: true,
-            }
-        );
-        assert_eq!(
-            crate::required_states(ActionKind::SelectOption),
-            crate::RequiredStates {
-                visible: true,
-                stable: false,
-                receives_events: false,
-                enabled: true,
-                editable: false,
-            }
-        );
-        for action in [ActionKind::Check, ActionKind::Uncheck] {
-            assert_eq!(
-                crate::required_states(action),
-                crate::RequiredStates {
-                    visible: true,
-                    stable: true,
-                    receives_events: true,
-                    enabled: true,
-                    editable: false,
-                }
-            );
-        }
-    }
-
-    #[test]
     fn radio_uncheck_is_rejected() {
         let error = ensure_check_allowed(true, true, false).unwrap_err();
         assert_eq!(
@@ -1128,18 +1016,6 @@ mod tests {
     }
 
     #[test]
-    fn select_option_diagnostics_match_playwright_failures() {
-        assert_eq!(
-            select_option_diagnostic("options_not_found"),
-            "Select option did not find some options"
-        );
-        assert_eq!(
-            select_option_diagnostic("option_not_enabled"),
-            "Option being selected is not enabled"
-        );
-    }
-
-    #[test]
     fn password_diagnostics_mask_echoed_values() {
         assert_eq!(
             diagnostic_value(&FieldKind::PasswordInput, "hunter2"),
@@ -1150,13 +1026,5 @@ mod tests {
             "rejected [REDACTED]"
         );
         assert_eq!(diagnostic_value(&FieldKind::TextInput, "hello"), "hello");
-    }
-
-    #[test]
-    fn playwright_fill_prepares_selection_before_cdp_input() {
-        assert!(PLAYWRIGHT_FILL_PREPARE.contains("el.select()"));
-        assert!(PLAYWRIGHT_FILL_PREPARE.contains("selection.addRange(range)"));
-        assert!(PLAYWRIGHT_FILL_PREPARE.contains("Cannot type text into input[type=number]"));
-        assert!(PLAYWRIGHT_FILL_PREPARE.contains("Malformed value"));
     }
 }

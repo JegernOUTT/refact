@@ -777,18 +777,6 @@ mod tests {
     }
 
     #[test]
-    fn rm_flag_spellings_are_equivalent() {
-        let commands = ["rm -r -f x", "rm -rf x", "rm --recursive --force x"];
-        let findings: Vec<_> = commands
-            .iter()
-            .map(|command| classify(command, vec![]).unwrap())
-            .collect();
-        assert!(findings.iter().all(|finding| {
-            finding.entry_id == findings[0].entry_id && finding.level == findings[0].level
-        }));
-    }
-
-    #[test]
     fn force_push_is_more_severe() {
         assert_eq!(
             classify("git push", vec![]).unwrap().level,

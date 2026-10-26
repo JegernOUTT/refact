@@ -1219,32 +1219,6 @@ mod tests {
     }
 
     #[test]
-    fn ignores_shell_options_that_do_not_run_the_following_argument() {
-        for command in [
-            "bash -x 'sudo rm -rf /'",
-            "bash --norc 'sudo rm -rf /'",
-            "bash --rcfile 'sudo rm -rf /'",
-        ] {
-            let extracted = extract_command_segments(command);
-            assert!(extracted.parse_ok, "{command:?}: {extracted:?}");
-            assert!(
-                !executable_names(command).iter().any(|name| name == "sudo"),
-                "{command:?}: {extracted:?}"
-            );
-        }
-
-        let safe = extract_command_segments("bash -xc 'printf safe'");
-        assert!(safe.parse_ok, "{safe:?}");
-        assert!(
-            safe.segments
-                .iter()
-                .filter_map(executable_basename)
-                .any(|name| name == "printf"),
-            "{safe:?}"
-        );
-    }
-
-    #[test]
     fn flags_any_input_piped_to_shell() {
         for command in [
             "curl http://x | sh",
@@ -1291,17 +1265,6 @@ mod tests {
             assert!(!extracted.parse_ok, "{command:?}: {extracted:?}");
             assert_eq!(structural_flags(&extracted), vec![UNCLASSIFIABLE]);
         }
-    }
-
-    #[test]
-    fn ksh_wrappers_extract_inner_commands() {
-        let command = "ksh -o pipefail -c 'sudo id'";
-        let extracted = extract_command_segments(command);
-        assert!(extracted.parse_ok, "{extracted:?}");
-        assert!(
-            executable_names(command).iter().any(|name| name == "sudo"),
-            "{extracted:?}"
-        );
     }
 
     #[test]

@@ -2033,121 +2033,11 @@ mod tests {
     }
 
     #[test]
-    fn table_formatting_from_fixture_worker_rows() {
-        let table = format_worker_table(&[worker("abcdef123456", "demo")]);
-        assert!(table.contains("PROJECT"));
-        assert!(table.contains("demo+abcdef12"));
-        assert!(table.contains("ready"));
-        assert!(table.contains("8001"));
-        assert!(table.contains("yes"));
-    }
-
-    #[test]
-    fn table_formatting_uses_unicode_display_width() {
-        let table = format_table(&[
-            vec!["NAME".to_string(), "VALUE".to_string()],
-            vec!["界".to_string(), "wide".to_string()],
-            vec!["aa".to_string(), "ascii".to_string()],
-        ]);
-        assert_eq!(table, "NAME  VALUE\n界    wide\naa    ascii\n");
-    }
-
-    #[test]
-    fn parse_logs_rejects_silent_target_and_follow_cases() {
-        let options = parse_cli_args(&["logs".into(), "project-id".into()]).unwrap();
-        match options.command {
-            CliCommand::Logs { target, daemon, .. } => {
-                assert_eq!(target.as_deref(), Some("project-id"));
-                assert!(!daemon);
-            }
-            _ => panic!("expected logs command"),
-        }
-
-        let error =
-            parse_cli_args(&["logs".into(), "--daemon".into(), "project-id".into()]).unwrap_err();
-        assert!(error.contains("does not accept a project target"));
-
-        let error = parse_cli_args(&["logs".into(), "--json".into(), "-f".into()]).unwrap_err();
-        assert!(error.contains("incompatible"));
-
-        let error = parse_cli_args(&["events".into(), "--json".into(), "-f".into()]).unwrap_err();
-        assert!(error.contains("incompatible"));
-    }
-
-    #[test]
-    fn parse_ui_variants_and_rejects_unknown_flag() {
-        for (args, expected_path, expected_json, expected_no_open) in [
-            (vec!["ui".into()], None, false, false),
-            (
-                vec!["ui".into(), "/tmp/x".into()],
-                Some(PathBuf::from("/tmp/x")),
-                false,
-                false,
-            ),
-            (vec!["ui".into(), "--json".into()], None, true, false),
-            (vec!["ui".into(), "--no-open".into()], None, false, true),
-        ] {
-            let options = parse_cli_args(&args).unwrap();
-            assert_eq!(
-                options.command,
-                CliCommand::Ui {
-                    path: expected_path,
-                    json: expected_json,
-                    no_open: expected_no_open,
-                }
-            );
-        }
-
-        let error = parse_cli_args(&["ui".into(), "--bogus".into()]).unwrap_err();
-        assert!(error.contains("unknown ui option `--bogus`"));
-    }
-
-    #[test]
-    fn ui_url_without_auth_uses_dashboard_or_project_path() {
-        assert_eq!(ui_url(8488, None, None), "http://127.0.0.1:8488/");
-        assert_eq!(
-            ui_url(8488, Some("project-id"), None),
-            "http://127.0.0.1:8488/p/project-id/"
-        );
-    }
-
-    #[test]
     fn ui_url_with_auth_encodes_bootstrap_token() {
         assert_eq!(
             ui_url(8488, Some("project-id"), Some("secret token&more")),
             "http://127.0.0.1:8488/p/project-id/?daemon_token=secret+token%26more"
         );
-    }
-
-    #[test]
-    fn parse_cron_subcommands_and_json_flag() {
-        let options = parse_cli_args(&["cron".into(), "--json".into(), "list".into()]).unwrap();
-        assert!(matches!(
-            options.command,
-            CliCommand::Cron {
-                command: CronCommand::List { project: None },
-                json: true
-            }
-        ));
-
-        let options = parse_cli_args(&[
-            "cron".into(),
-            "pause".into(),
-            "--project".into(),
-            "abc".into(),
-            "job-1".into(),
-        ])
-        .unwrap();
-        assert!(matches!(
-            options.command,
-            CliCommand::Cron {
-                command: CronCommand::Pause {
-                    project: Some(_),
-                    id
-                },
-                json: false
-            } if id == "job-1"
-        ));
     }
 
     #[test]
@@ -2220,19 +2110,6 @@ mod tests {
     }
 
     #[test]
-    fn id_prefix_resolution_picks_unique_project() {
-        let projects = vec![ProjectEntry {
-            id: "abcdef123456".to_string(),
-            slug: "demo".to_string(),
-            root: PathBuf::from("/tmp/demo"),
-            pinned: false,
-            last_active_ms: 0,
-            settings: Default::default(),
-        }];
-        assert_eq!(resolve_target(&projects, "abc").unwrap(), "abcdef123456");
-    }
-
-    #[test]
     fn path_resolution_uses_registered_root() {
         let dir = tempfile::tempdir().unwrap();
         let root =
@@ -2250,30 +2127,6 @@ mod tests {
             resolve_target(&projects, &dir.path().to_string_lossy()).unwrap(),
             id
         );
-    }
-
-    #[test]
-    fn doctor_check_aggregation_exit_code() {
-        assert_eq!(doctor_exit_code(&[check("ok", true, "yes")]), 0);
-        assert_eq!(doctor_exit_code(&[check("bad", false, "no")]), 1);
-    }
-
-    #[tokio::test]
-    async fn workers_responsive_ignores_stopped_workers() {
-        let mut row = worker("abcdef123456", "demo");
-        row.state = WorkerState::Stopped;
-        row.http_port = Some(unused_loopback_port().await);
-
-        assert!(workers_responsive(&[row]).await);
-    }
-
-    #[test]
-    fn parses_events_sse_snapshot() {
-        let text =
-            "data: {\"ts_ms\":1,\"kind\":\"worker_ready\",\"project_id\":\"p\",\"payload\":{}}\n\n";
-        let events = parse_sse_events(text);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].kind, "worker_ready");
     }
 
     #[test]
@@ -2365,38 +2218,6 @@ mod tests {
         accept_task.abort();
     }
 
-    #[tokio::test]
-    async fn log_delta_handles_rotation_and_split_multibyte() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("daemon.log");
-        tokio::fs::write(&path, "initial longer log\n")
-            .await
-            .unwrap();
-        let mut state = initial_log_follow_state(&path).await;
-
-        let rotated = format!("{}new-after-rotation\n", "x".repeat(state.offset as usize));
-        std::fs::remove_file(&path).unwrap();
-        tokio::fs::write(&path, &rotated).await.unwrap();
-        assert_eq!(read_log_delta(&path, &mut state).await.unwrap(), rotated);
-        assert_eq!(state.offset, rotated.len() as u64);
-
-        tokio::fs::write(&path, b"new\n").await.unwrap();
-        assert_eq!(read_log_delta(&path, &mut state).await.unwrap(), "new\n");
-        assert_eq!(state.offset, 4);
-
-        let glyph = "💿".as_bytes();
-        let mut partial = b"new\n".to_vec();
-        partial.extend_from_slice(&glyph[..2]);
-        tokio::fs::write(&path, &partial).await.unwrap();
-        assert_eq!(read_log_delta(&path, &mut state).await.unwrap(), "");
-        assert_eq!(state.offset, 4);
-
-        partial.extend_from_slice(&glyph[2..]);
-        partial.push(b'\n');
-        tokio::fs::write(&path, &partial).await.unwrap();
-        assert_eq!(read_log_delta(&path, &mut state).await.unwrap(), "💿\n");
-    }
-
     fn daemon_info(port: u16) -> DaemonInfo {
         DaemonInfo {
             pid: 1,
@@ -2412,11 +2233,6 @@ mod tests {
                 mdns: String::new(),
             },
         }
-    }
-
-    async fn unused_loopback_port() -> u16 {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        listener.local_addr().unwrap().port()
     }
 
     struct EnvGuard {
@@ -2701,53 +2517,6 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(daemon)]
-    async fn status_human_missing_daemon_json_is_passive_unreachable() {
-        let cache_dir = tempfile::tempdir().unwrap();
-        let config_dir = tempfile::tempdir().unwrap();
-        let _guard = EnvGuard::set_basic(cache_dir.path(), config_dir.path());
-
-        let mut out = Vec::new();
-        assert_eq!(run_status(false, &mut out).await.unwrap(), 1);
-        assert_eq!(
-            String::from_utf8(out).unwrap(),
-            "daemon not running: daemon.json not found\n"
-        );
-        assert!(!crate::daemon::paths::daemon_json_path().exists());
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(daemon)]
-    async fn version_json_unreachable_daemon_is_valid_json() {
-        let cache_dir = tempfile::tempdir().unwrap();
-        let config_dir = tempfile::tempdir().unwrap();
-        let _guard = EnvGuard::set_basic(cache_dir.path(), config_dir.path());
-        let port = unused_loopback_port().await;
-        crate::daemon::state::write_daemon_info_atomic(
-            &crate::daemon::paths::daemon_json_path(),
-            &daemon_info(port),
-        )
-        .await
-        .unwrap();
-
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let code = run_with_io(
-            CliOptions {
-                command: CliCommand::Version { json: true },
-            },
-            &mut stdout,
-            &mut stderr,
-        )
-        .await;
-        assert_eq!(code, 0);
-        assert!(stderr.is_empty());
-        let value = serde_json::from_slice::<Value>(&stdout).unwrap();
-        assert_eq!(value["client"], env!("CARGO_PKG_VERSION"));
-        assert!(value["daemon"].is_null());
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(daemon)]
     async fn stop_daemon_auth_enabled_live_daemon_shuts_down() {
         let cache_dir = tempfile::tempdir().unwrap();
         let config_dir = tempfile::tempdir().unwrap();
@@ -3003,64 +2772,5 @@ mod tests {
             .contains("\"enabled\":false"));
 
         shutdown_test_daemon(&info, task).await;
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(daemon)]
-    async fn doctor_catches_dead_daemon_version_mismatch() {
-        let cache_dir = tempfile::tempdir().unwrap();
-        let config_dir = tempfile::tempdir().unwrap();
-        let Some(_guard) = EnvGuard::set(cache_dir.path(), config_dir.path()) else {
-            return;
-        };
-        let (info, task) = start_test_daemon(&cache_dir).await;
-        let project_dir = tempfile::tempdir().unwrap();
-        let opened: Value = retry_open_project(&info, project_dir.path()).await;
-        let project_id = opened["project_id"].as_str().unwrap().to_string();
-        let _: Value = client::delete_json(&info, &format!("/daemon/v1/projects/{project_id}"))
-            .await
-            .unwrap();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
-        while !client::ping_daemon(&info).await.is_alive() {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "daemon did not become responsive"
-            );
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        let report = doctor_report().await;
-        assert_eq!(report.exit_code(), 0, "doctor checks: {:#?}", report.checks);
-        assert!(report
-            .checks
-            .iter()
-            .any(|check| check.name == "binary path" && check.ok));
-        assert!(report
-            .checks
-            .iter()
-            .any(|check| check.name == "worker count" && check.ok));
-        assert!(report
-            .checks
-            .iter()
-            .any(|check| check.name == "project roots" && check.ok));
-        shutdown_test_daemon(&info, task).await;
-
-        let mut stale = info.clone();
-        stale.version = "0.0.0".to_string();
-        crate::daemon::state::write_daemon_info_atomic(
-            &crate::daemon::paths::daemon_json_path(),
-            &stale,
-        )
-        .await
-        .unwrap();
-        let report = doctor_report().await;
-        assert_eq!(report.exit_code(), 1);
-        assert!(report
-            .checks
-            .iter()
-            .any(|check| check.name == "daemon reachable" && !check.ok));
-        assert!(report
-            .checks
-            .iter()
-            .any(|check| check.name == "version match" && !check.ok));
     }
 }

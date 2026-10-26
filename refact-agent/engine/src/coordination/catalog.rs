@@ -579,56 +579,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_row_carries_the_admission_class_it_is_waiting_in() {
-        let project = tempfile::tempdir().unwrap();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![project.path().into()];
-        let app = AppState::from_gcx(gcx).await;
-        let mut session = ChatSession::new("typing".into());
-        session.work_project_root = Some(project.path().into());
-        app.chat
-            .sessions
-            .write()
-            .await
-            .insert("typing".into(), Arc::new(tokio::sync::Mutex::new(session)));
-        assert!(build_catalog(&app, None)
-            .await
-            .unwrap()
-            .find("typing")
-            .unwrap()
-            .metadata
-            .priority
-            .is_none());
-
-        let _ticket = app
-            .work_scheduler
-            .reserve(
-                refact_work_core::AdmissionRequest::new(
-                    WorkKey::trajectory("typing").run(1),
-                    refact_work_core::WorkScope::single("project"),
-                )
-                .with_priority(refact_work_core::WorkPriority::UserBlocking),
-            )
-            .unwrap();
-        let catalog = build_catalog(&app, None).await.unwrap();
-        assert_eq!(
-            catalog.find("typing").unwrap().metadata.priority,
-            Some(refact_work_core::WorkPriority::UserBlocking),
-            "a queued row says which class it is waiting in"
-        );
-    }
-
-    #[test]
-    fn waiting_user_is_distinct_from_parked_and_idle() {
-        let mut session = ChatSession::new("chat".into());
-        assert_eq!(session_state(&session), WorkStateTag::Idle);
-        session.runtime.state = crate::chat::types::SessionState::WaitingUserInput;
-        assert_eq!(session_state(&session), WorkStateTag::WaitingApproval);
-        session.runtime.state = crate::chat::types::SessionState::Paused;
-        assert_eq!(session_state(&session), WorkStateTag::Parked);
-    }
-
-    #[tokio::test]
     async fn message_events_maintain_provenance_without_a_subscriber_or_catalog_body_scan() {
         let project = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;

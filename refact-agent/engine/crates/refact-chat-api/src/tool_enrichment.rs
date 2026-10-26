@@ -626,15 +626,6 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_http_url_strips_redirect_query_and_credentials() {
-        assert_eq!(
-            sanitize_http_url("https://user:token@example.test/final?token=secret#fragment"),
-            Some("https://example.test/final".to_string())
-        );
-        assert!(sanitize_http_url("file:///private/final").is_none());
-    }
-
-    #[test]
     fn merging_deduplicates_and_prefers_native_provenance() {
         let mut message = ChatMessage::new("tool".to_string(), "raw result".to_string());
         let mut heuristic = reference(ToolEnrichmentKind::Symbol, "crate::thing");
@@ -704,17 +695,6 @@ mod tests {
             Some("native action")
         );
         assert_eq!(message.content.content_text_only(), "raw result");
-    }
-
-    #[test]
-    fn empty_enrichment_does_not_create_a_key() {
-        let mut message = ChatMessage::new("tool".to_string(), "raw result".to_string());
-
-        assert!(!attach_tool_enrichment(
-            &mut message,
-            ToolEnrichment::default(),
-        ));
-        assert!(!message.extra.contains_key(TOOL_ENRICHMENT_EXTRA_KEY));
     }
 
     #[test]

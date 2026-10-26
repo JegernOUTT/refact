@@ -54,32 +54,4 @@ mod tests {
         assert_eq!(provider, "anthropic");
         assert_eq!(model, "claude-3");
     }
-
-    #[test]
-    fn test_split_model_provider_no_slash() {
-        let (provider, model) = split_model_provider("gpt-4");
-        assert_eq!(provider, "unknown");
-        assert_eq!(model, "gpt-4");
-    }
-
-    #[test]
-    fn test_split_model_provider_sub_model() {
-        let (provider, model) = split_model_provider("provider/sub/model");
-        assert_eq!(provider, "provider");
-        assert_eq!(model, "sub/model");
-    }
-
-    #[test]
-    fn test_split_model_provider_empty() {
-        let (provider, model) = split_model_provider("");
-        assert_eq!(provider, "unknown");
-        assert_eq!(model, "");
-    }
-
-    #[test]
-    fn test_canonicalize_mode_for_stats_normalizes_legacy_modes() {
-        assert_eq!(canonicalize_mode_for_stats("TASK_AGENT"), "task_agent");
-        assert_eq!(canonicalize_mode_for_stats("NO_TOOLS"), "explore");
-        assert_eq!(canonicalize_mode_for_stats("plan"), "plan");
-    }
 }

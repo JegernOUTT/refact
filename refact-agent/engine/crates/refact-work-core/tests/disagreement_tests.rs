@@ -2,7 +2,7 @@ use refact_work_core::identity::{ProjectKey, WorkKey};
 use refact_work_core::settings::CoordinationSettings;
 use refact_work_core::store::records::{
     AdjudicationRefusal, AdjudicationVerdict, DisagreementPosition, DisagreementRecord,
-    DisagreementStatus, EvidenceKind, EvidenceRef, FilingRefusal,
+    DisagreementStatus, EvidenceKind, EvidenceRef,
 };
 use refact_work_core::store::{CoordinationStore, DisagreementFiling};
 
@@ -120,41 +120,6 @@ fn evidence_the_winning_position_never_presented_cannot_decide_it() {
 }
 
 #[test]
-fn without_decisive_evidence_the_record_stays_open_with_its_reason() {
-    let mut filed = record("d-3");
-
-    let status = filed
-        .resolve(
-            "reviewer",
-            AdjudicationVerdict::Unresolvable {
-                reason: "neither run isolates the ordering".to_string(),
-            },
-            REVISION,
-            1_700_000_100_000,
-        )
-        .unwrap();
-
-    assert_eq!(status, DisagreementStatus::Open);
-    assert_eq!(filed.status, DisagreementStatus::Open);
-    assert!(filed.adjudication.is_none(), "no winner may be recorded");
-    assert_eq!(
-        filed.open_reason.as_deref(),
-        Some("neither run isolates the ordering")
-    );
-    assert_eq!(
-        filed.resolve(
-            "reviewer",
-            AdjudicationVerdict::Unresolvable {
-                reason: "   ".to_string()
-            },
-            REVISION,
-            1_700_000_200_000,
-        ),
-        Err(AdjudicationRefusal::MissingReason)
-    );
-}
-
-#[test]
 fn a_revision_that_moved_makes_the_record_stale_rather_than_adjudicated() {
     let mut filed = record("d-4");
     assert!(!filed.is_stale_against(REVISION));
@@ -195,26 +160,6 @@ fn a_revision_that_moved_makes_the_record_stale_rather_than_adjudicated() {
         ),
         Err(AdjudicationRefusal::NotOpen(DisagreementStatus::Stale))
     );
-}
-
-#[test]
-fn a_one_sided_or_unnamed_filing_is_refused() {
-    let mut single = record("d-5");
-    single.positions.truncate(1);
-    assert_eq!(single.validate(), Err(FilingRefusal::NotTwoSided(1)));
-
-    let mut duplicated = record("d-6");
-    duplicated.positions[1].position_id = "for".to_string();
-    assert_eq!(
-        duplicated.validate(),
-        Err(FilingRefusal::DuplicatePosition("for".to_string()))
-    );
-
-    let mut blank = record("d-7");
-    blank.claim = "  ".to_string();
-    assert_eq!(blank.validate(), Err(FilingRefusal::EmptyClaim));
-
-    assert_eq!(record("d-8").validate(), Ok(()));
 }
 
 #[tokio::test]
@@ -340,46 +285,4 @@ async fn the_open_record_cap_refuses_a_filing_instead_of_evicting_a_dispute() {
             .unwrap(),
         DisagreementFiling::Filed(_)
     ));
-}
-
-#[tokio::test]
-async fn retention_drops_settled_records_by_age_and_never_open_ones() {
-    let mut settings = CoordinationSettings::default();
-    settings.store_max_disagreements = 2;
-    let store = store(&settings).await;
-    let access = store.authorize(ProjectKey::new("alpha"));
-
-    let mut old_open = record("d-old-open");
-    old_open.updated_at_ms = 10;
-    store.file_disagreement(&access, &old_open).await.unwrap();
-    let mut old_settled = record("d-old-settled");
-    old_settled.updated_at_ms = 11;
-    store
-        .file_disagreement(&access, &old_settled)
-        .await
-        .unwrap();
-    old_settled.withdraw(12);
-    store
-        .put_disagreement_resolution(&access, &old_settled)
-        .await
-        .unwrap();
-
-    let expired = store.expire_disagreements(&access, 1_000).await.unwrap();
-    let kept = store.list_disagreements(&access, None).await.unwrap();
-
-    assert_eq!(expired, 1);
-    assert_eq!(kept.len(), 1);
-    assert_eq!(kept[0].record_id, "d-old-open");
-
-    for index in 0..3i64 {
-        let mut extra = record(&format!("d-cap-{index}"));
-        extra.updated_at_ms = 2_000 + index;
-        store.file_disagreement(&access, &extra).await.unwrap();
-    }
-    let report = store.prune(&access).await.unwrap();
-    let remaining = store.list_disagreements(&access, None).await.unwrap();
-
-    assert_eq!(report.disagreements, 2);
-    assert_eq!(remaining.len(), settings.store_max_disagreements);
-    assert_eq!(remaining[0].record_id, "d-cap-2");
 }

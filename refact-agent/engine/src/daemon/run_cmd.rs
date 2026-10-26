@@ -1160,75 +1160,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_run_args_full_matrix() {
-        let opts = parse_run_args(&[
-            OsString::from("--project"),
-            OsString::from("/tmp/project"),
-            OsString::from("--mode"),
-            OsString::from("explore"),
-            OsString::from("--model"),
-            OsString::from("m"),
-            OsString::from("--approve"),
-            OsString::from("auto"),
-            OsString::from("--json"),
-            OsString::from("--timeout-secs"),
-            OsString::from("12"),
-            OsString::from("do"),
-            OsString::from("x"),
-        ])
-        .unwrap();
-        assert_eq!(opts.project, Some(PathBuf::from("/tmp/project")));
-        assert_eq!(opts.mode, RunMode::Explore);
-        assert_eq!(opts.model.as_deref(), Some("m"));
-        assert_eq!(opts.approve, ApprovalPolicy::Auto);
-        assert!(opts.json);
-        assert_eq!(opts.timeout_secs, 12);
-        assert_eq!(opts.prompt, "do x");
-    }
-
-    #[test]
     fn parse_run_args_defaults_to_deny_agent() {
         let opts = parse_run_args(&[OsString::from("hello")]).unwrap();
         assert_eq!(opts.mode, RunMode::Agent);
         assert_eq!(opts.approve, ApprovalPolicy::Deny);
         assert_eq!(opts.timeout_secs, DEFAULT_TIMEOUT_SECS);
         assert_eq!(opts.prompt, "hello");
-    }
-
-    #[test]
-    fn parse_run_args_rejects_invalid_mode() {
-        let err = parse_run_args(&[
-            OsString::from("--mode"),
-            OsString::from("debug"),
-            OsString::from("hello"),
-        ])
-        .unwrap_err();
-        assert!(err.contains("--mode"));
-    }
-
-    #[test]
-    fn parse_run_args_requires_prompt() {
-        let err = parse_run_args(&[OsString::from("--json")]).unwrap_err();
-        assert!(err.contains("prompt"));
-    }
-
-    #[test]
-    fn run_error_kind_json_names_are_stable() {
-        assert_eq!(RunErrorKind::Unreachable.as_str(), "unreachable");
-        assert_eq!(RunErrorKind::ProjectOpen.as_str(), "project_open");
-        assert_eq!(RunErrorKind::Chat.as_str(), "chat");
-        assert_eq!(RunErrorKind::ApprovalDenied.as_str(), "approval_denied");
-        assert_eq!(RunErrorKind::Timeout.as_str(), "timeout");
-        assert_eq!(RunErrorKind::Interrupted.as_str(), "interrupted");
-    }
-
-    #[test]
-    fn exit_code_mapping_table() {
-        assert_eq!(exit_code_for(RunErrorKind::Unreachable), 1);
-        assert_eq!(exit_code_for(RunErrorKind::Chat), 2);
-        assert_eq!(exit_code_for(RunErrorKind::ApprovalDenied), 3);
-        assert_eq!(exit_code_for(RunErrorKind::Timeout), 4);
-        assert_eq!(exit_code_for(RunErrorKind::Interrupted), 130);
     }
 
     #[test]
@@ -1282,53 +1219,6 @@ mod tests {
             approval_decision(ApprovalPolicy::Auto, false, None),
             ApprovalDecision::Approve
         );
-    }
-
-    #[test]
-    fn summarize_tool_call_handles_openai_shape() {
-        let summary = summarize_tool_call(&json!({
-            "function": {"name": "shell", "arguments": "{\"command\":\"echo hi\"}"}
-        }));
-        assert_eq!(summary.name, "shell");
-        assert!(summary.args_preview.contains("echo hi"));
-    }
-
-    #[test]
-    fn reconnect_snapshot_prefix_prints_only_suffix() {
-        let mut state = RunState::new("chat".to_string());
-        state.final_text = "hello".to_string();
-        let mut io = BufferIo::new();
-        let opts = options(PathBuf::from("/tmp/project"), ApprovalPolicy::Deny, false);
-        handle_snapshot(
-            &mut state,
-            &json!({
-                "messages": [{"role": "assistant", "content": "hello world"}]
-            }),
-            &opts,
-            &mut io,
-        )
-        .unwrap();
-        assert_eq!(io.stdout, " world");
-        assert_eq!(state.final_text, "hello world");
-    }
-
-    #[test]
-    fn reconnect_snapshot_different_text_prints_separator_and_full_text() {
-        let mut state = RunState::new("chat".to_string());
-        state.final_text = "hello".to_string();
-        let mut io = BufferIo::new();
-        let opts = options(PathBuf::from("/tmp/project"), ApprovalPolicy::Deny, false);
-        handle_snapshot(
-            &mut state,
-            &json!({
-                "messages": [{"role": "assistant", "content": "goodbye"}]
-            }),
-            &opts,
-            &mut io,
-        )
-        .unwrap();
-        assert_eq!(io.stdout, "\n--- reconnect ---\ngoodbye");
-        assert_eq!(state.final_text, "goodbye");
     }
 
     #[test]

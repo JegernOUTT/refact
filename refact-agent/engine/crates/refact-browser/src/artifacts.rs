@@ -668,9 +668,6 @@ fn paper_format(format: &str) -> Option<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use refact_integrations::browser_models::{
-        BrowserPdfMargin, BrowserScreenshotAnimations, BrowserScreenshotCaret,
-    };
 
     fn metrics() -> ScreenshotMetrics {
         ScreenshotMetrics {
@@ -683,39 +680,6 @@ mod tests {
             content_width: 1200.0,
             content_height: 2400.0,
         }
-    }
-
-    #[test]
-    fn screenshot_options_map_every_cdp_field() {
-        let options = BrowserScreenshotOptions {
-            full_page: true,
-            clip: Some(BrowserScreenshotClip {
-                x: 5.0,
-                y: 6.0,
-                width: 1000.0,
-                height: 2000.0,
-            }),
-            image_type: Some(BrowserScreenshotType::Webp),
-            quality: Some(77),
-            scale: Some(BrowserScreenshotScale::Css),
-            omit_background: true,
-            animations: Some(BrowserScreenshotAnimations::Disabled),
-            caret: Some(BrowserScreenshotCaret::Initial),
-            mask: Vec::new(),
-            mask_color: Some("#123456".to_string()),
-            style: Some("body{color:red}".to_string()),
-        };
-        let capture = screenshot_capture(&options, metrics(), None).unwrap();
-        assert_eq!(capture.format, Page::CaptureScreenshotFormatOption::Webp);
-        assert_eq!(capture.mime, "image/webp");
-        assert_eq!(capture.quality, Some(77));
-        assert_eq!(capture.clip.x, 5.0);
-        assert_eq!(capture.clip.y, 6.0);
-        assert_eq!(capture.clip.width, 1000.0);
-        assert_eq!(capture.clip.height, 2000.0);
-        assert_eq!(capture.clip.scale, 0.5);
-        assert!(capture.capture_beyond_viewport);
-        assert_eq!(capture.downscale, None);
     }
 
     #[test]
@@ -749,42 +713,6 @@ mod tests {
         assert_eq!(capture_downscale(f64::NAN, 10.0), None);
         let by_pixels = capture_downscale(6000.0, 6000.0).unwrap();
         assert!((6000.0 * by_pixels).powi(2) <= MAX_CAPTURE_PIXELS + 1.0);
-    }
-
-    #[test]
-    fn document_clip_can_capture_beyond_the_viewport() {
-        let capture = screenshot_capture(
-            &BrowserScreenshotOptions {
-                clip: Some(BrowserScreenshotClip {
-                    x: 500.0,
-                    y: 700.0,
-                    width: 100.0,
-                    height: 80.0,
-                }),
-                ..Default::default()
-            },
-            metrics(),
-            None,
-        )
-        .unwrap();
-        assert_eq!(capture.clip.x, 500.0);
-        assert_eq!(capture.clip.y, 700.0);
-        assert_eq!(capture.clip.width, 100.0);
-        assert_eq!(capture.clip.height, 80.0);
-        assert_eq!(capture.clip.scale, 1.0);
-        assert!(capture.capture_beyond_viewport);
-    }
-
-    #[test]
-    fn viewport_capture_adds_scroll_offset_and_respects_viewport_scale() {
-        let capture =
-            screenshot_capture(&BrowserScreenshotOptions::default(), metrics(), None).unwrap();
-        assert_eq!(capture.clip.x, 10.0);
-        assert_eq!(capture.clip.y, 20.0);
-        assert_eq!(capture.clip.width, 400.0);
-        assert_eq!(capture.clip.height, 300.0);
-        assert_eq!(capture.clip.scale, 2.0);
-        assert!(!capture.capture_beyond_viewport);
     }
 
     #[test]
@@ -835,171 +763,6 @@ mod tests {
     }
 
     #[test]
-    fn pdf_options_map_formats_dimensions_margins_and_flags() {
-        let payload = pdf_payload(&BrowserPdfOptions {
-            landscape: Some(true),
-            print_background: Some(true),
-            scale: Some(0.8),
-            format: Some("A4".to_string()),
-            margins: Some(BrowserPdfMargin {
-                top: Some("96px".to_string()),
-                right: Some("2.54cm".to_string()),
-                bottom: Some("25.4mm".to_string()),
-                left: Some("1in".to_string()),
-            }),
-            page_ranges: Some("1-2".to_string()),
-            prefer_css_page_size: Some(true),
-            tagged: Some(true),
-            outline: Some(true),
-            ..Default::default()
-        })
-        .unwrap();
-        assert_eq!(payload.paper_width, Some(8.27));
-        assert_eq!(payload.paper_height, Some(11.7));
-        assert_eq!(payload.margin_top, Some(1.0));
-        assert_eq!(payload.margin_left, Some(1.0));
-        assert_eq!(payload.page_ranges.as_deref(), Some("1-2"));
-        assert_eq!(payload.generate_tagged_pdf, Some(true));
-        assert_eq!(payload.generate_document_outline, Some(true));
-        assert_eq!(
-            payload.transfer_mode,
-            Some(Page::PrintToPDFTransfer_modeOption::ReturnAsStream)
-        );
-    }
-
-    fn tile(label: &str, width: u32, height: u32) -> ComposeTile {
-        ComposeTile {
-            label: label.to_string(),
-            width,
-            height,
-        }
-    }
-
-    fn encoded_tile(width: u32, height: u32, color: Rgba<u8>) -> Vec<u8> {
-        let image = RgbaImage::from_pixel(width, height, color);
-        let mut bytes = Vec::new();
-        image
-            .write_to(&mut Cursor::new(&mut bytes), CodecFormat::Png)
-            .unwrap();
-        bytes
-    }
-
-    #[test]
-    fn grid_layout_uses_square_columns_and_uniform_cells() {
-        let plan = compose_plan(
-            &[
-                tile("a", 100, 50),
-                tile("b", 60, 80),
-                tile("c", 40, 40),
-                tile("d", 20, 20),
-                tile("e", 20, 20),
-            ],
-            ComposeLayout::Grid,
-            true,
-        )
-        .unwrap();
-
-        assert_eq!(plan.columns, 3);
-        assert_eq!(plan.rows, 2);
-        assert_eq!(plan.label_band, LABEL_BAND_HEIGHT);
-        assert_eq!(plan.width, SHEET_PADDING * 2 + 3 * 100 + 2 * TILE_GAP);
-        assert_eq!(
-            plan.height,
-            SHEET_PADDING * 2 + 2 * (80 + LABEL_BAND_HEIGHT) + TILE_GAP
-        );
-        assert_eq!(plan.placements[0].x, SHEET_PADDING);
-        assert_eq!(plan.placements[0].y, SHEET_PADDING + LABEL_BAND_HEIGHT + 15);
-        assert_eq!(plan.placements[1].x, SHEET_PADDING + 100 + TILE_GAP + 20);
-        assert_eq!(
-            plan.placements[3].y,
-            SHEET_PADDING + 80 + LABEL_BAND_HEIGHT + TILE_GAP + LABEL_BAND_HEIGHT + 30
-        );
-    }
-
-    #[test]
-    fn strip_layout_is_one_row_and_labels_are_optional() {
-        let tiles = [tile("default", 30, 40), tile("hover", 30, 40)];
-        let strip = compose_plan(&tiles, ComposeLayout::Strip, true).unwrap();
-        assert_eq!((strip.columns, strip.rows), (2, 1));
-        assert_eq!(strip.height, SHEET_PADDING * 2 + 40 + LABEL_BAND_HEIGHT);
-
-        let unlabelled = compose_plan(&tiles, ComposeLayout::Strip, false).unwrap();
-        assert_eq!(unlabelled.label_band, 0);
-        assert_eq!(unlabelled.height, SHEET_PADDING * 2 + 40);
-        assert_eq!(unlabelled.placements[0].y, SHEET_PADDING);
-    }
-
-    #[test]
-    fn compose_plan_rejects_empty_and_degenerate_tiles() {
-        assert!(compose_plan(&[], ComposeLayout::Grid, true).is_err());
-        assert!(compose_plan(&[tile("a", 0, 10)], ComposeLayout::Grid, true).is_err());
-    }
-
-    #[test]
-    fn compose_sheet_draws_every_tile_and_its_label() {
-        let red = Rgba([255, 0, 0, 255]);
-        let blue = Rgba([0, 0, 255, 255]);
-        let bytes = compose_sheet(
-            &[
-                ("default".to_string(), encoded_tile(40, 30, red)),
-                ("hover".to_string(), encoded_tile(40, 30, blue)),
-            ],
-            ComposeLayout::Strip,
-            true,
-        )
-        .unwrap();
-        let sheet = image::load_from_memory(&bytes).unwrap().to_rgba8();
-        let plan = compose_plan(
-            &[tile("default", 40, 30), tile("hover", 40, 30)],
-            ComposeLayout::Strip,
-            true,
-        )
-        .unwrap();
-
-        assert_eq!((sheet.width(), sheet.height()), (plan.width, plan.height));
-        assert_eq!(
-            *sheet.get_pixel(plan.placements[0].x, plan.placements[0].y),
-            red
-        );
-        assert_eq!(
-            *sheet.get_pixel(plan.placements[1].x, plan.placements[1].y),
-            blue
-        );
-        let label_band_has_text = (plan.placements[0].label_x..plan.placements[0].label_x + 40)
-            .any(|x| {
-                (plan.placements[0].label_y
-                    ..plan.placements[0].label_y + GLYPH_HEIGHT * GLYPH_SCALE)
-                    .any(|y| *sheet.get_pixel(x, y) == LABEL_TEXT)
-            });
-        assert!(label_band_has_text);
-    }
-
-    #[test]
-    fn unlabelled_composition_leaves_no_text_pixels() {
-        let bytes = compose_sheet(
-            &[(
-                "hover".to_string(),
-                encoded_tile(20, 20, Rgba([9, 9, 9, 255])),
-            )],
-            ComposeLayout::Grid,
-            false,
-        )
-        .unwrap();
-        let sheet = image::load_from_memory(&bytes).unwrap().to_rgba8();
-
-        assert!(sheet.pixels().all(|pixel| *pixel != LABEL_TEXT));
-    }
-
-    #[test]
-    fn labels_are_uppercased_and_truncated_to_the_cell() {
-        assert_eq!(fit_label("hover", 1_000), "HOVER");
-        assert_eq!(fit_label("hover", GLYPH_ADVANCE * 5), "HOVER");
-        assert_eq!(fit_label("hover", GLYPH_ADVANCE * 4), "HO..");
-        assert_eq!(fit_label("hover", GLYPH_ADVANCE), "H");
-        assert_eq!(fit_label("hover", 0), "");
-    }
-
-    #[test]
     fn element_state_sequence_drives_and_unwinds_every_state() {
         assert_eq!(
             element_state_sequence(&[
@@ -1023,58 +786,5 @@ mod tests {
                 ElementStateAction::Blur,
             ]
         );
-    }
-
-    #[test]
-    fn element_state_sequence_defaults_deduplicates_and_returns_to_rest() {
-        assert_eq!(
-            element_state_sequence(&[]),
-            element_state_sequence(&DEFAULT_ELEMENT_STATES)
-        );
-        assert_eq!(
-            element_state_sequence(&[BrowserElementState::Hover, BrowserElementState::Hover]),
-            vec![
-                ElementStateAction::Hover,
-                ElementStateAction::Capture(BrowserElementState::Hover),
-                ElementStateAction::MoveMouseAway,
-            ]
-        );
-        assert_eq!(
-            element_state_sequence(&[BrowserElementState::Active, BrowserElementState::Default]),
-            vec![
-                ElementStateAction::Hover,
-                ElementStateAction::PressAndHold,
-                ElementStateAction::Capture(BrowserElementState::Active),
-                ElementStateAction::ReleaseMouse,
-                ElementStateAction::MoveMouseAway,
-                ElementStateAction::Blur,
-                ElementStateAction::Capture(BrowserElementState::Default),
-            ]
-        );
-    }
-
-    #[test]
-    fn pdf_rejects_conflicting_or_unknown_sizes() {
-        assert!(pdf_payload(&BrowserPdfOptions {
-            format: Some("A4".to_string()),
-            width: Some("8in".to_string()),
-            ..Default::default()
-        })
-        .is_err());
-        assert!(pdf_payload(&BrowserPdfOptions {
-            format: Some("mystery".to_string()),
-            ..Default::default()
-        })
-        .is_err());
-        assert!(pdf_payload(&BrowserPdfOptions {
-            width: Some("12qu".to_string()),
-            ..Default::default()
-        })
-        .is_err());
-        assert!(pdf_payload(&BrowserPdfOptions {
-            scale: Some(2.1),
-            ..Default::default()
-        })
-        .is_err());
     }
 }

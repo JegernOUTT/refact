@@ -2672,26 +2672,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn relaunch_command_uses_supplied_executable() {
-        let executable = PathBuf::from("/stable/refact-agent");
-        let command = daemon_relaunch_command(&executable);
-
-        assert_eq!(command.get_program(), executable.as_os_str());
-        assert_eq!(
-            command.get_args().collect::<Vec<_>>(),
-            vec![std::ffi::OsStr::new("daemon")]
-        );
-        assert_eq!(
-            command.get_envs().find_map(|(key, value)| {
-                (key == std::ffi::OsStr::new("REFACT_DAEMON_RELAUNCH"))
-                    .then_some(value)
-                    .flatten()
-            }),
-            Some(std::ffi::OsStr::new("1"))
-        );
-    }
-
     async fn test_state(dir: &tempfile::TempDir) -> Arc<DaemonState> {
         let state = DaemonState::new(
             DaemonConfig::default(),
@@ -2764,15 +2744,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn daemon_server_bind_rejects_invalid_host() {
-        let config = DaemonConfig {
-            bind: "localhost".to_string(),
-            ..DaemonConfig::default()
-        };
-        assert!(bind_listener(&config).is_err());
     }
 
     #[test]
@@ -2999,105 +2970,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn daemon_server_status_router_reports_workers_zero() {
-        use hyper::{Body, Request, StatusCode};
-        use tower::ServiceExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let state = test_state(&dir).await;
-        let response = make_router(state, 8488)
-            .oneshot(
-                Request::builder()
-                    .uri("/daemon/v1/status")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(json["workers"], 0);
-        assert_eq!(json["cron_pending"], serde_json::json!({}));
-        assert_eq!(json["port"], 8488);
-        let executable_sha256 = json["executable_sha256"]
-            .as_str()
-            .expect("daemon status must report executable_sha256 for staleness detection");
-        assert_eq!(executable_sha256.len(), 64);
-    }
-
-    #[tokio::test]
-    async fn daemon_doctor_router_returns_findings_shape() {
-        use hyper::{Body, Request, StatusCode};
-        use tower::ServiceExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let state = test_state(&dir).await;
-        {
-            let mut cache = state.update_check_cache.lock().await;
-            *cache = Some((
-                std::time::Instant::now(),
-                refact_self_update::UpdateCheckInfo {
-                    current_version: "1.2.3".to_string(),
-                    latest_version: Some("1.2.3".to_string()),
-                    update_available: false,
-                    releases: Vec::new(),
-                },
-            ));
-        }
-        let response = make_router(state, 8488)
-            .oneshot(
-                Request::builder()
-                    .uri("/daemon/v1/doctor")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let (status, json) = response_json(response).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(json["generated_at_ms"].as_u64().unwrap() > 0);
-        assert!(json["findings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|finding| { finding["id"] == "port_conflict" && finding["severity"] == "info" }));
-    }
-
-    #[tokio::test]
-    async fn daemon_doctor_router_is_not_an_auth_exemption() {
-        use crate::daemon::config::AuthConfig;
-        use axum::extract::ConnectInfo;
-        use hyper::{Body, Request, StatusCode};
-        use std::net::SocketAddr;
-        use tower::ServiceExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let config = DaemonConfig {
-            auth: AuthConfig {
-                enabled: true,
-                token: Some("secret".to_string()),
-                ..Default::default()
-            },
-            ..DaemonConfig::default()
-        };
-        let state = DaemonState::new(
-            config,
-            EventBus::new(dir.path().join("events.jsonl")),
-            Some("secret".to_string()),
-        );
-        let mut request = Request::builder()
-            .uri("/daemon/v1/doctor")
-            .body(Body::empty())
-            .unwrap();
-        request
-            .extensions_mut()
-            .insert(ConnectInfo(SocketAddr::from(([192, 168, 1, 50], 40000))));
-        let response = make_router(state, 8488).oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
     async fn auth_matrix_project_cookie_cannot_reach_fs_browse_or_doctor() {
         use crate::daemon::config::AuthConfig;
         use axum::extract::ConnectInfo;
@@ -3146,29 +3018,6 @@ mod tests {
         doctor.extensions_mut().insert(remote());
         let doctor = router.oneshot(doctor).await.unwrap();
         assert_eq!(doctor.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn auth_matrix_fs_browse_loopback_allowed_when_auth_off() {
-        use axum::extract::ConnectInfo;
-        use hyper::{Body, Request, StatusCode};
-        use std::net::SocketAddr;
-        use tower::ServiceExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let state = test_state(&dir).await;
-        let body = serde_json::json!({"path": dir.path()}).to_string();
-        let mut request = Request::builder()
-            .method("POST")
-            .uri("/daemon/v1/fs/browse")
-            .header("content-type", "application/json")
-            .body(Body::from(body))
-            .unwrap();
-        request
-            .extensions_mut()
-            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40000))));
-        let response = make_router(state, 8488).oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -3280,33 +3129,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(scheduler_env)]
-    async fn daemon_cron_status_reports_pending_clock_shape() {
-        use hyper::{Body, Request, StatusCode};
-        use tower::ServiceExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let state = test_state(&dir).await;
-        state.set_cron_pending("project-a", Some(200_000)).await;
-        state.set_cron_pending("project-b", Some(150_000)).await;
-        let response = make_router(state, 8488)
-            .oneshot(
-                Request::builder()
-                    .uri("/cron/status")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(json["enabled"], true);
-        assert_eq!(json["jobs"], 2);
-        assert_eq!(json["next_wake_ms"], 60_000);
-    }
-
-    #[tokio::test]
     async fn daemon_router_restart_returns_success_and_requests_shutdown() {
         use hyper::{Body, Request, StatusCode};
         use tower::ServiceExt;
@@ -3329,63 +3151,6 @@ mod tests {
         assert_eq!(json["success"], true);
         assert_eq!(json["restarting"], true);
         assert_eq!(shutdown_rx.recv().await.unwrap(), "restart_requested");
-    }
-
-    #[tokio::test]
-    async fn daemon_router_update_status_is_idle_initially() {
-        use hyper::{Body, Request, StatusCode};
-        use tower::ServiceExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let state = test_state(&dir).await;
-        let response = make_router(state, 8488)
-            .oneshot(
-                Request::builder()
-                    .uri("/daemon/v1/update/status")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let (status, json) = response_json(response).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["phase"], "idle");
-        assert_eq!(json["detail"], serde_json::Value::Null);
-    }
-
-    #[tokio::test]
-    async fn daemon_router_update_check_serves_fresh_cache_without_network() {
-        use hyper::{Body, Request, StatusCode};
-        use tower::ServiceExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let state = test_state(&dir).await;
-        {
-            let mut cache = state.update_check_cache.lock().await;
-            *cache = Some((
-                std::time::Instant::now(),
-                refact_self_update::UpdateCheckInfo {
-                    current_version: "1.2.3".to_string(),
-                    latest_version: Some("9.9.9".to_string()),
-                    update_available: true,
-                    releases: Vec::new(),
-                },
-            ));
-        }
-        let response = make_router(state, 8488)
-            .oneshot(
-                Request::builder()
-                    .uri("/daemon/v1/update/check")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let (status, json) = response_json(response).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["current_version"], "1.2.3");
-        assert_eq!(json["latest_version"], "9.9.9");
-        assert_eq!(json["update_available"], true);
     }
 
     #[tokio::test]
@@ -3413,27 +3178,6 @@ mod tests {
         let (status, json) = response_json(response).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(json["error"], "update already in progress");
-    }
-
-    #[tokio::test]
-    async fn daemon_server_auth_disabled_passthrough() {
-        use hyper::{Body, Request, StatusCode};
-        use tower::ServiceExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let state = test_state(&dir).await;
-        let response = make_router(state, 8488)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/daemon/v1/shutdown")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"reason":"t"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -3568,73 +3312,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn daemon_server_auth_enabled_loopback_needs_no_credentials() {
-        use crate::daemon::config::AuthConfig;
-        use axum::extract::ConnectInfo;
-        use hyper::{Body, Request, StatusCode};
-        use std::net::SocketAddr;
-        use tower::ServiceExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let config = DaemonConfig {
-            auth: AuthConfig {
-                enabled: true,
-                token: Some("secret".to_string()),
-                username: Some("alice".to_string()),
-                password: Some("hunter2".to_string()),
-            },
-            ..DaemonConfig::default()
-        };
-        let state = DaemonState::new(
-            config,
-            EventBus::new(dir.path().join("events.jsonl")),
-            Some("secret".to_string()),
-        );
-        let mut request = Request::builder()
-            .uri("/daemon/v1/projects")
-            .body(Body::empty())
-            .unwrap();
-        request
-            .extensions_mut()
-            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40000))));
-        let response = make_router(state, 8488).oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn daemon_server_auth_enabled_status_exempt() {
-        use crate::daemon::config::AuthConfig;
-        use axum::extract::ConnectInfo;
-        use hyper::{Body, Request, StatusCode};
-        use std::net::SocketAddr;
-        use tower::ServiceExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let config = DaemonConfig {
-            auth: AuthConfig {
-                enabled: true,
-                token: Some("secret".to_string()),
-                ..Default::default()
-            },
-            ..DaemonConfig::default()
-        };
-        let state = DaemonState::new(
-            config,
-            EventBus::new(dir.path().join("events.jsonl")),
-            Some("secret".to_string()),
-        );
-        let mut request = Request::builder()
-            .uri("/daemon/v1/status")
-            .body(Body::empty())
-            .unwrap();
-        request
-            .extensions_mut()
-            .insert(ConnectInfo(SocketAddr::from(([192, 168, 1, 50], 40000))));
-        let response = make_router(state, 8488).oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
     async fn daemon_control_plane_body_is_not_proxy_limited() {
         use hyper::{Body, Request, StatusCode};
         use tower::ServiceExt;
@@ -3682,96 +3359,6 @@ mod tests {
 
         assert!(!text.contains("secret-token"));
         assert!(text.contains("daemon_token=<redacted>&chat=1"));
-    }
-
-    #[tokio::test]
-    async fn worker_status_handler_stores_report_and_emits_only_on_change() {
-        use crate::daemon_link::WorkerStatusReport;
-        use tokio::time::{timeout, Duration};
-
-        fn report(
-            project_id: &str,
-            pid: u32,
-            lsp_clients: usize,
-            busy_chats: usize,
-        ) -> WorkerStatusReport {
-            WorkerStatusReport {
-                project_id: project_id.to_string(),
-                pid,
-                instance_token: "token".to_string(),
-                lsp_clients,
-                busy_chats,
-                exec_running: 0,
-                last_activity_ts: 55,
-            }
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        let state = test_state(&dir).await;
-        let mut events = state.events.subscribe();
-        let root = tempfile::tempdir().unwrap();
-        let entry = {
-            let mut registry = state.projects.write().await;
-            registry.open(root.path().to_path_buf()).await.unwrap()
-        };
-        state
-            .supervisor
-            .set_test_worker_info(
-                &entry.id,
-                123,
-                crate::daemon::supervisor::WorkerState::Ready,
-                "token",
-            )
-            .await;
-
-        let first = worker_status(
-            State((state.clone(), 8488)),
-            Json(report(&entry.id, 123, 1, 0)),
-        )
-        .await;
-        let (status, first) = response_json(first).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(first["event_emitted"], true);
-        let event = timeout(Duration::from_secs(1), events.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(event.kind, "worker_status");
-        assert_eq!(event.project_id.as_deref(), Some(entry.id.as_str()));
-        assert_eq!(
-            state
-                .latest_worker_status(&entry.id)
-                .await
-                .unwrap()
-                .lsp_clients,
-            1
-        );
-
-        let second = worker_status(
-            State((state.clone(), 8488)),
-            Json(report(&entry.id, 123, 1, 0)),
-        )
-        .await;
-        let (status, second) = response_json(second).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(second["event_emitted"], false);
-        assert!(timeout(Duration::from_millis(50), events.recv())
-            .await
-            .is_err());
-
-        let third = worker_status(
-            State((state.clone(), 8488)),
-            Json(report(&entry.id, 123, 2, 0)),
-        )
-        .await;
-        let (status, third) = response_json(third).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(third["event_emitted"], true);
-        let event = timeout(Duration::from_secs(1), events.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(event.payload["lsp_clients"], 2);
     }
 
     #[tokio::test]

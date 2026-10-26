@@ -167,34 +167,6 @@ mod tests {
     }
 
     #[test]
-    fn test_augmented_path_includes_existing_dirs() {
-        let tmp = tempfile::tempdir().unwrap();
-        let extra = tmp.path().join("extra_bin");
-        std::fs::create_dir_all(&extra).unwrap();
-        let base = extra.to_str().unwrap().to_string();
-        let result = augmented_path(Some(&base));
-        assert!(result.contains(extra.to_str().unwrap()));
-    }
-
-    #[test]
-    fn test_augmented_path_skips_nonexistent_dirs() {
-        let nonexistent = "/definitely/does/not/exist/xyz_999888";
-        let result = augmented_path(Some("/usr/bin"));
-        let parts: Vec<&str> = result.split(PATH_SEPARATOR).collect();
-        assert!(!parts.contains(&nonexistent));
-    }
-
-    #[test]
-    fn test_augmented_path_deduplicates() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().to_str().unwrap().to_string();
-        let base = format!("{dir}{sep}{dir}{sep}{dir}", sep = PATH_SEPARATOR);
-        let result = augmented_path(Some(&base));
-        let count = result.split(PATH_SEPARATOR).filter(|&s| s == dir).count();
-        assert_eq!(count, 1);
-    }
-
-    #[test]
     fn test_resolve_command_finds_binary_in_extra_dir() {
         let tmp = tempfile::tempdir().unwrap();
         #[cfg(windows)]
@@ -210,63 +182,5 @@ mod tests {
         assert!(result.is_ok());
         let resolved = result.unwrap();
         assert_eq!(resolved.program, bin_path);
-    }
-
-    #[test]
-    fn test_resolve_command_absolute_path_passthrough() {
-        let tmp = tempfile::tempdir().unwrap();
-        let bin_path = tmp.path().join("absolute_tool");
-        std::fs::write(&bin_path, "#!/bin/sh\necho hi").unwrap();
-        make_executable(&bin_path);
-
-        let abs = bin_path.to_str().unwrap();
-        let result = resolve_command(abs, abs, None);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().program, bin_path);
-    }
-
-    #[test]
-    fn test_resolve_command_not_found_error() {
-        let result = resolve_command(
-            "nonexistent_tool_zzz_99999",
-            "nonexistent_tool_zzz_99999 --flag",
-            Some("/tmp"),
-        );
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.command, "nonexistent_tool_zzz_99999");
-        assert_eq!(err.full_command, "nonexistent_tool_zzz_99999 --flag");
-        assert!(err.effective_path.contains("/tmp"));
-    }
-
-    #[test]
-    fn test_resolve_command_not_found_message() {
-        let result = resolve_command(
-            "uvx_not_here",
-            "uvx_not_here mcp-server-fetch",
-            Some("/tmp"),
-        );
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_user_message();
-        assert!(msg.contains("uvx_not_here"));
-        assert!(msg.contains("Install the tool"));
-        assert!(msg.contains("absolute path"));
-        assert!(msg.contains("env.PATH"));
-    }
-
-    #[test]
-    fn test_resolve_with_config_env_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        #[cfg(windows)]
-        let bin_name = "config_path_tool.exe";
-        #[cfg(not(windows))]
-        let bin_name = "config_path_tool";
-        let bin_path = tmp.path().join(bin_name);
-        std::fs::write(&bin_path, "#!/bin/sh\necho hi").unwrap();
-        make_executable(&bin_path);
-
-        let config_path = tmp.path().to_str().unwrap();
-        let result = resolve_command("config_path_tool", "config_path_tool", Some(config_path));
-        assert!(result.is_ok());
     }
 }

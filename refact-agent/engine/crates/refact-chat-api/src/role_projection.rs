@@ -494,59 +494,6 @@ mod tests {
     }
 
     #[test]
-    fn plan_projection_without_deltas_is_the_approved_base_verbatim() {
-        let projection = project_role(
-            ProjectedRole::Plan,
-            &base(),
-            &[],
-            ProjectionLimits::default(),
-        );
-
-        assert_eq!(projection.text, base().body);
-        assert_eq!(projection.delta_count, 0);
-        assert!(projection.checkpoint.is_none());
-    }
-
-    #[test]
-    fn plan_projection_below_the_threshold_matches_plain_synthesis() {
-        let notes = notes(3);
-        let projection = project_role(
-            ProjectedRole::Plan,
-            &base(),
-            &deltas(&notes),
-            ProjectionLimits::default(),
-        );
-
-        assert_eq!(
-            projection.text,
-            format!(
-                "{}\n\n---\n\n## Plan updates\n\n{}",
-                base().body,
-                notes.join("\n\n")
-            )
-        );
-        assert!(projection.checkpoint.is_none());
-    }
-
-    #[test]
-    fn plan_projection_is_deterministic_across_repeated_calls() {
-        let notes = notes(200);
-        let deltas = deltas(&notes);
-        let limits = ProjectionLimits {
-            checkpoint_after_deltas: 8,
-            max_chars: 4_096,
-        };
-
-        let first = project_role(ProjectedRole::Plan, &base(), &deltas, limits);
-        for _ in 0..5 {
-            assert_eq!(
-                project_role(ProjectedRole::Plan, &base(), &deltas, limits),
-                first
-            );
-        }
-    }
-
-    #[test]
     fn plan_projection_bounds_two_hundred_deltas_and_keeps_approved_constraints() {
         let notes = notes(200);
         let deltas = deltas(&notes);

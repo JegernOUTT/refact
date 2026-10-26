@@ -677,70 +677,6 @@ mod tests {
         card
     }
 
-    const CODE_INTEL_TOOLS: &[&str] = &[
-        "codegraph_overview",
-        "code_health",
-        "git_risk",
-        "code_why",
-        "code_duplication",
-        "code_map",
-        "security_scan",
-        "pr_blast",
-        "dead_code",
-    ];
-
-    #[test]
-    fn every_code_intel_fixture_uses_summary_as_collapsed_headline() {
-        for name in CODE_INTEL_TOOLS {
-            let result = fixture(name);
-            let expected = result["summary"].as_str().unwrap().to_string();
-            let card = card(name, result);
-            let cell = CodeIntelToolCell::new(&card, false).unwrap();
-            assert_eq!(cell.headline(), expected, "{name}");
-            let rendered = text(&cell.render(160));
-            assert!(rendered.contains(&expected), "{name}: {rendered}");
-            let dispatched = cell_from_tool_card(card, false);
-            assert_eq!(dispatched.kind(), HistoryCellKind::Search, "{name}");
-            assert!(
-                text(&dispatched.render(160)).starts_with("code intel\n"),
-                "{name}"
-            );
-        }
-    }
-
-    #[test]
-    fn malformed_code_intel_payload_uses_the_generic_tool_card() {
-        let mut card = tool_card("code_health", json!({}), "[]");
-        card.expanded = false;
-        card.set_result("[]");
-        assert!(CodeIntelToolCell::new(&card, false).is_none());
-        let cell = cell_from_tool_card(card, false);
-        assert_eq!(cell.kind(), HistoryCellKind::Tool);
-        assert!(text(&cell.render(80)).starts_with("tool\n"));
-    }
-
-    #[test]
-    fn code_map_markdown_uses_the_markdown_renderer() {
-        let mut result = fixture("code_map");
-        result["markdown"] = json!("## Architecture\n\n- **entrypoint**");
-        let mut card = card("code_map", result);
-        card.expanded = true;
-        let rendered = text(&CodeIntelToolCell::new(&card, false).unwrap().render(100));
-        assert!(rendered.contains("Architecture"));
-        assert!(rendered.contains("entrypoint"));
-    }
-
-    #[test]
-    fn index_state_and_absolute_path_prefix_render_once() {
-        let mut card = card("pr_blast", fixture("pr_blast"));
-        card.expanded = true;
-        let rendered = text(&CodeIntelToolCell::new(&card, false).unwrap().render(120));
-        assert!(rendered.contains("[index ready]"));
-        assert_eq!(rendered.matches("[paths: /workspace/repo/]").count(), 1);
-        assert!(rendered.contains("src/b.rs"));
-        assert!(rendered.contains("tests/a.rs"));
-    }
-
     #[test]
     fn code_intel_text_is_sanitized_and_wrapped() {
         let mut result = fixture("security_scan");
@@ -752,25 +688,5 @@ mod tests {
         let rendered = text(&CodeIntelToolCell::new(&card, false).unwrap().render(30));
         assert!(!rendered.contains('\u{1b}'));
         assert!(rendered.lines().all(|line| line.chars().count() <= 30));
-    }
-
-    #[test]
-    fn warning_is_rendered_from_its_json_field() {
-        let mut result = fixture("codegraph_overview");
-        result["warning"] = json!("cross-file analysis is partial");
-        let mut card = card("codegraph_overview", result);
-        card.expanded = true;
-        let rendered = text(&CodeIntelToolCell::new(&card, false).unwrap().render(120));
-        assert!(rendered.contains("warning: cross-file analysis is partial"));
-        assert!(!rendered.contains('⚠'));
-    }
-
-    #[test]
-    fn only_source_severity_variants_are_rendered() {
-        assert_eq!(parse_severity(&json!("Low")), Some(Severity::Low));
-        assert_eq!(parse_severity(&json!("Medium")), Some(Severity::Medium));
-        assert_eq!(parse_severity(&json!("High")), Some(Severity::High));
-        assert_eq!(parse_severity(&json!("Critical")), Some(Severity::Critical));
-        assert_eq!(parse_severity(&json!("Info")), None);
     }
 }

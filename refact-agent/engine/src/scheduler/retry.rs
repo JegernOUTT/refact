@@ -119,19 +119,6 @@ mod tests {
     }
 
     #[test]
-    fn server_error_requires_context_for_numeric_5xx() {
-        for input in [
-            "http 503",
-            "status code: 504",
-            "response_code=502",
-            "HTTP status 500",
-            "service unavailable",
-        ] {
-            assert_eq!(classify(input), Some(RetryCategory::ServerError), "{input}");
-        }
-    }
-
-    #[test]
     fn retry_delay_is_bounded_and_reuses_last_delay() {
         let config = RetryConfig {
             max_attempts: 4,

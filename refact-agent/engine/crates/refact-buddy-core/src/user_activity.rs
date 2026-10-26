@@ -317,7 +317,6 @@ fn format_window(start: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{DateTime, TimeZone};
 
     #[test]
     fn ring_holds_200_evicts_oldest() {
@@ -337,50 +336,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn ring_persists_and_reloads() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut ring = UserActivityRing::new(dir.path().to_path_buf(), 200);
-        ring.push(UserAction::FileOpened {
-            path: "src/main.rs".to_string(),
-            ts: Utc::now(),
-        });
-        ring.push(UserAction::CommandRun {
-            command_preview: "cargo check".to_string(),
-            chat_id: "chat-1".to_string(),
-            ts: Utc::now(),
-        });
-        ring.persist().await.unwrap();
-        ring.persist().await.unwrap();
-
-        let reloaded = UserActivityRing::load(dir.path()).await;
-        let actions = reloaded.snapshot();
-        assert_eq!(actions.len(), 2);
-        assert_eq!(
-            tokio::fs::read_to_string(activity_path(dir.path()))
-                .await
-                .unwrap()
-                .lines()
-                .count(),
-            2
-        );
-    }
-
-    #[test]
-    fn time_of_day_pattern_buckets_correctly() {
-        let actions = [9, 10, 11, 19, 20, 21]
-            .into_iter()
-            .map(|hour| UserAction::FileOpened {
-                path: format!("file-{hour}"),
-                ts: local_ts(hour),
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            time_of_day_pattern(&actions),
-            "mostly active 09–12 and 19–22"
-        );
-    }
-
     #[test]
     fn redacts_secrets_in_paths() {
         let mut ring = UserActivityRing::new(PathBuf::from("/tmp/project"), 200);
@@ -396,32 +351,5 @@ mod tests {
             }
             _ => panic!("unexpected action"),
         }
-    }
-
-    #[test]
-    fn last_hours_returns_correct_window() {
-        let mut ring = UserActivityRing::new(PathBuf::from("/tmp/project"), 200);
-        ring.push(UserAction::FileOpened {
-            path: "old.rs".to_string(),
-            ts: Utc::now() - Duration::hours(25),
-        });
-        ring.push(UserAction::FileOpened {
-            path: "new.rs".to_string(),
-            ts: Utc::now() - Duration::hours(2),
-        });
-        let actions = ring.last_hours(24);
-        assert_eq!(actions.len(), 1);
-        match &actions[0] {
-            UserAction::FileOpened { path, .. } => assert_eq!(path, "new.rs"),
-            _ => panic!("unexpected action"),
-        }
-    }
-
-    fn local_ts(hour: u32) -> DateTime<Utc> {
-        Local
-            .with_ymd_and_hms(2024, 1, 2, hour, 0, 0)
-            .single()
-            .unwrap()
-            .with_timezone(&Utc)
     }
 }

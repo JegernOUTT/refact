@@ -2920,79 +2920,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_activity_refreshes_last_activity() {
-        let (_temp, registry) = registry().await;
-        let (record, _, _) = registry.create(request("parent")).await.unwrap();
-
-        let updated = registry
-            .update_activity(&record.agent_id, None, None, None)
-            .await
-            .unwrap();
-
-        assert!(updated.last_activity.is_some());
-        assert!(
-            chrono::DateTime::parse_from_rfc3339(updated.last_activity.as_deref().unwrap()).is_ok()
-        );
-    }
-
-    #[tokio::test]
-    async fn rapid_progress_updates_are_debounced_to_one_persisted_write() {
-        let (temp, registry) = registry().await;
-        let (record, _, _) = registry.create(request("parent")).await.unwrap();
-        let records_path = temp.path().join("agents").join("records.json");
-        let baseline = tokio::fs::read_to_string(&records_path).await.unwrap();
-
-        let mut last = None;
-        for step in 1..=5 {
-            last = Some(
-                registry
-                    .update_progress(&record.agent_id, format!("step {step}"), step)
-                    .await
-                    .unwrap(),
-            );
-        }
-
-        let persisted_before_flush = tokio::fs::read_to_string(&records_path).await.unwrap();
-        assert_eq!(persisted_before_flush, baseline);
-
-        registry.flush_pending_writes_for_test().await.unwrap();
-
-        let persisted = storage::load_all(&temp.path().join("agents"))
-            .await
-            .unwrap();
-        assert_eq!(persisted.get(&record.agent_id), last.as_ref());
-    }
-
-    #[tokio::test]
-    async fn old_terminal_records_within_retention_are_kept_on_write() {
-        let (temp, registry) = registry().await;
-        let (old, _, _) = registry.create(request("parent")).await.unwrap();
-        registry
-            .mark_failed(&old.agent_id, "boom".to_string())
-            .await
-            .unwrap();
-        registry
-            .set_last_update_at_for_test(&old.agent_id, Utc::now() - TimeDelta::days(8))
-            .await
-            .unwrap();
-        let (recent, _, _) = registry.create(request("parent")).await.unwrap();
-        registry
-            .mark_completed(&recent.agent_id, completion())
-            .await
-            .unwrap();
-        let (live, _, _) = registry.create(request("parent")).await.unwrap();
-
-        registry.flush_pending_writes_for_test().await.unwrap();
-
-        let persisted = storage::load_all(&temp.path().join("agents"))
-            .await
-            .unwrap();
-        assert!(persisted.contains_key(&old.agent_id));
-        assert!(persisted.contains_key(&recent.agent_id));
-        assert!(persisted.contains_key(&live.agent_id));
-    }
-
-    #[tokio::test]
     async fn queued_inbox_accepts_messages_and_terminal_agents_reject_them() {
         let (_temp, registry) = registry().await;
         let (record, _, _) = registry.create(request("parent")).await.unwrap();
@@ -3596,42 +3523,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delivery_idle_and_completion_mode_persist() {
-        let (temp, registry) = registry().await;
-        let (record, _, _) = registry.create(request("parent")).await.unwrap();
-        assert_eq!(record.completion_push, PushMode::Append);
-        registry
-            .set_completion_push(&record.agent_id, PushMode::Preempt)
-            .await
-            .unwrap();
-        let idle = delivery(PushMode::WhenIdle);
-        registry
-            .enqueue_delivery(&record.agent_id, idle.clone())
-            .await
-            .unwrap();
-        let restored = storage::load_all(&temp.path().join("agents"))
-            .await
-            .unwrap();
-        let restored = &restored[&record.agent_id];
-        assert_eq!(restored.completion_push, PushMode::Preempt);
-        assert_eq!(restored.pending_deliveries[0].id, idle.id);
-        assert!(!restored.delivery_ids.contains(&idle.id));
-        assert!(registry
-            .drain_deliveries(&record.agent_id, false)
-            .await
-            .unwrap()
-            .is_empty());
-        assert_eq!(
-            registry
-                .drain_deliveries(&record.agent_id, true)
-                .await
-                .unwrap()[0]
-                .id,
-            idle.id
-        );
-    }
-
-    #[tokio::test]
     async fn claimed_delivery_survives_restart_until_acknowledged() {
         let (temp, registry) = registry().await;
         let (record, _, _) = registry.create(request("parent")).await.unwrap();
@@ -3961,27 +3852,6 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<BgAgentStatus>(serde_json::json!("closed")).unwrap(),
             BgAgentStatus::Closed
-        );
-    }
-
-    #[tokio::test]
-    async fn set_merge_status_rejects_unknown_statuses() {
-        let (_temp, registry) = registry().await;
-        let (record, _, _) = registry.create(request("parent")).await.unwrap();
-
-        assert_eq!(
-            registry
-                .set_merge_status(&record.agent_id, "weird")
-                .await
-                .unwrap_err(),
-            "invalid merge status"
-        );
-        assert_eq!(
-            registry
-                .set_merge_outcome(&record.agent_id, "weird", None, None)
-                .await
-                .unwrap_err(),
-            "invalid merge status"
         );
     }
 

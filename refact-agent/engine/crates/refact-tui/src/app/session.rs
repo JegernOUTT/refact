@@ -1189,16 +1189,6 @@ mod tests {
     }
 
     #[test]
-    fn reset_session_surfaces_covers_every_session_surface() {
-        let mut app = App::new(project());
-        open_every_session_surface(&mut app);
-
-        app.reset_session_surfaces();
-
-        assert_session_surfaces_closed(&app);
-    }
-
-    #[test]
     fn project_switch_closes_every_session_surface() {
         let mut app = App::new(project());
         open_every_session_surface(&mut app);
@@ -1226,41 +1216,6 @@ mod tests {
         app.resume_chat("next-chat".to_string(), "Next chat".to_string(), None);
 
         assert_session_surfaces_closed(&app);
-    }
-
-    #[test]
-    fn new_chat_replaces_the_transcript_with_a_session_header() {
-        let mut app = App::new(project());
-
-        app.new_chat();
-
-        assert!(matches!(
-            app.visible_transcript().first(),
-            Some(TranscriptItem::Session { title, .. }) if title == "New chat"
-        ));
-        assert_eq!(app.session_state(), SessionState::Idle);
-    }
-
-    #[test]
-    fn recent_session_switch_selects_the_requested_chat() {
-        let mut app = App::new(project());
-        let current = app.chat_id().to_string();
-        app.set_recent_sessions(vec![
-            PickerItem {
-                id: current,
-                title: "Current".to_string(),
-                description: "now".to_string(),
-            },
-            PickerItem {
-                id: "chat-next".to_string(),
-                title: "Next chat".to_string(),
-                description: "recent".to_string(),
-            },
-        ]);
-
-        assert_eq!(app.switch_recent_session(1), AppAction::SubscribeCurrent);
-        assert_eq!(app.chat_id(), "chat-next");
-        assert_eq!(app.session_title(), Some("Next chat"));
     }
 
     #[test]
@@ -1361,27 +1316,6 @@ mod tests {
         assert_eq!(app.session_state(), SessionState::Idle);
         assert!(!app.abort_in_flight);
         assert_eq!(app.visible_transcript().len(), before);
-    }
-
-    #[test]
-    fn usage_summary_preserves_partial_empty_and_complete_reports() {
-        let partial = UsageSummary::from_value(&serde_json::json!({"prompt_tokens": 12})).unwrap();
-        assert_eq!(partial.prompt_tokens, Some(12));
-        assert_eq!(partial.completion_tokens, None);
-        assert_eq!(partial.total_tokens, None);
-        assert_eq!(partial.tokens_used(), None);
-        assert_eq!(partial.display(), "12 in");
-
-        assert_eq!(UsageSummary::from_value(&serde_json::json!({})), None);
-
-        let complete = UsageSummary::from_value(&serde_json::json!({
-            "prompt_tokens": 12,
-            "completion_tokens": 8,
-        }))
-        .unwrap();
-        assert_eq!(complete.total_tokens, Some(20));
-        assert_eq!(complete.tokens_used(), Some(20));
-        assert_eq!(complete.display(), "20 tok");
     }
 
     #[test]

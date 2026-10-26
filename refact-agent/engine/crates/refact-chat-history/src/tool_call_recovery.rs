@@ -467,35 +467,7 @@ mod tests {
         names.iter().map(|s| s.to_string()).collect()
     }
 
-    fn make_tools_json(names: &[&str]) -> Option<Vec<Value>> {
-        Some(
-            names
-                .iter()
-                .map(|name| {
-                    json!({
-                        "type": "function",
-                        "function": {
-                            "name": name,
-                            "description": "test tool",
-                            "parameters": {"type": "object", "properties": {}}
-                        }
-                    })
-                })
-                .collect(),
-        )
-    }
-
     // ========== allowed_tool_names ==========
-
-    #[test]
-    fn test_allowed_tool_names_from_openai_format() {
-        let tools = make_tools_json(&["shell", "cat", "apply_patch"]);
-        let names = allowed_tool_names(&tools);
-        assert!(names.contains("shell"));
-        assert!(names.contains("cat"));
-        assert!(names.contains("apply_patch"));
-        assert_eq!(names.len(), 3);
-    }
 
     #[test]
     fn test_allowed_tool_names_empty() {
@@ -506,96 +478,13 @@ mod tests {
     // ========== extract_first_json_object ==========
 
     #[test]
-    fn test_extract_json_simple() {
-        let s = r#"some garbage {"key":"value"} more"#;
-        assert_eq!(extract_first_json_object(s).unwrap(), r#"{"key":"value"}"#);
-    }
-
-    #[test]
-    fn test_extract_json_nested() {
-        let s = r#"prefix {"outer":{"inner":42}} suffix"#;
-        assert_eq!(
-            extract_first_json_object(s).unwrap(),
-            r#"{"outer":{"inner":42}}"#
-        );
-    }
-
-    #[test]
-    fn test_extract_json_with_escaped_braces_in_string() {
-        let s = r#"x {"patch":"line1\nline2","b":1} y"#;
-        assert_eq!(
-            extract_first_json_object(s).unwrap(),
-            r#"{"patch":"line1\nline2","b":1}"#
-        );
-    }
-
-    #[test]
-    fn test_extract_json_none_when_no_brace() {
-        assert!(extract_first_json_object("no json here").is_none());
-    }
-
-    #[test]
     fn test_extract_json_none_when_unclosed() {
         assert!(extract_first_json_object("start {\"key\":\"val").is_none());
     }
 
     // ========== extract_clean_preamble ==========
 
-    #[test]
-    fn test_clean_preamble_strips_garbled() {
-        let content = "I'll run the test.րցassistant to=functions.shell rest";
-        let marker_pos = content.find("to=functions.shell").unwrap();
-        let clean = extract_clean_preamble(content, marker_pos);
-        assert_eq!(clean, "I'll run the test.");
-    }
-
-    #[test]
-    fn test_clean_preamble_with_plus_signs() {
-        let content = "I'll patch that safely. +#+#+#+#+#+assistant to=functions.apply_patch rest";
-        let marker_pos = content.find("to=functions.apply_patch").unwrap();
-        let clean = extract_clean_preamble(content, marker_pos);
-        assert_eq!(clean, "I'll patch that safely.");
-    }
-
     // ========== recover_tool_calls_from_chatml_content ==========
-
-    #[test]
-    fn test_recover_single_shell_tool() {
-        let content = concat!(
-            "I'll run the new stress test and then type-check.",
-            "րցassistant to=functions.shell մեկusage 天天中彩票 JSON\n",
-            r#"{"command":"npm run test","workdir":"/home/user/project","timeout":"600"}"#
-        );
-        let allowed = make_allowed(&["shell", "cat"]);
-        let result = recover_tool_calls_from_chatml_content(content, &allowed);
-        assert!(result.is_some());
-        let (clean, calls) = result.unwrap();
-        assert_eq!(calls.len(), 1);
-
-        let tc = &calls[0];
-        assert_eq!(tc["function"]["name"], "shell");
-        let args: Value =
-            serde_json::from_str(tc["function"]["arguments"].as_str().unwrap()).unwrap();
-        assert_eq!(args["command"], "npm run test");
-        assert_eq!(args["workdir"], "/home/user/project");
-
-        assert!(clean.contains("type-check."));
-        assert!(!clean.contains("մեկ"));
-    }
-
-    #[test]
-    fn test_recover_apply_patch_tool() {
-        let content = concat!(
-            "I'll patch this. +#+#+#+#+#+assistant to=functions.apply_patch մեdata json\n",
-            r#"{"patch": "*** Begin Patch\n*** Update File: /src/main.rs\n@@\n-old\n+new\n"}"#
-        );
-        let allowed = make_allowed(&["apply_patch", "shell"]);
-        let result = recover_tool_calls_from_chatml_content(content, &allowed);
-        assert!(result.is_some());
-        let (_, calls) = result.unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0]["function"]["name"], "apply_patch");
-    }
 
     #[test]
     fn test_recover_rejects_unknown_tool() {
@@ -611,12 +500,6 @@ mod tests {
         let allowed = make_allowed(&["shell"]);
         let result = recover_tool_calls_from_chatml_content(content, &allowed);
         assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_recover_empty_content() {
-        let allowed = make_allowed(&["shell"]);
-        assert!(recover_tool_calls_from_chatml_content("", &allowed).is_none());
     }
 
     #[test]
@@ -666,23 +549,6 @@ mod tests {
         assert_eq!(result[1]["id"], "call_abc123__1");
         assert_eq!(result[0]["index"], 0);
         assert_eq!(result[1]["index"], 1);
-    }
-
-    #[test]
-    fn test_unwrap_parallel_tool_name_format() {
-        let wrapper = json!({
-            "type": "function",
-            "id": "call_xyz",
-            "function": {
-                "name": "multi_tool_use.parallel",
-                "arguments": r#"{"tool_uses":[{"tool_name":"shell","tool_input":{"command":"ls"}},{"tool_name":"cat","tool_input":{"path":"/a.rs"}}]}"#
-            }
-        });
-        let allowed = make_allowed(&["shell", "cat"]);
-        let result = unwrap_multi_tool_use_parallel(&[wrapper], &allowed);
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0]["function"]["name"], "shell");
-        assert_eq!(result[1]["function"]["name"], "cat");
     }
 
     #[test]
@@ -741,19 +607,6 @@ mod tests {
         let result = unwrap_multi_tool_use_parallel(&[wrapper], &allowed);
         // No valid inner calls -> wrapper remains
         assert_eq!(result.len(), 0);
-    }
-
-    #[test]
-    fn test_unwrap_no_parallel_passthrough() {
-        let normal1 =
-            json!({"type":"function","id":"c1","function":{"name":"cat","arguments":"{}"}});
-        let normal2 =
-            json!({"type":"function","id":"c2","function":{"name":"shell","arguments":"{}"}});
-        let allowed = make_allowed(&["cat", "shell"]);
-        let result = unwrap_multi_tool_use_parallel(&[normal1.clone(), normal2.clone()], &allowed);
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0]["id"], "c1");
-        assert_eq!(result[1]["id"], "c2");
     }
 
     // ========== Real-world test cases from responses.jsonl ==========

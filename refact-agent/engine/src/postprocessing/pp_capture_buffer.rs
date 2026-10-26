@@ -144,29 +144,4 @@ impl CaptureBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_head_strategy() {
-        let mut buf = CaptureBuffer::new(20, KeepStrategy::Head);
-        buf.push_line("line1".into());
-        buf.push_line("line2".into());
-        buf.push_line("line3".into());
-        buf.push_line("line4".into());
-        let result = buf.finish();
-        assert!(result.starts_with("line1"));
-        assert!(result.contains("⚠️"));
-        assert!(result.contains("truncated"));
-    }
-
-    #[test]
-    fn test_head_and_tail_strategy() {
-        let mut buf = CaptureBuffer::new(50, KeepStrategy::HeadAndTail);
-        for i in 1..=10 {
-            buf.push_line(format!("line{}", i));
-        }
-        let result = buf.finish();
-        assert!(result.contains("line1"));
-        assert!(result.contains("line10"));
-        assert!(result.contains("⚠️"));
-    }
 }

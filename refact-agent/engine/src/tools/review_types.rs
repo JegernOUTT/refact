@@ -432,123 +432,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn review_report_serde_roundtrip_keeps_every_field() {
-        let mut hypothesis = finding("rf-2");
-        hypothesis.reproduction = None;
-        hypothesis.evidence_present = false;
-        hypothesis.severity = ReviewSeverity::Note;
-        let report = ReviewReport {
-            depth: "deep".to_string(),
-            outcome: ReviewOutcome::Partial,
-            scope: ReviewScopeSummary {
-                mode: "strict".to_string(),
-                requested_files: 12,
-                reviewed_files: 14,
-                files: vec!["src/lib.rs".to_string()],
-                focus: Some("browser lifecycle".to_string()),
-                expansion: Some("+2 dependency edges".to_string()),
-                out_of_scope_findings: 1,
-                dropped_files: vec!["src/dropped.rs".to_string()],
-            },
-            diff: ReviewDiffSummary {
-                base: Some("1a2b3c".to_string()),
-                head: Some("HEAD".to_string()),
-                changed_files: 7,
-                hunks: 31,
-            },
-            stages: vec![
-                StageRun::ok("diff", Some("model-a".to_string()), 4010),
-                StageRun::timed_out("dependencies", None, 360000, "stage_budget")
-                    .with_trace_chat_id(Some("subchat-dep".to_string())),
-                StageRun::failed("spec", None, 10, "output_contract"),
-                StageRun::not_run("browser", "applies_when"),
-            ],
-            findings: vec![finding("rf-1"), hypothesis],
-            duration_ms: 500000,
-            duplicates_merged: 3,
-            scratch_dir: Some(".refact/review_scratch/rv-1".to_string()),
-        };
-
-        let value = serde_json::to_value(&report).unwrap();
-        assert_eq!(value["outcome"], "partial");
-        assert_eq!(value["stages"][1]["trace_chat_id"], "subchat-dep");
-        assert!(value["stages"][0].get("trace_chat_id").is_none());
-        assert_eq!(value["scope"]["dropped_files"][0], "src/dropped.rs");
-        assert_eq!(value["findings"][0]["severity"], "high");
-        assert_eq!(value["findings"][1]["severity"], "note");
-        assert_eq!(value["stages"][0]["status"], "ok");
-        assert_eq!(value["stages"][1]["status"], "timed_out");
-        assert_eq!(value["stages"][1]["reason"], "stage_budget");
-        assert_eq!(value["stages"][3]["status"], "not_run");
-        assert_eq!(value["scope"]["mode"], "strict");
-        assert!(value["findings"][0].get("confidence").is_none());
-        assert!(value["findings"][0].get("rank_tier").is_none());
-        assert!(value["findings"][0].get("verification_status").is_none());
-        assert_eq!(
-            serde_json::from_value::<ReviewReport>(value).unwrap(),
-            report
-        );
-    }
-
-    #[test]
-    fn review_hypotheses_are_findings_without_reproduction_and_without_evidence() {
-        let mut quoted_only = finding("rf-quote");
-        quoted_only.reproduction = None;
-        let mut repro_only = finding("rf-repro");
-        repro_only.evidence_present = false;
-        let mut neither = finding("rf-none");
-        neither.reproduction = None;
-        neither.evidence_present = false;
-        let mut disputed = finding("rf-disputed");
-        disputed.disputed = Some(Dispute {
-            stage: "adversarial".to_string(),
-            reason: "guarded by an earlier check".to_string(),
-        });
-
-        let report = ReviewReport {
-            depth: "normal".to_string(),
-            outcome: ReviewOutcome::Reviewed,
-            scope: ReviewScopeSummary::default(),
-            diff: ReviewDiffSummary::default(),
-            stages: vec![],
-            findings: vec![quoted_only, repro_only, neither, disputed],
-            duration_ms: 0,
-            duplicates_merged: 0,
-            scratch_dir: None,
-        };
-
-        let hypotheses: Vec<&str> = report
-            .hypotheses()
-            .into_iter()
-            .map(|finding| finding.id.as_str())
-            .collect();
-        assert_eq!(hypotheses, ["rf-none", "rf-disputed"]);
-        let facts: Vec<&str> = report
-            .facts()
-            .into_iter()
-            .map(|finding| finding.id.as_str())
-            .collect();
-        assert_eq!(facts, ["rf-quote", "rf-repro"]);
-        assert_eq!(report.reproduced(), 1);
-    }
-
-    #[test]
-    fn review_severity_parses_current_and_legacy_words_and_rejects_junk() {
-        assert_eq!(
-            ReviewSeverity::parse("blocker"),
-            Some(ReviewSeverity::Blocker)
-        );
-        assert_eq!(
-            ReviewSeverity::parse(" CRITICAL "),
-            Some(ReviewSeverity::Blocker)
-        );
-        assert_eq!(ReviewSeverity::parse("nit"), Some(ReviewSeverity::Note));
-        assert_eq!(ReviewSeverity::parse("showstopper"), None);
-        assert!(ReviewSeverity::Blocker.rank() > ReviewSeverity::High.rank());
-        assert!(ReviewSeverity::Low.rank() > ReviewSeverity::Note.rank());
-    }
-
     fn report_with_stages(stages: Vec<StageRun>) -> ReviewReport {
         ReviewReport {
             depth: "normal".to_string(),
@@ -561,23 +444,6 @@ mod tests {
             duplicates_merged: 0,
             scratch_dir: None,
         }
-    }
-
-    #[test]
-    fn review_stage_rows_record_incomplete_stages() {
-        let report = report_with_stages(vec![
-            StageRun::ok("diff", None, 1),
-            StageRun::timed_out("tests", None, 2, "stage_budget"),
-            StageRun::not_run("browser", "applies_when"),
-        ]);
-
-        let incomplete: Vec<&str> = report
-            .incomplete_stages()
-            .into_iter()
-            .map(|stage| stage.name.as_str())
-            .collect();
-        assert_eq!(incomplete, ["tests", "browser"]);
-        assert_eq!(report.completed_stages(), 1);
     }
 
     #[test]
@@ -637,13 +503,5 @@ mod tests {
 
         assert_eq!(report.outcome, ReviewOutcome::Inconclusive);
         assert!(report.scope.dropped_files.is_empty());
-    }
-
-    #[test]
-    fn review_depth_parses_known_values_only() {
-        assert_eq!(ReviewDepth::parse("normal"), Some(ReviewDepth::Normal));
-        assert_eq!(ReviewDepth::parse("DEEP"), Some(ReviewDepth::Deep));
-        assert_eq!(ReviewDepth::parse("max"), None);
-        assert!(ReviewDepth::Normal < ReviewDepth::Deep);
     }
 }

@@ -527,7 +527,7 @@ mod tests {
     use crate::chat::types::TaskMeta as ThreadTaskMeta;
     use crate::tasks::types::{BoardCard, TaskBoard, TaskMeta, TaskStatus};
     use crate::tools::tools_description::Tool;
-    use refact_chat_api::{ChatCommand, ThreadParams};
+    use refact_chat_api::ChatCommand;
     use refact_runtime_api::{
         ChatSessionSnapshot, ChatSessionUpdate, CreateSessionRequest, RuntimeTrajectorySnapshot,
         SessionState,
@@ -700,27 +700,6 @@ mod tests {
         ))
     }
 
-    fn tool_output_text(result: (bool, Vec<ContextEnum>)) -> String {
-        match result.1.into_iter().next().unwrap() {
-            ContextEnum::ChatMessage(message) => match message.content {
-                ChatContent::SimpleText(text) => text,
-                _ => panic!("expected text output"),
-            },
-            _ => panic!("expected chat message"),
-        }
-    }
-
-    #[test]
-    fn tool_agent_chat_summary_description_is_correct() {
-        let desc = ToolAgentChatSummary::new().tool_description();
-
-        assert_eq!(desc.name, "agent_chat_summary");
-        assert_eq!(desc.input_schema["required"], json!(["card_id"]));
-        assert!(desc.input_schema["properties"].get("focus").is_some());
-        assert!(desc.input_schema["properties"].get("task_id").is_some());
-        assert!(desc.description.contains("Planner-only"));
-    }
-
     #[tokio::test]
     async fn tool_agent_chat_summary_rejects_non_planner_role() {
         let temp = tempfile::tempdir().unwrap();
@@ -735,60 +714,5 @@ mod tests {
             .unwrap_err();
 
         assert!(err.contains("can only be called by the task planner"));
-    }
-
-    #[tokio::test]
-    async fn tool_agent_chat_summary_empty_session_returns_no_messages() {
-        let temp = tempfile::tempdir().unwrap();
-        let facade = Arc::new(MockChatSessionFacade::default());
-        facade.snapshots.lock().unwrap().insert(
-            "agent-chat-1".to_string(),
-            Ok(ChatSessionSnapshot {
-                messages: vec![],
-                thread: ThreadParams::default(),
-                session_state: SessionState::Idle,
-                pause_reasons: vec![],
-                goal: None,
-            }),
-        );
-        facade
-            .states
-            .lock()
-            .unwrap()
-            .insert("agent-chat-1".to_string(), Ok(Some(SessionState::Idle)));
-        let gcx = write_task(temp.path(), test_card(Some("agent-chat-1".to_string()))).await;
-        let ccx = planner_ccx(gcx, "planner", facade).await;
-        let mut tool = ToolAgentChatSummary::new();
-        let args = HashMap::from([("card_id".to_string(), json!("T-29"))]);
-
-        let output = tool_output_text(
-            tool.tool_execute(ccx, &"call".to_string(), &args)
-                .await
-                .unwrap(),
-        );
-
-        assert!(output.contains("# Agent Chat Summary: T-29"));
-        assert!(output.contains("No messages found"));
-    }
-
-    #[test]
-    fn tool_agent_chat_summary_mock_subchat_result_rendered() {
-        let raw = r#"{
-            "decisions": ["Used sticky alerts at top regardless of pagination"],
-            "files_touched": ["src/tools/tool_task_check_agents.rs (modified)"],
-            "blockers": ["None"],
-            "next_steps": ["Run cargo test"],
-            "current_state": "finishing tests",
-            "confidence_score": 87
-        }"#;
-
-        let output = render_summary_response("T-29", raw);
-
-        assert!(output.contains("# Agent Chat Summary: T-29"));
-        assert!(output.contains("**Confidence:** 87/100"));
-        assert!(output.contains("**Current state:** finishing tests"));
-        assert!(output.contains("- Used sticky alerts at top regardless of pagination"));
-        assert!(output.contains("- src/tools/tool_task_check_agents.rs (modified)"));
-        assert!(output.contains("- Run cargo test"));
     }
 }

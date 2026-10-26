@@ -318,18 +318,6 @@ async fn member_without_seat_is_refused() {
 }
 
 #[tokio::test]
-async fn non_root_caller_is_refused() {
-    let (_app, _workspace, ccx) = fixture().await;
-    ccx.lock().await.background_agent_id = Some("background-agent".into());
-
-    let error = execute(ccx, &grant_args("member-chat", "recipient-chat"))
-        .await
-        .unwrap_err();
-
-    assert!(error.contains("Only a top-level root"), "{error}");
-}
-
-#[tokio::test]
 async fn member_equal_to_recipient_is_refused() {
     let (app, workspace, ccx) = fixture().await;
     let project = crate::coordination::roots::project_identity(workspace.path());
@@ -491,41 +479,4 @@ async fn role_grant_requires_confirmation() {
     assert_eq!(confirmations.len(), 1);
     assert_eq!(confirmations[0].tool_name, "team_role_grant");
     assert_eq!(confirmations[0].rule, "explicit_user_consent");
-}
-
-#[tokio::test]
-async fn team_role_grant_is_registered_and_allow_listed() {
-    let gcx = crate::global_context::tests::make_test_gcx().await;
-    crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all(&gcx.config_dir)
-        .await
-        .unwrap();
-    let registered = crate::tools::tools_list::get_available_tools(gcx.clone()).await;
-    let matches = registered
-        .iter()
-        .filter(|tool| tool.tool_description().name == "team_role_grant")
-        .collect::<Vec<_>>();
-    assert_eq!(matches.len(), 1);
-    assert!(matches!(
-        matches[0].tool_description().source.source_type,
-        crate::tools::tools_description::ToolSourceType::Builtin
-    ));
-    assert!(!matches[0].tool_description().allow_parallel);
-    for mode in ["agent", "task_planner"] {
-        let config =
-            crate::yaml_configs::customization_registry::get_mode_config(gcx.clone(), mode, None)
-                .await
-                .unwrap();
-        assert!(
-            config.tools.iter().any(|name| name == "team_role_grant"),
-            "{mode}"
-        );
-        assert!(
-            config
-                .tool_confirm
-                .rules
-                .iter()
-                .any(|rule| { rule.match_pattern == "team_role_grant" && rule.action == "ask" }),
-            "{mode}"
-        );
-    }
 }

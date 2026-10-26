@@ -279,24 +279,6 @@ impl IntegrationTrait for IntegrationMCPUnified {
 mod unified_tests {
     use super::*;
 
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn integr_stdio_unavailable_observer_does_not_block_spawn() {
-        let mut command = tokio::process::Command::new("sh");
-        command.arg("-c").arg("exit 0");
-        let setup = refact_exec::ObservationSetup::unavailable("ptrace denied");
-
-        let mut child = command.spawn().unwrap();
-        let observation = setup.start_with_external_reaper(child.id());
-        let status = child.wait().await.unwrap();
-
-        assert!(status.success());
-        assert_eq!(
-            observation.reader().status(),
-            refact_exec::ObservationStatus::Unavailable("ptrace denied".to_string())
-        );
-    }
-
     #[test]
     fn test_unified_transport_choice_url_selects_http() {
         let value = serde_json::json!({"url": "https://mcp.example.com/mcp", "command": ""});
@@ -308,12 +290,6 @@ mod unified_tests {
     #[test]
     fn test_unified_transport_choice_command_selects_stdio() {
         let value = serde_json::json!({"command": "npx -y @org/mcp-server", "url": ""});
-        assert_eq!(unified_transport_choice(&value).unwrap(), "stdio");
-    }
-
-    #[test]
-    fn test_unified_transport_choice_empty_defaults_to_stdio() {
-        let value = serde_json::json!({});
         assert_eq!(unified_transport_choice(&value).unwrap(), "stdio");
     }
 

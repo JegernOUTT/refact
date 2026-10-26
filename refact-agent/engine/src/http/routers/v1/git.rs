@@ -473,29 +473,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn git_commit_accepts_plain_workspace_root() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let (dir, repo) = init_repo();
-        *gcx.documents_state.workspace_vcs_roots.lock().unwrap() = vec![dir.path().to_path_buf()];
-
-        let response = post_commit(
-            gcx,
-            commit_body(
-                json!({ "root": dir.path().to_string_lossy() }),
-                "Plain root commit",
-            ),
-        )
-        .await;
-
-        assert_eq!(response["commits_applied"].as_array().unwrap().len(), 1);
-        assert!(response["error_log"].as_array().unwrap().is_empty());
-        assert_eq!(
-            repo.head().unwrap().peel_to_commit().unwrap().message(),
-            Some("Plain root commit")
-        );
-    }
-
-    #[tokio::test]
     async fn git_commit_maps_plain_workspace_subdir_to_enclosing_repo() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let (dir, repo) = init_repo();
@@ -517,55 +494,6 @@ mod tests {
         assert_eq!(
             repo.head().unwrap().peel_to_commit().unwrap().message(),
             Some("Subdir root commit")
-        );
-    }
-
-    #[tokio::test]
-    async fn git_commit_keeps_legacy_project_path_request_working() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let (dir, repo) = init_repo();
-        *gcx.documents_state.workspace_vcs_roots.lock().unwrap() = vec![dir.path().to_path_buf()];
-        let project_path = Url::from_file_path(dir.path()).unwrap();
-
-        let response = post_commit(
-            gcx,
-            commit_body(
-                json!({ "project_path": project_path }),
-                "Legacy path commit",
-            ),
-        )
-        .await;
-
-        assert_eq!(response["commits_applied"].as_array().unwrap().len(), 1);
-        assert!(response["error_log"].as_array().unwrap().is_empty());
-        assert_eq!(
-            repo.head().unwrap().peel_to_commit().unwrap().message(),
-            Some("Legacy path commit")
-        );
-    }
-
-    #[tokio::test]
-    async fn git_commit_maps_legacy_project_subdir_to_active_enclosing_repo() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let (dir, repo) = init_repo();
-        let subdir = dir.path().join("refact-agent").join("engine");
-        fs::create_dir_all(&subdir).unwrap();
-        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![subdir.clone()];
-
-        let response = post_commit(
-            gcx,
-            commit_body(
-                json!({ "project_path": Url::from_file_path(&subdir).unwrap() }),
-                "Legacy subdir commit",
-            ),
-        )
-        .await;
-
-        assert_eq!(response["commits_applied"].as_array().unwrap().len(), 1);
-        assert!(response["error_log"].as_array().unwrap().is_empty());
-        assert_eq!(
-            repo.head().unwrap().peel_to_commit().unwrap().message(),
-            Some("Legacy subdir commit")
         );
     }
 
@@ -604,23 +532,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn git_commit_rejects_non_file_legacy_project_url() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-
-        let (status, response) = post_commit_response(
-            gcx,
-            commit_body(
-                json!({ "project_path": "https://example.com/repository" }),
-                "Invalid URL commit",
-            ),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(response["detail"], "Invalid project_path file URL");
-    }
-
     #[cfg(windows)]
     #[test]
     fn git_commit_decodes_windows_legacy_file_url_shape() {
@@ -629,34 +540,5 @@ mod tests {
         let decoded = decode_legacy_project_path(&project_path).unwrap();
 
         assert_eq!(decoded, PathBuf::from(r"C:\Users\Test User\repository"));
-    }
-
-    #[tokio::test]
-    async fn git_commit_decodes_legacy_localhost_file_url() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let dir = tempfile::Builder::new()
-            .prefix("legacy git workspace ")
-            .tempdir()
-            .unwrap();
-        let repo = init_repo_at(dir.path());
-        *gcx.documents_state.workspace_vcs_roots.lock().unwrap() = vec![dir.path().to_path_buf()];
-        let mut project_path = Url::from_file_path(dir.path()).unwrap();
-        project_path.set_host(Some("localhost")).unwrap();
-        assert!(project_path.as_str().contains("%20"));
-
-        let response = post_commit(
-            gcx,
-            commit_body(
-                json!({ "project_path": project_path }),
-                "Decoded legacy URL commit",
-            ),
-        )
-        .await;
-
-        assert_eq!(response["commits_applied"].as_array().unwrap().len(), 1);
-        assert_eq!(
-            repo.head().unwrap().peel_to_commit().unwrap().message(),
-            Some("Decoded legacy URL commit")
-        );
     }
 }

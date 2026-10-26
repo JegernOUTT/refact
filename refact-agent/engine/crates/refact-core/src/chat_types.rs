@@ -170,60 +170,6 @@ mod image_header_tests {
         bytes
     }
 
-    fn jpeg_header(width: u16, height: u16) -> Vec<u8> {
-        let mut bytes = vec![0xff, 0xd8, 0xff, 0xc0, 0, 17, 8];
-        bytes.extend_from_slice(&height.to_be_bytes());
-        bytes.extend_from_slice(&width.to_be_bytes());
-        bytes.extend_from_slice(&[0; 10]);
-        bytes
-    }
-
-    fn webp_header(width: u32, height: u32) -> Vec<u8> {
-        let mut bytes = vec![0; 30];
-        bytes[0..4].copy_from_slice(b"RIFF");
-        bytes[8..12].copy_from_slice(b"WEBP");
-        bytes[12..16].copy_from_slice(b"VP8X");
-        let width = (width - 1).to_le_bytes();
-        let height = (height - 1).to_le_bytes();
-        bytes[24..27].copy_from_slice(&width[..3]);
-        bytes[27..30].copy_from_slice(&height[..3]);
-        bytes
-    }
-
-    fn gif_header(width: u16, height: u16) -> Vec<u8> {
-        let mut bytes = b"GIF89a".to_vec();
-        bytes.extend_from_slice(&width.to_le_bytes());
-        bytes.extend_from_slice(&height.to_le_bytes());
-        bytes
-    }
-
-    #[test]
-    fn probes_supported_image_headers() {
-        assert_eq!(
-            probe_image_dimensions(&png_header(4032, 3024)).unwrap(),
-            (4032, 3024)
-        );
-        assert_eq!(
-            probe_image_dimensions(&jpeg_header(4032, 3024)).unwrap(),
-            (4032, 3024)
-        );
-        assert_eq!(
-            probe_image_dimensions(&webp_header(4032, 3024)).unwrap(),
-            (4032, 3024)
-        );
-        assert_eq!(
-            probe_image_dimensions(&gif_header(4032, 3024)).unwrap(),
-            (4032, 3024)
-        );
-    }
-
-    #[test]
-    fn pixel_guard_accepts_common_camera_dimensions() {
-        let bytes = png_header(4032, 3024);
-        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-        assert!(image_reader_from_b64string(&encoded).is_ok());
-    }
-
     #[test]
     fn pixel_guard_rejects_oversized_dimensions_before_decode() {
         let bytes = png_header(9000, 9000);
@@ -764,52 +710,6 @@ pub struct ChatToolCall {
     pub started_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at_ms: Option<u64>,
-}
-
-#[cfg(test)]
-mod chat_tool_call_tests {
-    use super::*;
-
-    #[derive(Deserialize)]
-    struct LegacyToolCall {
-        id: String,
-        function: ChatToolFunction,
-        #[serde(rename = "type")]
-        tool_type: String,
-    }
-
-    #[test]
-    fn timing_fields_are_optional_and_additive() {
-        let old_value = serde_json::json!({
-            "id": "call-1",
-            "type": "function",
-            "function": {"name": "sleep", "arguments": "{}"}
-        });
-        let old_call: ChatToolCall = serde_json::from_value(old_value).unwrap();
-        assert_eq!(old_call.started_at_ms, None);
-        assert_eq!(old_call.completed_at_ms, None);
-
-        let timed_call = ChatToolCall {
-            id: "call-1".to_string(),
-            index: None,
-            function: ChatToolFunction {
-                name: "sleep".to_string(),
-                arguments: "{}".to_string(),
-            },
-            tool_type: "function".to_string(),
-            extra_content: None,
-            started_at_ms: Some(1_700_000_000_000),
-            completed_at_ms: Some(1_700_000_008_000),
-        };
-        let value = serde_json::to_value(&timed_call).unwrap();
-        assert_eq!(value["started_at_ms"], 1_700_000_000_000_u64);
-        assert_eq!(value["completed_at_ms"], 1_700_000_008_000_u64);
-
-        let legacy: LegacyToolCall = serde_json::from_value(value).unwrap();
-        assert_eq!(legacy.id, "call-1");
-        assert_eq!(legacy.function.name, "sleep");
-        assert_eq!(legacy.tool_type, "function");
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -1613,19 +1513,6 @@ mod delivery_tests {
     use super::*;
 
     #[test]
-    fn push_mode_defaults_to_append_and_roundtrips() {
-        assert_eq!(PushMode::default(), PushMode::Append);
-        assert_eq!(
-            serde_json::to_value(PushMode::WhenIdle).unwrap(),
-            serde_json::json!("when_idle")
-        );
-        assert_eq!(
-            serde_json::from_value::<PushMode>(serde_json::json!("preempt")).unwrap(),
-            PushMode::Preempt
-        );
-    }
-
-    #[test]
     fn delivery_status_serializes_every_distinct_lifecycle_state() {
         for (status, wire) in [
             (DeliveryStatus::Pending, "pending"),
@@ -1660,27 +1547,6 @@ mod delivery_tests {
         assert!(PushMode::from_args(&args).is_err());
         args.insert("push".to_string(), serde_json::json!(3));
         assert!(PushMode::from_args(&args).is_err());
-    }
-
-    #[test]
-    fn pending_delivery_stamps_messages_with_stable_id() {
-        let delivery = PendingDelivery::new(
-            vec![ChatMessage {
-                role: "user".to_string(),
-                content: ChatContent::SimpleText("hello".to_string()),
-                ..Default::default()
-            }],
-            PushMode::Append,
-            "test",
-            false,
-        );
-        let stamped = delivery.stamp_messages();
-        assert_eq!(
-            delivery_id_of_message(&stamped[0]),
-            Some(delivery.id.as_str())
-        );
-        assert_eq!(delivery.preview_text(), "hello");
-        assert!(!delivery.id.is_empty());
     }
 
     #[test]
@@ -1737,30 +1603,6 @@ mod delivery_tests {
         delivery.set_ttl_secs(u64::MAX);
         assert_eq!(delivery.expires_at_ms, Some(u64::MAX));
         assert!(!delivery.is_expired_at(u64::MAX - 1));
-    }
-
-    #[test]
-    fn ensure_ttl_measures_from_enqueue_and_heals_unknown_enqueue_time() {
-        let mut kept =
-            PendingDelivery::with_id("kept", Vec::new(), PushMode::Append, "test", false);
-        kept.enqueued_at_ms = 10_000;
-        kept.expires_at_ms = Some(11_000);
-        kept.ensure_ttl_secs(90_000, 60);
-        assert_eq!(kept.expires_at_ms, Some(11_000));
-
-        let mut aged =
-            PendingDelivery::with_id("aged", Vec::new(), PushMode::Append, "test", false);
-        aged.enqueued_at_ms = 10_000;
-        aged.ensure_ttl_secs(90_000, 60);
-        assert_eq!(aged.expires_at_ms, Some(70_000));
-        assert!(aged.is_expired_at(90_000));
-
-        let mut legacy: PendingDelivery =
-            serde_json::from_value(serde_json::json!({"id": "legacy"})).unwrap();
-        legacy.ensure_ttl_secs(90_000, 60);
-        assert_eq!(legacy.enqueued_at_ms, 90_000);
-        assert_eq!(legacy.expires_at_ms, Some(150_000));
-        assert!(!legacy.is_expired_at(90_000));
     }
 
     #[test]

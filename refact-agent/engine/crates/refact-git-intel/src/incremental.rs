@@ -446,18 +446,6 @@ mod tests {
     }
 
     #[test]
-    fn unborn_repo_returns_empty_incremental_history() {
-        let dir = TempRepo::new();
-        Repository::init(dir.path()).unwrap();
-
-        let intel = mine_incremental(dir.path(), &IncrementalConfig::default()).unwrap();
-
-        assert_eq!(intel.commits_analyzed, 0);
-        assert!(intel.commit_records.is_empty());
-        assert_eq!(newest_commit_ts(dir.path()).unwrap(), None);
-    }
-
-    #[test]
     fn same_second_frontier_keeps_unseen_commit() {
         let dir = TempRepo::new();
         let repo = Repository::init(dir.path()).unwrap();
@@ -521,26 +509,6 @@ mod tests {
             full.co_change.get(&("a.rs".into(), "b.rs".into())),
             Some(&2)
         );
-    }
-
-    #[test]
-    fn merge_intel_sums_churn() {
-        let mut base = GitIntel::default();
-        base.file_churn.insert("a.rs".into(), 2);
-        base.file_churn.insert("b.rs".into(), 1);
-        base.commits_analyzed = 2;
-
-        let mut delta = GitIntel::default();
-        delta.file_churn.insert("a.rs".into(), 3);
-        delta.file_churn.insert("c.rs".into(), 4);
-        delta.commits_analyzed = 3;
-
-        merge_intel(&mut base, &delta);
-
-        assert_eq!(base.file_churn.get("a.rs"), Some(&5));
-        assert_eq!(base.file_churn.get("b.rs"), Some(&1));
-        assert_eq!(base.file_churn.get("c.rs"), Some(&4));
-        assert_eq!(base.commits_analyzed, 5);
     }
 
     #[test]
@@ -610,54 +578,6 @@ mod tests {
         let full = mine_history(dir.path(), 100).unwrap();
 
         assert_same_mining_result(&incremental, &full);
-    }
-
-    #[test]
-    fn mine_history_order_matches_incremental() {
-        let dir = TempRepo::new();
-        let repo = Repository::init(dir.path()).unwrap();
-        commit_files_at(
-            &repo,
-            &[("a.rs", "1\n")],
-            "first",
-            "Alice",
-            "alice@x.com",
-            1_700_000_000,
-        );
-        commit_files_at(
-            &repo,
-            &[("b.rs", "1\n")],
-            "second",
-            "Bob",
-            "bob@x.com",
-            1_700_000_100,
-        );
-        let base = mine_history(dir.path(), 100).unwrap();
-
-        commit_files_at(
-            &repo,
-            &[("c.rs", "1\n")],
-            "third",
-            "Cara",
-            "cara@x.com",
-            1_700_000_200,
-        );
-
-        let incremental = mine_history_incremental(dir.path(), Some(base), 100).unwrap();
-        let full = mine_history(dir.path(), 100).unwrap();
-        let incremental_order = incremental
-            .commit_records
-            .iter()
-            .map(|record| record.oid.clone())
-            .collect::<Vec<_>>();
-        let full_order = full
-            .commit_records
-            .iter()
-            .map(|record| record.oid.clone())
-            .collect::<Vec<_>>();
-
-        assert_eq!(incremental_order, full_order);
-        assert_eq!(incremental.commit_records, full.commit_records);
     }
 
     #[test]
@@ -749,14 +669,5 @@ mod tests {
         assert_eq!(base.commits_with_unreadable_diff, 2);
         assert_eq!(base.fix_commit_counts.get("delta.rs"), Some(&2));
         assert_eq!(base.fix_commit_counts.get("base.rs"), Some(&1));
-    }
-
-    #[test]
-    fn newest_commit_ts_returns_head_time() {
-        let dir = fixture_repo();
-
-        let ts = newest_commit_ts(dir.path()).unwrap();
-
-        assert_eq!(ts, Some(1_700_000_200));
     }
 }

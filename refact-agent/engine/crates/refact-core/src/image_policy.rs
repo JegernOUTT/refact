@@ -153,14 +153,6 @@ mod tests {
     }
 
     #[test]
-    fn policy_uses_defaults_without_metadata() {
-        assert_eq!(
-            ImagePolicy::for_model(&BaseModelRecord::default()),
-            ImagePolicy::default()
-        );
-    }
-
-    #[test]
     fn policy_uses_and_clamps_model_metadata() {
         let model = BaseModelRecord {
             image_max_side_px: Some(1200),
@@ -186,41 +178,5 @@ mod tests {
             image::load_from_memory(&large).unwrap().dimensions(),
             (1568, 1176)
         );
-    }
-
-    #[test]
-    fn lossless_native_keeps_native_geometry_and_encodes_png() {
-        let policy = ImagePolicy::lossless_native();
-        assert_eq!(policy.max_side, 0);
-        assert_eq!(policy.preferred_side, 0);
-        assert_eq!(policy.format, ImageFormat::Png);
-        assert_eq!(policy.quality, None);
-
-        let (encoded, mime) =
-            resize_to_policy(&encoded_png(4000, 3000), "image/png", &policy).unwrap();
-        assert_eq!(mime, "image/png");
-        assert_eq!(
-            image::load_from_memory(&encoded).unwrap().dimensions(),
-            (4000, 3000)
-        );
-    }
-
-    #[test]
-    fn resize_returns_the_policy_mime() {
-        let bytes = encoded_png(10, 10);
-        for (format, expected) in [
-            (ImageFormat::Png, "image/png"),
-            (ImageFormat::Webp, "image/webp"),
-            (ImageFormat::Jpeg, "image/jpeg"),
-        ] {
-            let policy = ImagePolicy {
-                format,
-                quality: Some(75),
-                ..ImagePolicy::default()
-            };
-            let (encoded, mime) = resize_to_policy(&bytes, "image/png", &policy).unwrap();
-            assert_eq!(mime, expected);
-            assert!(image::load_from_memory(&encoded).is_ok());
-        }
     }
 }

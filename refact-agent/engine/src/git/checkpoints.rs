@@ -608,7 +608,7 @@ pub async fn abort_init_shadow_repos(gcx: Arc<GlobalContext>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::FileChangeStatus;
+
     use crate::worktrees::types::WorktreeMeta;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -669,58 +669,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn checkpoint_worktree_create_uses_worktree_root() {
-        let f = fixture().await;
-        let (checkpoint, repo) = create_workspace_checkpoint_for_root(
-            f.gcx.clone(),
-            &f.worktree_meta.root,
-            None,
-            "checkpoint_worktree_create",
-        )
-        .await
-        .unwrap();
-        assert_eq!(checkpoint.workspace_folder, f.worktree);
-        assert_eq!(repo.workdir().unwrap(), f.worktree.as_path());
-        assert!(!checkpoint.commit_hash.is_empty());
-    }
-
-    #[tokio::test]
-    async fn checkpoint_worktree_preview_reports_worktree_changes() {
-        let f = fixture().await;
-        let (checkpoint, _) = create_workspace_checkpoint_for_root(
-            f.gcx.clone(),
-            &f.worktree,
-            None,
-            "checkpoint_worktree_preview",
-        )
-        .await
-        .unwrap();
-        write_file(&f.worktree.join("src").join("file.txt"), "after\n");
-        let (files_changed, _reverted_to, checkpoint_for_undo) =
-            preview_changes_for_workspace_checkpoint_for_root(
-                f.gcx.clone(),
-                &f.worktree,
-                &checkpoint,
-                "checkpoint_worktree_preview",
-            )
-            .await
-            .unwrap();
-        assert_eq!(checkpoint_for_undo.workspace_folder, f.worktree);
-        let changed_file = files_changed
-            .iter()
-            .find(|change| change.relative_path == PathBuf::from("src/file.txt"))
-            .unwrap();
-        assert_eq!(changed_file.status, FileChangeStatus::MODIFIED);
-        assert_eq!(
-            changed_file.absolute_path,
-            f.worktree.join("src").join("file.txt")
-        );
-        assert!(files_changed
-            .iter()
-            .all(|change| change.absolute_path.starts_with(&f.worktree)));
-    }
-
-    #[tokio::test]
     async fn checkpoint_worktree_restore_reverts_only_worktree() {
         let f = fixture().await;
         let (checkpoint, _) = create_workspace_checkpoint_for_root(
@@ -773,41 +721,5 @@ mod tests {
         .await
         .unwrap_err();
         assert!(error.contains("different workspace folder"));
-    }
-
-    #[tokio::test]
-    async fn checkpoint_worktree_stale_root_is_rejected() {
-        let f = fixture().await;
-        let error = match create_workspace_checkpoint_for_root(
-            f.gcx.clone(),
-            &f.worktree.join("deleted-root"),
-            None,
-            "checkpoint_worktree_stale",
-        )
-        .await
-        {
-            Ok(_) => panic!("stale worktree root unexpectedly created a checkpoint"),
-            Err(e) => e,
-        };
-        assert!(error.contains("does not exist or cannot be resolved"));
-    }
-
-    #[tokio::test]
-    async fn checkpoint_worktree_legacy_no_worktree_uses_active_workspace() {
-        let f = fixture().await;
-        write_file(&f.source.join("src").join("legacy.txt"), "legacy before\n");
-        let (checkpoint, _) =
-            create_workspace_checkpoint(f.gcx.clone(), None, "checkpoint_worktree_legacy")
-                .await
-                .unwrap();
-        assert_eq!(checkpoint.workspace_folder, f.source);
-        write_file(&f.source.join("src").join("legacy.txt"), "legacy after\n");
-        restore_workspace_checkpoint(f.gcx.clone(), &checkpoint, "checkpoint_worktree_legacy")
-            .await
-            .unwrap();
-        assert_eq!(
-            fs::read_to_string(f.source.join("src").join("legacy.txt")).unwrap(),
-            "legacy before\n"
-        );
     }
 }

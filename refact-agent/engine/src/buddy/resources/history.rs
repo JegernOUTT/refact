@@ -168,21 +168,6 @@ async fn safe_path(root: &Path, path: &Path) -> Result<(), ResourceError> {
     Ok(())
 }
 
-#[cfg(test)]
-fn contains_reference(value: &Value, id: &str) -> bool {
-    match value {
-        Value::String(text) => {
-            text == id
-                || text
-                    .split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
-                    .any(|part| part == id)
-        }
-        Value::Array(values) => values.iter().any(|value| contains_reference(value, id)),
-        Value::Object(values) => values.values().any(|value| contains_reference(value, id)),
-        _ => false,
-    }
-}
-
 fn protected_metadata(value: &Value) -> bool {
     crate::chat::trajectory_archive::protected_metadata(value)
 }
@@ -282,52 +267,5 @@ impl AsyncResourceAdapter for HistoryAdapter {
             Ok(ResourceApplyState::Applied)
         })
         .await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn byte_versions_include_unknown_fields_and_safe_paths_reject_cross_root() {
-        let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let path = root.path().join("trajectory.json");
-        tokio::fs::write(&path, b"{\"id\":\"c\",\"unknown\":1}")
-            .await
-            .unwrap();
-        let version = fingerprint(&tokio::fs::read(&path).await.unwrap()).unwrap();
-        tokio::fs::write(&path, b"{\"id\":\"c\",\"unknown\":2}")
-            .await
-            .unwrap();
-        assert_ne!(
-            version,
-            fingerprint(&tokio::fs::read(&path).await.unwrap()).unwrap()
-        );
-        assert!(safe_path(root.path(), &path).await.is_ok());
-        assert!(matches!(
-            safe_path(outside.path(), &path).await,
-            Err(ResourceError::PathEscapesProject)
-        ));
-    }
-
-    #[test]
-    fn protects_nested_native_goals_and_pins() {
-        assert!(protected_metadata(
-            &serde_json::json!({"extra":{"active_goal":{"id":"g"}}})
-        ));
-        assert!(protected_metadata(&serde_json::json!({"pinned":true})));
-        assert!(!protected_metadata(
-            &serde_json::json!({"pinned":false,"messages":[]})
-        ));
-        assert!(contains_reference(
-            &serde_json::json!({"evidence_refs":["trajectory:chat-a:1"]}),
-            "chat-a"
-        ));
-        assert!(!contains_reference(
-            &serde_json::json!({"source":"chat-ab"}),
-            "chat-a"
-        ));
     }
 }

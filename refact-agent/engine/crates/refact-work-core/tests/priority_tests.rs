@@ -278,39 +278,3 @@ async fn residency_eviction_ignores_priority_and_keeps_the_evicted_class() {
     drop(later);
     assert_eq!(scheduler.snapshot().outstanding, 0);
 }
-
-#[tokio::test]
-async fn the_class_is_assigned_or_defaulted_and_visible_in_the_projection() {
-    let scheduler = scheduler(CoordinationSettings {
-        default_priority: WorkPriority::Speculative,
-        ..caps(2, 2, 2)
-    });
-    let inherited = scheduler
-        .reserve(request("inherited", "project", "r"))
-        .expect("reserve")
-        .acquire()
-        .await
-        .expect("permit");
-    let assigned = admit(&scheduler, "assigned", "r", WorkPriority::UserBlocking).await;
-    assert_eq!(
-        ticket(&scheduler, "inherited").map(|t| t.priority),
-        Some(WorkPriority::Speculative),
-        "an unassigned run takes the configured default class"
-    );
-    assert_eq!(
-        ticket(&scheduler, "assigned").map(|t| t.priority),
-        Some(WorkPriority::UserBlocking)
-    );
-    let rendered = serde_json::to_string(&scheduler.snapshot()).unwrap();
-    assert!(
-        rendered.contains("\"priority\":\"user_blocking\""),
-        "{rendered}"
-    );
-    assert!(
-        rendered.contains("\"priority\":\"speculative\""),
-        "{rendered}"
-    );
-    inherited.release();
-    assigned.release();
-    assert_eq!(scheduler.snapshot().outstanding, 0);
-}

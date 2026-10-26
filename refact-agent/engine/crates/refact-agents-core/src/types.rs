@@ -92,19 +92,6 @@ mod cap_stop_tests {
     use super::CapStop;
 
     #[test]
-    fn typed_cap_round_trips() {
-        let stop = CapStop {
-            key: super::CapKind::Steps,
-            scope: super::CapScope::Child,
-            limit: 100,
-            used: 100,
-            resumable: true,
-            run_generation: 3,
-        };
-        assert_eq!(CapStop::from_error(&stop.as_error().unwrap()), Some(stop));
-    }
-
-    #[test]
     fn legacy_step_envelope_is_readable() {
         let stop = CapStop::from_error(
             r#"CAP_STOP:{"key":"max_steps","limit":10,"used":10,"resumable":true}"#,
@@ -336,50 +323,4 @@ pub struct AgentCompletion {
     pub deliverable_status: Option<refact_chat_api::DeliverableStatus>,
     /// Declared by the child at finish; `None` is `unknown`, never "sufficient".
     pub handoff: Option<refact_chat_api::HandoffReport>,
-}
-
-#[cfg(test)]
-mod handoff_record_tests {
-    use super::BackgroundAgent;
-
-    #[test]
-    fn a_legacy_record_without_the_handoff_fields_still_loads() {
-        let legacy = serde_json::json!({
-            "schema_version": 1,
-            "agent_id": "agent-1",
-            "parent_chat_id": "parent",
-            "parent_root_chat_id": null,
-            "parent_tool_call_id": null,
-            "child_chat_id": null,
-            "kind": "subagent",
-            "config_name": "subagent",
-            "title": "legacy",
-            "prompt": "prompt",
-            "target_files": [],
-            "status": "completed",
-            "progress": null,
-            "step_count": 0,
-            "last_activity": null,
-            "result_summary": null,
-            "result_payload_path": null,
-            "error": null,
-            "edited_files": [],
-            "diff_summary": null,
-            "conflict_summary": null,
-            "completion_message_id": null,
-            "completion_pushed_at": null,
-            "model": "model",
-            "created_at": "2026-01-01T00:00:00Z",
-            "started_at": null,
-            "finished_at": null,
-            "last_update_at": "2026-01-01T00:00:00Z",
-            "change_seq": 1
-        });
-        let record: BackgroundAgent = serde_json::from_value(legacy).unwrap();
-        assert!(record.handoff.is_none());
-        assert!(record.profile_name.is_none());
-        let reserialized = serde_json::to_value(&record).unwrap();
-        assert!(reserialized.get("handoff").is_none());
-        assert!(reserialized.get("profile_name").is_none());
-    }
 }

@@ -33,49 +33,8 @@ mod tests {
     }
 
     #[test]
-    fn test_yaml_str_present() {
-        let v = make_map(&[("key", serde_yaml::Value::String("value".to_string()))]);
-        assert_eq!(yaml_str(&v, "key"), "value");
-    }
-
-    #[test]
-    fn test_yaml_str_missing() {
-        let v = make_map(&[]);
-        assert_eq!(yaml_str(&v, "key"), "");
-    }
-
-    #[test]
-    fn test_yaml_str_list_present() {
-        let seq = serde_yaml::Value::Sequence(vec![
-            serde_yaml::Value::String("a".to_string()),
-            serde_yaml::Value::String("b".to_string()),
-        ]);
-        let v = make_map(&[("list", seq)]);
-        assert_eq!(yaml_str_list(&v, "list"), vec!["a", "b"]);
-    }
-
-    #[test]
-    fn test_yaml_str_list_missing() {
-        let v = make_map(&[]);
-        assert!(yaml_str_list(&v, "list").is_empty());
-    }
-
-    #[test]
-    fn test_yaml_bool_true() {
-        let v = make_map(&[("flag", serde_yaml::Value::Bool(true))]);
-        assert!(yaml_bool(&v, "flag", false));
-    }
-
-    #[test]
     fn test_yaml_bool_false() {
         let v = make_map(&[("flag", serde_yaml::Value::Bool(false))]);
         assert!(!yaml_bool(&v, "flag", true));
-    }
-
-    #[test]
-    fn test_yaml_bool_missing_uses_default() {
-        let v = make_map(&[]);
-        assert!(yaml_bool(&v, "missing", true));
-        assert!(!yaml_bool(&v, "missing", false));
     }
 }

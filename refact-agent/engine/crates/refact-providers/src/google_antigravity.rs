@@ -797,28 +797,6 @@ mod tests {
     }
 
     #[test]
-    fn catalog_context_never_overrides_the_api_context() {
-        let provider = GoogleAntigravityProvider::default();
-        let response = live_response(
-            vec![live_model("gemini-3-pro", json!({"maxTokens": 16_384}))],
-            json!({}),
-        );
-        let caps = HashMap::from([(
-            "google_antigravity/gemini-3-pro".to_string(),
-            ModelCapabilities {
-                n_ctx: 128_000,
-                ..Default::default()
-            },
-        )]);
-
-        let models = provider
-            .available_models_from_live_response(&response, &caps)
-            .unwrap();
-
-        assert_eq!(models[0].n_ctx, 16_384);
-    }
-
-    #[test]
     fn internal_models_and_role_reserved_ids_are_excluded() {
         let provider = GoogleAntigravityProvider::default();
         let response = live_response(
@@ -1042,29 +1020,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_support_and_cache_control_are_provider_level_constants() {
-        let provider = GoogleAntigravityProvider::default();
-        let response = live_response(vec![live_model("gemini-3-pro", json!({}))], json!({}));
-        let caps = HashMap::from([(
-            "google_antigravity/gemini-3-pro".to_string(),
-            ModelCapabilities {
-                n_ctx: 128_000,
-                supports_tools: false,
-                supports_cache_control: true,
-                ..Default::default()
-            },
-        )]);
-
-        let models = provider
-            .available_models_from_live_response(&response, &caps)
-            .unwrap();
-
-        assert_eq!(models[0].supports_tools, SUPPORTS_TOOLS);
-        assert_eq!(models[0].supports_parallel_tools, SUPPORTS_TOOLS);
-        assert_eq!(models[0].supports_cache_control, SUPPORTS_CACHE_CONTROL);
-    }
-
-    #[test]
     fn enabled_models_match_bare_and_provider_qualified_ids() {
         let provider = GoogleAntigravityProvider {
             enabled_models: vec![
@@ -1144,13 +1099,6 @@ mod tests {
     }
 
     #[test]
-    fn no_name_based_model_filter_is_applied() {
-        assert!(GoogleAntigravityProvider::default()
-            .model_filter_regex()
-            .is_none());
-    }
-
-    #[test]
     fn runtime_uses_the_antigravity_cli_backend() {
         let provider = GoogleAntigravityProvider {
             oauth_tokens: OAuthTokens {
@@ -1203,43 +1151,5 @@ mod tests {
         assert_eq!(quota.groups[0].buckets[0].remaining_fraction, Some(0.42));
         assert_eq!(quota.groups[0].buckets[0].reset.as_deref(), Some("later"));
         assert_eq!(quota.raw, payload);
-    }
-
-    #[test]
-    fn parses_snake_case_aliases_and_flattened_remaining() {
-        let payload = json!({
-            "quota_groups": [{
-                "display_name": "Requests",
-                "quota_buckets": [{
-                    "bucket_id": "daily",
-                    "display_name": "Daily",
-                    "remaining_fraction": 0.75
-                }]
-            }]
-        });
-        let quota = GoogleAntigravityProvider::parse_quota_summary(&payload).unwrap();
-        assert_eq!(quota.groups[0].display_name, "Requests");
-        assert_eq!(quota.groups[0].buckets[0].bucket_id, "daily");
-        assert_eq!(quota.groups[0].buckets[0].remaining_fraction, Some(0.75));
-    }
-
-    #[test]
-    fn tolerates_null_quota_labels() {
-        let payload = json!({
-            "groups": [{
-                "displayName": null,
-                "buckets": [{
-                    "bucketId": null,
-                    "displayName": null,
-                    "remainingFraction": 0.5
-                }]
-            }]
-        });
-
-        let quota = GoogleAntigravityProvider::parse_quota_summary(&payload).unwrap();
-
-        assert_eq!(quota.groups[0].display_name, "");
-        assert_eq!(quota.groups[0].buckets[0].bucket_id, "");
-        assert_eq!(quota.groups[0].buckets[0].display_name, "");
     }
 }

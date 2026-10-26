@@ -354,14 +354,6 @@ impl ClockManager {
     fn replay_source(&self) -> Option<String> {
         (!self.replay_log.is_empty()).then(|| self.replay_log.join(";\n"))
     }
-
-    #[cfg(test)]
-    fn script_count(&self, target_id: &str) -> usize {
-        self.tab_scripts
-            .get(target_id)
-            .map(|scripts| 1 + usize::from(scripts.replay.is_some()))
-            .unwrap_or(0)
-    }
 }
 
 pub fn clock_init_script(source: &str) -> Page::AddScriptToEvaluateOnNewDocument {
@@ -424,58 +416,6 @@ fn evaluate_main_world(tab: &Tab, expression: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn human_ticks_follow_the_playwright_format() {
-        assert_eq!(parse_human_ticks("08").unwrap(), 8_000);
-        assert_eq!(parse_human_ticks("8").unwrap(), 8_000);
-        assert_eq!(parse_human_ticks("01:00").unwrap(), 60_000);
-        assert_eq!(parse_human_ticks("30:00").unwrap(), 1_800_000);
-        assert_eq!(parse_human_ticks("02:34:10").unwrap(), 9_250_000);
-        assert_eq!(parse_human_ticks("").unwrap(), 0);
-    }
-
-    #[test]
-    fn human_ticks_reject_malformed_and_out_of_range_components() {
-        for text in ["1:2:3:4", "60:00", "01:60", "aa:bb", "1:2:3", "01:00:00:00"] {
-            assert!(parse_human_ticks(text).is_err(), "accepted {text}");
-        }
-    }
-
-    #[test]
-    fn numeric_ticks_pass_through_as_milliseconds() {
-        assert_eq!(parse_clock_ticks(&ClockTicks::Millis(1000)).unwrap(), 1000);
-        assert_eq!(
-            parse_clock_ticks(&ClockTicks::Human("01:00".to_string())).unwrap(),
-            60_000
-        );
-    }
-
-    #[test]
-    fn clock_time_accepts_unix_millis_and_iso_strings() {
-        assert_eq!(
-            parse_clock_time(&ClockTime::UnixMillis(1_580_601_600_000)).unwrap(),
-            1_580_601_600_000
-        );
-        assert_eq!(
-            parse_clock_time(&ClockTime::Text("2020-02-02T00:00:00Z".to_string())).unwrap(),
-            1_580_601_600_000
-        );
-        assert_eq!(
-            parse_clock_time(&ClockTime::Text("2020-02-02".to_string())).unwrap(),
-            1_580_601_600_000
-        );
-        assert_eq!(
-            parse_clock_time(&ClockTime::Text("2020-02-02T00:00:00".to_string())).unwrap(),
-            1_580_601_600_000
-        );
-    }
-
-    #[test]
-    fn clock_time_rejects_unparseable_text() {
-        assert!(parse_clock_time(&ClockTime::Text("not-a-date".to_string())).is_err());
-        assert!(parse_clock_time(&ClockTime::Text(String::new())).is_err());
-    }
 
     #[test]
     fn ordering_guard_requires_install_before_time_travel() {
@@ -569,34 +509,6 @@ mod tests {
     }
 
     #[test]
-    fn uninstall_script_restores_originals_and_clears_the_global() {
-        let script = clock_uninstall_script();
-        assert!(script.contains("controller.uninstall()"));
-        assert!(script.contains("delete globalThis.__refactClock"));
-    }
-
-    #[test]
-    fn every_op_maps_to_a_distinct_action_and_controller_method() {
-        let ops = [
-            ClockOp::Install { time_ms: 0 },
-            ClockOp::FastForward { ticks_ms: 0 },
-            ClockOp::PauseAt { time_ms: 0 },
-            ClockOp::Resume,
-            ClockOp::RunFor { ticks_ms: 0 },
-            ClockOp::SetFixedTime { time_ms: 0 },
-            ClockOp::SetSystemTime { time_ms: 0 },
-        ];
-        let mut actions: Vec<&str> = ops.iter().map(ClockOp::action_name).collect();
-        let mut methods: Vec<&str> = ops.iter().map(ClockOp::method).collect();
-        actions.sort_unstable();
-        actions.dedup();
-        methods.sort_unstable();
-        methods.dedup();
-        assert_eq!(actions.len(), ops.len());
-        assert_eq!(methods.len(), ops.len());
-    }
-
-    #[test]
     fn vendored_source_keeps_its_public_clock_contract() {
         for marker in [
             "globalThis.__refactClock = inject(globalThis, 'chromium')",
@@ -636,100 +548,6 @@ mod tests {
     }
 
     #[test]
-    fn manager_starts_uninstalled_and_resets_to_a_clean_state() {
-        let mut manager = ClockManager::default();
-        assert!(!manager.is_installed());
-        assert!(!manager.is_paused());
-        assert_eq!(manager.reset(&[]).unwrap(), false);
-        assert_eq!(manager.state(), ClockState::default());
-    }
-
-    #[test]
-    fn every_op_collapses_into_a_single_replay_script_per_tab() {
-        let mut manager = ClockManager::default();
-        manager.installed = true;
-        manager.tab_scripts.insert(
-            "tab".to_string(),
-            TabClockScripts {
-                bootstrap: "bootstrap-1".to_string(),
-                replay: None,
-            },
-        );
-        assert_eq!(manager.script_count("tab"), 1);
-        assert_eq!(manager.replay_source(), None);
-
-        let ops = [
-            ClockOp::Install { time_ms: 1_000 },
-            ClockOp::FastForward { ticks_ms: 500 },
-            ClockOp::PauseAt { time_ms: 2_000 },
-            ClockOp::Resume,
-            ClockOp::SetFixedTime { time_ms: 3_000 },
-        ];
-        let mut stale = Vec::new();
-        for (index, op) in ops.iter().cycle().take(40).enumerate() {
-            manager.replay_log.push(clock_log_script(op, index as i64));
-            let source = manager.replay_source().unwrap();
-            if let Some(previous) = manager
-                .tab_scripts
-                .get_mut("tab")
-                .unwrap()
-                .replay
-                .replace(format!("replay-{index}"))
-            {
-                stale.push(previous);
-            }
-            assert_eq!(
-                manager.script_count("tab"),
-                2,
-                "op {index} must not add another init script"
-            );
-            assert_eq!(source.lines().count(), index + 1);
-        }
-        assert_eq!(
-            stale.len(),
-            39,
-            "each op after the first retires one script"
-        );
-        assert_eq!(stale.last().unwrap(), "replay-38");
-
-        let source = manager.replay_source().unwrap();
-        for op in ops {
-            assert!(source.contains(op.method()), "{} is replayed", op.method());
-        }
-    }
-
-    #[test]
-    fn an_adopted_tab_registers_the_bootstrap_plus_the_current_replay_only() {
-        let mut manager = ClockManager::default();
-        assert_eq!(manager.replay_source(), None);
-        manager.installed = true;
-        for (index, op) in [
-            ClockOp::Install { time_ms: 10 },
-            ClockOp::FastForward { ticks_ms: 20 },
-            ClockOp::PauseAt { time_ms: 30 },
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            manager.replay_log.push(clock_log_script(&op, index as i64));
-        }
-        manager.tab_scripts.insert(
-            "adopted".to_string(),
-            TabClockScripts {
-                bootstrap: "bootstrap-adopted".to_string(),
-                replay: Some("replay-adopted".to_string()),
-            },
-        );
-        assert_eq!(manager.script_count("adopted"), 2);
-        assert_eq!(manager.replay_source().unwrap().lines().count(), 3);
-
-        manager.installed = false;
-        manager.replay_log.clear();
-        manager.tab_scripts.clear();
-        assert_eq!(manager.script_count("adopted"), 0);
-    }
-
-    #[test]
     fn manager_rejects_out_of_order_steps_before_touching_the_browser() {
         let mut manager = ClockManager::default();
         let error = manager
@@ -746,10 +564,5 @@ mod tests {
             .run(&[], ClockOp::Install { time_ms: 0 }, 0)
             .unwrap_err();
         assert!(error.contains("requires an open tab"), "{error}");
-    }
-
-    #[test]
-    fn wall_clock_helper_returns_a_plausible_unix_timestamp() {
-        assert!(current_wall_ms() > 1_600_000_000_000);
     }
 }

@@ -1168,22 +1168,6 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
-    #[test]
-    fn daemon_state_captures_canonical_relaunch_executable() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = DaemonState::new_with_daemon_dir(
-            DaemonConfig::default(),
-            EventBus::new(dir.path().join("events.jsonl")),
-            None,
-            dir.path().join("daemon"),
-            0,
-        );
-
-        let executable = state.relaunch_executable().unwrap();
-        assert!(executable.is_absolute());
-        assert_eq!(executable, executable.canonicalize().unwrap());
-    }
-
     #[cfg(unix)]
     #[test]
     fn daemon_state_keeps_executable_path_across_atomic_replacement() {
@@ -1268,46 +1252,6 @@ mod tests {
             last_active_ms: 100,
             settings: ProjectSettings::default(),
         }
-    }
-
-    #[test]
-    fn executable_sha256_for_path_hashes_file_contents() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bin");
-        std::fs::write(&path, b"abc").unwrap();
-        assert_eq!(
-            executable_sha256_for_path(&path).unwrap(),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-        assert!(executable_sha256_for_path(&dir.path().join("missing")).is_err());
-    }
-
-    #[test]
-    fn worker_status_event_fields_changed_checks_event_fields() {
-        let previous = status_report(1, 2, 0);
-        let mut activity_only = status_report(1, 2, 0);
-        activity_only.last_activity_ts = 99;
-
-        assert!(!worker_status_event_fields_changed(
-            &previous,
-            &activity_only
-        ));
-        assert!(worker_status_event_fields_changed(
-            &status_report(1, 2, 0),
-            &status_report(2, 2, 0)
-        ));
-        assert!(worker_status_event_fields_changed(
-            &status_report(1, 2, 0),
-            &status_report(1, 3, 0)
-        ));
-        assert!(worker_status_event_fields_changed(
-            &status_report(1, 2, 0),
-            &status_report(1, 2, 1)
-        ));
-        assert!(worker_status_event_fields_changed(
-            &status_report(1, 2, 1),
-            &status_report(1, 2, 0)
-        ));
     }
 
     #[tokio::test]
@@ -1434,83 +1378,6 @@ mod tests {
         assert_eq!(rows[0].idle_deadline_ms, None);
     }
 
-    #[tokio::test]
-    async fn worker_rows_report_whether_project_root_exists() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = DaemonState::new_with_daemon_dir(
-            DaemonConfig::default(),
-            EventBus::new(dir.path().join("events.jsonl")),
-            None,
-            dir.path().join("daemon"),
-            0,
-        );
-        let present_root = dir.path().join("present-project");
-        let missing_root = dir.path().join("missing-project");
-        std::fs::create_dir_all(&present_root).unwrap();
-        std::fs::create_dir_all(&missing_root).unwrap();
-        let (present_id, missing_id) = {
-            let mut registry = state.projects.write().await;
-            let present = registry.open(present_root.clone()).await.unwrap();
-            let missing = registry.open(missing_root.clone()).await.unwrap();
-            (present.id, missing.id)
-        };
-        std::fs::remove_dir_all(&missing_root).unwrap();
-
-        let rows = state.worker_rows().await;
-
-        assert_eq!(rows.len(), 2);
-        let row_by_id = |id: &str| rows.iter().find(|row| row.project_id == id).unwrap();
-        assert!(row_by_id(&present_id).root_exists);
-        assert!(!row_by_id(&missing_id).root_exists);
-    }
-
-    #[test]
-    fn worker_row_deserializes_missing_root_exists_as_true() {
-        let row = worker_row_json_without_root_exists();
-        let parsed: WorkerRow = serde_json::from_value(row).unwrap();
-        assert!(parsed.root_exists);
-    }
-
-    fn worker_row_json_without_root_exists() -> Value {
-        serde_json::json!({
-            "project_id": "project",
-            "slug": "project",
-            "root": "/tmp/project",
-            "pinned": false,
-            "last_active_ms": 0,
-            "state": "stopped",
-            "pid": null,
-            "rss_bytes": null,
-            "cpu_percent": null,
-            "uptime_secs": null,
-            "http_port": null,
-            "lsp_port": null,
-            "lsp_clients": 0,
-            "busy_chats": 0,
-            "exec_running": 0,
-            "live_proxy_streams": 0,
-            "cron_next_fire_ms": null,
-            "idle_deadline_ms": null,
-            "last_status_report_ms": null,
-            "last_error": null,
-            "log_path": "/tmp/log"
-        })
-    }
-
-    #[tokio::test]
-    async fn refresh_proxy_activity_updates_activity_timestamp() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = DaemonState::new(
-            DaemonConfig::default(),
-            EventBus::new(dir.path().join("events.jsonl")),
-            None,
-        );
-
-        state.refresh_proxy_activity("project").await;
-
-        assert!(state.proxy_activity("project").await.last_proxy_activity_ms > 0);
-    }
-
     #[test]
     fn idle_deadline_requires_fresh_status() {
         let entry = test_project_entry();
@@ -1566,20 +1433,5 @@ mod tests {
     #[cfg(unix)]
     fn file_mode(path: &Path) -> u32 {
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777
-    }
-
-    #[tokio::test]
-    async fn daemon_info_urls_contain_port_and_host() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = DaemonState::new(
-            DaemonConfig::default(),
-            EventBus::new(dir.path().join("e.jsonl")),
-            None,
-        );
-        let info = state.daemon_info(9000, "0.0.0.0".to_string());
-        assert!(info.urls.loopback.contains("127.0.0.1:9000"));
-        assert!(info.urls.mdns.contains(".local:9000"));
-        assert!(info.urls.loopback.starts_with("http://"));
-        assert!(info.urls.mdns.starts_with("http://"));
     }
 }

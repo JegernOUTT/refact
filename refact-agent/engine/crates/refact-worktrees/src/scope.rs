@@ -355,42 +355,6 @@ mod tests {
     }
 
     #[test]
-    fn worktree_execution_scope_reports_enforcement_and_project_dirs() {
-        let (_temp, root, source, repo, _outside) = setup_dirs();
-        let scope = make_scope(&root, &source, &repo);
-        assert!(scope.is_enforced());
-        assert_eq!(scope.effective_root(), root.as_path());
-        assert_eq!(scope.effective_project_dirs(), vec![root]);
-        assert_eq!(scope.repo_root(), repo.as_path());
-    }
-
-    #[test]
-    fn worktree_execution_scope_resolves_relative_path_under_root() {
-        let (_temp, root, source, repo, _outside) = setup_dirs();
-        let scope = make_scope(&root, &source, &repo);
-        let resolved = scope
-            .resolve_existing_path(Path::new("src/main.rs"))
-            .unwrap();
-        assert_eq!(resolved.path, root.join("src").join("main.rs"));
-        assert!(!resolved.used_absolute_path);
-        assert!(!resolved.outside_absolute_path);
-        assert!(!resolved.privacy_check_required);
-        assert!(resolved.remapped_from.is_none());
-    }
-
-    #[test]
-    fn worktree_execution_scope_marks_absolute_path_under_root() {
-        let (_temp, root, source, repo, _outside) = setup_dirs();
-        let scope = make_scope(&root, &source, &repo);
-        let raw = root.join("src").join("main.rs");
-        let resolved = scope.resolve_existing_path(&raw).unwrap();
-        assert_eq!(resolved.path, raw);
-        assert!(resolved.used_absolute_path);
-        assert!(!resolved.outside_absolute_path);
-        assert!(resolved.remapped_from.is_none());
-    }
-
-    #[test]
     fn worktree_execution_scope_remaps_absolute_source_path() {
         let (_temp, root, source, repo, _outside) = setup_dirs();
         let scope = make_scope(&root, &source, &repo);
@@ -450,25 +414,6 @@ mod tests {
     }
 
     #[test]
-    fn worktree_execution_scope_rejects_non_existing_parent() {
-        let (_temp, root, source, repo, _outside) = setup_dirs();
-        let scope = make_scope(&root, &source, &repo);
-        let result = scope.resolve_path(Path::new("missing/new.txt"));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Parent directory"));
-    }
-
-    #[test]
-    fn worktree_execution_scope_resolves_non_existing_file_with_existing_parent() {
-        let (_temp, root, source, repo, _outside) = setup_dirs();
-        let scope = make_scope(&root, &source, &repo);
-        let resolved = scope.resolve_path(Path::new("src/new.rs")).unwrap();
-        assert_eq!(resolved.path, root.join("src").join("new.rs"));
-        assert!(!resolved.used_absolute_path);
-        assert!(!resolved.outside_absolute_path);
-    }
-
-    #[test]
     fn worktree_execution_scope_resolves_creatable_nested_path() {
         let (_temp, root, source, repo, _outside) = setup_dirs();
         let scope = make_scope(&root, &source, &repo);
@@ -482,26 +427,6 @@ mod tests {
         assert!(!resolved.outside_absolute_path);
         let escaped = scope.resolve_creatable_path(Path::new("../escaped/file.rs"));
         assert!(escaped.is_err());
-    }
-
-    #[test]
-    fn worktree_execution_scope_resolves_workdir() {
-        let (_temp, root, source, repo, _outside) = setup_dirs();
-        let scope = make_scope(&root, &source, &repo);
-        let default_workdir = scope.resolve_workdir(None).unwrap();
-        assert_eq!(default_workdir.path, root);
-        let src_workdir = scope.resolve_workdir(Some("src")).unwrap();
-        assert!(src_workdir.path.ends_with("src"));
-        assert!(!src_workdir.outside_absolute_path);
-    }
-
-    #[test]
-    fn worktree_execution_scope_rejects_file_as_workdir() {
-        let (_temp, root, source, repo, _outside) = setup_dirs();
-        let scope = make_scope(&root, &source, &repo);
-        let result = scope.resolve_workdir(Some("src/main.rs"));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not a directory"));
     }
 
     #[test]

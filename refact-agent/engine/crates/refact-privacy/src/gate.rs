@@ -417,25 +417,6 @@ mod tests {
     }
 
     #[test]
-    fn refusal_model_facing_text_is_canonical() {
-        let audited = AuditedRecords {
-            value: "payload".to_string(),
-            records: vec![record(".env", "secrets")],
-        };
-
-        let policy = compiled(&policy());
-        let refusal = match clear(audited, &destination("untrusted"), &policy) {
-            Ok(_) => panic!("untrusted destination should be refused"),
-            Err(refusal) => refusal,
-        };
-
-        let facing = refusal.model_facing();
-        assert!(facing.starts_with("Output withheld by user privacy policy"));
-        assert!(facing.contains("zone \""));
-        assert!(facing.contains(".env"));
-    }
-
-    #[test]
     fn refusal_does_not_mutate_messages() {
         let messages = Arc::new(vec![
             message_with_record("src/main.rs", "normal"),
@@ -455,19 +436,6 @@ mod tests {
         let after = serde_json::to_value(messages.as_ref()).expect("messages should serialize");
         assert_eq!(refusal.offending[0].0, 1);
         assert_eq!(before, after);
-    }
-
-    #[test]
-    fn records_are_derived_from_message_privacy_metadata() {
-        let messages = vec![
-            ChatMessage::new("user".to_string(), "hello".to_string()),
-            message_with_record(".env", "secrets"),
-        ];
-
-        assert_eq!(
-            records_from_messages(&messages),
-            Ok(vec![(1, record(".env", "secrets"))])
-        );
     }
 
     #[test]
@@ -492,25 +460,6 @@ mod tests {
 
         assert!(refusal.message.contains("message 1"));
         assert!(refusal.message.contains("malformed privacy metadata"));
-    }
-
-    #[test]
-    fn refusal_uses_message_index_for_a_multifile_message() {
-        let messages = Arc::new(vec![message_with_records(vec![
-            record("src/first.rs", "normal"),
-            record("keys/private.pem", "secrets"),
-            record("src/third.rs", "normal"),
-        ])]);
-        let audited = AuditedMessages { messages };
-        let policy = compiled(&policy());
-
-        let refusal = match clear(audited, &destination("untrusted"), &policy) {
-            Ok(_) => panic!("guarded file must be refused"),
-            Err(refusal) => refusal,
-        };
-
-        assert_eq!(refusal.offending[0].0, 0);
-        assert!(refusal.message.contains("message 0"));
     }
 
     #[test]

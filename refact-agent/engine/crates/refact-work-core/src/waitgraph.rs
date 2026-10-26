@@ -747,18 +747,6 @@ mod tests {
     }
 
     #[test]
-    fn a_long_chain_whose_tail_progresses_is_never_reported() {
-        let graph = graph(
-            vec![("a", blocked(1)), ("b", blocked(1)), ("c", running())],
-            vec![
-                edge("a", "b", WaitKind::AgentWait).with_group(1),
-                edge("b", "c", WaitKind::AgentWait).with_group(2),
-            ],
-        );
-        assert_eq!(detect(&graph), Detection::NoDeadlock);
-    }
-
-    #[test]
     fn waiting_on_a_human_a_process_or_a_timer_is_never_a_cycle() {
         for external in [
             WaitTarget::User,

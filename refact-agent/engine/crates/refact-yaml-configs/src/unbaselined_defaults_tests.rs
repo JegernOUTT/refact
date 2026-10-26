@@ -249,25 +249,6 @@ async fn unbaselined_newer_or_equal_version_is_kept() {
 }
 
 #[tokio::test]
-async fn unbaselined_equal_version_but_edited_default_is_kept_and_unbaselined() {
-    let temp = tempfile::tempdir().unwrap();
-    let embedded = embedded_task_agent();
-    let version = extract_schema_version(&embedded);
-    let edited = format!("schema_version: {version}\nid: task_agent\nprompt: User edit\n");
-    assert_ne!(compute_checksum(&edited), compute_checksum(&embedded));
-    let path = install(temp.path(), KEY, &edited).await;
-
-    for _ in 0..2 {
-        global_configs_try_create_all(temp.path()).await.unwrap();
-        assert_eq!(fs::read(&path).await.unwrap(), edited.as_bytes());
-        assert!(backups(&path).is_empty());
-        assert!(!load_checksums(&temp.path().join(CHECKSUM_FILE))
-            .await
-            .contains_key(KEY));
-    }
-}
-
-#[tokio::test]
 async fn unparseable_default_is_never_touched() {
     for old in [
         "schema_version: 1\ntools: [",

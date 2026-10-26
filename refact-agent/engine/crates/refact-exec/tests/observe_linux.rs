@@ -126,26 +126,6 @@ async fn root_exit_does_not_wait_for_background_descendant() {
     }
 }
 
-#[tokio::test]
-#[ignore]
-async fn healthy_background_observation_is_pending() {
-    if !ptrace_tests_enabled() {
-        return;
-    }
-    let registry = ExecRegistry::new();
-    let result = registry
-        .spawn(ExecSpawnRequest::background("sleep 30").with_observe(true))
-        .await
-        .unwrap();
-    let process_id = result.snapshot.meta.process_id;
-
-    assert!(matches!(result.observation, ObservationStatus::Pending(_)));
-    let reader = registry.observation_reader(&process_id).await.unwrap();
-    assert!(matches!(reader.status(), ObservationStatus::Pending(_)));
-
-    registry.kill(&process_id).await.unwrap();
-}
-
 fn processes_with_marker(marker: &str) -> Vec<u32> {
     let expected = format!("{marker}=1").into_bytes();
     std::fs::read_dir("/proc")

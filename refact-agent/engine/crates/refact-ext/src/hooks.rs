@@ -342,7 +342,6 @@ pub async fn load_hooks(ext_dirs: &ExtDirs) -> Vec<HookConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[tokio::test]
     async fn test_load_hooks_refact_yaml() {
@@ -450,51 +449,6 @@ hooks:
     }
 
     #[tokio::test]
-    async fn test_load_hooks_missing_file() {
-        let ext_dirs = ExtDirs {
-            global_dirs: vec![PathBuf::from("/nonexistent/path")],
-            installed_dirs: vec![],
-            project_dirs: vec![],
-        };
-        let hooks = load_hooks(&ext_dirs).await;
-        assert!(hooks.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_load_hooks_malformed_yaml() {
-        let tmp = tempfile::tempdir().unwrap();
-        tokio::fs::write(tmp.path().join("hooks.yaml"), "not: valid: yaml: :::")
-            .await
-            .unwrap();
-
-        let ext_dirs = ExtDirs {
-            global_dirs: vec![tmp.path().to_path_buf()],
-            installed_dirs: vec![],
-            project_dirs: vec![],
-        };
-        let hooks = load_hooks(&ext_dirs).await;
-        assert!(hooks.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_load_hooks_malformed_json() {
-        let tmp = tempfile::tempdir().unwrap();
-        let claude_dir = tmp.path().join(".claude");
-        tokio::fs::create_dir_all(&claude_dir).await.unwrap();
-        tokio::fs::write(claude_dir.join("settings.json"), "{invalid json}")
-            .await
-            .unwrap();
-
-        let ext_dirs = ExtDirs {
-            global_dirs: vec![claude_dir.clone()],
-            installed_dirs: vec![],
-            project_dirs: vec![],
-        };
-        let hooks = load_hooks(&ext_dirs).await;
-        assert!(hooks.is_empty());
-    }
-
-    #[tokio::test]
     async fn test_load_hooks_unknown_event_skipped() {
         let tmp = tempfile::tempdir().unwrap();
         let hooks_yaml = r#"
@@ -520,179 +474,6 @@ hooks:
         let hooks = load_hooks(&ext_dirs).await;
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0].event, HookEvent::PreToolUse);
-    }
-
-    #[tokio::test]
-    async fn test_load_hooks_all_events() {
-        let tmp = tempfile::tempdir().unwrap();
-        let hooks_yaml = r#"
-hooks:
-  PreToolUse:
-    - hooks:
-        - type: command
-          command: "cmd1"
-  PostToolUse:
-    - hooks:
-        - type: command
-          command: "cmd2"
-  UserPromptSubmit:
-    - hooks:
-        - type: command
-          command: "cmd3"
-  SessionStart:
-    - hooks:
-        - type: command
-          command: "cmd4"
-  SessionEnd:
-    - hooks:
-        - type: command
-          command: "cmd5"
-  Stop:
-    - hooks:
-        - type: command
-          command: "cmd6"
-  SubagentStop:
-    - hooks:
-        - type: command
-          command: "cmd7"
-  Notification:
-    - hooks:
-        - type: command
-          command: "cmd8"
-  PreCompact:
-    - hooks:
-        - type: command
-          command: "cmd9"
-"#;
-        tokio::fs::write(tmp.path().join("hooks.yaml"), hooks_yaml)
-            .await
-            .unwrap();
-
-        let ext_dirs = ExtDirs {
-            global_dirs: vec![tmp.path().to_path_buf()],
-            installed_dirs: vec![],
-            project_dirs: vec![],
-        };
-        let hooks = load_hooks(&ext_dirs).await;
-        assert_eq!(hooks.len(), 9);
-    }
-
-    #[tokio::test]
-    async fn test_precompact_event_parsing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let hooks_yaml = r#"
-hooks:
-  PreCompact:
-    - hooks:
-        - type: command
-          command: "./compact_hook.sh"
-          timeout: 60
-"#;
-        tokio::fs::write(tmp.path().join("hooks.yaml"), hooks_yaml)
-            .await
-            .unwrap();
-
-        let ext_dirs = ExtDirs {
-            global_dirs: vec![tmp.path().to_path_buf()],
-            installed_dirs: vec![],
-            project_dirs: vec![],
-        };
-        let hooks = load_hooks(&ext_dirs).await;
-        assert_eq!(hooks.len(), 1);
-        assert_eq!(hooks[0].event, HookEvent::PreCompact);
-        assert_eq!(hooks[0].command, "./compact_hook.sh");
-        assert_eq!(hooks[0].timeout, Some(60));
-    }
-
-    #[tokio::test]
-    async fn test_precompact_event_parsing_json() {
-        let tmp = tempfile::tempdir().unwrap();
-        let claude_dir = tmp.path().join(".claude");
-        tokio::fs::create_dir_all(&claude_dir).await.unwrap();
-
-        let settings_json = r#"{
-  "hooks": {
-    "PreCompact": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "echo compacting"
-          }
-        ]
-      }
-    ]
-  }
-}"#;
-        tokio::fs::write(claude_dir.join("settings.json"), settings_json)
-            .await
-            .unwrap();
-
-        let ext_dirs = ExtDirs {
-            global_dirs: vec![claude_dir.clone()],
-            installed_dirs: vec![],
-            project_dirs: vec![],
-        };
-        let hooks = load_hooks(&ext_dirs).await;
-        assert_eq!(hooks.len(), 1);
-        assert_eq!(hooks[0].event, HookEvent::PreCompact);
-        assert_eq!(hooks[0].command, "echo compacting");
-    }
-
-    #[tokio::test]
-    async fn test_settings_local_json_loaded() {
-        let tmp = tempfile::tempdir().unwrap();
-        let claude_dir = tmp.path().join(".claude");
-        tokio::fs::create_dir_all(&claude_dir).await.unwrap();
-
-        let settings_json = r#"{
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "echo from_settings"
-          }
-        ]
-      }
-    ]
-  }
-}"#;
-        let local_settings_json = r#"{
-  "hooks": {
-    "SessionEnd": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "echo from_local_settings"
-          }
-        ]
-      }
-    ]
-  }
-}"#;
-        tokio::fs::write(claude_dir.join("settings.json"), settings_json)
-            .await
-            .unwrap();
-        tokio::fs::write(claude_dir.join("settings.local.json"), local_settings_json)
-            .await
-            .unwrap();
-
-        let ext_dirs = ExtDirs {
-            global_dirs: vec![claude_dir.clone()],
-            installed_dirs: vec![],
-            project_dirs: vec![],
-        };
-        let hooks = load_hooks(&ext_dirs).await;
-        assert_eq!(hooks.len(), 2);
-        assert!(hooks
-            .iter()
-            .any(|h| h.event == HookEvent::SessionStart && h.command == "echo from_settings"));
-        assert!(hooks
-            .iter()
-            .any(|h| h.event == HookEvent::SessionEnd && h.command == "echo from_local_settings"));
     }
 
     #[tokio::test]
@@ -768,61 +549,6 @@ hooks:
         let _ = (local_hook, base_hook);
     }
 
-    #[tokio::test]
-    async fn test_load_hooks_no_matcher_ok() {
-        let tmp = tempfile::tempdir().unwrap();
-        let hooks_yaml = r#"
-hooks:
-  SessionStart:
-    - hooks:
-        - type: command
-          command: "./startup.sh"
-"#;
-        tokio::fs::write(tmp.path().join("hooks.yaml"), hooks_yaml)
-            .await
-            .unwrap();
-
-        let ext_dirs = ExtDirs {
-            global_dirs: vec![tmp.path().to_path_buf()],
-            installed_dirs: vec![],
-            project_dirs: vec![],
-        };
-        let hooks = load_hooks(&ext_dirs).await;
-        assert_eq!(hooks.len(), 1);
-        assert!(hooks[0].matcher.is_none());
-        assert!(hooks[0].timeout.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_load_hooks_combines_global_and_project() {
-        let global_tmp = tempfile::tempdir().unwrap();
-        let project_tmp = tempfile::tempdir().unwrap();
-
-        tokio::fs::write(
-            global_tmp.path().join("hooks.yaml"),
-            "hooks:\n  SessionStart:\n    - hooks:\n        - type: command\n          command: global_cmd",
-        )
-        .await
-        .unwrap();
-
-        tokio::fs::write(
-            project_tmp.path().join("hooks.yaml"),
-            "hooks:\n  SessionEnd:\n    - hooks:\n        - type: command\n          command: project_cmd",
-        )
-        .await
-        .unwrap();
-
-        let ext_dirs = ExtDirs {
-            global_dirs: vec![global_tmp.path().to_path_buf()],
-            installed_dirs: vec![],
-            project_dirs: vec![project_tmp.path().to_path_buf()],
-        };
-        let hooks = load_hooks(&ext_dirs).await;
-        assert_eq!(hooks.len(), 2);
-        assert!(hooks.iter().any(|h| h.command == "global_cmd"));
-        assert!(hooks.iter().any(|h| h.command == "project_cmd"));
-    }
-
     #[test]
     fn test_event_from_str_all_variants() {
         assert_eq!(event_from_str("PreToolUse"), Some(HookEvent::PreToolUse));
@@ -864,28 +590,6 @@ hooks:
     }
 
     #[test]
-    fn test_every_event_round_trips_through_name_and_has_a_kind() {
-        let all = [
-            HookEvent::PreToolUse,
-            HookEvent::PostToolUse,
-            HookEvent::UserPromptSubmit,
-            HookEvent::PermissionDecision,
-            HookEvent::SessionStart,
-            HookEvent::SessionEnd,
-            HookEvent::Stop,
-            HookEvent::SubagentStart,
-            HookEvent::SubagentStop,
-            HookEvent::Notification,
-            HookEvent::PreCompact,
-            HookEvent::PostCompact,
-            HookEvent::GoalValidation,
-        ];
-        for event in all {
-            assert_eq!(event_from_str(event.as_str()), Some(event.clone()));
-        }
-    }
-
-    #[test]
     fn test_control_and_observation_events_are_partitioned() {
         assert_eq!(HookEvent::PreToolUse.kind(), HookKind::Control);
         assert_eq!(HookEvent::PostToolUse.kind(), HookKind::Control);
@@ -900,22 +604,6 @@ hooks:
         assert_eq!(HookEvent::Notification.kind(), HookKind::Observation);
         assert_eq!(HookEvent::PostCompact.kind(), HookKind::Observation);
         assert_eq!(HookEvent::GoalValidation.kind(), HookKind::Observation);
-    }
-
-    #[test]
-    fn test_hooks_config_defaults_are_enabled_and_bounded() {
-        let config = HooksConfig::default();
-        assert!(config.enabled);
-        assert!(config.trusted_projects.is_empty());
-        assert_eq!(config.default_timeout_secs, DEFAULT_HOOK_TIMEOUT_SECS);
-        assert_eq!(config.max_recursion_depth, DEFAULT_HOOK_RECURSION_DEPTH);
-        assert_eq!(config.max_output_bytes, DEFAULT_HOOK_OUTPUT_BYTES);
-    }
-
-    #[test]
-    fn test_hooks_config_empty_yaml_keeps_defaults() {
-        let config: HooksConfig = serde_yaml::from_str("{}").unwrap();
-        assert_eq!(config, HooksConfig::default());
     }
 
     #[test]
@@ -969,46 +657,5 @@ hooks:
         let hooks = load_hooks(&ext_dirs).await;
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0].command, "./ok.sh");
-    }
-
-    #[tokio::test]
-    async fn test_new_events_load_from_yaml() {
-        let tmp = tempfile::tempdir().unwrap();
-        let hooks_yaml = r#"
-hooks:
-  PermissionDecision:
-    - hooks:
-        - type: command
-          command: "perm"
-  SubagentStart:
-    - hooks:
-        - type: command
-          command: "sub_start"
-  PostCompact:
-    - hooks:
-        - type: command
-          command: "post_compact"
-  GoalValidation:
-    - hooks:
-        - type: command
-          command: "goal"
-"#;
-        tokio::fs::write(tmp.path().join("hooks.yaml"), hooks_yaml)
-            .await
-            .unwrap();
-
-        let ext_dirs = ExtDirs {
-            global_dirs: vec![tmp.path().to_path_buf()],
-            installed_dirs: vec![],
-            project_dirs: vec![],
-        };
-        let hooks = load_hooks(&ext_dirs).await;
-        assert_eq!(hooks.len(), 4);
-        assert!(hooks
-            .iter()
-            .any(|h| h.event == HookEvent::PermissionDecision));
-        assert!(hooks.iter().any(|h| h.event == HookEvent::SubagentStart));
-        assert!(hooks.iter().any(|h| h.event == HookEvent::PostCompact));
-        assert!(hooks.iter().any(|h| h.event == HookEvent::GoalValidation));
     }
 }

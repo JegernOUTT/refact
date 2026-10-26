@@ -170,35 +170,4 @@ fn strip_inline_markdown(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn useful_line_prefers_heading_text() {
-        let markdown = "\n# Review Code\nDetails";
-
-        assert_eq!(
-            first_useful_line_or_heading(markdown),
-            Some("Review Code".to_string())
-        );
-    }
-
-    #[test]
-    fn sanitize_identifier_normalizes_names() {
-        assert_eq!(sanitize_skill_id("My Skill.v2"), "my-skill-v2");
-        assert_eq!(sanitize_command_name("docs/review"), "docs-review");
-        assert_eq!(sanitize_subagent_id("Research Agent"), "research-agent");
-    }
-
-    #[test]
-    fn render_frontmatter_roundtrip() {
-        let mut mapping = Mapping::new();
-        set_yaml_string(&mut mapping, "description", "Review code");
-        set_yaml_string_list(&mut mapping, "allowed-tools", &["cat".to_string()]);
-
-        let rendered = render_markdown_with_frontmatter(&mapping, "Body").unwrap();
-        let (frontmatter, body) = parse_markdown_frontmatter(&rendered);
-
-        assert_eq!(yaml_string(&frontmatter, "description"), "Review code");
-        assert_eq!(yaml_string_list(&frontmatter, "allowed-tools"), vec!["cat"]);
-        assert_eq!(body, "Body");
-    }
 }

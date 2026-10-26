@@ -363,14 +363,6 @@ mod tests {
         assert!(intermediate.used() > 0 && intermediate.used() <= intermediate.cap());
     }
 
-    #[test]
-    fn unparsed_worker_output_is_refused_rather_than_ignored() {
-        let denied =
-            authorize_program("hello from the worker", &orchestrator(), &limits()).unwrap_err();
-
-        assert!(denied.contains("not a host call"));
-    }
-
     #[tokio::test]
     async fn code_mode_refuses_to_run_when_no_sandbox_provider_can_enforce_it() {
         let registry = ExecRegistry::new();

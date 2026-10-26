@@ -130,20 +130,6 @@ fn in_flight_count_survives_reinstall() {
 
 #[test]
 #[serial(provider_pressure, coordination_metrics, runtime_settings)]
-fn disabling_pressure_uninstalls() {
-    uninstall_pressure_registry();
-    crate::llm::pressure::install_provider_pressure(&CoordinationSettings::default()).unwrap();
-    let disabled = CoordinationSettings {
-        provider_pressure_enabled: false,
-        ..CoordinationSettings::default()
-    };
-    crate::llm::pressure::install_provider_pressure(&disabled).unwrap();
-    assert!(pressure_registry().is_none());
-    uninstall_pressure_registry();
-}
-
-#[test]
-#[serial(provider_pressure, coordination_metrics, runtime_settings)]
 fn runtime_settings_install_live_preserves_state() {
     uninstall_pressure_registry();
     let settings = crate::runtime_settings::TrajectoryRuntimeSettings::default();

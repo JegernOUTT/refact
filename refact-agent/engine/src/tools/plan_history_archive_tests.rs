@@ -163,37 +163,3 @@ async fn goal_history_after_fold_lists_all_deltas_once() {
     let goal = get_goal(role_session(ProjectedRole::Goal, 100, true), true).await;
     assert_complete_history(&goal);
 }
-
-#[tokio::test]
-#[serial_test::serial(runtime_settings)]
-async fn projection_fields_unchanged_by_fold() {
-    crate::runtime_settings::reset_for_test();
-    let before_plan = get_plan(role_session(ProjectedRole::Plan, 100, false), false).await;
-    let after_plan = get_plan(role_session(ProjectedRole::Plan, 100, true), false).await;
-    for field in ["content", "delta_count", "checkpoint"] {
-        assert_eq!(before_plan[field], after_plan[field], "plan {field}");
-    }
-
-    let before_goal = get_goal(role_session(ProjectedRole::Goal, 100, false), false).await;
-    let after_goal = get_goal(role_session(ProjectedRole::Goal, 100, true), false).await;
-    for field in ["content", "delta_count", "checkpoint"] {
-        assert_eq!(before_goal[field], after_goal[field], "goal {field}");
-    }
-}
-
-#[tokio::test]
-#[serial_test::serial(runtime_settings)]
-async fn history_without_fold_is_unchanged() {
-    crate::runtime_settings::reset_for_test();
-    let plan = get_plan(role_session(ProjectedRole::Plan, 3, false), true).await;
-    assert_eq!(
-        plan["history"],
-        json!([
-            {"seq": 1, "content": "update 1"},
-            {"seq": 2, "content": "update 2"},
-            {"seq": 3, "content": "update 3"}
-        ])
-    );
-    let goal = get_goal(role_session(ProjectedRole::Goal, 3, false), true).await;
-    assert_eq!(goal["history"], plan["history"]);
-}

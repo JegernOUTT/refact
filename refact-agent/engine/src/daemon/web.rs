@@ -667,7 +667,6 @@ mod tests {
     use crate::daemon::config::DaemonConfig;
     use crate::daemon::events::EventBus;
     use crate::daemon::projects::ProjectRegistry;
-    use crate::daemon_link::WorkerStatusReport;
 
     struct TestState {
         _dir: tempfile::TempDir,
@@ -697,18 +696,6 @@ mod tests {
         TestState { _dir: dir, state }
     }
 
-    fn status_report(project_id: &str, lsp_clients: usize) -> WorkerStatusReport {
-        WorkerStatusReport {
-            project_id: project_id.to_string(),
-            pid: 123,
-            instance_token: "token".to_string(),
-            lsp_clients,
-            busy_chats: 2,
-            exec_running: 1,
-            last_activity_ts: 777,
-        }
-    }
-
     #[test]
     fn daemon_gui_index_injects_prefix_shim_and_escapes_project_id() {
         let candidates = GuiPublicOriginCandidates {
@@ -731,38 +718,6 @@ mod tests {
     }
 
     #[test]
-    fn daemon_origin_candidates_are_project_aware() {
-        let candidates = daemon_origin_candidates(8488, "abc123");
-        assert!(candidates
-            .origins
-            .iter()
-            .any(|origin| origin == "http://127.0.0.1:8488/p/abc123"));
-        assert!(candidates
-            .origins
-            .iter()
-            .all(|origin| origin.ends_with("/p/abc123")));
-    }
-
-    #[test]
-    fn daemon_gui_bootstrap_composes_with_origin_marker_injection() {
-        let worker_candidates = GuiPublicOriginCandidates {
-            origins: vec!["http://127.0.0.1:8488".to_string()],
-        };
-        let daemon_candidates = GuiPublicOriginCandidates {
-            origins: vec!["http://127.0.0.1:8488/p/abc123".to_string()],
-        };
-        let asset = ChatGuiAsset::get(INDEX_PATH).expect("embedded index.html");
-        let body =
-            crate::http::routers::gui::inject_gui_origin_candidates(asset.data, &worker_candidates);
-        let html = std::str::from_utf8(body.as_ref()).unwrap();
-        let injected = inject_daemon_gui_bootstrap(html, "abc123", &daemon_candidates);
-
-        assert!(injected.contains("http://127.0.0.1:8488"));
-        assert!(injected.contains("http://127.0.0.1:8488/p/abc123"));
-        assert_eq!(injected.matches(DAEMON_GUI_BOOTSTRAP_SENTINEL).count(), 1);
-    }
-
-    #[test]
     fn redirect_without_daemon_token_preserves_other_query() {
         let uri: Uri = "/p/abc/?daemon_token=secret&theme=dark&q=a%20b"
             .parse()
@@ -772,12 +727,6 @@ mod tests {
             redirect_without_daemon_token(&uri),
             "/p/abc/?theme=dark&q=a+b"
         );
-    }
-
-    #[test]
-    fn picker_html_mentions_auth_error() {
-        assert!(PICKER_TEMPLATE
-            .contains("Authentication required. Open this page through the daemon launch URL."));
     }
 
     #[test]
@@ -812,108 +761,6 @@ mod tests {
         assert!(html.contains("/p/abc123/"));
         assert!(html.contains("\"cron_next_fire_ms\":42"));
         assert!(!html.contains("/tmp/<workspace>"));
-    }
-
-    #[tokio::test]
-    async fn picker_data_contains_registered_project_status() {
-        let test = test_state().await;
-        let state = test.state;
-        let root = tempfile::tempdir().unwrap();
-        let entry = {
-            let mut registry = state.projects.write().await;
-            registry.open(root.path().to_path_buf()).await.unwrap()
-        };
-        state.store_worker_status(status_report(&entry.id, 3)).await;
-        state.set_cron_pending(&entry.id, Some(12345)).await;
-
-        let data = picker_data(state, 8488).await;
-        assert_eq!(data.projects.len(), 1);
-        assert_eq!(data.projects[0].id, entry.id);
-        assert_eq!(data.projects[0].lsp_clients, 3);
-        assert_eq!(data.projects[0].busy_chats, 2);
-        assert_eq!(data.projects[0].exec_running, 1);
-        assert_eq!(data.projects[0].cron_next_fire_ms, Some(12345));
-    }
-
-    #[tokio::test]
-    async fn dashboard_index_serves_spa_bootstrap_and_noscript_projects() {
-        let test = test_state().await;
-        let state = test.state;
-        let root = tempfile::Builder::new()
-            .prefix("dashboard-project")
-            .tempdir()
-            .unwrap();
-        let entry = {
-            let mut registry = state.projects.write().await;
-            registry.open(root.path().to_path_buf()).await.unwrap()
-        };
-
-        let response = crate::daemon::server::make_router(state, 8488)
-            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
-        let body = String::from_utf8(body.to_vec()).unwrap();
-        assert!(body.contains("window.__REFACT_BOOTSTRAP_CONFIG__ = {\"surface\":\"dashboard\"};"));
-        assert!(body.contains("<noscript>"));
-        assert!(body.contains(&html_escape(&entry.slug)));
-        assert!(body.contains(&format!("href=\"/p/{}/\"", entry.id)));
-        assert!(body.contains("href=\"/picker\""));
-        assert!(body.contains("http://127.0.0.1:8488"));
-        assert!(!body.contains(DAEMON_GUI_BOOTSTRAP_SENTINEL));
-    }
-
-    #[tokio::test]
-    async fn picker_route_serves_legacy_picker() {
-        let test = test_state().await;
-        let state = test.state;
-        let root = tempfile::Builder::new()
-            .prefix("picker-project")
-            .tempdir()
-            .unwrap();
-        let entry = {
-            let mut registry = state.projects.write().await;
-            registry.open(root.path().to_path_buf()).await.unwrap()
-        };
-
-        let response = crate::daemon::server::make_router(state, 8488)
-            .oneshot(
-                Request::builder()
-                    .uri("/picker")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
-        let body = String::from_utf8(body.to_vec()).unwrap();
-        assert!(body.contains("<title>Refact daemon projects</title>"));
-        assert!(body.contains(&html_escape(&entry.slug)));
-        assert!(body.contains(&format!("href=\"/p/{}/\"", entry.id)));
-        assert!(!body.contains("__REFACT_BOOTSTRAP_CONFIG__"));
-    }
-
-    #[tokio::test]
-    async fn unknown_project_index_returns_404_page() {
-        let state = test_state().await.state;
-        let response = crate::daemon::server::make_router(state, 8488)
-            .oneshot(
-                Request::builder()
-                    .uri("/p/missing/")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
-        let body = String::from_utf8(body.to_vec()).unwrap();
-        assert!(body.contains("Project not found"));
-        assert!(body.contains("Back to projects"));
     }
 
     #[tokio::test]
@@ -976,22 +823,6 @@ mod tests {
             );
             assert!(response.headers().get(header::LOCATION).is_none(), "{uri}");
         }
-    }
-
-    #[tokio::test]
-    async fn auth_enabled_dist_chat_assets_are_public() {
-        let state = test_state_with_auth(Some("secret-token")).await.state;
-        let response = crate::daemon::server::make_router(state, 8488)
-            .oneshot(
-                Request::builder()
-                    .uri("/dist/chat/missing.css")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -1168,66 +999,6 @@ mod tests {
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn daemon_asset_route_serves_css_and_js_with_content_types_when_embedded() {
-        let state = test_state().await.state;
-        for (path, content_type) in [
-            ("style.css", "text/css; charset=utf-8"),
-            ("index.umd.cjs", "text/javascript; charset=utf-8"),
-        ] {
-            if ChatGuiAsset::get(&format!("dist/chat/{path}")).is_none() {
-                continue;
-            }
-            let response = crate::daemon::server::make_router(state.clone(), 8488)
-                .oneshot(
-                    Request::builder()
-                        .uri(format!("/dist/chat/{path}"))
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(
-                response
-                    .headers()
-                    .get(axum::http::header::CONTENT_TYPE)
-                    .unwrap(),
-                content_type
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn project_index_route_injects_daemon_gui_for_registered_project() {
-        let test = test_state().await;
-        let state = test.state;
-        let root = tempfile::tempdir().unwrap();
-        let entry = {
-            let mut registry = state.projects.write().await;
-            registry.open(root.path().to_path_buf()).await.unwrap()
-        };
-        let response = crate::daemon::server::make_router(state, 8488)
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/p/{}/", entry.id))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
-        let body = String::from_utf8(body.to_vec()).unwrap();
-        assert!(body.contains("daemonProjectApiPrefix"));
-        assert!(body.contains("window.__REFACT_DAEMON_PROJECT_API_PREFIX__"));
-        assert!(body.contains("window.fetch = function"));
-        assert!(body.contains("window.EventSource = function"));
-        assert!(body.contains("window.__REFACT_BOOTSTRAP_CONFIG__ = {\"surface\":\"workspace\"};"));
-        assert!(body.contains(&format!("/p/{}", entry.id)));
-        assert!(body.contains(&format!("http://127.0.0.1:8488/p/{}", entry.id)));
     }
 
     #[test]

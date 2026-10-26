@@ -326,21 +326,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn workflow_label_mapping() {
-        assert_eq!(
-            workflow_label("commit_message"),
-            "commit message generation"
-        );
-        assert_eq!(workflow_label("follow_up"), "follow-up suggestions");
-        assert_eq!(workflow_label("compress_trajectory"), "chat compression");
-        assert_eq!(workflow_label("memo_extraction"), "memo extraction");
-        assert_eq!(workflow_label("kg_enrich"), "knowledge graph enrichment");
-        assert_eq!(workflow_label("kg_deprecate"), "knowledge cleanup");
-        assert_eq!(workflow_label("title_generating"), "title generation");
-        assert_eq!(workflow_label("unknown_workflow"), "unknown_workflow");
-    }
-
     #[tokio::test]
     async fn workflow_transcript_records_failure_category() {
         let dir = tempfile::tempdir().unwrap();

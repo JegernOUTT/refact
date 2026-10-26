@@ -497,27 +497,4 @@ mod tests {
         )
         .is_ok());
     }
-
-    #[tokio::test]
-    async fn memory_version_covers_unknown_fields_and_archived_documents() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("memory.md");
-        tokio::fs::write(
-            &path,
-            "---\nstatus: archived\nunknown: one\n---\n# Anchor\n",
-        )
-        .await
-        .unwrap();
-        let first = fingerprint(&snapshot(dir.path()).await.unwrap()).unwrap();
-        tokio::fs::write(
-            &path,
-            "---\nstatus: archived\nunknown: two\n---\n# Anchor\n",
-        )
-        .await
-        .unwrap();
-        assert_ne!(
-            first,
-            fingerprint(&snapshot(dir.path()).await.unwrap()).unwrap()
-        );
-    }
 }

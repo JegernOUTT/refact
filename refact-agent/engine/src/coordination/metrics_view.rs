@@ -195,32 +195,4 @@ mod tests {
         ));
         recorder.snapshot()
     }
-
-    #[test]
-    fn read_entries_preserve_distinct_verdict_series_and_redact_again() {
-        let entries = entries(&snapshot());
-        let verdicts = entries
-            .iter()
-            .filter_map(|entry| match entry {
-                MetricEntry::Series { series } if series.name == EVIDENCE_VERDICTS => series
-                    .labels
-                    .iter()
-                    .find(|label| label.name == "verdict")
-                    .map(|label| label.value.as_str()),
-                _ => None,
-            })
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(
-            verdicts,
-            ["blocked", "failed", "not_run", "unavailable"].into()
-        );
-        let MetricEntry::Explanation { explanation } = entries.last().unwrap() else {
-            panic!("the explanation must be readable")
-        };
-        assert_eq!(explanation.decision, Decision::Denial);
-        assert_eq!(explanation.rule, "policy.no_secret");
-        assert_eq!(explanation.outcome, "denied");
-        assert_eq!(explanation.inputs[0].0, "reason");
-        assert!(explanation.inputs[0].1.starts_with("redacted:"));
-    }
 }

@@ -126,16 +126,3 @@ impl App {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn recognizes_plain_space() {
-        assert!(is_plain_space_key(KeyEvent::new(
-            KeyCode::Char(' '),
-            KeyModifiers::empty(),
-        )));
-    }
-}

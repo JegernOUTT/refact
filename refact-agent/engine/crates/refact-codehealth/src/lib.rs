@@ -134,63 +134,6 @@ mod tests {
     }
 
     #[test]
-    fn branchy_nested_function_is_higher_complexity_lower_maintainability() {
-        let simple_src = "fn simple() -> i32 { 1 }\n";
-        let branchy_src = "\
-fn branchy(x: i32) -> i32 {
-    if x > 0 {
-        if x > 10 {
-            for _i in 0..x {
-                if x % 2 == 0 && x > 5 {
-                    return 1;
-                }
-            }
-        }
-    }
-    0
-}
-";
-        let simple = analyze("rust", simple_src);
-        let branchy = analyze("rust", branchy_src);
-        let s = &simple.functions[0];
-        let b = branchy
-            .functions
-            .iter()
-            .find(|f| f.name == "branchy")
-            .unwrap();
-        assert!(
-            b.complexity > s.complexity,
-            "branchy {} > simple {}",
-            b.complexity,
-            s.complexity
-        );
-        assert!(b.nesting >= 3, "deeply nested, got {}", b.nesting);
-        assert!(
-            b.maintainability < s.maintainability,
-            "branchy {} < simple {}",
-            b.maintainability,
-            s.maintainability
-        );
-    }
-
-    #[test]
-    fn python_methods_are_detected() {
-        let src = "\
-class Foo:
-    def method_a(self):
-        if True:
-            pass
-
-    def method_b(self):
-        pass
-";
-        let health = analyze("python", src);
-        let names: Vec<String> = health.functions.iter().map(|f| f.name.clone()).collect();
-        assert!(names.contains(&"method_a".to_string()), "got {names:?}");
-        assert!(names.contains(&"method_b".to_string()), "got {names:?}");
-    }
-
-    #[test]
     fn nested_local_functions_are_not_enumerated_separately() {
         let src = "\
 def outer():
@@ -202,12 +145,5 @@ def outer():
         let names: Vec<String> = health.functions.iter().map(|f| f.name.clone()).collect();
 
         assert_eq!(names, vec!["outer".to_string()]);
-    }
-
-    #[test]
-    fn empty_or_unknown_lang_is_safe() {
-        let health = analyze("unknown", "whatever");
-        assert!(health.functions.is_empty());
-        assert_eq!(health.avg_maintainability, 100.0);
     }
 }

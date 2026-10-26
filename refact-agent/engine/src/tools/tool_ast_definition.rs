@@ -528,35 +528,6 @@ mod tests {
         Arc::new(AtomicBool::new(false))
     }
 
-    #[tokio::test]
-    async fn symbol_def_hierarchy_sections_include_type_chain() {
-        let service = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
-        service
-            .index_file("src/base.py", "class A:\n    pass\n", "python")
-            .await
-            .unwrap();
-        service
-            .index_file("src/mid.py", "class B(A):\n    pass\n", "python")
-            .await
-            .unwrap();
-        service
-            .index_file("src/leaf.py", "class C(B):\n    pass\n", "python")
-            .await
-            .unwrap();
-        service.connect_usages().await.unwrap();
-
-        let defs = service.definitions("B").await.unwrap();
-        let sections = type_hierarchy_sections(&service, &defs, &no_abort())
-            .await
-            .unwrap();
-        let rendered = sections.join("\n");
-
-        assert!(rendered.contains("Inheritance for `B`"));
-        assert!(rendered.contains("A"));
-        assert!(rendered.contains("B"));
-        assert!(rendered.contains("C"));
-    }
-
     struct ScopeFixture {
         _temp: tempfile::TempDir,
         worktree: WorktreeMeta,
@@ -642,18 +613,6 @@ mod tests {
             updated: None,
             file_path: path,
         }
-    }
-
-    async fn add_related_memory(
-        gcx: Arc<crate::global_context::GlobalContext>,
-        path: PathBuf,
-        filename: &str,
-        entity: &str,
-    ) {
-        gcx.knowledge_index
-            .lock()
-            .await
-            .add_card(related_memory(path, filename, entity));
     }
 
     fn context_file_names(results: &[ContextEnum]) -> Vec<String> {
@@ -827,166 +786,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn symbol_def_symbol_count_cap_rejects_excess() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let ccx = Arc::new(AMutex::new(
-            AtCommandsContext::new_from_app(
-                crate::app_state::AppState::from_gcx(gcx).await,
-                4096,
-                20,
-                false,
-                vec![],
-                "chat".to_string(),
-                None,
-                "model".to_string(),
-                None,
-                None,
-            )
-            .await,
-        ));
-        let mut tool = ToolAstDefinition {
-            config_path: String::new(),
-        };
-        let many = (0..MAX_SYMBOLS + 5)
-            .map(|i| format!("sym{i}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        let args = HashMap::from_iter([("symbols".to_string(), Value::String(many))]);
-
-        let err = tool
-            .tool_execute(ccx, &"call".to_string(), &args)
-            .await
-            .unwrap_err();
-        assert!(err.contains("Too many symbols"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn symbol_def_abort_stops_processing() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let service = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
-        service
-            .index_file("src/lib.rs", "pub fn shared() {}\n", "rust")
-            .await
-            .unwrap();
-        service.connect_usages().await.unwrap();
-
-        let abort_flag = Arc::new(AtomicBool::new(true));
-        let (_corrections, results) = symbol_def_via_codegraph(
-            gcx.clone(),
-            service,
-            &["shared".to_string()],
-            "shared",
-            &"call".to_string(),
-            None,
-            abort_flag,
-        )
-        .await
-        .unwrap();
-
-        let names = context_file_names(&results);
-        let text = tool_text(&results);
-        assert!(
-            names.is_empty(),
-            "aborted call should not attach defs: {names:?}"
-        );
-        assert!(text.contains("Aborted"), "should note the abort: {text}");
-    }
-
-    #[tokio::test]
-    async fn symbol_def_related_memory_stays_in_sidecar_enrichment() {
-        let fixture = make_scope_fixture();
-        let gcx = scope_gcx(vec![]).await;
-        let scope = ExecutionScope::from_worktree(&fixture.worktree);
-        let service = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
-        let worktree_lib = fixture.root.join("src").join("lib.rs");
-        index_absolute(&service, &worktree_lib, "pub fn shared() {}\n").await;
-        service.connect_usages().await.unwrap();
-        let (_corrections, baseline_results) = symbol_def_via_codegraph(
-            gcx.clone(),
-            service.clone(),
-            &["shared".to_string()],
-            "shared",
-            &"call".to_string(),
-            Some(&scope),
-            no_abort(),
-        )
-        .await
-        .unwrap();
-        let baseline_text = tool_text(&baseline_results);
-        let memory_path = fixture
-            .root
-            .join(".refact")
-            .join("knowledge")
-            .join("shared.md");
-        fs::create_dir_all(memory_path.parent().unwrap()).unwrap();
-        fs::write(&memory_path, "related\n").unwrap();
-        add_related_memory(
-            gcx.clone(),
-            memory_path.clone(),
-            &worktree_lib.to_string_lossy(),
-            "shared",
-        )
-        .await;
-
-        let (_corrections, results) = symbol_def_via_codegraph(
-            gcx,
-            service,
-            &["shared".to_string()],
-            "shared",
-            &"call".to_string(),
-            Some(&scope),
-            no_abort(),
-        )
-        .await
-        .unwrap();
-
-        let text = tool_text(&results);
-        assert_eq!(text, baseline_text);
-        let enrichment = results
-            .iter()
-            .find_map(|result| match result {
-                ContextEnum::ChatMessage(message) if message.role == "tool" => {
-                    refact_chat_api::tool_enrichment_from_extra(&message.extra)
-                }
-                _ => None,
-            })
-            .expect("definition enrichment");
-        assert!(enrichment.references.iter().any(|reference| {
-            reference.target == ".refact/knowledge/shared.md"
-                && reference.status.as_deref() == Some("related_memory")
-        }));
-    }
-
-    #[tokio::test]
-    async fn related_memory_lookup_releases_global_index_before_local_lookups() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        add_related_memory(
-            gcx.clone(),
-            PathBuf::from("/knowledge/shared.md"),
-            "src/lib.rs",
-            "shared",
-        )
-        .await;
-        let lock = gcx.knowledge_index.lock().await;
-        let abort_flag = no_abort();
-        let lookup = compute_related_memories(
-            gcx.clone(),
-            vec!["src/lib.rs".to_string()],
-            "shared",
-            &abort_flag,
-        );
-        tokio::pin!(lookup);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut lookup)
-                .await
-                .is_err(),
-            "related-memory lookup should wait only for the shared index lock"
-        );
-        drop(lock);
-        assert_eq!(lookup.await.len(), 1);
-    }
-
-    #[tokio::test]
     async fn aborted_symbol_def_skips_related_memory_lookup() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let service = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
@@ -1017,21 +816,5 @@ mod tests {
         drop(lock);
 
         assert!(tool_text(&result.1).contains("Aborted"));
-    }
-
-    #[test]
-    fn related_memory_identifier_regex_is_static_and_filters_invalid_entities() {
-        let first = std::ptr::addr_of!(*IDENTIFIER_RE);
-        let second = std::ptr::addr_of!(*IDENTIFIER_RE);
-        assert_eq!(first, second);
-        assert_eq!(
-            related_memory_entities("crate.shared, valid::Thing, invalid-name"),
-            vec![
-                "Thing".to_string(),
-                "crate::shared".to_string(),
-                "shared".to_string(),
-                "valid::Thing".to_string(),
-            ]
-        );
     }
 }

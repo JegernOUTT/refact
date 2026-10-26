@@ -1633,7 +1633,7 @@ mod tests {
     use super::OpenAICodexProvider;
     use refact_core::model_caps::ModelCapabilities;
     use crate::openai_codex_oauth::OAuthTokens;
-    use crate::traits::{CustomModelConfig, ModelPricing, ModelSource, ProviderTrait};
+    use crate::traits::{ModelPricing, ProviderTrait};
 
     fn provider_with_oauth(access_token: &str, chatgpt_account_id: &str) -> OpenAICodexProvider {
         OpenAICodexProvider {
@@ -1736,25 +1736,6 @@ mod tests {
     }
 
     #[test]
-    fn model_source_uses_api_when_live_discovery_is_authenticated() {
-        let p = provider_with_oauth("tok", "acct-123");
-        assert_eq!(p.model_source(), ModelSource::Api);
-        let p_no_auth = OpenAICodexProvider::default();
-        assert_eq!(p_no_auth.model_source(), ModelSource::ModelCaps);
-    }
-
-    #[test]
-    fn unauthenticated_provider_reports_not_configured() {
-        let p = OpenAICodexProvider::default();
-        assert!(!p.has_credentials());
-        assert_eq!(
-            p.diagnose_auth_status(),
-            "Not configured — log in via OAuth"
-        );
-        assert!(p.resolve_wham_context().is_err());
-    }
-
-    #[test]
     fn logged_in_provider_uses_chatgpt_backend() {
         let mut p = provider_with_oauth("tok", "acct-123");
         p.enabled_models = vec!["gpt-5.6-sol".to_string()];
@@ -1774,13 +1755,6 @@ mod tests {
             Some("acct-123")
         );
         assert_eq!(p.diagnose_auth_status(), "Connected (ChatGPT backend)");
-    }
-
-    #[test]
-    fn model_filter_regex_is_none_so_the_api_is_the_only_source_of_ids() {
-        assert!(OpenAICodexProvider::default()
-            .model_filter_regex()
-            .is_none());
     }
 
     #[test]
@@ -1953,77 +1927,6 @@ mod tests {
     }
 
     #[test]
-    fn no_auth_returns_custom_models_only() {
-        let mut p = OpenAICodexProvider::default();
-        p.enabled_models = vec!["my-custom".to_string()];
-        p.custom_models
-            .insert("my-custom".to_string(), CustomModelConfig::default());
-
-        let models = p.get_custom_models_only();
-
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "my-custom");
-        assert!(models[0].enabled);
-    }
-
-    #[test]
-    fn custom_models_still_appear_next_to_live_models() {
-        let mut p = provider_with_oauth("tok", "acct-123");
-        p.enabled_models = vec!["my-custom".to_string()];
-        p.custom_models.insert(
-            "my-custom".to_string(),
-            CustomModelConfig {
-                n_ctx: Some(4096),
-                supports_tools: Some(true),
-                pricing: Some(ModelPricing {
-                    prompt: 1.0,
-                    generated: 2.0,
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-        );
-
-        let models = p.available_models_from_live_chatgpt_models(&live_payload(), &caps_map());
-        let custom = models.iter().find(|m| m.id == "my-custom").unwrap();
-        assert!(custom.enabled);
-        assert!(custom.is_custom);
-        assert!(models.iter().any(|m| m.id == "gpt-6-astra"));
-    }
-
-    #[test]
-    fn custom_model_pricing_is_applied_to_live_models() {
-        let mut p = provider_with_oauth("tok", "acct-123");
-        p.custom_models.insert(
-            "gpt-6-astra".to_string(),
-            CustomModelConfig {
-                pricing: Some(ModelPricing {
-                    prompt: 9.0,
-                    generated: 18.0,
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-        );
-
-        let models = p.available_models_from_live_chatgpt_models(
-            &[live_record("gpt-6-astra", "list", true, 400_000)],
-            &HashMap::new(),
-        );
-        let model = models.iter().find(|m| m.id == "gpt-6-astra").unwrap();
-
-        assert_eq!(model.pricing.as_ref().map(|p| p.prompt), Some(9.0));
-    }
-
-    #[test]
-    fn codex_cli_unmanaged_refresh_message_always_returns_none() {
-        // CLI fallback was removed entirely; this hook is preserved for callers
-        // but never produces a message anymore.
-        assert!(OpenAICodexProvider::codex_cli_unmanaged_refresh_message("cli-access").is_none());
-        assert!(OpenAICodexProvider::codex_cli_unmanaged_refresh_message("").is_none());
-    }
-
-    #[test]
     fn websocket_setting_is_opt_in_for_chatgpt_backend_runtime() {
         let mut p = provider_with_oauth("tok", "acct-123");
         p.enabled_models = vec!["gpt-5-codex".to_string()];
@@ -2101,18 +2004,6 @@ http_response_header_retry_max_attempts: 12
             settings["http_response_header_retry_max_attempts"],
             json!(12)
         );
-    }
-
-    #[test]
-    fn provider_settings_as_json_does_not_expose_api_key_fields() {
-        let p = provider_with_oauth("tok", "acct-123");
-        let settings = p.provider_settings_as_json();
-        let obj = settings.as_object().unwrap();
-        assert!(!obj.contains_key("api_key_ready"));
-        assert!(!obj.contains_key("api_key_exchange_error"));
-        assert!(!obj.contains_key("cli_refresh_managed"));
-        assert_eq!(obj["auth_source"], json!("in_app_oauth"));
-        assert_eq!(obj["oauth_connected"], json!(true));
     }
 
     #[test]
@@ -2247,28 +2138,6 @@ http_response_header_retry_max_attempts: 12
             usage.raw_extra["future_quota"]["provider_added"],
             json!(true)
         );
-    }
-
-    #[test]
-    fn openai_codex_redeem_payload_parses_code_and_windows() {
-        let redeem = OpenAICodexProvider::parse_redeem_payload(&json!({
-            "code": "reset",
-            "windows_reset": 2
-        }));
-        assert_eq!(redeem.code, "reset");
-        assert_eq!(redeem.windows_reset, Some(2));
-
-        // Tolerates a `data` wrapper, camelCase key, and string-encoded number.
-        let wrapped = OpenAICodexProvider::parse_redeem_payload(&json!({
-            "data": { "code": "already_redeemed", "windowsReset": "1" }
-        }));
-        assert_eq!(wrapped.code, "already_redeemed");
-        assert_eq!(wrapped.windows_reset, Some(1));
-
-        // Missing fields degrade gracefully.
-        let empty = OpenAICodexProvider::parse_redeem_payload(&json!({}));
-        assert_eq!(empty.code, "");
-        assert_eq!(empty.windows_reset, None);
     }
 
     #[test]

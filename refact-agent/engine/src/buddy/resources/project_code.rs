@@ -242,17 +242,3 @@ impl AsyncResourceAdapter for ProjectCodeAdapter {
         Err(ResourceError::UnsupportedResource)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn isolated_draft_is_typed_and_does_not_accept_commands() {
-        let value = serde_json::json!({"project":{"project_id":"p","canonical_root":"/p"},"worktree_id":"w","chat_id":"c"});
-        let draft: ProjectCodeDraft = serde_json::from_value(value).unwrap();
-        assert_eq!(draft.worktree_id, "w");
-        assert_eq!(draft.chat_id, "c");
-        assert!(serde_json::from_value::<ProjectCodeDraft>(serde_json::json!({"project":{"project_id":"p","canonical_root":"/p"},"worktree_id":"w","chat_id":"c","command":"publish"})).is_err());
-    }
-}

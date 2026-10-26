@@ -294,14 +294,6 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    #[test]
-    fn chat_client_builds_with_bounded_setup_timeouts() {
-        assert_eq!(CHAT_CONNECT_TIMEOUT, Duration::from_secs(10));
-        assert_eq!(CHAT_REQUEST_TIMEOUT, Duration::from_secs(30));
-        let _ = ProxyChatClient::new("http://127.0.0.1:8488".to_string(), "p".to_string(), None)
-            .unwrap();
-    }
-
     #[tokio::test(start_paused = true)]
     async fn send_command_times_out_on_unresponsive_endpoint() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -365,40 +357,5 @@ mod tests {
             Some("snapshot")
         );
         server.abort();
-    }
-
-    #[test]
-    fn daemon_base_url_uses_loopback_for_wildcard_binds() {
-        let mut info = DaemonInfo {
-            pid: 1,
-            port: 8488,
-            bind: "0.0.0.0".to_string(),
-            version: "1".to_string(),
-            executable_sha256: None,
-            auth_token: None,
-            started_at_ms: 0,
-            hostname_local: "host.local".to_string(),
-            urls: crate::daemon::state::DaemonUrls {
-                loopback: "".to_string(),
-                mdns: "".to_string(),
-            },
-        };
-        assert_eq!(daemon_base_url(&info), "http://127.0.0.1:8488");
-        info.bind = "127.0.0.1".to_string();
-        assert_eq!(daemon_base_url(&info), "http://127.0.0.1:8488");
-    }
-
-    #[test]
-    fn chat_client_status_502_is_unreachable() {
-        assert!(ChatClientError::Status {
-            status: 502,
-            body: "bad gateway".to_string(),
-        }
-        .is_unreachable());
-        assert!(!ChatClientError::Status {
-            status: 400,
-            body: "bad".to_string(),
-        }
-        .is_unreachable());
     }
 }

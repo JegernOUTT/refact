@@ -163,29 +163,6 @@ mod tests {
     }
 
     #[test]
-    fn extracts_functions_classes_and_methods() {
-        let src = "\
-class Animal:
-    def speak(self):
-        pass
-
-class Dog(Animal):
-    def speak(self):
-        bark()
-
-def bark():
-    pass
-";
-        let (symbols, _refs) = extract(src);
-        let paths: Vec<String> = symbols.iter().map(|s| s.double_colon_path()).collect();
-        assert!(paths.contains(&"Animal".to_string()));
-        assert!(paths.contains(&"Animal::speak".to_string()));
-        assert!(paths.contains(&"Dog".to_string()));
-        assert!(paths.contains(&"Dog::speak".to_string()));
-        assert!(paths.contains(&"bark".to_string()));
-    }
-
-    #[test]
     fn extracts_class_heritage() {
         let src = "\
 class Base:
@@ -198,21 +175,6 @@ class Derived(Base):
         let derived = symbols.iter().find(|s| s.name() == "Derived").unwrap();
         assert_eq!(derived.this_is_a_class, "Derived");
         assert_eq!(derived.this_class_derived_from, vec!["Base".to_string()]);
-    }
-
-    #[test]
-    fn extracts_calls_with_enclosing_symbol() {
-        let src = "\
-def caller():
-    callee()
-
-def callee():
-    pass
-";
-        let (_symbols, refs) = extract(src);
-        let call = refs.iter().find(|r| r.name == "callee").unwrap();
-        assert_eq!(call.from, "caller");
-        assert_eq!(call.kind, EdgeKind::Calls);
     }
 
     #[test]

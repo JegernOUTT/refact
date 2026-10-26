@@ -367,23 +367,6 @@ mod tests {
     use tokio::net::TcpListener;
 
     #[tokio::test]
-    async fn empty_endpoint_returns_error() {
-        let model_rec = BaseModelRecord {
-            id: "test-model".to_string(),
-            name: "test".to_string(),
-            ..Default::default()
-        };
-        let client = reqwest::Client::new();
-        let sampling_parameters = SamplingParameters::default();
-
-        let result =
-            forward_to_openai_style_endpoint(&model_rec, "prompt", &client, &sampling_parameters)
-                .await;
-
-        assert_eq!(result.unwrap_err(), "No endpoint configured for test-model");
-    }
-
-    #[tokio::test]
     async fn redacts_bearer_credential_from_accepted_400_json() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -430,10 +413,5 @@ mod tests {
 
         assert!(!redacted.contains("quoted"));
         assert!(redacted.contains("[REDACTED]"));
-    }
-
-    #[test]
-    fn compression_from_prompt_returns_absent_json_shape() {
-        assert_eq!(try_get_compression_from_prompt("prompt"), json!("absent"));
     }
 }

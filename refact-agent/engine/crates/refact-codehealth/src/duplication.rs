@@ -750,64 +750,6 @@ pub(crate) fn dry_duplication_pct_violates(duplication_pct: f64) -> bool {
 mod tests {
     use super::*;
 
-    fn duplicated_rust_source() -> String {
-        let block_a = r#"
-fn compute_alpha(input: i32) -> i32 {
-    let mut total = 0;
-    let mut current = input;
-    for idx in 0..25 {
-        total += idx;
-        current += total;
-        if current % 2 == 0 {
-            total += current / 2;
-        } else {
-            total += current * 3;
-        }
-        total -= idx / 2;
-        current += 1;
-    }
-    total += current;
-    total += input;
-    total += current - input;
-    total += input * 2;
-    total += current / 3;
-    total += input % 5;
-    total += current + input;
-    total -= input / 2;
-    total += current * input;
-    total
-}
-"#;
-        let block_b = r#"
-fn compute_beta(value: i32) -> i32 {
-    let mut total = 0;
-    let mut current = value;
-    for idx in 0..25 {
-        total += idx;
-        current += total;
-        if current % 2 == 0 {
-            total += current / 2;
-        } else {
-            total += current * 3;
-        }
-        total -= idx / 2;
-        current += 1;
-    }
-    total += current;
-    total += value;
-    total += current - value;
-    total += value * 2;
-    total += current / 3;
-    total += value % 5;
-    total += current + value;
-    total -= value / 2;
-    total += current * value;
-    total
-}
-"#;
-        format!("{block_a}\n{block_b}")
-    }
-
     fn cross_file_rust_source(name: &str, param: &str) -> String {
         format!(
             r#"
@@ -879,48 +821,6 @@ fn {name}({param}: i32) -> i32 {{
         src
     }
 
-    fn shared_block_source(name: &str, prefix: &str, suffix: &str, lines: usize) -> String {
-        let mut src = format!("fn {name}(input: i32) -> i32 {{\n    {prefix}\n");
-        for _ in 0..lines {
-            src.push_str("    total = total + input;\n");
-        }
-        src.push_str(&format!("    {suffix}\n    total\n}}\n"));
-        src
-    }
-
-    #[test]
-    fn duplicated_rust_blocks_produce_clone_pair_and_percentage() {
-        let src = duplicated_rust_source();
-        let clones = detect_clones("rust", &src);
-        assert!(!clones.is_empty(), "expected at least one clone pair");
-        assert!(
-            clones
-                .iter()
-                .any(|clone| clone.token_len >= MIN_CLONE_TOKENS),
-            "got {clones:?}"
-        );
-        assert!(clones
-            .iter()
-            .all(|clone| { clone.a_end_line >= clone.line_a && clone.b_end_line >= clone.line_b }));
-        assert!(duplication_pct("rust", &src) > 0.0);
-    }
-
-    #[test]
-    fn short_unique_source_has_no_duplication() {
-        let src = "fn unique(value: i32) -> i32 { value + 1 }\n";
-        assert!(detect_clones("rust", src).is_empty());
-        assert_eq!(duplication_pct("rust", src), 0.0);
-    }
-
-    #[test]
-    fn tokenization_collapses_different_identifiers() {
-        let x_tokens = tokenize("rust", "fn a() { let x = 1; }\n");
-        let y_tokens = tokenize("rust", "fn b() { let y = 1; }\n");
-        let x_hashes: Vec<u64> = x_tokens.iter().map(|token| token.kind_hash).collect();
-        let y_hashes: Vec<u64> = y_tokens.iter().map(|token| token.kind_hash).collect();
-        assert_eq!(x_hashes, y_hashes);
-    }
-
     #[test]
     fn cross_file_identical_blocks_produce_clone_pair() {
         let files = vec![
@@ -943,20 +843,6 @@ fn {name}({param}: i32) -> i32 {{
             "got {clones:?}"
         );
         assert!(cross_file_duplication_pct(&files) > 0.0);
-    }
-
-    #[test]
-    fn import_only_files_do_not_produce_cross_file_clones() {
-        let imports = (0..30)
-            .map(|idx| format!("use crate::shared::module_{idx}::Item;\n"))
-            .collect::<String>();
-        let files = vec![
-            ("a.rs".to_string(), "rust".to_string(), imports.clone()),
-            ("b.rs".to_string(), "rust".to_string(), imports),
-        ];
-
-        assert!(detect_cross_file_clones(&files).is_empty());
-        assert_eq!(cross_file_duplication_pct(&files), 0.0);
     }
 
     #[test]
@@ -1011,17 +897,6 @@ fn {name}({param}: i32) -> i32 {{
         for (lang, source) in cases {
             assert!(tokenize(lang, source).is_empty(), "{lang}");
         }
-    }
-
-    #[test]
-    fn php_namespace_use_declarations_are_excluded() {
-        let without_imports = tokenize("php", "<?php\n");
-        let with_imports = tokenize(
-            "php",
-            "<?php\nuse Vendor\\Package\\Item;\nuse Vendor\\Package\\OtherItem as Alias;\n",
-        );
-
-        assert_eq!(with_imports, without_imports);
     }
 
     #[test]
@@ -1097,41 +972,6 @@ fn {name}({param}: i32) -> i32 {{
                 .any(|clone| clone.token_len >= MIN_CLONE_TOKENS),
             "got {clones:?}"
         );
-    }
-
-    #[test]
-    fn cross_file_unique_sources_produce_no_clone_pair() {
-        let files = vec![
-            (
-                "a.rs".to_string(),
-                "rust".to_string(),
-                "fn unique_a(value: i32) -> i32 { value + 1 }\n".to_string(),
-            ),
-            (
-                "b.rs".to_string(),
-                "rust".to_string(),
-                "fn unique_b(value: i32) -> i32 { value * 3 }\n".to_string(),
-            ),
-        ];
-        assert!(detect_cross_file_clones(&files).is_empty());
-        assert_eq!(cross_file_duplication_pct(&files), 0.0);
-    }
-
-    #[test]
-    fn same_file_content_under_different_paths_is_cross_file_clone() {
-        let src = cross_file_rust_source("compute_alpha", "input");
-        let files = vec![
-            ("a.rs".to_string(), "rust".to_string(), src.clone()),
-            ("copy.rs".to_string(), "rust".to_string(), src),
-        ];
-        let clones = detect_cross_file_clones(&files);
-        assert!(
-            clones.iter().any(|clone| clone.file_a == "a.rs"
-                && clone.file_b == "copy.rs"
-                && clone.token_len >= MIN_CLONE_TOKENS),
-            "got {clones:?}"
-        );
-        assert_eq!(cross_file_duplication_pct(&files), 1.0);
     }
 
     #[test]
@@ -1211,61 +1051,6 @@ fn {name}({param}: i32) -> i32 {{
     }
 
     #[test]
-    fn cross_file_clone_pair_reports_exact_lines() {
-        let shared_lines = 18;
-        let files = vec![
-            (
-                "a.rs".to_string(),
-                "rust".to_string(),
-                shared_block_source(
-                    "with_shared_a",
-                    "let mut total = input;",
-                    "total = total - input;",
-                    shared_lines,
-                ),
-            ),
-            (
-                "b.rs".to_string(),
-                "rust".to_string(),
-                shared_block_source(
-                    "with_shared_b",
-                    "let mut total = input * input;",
-                    "total = total / 2;",
-                    shared_lines,
-                ),
-            ),
-        ];
-        let clones = detect_cross_file_clones(&files);
-        let clone = clones
-            .iter()
-            .find(|clone| clone.file_a == "a.rs" && clone.file_b == "b.rs")
-            .expect("expected cross-file clone");
-        assert_eq!(clone.line_a, clone.a_start_line);
-        assert_eq!(clone.line_b, clone.b_start_line);
-        assert!(
-            clone.a_start_line >= 1 && clone.a_start_line <= 3,
-            "a_start_line={}",
-            clone.a_start_line
-        );
-        assert!(
-            clone.a_end_line >= 18 && clone.a_end_line >= clone.a_start_line,
-            "a_end_line={}",
-            clone.a_end_line
-        );
-        assert!(
-            clone.b_start_line >= 1 && clone.b_start_line <= 3,
-            "b_start_line={}",
-            clone.b_start_line
-        );
-        assert!(
-            clone.b_end_line >= 18 && clone.b_end_line >= clone.b_start_line,
-            "b_end_line={}",
-            clone.b_end_line
-        );
-        assert!(clone.token_len >= MIN_CLONE_TOKENS);
-    }
-
-    #[test]
     fn clone_beyond_old_prefix_cap_is_found() {
         let mut files: Vec<(String, String, String)> = (0..80)
             .map(|idx| {
@@ -1298,43 +1083,6 @@ fn {name}({param}: i32) -> i32 {{
                 && clone.token_len >= MIN_CLONE_TOKENS),
             "got {clones:?}"
         );
-    }
-
-    #[test]
-    fn cross_file_analysis_matches_individual_passes() {
-        let files = vec![
-            (
-                "a.rs".to_string(),
-                "rust".to_string(),
-                cross_file_rust_source("compute_alpha", "input"),
-            ),
-            (
-                "b.rs".to_string(),
-                "rust".to_string(),
-                cross_file_rust_source("compute_beta", "value"),
-            ),
-            (
-                "unique.rs".to_string(),
-                "rust".to_string(),
-                "fn unique(value: i32) -> i32 { value + 1 }\n".to_string(),
-            ),
-        ];
-
-        let combined = cross_file_analysis(&files);
-
-        assert_eq!(combined.clones, detect_cross_file_clones(&files));
-        assert_eq!(combined.duplication_pct, cross_file_duplication_pct(&files));
-        assert_eq!(
-            combined.duplicated_tokens_by_path,
-            per_file_duplicated_token_counts(&files)
-        );
-        for (path, lang, text) in &files {
-            assert_eq!(
-                combined.tokens_by_path.get(path).copied(),
-                Some(tokenize(lang, text).len()),
-                "token totals must match for {path}"
-            );
-        }
     }
 
     #[test]

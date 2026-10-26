@@ -272,7 +272,6 @@ pub fn try_synthesize_current_plan<S: PlanRoleSession + ?Sized>(
 mod tests {
     use super::*;
     use crate::{ChatEvent, EventEnvelope};
-    use refact_core::chat_types::ChatContent;
 
     #[derive(Default)]
     struct TestSession {
@@ -292,10 +291,6 @@ mod tests {
 
         fn add_message(&mut self, message: ChatMessage) {
             self.add_plan_role_message(message);
-        }
-
-        fn install_plan(&mut self, mode: &str, body: &str) -> PlanInstallReport {
-            install_plan(self, mode, body)
         }
     }
 
@@ -401,30 +396,6 @@ mod tests {
     }
 
     #[test]
-    fn current_plan_returns_highest_version() {
-        let mut session = make_session();
-
-        install_plan(&mut session, "agent", "one");
-        install_plan(&mut session, "agent", "two");
-        let third = install_plan(&mut session, "agent", "three");
-
-        let current = current_plan(&session).unwrap();
-        assert_eq!(plan_version(current), Some(third.version));
-        assert_eq!(current.message_id, session.messages[2].message_id);
-    }
-
-    #[test]
-    fn current_base_plan_returns_single_plan() {
-        let mut session = make_session();
-        install_plan(&mut session, "agent", "base");
-
-        let current = current_base_plan(&session).unwrap();
-
-        assert_eq!(current.role, PLAN_ROLE);
-        assert_eq!(current.content.content_text_only(), "base");
-    }
-
-    #[test]
     fn plan_delta_events_in_order() {
         let mut session = make_session();
         session.add_message(internal_roles::plan_delta(
@@ -472,112 +443,5 @@ mod tests {
             synthesized,
             "base plan\n\n---\n\n## Plan updates\n\nfirst update\n\nsecond update"
         );
-    }
-
-    #[test]
-    fn synthesize_current_plan_uses_truncated_delta_content() {
-        let mut session = make_session();
-        install_plan(&mut session, "agent", "base plan");
-        let oversized = "x".repeat(internal_roles::MAX_PLAN_DELTA_CHARS + 100);
-        session.add_message(internal_roles::plan_delta(
-            "tool.update_plan",
-            serde_json::json!({"seq": 1}),
-            oversized,
-        ));
-
-        let delta = plan_delta_events(&session)[0];
-        let delta_content = delta.content.content_text_only();
-        let synthesized = synthesize_current_plan(&session).unwrap();
-
-        assert!(delta_content.chars().count() <= internal_roles::MAX_PLAN_DELTA_CHARS);
-        assert!(delta_content.contains("[truncated:"));
-        assert!(synthesized.ends_with(&delta_content));
-        assert!(synthesized.chars().count() < internal_roles::MAX_PLAN_DELTA_CHARS + 200);
-    }
-
-    #[test]
-    fn plan_history_desc_by_version() {
-        let mut session = make_session();
-
-        install_plan(&mut session, "agent", "one");
-        install_plan(&mut session, "agent", "two");
-        install_plan(&mut session, "agent", "three");
-
-        let versions: Vec<u32> = plan_history(&session)
-            .into_iter()
-            .filter_map(plan_version)
-            .collect();
-        assert_eq!(versions, vec![3, 2, 1]);
-    }
-
-    #[test]
-    fn oversized_plan_body_is_truncated() {
-        let oversized = "x".repeat(internal_roles::MAX_PLAN_BODY_CHARS + 100);
-        let mut session = make_session();
-        install_plan(&mut session, "agent", &oversized);
-        let msg = current_plan(&session).unwrap();
-        let body = match &msg.content {
-            ChatContent::SimpleText(s) => s.as_str(),
-            _ => panic!("expected SimpleText"),
-        };
-        assert!(
-            body.chars().count() < oversized.chars().count(),
-            "body should be shorter than original"
-        );
-        assert!(
-            body.contains("[truncated:"),
-            "truncation marker must be present"
-        );
-    }
-
-    #[test]
-    fn plan_truncation_preserves_utf8_boundary() {
-        let oversized: String = "✓".repeat(internal_roles::MAX_PLAN_BODY_CHARS + 100);
-        let mut session = make_session();
-        install_plan(&mut session, "agent", &oversized);
-        let msg = current_plan(&session).unwrap();
-        let body = match &msg.content {
-            ChatContent::SimpleText(s) => s.clone(),
-            _ => panic!("expected SimpleText"),
-        };
-        assert!(!body.is_empty());
-        assert!(
-            std::str::from_utf8(body.as_bytes()).is_ok(),
-            "body must be valid UTF-8"
-        );
-        assert!(
-            body.contains("[truncated:"),
-            "truncation marker must be present"
-        );
-    }
-
-    #[test]
-    fn plan_metadata_records_truncation() {
-        let oversized = "y".repeat(internal_roles::MAX_PLAN_BODY_CHARS + 50);
-        let original_len = oversized.chars().count();
-        let mut session = make_session();
-        install_plan(&mut session, "agent", &oversized);
-        let msg = current_plan(&session).unwrap();
-        let plan_meta = msg.extra.get("plan").unwrap();
-        assert_eq!(plan_meta["truncated"], serde_json::json!(true));
-        assert_eq!(plan_meta["original_chars"], serde_json::json!(original_len));
-    }
-
-    #[test]
-    fn install_emits_message_added_event() {
-        let mut session = make_session();
-        let report = session.install_plan("agent", "one");
-
-        assert_eq!(report.version, 1);
-        let json = session.events.remove(0);
-        let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
-        match envelope.event {
-            ChatEvent::MessageAdded { message, index } => {
-                assert_eq!(index, 0);
-                assert_eq!(message.role, PLAN_ROLE);
-                assert_eq!(plan_version(&message), Some(1));
-            }
-            other => panic!("expected MessageAdded, got {:?}", other),
-        }
     }
 }

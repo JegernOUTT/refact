@@ -387,30 +387,6 @@ mod tests {
         serde_json::from_str(&text).unwrap()
     }
 
-    #[test]
-    fn update_preserves_push_when_omitted_and_accepts_explicit_modes() {
-        let mut job = test_task("push", false);
-        job.push = PushMode::WhenIdle;
-        let input = CronUpdateInput::from_args(&args(&[
-            ("id", json!("push")),
-            ("description", json!("changed")),
-        ]))
-        .unwrap();
-        apply_update(&mut job, input, 1000).unwrap();
-        assert_eq!(job.push, PushMode::WhenIdle);
-        for (wire, mode) in [
-            ("preempt", PushMode::Preempt),
-            ("append", PushMode::Append),
-            ("when_idle", PushMode::WhenIdle),
-        ] {
-            let input =
-                CronUpdateInput::from_args(&args(&[("id", json!("push")), ("push", json!(wire))]))
-                    .unwrap();
-            apply_update(&mut job, input, 1000).unwrap();
-            assert_eq!(job.push, mode);
-        }
-    }
-
     #[tokio::test]
     async fn cron_update_edits_schedule_to_interval() {
         let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());

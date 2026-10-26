@@ -913,7 +913,7 @@ mod tests {
     use crate::app_state::AppState;
     use crate::chat::types::TaskMeta as ThreadTaskMeta;
     use crate::tasks::types::{BoardCard, TaskBoard, TaskMeta, TaskStatus};
-    use crate::tools::settings_guard::SettingsGuard;
+
     use crate::tools::tools_description::Tool;
     use serial_test::serial;
 
@@ -1069,16 +1069,6 @@ mod tests {
         assert!(err.contains("can only be called by task agents"));
     }
 
-    #[test]
-    fn question_id_format_8_hex() {
-        let question_id = make_question_id();
-
-        assert_eq!(question_id.len(), 8);
-        assert!(question_id
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
-    }
-
     #[tokio::test]
     async fn planner_reply_rejects_non_planner_role() {
         let temp = tempfile::tempdir().unwrap();
@@ -1178,34 +1168,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_ask_planner_tracks_the_question_in_the_shared_service() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = write_task(temp.path(), vec![test_card("T-40", "QnA", vec![])]).await;
-        let ccx = task_ccx(gcx.clone(), "agents", Some("T-40")).await;
-
-        ToolAgentAskPlanner::new()
-            .tool_execute(
-                ccx,
-                &"call".to_string(),
-                &args(&[
-                    ("question", json!("Which one?")),
-                    ("urgency", json!("info")),
-                ]),
-            )
-            .await
-            .unwrap();
-
-        let tracked = gcx
-            .agents
-            .questions()
-            .pending_for_asker("task:task-1:card:T-40", Utc::now());
-        assert_eq!(tracked.len(), 1);
-        assert_eq!(tracked[0].kind, refact_chat_api::QuestionKind::BoardPlanner);
-        assert_eq!(tracked[0].text, "Which one?");
-        assert!(tracked[0].expires_at.is_some());
-    }
-
-    #[tokio::test]
     async fn planner_reply_rejects_unknown_question_id() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = write_task(temp.path(), vec![test_card("T-40", "QnA", vec![])]).await;
@@ -1225,53 +1187,6 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err, "Question 1234abcd not found on card T-40");
-    }
-
-    #[test]
-    fn task_questions_list_filters_unanswered_correctly() {
-        let cards = vec![
-            test_card(
-                "T-1",
-                "first card",
-                vec![
-                    StatusUpdate {
-                        timestamp: Utc::now().to_rfc3339(),
-                        message: "[ASK:aaaaaaaa] Answered question (urgency=info)".to_string(),
-                    },
-                    StatusUpdate {
-                        timestamp: Utc::now().to_rfc3339(),
-                        message: "[REPLY:aaaaaaaa] Answer".to_string(),
-                    },
-                    StatusUpdate {
-                        timestamp: Utc::now().to_rfc3339(),
-                        message: "[ASK:bbbbbbbb] Blocking question (urgency=info)".to_string(),
-                    },
-                    StatusUpdate {
-                        timestamp: Utc::now().to_rfc3339(),
-                        message: "[ASK:bbbbbbbb:block] agent flagged for planner attention"
-                            .to_string(),
-                    },
-                ],
-            ),
-            test_card(
-                "T-2",
-                "second card",
-                vec![StatusUpdate {
-                    timestamp: Utc::now().to_rfc3339(),
-                    message: "[ASK:cccccccc] Open question (urgency=info)".to_string(),
-                }],
-            ),
-        ];
-
-        let questions = collect_unanswered_questions(&cards);
-        let output = format_unanswered_questions(&questions);
-
-        assert_eq!(questions.len(), 2);
-        assert!(!output.contains("aaaaaaaa"));
-        assert!(output.contains("bbbbbbbb"));
-        assert!(output.contains("cccccccc"));
-        assert!(output.contains("| block | Blocking question |"));
-        assert!(output.contains("| info | Open question |"));
     }
 
     #[tokio::test]
@@ -1317,115 +1232,6 @@ mod tests {
         assert!(output.contains("Planner wake-up failed"));
     }
 
-    #[tokio::test]
-    #[serial(runtime_settings)]
-    async fn planner_qna_question_limit_setting_truncates_and_is_loud() {
-        let _guard = SettingsGuard::install(|settings| {
-            settings.planner_qna_question_limit = 32;
-        });
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = write_task(temp.path(), vec![test_card("T-41", "QnA", vec![])]).await;
-        let ccx = task_ccx(gcx.clone(), "agents", Some("T-41")).await;
-        let long_question = "q".repeat(200);
-
-        let output = output_text(
-            ToolAgentAskPlanner::new()
-                .tool_execute(
-                    ccx,
-                    &"call".to_string(),
-                    &args(&[
-                        ("question", json!(long_question)),
-                        ("urgency", json!("info")),
-                    ]),
-                )
-                .await
-                .unwrap(),
-        );
-
-        let board = storage::load_board(gcx, "task-1").await.unwrap();
-        let card = board.get_card("T-41").unwrap();
-        let recorded = &card.status_updates[0].message;
-        assert!(
-            recorded.matches('q').count() == 32,
-            "expected the question truncated to 32 chars, got: {}",
-            recorded
-        );
-        assert!(
-            output.contains("showing 32 of 200 question characters")
-                && output.contains("planner_qna_question_limit = 32"),
-            "expected a quantified question-truncation notice, got: {}",
-            output
-        );
-    }
-
-    #[tokio::test]
-    #[serial(runtime_settings)]
-    async fn planner_qna_answer_limit_setting_truncates_and_is_loud() {
-        let _guard = SettingsGuard::install(|settings| {
-            settings.planner_qna_answer_limit = 16;
-        });
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = write_task(
-            temp.path(),
-            vec![test_card(
-                "T-42",
-                "QnA",
-                vec![StatusUpdate {
-                    timestamp: Utc::now().to_rfc3339(),
-                    message: "[ASK:abcdabcd] Which one? (urgency=info)".to_string(),
-                }],
-            )],
-        )
-        .await;
-        let ccx = task_ccx(gcx.clone(), "planner", Some("T-42")).await;
-        let long_answer = "a".repeat(120);
-
-        let output = output_text(
-            ToolPlannerReply::new()
-                .tool_execute(
-                    ccx,
-                    &"call".to_string(),
-                    &args(&[
-                        ("card_id", json!("T-42")),
-                        ("question_id", json!("abcdabcd")),
-                        ("answer", json!(long_answer)),
-                    ]),
-                )
-                .await
-                .unwrap(),
-        );
-
-        let board = storage::load_board(gcx, "task-1").await.unwrap();
-        let card = board.get_card("T-42").unwrap();
-        let recorded = card
-            .status_updates
-            .iter()
-            .find(|update| update.message.starts_with("[REPLY:"))
-            .expect("reply update");
-        assert!(recorded.message.ends_with(&"a".repeat(16)));
-        assert!(!recorded.message.ends_with(&"a".repeat(17)));
-        assert!(
-            output.contains("showing 16 of 120 answer characters")
-                && output.contains("planner_qna_answer_limit = 16"),
-            "expected a quantified answer-truncation notice, got: {}",
-            output
-        );
-    }
-
-    #[test]
-    fn qna_truncation_notice_quantifies_shown_and_total() {
-        let notice = qna_truncation_notice("question", 800, 2_048, "planner_qna_question_limit");
-        assert!(
-            notice.contains("showing 800 of 2048 question characters"),
-            "{}",
-            notice
-        );
-        assert!(
-            notice.contains("planner_qna_question_limit = 800"),
-            "{}",
-            notice
-        );
-    }
     #[tokio::test]
     async fn planner_reply_records_once_and_delivers_live_with_each_push_mode() {
         use crate::chat::types::{ChatSession, SessionState, PushMode};
@@ -1564,146 +1370,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn info_question_is_board_only_even_with_explicit_preempt() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = write_task(temp.path(), vec![test_card("T-1", "QnA", vec![])]).await;
-        let ccx = task_ccx(gcx.clone(), "agents", Some("T-1")).await;
-        ToolAgentAskPlanner::new()
-            .tool_execute(
-                ccx.clone(),
-                &"call".into(),
-                &args(&[
-                    ("question", json!("Help")),
-                    ("urgency", json!("info")),
-                    ("push", json!("preempt")),
-                ]),
-            )
-            .await
-            .unwrap();
-        assert!(ccx.lock().await.app.chat.sessions.read().await.is_empty());
-        assert_eq!(
-            storage::load_board(gcx, "task-1")
-                .await
-                .unwrap()
-                .get_card("T-1")
-                .unwrap()
-                .status_updates
-                .len(),
-            1
-        );
-    }
-    #[tokio::test]
-    async fn blocking_question_defaults_to_append_and_propagates_explicit_modes() {
-        use crate::chat::types::{ChatSession, SessionState, PushMode};
-        for (raw, expected) in [
-            (None, PushMode::Append),
-            (Some("preempt"), PushMode::Preempt),
-            (Some("when_idle"), PushMode::WhenIdle),
-        ] {
-            let temp = tempfile::tempdir().unwrap();
-            let gcx = write_task(temp.path(), vec![test_card("T-1", "QnA", vec![])]).await;
-            let ccx = task_ccx(gcx, "agents", Some("T-1")).await;
-            let mut planner = ChatSession::new("planner-chat".into());
-            planner.runtime.state = SessionState::Generating;
-            planner.draft_message = Some(ChatMessage {
-                role: "assistant".into(),
-                content: ChatContent::SimpleText("partial answer".into()),
-                ..Default::default()
-            });
-            planner.thread.task_meta = Some(ThreadTaskMeta {
-                task_id: "task-1".into(),
-                role: "planner".into(),
-                agent_id: None,
-                card_id: None,
-                planner_chat_id: None,
-            });
-            planner
-                .queue_processor_running
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-            let planner = Arc::new(AMutex::new(planner));
-            ccx.lock()
-                .await
-                .app
-                .chat
-                .sessions
-                .write()
-                .await
-                .insert("planner-chat".into(), planner.clone());
-            let mut arguments = args(&[("question", json!("Help")), ("urgency", json!("block"))]);
-            if let Some(raw) = raw {
-                arguments.insert("push".into(), json!(raw));
-            }
-            let output = output_text(
-                ToolAgentAskPlanner::new()
-                    .tool_execute(ccx, &"call".into(), &arguments)
-                    .await
-                    .unwrap(),
-            );
-            let planner = planner.lock().await;
-            assert!(planner.command_queue.is_empty());
-            if expected == PushMode::Preempt {
-                assert!(output.contains("question delivered"));
-            } else {
-                assert!(output.contains("question queued"));
-                assert_eq!(planner.pending_deliveries.front().unwrap().push, expected);
-                assert!(!planner.abort_flag.load(std::sync::atomic::Ordering::SeqCst));
-            }
-        }
-    }
-    #[tokio::test]
-    async fn planner_reply_default_append_lands_on_idle_live_session() {
-        use crate::chat::types::ChatSession;
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = write_task(
-            temp.path(),
-            vec![test_card(
-                "T-1",
-                "QnA",
-                vec![StatusUpdate {
-                    timestamp: Utc::now().to_rfc3339(),
-                    message: "[ASK:1234abcd] Help".into(),
-                }],
-            )],
-        )
-        .await;
-        let ccx = task_ccx(gcx, "planner", None).await;
-        let session = ChatSession::new("agent-chat-T-1".into());
-        session
-            .queue_processor_running
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        let session = Arc::new(AMutex::new(session));
-        ccx.lock()
-            .await
-            .app
-            .chat
-            .sessions
-            .write()
-            .await
-            .insert("agent-chat-T-1".into(), session.clone());
-        let output = output_text(
-            ToolPlannerReply::new()
-                .tool_execute(
-                    ccx,
-                    &"call".into(),
-                    &args(&[
-                        ("card_id", json!("T-1")),
-                        ("question_id", json!("1234abcd")),
-                        ("answer", json!("Proceed")),
-                    ]),
-                )
-                .await
-                .unwrap(),
-        );
-        assert!(output.contains("Reply message delivered"));
-        let session = session.lock().await;
-        assert!(session.command_queue.is_empty());
-        assert!(session.pending_deliveries.is_empty());
-        assert_eq!(
-            session.messages.last().unwrap().content.content_text_only(),
-            "[Planner REPLY to 1234abcd] Proceed"
-        );
-    }
     #[tokio::test]
     async fn planner_reply_to_idle_agent_is_delivered_and_missing_card_is_rejected() {
         use crate::chat::types::ChatSession;

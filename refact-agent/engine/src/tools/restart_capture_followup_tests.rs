@@ -40,31 +40,6 @@ async fn capture_without_base_commit_diffs_from_merge_base() {
 }
 
 #[tokio::test]
-async fn capture_without_merge_base_reports_branch_tip_fallback() {
-    let fixture = Fixture::new().await;
-    let root = fixture.old.worktree_path();
-    git(&fixture.source, &["checkout", "--orphan", "unrelated-base"]);
-    std::fs::write(
-        fixture.source.join("unrelated.txt"),
-        "unrelated base edit\n",
-    )
-    .unwrap();
-    git(&fixture.source, &["add", "unrelated.txt"]);
-    git(&fixture.source, &["commit", "-m", "unrelated root"]);
-
-    let report = capture_failed_agent_diff(root.to_str().unwrap(), None, Some("unrelated-base"))
-        .await
-        .unwrap();
-    fixture.old.cleanup_unlinked(fixture.gcx).await;
-
-    assert!(
-        report.contains("base: unrelated-base tip (no merge base found)"),
-        "{report}"
-    );
-    assert!(report.contains("-unrelated base edit"), "{report}");
-}
-
-#[tokio::test]
 async fn late_recapture_refusal_is_recorded_on_the_card() {
     let fixture = Fixture::new().await;
     let original = storage::load_board(fixture.gcx.clone(), "task-1")

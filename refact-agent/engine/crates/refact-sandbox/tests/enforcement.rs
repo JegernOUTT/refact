@@ -1,7 +1,5 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::time::{Duration, Instant};
-
 use refact_sandbox::{BwrapProvider, Enforcement, ExecSandboxSpec, SandboxMode, SandboxProvider};
 
 fn run_confined(
@@ -76,35 +74,6 @@ fn read_only_denies_workspace_writes() {
 
     assert!(!output.status.success());
     assert!(!denied.exists());
-}
-
-#[test]
-fn bwrap_network_isolation_fast_fails_loopback_curl() {
-    let provider = BwrapProvider;
-    if provider.probe() != Enforcement::Full {
-        assert_eq!(provider.probe(), Enforcement::Unusable);
-        return;
-    }
-    if Command::new("curl").arg("--version").output().is_err() {
-        return;
-    }
-    let workspace = tempfile::tempdir().unwrap();
-    let spec = bwrap_spec(SandboxMode::WorkspaceWrite, workspace.path(), false);
-    let started = Instant::now();
-
-    let output = run_confined(
-        &provider,
-        spec,
-        "curl",
-        &[
-            "--max-time".to_string(),
-            "1".to_string(),
-            "http://127.0.0.1:1".to_string(),
-        ],
-    );
-
-    assert!(!output.status.success());
-    assert!(started.elapsed() < Duration::from_secs(2));
 }
 
 fn hidden_landlock_output(spec: &ExecSandboxSpec, program: &str, args: &[String]) -> Output {

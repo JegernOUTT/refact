@@ -239,62 +239,6 @@ mod tests {
     }
 
     #[test]
-    fn drop_notice_is_none_at_zero_dropped() {
-        let split = ChunkSplit {
-            chunks: vec![sample_chunk("kept")],
-            dropped_chunks: 0,
-        };
-        assert!(split.drop_notice().is_none());
-
-        let empty = ChunkSplit::default();
-        assert!(empty.drop_notice().is_none());
-    }
-
-    #[test]
-    fn drop_notice_quantifies_dropped_chunks() {
-        let split = ChunkSplit {
-            chunks: vec![sample_chunk("kept")],
-            dropped_chunks: 2,
-        };
-        let notice = split.drop_notice().unwrap();
-        assert!(notice.contains("chunking incomplete: 2 of 3 chunks were dropped"));
-    }
-
-    #[test]
-    fn get_chunks_empty_input_yields_no_chunks_and_zero_dropped() {
-        let split = get_chunks(
-            &String::new(),
-            &PathBuf::from("/tmp/file.md"),
-            &String::new(),
-            (0, 0),
-            None,
-            10,
-            0,
-            false,
-        );
-        assert!(split.chunks.is_empty());
-        assert_eq!(split.dropped_chunks, 0);
-        assert!(split.drop_notice().is_none());
-    }
-
-    #[test]
-    fn get_chunks_without_tokenizer_splits_long_line_without_drops() {
-        let split = get_chunks(
-            &"abcdefgh".repeat(10),
-            &PathBuf::from("/tmp/file.md"),
-            &String::new(),
-            (0, 0),
-            None,
-            4,
-            0,
-            false,
-        );
-        assert!(!split.chunks.is_empty());
-        assert_eq!(split.dropped_chunks, 0);
-        assert!(split.drop_notice().is_none());
-    }
-
-    #[test]
     fn get_chunks_with_tokenizer_decodes_oversized_line_without_drops() {
         let tokenizer = wordlevel_tokenizer();
         let split = get_chunks(

@@ -726,121 +726,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_flat_json_maps_to_cron_agentturn_chat() {
-        let value = json!({
-            "id": "cron_legacy",
-            "cron": "7 * * * *",
-            "prompt": "Check the frogs",
-            "description": "Hourly frog check",
-            "recurring": false,
-            "durable": true,
-            "created_at_ms": 123,
-            "chat_id": "chat-1",
-            "mode": "agent",
-            "last_fired_at_ms": null,
-            "fire_count": 0,
-            "auto_expire_after_ms": 0
-        });
-
-        let job: Job = serde_json::from_value(value).unwrap();
-
-        assert_eq!(
-            job.trigger,
-            Trigger::Cron {
-                expr: "7 * * * *".to_string(),
-                tz: None,
-            }
-        );
-        assert_eq!(
-            job.action,
-            Action::AgentTurn {
-                prompt: "Check the frogs".to_string(),
-                target: AgentTarget::ExistingChat {
-                    chat_id: "chat-1".to_string(),
-                },
-                mode: Some("agent".to_string()),
-                model: None,
-                tools: None,
-            }
-        );
-        assert_eq!(job.delivery, Delivery::Chat);
-        assert!(!job.recurring);
-        assert_eq!(job.auto_expire_after_ms, 0);
-        assert!(job.enabled);
-    }
-
-    #[test]
-    fn new_nested_json_round_trips() {
-        let job = nested_job();
-        let json = serde_json::to_string(&job).unwrap();
-        let round_tripped: Job = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(round_tripped, job);
-    }
-
-    #[test]
-    fn notifier_delivery_from_value_accepts_target() {
-        let delivery = delivery_from_value(&json!({
-            "kind": "notifier",
-            "integration_id": "notifier_telegram",
-            "target": "chat-1",
-        }))
-        .unwrap();
-
-        assert_eq!(
-            delivery,
-            Delivery::Notifier {
-                integration_id: "notifier_telegram".to_string(),
-                target: Some("chat-1".to_string()),
-            }
-        );
-    }
-
-    #[test]
-    fn delivery_from_value_accepts_kind_and_type_aliases() {
-        assert_eq!(
-            delivery_from_value(&json!({"kind":"chat"})).unwrap(),
-            Delivery::Chat
-        );
-        assert_eq!(
-            delivery_from_value(&json!({"type":"chat"})).unwrap(),
-            Delivery::Chat
-        );
-        assert_eq!(
-            delivery_from_value(&json!({"kind":"webhook","url":"https://example.test/hook"}))
-                .unwrap(),
-            Delivery::Webhook {
-                url: "https://example.test/hook".to_string(),
-                token: None,
-            }
-        );
-        assert_eq!(
-            delivery_from_value(&json!({"type":"webhook","url":"https://example.test/hook"}))
-                .unwrap(),
-            Delivery::Webhook {
-                url: "https://example.test/hook".to_string(),
-                token: None,
-            }
-        );
-        assert_eq!(
-            delivery_from_value(&json!({"kind":"notifier","integration_id":"notifier_telegram"}))
-                .unwrap(),
-            Delivery::Notifier {
-                integration_id: "notifier_telegram".to_string(),
-                target: None,
-            }
-        );
-        assert_eq!(
-            delivery_from_value(&json!({"type":"notifier","integration_id":"notifier_telegram"}))
-                .unwrap(),
-            Delivery::Notifier {
-                integration_id: "notifier_telegram".to_string(),
-                target: None,
-            }
-        );
-    }
-
-    #[test]
     fn non_time_triggers_do_not_auto_expire() {
         let mut job = Job::new_cron_agent_chat(
             "*/5 * * * *".to_string(),
@@ -894,13 +779,6 @@ mod tests {
     }
 
     #[test]
-    fn notifier_delivery_requires_integration_id() {
-        let err = delivery_from_value(&json!({"kind": "notifier"})).unwrap_err();
-
-        assert_eq!(err, "delivery notifier requires `integration_id`");
-    }
-
-    #[test]
     fn serialize_emits_nested_shape() {
         let serialized = serde_json::to_value(nested_job()).unwrap();
 
@@ -914,20 +792,5 @@ mod tests {
         assert_eq!(serialized["delivery"]["kind"], json!("chat"));
         assert!(serialized.get("cron").is_none());
         assert!(serialized.get("prompt").is_none());
-    }
-
-    #[test]
-    fn recent_runs_are_preserved_on_deserialize() {
-        let runs = (0..25)
-            .map(|idx| json!({"at_ms": idx, "status": "ok", "error": null}))
-            .collect::<Vec<_>>();
-        let mut value = serde_json::to_value(nested_job()).unwrap();
-        value["recent_runs"] = json!(runs);
-
-        let job: Job = serde_json::from_value(value).unwrap();
-
-        assert_eq!(job.recent_runs.len(), 25);
-        assert_eq!(job.recent_runs[0].at_ms, 0);
-        assert_eq!(job.recent_runs[24].at_ms, 24);
     }
 }

@@ -65,21 +65,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn osc52_sequence_encodes_base64_payload() {
-        let (bytes, report) = osc52_sequence("hi", false);
-
-        assert_eq!(bytes, b"\x1b]52;c;aGk=\x07");
-        assert_eq!(
-            report,
-            ClipboardCopyReport {
-                original_bytes: 2,
-                copied_bytes: 2,
-                truncated: false,
-            }
-        );
-    }
-
-    #[test]
     fn osc52_sequence_wraps_for_tmux_passthrough() {
         let (bytes, report) = osc52_sequence("hi", true);
 

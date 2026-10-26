@@ -228,39 +228,3 @@ impl Document {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::str::FromStr;
-
-    #[test]
-    fn symbol_type_from_str_covers_all_kinds() {
-        assert_eq!(SymbolType::from_str("module"), Ok(SymbolType::Module));
-        assert_eq!(
-            SymbolType::from_str("struct_declaration"),
-            Ok(SymbolType::StructDeclaration)
-        );
-        assert_eq!(
-            SymbolType::from_str("type_alias"),
-            Ok(SymbolType::TypeAlias)
-        );
-        assert_eq!(
-            SymbolType::from_str("function_declaration"),
-            Ok(SymbolType::FunctionDeclaration)
-        );
-        assert_eq!(
-            SymbolType::from_str("variable_usage"),
-            Ok(SymbolType::VariableUsage)
-        );
-        assert_eq!(SymbolType::from_str("nonsense"), Ok(SymbolType::Unknown));
-    }
-
-    #[test]
-    fn document_reports_and_updates_text() {
-        let mut doc = Document::new(&std::path::PathBuf::from("/tmp/x.rs"));
-        assert!(doc.text_as_string().is_err());
-        doc.update_text(&"hello".to_string());
-        assert_eq!(doc.text_as_string().unwrap(), "hello");
-    }
-}

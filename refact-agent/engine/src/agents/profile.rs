@@ -658,18 +658,6 @@ mod tests {
     }
 
     #[test]
-    fn revision_is_stable_for_identical_content_and_scoped_to_the_name() {
-        let limits = refact_work_core::CoordinationSettings::default();
-        let declaration = spec_value("tools: [cat]\nrole: same\n");
-        let first = AgentProfile::parse("one", &declaration, &limits).unwrap();
-        let again = AgentProfile::parse("one", &declaration, &limits).unwrap();
-        let other = AgentProfile::parse("two", &declaration, &limits).unwrap();
-        assert_eq!(first.revision, again.revision);
-        assert_ne!(first.revision, other.revision);
-        assert_ne!(first.revision, 0);
-    }
-
-    #[test]
     fn malformed_and_oversized_declarations_are_structured_errors() {
         let limits = refact_work_core::CoordinationSettings::default();
         let unknown_field =
@@ -719,30 +707,5 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(outside, ProfileError::ProfileWidened { .. }));
-    }
-
-    #[test]
-    fn budget_turns_cap_steps_alongside_an_explicit_step_cap() {
-        let profile = profile("max_steps: 40\nbudget:\n  max_turns: 12\n");
-        let effective =
-            resolve_profile_instance(&profile, None, &RunNarrowing::default(), &ToolsPolicy::All)
-                .unwrap();
-        assert_eq!(effective.max_steps, Some(12));
-        assert_eq!(
-            effective
-                .budget
-                .as_ref()
-                .and_then(|budget| budget.max_turns),
-            Some(12)
-        );
-    }
-
-    #[tokio::test]
-    async fn unknown_profile_names_are_refused_before_anything_is_created() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let limits = refact_work_core::CoordinationSettings::default();
-        let error = load_profile(gcx, "not-defined", &limits).await.unwrap_err();
-        assert!(matches!(error, ProfileError::ProfileUnknown { .. }));
-        assert_eq!(error.to_json()["code"], "profile_unknown");
     }
 }

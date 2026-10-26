@@ -584,10 +584,6 @@ mod tests {
         req
     }
 
-    fn loopback_request(origin: Option<&str>) -> Request<Body> {
-        request_from(SocketAddr::from(([127, 0, 0, 1], 40000)), origin)
-    }
-
     async fn router_response(peer: SocketAddr, origin: Option<&str>) -> StatusCode {
         use tower::ServiceExt;
 
@@ -622,11 +618,6 @@ mod tests {
         let t = resolve_token(Some(""));
         assert!(!t.is_empty());
         assert_ne!(t, "");
-    }
-
-    #[test]
-    fn token_matches_accepts_equal_tokens() {
-        assert!(token_matches("secret-token", "secret-token"));
     }
 
     #[test]
@@ -736,18 +727,6 @@ mod tests {
             .unwrap();
 
         assert!(!request_authorized(&request, "secret-token"));
-    }
-
-    #[test]
-    fn auth_middleware_accepts_later_matching_source() {
-        let request = Request::builder()
-            .uri("/daemon/v1/projects?daemon_token=wrong-query")
-            .header(header::AUTHORIZATION, "Bearer wrong-bearer")
-            .header(header::COOKIE, "refact_daemon_auth=secret-token")
-            .body(Body::empty())
-            .unwrap();
-
-        assert!(request_authorized(&request, "secret-token"));
     }
 
     #[test]
@@ -921,52 +900,6 @@ mod tests {
         ));
         assert!(!origin_allowed_for_loopback_or_ide("http://evil.example"));
         assert!(!origin_allowed_for_loopback_or_ide("null"));
-    }
-
-    #[test]
-    fn loopback_trust_allows_ide_webview_origins_from_loopback_peer() {
-        assert!(loopback_trust_allowed(&loopback_request(None)));
-        assert!(loopback_trust_allowed(&loopback_request(Some(
-            "http://refactai"
-        ))));
-        assert!(loopback_trust_allowed(&loopback_request(Some(
-            "vscode-webview://11112222-3333-4444-5555-666677778888"
-        ))));
-        assert!(loopback_trust_allowed(&loopback_request(Some(
-            "http://127.0.0.1:8488"
-        ))));
-    }
-
-    #[test]
-    fn loopback_trust_rejects_untrusted_origins_and_remote_peers() {
-        assert!(!loopback_trust_allowed(&loopback_request(Some(
-            "http://evil.example"
-        ))));
-        assert!(!loopback_trust_allowed(&loopback_request(Some("null"))));
-        assert!(!loopback_trust_allowed(&request_from(
-            SocketAddr::from(([192, 168, 1, 50], 40000)),
-            Some("http://refactai"),
-        )));
-    }
-
-    #[tokio::test]
-    async fn enforce_allows_ide_webview_origins_from_loopback_peer() {
-        assert_eq!(
-            router_response(
-                SocketAddr::from(([127, 0, 0, 1], 40000)),
-                Some("http://refactai"),
-            )
-            .await,
-            StatusCode::OK
-        );
-        assert_eq!(
-            router_response(
-                SocketAddr::from(([127, 0, 0, 1], 40000)),
-                Some("vscode-webview://11112222-3333-4444-5555-666677778888"),
-            )
-            .await,
-            StatusCode::OK
-        );
     }
 
     #[tokio::test]

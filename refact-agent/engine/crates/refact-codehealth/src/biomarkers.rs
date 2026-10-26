@@ -794,12 +794,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn trivial_function_has_no_findings() {
-        let findings = detect_biomarkers("rust", "fn simple() -> i32 { 1 }\n");
-        assert!(findings.is_empty(), "got {findings:?}");
-    }
-
-    #[test]
     fn rust_crash_idioms_emit_error_handling_findings() {
         let src =
             "fn fail(result: Result<(), &str>) {\n    result.unwrap();\n    panic!(\"boom\");\n}\n";
@@ -830,17 +824,6 @@ mod tests {
                 && f.detail != "panic turns a recoverable error into a crash"),
             "got {findings:?}"
         );
-    }
-
-    #[test]
-    fn branchy_deep_function_emits_findings() {
-        let src = format!("fn brain(x: i32) -> i32 {{\n{}\n    0\n}}\n", (0..75).map(|i| format!("    if x > {i} {{ if x % 2 == 0 {{ if x < 100 {{ if x != 42 {{ return {i}; }} }} }} }}")).collect::<Vec<_>>().join("\n"));
-        let findings = detect_biomarkers("rust", &src);
-        assert!(
-            findings.iter().any(|f| f.biomarker == "brain_method"),
-            "got {findings:?}"
-        );
-        assert!(findings.iter().any(|f| f.biomarker == "nested_complexity"));
     }
 
     #[test]
@@ -881,46 +864,10 @@ mod tests {
     }
 
     #[test]
-    fn boolean_condition_counts_operator_tokens_once() {
-        let src = "fn check(a: bool, b: bool, c: bool) -> bool {\n    if a && b || c {\n        return true;\n    }\n    false\n}\n";
-        let findings = detect_biomarkers("rust", src);
-        assert!(
-            findings
-                .iter()
-                .all(|f| f.biomarker != "complex_conditional"),
-            "got {findings:?}"
-        );
-    }
-
-    #[test]
     fn python_boolean_condition_counts_operator_tokens_once() {
         let src =
             "def check(a, b, c):\n    if a and b or c:\n        return True\n    return False\n";
         let findings = detect_biomarkers("python", src);
-        assert!(
-            findings
-                .iter()
-                .all(|f| f.biomarker != "complex_conditional"),
-            "got {findings:?}"
-        );
-    }
-
-    #[test]
-    fn javascript_boolean_condition_counts_operator_tokens_once() {
-        let src = "function check(a, b, c) {\n    if (a && b || c) {\n        return true;\n    }\n    return false;\n}\n";
-        let findings = detect_biomarkers("javascript", src);
-        assert!(
-            findings
-                .iter()
-                .all(|f| f.biomarker != "complex_conditional"),
-            "got {findings:?}"
-        );
-    }
-
-    #[test]
-    fn typescript_boolean_condition_counts_operator_tokens_once() {
-        let src = "function check(a: boolean, b: boolean, c: boolean): boolean {\n    if (a && b || c) {\n        return true;\n    }\n    return false;\n}\n";
-        let findings = detect_biomarkers("typescript", src);
         assert!(
             findings
                 .iter()

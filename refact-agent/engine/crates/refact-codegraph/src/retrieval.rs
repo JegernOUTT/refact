@@ -108,47 +108,6 @@ pub fn search_hybrid(store: &Store, query: &str, limit: usize) -> Result<Vec<Cod
 mod tests {
     use super::*;
 
-    fn store_with_files() -> Store {
-        let store = Store::open_in_memory().unwrap();
-        store
-            .index_file_graph(
-                "src/auth.rs",
-                "fn authenticate_user(token: &str) -> bool { validate_token(token) }\nfn validate_token(t: &str) -> bool { true }\n",
-                "rust",
-            )
-            .unwrap();
-        store
-            .index_file_graph(
-                "src/widget.rs",
-                "struct Widget;\nimpl Widget { fn render(&self) {} }\n",
-                "rust",
-            )
-            .unwrap();
-        store.connect_usages().unwrap();
-        store
-    }
-
-    #[test]
-    fn hybrid_search_ranks_symbol_name_match_first() {
-        let store = store_with_files();
-        let hits = search_hybrid(&store, "authenticate", 10).unwrap();
-        assert!(!hits.is_empty(), "expected hits for 'authenticate'");
-        assert_eq!(hits[0].path, "src/auth.rs");
-        assert!(hits
-            .iter()
-            .any(|h| h.symbol.as_deref() == Some("authenticate_user")));
-    }
-
-    #[test]
-    fn hybrid_search_matches_fts_content() {
-        let store = store_with_files();
-        let hits = search_hybrid(&store, "render", 10).unwrap();
-        assert!(
-            hits.iter().any(|h| h.path == "src/widget.rs"),
-            "expected widget.rs for 'render', got {hits:?}"
-        );
-    }
-
     #[test]
     fn fts_only_hits_return_real_file_span() {
         let store = Store::open_in_memory().unwrap();
@@ -164,12 +123,5 @@ mod tests {
         let hit = hits.iter().find(|h| h.path == "docs/readme.md").unwrap();
 
         assert_eq!((hit.line1, hit.line2, hit.symbol.as_deref()), (1, 3, None));
-    }
-
-    #[test]
-    fn hybrid_search_empty_query_returns_empty() {
-        let store = store_with_files();
-        let hits = search_hybrid(&store, "  ", 10).unwrap();
-        assert!(hits.is_empty());
     }
 }

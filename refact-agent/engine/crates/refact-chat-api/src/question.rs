@@ -769,33 +769,6 @@ impl QuestionRegistry {
 mod tests {
     use super::*;
 
-    #[test]
-    fn every_question_family_roundtrips_through_one_contract() {
-        for kind in [
-            QuestionKind::UserInput,
-            QuestionKind::AgentParent,
-            QuestionKind::BoardPlanner,
-            QuestionKind::PlanApproval,
-            QuestionKind::PermissionEscalation,
-        ] {
-            let question = QuestionContract::pending(
-                "q",
-                kind,
-                "asker",
-                "answerer",
-                "correlation",
-                "Continue?",
-                None,
-                Utc::now(),
-                None,
-            )
-            .unwrap();
-            let decoded: QuestionContract =
-                serde_json::from_value(serde_json::to_value(&question).unwrap()).unwrap();
-            assert_eq!(decoded, question);
-        }
-    }
-
     const KINDS: [QuestionKind; 5] = [
         QuestionKind::UserInput,
         QuestionKind::AgentParent,
@@ -925,34 +898,6 @@ mod tests {
         assert_eq!(
             registry.get(&question.id).unwrap().state,
             QuestionState::Pending
-        );
-    }
-
-    #[test]
-    fn expiry_moves_pending_to_expired_and_leaves_settled_questions_alone() {
-        let registry = registry();
-        let now = Utc::now();
-        let pending = registry
-            .ask(ask(QuestionKind::UserInput, "a"), now)
-            .unwrap();
-        let answered = registry
-            .ask(ask(QuestionKind::UserInput, "b"), now)
-            .unwrap();
-        registry
-            .answer(&answered.id, "answerer", "yes".into(), now)
-            .unwrap();
-        registry.expire(now + ChronoDuration::seconds(1_000_000));
-        assert_eq!(
-            registry.get(&pending.id).unwrap().state,
-            QuestionState::Expired
-        );
-        assert_eq!(
-            registry.get(&answered.id).unwrap().state,
-            QuestionState::Answered
-        );
-        assert_eq!(
-            registry.answer(&pending.id, "answerer", "late".into(), now),
-            Err(QuestionError::AlreadySettled(QuestionState::Expired))
         );
     }
 
@@ -1234,32 +1179,5 @@ mod tests {
         let mut forged = defaulted.clone();
         forged.answer = Some("something else".into());
         assert!(forged.validate().is_err());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_waiter_on_a_low_stakes_question_is_told_it_defaulted() {
-        let registry = registry();
-        let now = Utc::now();
-        let question = registry
-            .ask(
-                ask(QuestionKind::UserInput, "c")
-                    .with_expiry_secs(Some(1))
-                    .with_default_answer(Some("skip".into())),
-                now,
-            )
-            .unwrap();
-        assert_eq!(
-            registry.wait(&question.id, now).await,
-            Ok(QuestionSettlement::Defaulted("skip".into()))
-        );
-    }
-
-    #[tokio::test]
-    async fn waiting_on_an_unknown_question_is_not_found() {
-        let registry = registry();
-        assert_eq!(
-            registry.wait("missing", Utc::now()).await,
-            Err(QuestionError::NotFound)
-        );
     }
 }

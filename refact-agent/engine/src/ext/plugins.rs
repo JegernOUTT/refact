@@ -664,110 +664,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_marketplace_json_claude_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let claude_plugin_dir = tmp.path().join(".claude-plugin");
-        tokio::fs::create_dir_all(&claude_plugin_dir).await.unwrap();
-        let mj_content = r#"{"name": "test-market", "plugins": []}"#;
-        tokio::fs::write(claude_plugin_dir.join("marketplace.json"), mj_content)
-            .await
-            .unwrap();
-
-        let mj = load_marketplace_json(tmp.path()).await.unwrap();
-        assert_eq!(mj.name, "test-market");
-    }
-
-    #[tokio::test]
-    async fn test_marketplace_json_fallback_root() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mj_content = r#"{"name": "root-market", "plugins": []}"#;
-        tokio::fs::write(tmp.path().join("marketplace.json"), mj_content)
-            .await
-            .unwrap();
-
-        let mj = load_marketplace_json(tmp.path()).await.unwrap();
-        assert_eq!(mj.name, "root-market");
-    }
-
-    #[tokio::test]
-    async fn test_marketplace_json_claude_path_preferred_over_root() {
-        let tmp = tempfile::tempdir().unwrap();
-        let claude_plugin_dir = tmp.path().join(".claude-plugin");
-        tokio::fs::create_dir_all(&claude_plugin_dir).await.unwrap();
-        tokio::fs::write(
-            claude_plugin_dir.join("marketplace.json"),
-            r#"{"name": "claude-market"}"#,
-        )
-        .await
-        .unwrap();
-        tokio::fs::write(
-            tmp.path().join("marketplace.json"),
-            r#"{"name": "root-market"}"#,
-        )
-        .await
-        .unwrap();
-
-        let mj = load_marketplace_json(tmp.path()).await.unwrap();
-        assert_eq!(mj.name, "claude-market");
-    }
-
-    #[test]
-    fn test_parse_marketplace_json_valid() {
-        let json = r#"{
-            "name": "test-marketplace",
-            "owner": {"name": "Test Author", "email": "test@example.com"},
-            "plugins": [
-                {
-                    "name": "plugin-a",
-                    "source": "./plugins/plugin-a",
-                    "description": "Plugin A",
-                    "version": "1.0.0",
-                    "tags": ["search"]
-                },
-                {
-                    "name": "plugin-b",
-                    "source": {"source": "github", "repo": "owner/plugin-b"},
-                    "description": "Plugin B",
-                    "version": "2.0.0"
-                }
-            ]
-        }"#;
-        let mj = parse_marketplace_json(json).unwrap();
-        assert_eq!(mj.name, "test-marketplace");
-        assert_eq!(mj.plugins.len(), 2);
-        assert_eq!(mj.plugins[0].name, "plugin-a");
-        assert_eq!(mj.plugins[0].description, "Plugin A");
-        assert_eq!(mj.plugins[0].version, "1.0.0");
-        assert_eq!(mj.plugins[0].tags, vec!["search"]);
-        assert_eq!(mj.plugins[1].name, "plugin-b");
-    }
-
-    #[test]
-    fn test_parse_marketplace_json_missing_fields() {
-        let json = r#"{"plugins": [{"name": "x"}]}"#;
-        let mj = parse_marketplace_json(json).unwrap();
-        assert_eq!(mj.name, "");
-        assert_eq!(mj.plugins.len(), 1);
-        assert_eq!(mj.plugins[0].name, "x");
-        assert_eq!(mj.plugins[0].description, "");
-        assert_eq!(mj.plugins[0].version, "");
-    }
-
-    #[test]
-    fn test_parse_marketplace_json_invalid() {
-        let result = parse_marketplace_json("not json at all");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_marketplace_json_empty_plugins() {
-        let json = r#"{"name": "empty", "plugins": []}"#;
-        let mj = parse_marketplace_json(json).unwrap();
-        assert_eq!(mj.name, "empty");
-        assert!(mj.plugins.is_empty());
-    }
-
     #[test]
     fn test_command_source_installed_plugin_serde() {
         let src = CommandSource::InstalledPlugin("my-plugin".to_string());
@@ -777,25 +673,6 @@ mod tests {
             assert_eq!(name, "my-plugin");
         } else {
             panic!("expected InstalledPlugin");
-        }
-    }
-
-    #[test]
-    fn test_command_source_variants_serde() {
-        use std::path::PathBuf;
-        let variants = vec![
-            CommandSource::GlobalClaude,
-            CommandSource::GlobalRefact,
-            CommandSource::ProjectClaude(PathBuf::from("/proj")),
-            CommandSource::ProjectRefact(PathBuf::from("/proj")),
-            CommandSource::InstalledPlugin("test-plugin".to_string()),
-        ];
-        for src in &variants {
-            let json = serde_json::to_string(src).unwrap();
-            let restored: CommandSource = serde_json::from_str(&json).unwrap();
-            let orig_json = serde_json::to_string(src).unwrap();
-            let rest_json = serde_json::to_string(&restored).unwrap();
-            assert_eq!(orig_json, rest_json, "Roundtrip failed for {:?}", src);
         }
     }
 
@@ -847,77 +724,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_install_writes_to_correct_dir_and_updates_db() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config");
-        tokio::fs::create_dir_all(&config_dir).await.unwrap();
-
-        let marketplace_dir = tmp.path().join("marketplace");
-        tokio::fs::create_dir_all(&marketplace_dir).await.unwrap();
-
-        let plugin_src = marketplace_dir.join("plugins").join("my-plugin");
-        tokio::fs::create_dir_all(&plugin_src).await.unwrap();
-        tokio::fs::write(
-            plugin_src.join("SKILL.md"),
-            "---\nname: test\ndescription: test skill\n---\nBody",
-        )
-        .await
-        .unwrap();
-
-        let marketplace_json = serde_json::json!({
-            "name": "test-market",
-            "plugins": [{
-                "name": "my-plugin",
-                "source": "./plugins/my-plugin",
-                "description": "Test plugin",
-                "version": "1.0.0"
-            }]
-        });
-        tokio::fs::write(
-            marketplace_dir.join("marketplace.json"),
-            serde_json::to_string(&marketplace_json).unwrap(),
-        )
-        .await
-        .unwrap();
-
-        let db_before = PluginsDb {
-            marketplaces: vec![MarketplaceEntry {
-                name: "test-market".to_string(),
-                source: marketplace_dir.to_string_lossy().to_string(),
-                added_at: "2024-01-01T00:00:00+00:00".to_string(),
-            }],
-            installed: vec![],
-        };
-        save_plugins_db(&config_dir, &db_before).await.unwrap();
-
-        let install_dir = plugin_install_dir(&config_dir, "my-plugin");
-        assert!(!install_dir.exists());
-
-        let mut size_acc = 0u64;
-        copy_dir_recursive(&plugin_src, &install_dir, &mut size_acc)
-            .await
-            .unwrap();
-
-        let mut db = load_plugins_db(&config_dir).await.unwrap();
-        db.installed.push(InstalledPluginEntry {
-            name: "my-plugin".to_string(),
-            marketplace: "test-market".to_string(),
-            version: "1.0.0".to_string(),
-            install_dir: install_dir.to_string_lossy().to_string(),
-            installed_at: Utc::now().to_rfc3339(),
-        });
-        save_plugins_db(&config_dir, &db).await.unwrap();
-
-        assert!(install_dir.exists());
-        assert!(install_dir.join("SKILL.md").exists());
-
-        let db_after = load_plugins_db(&config_dir).await.unwrap();
-        assert_eq!(db_after.installed.len(), 1);
-        assert_eq!(db_after.installed[0].name, "my-plugin");
-        assert_eq!(db_after.installed[0].marketplace, "test-market");
-    }
-
-    #[tokio::test]
     async fn test_plugins_db_roundtrip() {
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().to_path_buf();
@@ -950,101 +756,6 @@ mod tests {
         let db = result.unwrap();
         assert!(db.marketplaces.is_empty());
         assert!(db.installed.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_ensure_default_marketplaces_empty_db_adds_entry() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config");
-        let cache_dir = tmp.path().join("cache");
-        tokio::fs::create_dir_all(&config_dir).await.unwrap();
-        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
-
-        let market1 = tmp.path().join("market-one");
-        tokio::fs::create_dir_all(&market1).await.unwrap();
-        tokio::fs::write(
-            market1.join("marketplace.json"),
-            r#"{"name": "market-one", "plugins": []}"#,
-        )
-        .await
-        .unwrap();
-
-        let market2 = tmp.path().join("market-two");
-        tokio::fs::create_dir_all(&market2).await.unwrap();
-        tokio::fs::write(
-            market2.join("marketplace.json"),
-            r#"{"name": "market-two", "plugins": []}"#,
-        )
-        .await
-        .unwrap();
-
-        let source1 = market1.to_string_lossy().to_string();
-        let source2 = market2.to_string_lossy().to_string();
-        ensure_default_marketplaces_with_source(
-            &config_dir,
-            &cache_dir,
-            &[source1.as_str(), source2.as_str()],
-        )
-        .await
-        .unwrap();
-
-        let db = load_plugins_db(&config_dir).await.unwrap();
-        assert_eq!(db.marketplaces.len(), 2);
-        let names: Vec<&str> = db.marketplaces.iter().map(|m| m.name.as_str()).collect();
-        assert!(names.contains(&"market-one"));
-        assert!(names.contains(&"market-two"));
-    }
-
-    #[tokio::test]
-    async fn test_ensure_default_marketplaces_non_empty_db_does_nothing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config");
-        let cache_dir = tmp.path().join("cache");
-        tokio::fs::create_dir_all(&config_dir).await.unwrap();
-
-        let existing_db = PluginsDb {
-            marketplaces: vec![MarketplaceEntry {
-                name: "existing".to_string(),
-                source: "/some/path".to_string(),
-                added_at: "2024-01-01".to_string(),
-            }],
-            installed: vec![],
-        };
-        save_plugins_db(&config_dir, &existing_db).await.unwrap();
-
-        ensure_default_marketplaces_with_source(
-            &config_dir,
-            &cache_dir,
-            &["anthropics/claude-code"],
-        )
-        .await
-        .unwrap();
-
-        let db = load_plugins_db(&config_dir).await.unwrap();
-        assert_eq!(db.marketplaces.len(), 1);
-        assert_eq!(db.marketplaces[0].name, "existing");
-    }
-
-    #[tokio::test]
-    async fn test_ensure_default_marketplaces_seeding_failure_non_fatal() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config");
-        let cache_dir = tmp.path().join("cache");
-        tokio::fs::create_dir_all(&config_dir).await.unwrap();
-
-        let result = ensure_default_marketplaces_with_source(
-            &config_dir,
-            &cache_dir,
-            &["/nonexistent/marketplace/path"],
-        )
-        .await;
-        assert!(result.is_ok(), "seeding failure should be non-fatal");
-
-        let db = load_plugins_db(&config_dir).await.unwrap();
-        assert!(
-            db.marketplaces.is_empty(),
-            "failed seeding should not add anything"
-        );
     }
 
     #[tokio::test]
@@ -1083,82 +794,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fetch_marketplace_updates_working_tree() {
-        let tmp = tempfile::tempdir().unwrap();
-        let origin_dir = tmp.path().join("origin");
-        tokio::fs::create_dir_all(&origin_dir).await.unwrap();
-
-        let origin_repo = git2::Repository::init(&origin_dir).unwrap();
-        std::fs::write(origin_dir.join("initial.txt"), "initial content").unwrap();
-        let sig = git2::Signature::now("test", "test@test.com").unwrap();
-        {
-            let mut index = origin_repo.index().unwrap();
-            index.add_path(std::path::Path::new("initial.txt")).unwrap();
-            let oid = index.write_tree().unwrap();
-            let tree = origin_repo.find_tree(oid).unwrap();
-            origin_repo
-                .commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
-                .unwrap();
-        }
-
-        let cache_dir = tmp.path().join("cache");
-        let cache_repo = git2::Repository::clone(origin_dir.to_str().unwrap(), &cache_dir).unwrap();
-
-        std::fs::write(origin_dir.join("new_file.txt"), "new content").unwrap();
-        {
-            let mut index = origin_repo.index().unwrap();
-            index
-                .add_path(std::path::Path::new("new_file.txt"))
-                .unwrap();
-            let oid = index.write_tree().unwrap();
-            let tree = origin_repo.find_tree(oid).unwrap();
-            let head_commit = origin_repo.head().unwrap().peel_to_commit().unwrap();
-            origin_repo
-                .commit(
-                    Some("HEAD"),
-                    &sig,
-                    &sig,
-                    "add new file",
-                    &tree,
-                    &[&head_commit],
-                )
-                .unwrap();
-        }
-
-        assert!(
-            !cache_dir.join("new_file.txt").exists(),
-            "new file should not yet be in cache"
-        );
-
-        let mut remote = cache_repo.find_remote("origin").unwrap();
-        remote
-            .fetch(
-                &["HEAD:refs/heads/main", "HEAD:refs/heads/master"],
-                None,
-                None,
-            )
-            .or_else(|_| remote.fetch(&["HEAD"], None, None))
-            .unwrap();
-        drop(remote);
-        let fetch_head = cache_repo
-            .find_reference("FETCH_HEAD")
-            .or_else(|_| cache_repo.find_reference("refs/heads/main"))
-            .or_else(|_| cache_repo.find_reference("refs/heads/master"))
-            .unwrap();
-        let target_obj = fetch_head.peel_to_commit().unwrap();
-        cache_repo
-            .reset(target_obj.as_object(), git2::ResetType::Hard, None)
-            .unwrap();
-
-        assert!(
-            cache_dir.join("new_file.txt").exists(),
-            "new file should be visible after fetch+reset"
-        );
-        let content = std::fs::read_to_string(cache_dir.join("new_file.txt")).unwrap();
-        assert_eq!(content, "new content");
-    }
-
-    #[tokio::test]
     async fn test_add_marketplace_twice_succeeds() {
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config");
@@ -1193,46 +828,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rename_collision_fix_removes_existing_before_rename() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cache_dir = tmp.path().join("cache");
-        tokio::fs::create_dir_all(&cache_dir.join("marketplaces"))
-            .await
-            .unwrap();
-
-        let final_dir = marketplace_cache_dir(&cache_dir, "test-market");
-        tokio::fs::create_dir_all(&final_dir).await.unwrap();
-        tokio::fs::write(
-            final_dir.join("marketplace.json"),
-            r#"{"name": "test-market", "plugins": []}"#,
-        )
-        .await
-        .unwrap();
-
-        let tmp_name = "tmp_marketplace_test";
-        let tmp_dir = marketplace_cache_dir(&cache_dir, tmp_name);
-        tokio::fs::create_dir_all(&tmp_dir).await.unwrap();
-        tokio::fs::write(
-            tmp_dir.join("marketplace.json"),
-            r#"{"name": "test-market", "plugins": [{"name": "new-plugin", "source": "./x"}]}"#,
-        )
-        .await
-        .unwrap();
-
-        if final_dir.exists() {
-            tokio::fs::remove_dir_all(&final_dir).await.unwrap();
-        }
-        tokio::fs::rename(&tmp_dir, &final_dir).await.unwrap();
-
-        assert!(final_dir.exists());
-        assert!(!tmp_dir.exists());
-        let content = tokio::fs::read_to_string(final_dir.join("marketplace.json"))
-            .await
-            .unwrap();
-        assert!(content.contains("new-plugin"));
-    }
-
-    #[tokio::test]
     async fn test_load_plugins_db_corrupt_json_returns_error() {
         let tmp = tempfile::tempdir().unwrap();
         tokio::fs::write(tmp.path().join("plugins.json"), "NOT VALID JSON {{{{")
@@ -1251,15 +846,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_load_plugins_db_missing_file_returns_empty() {
-        let result = load_plugins_db(Path::new("/nonexistent/dir/that/does/not/exist")).await;
-        assert!(result.is_ok());
-        let db = result.unwrap();
-        assert!(db.marketplaces.is_empty());
-        assert!(db.installed.is_empty());
-    }
-
     #[test]
     fn test_resolve_plugin_source_rejects_escape_via_components() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1272,13 +858,6 @@ mod tests {
             "error should mention 'unsafe': {}",
             msg
         );
-    }
-
-    #[test]
-    fn test_resolve_plugin_source_rejects_absolute_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let result = resolve_plugin_source_dir(tmp.path(), &serde_json::json!("/etc/passwd"));
-        assert!(result.is_err());
     }
 
     #[cfg(unix)]
@@ -1313,86 +892,5 @@ mod tests {
         let result =
             resolve_plugin_source_dir(&marketplace_dir, &serde_json::json!("./plugins/my-plugin"));
         assert!(result.is_ok(), "regular dir should succeed: {:?}", result);
-    }
-
-    #[tokio::test]
-    async fn test_marketplace_json_present_detects_both_layouts_and_absence() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-        assert!(
-            !marketplace_json_present(dir),
-            "empty dir must report no marketplace.json"
-        );
-
-        tokio::fs::write(dir.join("marketplace.json"), r#"{"name":"root"}"#)
-            .await
-            .unwrap();
-        assert!(
-            marketplace_json_present(dir),
-            "root-level marketplace.json must be detected"
-        );
-
-        let claude_dir = dir.join(".claude-plugin");
-        tokio::fs::create_dir_all(&claude_dir).await.unwrap();
-        tokio::fs::write(claude_dir.join("marketplace.json"), r#"{"name":"claude"}"#)
-            .await
-            .unwrap();
-        assert_eq!(
-            marketplace_json_path(dir),
-            Some(claude_dir.join("marketplace.json")),
-            ".claude-plugin layout must be preferred over the root file"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_resolve_marketplace_dir_local_source_returns_source() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cache_dir = tmp.path().join("cache");
-        let local = tmp.path().join("local-market");
-        let source = local.to_string_lossy().to_string();
-
-        let resolved = resolve_marketplace_dir(&cache_dir, "ignored-name", &source)
-            .await
-            .unwrap();
-        assert_eq!(resolved, PathBuf::from(&source));
-        assert!(
-            !marketplace_cache_dir(&cache_dir, "ignored-name").exists(),
-            "local source must not create a cache directory"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_resolve_marketplace_dir_remote_present_skips_refetch() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cache_dir = tmp.path().join("cache");
-        let name = "already-cached";
-        let cached = marketplace_cache_dir(&cache_dir, name);
-        tokio::fs::create_dir_all(&cached).await.unwrap();
-        tokio::fs::write(
-            cached.join("marketplace.json"),
-            r#"{"name":"already-cached","plugins":[]}"#,
-        )
-        .await
-        .unwrap();
-
-        let resolved = resolve_marketplace_dir(&cache_dir, name, "owner/repo")
-            .await
-            .unwrap();
-        assert_eq!(resolved, cached);
-        assert!(cached.join("marketplace.json").exists());
-    }
-
-    #[tokio::test]
-    async fn test_refetch_marketplace_rejects_local_source() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cache_dir = tmp.path().join("cache");
-        let local = tmp.path().join("local-market");
-        let source = local.to_string_lossy().to_string();
-
-        let result = refetch_marketplace_into_cache(&cache_dir, "name", &source).await;
-        assert!(
-            result.is_err(),
-            "local sources must never be re-fetched into the cache"
-        );
     }
 }

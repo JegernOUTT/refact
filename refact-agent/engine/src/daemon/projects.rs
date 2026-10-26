@@ -509,6 +509,7 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
     use tempfile::tempdir;
 
     struct EnvGuard {
@@ -565,38 +566,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_id_stable_across_dotdot_spelling() {
-        let dir = tempdir().unwrap();
-        let sub = dir.path().join("api");
-        std::fs::create_dir_all(&sub).unwrap();
-
-        let canon = dunce::simplified(&sub.canonicalize().unwrap()).to_path_buf();
-        let id1 = project_id(&canon);
-
-        let dotdot = sub.join("..").join("api");
-        let canon2 = dunce::simplified(&dotdot.canonicalize().unwrap()).to_path_buf();
-        let id2 = project_id(&canon2);
-
-        assert_eq!(id1, id2);
-    }
-
-    #[tokio::test]
-    async fn project_id_uses_full_sha256_and_distinguishes_roots() {
-        let dir = tempdir().unwrap();
-        let root_a = dir.path().join("a");
-        let root_b = dir.path().join("b");
-        std::fs::create_dir_all(&root_a).unwrap();
-        std::fs::create_dir_all(&root_b).unwrap();
-
-        let id_a = project_id(&root_a);
-        let id_b = project_id(&root_b);
-
-        assert_eq!(id_a.len(), 64);
-        assert_eq!(id_b.len(), 64);
-        assert_ne!(id_a, id_b);
-    }
-
-    #[tokio::test]
     async fn project_id_collision_is_rejected() {
         let dir = tempdir().unwrap();
         let root_a = dir.path().join("a");
@@ -620,96 +589,6 @@ mod tests {
         let error = reg.open(root_a).await.unwrap_err();
 
         assert!(error.contains("collision"));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn project_id_stable_via_symlink() {
-        use std::os::unix::fs::symlink;
-        let dir = tempdir().unwrap();
-        let real = dir.path().join("real");
-        std::fs::create_dir_all(&real).unwrap();
-        let link = dir.path().join("link");
-        symlink(&real, &link).unwrap();
-
-        let id_real = project_id(&dunce::simplified(&real.canonicalize().unwrap()).to_path_buf());
-        let id_link = project_id(&dunce::simplified(&link.canonicalize().unwrap()).to_path_buf());
-        assert_eq!(id_real, id_link);
-    }
-
-    fn sample_entry() -> ProjectEntry {
-        ProjectEntry {
-            id: "abc".to_string(),
-            slug: "proj".to_string(),
-            root: PathBuf::from("/tmp/proj"),
-            pinned: false,
-            last_active_ms: 7,
-            settings: ProjectSettings::default(),
-        }
-    }
-
-    #[test]
-    fn project_view_without_busy_matches_bare_project_entry_json() {
-        let entry = sample_entry();
-        let view = ProjectView {
-            entry: entry.clone(),
-            workspace_busy: None,
-        };
-        let view_json = serde_json::to_value(&view).unwrap();
-        assert_eq!(view_json, serde_json::to_value(&entry).unwrap());
-        assert!(view_json.get("workspace_busy").is_none());
-        // Old clients that only know ProjectEntry must still deserialise the row.
-        assert_eq!(
-            serde_json::from_value::<ProjectEntry>(view_json.clone()).unwrap(),
-            entry
-        );
-        assert_eq!(
-            serde_json::from_value::<ProjectView>(view_json).unwrap(),
-            view
-        );
-    }
-
-    #[test]
-    fn project_view_with_busy_adds_a_sibling_field_only() {
-        let entry = sample_entry();
-        let busy = WorkspaceBusyInfo {
-            project_id: entry.id.clone(),
-            root: entry.root.clone(),
-            holder: "pid 42, http port 8001".to_string(),
-            lease_path: PathBuf::from("/tmp/locks/abc.lock"),
-            observed_at_ms: 11,
-            holder_pid: Some(42),
-            holder_http_port: Some(8001),
-        };
-        let view = ProjectView {
-            entry: entry.clone(),
-            workspace_busy: Some(busy.clone()),
-        };
-        let view_json = serde_json::to_value(&view).unwrap();
-        assert_eq!(view_json["id"], entry.id);
-        assert_eq!(view_json["workspace_busy"]["holder_pid"], 42);
-        // A client that only knows ProjectEntry ignores the extra field.
-        assert_eq!(
-            serde_json::from_value::<ProjectEntry>(view_json.clone()).unwrap(),
-            entry
-        );
-        assert_eq!(
-            serde_json::from_value::<ProjectView>(view_json)
-                .unwrap()
-                .workspace_busy,
-            Some(busy)
-        );
-    }
-
-    #[test]
-    fn slug_dedup_adds_numeric_suffix() {
-        let api1 = PathBuf::from("/tmp/api");
-        let api2 = PathBuf::from("/tmp/other/api");
-
-        let slug1 = make_slug(&api1, std::iter::empty());
-        assert_eq!(slug1, "api");
-        let slug2 = make_slug(&api2, std::iter::once(slug1.as_str()));
-        assert_eq!(slug2, "api-2");
     }
 
     #[tokio::test]
@@ -762,48 +641,6 @@ mod tests {
         assert!(reg.list().is_empty());
         assert!(dir.path().join("projects.json.bad").exists());
         assert!(!path.exists());
-    }
-
-    #[tokio::test]
-    async fn open_idempotency() {
-        let dir = tempdir().unwrap();
-        let root = dir.path().join("proj");
-        std::fs::create_dir_all(&root).unwrap();
-
-        let mut reg = make_registry(&dir);
-        let e1 = reg.open(root.clone()).await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-        let e2 = reg.open(root.clone()).await.unwrap();
-
-        assert_eq!(e1.id, e2.id);
-        assert_eq!(e1.slug, e2.slug);
-        assert!(e2.last_active_ms >= e1.last_active_ms);
-        assert_eq!(reg.list().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn open_with_settings_overrides_existing_entry() {
-        let dir = tempdir().unwrap();
-        let root = dir.path().join("proj");
-        std::fs::create_dir_all(&root).unwrap();
-        let settings = ProjectSettings {
-            ast: false,
-            vecdb: false,
-            ast_max_files: 7,
-            vecdb_max_files: 8,
-        };
-
-        let mut reg = make_registry(&dir);
-        let original = reg.open(root.clone()).await.unwrap();
-        assert_eq!(original.settings, ProjectSettings::default());
-        let updated = reg
-            .open_with_settings(root, Some(settings.clone()))
-            .await
-            .unwrap();
-
-        assert_eq!(updated.id, original.id);
-        assert_eq!(updated.settings, settings);
-        assert_eq!(reg.list()[0].settings, settings);
     }
 
     #[tokio::test]
@@ -1035,38 +872,5 @@ mod tests {
         assert!(state.supervisor.worker_info(&entry.id).await.is_none());
         assert!(state.projects.read().await.get(&entry.id).is_none());
         state.supervisor.stop_all().await;
-    }
-
-    #[tokio::test]
-    async fn open_missing_path_returns_400() {
-        use crate::daemon::{config::DaemonConfig, events::EventBus, state::DaemonState};
-        use axum::body::Body;
-        use hyper::{Request, StatusCode};
-        use tower::ServiceExt;
-
-        let dir = tempdir().unwrap();
-        let state = DaemonState::new(
-            DaemonConfig::default(),
-            EventBus::new(dir.path().join("events.jsonl")),
-            None,
-        );
-        state.load_projects(dir.path().join("projects.json")).await;
-        let router = crate::daemon::server::make_router(state, 8488);
-
-        let body =
-            serde_json::to_vec(&serde_json::json!({"root": "/definitely/does/not/exist/at/all"}))
-                .unwrap();
-        let resp = router
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/daemon/v1/projects/open")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

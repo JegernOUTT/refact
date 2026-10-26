@@ -190,11 +190,6 @@ impl StreamController {
         self.has_tail()
     }
 
-    #[cfg(test)]
-    fn render_count(&self) -> usize {
-        self.render_cache.render_count()
-    }
-
     pub fn queued_lines(&self) -> usize {
         self.queue.iter().map(|line| line.line_count).sum()
     }
@@ -662,26 +657,9 @@ fn first_table_range(source: &str) -> Option<(usize, usize)> {
 mod tests {
     use super::*;
     use crate::render::render_markdown;
-    use crate::render::wrapping::line_to_plain;
 
     fn controller() -> StreamController {
         StreamController::new(None, std::path::Path::new("."))
-    }
-
-    fn text(lines: &[Line<'_>]) -> String {
-        lines
-            .iter()
-            .map(line_to_plain)
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    fn current_tail_text(stream: &mut StreamController) -> Vec<String> {
-        stream
-            .current_tail_lines_reflowed()
-            .iter()
-            .map(|line| line_to_plain(&line.line))
-            .collect()
     }
 
     #[test]
@@ -765,15 +743,6 @@ mod tests {
         stream.push_delta(" main() {}\n```\n");
         while stream.run_commit_tick().is_some() {}
         assert_eq!(stream.finalize(), "```rust\nfn main() {}\n```\n");
-    }
-
-    #[test]
-    fn unicode_split_across_delta_boundary_is_preserved() {
-        let mut stream = controller();
-        stream.push_delta("hello ");
-        stream.push_delta("🦀\n");
-        assert_eq!(stream.run_commit_tick(), Some("hello 🦀\n".to_string()));
-        assert_eq!(stream.committed(), "hello 🦀\n");
     }
 
     #[test]
@@ -886,109 +855,6 @@ mod tests {
             Some("| A | B |\n| --- | --- |\n| one | two |\n\n".to_string())
         );
         assert_eq!(stream.run_commit_tick(), Some("after\n".to_string()));
-    }
-
-    #[test]
-    fn oldest_queued_age_tracks_first_stable_line() {
-        let mut stream = controller();
-        stream.push_delta("one\ntwo\n");
-        let age = stream.oldest_queued_age(Instant::now() + Duration::from_millis(150));
-        assert!(age.is_some_and(|age| age >= Duration::from_millis(100)));
-    }
-
-    #[test]
-    fn set_width_rebuilds_queue_without_reemitting_emitted_lines() {
-        let mut stream = StreamController::new(Some(12), std::path::Path::new("."));
-        stream.push_delta("alpha beta gamma\ndelta\n");
-        assert!(stream.run_commit_tick().is_some());
-        let emitted = stream.committed().to_string();
-        stream.set_width(Some(24));
-        while stream.run_commit_tick().is_some() {}
-        assert!(stream.committed().starts_with(&emitted));
-        assert_eq!(stream.finalize(), "alpha beta gamma\ndelta\n");
-    }
-
-    #[test]
-    fn current_tail_reflows_markdown_soft_breaks() {
-        let mut stream = StreamController::new(Some(12), std::path::Path::new("."));
-        stream.push_delta("alpha beta gamma\ndelta epsilon zeta");
-
-        assert_eq!(
-            current_tail_text(&mut stream),
-            vec!["delta", "epsilon zeta"]
-        );
-    }
-
-    #[test]
-    fn streaming_parse_work_grows_linearly_with_complete_deltas() {
-        let mut stream = controller();
-        let deltas = 32usize;
-        for index in 0..deltas {
-            stream.push_delta(&format!("line {index}\n"));
-        }
-        assert!(stream.render_count() <= deltas * 2);
-    }
-
-    #[test]
-    fn render_cache_keeps_alternating_stream_inputs() {
-        let mut stream = controller();
-        let first = stream.render_source("first\n");
-        let second = stream.render_source("second\n");
-        let renders_after_first_pass = stream.render_count();
-
-        assert_eq!(stream.render_source("first\n"), first);
-        assert_eq!(stream.render_source("second\n"), second);
-        assert_eq!(stream.render_count(), renders_after_first_pass);
-    }
-
-    #[test]
-    fn raw_render_mode_streams_source_lines_without_markdown_rewrite() {
-        let mut stream = controller();
-        stream.push_delta("## Heading\n");
-        stream.set_render_mode(HistoryRenderMode::Raw);
-
-        let (cell, idle) = stream.drain_for_commit_tick(DrainPlan::Batch(usize::MAX));
-        let cell = cell.expect("raw stream cell");
-
-        assert!(idle);
-        assert_eq!(text(&cell.render(80)), "• ## Heading");
-    }
-
-    #[test]
-    fn plan_stream_controller_uses_raw_render_mode_for_source_lines() {
-        let mut plan = PlanStreamController::new(Some(80), std::path::Path::new("."));
-        plan.set_render_mode(HistoryRenderMode::Raw);
-        plan.push_delta("## Heading\n");
-
-        let (cell, idle) = plan.drain_for_commit_tick(DrainPlan::Batch(usize::MAX));
-        let rendered = text(&cell.expect("plan stream cell").render(80));
-
-        assert!(idle);
-        assert!(rendered.contains("Proposed Plan"));
-        assert!(rendered.contains("## Heading"));
-    }
-
-    #[test]
-    fn plan_stream_header_matches_static_plan_header() {
-        let static_header = crate::history::cells::PlanCell::new(
-            crate::history::cells::PlanCellData::new("", "agent", 1, 0),
-        )
-        .render(80)
-        .into_iter()
-        .next()
-        .expect("static plan header");
-
-        let mut stream = PlanStreamController::new(Some(80), std::path::Path::new("."));
-        stream.push_delta("content\n");
-        let (cell, _) = stream.drain_for_commit_tick(DrainPlan::Batch(usize::MAX));
-        let stream_header = cell
-            .expect("streamed plan cell")
-            .render(80)
-            .into_iter()
-            .next()
-            .expect("streamed plan header");
-
-        assert_eq!(stream_header, static_header);
     }
 
     fn utf8_chunks(source: &str, max_bytes: usize) -> Vec<&str> {

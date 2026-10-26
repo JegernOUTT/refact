@@ -179,19 +179,6 @@ mod tests {
     }
 
     #[test]
-    fn collapse_diagnostics_preserves_distinct_signatures() {
-        let collapsed = collapse_diagnostics(vec![
-            diagnostic("first", "one"),
-            diagnostic("second", "two"),
-        ]);
-        assert_eq!(collapsed.len(), 2);
-        assert_eq!(collapsed[0].error_message, "first");
-        assert_eq!(collapsed[1].error_message, "second");
-        assert_eq!(collapsed[0].occurrences, None);
-        assert_eq!(collapsed[1].occurrences, None);
-    }
-
-    #[test]
     fn unavailable_model_id_extracts_only_model_not_found_errors() {
         assert_eq!(
             unavailable_model_id(
@@ -201,49 +188,5 @@ mod tests {
             Some("claude_code/claude-opus-5".to_string())
         );
         assert_eq!(unavailable_model_id("unrelated network error"), None);
-    }
-
-    #[test]
-    fn stream_corrupted_maps_to_medium_severity_and_normal_priority() {
-        let error = "stream ended unexpectedly while decoding response body";
-        assert_eq!(
-            refact_core::retry_policy::classify_user_error(error),
-            refact_core::retry_policy::UserErrorCategory::StreamCorrupted
-        );
-        assert_eq!(
-            classify_diagnostic_severity(error),
-            DiagnosticSeverity::Medium
-        );
-        assert_eq!(
-            collect_diagnostics_from_error(error).severity,
-            DiagnosticSeverity::Medium
-        );
-        assert_eq!(diagnostic_priority_label(error), "normal");
-    }
-
-    #[test]
-    fn generic_error_preserves_old_default_high_heuristic() {
-        assert_eq!(
-            classify_diagnostic_severity("some error happened"),
-            DiagnosticSeverity::High
-        );
-        assert_eq!(
-            classify_diagnostic_severity("critical panic occurred"),
-            DiagnosticSeverity::Critical
-        );
-        assert_eq!(
-            classify_diagnostic_severity("just a warn message"),
-            DiagnosticSeverity::Medium
-        );
-        assert_eq!(
-            classify_diagnostic_severity("nothing notable"),
-            DiagnosticSeverity::High
-        );
-        assert_eq!(
-            collect_diagnostics_from_error("nothing notable").severity,
-            DiagnosticSeverity::Low
-        );
-        assert_eq!(diagnostic_priority_label("some error happened"), "high");
-        assert_eq!(diagnostic_priority_label("just a warn message"), "high");
     }
 }

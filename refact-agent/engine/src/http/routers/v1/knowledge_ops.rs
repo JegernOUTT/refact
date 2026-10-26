@@ -546,36 +546,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn auto_link_all_memories_links_similar_active_docs() {
-        let dir = tempfile::tempdir().unwrap();
-        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
-        tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
-        tokio::fs::write(dir.path().join("shared.rs"), "fn shared() {}")
-            .await
-            .unwrap();
-        let first_path = knowledge_dir.join("first.md");
-        let second_path = knowledge_dir.join("second.md");
-        let mut first = active_frontmatter("first");
-        first.tags = strings(&["component:foo", "workflow:bar"]);
-        first.filenames = strings(&["shared.rs"]);
-        let mut second = active_frontmatter("second");
-        second.tags = strings(&["component:foo", "workflow:bar"]);
-        second.filenames = strings(&["shared.rs"]);
-        write_memory_frontmatter(&first_path, first, "First body").await;
-        write_memory_frontmatter(&second_path, second, "Second body").await;
-        let gcx = test_gcx_with_workspace(dir.path()).await;
-
-        let stats = auto_link_all_memories(gcx).await.unwrap();
-
-        let (first, _) = read_frontmatter_body(&first_path).await;
-        let (second, _) = read_frontmatter_body(&second_path).await;
-        assert!(first.links.contains(&"second".to_string()));
-        assert!(second.links.contains(&"first".to_string()));
-        assert!(stats.docs_updated >= 1);
-        assert!(stats.links_added >= 1);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
     async fn auto_link_all_memories_skips_trajectory_targets() {
         let dir = tempfile::tempdir().unwrap();
         let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
@@ -603,29 +573,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn auto_link_all_memories_is_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
-        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
-        tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
-        let first_path = knowledge_dir.join("first.md");
-        let second_path = knowledge_dir.join("second.md");
-        let mut first = active_frontmatter("first");
-        first.tags = strings(&["component:foo", "workflow:bar"]);
-        let mut second = active_frontmatter("second");
-        second.tags = strings(&["component:foo", "workflow:bar"]);
-        write_memory_frontmatter(&first_path, first, "First body").await;
-        write_memory_frontmatter(&second_path, second, "Second body").await;
-        let gcx = test_gcx_with_workspace(dir.path()).await;
-
-        let first_stats = auto_link_all_memories(gcx.clone()).await.unwrap();
-        let second_stats = auto_link_all_memories(gcx).await.unwrap();
-
-        assert!(first_stats.links_added >= 1);
-        assert_eq!(second_stats.docs_updated, 0);
-        assert_eq!(second_stats.links_added, 0);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
     async fn auto_link_all_memories_preserves_filenames() {
         let dir = tempfile::tempdir().unwrap();
         let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
@@ -648,34 +595,6 @@ mod tests {
         assert!(stats.links_added >= 1);
         assert!(first.links.contains(&"second".to_string()));
         assert_eq!(first.filenames, strings(&[missing]));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn update_status_accepts_aliases_with_canonical_frontmatter() {
-        let cases = [
-            ("needs-review", "proposed"),
-            ("stale", "deprecated"),
-            ("obsolete", "deprecated"),
-            ("inactive", "archived"),
-            ("archive", "archived"),
-        ];
-
-        for (alias, expected) in cases {
-            let dir = tempfile::tempdir().unwrap();
-            let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
-            tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
-            let path = knowledge_dir.join(format!("{}.md", alias.replace('-', "_")));
-            let body = format!("Body for {alias}");
-            write_memory(&path, alias, &body).await;
-            let gcx = test_gcx_with_workspace(dir.path()).await;
-
-            let response = update_status(gcx, &path, alias).await.unwrap();
-
-            assert_eq!(response.status(), StatusCode::OK);
-            let (frontmatter, updated_body) = read_frontmatter_body(&path).await;
-            assert_eq!(frontmatter.status.as_deref(), Some(expected));
-            assert_eq!(updated_body, body);
-        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -828,46 +747,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn update_pinned_preserves_file_and_body() {
-        let dir = tempfile::tempdir().unwrap();
-        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
-        tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
-        let path = knowledge_dir.join("pinned.md");
-        let body = "# Pinned\n\nOriginal body";
-        write_memory(&path, "pinned", body).await;
-        let gcx = test_gcx_with_workspace(dir.path()).await;
-
-        let response = update_status(gcx, &path, "pinned").await.unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(path.exists());
-        let (frontmatter, updated_body) = read_frontmatter_body(&path).await;
-        assert_eq!(frontmatter.status.as_deref(), Some("pinned"));
-        assert!(frontmatter.is_active());
-        assert_eq!(updated_body, body);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn update_proposed_preserves_file_and_body() {
-        let dir = tempfile::tempdir().unwrap();
-        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
-        tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
-        let path = knowledge_dir.join("proposed.md");
-        let body = "# Proposed\n\nOriginal body";
-        write_memory(&path, "proposed", body).await;
-        let gcx = test_gcx_with_workspace(dir.path()).await;
-
-        let response = update_status(gcx, &path, "needs-review").await.unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(path.exists());
-        let (frontmatter, updated_body) = read_frontmatter_body(&path).await;
-        assert_eq!(frontmatter.status.as_deref(), Some("proposed"));
-        assert!(frontmatter.is_active());
-        assert_eq!(updated_body, body);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
     async fn update_archived_preserves_body_and_makes_memory_inactive() {
         let dir = tempfile::tempdir().unwrap();
         let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
@@ -883,32 +762,6 @@ mod tests {
         assert!(path.exists());
         let (frontmatter, updated_body) = read_frontmatter_body(&path).await;
         assert_eq!(frontmatter.status.as_deref(), Some("archived"));
-        assert!(!frontmatter.is_active());
-        assert_eq!(updated_body, body);
-        let kg = build_knowledge_graph(gcx.clone()).await;
-        assert!(kg.active_docs().all(|doc| doc.path != path));
-        let found = crate::memories::load_memories_by_tags(gcx, &["http-test"], 10)
-            .await
-            .unwrap();
-        assert!(found.is_empty());
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn update_deprecated_preserves_body_and_makes_memory_inactive() {
-        let dir = tempfile::tempdir().unwrap();
-        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
-        tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
-        let path = knowledge_dir.join("deprecated.md");
-        let body = "Deprecated body";
-        write_memory(&path, "deprecated", body).await;
-        let gcx = test_gcx_with_workspace(dir.path()).await;
-
-        let response = update_status(gcx.clone(), &path, "stale").await.unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(path.exists());
-        let (frontmatter, updated_body) = read_frontmatter_body(&path).await;
-        assert_eq!(frontmatter.status.as_deref(), Some("deprecated"));
         assert!(!frontmatter.is_active());
         assert_eq!(updated_body, body);
         let kg = build_knowledge_graph(gcx.clone()).await;

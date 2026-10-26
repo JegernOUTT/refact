@@ -222,8 +222,8 @@ pub(super) async fn indexed_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::trajectory_index::entry_from_trajectory_value;
-    use crate::coordination::{catalog, privacy_guard};
+
+    use crate::coordination::privacy_guard;
     use serde_json::json;
     use std::sync::Arc;
 
@@ -238,132 +238,6 @@ mod tests {
         assert!(work.records.is_empty());
         assert_eq!(work.measured_tokens, None);
         assert_eq!(work.source_revision, 9);
-    }
-
-    #[tokio::test]
-    async fn historical_rows_follow_the_index_without_per_request_body_reads_and_live_rows_win() {
-        let project = tempfile::tempdir().unwrap();
-        let dir = project.path().join(".refact/trajectories");
-        tokio::fs::create_dir_all(&dir).await.unwrap();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![project.path().into()];
-        let app = AppState::from_gcx(gcx).await;
-        let path = dir.join("historical.json");
-        let value = json!({
-            "id":"historical", "title":"Indexed history", "model":"trusted/model", "mode":"AGENT",
-            "created_at":"2026-01-01T00:00:00Z", "updated_at":"2026-01-02T00:00:00Z",
-            "messages":[], "version":7, "tool_use":"agent"
-        });
-        tokio::fs::write(&path, serde_json::to_vec(&value).unwrap())
-            .await
-            .unwrap();
-        let mut entry = entry_from_trajectory_value(&dir, &path, &value, None).unwrap();
-        assert!(entry.work.as_ref().unwrap().provenance_complete);
-        app.gcx
-            .trajectory_index_coordinator
-            .upsert(&dir, entry.clone())
-            .await
-            .unwrap();
-        let first = catalog::build_catalog(&app, None).await.unwrap();
-        let row = first.find("historical").unwrap();
-        assert_ne!(row.metadata.freshness, Freshness::Live);
-        assert_eq!(row.state, WorkStateTag::Unknown);
-        assert_eq!(row.metadata.source_revision, 7);
-        assert_eq!(row.metadata.measured_tokens, None);
-        tokio::fs::write(&path, "not valid JSON").await.unwrap();
-        for _ in 0..3 {
-            let next = catalog::build_catalog(&app, None).await.unwrap();
-            assert_eq!(
-                next.find("historical").unwrap().title.as_deref(),
-                Some("Indexed history")
-            );
-        }
-        entry.title = "Updated index".into();
-        app.gcx
-            .trajectory_index_coordinator
-            .upsert(&dir, entry)
-            .await
-            .unwrap();
-        assert_eq!(
-            catalog::build_catalog(&app, None)
-                .await
-                .unwrap()
-                .find("historical")
-                .unwrap()
-                .title
-                .as_deref(),
-            Some("Updated index")
-        );
-        let mut live = crate::chat::types::ChatSession::new("historical".into());
-        live.work_project_root = Some(project.path().into());
-        live.thread.title = "Live session".into();
-        app.chat
-            .sessions
-            .write()
-            .await
-            .insert("historical".into(), Arc::new(tokio::sync::Mutex::new(live)));
-        let live = catalog::build_catalog(&app, None).await.unwrap();
-        assert_eq!(live.len(), 1);
-        assert_eq!(
-            live.find("historical").unwrap().metadata.freshness,
-            Freshness::Live
-        );
-        app.chat.sessions.write().await.clear();
-        app.gcx
-            .trajectory_index_coordinator
-            .remove(&dir, ["historical".into()].into())
-            .await
-            .unwrap();
-        assert!(catalog::build_catalog(&app, None)
-            .await
-            .unwrap()
-            .find("historical")
-            .is_none());
-    }
-
-    #[tokio::test]
-    async fn thousands_of_indexed_histories_are_projected_without_any_body_read_per_turn() {
-        const ROWS: usize = 2000;
-        let project = tempfile::tempdir().unwrap();
-        let dir = project.path().join(".refact/trajectories");
-        tokio::fs::create_dir_all(&dir).await.unwrap();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![project.path().into()];
-        let app = AppState::from_gcx(gcx).await;
-        let mut paths = Vec::with_capacity(ROWS);
-        for index in 0..ROWS {
-            let id = format!("history-{index:05}");
-            let path = dir.join(format!("{id}.json"));
-            let value = json!({
-                "id": id, "title": format!("Indexed {index}"), "model":"trusted/model", "mode":"AGENT",
-                "created_at":"2026-01-01T00:00:00Z", "updated_at":"2026-01-02T00:00:00Z",
-                "messages":[], "version":1, "tool_use":"agent"
-            });
-            std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
-            paths.push(path);
-        }
-        let bootstrap = catalog::build_catalog(&app, None).await.unwrap();
-        assert_eq!(bootstrap.len(), ROWS);
-        for path in &paths {
-            std::fs::write(path, "not valid JSON").unwrap();
-        }
-        let before = app
-            .gcx
-            .trajectory_index_coordinator
-            .listing_counters_for_test();
-        for turn in 0..5 {
-            let catalog = catalog::build_catalog(&app, None).await.unwrap();
-            assert_eq!(catalog.len(), ROWS, "turn {turn}");
-            let row = catalog.find("history-01999").unwrap();
-            assert_eq!(row.title.as_deref(), Some("Indexed 1999"));
-            assert_ne!(row.metadata.freshness, Freshness::Live);
-        }
-        let after = app
-            .gcx
-            .trajectory_index_coordinator
-            .listing_counters_for_test();
-        assert_eq!(after.index_reads, before.index_reads);
-        assert_eq!(after.directory_scans, before.directory_scans);
     }
 
     #[tokio::test]

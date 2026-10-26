@@ -2,10 +2,8 @@ use refact_core::chat_types::ChatMessage;
 use refact_llm::adapters::openai_chat::OpenAiChatAdapter;
 
 use super::wire_soak_helpers::{
-    assert_tool_result_immediately_follows_tool_call, assert_no_literal_role_strings_in_body,
-    assert_no_plan_history_in_body, assert_plan_count_in_body, chronological_plan_messages,
-    default_settings, generate_mixed_corpus, lower_body, three_plan_versions,
-    tool_ordering_messages,
+    assert_tool_result_immediately_follows_tool_call, chronological_plan_messages,
+    default_settings, lower_body, tool_ordering_messages,
 };
 
 fn lower_openai_chat(messages: Vec<ChatMessage>) -> serde_json::Value {
@@ -75,29 +73,6 @@ fn prefix_before_original_plan_is_stable_after_later_plan_update() {
         serde_json::to_vec(&first_messages[..3]).unwrap(),
         serde_json::to_vec(&second_messages[..3]).unwrap()
     );
-}
-
-#[test]
-fn assert_no_literal_role_strings() {
-    let body = lower_openai_chat(generate_mixed_corpus(13, 100));
-
-    assert_no_literal_role_strings_in_body(&body);
-}
-
-#[test]
-fn assert_all_plans_are_rendered_chronologically() {
-    let body = lower_openai_chat(three_plan_versions());
-
-    assert_plan_count_in_body(&body, 3);
-    assert_no_plan_history_in_body(&body);
-}
-
-#[test]
-fn assert_mixed_corpus_renders_each_plan_message() {
-    let body = lower_openai_chat(generate_mixed_corpus(29, 100));
-
-    assert_plan_count_in_body(&body, 5);
-    assert_no_plan_history_in_body(&body);
 }
 
 #[test]

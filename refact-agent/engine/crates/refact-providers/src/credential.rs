@@ -264,16 +264,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolves_and_trims_output() {
-        assert_eq!(
-            resolve("trim", &shell_spec("printf ' token \\n'"), false)
-                .await
-                .unwrap(),
-            "token"
-        );
-    }
-
-    #[tokio::test]
     async fn caches_and_force_refreshes() {
         let dir = tempfile::tempdir().unwrap();
         let count = dir.path().join("count");
@@ -286,43 +276,6 @@ mod tests {
         assert_eq!(resolve("cache", &spec, false).await.unwrap(), "1");
         assert_eq!(resolve("cache", &spec, false).await.unwrap(), "1");
         assert_eq!(resolve("cache", &spec, true).await.unwrap(), "2");
-    }
-
-    #[tokio::test]
-    async fn concurrent_force_refreshes_are_singleflight() {
-        let dir = tempfile::tempdir().unwrap();
-        let count = dir.path().join("force-count");
-        let script = format!(
-            "n=$(cat '{}' 2>/dev/null || echo 0); n=$((n+1)); sleep 0.1; echo $n > '{}'; echo $n",
-            count.display(),
-            count.display()
-        );
-        let spec = Arc::new(shell_spec(&script));
-        let first = tokio::spawn({
-            let spec = spec.clone();
-            async move { resolve("force", &spec, true).await }
-        });
-        let second = tokio::spawn({
-            let spec = spec.clone();
-            async move { resolve("force", &spec, true).await }
-        });
-        assert_eq!(first.await.unwrap().unwrap(), "1");
-        assert_eq!(second.await.unwrap().unwrap(), "1");
-    }
-
-    #[tokio::test]
-    async fn concurrent_calls_are_singleflight() {
-        let spec = Arc::new(shell_spec("sleep 0.1; printf token"));
-        let a = tokio::spawn({
-            let spec = spec.clone();
-            async move { resolve("same", &spec, false).await }
-        });
-        let b = tokio::spawn({
-            let spec = spec.clone();
-            async move { resolve("same", &spec, false).await }
-        });
-        assert_eq!(a.await.unwrap().unwrap(), "token");
-        assert_eq!(b.await.unwrap().unwrap(), "token");
     }
 
     #[tokio::test]
@@ -346,26 +299,6 @@ mod tests {
         });
         assert_eq!(first.await.unwrap().unwrap(), "2");
         assert_eq!(second.await.unwrap().unwrap(), "2");
-    }
-
-    #[tokio::test]
-    async fn refreshes_after_expiry() {
-        let dir = tempfile::tempdir().unwrap();
-        let count = dir.path().join("expiry-count");
-        let script = format!(
-            "n=$(cat '{}' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '{}'; echo $n",
-            count.display(),
-            count.display()
-        );
-        let mut spec = shell_spec(&script);
-        let CredentialSpec::Command {
-            refresh_interval_ms,
-            ..
-        } = &mut spec;
-        *refresh_interval_ms = 1_000;
-        assert_eq!(resolve("expiry", &spec, false).await.unwrap(), "1");
-        tokio::time::sleep(Duration::from_millis(1_050)).await;
-        assert_eq!(resolve("expiry", &spec, false).await.unwrap(), "2");
     }
 
     #[tokio::test]

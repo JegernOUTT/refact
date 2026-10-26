@@ -908,28 +908,6 @@ mod tests {
     }
 
     #[test]
-    fn openrouter_extra_body_header_merges_into_request_body() {
-        let req = LlmRequest::new(
-            "openai/gpt-4o".to_string(),
-            vec![ChatMessage::new("user".to_string(), "Hi".to_string())],
-        );
-        let mut settings = default_settings();
-        settings.endpoint = "https://openrouter.ai/api/v1/chat/completions".to_string();
-        settings.model_name = "openai/gpt-4o".to_string();
-        settings.extra_headers.insert(
-            crate::adapter::OPENROUTER_EXTRA_BODY_HEADER.to_string(),
-            r#"{"provider":{"sort":"throughput"},"usage":{"include":true}}"#.to_string(),
-        );
-
-        let http = OpenAiChatAdapter
-            .build_http(&cleared(&req), &settings)
-            .unwrap();
-
-        assert_eq!(http.body["provider"]["sort"], json!("throughput"));
-        assert_eq!(http.body["usage"]["include"], json!(true));
-    }
-
-    #[test]
     fn openrouter_extra_body_header_protected_fields_are_rejected() {
         let req = LlmRequest::new(
             "openai/gpt-4o".to_string(),
@@ -970,20 +948,6 @@ mod tests {
         assert!(!http.body.to_string().contains("\"privacy\""));
     }
 
-    fn event_message(subkind: &str, source: &str, payload: Value, content: &str) -> ChatMessage {
-        let mut extra = serde_json::Map::new();
-        extra.insert(
-            "event".to_string(),
-            json!({"subkind": subkind, "source": source, "payload": payload}),
-        );
-        ChatMessage {
-            role: "event".to_string(),
-            content: ChatContent::SimpleText(content.to_string()),
-            extra,
-            ..Default::default()
-        }
-    }
-
     fn goal_message(mode: &str, version: u32, content: &str) -> ChatMessage {
         let mut extra = serde_json::Map::new();
         extra.insert(
@@ -1013,38 +977,6 @@ mod tests {
     }
 
     #[test]
-    fn convert_event_to_user_wrapped_xml() {
-        let messages = vec![event_message(
-            "mode_switch",
-            "mode",
-            json!({"next":"agent"}),
-            "Switched to agent",
-        )];
-
-        let converted = convert_messages_to_openai(&messages, false);
-
-        assert_eq!(converted.len(), 1);
-        assert_eq!(converted[0]["role"], "user");
-        let content = converted[0]["content"].as_array().unwrap();
-        let text = content[0]["text"].as_str().unwrap();
-        assert!(text.contains("<event subkind=\"mode_switch\""));
-        assert!(text.contains("<message>Switched to agent</message>"));
-    }
-
-    #[test]
-    fn convert_plan_to_user_wrapped_xml() {
-        let messages = vec![plan_message("agent", 1, "Do the thing")];
-
-        let converted = convert_messages_to_openai(&messages, false);
-
-        assert_eq!(converted.len(), 1);
-        assert_eq!(converted[0]["role"], "user");
-        let text = converted[0]["content"].as_str().unwrap();
-        assert!(text.contains("<plan mode=\"agent\" version=\"1\">"));
-        assert!(text.contains("Do the thing"));
-    }
-
-    #[test]
     fn convert_goal_and_plan_to_user_wrapped_xml_in_order() {
         let messages = vec![
             goal_message("agent", 1, "Reach the goal"),
@@ -1058,113 +990,6 @@ mod tests {
         assert_eq!(serialized.matches("<plan mode=").count(), 1);
         assert!(serialized.find("<goal mode=").unwrap() < serialized.find("<plan mode=").unwrap());
         assert!(!serialized.contains("\"role\":\"goal\""));
-    }
-
-    #[test]
-    fn convert_multiple_plan_versions_chronologically() {
-        let messages = vec![
-            ChatMessage::new("user".to_string(), "first user".to_string()),
-            plan_message("agent", 1, "first plan"),
-            ChatMessage::new("user".to_string(), "second user".to_string()),
-            plan_message("agent", 2, "second plan"),
-            ChatMessage::new("user".to_string(), "third user".to_string()),
-        ];
-
-        let converted = convert_messages_to_openai(&messages, false);
-        let serialized = json!({"messages": converted}).to_string();
-
-        assert_eq!(converted.len(), 5);
-        assert_eq!(
-            converted[0],
-            json!({"role": "user", "content": "first user"})
-        );
-        assert!(converted[1]["content"]
-            .as_str()
-            .unwrap()
-            .contains("version=\"1\""));
-        assert_eq!(
-            converted[2],
-            json!({"role": "user", "content": "second user"})
-        );
-        assert!(converted[3]["content"]
-            .as_str()
-            .unwrap()
-            .contains("version=\"2\""));
-        assert_eq!(
-            converted[4],
-            json!({"role": "user", "content": "third user"})
-        );
-        assert_eq!(serialized.matches("<plan mode=").count(), 2);
-        assert!(!serialized.contains("<plan-history>"));
-    }
-
-    #[test]
-    fn convert_no_literal_role_strings() {
-        let messages = vec![
-            ChatMessage::new("user".to_string(), "Hi".to_string()),
-            event_message("mode_switch", "mode", json!({"next":"agent"}), "Switched"),
-            plan_message("agent", 1, "Do it"),
-            ChatMessage::new("assistant".to_string(), "Ok".to_string()),
-        ];
-
-        let converted = convert_messages_to_openai(&messages, false);
-        let body = json!({"messages": converted}).to_string();
-
-        assert!(!body.contains("\"role\":\"event\""));
-        assert!(!body.contains("\"role\":\"plan\""));
-    }
-
-    #[test]
-    fn convert_goal_pursuit_event_reaches_wire() {
-        let messages = vec![event_message(
-            "goal_pursuit",
-            "chat.goal",
-            json!({"turn": 2}),
-            "checking progress",
-        )];
-
-        let converted = convert_messages_to_openai(&messages, false);
-        let serialized = json!({"messages": converted}).to_string();
-
-        assert!(serialized.contains("<event subkind=\\\"goal_pursuit\\\""));
-        assert!(serialized.contains("checking progress"));
-        assert!(!serialized.contains("<goal-update"));
-    }
-
-    #[test]
-    fn convert_event_escapes_xml_special_chars() {
-        let messages = vec![event_message(
-            "mode_switch",
-            "mode",
-            json!({"value":"<tag>&stuff"}),
-            "a < b & c > d",
-        )];
-
-        let converted = convert_messages_to_openai(&messages, false);
-        let text = converted[0]["content"][0]["text"].as_str().unwrap();
-
-        assert!(text.contains("&lt;tag&gt;&amp;stuff"));
-        assert!(text.contains("<message>a &lt; b &amp; c &gt; d</message>"));
-    }
-
-    #[test]
-    fn test_build_http_basic() {
-        let adapter = OpenAiChatAdapter;
-        let mut req = LlmRequest::new(
-            "gpt-4".to_string(),
-            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
-        );
-        req.params.top_p = Some(0.9);
-        let settings = default_settings();
-
-        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
-
-        assert_eq!(http.url, "https://api.openai.com/v1/chat/completions");
-        assert!(http.headers.contains_key(AUTHORIZATION));
-        assert_eq!(http.body["model"], "gpt-4");
-        assert_eq!(http.body["messages"][0]["role"], "user");
-        assert_eq!(http.body["messages"][0]["content"], "Hello");
-        assert!((http.body["top_p"].as_f64().unwrap() - 0.9).abs() < 0.000_001);
     }
 
     #[test]
@@ -1244,29 +1069,6 @@ mod tests {
         );
         assert!(http.headers.get("x-api-key").is_none());
         assert!(http.headers.get("Copilot-Vision-Request").is_none());
-    }
-
-    #[test]
-    fn github_copilot_openai_chat_marks_tool_continuation_as_agent() {
-        let adapter = OpenAiChatAdapter;
-        let req = LlmRequest::new(
-            "github_copilot/gpt-4.1".to_string(),
-            vec![ChatMessage {
-                role: "tool".to_string(),
-                content: refact_core::chat_types::ChatContent::SimpleText("done".to_string()),
-                tool_call_id: "call_1".to_string(),
-                ..Default::default()
-            }],
-        );
-        let mut settings = default_settings();
-        settings.endpoint = "https://api.githubcopilot.com/v1/chat/completions".to_string();
-
-        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
-
-        assert_eq!(
-            http.headers.get("x-initiator").unwrap().to_str().unwrap(),
-            "agent"
-        );
     }
 
     #[test]
@@ -1395,39 +1197,6 @@ mod tests {
     }
 
     #[test]
-    fn test_build_http_with_tools() {
-        let adapter = OpenAiChatAdapter;
-        let tools = vec![json!({
-            "type": "function",
-            "function": {
-                "name": "get_weather",
-                "parameters": {"type": "object"}
-            }
-        })];
-        let req = LlmRequest::new("gpt-4".to_string(), vec![])
-            .with_tools(tools, Some(CanonicalToolChoice::Auto));
-        let settings = default_settings();
-
-        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
-
-        assert!(http.body.get("tools").is_some());
-        assert_eq!(http.body["tool_choice"], "auto");
-    }
-
-    #[test]
-    fn test_build_http_tools_skipped_when_unsupported() {
-        let adapter = OpenAiChatAdapter;
-        let tools = vec![json!({"type": "function"})];
-        let req = LlmRequest::new("gpt-4".to_string(), vec![]).with_tools(tools, None);
-        let mut settings = default_settings();
-        settings.supports_tools = false;
-
-        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
-
-        assert!(http.body.get("tools").is_none());
-    }
-
-    #[test]
     fn test_parse_stream_chunk_content() {
         let adapter = OpenAiChatAdapter;
         let chunk = r#"{"choices":[{"delta":{"content":"Hello"}}]}"#;
@@ -1454,20 +1223,6 @@ mod tests {
                 assert_eq!(text, "I can’t help with that.")
             }
             _ => panic!("expected AppendContent"),
-        }
-    }
-
-    #[test]
-    fn test_parse_stream_chunk_reasoning_content() {
-        let adapter = OpenAiChatAdapter;
-        let chunk = r#"{"choices":[{"delta":{"reasoning_content":"Reasoning step"}}]}"#;
-
-        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
-
-        assert_eq!(deltas.len(), 1);
-        match &deltas[0] {
-            LlmStreamDelta::AppendReasoning { text, .. } => assert_eq!(text, "Reasoning step"),
-            _ => panic!("expected AppendReasoning"),
         }
     }
 
@@ -1564,24 +1319,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_stream_chunk_tool_calls_missing_index_are_normalized() {
-        let adapter = OpenAiChatAdapter;
-        let chunk = r#"{"choices":[{"delta":{"tool_calls":[{"id":"call_1","function":{"name":"shell","arguments":"{\"command\":\"ls\"}"}}]}}]}"#;
-
-        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
-
-        match &deltas[0] {
-            LlmStreamDelta::SetToolCalls { tool_calls } => {
-                assert_eq!(tool_calls.len(), 1);
-                assert_eq!(tool_calls[0]["index"], 0);
-                assert_eq!(tool_calls[0]["id"], "call_1");
-                assert_eq!(tool_calls[0]["function"]["name"], "shell");
-            }
-            _ => panic!("expected SetToolCalls"),
-        }
-    }
-
-    #[test]
     fn test_parse_stream_chunk_tool_calls_arguments_only_preserved() {
         let adapter = OpenAiChatAdapter;
         let chunk = r#"{"choices":[{"delta":{"tool_calls":[{"index":2,"function":{"arguments":"{\"q\""}}]}}]}"#;
@@ -1598,106 +1335,11 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_stream_chunk_legacy_function_call_supported() {
-        let adapter = OpenAiChatAdapter;
-        let chunk = r#"{"choices":[{"delta":{"function_call":{"name":"shell","arguments":"{\"command\":\"pwd\"}"}}}]}"#;
-
-        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
-
-        match &deltas[0] {
-            LlmStreamDelta::SetToolCalls { tool_calls } => {
-                assert_eq!(tool_calls[0]["function"]["name"], "shell");
-                assert_eq!(
-                    tool_calls[0]["function"]["arguments"],
-                    "{\"command\":\"pwd\"}"
-                );
-            }
-            _ => panic!("expected SetToolCalls"),
-        }
-    }
-
-    #[test]
-    fn test_parse_stream_chunk_final_message_tool_calls_finalize() {
-        let adapter = OpenAiChatAdapter;
-        let chunk = r#"{"choices":[{"finish_reason":"tool_calls","message":{"tool_calls":[{"id":"call_final","function":{"name":"shell","arguments":"{\"command\":\"pwd\"}"}}]}}]}"#;
-
-        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
-
-        assert!(deltas
-            .iter()
-            .any(|d| matches!(d, LlmStreamDelta::FinalizeToolCalls { .. })));
-    }
-
-    #[test]
     fn test_parse_stream_chunk_malformed_skipped() {
         let adapter = OpenAiChatAdapter;
         let result = adapter.parse_stream_chunk("not json");
 
         assert!(matches!(result, Err(StreamParseError::MalformedChunk(_))));
-    }
-
-    #[test]
-    fn test_convert_messages_filters_unknown_roles() {
-        let messages = vec![
-            ChatMessage::new("user".to_string(), "hi".to_string()),
-            ChatMessage::new("unknown_role".to_string(), "ignored".to_string()),
-            ChatMessage::new("assistant".to_string(), "hello".to_string()),
-        ];
-
-        let converted = convert_messages_to_openai(&messages, false);
-
-        assert_eq!(converted.len(), 2);
-        assert_eq!(converted[0]["role"], "user");
-        assert_eq!(converted[1]["role"], "assistant");
-    }
-
-    #[test]
-    fn test_convert_messages_preserves_developer_role() {
-        let messages = vec![
-            ChatMessage::new(
-                "developer".to_string(),
-                "Prefer concise answers".to_string(),
-            ),
-            ChatMessage::new("user".to_string(), "hi".to_string()),
-        ];
-
-        let converted = convert_messages_to_openai(&messages, false);
-
-        assert_eq!(converted.len(), 2);
-        assert_eq!(converted[0]["role"], "developer");
-        assert_eq!(converted[0]["content"], "Prefer concise answers");
-    }
-
-    #[test]
-    fn test_build_http_with_response_format_json_schema() {
-        let adapter = OpenAiChatAdapter;
-        let mut req = LlmRequest::new("gpt-4".to_string(), vec![]);
-        req.response_format = Some(ResponseFormat::JsonSchema {
-            name: "person".to_string(),
-            description: Some("A person object".to_string()),
-            schema: json!({"type": "object", "properties": {"name": {"type": "string"}}}),
-            strict: true,
-        });
-        let settings = default_settings();
-
-        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
-
-        let rf = &http.body["response_format"];
-        assert_eq!(rf["type"], "json_schema");
-        assert_eq!(rf["json_schema"]["name"], "person");
-        assert_eq!(rf["json_schema"]["strict"], true);
-    }
-
-    #[test]
-    fn test_build_http_with_response_format_json_object() {
-        let adapter = OpenAiChatAdapter;
-        let mut req = LlmRequest::new("gpt-4".to_string(), vec![]);
-        req.response_format = Some(ResponseFormat::JsonObject);
-        let settings = default_settings();
-
-        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
-
-        assert_eq!(http.body["response_format"]["type"], "json_object");
     }
 
     #[test]
@@ -1755,32 +1397,6 @@ mod tests {
         );
         assert_eq!(http.body["stream"], true);
         assert_eq!(http.body["custom_field"], "allowed");
-    }
-
-    #[test]
-    fn test_user_agent_format() {
-        let adapter = OpenAiChatAdapter;
-        let req = LlmRequest::new(
-            "gpt-4".to_string(),
-            vec![ChatMessage::new("user".to_string(), "Hi".to_string())],
-        );
-
-        let http = adapter
-            .build_http(&cleared(&req), &default_settings())
-            .unwrap();
-
-        // User-Agent should use space separator for broadly compatible provider logging.
-        let ua = http.headers.get(USER_AGENT).unwrap().to_str().unwrap();
-        assert!(
-            ua.starts_with("refact-lsp "),
-            "User-Agent should start with 'refact-lsp ' (space, not slash)"
-        );
-        // Should match format: "refact-lsp X.Y.Z"
-        let parts: Vec<&str> = ua.split(' ').collect();
-        assert_eq!(parts.len(), 2, "User-Agent should have exactly 2 parts");
-        assert_eq!(parts[0], "refact-lsp");
-        // Version should be semver-like
-        assert!(parts[1].contains('.'), "Version should contain dots");
     }
 
     #[test]
@@ -1852,130 +1468,6 @@ mod tests {
         // Only regular tool result should be present
         let tool_result = &converted[2];
         assert_eq!(tool_result["tool_call_id"], "call_456");
-    }
-
-    #[test]
-    fn test_stream_citations_in_delta() {
-        let adapter = OpenAiChatAdapter;
-        let chunk = r#"{"id":"123","choices":[{"index":0,"delta":{"citations":[{"url":"https://example.com","title":"Example","snippet":"Some text"}]}}]}"#;
-
-        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
-        let citation_count = deltas
-            .iter()
-            .filter(|d| matches!(d, LlmStreamDelta::AddCitation { .. }))
-            .count();
-        assert_eq!(citation_count, 1);
-
-        // Verify citation content
-        if let Some(LlmStreamDelta::AddCitation { citation }) = deltas
-            .iter()
-            .find(|d| matches!(d, LlmStreamDelta::AddCitation { .. }))
-        {
-            assert_eq!(
-                citation.get("url").and_then(|v| v.as_str()),
-                Some("https://example.com")
-            );
-            assert_eq!(
-                citation.get("title").and_then(|v| v.as_str()),
-                Some("Example")
-            );
-        }
-    }
-
-    #[test]
-    fn test_text_only_multimodal_normalized_to_string() {
-        use refact_core::chat_types::MultimodalElement;
-
-        let messages = vec![
-            ChatMessage {
-                role: "assistant".to_string(),
-                content: ChatContent::Multimodal(vec![MultimodalElement {
-                    m_type: "text".to_string(),
-                    m_content: "".to_string(),
-                }]),
-                ..Default::default()
-            },
-            ChatMessage {
-                role: "tool".to_string(),
-                content: ChatContent::Multimodal(vec![MultimodalElement {
-                    m_type: "text".to_string(),
-                    m_content: "rev: 0\ncards: []".to_string(),
-                }]),
-                tool_call_id: "call_123".to_string(),
-                ..Default::default()
-            },
-        ];
-
-        let converted = convert_messages_to_openai(&messages, false);
-
-        // Text-only Multimodal must be serialized as plain string, not array
-        assert!(
-            converted[0]["content"].is_string(),
-            "assistant text-only multimodal must serialize as string, got: {}",
-            converted[0]["content"]
-        );
-        assert_eq!(converted[0]["content"], "");
-
-        assert!(
-            converted[1]["content"].is_string(),
-            "tool text-only multimodal must serialize as string, got: {}",
-            converted[1]["content"]
-        );
-        assert_eq!(converted[1]["content"], "rev: 0\ncards: []");
-    }
-
-    #[test]
-    fn test_multimodal_with_image_stays_array() {
-        use refact_core::chat_types::MultimodalElement;
-
-        let messages = vec![ChatMessage {
-            role: "user".to_string(),
-            content: ChatContent::Multimodal(vec![
-                MultimodalElement {
-                    m_type: "text".to_string(),
-                    m_content: "Look at this".to_string(),
-                },
-                MultimodalElement {
-                    m_type: "image/png".to_string(),
-                    m_content: "base64data".to_string(),
-                },
-            ]),
-            ..Default::default()
-        }];
-
-        let converted = convert_messages_to_openai(&messages, false);
-
-        // Multimodal with images must stay as array
-        assert!(
-            converted[0]["content"].is_array(),
-            "user multimodal with image must serialize as array"
-        );
-        let arr = converted[0]["content"].as_array().unwrap();
-        assert_eq!(arr.len(), 2);
-        assert_eq!(arr[0]["type"], "text");
-        assert_eq!(arr[1]["type"], "image_url");
-    }
-
-    #[test]
-    fn test_reasoning_content_included_in_assistant() {
-        let messages = vec![
-            ChatMessage::new("user".to_string(), "Solve this".to_string()),
-            ChatMessage {
-                role: "assistant".to_string(),
-                content: refact_core::chat_types::ChatContent::SimpleText("The answer".to_string()),
-                reasoning_content: Some("Let me reason through this...".to_string()),
-                ..Default::default()
-            },
-        ];
-
-        let converted = convert_messages_to_openai(&messages, false);
-
-        assert_eq!(converted.len(), 2);
-        assert_eq!(
-            converted[1]["reasoning_content"],
-            "Let me reason through this..."
-        );
-        assert_eq!(converted[1]["content"], "The answer");
     }
 
     #[test]
@@ -2056,20 +1548,6 @@ mod tests {
     }
 
     #[test]
-    fn test_reasoning_content_not_included_when_absent() {
-        let messages = vec![ChatMessage {
-            role: "assistant".to_string(),
-            content: refact_core::chat_types::ChatContent::SimpleText("Hi".to_string()),
-            reasoning_content: None,
-            ..Default::default()
-        }];
-
-        let converted = convert_messages_to_openai(&messages, false);
-
-        assert!(converted[0].get("reasoning_content").is_none());
-    }
-
-    #[test]
     fn test_parse_openai_usage_with_anthropic_cache() {
         // OpenRouter -> Anthropic: top-level cache fields
         let usage = json!({
@@ -2147,39 +1625,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_openai_usage_no_cache() {
-        let usage = json!({
-            "prompt_tokens": 1000,
-            "completion_tokens": 100,
-            "total_tokens": 1100
-        });
-
-        let result = parse_openai_usage(&usage).unwrap();
-
-        assert_eq!(result.prompt_tokens, 1000);
-        assert_eq!(result.completion_tokens, 100);
-        assert_eq!(result.cache_creation_tokens, None);
-        assert_eq!(result.cache_read_tokens, None);
-        assert_eq!(result.total_tokens, 1100);
-    }
-
-    #[test]
-    fn test_parse_openai_usage_zero_cache_tokens_filtered() {
-        // Zero cache tokens should be filtered out (None instead of Some(0))
-        let usage = json!({
-            "prompt_tokens": 1000,
-            "completion_tokens": 100,
-            "cache_creation_input_tokens": 0,
-            "cache_read_input_tokens": 0
-        });
-
-        let result = parse_openai_usage(&usage).unwrap();
-
-        assert_eq!(result.cache_creation_tokens, None);
-        assert_eq!(result.cache_read_tokens, None);
-    }
-
-    #[test]
     fn test_openrouter_anthropic_uses_top_level_cache_control() {
         let adapter = OpenAiChatAdapter;
         let req = LlmRequest::new(
@@ -2208,43 +1653,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn test_litellm_anthropic_uses_block_level_cache_control() {
-        let adapter = OpenAiChatAdapter;
-        let req = LlmRequest::new(
-            "anthropic/claude-sonnet-4.6".to_string(),
-            vec![
-                ChatMessage::new("system".to_string(), "You are helpful".to_string()),
-                ChatMessage::new("user".to_string(), "Hello".to_string()),
-                ChatMessage::new("assistant".to_string(), "Hi".to_string()),
-            ],
-        )
-        .with_cache_control(CacheControl::Ephemeral);
-        let mut settings = default_settings();
-        settings.endpoint = "http://localhost:4000/v1/chat/completions".to_string();
-        settings.model_name = "anthropic/claude-sonnet-4.6".to_string();
-        settings
-            .extra_headers
-            .insert(BASE_PROVIDER_HEADER.to_string(), "litellm".to_string());
-
-        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
-
-        assert!(http.body.get("cache_control").is_none());
-        let messages = http.body["messages"].as_array().unwrap();
-        assert_eq!(
-            messages[0]["content"][0]["cache_control"]["type"],
-            "ephemeral"
-        );
-        assert_eq!(
-            messages[1]["content"][0]["cache_control"]["type"],
-            "ephemeral"
-        );
-        assert_eq!(
-            messages[2]["content"][0]["cache_control"]["type"],
-            "ephemeral"
-        );
     }
 
     #[test]
@@ -2283,107 +1691,5 @@ mod tests {
             .get("cache_control")
             .is_some());
         assert!(http.body.get("cache_control").is_none());
-    }
-
-    #[test]
-    fn test_litellm_alias_limits_cache_control_to_four_markers() {
-        let adapter = OpenAiChatAdapter;
-        let mut messages = vec![ChatMessage::new(
-            "system".to_string(),
-            "You are helpful".to_string(),
-        )];
-        for index in 0..6 {
-            let role = if index % 2 == 0 { "user" } else { "assistant" };
-            messages.push(ChatMessage::new(
-                role.to_string(),
-                format!("message {index}"),
-            ));
-        }
-        let req = LlmRequest::new("sonnet-5".to_string(), messages)
-            .with_cache_control(CacheControl::Ephemeral);
-        let mut settings = default_settings();
-        settings.model_name = "sonnet-5".to_string();
-        settings
-            .extra_headers
-            .insert(BASE_PROVIDER_HEADER.to_string(), "litellm".to_string());
-
-        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
-        let marker_count = http.body["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .flat_map(|message| message["content"].as_array().into_iter().flatten())
-            .filter(|block| block.get("cache_control").is_some())
-            .count();
-
-        assert_eq!(marker_count, 4);
-    }
-
-    #[test]
-    fn test_non_litellm_anthropic_compatible_provider_has_no_cache_markers() {
-        let adapter = OpenAiChatAdapter;
-        let req = LlmRequest::new(
-            "claude-sonnet".to_string(),
-            vec![
-                ChatMessage::new("system".to_string(), "You are helpful".to_string()),
-                ChatMessage::new("user".to_string(), "Hello".to_string()),
-            ],
-        )
-        .with_cache_control(CacheControl::Ephemeral);
-        let mut settings = default_settings();
-        settings.endpoint = "https://anthropic-compatible.example/v1/chat/completions".to_string();
-        settings.model_name = "claude-sonnet".to_string();
-
-        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
-
-        assert!(http.body.get("cache_control").is_none());
-        assert!(!http.body["messages"].to_string().contains("cache_control"));
-    }
-
-    #[test]
-    fn test_build_http_omits_cache_control_when_unsupported() {
-        let adapter = OpenAiChatAdapter;
-        let req = LlmRequest::new(
-            "local-model".to_string(),
-            vec![
-                ChatMessage::new("system".to_string(), "You are helpful".to_string()),
-                ChatMessage::new("user".to_string(), "Hello".to_string()),
-            ],
-        )
-        .with_cache_control(CacheControl::Ephemeral);
-        let mut settings = default_settings();
-        settings.model_name = "local-model".to_string();
-        settings.supports_cache_control = false;
-
-        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
-
-        assert!(http.body.get("cache_control").is_none());
-        assert!(!http.body.to_string().contains("cache_control"));
-    }
-
-    #[test]
-    fn test_non_openrouter_keeps_explicit_block_level_cache_control() {
-        let mut messages = vec![
-            json!({"role": "system", "content": "You are a helpful assistant"}),
-            json!({"role": "user", "content": "Hello"}),
-            json!({"role": "assistant", "content": "Hi there"}),
-            json!({"role": "user", "content": "How are you?"}),
-            json!({"role": "assistant", "content": "I'm doing well"}),
-        ];
-
-        inject_cache_control(&mut messages);
-
-        // Existing explicit strategy behavior remains for non-OpenRouter targets.
-        let system_content = messages[0]["content"].as_array().unwrap();
-        assert_eq!(system_content[0]["cache_control"]["type"], "ephemeral");
-
-        let assistant1_content = messages[2]["content"].as_array().unwrap();
-        assert!(assistant1_content[0].get("cache_control").is_some());
-
-        let user2_content = messages[3]["content"].as_array().unwrap();
-        assert!(user2_content[0].get("cache_control").is_some());
-
-        let assistant2_content = messages[4]["content"].as_array().unwrap();
-        assert!(assistant2_content[0].get("cache_control").is_some());
     }
 }

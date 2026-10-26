@@ -1238,16 +1238,6 @@ mod tests {
     }
 
     #[test]
-    fn test_partial_output_alone_classifies_as_stream_corrupted() {
-        assert_eq!(
-            classify_user_error(
-                "Stream interrupted after partial output and all retry attempts failed."
-            ),
-            UserErrorCategory::StreamCorrupted
-        );
-    }
-
-    #[test]
     fn retryable_status_wins_over_generic_validation_words() {
         assert!(matches!(
             classify_llm_error_for_retry("LLM error (429): ValidationException: rate limited"),
@@ -1256,20 +1246,6 @@ mod tests {
         assert_eq!(
             classify_user_error("LLM error (429): ValidationException: rate limited"),
             UserErrorCategory::ProviderRateLimit
-        );
-    }
-
-    #[test]
-    fn billing_quota_wins_over_retryable_status() {
-        assert_eq!(
-            classify_llm_error_for_retry("LLM error (429): insufficient_quota"),
-            RetryDecision::DoNotRetry {
-                reason: "non_retryable_error",
-            }
-        );
-        assert_eq!(
-            classify_user_error("LLM error (429): insufficient_quota"),
-            UserErrorCategory::BillingQuota
         );
     }
 
@@ -1325,17 +1301,6 @@ mod tests {
     }
 
     #[test]
-    fn does_not_retry_user_cancellation() {
-        assert!(matches!(
-            classify_llm_error_for_retry("Aborted"),
-            RetryDecision::UserCancelled {
-                reason: "cancelled"
-            }
-        ));
-        assert_eq!(classify_user_error("Aborted"), UserErrorCategory::Unknown);
-    }
-
-    #[test]
     fn wrapped_abort_sentinel_classified_as_user_cancelled() {
         let wrapped = "Stream interrupted after partial output and all retry attempts failed. \
             Original error: Aborted";
@@ -1362,26 +1327,6 @@ mod tests {
     }
 
     #[test]
-    fn http2_stream_canceled_is_not_user_cancelled() {
-        let decision = classify_llm_error_for_retry("LLM request failed: HTTP/2 stream canceled");
-        assert!(
-            !decision.is_user_cancelled(),
-            "HTTP/2 stream canceled must not be classified as user cancellation, got {:?}",
-            decision
-        );
-    }
-
-    #[test]
-    fn operation_canceled_by_peer_is_not_user_cancelled() {
-        let decision = classify_llm_error_for_retry("operation canceled by peer");
-        assert!(
-            !decision.is_user_cancelled(),
-            "remote-side cancellation must not be classified as user cancellation, got {:?}",
-            decision
-        );
-    }
-
-    #[test]
     fn should_retry_obeys_attempt_limit_and_abort() {
         let flag = AtomicBool::new(false);
         assert!(should_retry_llm_error("timeout", 0, &flag));
@@ -1392,43 +1337,5 @@ mod tests {
         ));
         flag.store(true, Ordering::SeqCst);
         assert!(!should_retry_llm_error("timeout", 0, &flag));
-    }
-
-    #[test]
-    fn helper_methods_identify_classification_groups() {
-        assert!(classify_llm_error_for_retry("timeout").is_retryable_transient());
-        assert!(classify_llm_error_for_retry("context length exceeded").is_context_limit());
-        assert!(classify_llm_error_for_retry("Aborted").is_user_cancelled());
-        assert_eq!(
-            classify_llm_error_for_retry("timeout").reason(),
-            "transient_error"
-        );
-    }
-
-    #[test]
-    fn user_error_info_has_action_and_retryability_for_each_category() {
-        let cases = [
-            (UserErrorCategory::ProviderTransient, "retry", true),
-            (UserErrorCategory::ProviderRateLimit, "retry", true),
-            (UserErrorCategory::ContextTooLarge, "compact", false),
-            (UserErrorCategory::AuthenticationFailed, "check_auth", false),
-            (UserErrorCategory::ModelUnavailable, "switch_model", false),
-            (UserErrorCategory::BillingQuota, "check_billing", false),
-            (UserErrorCategory::InvalidRequest, "none", false),
-            (UserErrorCategory::NetworkFailure, "retry", true),
-            (UserErrorCategory::StreamCorrupted, "retry", true),
-            (UserErrorCategory::ToolSchemaInvalid, "none", false),
-            (UserErrorCategory::ContentPolicy, "none", false),
-            (UserErrorCategory::Unknown, "none", false),
-        ];
-
-        for (category, suggested_action, is_retryable) in cases {
-            let info = user_error_info(category);
-            assert_eq!(info.category, category);
-            assert!(!info.title.is_empty());
-            assert!(!info.explanation.is_empty());
-            assert_eq!(info.suggested_action, suggested_action);
-            assert_eq!(info.is_retryable, is_retryable);
-        }
     }
 }

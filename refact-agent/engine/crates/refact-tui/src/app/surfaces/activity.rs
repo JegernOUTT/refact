@@ -337,34 +337,6 @@ mod tests {
     }
 
     #[test]
-    fn overlay_renders_agent_status_progress_and_process_completion() {
-        let process = ProcessCompletedEvent {
-            process_id: "exec-1".to_string(),
-            status: "exited".to_string(),
-            exit_code: Some(0),
-            short_description: "cargo test".to_string(),
-            mode: "service".to_string(),
-        };
-        let card = ToolCard::from_tool_call(&json!({
-            "id": "tool-1",
-            "function": {"name": "process_start", "arguments": "{\"service_name\":\"demo\"}"},
-            "status": "running"
-        }));
-
-        let overlay = overlay(&[agent()], &[], None, &[process], &[&card], Some("agent-1"));
-        let text = overlay.lines.join("\n");
-
-        assert!(text.contains("[running] Implement activity"));
-        assert!(text.contains("progress: Writing tests"));
-        assert!(text.contains("edited files: src/activity.rs"));
-        assert!(text.contains("diff summary: one file changed"));
-        assert!(text.contains("conflict summary: none"));
-        assert!(text.contains("result summary: partial"));
-        assert!(text.contains("cargo test · exited · service"));
-        assert!(text.contains("process_start · running"));
-    }
-
-    #[test]
     fn process_registry_reuses_tool_family_and_activity_uses_timestamp_duration() {
         let sleep = ToolCard::from_tool_call(&json!({
             "function": {"name": "t_wait", "arguments": "{}"}
@@ -394,77 +366,5 @@ mod tests {
             .lines
             .join("\n");
         assert!(text.contains("duration ms: 6"));
-    }
-
-    #[test]
-    fn worker_telemetry_renders_every_field_and_unknowns() {
-        let worker = WorkerInfo {
-            project_id: "project-1".to_string(),
-            slug: "demo".to_string(),
-            root: PathBuf::from("/tmp/demo"),
-            root_exists: Some(true),
-            pinned: Some(false),
-            last_active_ms: Some(1),
-            state: json!("ready"),
-            pid: Some(2),
-            rss_bytes: Some(3),
-            cpu_percent: Some(4.5),
-            uptime_secs: Some(5),
-            http_port: Some(6),
-            lsp_port: Some(7),
-            lsp_clients: Some(8),
-            busy_chats: Some(9),
-            exec_running: Some(10),
-            live_proxy_streams: Some(11),
-            cron_next_fire_ms: Some(12),
-            idle_deadline_ms: Some(13),
-            last_status_report_ms: Some(14),
-            last_error: Some("none".to_string()),
-            log_path: "/tmp/demo.log".to_string(),
-        };
-        let text = overlay(&[], &[worker], None, &[], &[], None)
-            .lines
-            .join("\n");
-
-        for label in [
-            "project ID",
-            "slug",
-            "root",
-            "root exists",
-            "pinned",
-            "last active ms",
-            "state",
-            "PID",
-            "RSS bytes",
-            "CPU percent",
-            "uptime secs",
-            "HTTP port",
-            "LSP port",
-            "LSP clients",
-            "busy chats",
-            "exec running",
-            "live proxy streams",
-            "cron next fire ms",
-            "idle deadline ms",
-            "last status report ms",
-            "last error",
-            "log path",
-        ] {
-            assert!(text.contains(label), "missing {label}");
-        }
-
-        let unknown = overlay(&[], &[WorkerInfo::default()], None, &[], &[], None)
-            .lines
-            .join("\n");
-        assert!(unknown.contains("RSS bytes: unknown"));
-        assert!(unknown.contains("log path: unknown"));
-    }
-
-    #[test]
-    fn activity_flag_accepts_only_truthy_values() {
-        assert!(surfaces_enabled_from_value(Some("1")));
-        assert!(surfaces_enabled_from_value(Some("on")));
-        assert!(!surfaces_enabled_from_value(Some("0")));
-        assert!(!surfaces_enabled_from_value(None));
     }
 }

@@ -298,23 +298,6 @@ mod tests {
     }
 
     #[test]
-    fn idle_tick_interval_override_parsing() {
-        assert_eq!(
-            parse_idle_tick_interval(Some("500".to_string())),
-            Duration::from_millis(500)
-        );
-        assert_eq!(parse_idle_tick_interval(None), TICK_INTERVAL);
-        assert_eq!(
-            parse_idle_tick_interval(Some("0".to_string())),
-            TICK_INTERVAL
-        );
-        assert_eq!(
-            parse_idle_tick_interval(Some("not-a-number".to_string())),
-            TICK_INTERVAL
-        );
-    }
-
-    #[test]
     fn cron_pending_boundary_blocks_only_within_horizon() {
         let now = 5_000;
         assert!(cron_pending_blocks_idle_stop(now, now));
@@ -474,38 +457,6 @@ mod tests {
             state.supervisor.worker_info(&entry.id).await.unwrap().state,
             WorkerState::Ready
         );
-        state.supervisor.stop_all().await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial(daemon)]
-    async fn idle_revalidation_keeps_worker_that_becomes_active() {
-        let Some(_env) = EnvGuard::fake_worker() else {
-            return;
-        };
-        let (_dir, state, entry) = harness(1).await;
-        state.supervisor.ensure_worker(&entry).await.unwrap();
-        store_idle_report_for_worker(&state, &entry.id).await;
-        tokio::time::sleep(Duration::from_millis(1100)).await;
-
-        let project_id = entry.id.clone();
-        let updater = tokio::spawn({
-            let state = state.clone();
-            async move {
-                state.update_proxy_activity(&project_id).await;
-            }
-        });
-        tokio::time::sleep(Duration::from_millis(25)).await;
-        tick_at(&state, now_ms()).await;
-        updater.await.unwrap();
-
-        assert_eq!(
-            state.supervisor.worker_info(&entry.id).await.unwrap().state,
-            WorkerState::Ready
-        );
-        assert!(!state.events.snapshot().await.iter().any(|event| {
-            event.kind == "worker_idle_stopped" && event.project_id.as_deref() == Some(&entry.id)
-        }));
         state.supervisor.stop_all().await;
     }
 

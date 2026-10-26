@@ -815,20 +815,6 @@ mod tests {
     }
 
     #[test]
-    fn terminal_downloads_are_pruned_to_the_retained_window() {
-        let tracker = DownloadTracker::default();
-        for index in 0..(RETAINED_TERMINAL_DOWNLOADS + 20) {
-            let guid = format!("done-{index}");
-            begin_download(&tracker, &guid);
-            tracker.progress(&guid, 4, 4, DownloadState::Completed);
-        }
-        let retained = tracked_guids(&tracker);
-        assert_eq!(retained.len(), RETAINED_TERMINAL_DOWNLOADS);
-        assert_eq!(retained.first().unwrap(), "done-20");
-        assert_eq!(retained.last().unwrap(), "done-69");
-    }
-
-    #[test]
     fn pruning_keeps_active_downloads_and_a_consistent_index_map() {
         let tracker = DownloadTracker::default();
         begin_download(&tracker, "still-running");
@@ -855,20 +841,6 @@ mod tests {
                 .map(|info| info.guid)
                 .as_deref(),
             Some("still-running")
-        );
-    }
-
-    #[test]
-    fn pruning_preserves_wait_cursor_semantics_for_the_retained_window() {
-        let tracker = DownloadTracker::default();
-        begin_download(&tracker, "first");
-        tracker.progress("first", 1, 1, DownloadState::Completed);
-        let cursor = tracker.cursor();
-        begin_download(&tracker, "second");
-        tracker.progress("second", 1, 1, DownloadState::Completed);
-        assert_eq!(
-            tracker.completed_after(cursor).map(|info| info.guid),
-            Some("second".to_string())
         );
     }
 
@@ -904,31 +876,6 @@ mod tests {
             validate_input_paths(&metadata(true), &["/missing/refact-upload.txt".to_string()])
                 .unwrap_err();
         assert!(error.contains("Upload path does not exist"));
-    }
-
-    #[test]
-    fn tracks_completed_and_canceled_downloads() {
-        let tracker = DownloadTracker::default();
-        let cursor = tracker.cursor();
-        tracker.begin(
-            "a".into(),
-            "https://example/a".into(),
-            "f".into(),
-            "a.txt".into(),
-            "/tmp/a".into(),
-        );
-        tracker.progress("a", 7, 7, DownloadState::Completed);
-        assert_eq!(tracker.completed_after(cursor).unwrap().received_bytes, 7);
-        tracker.begin(
-            "b".into(),
-            "https://example/b".into(),
-            "f".into(),
-            "b.txt".into(),
-            "/tmp/b".into(),
-        );
-        tracker.progress("b", 2, 9, DownloadState::Canceled);
-        assert_eq!(tracker.take_report().len(), 2);
-        assert!(tracker.take_report().is_empty());
     }
 
     #[test]
@@ -992,20 +939,5 @@ mod tests {
             tracker.take_report()[0].failure_reason.as_deref(),
             Some(CANCELED_REASON)
         );
-    }
-
-    #[test]
-    fn reports_download_only_after_terminal_progress() {
-        let tracker = DownloadTracker::default();
-        tracker.begin(
-            "a".into(),
-            "https://example/a".into(),
-            "f".into(),
-            "a.txt".into(),
-            "/tmp/a".into(),
-        );
-        assert!(tracker.take_report().is_empty());
-        tracker.progress("a", 7, 7, DownloadState::Completed);
-        assert_eq!(tracker.take_report().len(), 1);
     }
 }

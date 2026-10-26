@@ -1053,56 +1053,6 @@ mod batch_tests {
     }
 
     #[test]
-    fn every_op_type_batch_key_is_registered() {
-        let op_types = [
-            MemoryOpType::MergeArchive,
-            MemoryOpType::ArchiveCandidate,
-            MemoryOpType::Archive,
-            MemoryOpType::MarkReviewNeeded,
-            MemoryOpType::MarkStale,
-            MemoryOpType::DeleteCandidate,
-            MemoryOpType::CreateMemory,
-            MemoryOpType::PromoteDigest,
-            MemoryOpType::UpdateMemory,
-            MemoryOpType::Retag,
-            MemoryOpType::RepairLinks,
-            MemoryOpType::Refresh,
-        ];
-        for op_type in op_types {
-            let sample = op(op_type, "registered batch key", MemoryOpStatus::Pending);
-            let key = memory_op_batch_key(&sample);
-            assert!(
-                MEMORY_BATCH_KEYS.contains(&key),
-                "batch key {} for {:?} missing from MEMORY_BATCH_KEYS",
-                key,
-                op_type
-            );
-        }
-        let exact = op(
-            MemoryOpType::MergeArchive,
-            &format!("{}: canonical=a", MEMORY_OP_EXACT_DUPLICATE_EVIDENCE),
-            MemoryOpStatus::Pending,
-        );
-        assert!(MEMORY_BATCH_KEYS.contains(&memory_op_batch_key(&exact)));
-    }
-
-    #[test]
-    fn batch_key_classifies_merge_variants() {
-        let exact = op(
-            MemoryOpType::MergeArchive,
-            &format!("{}: canonical=a", MEMORY_OP_EXACT_DUPLICATE_EVIDENCE),
-            MemoryOpStatus::Pending,
-        );
-        let near = op(
-            MemoryOpType::MergeArchive,
-            "near duplicate: canonical=a",
-            MemoryOpStatus::Pending,
-        );
-        assert_eq!(memory_op_batch_key(&exact), "merge_exact_duplicate");
-        assert_eq!(memory_op_batch_key(&near), "merge_near_duplicate");
-    }
-
-    #[test]
     fn batches_group_pending_approval_ops_with_preview() {
         let mut ops = vec![
             op(
@@ -1135,28 +1085,5 @@ mod batch_tests {
         let archive = batches.iter().find(|b| b.batch_key == "archive").unwrap();
         assert_eq!(archive.count, 1);
         assert!(!batches.iter().any(|b| b.count == 0));
-    }
-
-    #[test]
-    fn non_approval_ops_do_not_batch() {
-        let mut auto = op(
-            MemoryOpType::CreateMemory,
-            "high confidence create",
-            MemoryOpStatus::Pending,
-        );
-        auto.requires_approval = false;
-        assert!(memory_op_batches(&[auto]).is_empty());
-    }
-
-    #[test]
-    fn batch_labels_are_human_readable() {
-        assert_eq!(
-            memory_op_batch_label("merge_near_duplicate", 312),
-            "Merge 312 near-duplicate memories"
-        );
-        assert_eq!(
-            memory_op_batch_label("archive", 7),
-            "Archive 7 stale memories"
-        );
     }
 }

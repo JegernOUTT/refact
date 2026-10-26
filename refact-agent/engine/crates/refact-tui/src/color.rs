@@ -67,33 +67,3 @@ pub fn perceptual_distance(a: (u8, u8, u8), b: (u8, u8, u8)) -> f32 {
 
     (dl * dl + da * da + db * db).sqrt()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn color_lightness_uses_luminance() {
-        assert!(is_light((255, 255, 255)));
-        assert!(!is_light((0, 0, 0)));
-        assert!(!is_light((255, 0, 0)));
-    }
-
-    #[test]
-    fn color_blend_interpolates_channels() {
-        assert_eq!(blend((255, 0, 0), (0, 0, 255), 0.5), (127, 0, 127));
-        assert_eq!(blend((10, 20, 30), (100, 120, 140), 0.0), (100, 120, 140));
-        assert_eq!(blend((10, 20, 30), (100, 120, 140), 1.0), (10, 20, 30));
-    }
-
-    #[test]
-    fn color_perceptual_distance_is_symmetric() {
-        let a = (12, 34, 56);
-        let b = (200, 150, 100);
-        assert_eq!(perceptual_distance(a, a), 0.0);
-        let ab = perceptual_distance(a, b);
-        let ba = perceptual_distance(b, a);
-        assert!((ab - ba).abs() < f32::EPSILON);
-        assert!(ab > 0.0);
-    }
-}

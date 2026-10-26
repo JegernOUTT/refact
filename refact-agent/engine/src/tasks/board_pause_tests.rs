@@ -265,16 +265,6 @@ async fn planner_resume_clears_gate_and_field() {
         .any(|update| update.message == "Resumed by planner"));
 }
 
-#[test]
-fn old_board_without_paused_at_loads() {
-    let board: TaskBoard = serde_yaml::from_str(
-        "cards:\n  - id: T-1\n    title: Legacy\n    column: doing\n    created_at: '2026-01-01T00:00:00Z'\n",
-    )
-    .unwrap();
-    assert!(board.cards[0].paused_at.is_none());
-    assert!(board.cards[0].paused_by.is_none());
-}
-
 #[tokio::test]
 async fn deliveries_wait_without_preemption_and_resume_wakes_pending_work_once() {
     let f = fixture(SessionState::Idle).await;

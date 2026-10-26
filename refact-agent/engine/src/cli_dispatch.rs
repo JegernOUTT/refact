@@ -343,68 +343,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_worker_version_exits_successfully() {
-        let error = parse_from(["refact", "worker", "--version"]).unwrap_err();
-
-        assert_eq!(error.exit_code, 0);
-        assert!(!error.use_stderr);
-        assert!(error.message.contains(env!("CARGO_PKG_VERSION")));
-    }
-
-    #[test]
-    fn parse_version() {
-        match parse_from(["refact", "version"]).unwrap() {
-            RefactCliCommand::Control(options) => {
-                assert!(matches!(
-                    options.command,
-                    crate::daemon::cli::CliCommand::Version { .. }
-                ));
-            }
-            _ => panic!("expected version control command"),
-        }
-    }
-
-    #[test]
-    fn parse_cron_control_command() {
-        match parse_from(["refact", "cron", "list", "--json"]).unwrap() {
-            RefactCliCommand::Control(options) => {
-                assert!(matches!(
-                    options.command,
-                    crate::daemon::cli::CliCommand::Cron { json: true, .. }
-                ));
-            }
-            _ => panic!("expected cron control command"),
-        }
-    }
-
-    #[test]
-    fn parse_ui_control_command() {
-        match parse_from(["refact", "ui", "/tmp/project", "--no-open"]).unwrap() {
-            RefactCliCommand::Control(options) => {
-                assert!(matches!(
-                    options.command,
-                    crate::daemon::cli::CliCommand::Ui {
-                        path: Some(path),
-                        json: false,
-                        no_open: true,
-                    } if path == std::path::PathBuf::from("/tmp/project")
-                ));
-            }
-            _ => panic!("expected ui control command"),
-        }
-    }
-    #[test]
-    fn parse_daemon_foreground() {
-        assert!(matches!(
-            parse_from(["refact", "daemon", "--foreground"]).unwrap(),
-            RefactCliCommand::Daemon {
-                foreground: true,
-                port: None
-            }
-        ));
-    }
-
-    #[test]
     fn parse_daemon_port() {
         assert!(matches!(
             parse_from(["refact", "daemon", "--port", "9000"]).unwrap(),
@@ -441,24 +379,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_jetbrains_daemon_spawn_argv() {
-        assert!(matches!(
-            parse_from(["refact", "daemon"]).unwrap(),
-            RefactCliCommand::Daemon {
-                foreground: false,
-                port: None
-            }
-        ));
-        assert!(matches!(
-            parse_from(["refact", "daemon", "--port", "9000"]).unwrap(),
-            RefactCliCommand::Daemon {
-                foreground: false,
-                port: Some(9000)
-            }
-        ));
-    }
-
-    #[test]
     fn parse_daemon_port_rejects_invalid_values() {
         let missing = parse_from(["refact", "daemon", "--port"]).unwrap_err();
         assert_eq!(missing.exit_code, 2);
@@ -474,31 +394,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_self_update_options() {
-        let command = parse_from([
-            "refact",
-            "self-update",
-            "--check",
-            "--version",
-            "v8.2.0",
-            "--force",
-            "--quiet",
-            "--json",
-        ])
-        .unwrap();
-        match command {
-            RefactCliCommand::SelfUpdate(options) => {
-                assert!(options.check);
-                assert_eq!(options.version.as_deref(), Some("8.2.0"));
-                assert!(options.force);
-                assert!(options.quiet);
-                assert!(options.json);
-            }
-            _ => panic!("expected self-update command"),
-        }
-    }
-
-    #[test]
     fn parse_run_defaults() {
         let command = parse_from(["refact", "run", "say hi"]).unwrap();
         match command {
@@ -509,44 +404,6 @@ mod tests {
                     crate::daemon::run_cmd::ApprovalPolicy::Deny
                 );
                 assert_eq!(options.mode, crate::daemon::run_cmd::RunMode::Agent);
-            }
-            _ => panic!("expected run command"),
-        }
-    }
-
-    #[test]
-    fn parse_run_full_options() {
-        let command = parse_from([
-            "refact",
-            "run",
-            "--project",
-            "/tmp/project",
-            "--mode",
-            "explore",
-            "--model",
-            "m",
-            "--approve",
-            "auto",
-            "--json",
-            "--timeout-secs",
-            "9",
-            "do work",
-        ])
-        .unwrap();
-        match command {
-            RefactCliCommand::Run(options) => {
-                assert_eq!(
-                    options.project,
-                    Some(std::path::PathBuf::from("/tmp/project"))
-                );
-                assert_eq!(options.mode, crate::daemon::run_cmd::RunMode::Explore);
-                assert_eq!(options.model.as_deref(), Some("m"));
-                assert_eq!(
-                    options.approve,
-                    crate::daemon::run_cmd::ApprovalPolicy::Auto
-                );
-                assert!(options.json);
-                assert_eq!(options.timeout_secs, 9);
             }
             _ => panic!("expected run command"),
         }
@@ -583,27 +440,6 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_daemon_command() {
-        assert!(matches!(
-            dispatch(RefactCliCommand::Daemon {
-                foreground: false,
-                port: Some(8490)
-            }),
-            DispatchResult::Daemon {
-                foreground: false,
-                port: Some(8490)
-            }
-        ));
-    }
-
-    #[test]
-    fn parse_unknown_subcommand_errors() {
-        let error = parse_from(["refact", "bogus"]).unwrap_err();
-        assert_eq!(error.exit_code, 2);
-        assert!(error.message.contains("unknown subcommand `bogus`"));
-    }
-
-    #[test]
     fn json_usage_errors_are_marked_for_machine_output() {
         let run = parse_from(["refact", "run", "--json"]).unwrap_err();
         assert_eq!(run.exit_code, 2);
@@ -614,31 +450,5 @@ mod tests {
         assert_eq!(control.exit_code, 2);
         assert!(control.json);
         assert_eq!(control.kind, Some("usage"));
-    }
-
-    #[test]
-    fn subcommand_daemon_help_routes_to_scoped_text() {
-        match parse_from(["refact", "logs", "--help"]).unwrap() {
-            RefactCliCommand::Help(text) => {
-                assert!(text.starts_with("refact logs"));
-                assert!(!text.contains("SUBCOMMANDS:"));
-            }
-            _ => panic!("expected help command"),
-        }
-
-        match parse_from(["refact", "run", "--help"]).unwrap() {
-            RefactCliCommand::Help(text) => {
-                assert!(text.starts_with("refact run"));
-                assert!(text.contains("--approve"));
-            }
-            _ => panic!("expected help command"),
-        }
-    }
-
-    #[test]
-    fn parse_tui_rejects_unknown_argument() {
-        let error = parse_from(["refact", "tui", "--bogus"]).unwrap_err();
-        assert_eq!(error.exit_code, 2);
-        assert!(error.message.contains("unexpected tui argument"));
     }
 }

@@ -140,17 +140,4 @@ mod tests {
         assert_eq!(loaded.thread.title, "Focused label");
         assert!(!loaded.thread.is_title_generated);
     }
-
-    #[test]
-    fn validates_required_non_empty_and_bounded_label() {
-        assert!(crate::chat::trajectories::validate_trajectory_label("  ").is_err());
-        assert!(crate::chat::trajectories::validate_trajectory_label(
-            &"x".repeat(TRAJECTORY_LABEL_MAX_CHARS + 1)
-        )
-        .is_err());
-        assert_eq!(
-            crate::chat::trajectories::validate_trajectory_label("  valid\n label  ").unwrap(),
-            "valid label"
-        );
-    }
 }

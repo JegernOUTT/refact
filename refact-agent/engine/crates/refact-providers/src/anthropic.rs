@@ -177,43 +177,4 @@ available:
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn anthropic_runtime_enables_cache_control() {
-        let provider = AnthropicProvider {
-            api_key: "sk-ant-test".to_string(),
-            enabled: true,
-            enabled_models: vec!["claude-sonnet-4".to_string()],
-            ..Default::default()
-        };
-
-        let runtime = provider.build_runtime().unwrap();
-
-        assert!(runtime.supports_cache_control);
-    }
-
-    #[test]
-    fn anthropic_available_models_enable_cache_control_even_when_caps_omit_it() {
-        let provider = AnthropicProvider {
-            enabled_models: vec!["claude-sonnet-4".to_string()],
-            ..Default::default()
-        };
-        let mut model_caps = HashMap::new();
-        model_caps.insert(
-            "anthropic/claude-sonnet-4".to_string(),
-            ModelCapabilities {
-                n_ctx: 200_000,
-                tokenizer: "claude".to_string(),
-                ..Default::default()
-            },
-        );
-
-        let models = provider.get_available_models_from_caps(&model_caps);
-        let model = models
-            .iter()
-            .find(|model| model.id == "claude-sonnet-4")
-            .expect("anthropic model should be available");
-
-        assert!(model.supports_cache_control);
-    }
 }

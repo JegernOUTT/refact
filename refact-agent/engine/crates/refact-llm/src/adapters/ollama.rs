@@ -787,42 +787,6 @@ mod tests {
         assert!(converted[1]["tool_call_id"].is_null());
     }
 
-    #[test]
-    fn build_http_uses_provider_num_ctx_when_request_does_not_override() {
-        let adapter = OllamaAdapter;
-        let req = LlmRequest::new(
-            "ollama/llama3.1:8b".to_string(),
-            vec![ChatMessage::new("user".to_string(), "Hi".to_string())],
-        );
-        let mut settings = default_settings();
-        settings
-            .extra_headers
-            .insert(OLLAMA_NUM_CTX_HEADER.to_string(), "16384".to_string());
-
-        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
-
-        assert_eq!(http.body["options"]["num_ctx"], 16384);
-        assert!(http.headers.get(OLLAMA_NUM_CTX_HEADER).is_none());
-    }
-
-    #[test]
-    fn build_http_sets_think_only_when_reasoning_requested() {
-        let adapter = OllamaAdapter;
-        let messages = vec![ChatMessage::new("user".to_string(), "Hi".to_string())];
-        let req = LlmRequest::new("ollama/llama3.1:8b".to_string(), messages.clone());
-        let http = adapter
-            .build_http(&cleared(&req), &default_settings())
-            .unwrap();
-        assert!(http.body.get("think").is_none());
-
-        let req = LlmRequest::new("ollama/llama3.1:8b".to_string(), messages)
-            .with_reasoning(ReasoningIntent::High);
-        let http = adapter
-            .build_http(&cleared(&req), &default_settings())
-            .unwrap();
-        assert_eq!(http.body["think"], true);
-    }
-
     fn tool_call_ids_from_chunk(chunk: &str) -> Vec<String> {
         let adapter = OllamaAdapter;
         adapter

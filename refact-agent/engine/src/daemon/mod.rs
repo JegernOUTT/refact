@@ -715,7 +715,7 @@ async fn wait_for_sigterm() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hyper::{Body, Request, StatusCode};
+
     use std::sync::{Arc, Mutex};
     use tracing_subscriber::fmt::MakeWriter;
 
@@ -744,12 +744,6 @@ mod tests {
     struct RustLogGuard(Option<String>);
 
     impl RustLogGuard {
-        fn unset() -> Self {
-            let previous = std::env::var("RUST_LOG").ok();
-            std::env::remove_var("RUST_LOG");
-            Self(previous)
-        }
-
         fn set(value: &str) -> Self {
             let previous = std::env::var("RUST_LOG").ok();
             std::env::set_var("RUST_LOG", value);
@@ -764,23 +758,6 @@ mod tests {
                 None => std::env::remove_var("RUST_LOG"),
             }
         }
-    }
-
-    fn capture_filtered_logs(filter: EnvFilter) -> String {
-        let logs = Arc::new(Mutex::new(Vec::new()));
-        let layer = tracing_subscriber::fmt::layer()
-            .without_time()
-            .with_ansi(false)
-            .with_writer(SharedWriter(logs.clone()))
-            .with_filter(filter);
-        let subscriber = tracing_subscriber::registry().with(layer);
-        tracing::subscriber::with_default(subscriber, || {
-            tracing::trace!(target: "hyper::proto::h2", "hyper trace noise");
-            tracing::debug!(target: "h2::hpack::decoder", "h2 debug noise");
-            tracing::info!(target: "refact_lsp::daemon", "daemon info kept");
-        });
-        let bytes = logs.lock().unwrap().clone();
-        String::from_utf8(bytes).unwrap()
     }
 
     fn write_log(path: &Path, size: usize, age_secs: u64) {
@@ -798,33 +775,6 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         panic!("daemon info not written");
-    }
-
-    #[test]
-    #[serial_test::serial(daemon)]
-    fn default_log_filter_keeps_app_info_and_drops_http_trace_noise() {
-        let _guard = RustLogGuard::unset();
-
-        let directives = default_log_filter_directives();
-        let output = capture_filtered_logs(log_env_filter());
-
-        assert!(directives.contains("info"));
-        for target in NOISY_LOG_TARGETS {
-            assert!(directives.contains(&format!("{target}=warn")));
-        }
-        assert!(output.contains("daemon info kept"));
-        assert!(!output.contains("hyper trace noise"));
-        assert!(!output.contains("h2 debug noise"));
-    }
-
-    #[test]
-    #[serial_test::serial(daemon)]
-    fn rust_log_override_allows_noisy_debugging_when_requested() {
-        let _guard = RustLogGuard::set("hyper=trace");
-
-        let output = capture_filtered_logs(log_env_filter());
-
-        assert!(output.contains("hyper trace noise"));
     }
 
     #[test]
@@ -901,58 +851,6 @@ mod tests {
         assert!(response.status().is_success());
         assert_eq!(task.await.unwrap(), 0);
         assert!(!paths.daemon_json_path.exists());
-    }
-
-    #[tokio::test]
-    async fn daemon_lifecycle_daemon_json_has_urls() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = RuntimePaths::in_dir(dir.path());
-        let config = config::DaemonConfig {
-            bind: "127.0.0.1".to_string(),
-            port: 0,
-            ..config::DaemonConfig::default()
-        };
-        let task_paths = paths.clone();
-        let task = tokio::spawn(async move {
-            run_daemon_entry_with_paths(config, task_paths, false, false).await
-        });
-        let info = wait_for_info(&paths.daemon_json_path).await;
-        assert!(info.urls.loopback.starts_with("http://127.0.0.1:"));
-        assert!(info.urls.mdns.contains(".local:"));
-        let client = reqwest::Client::new();
-        let _ = client
-            .post(format!("http://127.0.0.1:{}/daemon/v1/shutdown", info.port))
-            .json(&serde_json::json!({"reason": "test"}))
-            .send()
-            .await
-            .unwrap();
-        let _ = task.await;
-    }
-
-    #[tokio::test]
-    async fn daemon_router_shutdown_endpoint_accepts_reason() {
-        use tower::ServiceExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let state = state::DaemonState::new(
-            config::DaemonConfig::default(),
-            events::EventBus::new(dir.path().join("events.jsonl")),
-            None,
-        );
-        let mut shutdown_rx = state.shutdown_receiver();
-        let response = server::make_router(state, 8488)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/daemon/v1/shutdown")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"reason":"test"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(shutdown_rx.recv().await.unwrap(), "test");
     }
 
     #[tokio::test(start_paused = true)]

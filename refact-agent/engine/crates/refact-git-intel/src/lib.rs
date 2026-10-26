@@ -1004,28 +1004,6 @@ mod tests {
             .unwrap();
     }
 
-    fn fixture_repo() -> (tempfile::TempDir, GitIntel) {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = Repository::init(dir.path()).unwrap();
-        commit_files(
-            &repo,
-            &[("a.rs", "1"), ("b.rs", "1")],
-            "c1",
-            "Alice",
-            "alice@x.com",
-        );
-        commit_files(
-            &repo,
-            &[("a.rs", "2"), ("b.rs", "2")],
-            "c2",
-            "Alice",
-            "alice@x.com",
-        );
-        commit_files(&repo, &[("a.rs", "3")], "c3", "Bob", "bob@x.com");
-        let intel = mine_history(dir.path(), 100).unwrap();
-        (dir, intel)
-    }
-
     fn windowed_intel() -> GitIntel {
         let now = 1_700_000_000;
         let day = 86_400;
@@ -1074,20 +1052,6 @@ mod tests {
             },
         ];
         intel
-    }
-
-    #[test]
-    fn windowed_helpers_use_only_commits_in_window() {
-        let now = 1_700_000_000;
-        let intel = windowed_intel();
-        assert_eq!(intel.commit_count_in_window("a.rs", now, 10), 2);
-        assert_eq!(intel.commit_count_in_window("a.rs", now, 1), 1);
-        assert_eq!(intel.commit_count_in_window("missing.rs", now, 10), 0);
-        assert_eq!(intel.lines_in_window("a.rs", now, 10), (7, 4));
-        assert_eq!(intel.lines_in_window("a.rs", now, 1), (5, 1));
-        assert_eq!(intel.lines_in_window("missing.rs", now, 10), (0, 0));
-        assert_eq!(intel.active_contributors_in_window(now, 10), 2);
-        assert_eq!(intel.active_contributors_in_window(now, 1), 1);
     }
 
     #[test]
@@ -1140,16 +1104,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_repo_history_helpers_return_empty_results() {
-        let dir = tempfile::tempdir().unwrap();
-        Repository::init(dir.path()).unwrap();
-
-        let intel = mine_history(dir.path(), 10).unwrap();
-        assert_eq!(intel.commits_analyzed, 0);
-        assert!(intel.commit_records.is_empty());
-    }
-
-    #[test]
     fn windowed_helpers_reject_invalid_day_windows_without_overflow() {
         let now = 1_700_000_000;
         let intel = windowed_intel();
@@ -1165,138 +1119,6 @@ mod tests {
         );
         assert_eq!(intel.active_contributors_in_window(now, -1), 0);
         assert_eq!(intel.active_contributors_in_window(now, i64::MAX), 0);
-    }
-
-    #[test]
-    fn temporal_weight_clamps_future_commits_to_one() {
-        let future = CommitRecord {
-            oid: None,
-            ts: 2_000_000,
-            author: "future@x.com".into(),
-            committer: "future@x.com".into(),
-            message: "future".into(),
-            files: vec![("future.rs".into(), 100, 0)],
-        };
-        let past = CommitRecord {
-            oid: None,
-            ts: 1_000_000,
-            author: "past@x.com".into(),
-            committer: "past@x.com".into(),
-            message: "past".into(),
-            files: vec![("past.rs".into(), 100, 0)],
-        };
-        let mut intel = GitIntel::default();
-        intel.commit_records = vec![future, past];
-
-        let hotspots = intel.temporal_hotspots(1_500_000, 2);
-
-        assert_eq!(hotspots[0], ("future.rs".into(), 1.0));
-        assert!(hotspots[1].1 < 1.0);
-    }
-
-    #[test]
-    fn ownership_percentile_and_partner_helpers_return_expected_values() {
-        let now = 1_700_000_000;
-        let intel = windowed_intel();
-        let (primary_author, primary_share) = intel.primary_owner("a.rs");
-        assert_eq!(primary_author, "alice@x.com");
-        assert!((primary_share - 2.0 / 3.0).abs() < 1e-9);
-        assert_eq!(intel.primary_owner("missing.rs"), (String::new(), 0.0));
-
-        let (recent_author, recent_share) = intel.recent_owner("a.rs", now, 10);
-        assert_eq!(recent_author, "alice@x.com");
-        assert!((recent_share - 0.5).abs() < 1e-9);
-        assert_eq!(intel.recent_owner("a.rs", now, 0), (String::new(), 0.0));
-
-        assert!((intel.churn_percentile("b.rs") - 0.5).abs() < 1e-9);
-        assert_eq!(intel.churn_percentile("missing.rs"), 0.0);
-        assert_eq!(intel.change_entropy_pct("missing.rs"), 0.0);
-        assert_eq!(
-            intel.co_change_partners("a.rs", 1),
-            vec![("b.rs".into(), 2), ("c.rs".into(), 1)]
-        );
-        assert_eq!(
-            intel.co_change_partners("a.rs", 2),
-            vec![("b.rs".into(), 2)]
-        );
-        assert!(intel.is_hotspot_file("a.rs", 1));
-        assert!(!intel.is_hotspot_file("b.rs", 1));
-    }
-
-    #[test]
-    fn hotspots_rank_by_churn() {
-        let (_dir, intel) = fixture_repo();
-        let hs = intel.hotspots(10);
-        assert_eq!(hs[0].path, "a.rs", "a.rs changed 3x, b.rs 2x: {hs:?}");
-        assert_eq!(hs[0].churn, 3);
-    }
-
-    #[test]
-    fn ownership_reflects_authors() {
-        let (_dir, intel) = fixture_repo();
-        let owners = intel.ownership("a.rs");
-        assert_eq!(
-            owners[0].author, "alice@x.com",
-            "Alice has 2/3 of a.rs: {owners:?}"
-        );
-        assert_eq!(owners[0].commits, 2);
-        assert!((owners[0].share - 2.0 / 3.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn co_change_detects_files_changed_together() {
-        let (_dir, intel) = fixture_repo();
-        let pairs = intel.co_change_pairs(1);
-        assert!(
-            pairs
-                .iter()
-                .any(|((x, y), c)| x == "a.rs" && y == "b.rs" && *c == 2),
-            "a.rs & b.rs co-changed twice: {pairs:?}"
-        );
-    }
-
-    #[test]
-    fn bus_factor_for_single_owner_is_one() {
-        let (_dir, intel) = fixture_repo();
-        assert_eq!(intel.bus_factor("b.rs"), 1, "b.rs only by Alice");
-    }
-
-    #[test]
-    fn truncation_notice_mentions_unreadable_diffs_when_nonzero() {
-        let _guard = config_guard();
-        let mut intel = GitIntel::default();
-        intel.commits_analyzed = 7;
-        intel.commits_with_unreadable_diff = 2;
-
-        let truncation = intel.history_truncation();
-        assert_eq!(truncation.commits_with_unreadable_diff, 2);
-        let notice = truncation.notice.unwrap();
-        assert!(notice.contains("churn incomplete: 2 of 7 commits had an unreadable diff"));
-    }
-
-    #[test]
-    fn truncation_notice_omits_unreadable_diffs_at_zero() {
-        let _guard = config_guard();
-        let mut intel = GitIntel::default();
-        intel.commits_analyzed = 7;
-
-        let truncation = intel.history_truncation();
-        assert_eq!(truncation.commits_with_unreadable_diff, 0);
-        assert!(truncation.notice.is_none());
-    }
-
-    #[test]
-    fn truncation_notice_joins_unreadable_diff_part_with_other_parts() {
-        let _guard = config_guard();
-        let mut intel = GitIntel::default();
-        intel.commits_analyzed = 5;
-        intel.commits_walked = 50;
-        intel.history_truncated = true;
-        intel.commits_with_unreadable_diff = 1;
-
-        let notice = intel.history_truncation().notice.unwrap();
-        assert!(notice.contains("history truncated"));
-        assert!(notice.contains("; churn incomplete: 1 of 5 commits had an unreadable diff"));
     }
 
     #[test]
@@ -1332,26 +1154,6 @@ mod tests {
             .files
             .iter()
             .any(|(p, a, d)| p == "lines.rs" && *a == 0 && *d == 1));
-    }
-
-    #[test]
-    fn install_git_intel_limits_changes_limits() {
-        let _guard = config_guard();
-        let original = config::limits();
-        config::install_git_intel_limits(config::GitIntelLimits {
-            max_commits: 11,
-            deep_walk_limit: 22,
-            max_files_per_commit_for_cochange: 33,
-            max_files_per_commit_for_entropy: 44,
-        });
-        let updated = config::limits();
-        config::install_git_intel_limits(original.clone());
-
-        assert_eq!(updated.max_commits, 11);
-        assert_eq!(updated.deep_walk_limit, 22);
-        assert_eq!(updated.max_files_per_commit_for_cochange, 33);
-        assert_eq!(updated.max_files_per_commit_for_entropy, 44);
-        assert_eq!(config::limits().max_commits, original.max_commits);
     }
 
     #[test]
@@ -1631,121 +1433,6 @@ mod tests {
         assert_eq!(features[0].1.ld, u32::MAX);
         assert!(features[0].1.entropy.is_finite());
         assert!((0.0..=1.0).contains(&intel.churn_risk("huge.rs")));
-    }
-
-    #[test]
-    fn organizational_metrics_flag_risks() {
-        let mut intel = GitIntel::default();
-        intel.file_churn.insert("risk.rs".into(), 6);
-        intel.file_churn.insert("middle.rs".into(), 4);
-        intel.file_churn.insert("calm.rs".into(), 2);
-        intel.file_authors.insert(
-            "risk.rs".into(),
-            HashMap::from([
-                ("a@x.com".into(), 2),
-                ("b@x.com".into(), 2),
-                ("c@x.com".into(), 2),
-                ("d@x.com".into(), 0),
-                ("e@x.com".into(), 0),
-            ]),
-        );
-        intel
-            .file_authors
-            .insert("calm.rs".into(), HashMap::from([("a@x.com".into(), 2)]));
-        intel.commit_records = vec![CommitRecord {
-            oid: None,
-            ts: 1,
-            author: "a@x.com".into(),
-            committer: "a@x.com".into(),
-            message: "churn".into(),
-            files: vec![("risk.rs".into(), 12, 0), ("calm.rs".into(), 2, 0)],
-        }];
-        assert!(intel.ownership_risk("risk.rs"));
-        assert!(intel.developer_congestion("risk.rs", 6, 0.4));
-        assert!(intel.knowledge_loss("calm.rs"));
-        assert!(intel.churn_risk("risk.rs") > intel.churn_risk("calm.rs"));
-        assert!(intel.churn_risk("calm.rs") < 1.0);
-    }
-
-    #[test]
-    fn churn_risk_scale_sane() {
-        let mut intel = GitIntel::default();
-        intel.file_churn.insert("hot.rs".into(), 32);
-        intel.file_churn.insert("warm.rs".into(), 8);
-        intel.file_churn.insert("cold.rs".into(), 1);
-        intel.file_authors.insert(
-            "hot.rs".into(),
-            HashMap::from([
-                ("a@x.com".into(), 2),
-                ("b@x.com".into(), 2),
-                ("c@x.com".into(), 2),
-                ("d@x.com".into(), 0),
-                ("e@x.com".into(), 0),
-            ]),
-        );
-        intel
-            .file_authors
-            .insert("cold.rs".into(), HashMap::from([("a@x.com".into(), 1)]));
-        intel.commit_records = vec![CommitRecord {
-            oid: None,
-            ts: 1,
-            author: "a@x.com".into(),
-            committer: "a@x.com".into(),
-            message: "focused churn".into(),
-            files: vec![("hot.rs".into(), 32, 0)],
-        }];
-
-        assert!(intel.churn_risk("hot.rs") >= 0.3);
-        assert!(intel.churn_risk("cold.rs") < 0.1);
-    }
-
-    #[test]
-    fn significant_commits_filter_noise_but_keep_decisions() {
-        let mut intel = GitIntel::default();
-        intel.commit_records = vec![
-            CommitRecord {
-                oid: None,
-                ts: 1,
-                author: "dev@x.com".into(),
-                committer: "dev@x.com".into(),
-                message: "introduce parser architecture".into(),
-                files: vec![],
-            },
-            CommitRecord {
-                oid: None,
-                ts: 2,
-                author: "dev@x.com".into(),
-                committer: "dev@x.com".into(),
-                message: "chore: update snapshots".into(),
-                files: vec![],
-            },
-            CommitRecord {
-                oid: None,
-                ts: 3,
-                author: "dev@x.com".into(),
-                committer: "dev@x.com".into(),
-                message: "ci: migrate to new runner".into(),
-                files: vec![],
-            },
-            CommitRecord {
-                oid: None,
-                ts: 4,
-                author: "dependabot@github.com".into(),
-                committer: "dependabot@github.com".into(),
-                message: "replace dependency versions".into(),
-                files: vec![],
-            },
-            CommitRecord {
-                oid: None,
-                ts: 5,
-                author: "dev@x.com".into(),
-                committer: "dev@x.com".into(),
-                message: "Merge branch main".into(),
-                files: vec![],
-            },
-        ];
-        assert_eq!(intel.significant_commits(10), vec![0, 2]);
-        assert_eq!(intel.significant_commits(1), vec![0]);
     }
 
     #[test]

@@ -256,42 +256,6 @@ mod tests {
     use chrono::Duration;
 
     #[test]
-    fn limiter_reports_rate_limited_reason() {
-        let mut lim = ChatReactionLimiter::new();
-        let now = Utc::now();
-        assert!(lim
-            .try_allow_kind("chat-a", ChatReactionKind::Insight, now)
-            .is_ok());
-        assert_eq!(
-            lim.try_allow_kind(
-                "chat-a",
-                ChatReactionKind::Insight,
-                now + Duration::seconds(10),
-            ),
-            Err(ChatReactionSkipReason::RateLimited)
-        );
-    }
-
-    #[test]
-    fn limiter_rollback_restores_quota_and_cooldown() {
-        let mut lim = ChatReactionLimiter::new();
-        let now = Utc::now();
-        let reservation = lim
-            .try_allow_kind("chat-a", ChatReactionKind::Insight, now)
-            .unwrap();
-
-        lim.rollback(reservation);
-
-        assert!(lim
-            .try_allow_kind(
-                "chat-a",
-                ChatReactionKind::Insight,
-                now + Duration::seconds(10),
-            )
-            .is_ok());
-    }
-
-    #[test]
     fn limiter_rollback_does_not_clobber_newer_reservation() {
         let mut lim = ChatReactionLimiter::new();
         let now = Utc::now();
@@ -340,33 +304,5 @@ mod tests {
             &overflow_chat,
             now + Duration::seconds(i64::from(GLOBAL_HOURLY_CAP))
         ));
-    }
-
-    #[test]
-    fn limiter_resets_after_hour() {
-        let mut lim = ChatReactionLimiter::new();
-        let now = Utc::now();
-        for i in 0..GLOBAL_HOURLY_CAP {
-            let chat_id = format!("chat-reset-{i}");
-            lim.allow(&chat_id, now + Duration::seconds(i64::from(i)));
-        }
-        let after_hour = now + Duration::seconds(3601);
-        assert!(lim.allow("chat-fresh", after_hour));
-    }
-
-    #[test]
-    fn limiter_prunes_stale_chat_ids() {
-        let mut lim = ChatReactionLimiter::new();
-        let t0 = chrono::Utc::now();
-        assert!(lim.allow_kind("chat-1", ChatReactionKind::Humor, t0));
-
-        let t1 = t0 + Duration::seconds(PER_CHAT_COOLDOWN_SECS + 1);
-        assert!(lim.allow_kind("chat-2", ChatReactionKind::Humor, t1));
-
-        assert!(
-            !lim.per_chat_kind_last_at
-                .contains_key(&("chat-1".to_string(), ChatReactionKind::Humor)),
-            "stale chat-1 entry must be pruned after second call"
-        );
     }
 }

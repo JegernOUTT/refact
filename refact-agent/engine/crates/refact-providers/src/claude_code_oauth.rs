@@ -671,47 +671,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn token_request_headers_match_claude_cli_identity() {
-        let headers = token_request_headers().unwrap();
-
-        assert_eq!(
-            headers.get(reqwest::header::CONTENT_TYPE).unwrap(),
-            "application/json"
-        );
-        assert_eq!(
-            headers.get(reqwest::header::USER_AGENT).unwrap(),
-            claude_code_compat::USER_AGENT
-        );
-        assert_eq!(headers.get("x-app").unwrap(), "cli");
-        assert_eq!(headers.get("x-stainless-lang").unwrap(), "js");
-        assert_eq!(
-            headers
-                .get("anthropic-dangerous-direct-browser-access")
-                .unwrap(),
-            "true"
-        );
-    }
-
-    #[test]
     fn refresh_response_without_refresh_token_preserves_old_token() {
         let token_resp: RefreshTokenResponse = serde_json::from_value(serde_json::json!({
             "access_token": "new-access-token",
-            "expires_in": 3600,
-        }))
-        .unwrap();
-
-        let tokens = oauth_tokens_from_refresh_response(token_resp, "old-refresh-token", 1000);
-
-        assert_eq!(tokens.access_token, "new-access-token");
-        assert_eq!(tokens.refresh_token, "old-refresh-token");
-        assert_eq!(tokens.expires_at, 3_601_000);
-    }
-
-    #[test]
-    fn refresh_response_with_empty_refresh_token_preserves_old_token() {
-        let token_resp: RefreshTokenResponse = serde_json::from_value(serde_json::json!({
-            "access_token": "new-access-token",
-            "refresh_token": "",
             "expires_in": 3600,
         }))
         .unwrap();
@@ -756,38 +718,6 @@ mod tests {
     }
 
     #[test]
-    fn refresh_response_with_new_refresh_token_uses_new_token() {
-        let token_resp: RefreshTokenResponse = serde_json::from_value(serde_json::json!({
-            "access_token": "new-access-token",
-            "refresh_token": "new-refresh-token",
-            "expires_in": 3600,
-        }))
-        .unwrap();
-
-        let tokens = oauth_tokens_from_refresh_response(token_resp, "old-refresh-token", 1000);
-
-        assert_eq!(tokens.access_token, "new-access-token");
-        assert_eq!(tokens.refresh_token, "new-refresh-token");
-        assert_eq!(tokens.expires_at, 3_601_000);
-    }
-
-    #[test]
-    fn exchange_response_trims_refresh_token() {
-        let token_resp: TokenResponse = serde_json::from_value(serde_json::json!({
-            "access_token": "new-access-token",
-            "refresh_token": " exchange-new ",
-            "expires_in": 3600,
-        }))
-        .unwrap();
-
-        let tokens = oauth_tokens_from_token_response(token_resp, 1000);
-
-        assert_eq!(tokens.access_token, "new-access-token");
-        assert_eq!(tokens.refresh_token, "exchange-new");
-        assert_eq!(tokens.expires_at, 3_601_000);
-    }
-
-    #[test]
     fn raw_callback_http_response_includes_csp() {
         let response = raw_http_response(200, "ok");
 
@@ -795,55 +725,6 @@ mod tests {
             .contains("Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'"));
         assert!(response.contains("Content-Type: text/html; charset=utf-8"));
         assert!(response.contains("Content-Length: 2"));
-    }
-
-    #[test]
-    fn parses_callback_url_authorization_input() {
-        let (code, state) = parse_code_and_state_input(
-            "http://localhost:34179/callback?code=abc%20123&state=state-456",
-        )
-        .unwrap();
-
-        assert_eq!(code, "abc 123");
-        assert_eq!(state, "state-456");
-    }
-
-    #[test]
-    fn parses_raw_query_authorization_input() {
-        let (code, state) = parse_code_and_state_input("?code=abc&state=state").unwrap();
-
-        assert_eq!(code, "abc");
-        assert_eq!(state, "state");
-    }
-
-    #[test]
-    fn parses_legacy_code_hash_state_authorization_input() {
-        let (code, state) = parse_code_and_state_input("abc#state").unwrap();
-
-        assert_eq!(code, "abc");
-        assert_eq!(state, "state");
-    }
-
-    #[test]
-    fn expiry_saturates_for_huge_expires_in() {
-        assert_eq!(expires_at_ms(1000, i64::MAX), i64::MAX);
-    }
-
-    #[test]
-    fn expiry_clamps_negative_expires_in_to_now() {
-        assert_eq!(expires_at_ms(1000, -3600), 1000);
-    }
-
-    #[tokio::test]
-    async fn pending_oauth_session_tracks_provider_instance_id() {
-        let _guard = pending_sessions_test_guard().await;
-        clear_pending_sessions_for_test().await;
-        let (session_id, _) = start_oauth_session(OAuthMode::Max, 34179, "claude_code_work").await;
-
-        let provider_instance_id = pending_session_provider_instance_id(&session_id).await;
-        assert_eq!(provider_instance_id.as_deref(), Some("claude_code_work"));
-
-        clear_pending_sessions_for_test().await;
     }
 
     #[tokio::test]

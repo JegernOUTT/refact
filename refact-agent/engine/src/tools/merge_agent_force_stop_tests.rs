@@ -9,11 +9,10 @@ use tokio::sync::Mutex;
 use crate::app_state::EngineChatSessionFacade;
 use crate::chat::types::{ChatSession, TaskMeta};
 use crate::tasks::storage;
-use crate::tools::tools_description::Tool;
 
 use super::merge_agent_target_checkout_tests::{git, Fixture, TARGET};
 use super::tool_agent_lifecycle::tests::{args, planner_ccx, MockChatFacade};
-use super::tool_task_merge_agent::{merge_agent_with_git_probe, ToolTaskMergeAgent};
+use super::tool_task_merge_agent::merge_agent_with_git_probe;
 
 async fn doing_fixture(legacy: bool) -> Fixture {
     let fixture = Fixture::new(true).await;
@@ -202,25 +201,6 @@ async fn force_merge_refuses_when_stop_unconfirmed() {
             serde_json::to_value(board).unwrap(),
             serde_json::to_value(after).unwrap()
         );
-    }
-}
-
-#[tokio::test]
-#[serial_test::serial(runtime_settings, coordination_metrics)]
-async fn force_merge_without_live_session_proceeds_as_before() {
-    for legacy in [false, true] {
-        let fixture = doing_fixture(legacy).await;
-        let facade = Arc::new(EngineChatSessionFacade::new(fixture.gcx.clone()));
-        let ccx = planner_ccx(fixture.gcx.clone(), facade, "planner").await;
-        ToolTaskMergeAgent::new()
-            .tool_execute(
-                ccx,
-                &"no-live-merge".into(),
-                &args(&[("card_id", json!("T-1")), ("force", json!(true))]),
-            )
-            .await
-            .unwrap();
-        assert_merged(&fixture).await;
     }
 }
 

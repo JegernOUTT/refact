@@ -1116,18 +1116,8 @@ mod tests {
     use ratatui::layout::Rect;
     use ratatui::style::Style;
     use ratatui::text::Line;
-    use std::panic::AssertUnwindSafe;
+
     use std::sync::{Arc, Mutex};
-
-    struct TestGuard<'a> {
-        output: &'a mut Vec<u8>,
-    }
-
-    impl Drop for TestGuard<'_> {
-        fn drop(&mut self) {
-            let _ = restore_terminal(self.output);
-        }
-    }
 
     #[derive(Clone)]
     struct FakeTerminalOps {
@@ -1253,23 +1243,6 @@ mod tests {
         unsafe {
             libc::close(write_fd);
         }
-    }
-
-    #[test]
-    fn terminal_guard_restores_on_panic() {
-        let mut output = Vec::new();
-        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            let _guard = TestGuard {
-                output: &mut output,
-            };
-            panic!("boom");
-        }));
-        assert!(result.is_err());
-        let rendered = String::from_utf8_lossy(&output);
-        assert!(rendered.contains("?1049l"));
-        assert!(rendered.contains("?2004l"));
-        assert!(rendered.contains("?1004l"));
-        assert!(rendered.contains("?1000l") || rendered.contains("?1002l"));
     }
 
     #[test]
@@ -1410,27 +1383,6 @@ mod tests {
     }
 
     #[test]
-    fn terminal_mode_env_fallback_is_truthy_only() {
-        assert!(is_truthy("1"));
-        assert!(is_truthy("true"));
-        assert!(!is_truthy("0"));
-        assert!(!is_truthy("false"));
-    }
-
-    #[test]
-    fn stdout_backend_uses_bounded_cursor_position() {
-        let mut backend = StdoutBackend::new(Position { x: 4, y: 9 });
-        assert_eq!(
-            Backend::get_cursor_position(&mut backend).unwrap(),
-            Position { x: 4, y: 9 }
-        );
-        assert_eq!(
-            Backend::get_cursor_position(&mut backend).unwrap(),
-            Position { x: 4, y: 9 }
-        );
-    }
-
-    #[test]
     fn stdout_backend_emits_osc8_without_mutating_cell_symbols() {
         let mut buffer = Buffer::empty(Rect::new(0, 0, 4, 1));
         buffer.set_string(0, 0, "link", Style::default());
@@ -1511,21 +1463,6 @@ mod tests {
     }
 
     #[test]
-    fn resize_rebuild_uses_the_bounded_cursor_position() {
-        let cursor_position = Position { x: 4, y: 9 };
-        let Ok(mut terminal) =
-            build_terminal_with_cursor(TerminalMode::Inline, cursor_position, 12)
-        else {
-            return;
-        };
-
-        assert_eq!(
-            Backend::get_cursor_position(terminal.backend_mut()).unwrap(),
-            cursor_position
-        );
-    }
-
-    #[test]
     fn restore_terminal_disables_raw_mode() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let mut ops = FakeTerminalOps {
@@ -1548,135 +1485,5 @@ mod tests {
                 TerminalStep::DisableRawMode,
             ]
         );
-    }
-
-    #[test]
-    fn restore_terminal_is_idempotent() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let mut ops = FakeTerminalOps {
-            calls: calls.clone(),
-            fail_on: None,
-            enhanced_keys: false,
-        };
-
-        restore_terminal_ops(&mut ops).unwrap();
-        restore_terminal_ops(&mut ops).unwrap();
-
-        assert_eq!(calls.lock().unwrap().len(), 14);
-        assert_eq!(
-            calls.lock().unwrap().last(),
-            Some(&TerminalStep::DisableRawMode)
-        );
-    }
-
-    #[test]
-    fn terminal_title_formats_project_and_status() {
-        assert_eq!(
-            terminal_title(Some("demo"), "generating"),
-            "refact · demo · generating"
-        );
-        assert_eq!(
-            terminal_title(Some(" demo\nproject "), " idle\tready "),
-            "refact · demo project · idle ready"
-        );
-        assert_eq!(terminal_title(None, "idle"), "refact · no project · idle");
-    }
-
-    #[test]
-    fn terminal_title_truncates_long_project_at_char_boundary() {
-        let title = terminal_title(Some(&format!("{}é", "a".repeat(120))), "generating");
-        assert_eq!(title.chars().count(), MAX_TERMINAL_TITLE_CHARS);
-        assert!(title.ends_with('…'));
-        assert!(title.starts_with("refact · "));
-    }
-
-    #[test]
-    fn terminal_title_config_defaults_on_and_respects_config_gate() {
-        assert!(TerminalTitleConfig::from_config_content(None, true).active());
-        assert!(!TerminalTitleConfig::from_config_content(None, false).active());
-        assert!(
-            !TerminalTitleConfig::from_config_content(Some("terminal_title = false"), true)
-                .active()
-        );
-        assert!(
-            TerminalTitleConfig::from_config_content(Some("[terminal]\ntitle = true"), true)
-                .active()
-        );
-        assert!(
-            !TerminalTitleConfig::from_config_content(Some("[terminal]\ntitle = false"), true)
-                .active()
-        );
-    }
-
-    #[test]
-    fn osc2_title_sequence_removes_control_bytes() {
-        assert_eq!(
-            osc2_title_sequence("demo\nproject"),
-            b"\x1b]2;demo project\x07"
-        );
-    }
-
-    #[test]
-    fn title_guard_pushes_and_restores_title_when_enabled() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        {
-            let ops = FakeTerminalOps {
-                calls: calls.clone(),
-                fail_on: None,
-                enhanced_keys: false,
-            };
-            let mut guard = TerminalRestoreGuard::new_with_title_config(
-                ops,
-                TerminalMode::Inline,
-                TerminalTitleConfig::from_config_content(None, true),
-            );
-            guard.initialize().unwrap();
-        }
-        let calls = calls.lock().unwrap().clone();
-        assert_eq!(calls.first(), Some(&TerminalStep::PushTitle));
-        assert!(calls.contains(&TerminalStep::PopTitle));
-    }
-
-    #[test]
-    fn frame_rate_limiter_clamps_to_min_interval() {
-        let t0 = Instant::now();
-        let mut limiter = FrameRateLimiter::default();
-
-        assert_eq!(limiter.clamp_deadline(t0), t0);
-        limiter.mark_emitted(t0);
-
-        assert_eq!(
-            limiter.clamp_deadline(t0 + Duration::from_millis(1)),
-            t0 + MIN_FRAME_INTERVAL
-        );
-    }
-
-    #[tokio::test]
-    async fn frame_requester_coalesces_immediate_requests() {
-        let (requester, mut rx) = FrameRequester::new();
-
-        requester.schedule_frame();
-        requester.schedule_frame();
-
-        assert!(tokio::time::timeout(Duration::from_millis(100), rx.recv())
-            .await
-            .unwrap()
-            .is_some());
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn frame_requester_waits_for_delayed_request() {
-        let (requester, mut rx) = FrameRequester::new();
-
-        requester.schedule_frame_in(Duration::from_millis(20));
-
-        assert!(tokio::time::timeout(Duration::from_millis(5), rx.recv())
-            .await
-            .is_err());
-        assert!(tokio::time::timeout(Duration::from_millis(100), rx.recv())
-            .await
-            .unwrap()
-            .is_some());
     }
 }

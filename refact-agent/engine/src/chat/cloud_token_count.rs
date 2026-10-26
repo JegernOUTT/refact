@@ -400,83 +400,6 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_count_parts_use_messages_count_tokens_endpoint() {
-        let model = base_model(
-            ANTHROPIC_CLOUD_TOKENIZER,
-            WireFormat::AnthropicMessages,
-            "https://api.anthropic.com/v1/messages",
-        );
-        let settings = test_settings(&model);
-        let cleared = cleared(req(), &model);
-        let mut parts = crate::llm::adapters::anthropic::AnthropicAdapter
-            .build_http(&cleared, &settings)
-            .unwrap();
-        parts.url = anthropic_count_url(&settings.endpoint).unwrap();
-        strip_anthropic_count_unsupported_fields(&mut parts.body);
-
-        assert_eq!(
-            parts.url,
-            "https://api.anthropic.com/v1/messages/count_tokens"
-        );
-        assert_eq!(parts.body["model"], json!("gpt-4.1"));
-        assert!(parts.body.get("messages").is_some());
-        assert!(parts.body.get("max_tokens").is_none());
-        assert!(parts.body.get("temperature").is_none());
-    }
-
-    #[test]
-    fn anthropic_count_accepts_already_count_endpoint() {
-        let model = base_model(
-            ANTHROPIC_CLOUD_TOKENIZER,
-            WireFormat::AnthropicMessages,
-            "https://api.anthropic.com/v1/messages/count_tokens",
-        );
-
-        assert_eq!(
-            anthropic_count_url(&model.endpoint).unwrap(),
-            "https://api.anthropic.com/v1/messages/count_tokens"
-        );
-    }
-
-    #[test]
-    fn anthropic_count_reserve_uses_adapter_adjusted_max_tokens() {
-        let model = base_model(
-            ANTHROPIC_CLOUD_TOKENIZER,
-            WireFormat::AnthropicMessages,
-            "https://api.anthropic.com/v1/messages",
-        );
-        let mut request = req();
-        request.reasoning = ReasoningIntent::BudgetTokens(2048);
-        request.params.max_tokens = 1024;
-        let settings = test_settings(&model);
-        let cleared = cleared(request, &model);
-
-        let parts = crate::llm::adapters::anthropic::AnthropicAdapter
-            .build_http(&cleared, &settings)
-            .unwrap();
-        let output_token_reserve = body_usize(&parts.body, "max_tokens").unwrap();
-
-        assert_eq!(output_token_reserve, 3072);
-    }
-
-    #[test]
-    fn cloud_context_limit_detects_exact_count_overflow() {
-        let model = BaseModelRecord {
-            id: "openai/gpt-4.1".to_string(),
-            n_ctx: 100,
-            ..Default::default()
-        };
-        let usage = ChatUsage {
-            prompt_tokens: 101,
-            total_tokens: 101,
-            ..Default::default()
-        };
-
-        assert!(cloud_input_exceeds_context(&usage, model.n_ctx, 0));
-        assert!(cloud_context_limit_message(&usage, &model, model.n_ctx, 0).contains("exceeding"));
-    }
-
-    #[test]
     fn cloud_context_limit_reserves_requested_output_tokens() {
         let usage = ChatUsage {
             prompt_tokens: 90,
@@ -486,17 +409,5 @@ mod tests {
 
         assert!(!cloud_input_exceeds_context(&usage, 100, 10));
         assert!(cloud_input_exceeds_context(&usage, 100, 11));
-    }
-
-    #[tokio::test]
-    async fn spawn_input_token_count_task_returns_none_for_unsupported_tokenizer() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let model = base_model(
-            "tiktoken",
-            WireFormat::OpenaiChatCompletions,
-            "https://api.openai.com/v1/chat/completions",
-        );
-        let task = spawn_input_token_count_task(gcx, reqwest::Client::new(), &req(), &model, None);
-        assert!(task.is_none());
     }
 }

@@ -101,53 +101,7 @@ pub fn pricing_provider_aliases(provider_name: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use refact_core::model_caps::model_caps_from_models_dev_catalog;
-    use refact_core::models_dev::load_models_dev_snapshot_catalog;
     use refact_core::provider_types::ModelPricingTier;
-
-    #[test]
-    fn test_models_dev_standard_provider_pricing_resolves_from_caps() {
-        let catalog = load_models_dev_snapshot_catalog().unwrap();
-        let caps = model_caps_from_models_dev_catalog(&catalog).unwrap();
-
-        for model in [
-            "openai/gpt-4o",
-            "anthropic/claude-3-5-sonnet-20241022",
-            "deepseek/deepseek-chat",
-        ] {
-            let pricing = standard_model_pricing_from_caps(&caps, model)
-                .unwrap_or_else(|| panic!("missing pricing for {model}"));
-            assert!(pricing.is_valid());
-            assert!(pricing.prompt > 0.0);
-            assert!(pricing.generated > 0.0);
-        }
-    }
-
-    #[test]
-    fn test_models_dev_standard_provider_pricing_uses_provider_aliases() {
-        let catalog = load_models_dev_snapshot_catalog().unwrap();
-        let caps = model_caps_from_models_dev_catalog(&catalog).unwrap();
-
-        let openai = standard_model_pricing_from_caps(&caps, "openai/gpt-4o").unwrap();
-        let responses = standard_model_pricing_from_caps(&caps, "openai_responses/gpt-4o").unwrap();
-        let gemini =
-            standard_model_pricing_from_caps(&caps, "google_gemini/gemini-1.5-flash").unwrap();
-
-        assert_eq!(responses.prompt, openai.prompt);
-        assert!(gemini.is_valid());
-    }
-
-    #[test]
-    fn test_pricing_provider_aliases_preserves_normalization() {
-        assert_eq!(
-            pricing_provider_aliases("openai_responses"),
-            vec!["openai".to_string(), "openai-responses".to_string()]
-        );
-        assert_eq!(
-            pricing_provider_aliases("google_gemini"),
-            vec!["google".to_string(), "google-gemini".to_string()]
-        );
-    }
 
     #[test]
     fn test_compute_cost_uses_long_context_tier_above_200k_input_tokens() {

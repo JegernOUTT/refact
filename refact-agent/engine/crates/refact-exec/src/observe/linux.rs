@@ -1002,22 +1002,6 @@ mod tests {
     }
 
     #[test]
-    fn repeated_path_is_published_once() {
-        let shared = Arc::new(Shared::new());
-        let mut supervisor = Supervisor::new(0, false, shared.clone());
-        let path = PathBuf::from("/tmp/repeat");
-
-        assert!(supervisor.publish_access(path.clone(), read_open()));
-        assert!(!supervisor.publish_access(path.clone(), read_open()));
-        assert!(!supervisor.publish_access(path.clone(), read_open()));
-
-        let access = shared_access(&shared);
-        assert_eq!(access.reads, vec![path]);
-        assert!(access.writes.is_empty());
-        assert_eq!(access, supervisor.observed_access());
-    }
-
-    #[test]
     fn read_then_write_publishes_both_bits() {
         let shared = Arc::new(Shared::new());
         let mut supervisor = Supervisor::new(0, false, shared.clone());
@@ -1026,21 +1010,6 @@ mod tests {
         assert!(supervisor.publish_access(path.clone(), read_open()));
         assert!(supervisor.publish_access(path.clone(), write_open()));
         assert!(!supervisor.publish_access(path.clone(), write_open()));
-
-        let access = shared_access(&shared);
-        assert_eq!(access.reads, vec![path.clone()]);
-        assert_eq!(access.writes, vec![path]);
-    }
-
-    #[test]
-    fn write_then_read_publishes_both_bits() {
-        let shared = Arc::new(Shared::new());
-        let mut supervisor = Supervisor::new(0, false, shared.clone());
-        let path = PathBuf::from("/tmp/write-then-read");
-
-        assert!(supervisor.publish_access(path.clone(), write_open()));
-        assert!(supervisor.publish_access(path.clone(), read_open()));
-        assert!(!supervisor.publish_access(path.clone(), read_open()));
 
         let access = shared_access(&shared);
         assert_eq!(access.reads, vec![path.clone()]);

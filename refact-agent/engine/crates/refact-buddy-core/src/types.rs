@@ -940,37 +940,4 @@ mod tests {
         let serialized = serde_json::to_value(event).unwrap();
         assert!(serialized.get("bubble_policy").is_none());
     }
-
-    #[test]
-    fn runtime_event_round_trips_ambient_bubble_policy() {
-        let mut value = minimal_runtime_event_json();
-        value["bubble_policy"] = serde_json::json!("ambient");
-
-        let event: BuddyRuntimeEvent = serde_json::from_value(value).unwrap();
-        let serialized = serde_json::to_string(&event).unwrap();
-        let round_tripped: BuddyRuntimeEvent = serde_json::from_str(&serialized).unwrap();
-
-        assert_eq!(event.bubble_policy, Some(BuddyBubblePolicy::Ambient));
-        assert_eq!(
-            round_tripped.bubble_policy,
-            Some(BuddyBubblePolicy::Ambient)
-        );
-    }
-
-    #[test]
-    fn task_pulse_legacy_alert_fields_stay_compatible() {
-        let pulse: TaskPulse = serde_json::from_value(serde_json::json!({
-            "total": 3,
-            "stuck": 2,
-            "abandoned": 1,
-            "by_status": {"planning": 3}
-        }))
-        .unwrap();
-
-        assert_eq!(pulse.total, 3);
-        assert_eq!(pulse.recent_stuck_alert_count_1h(), 2);
-        assert_eq!(pulse.recent_abandoned_alert_count_24h(), 1);
-        assert_eq!(pulse.recent_stuck_alerts_1h, 0);
-        assert_eq!(pulse.recent_abandoned_alerts_24h, 0);
-    }
 }

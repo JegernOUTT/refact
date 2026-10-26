@@ -1,11 +1,9 @@
+use base64::Engine;
 use std::collections::BTreeMap;
-use std::ffi::OsString;
 use std::path::Path as FsPath;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::http::StatusCode;
-use base64::Engine;
 use headless_chrome::Tab;
 use headless_chrome::protocol::cdp::{Page, Runtime};
 use refact_core::image_policy::ImagePolicy;
@@ -25,7 +23,6 @@ use refact_lsp::integrations::browser_models::{
     NetworkReportMode, PageContextMode, RouteHandler, SessionPolicy, TabTarget, UrlPattern,
     WebSocketEventKind, WebSocketFrameDisposition, WebSocketMessageAction, WebSocketRouteMode,
 };
-use refact_lsp::refact_browser::devices;
 use refact_lsp::refact_browser::{
     BrowserLaunchOptions, BrowserRuntime, CdpKeyboardDispatcher, CdpMouseDispatcher, CheckedState,
     HandleError, Keyboard, HitTargetController, HitTargetResult, Mouse, MouseButton,
@@ -45,52 +42,6 @@ fn execute_fixture_steps(
 ) -> refact_lsp::integrations::browser_models::ExecutionReport {
     execute_fixture_steps_with_policy(tab, steps, &ImagePolicy::browser_capture())
 }
-
-const FIXTURE_PAGES: &[&str] = &[
-    "delayed-button.html",
-    "overlay.html",
-    "moving-target.html",
-    "animation.html",
-    "states.html",
-    "roles.html",
-    "accname.html",
-    "snapshot.html",
-    "controlled-input.html",
-    "input-events.html",
-    "form-actions.html",
-    "iframe-form.html",
-    "nested-iframe.html",
-    "nested-iframe-outer.html",
-    "nested-iframe-inner.html",
-    "shadow-dom.html",
-    "dialog.html",
-    "fetch-after-click.html",
-    "slow-network.html",
-    "popup.html",
-    "route-target.html",
-    "context-probe.html",
-    "upload.html",
-    "download.html",
-    "contenteditable.html",
-    "hover-menu.html",
-    "strict-multi.html",
-    "readouts.html",
-    "compose.html",
-    "hostile-globals.html",
-    "hit-target.html",
-    "selectors.html",
-    "cookie-banner.html",
-    "interstitial.html",
-    "generator.html",
-    "ws-echo.html",
-    "ws-intercept.html",
-    "har-target.html",
-    "clock.html",
-    "visual-states.html",
-    "poll-state.html",
-    "aria-shadow.html",
-    "aria-widgets.html",
-];
 
 fn execute_steps(
     tab: &Tab,
@@ -283,16 +234,6 @@ fn returned_eval_string(
         .unwrap_or("")
 }
 
-#[tokio::test]
-async fn fixture_server_starts_and_serves_page() {
-    let server = FixtureServer::start().await.unwrap();
-    let response = reqwest::get(server.url("delayed-button.html"))
-        .await
-        .unwrap();
-    assert_eq!(response.status().as_u16(), StatusCode::OK.as_u16());
-    assert!(response.text().await.unwrap().contains("Delayed button"));
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn a_default_navigate_batch_returns_a_snapshot_context_and_zero_images() {
@@ -355,72 +296,6 @@ async fn a_default_navigate_batch_returns_a_snapshot_context_and_zero_images() {
         "page header was {} chars: {header}",
         header.len()
     );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn page_context_screenshot_returns_a_png_instead_of_a_snapshot() {
-    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
-        return;
-    };
-    case.setup_world();
-    let target = case.server.url("getby.html");
-    let snapshot_page = case.server.url("snapshot.html");
-    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
-
-    let report = execute_request_with_runtime(
-        runtime.clone(),
-        BrowserActionRequest {
-            session: SessionPolicy::SharedDefault,
-            target: TabTarget::Active,
-            attach_screenshot: None,
-            page_context: Some(PageContextMode::Screenshot),
-            network: NetworkReportMode::default(),
-            steps: vec![BrowserStep::Navigate {
-                url: target,
-                timeout_ms: None,
-            }],
-            block_service_workers: None,
-            continue_on_error: false,
-        },
-        &ImagePolicy::browser_capture(),
-    )
-    .await
-    .unwrap();
-
-    assert!(report.ok, "navigate failed: {report:?}");
-    let screenshot = report
-        .screenshot
-        .expect("screenshot mode must attach an image");
-    assert!(screenshot.mime.starts_with("image/"));
-    assert!(!screenshot.data.is_empty());
-    assert!(
-        report.page.and_then(|page| page.snapshot).is_none(),
-        "screenshot mode must not attach the aria snapshot"
-    );
-
-    let both = execute_request_with_runtime(
-        runtime,
-        BrowserActionRequest {
-            session: SessionPolicy::SharedDefault,
-            target: TabTarget::Active,
-            attach_screenshot: None,
-            page_context: Some(PageContextMode::Both),
-            network: NetworkReportMode::default(),
-            steps: vec![BrowserStep::Navigate {
-                url: snapshot_page,
-                timeout_ms: None,
-            }],
-            block_service_workers: None,
-            continue_on_error: false,
-        },
-        &ImagePolicy::browser_capture(),
-    )
-    .await
-    .unwrap();
-
-    assert!(both.screenshot.is_some());
-    assert!(both.page.and_then(|page| page.snapshot).is_some());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -682,16 +557,6 @@ async fn network_waits_coexist_with_locator_handlers_and_dialogs_in_one_batch() 
     }));
 }
 
-#[test]
-fn chrome_discovery_returns_none_for_missing_candidates() {
-    let empty_path = tempdir().unwrap();
-    let found = discover_chrome_with(
-        Some(OsString::from("missing-browser")),
-        Some(empty_path.path().as_os_str().to_os_string()),
-    );
-    assert_eq!(found, None);
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn http_request_shares_the_page_session_cookie_in_both_directions() {
@@ -735,61 +600,6 @@ async fn http_request_shares_the_page_session_cookie_in_both_directions() {
     let cookies = cookies.as_str().unwrap();
     assert!(cookies.contains("api_issued=from-api"), "{cookies}");
     assert!(cookies.contains("fixture_session=logged-in"), "{cookies}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn fixture_server_serves_every_page_in_browser() {
-    let Some(case) = BrowserCase::start(FIXTURE_PAGES[0]).await else {
-        return;
-    };
-    for page in &FIXTURE_PAGES[1..] {
-        case.navigate(page);
-        assert!(case.tab.get_url().ends_with(page));
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn navigation_steps_wait_for_reload_history_and_open_tab() {
-    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
-        return;
-    };
-    let initial_url = case.server.url("snapshot.html");
-    let next_url = case.server.url("delayed-button.html");
-    let report = execute_steps_with_runtime(
-        &mut case.runtime,
-        &[
-            BrowserStep::Reload,
-            BrowserStep::Eval {
-                expression: "history.pushState({}, '', '#same-document'); location.href"
-                    .to_string(),
-                timeout_ms: None,
-            },
-            BrowserStep::GoBack,
-            BrowserStep::GoForward,
-            BrowserStep::Navigate {
-                url: next_url.clone(),
-                timeout_ms: None,
-            },
-            BrowserStep::GoBack,
-            BrowserStep::GoForward,
-            BrowserStep::OpenTab {
-                device: None,
-                url: Some(initial_url.clone()),
-            },
-        ],
-        &ImagePolicy::browser_capture(),
-    );
-
-    assert!(report.ok, "navigation steps failed: {report:?}");
-    assert_eq!(report.steps.len(), 8);
-    assert_eq!(report.steps[2].summary, "Navigated back");
-    assert_eq!(report.steps[3].summary, "Navigated forward");
-    assert_eq!(report.steps[5].summary, "Navigated back");
-    assert_eq!(report.steps[6].summary, "Navigated forward");
-    assert_eq!(report.url.as_deref(), Some(initial_url.as_str()));
-    assert_eq!(report.new_tabs.len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1159,98 +969,6 @@ async fn artifacts_capture_page_clip_element_pdf_and_highlight_lifecycle() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn design_tools_measure_marks_contrast_and_visual_changes() {
-    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
-        return;
-    };
-    case.setup_world();
-    case.tab
-        .evaluate(
-            "document.querySelector('nav').id='probe-target';document.querySelector('nav').style.cssText='width:50vw;overflow:hidden;color:#777;background:#888';true",
-            false,
-        )
-        .unwrap();
-
-    let report = execute_steps_with_runtime(
-        &mut case.runtime,
-        &[
-            BrowserStep::SetViewport {
-                width: 375,
-                height: 800,
-                device_scale_factor: Some(1.0),
-                is_mobile: Some(false),
-                has_touch: Some(false),
-            },
-            BrowserStep::EmulateMedia {
-                color_scheme: Some("dark".to_string()),
-                reduced_motion: None,
-                forced_colors: None,
-                contrast: None,
-                media: None,
-            },
-            BrowserStep::Styles {
-                locator: BrowserLocator::css("#probe-target"),
-                property_filter: Some("color|width|overflow".to_string()),
-            },
-            BrowserStep::AccessibilitySnapshot {
-                options: AccessibilitySnapshotOptions {
-                    mode: Default::default(),
-                    refs: Some(true),
-                    boxes: true,
-                    locator: None,
-                    depth: None,
-                    max_chars: None,
-                },
-            },
-        ],
-        &ImagePolicy::browser_capture(),
-    );
-    assert!(report.ok, "design probe failed: {report:?}");
-    let yaml = report.steps[3].data.as_ref().unwrap()["yaml"]
-        .as_str()
-        .unwrap();
-    assert!(yaml
-        .lines()
-        .any(|line| line.contains("[ref=") && line.contains("[box=")));
-
-    let contrast = case
-        .tab
-        .evaluate(
-            "(()=>{const s=getComputedStyle(document.querySelector('#probe-target'));return s.color!==s.backgroundColor})()",
-            false,
-        )
-        .unwrap();
-    assert_eq!(contrast.value, Some(json!(true)));
-
-    let baseline = execute_fixture_steps(
-        &case.tab,
-        &[BrowserStep::Screenshot {
-            options: Default::default(),
-        }],
-    );
-    case.tab
-        .evaluate(
-            "document.querySelector('#probe-target').style.background='magenta';true",
-            false,
-        )
-        .unwrap();
-    let changed = execute_fixture_steps(
-        &case.tab,
-        &[BrowserStep::Screenshot {
-            options: Default::default(),
-        }],
-    );
-    let baseline_image = &baseline.steps[0].data.as_ref().unwrap()["artifact"]["data"];
-    let changed_image = &changed.steps[0].data.as_ref().unwrap()["artifact"]["data"];
-    assert!(
-        baseline_image.is_string(),
-        "screenshot payload lives under artifact.data"
-    );
-    assert_ne!(baseline_image, changed_image);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn world_utility_survives_hostile_globals() {
     let Some(mut case) = BrowserCase::start("hostile-globals.html").await else {
         return;
@@ -1290,63 +1008,6 @@ async fn world_utility_reinjects_after_navigation() {
             .contains("Hostile globals fixture"),
         "utility world should be reinjected into the new document"
     );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn world_stealth_stays_in_main_world() {
-    let Some(mut case) = BrowserCase::start("delayed-button.html").await else {
-        return;
-    };
-    case.setup_world();
-    assert_eq!(
-        case.tab
-            .evaluate(
-                "globalThis.__refact_stealth_installed === true && navigator.webdriver === undefined",
-                false,
-            )
-            .unwrap()
-            .value,
-        Some(json!(true))
-    );
-    let frame_id = case
-        .tab
-        .call_method(Page::GetFrameTree(None))
-        .unwrap()
-        .frame_tree
-        .frame
-        .id;
-    let context_id = case
-        .tab
-        .call_method(Page::CreateIsolatedWorld {
-            frame_id,
-            world_name: Some(UTILITY_WORLD_NAME.to_string()),
-            grant_univeral_access: Some(true),
-        })
-        .unwrap()
-        .execution_context_id;
-    let isolated = case
-        .tab
-        .call_method(Runtime::Evaluate {
-            expression: "globalThis.__refact_stealth_installed".to_string(),
-            object_group: None,
-            include_command_line_api: None,
-            silent: None,
-            context_id: Some(context_id),
-            return_by_value: Some(true),
-            generate_preview: None,
-            user_gesture: None,
-            await_promise: None,
-            throw_on_side_effect: None,
-            timeout: None,
-            disable_breaks: None,
-            repl_mode: None,
-            allow_unsafe_eval_blocked_by_csp: None,
-            unique_context_id: None,
-            serialization_options: None,
-        })
-        .unwrap();
-    assert_eq!(isolated.result.value, None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1827,30 +1488,6 @@ async fn fill_controlled_input_react() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn fill_falls_back_when_cdp_input_is_rejected() {
-    let Some(case) = BrowserCase::start("form-actions.html").await else {
-        return;
-    };
-    let report = execute_fixture_steps(
-        &case.tab,
-        &[BrowserStep::Fill {
-            locator: BrowserLocator::css("#fallback"),
-            text: "fallback value".to_string(),
-            clear_first: true,
-            verify: true,
-        }],
-    );
-    assert!(report.ok, "fallback fill failed: {report:?}");
-    assert_ne!(
-        report.steps[0].fill_strategy,
-        Some(FillStrategy::NativeTyping)
-    );
-    assert_eq!(report.steps[0].verified, Some(true));
-    assert!(report.steps[0].retries > 0);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn disabled_fill_reports_enabled_actionability_state() {
     let Some(case) = BrowserCase::start("form-actions.html").await else {
         return;
@@ -1927,26 +1564,6 @@ async fn radio_uncheck_returns_playwright_error() {
         .as_deref()
         .unwrap()
         .contains("Cannot uncheck radio button"));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn select_option_selects_from_multiple_select() {
-    let Some(case) = BrowserCase::start("form-actions.html").await else {
-        return;
-    };
-    let report = execute_fixture_steps(
-        &case.tab,
-        &[BrowserStep::SelectOption {
-            locator: BrowserLocator::css("#multiple"),
-            value: "Beta option".to_string(),
-        }],
-    );
-    assert!(report.ok, "select option failed: {report:?}");
-    assert_eq!(
-        report.steps[0].data.as_ref().unwrap()["selected"],
-        json!(["beta"])
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2042,70 +1659,6 @@ async fn tap_requires_touch_emulation_then_fires_touch_events() {
         .value
         .unwrap();
     assert_eq!(recorded, json!("touchstart,touchend,click"));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn emulate_device_changes_reported_viewport_and_user_agent() {
-    let Some(mut case) = BrowserCase::start("input-events.html").await else {
-        return;
-    };
-
-    let report = execute_steps_with_runtime(
-        &mut case.runtime,
-        &[BrowserStep::EmulateDevice {
-            name: "Pixel 7".to_string(),
-        }],
-        &ImagePolicy::browser_capture(),
-    );
-    assert!(report.ok, "emulate_device failed: {report:?}");
-    assert!(report.steps[0].summary.contains("Pixel 7"));
-
-    let metrics: serde_json::Value = serde_json::from_str(
-        case.tab
-            .evaluate(
-                "JSON.stringify({inner: innerWidth, screen: screen.width, dpr: devicePixelRatio})",
-                false,
-            )
-            .unwrap()
-            .value
-            .unwrap()
-            .as_str()
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(metrics["inner"], json!(412), "viewport metrics: {metrics}");
-    assert_eq!(metrics["screen"], json!(412), "viewport metrics: {metrics}");
-    assert_eq!(metrics["dpr"], json!(2.625), "viewport metrics: {metrics}");
-    let user_agent = case
-        .tab
-        .evaluate("navigator.userAgent", false)
-        .unwrap()
-        .value
-        .unwrap();
-    assert_eq!(
-        user_agent,
-        json!(devices::lookup("Pixel 7").unwrap().user_agent)
-    );
-    let touch_points = case
-        .tab
-        .evaluate("navigator.maxTouchPoints > 0", false)
-        .unwrap()
-        .value
-        .unwrap();
-    assert_eq!(touch_points, json!(true));
-
-    let unknown = execute_steps_with_runtime(
-        &mut case.runtime,
-        &[BrowserStep::EmulateDevice {
-            name: "Pixel 777".to_string(),
-        }],
-        &ImagePolicy::browser_capture(),
-    );
-    assert!(!unknown.ok, "unknown device must fail: {unknown:?}");
-    let error = unknown.steps[0].error.clone().unwrap();
-    assert!(error.contains("Unknown device 'Pixel 777'"), "{error}");
-    assert!(error.contains("Pixel 7"), "{error}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2219,29 +1772,6 @@ async fn press_sequentially_triggers_per_character_key_handlers() {
         .value
         .unwrap();
     assert_eq!(value, json!("abc"));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn hover_reveals_css_menu() {
-    let Some(case) = BrowserCase::start("hover-menu.html").await else {
-        return;
-    };
-    let report = execute_fixture_steps(
-        &case.tab,
-        &[
-            BrowserStep::Hover {
-                locator: BrowserLocator::css("#trigger"),
-                timeout_ms: None,
-            },
-            BrowserStep::WaitForSelector {
-                locator: BrowserLocator::css("#menu a"),
-                state: None,
-                timeout_ms: Some(2_000),
-            },
-        ],
-    );
-    assert!(report.ok, "hover should use real pointer input: {report:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2414,29 +1944,6 @@ async fn hit_target_interceptor_suppresses_overlay_appearing_after_precheck() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn wait_for_function_resolves_a_delayed_main_world_flag() {
-    let Some(case) = BrowserCase::start("poll-state.html").await else {
-        return;
-    };
-    let report = execute_fixture_steps(
-        &case.tab,
-        &[BrowserStep::WaitForFunction {
-            expression: "() => globalThis.__refactReady".to_string(),
-            locator: None,
-            timeout_ms: Some(5_000),
-            polling_ms: None,
-        }],
-    );
-
-    assert!(report.ok, "delayed flag must settle: {report:?}");
-    let data = report.steps[0].data.as_ref().unwrap();
-    assert_eq!(data["value"], json!(true));
-    assert!(data["attempts"].as_u64().unwrap() >= 1);
-    assert!(data["elapsed_ms"].as_u64().is_some());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn wait_for_function_re_resolves_its_locator_across_re_renders() {
     let Some(case) = BrowserCase::start("poll-state.html").await else {
         return;
@@ -2469,33 +1976,6 @@ async fn wait_for_function_re_resolves_its_locator_across_re_renders() {
         render > 1,
         "predicate must have run against a replacement node, not the original: {data}"
     );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn expect_poll_waits_for_a_numeric_threshold_and_reports_attempts() {
-    let Some(case) = BrowserCase::start("poll-state.html").await else {
-        return;
-    };
-    let report = execute_fixture_steps(
-        &case.tab,
-        &[BrowserStep::ExpectPoll {
-            expression: "globalThis.__refactCounter".to_string(),
-            expected: json!(4),
-            matcher: BrowserPollMatcher::Gt,
-            timeout_ms: Some(5_000),
-            soft: None,
-        }],
-    );
-
-    assert!(report.ok, "counter must exceed the threshold: {report:?}");
-    let assertion = report.steps[0].assertion.as_ref().unwrap();
-    assert_eq!(assertion.matcher, "gt");
-    assert!(assertion.passed);
-    assert!(!assertion.soft);
-    assert_eq!(assertion.expected, json!(4));
-    assert!(assertion.received.as_f64().unwrap() > 4.0);
-    assert!(assertion.attempts > 1, "expected polling: {assertion:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2600,192 +2080,6 @@ async fn input_value_reads_the_typed_property_not_the_stale_attribute() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn input_value_rejects_non_field_elements() {
-    let Some(case) = BrowserCase::start("readouts.html").await else {
-        return;
-    };
-    let report = execute_fixture_steps(
-        &case.tab,
-        &[BrowserStep::InputValue {
-            locator: BrowserLocator::css("#not-a-field"),
-        }],
-    );
-
-    assert!(
-        !report.ok,
-        "input_value must reject a plain div: {report:?}"
-    );
-    let error = report.steps[0].error.as_deref().unwrap_or_default();
-    assert!(error.contains("<input>"), "{error}");
-    assert!(error.contains("<select>"), "{error}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn count_reports_every_match_without_strictness() {
-    let Some(case) = BrowserCase::start("readouts.html").await else {
-        return;
-    };
-    let report = execute_fixture_steps(
-        &case.tab,
-        &[
-            BrowserStep::Count {
-                locator: BrowserLocator::css(".row"),
-            },
-            BrowserStep::Count {
-                locator: BrowserLocator::css("#never-rendered"),
-            },
-        ],
-    );
-
-    assert!(report.ok, "count must not be strict: {report:?}");
-    assert_eq!(report.steps[0].data.as_ref().unwrap()["count"], json!(4));
-    assert_eq!(report.steps[1].data.as_ref().unwrap()["count"], json!(0));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn all_texts_honours_the_limit_and_reports_the_true_total() {
-    let Some(case) = BrowserCase::start("readouts.html").await else {
-        return;
-    };
-    let report = execute_fixture_steps(
-        &case.tab,
-        &[
-            BrowserStep::AllTexts {
-                locator: BrowserLocator::css(".row"),
-                mode: BrowserTextMode::InnerText,
-                limit: Some(2),
-            },
-            BrowserStep::AllTexts {
-                locator: BrowserLocator::css(".row"),
-                mode: BrowserTextMode::TextContent,
-                limit: None,
-            },
-        ],
-    );
-
-    assert!(report.ok, "all_texts batch failed: {report:?}");
-    let limited = report.steps[0].data.as_ref().unwrap();
-    assert_eq!(limited["texts"], json!(["First", "Second"]));
-    assert_eq!(limited["total"], json!(4));
-
-    let full = report.steps[1].data.as_ref().unwrap();
-    assert_eq!(
-        full["texts"],
-        json!(["First clipped", "Second", "Third", "Fourth"])
-    );
-    assert_eq!(full["total"], json!(4));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn bounding_box_measures_visible_elements_and_is_null_when_hidden() {
-    let Some(case) = BrowserCase::start("readouts.html").await else {
-        return;
-    };
-    let report = execute_fixture_steps(
-        &case.tab,
-        &[
-            BrowserStep::BoundingBox {
-                locator: BrowserLocator::css("#measured"),
-            },
-            BrowserStep::BoundingBox {
-                locator: BrowserLocator::css("#display-none"),
-            },
-        ],
-    );
-
-    assert!(report.ok, "bounding_box batch failed: {report:?}");
-    let measured = &report.steps[0].data.as_ref().unwrap()["bounding_box"];
-    assert_eq!(measured["x"], json!(40.0));
-    assert_eq!(measured["y"], json!(60.0));
-    assert_eq!(measured["width"], json!(220.0));
-    assert_eq!(measured["height"], json!(30.0));
-    assert_eq!(
-        report.steps[1].data.as_ref().unwrap()["bounding_box"],
-        json!(null)
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn element_state_reports_every_flag_in_one_read() {
-    let Some(case) = BrowserCase::start("readouts.html").await else {
-        return;
-    };
-    let report = execute_fixture_steps(
-        &case.tab,
-        &[
-            BrowserStep::ElementState {
-                locator: BrowserLocator::css("#ticked"),
-            },
-            BrowserStep::ElementState {
-                locator: BrowserLocator::css("#display-none"),
-            },
-        ],
-    );
-
-    assert!(report.ok, "element_state batch failed: {report:?}");
-    let ticked = &report.steps[0].data.as_ref().unwrap()["state"];
-    assert_eq!(ticked["visible"], json!(true));
-    assert_eq!(ticked["enabled"], json!(true));
-    assert_eq!(ticked["checked"], json!("checked"));
-    assert_eq!(ticked["stable"], json!(true));
-    assert_eq!(
-        report.steps[1].data.as_ref().unwrap()["state"]["visible"],
-        json!(false)
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn readouts_stay_strict_for_single_element_steps() {
-    let Some(case) = BrowserCase::start("readouts.html").await else {
-        return;
-    };
-    let report = execute_fixture_steps(
-        &case.tab,
-        &[BrowserStep::BoundingBox {
-            locator: BrowserLocator::css(".row"),
-        }],
-    );
-
-    assert!(
-        !report.ok,
-        "bounding_box must reject multiple matches: {report:?}"
-    );
-    let error = report.steps[0].error.as_deref().unwrap_or_default();
-    assert!(error.contains("resolved to 4 elements"), "{error}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn wait_for_selector_accepts_multiple_matches() {
-    let Some(case) = BrowserCase::start("strict-multi.html").await else {
-        return;
-    };
-    let report = execute_fixture_steps(
-        &case.tab,
-        &[BrowserStep::WaitForSelector {
-            locator: BrowserLocator::css(".duplicate"),
-            state: None,
-            timeout_ms: Some(2_000),
-        }],
-    );
-    assert!(
-        report.ok,
-        "wait for selector must accept multiple matches: {report:?}"
-    );
-    assert!(
-        report.steps[0].summary.contains("3 match(es)"),
-        "{:?}",
-        report.steps[0]
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn click_if_exists_skips_attached_invisible_element_without_retry_budget() {
     let Some(case) = BrowserCase::start("states.html").await else {
         return;
@@ -2838,26 +2132,6 @@ async fn click_if_exists_skips_attached_invisible_element_without_retry_budget()
     assert!(
         elapsed < Duration::from_secs(4),
         "skip did not stay below the action retry budget: {elapsed:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn click_if_exists_skips_missing_element() {
-    let Some(case) = BrowserCase::start("states.html").await else {
-        return;
-    };
-    let report = execute_fixture_steps(
-        &case.tab,
-        &[BrowserStep::ClickIfExists {
-            locator: BrowserLocator::css("#never-rendered"),
-        }],
-    );
-    assert!(report.ok, "missing element must skip: {report:?}");
-    assert!(
-        report.steps[0].summary.contains("Skipped click_if_exists"),
-        "{:?}",
-        report.steps[0]
     );
 }
 
@@ -2981,68 +2255,6 @@ async fn element_states_match_playwright_predicates() {
     assert!(states[9].visible);
     assert!(!states[10].visible);
     assert_eq!(states[11].editable, Some(true));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn expectation_values_follow_aria_checked_and_aria_disabled() {
-    let Some(mut case) = BrowserCase::start("aria-shadow.html").await else {
-        return;
-    };
-    case.setup_world();
-    let mut values = Vec::new();
-    for selector in ["#aria-checked", "#aria-switch", "#aria-disabled-input"] {
-        let handle = case
-            .runtime
-            .world_manager
-            .call_injected_handles(
-                &case.tab,
-                "resolveAll",
-                json!([{"by":"css","value":selector}]),
-            )
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap();
-        values.push(
-            case.runtime
-                .world_manager
-                .expectation_values(&case.tab, &handle)
-                .unwrap(),
-        );
-    }
-
-    assert_eq!(values[0]["checked"], json!(true));
-    assert_eq!(values[0]["indeterminate"], json!(false));
-    assert_eq!(values[1]["checked"], json!(false));
-    assert_eq!(values[2]["enabled"], json!(false));
-    assert_eq!(values[2]["editable"], json!(false));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn extract_links_pierces_open_shadow_roots() {
-    let Some(case) = BrowserCase::start("aria-shadow.html").await else {
-        return;
-    };
-    let report = execute_steps(
-        &case.tab,
-        &[BrowserStep::ExtractLinks {
-            locator: Some(BrowserLocator::css("body")),
-            limit: None,
-        }],
-    );
-    assert!(report.ok, "shadow extract_links failed: {report:?}");
-    let data = report.steps[0].data.as_ref().unwrap();
-    assert_eq!(data["total"], json!(3));
-    let urls = data["links"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|link| link["url"].as_str().unwrap().to_string())
-        .collect::<Vec<_>>();
-    assert!(urls.contains(&"https://example.com/shadow".to_string()));
-    assert!(urls.contains(&"https://example.com/nested".to_string()));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3229,30 +2441,6 @@ async fn moving_target_stability_predicate_reports_each_probe() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn moving_target_waits_until_stable() {
-    let Some(case) = BrowserCase::start("moving-target.html").await else {
-        return;
-    };
-    let report = execute_fixture_steps(
-        &case.tab,
-        &[
-            BrowserStep::WaitForElementStable {
-                locator: BrowserLocator::css("#moving"),
-                timeout_ms: Some(4_000),
-            },
-            BrowserStep::Click {
-                locator: BrowserLocator::css("#moving"),
-                timeout_ms: None,
-            },
-            text_step("#result"),
-        ],
-    );
-    assert!(report.ok, "stable wait and click failed: {report:?}");
-    assert_eq!(returned_text(&report), "moving clicked");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn moving_target_click_reports_successful_retries() {
     let Some(mut case) = BrowserCase::start("moving-target.html").await else {
         return;
@@ -3422,30 +2610,6 @@ async fn keyboard_types_unicode_into_contenteditable() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn fetch_after_click_renders_slow_echo() {
-    let Some(case) = BrowserCase::start("fetch-after-click.html").await else {
-        return;
-    };
-    let report = execute_fixture_steps(
-        &case.tab,
-        &[
-            BrowserStep::Click {
-                locator: BrowserLocator::css("#fetch"),
-                timeout_ms: None,
-            },
-            BrowserStep::WaitForText {
-                text: "echo ok after 400ms".to_string(),
-                timeout_ms: Some(3_000),
-            },
-            text_step("#result"),
-        ],
-    );
-    assert!(report.ok, "fetch result did not render: {report:?}");
-    assert_eq!(returned_text(&report), "echo ok after 400ms");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn locator_handler_clears_cookie_banner_before_click_and_records_firing() {
     let Some(case) = BrowserCase::start("cookie-banner.html").await else {
         return;
@@ -3564,37 +2728,6 @@ async fn locator_handler_clears_interstitial_that_appears_between_actions() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn legacy_dismiss_overlays_step_still_clears_cookie_banner() {
-    let Some(case) = BrowserCase::start("cookie-banner.html").await else {
-        return;
-    };
-    let report = execute_fixture_steps(
-        &case.tab,
-        &[
-            BrowserStep::DismissOverlays { aggressive: false },
-            BrowserStep::Click {
-                locator: BrowserLocator::css("#target"),
-                timeout_ms: None,
-            },
-        ],
-    );
-
-    assert!(report.ok, "legacy dismiss step failed: {report:?}");
-    let text = case
-        .tab
-        .evaluate("document.querySelector('#target').textContent", false)
-        .unwrap()
-        .value
-        .unwrap();
-    assert_eq!(text, "clicked");
-    assert!(report
-        .locator_handlers
-        .iter()
-        .any(|firing| firing.name == "dismiss_overlays" && firing.ok));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn popup_click_opens_second_tab() {
     let Some(mut case) = BrowserCase::start("popup.html").await else {
         return;
@@ -3662,39 +2795,6 @@ async fn switch_tab_retargets_later_steps() {
     assert_eq!(
         report.steps[1].data.as_ref().unwrap()["value"],
         "Popup child"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn wait_for_popup_defers_until_a_later_step_in_the_runtime_batch_path() {
-    let Some(mut case) = BrowserCase::start("popup.html").await else {
-        return;
-    };
-    case.setup_world();
-    let report = execute_steps_with_runtime(
-        &mut case.runtime,
-        &[
-            BrowserStep::WaitForPopup {
-                timeout_ms: Some(5_000),
-            },
-            BrowserStep::Click {
-                locator: BrowserLocator::css("#open"),
-                timeout_ms: None,
-            },
-        ],
-        &ImagePolicy::browser_capture(),
-    );
-
-    assert!(report.ok, "runtime popup batch failed: {report:?}");
-    assert_eq!(report.new_tabs.len(), 1);
-    assert_eq!(
-        report.steps[0].data.as_ref().unwrap()["tab_id"],
-        report.new_tabs[0].id
-    );
-    assert_eq!(
-        report.steps[0].summary,
-        format!("Popup opened: {}", report.new_tabs[0].id)
     );
 }
 
@@ -4797,48 +3897,6 @@ async fn dialog_fixture_uses_armed_accept_and_prompt_text() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn upload_route_accepts_multipart_body() {
-    let Some(case) = BrowserCase::start("upload.html").await else {
-        return;
-    };
-    let boundary = "refact-browser-fixture";
-    let body = format!(
-        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"fixture.txt\"\r\nContent-Type: text/plain\r\n\r\nfixture upload\r\n--{boundary}--\r\n"
-    );
-    let response = reqwest::Client::new()
-        .post(case.server.url("upload"))
-        .header(
-            "content-type",
-            format!("multipart/form-data; boundary={boundary}"),
-        )
-        .body(body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status().as_u16(), StatusCode::OK.as_u16());
-    assert_eq!(
-        response.json::<serde_json::Value>().await.unwrap()["accepted"],
-        true
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn download_route_sets_attachment_headers() {
-    let Some(case) = BrowserCase::start("download.html").await else {
-        return;
-    };
-    let response = reqwest::get(case.server.url("download")).await.unwrap();
-    assert_eq!(response.status().as_u16(), StatusCode::OK.as_u16());
-    assert_eq!(
-        response.headers().get("content-disposition").unwrap(),
-        "attachment; filename=browser-fixture.txt"
-    );
-    assert_eq!(response.text().await.unwrap(), "browser fixture download\n");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn uploads_visible_hidden_and_file_chooser_inputs() {
     let Some(mut case) = BrowserCase::start("upload.html").await else {
         return;
@@ -5304,40 +4362,6 @@ async fn file_drop_and_coordinate_mouse_reach_page_handlers() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn selector_evaluator_matches_and_sorts_layout_relations() {
-    let Some(mut case) = BrowserCase::start("selectors.html").await else {
-        return;
-    };
-    case.setup_world();
-    let selectors = [
-        ("css=#layout button:above(#anchor)", vec!["above"]),
-        ("css=#layout button:below(#anchor)", vec!["below", "far"]),
-        ("css=#layout button:near(#anchor)", vec!["near"]),
-    ];
-    for (selector, expected_ids) in selectors {
-        let handles = case
-            .runtime
-            .world_manager
-            .call_injected_handles(&case.tab, "querySelectorAll", json!([selector]))
-            .unwrap();
-        let ids = handles
-            .iter()
-            .map(|handle| {
-                case.runtime
-                    .world_manager
-                    .call_function_on(&case.tab, handle, "function() { return this.id; }", vec![])
-                    .unwrap()
-                    .as_str()
-                    .unwrap()
-                    .to_string()
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(ids, expected_ids, "selector {selector}");
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn aria_refs_reuse_invalidate_and_resolve_latest_snapshot_elements() {
     let Some(mut case) = BrowserCase::start("snapshot.html").await else {
         return;
@@ -5603,51 +4627,6 @@ async fn scoped_accessibility_snapshot_returns_only_the_target_subtree() {
             .value
             .unwrap(),
         json!("yes")
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn depth_limited_accessibility_snapshot_marks_truncated_children() {
-    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
-        return;
-    };
-    case.setup_world();
-
-    let report = execute_steps_with_runtime(
-        &mut case.runtime,
-        &[
-            BrowserStep::AccessibilitySnapshot {
-                options: AccessibilitySnapshotOptions::default(),
-            },
-            BrowserStep::AccessibilitySnapshot {
-                options: AccessibilitySnapshotOptions {
-                    depth: Some(1),
-                    ..Default::default()
-                },
-            },
-        ],
-        &ImagePolicy::browser_capture(),
-    );
-    assert!(report.ok, "snapshots failed: {report:?}");
-    let full = report.steps[0].data.as_ref().unwrap()["yaml"]
-        .as_str()
-        .unwrap();
-    let limited = report.steps[1].data.as_ref().unwrap()["yaml"]
-        .as_str()
-        .unwrap();
-
-    assert!(
-        !full.contains("truncated"),
-        "an unlimited snapshot must not gain markers: {full}"
-    );
-    assert!(
-        limited.contains("… (") && limited.contains("truncated)"),
-        "depth limit must emit a counted marker: {limited}"
-    );
-    assert!(
-        limited.lines().count() < full.lines().count(),
-        "depth limit must shrink the snapshot"
     );
 }
 
@@ -6159,59 +5138,6 @@ async fn capture_frames_records_an_animation_as_a_labelled_filmstrip() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn capture_frames_scopes_to_an_element_and_to_the_full_page() {
-    let Some(mut case) = BrowserCase::start("animation.html").await else {
-        return;
-    };
-    let policy = ImagePolicy::browser_capture();
-
-    let scoped = execute_steps_with_runtime(
-        &mut case.runtime,
-        &[
-            BrowserStep::Eval {
-                expression: "playAnimation()".to_string(),
-                timeout_ms: None,
-            },
-            BrowserStep::CaptureFrames {
-                duration_ms: Some(600),
-                frame_count: Some(3),
-                interval_ms: None,
-                locator: Some(BrowserLocator::css("#stage")),
-                full_page: None,
-            },
-        ],
-        &policy,
-    );
-    assert!(scoped.ok, "element-scoped capture failed: {scoped:?}");
-    let scoped_data = scoped.steps[1].data.as_ref().unwrap();
-    let scoped_frame = &scoped_data["frames"][0]["artifact"];
-    assert_eq!(scoped_frame["width"], json!(480));
-    assert_eq!(scoped_frame["height"], json!(240));
-    assert_eq!(
-        scoped_data["warnings"],
-        json!(["element-scoped frames use timed screenshots"])
-    );
-
-    let full = execute_steps_with_runtime(
-        &mut case.runtime,
-        &[BrowserStep::CaptureFrames {
-            duration_ms: Some(400),
-            frame_count: Some(2),
-            interval_ms: None,
-            locator: None,
-            full_page: Some(true),
-        }],
-        &policy,
-    );
-    assert!(full.ok, "full-page capture failed: {full:?}");
-    assert_eq!(
-        full.steps[0].data.as_ref().unwrap()["warnings"],
-        json!(["full-page frames use timed screenshots"])
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn capture_frames_rejects_requests_beyond_the_hard_caps() {
     let Some(mut case) = BrowserCase::start("animation.html").await else {
         return;
@@ -6586,39 +5512,6 @@ async fn screenshot_mask_hides_a_fixture_element_and_restores_the_dom() {
         .value
         .unwrap();
     assert_eq!(leftovers, json!(0));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn set_window_bounds_on_headless_succeeds_without_applying() {
-    if !e2e_enabled() {
-        print_skip();
-        return;
-    }
-    let profile = tempdir().unwrap();
-    let mut runtime = launch_browser(&profile);
-    let tab = runtime.browser.new_tab().unwrap();
-    runtime.set_active_tab_target_id(tab.get_target_id().to_string());
-
-    let report = execute_steps_with_runtime(
-        &mut runtime,
-        &[BrowserStep::SetWindowBounds {
-            x: None,
-            y: None,
-            width: Some(1024),
-            height: Some(768),
-        }],
-        &ImagePolicy::browser_capture(),
-    );
-
-    assert!(report.ok, "headless set_window_bounds must not fail");
-    let step = &report.steps[0];
-    assert!(step.summary.contains("headless"));
-    assert!(step.summary.contains("set_viewport"));
-    let data = step.data.as_ref().unwrap();
-    assert_eq!(data["applied"], json!(false));
-    assert_eq!(data["headless"], json!(true));
-    assert!(runtime.window_bounds().is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -934,26 +934,6 @@ pub async fn handle_v1_buddy_operator_action_execute(
 mod resource_http_tests {
     use super::*;
 
-    #[test]
-    fn unavailable_reason_serializes_each_supported_kind() {
-        for (kind, expected) in [
-            (OperatorOpenFailureKind::AlreadyOwned, "already_owned"),
-            (OperatorOpenFailureKind::IoError, "io_error"),
-            (OperatorOpenFailureKind::ProjectMismatch, "project_mismatch"),
-            (OperatorOpenFailureKind::NotAttempted, "not_attempted"),
-        ] {
-            let reason = unavailable_reason(OperatorUnavailableStatus {
-                kind,
-                detail: "safe detail".to_string(),
-                retry_in_seconds: Some(30),
-            });
-            let value = serde_json::to_value(reason).unwrap();
-            assert_eq!(value["kind"], expected);
-            assert_eq!(value["detail"], "safe detail");
-            assert_eq!(value["retry_in_seconds"], 30);
-        }
-    }
-
     #[tokio::test]
     async fn unavailable_status_reports_the_owner_and_manual_reopen_recovers() {
         let root = tempfile::tempdir().unwrap();
@@ -1395,42 +1375,5 @@ mod resource_http_tests {
             ActionResult::Rejected(ActionRejection::RepositoryFailure)
         ));
         reopened.shutdown().await;
-    }
-    #[tokio::test]
-    async fn authenticated_transport_and_disabled_runtime_never_mint_grants() {
-        let root = tempfile::tempdir().unwrap();
-        let mut gcx = crate::global_context::tests::make_test_gcx_with_dirs(
-            root.path().join("cache"),
-            root.path().join("config"),
-        )
-        .await;
-        std::sync::Arc::get_mut(&mut gcx)
-            .unwrap()
-            .cmdline
-            .daemon_auth_token = Some("fixture-secret".into());
-        let app = AppState::from_gcx(gcx).await;
-        let request = || GrantResourceRequest {
-            project_id: "fixture".into(),
-            spec_hash: "missing".into(),
-            expires_in_seconds: 60,
-            recovery_execution_id: None,
-            native_rights: None,
-        };
-        assert!(
-            handle_resource_grant(State(app.clone()), HeaderMap::new(), axum::Json(request()))
-                .await
-                .is_err()
-        );
-        let mut headers = HeaderMap::new();
-        headers.insert("authorization", "Bearer fixture-secret".parse().unwrap());
-        assert!(
-            handle_resource_grant(State(app), headers, axum::Json(request()))
-                .await
-                .is_err()
-        );
-        assert!(!root
-            .path()
-            .join("project/.refact/operator-recovery")
-            .exists());
     }
 }

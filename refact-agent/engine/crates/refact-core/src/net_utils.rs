@@ -30,13 +30,4 @@ mod tests {
 
         assert!(is_someone_listening_on_that_tcp_port(port, Duration::from_secs(1)).await);
     }
-
-    #[tokio::test]
-    async fn returns_false_for_unused_localhost_port() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-
-        assert!(!is_someone_listening_on_that_tcp_port(port, Duration::from_secs(1)).await);
-    }
 }

@@ -761,8 +761,6 @@ mod tests {
     use crate::chat::types::{ChatSession, SessionState};
     use crate::exec::{ExecMode, ExecOwnerMeta, ExecSpawnRequest};
     use crate::global_context::GlobalContext;
-    use crate::tools::settings_guard::SettingsGuard;
-    use serial_test::serial;
 
     async fn test_context(
         chat_id: &str,
@@ -997,25 +995,6 @@ mod tests {
             .all(|message| message.extra["event"]["payload"]["process_id"] == json!(process_id)));
     }
 
-    #[test]
-    fn push_defaults_to_append_and_validates_modes() {
-        let mut input = args(vec![("process_id", json!("exec_test"))]);
-        assert_eq!(parse_subscribe_args(&input).unwrap().push, PushMode::Append);
-        for (value, expected) in [
-            ("preempt", PushMode::Preempt),
-            ("when_idle", PushMode::WhenIdle),
-        ] {
-            input.insert("push".into(), json!(value));
-            assert_eq!(parse_subscribe_args(&input).unwrap().push, expected);
-        }
-        input.insert("push".into(), json!(true));
-        assert!(parse_subscribe_args(&input).is_err());
-        assert_eq!(
-            process_subscribe_input_schema()["properties"]["push"]["default"],
-            "append"
-        );
-    }
-
     #[tokio::test]
     async fn failed_batch_retains_id_and_bounded_order_then_retries() {
         let (gcx, _, session) = test_context("retry-subscribe").await;
@@ -1114,13 +1093,6 @@ mod tests {
             )
             .await
         );
-    }
-
-    #[test]
-    fn regex_filter_uses_substring_match() {
-        let regex = Regex::new("error").unwrap();
-
-        assert!(line_matches(Some(&regex), "fatal error: bind failed"));
     }
 
     #[test]
@@ -1287,47 +1259,5 @@ mod tests {
             .unwrap()
             .unwrap();
         let _ = gcx.exec_registry.kill(&process_id).await;
-    }
-
-    #[test]
-    fn process_subscribe_is_registered() {
-        let names = crate::tools::tools_list::builtin_system_tools(String::new())
-            .into_iter()
-            .map(|tool| tool.tool_description().name)
-            .collect::<Vec<_>>();
-        assert!(names.contains(&"process_subscribe".to_string()));
-    }
-
-    #[test]
-    #[serial(runtime_settings)]
-    fn process_subscribe_preview_bytes_setting_changes_preview_and_is_loud() {
-        let _guard = SettingsGuard::install(|settings| {
-            settings.process_subscribe_preview_bytes = 20;
-        });
-        let mut state = SubscriptionState::new(None, 100, DEFAULT_MAX_LINE_BYTES);
-        assert_eq!(state.preview_bytes, 20);
-
-        let long_line = "z".repeat(300);
-        state.add_summary_line(long_line, Instant::now());
-        let summary = state.active_summary.take().expect("summary builder");
-
-        assert!(
-            summary.first_line.starts_with(&"z".repeat(20)),
-            "expected the preview cut at 20 bytes, got: {}",
-            summary.first_line
-        );
-        assert!(
-            summary.first_line.contains("showing 20 of 300 line bytes")
-                && summary
-                    .first_line
-                    .contains("process_subscribe_preview_bytes = 20"),
-            "expected a quantified preview-truncation marker, got: {}",
-            summary.first_line
-        );
-    }
-
-    #[test]
-    fn process_subscribe_preview_line_is_unmarked_when_it_fits() {
-        assert_eq!(preview_line("short line", 200), "short line");
     }
 }

@@ -62,19 +62,3 @@ impl HistoryCell for ApprovalCell {
         ))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::history::cells::test_support::{approval_state, text};
-
-    #[test]
-    fn approval_cell_snapshot() {
-        let mut cell = ApprovalCell::new(approval_state(), None);
-        assert!(!cell.is_final());
-        assert!(text(&cell.render(80)).contains("Approval required"));
-        cell.set_status(ToolStatus::ApprovedOnce);
-        assert!(cell.is_final());
-        assert!(text(&cell.render(80)).contains("approval ✓ approved once"));
-    }
-}

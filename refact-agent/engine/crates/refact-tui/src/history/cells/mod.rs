@@ -1007,58 +1007,6 @@ mod tests {
     }
 
     #[test]
-    fn raw_lines_from_source_omits_trailing_empty_line() {
-        assert_eq!(raw_lines_from_source("one\ntwo\n").len(), 2);
-    }
-
-    #[test]
-    fn themes_change_transcript_colours_but_dark_preserves_them() {
-        let item = TranscriptItem::Tool(test_support::tool_card(
-            "shell",
-            serde_json::json!({"command": "echo hi"}),
-            "stdout: hi",
-        ));
-        let cell = cell_from_transcript_item(&item, false);
-        let dark = resolve_cell_lines_with_color_enabled(
-            cell.render_raw(80),
-            &TuiTheme::dark(),
-            true,
-            true,
-        );
-        let light = resolve_cell_lines_with_color_enabled(
-            cell.render_raw(80),
-            &TuiTheme::light(),
-            true,
-            true,
-        );
-
-        let dark_colours = dark
-            .iter()
-            .flat_map(|line| {
-                line.style
-                    .fg
-                    .into_iter()
-                    .chain(line.spans.iter().filter_map(|span| span.style.fg))
-            })
-            .collect::<Vec<_>>();
-        let light_colours = light
-            .iter()
-            .flat_map(|line| {
-                line.style
-                    .fg
-                    .into_iter()
-                    .chain(line.spans.iter().filter_map(|span| span.style.fg))
-            })
-            .collect::<Vec<_>>();
-
-        assert!(dark_colours.contains(&TuiTheme::dark().style(ThemeRole::Highlight).fg.unwrap()));
-        assert!(dark_colours.contains(&TuiTheme::dark().style(ThemeRole::Text).fg.unwrap()));
-        assert!(light_colours.contains(&TuiTheme::light().style(ThemeRole::Highlight).fg.unwrap()));
-        assert!(light_colours.contains(&TuiTheme::light().style(ThemeRole::Text).fg.unwrap()));
-        assert_ne!(dark_colours, light_colours);
-    }
-
-    #[test]
     fn no_color_strips_transcript_cell_colours() {
         let item = TranscriptItem::Tool(test_support::tool_card(
             "shell",

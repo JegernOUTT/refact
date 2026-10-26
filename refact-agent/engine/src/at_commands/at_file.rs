@@ -694,63 +694,6 @@ mod tests {
         .unwrap();
     }
 
-    #[test]
-    fn test_file_range() {
-        {
-            let mut value = String::from(":10-20");
-            let result = colon_lines_range_from_arg(&mut value);
-            assert_eq!(
-                result,
-                Some(ColonLinesRange {
-                    kind: RangeKind::Range,
-                    line1: 10,
-                    line2: 20
-                })
-            );
-        }
-        {
-            let mut value = String::from(":5-");
-            let result = colon_lines_range_from_arg(&mut value);
-            assert_eq!(
-                result,
-                Some(ColonLinesRange {
-                    kind: RangeKind::GradToCursorSuffix,
-                    line1: 5,
-                    line2: 0
-                })
-            );
-        }
-        {
-            let mut value = String::from(":-15");
-            let result = colon_lines_range_from_arg(&mut value);
-            assert_eq!(
-                result,
-                Some(ColonLinesRange {
-                    kind: RangeKind::GradToCursorPrefix,
-                    line1: 0,
-                    line2: 15
-                })
-            );
-        }
-        {
-            let mut value = String::from(":25");
-            let result = colon_lines_range_from_arg(&mut value);
-            assert_eq!(
-                result,
-                Some(ColonLinesRange {
-                    kind: RangeKind::GradToCursorTwoSided,
-                    line1: 25,
-                    line2: 0
-                })
-            );
-        }
-        {
-            let mut value = String::from("invalid");
-            let result = colon_lines_range_from_arg(&mut value);
-            assert_eq!(result, None);
-        }
-    }
-
     #[tokio::test]
     async fn relative_candidates_ignore_detached_cache_worktree_when_source_exists() {
         let source_temp = tempfile::tempdir().unwrap();

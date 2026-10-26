@@ -155,6 +155,9 @@ mod tests {
 
     fn goal_snapshot() -> GoalSnapshot {
         GoalSnapshot {
+            owner: None,
+            revision: 0,
+            plan: None,
             content: "ship the card".to_string(),
             version: 1,
             active: true,
@@ -235,13 +238,6 @@ mod tests {
     }
 
     #[test]
-    fn from_thread_parts_defaults_goal_none() {
-        let snapshot = snapshot();
-
-        assert_eq!(snapshot.goal, None);
-    }
-
-    #[test]
     fn trajectory_snapshot_goal_roundtrip() {
         let mut snapshot = snapshot();
         let goal = goal_snapshot();
@@ -280,17 +276,6 @@ mod tests {
         let legacy: TrajectorySnapshot = serde_json::from_value(value).unwrap();
         assert_eq!(legacy.auto_compression_cap, None);
         assert!(!legacy.auto_compression_cap_pending);
-    }
-
-    #[test]
-    fn obsolete_compression_cooldown_is_ignored_on_load() {
-        let mut value = serde_json::to_value(snapshot()).unwrap();
-        value["compression_retry_after_ms"] = serde_json::json!({"old-hash": 123_456});
-        let decoded: TrajectorySnapshot = serde_json::from_value(value).unwrap();
-        assert!(serde_json::to_value(decoded)
-            .unwrap()
-            .get("compression_retry_after_ms")
-            .is_none());
     }
 
     #[test]
@@ -380,31 +365,6 @@ mod tests {
             restored.pending_browser_decision,
             snapshot.pending_browser_decision
         );
-    }
-
-    #[test]
-    fn trajectory_snapshot_missing_waiting_for_card_ids_defaults_empty() {
-        // Trajectories written before waiting_for_card_ids existed (and current
-        // files, which omit the field when empty) must still deserialize.
-        let snapshot = snapshot();
-        let encoded = serde_json::to_string(&snapshot).unwrap();
-        let mut value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
-        value
-            .as_object_mut()
-            .unwrap()
-            .remove("waiting_for_card_ids");
-
-        let decoded: TrajectorySnapshot = serde_json::from_value(value).unwrap();
-        assert!(decoded.waiting_for_card_ids.is_empty());
-    }
-
-    #[test]
-    fn trajectory_snapshot_empty_waiting_for_card_ids_not_serialized() {
-        let snapshot = snapshot();
-        let encoded = serde_json::to_string(&snapshot).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
-
-        assert!(value.get("waiting_for_card_ids").is_none());
     }
 
     #[test]

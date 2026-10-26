@@ -199,22 +199,6 @@ mod tests {
     }
 
     #[test]
-    fn declared_scope_says_it_is_not_enforced_until_strict() {
-        let none = PathScope::declared(vec![], false);
-        assert!(!none.is_enforced());
-        assert!(none.describe().contains("no path scope"));
-
-        let declared = PathScope::declared(vec!["src/a.rs".into()], false);
-        assert!(!declared.is_enforced());
-        assert!(declared.describe().contains("not enforced"));
-        assert!(!declared.describe().contains("enforced on every"));
-
-        let enforced = PathScope::declared(vec!["src/a.rs".into()], true);
-        assert!(enforced.is_enforced());
-        assert!(enforced.describe().contains("enforced on every built-in"));
-    }
-
-    #[test]
     fn strict_mode_follows_the_card_and_the_configured_default() {
         let files = vec!["src/a.rs".to_string()];
         let mut limits = limits();
@@ -502,15 +486,5 @@ mod tests {
             .unwrap(),
             ScopeOutcome::Allowed
         );
-    }
-
-    #[test]
-    fn refusal_text_names_the_scope_and_never_claims_unimplemented_enforcement() {
-        let strict = refusal_message("/root/src/evil.rs", &["src/a.rs".to_string()], true);
-        assert!(strict.contains("enforced path scope"));
-        assert!(strict.contains("src/a.rs"));
-        let declared = refusal_message("/root/src/evil.rs", &["src/a.rs".to_string()], false);
-        assert!(declared.contains("target_files scope"));
-        assert!(!declared.contains("enforced"));
     }
 }

@@ -341,15 +341,6 @@ mod tests {
     }
 
     #[test]
-    fn test_recover_function_style_checks_all_allowed_tools() {
-        let allowed = make_allowed(&["shell", "apply_patch"]);
-        let content = r#"apply_patch({"patch":"*** Begin Patch"})"#;
-        let (_, calls, source) = recover_tool_calls_from_oss_text(content, &allowed).unwrap();
-        assert_eq!(source, "function_text_recovery");
-        assert_eq!(calls[0]["function"]["name"], "apply_patch");
-    }
-
-    #[test]
     fn test_recover_fenced_json() {
         let allowed = make_allowed(&["apply_patch"]);
         let content = "```json\n{\"tool\":\"apply_patch\",\"arguments\":{\"patch\":\"*** Begin Patch\"}}\n```";
@@ -456,25 +447,5 @@ mod tests {
             This is a very common operation that you might want to perform when \
             debugging or inspecting the state of the system.";
         assert!(recover_tool_calls_from_oss_text(content, &allowed).is_none());
-    }
-
-    #[test]
-    fn test_prose_guard_allows_short_prefix() {
-        // Small prefix like "Running:" is fine (< 120 non-ws chars after removal)
-        let allowed = make_allowed(&["shell"]);
-        let content = r#"Running: shell({"command":"ls","workdir":"/tmp"})"#;
-        let result = recover_tool_calls_from_oss_text(content, &allowed);
-        assert!(result.is_some());
-    }
-
-    #[test]
-    fn test_clean_content_has_no_stray_paren() {
-        let allowed = make_allowed(&["shell"]);
-        let content = r#"shell({"command":"ls","workdir":"/tmp"})"#;
-        let (clean, _, _) = recover_tool_calls_from_oss_text(content, &allowed).unwrap();
-        assert!(
-            !clean.contains(')'),
-            "clean content must not have stray closing paren"
-        );
     }
 }

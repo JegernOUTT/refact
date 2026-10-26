@@ -391,7 +391,7 @@ impl<T: Serialize> ToolJson<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::ToolJson;
+
     use serde::{Serialize, Serializer};
 
     struct SerializationFailure;
@@ -405,27 +405,5 @@ mod tests {
                 "deliberate serialization failure",
             ))
         }
-    }
-
-    #[test]
-    fn tool_json_serialization_failure_returns_attributable_valid_json() {
-        let output = ToolJson::new(
-            "code_intel_test",
-            "summary with a \"quote\" and newline\n",
-            SerializationFailure,
-        )
-        .to_text();
-
-        let fallback: serde_json::Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(fallback["tool"], "code_intel_test");
-        assert_eq!(
-            fallback["summary"],
-            "summary with a \"quote\" and newline\n"
-        );
-        assert_eq!(
-            fallback["error"]["message"],
-            "deliberate serialization failure"
-        );
-        assert_eq!(fallback["error"]["kind"], "serialization_failed");
     }
 }

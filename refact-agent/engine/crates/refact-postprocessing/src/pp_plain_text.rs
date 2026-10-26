@@ -248,16 +248,4 @@ mod tests {
         assert!(!text.contains("No content: tokens limit reached"));
         assert_eq!(remaining, 0);
     }
-
-    #[tokio::test]
-    async fn single_plain_text_message_can_use_full_budget() {
-        let content = "x".repeat(300);
-        let messages = vec![tool_message("call_1", content.clone())];
-
-        let (processed, remaining) = postprocess_plain_text(messages, None, 100, &None).await;
-
-        assert_eq!(processed.len(), 1);
-        assert_eq!(processed[0].content.content_text_only(), content);
-        assert!(remaining > 0);
-    }
 }

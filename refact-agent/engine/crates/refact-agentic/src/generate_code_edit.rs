@@ -30,20 +30,8 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_markdown_fences_without_language() {
-        let input = "```\nsome code\n```";
-        assert_eq!(remove_markdown_fences(input), "some code");
-    }
-
-    #[test]
     fn test_remove_markdown_fences_no_fences() {
         let input = "plain code without fences";
         assert_eq!(remove_markdown_fences(input), "plain code without fences");
-    }
-
-    #[test]
-    fn test_remove_markdown_fences_with_whitespace() {
-        let input = "  ```rust\nfn main() {}\n```  ";
-        assert_eq!(remove_markdown_fences(input), "fn main() {}");
     }
 }

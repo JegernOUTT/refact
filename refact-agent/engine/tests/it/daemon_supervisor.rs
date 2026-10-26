@@ -276,8 +276,26 @@ async fn concurrent_ensure_spawns_one_process() {
     );
     let first = first.unwrap();
     let second = second.unwrap();
-    assert_eq!(first.state, WorkerState::Ready);
+    assert!(matches!(
+        first.state,
+        WorkerState::Starting | WorkerState::Ready
+    ));
+    assert!(matches!(
+        second.state,
+        WorkerState::Starting | WorkerState::Ready
+    ));
+    assert!(first.pid.is_some());
+    assert!(second.pid.is_some());
     assert_eq!(first.pid, second.pid);
+    let ready = tokio::time::timeout(
+        Duration::from_secs(8),
+        supervisor.ensure_ready_worker(&entry),
+    )
+    .await
+    .expect("concurrent worker did not become ready in time")
+    .expect("concurrent worker failed readiness");
+    assert_eq!(ready.state, WorkerState::Ready);
+    assert_eq!(ready.pid, first.pid);
     let starting = events
         .snapshot()
         .await

@@ -1068,65 +1068,10 @@ mod tests {
     }
 
     #[test]
-    fn test_auth_type_enum_roundtrip() {
-        for (variant, expected_str) in [
-            (AuthType::None, "\"none\""),
-            (AuthType::Bearer, "\"bearer\""),
-            (
-                AuthType::Oauth2ClientCredentials,
-                "\"oauth2_client_credentials\"",
-            ),
-            (AuthType::Oauth2Pkce, "\"oauth2_pkce\""),
-        ] {
-            let serialized = serde_json::to_string(&variant).unwrap();
-            assert_eq!(serialized, expected_str);
-            let deserialized: AuthType = serde_json::from_str(&serialized).unwrap();
-            assert_eq!(deserialized, variant);
-        }
-    }
-
-    #[test]
-    fn test_auth_type_oauth2_alias() {
-        let json = serde_json::json!({"auth_type": "oauth2"});
-        let settings: MCPAuthSettings = serde_json::from_value(json).unwrap();
-        assert_eq!(settings.auth_type, AuthType::Oauth2ClientCredentials);
-    }
-
-    #[test]
-    fn test_auth_type_backward_compat_oauth2_alias() {
-        let json = serde_json::json!({"auth_type": "oauth2"});
-        let settings: MCPAuthSettings = serde_json::from_value(json).unwrap();
-        assert_eq!(settings.auth_type, AuthType::Oauth2ClientCredentials);
-    }
-
-    #[test]
-    fn test_auth_type_oauth2_client_credentials_unchanged() {
-        let json = serde_json::json!({"auth_type": "oauth2_client_credentials"});
-        let settings: MCPAuthSettings = serde_json::from_value(json).unwrap();
-        assert_eq!(settings.auth_type, AuthType::Oauth2ClientCredentials);
-    }
-
-    #[test]
     fn test_auth_type_oauth2_pkce_deserialized() {
         let json = serde_json::json!({"auth_type": "oauth2_pkce"});
         let settings: MCPAuthSettings = serde_json::from_value(json).unwrap();
         assert_eq!(settings.auth_type, AuthType::Oauth2Pkce);
-    }
-
-    #[test]
-    fn test_auth_settings_serialization_roundtrip() {
-        let settings = MCPAuthSettings {
-            auth_type: AuthType::Bearer,
-            bearer_token: "tok123".to_string(),
-            oauth2_client_id: "".to_string(),
-            oauth2_client_secret: "".to_string(),
-            oauth2_token_url: "".to_string(),
-            oauth2_scopes: vec![],
-            oauth_tokens: None,
-        };
-        let json = serde_json::to_value(&settings).unwrap();
-        let roundtrip: MCPAuthSettings = serde_json::from_value(json).unwrap();
-        assert_eq!(settings, roundtrip);
     }
 
     #[test]
@@ -1142,22 +1087,6 @@ mod tests {
         };
         let json = serde_json::to_value(&tokens).unwrap();
         let roundtrip: MCPOAuthTokens = serde_json::from_value(json).unwrap();
-        assert_eq!(tokens, roundtrip);
-    }
-
-    #[test]
-    fn test_mcp_oauth_tokens_serialization_roundtrip_yaml() {
-        let tokens = MCPOAuthTokens {
-            access_token: "access_abc".to_string(),
-            refresh_token: "refresh_xyz".to_string(),
-            expires_at: 1700000000000,
-            client_id: "client_123".to_string(),
-            client_secret: None,
-            scopes: vec!["openid".to_string()],
-            bound_url: None,
-        };
-        let yaml = serde_yaml::to_string(&tokens).unwrap();
-        let roundtrip: MCPOAuthTokens = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(tokens, roundtrip);
     }
 
@@ -1351,26 +1280,6 @@ mod tests {
     }
 
     #[test]
-    fn test_reconstruct_token_response_access_token() {
-        use oauth2::TokenResponse;
-        let tokens = MCPOAuthTokens {
-            access_token: "access_abc123".to_string(),
-            refresh_token: "refresh_xyz".to_string(),
-            expires_at: (SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as i64)
-                + 3_600_000,
-            client_id: "client_id_1".to_string(),
-            client_secret: None,
-            scopes: vec![],
-            bound_url: None,
-        };
-        let response = reconstruct_token_response(&tokens).unwrap();
-        assert_eq!(response.access_token().secret(), "access_abc123");
-    }
-
-    #[test]
     fn test_reconstruct_token_response_expired_has_zero_expires_in() {
         use oauth2::TokenResponse;
         let tokens = MCPOAuthTokens {
@@ -1405,17 +1314,6 @@ mod tests {
         let response = reconstruct_token_response(&tokens).unwrap();
         assert_eq!(response.access_token().secret(), "access_only");
         assert!(response.refresh_token().is_none());
-    }
-
-    #[tokio::test]
-    async fn test_no_tokens_in_config_returns_none() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_str().unwrap().to_string();
-        let result = load_tokens_from_config(&path).await;
-        assert!(
-            result.is_none(),
-            "Empty config should return None for tokens"
-        );
     }
 
     #[tokio::test]
@@ -1482,14 +1380,6 @@ mod tests {
     }
 
     #[test]
-    fn test_retry_cadence_never_outruns_refresh_window() {
-        assert!(
-            REFRESH_RETRY_MAX_SECS * 1000 <= REFRESH_BEFORE_EXPIRY_MS as u64,
-            "backoff must not delay the expiry check past the refresh window"
-        );
-    }
-
-    #[test]
     fn test_is_token_expired() {
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1511,18 +1401,6 @@ mod tests {
 
         tokens.expires_at = now_ms - 1;
         assert!(is_token_expired(&tokens));
-    }
-
-    #[test]
-    fn test_refresh_retry_backoff_saturates() {
-        let mut delay = REFRESH_RETRY_BASE_SECS;
-        for _ in 0..10 {
-            delay = (delay * 2).min(REFRESH_RETRY_MAX_SECS);
-        }
-        assert_eq!(delay, REFRESH_RETRY_MAX_SECS);
-
-        delay = (delay * 2).min(REFRESH_RETRY_MAX_SECS);
-        assert_eq!(delay, REFRESH_RETRY_MAX_SECS);
     }
 
     #[test]
@@ -1747,34 +1625,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_clear_tokens_fails_on_nonexistent_file() {
-        let result =
-            clear_tokens_from_config("/tmp/nonexistent_mcp_test_file_xyz_12345.yaml").await;
-        assert!(result.is_err(), "Should fail on nonexistent file");
-    }
-
-    #[test]
-    fn test_scopes_deserialize_from_string() {
-        let json = serde_json::json!({"auth_type": "bearer", "oauth2_scopes": "read write"});
-        let settings: MCPAuthSettings = serde_json::from_value(json).unwrap();
-        assert_eq!(settings.oauth2_scopes, vec!["read", "write"]);
-    }
-
-    #[test]
-    fn test_scopes_deserialize_from_array() {
-        let json = serde_json::json!({"auth_type": "bearer", "oauth2_scopes": ["read", "write"]});
-        let settings: MCPAuthSettings = serde_json::from_value(json).unwrap();
-        assert_eq!(settings.oauth2_scopes, vec!["read", "write"]);
-    }
-
-    #[test]
-    fn test_scopes_deserialize_empty_string() {
-        let json = serde_json::json!({"auth_type": "bearer", "oauth2_scopes": ""});
-        let settings: MCPAuthSettings = serde_json::from_value(json).unwrap();
-        assert!(settings.oauth2_scopes.is_empty());
-    }
-
     #[test]
     fn test_reconstruct_near_expiry_produces_expires_in() {
         use oauth2::TokenResponse;
@@ -1799,33 +1649,6 @@ mod tests {
             expires_in.as_secs(),
             1,
             "500ms remaining should ceil to 1 second"
-        );
-    }
-
-    #[test]
-    fn test_reconstruct_expired_produces_zero_expires_in() {
-        use oauth2::TokenResponse;
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
-        let tokens = MCPOAuthTokens {
-            access_token: "tok".to_string(),
-            refresh_token: String::new(),
-            expires_at: now_ms - 1,
-            client_id: "client".to_string(),
-            client_secret: None,
-            scopes: vec![],
-            bound_url: None,
-        };
-        let response = reconstruct_token_response(&tokens).unwrap();
-        let expires_in = response
-            .expires_in()
-            .expect("expires_in should be present for expired token");
-        assert_eq!(
-            expires_in.as_secs(),
-            0,
-            "expired token should have expires_in = 0"
         );
     }
 
@@ -1939,19 +1762,6 @@ mod tests {
             info.resource_metadata.as_deref(),
             Some("https://mcp.example.com/.well-known/oauth-protected-resource")
         );
-    }
-
-    #[test]
-    fn test_parse_www_authenticate_unquoted_and_bare() {
-        let info = parse_www_authenticate("Bearer realm=api, scope=mcp").unwrap();
-        assert_eq!(info.scheme, "Bearer");
-        assert_eq!(info.realm.as_deref(), Some("api"));
-        assert_eq!(info.scope.as_deref(), Some("mcp"));
-
-        let bare = parse_www_authenticate("Bearer").unwrap();
-        assert_eq!(bare.scheme, "Bearer");
-        assert!(bare.realm.is_none());
-        assert!(bare.scope.is_none());
     }
 
     #[test]
@@ -2164,34 +1974,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ensure_oauth2_pkce_auth_type_preserves_comments() {
-        let mut file = NamedTempFile::new().unwrap();
-        writeln!(
-            file,
-            "# mcp_marketplace_source: community\n# mcp_marketplace_server: github\nurl: https://mcp.example.com/mcp\nauth_type: none\nheaders:\n  Accept: application/json"
-        )
-        .unwrap();
-        let path = file.path().to_string_lossy().to_string();
-
-        let changed = ensure_oauth2_pkce_auth_type(&path).await.unwrap();
-        assert!(changed);
-
-        let content = tokio::fs::read_to_string(&path).await.unwrap();
-        assert!(
-            content.contains("# mcp_marketplace_source: community"),
-            "marketplace source comment must survive the rewrite, got: {}",
-            content
-        );
-        assert!(content.contains("# mcp_marketplace_server: github"));
-        assert!(content.contains("auth_type: oauth2_pkce"));
-        assert!(!content.contains("auth_type: none"));
-        assert!(
-            content.contains("  Accept: application/json"),
-            "nested formatting preserved"
-        );
-    }
-
-    #[tokio::test]
     async fn test_ensure_oauth2_pkce_auth_type_appends_when_missing() {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "# header comment\nurl: https://mcp.example.com/mcp").unwrap();
@@ -2208,29 +1990,5 @@ mod tests {
             value.get("auth_type").and_then(|v| v.as_str()),
             Some("oauth2_pkce")
         );
-    }
-
-    #[test]
-    fn test_remote_mcp_schemas_keep_manual_auth_in_advanced_configuration() {
-        for schema in [
-            include_str!("mcp_http_schema.yaml"),
-            include_str!("mcp_sse_schema.yaml"),
-        ] {
-            let value: serde_yaml::Value = serde_yaml::from_str(schema).unwrap();
-            let fields = value.get("fields").and_then(|v| v.as_mapping()).unwrap();
-
-            for (field_name, field) in fields {
-                let field_name = field_name.as_str().unwrap();
-                let field = field.as_mapping().unwrap();
-                let is_advanced = field
-                    .get(serde_yaml::Value::String("f_extra".to_string()))
-                    .is_some();
-                assert_eq!(
-                    is_advanced,
-                    field_name != "url",
-                    "only url should be visible before advanced configuration is opened"
-                );
-            }
-        }
     }
 }

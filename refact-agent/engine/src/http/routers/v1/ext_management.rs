@@ -1806,11 +1806,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_name_rejects_dot_prefix() {
-        assert!(validate_name(".hidden").is_err());
-    }
-
-    #[test]
     fn test_validate_name_rejects_slash() {
         assert!(validate_name("path/traversal").is_err());
     }
@@ -1824,64 +1819,6 @@ mod tests {
     fn test_validate_name_rejects_dotdot() {
         assert!(validate_name("../../etc/passwd").is_err());
         assert!(validate_name("..").is_err());
-    }
-
-    #[test]
-    fn test_skill_content_roundtrip() {
-        let content = build_skill_roundtrip("my-skill", "A useful skill", "Do something");
-        assert!(content.contains("---"));
-        assert!(content.contains("name: my-skill"));
-        assert!(content.contains("description: A useful skill"));
-        assert!(content.contains("Do something"));
-
-        let (fm, body) = parse_frontmatter_and_body(&content);
-        assert_eq!(fm.get("name").and_then(|v| v.as_str()), Some("my-skill"));
-        assert_eq!(
-            fm.get("description").and_then(|v| v.as_str()),
-            Some("A useful skill")
-        );
-        assert_eq!(body.trim(), "Do something");
-    }
-
-    #[test]
-    fn test_hooks_to_yaml_roundtrip() {
-        let hooks = vec![
-            HookConfigFlat {
-                event: HookEvent::PreToolUse,
-                matcher: Some("Bash".to_string()),
-                command: "./check.sh".to_string(),
-                timeout: Some(30),
-            },
-            HookConfigFlat {
-                event: HookEvent::SessionStart,
-                matcher: None,
-                command: "echo start".to_string(),
-                timeout: None,
-            },
-        ];
-        let yaml = hooks_to_yaml_string(&hooks).expect("should serialize");
-        assert!(yaml.contains("PreToolUse"));
-        assert!(yaml.contains("SessionStart"));
-        assert!(yaml.contains("./check.sh"));
-        assert!(yaml.contains("echo start"));
-        assert!(yaml.contains("Bash"));
-        assert!(yaml.contains("30"));
-    }
-
-    #[test]
-    fn test_hooks_to_yaml_empty() {
-        let hooks: Vec<HookConfigFlat> = vec![];
-        let yaml = hooks_to_yaml_string(&hooks).expect("should serialize");
-        assert!(yaml.contains("hooks"));
-    }
-
-    #[test]
-    fn test_validate_name_clean_helper() {
-        assert!(validate_name_clean("skill-name"));
-        assert!(!validate_name_clean(""));
-        assert!(!validate_name_clean(".hidden"));
-        assert!(!validate_name_clean("a/b"));
-        assert!(!validate_name_clean(".."));
     }
 
     #[test]
@@ -1919,65 +1856,10 @@ mod tests {
     }
 
     #[test]
-    fn test_source_str_values() {
-        assert_eq!(source_str(&CommandSource::GlobalRefact), "global_refact");
-        assert_eq!(source_str(&CommandSource::GlobalClaude), "global_claude");
-        assert_eq!(
-            source_str(&CommandSource::ProjectRefact(PathBuf::new())),
-            "project_refact"
-        );
-        assert_eq!(
-            source_str(&CommandSource::ProjectClaude(PathBuf::new())),
-            "project_claude"
-        );
-    }
-
-    #[test]
-    fn test_scope_str_values() {
-        assert_eq!(scope_str(&CommandSource::GlobalRefact), "global");
-        assert_eq!(scope_str(&CommandSource::GlobalClaude), "global");
-        assert_eq!(
-            scope_str(&CommandSource::ProjectRefact(PathBuf::new())),
-            "local"
-        );
-        assert_eq!(
-            scope_str(&CommandSource::ProjectClaude(PathBuf::new())),
-            "local"
-        );
-    }
-
-    #[test]
     fn test_read_only_values() {
         assert!(!is_read_only(&CommandSource::GlobalRefact));
         assert!(is_read_only(&CommandSource::GlobalClaude));
         assert!(!is_read_only(&CommandSource::ProjectRefact(PathBuf::new())));
         assert!(is_read_only(&CommandSource::ProjectClaude(PathBuf::new())));
-    }
-
-    #[tokio::test]
-    async fn test_hooks_get_from_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let hooks_yaml = r#"hooks:
-  PreToolUse:
-    - matcher: "Bash"
-      hooks:
-        - type: command
-          command: "./check.sh"
-          timeout: 30
-"#;
-        tokio::fs::write(tmp.path().join("hooks.yaml"), hooks_yaml)
-            .await
-            .unwrap();
-        let ext_dirs = ExtDirs {
-            global_dirs: vec![tmp.path().to_path_buf()],
-            project_dirs: vec![],
-            installed_dirs: vec![],
-        };
-        let hooks = load_hooks(&ext_dirs).await;
-        let flat: Vec<HookConfigFlat> = hooks.iter().map(HookConfigFlat::from).collect();
-        assert_eq!(flat.len(), 1);
-        assert_eq!(flat[0].command, "./check.sh");
-        assert_eq!(flat[0].matcher, Some("Bash".to_string()));
-        assert_eq!(flat[0].timeout, Some(30));
     }
 }

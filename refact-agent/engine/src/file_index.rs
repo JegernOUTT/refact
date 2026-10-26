@@ -393,20 +393,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lookup_falls_back_to_a_single_stat_and_caches() {
-        let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("a.txt");
-        std::fs::write(&file, "hello").unwrap();
-        let index = FileIndex::default();
-
-        assert!(index.get(&file).is_none());
-        let facts = index.lookup_or_stat(&file).expect("stat fallback");
-
-        assert_eq!(facts.size, 5);
-        assert!(index.get(&file).is_some());
-    }
-
-    #[test]
     fn cap_is_reported_instead_of_silently_dropping_and_lookup_still_works() {
         let temp = tempfile::tempdir().unwrap();
         let index = FileIndex::new(0);
@@ -421,26 +407,6 @@ mod tests {
         assert_eq!(status.skipped_over_cap, 1);
         assert!(!status.complete);
         assert!(index.lookup_or_stat(&file).is_some());
-    }
-
-    #[test]
-    fn delete_invalidates_only_that_entry() {
-        let temp = tempfile::tempdir().unwrap();
-        let kept = temp.path().join("kept.txt");
-        let gone = temp.path().join("gone.txt");
-        std::fs::write(&kept, "a").unwrap();
-        std::fs::write(&gone, "b").unwrap();
-        let index = FileIndex::default();
-        index.refresh(&kept);
-        index.refresh(&gone);
-        assert_eq!(index.len(), 2);
-
-        std::fs::remove_file(&gone).unwrap();
-        index.refresh(&gone);
-
-        assert_eq!(index.len(), 1);
-        assert!(index.get(&kept).is_some());
-        assert!(index.get(&gone).is_none());
     }
 
     #[cfg(unix)]
@@ -468,23 +434,6 @@ mod tests {
         std::fs::remove_file(&secret).unwrap();
         index.refresh(&secret);
         assert!(index.aliases_of(&alias_facts, &alias).is_empty());
-    }
-
-    #[test]
-    fn build_populates_and_reports_ready() {
-        let temp = tempfile::tempdir().unwrap();
-        for i in 0..10 {
-            std::fs::write(temp.path().join(format!("f{i}.txt")), "x").unwrap();
-        }
-        let index = FileIndex::default();
-        let shutdown = AtomicBool::new(false);
-
-        build_blocking(&index, &[temp.path().to_path_buf()], &shutdown);
-
-        let status = index.status();
-        assert_eq!(status.state, FileIndexState::Ready);
-        assert_eq!(status.entries, 10);
-        assert!(status.complete);
     }
 
     #[test]

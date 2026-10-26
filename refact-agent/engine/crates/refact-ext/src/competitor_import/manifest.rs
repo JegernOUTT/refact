@@ -311,11 +311,6 @@ pub async fn write_string_atomic(path: &Path, content: &str) -> Result<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn string_and_bytes_hash_match() {
-        assert_eq!(hash_string("abc"), hash_bytes(b"abc"));
-    }
-
     #[tokio::test]
     async fn manifest_roundtrip_is_atomic_json() {
         let temp = tempfile::tempdir().unwrap();

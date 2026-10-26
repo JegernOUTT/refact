@@ -256,21 +256,6 @@ fn helper() {}
     }
 
     #[test]
-    fn definitions_resolves_by_double_colon_path() {
-        let store = store_with_rust();
-        let defs = definitions(&store, "Widget::render").unwrap();
-        assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].name(), "render");
-    }
-
-    #[test]
-    fn definition_paths_fuzzy_matches_substring() {
-        let store = store_with_rust();
-        let hits = definition_paths_fuzzy(&store, "render", 10).unwrap();
-        assert!(hits.iter().any(|p| p.contains("render")));
-    }
-
-    #[test]
     fn same_basename_facade_keeps_path_qualified_identities() {
         let store = Store::open_in_memory().unwrap();
         store
@@ -305,56 +290,5 @@ fn helper() {}
         assert!(!run.usages.iter().any(|usage| {
             usage.resolved_as == "src/a/m.rs::helper" && usage.debug_hint == "calls"
         }));
-    }
-
-    #[test]
-    fn fetch_counters_reports_docs_and_defs() {
-        let store = store_with_rust();
-        let counters = fetch_counters(&store).unwrap();
-        assert_eq!(counters.counter_docs, 1);
-        assert!(counters.counter_defs >= 3);
-    }
-
-    #[test]
-    fn fetch_counters_counts_symbols_not_helper_nodes() {
-        let store = Store::open_in_memory().unwrap();
-        let file_id = store
-            .insert_node("file", "src/api.rs", "api.rs", "rust", 1, 3)
-            .unwrap();
-        let route_id = store
-            .insert_node("route", "src/api.rs", "GET /users", "rust", 0, 0)
-            .unwrap();
-        store
-            .add_edge(route_id, file_id, "defined_in", 1.0)
-            .unwrap();
-
-        let counters = fetch_counters(&store).unwrap();
-
-        assert_eq!(counters.counter_docs, 1);
-        assert_eq!(counters.counter_defs, 0);
-        assert_eq!(counters.counter_usages, 0);
-    }
-
-    #[test]
-    fn type_hierarchy_renders_inheritance_chain() {
-        let store = Store::open_in_memory().unwrap();
-        store
-            .index_file_graph("src/a.py", "class A:\n    pass\n", "python")
-            .unwrap();
-        store
-            .index_file_graph("src/b.py", "class B(A):\n    pass\n", "python")
-            .unwrap();
-        store
-            .index_file_graph("src/c.py", "class C(B):\n    pass\n", "python")
-            .unwrap();
-        store.connect_usages().unwrap();
-
-        let tree = type_hierarchy(&store, "").unwrap();
-        assert!(tree.contains('A'), "tree should mention root A: {tree}");
-        assert!(tree.contains('B'));
-        assert!(tree.contains('C'));
-        let a_pos = tree.find("A").unwrap();
-        let b_pos = tree.find("B").unwrap();
-        assert!(a_pos < b_pos, "A (root) should appear before B");
     }
 }

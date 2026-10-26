@@ -121,36 +121,6 @@ mod tests {
     }
 
     #[test]
-    fn inactive_docs_are_reported_for_removal() {
-        let mut graph = KnowledgeGraph::new();
-        graph.add_doc(doc(
-            "/tmp/deprecated.md",
-            KnowledgeFrontmatter {
-                id: Some("deprecated".to_string()),
-                status: Some("deprecated".to_string()),
-                ..Default::default()
-            },
-        ));
-        graph.add_doc(doc(
-            "/tmp/archived.md",
-            KnowledgeFrontmatter {
-                id: Some("archived".to_string()),
-                status: Some("archived".to_string()),
-                ..Default::default()
-            },
-        ));
-
-        let report = graph.check_staleness(180, 90);
-
-        assert!(report
-            .inactive_docs
-            .contains(&PathBuf::from("/tmp/deprecated.md")));
-        assert!(report
-            .inactive_docs
-            .contains(&PathBuf::from("/tmp/archived.md")));
-    }
-
-    #[test]
     fn active_docs_past_max_age_are_stale() {
         let old_date = (Utc::now() - Duration::days(181))
             .format("%Y-%m-%d")

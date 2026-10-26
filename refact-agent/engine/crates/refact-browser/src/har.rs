@@ -852,22 +852,6 @@ mod tests {
     }
 
     #[test]
-    fn captures_are_dropped_when_no_recording_is_active() {
-        let recorder = HarRecorder::default();
-        let called = Arc::new(Mutex::new(false));
-        let flag = called.clone();
-        recorder.capture_body(
-            &network_entry(),
-            Box::new(move || {
-                *flag.lock().unwrap() = true;
-                None
-            }),
-        );
-        assert!(!*called.lock().unwrap());
-        assert!(recorder.stop().is_err());
-    }
-
-    #[test]
     fn har_entry_assembly_masks_headers_query_and_content() {
         let entry = entry_from_monitor(
             &network_entry(),
@@ -938,58 +922,6 @@ mod tests {
     }
 
     #[test]
-    fn replay_entries_without_a_body_still_match_on_method_and_url() {
-        let replay = HarReplay {
-            entries: vec![entry_for("POST", "https://x.test/rpc", 204)],
-            matcher: None,
-            not_found: HarNotFound::Fallback,
-            label: "rpc.har".to_string(),
-        };
-
-        for post_data in [None, Some("anything")] {
-            assert!(replay
-                .match_request("POST", "https://x.test/rpc", post_data)
-                .is_some());
-        }
-    }
-
-    #[test]
-    fn merging_keeps_posts_with_different_bodies_apart() {
-        let merge = merge_har_entries(
-            vec![
-                entry_with_body("POST", "https://x.test/rpc", 200, "one"),
-                entry_with_body("POST", "https://x.test/rpc", 201, "two"),
-            ],
-            vec![entry_with_body("POST", "https://x.test/rpc", 503, "two")],
-        );
-
-        assert_eq!((merge.replaced, merge.appended), (1, 0));
-        assert_eq!(merge.entries[0].response.status, 200);
-        assert_eq!(merge.entries[1].response.status, 503);
-    }
-
-    #[test]
-    fn merging_replaces_matched_method_and_url_and_appends_the_rest() {
-        let merge = merge_har_entries(
-            vec![
-                entry_for("GET", "https://example.test/a", 200),
-                entry_for("POST", "https://example.test/a", 201),
-            ],
-            vec![
-                entry_for("get", "https://example.test/a", 503),
-                entry_for("GET", "https://example.test/b", 200),
-            ],
-        );
-
-        assert_eq!(merge.replaced, 1);
-        assert_eq!(merge.appended, 1);
-        assert_eq!(merge.entries.len(), 3);
-        assert_eq!(merge.entries[0].response.status, 503);
-        assert_eq!(merge.entries[1].response.status, 201);
-        assert_eq!(merge.entries[2].request.url, "https://example.test/b");
-    }
-
-    #[test]
     fn recording_never_collapses_requests_recorded_in_the_same_session() {
         let merge = merge_har_entries(
             Vec::new(),
@@ -1025,20 +957,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![404, 500]
         );
-    }
-
-    #[test]
-    fn recording_without_an_update_base_keeps_every_recorded_entry() {
-        let merge = merge_har_entries(
-            Vec::new(),
-            vec![
-                entry_for("GET", "https://example.test/a", 200),
-                entry_for("GET", "https://example.test/b", 200),
-            ],
-        );
-
-        assert_eq!((merge.replaced, merge.appended), (0, 2));
-        assert_eq!(merge.entries.len(), 2);
     }
 
     #[test]

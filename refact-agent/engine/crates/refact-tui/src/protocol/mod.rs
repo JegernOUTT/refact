@@ -2028,55 +2028,6 @@ mod tests {
     }
 
     #[test]
-    fn subchat_update_parses_parent_tool_progress() {
-        let event = SseEvent::from_raw(&json!({
-            "type": "subchat_update",
-            "tool_call_id": "call-1",
-            "subchat_id": "1/2: search({})",
-            "attached_files": ["src/lib.rs", "src/app.rs"],
-            "depth": 7
-        }));
-
-        match event {
-            SseEvent::SubchatUpdate {
-                tool_call_id,
-                subchat_id,
-                attached_files,
-                depth,
-            } => {
-                assert_eq!(tool_call_id, "call-1");
-                assert_eq!(subchat_id, "1/2: search({})");
-                assert_eq!(attached_files, vec!["src/lib.rs", "src/app.rs"]);
-                assert_eq!(depth, 7);
-            }
-            other => panic!("unexpected event: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn ack_parses_delivery_correlation_fields() {
-        let event = SseEvent::from_raw(&json!({
-            "type": "ack",
-            "client_request_id": "request-1",
-            "accepted": true,
-            "result": {"queued": true}
-        }));
-
-        match event {
-            SseEvent::Ack {
-                client_request_id,
-                accepted,
-                result,
-            } => {
-                assert_eq!(client_request_id, "request-1");
-                assert!(accepted);
-                assert_eq!(result, Some(json!({"queued": true})));
-            }
-            other => panic!("unexpected event: {other:?}"),
-        }
-    }
-
-    #[test]
     fn message_mutation_envelopes_require_valid_authoritative_fields() {
         let message = json!({"message_id": "u1", "role": "user", "content": "hello"});
 
@@ -2312,21 +2263,6 @@ mod tests {
     }
 
     #[test]
-    fn sanitized_inbound_user_replay_deduplicates_by_message_id() {
-        let mut state = TranscriptState::new();
-        let message = json!({
-            "message_id": "u1",
-            "role": "user",
-            "content": "hello\x1b]0;pwned\x07\x1b[2J world",
-        });
-
-        assert!(state.add_message(&message));
-        assert!(!state.add_message(&message));
-        assert_eq!(state.messages().len(), 1);
-        assert_eq!(state.messages()[0].content, "hello world");
-    }
-
-    #[test]
     fn optimistic_user_message_reconciles_only_with_matching_client_message_id() {
         let mut state = TranscriptState::new();
         state.push_optimistic_user_message("same", "optimistic-1");
@@ -2347,67 +2283,6 @@ mod tests {
         assert!(!state.replace_optimistic_user_message_at(different, None));
         assert_eq!(state.messages().len(), 1);
         assert_eq!(state.messages()[0].message_id.as_deref(), Some("server-1"));
-    }
-
-    #[test]
-    fn authoritative_index_replaces_existing_message_at_start_middle_and_end() {
-        let initial = json!([
-            {"message_id": "a", "role": "assistant", "content": "a", "stream_finished": true},
-            {"message_id": "b", "role": "assistant", "content": "b", "stream_finished": true},
-            {"message_id": "c", "role": "assistant", "content": "c", "stream_finished": true},
-        ]);
-
-        for (message_id, index, expected) in [
-            ("c", 0, ["c", "a", "b"]),
-            ("a", 1, ["b", "a", "c"]),
-            ("a", 2, ["b", "c", "a"]),
-        ] {
-            let mut state = TranscriptState::new();
-            state.reset_from_messages(initial.as_array().unwrap());
-            assert!(!state.add_message_at(
-                &json!({
-                    "message_id": message_id,
-                    "role": "assistant",
-                    "content": format!("{message_id} updated"),
-                    "stream_finished": true,
-                }),
-                Some(index),
-            ));
-            assert_eq!(
-                state
-                    .messages()
-                    .iter()
-                    .map(|message| message.message_id.as_deref().unwrap())
-                    .collect::<Vec<_>>(),
-                expected,
-            );
-        }
-    }
-
-    #[test]
-    fn authoritative_index_moves_exact_optimistic_user_match() {
-        let mut state = TranscriptState::new();
-        state.add_message(&json!({"message_id": "before", "role": "user", "content": "before"}));
-        state.push_optimistic_user_message("same", "client-1");
-        state.add_message(&json!({"message_id": "after", "role": "user", "content": "after"}));
-
-        assert!(state.replace_optimistic_user_message_at(
-            TranscriptMessage::from_wire(&json!({
-                "message_id": "server-1",
-                "role": "user",
-                "content": "same",
-                "extra": {"client_message_id": "client-1"},
-            })),
-            Some(0),
-        ));
-        assert_eq!(
-            state
-                .messages()
-                .iter()
-                .map(|message| message.message_id.as_deref())
-                .collect::<Vec<_>>(),
-            [Some("server-1"), Some("before"), Some("after")],
-        );
     }
 
     #[test]

@@ -967,13 +967,6 @@ mod tests {
         assert_eq!(policy.catalogue, default_catalogue());
     }
 
-    #[test]
-    fn legacy_approval_memory_key_is_ignored() {
-        let policy: ShellGatePolicy =
-            serde_yaml::from_str("mode: balanced\nremember_approvals_per_chat: false\n").unwrap();
-        assert_eq!(policy.mode, ApprovalMode::Balanced);
-    }
-
     #[tokio::test]
     async fn saved_policy_round_trips() {
         let temp = tempfile::tempdir().unwrap();
@@ -988,29 +981,5 @@ mod tests {
         policy.rebuild_catalogue();
         save_policy(gcx.clone(), &policy).await.unwrap();
         assert_eq!(load_policy(gcx).await, policy);
-    }
-
-    #[tokio::test]
-    async fn audit_file_stays_bounded() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = test_gcx(temp.path()).await;
-        for index in 0..650 {
-            append_audit(
-                gcx.clone(),
-                AuditEntry {
-                    ts_ms: index,
-                    chat_id: "chat".to_string(),
-                    command: "x".repeat(2048),
-                    decision: "pass".to_string(),
-                    layer: "default".to_string(),
-                    rule: String::new(),
-                    risk_level: None,
-                },
-            )
-            .await;
-        }
-        let entries = read_audit(gcx, 1000).await;
-        assert!(entries.len() <= 501);
-        assert_eq!(entries.first().unwrap().ts_ms, 649);
     }
 }

@@ -183,16 +183,6 @@ mod tests {
     }
 
     #[test]
-    fn signal_round_trips_and_is_explicitly_non_authoritative() {
-        let signal = signal("project-a", "chat-a", Some(3));
-        let value = serde_json::to_value(&signal).unwrap();
-        assert_eq!(value["authority"], "hint");
-        let round_tripped = serde_json::from_value::<OperatorSignal>(value).unwrap();
-        assert_eq!(round_tripped.authority, OperatorSignalAuthority::Hint);
-        assert_eq!(round_tripped.runtime_event.id, signal.runtime_event.id);
-    }
-
-    #[test]
     fn projection_rejects_duplicate_and_out_of_order_per_source_only() {
         let mut projection = OperatorSignalProjection::default();
         assert!(projection

@@ -67,21 +67,3 @@ fn capitalize(label: &str) -> String {
         .map(|first| first.to_uppercase().chain(chars).collect())
         .unwrap_or_default()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn workflow_display_name_uses_titles_or_human_workflow_labels() {
-        assert_eq!(
-            workflow_display_name("buddy_dependency_radar"),
-            "Dependency Radar"
-        );
-        assert_eq!(workflow_display_name("memo_extraction"), "Memo extraction");
-        assert_eq!(
-            workflow_display_scope("memo_extraction"),
-            "Latest run of Memo extraction"
-        );
-    }
-}

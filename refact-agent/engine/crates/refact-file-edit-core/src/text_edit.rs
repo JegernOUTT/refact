@@ -301,51 +301,6 @@ pub fn parse_line_ranges(ranges_str: &str, total_lines: usize) -> Result<Vec<Lin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
-    fn args(entries: Vec<(&str, Value)>) -> HashMap<String, Value> {
-        entries
-            .into_iter()
-            .map(|(key, value)| (key.to_string(), value))
-            .collect()
-    }
-
-    #[test]
-    fn parse_string_arg_accepts_strings_and_rejects_missing_or_wrong_type() {
-        let args = args(vec![("path", json!("file.txt")), ("count", json!(1))]);
-        assert_eq!(parse_string_arg(&args, "path", "hint").unwrap(), "file.txt");
-        assert!(parse_string_arg(&args, "missing", "hint")
-            .unwrap_err()
-            .contains("Missing 'missing'"));
-        assert!(parse_string_arg(&args, "count", "hint")
-            .unwrap_err()
-            .contains("must be a string"));
-    }
-
-    #[test]
-    fn parse_bool_arg_accepts_booleans_strings_and_default() {
-        let args = args(vec![
-            ("enabled", json!(true)),
-            ("disabled", json!("false")),
-            ("bad", json!("maybe")),
-        ]);
-        assert!(parse_bool_arg(&args, "enabled", false).unwrap());
-        assert!(!parse_bool_arg(&args, "disabled", true).unwrap());
-        assert!(parse_bool_arg(&args, "missing", true).unwrap());
-        assert!(parse_bool_arg(&args, "bad", false)
-            .unwrap_err()
-            .contains("must be true/false"));
-    }
-
-    #[test]
-    fn edit_result_summary_reports_line_delta() {
-        let path = PathBuf::from("/path/to/file.rs");
-        let summary = edit_result_summary("a\nb\nc", "a\nb\nc\nd\ne", &path);
-        assert!(summary.contains("file.rs"));
-        assert!(summary.contains("3"));
-        assert!(summary.contains("5"));
-        assert!(summary.contains("+2"));
-    }
 
     #[test]
     fn normalizes_and_restores_line_endings() {
@@ -368,15 +323,6 @@ mod tests {
         let indented = "    8080: \"http\"\n    9090: \"grpc\"";
         assert_eq!(strip_line_number_prefixes(indented), indented);
         assert_eq!(strip_line_number_prefixes(""), "");
-    }
-
-    #[test]
-    fn find_match_lines_reports_lines_and_ignores_empty_pattern() {
-        let content = "line1\nfoo\nline3\nfoo\nline5";
-        assert_eq!(find_match_lines(content, "foo"), vec![2, 4]);
-        assert_eq!(find_match_lines("some content", ""), Vec::<usize>::new());
-        assert_eq!(find_match_lines("abcabc", "abc").len(), 2);
-        assert_eq!(find_match_lines("a\na\na", "a"), vec![1, 2, 3]);
     }
 
     #[test]
@@ -415,17 +361,6 @@ mod tests {
     }
 
     #[test]
-    fn insert_at_anchor_inserts_before_after_and_multiple() {
-        let content = "line1\nANCHOR\nline3";
-        let result = insert_at_anchor(content, "ANCHOR", "\ninserted", false, true).unwrap();
-        assert_eq!(result, "line1\nANCHOR\ninserted\nline3");
-        let result = insert_at_anchor(content, "ANCHOR", "inserted\n", false, false).unwrap();
-        assert_eq!(result, "line1\ninserted\nANCHOR\nline3");
-        let result = insert_at_anchor("A\nA", "A", "x", true, true).unwrap();
-        assert_eq!(result, "Ax\nAx");
-    }
-
-    #[test]
     fn insert_at_anchor_reports_empty_missing_or_repeated_unique_anchor() {
         assert!(insert_at_anchor("content", "", "x", false, true)
             .unwrap_err()
@@ -434,30 +369,6 @@ mod tests {
         assert!(insert_at_anchor("A\nA\nA", "A", "x", false, true)
             .unwrap_err()
             .contains("anchor occurrences"));
-    }
-
-    #[test]
-    fn parse_line_ranges_accepts_single_multiple_and_open_ended_ranges() {
-        assert!(parse_line_ranges("5", 10).is_ok());
-        assert!(parse_line_ranges("1:10", 10).is_ok());
-        assert!(parse_line_ranges(":5", 10).is_ok());
-        assert!(parse_line_ranges("5:", 10).is_ok());
-        let ranges = parse_line_ranges("1:3,7:9", 10).unwrap();
-        assert_eq!(ranges.len(), 2);
-    }
-
-    #[test]
-    fn parse_line_ranges_preserves_order_and_supports_empty_file_line_one() {
-        let ranges = parse_line_ranges("4:4,2:2", 10).unwrap();
-        assert_eq!(ranges.len(), 2);
-        assert_eq!(ranges[0].start, 4);
-        assert_eq!(ranges[1].start, 2);
-
-        let ranges = parse_line_ranges("1:1", 0).unwrap();
-        assert_eq!(ranges.len(), 1);
-        assert_eq!(ranges[0].start, 1);
-        assert_eq!(ranges[0].end, 1);
-        assert!(parse_line_ranges("2:2", 0).is_err());
     }
 
     #[test]

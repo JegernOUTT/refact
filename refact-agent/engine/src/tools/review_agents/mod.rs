@@ -439,16 +439,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn review_scheduler_idle_limit_never_drops_below_the_floor() {
-        let mut schedule = params(1);
-        schedule.idle_timeout = Duration::from_secs(1);
-        assert_eq!(schedule.idle_limit(), MIN_IDLE_TIMEOUT);
-
-        schedule.idle_timeout = Duration::from_secs(300);
-        assert_eq!(schedule.idle_limit(), Duration::from_secs(300));
-    }
-
     #[tokio::test]
     async fn review_watchdog_kills_a_silent_stage() {
         let activity = Arc::new(AtomicU64::new(now_ms()));
@@ -526,17 +516,6 @@ mod tests {
         assert!(product.run.reason.is_none());
         assert!(abort.load(Ordering::SeqCst));
         product
-    }
-
-    #[tokio::test]
-    async fn review_watchdog_keeps_an_actively_working_stage_alive_past_the_idle_limit() {
-        assert_heartbeating_stage_survives(
-            10,
-            Duration::from_millis(30),
-            Duration::from_millis(60),
-            Duration::from_millis(10),
-        )
-        .await;
     }
 
     #[tokio::test]

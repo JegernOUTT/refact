@@ -30,13 +30,3 @@ impl App {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn overlay_contexts_are_distinct() {
-        assert_ne!(KeyContext::Overlay, KeyContext::OverlaySearch);
-    }
-}

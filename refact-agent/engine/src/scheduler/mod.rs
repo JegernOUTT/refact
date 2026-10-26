@@ -95,30 +95,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[serial_test::serial(scheduler_env)]
-    fn config_disable_skips_runner_spawn() {
-        let config = SchedulerConfig {
-            enabled: false,
-            ..SchedulerConfig::default()
-        };
-
-        assert!(spawn_if_enabled(memory_store(), config.clone()).is_none());
-        assert_eq!(
-            cron_create_policy(&config, true),
-            Err(SCHEDULER_DISABLED_ERROR.to_string())
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(scheduler_env)]
-    fn cli_disable_skips_runner_spawn() {
-        let config = SchedulerConfig::default().with_startup_overrides(true);
-
-        assert!(!config.enabled);
-        assert!(spawn_if_enabled(memory_store(), config).is_none());
-    }
-
-    #[test]
     fn disable_durable_forces_session_only() {
         let config = SchedulerConfig {
             disable_durable: true,

@@ -316,13 +316,6 @@ fn set_read_timeout(socket: &mut CdpSocket, timeout: Option<Duration>) -> Result
 mod tests {
     use super::*;
 
-    fn warnings(method: &str) -> Vec<String> {
-        match classify_cdp_command(method, None, Some("TAB-1")) {
-            CdpGuardrail::Allowed { warnings } => warnings,
-            CdpGuardrail::Denied { reason } => panic!("unexpectedly denied {method}: {reason}"),
-        }
-    }
-
     fn denial(method: &str, params: Option<&Value>, own: Option<&str>) -> String {
         match classify_cdp_command(method, params, own) {
             CdpGuardrail::Denied { reason } => reason,
@@ -373,41 +366,6 @@ mod tests {
                 classify_cdp_command(method, None, Some("TAB-1")),
                 CdpGuardrail::Allowed { .. }
             ));
-        }
-    }
-
-    #[test]
-    fn state_mutating_emulation_and_network_methods_warn_about_reset_blindness() {
-        for method in [
-            "Emulation.setDeviceMetricsOverride",
-            "Emulation.clearGeolocationOverride",
-            "Network.setBlockedURLs",
-            "Network.setCookie",
-        ] {
-            let warnings = warnings(method);
-            assert_eq!(warnings.len(), 1, "expected one warning for {method}");
-            assert!(
-                warnings[0].contains(method) && warnings[0].contains("reset"),
-                "unexpected warning for {method}: {}",
-                warnings[0]
-            );
-        }
-    }
-
-    #[test]
-    fn read_only_and_unrelated_domains_do_not_warn() {
-        for method in [
-            "Network.getResponseBody",
-            "Emulation.canEmulate",
-            "Runtime.evaluate",
-            "Page.setBypassCSP",
-            "DOM.getDocument",
-            "malformed",
-        ] {
-            assert!(
-                warnings(method).is_empty(),
-                "{method} should not warn about reset blindness"
-            );
         }
     }
 

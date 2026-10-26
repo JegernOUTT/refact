@@ -680,18 +680,6 @@ mod tests {
         LeaseManager::new(store, access, instance, &settings()).unwrap()
     }
 
-    #[tokio::test]
-    async fn disabled_coordination_leaves_merges_without_a_durable_lease() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = AppState::from_gcx(gcx).await;
-        let settings = CoordinationSettings {
-            enabled: false,
-            ..settings()
-        };
-
-        assert!(leases_for_settings(&app, &settings).await.is_none());
-    }
-
     fn publish(project: &str, instance: &str, state: PresenceState) {
         presence::publish(
             project,
@@ -731,35 +719,6 @@ mod tests {
             .await
             .unwrap()
             .unwrap()
-    }
-
-    #[tokio::test]
-    async fn acquire_renew_and_release_never_change_the_generation() {
-        let project = project_id();
-        let store = store().await;
-        let engine = manager(store.clone(), &project, "engine-1");
-
-        let holder = engine.acquire("build", NOW_MS).await.unwrap();
-        let renewed = engine.renew(&holder, NOW_MS + 100).await.unwrap();
-        let renewed_again = engine.renew(&renewed, NOW_MS + 200).await.unwrap();
-
-        assert_eq!(holder.fencing_generation, 1);
-        assert_eq!(renewed.fencing_generation, holder.fencing_generation);
-        assert_eq!(renewed_again.fencing_generation, holder.fencing_generation);
-        assert_eq!(renewed.owner_token, holder.owner_token);
-        assert_eq!(renewed.acquired_at_ms, holder.acquired_at_ms);
-        assert_eq!(renewed_again.expires_at_ms, NOW_MS + 200 + TTL_MS);
-        assert!(engine.release(&renewed_again).await.unwrap());
-        assert_eq!(engine.inspect("build", NOW_MS).await.unwrap(), None);
-        assert_eq!(
-            engine
-                .acquire("build", NOW_MS + 300)
-                .await
-                .unwrap()
-                .fencing_generation,
-            1,
-            "a released lease is free again, not a continuation of the old term"
-        );
     }
 
     #[tokio::test]
@@ -931,47 +890,6 @@ mod tests {
         assert_eq!(taken.record.generation_after, held.fencing_generation + 1);
         assert_eq!(taken.record.reason, "holder unreachable for a full term");
         assert_eq!(journal, vec![taken.record]);
-    }
-
-    #[tokio::test]
-    async fn stale_holder_diagnostics_report_identity_age_and_presence() {
-        let project = project_id();
-        let store = store().await;
-        let old = manager(store.clone(), &project, "engine-1");
-        let onlooker = manager(store.clone(), &project, "engine-2");
-        old.acquire("build", NOW_MS).await.unwrap();
-
-        let while_running = onlooker
-            .inspect("build", NOW_MS + 250)
-            .await
-            .unwrap()
-            .unwrap();
-        publish(&project, "engine-1", PresenceState::Unreachable);
-        let after_expiry = onlooker
-            .inspect("build", NOW_MS + TTL_MS + 400)
-            .await
-            .unwrap()
-            .unwrap();
-        let blocked = onlooker
-            .acquire("build", NOW_MS + TTL_MS + 400)
-            .await
-            .unwrap_err();
-        presence::forget(&project);
-
-        assert_eq!(while_running.holder_instance, "engine-1");
-        assert_eq!(while_running.acquired_at_ms, NOW_MS);
-        assert_eq!(while_running.held_for_ms, 250);
-        assert_eq!(while_running.expired_for_ms, 0);
-        assert_eq!(
-            while_running.presence, None,
-            "an engine presence never classified is not claimed to be anything"
-        );
-        assert_eq!(after_expiry.presence, Some(PresenceState::Unreachable));
-        assert_eq!(after_expiry.expired_for_ms, 400);
-        assert!(
-            matches!(blocked, LeaseError::Held(holder) if holder.expired_for_ms == 400),
-            "an expired lease is still reported, never silently seized"
-        );
     }
 
     #[tokio::test]

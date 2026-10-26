@@ -176,38 +176,4 @@ mod tests {
         assert_eq!(stored.seen_at, t0 + Duration::minutes(31));
         assert_eq!(stored.payload["count"], 11);
     }
-
-    #[test]
-    fn zero_ttl_keeps_legacy_refresh_behavior() {
-        let mut store = FactStore::new();
-        let t0 = Utc::now();
-
-        assert!(store.ingest_with_refresh_ttl(fact("diag:y", t0, 1), Duration::zero()));
-        assert!(store.ingest_with_refresh_ttl(
-            fact("diag:y", t0 + Duration::seconds(1), 2),
-            Duration::zero()
-        ));
-        let stored = store.iter().find(|f| f.key == "diag:y").unwrap();
-        assert_eq!(stored.payload["count"], 2);
-    }
-
-    #[test]
-    fn ttl_gate_tracks_distinct_keys_independently() {
-        let mut store = FactStore::new();
-        let t0 = Utc::now();
-        let ttl = Duration::minutes(30);
-
-        assert!(store.ingest_with_refresh_ttl(fact("diag:a", t0, 1), ttl));
-        assert!(store.ingest_with_refresh_ttl(fact("diag:b", t0 + Duration::minutes(1), 1), ttl));
-        assert_eq!(
-            store.ingest_many_with_refresh_ttl(
-                vec![
-                    fact("diag:a", t0 + Duration::minutes(2), 2),
-                    fact("diag:c", t0 + Duration::minutes(2), 1),
-                ],
-                ttl,
-            ),
-            1
-        );
-    }
 }

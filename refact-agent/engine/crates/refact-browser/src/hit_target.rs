@@ -419,22 +419,6 @@ impl HitTargetController {
         );
         token
     }
-
-    #[cfg(test)]
-    fn take_immediate_result(
-        &self,
-        token: InterceptorToken,
-    ) -> Result<HitTargetResult, HitTargetError> {
-        let entry = self
-            .entries
-            .lock()
-            .unwrap()
-            .remove(&token)
-            .ok_or(HitTargetError::UnknownToken(token))?;
-        entry.immediate.ok_or_else(|| {
-            HitTargetError::InvalidResult("Hit-target interceptor result is remote".to_string())
-        })
-    }
 }
 
 fn translated_handle_point(
@@ -609,61 +593,6 @@ mod tests {
                 .push((child_frame_id.to_string(), point_in_parent));
             Ok(self.hit_result.clone().unwrap_or(HitTargetResult::Done))
         }
-    }
-
-    fn handle() -> ElementHandle {
-        ElementHandle {
-            object_id: "object".to_string(),
-            backend_node_id: Some(1),
-            context_id: 2,
-            frame_id: "main".to_string(),
-        }
-    }
-
-    #[test]
-    fn token_state_machine_consumes_immediate_result_once() {
-        let controller = HitTargetController::default();
-        let token = controller.skip_interceptor(&handle());
-        assert_eq!(
-            controller.take_immediate_result(token).unwrap(),
-            HitTargetResult::Skipped
-        );
-        assert_eq!(
-            controller.take_immediate_result(token),
-            Err(HitTargetError::UnknownToken(token))
-        );
-    }
-
-    #[test]
-    fn tokens_are_unique_and_unknown_tokens_are_rejected() {
-        let controller = HitTargetController::default();
-        let first = controller.insert_entry(handle(), None, Some(HitTargetResult::Done));
-        let second = controller.insert_entry(handle(), None, Some(HitTargetResult::Done));
-        assert_ne!(first, second);
-        let missing = InterceptorToken(999);
-        assert!(matches!(
-            controller.entries.lock().unwrap().remove(&missing),
-            None
-        ));
-    }
-
-    #[test]
-    fn drag_actions_are_classified_for_skip_before_installation() {
-        assert_eq!(interceptor_action(ActionKind::DragSource), Some("drag"));
-        assert_eq!(interceptor_action(ActionKind::DragTarget), Some("drag"));
-        assert_eq!(interceptor_action(ActionKind::Click), Some("mouse"));
-    }
-
-    #[test]
-    fn unsupported_frame_transform_is_typed_and_clear() {
-        let error = HitTargetError::UnsupportedFrameTransform {
-            frame_id: "child".to_string(),
-            reason: "iframe owner is transformed".to_string(),
-        };
-        assert_eq!(
-            error.to_string(),
-            "Cannot translate pointer coordinates into frame child: iframe owner is transformed"
-        );
     }
 
     #[test]

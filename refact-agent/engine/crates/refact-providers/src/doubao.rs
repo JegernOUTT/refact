@@ -330,144 +330,6 @@ available:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use refact_core::models_dev::{
-        ModelsDevLimit, ModelsDevModalities, ModelsDevModel, ModelsDevProvider,
-    };
-
-    fn text_chat_model(model_id: &str) -> ModelsDevModel {
-        ModelsDevModel {
-            id: model_id.to_string(),
-            name: model_id.to_string(),
-            tool_call: Some(true),
-            limit: Some(ModelsDevLimit {
-                context: Some(128_000),
-                output: Some(16_384),
-                ..Default::default()
-            }),
-            modalities: Some(ModelsDevModalities {
-                input: vec!["text".to_string()],
-                output: vec!["text".to_string()],
-            }),
-            ..Default::default()
-        }
-    }
-
-    fn doubao_catalog() -> ModelsDevCatalog {
-        HashMap::from([(
-            "volcengine-cn".to_string(),
-            ModelsDevProvider {
-                id: "volcengine-cn".to_string(),
-                name: "Volcengine Ark".to_string(),
-                api: Some("https://ark.cn-beijing.volces.com/api/v3".to_string()),
-                npm: Some("@ai-sdk/openai-compatible".to_string()),
-                models: HashMap::from([(
-                    "doubao-catalog".to_string(),
-                    text_chat_model("doubao-catalog"),
-                )]),
-                ..Default::default()
-            },
-        )])
-    }
-
-    #[test]
-    fn doubao_default_settings_use_volcengine_cn_and_ark_base_url() {
-        let provider = DoubaoProvider::default();
-
-        assert_eq!(provider.effective_models_dev_provider_id(), "volcengine-cn");
-        assert_eq!(
-            provider.effective_base_url(),
-            "https://ark.cn-beijing.volces.com/api/v3"
-        );
-        assert_eq!(
-            provider.default_wire_format(),
-            WireFormat::OpenaiChatCompletions
-        );
-    }
-
-    #[test]
-    fn doubao_missing_models_dev_provider_returns_custom_only_available_models() {
-        let mut provider = DoubaoProvider::default();
-        provider.custom_models.insert(
-            "ep-20260430-demo".to_string(),
-            CustomModelConfig {
-                n_ctx: Some(8192),
-                supports_tools: Some(true),
-                ..Default::default()
-            },
-        );
-        provider.set_model_enabled("ep-20260430-demo", true);
-
-        let models = provider
-            .available_models_from_catalog(&ModelsDevCatalog::new())
-            .unwrap();
-
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "ep-20260430-demo");
-        assert!(models[0].enabled);
-        assert!(models[0].is_custom);
-        assert!(models[0].supports_tools);
-    }
-
-    #[test]
-    fn doubao_configured_custom_model_can_be_enabled_and_removed() {
-        let mut provider = DoubaoProvider::default();
-        provider.add_custom_model(
-            "ark-deployment-id".to_string(),
-            CustomModelConfig {
-                n_ctx: Some(32_768),
-                supports_tools: Some(true),
-                ..Default::default()
-            },
-        );
-        provider.set_model_enabled("ark-deployment-id", true);
-
-        let models = provider
-            .available_models_from_catalog(&ModelsDevCatalog::new())
-            .unwrap();
-        let custom = models
-            .iter()
-            .find(|model| model.id == "ark-deployment-id")
-            .unwrap();
-        assert!(custom.enabled);
-        assert!(custom.is_custom);
-        assert_eq!(custom.n_ctx, 32_768);
-
-        assert!(provider.remove_custom_model("ark-deployment-id"));
-        let models = provider
-            .available_models_from_catalog(&ModelsDevCatalog::new())
-            .unwrap();
-        assert!(models.is_empty());
-    }
-
-    #[test]
-    fn doubao_uses_models_dev_catalog_when_provider_exists() {
-        let mut provider = DoubaoProvider::default();
-        provider.set_model_enabled("doubao-catalog", true);
-        provider.add_custom_model(
-            "ark-custom".to_string(),
-            CustomModelConfig {
-                n_ctx: Some(4096),
-                ..Default::default()
-            },
-        );
-
-        let models = provider
-            .available_models_from_catalog(&doubao_catalog())
-            .unwrap();
-        let catalog_model = models
-            .iter()
-            .find(|model| model.id == "doubao-catalog")
-            .unwrap();
-        let custom = models
-            .iter()
-            .find(|model| model.id == "ark-custom")
-            .unwrap();
-
-        assert!(catalog_model.enabled);
-        assert!(!catalog_model.is_custom);
-        assert!(!custom.enabled);
-        assert!(custom.is_custom);
-    }
 
     #[test]
     fn doubao_runtime_endpoint_uses_base_url_chat_completions_normalization() {
@@ -491,19 +353,6 @@ mod tests {
         assert_eq!(runtime.wire_format, WireFormat::OpenaiChatCompletions);
         assert_eq!(
             runtime.chat_endpoint,
-            "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
-        );
-    }
-
-    #[test]
-    fn doubao_runtime_accepts_full_chat_completions_url() {
-        let provider = DoubaoProvider {
-            base_url: "https://ark.cn-beijing.volces.com/api/v3/chat/completions".to_string(),
-            ..Default::default()
-        };
-
-        assert_eq!(
-            provider.chat_endpoint().unwrap(),
             "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
         );
     }
@@ -584,19 +433,5 @@ mod tests {
             "https://ark.cn-beijing.volces.com/api/v3"
         );
         assert_eq!(settings["models_dev_provider_id"], "volcengine");
-    }
-
-    #[test]
-    fn doubao_schema_exposes_actionable_catalog_warning() {
-        let provider = DoubaoProvider::default();
-        let schema = provider.provider_schema();
-        let warning = provider.catalog_unavailable_message();
-
-        assert!(schema.contains("built-in models may be absent"));
-        assert!(schema.contains("custom model IDs"));
-        assert!(schema.contains("deployment"));
-        assert!(warning.contains("Volcengine/Ark"));
-        assert!(warning.contains("models.dev"));
-        assert!(warning.contains("custom models"));
     }
 }

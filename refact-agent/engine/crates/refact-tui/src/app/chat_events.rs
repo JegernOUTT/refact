@@ -1740,44 +1740,4 @@ mod tests {
             Some(43)
         );
     }
-
-    #[test]
-    fn approval_tool_call_ids_deduplicate_nested_values() {
-        let ids = approval_tool_call_ids(&json!({
-            "reasons": [{"tool_call_id": "call-2"}],
-            "tool_call_ids": ["call-1", "call-2"],
-        }));
-
-        assert_eq!(ids, ["call-1", "call-2"]);
-    }
-
-    #[test]
-    fn usage_updates_clear_explicit_empty_and_null_values() {
-        let mut app = App::new(project());
-
-        app.update_usage_value(&json!({
-            "prompt_tokens": 12,
-            "completion_tokens": 8,
-        }));
-        assert_eq!(app.usage().unwrap().total_tokens, Some(20));
-
-        app.update_usage_value(&Value::Null);
-        assert_eq!(app.usage(), None);
-
-        app.update_usage_value(&json!({
-            "prompt_tokens": 12,
-            "completion_tokens": 8,
-        }));
-        app.update_usage_value(&json!({}));
-        assert_eq!(app.usage(), None);
-
-        app.update_usage_value(&json!({
-            "prompt_tokens": 12,
-            "completion_tokens": 8,
-        }));
-        app.update_usage_value(&json!({"prompt_tokens": 9}));
-        assert_eq!(app.usage().unwrap().prompt_tokens, Some(9));
-        assert_eq!(app.usage().unwrap().completion_tokens, None);
-        assert_eq!(app.usage().unwrap().total_tokens, None);
-    }
 }

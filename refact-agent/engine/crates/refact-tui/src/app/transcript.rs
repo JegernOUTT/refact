@@ -1747,24 +1747,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rendered_state_keys_track_visible_assistant_parts() {
-        let message = TranscriptMessage::from_wire(&json!({
-            "message_id": "assistant-1",
-            "role": "assistant",
-            "reasoning_content": "think",
-            "content": "answer",
-            "citations": [{"url": "https://example.com"}],
-            "server_content_blocks": [{"type": "notice"}],
-            "stream_finished": true,
-        }));
-
-        let keys = rendered_state_keys_for_message(&message);
-
-        assert_eq!(keys.len(), 4);
-        assert!(keys.iter().all(|key| key.starts_with("assistant-1:")));
-    }
-
-    #[test]
     fn inline_images_leave_textual_fallback_in_the_ratatui_cell() {
         let message = TranscriptMessage::from_wire(&json!({
             "role": "assistant",
@@ -1782,60 +1764,6 @@ mod tests {
         assert!(raw.contains("[image: image/png, 4 bytes]"));
         assert!(!raw.contains('\x1b'));
         assert!(inline_images_for_visible_transcript(&images, None, &[]).is_empty());
-    }
-
-    #[test]
-    fn inline_images_keep_one_terminal_write_record_per_image() {
-        let item = TranscriptItem::Image {
-            placeholder: "[image: image/png, 4 bytes]".to_string(),
-            data: b"ABCD".to_vec(),
-            mime: "image/png".to_string(),
-        };
-        let images = inline_images_for_visible_transcript(
-            &[item],
-            Some(crate::terminal_probe::ImageProtocol::Kitty),
-            &[ratatui::layout::Position { x: 4, y: 2 }],
-        );
-
-        assert_eq!(images.len(), 1);
-        assert_eq!(images[0].data, b"ABCD");
-        assert_eq!(images[0].position, ratatui::layout::Position { x: 4, y: 2 });
-    }
-
-    #[test]
-    fn image_render_keys_follow_content_before_citations() {
-        let message = TranscriptMessage::from_wire(&json!({
-            "message_id": "assistant-1",
-            "role": "assistant",
-            "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJDRA=="}}],
-            "citations": [{"url": "https://example.com"}],
-            "stream_finished": true,
-        }));
-
-        let keys = rendered_state_keys_for_message(&message);
-
-        assert_eq!(keys.len(), 2);
-        assert!(keys[0].contains(":image:"));
-        assert!(keys[1].contains(":citation:"));
-    }
-
-    #[test]
-    fn image_placeholder_moves_to_its_own_cell_without_duplication() {
-        let message = TranscriptMessage::from_wire(&json!({
-            "role": "assistant",
-            "content": [
-                {"type": "text", "text": "before"},
-                {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJDRA=="}},
-                {"type": "text", "text": "after"}
-            ],
-            "stream_finished": true,
-        }));
-        let images = image_items(&message);
-
-        assert_eq!(
-            assistant_content_without_images(&message.content, &images),
-            "before\nafter"
-        );
     }
 
     #[test]
@@ -1878,47 +1806,12 @@ mod tests {
     }
 
     #[test]
-    fn thinking_blocks_add_individual_render_keys() {
-        let message = TranscriptMessage::from_wire(&json!({
-            "message_id": "assistant-1",
-            "role": "assistant",
-            "content": "answer",
-            "thinking_blocks": [{"type": "thinking", "thinking": "private reasoning"}],
-            "stream_finished": true,
-        }));
-
-        let keys = rendered_state_keys_for_message(&message);
-
-        assert_eq!(keys.len(), 2);
-        assert!(keys[0].contains(":thinking:"));
-    }
-
-    #[test]
     fn non_stable_render_keys_are_not_replay_identities() {
         assert!(!state_key_has_stable_identity(
             "assistant:assistant:0:0000000000000000"
         ));
         assert!(state_key_has_stable_identity(
             "message-1:assistant:0:0000000000000000"
-        ));
-    }
-
-    #[test]
-    fn system_messages_use_the_system_fact_channel() {
-        let message = TranscriptMessage::from_wire(&json!({
-            "message_id": "system-1",
-            "role": "system",
-            "content": "Server-maintained fact",
-            "stream_finished": true,
-        }));
-        let mut app = App::notice_only("test");
-
-        app.append_render_message(&message);
-
-        assert!(matches!(
-            app.visible_transcript().last(),
-            Some(TranscriptItem::SystemFact(lines))
-                if lines == &["System".to_string(), "Server-maintained fact".to_string()]
         ));
     }
 

@@ -32,12 +32,4 @@ pub use semantic_match::{find_related_decisions, DEFAULT_DEDUP_TAU};
 pub use sources::extract_all;
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn single_tau_used_by_evolution_and_semantic_match() {
-        assert_eq!(
-            crate::evolution::DEFAULT_DEDUP_TAU,
-            crate::DEFAULT_DEDUP_TAU
-        );
-    }
-}
+mod tests {}

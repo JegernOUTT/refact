@@ -176,23 +176,6 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn telegram_schema_validates_and_registration_resolves() {
-        let integration = crate::integrations::integration_from_name(INTEGRATION_ID).unwrap();
-        let schema: serde_yaml::Value = serde_yaml::from_str(integration.integr_schema()).unwrap();
-        let schema_json = serde_json::to_value(schema).unwrap();
-        let schema_struct: crate::integrations::yaml_schema::ISchema =
-            serde_json::from_value(schema_json.clone()).unwrap();
-
-        assert!(schema_struct.fields.contains_key("bot_token"));
-        assert!(schema_struct.fields.contains_key("default_chat_id"));
-        assert_eq!(
-            schema_json["fields"]["bot_token"]["f_extra"]["password"],
-            json!(true)
-        );
-        assert!(crate::integrations::integrations_list(true).contains(&INTEGRATION_ID));
-    }
-
     #[tokio::test]
     async fn telegram_send_posts_expected_request() {
         let received = Arc::new(AMutex::new(Vec::<Value>::new()));

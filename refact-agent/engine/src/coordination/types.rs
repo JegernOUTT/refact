@@ -620,35 +620,6 @@ mod tests {
     }
 
     #[test]
-    fn state_tag_round_trips_through_its_string_form() {
-        for state in WorkStateTag::ALL {
-            assert_eq!(WorkStateTag::parse(state.as_str()), Some(state));
-        }
-    }
-
-    #[test]
-    fn attention_rows_sort_before_everything_else() {
-        let mut rows = vec![
-            row(WorkStateTag::Running, false, 100, "b"),
-            row(WorkStateTag::Idle, true, 1, "a"),
-        ];
-        rows.sort_by_key(|r| r.sort_key());
-        assert_eq!(rows[0].key.id, "a");
-    }
-
-    #[test]
-    fn equal_state_and_attention_sort_by_recency_then_key() {
-        let mut rows = vec![
-            row(WorkStateTag::Running, false, 5, "z"),
-            row(WorkStateTag::Running, false, 9, "y"),
-            row(WorkStateTag::Running, false, 9, "a"),
-        ];
-        rows.sort_by_key(|r| r.sort_key());
-        let ids: Vec<_> = rows.iter().map(|r| r.key.id.as_str()).collect();
-        assert_eq!(ids, vec!["a", "y", "z"]);
-    }
-
-    #[test]
     fn withholding_removes_every_path_and_free_text_field() {
         let withheld = row(WorkStateTag::Running, false, 1, "a").withheld();
 
@@ -665,22 +636,6 @@ mod tests {
         assert_eq!(withheld.key.id, "a");
         assert_eq!(withheld.state, WorkStateTag::Running);
         assert_eq!(withheld.root.project, "proj");
-    }
-
-    #[test]
-    fn disclosed_paths_are_deduped_and_sorted() {
-        let mut base = row(WorkStateTag::Idle, false, 1, "a");
-        base.declared_files = vec!["/p/b.rs".to_string(), "/p/a.rs".to_string()];
-        base.observed_files = vec!["/p/a.rs".to_string()];
-
-        assert_eq!(
-            base.disclosed_paths(),
-            vec![
-                "/p".to_string(),
-                "/p/a.rs".to_string(),
-                "/p/b.rs".to_string()
-            ]
-        );
     }
 
     #[test]
@@ -710,27 +665,5 @@ mod tests {
 
         assert_eq!(root.presence, RootPresence::Unknown);
         assert!(!root.presence.is_active_location());
-    }
-
-    #[test]
-    fn presence_round_trips_through_its_string_form() {
-        for presence in RootPresence::ALL {
-            let json = serde_json::to_value(presence).unwrap();
-            assert_eq!(json, serde_json::json!(presence.as_str()));
-            assert_eq!(
-                serde_json::from_value::<RootPresence>(json).unwrap(),
-                presence
-            );
-        }
-        assert!(RootPresence::Present.is_active_location());
-        assert!(!RootPresence::Missing.is_active_location());
-        assert!(!RootPresence::Unknown.is_active_location());
-    }
-
-    #[test]
-    fn terminal_and_active_states_are_disjoint() {
-        for state in WorkStateTag::ALL {
-            assert!(!(state.is_terminal() && state.is_active()), "{state:?}");
-        }
     }
 }

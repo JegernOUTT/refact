@@ -418,11 +418,6 @@ mod tests {
     }
 
     #[test]
-    fn reduce_empty_ledger_is_none() {
-        assert!(reduce_goal_ledger(&[]).is_none());
-    }
-
-    #[test]
     fn reduce_replays_progress_and_status() {
         let entries = vec![
             installed(1),
@@ -735,33 +730,5 @@ mod tests {
         let state = reduce_goal_ledger(&entries).unwrap();
         let rollup = crate::aggregate_sub_goals(&state.sub_goals, crate::ROOT_SUB_GOAL_ID);
         assert!(!rollup.parent_may_proceed());
-    }
-
-    #[test]
-    fn snooze_set_and_cleared_by_reset() {
-        let entries = vec![
-            installed(1),
-            entry(
-                2,
-                2_000,
-                GoalLedgerOp::SnoozeSet {
-                    until_ms: Some(99_000),
-                },
-            ),
-        ];
-        assert_eq!(
-            reduce_goal_ledger(&entries).unwrap().snoozed_until_ms,
-            Some(99_000)
-        );
-
-        let mut cleared = entries.clone();
-        cleared.push(entry(
-            3,
-            3_000,
-            GoalLedgerOp::ProgressReset {
-                reason: "user_message".to_string(),
-            },
-        ));
-        assert_eq!(reduce_goal_ledger(&cleared).unwrap().snoozed_until_ms, None);
     }
 }

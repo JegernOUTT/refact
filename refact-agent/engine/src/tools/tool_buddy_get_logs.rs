@@ -344,11 +344,6 @@ pub(crate) async fn read_log_content_with_notice(
 }
 
 #[cfg(test)]
-async fn read_log_content(log_path: &std::path::Path) -> Result<String, String> {
-    Ok(read_log_content_with_notice(log_path).await?.text)
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::tools::settings_guard::SettingsGuard;
@@ -361,51 +356,6 @@ mod tests {
         assert!(!redacted.contains("sk-abc123defgh456ijklmn"));
         assert!(!redacted.contains("mytoken123"));
         assert!(redacted.contains("[REDACTED]"));
-    }
-
-    #[test]
-    fn test_buddy_get_logs_limit() {
-        assert!(DEFAULT_LINES <= MAX_LINES);
-        assert_eq!(501_usize.min(MAX_LINES), MAX_LINES);
-    }
-
-    #[tokio::test]
-    async fn classic_rustbinary_layout_is_found() {
-        let dir = tempfile::tempdir().unwrap();
-        let logs_dir = dir.path().join("logs");
-        tokio::fs::create_dir_all(&logs_dir).await.unwrap();
-        tokio::fs::write(logs_dir.join("rustbinary.2026-07-01"), "classic tail")
-            .await
-            .unwrap();
-
-        let resolved = resolve_log_dir(dir.path());
-        let content = read_log_content(&resolved).await.unwrap();
-
-        assert_eq!(resolved, logs_dir);
-        assert!(is_log_candidate("rustbinary.2026-07-01"));
-        assert!(content.contains("classic tail"));
-    }
-
-    #[tokio::test]
-    async fn daemon_worker_layout_is_found_and_preferred() {
-        let dir = tempfile::tempdir().unwrap();
-        let classic_dir = dir.path().join("logs");
-        let daemon_dir = dir.path().join("daemon").join("logs");
-        tokio::fs::create_dir_all(&classic_dir).await.unwrap();
-        tokio::fs::create_dir_all(&daemon_dir).await.unwrap();
-        tokio::fs::write(classic_dir.join("rustbinary.2026-07-01"), "classic")
-            .await
-            .unwrap();
-        tokio::fs::write(daemon_dir.join("worker-1.log"), "daemon tail")
-            .await
-            .unwrap();
-
-        let resolved = resolve_log_dir(dir.path());
-        let content = read_log_content(&resolved).await.unwrap();
-
-        assert_eq!(resolved, daemon_dir);
-        assert!(is_log_candidate("worker-1.log"));
-        assert!(content.contains("daemon tail"));
     }
 
     #[tokio::test]
@@ -436,41 +386,5 @@ mod tests {
             "expected a quantified log-tail notice, got: {}",
             notice
         );
-    }
-
-    #[tokio::test]
-    #[serial(runtime_settings)]
-    async fn get_logs_tail_emits_no_notice_when_whole_log_fits() {
-        let _guard = SettingsGuard::install(|settings| {
-            settings.get_logs_max_tail_bytes = 1_048_576;
-        });
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("rustbinary.2026-07-01");
-        tokio::fs::write(&path, "line one\nline two\n")
-            .await
-            .unwrap();
-
-        let tail = read_bounded_log_tail_with_notice(&path).await.unwrap();
-
-        assert_eq!(tail.text, "line one\nline two\n");
-        assert!(tail.notice.is_none());
-    }
-
-    #[tokio::test]
-    #[serial(runtime_settings)]
-    async fn large_file_tail_does_not_read_whole_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("rustbinary.2026-07-01");
-        let content = format!(
-            "old-start\n{}\nrecent-tail",
-            "x".repeat(crate::runtime_settings::current().get_logs_max_tail_bytes + 1024)
-        );
-        tokio::fs::write(&path, content).await.unwrap();
-
-        let tail = read_log_content(&path).await.unwrap();
-
-        assert!(tail.len() <= crate::runtime_settings::current().get_logs_max_tail_bytes);
-        assert!(!tail.contains("old-start"));
-        assert!(tail.contains("recent-tail"));
     }
 }

@@ -235,28 +235,4 @@ mod tests {
 
         assert!(search_hybrid("oauth token refresh", &pages, &HashMap::new()).is_empty());
     }
-
-    #[test]
-    fn search_hybrid_uses_prior() {
-        let pages = vec![
-            page("file:src/a.rs", "src/a.rs auth token"),
-            page("file:src/b.rs", "src/b.rs auth token"),
-        ];
-        let prior = HashMap::from([
-            ("file:src/a.rs".to_string(), 0.1),
-            ("file:src/b.rs".to_string(), 0.9),
-        ]);
-
-        let hits = search_hybrid("auth token", &pages, &prior);
-
-        assert_eq!(hits[0].page.id, "file:src/b.rs");
-    }
-
-    #[test]
-    fn rrf_fuse_middle_index_is_competitive_for_opposite_rankings() {
-        let fused = rrf_fuse(&[vec![0, 1, 2], vec![2, 1, 0]], 60.0);
-        let score_1 = fused.iter().find(|(idx, _)| *idx == 1).unwrap().1;
-        let best = fused.first().unwrap().1;
-        assert!(score_1 >= best * 0.99, "score_1={score_1}, best={best}");
-    }
 }

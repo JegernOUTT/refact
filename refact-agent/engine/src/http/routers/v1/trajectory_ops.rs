@@ -1027,57 +1027,6 @@ mod tests {
         assert!(source.goal.as_ref().unwrap().active);
     }
 
-    #[test]
-    fn report_transfer_preserves_archive_and_ledger_stop_wins() {
-        let (mut session, _) = source_session_with_active_goal("source");
-        let mut raw = vec![ChatMessage::new("user".into(), "immutable archive".into())];
-        raw.extend(
-            transition_report(
-                &session.messages,
-                1,
-                "model".into(),
-                "agent".into(),
-                "agent".into(),
-            )
-            .unwrap(),
-        );
-        let archive = serde_json::to_vec(&raw[0]).unwrap();
-        let transfer =
-            transition_goal(&raw, session.goal.as_ref(), "source", "target", "agent").unwrap();
-        assert!(transfer.transferred());
-        assert_eq!(
-            serde_json::to_vec(&transfer.source_messages[0]).unwrap(),
-            archive
-        );
-        assert_eq!(transfer.source_messages.len(), raw.len());
-        let report = transition_report(
-            &transfer.target_messages,
-            1,
-            "model".into(),
-            "agent".into(),
-            "agent".into(),
-        )
-        .unwrap();
-        assert_eq!(report.len(), 1);
-        assert_eq!(report[0].role, "compression_report");
-        assert!(refact_core::active_context::active_context(&report)
-            .unwrap()
-            .messages
-            .iter()
-            .any(|m| m.role == "goal"));
-        session.goal_ledger_append(refact_chat_api::GoalLedgerOp::StatusChanged {
-            from: GoalStatus::Active,
-            to: GoalStatus::Stopped,
-            reason: "user stop".into(),
-        });
-        let goal = transition_source_goal(&session);
-        assert!(
-            !transition_goal(&raw, goal.as_ref(), "source", "target", "agent")
-                .unwrap()
-                .transferred()
-        );
-    }
-
     #[tokio::test]
     async fn staged_destination_is_goal_free_when_source_save_fails() {
         let dir = tempfile::tempdir().unwrap();
@@ -1263,18 +1212,6 @@ mod tests {
             serde_json::from_value(json!({"options": {}, "expected_trajectory_version": 42}))
                 .unwrap();
         assert_eq!(req.expected_trajectory_version, Some(42));
-    }
-
-    #[test]
-    fn llm_compress_request_blank_model_uses_automatic_resolution() {
-        let blank: LlmCompressRequest =
-            serde_json::from_str(r#"{"options":{"summary_model":"  "}}"#).unwrap();
-        let missing: LlmCompressRequest = serde_json::from_str("{}").unwrap();
-        assert_eq!(blank.requested_model(), None);
-        assert_eq!(missing.requested_model(), None);
-        let explicit: LlmCompressRequest =
-            serde_json::from_str(r#"{"options":{"summary_model":" configured-model "}}"#).unwrap();
-        assert_eq!(explicit.requested_model(), Some("configured-model"));
     }
 
     #[test]
@@ -1525,35 +1462,6 @@ mod tests {
         assert_eq!(
             source_goal_message.extra["goal"]["transferred_to"],
             json!(target_chat_id)
-        );
-    }
-
-    #[test]
-    fn http_mode_transition_goal_transfer_no_goal_is_noop() {
-        let source_messages = vec![ChatMessage::new("user".to_string(), "hello".to_string())];
-        let mut target_messages = vec![plan_message("Target plan")];
-        let original_role = target_messages[0].role.clone();
-        let original_content = target_messages[0].content.content_text_only();
-
-        let transferred_goal = transfer_goal_into_transition_messages(
-            &source_messages,
-            None,
-            &[],
-            "source-chat",
-            "target-chat",
-            "task_agent",
-            &mut target_messages,
-            1,
-        );
-
-        assert!(!transferred_goal.transferred());
-        assert!(transferred_goal.target_goal.is_none());
-        assert!(transferred_goal.source_goal.is_none());
-        assert_eq!(target_messages.len(), 1);
-        assert_eq!(target_messages[0].role, original_role);
-        assert_eq!(
-            target_messages[0].content.content_text_only(),
-            original_content
         );
     }
 

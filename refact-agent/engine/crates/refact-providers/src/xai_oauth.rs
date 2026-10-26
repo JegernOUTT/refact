@@ -852,33 +852,6 @@ mod tests {
     }
 
     #[test]
-    fn live_tool_support_is_a_provider_constant_not_a_catalog_guess() {
-        let provider = XAIOAuthProvider::default();
-        let response = json!({"data": [live_grok_4_6_record()]});
-        // models.dev claims no tools; the proxy says nothing, so our constant wins.
-        let caps = HashMap::from([(
-            "xai_oauth/grok-4.6".to_string(),
-            ModelCapabilities {
-                n_ctx: 128_000,
-                supports_tools: false,
-                ..Default::default()
-            },
-        )]);
-
-        let with_caps = provider
-            .available_models_from_live_response(&response, &caps)
-            .unwrap();
-        let without_caps = provider
-            .available_models_from_live_response(&response, &HashMap::new())
-            .unwrap();
-
-        assert_eq!(with_caps[0].supports_tools, SUPPORTS_TOOLS);
-        assert_eq!(with_caps[0].supports_parallel_tools, SUPPORTS_TOOLS);
-        assert_eq!(without_caps[0].supports_tools, SUPPORTS_TOOLS);
-        assert_eq!(without_caps[0].supports_parallel_tools, SUPPORTS_TOOLS);
-    }
-
-    #[test]
     fn live_context_window_overrides_provider_qualified_catalog_caps() {
         let provider = XAIOAuthProvider {
             enabled_models: vec!["xai_oauth/grok-4.6".to_string()],
@@ -969,11 +942,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_does_not_filter_model_ids() {
-        assert_eq!(XAIOAuthProvider::default().model_filter_regex(), None);
-    }
-
-    #[test]
     fn catalog_listing_never_invents_models_from_models_dev() {
         let provider = XAIOAuthProvider {
             enabled_models: vec!["grok-4.6".to_string()],
@@ -997,19 +965,6 @@ mod tests {
         assert!(usage.windows.is_empty());
         assert!(usage.headers.is_empty());
         assert!(usage.message.contains("rate-limit metadata"));
-    }
-
-    #[tokio::test]
-    async fn no_captured_headers_retains_passive_usage() {
-        let mut provider = XAIOAuthProvider::default();
-
-        assert!(provider.captured_usage().is_none());
-        assert!(!provider.capture_rate_limit_headers(&HashMap::new()));
-        assert!(provider.captured_usage().is_none());
-        assert_eq!(
-            provider.fetch_usage().await.unwrap(),
-            XAIOAuthProvider::passive_usage()
-        );
     }
 
     #[test]

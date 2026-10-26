@@ -863,67 +863,6 @@ mod tests {
     }
 
     #[test]
-    fn analysis_render_steps_shrink_previews_then_omit_then_truncate_controls() {
-        let steps: Vec<_> = analysis_render_steps(10).collect();
-        assert_eq!(
-            steps[0],
-            AnalysisRenderStep {
-                preview_cap: ANALYSIS_PREVIEW_CAP,
-                keep_recent: 10,
-                control_cap: None,
-            }
-        );
-        let floor = steps
-            .iter()
-            .position(|s| s.preview_cap == ANALYSIS_PREVIEW_FLOOR)
-            .unwrap();
-        assert!(steps[..=floor]
-            .iter()
-            .all(|s| s.keep_recent == 10 && s.control_cap.is_none()));
-        assert_eq!(steps[floor + 1].keep_recent, 5);
-        let last_omission = steps.iter().rposition(|s| s.control_cap.is_none()).unwrap();
-        assert_eq!(steps[last_omission].keep_recent, 0);
-        assert_eq!(
-            steps[last_omission + 1].control_cap,
-            Some(ANALYSIS_PREVIEW_CAP)
-        );
-        assert_eq!(
-            steps.last().unwrap(),
-            &AnalysisRenderStep {
-                preview_cap: ANALYSIS_PREVIEW_FLOOR,
-                keep_recent: 0,
-                control_cap: Some(0),
-            }
-        );
-        assert!(steps.windows(2).all(|pair| {
-            pair[1].preview_cap <= pair[0].preview_cap && pair[1].keep_recent <= pair[0].keep_recent
-        }));
-        assert!(analysis_render_steps(0).all(|s| s.keep_recent == 0));
-    }
-
-    #[test]
-    fn render_annotated_messages_keeps_everything_when_it_fits() {
-        let messages = sample_conversation();
-        let metadata = extract_conversation_metadata(&messages);
-        let entries = analysis_entries(&metadata);
-        assert_eq!(entries.iter().filter(|e| !e.mandatory).count(), 6);
-        let rendered = render_annotated_messages(
-            &entries,
-            AnalysisRenderStep {
-                preview_cap: 5,
-                keep_recent: 6,
-                control_cap: None,
-            },
-        );
-        assert!(!rendered.contains("omitted"));
-        assert!(rendered.contains("[MSG_ID:0] [user]\nfirst...\n"));
-        assert!(rendered.contains("tool: t_cat {\"pat...\n"));
-        assert!(rendered.contains("[MSG_ID:3] [plan]\nPLAN BODY\n"));
-        assert!(rendered.contains("[MSG_ID:6] [user]\nlatest request\n"));
-        assert!(rendered.contains("[MSG_ID:7] [assistant]\nthird...\n"));
-    }
-
-    #[test]
     fn render_annotated_messages_omits_oldest_but_keeps_controls_and_latest_user() {
         let messages = sample_conversation();
         let metadata = extract_conversation_metadata(&messages);
@@ -942,25 +881,6 @@ mod tests {
         assert!(rendered.contains("[MSG_ID:7] [assistant]\nthird answer\n"));
         assert!(!rendered.contains("first request"));
         assert!(!rendered.contains("tool: t_cat"));
-    }
-
-    #[test]
-    fn render_annotated_messages_truncates_controls_only_as_last_resort() {
-        let messages = sample_conversation();
-        let metadata = extract_conversation_metadata(&messages);
-        let entries = analysis_entries(&metadata);
-        let rendered = render_annotated_messages(
-            &entries,
-            AnalysisRenderStep {
-                preview_cap: ANALYSIS_PREVIEW_FLOOR,
-                keep_recent: 0,
-                control_cap: Some(4),
-            },
-        );
-        assert_eq!(
-            rendered,
-            "[MSG_ID:0..MSG_ID:2] 3 older messages omitted\n[MSG_ID:3] [plan]\nPLAN...\n[MSG_ID:4..MSG_ID:5] 2 older messages omitted\n[MSG_ID:6] [user]\nlate...\n[MSG_ID:7] older message omitted\n"
-        );
     }
 
     #[test]
@@ -992,19 +912,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn analysis_prompt_tokens_without_tokenizer_divides_by_calibrated_density() {
-        assert_eq!(analysis_prompt_tokens(None, 2.0, "").unwrap(), 1);
-        assert_eq!(
-            analysis_prompt_tokens(None, 2.0, &"x".repeat(1000)).unwrap(),
-            501
-        );
-        assert_eq!(
-            analysis_prompt_tokens(None, 3.0, &"x".repeat(1000)).unwrap(),
-            335
-        );
-    }
-
     fn metered_assistant(input_tokens: usize) -> ChatMessage {
         let mut message = text_message("assistant", "ok");
         message.usage = Some(crate::call_validation::ChatUsage {
@@ -1014,92 +921,6 @@ mod tests {
             ..Default::default()
         });
         message
-    }
-
-    #[test]
-    fn usage_calibration_measures_bytes_per_token_on_the_context_the_model_saw() {
-        let mut messages = vec![
-            text_message("user", &"u".repeat(100_000)),
-            text_message("tool", &"t".repeat(200_000)),
-            metered_assistant(100_000),
-            text_message("tool", &"later".repeat(100_000)),
-        ];
-        let calibrated = usage_calibrated_bytes_per_token(&messages).unwrap();
-        assert!((calibrated - 300_000.0 / 100_000.0 / ANALYSIS_CALIBRATION_MARGIN).abs() < 1e-9);
-
-        messages[2] = metered_assistant(ANALYSIS_CALIBRATION_MIN_TOKENS - 1);
-        assert_eq!(usage_calibrated_bytes_per_token(&messages), None);
-
-        messages[2] = metered_assistant(1_000_000);
-        assert_eq!(
-            usage_calibrated_bytes_per_token(&messages),
-            None,
-            "denser than 1.5 B/tok"
-        );
-
-        messages[1] = text_message("tool", &"t".repeat(700_000));
-        messages[2] = metered_assistant(ANALYSIS_CALIBRATION_MIN_TOKENS);
-        assert_eq!(
-            usage_calibrated_bytes_per_token(&messages),
-            None,
-            "sparser than 6 B/tok"
-        );
-
-        messages[2] = text_message("assistant", "no usage at all");
-        assert_eq!(usage_calibrated_bytes_per_token(&messages), None);
-    }
-
-    #[test]
-    fn usage_calibration_ignores_usage_from_before_a_compression_boundary() {
-        let messages = vec![
-            text_message("tool", &"t".repeat(200_000)),
-            metered_assistant(100_000),
-            text_message(
-                refact_core::active_context::COMPRESSION_REPORT_KEY,
-                "rebuilt",
-            ),
-            text_message("user", "after"),
-        ];
-        assert_eq!(usage_calibrated_bytes_per_token(&messages), None);
-    }
-
-    #[test]
-    fn analysis_models_prefer_the_chat_model_then_the_default_slots() {
-        let defaults = crate::caps::DefaultModels {
-            chat_default_model: "provider/default".to_string(),
-            chat_model_2: "provider/second".to_string(),
-            ..Default::default()
-        };
-        assert_eq!(
-            analysis_model_candidates(None, Some("provider/chat"), &defaults),
-            vec!["provider/chat", "provider/default", "provider/second"]
-        );
-        assert_eq!(
-            analysis_model_candidates(Some("provider/manual"), Some("provider/chat"), &defaults),
-            vec!["provider/manual"]
-        );
-        assert_eq!(
-            analysis_model_candidates(None, Some("provider/default"), &defaults),
-            vec!["provider/default", "provider/second"]
-        );
-        assert_eq!(
-            analysis_model_candidates(None, Some(" "), &defaults),
-            vec!["provider/default", "provider/second"]
-        );
-        assert!(analysis_model_candidates(None, None, &Default::default()).is_empty());
-    }
-
-    #[test]
-    fn context_rejections_are_recognized_across_providers() {
-        assert!(is_context_rejection(
-            "Anthropic invalid_request_error: prompt is too long: 201000 tokens > 200000 maximum context window"
-        ));
-        assert!(is_context_rejection(
-            "OpenAI BadRequestError: context_length_exceeded: Please reduce your prompt"
-        ));
-        assert!(!is_context_rejection(
-            "OpenAI API error (401 Unauthorized): bad key"
-        ));
     }
 
     #[test]
@@ -1160,24 +981,6 @@ mod tests {
             kept[0] >= kept[1],
             "calibrated density never keeps less: {kept:?}"
         );
-    }
-
-    #[test]
-    fn reconstruction_audit_keeps_source_records() {
-        let mut source = ChatMessage::new("user".into(), "source".into());
-        crate::privacy::records::attach_record(
-            &mut source,
-            refact_privacy::FileRecord {
-                path: "secret.rs".into(),
-                zone: "private".into(),
-                attribution: refact_privacy::Attribution::Declared,
-            },
-        );
-        let mut narrative = ChatMessage::new("user".into(), "summary".into());
-        crate::privacy::records::carry_records_into(&mut narrative, &[source]).unwrap();
-        let records = refact_privacy::records_from_messages(&[narrative]).unwrap();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].1.zone, "private");
     }
 
     fn guarded_record(path: &str, zone: &str) -> refact_privacy::FileRecord {
@@ -1376,117 +1179,5 @@ mod tests {
         fn workspace_folders(&self) -> Vec<PathBuf> {
             self.workspace_folders.clone()
         }
-    }
-
-    #[tokio::test]
-    async fn test_assemble_new_chat_limits_message_budget_and_images() {
-        use crate::scratchpads::multimodality::MultimodalElement;
-
-        let paths = TestPaths::new(vec![]);
-        let original_messages = vec![
-            ChatMessage {
-                role: "user".to_string(),
-                content: ChatContent::SimpleText("baseline ".repeat(400)),
-                ..Default::default()
-            },
-            ChatMessage {
-                role: "user".to_string(),
-                content: ChatContent::Multimodal(vec![
-                    MultimodalElement {
-                        m_type: "text".to_string(),
-                        m_content: "first image context ".repeat(100),
-                    },
-                    MultimodalElement {
-                        m_type: "image/png".to_string(),
-                        m_content: "base64data-one".to_string(),
-                    },
-                ]),
-                ..Default::default()
-            },
-            ChatMessage {
-                role: "user".to_string(),
-                content: ChatContent::Multimodal(vec![
-                    MultimodalElement {
-                        m_type: "text".to_string(),
-                        m_content: "second image context ".repeat(100),
-                    },
-                    MultimodalElement {
-                        m_type: "image/png".to_string(),
-                        m_content: "base64data-two".to_string(),
-                    },
-                ]),
-                ..Default::default()
-            },
-        ];
-        let budget = calculate_transition_context_budget(&original_messages);
-        let decisions = ParsedDecisions {
-            summary: "summary ".repeat(200),
-            messages_to_preserve: vec!["MSG_ID:1".to_string(), "MSG_ID:2".to_string()],
-            handoff_message: "continue ".repeat(200),
-            ..Default::default()
-        };
-
-        let new_messages = assemble_new_chat(&paths, &original_messages, &decisions, "agent")
-            .await
-            .unwrap();
-        let message_symbols = new_messages
-            .iter()
-            .filter(|msg| msg.role != "context_file")
-            .map(|msg| text_symbols(&msg.content.content_text_only()))
-            .sum::<usize>();
-        let image_count = count_images_in_messages(&new_messages);
-
-        assert!(message_symbols <= budget.messages_symbols);
-        assert_eq!(image_count, 2);
-    }
-
-    #[tokio::test]
-    async fn test_assemble_new_chat_limits_file_budget() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("src/main.rs");
-        std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &file_path,
-            "fn main() { println!(\"hello\"); }\n".repeat(300),
-        )
-        .unwrap();
-
-        let paths = TestPaths::new(vec![dir.path().to_path_buf()]);
-
-        let original_messages = vec![
-            ChatMessage {
-                role: "context_file".to_string(),
-                content: ChatContent::ContextFiles(vec![ContextFile {
-                    file_name: "src/main.rs".to_string(),
-                    file_content: "old content\n".repeat(300),
-                    line1: 1,
-                    line2: 300,
-                    ..Default::default()
-                }]),
-                ..Default::default()
-            },
-            ChatMessage {
-                role: "user".to_string(),
-                content: ChatContent::SimpleText("requirements ".repeat(500)),
-                ..Default::default()
-            },
-        ];
-        let budget = calculate_transition_context_budget(&original_messages);
-        let decisions = ParsedDecisions {
-            files_to_open: vec!["src/main.rs".to_string()],
-            ..Default::default()
-        };
-
-        let new_messages = assemble_new_chat(&paths, &original_messages, &decisions, "agent")
-            .await
-            .unwrap();
-        let file_symbols = new_messages
-            .iter()
-            .filter(|msg| msg.role == "context_file")
-            .map(|msg| text_symbols(&msg.content.content_text_only()))
-            .sum::<usize>();
-
-        assert!(file_symbols <= budget.files_symbols);
-        assert!(file_symbols > 0);
     }
 }

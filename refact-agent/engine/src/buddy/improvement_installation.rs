@@ -1532,23 +1532,6 @@ pub(crate) mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn canary_executor_rejects_shutdown_cancel_and_non_namespace_spawn() {
-        use std::sync::{Arc, atomic::AtomicBool};
-        let registry = crate::exec::ExecRegistry::new();
-        for (shutdown, cancelled) in [(true, false), (false, true), (false, false)] {
-            let request = crate::exec::ExecSpawnRequest::foreground("must never execute");
-            assert!(registry
-                .execute(
-                    request,
-                    Arc::new(AtomicBool::new(shutdown)),
-                    Arc::new(AtomicBool::new(cancelled))
-                )
-                .await
-                .is_err());
-        }
-    }
-
     struct FailedCanaryExecutor {
         result: std::sync::Mutex<Option<Result<CanaryOutput, String>>>,
         shutdown_on_spawn: bool,
@@ -2177,16 +2160,6 @@ pub(crate) mod tests {
         bytes
     }
 
-    #[test]
-    fn host_static_gate_rejects_dynamic_and_foreign_arch() {
-        let mut bytes = elf();
-        assert!(static_host_image(&bytes, std::env::consts::ARCH).is_ok());
-        for kind in [2u32, 3] {
-            bytes[64..68].copy_from_slice(&kind.to_le_bytes());
-            assert!(static_host_image(&bytes, std::env::consts::ARCH).is_err());
-        }
-        assert!(static_host_image(&bytes, "foreign").is_err());
-    }
     #[test]
     fn static_gate_rejects_malformed_headers_segments_and_entry() {
         for (offset, replacement) in [

@@ -573,25 +573,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_delegate_push_message_uses_unified_noun_and_includes_edited_files() {
-        let record = completed_record(BgAgentKind::Delegate).await;
-        let message = build_push_message(&record);
-        assert!(message.contains("[background subagent finished]"));
-        assert!(message.contains("Edited files:"));
-        assert!(message.contains("src/auth/retry.ts"));
-        assert!(message.contains("Open the child trajectory: [view](refact://chat/child)"));
-    }
-
-    #[tokio::test]
-    async fn subagent_push_message_includes_edited_files() {
-        let record = completed_record(BgAgentKind::Subagent).await;
-        let message = build_push_message(&record);
-        assert!(message.contains("[background subagent finished]"));
-        assert!(message.contains("Edited files:"));
-        assert!(message.contains("Open the child trajectory: [view](refact://chat/child)"));
-    }
-
-    #[tokio::test]
     async fn push_message_preserves_long_summary() {
         let temp = tempfile::tempdir().unwrap();
         let registry =

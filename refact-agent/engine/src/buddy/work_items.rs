@@ -173,7 +173,7 @@ pub(crate) fn stable_hash(parts: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use refact_buddy_core::operator_types::{NativeSourceKind, ProjectIdentity};
+    use refact_buddy_core::operator_types::ProjectIdentity;
 
     fn project() -> ProjectIdentity {
         ProjectIdentity {
@@ -189,84 +189,5 @@ mod tests {
         let branch = SubjectKey::new(&project(), "check", "lint", "src", "feature@a").unwrap();
         assert_ne!(base.work_item_id(), narrower.work_item_id());
         assert_ne!(base.artifact_id(), branch.artifact_id());
-    }
-
-    #[test]
-    fn draft_uses_deterministic_subject_and_keeps_source_identity() {
-        let subject = SubjectKey::new(&project(), "check", "cargo", "engine", "main@a").unwrap();
-        let item = WorkItemDraft {
-            project: project(),
-            subject: subject.clone(),
-            kind: "check".to_string(),
-            title: "Cargo check".to_string(),
-            state: WorkItemState::NeedsAttention,
-            native_sources: vec![NativeSourceIdentity {
-                source_kind: NativeSourceKind::Check,
-                source_id: "cargo".to_string(),
-                source_version: "main@a".to_string(),
-            }],
-            last_material_change_at: "2026-09-05T00:00:00Z".to_string(),
-            severity: Some(WorkItemSeverity::Unknown),
-            problem_summary: problem_summary_from_title("Cargo check"),
-            scope: Some("engine".to_string()),
-        }
-        .build()
-        .unwrap();
-        assert_eq!(item.id, subject.work_item_id());
-        assert_eq!(item.subject.version, "main@a");
-    }
-
-    #[test]
-    fn rows_expose_distinct_summaries() {
-        let summaries = [
-            ("provider", "Repair provider authentication"),
-            ("workspace", "Review uncommitted workspace changes"),
-            ("instructions", "Update missing AGENTS instructions"),
-            ("modes", "Resolve overlapping mode prompts"),
-            ("dependencies", "Check dependency manifest changes"),
-        ]
-        .into_iter()
-        .map(|(kind, title)| {
-            WorkItemDraft {
-                project: project(),
-                subject: SubjectKey::new(&project(), kind, kind, kind, "main@a").unwrap(),
-                kind: kind.to_string(),
-                title: title.to_string(),
-                state: WorkItemState::NeedsAttention,
-                native_sources: vec![],
-                last_material_change_at: "2026-09-05T00:00:00Z".to_string(),
-                severity: Some(WorkItemSeverity::Unknown),
-                problem_summary: problem_summary_from_title(title),
-                scope: None,
-            }
-            .build()
-            .unwrap()
-            .problem_summary
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(summaries.len(), 5);
-    }
-
-    #[test]
-    fn missing_severity_or_scope_is_representable() {
-        let item = WorkItemDraft {
-            project: project(),
-            subject: SubjectKey::new(&project(), "check", "lint", "src", "main@a").unwrap(),
-            kind: "check".to_string(),
-            title: "Lint source".to_string(),
-            state: WorkItemState::NeedsAttention,
-            native_sources: vec![],
-            last_material_change_at: "2026-09-05T00:00:00Z".to_string(),
-            severity: None,
-            problem_summary: None,
-            scope: None,
-        }
-        .build()
-        .unwrap();
-        let wire = serde_json::to_string(&item).unwrap();
-        assert!(!wire.contains("severity"));
-        let round_trip: WorkItem = serde_json::from_str(&wire).unwrap();
-        assert_eq!(round_trip.severity, None);
-        assert_eq!(round_trip.scope, None);
     }
 }

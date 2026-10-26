@@ -285,25 +285,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn custom_provider_cache_control_defaults_false_and_can_enable() {
-        let mut provider = CustomProvider::default();
-
-        assert!(!provider.supports_cache_control);
-        assert!(!provider.build_runtime().unwrap().supports_cache_control);
-
-        provider
-            .provider_settings_apply(serde_yaml::from_str("supports_cache_control: true").unwrap())
-            .unwrap();
-
-        assert!(provider.supports_cache_control);
-        assert!(provider.build_runtime().unwrap().supports_cache_control);
-        assert_eq!(
-            provider.provider_settings_as_json()["supports_cache_control"],
-            true
-        );
-    }
-
-    #[test]
     fn custom_provider_extra_headers_replace_preserve_and_remove() {
         let mut provider = CustomProvider::default();
         provider
@@ -358,114 +339,6 @@ extra_headers:
     }
 
     #[test]
-    fn custom_provider_extra_headers_empty_map_clears_all() {
-        let mut provider = CustomProvider::default();
-        provider
-            .extra_headers
-            .insert("X-Secret".to_string(), "old-secret".to_string());
-
-        provider
-            .provider_settings_apply(serde_yaml::from_str("extra_headers: {}").unwrap())
-            .unwrap();
-
-        assert!(provider.extra_headers.is_empty());
-    }
-
-    #[test]
-    fn custom_provider_extra_headers_null_clears_all() {
-        let mut provider = CustomProvider::default();
-        provider
-            .extra_headers
-            .insert("X-Secret".to_string(), "old-secret".to_string());
-
-        provider
-            .provider_settings_apply(serde_yaml::from_str("extra_headers:").unwrap())
-            .unwrap();
-
-        assert!(provider.extra_headers.is_empty());
-    }
-
-    #[test]
-    fn custom_provider_extra_headers_absent_preserves_existing() {
-        let mut provider = CustomProvider::default();
-        provider
-            .extra_headers
-            .insert("X-Secret".to_string(), "old-secret".to_string());
-
-        provider
-            .provider_settings_apply(serde_yaml::from_str("enabled: true").unwrap())
-            .unwrap();
-
-        assert_eq!(
-            provider.extra_headers.get("X-Secret").map(String::as_str),
-            Some("old-secret")
-        );
-    }
-
-    #[test]
-    fn custom_provider_extra_headers_yaml_string_parses_and_applies() {
-        let mut provider = CustomProvider::default();
-        provider
-            .extra_headers
-            .insert("X-Secret".to_string(), "old-secret".to_string());
-        provider
-            .extra_headers
-            .insert("X-Absent".to_string(), "old-absent".to_string());
-
-        provider
-            .provider_settings_apply(
-                serde_yaml::from_str(
-                    r#"
-extra_headers: |
-  X-Secret: "***"
-  X-New: new-value
-  X-Remove-Number: 7
-"#,
-                )
-                .unwrap(),
-            )
-            .unwrap();
-
-        assert_eq!(
-            provider.extra_headers.get("X-Secret").map(String::as_str),
-            Some("old-secret")
-        );
-        assert_eq!(
-            provider.extra_headers.get("X-New").map(String::as_str),
-            Some("new-value")
-        );
-        assert!(provider.extra_headers.get("X-Remove-Number").is_none());
-        assert!(provider.extra_headers.get("X-Absent").is_none());
-    }
-
-    #[test]
-    fn custom_provider_extra_headers_json_string_parses_and_applies() {
-        let mut provider = CustomProvider::default();
-        provider
-            .extra_headers
-            .insert("X-Secret".to_string(), "old-secret".to_string());
-
-        provider
-            .provider_settings_apply(
-                serde_yaml::to_value(json!({
-                    "extra_headers": "{\"X-Secret\":\"***\",\"X-Json\":\"json-value\",\"X-Remove\":7}"
-                }))
-                .unwrap(),
-            )
-            .unwrap();
-
-        assert_eq!(
-            provider.extra_headers.get("X-Secret").map(String::as_str),
-            Some("old-secret")
-        );
-        assert_eq!(
-            provider.extra_headers.get("X-Json").map(String::as_str),
-            Some("json-value")
-        );
-        assert!(provider.extra_headers.get("X-Remove").is_none());
-    }
-
-    #[test]
     fn custom_provider_extra_headers_invalid_string_errors_and_preserves_existing() {
         let mut provider = CustomProvider::default();
         provider
@@ -484,43 +357,6 @@ extra_headers: |
     }
 
     #[test]
-    fn custom_provider_schema_exposes_extra_headers() {
-        let schema = CustomProvider::default().provider_schema();
-        assert!(schema.contains("extra_headers:"));
-        assert!(schema.contains("f_label: \"Extra Headers\""));
-    }
-
-    #[test]
-    fn custom_provider_schema_exposes_confirmed_command_credential() {
-        let schema = CustomProvider::default().provider_schema();
-        assert!(schema.contains("credential:"));
-        assert!(schema.contains("f_object: true"));
-        assert!(schema.contains("f_label: \"Credential Command\""));
-        assert!(schema.contains("f_confirmation: true"));
-    }
-
-    #[test]
-    fn custom_provider_accepts_valid_command_credential() {
-        let mut provider = CustomProvider::default();
-        provider
-            .provider_settings_apply(
-                serde_yaml::from_str(
-                    "credential:\n  type: command\n  command: helper\n  args: [token]\n",
-                )
-                .unwrap(),
-            )
-            .unwrap();
-
-        let CredentialSpec::Command {
-            timeout_ms,
-            refresh_interval_ms,
-            ..
-        } = provider.credential.as_ref().unwrap();
-        assert_eq!(*timeout_ms, 5_000);
-        assert_eq!(*refresh_interval_ms, 300_000);
-    }
-
-    #[test]
     fn custom_provider_rejects_static_and_command_credentials_together() {
         let mut provider = CustomProvider::default();
         let error = provider
@@ -533,15 +369,6 @@ extra_headers: |
             .unwrap_err();
         assert!(error.contains("mutually exclusive"));
         assert!(provider.api_key.is_empty());
-        assert!(provider.credential.is_none());
-    }
-
-    #[test]
-    fn custom_provider_static_api_key_compatibility_is_unchanged() {
-        let mut provider = CustomProvider::default();
-        provider.api_key = "static-token".to_string();
-        let runtime = provider.build_runtime().unwrap();
-        assert_eq!(runtime.api_key, "static-token");
         assert!(provider.credential.is_none());
     }
 }

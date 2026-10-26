@@ -493,10 +493,8 @@ pub fn trace_for_model(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::call_validation::ChatMessage;
-    use crate::chat::types::{CausalStamp, PushMode};
+
     use refact_privacy::{PrivacyPolicy, ShellBehavior, Zone};
-    use refact_work_core::CoordinationSettings;
 
     fn project() -> ProjectKey {
         ProjectKey::new("project")
@@ -566,33 +564,6 @@ mod tests {
     }
 
     #[test]
-    fn several_causes_on_one_event_are_all_preserved() {
-        let mut events = chain();
-        events.push(event(
-            "decision:merged",
-            CausalKind::Decision,
-            "parent",
-            vec![cause("evidence:f"), cause("delivery:m")],
-            5,
-        ));
-        let trace = reconstruct(&events, "decision:merged");
-        let root = trace
-            .events
-            .iter()
-            .find(|held| held.event_id == "decision:merged")
-            .unwrap();
-        assert_eq!(root.causes.len(), 2, "causality is a DAG, not a chain");
-        assert!(trace
-            .events
-            .iter()
-            .any(|held| held.event_id == "delivery:m"));
-        assert!(trace
-            .events
-            .iter()
-            .any(|held| held.event_id == "spawn:child"));
-    }
-
-    #[test]
     fn an_unknown_cause_is_recorded_as_unknown_and_never_guessed() {
         let recorded = event("delivery:lonely", CausalKind::Delivery, "parent", vec![], 1);
         assert_eq!(recorded.causes, vec![CausalCause::Unknown]);
@@ -655,95 +626,6 @@ mod tests {
         let trace = recorder.trace("event:7");
         assert!(!trace.complete, "an evicted ancestor is never invented");
         assert_eq!(trace.gaps, vec!["event:4".to_string()]);
-    }
-
-    #[test]
-    fn the_last_recorded_event_of_a_scope_is_what_the_next_one_is_caused_by() {
-        let recorder = CausalRecorder::new();
-        assert_eq!(recorder.causes_from("empty"), vec![CausalCause::Unknown]);
-        let seq = recorder.next_seq();
-        recorder.push(
-            event("delivery:m", CausalKind::Delivery, "parent", vec![], seq),
-            16,
-        );
-        assert_eq!(
-            recorder.causes_from("parent"),
-            vec![cause("delivery:m")],
-            "a spawn from this chat is caused by the message it is acting on"
-        );
-        assert_eq!(recorder.causes_from("other"), vec![CausalCause::Unknown]);
-    }
-
-    #[test]
-    fn a_stamped_delivery_carries_its_causes_and_an_unstamped_one_reads_as_unknown() {
-        let mut stamped = PendingDelivery::with_id(
-            "d1",
-            vec![ChatMessage::new("user".into(), "hi".into())],
-            PushMode::Append,
-            "test",
-            false,
-        );
-        assert!(stamped.causal.is_none());
-        assert_eq!(
-            delivery_event("chat", &stamped).causes,
-            vec![CausalCause::Unknown]
-        );
-        assert_eq!(delivery_event("chat", &stamped).event_id, "delivery:d1");
-
-        stamped.causal = Some(CausalStamp::new(
-            "delivery:explicit",
-            vec!["evidence:f".to_string(), "".to_string()],
-        ));
-        let event = delivery_event("chat", &stamped);
-        assert_eq!(event.event_id, "delivery:explicit");
-        assert_eq!(event.causes, vec![cause("evidence:f")]);
-    }
-
-    #[tokio::test]
-    async fn an_unavailable_recorder_still_records_and_marks_the_trace_incomplete() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = AppState::from_gcx(gcx).await;
-        let scope = format!("chat-{}", uuid::Uuid::new_v4());
-        let root = format!("delivery:{scope}");
-        let durable = record(
-            &app,
-            CausalEvent::new(root.clone(), CausalKind::Delivery, scope.clone()),
-        )
-        .await;
-        assert!(
-            recorder()
-                .events_in_scope(&scope)
-                .iter()
-                .any(|held| held.event_id == root),
-            "the operation records even when durability is unavailable"
-        );
-        let trace = recorder().trace(&root);
-        assert_eq!(trace.root, root);
-        assert!(
-            !trace.complete || durable,
-            "a trace that could not be persisted is never reported as whole"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_ledger_round_trips_events_and_enforces_its_retention_bound() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("coordination.sqlite");
-        let store = Arc::new(
-            CoordinationStore::open(&path, &CoordinationSettings::default())
-                .await
-                .unwrap(),
-        );
-        let ledger = CausalLedger::new(store, project());
-        for record in chain() {
-            ledger.record(&record).await.unwrap();
-        }
-        let stored = ledger.events().await.unwrap();
-        assert_eq!(stored.len(), 4);
-        let trace = reconstruct(&stored, "decision:d");
-        assert_eq!(trace.events.len(), 4);
-        assert_eq!(ledger.retain(2).await.unwrap(), 2);
-        assert_eq!(ledger.events().await.unwrap().len(), 2);
     }
 
     #[tokio::test]

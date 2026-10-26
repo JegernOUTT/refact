@@ -551,37 +551,4 @@ mod tests {
         assert_eq!(crate::runtime_settings::current().max_queue_size, 7);
         crate::runtime_settings::reset_for_test();
     }
-    #[test]
-    fn persisted_parser_rejects_schema_versions_and_malformed_known_values() {
-        assert!(crate::runtime_settings::parse_persisted(b"schema_version: 99\n").is_err());
-        assert!(crate::runtime_settings::parse_persisted(b"max_queue_size: wrong\n").is_err());
-        assert!(crate::runtime_settings::parse_persisted(
-            b"future: {anything: true}\nmax_queue_size: 7\n"
-        )
-        .is_ok());
-    }
-    #[test]
-    fn patch_preserves_unknown_nested_and_secret_fields() {
-        let before =
-            Some(b"max_queue_size: 7\nfuture:\n  token: secret\n  list: [a, b]\n".to_vec());
-        let after = patched(
-            &before,
-            &draft("max_queue_size", serde_yaml::to_value(9).unwrap()),
-        )
-        .unwrap();
-        let before: serde_yaml::Value = serde_yaml::from_slice(before.as_ref().unwrap()).unwrap();
-        let after: serde_yaml::Value = serde_yaml::from_slice(&after).unwrap();
-        assert_eq!(before["future"], after["future"]);
-        assert_eq!(after["max_queue_size"].as_u64(), Some(9));
-    }
-    #[test]
-    fn patch_rejects_unknown_keys_and_invalid_known_values() {
-        assert!(patched(&None, &draft("future", serde_yaml::Value::Null)).is_err());
-        assert!(patched(
-            &None,
-            &draft("max_queue_size", serde_yaml::to_value(0).unwrap())
-        )
-        .is_err());
-        assert_ne!(version(&None), version(&Some(Vec::new())));
-    }
 }

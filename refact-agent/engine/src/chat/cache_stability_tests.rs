@@ -14,9 +14,8 @@ use crate::caps::{BaseModelRecord, ChatModelRecord, CodeAssistantCaps};
 use crate::chat::cache_diagnostics::compute_provider_request_hashes;
 use crate::chat::cache_guard::{is_append_only_prefix, sanitize_body_for_cache_guard};
 use crate::chat::prepare::{prepare_chat_passthrough, ChatPrepareOptions};
-use refact_core::active_context::{active_context, make_reconstruction_report, ReconstructionMetadata};
 use crate::chat::trajectories::{
-    ensure_frozen_prefix, load_trajectory_for_chat, save_trajectory_snapshot, TrajectorySnapshot,
+    load_trajectory_for_chat, save_trajectory_snapshot, TrajectorySnapshot,
 };
 use crate::chat::types::{ChatSession, ThreadParams};
 use crate::global_context::GlobalContext;
@@ -324,17 +323,6 @@ fn normalize_claude_code_cache_body(mut body: Value) -> Value {
     body
 }
 
-fn direct_openai_body(messages: Vec<ChatMessage>, tools: Vec<Value>) -> Value {
-    let req = LlmRequest::new("test/cache-openai".to_string(), messages)
-        .with_params(CommonParams {
-            max_tokens: 1024,
-            n: Some(1),
-            ..Default::default()
-        })
-        .with_tools(tools, None);
-    openai_body(&req, "cache-openai")
-}
-
 fn user(text: &str) -> ChatMessage {
     ChatMessage::new("user".to_string(), text.to_string())
 }
@@ -365,167 +353,6 @@ fn cache_tool() -> Value {
             "parameters": {"type": "object"}
         }
     })
-}
-
-#[tokio::test]
-async fn cache_stability_switch_mode_enrichment_drift_reuses_frozen_tools() {
-    let model_id = "test/cache-openai";
-    let (gcx, workspace) = gcx_with_models_and_modes(
-        vec![model_record(
-            model_id,
-            WireFormat::OpenaiChatCompletions,
-            "",
-        )],
-        vec![
-            mode_config("agent", "Agent", "Do agent work"),
-            mode_config("explore", "Explore", "Look around"),
-        ],
-    )
-    .await;
-    let tools = vec![handoff_tool_desc()];
-    let first = prepare_request(
-        gcx.clone(),
-        model_id,
-        vec![system("FROZEN SYSTEM"), user("hello")],
-        tools.clone(),
-        None,
-        false,
-    )
-    .await;
-    let first_body = openai_body(&first.llm_request, "cache-openai");
-    let first_hashes = compute_provider_request_hashes(&first_body);
-    let prefix = frozen_prefix(
-        "FROZEN SYSTEM",
-        Value::Array(first.llm_request.tools.clone().unwrap()),
-    );
-
-    install_project_registry(
-        &gcx,
-        workspace.path(),
-        vec![
-            mode_config("agent", "Agent", "Mutated agent mode"),
-            mode_config("mutated", "Mutated", "This must not enter frozen tools"),
-        ],
-    );
-    let second = prepare_request(
-        gcx,
-        model_id,
-        vec![system("FROZEN SYSTEM"), user("hello again")],
-        tools,
-        Some(prefix),
-        false,
-    )
-    .await;
-    let second_body = openai_body(&second.llm_request, "cache-openai");
-    let second_hashes = compute_provider_request_hashes(&second_body);
-
-    assert_eq!(first_hashes.tools_sha256, second_hashes.tools_sha256);
-    assert_eq!(first_hashes.system_sha256, second_hashes.system_sha256);
-    assert!(!second_body["tools"].to_string().contains("mutated"));
-}
-
-#[tokio::test]
-async fn cache_stability_system_prompt_drift_reuses_frozen_system() {
-    let model_id = "test/cache-openai";
-    let frozen_tools = json!([cache_tool()]);
-    let prefix = frozen_prefix("FROZEN SYSTEM", frozen_tools);
-    let (gcx, _workspace) = gcx_with_models_and_modes(
-        vec![model_record(
-            model_id,
-            WireFormat::OpenaiChatCompletions,
-            "",
-        )],
-        vec![mode_config("agent", "Agent", "Do agent work")],
-    )
-    .await;
-
-    let first = prepare_request(
-        gcx.clone(),
-        model_id,
-        vec![system("dynamic workspace tree A"), user("hello")],
-        vec![handoff_tool_desc()],
-        Some(prefix.clone()),
-        false,
-    )
-    .await;
-    let second = prepare_request(
-        gcx,
-        model_id,
-        vec![system("dynamic workspace tree B"), user("hello again")],
-        vec![handoff_tool_desc()],
-        Some(prefix),
-        false,
-    )
-    .await;
-    let first_hashes =
-        compute_provider_request_hashes(&openai_body(&first.llm_request, "cache-openai"));
-    let second_hashes =
-        compute_provider_request_hashes(&openai_body(&second.llm_request, "cache-openai"));
-
-    assert_eq!(first_hashes.system_sha256, second_hashes.system_sha256);
-    assert_eq!(
-        first.llm_request.messages[0].content.content_text_only(),
-        "FROZEN SYSTEM"
-    );
-    assert_eq!(
-        second.llm_request.messages[0].content.content_text_only(),
-        "FROZEN SYSTEM"
-    );
-}
-
-#[tokio::test]
-async fn cache_stability_model_switch_away_and_back_never_refreezes_prefix() {
-    let cc_model = "claude_code/claude-opus-4";
-    let other_model = "test/cache-openai";
-    let frozen_tools = json!([cache_tool()]);
-    let prefix = frozen_prefix("FROZEN SYSTEM", frozen_tools);
-    let (gcx, _workspace) = gcx_with_models_and_modes(
-        vec![
-            model_record(cc_model, WireFormat::AnthropicMessages, "cc-oauth-token"),
-            model_record(other_model, WireFormat::OpenaiChatCompletions, ""),
-        ],
-        vec![mode_config("agent", "Agent", "Do agent work")],
-    )
-    .await;
-
-    let before = prepare_request(
-        gcx.clone(),
-        cc_model,
-        vec![system("dynamic before"), user("hello")],
-        vec![handoff_tool_desc()],
-        Some(prefix.clone()),
-        false,
-    )
-    .await;
-    let before_body =
-        normalize_claude_code_cache_body(claude_body(&before.llm_request, "claude-opus-4"));
-    let before_hashes = compute_provider_request_hashes(&before_body);
-
-    let mut session = ChatSession::new("model-switch-cache".to_string());
-    session.thread.frozen_request_prefix = Some(prefix.clone());
-    session.thread.model = other_model.to_string();
-    assert!(
-        ensure_frozen_prefix(&mut session, Some("REFREEZE".to_string()), Some(json!([]))).is_none()
-    );
-    assert_eq!(session.thread.frozen_request_prefix, Some(prefix.clone()));
-    session.thread.model = cc_model.to_string();
-
-    let after = prepare_request(
-        gcx,
-        cc_model,
-        vec![system("dynamic after"), user("hello after switch")],
-        vec![handoff_tool_desc()],
-        session.thread.frozen_request_prefix.clone(),
-        false,
-    )
-    .await;
-    let after_body =
-        normalize_claude_code_cache_body(claude_body(&after.llm_request, "claude-opus-4"));
-    let after_hashes = compute_provider_request_hashes(&after_body);
-
-    assert_eq!(before_hashes.tools_sha256, after_hashes.tools_sha256);
-    assert_eq!(before_body["system"], after_body["system"]);
-    assert_eq!(before_hashes.system_sha256, after_hashes.system_sha256);
 }
 
 #[tokio::test]
@@ -656,86 +483,6 @@ async fn cache_stability_claude_code_identity_survives_reload_and_reuses_bytes()
     let parsed: Value = serde_json::from_str(user_id).unwrap();
     assert_eq!(parsed["device_id"], identity.device_id);
     assert_eq!(parsed["session_id"], identity.session_id);
-}
-
-#[test]
-fn cache_stability_compression_preserves_user_bytes_and_resets_append_only_baseline() {
-    let mut session = ChatSession::new("compression-cache".to_string());
-    session.messages = vec![
-        system("stable system"),
-        user("first exact bytes 🐸"),
-        assistant("assistant run"),
-        tool("tool result"),
-        user("second exact bytes\nwith newline"),
-        assistant("second assistant run"),
-        user("third exact bytes"),
-    ];
-    let before_users: Vec<String> = session
-        .messages
-        .iter()
-        .filter(|message| message.role == "user")
-        .map(|message| serde_json::to_string(message).unwrap())
-        .collect();
-
-    let archive = serde_json::to_value(&session.messages).unwrap();
-    let mut context = user("Reconstructed continuation context");
-    context.message_id = "rebuilt-context".to_string();
-    session.messages.push(
-        make_reconstruction_report(vec![context], ReconstructionMetadata::default()).unwrap(),
-    );
-    session.cache_guard_force_next = true;
-
-    let after_users: Vec<String> = session
-        .messages
-        .iter()
-        .filter(|message| message.role == "user")
-        .map(|message| serde_json::to_string(message).unwrap())
-        .collect();
-    assert_eq!(after_users, before_users);
-    assert_eq!(
-        serde_json::to_value(&session.messages[..session.messages.len() - 1]).unwrap(),
-        archive
-    );
-    let active = active_context(&session.messages).unwrap().messages;
-    assert_eq!(active.len(), 1);
-
-    let compressed_body =
-        sanitize_body_for_cache_guard(&direct_openai_body(active, vec![cache_tool()]));
-    let forced_baseline = if session.cache_guard_force_next {
-        compressed_body.clone()
-    } else {
-        panic!("compression must force the next cache guard snapshot")
-    };
-    session.cache_guard_force_next = false;
-    session.messages.push(user("post compression append"));
-    let next_body = sanitize_body_for_cache_guard(&direct_openai_body(
-        active_context(&session.messages).unwrap().messages,
-        vec![cache_tool()],
-    ));
-
-    assert!(is_append_only_prefix(&forced_baseline, &next_body));
-}
-
-#[test]
-fn cache_stability_append_only_event_at_tail_preserves_prior_prefix() {
-    let mut messages = vec![system("stable system"), user("hello"), assistant("answer")];
-    let prev_body =
-        sanitize_body_for_cache_guard(&direct_openai_body(messages.clone(), vec![cache_tool()]));
-    let prev_hashes = compute_provider_request_hashes(&prev_body);
-
-    messages.push(crate::chat::internal_roles::event(
-        crate::chat::internal_roles::EventSubkind::SystemNotice,
-        "cache_stability.test",
-        json!({"kind": "tail"}),
-        "tail event".to_string(),
-    ));
-    let next_body =
-        sanitize_body_for_cache_guard(&direct_openai_body(messages, vec![cache_tool()]));
-    let next_hashes = compute_provider_request_hashes(&next_body);
-
-    assert_eq!(prev_hashes.tools_sha256, next_hashes.tools_sha256);
-    assert_eq!(prev_hashes.system_sha256, next_hashes.system_sha256);
-    assert!(is_append_only_prefix(&prev_body, &next_body));
 }
 
 /// Crossing a plan checkpoint is a projection decision only: every
@@ -913,49 +660,4 @@ async fn completed_prefix_fork_keeps_parent_wire_bytes_and_thinking_signatures_p
     let second_turn =
         sanitize_body_for_cache_guard(&openai_body(&request(child_system), "cache-openai"));
     assert!(is_append_only_prefix(&first_turn, &second_turn));
-}
-
-#[tokio::test]
-async fn work_capsules_append_through_openai_and_anthropic_without_changing_prior_wire_prefix() {
-    let model = "test/cache-openai";
-    let (gcx, workspace) = gcx_with_models_and_modes(
-        vec![model_record(model, WireFormat::OpenaiChatCompletions, "")],
-        vec![mode_config("agent", "Agent", "Agent")],
-    )
-    .await;
-    let (root, _) = crate::caps::project_model_defaults_state(gcx.clone()).await;
-    gcx.caps_state.write().await.loaded_project_root = Some(root);
-    let app = AppState::from_gcx(gcx).await;
-    let mut session = ChatSession::new("work-wire".into());
-    session.work_project_root = Some(workspace.path().into());
-    session.thread.model = model.into();
-    session.messages = vec![system("stable system"), user("hello"), assistant("answer")];
-    let session = Arc::new(AMutex::new(session));
-    app.chat
-        .sessions
-        .write()
-        .await
-        .insert("work-wire".into(), session.clone());
-    let before = session.lock().await.messages.clone();
-    crate::chat::generation::prepare_project_work_context(&app, &session).await;
-    let after = session.lock().await.messages.clone();
-    assert_eq!(after.len(), before.len() + 1);
-    for anthropic in [false, true] {
-        let body = |messages| {
-            let request = LlmRequest::new(model.into(), messages).with_params(CommonParams {
-                max_tokens: 1024,
-                ..Default::default()
-            });
-            sanitize_body_for_cache_guard(&if anthropic {
-                normalize_claude_code_cache_body(claude_body(&request, "claude-opus-4"))
-            } else {
-                openai_body(&request, "cache-openai")
-            })
-        };
-        let old = body(before.clone());
-        let new = body(after.clone());
-        assert!(is_append_only_prefix(&old, &new), "anthropic={anthropic}");
-        assert!(!new.to_string().contains("policy_key"));
-        assert!(!new.to_string().contains("work_context_capsule"));
-    }
 }

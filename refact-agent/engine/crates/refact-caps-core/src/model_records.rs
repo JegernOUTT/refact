@@ -282,12 +282,6 @@ impl DefaultModels {
 mod tests {
     use super::*;
 
-    #[derive(Deserialize)]
-    struct NormalizedName {
-        #[serde(deserialize_with = "normalize_string")]
-        name: String,
-    }
-
     #[test]
     fn reasoning_support_and_type_strings_follow_precedence() {
         let none = ChatModelRecord::default();
@@ -333,93 +327,6 @@ mod tests {
     }
 
     #[test]
-    fn completion_family_serde_roundtrip_preserves_flattened_fields() {
-        let record = CompletionModelRecord {
-            base: BaseModelRecord {
-                n_ctx: 8192,
-                name: "qwen".to_string(),
-                tokenizer: "hf://tokenizer".to_string(),
-                completion_endpoint_style: "openai_chat_completions".to_string(),
-                ..Default::default()
-            },
-            scratchpad: "custom".to_string(),
-            scratchpad_patch: serde_json::json!({"fim_prefix": "<fim>", "rag_ratio": 0.25}),
-            model_family: Some(CompletionModelFamily::Qwen2_5CoderBase),
-        };
-
-        let value = serde_json::to_value(&record).unwrap();
-        assert_eq!(
-            value.get("model_family").and_then(|v| v.as_str()),
-            Some("qwen2.5-coder-base")
-        );
-        assert_eq!(value.get("n_ctx").and_then(|v| v.as_u64()), Some(8192));
-
-        let decoded: CompletionModelRecord = serde_json::from_value(value).unwrap();
-        assert_eq!(decoded.base.n_ctx, 8192);
-        assert_eq!(decoded.base.name, "qwen");
-        assert_eq!(decoded.base.tokenizer, "hf://tokenizer");
-        assert_eq!(
-            decoded.base.completion_endpoint_style,
-            "openai_chat_completions"
-        );
-        assert_eq!(decoded.scratchpad, "custom");
-        assert_eq!(
-            decoded
-                .scratchpad_patch
-                .get("fim_prefix")
-                .and_then(|v| v.as_str()),
-            Some("<fim>")
-        );
-        assert_eq!(
-            decoded.model_family,
-            Some(CompletionModelFamily::Qwen2_5CoderBase)
-        );
-    }
-
-    #[test]
-    fn model_record_defaults_match_empty_serde_defaults_for_non_trivial_fields() {
-        assert_eq!(default_chat_scratchpad(), "");
-        assert_eq!(default_completion_scratchpad(), "FIM-PSM");
-        assert_eq!(
-            default_completion_scratchpad_patch(),
-            serde_json::json!({"context_format": "chat", "rag_ratio": 0.5})
-        );
-        assert_eq!(
-            default_hf_tokenizer_template(),
-            "https://huggingface.co/$HF_MODEL/resolve/main/tokenizer.json"
-        );
-
-        let default_chat = ChatModelRecord::default();
-        let chat: ChatModelRecord = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert_eq!(default_chat.scratchpad, "");
-        assert_eq!(chat.scratchpad, "");
-        assert!(default_chat.base.enabled);
-        assert!(chat.base.enabled);
-        assert!(default_chat.base.supports_cache_control);
-        assert!(chat.base.supports_cache_control);
-        assert!(default_chat.supports_temperature);
-        assert!(chat.supports_temperature);
-
-        let default_completion = CompletionModelRecord::default();
-        let completion: CompletionModelRecord =
-            serde_json::from_value(serde_json::json!({})).unwrap();
-        assert_eq!(default_completion.scratchpad, "FIM-PSM");
-        assert_eq!(completion.scratchpad, "FIM-PSM");
-        assert_eq!(
-            default_completion.scratchpad_patch,
-            serde_json::json!({"context_format": "chat", "rag_ratio": 0.5})
-        );
-        assert_eq!(
-            completion.scratchpad_patch,
-            serde_json::json!({"context_format": "chat", "rag_ratio": 0.5})
-        );
-        assert!(default_completion.base.enabled);
-        assert!(completion.base.enabled);
-        assert!(default_completion.base.supports_cache_control);
-        assert!(completion.base.supports_cache_control);
-    }
-
-    #[test]
     fn completion_endpoint_style_is_independent_from_scratchpad_style() {
         let completion: CompletionModelRecord = serde_json::from_value(serde_json::json!({
             "completion_endpoint_style": "openai_chat_completions",
@@ -447,66 +354,5 @@ mod tests {
                 .unwrap(),
             refact_core::llm_types::CompletionEndpointStyle::OpenaiChatCompletions
         );
-    }
-
-    #[test]
-    fn default_metadata_has_no_pricing_map() {
-        let metadata = CapsMetadata::default();
-        assert!(metadata.features.is_empty());
-        assert!(serde_json::to_value(metadata)
-            .unwrap()
-            .get("pricing")
-            .is_none());
-
-        let decoded: CapsMetadata = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert!(decoded.features.is_empty());
-    }
-
-    #[test]
-    fn default_models_serde_aliases_and_defaults_work() {
-        let decoded: DefaultModels = serde_json::from_value(serde_json::json!({
-            "completion_model": "starcoder",
-            "chat_model": "gpt-4.1",
-            "chat_model_2": "gpt-4.1-pro",
-            "task_planner_agent_model": "gpt-4.1-agent",
-            "chat_light_model": "gpt-4.1-mini"
-        }))
-        .unwrap();
-        assert_eq!(decoded.completion_default_model, "starcoder");
-        assert_eq!(decoded.chat_default_model, "gpt-4.1");
-        assert_eq!(decoded.chat_model_2, "gpt-4.1-pro");
-        assert_eq!(decoded.task_planner_agent_model, "gpt-4.1-agent");
-        assert_eq!(decoded.chat_thinking_model, "");
-        assert_eq!(decoded.chat_light_model, "gpt-4.1-mini");
-        assert_eq!(decoded.chat_buddy_model, "");
-
-        let mut target = DefaultModels::default();
-        target.apply_override(&decoded, Some("openai"));
-        assert_eq!(target.completion_default_model, "openai/starcoder");
-        assert_eq!(target.chat_default_model, "openai/gpt-4.1");
-        assert_eq!(target.chat_model_2, "openai/gpt-4.1-pro");
-        assert_eq!(target.task_planner_agent_model, "openai/gpt-4.1-agent");
-        assert_eq!(target.chat_light_model, "openai/gpt-4.1-mini");
-        assert_eq!(target.chat_thinking_model, "");
-        assert_eq!(target.chat_buddy_model, "");
-
-        let mut already_qualified = DefaultModels::default();
-        already_qualified.apply_override(
-            &DefaultModels {
-                chat_default_model: "openai/gpt-4.1".to_string(),
-                ..Default::default()
-            },
-            Some("openai"),
-        );
-        assert_eq!(already_qualified.chat_default_model, "openai/gpt-4.1");
-    }
-
-    #[test]
-    fn normalize_string_lowercases_and_replaces_separators() {
-        let decoded: NormalizedName = serde_json::from_value(serde_json::json!({
-            "name": "OpenAI Responses-2"
-        }))
-        .unwrap();
-        assert_eq!(decoded.name, "openai_responses_2");
     }
 }

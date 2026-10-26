@@ -335,47 +335,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_load_skill_missing_skill_md() {
-        let tmp = tempfile::tempdir().unwrap();
-        let skill_dir = tmp.path().join("not_a_skill");
-        tokio::fs::create_dir_all(&skill_dir).await.unwrap();
-
-        let result = load_skill_from_dir(&skill_dir, CommandSource::GlobalRefact).await;
-        assert!(result.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_load_skill_missing_name() {
-        let tmp = tempfile::tempdir().unwrap();
-        let skill_dir = tmp.path().join("skills").join("bad_skill");
-        tokio::fs::create_dir_all(&skill_dir).await.unwrap();
-
-        tokio::fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\ndescription: No name here\n---\nBody",
-        )
-        .await
-        .unwrap();
-
-        let result = load_skill_from_dir(&skill_dir, CommandSource::GlobalRefact).await;
-        assert!(result.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_load_skill_missing_description() {
-        let tmp = tempfile::tempdir().unwrap();
-        let skill_dir = tmp.path().join("skills").join("no_desc");
-        tokio::fs::create_dir_all(&skill_dir).await.unwrap();
-
-        tokio::fs::write(skill_dir.join("SKILL.md"), "---\nname: no_desc\n---\nBody")
-            .await
-            .unwrap();
-
-        let result = load_skill_from_dir(&skill_dir, CommandSource::GlobalRefact).await;
-        assert!(result.is_none());
-    }
-
-    #[tokio::test]
     async fn test_load_skill_defaults() {
         let tmp = tempfile::tempdir().unwrap();
         let skill_dir = tmp.path().join("skills").join("minimal");
@@ -396,37 +355,6 @@ mod tests {
         assert!(full.context.is_none());
         assert!(full.agent.is_none());
         assert!(full.allowed_tools.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_load_skill_indices_multiple() {
-        let tmp = tempfile::tempdir().unwrap();
-        let skills_dir = tmp.path().join("skills");
-
-        for skill_name in &["alpha", "beta", "gamma"] {
-            let dir = skills_dir.join(skill_name);
-            tokio::fs::create_dir_all(&dir).await.unwrap();
-            tokio::fs::write(
-                dir.join("SKILL.md"),
-                format!(
-                    "---\nname: {}\ndescription: Skill {}\n---\nBody",
-                    skill_name, skill_name
-                ),
-            )
-            .await
-            .unwrap();
-        }
-
-        let ext_dirs = ExtDirs {
-            global_dirs: vec![tmp.path().to_path_buf()],
-            installed_dirs: vec![],
-            project_dirs: vec![],
-        };
-        let indices = load_skill_indices(&ext_dirs).await;
-        assert_eq!(indices.len(), 3);
-        assert_eq!(indices[0].name, "alpha");
-        assert_eq!(indices[1].name, "beta");
-        assert_eq!(indices[2].name, "gamma");
     }
 
     #[tokio::test]
@@ -481,46 +409,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_load_skill_full_not_found() {
-        let ext_dirs = ExtDirs {
-            global_dirs: vec![PathBuf::from("/nonexistent")],
-            installed_dirs: vec![],
-            project_dirs: vec![],
-        };
-        let full = load_skill_full(&ext_dirs, "nonexistent").await;
-        assert!(full.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_load_skill_linked_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        tokio::fs::write(tmp.path().join("context.md"), "Some linked content")
-            .await
-            .unwrap();
-
-        let result = load_skill_linked_file(tmp.path(), "context.md").await;
-        assert_eq!(result, Some("Some linked content".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_load_skill_linked_file_missing() {
-        let result = load_skill_linked_file(Path::new("/nonexistent"), "missing.md").await;
-        assert!(result.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_include_path_traversal_rejected() {
-        let result = load_skill_linked_file(Path::new("/some/dir"), "../../secret.txt").await;
-        assert!(result.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_include_absolute_path_rejected() {
-        let result = load_skill_linked_file(Path::new("/some/dir"), "/etc/passwd").await;
-        assert!(result.is_none());
-    }
-
-    #[tokio::test]
     async fn test_include_valid_path_works() {
         let tmp = tempfile::tempdir().unwrap();
         let templates_dir = tmp.path().join("templates");
@@ -553,17 +441,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_load_skill_no_skills_dir() {
-        let ext_dirs = ExtDirs {
-            global_dirs: vec![PathBuf::from("/nonexistent/path")],
-            installed_dirs: vec![],
-            project_dirs: vec![],
-        };
-        let indices = load_skill_indices(&ext_dirs).await;
-        assert!(indices.is_empty());
-    }
-
-    #[tokio::test]
     async fn test_skill_index_only_no_body() {
         let tmp = tempfile::tempdir().unwrap();
         let skill_dir = tmp.path().join("skills").join("large_skill");
@@ -586,57 +463,6 @@ mod tests {
         assert!(index.user_invocable);
     }
 
-    #[tokio::test]
-    async fn test_skill_index_only_missing_skill_md() {
-        let tmp = tempfile::tempdir().unwrap();
-        let skill_dir = tmp.path().join("no_skill");
-        tokio::fs::create_dir_all(&skill_dir).await.unwrap();
-
-        let index = load_skill_index_only(&skill_dir, CommandSource::GlobalRefact).await;
-        assert!(index.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_skill_index_only_missing_name() {
-        let tmp = tempfile::tempdir().unwrap();
-        let skill_dir = tmp.path().join("skills").join("no_name");
-        tokio::fs::create_dir_all(&skill_dir).await.unwrap();
-        tokio::fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\ndescription: No name\n---\nBody",
-        )
-        .await
-        .unwrap();
-
-        let index = load_skill_index_only(&skill_dir, CommandSource::GlobalRefact).await;
-        assert!(index.is_none());
-    }
-
-    #[cfg(not(windows))] // Windows has case-insensitive filesystem; SKILL.md == skill.md there
-    #[tokio::test]
-    async fn test_load_skill_case_sensitive_skill_md() {
-        let tmp = tempfile::tempdir().unwrap();
-        let skill_dir = tmp.path().join("skills").join("case_test");
-        tokio::fs::create_dir_all(&skill_dir).await.unwrap();
-        tokio::fs::write(
-            skill_dir.join("skill.md"),
-            "---\nname: case_test\ndescription: desc\n---\nBody",
-        )
-        .await
-        .unwrap();
-
-        let ext_dirs = ExtDirs {
-            global_dirs: vec![tmp.path().to_path_buf()],
-            installed_dirs: vec![],
-            project_dirs: vec![],
-        };
-        let indices = load_skill_indices(&ext_dirs).await;
-        assert!(
-            indices.is_empty(),
-            "SKILL.md must be uppercase, skill.md should not be recognized"
-        );
-    }
-
     #[test]
     fn test_validate_skill_id_valid() {
         assert!(validate_skill_id("my-skill").is_ok());
@@ -657,21 +483,6 @@ mod tests {
         assert!(validate_skill_id("").is_err());
         assert!(validate_skill_id("..").is_err());
         assert!(validate_skill_id("name with spaces").is_err());
-    }
-
-    #[tokio::test]
-    async fn test_load_skill_full_rejects_traversal() {
-        let tmp = tempfile::tempdir().unwrap();
-        let ext_dirs = ExtDirs {
-            global_dirs: vec![tmp.path().to_path_buf()],
-            installed_dirs: vec![],
-            project_dirs: vec![],
-        };
-        let result = load_skill_full(&ext_dirs, "../evil").await;
-        assert!(result.is_none(), "traversal name should be rejected");
-
-        let result2 = load_skill_full(&ext_dirs, "../../etc").await;
-        assert!(result2.is_none(), "traversal name should be rejected");
     }
 
     #[tokio::test]

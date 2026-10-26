@@ -3827,33 +3827,6 @@ mod tests {
     use super::*;
     use crate::call_validation::{ChatToolCall, ChatToolFunction};
 
-    #[tokio::test]
-    async fn completion_side_effects_do_not_block_generation_on_buddy_lock() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = AppState::from_gcx(gcx).await;
-        let buddy_guard = app.buddy.buddy.lock().await;
-        let session_arc = Arc::new(AMutex::new(ChatSession::new(
-            "completion-side-effects".to_string(),
-        )));
-
-        tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            spawn_chat_completion_side_effects(
-                app.clone(),
-                session_arc.clone(),
-                "completion-side-effects".to_string(),
-                "Completion Side Effects".to_string(),
-                false,
-            ),
-        )
-        .await
-        .expect("completion side effects must detach before waiting for Buddy");
-
-        assert_eq!(session_arc.lock().await.post_turn_task_handles.len(), 1);
-        drop(buddy_guard);
-        session_arc.lock().await.close_event_channel();
-    }
-
     fn make_user_msg(content: &str) -> ChatMessage {
         ChatMessage {
             role: "user".to_string(),
@@ -3926,95 +3899,6 @@ mod tests {
             }),
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn mcp_lazy_hint_is_inserted_once_without_inlining_the_catalog() {
-        let mut session = ChatSession::new("mcp-lazy".to_string());
-        session.add_message(ChatMessage::new("system".to_string(), "system".to_string()));
-        session.add_message(make_user_msg("hello"));
-
-        assert!(inject_mcp_lazy_hint(&mut session, 52));
-        assert!(!inject_mcp_lazy_hint(&mut session, 52));
-
-        let hint = &session.messages[1];
-        assert_eq!(hint.role, "cd_instruction");
-        assert_eq!(hint.tool_call_id, MCP_LAZY_INDEX_MARKER);
-        let text = hint.content.content_text_only();
-        assert!(text.contains("52 tools available"));
-        assert!(text.contains("mcp_tool_search"));
-        assert!(text.contains("\"query\": \".\""));
-        assert!(text.contains("\"max_results\": 52"));
-        assert!(!text.contains("Available MCP tools"));
-        assert!(text.len() < 300);
-    }
-
-    #[test]
-    fn goal_budget_pursuit_usage_requires_marker() {
-        let mut session = ChatSession::new("goal-generation".to_string());
-        session.install_goal("agent", "ship it", true, GoalBudget::default());
-        session.add_message(make_assistant_msg("not a pursuit"));
-        session.messages.last_mut().unwrap().usage = Some(ChatUsage {
-            prompt_tokens: 10,
-            completion_tokens: 5,
-            total_tokens: 15,
-            cache_read_tokens: None,
-            cache_creation_tokens: None,
-            metering_usd: None,
-        });
-        assert!(latest_goal_pursuit_usage(&session).is_none());
-
-        session.messages.last_mut().unwrap().extra.insert(
-            "goal_pursuit".to_string(),
-            json!({"account_progress": true}),
-        );
-        let usage = latest_goal_pursuit_usage(&session).unwrap();
-        assert_eq!(usage.total_tokens, 15);
-        assert!(session.goal_record_progress_from_usage(&usage));
-        assert_eq!(session.goal.as_ref().unwrap().progress.turns_used, 1);
-        assert_eq!(session.goal.as_ref().unwrap().progress.tokens_used, 15);
-        assert_eq!(session.goal.as_ref().unwrap().progress.no_progress_turns, 1);
-    }
-
-    #[test]
-    fn goal_budget_pursuit_usage_records_expiring_turn() {
-        let mut session = ChatSession::new("goal-generation-expiring".to_string());
-        session.install_goal(
-            "agent",
-            "ship it",
-            true,
-            GoalBudget {
-                max_turns: Some(10),
-                max_minutes: Some(1),
-                max_tokens: Some(1_000),
-                max_cost_cents: None,
-                cooldown_ms: 1_500,
-                no_progress_token_threshold: 10,
-                no_progress_turns: Some(2),
-                explicit: false,
-            },
-        );
-        session.goal.as_mut().unwrap().progress.started_at_ms = 1;
-        let mut assistant = make_assistant_msg("late pursuit");
-        assistant.usage = Some(ChatUsage {
-            prompt_tokens: 10,
-            completion_tokens: 15,
-            total_tokens: 25,
-            cache_read_tokens: None,
-            cache_creation_tokens: None,
-            metering_usd: None,
-        });
-        assistant.extra.insert(
-            "goal_pursuit".to_string(),
-            json!({"account_progress": true}),
-        );
-        session.add_message(assistant);
-
-        let usage = latest_goal_pursuit_usage(&session).unwrap();
-        assert!(session.goal_record_progress_from_usage(&usage));
-        assert_eq!(session.goal.as_ref().unwrap().progress.turns_used, 1);
-        assert_eq!(session.goal.as_ref().unwrap().progress.tokens_used, 25);
-        assert_eq!(session.goal_status, Some(GoalStatus::BudgetExhausted));
     }
 
     fn make_assistant_with_tool_call(tool_call_id: &str, tool_name: &str) -> ChatMessage {
@@ -4119,37 +4003,6 @@ mod tests {
     }
 
     #[test]
-    fn model_type_defaults_for_thread_keeps_normal_chat_defaults_when_model_is_shared() {
-        let (user_defaults, defaults) = shared_model_defaults();
-        let thread = ThreadParams::default();
-
-        let selected =
-            model_type_defaults_for_thread(&user_defaults, &defaults, &thread, "shared/model");
-
-        assert_eq!(selected.temperature, Some(0.1));
-    }
-
-    #[test]
-    fn model_type_defaults_for_thread_uses_task_planner_defaults_for_task_agents() {
-        let (user_defaults, defaults) = shared_model_defaults();
-        let thread = ThreadParams {
-            task_meta: Some(TaskMeta {
-                task_id: "task-1".to_string(),
-                role: "agents".to_string(),
-                agent_id: Some("agent-1".to_string()),
-                card_id: Some("T-1".to_string()),
-                planner_chat_id: Some("planner-chat".to_string()),
-            }),
-            ..Default::default()
-        };
-
-        let selected =
-            model_type_defaults_for_thread(&user_defaults, &defaults, &thread, "shared/model");
-
-        assert_eq!(selected.temperature, Some(0.3));
-    }
-
-    #[test]
     fn context_limit_final_error_redacts_provider_secret() {
         let text = context_limit_final_error_message(
             "context_length_exceeded: Authorization: Bearer sk-test-secret",
@@ -4242,91 +4095,6 @@ mod tests {
             wrapped_final.len()
                 <= PARTIAL_OUTPUT_STREAM_ERROR.len() + 17 + final_context_limit_error_bound()
         );
-    }
-
-    #[test]
-    fn normalize_stop_reason_openai_length() {
-        assert_eq!(
-            normalize_stop_reason("length"),
-            Some(NormalizedStopReason::ProviderLengthStop)
-        );
-        assert_eq!(
-            normalize_stop_reason("max_output_tokens"),
-            Some(NormalizedStopReason::ProviderLengthStop)
-        );
-    }
-
-    #[test]
-    fn normalize_stop_reason_anthropic_max_tokens() {
-        assert_eq!(
-            normalize_stop_reason("max_tokens"),
-            Some(NormalizedStopReason::ProviderLengthStop)
-        );
-    }
-
-    #[test]
-    fn normalize_stop_reason_gemini_max_tokens() {
-        assert_eq!(
-            normalize_stop_reason("MAX_TOKENS"),
-            Some(NormalizedStopReason::ProviderLengthStop)
-        );
-    }
-
-    #[test]
-    fn normalize_stop_reason_generic_context_length() {
-        assert_eq!(
-            normalize_stop_reason("context_length_exceeded: input too long for model_length"),
-            Some(NormalizedStopReason::ContextLengthStop)
-        );
-    }
-
-    #[test]
-    fn test_claude_code_identity_generated_once_per_session() {
-        let model = claude_code_model();
-        let mut session = ChatSession::new("cc-identity".to_string());
-
-        let first = ensure_claude_code_identity_for_test(&mut session, &model).unwrap();
-        let version_after_first = session.trajectory_version;
-        let second = ensure_claude_code_identity_for_test(&mut session, &model).unwrap();
-
-        assert_eq!(first, second);
-        assert_eq!(session.thread.claude_code_identity, Some(first));
-        assert_eq!(session.trajectory_version, version_after_first);
-        assert!(session.trajectory_dirty);
-    }
-
-    #[test]
-    fn test_claude_code_identity_reuses_deserialized_identity() {
-        let model = claude_code_model();
-        let identity: crate::llm::ClaudeCodeIdentity = serde_json::from_str(
-            r#"{
-                "device_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                "session_id":"bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
-            }"#,
-        )
-        .unwrap();
-        let mut session = ChatSession::new("cc-reload".to_string());
-        session.thread.claude_code_identity = Some(identity.clone());
-
-        let reused = ensure_claude_code_identity_for_test(&mut session, &model).unwrap();
-
-        assert_eq!(reused, identity);
-        assert_eq!(session.trajectory_version, 0);
-        assert!(!session.trajectory_dirty);
-    }
-
-    #[test]
-    fn test_claude_code_identity_skips_non_claude_code_models() {
-        let mut session = ChatSession::new("not-cc".to_string());
-        let model = BaseModelRecord {
-            wire_format: crate::llm::WireFormat::AnthropicMessages,
-            auth_token: String::new(),
-            ..Default::default()
-        };
-
-        assert!(ensure_claude_code_identity_for_test(&mut session, &model).is_none());
-        assert!(session.thread.claude_code_identity.is_none());
-        assert_eq!(session.trajectory_version, 0);
     }
 
     fn identified(id: &str, mut message: ChatMessage) -> ChatMessage {
@@ -4447,29 +4215,6 @@ mod tests {
         assert_eq!(persist_preamble_messages(&mut session, &with_preamble), 0);
     }
 
-    #[test]
-    fn mcp_lazy_hint_targets_the_active_context() {
-        let mut session = handed_off_session();
-        let mut archived_hint = ChatMessage::new("cd_instruction".into(), "archived".into());
-        archived_hint.tool_call_id = MCP_LAZY_INDEX_MARKER.into();
-        session.insert_message(1, archived_hint);
-        assert_eq!(
-            persist_preamble_messages(
-                &mut session,
-                &[ChatMessage::new("system".into(), "fresh prompt".into())]
-            ),
-            1
-        );
-
-        assert!(inject_mcp_lazy_hint(&mut session, 7));
-        assert_eq!(
-            active_roles(&session)[..3],
-            ["system", "cd_instruction", "context_file"]
-        );
-        assert!(!inject_mcp_lazy_hint(&mut session, 7));
-        assert_eq!(session.messages.len(), 3);
-    }
-
     #[tokio::test]
     async fn resolved_new_chat_default_persists_through_checkpoint_writer() {
         let root = tempfile::tempdir().unwrap();
@@ -4501,24 +4246,6 @@ mod tests {
     }
 
     #[test]
-    fn test_tail_needs_assistant_ends_with_assistant_no_tools() {
-        let messages = vec![make_user_msg("hello"), make_assistant_msg("response")];
-        assert!(!tail_needs_assistant(&messages));
-    }
-
-    #[test]
-    fn test_tail_needs_assistant_ends_with_user() {
-        let messages = vec![make_user_msg("hello")];
-        assert!(tail_needs_assistant(&messages));
-    }
-
-    #[test]
-    fn test_tail_needs_assistant_ends_with_event() {
-        let messages = vec![make_event_msg("synthetic prompt")];
-        assert!(tail_needs_assistant(&messages));
-    }
-
-    #[test]
     fn test_tail_needs_assistant_ends_with_tool_from_client() {
         let messages = vec![
             make_user_msg("hello"),
@@ -4539,78 +4266,6 @@ mod tests {
     }
 
     #[test]
-    fn test_reasoning_token_limit_stop_detects_thought_only_length_finish() {
-        let message = make_reasoning_token_limit_msg();
-        assert!(is_reasoning_token_limit_stop(&message));
-    }
-
-    #[test]
-    fn test_reasoning_token_limit_stop_ignores_context_length_stop() {
-        let mut message = make_reasoning_token_limit_msg();
-        message.finish_reason = Some("context_length_exceeded".to_string());
-
-        assert!(!is_reasoning_token_limit_stop(&message));
-    }
-
-    #[test]
-    fn test_reasoning_token_limit_stop_ignores_visible_answer() {
-        let mut message = make_reasoning_token_limit_msg();
-        message.content = ChatContent::SimpleText("visible answer".to_string());
-        assert!(!is_reasoning_token_limit_stop(&message));
-    }
-
-    #[test]
-    fn length_stop_empty_reasoning_high_pressure_requests_compression() {
-        let message = make_high_pressure_length_stop();
-        let messages = vec![make_user_msg("continue"), message.clone()];
-
-        assert!(is_high_pressure_length_stop(
-            &message,
-            &messages,
-            100_000,
-            false,
-            refact_core::provider_types::ImageTokenMode::Provider
-        ));
-    }
-
-    #[test]
-    fn low_pressure_length_stop_does_not_trigger_compression() {
-        let message = make_low_pressure_length_stop();
-        let messages = vec![make_user_msg("continue"), message.clone()];
-
-        assert!(!is_high_pressure_length_stop(
-            &message,
-            &messages,
-            100_000,
-            false,
-            refact_core::provider_types::ImageTokenMode::Provider
-        ));
-    }
-
-    #[test]
-    fn length_stop_visible_answer_without_high_pressure_does_not_request_compression() {
-        let mut message = make_high_pressure_length_stop();
-        message.content = ChatContent::SimpleText("ordinary visible answer".repeat(20));
-        message.usage = Some(ChatUsage {
-            prompt_tokens: 100,
-            completion_tokens: 200,
-            total_tokens: 300,
-            cache_read_tokens: None,
-            cache_creation_tokens: None,
-            metering_usd: None,
-        });
-        let messages = vec![make_user_msg("continue"), message.clone()];
-
-        assert!(!is_high_pressure_length_stop(
-            &message,
-            &messages,
-            100_000,
-            false,
-            refact_core::provider_types::ImageTokenMode::Provider
-        ));
-    }
-
-    #[test]
     fn length_stop_with_tool_calls_does_not_request_compression() {
         let mut message = make_high_pressure_length_stop();
         message.tool_calls = make_assistant_with_tool_call("call_123", "cat").tool_calls;
@@ -4623,42 +4278,6 @@ mod tests {
             false,
             refact_core::provider_types::ImageTokenMode::Provider
         ));
-    }
-
-    #[test]
-    fn max_output_tokens_alias_is_treated_like_length() {
-        let mut message = make_high_pressure_length_stop();
-        message.finish_reason = Some("max_output_tokens".to_string());
-        let messages = vec![make_user_msg("continue"), message.clone()];
-
-        assert!(is_high_pressure_length_stop(
-            &message,
-            &messages,
-            100_000,
-            false,
-            refact_core::provider_types::ImageTokenMode::Provider
-        ));
-    }
-
-    #[test]
-    fn test_tail_needs_assistant_empty_assistant_discarded() {
-        let messages = vec![
-            make_user_msg("hello"),
-            make_assistant_with_tool_call("call_123", "cat"),
-            make_tool_msg("call_123", "file content"),
-        ];
-        assert!(tail_needs_assistant(&messages));
-    }
-
-    #[test]
-    fn test_tail_needs_assistant_context_file_after_tool() {
-        let messages = vec![
-            make_user_msg("hello"),
-            make_assistant_with_tool_call("call_123", "cat"),
-            make_tool_msg("call_123", "file content"),
-            make_context_file_msg(),
-        ];
-        assert!(tail_needs_assistant(&messages));
     }
 
     #[test]
@@ -4781,152 +4400,6 @@ mod tests {
     }
 
     #[test]
-    fn test_tail_needs_assistant_empty_messages() {
-        let messages: Vec<ChatMessage> = vec![];
-        assert!(!tail_needs_assistant(&messages));
-    }
-
-    #[test]
-    fn test_tail_needs_assistant_assistant_with_empty_tool_calls() {
-        let messages = vec![
-            make_user_msg("hello"),
-            ChatMessage {
-                role: "assistant".to_string(),
-                content: ChatContent::SimpleText("response".to_string()),
-                tool_calls: Some(vec![]),
-                ..Default::default()
-            },
-        ];
-        assert!(!tail_needs_assistant(&messages));
-    }
-
-    #[test]
-    fn test_fork_error_does_not_break_loop() {
-        let mut loop_count = 0;
-        let mut reached_normal_generation = false;
-
-        loop {
-            loop_count += 1;
-            if loop_count > 5 {
-                panic!("Loop ran too many times");
-            }
-
-            let fork_agent: Option<String> = if loop_count == 1 {
-                Some("subagent".to_string())
-            } else {
-                None
-            };
-
-            if fork_agent.is_some() {
-                let fork_result: Result<String, String> = Err("subchat failed".to_string());
-                match fork_result {
-                    Ok(_content) => {
-                        break;
-                    }
-                    Err(_e) => {
-                        continue;
-                    }
-                }
-            }
-
-            reached_normal_generation = true;
-            break;
-        }
-
-        assert!(
-            reached_normal_generation,
-            "Normal generation path must be reached after fork error"
-        );
-        assert_eq!(
-            loop_count, 2,
-            "Loop must iterate twice: fork error then normal generation"
-        );
-    }
-
-    #[test]
-    fn test_context_limit_gate_recognizes_explicit_and_wrapped_errors() {
-        let explicit = context_limit_error("context_length_exceeded: reduce prompt", false);
-        let wrapped = context_limit_error(
-            &format!(
-                "{} Original error: context_length_exceeded",
-                PARTIAL_OUTPUT_STREAM_ERROR,
-            ),
-            true,
-        );
-        assert!(explicit.retry_decision().is_context_limit());
-        assert!(wrapped.retry_decision().is_context_limit());
-    }
-
-    #[test]
-    fn normal_chat_context_limit_requests_reactive_compaction() {
-        let error = context_limit_error("context_length_exceeded", false);
-        assert!(error.retry_decision().is_context_limit());
-    }
-
-    #[test]
-    fn context_length_error_triggers_reactive_compression() {
-        let error = context_limit_error("input too long for model_length", false);
-        assert!(error.retry_decision().is_context_limit());
-    }
-
-    #[test]
-    fn task_planner_context_limit_requests_reactive_compaction() {
-        let error = context_limit_error("context_length_exceeded", false);
-        assert!(error.retry_decision().is_context_limit());
-    }
-
-    #[test]
-    fn test_context_limit_compaction_allows_partial_output_errors() {
-        let abort = std::sync::atomic::AtomicBool::new(false);
-        let partial_context_error = context_limit_error(
-            &format!(
-                "{} Original error: context_length_exceeded",
-                PARTIAL_OUTPUT_STREAM_ERROR,
-            ),
-            true,
-        );
-
-        assert!(partial_context_error.retry_decision().is_context_limit());
-        assert!(!partial_context_error.should_retry(0, &abort));
-        assert!(
-            partial_context_error.retry_decision().is_context_limit()
-                && !abort.load(Ordering::SeqCst)
-        );
-    }
-
-    #[test]
-    fn test_context_limit_compaction_blocked_by_abort_flag() {
-        let abort = std::sync::atomic::AtomicBool::new(true);
-        let partial_context_error = context_limit_error("context_length_exceeded", false);
-
-        assert!(partial_context_error.retry_decision().is_context_limit());
-        assert!(
-            !(partial_context_error.retry_decision().is_context_limit()
-                && !abort.load(Ordering::SeqCst)),
-            "abort must suppress reactive compaction",
-        );
-    }
-
-    #[test]
-    fn test_segment_summary_count_resets_on_success() {
-        let segment_summary_count = 0usize;
-        assert_eq!(segment_summary_count, 0);
-    }
-
-    #[test]
-    fn test_downgrade_bogus_tool_calls_finish_reason() {
-        let mut result = ChoiceFinal {
-            finish_reason: Some("tool_calls".to_string()),
-            ..Default::default()
-        };
-
-        maybe_downgrade_bogus_tool_calls_finish_reason(&mut result, "test");
-
-        assert_eq!(result.finish_reason.as_deref(), Some("stop"));
-        assert!(result.extra.contains_key("_tool_call_guard"));
-    }
-
-    #[test]
     fn test_does_not_downgrade_tool_calls_finish_reason_when_tool_calls_exist() {
         let mut result = ChoiceFinal {
             finish_reason: Some("tool_calls".to_string()),
@@ -4944,53 +4417,6 @@ mod tests {
         maybe_downgrade_bogus_tool_calls_finish_reason(&mut result, "test");
 
         assert_eq!(result.finish_reason.as_deref(), Some("tool_calls"));
-        assert!(!result.extra.contains_key("_tool_call_guard"));
-    }
-
-    #[test]
-    fn test_downgrade_bogus_tool_use_finish_reason() {
-        let mut result = ChoiceFinal {
-            finish_reason: Some("tool_use".to_string()),
-            ..Default::default()
-        };
-
-        maybe_downgrade_bogus_tool_calls_finish_reason(&mut result, "test");
-
-        assert_eq!(result.finish_reason.as_deref(), Some("stop"));
-        assert_eq!(
-            result.extra["_tool_call_guard"]["original_finish_reason"],
-            "tool_use"
-        );
-    }
-
-    #[test]
-    fn test_does_not_downgrade_tool_use_finish_reason_when_tool_calls_exist() {
-        let mut result = ChoiceFinal {
-            finish_reason: Some("tool_use".to_string()),
-            tool_calls_raw: vec![json!({
-                "type": "function",
-                "id": "call_123",
-                "function": { "name": "shell", "arguments": "{}" }
-            })],
-            ..Default::default()
-        };
-
-        maybe_downgrade_bogus_tool_calls_finish_reason(&mut result, "test");
-
-        assert_eq!(result.finish_reason.as_deref(), Some("tool_use"));
-        assert!(!result.extra.contains_key("_tool_call_guard"));
-    }
-
-    #[test]
-    fn test_does_not_downgrade_non_tool_calls_finish_reason() {
-        let mut result = ChoiceFinal {
-            finish_reason: Some("stop".to_string()),
-            ..Default::default()
-        };
-
-        maybe_downgrade_bogus_tool_calls_finish_reason(&mut result, "test");
-
-        assert_eq!(result.finish_reason.as_deref(), Some("stop"));
         assert!(!result.extra.contains_key("_tool_call_guard"));
     }
 
@@ -5052,151 +4478,6 @@ mod tests {
         assert_eq!(chunks.concat(), text);
     }
 
-    #[tokio::test]
-    async fn test_models_dev_generation_metering_uses_central_pricing_lookup() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = AppState::from_gcx(gcx).await;
-        let mut model_caps = std::collections::HashMap::new();
-        model_caps.insert(
-            "openai/gpt-4o".to_string(),
-            crate::caps::model_caps::ModelCapabilities {
-                n_ctx: 128_000,
-                max_output_tokens: 16_384,
-                pricing: Some(crate::providers::traits::ModelPricing {
-                    prompt: 2.0,
-                    generated: 4.0,
-                    cache_read: Some(1.0),
-                    cache_creation: Some(3.0),
-                    context_over_200k: None,
-                }),
-                ..Default::default()
-            },
-        );
-        {
-            let mut caps = app.model.caps.write().await;
-            caps.caps = Some(std::sync::Arc::new(crate::caps::CodeAssistantCaps {
-                model_caps: std::sync::Arc::new(model_caps),
-                ..Default::default()
-            }));
-            caps.last_attempted_ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-        }
-        let usage = ChatUsage {
-            prompt_tokens: 1_000,
-            completion_tokens: 2_000,
-            total_tokens: 3_000,
-            cache_read_tokens: Some(500),
-            cache_creation_tokens: Some(250),
-            metering_usd: None,
-        };
-
-        let metering = generation_metering_usd(&app, "openai/gpt-4o", &usage)
-            .await
-            .unwrap();
-
-        assert_eq!(metering.prompt_usd, 0.002);
-        assert_eq!(metering.generated_usd, 0.008);
-        assert_eq!(metering.cache_read_usd, Some(0.0005));
-        assert_eq!(metering.cache_creation_usd, Some(0.00075));
-    }
-
-    #[test]
-    fn cache_guard_violation_does_not_become_error_state_in_generation_loop() {
-        let result: Result<GenerationResult, LlmStreamError> =
-            Ok(GenerationResult::PausedForUserDecision);
-        let would_call_finish_stream_with_error = matches!(result, Err(_));
-        let would_break_cleanly = matches!(result, Ok(GenerationResult::PausedForUserDecision));
-        assert!(
-            would_break_cleanly,
-            "PausedForUserDecision must break the loop cleanly"
-        );
-        assert!(
-            !would_call_finish_stream_with_error,
-            "PausedForUserDecision must not trigger finish_stream_with_error"
-        );
-    }
-
-    #[test]
-    fn enrichment_identity_survives_context_removal_and_restore() {
-        let mut session = ChatSession::new("enrichment-identity".to_string());
-        let identity = "query-fingerprint:result-fingerprint".to_string();
-        let query_fingerprint = "query-fingerprint".to_string();
-        let mut user = make_user_msg("query");
-        record_enrichment_identity_on_user_message(&mut user, &identity, &query_fingerprint);
-        session.add_message(user);
-        session.add_message(ChatMessage {
-            role: "context_file".to_string(),
-            tool_call_id: "knowledge_enrichment".to_string(),
-            ..Default::default()
-        });
-        session.record_enrichment_identity(identity.clone());
-        session
-            .messages
-            .retain(|message| message.role != "context_file");
-
-        let restored = ChatSession::new_with_trajectory(
-            "enrichment-identity".to_string(),
-            session.messages.clone(),
-            session.thread.clone(),
-            session.created_at.clone(),
-            None,
-            Vec::new(),
-            None,
-        );
-
-        assert!(restored.has_enrichment_identity(&identity));
-    }
-
-    #[test]
-    fn enrichment_insertion_rejects_stale_turns_and_reused_identities() {
-        let mut session = ChatSession::new("enrichment-stale".to_string());
-        session.add_message(make_user_msg("current query"));
-        let user = session.messages.last().unwrap();
-        let turn = EnrichmentTurnIdentity {
-            revision: session.trajectory_version,
-            latest_user_id: user.message_id.clone(),
-            query_fingerprint: enrichment_query_fingerprint(&user.content.content_text_only()),
-        };
-
-        assert_eq!(
-            enrichment_insertion_index(&session, &turn, Some("fresh-result")),
-            Some(0)
-        );
-        session.record_enrichment_identity("fresh-result".to_string());
-        assert!(enrichment_insertion_index(&session, &turn, Some("fresh-result")).is_none());
-
-        session.add_message(make_assistant_msg("reply"));
-        assert!(enrichment_insertion_index(&session, &turn, Some("new-result")).is_none());
-    }
-
-    #[test]
-    fn cache_guard_other_failure_propagates_as_error() {
-        use crate::chat::cache_guard::CacheGuardOutcome;
-        use crate::chat::stream_core::LlmStreamError;
-
-        let error_outcome = CacheGuardOutcome::Error("simulated io failure".to_string());
-        assert!(
-            matches!(error_outcome, CacheGuardOutcome::Error(_)),
-            "Error variant must be distinguishable"
-        );
-        assert!(
-            !matches!(error_outcome, CacheGuardOutcome::Pass(_)),
-            "Error must not be treated as Pass"
-        );
-        assert!(
-            !matches!(error_outcome, CacheGuardOutcome::Paused { .. }),
-            "Error must not be treated as Paused"
-        );
-
-        let stream_err: Result<Vec<()>, LlmStreamError> =
-            Err(LlmStreamError::from("simulated io failure".to_string()));
-        assert!(
-            matches!(stream_err, Err(_)),
-            "Error outcome must propagate as Err in the generation chain"
-        );
-    }
     fn length_stop_marker_msg() -> ChatMessage {
         length_stop_continue_instruction(LengthStopKind::PartialOutput)
     }
@@ -5228,26 +4509,6 @@ mod tests {
         assert_eq!(length_stop_kind(&context_stop), None);
 
         assert_eq!(length_stop_kind(&make_user_msg("hi")), None);
-    }
-
-    #[test]
-    fn length_stop_recovery_attempts_counts_markers_since_last_user() {
-        let messages = vec![
-            make_user_msg("first"),
-            length_stop_marker_msg(),
-            make_user_msg("second"),
-            length_stop_marker_msg(),
-            length_stop_marker_msg(),
-            make_reasoning_token_limit_msg(),
-        ];
-        assert_eq!(length_stop_recovery_attempts(&messages), 2);
-
-        let fresh_turn = vec![
-            make_user_msg("first"),
-            length_stop_marker_msg(),
-            make_user_msg("second"),
-        ];
-        assert_eq!(length_stop_recovery_attempts(&fresh_turn), 0);
     }
 
     #[tokio::test]

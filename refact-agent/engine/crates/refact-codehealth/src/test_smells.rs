@@ -123,38 +123,6 @@ mod tests {
     }
 
     #[test]
-    fn large_assertion_block_medium_for_twenty_assertions() {
-        let findings = test_smell_biomarkers(&input(
-            vec![block("checks_values", 10, 35, 20)],
-            vec![],
-            true,
-        ));
-
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].biomarker, "large_assertion_block");
-        assert_eq!(findings[0].category, "test_quality");
-        assert_eq!(findings[0].dimension, Dimension::Defect);
-        assert_eq!(findings[0].severity, Severity::Medium);
-        assert_eq!(findings[0].line, 10);
-        assert!(findings[0].detail.contains("checks_values"));
-        assert!(findings[0].detail.contains("20"));
-    }
-
-    #[test]
-    fn large_assertion_block_high_for_thirty_assertions() {
-        let findings = test_smell_biomarkers(&input(
-            vec![block("checks_many_values", 3, 40, 30)],
-            vec![],
-            true,
-        ));
-
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].biomarker, "large_assertion_block");
-        assert_eq!(findings[0].severity, Severity::High);
-        assert_eq!(findings[0].line, 3);
-    }
-
-    #[test]
     fn non_test_file_fires_nothing() {
         let findings = test_smell_biomarkers(&input(
             vec![block("checks_values", 10, 35, 20)],

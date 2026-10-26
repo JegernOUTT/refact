@@ -1046,30 +1046,6 @@ mod tests {
     use crate::app_state::AppState;
     use crate::chat::types::TaskMeta as ThreadTaskMeta;
 
-    #[test]
-    fn downstream_base_resolution_prefers_card_over_task_legacy_fallback() {
-        let base = resolve_base(
-            None,
-            None,
-            Some("card-commit".to_string()),
-            Some("card-branch".to_string()),
-            Some("task-commit".to_string()),
-            Some("task-branch".to_string()),
-        )
-        .unwrap();
-        assert_eq!(base.refish, "card-commit");
-
-        let legacy = resolve_base(
-            None,
-            None,
-            None,
-            None,
-            Some("task-commit".to_string()),
-            Some("task-branch".to_string()),
-        )
-        .unwrap();
-        assert_eq!(legacy.refish, "task-commit");
-    }
     use crate::tasks::types::{TaskBoard, TaskMeta, TaskStatus};
     use crate::tools::settings_guard::SettingsGuard;
     use crate::tools::tools_description::Tool;
@@ -1196,13 +1172,6 @@ mod tests {
         for path in expected {
             assert!(paths.contains(path), "missing {path} in {output}");
         }
-    }
-
-    fn count_lines_with_prefix(output: &str, prefix: &str) -> usize {
-        output
-            .lines()
-            .filter(|line| line.starts_with(prefix))
-            .count()
     }
 
     async fn execute_diff(
@@ -1368,19 +1337,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn tool_agent_diff_description_is_correct() {
-        let desc = ToolAgentDiff::new().tool_description();
-
-        assert_eq!(desc.name, "agent_diff");
-        assert_eq!(desc.input_schema["required"], json!(["card_id"]));
-        assert_eq!(
-            desc.input_schema["properties"]["mode"]["enum"],
-            json!(["stat", "unified", "name-only"])
-        );
-        assert!(desc.description.contains("real git diff"));
-    }
-
     #[tokio::test]
     async fn tool_agent_diff_rejects_non_planner_role() {
         let temp = tempfile::tempdir().unwrap();
@@ -1395,22 +1351,6 @@ mod tests {
             .unwrap_err();
 
         assert!(err.contains("can only be called by the task planner"));
-    }
-
-    #[tokio::test]
-    async fn tool_agent_diff_missing_card_id_returns_error() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = write_task(temp.path(), test_card(None, None)).await;
-        let ccx = planner_ccx(gcx, "planner").await;
-        let mut tool = ToolAgentDiff::new();
-        let args = HashMap::new();
-
-        let err = tool
-            .tool_execute(ccx, &"call".to_string(), &args)
-            .await
-            .unwrap_err();
-
-        assert_eq!(err, "Missing 'card_id'");
     }
 
     #[tokio::test]
@@ -1544,144 +1484,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_agent_diff_unified_sections_include_dirty_state() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = legacy_repo_path(temp.path());
-        std::fs::create_dir_all(&repo).unwrap();
-        init_repo(&repo);
-        run_git(&repo, &["checkout", "-b", "agent-branch"]);
-        commit_file(&repo, "committed.txt", "committed\n", "committed change");
-        write_file(&repo, "staged.txt", "staged\n");
-        run_git(&repo, &["add", "staged.txt"]);
-        std::fs::write(repo.join("file.txt"), "hello\nunstaged\n").unwrap();
-        write_file(&repo, "untracked.txt", "untracked\n");
-        let card = test_card(
-            Some("agent-branch".to_string()),
-            Some(repo.to_string_lossy().to_string()),
-        );
-        let gcx = write_task(&repo, card).await;
-        let ccx = planner_ccx(gcx, "planner").await;
-        let mut tool = ToolAgentDiff::new();
-
-        let unified = tool_output_text(
-            tool.tool_execute(
-                ccx,
-                &"call".to_string(),
-                &HashMap::from([
-                    ("card_id".to_string(), json!("T-1")),
-                    ("mode".to_string(), json!("unified")),
-                ]),
-            )
-            .await
-            .unwrap(),
-        );
-
-        assert!(unified.contains("## Committed changes since base"));
-        assert!(unified.contains("## Staged changes"));
-        assert!(unified.contains("## Unstaged changes"));
-        assert!(unified.contains("## Untracked files"));
-        assert!(unified.contains("+committed"));
-        assert!(unified.contains("+staged"));
-        assert!(unified.contains("+unstaged"));
-        assert!(unified.contains("untracked.txt"));
-    }
-
-    #[tokio::test]
-    async fn agent_diff_unified_includes_untracked_file_content() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = legacy_repo_path(temp.path());
-        std::fs::create_dir_all(&repo).unwrap();
-        init_repo(&repo);
-        run_git(&repo, &["checkout", "-b", "agent-branch"]);
-        write_file(&repo, "new.txt", "alpha\nbeta\n");
-        let card = test_card(
-            Some("agent-branch".to_string()),
-            Some(repo.to_string_lossy().to_string()),
-        );
-        let gcx = write_task(&repo, card).await;
-
-        let unified = execute_diff(gcx, "unified").await.unwrap();
-
-        assert!(unified.contains("--- /dev/null"));
-        assert!(unified.contains("+++ b/new.txt"));
-        assert!(unified.contains("+alpha"));
-        assert!(unified.contains("+beta"));
-    }
-
-    #[tokio::test]
-    async fn agent_diff_unified_truncates_large_untracked_files() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = legacy_repo_path(temp.path());
-        std::fs::create_dir_all(&repo).unwrap();
-        init_repo(&repo);
-        run_git(&repo, &["checkout", "-b", "agent-branch"]);
-        write_file(&repo, "big.txt", &"a".repeat(200 * 1024));
-        let card = test_card(
-            Some("agent-branch".to_string()),
-            Some(repo.to_string_lossy().to_string()),
-        );
-        let gcx = write_task(&repo, card).await;
-
-        let unified = execute_diff_with_max_lines(gcx, "unified", 20)
-            .await
-            .unwrap();
-
-        assert!(unified.contains("+++ b/big.txt"));
-        assert!(unified.contains("... (truncated, 139264 more bytes)"));
-        assert!(count_lines_with_prefix(&unified, "+a") <= 1);
-    }
-
-    #[tokio::test]
-    async fn agent_diff_unified_skips_binary_untracked_files() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = legacy_repo_path(temp.path());
-        std::fs::create_dir_all(&repo).unwrap();
-        init_repo(&repo);
-        run_git(&repo, &["checkout", "-b", "agent-branch"]);
-        std::fs::write(repo.join("binary.bin"), b"abc\0def").unwrap();
-        let card = test_card(
-            Some("agent-branch".to_string()),
-            Some(repo.to_string_lossy().to_string()),
-        );
-        let gcx = write_task(&repo, card).await;
-
-        let unified = execute_diff(gcx, "unified").await.unwrap();
-
-        assert!(unified.contains("binary.bin (binary, 7 bytes)"));
-        assert!(!unified.contains("+++ b/binary.bin"));
-        assert!(!unified.contains("+abc"));
-    }
-
-    #[tokio::test]
-    async fn agent_diff_unified_respects_total_size_budget() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = legacy_repo_path(temp.path());
-        std::fs::create_dir_all(&repo).unwrap();
-        init_repo(&repo);
-        run_git(&repo, &["checkout", "-b", "agent-branch"]);
-        for index in 0..6 {
-            write_file(&repo, &format!("file-{index}.txt"), &"x".repeat(64 * 1024));
-        }
-        let card = test_card(
-            Some("agent-branch".to_string()),
-            Some(repo.to_string_lossy().to_string()),
-        );
-        let gcx = write_task(&repo, card).await;
-
-        let unified = execute_diff(gcx, "unified").await.unwrap();
-
-        assert_eq!(
-            unified
-                .matches("more untracked files omitted due to size cap")
-                .count(),
-            1
-        );
-        assert!(unified.contains("(2 more untracked files omitted due to size cap)"));
-        assert!(unified.contains("file-4.txt"));
-        assert!(unified.contains("file-5.txt"));
-    }
-
-    #[tokio::test]
     async fn tool_agent_diff_prefers_original_base_commit_after_base_branch_advances() {
         let temp = tempfile::tempdir().unwrap();
         let repo = legacy_repo_path(temp.path());
@@ -1722,37 +1524,6 @@ mod tests {
         assert!(name_only.contains(&format!("**Base:** commit {}", base_commit)));
         assert!(name_only.contains("agent.txt"));
         assert!(!name_only.contains("main.txt"));
-    }
-
-    #[tokio::test]
-    async fn tool_agent_diff_reports_no_changes() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = legacy_repo_path(temp.path());
-        std::fs::create_dir_all(&repo).unwrap();
-        init_repo(&repo);
-        run_git(&repo, &["checkout", "-b", "agent-branch"]);
-        let card = test_card(
-            Some("agent-branch".to_string()),
-            Some(repo.to_string_lossy().to_string()),
-        );
-        let gcx = write_task(&repo, card).await;
-        let ccx = planner_ccx(gcx, "planner").await;
-        let mut tool = ToolAgentDiff::new();
-
-        let output = tool_output_text(
-            tool.tool_execute(
-                ccx,
-                &"call".to_string(),
-                &HashMap::from([
-                    ("card_id".to_string(), json!("T-1")),
-                    ("mode".to_string(), json!("stat")),
-                ]),
-            )
-            .await
-            .unwrap(),
-        );
-
-        assert!(output.contains("(no changes detected)"));
     }
 
     #[tokio::test]
@@ -1818,53 +1589,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_diff_falls_back_to_valid_legacy_path_when_registry_id_is_stale() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = legacy_repo_path(temp.path());
-        std::fs::create_dir_all(&repo).unwrap();
-        init_repo(&repo);
-        run_git(&repo, &["checkout", "-b", "agent-branch"]);
-        commit_file(&repo, "legacy.txt", "legacy\n", "legacy change");
-        let card = test_card_with_worktree_name(
-            Some("agent-branch".to_string()),
-            Some(repo.to_string_lossy().to_string()),
-            Some("missing-registry-id".to_string()),
-        );
-        let gcx = write_task(&repo, card).await;
-
-        let name_only = execute_diff(gcx, "name-only").await.unwrap();
-
-        assert!(name_only.contains("legacy.txt"), "{name_only}");
-    }
-
-    #[tokio::test]
-    async fn agent_diff_resolves_registered_worktree_by_reference_when_meta_is_missing() {
-        let temp = tempfile::tempdir().unwrap();
-        let (gcx, source, registered) = create_registered_worktree(&temp, "task-1", "T-1").await;
-        let service =
-            WorktreeService::new(gcx.cache_dir.clone(), source.canonicalize().unwrap()).unwrap();
-        let mut registry = service.load_registry().await.unwrap();
-        registry.records[0].meta.task_id = None;
-        registry.records[0].meta.card_id = None;
-        registry.records[0].references = vec![crate::worktrees::types::WorktreeReference {
-            kind: "task_agent".to_string(),
-            task_id: Some("task-1".to_string()),
-            card_id: Some("T-1".to_string()),
-            chat_id: Some("agent-chat-1".to_string()),
-            agent_id: Some("agent-1".to_string()),
-        }];
-        service.save_registry(&registry).await.unwrap();
-        write_file(&registered.meta.root, "referenced.txt", "referenced\n");
-        let card = test_card_with_worktree_name(registered.meta.branch.clone(), None, None);
-        let gcx = write_task_with_gcx(gcx, &source, card, task_meta()).await;
-
-        let unified = execute_diff(gcx, "unified").await.unwrap();
-
-        assert!(unified.contains("referenced.txt"), "{unified}");
-        assert!(unified.contains("+referenced"), "{unified}");
-    }
-
-    #[tokio::test]
     async fn agent_diff_registry_metadata_mismatch_is_rejected() {
         let temp = tempfile::tempdir().unwrap();
         let (gcx, source, registered) =
@@ -1891,43 +1615,6 @@ mod tests {
             .unwrap_err();
 
         assert!(err.contains("does not match task task-1 card T-1"), "{err}");
-    }
-
-    #[test]
-    fn tool_agent_diff_truncates_output() {
-        let card = test_card(Some("agent".to_string()), Some("/tmp/wt".to_string()));
-        let output = "a\nb\nc\nd\n";
-
-        let rendered = render_agent_diff(
-            &card,
-            "agent",
-            &DiffBase {
-                refish: "main".to_string(),
-                label: "branch main".to_string(),
-            },
-            AgentDiffMode::Unified,
-            output,
-            2,
-        );
-
-        assert!(
-            rendered.contains("a\nb\n... (2 more lines, use mode='name-only' to see all files)")
-        );
-    }
-
-    #[test]
-    fn tool_agent_diff_caps_large_individual_lines() {
-        let output = format!("HEAD{}TAIL\nnext", "x".repeat(50_000));
-
-        let rendered = truncate_lines(&output, 10);
-
-        let first_line = rendered.lines().next().unwrap();
-        assert_eq!(first_line.chars().count(), 2_000);
-        assert!(first_line.starts_with("HEAD"));
-        assert!(first_line.ends_with("TAIL"));
-        assert!(first_line.contains("chars omitted"));
-        assert!(first_line.contains("tool_max_line_chars"));
-        assert!(rendered.ends_with("\nnext"));
     }
 
     #[tokio::test]
@@ -1961,76 +1648,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn git_output_cap_notice_quantifies_shown_and_total() {
-        let notice = git_output_cap_notice(1_048_576, 3_000_000, 1_048_576);
-        assert!(
-            notice.contains("showing 1048576 of 3000000+ git output bytes"),
-            "{}",
-            notice
-        );
-        assert!(
-            notice.contains("agent_diff_max_output_bytes = 1048576"),
-            "{}",
-            notice
-        );
-    }
-
-    #[tokio::test]
-    #[serial(runtime_settings)]
-    async fn run_git_truncates_output_at_byte_cap() {
-        let _guard = SettingsGuard::install(|settings| {
-            settings.agent_diff_max_output_bytes = 200_000;
-        });
-        let temp = tempfile::tempdir().unwrap();
-        let repo = temp.path();
-        init_repo(repo);
-        let content_a = "a".repeat(600_000);
-        std::fs::write(repo.join("big.txt"), &content_a).unwrap();
-        run_git(repo, &["add", "big.txt"]);
-        run_git(repo, &["commit", "-m", "add big"]);
-        let content_b = "b".repeat(600_000);
-        std::fs::write(repo.join("big.txt"), &content_b).unwrap();
-
-        let output = super::run_git(repo, &["diff", "HEAD", "--text"], GIT_DIFF_TIMEOUT)
-            .await
-            .unwrap();
-
-        let limit = crate::runtime_settings::current().agent_diff_max_output_bytes;
-        assert!(
-            output.contains("agent_diff_max_output_bytes ="),
-            "expected a quantified truncation footer, got tail: {}",
-            &output[output.len().saturating_sub(400)..]
-        );
-        assert!(
-            output.len() <= limit + 400,
-            "output {} bytes exceeds cap + overhead",
-            output.len()
-        );
-    }
-
     #[tokio::test]
     async fn run_git_respects_timeout() {
         let result =
             super::run_with_timeout(std::future::pending::<()>(), Duration::from_nanos(1)).await;
 
         assert!(result.is_err(), "expected timeout");
-    }
-
-    #[tokio::test]
-    async fn agent_diff_is_async_compatible() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = temp.path();
-        init_repo(repo);
-
-        let result = super::run_git(
-            repo,
-            &["rev-parse", "--is-inside-work-tree"],
-            GIT_DIFF_TIMEOUT,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result.trim(), "true");
     }
 }

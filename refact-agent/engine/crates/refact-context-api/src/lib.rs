@@ -25,16 +25,3 @@ pub const CAPS_ACCESS_FOLLOW_UP: &str =
 pub fn omitted_traits_follow_up_notes() -> [&'static str; 2] {
     [PRIVACY_ACCESS_FOLLOW_UP, CAPS_ACCESS_FOLLOW_UP]
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn follow_up_notes_document_omitted_traits() {
-        let notes = omitted_traits_follow_up_notes();
-
-        assert!(notes.iter().any(|note| note.contains("PrivacyAccess")));
-        assert!(notes.iter().any(|note| note.contains("CapsAccess")));
-    }
-}

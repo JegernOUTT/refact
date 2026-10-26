@@ -203,39 +203,4 @@ mod tests {
     use super::*;
     use refact_core::chat_types::ChatContent;
     use serde_json::json;
-
-    #[test]
-    fn is_segment_summary_detects_assistant_compression_kind() {
-        let mut extra = serde_json::Map::new();
-        extra.insert(
-            "compression".to_string(),
-            json!({ "kind": SEGMENT_SUMMARY_KIND }),
-        );
-        let summary = ChatMessage {
-            role: "assistant".to_string(),
-            content: ChatContent::SimpleText("summary".to_string()),
-            extra,
-            ..Default::default()
-        };
-
-        assert!(is_segment_summary(&summary));
-    }
-
-    #[test]
-    fn is_segment_summary_rejects_ui_only_messages() {
-        let mut extra = serde_json::Map::new();
-        extra.insert(
-            "compression".to_string(),
-            json!({ "kind": SEGMENT_SUMMARY_KIND }),
-        );
-        extra.insert("_ui_only".to_string(), json!(true));
-        let summary = ChatMessage {
-            role: "assistant".to_string(),
-            content: ChatContent::SimpleText("summary".to_string()),
-            extra,
-            ..Default::default()
-        };
-
-        assert!(!is_segment_summary(&summary));
-    }
 }

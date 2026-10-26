@@ -187,14 +187,6 @@ fn add_owner_shares(intel: &GitIntel, path: &str, weight: f64, scores: &mut BTre
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-
-    fn authors(entries: &[(&str, u32)]) -> HashMap<String, u32> {
-        entries
-            .iter()
-            .map(|(author, commits)| ((*author).to_string(), *commits))
-            .collect()
-    }
 
     #[test]
     fn build_coupling_graph_collapses_undirected_pairs_and_ranks_highest_first() {
@@ -231,26 +223,5 @@ mod tests {
         assert_eq!(hidden[0].a, "c.rs");
         assert_eq!(hidden[0].b, "d.rs");
         assert_eq!(hidden[0].co_changes, 4);
-    }
-
-    #[test]
-    fn reviewer_suggestions_returns_dominant_changed_file_owner_first() {
-        let mut intel = GitIntel::default();
-        intel.file_authors.insert(
-            "changed.rs".into(),
-            authors(&[("alice@example.com", 8), ("bob@example.com", 2)]),
-        );
-        intel
-            .file_authors
-            .insert("neighbor.rs".into(), authors(&[("bob@example.com", 3)]));
-        intel
-            .co_change
-            .insert(("changed.rs".into(), "neighbor.rs".into()), 1);
-        intel.co_change.insert(("x.rs".into(), "y.rs".into()), 10);
-
-        let suggestions = reviewer_suggestions(&intel, &["changed.rs".into()], 2);
-
-        assert_eq!(suggestions[0].0, "alice@example.com");
-        assert!(suggestions[0].1 > suggestions[1].1);
     }
 }

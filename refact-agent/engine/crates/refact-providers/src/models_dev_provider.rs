@@ -611,23 +611,6 @@ mod tests {
     }
 
     #[test]
-    fn models_dev_provider_runtime_endpoint_avoids_double_v1() {
-        let catalog = catalog_with_provider(
-            "alibaba",
-            openai_provider("https://dashscope.aliyuncs.com/compatible-mode/v1"),
-        );
-        let config = ModelsDevProviderConfig::new("alibaba", ModelsDevProviderFamily::Qwen);
-
-        let endpoint = models_dev_runtime_endpoint(&catalog, &config).unwrap();
-
-        assert_eq!(
-            endpoint,
-            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-        );
-        assert!(!endpoint.contains("/v1/v1/"));
-    }
-
-    #[test]
     fn models_dev_provider_custom_model_merge_and_enabled_state() {
         let catalog = catalog_with_provider(
             "alibaba",

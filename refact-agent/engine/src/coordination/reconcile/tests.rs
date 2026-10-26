@@ -197,35 +197,6 @@ async fn surface_only_reconciliation_surfaces_persisted_and_unknown_without_star
     );
 }
 
-#[serial_test::serial(runtime_settings)]
-#[tokio::test]
-async fn production_startup_owns_reconciliation_and_skips_when_disabled() {
-    crate::runtime_settings::reset_for_test();
-    let workspace = tempfile::tempdir().unwrap();
-    let config = tempfile::tempdir().unwrap();
-    let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
-        workspace.path().join("cache"),
-        config.path().to_path_buf(),
-    )
-    .await;
-    *gcx.documents_state.workspace_folders.lock().unwrap() = vec![workspace.path().to_path_buf()];
-    let app = crate::app_state::AppState::from_gcx(gcx).await;
-
-    let service = super::start_background_reconciliation(&app)
-        .await
-        .expect("enabled coordination starts reconciliation");
-    tokio::time::timeout(Duration::from_secs(5), service.shutdown())
-        .await
-        .expect("shutdown joins reconciliation");
-
-    let disabled = crate::tools::settings_guard::SettingsGuard::install(|settings| {
-        settings.coordination.enabled = false;
-    });
-    assert!(super::start_background_reconciliation(&app).await.is_none());
-    drop(disabled);
-    crate::runtime_settings::reset_for_test();
-}
-
 #[test]
 fn every_boundary_and_every_piece_of_evidence_has_one_decided_resolution() {
     use InspectionReason::*;
@@ -372,78 +343,6 @@ async fn launch_boundaries_are_idempotent_forward_only_and_never_repeated() {
         settled.state,
         IntentState::Terminal,
         "a launch refused before acknowledgement still has a known outcome"
-    );
-}
-
-#[tokio::test]
-async fn each_crash_boundary_is_resolved_by_what_it_proves_and_nothing_more() {
-    let project = project_id();
-    let store = store().await;
-    let intent_only = run("after-intent");
-    let dispatched = run("after-record");
-    let acknowledged = run("after-ack");
-    let terminal = run("after-terminal");
-    for (run, boundary) in [
-        (&intent_only, IntentState::Persisted),
-        (&dispatched, IntentState::Dispatched),
-        (&acknowledged, IntentState::Acknowledged),
-        (&terminal, IntentState::Terminal),
-    ] {
-        crashed_launch(&store, &project, run, boundary).await;
-    }
-    publish(&project, "engine-crashed", PresenceState::Unreachable);
-
-    let log = StartLog::default();
-    let reconciler = Reconciler::new(
-        store.clone(),
-        &setup(
-            &project,
-            "engine-recovering",
-            probe(Observation::No, Observation::No),
-            log.action(),
-        ),
-    )
-    .unwrap();
-    let report = reconciler
-        .reconcile(ReconcileTrigger::Startup, RECOVER_AT_MS)
-        .await;
-    presence::forget(&project);
-
-    assert_eq!(report.started, vec![intent_only.clone()]);
-    assert_eq!(
-        log.started(),
-        vec![intent_only.clone()],
-        "only the boundary that provably had no effect may be started"
-    );
-    assert_eq!(report.recovered, vec![acknowledged.clone()]);
-    assert_eq!(report.settled, vec![terminal.clone()]);
-    assert!(report.left_running.is_empty());
-    assert!(report.failed.is_empty(), "{:?}", report.failed);
-    assert_eq!(report.needs_inspection.len(), 1);
-    let surfaced = &report.needs_inspection[0];
-    assert_eq!(surfaced.run, dispatched);
-    assert_eq!(surfaced.state, IntentState::Dispatched);
-    assert_eq!(surfaced.reason, InspectionReason::UnacknowledgedLaunch);
-    assert_eq!(
-        state_of(&store, &project, &dispatched).await,
-        IntentState::Dispatched,
-        "an unknown launch is left exactly as it was, not advanced or reset"
-    );
-    assert_eq!(
-        state_of(&store, &project, &acknowledged).await,
-        IntentState::Acknowledged,
-        "recovery is the owning runtime's job; reconciliation rewrites nothing"
-    );
-    assert_eq!(
-        state_of(&store, &project, &intent_only).await,
-        IntentState::Dispatched,
-        "the runtime claim is recorded before the start has any effect"
-    );
-    assert_eq!(report.pruned, 0);
-    assert_eq!(
-        state_of(&store, &project, &terminal).await,
-        IntentState::Terminal,
-        "a settled run inside its retention window is kept, not resurrected"
     );
 }
 

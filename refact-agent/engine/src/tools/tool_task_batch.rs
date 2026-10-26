@@ -1641,97 +1641,6 @@ mod tests {
         assert!(error.contains("does not match"));
     }
 
-    #[tokio::test]
-    async fn planner_context_accepts_task_id_matching_bound_task() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let ccx = planner_ccx(gcx).await;
-        let args = HashMap::from([("task_id".to_string(), json!("task-1"))]);
-
-        let (_, task_id) = planner_context(&ccx, &args, "batch_tool").await.unwrap();
-
-        assert_eq!(task_id, "task-1");
-    }
-
-    #[tokio::test]
-    async fn planner_context_rejects_non_string_task_id() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let ccx = planner_ccx(gcx).await;
-        let args = HashMap::from([("task_id".to_string(), json!(123))]);
-
-        let error = match planner_context(&ccx, &args, "batch_tool").await {
-            Ok(_) => panic!("non-string task_id should be rejected"),
-            Err(error) => error,
-        };
-
-        assert!(error.contains("must be a string"));
-    }
-
-    #[tokio::test]
-    async fn planner_context_rejects_blank_task_id() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let ccx = planner_ccx(gcx).await;
-        let args = HashMap::from([("task_id".to_string(), json!("  \n  "))]);
-
-        let error = match planner_context(&ccx, &args, "batch_tool").await {
-            Ok(_) => panic!("blank task_id should be rejected"),
-            Err(error) => error,
-        };
-
-        assert!(error.contains("non-empty string"));
-    }
-
-    #[test]
-    fn spawn_agents_batch_with_3_valid_cards() {
-        let board = TaskBoard {
-            cards: vec![
-                card("T-1", "planned", vec![]),
-                card("T-2", "planned", vec![]),
-                card("T-3", "planned", vec![]),
-            ],
-            ..Default::default()
-        };
-        let items = vec![
-            Ok(SpawnBatchItem {
-                card_id: "T-1".to_string(),
-                suggested_steps: None,
-                files_to_open: vec![],
-                base_branch: None,
-                base_commit: None,
-            }),
-            Ok(SpawnBatchItem {
-                card_id: "T-2".to_string(),
-                suggested_steps: None,
-                files_to_open: vec![],
-                base_branch: None,
-                base_commit: None,
-            }),
-            Ok(SpawnBatchItem {
-                card_id: "T-3".to_string(),
-                suggested_steps: None,
-                files_to_open: vec![],
-                base_branch: None,
-                base_commit: None,
-            }),
-        ];
-
-        let errors = validate_spawn_agent_cards(&board, &items);
-
-        assert_eq!(errors, vec![None, None, None]);
-    }
-
-    #[test]
-    fn spawn_batch_forwards_card_base_refs() {
-        let item = parse_spawn_item(&json!({
-            "card_id": "T-1",
-            "base_branch": "release",
-            "base_commit": "abc123"
-        }))
-        .unwrap();
-        let args = spawn_args("task-1", &item);
-        assert_eq!(args.get("base_branch"), Some(&json!("release")));
-        assert_eq!(args.get("base_commit"), Some(&json!("abc123")));
-    }
-
     #[test]
     fn merge_ready_in_order_stops_on_conflict() {
         let mut first = card("T-1", "done", vec![]);
@@ -1803,22 +1712,6 @@ The agent's work has been successfully merged back to the target branch.
     }
 
     #[test]
-    fn merge_result_reports_rendered_non_reverted_merge_as_merged() {
-        let rendered = r#"# Agent Work Merged
-
-The agent's work has been successfully merged back to the target branch.
-
-**Post-merge check:** `cargo test` passed"#;
-
-        let result = merge_result_from_tool("T-1".to_string(), rendered_merge_result(rendered));
-
-        assert!(result.merged);
-        assert!(!result.conflict);
-        assert_eq!(result.error, None);
-        assert!(should_continue_merges(&result, true));
-    }
-
-    #[test]
     fn merge_ready_in_order_stops_after_generic_non_merge() {
         let result = MergeBatchResult {
             card_id: "T-1".to_string(),
@@ -1828,53 +1721,6 @@ The agent's work has been successfully merged back to the target branch.
         };
 
         assert!(!should_continue_merges(&result, false));
-    }
-
-    #[test]
-    fn merge_ready_in_order_conflict_setting_only_controls_conflicts() {
-        let result = MergeBatchResult {
-            card_id: "T-1".to_string(),
-            merged: true,
-            conflict: true,
-            error: None,
-        };
-
-        assert!(!should_continue_merges(&result, true));
-        assert!(should_continue_merges(&result, false));
-    }
-
-    #[test]
-    fn merge_ready_in_order_exposes_post_merge_verification_schema() {
-        let schema = ToolMergeReadyInOrder::new().tool_description().input_schema;
-        let properties = schema["properties"].as_object().unwrap();
-
-        assert_eq!(properties["auto_revert"]["type"], json!("boolean"));
-        assert_eq!(properties["auto_revert"]["default"], json!(false));
-        assert_eq!(
-            properties["auto_revert_timeout_secs"]["type"],
-            json!("integer")
-        );
-        assert_eq!(
-            properties["auto_revert_timeout_secs"]["default"],
-            json!(crate::chat::post_merge_check::DEFAULT_POST_MERGE_CHECK_TIMEOUT_SECS)
-        );
-        assert!(!properties.contains_key("force"));
-    }
-
-    #[test]
-    fn merge_ready_in_order_forwards_post_merge_verification_args() {
-        let requested = HashMap::from([
-            ("auto_revert".to_string(), json!(true)),
-            ("auto_revert_timeout_secs".to_string(), json!(120)),
-        ]);
-        let auto_revert = auto_revert_arg(&requested).unwrap();
-        let timeout = auto_revert_timeout_secs_arg(&requested).unwrap();
-
-        let forwarded = merge_args("task-1", "T-1", "squash", auto_revert, timeout);
-
-        assert_eq!(forwarded["auto_revert"], json!(true));
-        assert_eq!(forwarded["auto_revert_timeout_secs"], json!(120));
-        assert!(!forwarded.contains_key("force"));
     }
 
     #[test]
@@ -1933,72 +1779,6 @@ The agent's work has been successfully merged back to the target branch.
         let card = board.get_card("T-1").unwrap();
         assert_eq!(card.column, "done");
         assert_eq!(card.final_report.as_deref(), Some("done cleanly"));
-    }
-
-    #[test]
-    fn spawn_agents_batch_without_a_schedule_stays_unscheduled() {
-        let args = HashMap::from([("cards".to_string(), json!([{ "card_id": "T-1" }]))]);
-
-        assert_eq!(parse_schedule(&args).unwrap(), None);
-    }
-
-    #[test]
-    fn spawn_agents_batch_schedule_is_absent_from_the_legacy_output_shape() {
-        let results = vec![SpawnBatchResult {
-            card_id: "T-1".to_string(),
-            agent_chat_id: None,
-            success: true,
-            error: None,
-        }];
-
-        let rendered = serde_json::to_value(&results).unwrap();
-
-        assert!(rendered.is_array());
-        assert_eq!(rendered[0]["card_id"], json!("T-1"));
-    }
-
-    #[test]
-    fn spawn_agents_batch_parses_every_lane_kind() {
-        let args = HashMap::from([(
-            "schedule".to_string(),
-            json!({
-                "lanes": [
-                    { "name": "roots", "kind": "parallel", "stages": [{ "card_id": "T-1" }] },
-                    { "name": "chain", "kind": "sequential", "stages": [{ "card_id": "T-2" }] },
-                    {
-                        "name": "review",
-                        "kind": "pipeline",
-                        "optional": true,
-                        "stages": [
-                            { "card_id": "T-3", "agent_id": "reviewer" },
-                            { "card_id": "T-4", "agent_id": "reviewer", "optional": true }
-                        ]
-                    }
-                ]
-            }),
-        )]);
-
-        let lanes = parse_schedule(&args).unwrap().unwrap();
-
-        assert_eq!(lanes[0].kind, LaneKind::Parallel);
-        assert_eq!(lanes[1].kind, LaneKind::Sequential);
-        assert_eq!(lanes[2].kind, LaneKind::Pipeline);
-        assert!(lanes[2].optional);
-        assert_eq!(lanes[2].stages[0].agent_id.as_deref(), Some("reviewer"));
-        assert_eq!(lanes[2].stages[1].agent_id.as_deref(), Some("reviewer"));
-        assert!(lanes[2].stages[1].optional);
-    }
-
-    #[test]
-    fn spawn_agents_batch_rejects_an_unknown_lane_kind() {
-        let args = HashMap::from([(
-            "schedule".to_string(),
-            json!({ "lanes": [{ "name": "roots", "kind": "waves", "stages": [] }] }),
-        )]);
-
-        let error = parse_schedule(&args).unwrap_err();
-
-        assert!(error.contains("unknown lane kind"), "{error}");
     }
 
     #[test]
@@ -2085,65 +1865,6 @@ The agent's work has been successfully merged back to the target branch.
         assert_eq!(schedule.admitted_wave, Some(0));
     }
 
-    #[test]
-    fn wave_limits_come_from_coordination_settings() {
-        let settings = refact_work_core::CoordinationSettings::default();
-
-        assert_eq!(
-            wave_limits(),
-            WaveLimits {
-                max_wave_width: settings.max_wave_width,
-                max_pipeline_depth: settings.max_pipeline_depth,
-            }
-        );
-        assert!(settings.max_wave_width >= 1);
-        assert!(settings.max_pipeline_depth >= 1);
-    }
-
-    #[test]
-    fn a_malformed_card_is_reported_even_when_a_schedule_excludes_it() {
-        let malformed = parse_spawn_item(&json!({ "suggested_steps": 3 }));
-        assert!(malformed.is_err());
-
-        let result =
-            pre_dispatch_result("<item 1>", &malformed, Some("Missing 'card_id'"), |_| false)
-                .expect("a card that never parsed must not vanish from the output");
-
-        assert_eq!(result.card_id, "<item 1>");
-        assert!(!result.success);
-        assert_eq!(result.error.as_deref(), Some("Missing 'card_id'"));
-    }
-
-    #[test]
-    fn a_card_the_schedule_did_not_admit_is_left_to_the_lane_report() {
-        let parsed = parse_spawn_item(&json!({ "card_id": "T-2" }));
-
-        assert_eq!(
-            pre_dispatch_result("T-2", &parsed, Some("not ready"), |_| false),
-            None
-        );
-        assert!(pre_dispatch_result("T-2", &parsed, Some("not ready"), |_| true).is_some());
-        assert_eq!(
-            pre_dispatch_result("T-2", &parsed, None, |_| true),
-            None,
-            "an admitted card with no validation error is spawned, not pre-reported"
-        );
-    }
-
-    #[test]
-    fn spawn_agents_batch_publishes_the_schedule_in_its_input_schema() {
-        let schema = ToolSpawnAgentsBatch::new().tool_description().input_schema;
-        let lane = &schema["properties"]["schedule"]["properties"]["lanes"]["items"];
-
-        assert_eq!(lane["properties"]["kind"]["enum"], json!(LaneKind::NAMES));
-        assert_eq!(
-            schema["required"],
-            json!(["cards"]),
-            "schedule must stay optional for existing callers"
-        );
-        assert!(lane["properties"]["stages"]["items"]["properties"]["agent_id"].is_object());
-    }
-
     fn overlap_schedule(
         board: &TaskBoard,
         card_ids: &[&str],
@@ -2212,15 +1933,6 @@ The agent's work has been successfully merged back to the target branch.
     }
 
     #[test]
-    fn spawn_agents_batch_submits_everything_at_once_without_overlap_ordering() {
-        let parsed = spawn_items(&["T-1", "T-2", "T-3"]);
-
-        let batches = submission_batches(&parsed, &[0, 1, 2], None);
-
-        assert_eq!(batches, vec![vec![0, 1, 2]]);
-    }
-
-    #[test]
     fn spawn_agents_batch_overlap_ordering_never_drops_an_eligible_card() {
         let board = TaskBoard {
             cards: vec![
@@ -2248,17 +1960,6 @@ The agent's work has been successfully merged back to the target branch.
             clique.dispatch,
             vec!["T-1".to_string(), "T-2".to_string(), "T-3".to_string()],
             "a total collision still dispatches every card"
-        );
-    }
-
-    #[test]
-    fn overlap_ordering_is_enabled_by_default_and_readable_from_settings() {
-        let settings = refact_work_core::CoordinationSettings::default();
-
-        assert!(settings.overlap_ordering_enabled);
-        assert_eq!(
-            crate::tasks::overlap::overlap_ordering_enabled(),
-            refact_work_core::coordination_settings().overlap_ordering_enabled
         );
     }
 

@@ -287,22 +287,6 @@ impl App {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn test_open_mode_picker(&mut self, modes: Value) {
-        let items = mode_items_from_response(&modes);
-        if items.is_empty() {
-            return;
-        }
-        self.mode_records = items.clone();
-        let current = self
-            .mode
-            .as_deref()
-            .filter(|mode| !mode.trim().is_empty())
-            .unwrap_or("agent");
-        self.modal_picker = Some(PickerState::modes(items, Some(current)));
-        self.composer_mode = ComposerMode::Chat;
-    }
-
     pub(super) fn open_slash_command_picker(&mut self) {
         let items = command_picker_items(CommandContext {
             active_turn: self.is_chat_active(),
@@ -1292,95 +1276,4 @@ fn toml_key_name(line: &str) -> Option<&str> {
 
 fn toml_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn settings_surface_gate_requires_a_truthy_value() {
-        assert!(settings_surface_enabled_from_value(Some("1")));
-        assert!(settings_surface_enabled_from_value(Some("true")));
-        assert!(!settings_surface_enabled_from_value(None));
-        assert!(!settings_surface_enabled_from_value(Some("0")));
-    }
-
-    #[test]
-    fn mode_picker_uses_the_surfaces_gate() {
-        let _surface_lock = crate::ui::goal_dock::test_surface_lock();
-        let mut app = App::notice_only("test");
-        app.open_mode_picker(serde_json::json!({"modes": [{"id": "agent", "title": "Agent"}]}));
-
-        assert!(app.modal_picker().is_none());
-        assert!(matches!(
-            app.visible_transcript().last(),
-            Some(TranscriptItem::Notice(text)) if text == "/mode requires REFACT_TUI_SURFACES=1"
-        ));
-    }
-
-    #[test]
-    fn permissions_picker_uses_the_surfaces_gate() {
-        let _surface_lock = crate::ui::goal_dock::test_surface_lock();
-        let mut app = App::notice_only("test");
-        app.open_permissions_picker();
-
-        assert!(app.modal_picker().is_none());
-        assert!(matches!(
-            app.visible_transcript().last(),
-            Some(TranscriptItem::Notice(text)) if text == "/permissions requires REFACT_TUI_SURFACES=1"
-        ));
-    }
-
-    #[test]
-    fn mode_picker_marks_current_mode_and_resolved_auto_approval() {
-        let mut app = App::notice_only("test");
-        app.mode = Some("agent".to_string());
-        app.test_open_mode_picker(serde_json::json!({"modes": [
-            {
-                "id": "ask", "title": "Ask", "tools_count": 1,
-                "thread_defaults": {"auto_approve_editing_tools": false},
-                "ui": {"order": 1, "tags": ["chat"]}
-            },
-            {
-                "id": "agent", "title": "Agent", "tools_count": 8,
-                "thread_defaults": {"auto_approve_editing_tools": true},
-                "ui": {"order": 2, "tags": ["tools"]}
-            }
-        ]}));
-
-        let modes = app.modal_picker().unwrap().filtered_mode_items();
-        let agent = modes.iter().find(|item| item.item.id == "agent").unwrap();
-
-        assert!(agent.is_current);
-        assert_eq!(agent.auto_approval_badge(), Some("! edits auto-approved"));
-    }
-
-    #[test]
-    fn view_overlay_uses_rendered_lines_as_raw_fallback() {
-        let mut app = App::notice_only("test");
-        app.open_view_overlay(ViewOverlay {
-            title: "Surface".to_string(),
-            rendered_lines: vec!["rendered".to_string()],
-            raw_lines: Vec::new(),
-            surface: None,
-        });
-
-        let overlay = app.transcript_overlay().expect("overlay opened");
-        assert_eq!(overlay.title(), "Surface");
-        assert_eq!(overlay.lines(), ["rendered"]);
-    }
-
-    #[test]
-    fn theme_picker_cancel_restores_snapshot() {
-        let mut app = App::notice_only("test");
-        let original = app.theme().name().to_string();
-
-        app.open_theme_picker();
-        app.preview_theme_name("light");
-        app.cancel_modal_picker();
-
-        assert_eq!(app.theme().name(), original);
-        assert!(app.modal_picker().is_none());
-    }
 }

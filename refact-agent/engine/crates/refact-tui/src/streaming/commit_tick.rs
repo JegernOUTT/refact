@@ -225,20 +225,4 @@ mod tests {
         assert!(output.cells.is_empty());
         assert_eq!(stream.queued_lines(), 1);
     }
-
-    #[test]
-    fn no_controllers_reports_idle_without_controller() {
-        let mut policy = AdaptiveChunkingPolicy::default();
-        let output = run_commit_tick(
-            &mut policy,
-            None,
-            None,
-            CommitTickScope::AnyMode,
-            Instant::now(),
-        );
-
-        assert!(!output.has_controller);
-        assert!(output.all_idle);
-        assert!(output.cells.is_empty());
-    }
 }

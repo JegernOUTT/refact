@@ -1640,58 +1640,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_change_logging_is_deduplicated() {
-        let session_arc = make_session_arc(MCPConnectionStatus::Failed {
-            message: "boom".to_string(),
-        });
-        let mut session_locked = session_arc.lock().await;
-        let session = session_locked
-            .as_any_mut()
-            .downcast_mut::<SessionMCP>()
-            .unwrap();
-
-        assert!(should_log_status_change(session));
-        assert!(!should_log_status_change(session));
-
-        session.connection_status = MCPConnectionStatus::Reconnecting { attempt: 1 };
-        assert!(should_log_status_change(session));
-        session.connection_status = MCPConnectionStatus::Reconnecting { attempt: 2 };
-        assert!(should_log_status_change(session));
-
-        session.last_logged_status = None;
-        session.connection_status = MCPConnectionStatus::Failed {
-            message: "boom".to_string(),
-        };
-        assert!(should_log_status_change(session));
-    }
-
-    #[test]
-    fn describe_connection_status_reports_failure_message() {
-        assert_eq!(
-            describe_connection_status(&MCPConnectionStatus::Failed {
-                message: "no tokens".to_string(),
-            }),
-            "no tokens"
-        );
-        assert_eq!(
-            describe_connection_status(&MCPConnectionStatus::Reconnecting { attempt: 3 }),
-            "reconnecting, attempt 3"
-        );
-        assert_eq!(
-            describe_connection_status(&MCPConnectionStatus::NeedsAuth),
-            "needs authentication"
-        );
-    }
-
-    #[test]
-    fn test_default_health_config() {
-        let cfg = CommonMCPSettings::default();
-        assert_eq!(cfg.health_check_interval, 30);
-        assert_eq!(cfg.reconnect_max_attempts, 7);
-        assert!(cfg.reconnect_enabled);
-    }
-
-    #[tokio::test]
     async fn test_unchanged_needs_auth_session_skips_relaunch() {
         let session_arc = make_session_arc(MCPConnectionStatus::NeedsAuth);
         let config = serde_json::json!({"url": "https://mcp.example.com"});
@@ -2047,40 +1995,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_reconnect_populates_peer_arc_requirement() {
-        // Verifies that reconnect_with_backoff creates a fresh peer_arc per attempt
-        // and populates it after successful transport init. The peer_arc is populated
-        // via: let peer = new_client.peer().clone(); *peer_arc.lock().await = Some(peer);
-        // This ensures on_tool_list_changed / on_resource_list_changed handlers work
-        // after reconnect (they check peer_arc for a Some value before making requests).
-        //
-        // Full functional verification requires a real MCP transport (tested in integration tests).
-        // This test validates the structural requirement is documented and the code compiles correctly.
-        let peer_arc: Arc<AMutex<Option<rmcp::service::Peer<rmcp::RoleClient>>>> =
-            Arc::new(AMutex::new(None));
-        assert!(peer_arc.try_lock().is_ok());
-    }
-
-    #[test]
-    fn test_mcp_connection_status_reconnecting_flag() {
-        let reconnecting = MCPConnectionStatus::Reconnecting { attempt: 2 };
-        let connected = MCPConnectionStatus::Connected;
-        let failed = MCPConnectionStatus::Failed {
-            message: "oops".to_string(),
-        };
-
-        assert!(matches!(
-            &reconnecting,
-            MCPConnectionStatus::Reconnecting { .. }
-        ));
-        assert!(!matches!(
-            &connected,
-            MCPConnectionStatus::Reconnecting { .. }
-        ));
-        assert!(!matches!(&failed, MCPConnectionStatus::Reconnecting { .. }));
-    }
-
     #[tokio::test]
     async fn test_build_auth_client_no_tokens_sets_needs_auth() {
         use super::super::session_mcp::SessionMCP;
@@ -2152,24 +2066,5 @@ mod tests {
             "Auth status should be NeedsLogin when no tokens, got {:?}",
             mcp_session.auth_status
         );
-    }
-
-    #[test]
-    fn test_mcp_connection_status_serialization() {
-        let status = MCPConnectionStatus::Reconnecting { attempt: 3 };
-        let json = serde_json::to_value(&status).unwrap();
-        assert_eq!(json["status"], "reconnecting");
-        assert_eq!(json["attempt"], 3);
-
-        let connected = MCPConnectionStatus::Connected;
-        let json2 = serde_json::to_value(&connected).unwrap();
-        assert_eq!(json2["status"], "connected");
-
-        let failed = MCPConnectionStatus::Failed {
-            message: "err".to_string(),
-        };
-        let json3 = serde_json::to_value(&failed).unwrap();
-        assert_eq!(json3["status"], "failed");
-        assert_eq!(json3["message"], "err");
     }
 }

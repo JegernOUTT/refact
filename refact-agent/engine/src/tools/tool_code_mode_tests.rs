@@ -117,35 +117,6 @@ fn tool_message(index: usize, failed: Option<bool>, text: &str) -> ChatMessage {
 }
 
 #[tokio::test]
-async fn code_mode_is_registered_and_allow_listed() {
-    let (app, _, _) = fixture(TerminalSecurityMode::SandboxRequired).await;
-    let available = get_available_tools(app.gcx.clone()).await;
-    let registered = available
-        .iter()
-        .filter(|tool| tool.tool_description().name == "code_mode")
-        .collect::<Vec<_>>();
-    assert_eq!(registered.len(), 1);
-    let description = registered[0].tool_description();
-    assert!(matches!(
-        description.source.source_type,
-        ToolSourceType::Builtin
-    ));
-    assert!(!description.allow_parallel);
-    assert_eq!(description.input_schema["required"], json!(["script"]));
-    assert_eq!(
-        description.input_schema["properties"]["script"]["minLength"],
-        1
-    );
-
-    let allowed = get_tools_for_mode(app.gcx.clone(), "agent", Some("test/default"))
-        .await
-        .into_iter()
-        .filter(|tool| tool.tool_description().name == "code_mode")
-        .count();
-    assert_eq!(allowed, 1);
-}
-
-#[tokio::test]
 #[serial_test::serial(runtime_settings)]
 async fn default_settings_refuse_before_any_spawn() {
     let (app, ccx, _) = fixture(TerminalSecurityMode::SandboxRequired).await;

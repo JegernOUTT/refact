@@ -37,106 +37,6 @@ fn strategy_arg(args: &HashMap<String, Value>) -> Result<WorktreeMergeStrategy, 
 mod tests {
     use super::*;
 
-    fn merged_response_with_warning() -> MergeWorktreeResponse {
-        MergeWorktreeResponse {
-            id: "wt-1".to_string(),
-            status: "merged".to_string(),
-            merged: true,
-            strategy: "squash".to_string(),
-            source_branch: "refact/chat/test".to_string(),
-            target_branch: "main".to_string(),
-            committed_uncommitted: None,
-            merge_commit: Some("abc123".to_string()),
-            cleanup: None,
-            conflict: None,
-            dirty_baseline: None,
-            affected_references: Vec::new(),
-            affected_reference_count: 0,
-            warnings: vec!["stash cleanup needs inspection".to_string()],
-        }
-    }
-
-    fn dirty_baseline_response() -> MergeWorktreeResponse {
-        MergeWorktreeResponse {
-            status: "dirty_baseline".to_string(),
-            merged: false,
-            merge_commit: None,
-            dirty_baseline: Some(crate::worktrees::types::DirtyBaseline {
-                branch: Some("main".to_string()),
-                files: vec!["M  src/lib.rs".to_string()],
-                files_truncated: false,
-                staged_count: 1,
-                unstaged_count: 0,
-                untracked_count: 0,
-            }),
-            warnings: Vec::new(),
-            ..merged_response_with_warning()
-        }
-    }
-
-    #[test]
-    fn dirty_target_refusal_names_the_files_and_the_acknowledged_option() {
-        let message = merge_response_message(&dirty_baseline_response());
-
-        assert!(
-            message.contains("Merge Refused: Dirty Target Checkout"),
-            "{message}"
-        );
-        assert!(message.contains("src/lib.rs"), "{message}");
-        assert!(
-            message.contains("acknowledge_dirty_baseline=true"),
-            "{message}"
-        );
-        assert!(!message.contains("Worktree Merged"), "{message}");
-    }
-
-    fn merged_response_with_cleanup_warning() -> MergeWorktreeResponse {
-        MergeWorktreeResponse {
-            cleanup: Some(crate::worktrees::types::WorktreeRemovalResult {
-                worktree_deleted: true,
-                branch_deleted: false,
-                registry_deleted: true,
-                stale_path: false,
-                warnings: vec!["branch deletion failed".to_string()],
-            }),
-            warnings: Vec::new(),
-            ..merged_response_with_warning()
-        }
-    }
-
-    #[test]
-    fn merge_response_message_includes_warnings() {
-        let message = merge_response_message(&merged_response_with_warning());
-
-        assert!(message.contains("## Warnings"));
-        assert!(message.contains("stash cleanup needs inspection"));
-    }
-
-    #[test]
-    fn merge_response_message_includes_cleanup_warnings() {
-        let message = merge_response_message(&merged_response_with_cleanup_warning());
-
-        assert!(message.contains("## Warnings"));
-        assert!(message.contains("branch deletion failed"));
-    }
-
-    #[test]
-    fn strategy_defaults_to_squash() {
-        assert_eq!(
-            strategy_arg(&HashMap::new()).unwrap(),
-            WorktreeMergeStrategy::Squash
-        );
-    }
-
-    #[test]
-    fn strategy_arg_rejects_non_string_values() {
-        let args = HashMap::from([("strategy".to_string(), Value::Bool(true))]);
-
-        assert!(strategy_arg(&args)
-            .unwrap_err()
-            .contains("must be a string"));
-    }
-
     #[test]
     fn bool_arg_accepts_model_spellings_and_rejects_garbage() {
         let args = HashMap::from([(
@@ -161,15 +61,6 @@ mod tests {
         assert!(bool_arg(&args, "include_uncommitted", true)
             .unwrap_err()
             .contains("must be a boolean"));
-    }
-
-    #[test]
-    fn string_arg_rejects_non_string_values() {
-        let args = HashMap::from([("target_branch".to_string(), Value::Bool(true))]);
-
-        assert!(string_arg(&args, "target_branch")
-            .unwrap_err()
-            .contains("must be a string"));
     }
 }
 

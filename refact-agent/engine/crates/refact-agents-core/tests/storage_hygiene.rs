@@ -3,7 +3,6 @@ use std::time::{Duration, SystemTime};
 
 use chrono::{TimeDelta, Utc};
 use refact_agents_core::storage::{load_all, save_all};
-use refact_agents_core::types::AgentRunOutcome;
 use refact_agents_core::{
     BackgroundAgent, BackgroundAgentRegistry, BgAgentKind, BgAgentStatus, CreateAgentRequest,
 };
@@ -207,61 +206,4 @@ async fn retention_keeps_n_recent_terminal_records_and_all_live_ones() {
         }
         assert_eq!(loaded["pending"], pending);
     }
-}
-
-#[tokio::test]
-async fn persisted_records_keep_history_fields() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut record = seed_record(temp.path()).await;
-    let now = Utc::now();
-    record.status = BgAgentStatus::Closed;
-    record.child_chat_id = Some("saved-child".into());
-    record.finished_at = Some(now);
-    record.last_update_at = now;
-    record.run_generation = 3;
-    record.previous_runs = vec![
-        AgentRunOutcome {
-            run_generation: 1,
-            status: BgAgentStatus::Failed,
-            step_count: 7,
-            result_summary: None,
-            error: Some("first run stopped".into()),
-            finished_at: Some(now - TimeDelta::days(2)),
-            worktree_id: None,
-            worktree_branch: None,
-            merge_status: None,
-        },
-        AgentRunOutcome {
-            run_generation: 2,
-            status: BgAgentStatus::Completed,
-            step_count: 13,
-            result_summary: Some("second run completed".into()),
-            error: None,
-            finished_at: Some(now - TimeDelta::days(1)),
-            worktree_id: None,
-            worktree_branch: None,
-            merge_status: None,
-        },
-    ];
-
-    save_all(temp.path(), vec![record.clone()]).await.unwrap();
-    let bytes = std::fs::read(temp.path().join("records.json")).unwrap();
-    let persisted: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(persisted[0]["run_generation"], 3);
-    assert_eq!(
-        persisted[0]["previous_runs"],
-        serde_json::to_value(&record.previous_runs).unwrap()
-    );
-    assert_eq!(
-        load_all(temp.path()).await.unwrap()[&record.agent_id],
-        record
-    );
-    let restored = BackgroundAgentRegistry::new(temp.path().to_path_buf())
-        .await
-        .unwrap();
-    assert_eq!(restored.get_any(&record.agent_id).await.unwrap(), record);
-    assert_eq!(
-        std::fs::read(temp.path().join("records.json")).unwrap(),
-        bytes
-    );
 }

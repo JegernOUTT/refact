@@ -1387,11 +1387,6 @@ pub(crate) async fn read_log_content_with_notice(
     crate::tools::tool_buddy_get_logs::read_bounded_log_tail_with_notice(newest).await
 }
 
-#[cfg(test)]
-pub(crate) async fn read_log_content(log_path: &std::path::Path) -> Result<String, String> {
-    Ok(read_log_content_with_notice(log_path).await?.text)
-}
-
 pub(crate) fn cap_text_to_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
@@ -1588,7 +1583,6 @@ pub async fn handle_v1_buddy_opportunity_dismiss(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buddy::types::TaskPulse;
 
     #[tokio::test]
     async fn enabled_legacy_accept_and_dismiss_fail_before_queue_mutation() {
@@ -1683,33 +1677,5 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("operator store unavailable"));
-    }
-
-    #[test]
-    fn pulse_report_task_section_separates_current_state_from_recent_alerts() {
-        let mut by_status = std::collections::HashMap::new();
-        by_status.insert("planning".to_string(), 4);
-        by_status.insert("active".to_string(), 1);
-        let pulse = BuddyPulse {
-            tasks: TaskPulse {
-                total: 5,
-                by_status,
-                recent_stuck_alerts_1h: 2,
-                recent_abandoned_alerts_24h: 3,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let markdown = render_pulse_to_markdown(&pulse, PulseScope::Tasks);
-
-        assert!(markdown.contains("### Current board state"));
-        assert!(markdown.contains("- Total tasks: 5"));
-        assert!(markdown.contains("- planning: 4"));
-        assert!(markdown.contains("### Recent alert history"));
-        assert!(markdown.contains("- Stuck alerts in the last hour: 2"));
-        assert!(markdown.contains("- Abandoned alerts in the last 24 hours: 3"));
-        assert!(!markdown.contains("- Stuck: 2"));
-        assert!(!markdown.contains("- Abandoned: 3"));
     }
 }

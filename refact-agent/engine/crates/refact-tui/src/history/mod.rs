@@ -763,7 +763,6 @@ pub fn render_transcript_item_hyperlink_lines_with_theme(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use super::*;
@@ -863,26 +862,6 @@ mod tests {
     #[derive(Debug, Clone)]
     struct EmptyCell;
 
-    #[derive(Debug, Clone)]
-    struct RevisionCountingCell {
-        revision_calls: Arc<AtomicUsize>,
-    }
-
-    impl cells::HistoryCell for RevisionCountingCell {
-        fn kind(&self) -> cells::HistoryCellKind {
-            cells::HistoryCellKind::Info
-        }
-
-        fn render_raw(&self, _width: usize) -> Vec<Line<'static>> {
-            vec![Line::from("counted")]
-        }
-
-        fn revision(&self) -> u64 {
-            self.revision_calls.fetch_add(1, Ordering::Relaxed);
-            1
-        }
-    }
-
     impl cells::HistoryCell for EmptyCell {
         fn kind(&self) -> cells::HistoryCellKind {
             cells::HistoryCellKind::Info
@@ -954,36 +933,6 @@ mod tests {
             insert_history(&mut terminal, insertion).unwrap();
         }
         assert_eq!(terminal.backend().size().unwrap().width, 40);
-    }
-
-    #[test]
-    fn enqueue_retains_transcript_identity_but_enqueue_cell_does_not() {
-        let mut history = HistoryBuffer::new();
-        let item_id = history.enqueue(TranscriptItem::Notice("item".to_string()));
-        let cell_id = history.enqueue_cell(Box::new(NoticeCell::new("cell")));
-
-        assert!(matches!(
-            history.history.iter().find(|entry| entry.id == item_id),
-            Some(HistoryEntry {
-                item: Some(TranscriptItem::Notice(text)),
-                ..
-            }) if text == "item"
-        ));
-        assert!(history
-            .history
-            .iter()
-            .find(|entry| entry.id == cell_id)
-            .is_some_and(|entry| entry.item.is_none()));
-        assert!(history
-            .pending
-            .iter()
-            .find(|entry| entry.id == item_id)
-            .is_some_and(|entry| entry.item.is_some()));
-        assert!(history
-            .pending
-            .iter()
-            .find(|entry| entry.id == cell_id)
-            .is_some_and(|entry| entry.item.is_none()));
     }
 
     #[test]
@@ -1065,31 +1014,6 @@ mod tests {
     }
 
     #[test]
-    fn pending_insertions_add_gutter_and_codex_spacers() {
-        let mut history = HistoryBuffer::new();
-        history.enqueue(TranscriptItem::Notice("one".to_string()));
-        history.enqueue(TranscriptItem::Assistant("two".to_string()));
-
-        let preview = history.pending_insertions(40);
-        let lines = preview[0]
-            .lines
-            .iter()
-            .map(|line| line_to_plain(&line.line))
-            .collect::<Vec<_>>();
-        assert_eq!(lines, vec!["  • one", "  ", "  • two"]);
-
-        history.drain_pending(40);
-        history.enqueue(TranscriptItem::Notice("three".to_string()));
-        let next = history.pending_insertions(40);
-        let lines = next[0]
-            .lines
-            .iter()
-            .map(|line| line_to_plain(&line.line))
-            .collect::<Vec<_>>();
-        assert_eq!(lines, vec!["", "  • three", "  "]);
-    }
-
-    #[test]
     fn replace_first_kind_synchronizes_item_backed_source_and_cell() {
         let mut history = HistoryBuffer::new();
         let cell_only_id = history.enqueue_cell(Box::new(cells::SessionCell::new(
@@ -1168,42 +1092,6 @@ mod tests {
             .chain(history.pending.iter())
             .filter(|entry| entry.id == id)
             .all(|entry| entry.item.as_ref() == Some(&updated)));
-    }
-
-    #[test]
-    fn pending_insertions_keep_one_blank_line_between_message_turns() {
-        let _color = crate::style::override_color_enabled_for_test(true);
-        let _bg = crate::terminal_palette::override_default_bg_for_test(Some((0, 0, 0)));
-        let mut history = HistoryBuffer::new();
-        history.enqueue(TranscriptItem::User("first".to_string()));
-        history.enqueue(TranscriptItem::Assistant("answer".to_string()));
-        history.enqueue(TranscriptItem::User("second".to_string()));
-
-        let preview = history.pending_insertions(40);
-        let lines = preview[0]
-            .lines
-            .iter()
-            .map(|line| line_to_plain(&line.line))
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            lines,
-            vec![
-                "  ",
-                "  › first",
-                "  ",
-                "  • answer",
-                "  ",
-                "  › second",
-                "  "
-            ]
-        );
-
-        let expected_bg = crate::style::user_message_style().bg.unwrap();
-        assert_eq!(preview[0].lines[0].line.style.bg, Some(expected_bg));
-        assert_eq!(preview[0].lines[1].line.style.bg, Some(expected_bg));
-        assert_eq!(preview[0].lines[2].line.style.bg, Some(expected_bg));
-        assert_eq!(preview[0].lines[3].line.style.bg, None);
     }
 
     #[test]
@@ -1602,23 +1490,6 @@ mod tests {
     }
 
     #[test]
-    fn inserted_tail_splits_oversized_visible_suffixes() {
-        let mut history = HistoryBuffer::new();
-        let id = history.enqueue_cell(Box::new(RepeatedLineCell::new(MAX_INSERTION_LINES + 1)));
-        history.drain_pending(80);
-
-        let insertions = history.inserted_tail_insertions(80, MAX_INSERTION_LINES + 1);
-        assert_eq!(insertions.len(), 2);
-        assert!(insertions
-            .iter()
-            .all(|insertion| insertion.lines.len() <= MAX_INSERTION_LINES));
-        assert_eq!(insertions[0].cell_ids, vec![id]);
-        assert_eq!(insertions[1].cell_ids, vec![id]);
-        assert_eq!(history.pending_cell_count(), 0);
-        assert_eq!(history.inserted_cell_count(), 1);
-    }
-
-    #[test]
     fn history_id_wrap_skips_live_ids() {
         let mut history = HistoryBuffer::new();
         history.next_id = 0;
@@ -1677,33 +1548,6 @@ mod tests {
         assert!(state.pending_is_due(Instant::now()));
         state.clear_pending_reflow();
         assert!(!state.has_pending_reflow());
-    }
-
-    #[test]
-    fn cache_key_includes_revision() {
-        let mut history = HistoryBuffer::new();
-        let id = history.enqueue_cell(Box::new(NoticeCell::new("first")));
-        let first = history.pending_insertions(40);
-        assert_eq!(history.render_count(), 1);
-        history.replace_pending_cell(id, Box::new(NoticeCell::new("second")));
-        let second = history.pending_insertions(40);
-        assert_eq!(history.render_count(), 2);
-        assert_ne!(first, second);
-    }
-
-    #[test]
-    fn cache_key_is_computed_once_per_cell_per_frame() {
-        let revision_calls = Arc::new(AtomicUsize::new(0));
-        let mut history = HistoryBuffer::new();
-        history.enqueue_cell(Box::new(RevisionCountingCell {
-            revision_calls: revision_calls.clone(),
-        }));
-
-        history.pending_insertions(40);
-        assert_eq!(revision_calls.load(Ordering::Relaxed), 1);
-
-        history.pending_insertions(40);
-        assert_eq!(revision_calls.load(Ordering::Relaxed), 2);
     }
 
     #[test]

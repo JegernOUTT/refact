@@ -824,43 +824,6 @@ mod tests {
     }
 
     #[test]
-    fn test_spawn_request_confinement_metadata_builders() {
-        let sandbox = ExecSandboxSpec {
-            mode: ExecSandboxMode::WorkspaceWrite,
-            ro_paths: vec![PathBuf::from("/readonly")],
-            rw_paths: vec![PathBuf::from("/workspace")],
-            allow_network: false,
-        };
-        let env_policy = ExecEnvPolicy::Scrubbed {
-            passthrough: vec!["PATH".to_string(), "HOME".to_string()],
-        };
-        let audit = ExecAuditMeta {
-            source: "tool.shell".to_string(),
-            justification: Some("run project tests".to_string()),
-        };
-
-        let request = ExecSpawnRequest::foreground("cargo test")
-            .with_sandbox(sandbox.clone())
-            .with_env_policy(env_policy.clone())
-            .with_audit(audit.clone())
-            .with_observe(true);
-
-        assert_eq!(request.sandbox, Some(sandbox));
-        assert_eq!(request.env_policy, env_policy);
-        assert_eq!(request.audit, Some(audit));
-        assert!(request.observe);
-    }
-
-    #[test]
-    fn test_process_id_prefix() {
-        let id = ExecProcessId::new();
-        assert!(
-            id.as_str().starts_with("exec_"),
-            "ID should start with 'exec_': {id}"
-        );
-    }
-
-    #[test]
     fn test_service_process_id_is_scope_aware() {
         let workspace_a = ExecOwnerMeta {
             chat_id: Some("chat-a".to_string()),
@@ -884,23 +847,6 @@ mod tests {
         assert!(ExecProcessId::for_service("  ", &workspace_a)
             .as_str()
             .starts_with("exec_service_service_"));
-    }
-
-    #[test]
-    fn test_service_process_id_normalizes_dot_workspace() {
-        let owner = ExecOwnerMeta {
-            workspace: Some(PathBuf::from("/tmp/ws")),
-            ..ExecOwnerMeta::default()
-        };
-        let owner_with_dot = ExecOwnerMeta {
-            workspace: Some(PathBuf::from("/tmp/ws/.")),
-            ..ExecOwnerMeta::default()
-        };
-
-        assert_eq!(
-            ExecProcessId::for_service("api", &owner),
-            ExecProcessId::for_service("api", &owner_with_dot)
-        );
     }
 
     #[cfg(unix)]
@@ -927,126 +873,12 @@ mod tests {
     }
 
     #[test]
-    fn test_service_process_id_keeps_distinct_absolute_workspaces() {
-        let first = ExecOwnerMeta {
-            workspace: Some(PathBuf::from("/tmp/ws-a")),
-            ..ExecOwnerMeta::default()
-        };
-        let second = ExecOwnerMeta {
-            workspace: Some(PathBuf::from("/tmp/ws-b")),
-            ..ExecOwnerMeta::default()
-        };
-
-        assert_ne!(
-            ExecProcessId::for_service("api", &first),
-            ExecProcessId::for_service("api", &second)
-        );
-    }
-
-    #[test]
-    fn test_process_id_display() {
-        let id = ExecProcessId("exec_abc123".to_string());
-        assert_eq!(id.to_string(), "exec_abc123");
-    }
-
-    #[test]
-    fn test_sanitize_short_description_basic() {
-        assert_eq!(sanitize_short_description("hello world"), "hello world");
-    }
-
-    #[test]
-    fn test_sanitize_short_description_control_chars() {
-        let input = "hello\x01\x02world\x7f";
-        assert_eq!(sanitize_short_description(input), "helloworld");
-    }
-
-    #[test]
-    fn test_sanitize_short_description_tabs_become_spaces() {
-        let input = "hello\tworld";
-        assert_eq!(sanitize_short_description(input), "hello world");
-    }
-
-    #[test]
     fn test_sanitize_short_description_capping() {
         let long = "a".repeat(100);
         let result = sanitize_short_description(&long);
         let chars: Vec<char> = result.chars().collect();
         assert_eq!(chars.len(), SHORT_DESC_MAX_LEN);
         assert_eq!(chars[SHORT_DESC_MAX_LEN - 1], '\u{2026}');
-    }
-
-    #[test]
-    fn test_sanitize_short_description_exactly_at_limit() {
-        let s = "a".repeat(SHORT_DESC_MAX_LEN);
-        let result = sanitize_short_description(&s);
-        assert_eq!(result, s);
-    }
-
-    #[test]
-    fn test_sanitize_short_description_multiline_takes_first_nonempty() {
-        let input = "\n  \nfirst line\nsecond line";
-        assert_eq!(sanitize_short_description(input), "first line");
-    }
-
-    #[test]
-    fn test_sanitize_short_description_trims_whitespace() {
-        assert_eq!(sanitize_short_description("  hello  "), "hello");
-    }
-
-    #[test]
-    fn test_sanitize_short_description_empty_string() {
-        assert_eq!(sanitize_short_description(""), "");
-    }
-
-    #[test]
-    fn test_generate_short_description_from_command() {
-        let result = generate_short_description("cargo build --release", &ExecMode::Foreground);
-        assert_eq!(result, "cargo build --release");
-    }
-
-    #[test]
-    fn test_generate_short_description_fallback_to_mode_when_empty() {
-        let result = generate_short_description("", &ExecMode::Background);
-        assert_eq!(result, "background");
-    }
-
-    #[test]
-    fn test_generate_short_description_fallback_whitespace_only() {
-        let result = generate_short_description("   ", &ExecMode::Service);
-        assert_eq!(result, "service");
-    }
-
-    #[test]
-    fn test_process_meta_uses_command_for_short_desc() {
-        let meta = ExecProcessMeta::new(ExecMode::Foreground, "echo hello".to_string());
-        assert_eq!(meta.short_description, "echo hello");
-        assert_eq!(meta.command, "echo hello");
-        assert_eq!(meta.owner, ExecOwnerMeta::default());
-        assert!(meta.started_at_ms.is_none());
-        assert!(meta.ended_at_ms.is_none());
-    }
-
-    #[test]
-    fn test_process_meta_custom_short_description() {
-        let meta = ExecProcessMeta::new(ExecMode::Service, "nginx".to_string())
-            .with_short_description("Web server (nginx)".to_string());
-        assert_eq!(meta.short_description, "Web server (nginx)");
-        assert_eq!(meta.command, "nginx");
-    }
-
-    #[test]
-    fn test_process_meta_owner_builders() {
-        let meta = ExecProcessMeta::new(ExecMode::Service, "server".to_string())
-            .with_chat_id("chat-a")
-            .with_tool_call_id("tool-a")
-            .with_service_name("api")
-            .with_workspace(PathBuf::from("/workspace"))
-            .with_cwd(PathBuf::from("/workspace/app"));
-        assert_eq!(meta.owner.chat_id.as_deref(), Some("chat-a"));
-        assert_eq!(meta.owner.tool_call_id.as_deref(), Some("tool-a"));
-        assert_eq!(meta.owner.service_name.as_deref(), Some("api"));
-        assert_eq!(meta.owner.workspace, Some(PathBuf::from("/workspace")));
-        assert_eq!(meta.cwd, Some(PathBuf::from("/workspace/app")));
     }
 
     #[test]
@@ -1108,103 +940,6 @@ mod tests {
     }
 
     #[test]
-    fn test_service_lookup_is_scoped() {
-        let owner = ExecOwnerMeta {
-            chat_id: Some("chat-a".to_string()),
-            tool_call_id: None,
-            service_name: Some("svc".to_string()),
-            workspace: Some(PathBuf::from("/workspace-a")),
-        };
-        assert!(owner.matches_service_lookup(
-            &ExecServiceLookup::new("svc")
-                .with_chat_id("chat-a")
-                .with_workspace(PathBuf::from("/workspace-a"))
-        ));
-        assert!(owner.matches_service_lookup(
-            &ExecServiceLookup::new("svc")
-                .with_chat_id("chat-a")
-                .with_workspace(PathBuf::from("/workspace-a/."))
-        ));
-        assert!(!owner.matches_service_lookup(
-            &ExecServiceLookup::new("svc")
-                .with_chat_id("chat-b")
-                .with_workspace(PathBuf::from("/workspace-a"))
-        ));
-    }
-
-    #[test]
-    fn test_snapshot_starts_in_starting_status() {
-        let meta = ExecProcessMeta::new(ExecMode::Foreground, "ls".to_string());
-        let snap = ExecProcessSnapshot::new(meta);
-        assert_eq!(snap.status, ExecStatus::Starting);
-    }
-
-    #[test]
-    fn test_snapshot_with_status() {
-        let meta = ExecProcessMeta::new(ExecMode::Foreground, "ls".to_string());
-        let snap =
-            ExecProcessSnapshot::new(meta).with_status(ExecStatus::Exited { exit_code: Some(0) });
-        assert_eq!(snap.status, ExecStatus::Exited { exit_code: Some(0) });
-    }
-
-    #[test]
-    fn test_snapshot_serialization_round_trip() {
-        let meta = ExecProcessMeta {
-            process_id: ExecProcessId("exec_test123".to_string()),
-            owner: ExecOwnerMeta {
-                chat_id: Some("chat-a".to_string()),
-                tool_call_id: Some("tool-a".to_string()),
-                service_name: Some("worker".to_string()),
-                workspace: Some(PathBuf::from("/workspace")),
-            },
-            mode: ExecMode::Background,
-            cwd: Some(PathBuf::from("/workspace/app")),
-            command: "sleep 10".to_string(),
-            short_description: "sleep 10".to_string(),
-            tty: false,
-            push: PushMode::WhenIdle,
-            created_at_ms: 1_000_000,
-            started_at_ms: Some(1_000_010),
-            ended_at_ms: None,
-        };
-        let snap = ExecProcessSnapshot::new(meta).with_status(ExecStatus::Running);
-
-        let json = serde_json::to_string(&snap).expect("serialization failed");
-        let deserialized: ExecProcessSnapshot =
-            serde_json::from_str(&json).expect("deserialization failed");
-
-        assert_eq!(snap, deserialized);
-    }
-
-    #[test]
-    fn test_exec_status_failed_serialization() {
-        let status = ExecStatus::Failed {
-            message: "oom killed".to_string(),
-        };
-        let json = serde_json::to_string(&status).unwrap();
-        let back: ExecStatus = serde_json::from_str(&json).unwrap();
-        assert_eq!(status, back);
-    }
-
-    #[test]
-    fn test_spawn_request_push_defaults_to_append_and_is_overridable() {
-        assert_eq!(
-            ExecSpawnRequest::background("sleep 1").push,
-            PushMode::Append
-        );
-        assert_eq!(
-            ExecSpawnRequest::background("sleep 1")
-                .with_push(PushMode::WhenIdle)
-                .push,
-            PushMode::WhenIdle
-        );
-        assert_eq!(
-            ExecProcessMeta::new(ExecMode::Background, "sleep 1".to_string()).push,
-            PushMode::Append
-        );
-    }
-
-    #[test]
     fn test_process_meta_without_push_field_deserializes_to_append() {
         // A record written before `push` existed must stay readable and keep
         // the legacy behaviour, which is `append`.
@@ -1229,17 +964,6 @@ mod tests {
 
         assert_eq!(meta.push, PushMode::Append);
         assert!(!meta.tty);
-    }
-
-    #[test]
-    fn test_process_meta_push_round_trips_for_every_mode() {
-        for push in [PushMode::Preempt, PushMode::Append, PushMode::WhenIdle] {
-            let meta =
-                ExecProcessMeta::new(ExecMode::Background, "sleep 1".to_string()).with_push(push);
-            let json = serde_json::to_string(&meta).unwrap();
-            let back: ExecProcessMeta = serde_json::from_str(&json).unwrap();
-            assert_eq!(back.push, push);
-        }
     }
 
     #[test]

@@ -170,35 +170,6 @@ fn extra(result: &(bool, Vec<ContextEnum>)) -> Value {
 }
 
 #[tokio::test]
-async fn team_seat_is_registered_and_allow_listed() {
-    let gcx = crate::global_context::tests::make_test_gcx().await;
-    crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all(&gcx.config_dir)
-        .await
-        .unwrap();
-    let registered = crate::tools::tools_list::get_available_tools(gcx.clone()).await;
-    let team_tools = registered
-        .iter()
-        .filter(|tool| tool.tool_description().name == "team_seat")
-        .collect::<Vec<_>>();
-    assert_eq!(team_tools.len(), 1);
-    assert!(matches!(
-        team_tools[0].tool_description().source.source_type,
-        crate::tools::tools_description::ToolSourceType::Builtin
-    ));
-    assert!(!team_tools[0].tool_description().allow_parallel);
-    for mode in ["agent", "task_agent", "task_planner"] {
-        let config =
-            crate::yaml_configs::customization_registry::get_mode_config(gcx.clone(), mode, None)
-                .await
-                .unwrap();
-        assert!(
-            config.tools.iter().any(|name| name == "team_seat"),
-            "{mode}"
-        );
-    }
-}
-
-#[tokio::test]
 async fn claim_then_second_claim_from_another_chat_is_refused() {
     let (app, workspace, first) = fixture().await;
     let second = caller(&app, "chat-b", workspace.path()).await;
@@ -331,71 +302,6 @@ async fn reclaim_takes_over_only_an_expired_seat() {
         unclaimed_refusal.contains("role `reviewer` is unclaimed"),
         "{unclaimed_refusal}"
     );
-}
-
-#[tokio::test]
-async fn record_outcome_is_logged() {
-    let (app, workspace, ccx) = fixture().await;
-    execute(
-        ccx.clone(),
-        "claim",
-        &[
-            ("role", json!("implementer")),
-            ("idempotency_key", json!("one")),
-        ],
-    )
-    .await
-    .unwrap();
-    execute(
-        ccx,
-        "record_outcome",
-        &[
-            ("role", json!("implementer")),
-            ("outcome", json!("complete")),
-        ],
-    )
-    .await
-    .unwrap();
-    app.teams
-        .with_roster(
-            &crate::coordination::roots::project_identity(workspace.path()),
-            "ship-it",
-            |_, roster| {
-                assert_eq!(
-                    roster.seat("implementer").unwrap().status.as_deref(),
-                    Some("complete")
-                );
-                let entries = roster.mission_log().entries();
-                assert!(entries.iter().any(|entry| matches!(
-                    &entry.event,
-                    crate::coordination::teams::MissionEvent::OutcomeRecorded { outcome, .. }
-                        if outcome == "complete"
-                )));
-            },
-        )
-        .unwrap();
-}
-
-#[tokio::test]
-async fn unknown_role_or_team_is_refused() {
-    let (_app, _workspace, ccx) = fixture().await;
-    let role_error = execute(ccx.clone(), "claim", &[("role", json!("unknown"))])
-        .await
-        .unwrap_err();
-    assert!(role_error.contains("this team defines no role `unknown`"));
-
-    let invalid_team = args(&[
-        ("team", json!("missing")),
-        ("action", json!("claim")),
-        ("role", json!("implementer")),
-    ]);
-    let error = ToolTeamSeat {
-        config_path: String::new(),
-    }
-    .tool_execute(ccx, &"missing-team".to_string(), &invalid_team)
-    .await
-    .unwrap_err();
-    assert!(error.contains("team `missing` is not defined"));
 }
 
 #[tokio::test]

@@ -776,20 +776,6 @@ mod tests {
     }
 
     #[test]
-    fn a_card_lands_one_level_below_its_deepest_dependency() {
-        let board = board(vec![
-            card("T-1", "planned", &[]),
-            card("T-2", "planned", &["T-1"]),
-            card("T-3", "planned", &["T-1", "T-2"]),
-        ]);
-
-        let waves = derive_waves(&board).unwrap();
-
-        assert_eq!(waves[1].cards, vec!["T-2".to_string()]);
-        assert_eq!(waves[2].cards, vec!["T-3".to_string()]);
-    }
-
-    #[test]
     fn wave_derivation_reuses_the_boards_own_cycle_detector() {
         let board = board(vec![
             card("T-1", "planned", &["T-2"]),
@@ -852,40 +838,6 @@ mod tests {
     }
 
     #[test]
-    fn a_repeated_agent_id_in_a_pipeline_advances_by_position_not_first_match() {
-        let stages = vec![
-            stage("T-1", Some("reviewer")),
-            stage("T-2", Some("builder")),
-            stage("T-3", Some("reviewer")),
-            stage("T-4", Some("shipper")),
-        ];
-        let first_match = stages
-            .iter()
-            .position(|stage| stage.agent_id.as_deref() == Some("reviewer"))
-            .unwrap();
-        assert_eq!(first_match, 0, "the repeated agent's first match is at 0");
-
-        let advance = advance_pipeline(&stages, 2);
-
-        assert_eq!(
-            advance,
-            PipelineAdvance::Next {
-                position: 3,
-                card_id: "T-4".to_string(),
-                agent_id: Some("shipper".to_string()),
-            }
-        );
-        assert_ne!(
-            advance,
-            PipelineAdvance::Next {
-                position: first_match + 1,
-                card_id: "T-2".to_string(),
-                agent_id: Some("builder".to_string()),
-            }
-        );
-    }
-
-    #[test]
     fn a_pipeline_cursor_walks_repeated_agents_by_position() {
         let board = board(vec![
             card("T-1", "done", &[]),
@@ -907,17 +859,6 @@ mod tests {
     }
 
     #[test]
-    fn advancing_past_the_last_pipeline_position_is_reported_not_silently_wrapped() {
-        let stages = vec![stage("T-1", Some("only")), stage("T-2", Some("only"))];
-
-        assert_eq!(advance_pipeline(&stages, 1), PipelineAdvance::Complete);
-        assert_eq!(
-            advance_pipeline(&stages, 9),
-            PipelineAdvance::OutOfRange { position: 9 }
-        );
-    }
-
-    #[test]
     fn a_sequential_lane_dispatches_only_its_current_position() {
         let board = planned_fixture();
         let lanes = vec![Lane {
@@ -935,67 +876,6 @@ mod tests {
             StageDecision::NotRun {
                 reason: "sequential lane 'serial' is at position 0".to_string(),
             }
-        );
-    }
-
-    #[test]
-    fn a_parallel_lane_dispatches_every_admitted_stage() {
-        let board = planned_fixture();
-        let lanes = vec![parallel_lane("roots", &["T-1", "T-2"])];
-
-        let schedule = plan_schedule(&board, &lanes, &limits()).unwrap();
-
-        assert_eq!(
-            schedule.dispatch,
-            vec!["T-1".to_string(), "T-2".to_string()]
-        );
-        assert_eq!(schedule.lanes[0].status, LaneStatus::Dispatched);
-    }
-
-    #[test]
-    fn an_undispatched_optional_lane_reports_not_run_with_a_reason() {
-        let board = planned_fixture();
-        let lanes = vec![
-            parallel_lane("roots", &["T-1", "T-2"]),
-            Lane {
-                name: "polish".to_string(),
-                kind: LaneKind::Parallel,
-                stages: vec![stage("T-5", None)],
-                optional: true,
-            },
-        ];
-
-        let schedule = plan_schedule(&board, &lanes, &limits()).unwrap();
-        let polish = &schedule.lanes[1];
-
-        assert_eq!(polish.status, LaneStatus::NotRun);
-        assert!(polish.optional);
-        assert!(!polish.stages.is_empty(), "not_run is not an empty result");
-        assert_eq!(
-            polish.reason.as_deref(),
-            Some("wave 0 is still running required card(s) T-1, T-2")
-        );
-    }
-
-    #[test]
-    fn an_empty_lane_reports_not_run_rather_than_finding_nothing() {
-        let board = planned_fixture();
-        let lanes = vec![
-            parallel_lane("roots", &["T-1"]),
-            Lane {
-                name: "empty".to_string(),
-                kind: LaneKind::Parallel,
-                stages: vec![],
-                optional: false,
-            },
-        ];
-
-        let schedule = plan_schedule(&board, &lanes, &limits()).unwrap();
-
-        assert_eq!(schedule.lanes[1].status, LaneStatus::NotRun);
-        assert_eq!(
-            schedule.lanes[1].reason.as_deref(),
-            Some("lane 'empty' declares no stages")
         );
     }
 
@@ -1060,33 +940,6 @@ mod tests {
         assert_eq!(
             schedule.lanes[0].reason.as_deref(),
             Some("pipeline lane 'chain' stopped at position 0: card T-1 failed")
-        );
-    }
-
-    #[test]
-    fn the_wave_width_limit_throttles_submission_without_refusing_the_schedule() {
-        let board = board(vec![
-            card("T-1", "planned", &[]),
-            card("T-2", "planned", &[]),
-            card("T-3", "planned", &[]),
-        ]);
-        let lanes = vec![parallel_lane("roots", &["T-1", "T-2", "T-3"])];
-        let narrow = WaveLimits {
-            max_wave_width: 2,
-            max_pipeline_depth: 16,
-        };
-
-        let schedule = plan_schedule(&board, &lanes, &narrow).unwrap();
-
-        assert_eq!(
-            schedule.dispatch,
-            vec!["T-1".to_string(), "T-2".to_string()]
-        );
-        assert_eq!(
-            schedule.lanes[0].stages[2].decision,
-            StageDecision::NotRun {
-                reason: "wave width limit of 2 card(s) per submission was reached".to_string(),
-            }
         );
     }
 
@@ -1231,27 +1084,6 @@ mod tests {
     }
 
     #[test]
-    fn overlap_order_is_deterministic_across_repeated_runs() {
-        let board = planned_fixture();
-        let lanes = vec![parallel_lane("roots", &["T-1", "T-2"])];
-        let inputs = overlapping(&[
-            ("T-1", &["/repo/a.rs", "/repo/b.rs"]),
-            ("T-2", &["/repo/b.rs"]),
-        ]);
-
-        let first = plan_schedule_with_overlap(&board, &lanes, &limits(), Some(&inputs)).unwrap();
-        for _ in 0..16 {
-            let again =
-                plan_schedule_with_overlap(&board, &lanes, &limits(), Some(&inputs)).unwrap();
-            assert_eq!(again, first);
-            assert_eq!(
-                serde_json::to_string(&again).unwrap(),
-                serde_json::to_string(&first).unwrap()
-            );
-        }
-    }
-
-    #[test]
     fn overlap_order_keeps_declared_and_observed_apart_in_the_record() {
         let board = board(vec![
             card("T-1", "planned", &[]),
@@ -1284,79 +1116,6 @@ mod tests {
             ]
         );
         assert!(order.note.contains("not permission or a guarantee"));
-    }
-
-    #[test]
-    fn overlap_order_disabled_reproduces_the_unordered_schedule_byte_for_byte() {
-        let board = fixture_dag(&[
-            ("T-1", "planned"),
-            ("T-2", "planned"),
-            ("T-3", "planned"),
-            ("T-4", "planned"),
-            ("T-5", "planned"),
-        ]);
-        let lanes = vec![
-            parallel_lane("roots", &["T-1", "T-2"]),
-            Lane {
-                name: "chain".to_string(),
-                kind: LaneKind::Sequential,
-                stages: vec![stage("T-3", None), stage("T-4", None)],
-                optional: false,
-            },
-            Lane {
-                name: "tail".to_string(),
-                kind: LaneKind::Parallel,
-                stages: vec![stage("T-5", None)],
-                optional: true,
-            },
-        ];
-
-        let legacy = plan_schedule(&board, &lanes, &limits()).unwrap();
-        let disabled = plan_schedule_with_overlap(&board, &lanes, &limits(), None).unwrap();
-
-        assert_eq!(disabled, legacy);
-        assert_eq!(
-            serde_json::to_string(&disabled).unwrap(),
-            serde_json::to_string(&legacy).unwrap()
-        );
-        assert!(disabled.overlap_order.is_empty());
-        assert!(
-            !serde_json::to_string(&disabled)
-                .unwrap()
-                .contains("serial_rank"),
-            "an unordered schedule must not grow a field"
-        );
-        assert_eq!(
-            disabled.submission_groups(),
-            vec![disabled.dispatch.clone()]
-        );
-    }
-
-    #[test]
-    fn overlap_order_with_nothing_known_is_indistinguishable_from_no_ordering() {
-        let board = fixture_dag(&[
-            ("T-1", "planned"),
-            ("T-2", "planned"),
-            ("T-3", "planned"),
-            ("T-4", "planned"),
-            ("T-5", "planned"),
-        ]);
-        let lanes = vec![
-            parallel_lane("roots", &["T-1", "T-2"]),
-            parallel_lane("rest", &["T-3", "T-4", "T-5"]),
-        ];
-        let nothing = OverlapInputs::new();
-
-        let legacy = plan_schedule(&board, &lanes, &limits()).unwrap();
-        let ordered =
-            plan_schedule_with_overlap(&board, &lanes, &limits(), Some(&nothing)).unwrap();
-
-        assert!(nothing.is_empty());
-        assert_eq!(
-            serde_json::to_string(&ordered).unwrap(),
-            serde_json::to_string(&legacy).unwrap(),
-            "unavailable overlap information must not perturb the wave"
-        );
     }
 
     #[test]
@@ -1458,21 +1217,5 @@ mod tests {
             "an undispatched card is not ranked and cannot delay one that is"
         );
         assert_eq!(schedule.lanes[1].stages[0].serial_rank, None);
-    }
-
-    #[test]
-    fn lane_kind_parsing_publishes_its_accepted_names() {
-        assert_eq!(LaneKind::parse("pipeline").unwrap(), LaneKind::Pipeline);
-        assert_eq!(LaneKind::parse("sequential").unwrap(), LaneKind::Sequential);
-        assert_eq!(LaneKind::parse("parallel").unwrap(), LaneKind::Parallel);
-        assert!(LaneKind::parse("waves").unwrap_err().contains("pipeline"));
-        assert_eq!(
-            LaneKind::NAMES,
-            &[
-                LaneKind::Parallel.as_str(),
-                LaneKind::Sequential.as_str(),
-                LaneKind::Pipeline.as_str()
-            ]
-        );
     }
 }

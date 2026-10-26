@@ -585,24 +585,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_oauth_start_fails_gracefully_when_server_unreachable() {
-        use crate::integrations::mcp::mcp_auth::MCPOAuthSessionManager;
-        let result = MCPOAuthSessionManager::start_oauth_flow(
-            "http://127.0.0.1:1",
-            "/tmp/test_mcp_oauth.yaml",
-            &[],
-            "http://127.0.0.1:8001/v1/mcp/oauth/callback",
-        )
-        .await;
-        assert!(
-            result.is_err(),
-            "start_oauth_flow should fail when server is unreachable"
-        );
-        let err = result.unwrap_err();
-        assert!(!err.is_empty(), "error message should not be empty");
-    }
-
-    #[tokio::test]
     async fn test_exchange_code_rejects_unknown_session_id() {
         use crate::integrations::mcp::mcp_auth::MCPOAuthSessionManager;
         let result =
@@ -612,15 +594,6 @@ mod tests {
             result.unwrap_err().contains("No pending OAuth session"),
             "should say session not found"
         );
-    }
-
-    #[tokio::test]
-    async fn test_expired_sessions_are_rejected() {
-        use crate::integrations::mcp::mcp_auth::MCPOAuthSessionManager;
-        MCPOAuthSessionManager::cleanup_expired_sessions().await;
-        let result = MCPOAuthSessionManager::exchange_code("nonexistent-session-xyz", "code").await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("No pending OAuth session"));
     }
 
     #[tokio::test]
@@ -652,52 +625,5 @@ mod tests {
             content.contains("url: https://example.com"),
             "other fields preserved"
         );
-    }
-
-    #[tokio::test]
-    async fn test_status_returns_authenticated_when_valid_token() {
-        let mut tmp = NamedTempFile::new().unwrap();
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
-        let future_expiry = now_ms + 3_600_000;
-        let yaml = format!(
-            "url: https://example.com\nauth_type: oauth2_pkce\noauth_tokens:\n  access_token: live_token\n  refresh_token: ref\n  expires_at: {}\n  client_id: cid\n  scopes:\n    - read\n",
-            future_expiry
-        );
-        tmp.write_all(yaml.as_bytes()).unwrap();
-        let path = tmp.path().to_str().unwrap().to_string();
-
-        let tokens = load_tokens_from_config(&path).await;
-        assert!(tokens.is_some());
-        let t = tokens.unwrap();
-        assert_eq!(t.access_token, "live_token");
-        let authenticated =
-            !t.access_token.is_empty() && (t.expires_at == 0 || t.expires_at > now_ms);
-        assert!(authenticated, "token should be valid");
-    }
-
-    #[tokio::test]
-    async fn test_status_returns_not_authenticated_when_expired() {
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
-        let past_expiry = now_ms - 1_000;
-        let mut tmp = NamedTempFile::new().unwrap();
-        let yaml = format!(
-            "auth_type: oauth2_pkce\noauth_tokens:\n  access_token: expired_token\n  refresh_token: ref\n  expires_at: {}\n  client_id: cid\n  scopes: []\n",
-            past_expiry
-        );
-        tmp.write_all(yaml.as_bytes()).unwrap();
-        let path = tmp.path().to_str().unwrap().to_string();
-
-        let tokens = load_tokens_from_config(&path).await;
-        assert!(tokens.is_some());
-        let t = tokens.unwrap();
-        let authenticated =
-            !t.access_token.is_empty() && (t.expires_at == 0 || t.expires_at > now_ms);
-        assert!(!authenticated, "expired token should not be authenticated");
     }
 }

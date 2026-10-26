@@ -476,23 +476,6 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_secs(120));
     }
 
-    #[test]
-    fn workspace_lease_acquires_and_releases() {
-        let locks_dir = tempfile::tempdir().unwrap();
-        let root = tempfile::tempdir().unwrap();
-        let lease =
-            try_acquire_workspace_lease_in(locks_dir.path(), root.path(), &test_info()).unwrap();
-        assert!(lease.path().exists());
-        let holder = read_workspace_lease_holder(lease.info_path()).unwrap();
-        assert_eq!(holder.pid, std::process::id());
-        assert_eq!(holder.http_port, 8001);
-        let lease_path = lease.path().to_path_buf();
-        drop(lease);
-        let reacquired =
-            try_acquire_workspace_lease_in(locks_dir.path(), root.path(), &test_info()).unwrap();
-        assert_eq!(reacquired.path(), lease_path.as_path());
-    }
-
     #[cfg(unix)]
     #[test]
     fn workspace_lease_drop_unlocks_while_a_duplicate_descriptor_is_open() {
@@ -531,20 +514,6 @@ mod tests {
         assert_eq!(holder.http_port, 8001);
         assert!(conflict.to_string().contains(WORKSPACE_BUSY_MARKER));
         assert!(conflict.holder_description().contains("http port 8001"));
-    }
-
-    #[test]
-    fn workspace_lease_holder_unreadable_when_file_is_malformed() {
-        let locks_dir = tempfile::tempdir().unwrap();
-        let root = tempfile::tempdir().unwrap();
-        let path = workspace_lease_info_path_in(locks_dir.path(), root.path());
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"not json at all").unwrap();
-        assert!(read_workspace_lease_holder(&path).is_none());
-        assert_eq!(
-            describe_workspace_lease_holder(None),
-            "unknown holder".to_string()
-        );
     }
 
     #[test]

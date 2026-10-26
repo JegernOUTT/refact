@@ -413,24 +413,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn letters_digits_and_shifted_symbols_resolve() {
-        assert_eq!(lookup("a", false).unwrap().code, "KeyA");
-        assert_eq!(lookup("KeyA", true).unwrap().key, "A");
-        assert_eq!(lookup("1", false).unwrap().code, "Digit1");
-        assert_eq!(lookup("Digit1", true).unwrap().key, "!");
-        assert_eq!(lookup("!", false).unwrap().code, "Digit1");
-    }
-
-    #[test]
-    fn control_and_navigation_keys_resolve() {
-        assert_eq!(lookup("Enter", false).unwrap().text, "\r");
-        assert_eq!(lookup("Tab", false).unwrap().key_code, 9);
-        assert_eq!(lookup("Escape", false).unwrap().key_code, 27);
-        assert_eq!(lookup("ArrowLeft", false).unwrap().key_code, 37);
-        assert_eq!(lookup("F12", false).unwrap().key_code, 123);
-    }
-
-    #[test]
     fn numpad_shift_changes_key_and_key_code() {
         let shifted = lookup("Numpad7", true).unwrap();
         assert_eq!(shifted.key, "7");

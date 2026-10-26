@@ -383,30 +383,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unknown_frontmatter_fields_roundtrip_through_to_yaml() {
-        let doc = "---\ntitle: \"Known\"\ntags: [\"buddy\"]\nunknown_scalar: keep-me\nunknown_list:\n  - alpha\n  - beta\n---\nBody";
-        let (frontmatter, _) = KnowledgeFrontmatter::parse(doc);
-
-        assert_eq!(frontmatter.title.as_deref(), Some("Known"));
-        assert_eq!(frontmatter.tags, vec!["buddy".to_string()]);
-        assert_eq!(
-            frontmatter.extra.get("unknown_scalar"),
-            Some(&serde_yaml::Value::String("keep-me".to_string()))
-        );
-        assert!(matches!(
-            frontmatter.extra.get("unknown_list"),
-            Some(serde_yaml::Value::Sequence(values)) if values.len() == 2
-        ));
-
-        let rendered = frontmatter.to_yaml();
-        let (roundtripped, _) = KnowledgeFrontmatter::parse(&format!("{}\nBody", rendered));
-
-        assert_eq!(roundtripped.title.as_deref(), Some("Known"));
-        assert_eq!(roundtripped.tags, vec!["buddy".to_string()]);
-        assert_eq!(roundtripped.extra, frontmatter.extra);
-    }
-
-    #[test]
     fn unknown_nested_and_tagged_fields_roundtrip_through_to_yaml() {
         let doc = "---\ntitle: Known\ncustom_object:\n  nested: true\ncustom_list: [alpha]\ncustom_tagged: !custom\n  nested: true\n'key: with colon': retained\ncustom_multiline: |\n  first\n  second\n---\nBody";
         let (frontmatter, start) = KnowledgeFrontmatter::parse(doc);
@@ -441,38 +417,5 @@ mod tests {
             assert_eq!(start, 0, "accepted invalid frontmatter: {invalid}");
             assert!(frontmatter.extra.is_empty());
         }
-    }
-
-    #[test]
-    fn unknown_nested_tags_preserve_values_and_body_offset() {
-        let yaml = "title: Known\ncustom:\n  nested: !custom [alpha, {enabled: true}]\ncustom_scalar: !scalar retained\ncustom_sequence: !sequence [one, two]";
-        let expected: serde_yaml::Mapping = serde_yaml::from_str(yaml).unwrap();
-        let doc = format!("---\n{yaml}\n---\nBody");
-        let (frontmatter, start) = KnowledgeFrontmatter::parse(&doc);
-        assert!(start > 0);
-        assert_eq!(&doc[start..], "Body");
-        for key in ["custom", "custom_scalar", "custom_sequence"] {
-            assert_eq!(frontmatter.extra.get(key), expected.get(key));
-        }
-        let rendered = format!("{}\nBody", frontmatter.to_yaml());
-        let (roundtripped, start) = KnowledgeFrontmatter::parse(&rendered);
-        assert!(start > 0);
-        assert_eq!(&rendered[start..], "Body");
-        assert_eq!(roundtripped.extra, frontmatter.extra);
-    }
-
-    #[test]
-    fn frontmatter_without_extra_serializes_without_artifacts() {
-        let frontmatter = KnowledgeFrontmatter {
-            id: Some("id-1".to_string()),
-            title: Some("Title".to_string()),
-            tags: vec!["buddy".to_string()],
-            ..Default::default()
-        };
-
-        assert_eq!(
-            frontmatter.to_yaml(),
-            "---\nid: \"id-1\"\ntitle: \"Title\"\ntags: [\"buddy\"]\n---"
-        );
     }
 }

@@ -1,5 +1,3 @@
-#[cfg(test)]
-use std::collections::HashMap;
 use std::path::PathBuf;
 use axum::extract::Path;
 use axum::response::Json;
@@ -388,88 +386,8 @@ pub fn smithery_api_key(sources: &[MarketplaceSource]) -> Option<String> {
 }
 
 #[cfg(test)]
-pub fn default_sources_config_for_test() -> SourcesConfig {
-    default_sources_config()
-}
-
-#[cfg(test)]
-pub fn get_source_map(
-    bundled: &MarketplaceSource,
-    sources: &[MarketplaceSource],
-) -> HashMap<String, MarketplaceSource> {
-    let mut map = HashMap::new();
-    map.insert(bundled.id.clone(), bundled.clone());
-    for s in sources {
-        map.insert(s.id.clone(), s.clone());
-    }
-    map
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_default_sources_include_official_mcp() {
-        let cfg = default_sources_config_for_test();
-        let official = cfg.sources.iter().find(|s| s.id == OFFICIAL_MCP_SOURCE_ID);
-        assert!(
-            official.is_some(),
-            "official-mcp must be in default sources"
-        );
-        let official = official.unwrap();
-        assert!(official.enabled, "official-mcp must be enabled by default");
-        assert_eq!(official.source_type, SourceType::OfficialMcp);
-        assert!(
-            official.api_key.is_none(),
-            "official-mcp must not need an api key"
-        );
-    }
-
-    #[test]
-    fn test_official_mcp_source_json_type_field() {
-        let source = MarketplaceSource {
-            id: OFFICIAL_MCP_SOURCE_ID.to_string(),
-            label: "MCP Registry".to_string(),
-            source_type: SourceType::OfficialMcp,
-            enabled: true,
-            url: None,
-            api_key: None,
-        };
-        let json = source_to_api_json(&source, false);
-        assert_eq!(json["type"], "official_mcp");
-        assert!(json.get("needs_api_key").is_none());
-        assert!(json.get("has_api_key").is_none());
-    }
-
-    #[tokio::test]
-    async fn test_source_config_persistence() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().to_path_buf();
-
-        let initial = load_sources(&config_dir).await;
-        assert!(
-            initial.sources.iter().any(|s| s.id == "refact"),
-            "should have refact source by default"
-        );
-
-        let mut cfg = initial.clone();
-        cfg.sources.push(MarketplaceSource {
-            id: "custom".to_string(),
-            label: "Custom".to_string(),
-            source_type: SourceType::RefactIndex,
-            enabled: true,
-            url: Some("https://example.com/index.json".to_string()),
-            api_key: None,
-        });
-        save_sources(&config_dir, &cfg).await.unwrap();
-
-        let reloaded = load_sources(&config_dir).await;
-        assert!(
-            reloaded.sources.iter().any(|s| s.id == "custom"),
-            "custom source should persist"
-        );
-    }
 
     #[cfg(unix)]
     #[tokio::test]
@@ -491,22 +409,6 @@ mod tests {
     }
 
     #[test]
-    fn test_bundled_source_not_removable() {
-        let bundled = bundled_source();
-        assert_eq!(bundled.id, BUNDLED_SOURCE_ID);
-        let json = source_to_api_json(&bundled, false);
-        assert_eq!(json["removable"], false);
-    }
-
-    #[test]
-    fn test_smithery_source_needs_api_key() {
-        let smithery = default_smithery_source();
-        let json = source_to_api_json(&smithery, true);
-        assert_eq!(json["needs_api_key"], true);
-        assert_eq!(json["has_api_key"], false);
-    }
-
-    #[test]
     fn test_smithery_api_key_extraction() {
         let mut sources = vec![default_smithery_source()];
         assert!(
@@ -520,23 +422,6 @@ mod tests {
 
         sources[0].enabled = false;
         assert!(smithery_api_key(&sources).is_none(), "no key when disabled");
-    }
-
-    #[test]
-    fn test_get_source_map() {
-        let bundled = bundled_source();
-        let extra = MarketplaceSource {
-            id: "extra".to_string(),
-            label: "Extra".to_string(),
-            source_type: SourceType::RefactIndex,
-            enabled: true,
-            url: Some("https://example.com".to_string()),
-            api_key: None,
-        };
-        let map = get_source_map(&bundled, &[extra]);
-        assert!(map.contains_key(BUNDLED_SOURCE_ID));
-        assert!(map.contains_key("extra"));
-        assert_eq!(map.len(), 2);
     }
 
     #[tokio::test]

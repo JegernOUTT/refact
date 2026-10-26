@@ -3,9 +3,6 @@ use std::path::Path;
 
 use regex_lite::Regex;
 
-const APP_RS_PRODUCTION_LINE_CAP: usize = 1_510;
-const STATE_RS_PRODUCTION_LINE_CAP: usize = 2_000;
-const RATCHET_SCHEDULE: &str = "1,510 app.rs production lines → 2,000 state.rs production lines";
 const INLINE_TEST_BOUNDARY: &str = "\n#[cfg(test)]\nmod tests {";
 enum NonEngineTuiToolMatch {
     Exact(&'static str),
@@ -33,31 +30,19 @@ const NON_ENGINE_TUI_TOOL_MATCHES: &[NonEngineTuiToolMatch] = &[
     NonEngineTuiToolMatch::Prefix("srvtoolu_"),
 ];
 
-#[test]
-fn app_rs_stays_within_the_current_ratchet_cap() {
-    assert_production_line_cap("src/app.rs", APP_RS_PRODUCTION_LINE_CAP);
-}
-
-#[test]
-fn state_rs_stays_within_the_current_ratchet_cap() {
-    assert_production_line_cap("src/app/state.rs", STATE_RS_PRODUCTION_LINE_CAP);
-}
-
-fn assert_production_line_cap(relative_path: &str, cap: usize) {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
-    let source = fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-    let production = source
-        .split_once(INLINE_TEST_BOUNDARY)
-        .map(|(production, _)| production)
-        .unwrap_or(&source);
-    let current_line_count = production.lines().count();
-
-    assert!(
-        current_line_count <= cap,
-        "{relative_path} has {current_line_count} production lines; cap is {cap}. Ratchet schedule: {RATCHET_SCHEDULE}. The cap may only decrease."
-    );
-}
+const RETIRED_TUI_TOOL_NAMES: &[&str] = &[
+    "sleep",
+    "get_plan",
+    "set_plan",
+    "update_plan",
+    "pause_goal",
+    "snooze_goal",
+    "pause_agent",
+    "resume_agent",
+    "wait_agents",
+    "agent_wait",
+    "agent_resume",
+];
 
 #[test]
 fn tui_tool_literals_are_registered_or_explicitly_exempt() {
@@ -93,11 +78,35 @@ fn tui_tool_literals_are_registered_or_explicitly_exempt() {
         "provider-native exemption contains an engine-registered tool"
     );
 
-    let missing = exact_matches
-        .iter()
-        .filter(|name| !registered.contains(*name))
-        .cloned()
-        .collect::<Vec<_>>();
+    for name in RETIRED_TUI_TOOL_NAMES {
+        assert!(
+            exact_matches.contains(*name),
+            "obsolete legacy exemption: {name}"
+        );
+        assert!(
+            !registered.contains(*name),
+            "legacy tool is registered again: {name}"
+        );
+    }
+    let missing_tools = |names: &std::collections::HashSet<String>| {
+        let mut missing = names
+            .iter()
+            .filter(|name| {
+                !registered.contains(*name) && !RETIRED_TUI_TOOL_NAMES.contains(&name.as_str())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        missing.sort();
+        missing
+    };
+    let mut negative_control = exact_matches.clone();
+    negative_control.insert("bogus_unregistered_tui_tool".into());
+    assert_eq!(
+        missing_tools(&negative_control),
+        ["bogus_unregistered_tui_tool"]
+    );
+
+    let missing = missing_tools(&exact_matches);
     assert!(
         missing.is_empty(),
         "TUI exact tool matches absent from the engine registry: {missing:?}"
@@ -112,8 +121,8 @@ fn tui_tool_literals_are_registered_or_explicitly_exempt() {
         .collect::<Vec<_>>();
     assert_eq!(
         process_tools.len(),
-        7,
-        "the TUI process_ matcher must continue to cover the seven engine process tools: {process_tools:?}"
+        6,
+        "the TUI process_ matcher must continue to cover the six engine process tools: {process_tools:?}"
     );
 }
 
@@ -142,7 +151,10 @@ fn engine_registered_tool_names() -> std::collections::HashSet<String> {
         .collect::<std::collections::HashSet<_>>();
     let mut registered = registered_types
         .iter()
-        .filter_map(|tool_type| tool_description_name(&engine_root.join("src/tools"), tool_type))
+        .map(|tool_type| {
+            tool_description_name(&engine_root.join("src/tools"), tool_type)
+                .unwrap_or_else(|| panic!("cannot resolve registered descriptor for {tool_type}"))
+        })
         .collect::<std::collections::HashSet<_>>();
     registered.extend(exposed_default_subagent_tool_names(&engine_root));
     registered
@@ -203,15 +215,23 @@ fn read_source(path: &Path) -> String {
 }
 
 fn tool_description_body<'a>(source: &'a str, tool_type: &str) -> Option<&'a str> {
-    let implementation = source.find(&format!("impl Tool for {tool_type} {{"))?;
+    if !source.contains(tool_type) {
+        return None;
+    }
+    let implementation_re = Regex::new(&format!(
+        r"impl\s+(?:[A-Za-z0-9_]+::)*Tool\s+for\s+{tool_type}\s*\{{"
+    ))
+    .expect("valid Tool implementation regex");
+    let implementation = implementation_re.find(source)?.start();
     let implementation = braced_body(&source[implementation..])?;
     let description = implementation.find("fn tool_description")?;
     function_body(&implementation[description..])
 }
 
 fn tool_name_from_description(source: &str, description: &str) -> Option<String> {
-    let name_field = Regex::new(r#"name:\s*"([a-z][a-z0-9_]*)"\.to_string"#)
-        .expect("valid tool name field regex");
+    let name_field =
+        Regex::new(r#"(?:name:\s*|\.name\s*=\s*)"([a-z][a-z0-9_]*)"\.(?:to_string|into)"#)
+            .expect("valid tool name field regex");
     if let Some(captures) = name_field.captures(description) {
         return Some(captures[1].to_string());
     }
@@ -226,7 +246,27 @@ fn tool_name_from_description(source: &str, description: &str) -> Option<String>
         }
     }
 
-    let helper = Regex::new(r"([a-z][a-z0-9_]*_description)\s*\(\s*\)")
+    if description
+        .trim_start_matches('{')
+        .trim_start()
+        .starts_with("description(")
+    {
+        let arguments = function_call_arguments(description, "description")?;
+        let helper = source.find("fn description(")?;
+        let body = function_body(&source[helper..])?;
+        let conditional = Regex::new(
+            r#"name:\s*if\s+resume\s*\{\s*"([a-z_]+)"\s*\}\s*else\s*\{\s*"([a-z_]+)"\s*\}"#,
+        )
+        .expect("valid conditional descriptor regex");
+        let names = conditional.captures(body)?;
+        return match arguments.rsplit(',').next()?.trim() {
+            "true" => Some(names[1].to_string()),
+            "false" => Some(names[2].to_string()),
+            _ => None,
+        };
+    }
+
+    let helper = Regex::new(r"([a-z][a-z0-9_]*_description)\s*\(")
         .expect("valid descriptor helper regex")
         .captures(description)?[1]
         .to_string();

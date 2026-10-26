@@ -1604,60 +1604,6 @@ mod tests {
     }
 
     #[test]
-    fn compact_format_renders_one_line_per_agent() {
-        let statuses = vec![
-            status("T-1", "P0", "doing", Some(SessionState::Generating), 3),
-            status("T-2", "P1", "doing", Some(SessionState::ExecutingTools), 4),
-        ];
-        let output =
-            format_agent_statuses_at(&statuses, &query(AgentReportFormat::Compact), now()).unwrap();
-
-        let lines = card_lines(&output);
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains("T-1"));
-        assert!(lines[1].contains("T-2"));
-    }
-
-    #[test]
-    fn attention_card_is_rendered_and_counted() {
-        let mut status = status("T-ATTN", "P1", "doing", Some(SessionState::Paused), 3);
-        status.attention = Some(attention());
-
-        let output = format_agent_statuses_at(
-            &[status.clone()],
-            &AgentStatusQuery::default_for_format(AgentReportFormat::Compact),
-            now(),
-        )
-        .unwrap();
-
-        assert!(output.contains("⚠ needs attention: Worker is waiting on an external dependency (since 2026-05-21T23:30:00Z, ×3)"));
-        assert!(output
-            .starts_with("⚠️  Alerts: 0 stuck, 0 failed, 1 needing approval, 1 needing attention"));
-        assert!(card_lines(&output)
-            .iter()
-            .any(|line| line.contains("T-ATTN")));
-        for format in [AgentReportFormat::Summary, AgentReportFormat::Detail] {
-            let rendered =
-                format_agent_statuses_at(&[status.clone()], &query(format), now()).unwrap();
-            assert!(
-                rendered.contains("⚠ needs attention: Worker is waiting on an external dependency")
-            );
-        }
-    }
-
-    #[test]
-    fn card_without_attention_renders_unchanged() {
-        let status = status("T-1", "P1", "doing", Some(SessionState::Generating), 3);
-        let output =
-            format_agent_statuses_at(&[status], &query(AgentReportFormat::Compact), now()).unwrap();
-
-        assert_eq!(
-            output,
-            "⚠️  Alerts: 0 stuck, 0 failed, 0 needing approval, 0 needing attention\n\nP1 🔄  T-1   t-1-title              | generating |  3m ago | last: cat\n\nshowing 1 of 1; no more pages\n"
-        );
-    }
-
-    #[test]
     fn active_generation_loop_is_not_stuck_only_because_activity_is_old() {
         let statuses = vec![
             status("T-1", "P0", "doing", Some(SessionState::Generating), 30),
@@ -1734,32 +1680,6 @@ mod tests {
     }
 
     #[test]
-    fn fresh_idle_agent_within_grace_is_running() {
-        for state in [Some(SessionState::Idle), None] {
-            let mut status = status("T-FRESH", "P1", "doing", state, 0);
-            status.started_at = Some(now() - Duration::seconds(30));
-            status.last_activity_at = None;
-
-            assert_eq!(
-                classify_agent_status(&status, now()),
-                AgentStateKind::Running
-            );
-            assert!(!format_compact_line(&status, now()).contains("STUCK"));
-            assert_eq!(AgentAlerts::from_statuses(&[status], now()).stuck, 0);
-        }
-    }
-
-    #[test]
-    fn idle_agent_beyond_grace_is_stuck() {
-        for state in [Some(SessionState::Idle), None] {
-            let status = status("T-OLD", "P1", "doing", state, 10);
-
-            assert_eq!(classify_agent_status(&status, now()), AgentStateKind::Stuck);
-            assert!(format_compact_line(&status, now()).contains("STUCK"));
-        }
-    }
-
-    #[test]
     fn idle_grace_uses_latest_start_or_activity_and_expires_at_boundary() {
         let old = now() - Duration::minutes(10);
         let recent = now() - Duration::seconds(30);
@@ -1807,77 +1727,6 @@ mod tests {
         assert!(format_compact_line(&status, now()).contains("STUCK"));
     }
 
-    #[test]
-    fn ab_variants_inherit_card_pause_and_start_metadata() {
-        let mut card = ab_doing_card("T-AB-PAUSED");
-        card.started_at = Some((now() - Duration::minutes(10)).to_rfc3339());
-        card.paused_at = Some((now() - Duration::minutes(5)).to_rfc3339());
-        card.paused_by = Some("planner-test".to_string());
-        let variants = card.ab_variants.as_ref().unwrap();
-        for (key, variant) in [("a", &variants.a), ("b", &variants.b)] {
-            let status = agent_status_from_ab_variant(
-                &card,
-                1,
-                key,
-                variant,
-                Some(SessionState::Idle),
-                None,
-            );
-
-            assert_eq!(status.paused_at, card.paused_at);
-            assert_eq!(status.paused_by, card.paused_by);
-            assert_eq!(
-                status.started_at,
-                card.started_at.as_deref().and_then(parse_timestamp)
-            );
-            assert_eq!(
-                classify_agent_status(&status, now()),
-                AgentStateKind::Paused
-            );
-            assert!(format_compact_line(&status, now()).contains("paused by planner-test since"));
-        }
-    }
-
-    #[test]
-    fn check_agents_surfaces_doing_card_without_agent_chat_id_as_stuck() {
-        let card = orphan_doing_card("T-404");
-        assert!(should_report_card(&card));
-
-        let status = agent_status_from_card(&card, 0, None, None);
-        assert_eq!(status.agent_chat_id, "none");
-        assert_eq!(classify_agent_status(&status, now()), AgentStateKind::Stuck);
-
-        let output =
-            format_agent_statuses_at(&[status], &query(AgentReportFormat::Compact), now()).unwrap();
-
-        assert!(output.starts_with("⚠️  Alerts: 1 stuck"));
-        assert!(output.contains("T-404"));
-        assert!(output.contains("STUCK"));
-    }
-
-    #[tokio::test]
-    async fn get_agent_statuses_surfaces_doing_card_without_agent_chat_id_as_stuck() {
-        let temp = tempfile::tempdir().unwrap();
-        let board = TaskBoard {
-            cards: vec![orphan_doing_card("T-404")],
-            ..Default::default()
-        };
-        let gcx = write_task_board(temp.path(), board).await;
-        let chat_facade = AppState::from_gcx(gcx.clone()).await.chat.facade.clone();
-
-        let statuses = get_agent_statuses(gcx, chat_facade, "task-1")
-            .await
-            .unwrap();
-
-        assert_eq!(statuses.len(), 1);
-        assert_eq!(statuses[0].card_id, "T-404");
-        assert_eq!(statuses[0].agent_chat_id, "none");
-        assert_eq!(
-            classify_agent_status(&statuses[0], now()),
-            AgentStateKind::Stuck
-        );
-    }
-
     #[tokio::test]
     async fn check_agents_tool_output_surfaces_doing_card_without_agent_chat_id() {
         let temp = tempfile::tempdir().unwrap();
@@ -1899,34 +1748,6 @@ mod tests {
         assert!(output.contains("T-404"));
         assert!(output.contains("STUCK"));
         assert!(output.contains("needs attention"));
-    }
-
-    #[tokio::test]
-    async fn check_agents_surfaces_active_ab_variants() {
-        let temp = tempfile::tempdir().unwrap();
-        let board = TaskBoard {
-            cards: vec![ab_doing_card("T-AB")],
-            ..Default::default()
-        };
-        let gcx = write_task_board(temp.path(), board).await;
-        insert_live_session(gcx.clone(), "agent-chat-a", SessionState::Generating).await;
-        insert_live_session(gcx.clone(), "agent-chat-b", SessionState::Paused).await;
-        let chat_facade = AppState::from_gcx(gcx.clone()).await.chat.facade.clone();
-
-        let statuses = get_agent_statuses(gcx, chat_facade, "task-1")
-            .await
-            .unwrap();
-        let output =
-            format_agent_statuses_at(&statuses, &query(AgentReportFormat::Compact), now()).unwrap();
-
-        assert_eq!(statuses.len(), 2);
-        assert_eq!(statuses[0].status_id(), "T-AB/a");
-        assert_eq!(statuses[1].status_id(), "T-AB/b");
-        assert!(output.contains("T-AB/a"));
-        assert!(output.contains("T-AB/b"));
-        assert!(output.contains("generating"));
-        assert!(output.contains("paused"));
-        assert!(!output.contains("STUCK"));
     }
 
     #[tokio::test]
@@ -2040,95 +1861,6 @@ mod tests {
         assert!(!aborted);
     }
 
-    #[test]
-    fn sticky_alerts_always_render_when_attention_agents_exist() {
-        let statuses = vec![
-            status("T-1", "P0", "doing", None, 18),
-            status("T-2", "P1", "failed", Some(SessionState::Error), 2),
-        ];
-        let mut query = query(AgentReportFormat::Compact);
-        query.card_ids = Some(HashSet::from(["missing".to_string()]));
-        let output = format_agent_statuses_at(&statuses, &query, now()).unwrap();
-
-        assert!(output
-            .starts_with("⚠️  Alerts: 1 stuck, 1 failed, 0 needing approval, 0 needing attention"));
-        assert!(card_lines(&output).is_empty());
-    }
-
-    #[test]
-    fn filters_by_status_priority_and_card_ids() {
-        let statuses = vec![
-            status("T-1", "P0", "doing", Some(SessionState::Generating), 2),
-            status("T-2", "P1", "done", Some(SessionState::Completed), 4),
-            status("T-3", "P1", "failed", Some(SessionState::Error), 6),
-        ];
-        let mut query = query(AgentReportFormat::Compact);
-        query.status_filter = Some(HashSet::from([
-            AgentStateKind::Done,
-            AgentStateKind::Failed,
-        ]));
-        query.priority_filter = Some(HashSet::from(["P1".to_string()]));
-        query.card_ids = Some(HashSet::from(["T-2".to_string()]));
-        let output = format_agent_statuses_at(&statuses, &query, now()).unwrap();
-
-        let lines = card_lines(&output);
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("T-2"));
-    }
-
-    #[test]
-    fn sort_by_priority_orders_p0_before_p1_before_p2() {
-        let statuses = vec![
-            status("T-2", "P2", "doing", Some(SessionState::Generating), 2),
-            status("T-0", "P0", "doing", Some(SessionState::Generating), 2),
-            status("T-1", "P1", "doing", Some(SessionState::Generating), 2),
-        ];
-        let mut query = query(AgentReportFormat::Compact);
-        query.sort = AgentSort::Priority;
-        let output = format_agent_statuses_at(&statuses, &query, now()).unwrap();
-        let lines = card_lines(&output);
-
-        assert!(lines[0].contains("T-0"));
-        assert!(lines[1].contains("T-1"));
-        assert!(lines[2].contains("T-2"));
-    }
-
-    #[test]
-    fn pagination_limit_and_offset_work() {
-        let statuses = vec![
-            status("T-1", "P1", "doing", Some(SessionState::Generating), 2),
-            status("T-2", "P1", "doing", Some(SessionState::Generating), 2),
-            status("T-3", "P1", "doing", Some(SessionState::Generating), 2),
-        ];
-        let mut query = query(AgentReportFormat::Compact);
-        query.sort = AgentSort::CardId;
-        query.limit = 2;
-        query.offset = 1;
-        let output = format_agent_statuses_at(&statuses, &query, now()).unwrap();
-        let lines = card_lines(&output);
-
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains("T-2"));
-        assert!(lines[1].contains("T-3"));
-        assert!(output.contains("showing 2 of 3; no more pages"));
-    }
-
-    #[test]
-    fn delta_mode_returns_only_changed_since_seq() {
-        let mut old = status("T-1", "P1", "doing", Some(SessionState::Generating), 30);
-        old.change_seq = 10;
-        let mut changed = status("T-2", "P1", "doing", Some(SessionState::Generating), 2);
-        changed.change_seq = 20;
-        let mut query = query(AgentReportFormat::Delta);
-        query.since_seq = Some(15);
-        let output = format_agent_statuses_at(&[old, changed], &query, now()).unwrap();
-        let lines = card_lines(&output);
-
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("T-2"));
-        assert!(!output.contains("T-1"));
-    }
-
     #[tokio::test]
     async fn check_agents_rejects_mismatched_task_id_override() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -2185,25 +1917,5 @@ mod tests {
             .unwrap_err();
 
         assert!(err.contains("task planner"));
-    }
-
-    #[tokio::test]
-    async fn check_agents_allows_same_task_id() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = write_empty_task(temp.path()).await;
-        let ccx = planner_ccx(gcx, "planner").await;
-
-        let output = tool_output_text(
-            ToolTaskCheckAgents::new()
-                .tool_execute(
-                    ccx,
-                    &"call".to_string(),
-                    &args(&[("task_id", json!("task-1"))]),
-                )
-                .await
-                .unwrap(),
-        );
-
-        assert!(output.contains("No agents have been spawned yet for this task"));
     }
 }

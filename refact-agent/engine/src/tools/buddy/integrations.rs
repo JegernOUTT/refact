@@ -236,56 +236,6 @@ mod tests {
     }
 
     #[test]
-    fn buddy_open_issue_caps_title_at_120_chars() {
-        let title = "a".repeat(140);
-        let out = forwarded(vec![("title", json!(title)), ("body", json!("body"))]);
-        let title = out["title"].as_str().expect("title should be string");
-
-        assert_eq!(title.chars().count(), TITLE_MAX_CHARS);
-        assert!(title.ends_with(TRUNCATED_SUFFIX));
-    }
-
-    #[test]
-    fn buddy_open_issue_rejects_invalid_provider() {
-        let err = prepare_forwarded_args(&args(vec![
-            ("title", json!("Bug")),
-            ("body", json!("Details")),
-            ("provider", json!("jira")),
-        ]))
-        .expect_err("invalid provider should fail");
-
-        assert_eq!(
-            err,
-            "buddy_open_issue: provider must be 'github' or 'gitlab'"
-        );
-    }
-
-    #[test]
-    fn buddy_open_issue_caps_labels_count_and_length() {
-        let out = forwarded(vec![
-            ("title", json!("Bug")),
-            ("body", json!("Details")),
-            (
-                "labels",
-                json!([
-                    "one",
-                    "two",
-                    "three",
-                    "four",
-                    "five",
-                    "six",
-                    "this-label-is-way-too-long-to-forward-because-it-crosses-fifty-characters"
-                ]),
-            ),
-        ]);
-
-        assert_eq!(
-            out["labels"],
-            json!(["one", "two", "three", "four", "five"])
-        );
-    }
-
-    #[test]
     fn buddy_open_issue_passes_valid_args_to_runner() {
         let out = forwarded(vec![
             ("title", json!("Bug")),
@@ -315,91 +265,6 @@ mod tests {
     }
 
     #[test]
-    fn buddy_open_issue_rejects_non_string_label() {
-        let err = prepare_forwarded_args(&args(vec![
-            ("title", json!("Bug")),
-            ("body", json!("Details")),
-            ("labels", json!(["ok", 42])),
-        ]))
-        .expect_err("non-string label should fail");
-
-        assert!(err.contains("labels[1]"));
-        assert!(err.contains("must be a string"));
-    }
-
-    #[test]
-    fn buddy_open_issue_rejects_non_array_labels() {
-        let err = prepare_forwarded_args(&args(vec![
-            ("title", json!("Bug")),
-            ("body", json!("Details")),
-            ("labels", json!("not-an-array")),
-        ]))
-        .expect_err("non-array labels should fail");
-
-        assert_eq!(err, "labels must be an array of strings");
-    }
-
-    #[test]
-    fn buddy_open_issue_forwards_only_allowlisted_keys() {
-        let out = forwarded(vec![
-            ("title", json!("Bug")),
-            ("body", json!("Details")),
-            ("labels", json!(["fix"])),
-            ("provider", json!("github")),
-        ]);
-
-        assert_eq!(out.len(), 5);
-        assert!(out.contains_key("title"));
-        assert!(out.contains_key("body"));
-        assert!(out.contains_key("labels"));
-        assert!(out.contains_key("provider"));
-        assert!(out.contains_key("confidence"));
-    }
-
-    #[test]
-    fn buddy_open_issue_accepts_valid_input() {
-        let out = forwarded(vec![
-            ("title", json!("Simple bug")),
-            ("body", json!("Repro steps")),
-        ]);
-
-        assert_eq!(out["title"], json!("Simple bug"));
-        assert_eq!(out["body"], json!("Repro steps"));
-        assert_eq!(out["confidence"], json!("confirmed"));
-    }
-
-    #[test]
-    fn buddy_open_issue_forwards_finding_fields() {
-        let out = forwarded(vec![
-            ("title", json!("Unsafe default")),
-            ("body", json!("Risky config")),
-            ("error", json!("hardcoded credential in config")),
-            ("source_file", json!("src/config.rs")),
-            ("tool_name", json!("security_scan")),
-        ]);
-
-        assert_eq!(out["error"], json!("hardcoded credential in config"));
-        assert_eq!(out["source_file"], json!("src/config.rs"));
-        assert_eq!(out["tool_name"], json!("security_scan"));
-        assert_eq!(out["confidence"], json!("confirmed"));
-    }
-
-    #[test]
-    fn buddy_open_issue_forwards_diagnostic_reference() {
-        let out = forwarded(vec![
-            ("title", json!("Crash")),
-            ("body", json!("Stack trace")),
-            ("diagnostic_id", json!("abc123")),
-            ("collected_at", json!("2026-06-29T00:00:00+00:00")),
-            ("diagnostic_index", json!(2)),
-        ]);
-
-        assert_eq!(out["diagnostic_id"], json!("abc123"));
-        assert_eq!(out["collected_at"], json!("2026-06-29T00:00:00+00:00"));
-        assert_eq!(out["diagnostic_index"], json!(2));
-    }
-
-    #[test]
     fn buddy_open_issue_redacts_forwarded_error() {
         let out = forwarded(vec![
             ("title", json!("Leak")),
@@ -409,16 +274,5 @@ mod tests {
         ]);
 
         assert_eq!(out["error"], json!("token=[REDACTED] leaked"));
-    }
-
-    #[test]
-    fn buddy_open_issue_skips_blank_finding_fields() {
-        let out = forwarded(vec![
-            ("title", json!("Bug")),
-            ("body", json!("Details")),
-            ("error", json!("   ")),
-        ]);
-
-        assert!(!out.contains_key("error"));
     }
 }

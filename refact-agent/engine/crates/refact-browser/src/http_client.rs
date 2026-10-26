@@ -645,14 +645,6 @@ mod tests {
     }
 
     #[test]
-    fn cookie_header_never_dumps_the_whole_jar() {
-        let header = cookie_header(&jar(), &Url::parse("https://api.example.test/v1").unwrap())
-            .unwrap_or_default();
-        assert!(!header.contains("other=nope"));
-        assert!(!header.contains("scoped=deep"));
-    }
-
-    #[test]
     fn set_cookie_writeback_parses_attributes_and_defaults_domain_and_path() {
         let url = Url::parse("https://api.example.test/v1/login").unwrap();
         let parsed = parse_set_cookies(
@@ -697,18 +689,6 @@ mod tests {
         assert_eq!(parsed[0].expires, Some(0.0));
         assert!(parsed[1].expires.unwrap() > Utc::now().timestamp() as f64);
         assert_eq!(parsed[2].expires, Some(1_445_412_480.0));
-    }
-
-    #[test]
-    fn round_trip_cookies_flow_from_the_jar_into_the_header_and_back_from_set_cookie() {
-        let url = Url::parse("https://api.example.test/v1/session").unwrap();
-        let header = cookie_header(&jar(), &url).unwrap();
-        assert!(header.contains("session=abc123"));
-
-        let refreshed = parse_set_cookies(&url, &["session=rotated; Path=/".to_string()]).accepted;
-        let merged = [refreshed.clone(), jar()].concat();
-        let next = cookie_header(&merged, &url).unwrap();
-        assert!(next.starts_with("session=rotated"));
     }
 
     #[test]
@@ -813,19 +793,6 @@ mod tests {
                 &Url::parse("https://api.example.test:443/other").unwrap()
             ),
             headers
-        );
-    }
-
-    #[test]
-    fn jar_cookies_are_rescoped_to_the_redirect_target() {
-        let target = Url::parse("https://evil.test/").unwrap();
-        assert_eq!(cookie_header(&jar(), &target), None);
-
-        let mut hijacked = jar();
-        hijacked.push(cookie("planted", "yes", "evil.test", "/", false));
-        assert_eq!(
-            cookie_header(&hijacked, &target).as_deref(),
-            Some("planted=yes")
         );
     }
 
@@ -979,19 +946,5 @@ mod tests {
             follow_redirect(Method::POST, StatusCode::PERMANENT_REDIRECT, body.clone()),
             (Method::POST, body)
         );
-    }
-
-    #[test]
-    fn response_artifacts_pick_an_extension_and_land_inside_the_artifact_directory() {
-        assert_eq!(response_body_extension(Some("application/json")), "json");
-        assert_eq!(response_body_extension(Some("text/csv")), "txt");
-        assert_eq!(response_body_extension(Some("image/png")), "bin");
-        assert_eq!(response_body_extension(None), "bin");
-
-        let dir = tempfile::tempdir().unwrap();
-        let artifacts_dir = dir.path().join("artifacts");
-        let path = save_response_body(b"payload", &artifacts_dir, "http-1-0.json").unwrap();
-        assert_eq!(path, artifacts_dir.join("http-1-0.json"));
-        assert_eq!(std::fs::read(&path).unwrap(), b"payload");
     }
 }

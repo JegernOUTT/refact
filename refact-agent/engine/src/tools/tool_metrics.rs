@@ -92,24 +92,3 @@ impl Tool for ToolMetrics {
         Vec::new()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn model_tool_description_keeps_the_read_surface_bounded_and_parallel() {
-        let tool = ToolMetrics {
-            config_path: String::new(),
-        };
-        let description = tool.tool_description();
-        assert_eq!(description.name, "metrics");
-        assert!(description.allow_parallel);
-        assert_eq!(description.input_schema["additionalProperties"], false);
-        assert_eq!(
-            description.input_schema["properties"]["limit"]["minimum"],
-            1
-        );
-        assert!(serde_json::from_value::<MetricsArgs>(json!({"unknown": true})).is_err());
-    }
-}

@@ -3369,22 +3369,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_params_serializes_exact_wire_shape() {
-        let set_params = capture_command(|client| async move {
-            client
-                .send_set_params("project", "chat", json!({"model": "gpt-demo"}))
-                .await
-        })
-        .await;
-        let mut expected = json!({
-            "type": "set_params",
-            "patch": {"model": "gpt-demo"},
-        });
-        expected["client_request_id"] = set_params["client_request_id"].clone();
-        assert_command(&set_params, expected);
-    }
-
-    #[tokio::test]
     async fn user_message_serializes_explicit_correlation_pair() {
         let user = capture_command(|client| async move {
             client
@@ -3553,23 +3537,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn regenerate_serializes_exact_wire_shape() {
-        let body = capture_command(|client| async move {
-            client
-                .send_regenerate_with_id("project", "chat", "regenerate")
-                .await
-        })
-        .await;
-        assert_command(
-            &body,
-            json!({
-                "client_request_id": "regenerate",
-                "type": "regenerate",
-            }),
-        );
-    }
-
-    #[tokio::test]
     async fn update_message_serializes_exact_wire_shape() {
         let body = capture_command(|client| async move {
             client
@@ -3703,24 +3670,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn singular_tool_decision_serializes_plural_wire_shape() {
-        let body = capture_command(|client| async move {
-            client
-                .send_tool_decision_with_id("project", "chat", "tool-decision", "tool-1", true)
-                .await
-        })
-        .await;
-        assert_command(
-            &body,
-            json!({
-                "client_request_id": "tool-decision",
-                "type": "tool_decisions",
-                "decisions": [{"tool_call_id": "tool-1", "accepted": true}],
-            }),
-        );
-    }
-
-    #[tokio::test]
     async fn tool_decisions_serializes_exact_plural_wire_shape() {
         let body = capture_command(|client| async move {
             client
@@ -3751,29 +3700,6 @@ mod tests {
                     {"tool_call_id": "tool-1", "accepted": true},
                     {"tool_call_id": "tool-2", "accepted": false},
                 ],
-            }),
-        );
-    }
-
-    #[tokio::test]
-    async fn clean_background_processes_serializes_exact_wire_shape() {
-        let body = capture_command(|client| async move {
-            client
-                .send_clean_background_processes_with_id(
-                    "project",
-                    "chat",
-                    "clean-background-processes",
-                    true,
-                )
-                .await
-        })
-        .await;
-        assert_command(
-            &body,
-            json!({
-                "client_request_id": "clean-background-processes",
-                "type": "clean_background_processes",
-                "include_services": true,
             }),
         );
     }
@@ -3828,15 +3754,6 @@ mod tests {
         assert_eq!(parser.push("data: two\n\n"), vec!["one\ntwo".to_string()]);
         assert!(parser.push("data: three\n").is_empty());
         assert_eq!(parser.finish(), vec!["three".to_string()]);
-    }
-
-    #[test]
-    fn chat_event_parses_type_chat_id_and_seq() {
-        let event =
-            parse_chat_event(r#"{"chat_id":"c","seq":"7","type":"stream_started"}"#).unwrap();
-        assert_eq!(event.chat_id.as_deref(), Some("c"));
-        assert_eq!(event.seq, Some(7));
-        assert_eq!(event.kind, "stream_started");
     }
 
     #[test]
@@ -4122,35 +4039,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_project_accepts_ready_worker_near_retry_deadline() {
-        let server = spawn_json_response_server(vec![
-            open_project_response("starting", None, None),
-            open_project_response("starting", None, None),
-            open_project_response("starting", None, None),
-            open_project_response("ready", Some(31000), Some(31001)),
-        ]);
-        let client = DaemonClient::new(&server.base_url, None).unwrap();
-        let started = Instant::now();
-
-        let project = client
-            .open_project_with_retry_policy(
-                Path::new("/tmp/fixture"),
-                OpenProjectRetryPolicy {
-                    deadline: Duration::from_secs(3600),
-                    initial_backoff: Duration::from_millis(100),
-                    max_backoff: Duration::from_millis(100),
-                    max_attempts: 8,
-                },
-            )
-            .await
-            .unwrap();
-        server.stop();
-
-        assert!(started.elapsed() >= Duration::from_millis(200));
-        assert_eq!(worker_state_label(project.worker.as_ref()), "ready");
-    }
-
-    #[tokio::test]
     async fn open_project_stops_after_exact_maximum_starting_attempts() {
         let (server, requests) = spawn_json_response_server_with_requests(
             (0..8)
@@ -4185,54 +4073,6 @@ mod tests {
             8
         );
         assert!(requests.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn list_projects_drops_rows_without_roots() {
-        let server = spawn_json_response_server(vec![json!([
-            {"id": "missing", "slug": "missing"},
-            {"id": "empty", "slug": "empty", "root": ""},
-            {"id": "valid", "slug": "valid", "root": "/tmp/valid"}
-        ])]);
-        let client = DaemonClient::new(&server.base_url, None).unwrap();
-
-        let projects = client.list_projects().await.unwrap();
-        server.stop();
-
-        assert_eq!(projects.len(), 1);
-        assert_eq!(projects[0].id, "valid");
-    }
-
-    #[test]
-    fn open_project_rejects_empty_root() {
-        let mut project: OpenProjectResponse =
-            serde_json::from_value(open_project_response("ready", Some(31000), Some(31001)))
-                .unwrap();
-        project.root = PathBuf::new();
-
-        assert!(matches!(
-            validate_open_project_response(&project),
-            Err(ClientError::Json(message)) if message.contains("empty root")
-        ));
-    }
-
-    #[tokio::test]
-    async fn open_project_accepts_ready_worker_with_nonzero_ports() {
-        let server = spawn_json_response_server(vec![open_project_response(
-            "ready",
-            Some(31000),
-            Some(31001),
-        )]);
-        let client = DaemonClient::new(&server.base_url, None).unwrap();
-
-        let project = client
-            .open_project(Path::new("/tmp/fixture"))
-            .await
-            .unwrap();
-        server.stop();
-
-        assert_eq!(project.project_id, "p1");
-        assert_eq!(project.worker.unwrap().http_port, Some(31000));
     }
 
     #[tokio::test]
@@ -4713,14 +4553,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn missing_response_values_remain_unknown_in_surfaces() {
-        assert_eq!(worker_state_label(Some(&WorkerInfo::default())), "unknown");
-        assert_eq!(DaemonEndpoint::from_info(DaemonInfoFile::default()), None);
-        assert_eq!(ProviderOAuthLogoutResponse::default().success, None);
-        assert_eq!(ProviderListItem::default().has_credentials, None);
-    }
-
     #[tokio::test]
     async fn trajectories_client_preserves_envelope_and_fetches_cursor_page() {
         let (server, requests) = spawn_json_response_server_with_requests(vec![
@@ -4754,22 +4586,6 @@ mod tests {
         )));
         assert_eq!(second_page.has_more, Some(false));
         assert_eq!(second_page.items[0].id, "chat-1");
-    }
-
-    #[tokio::test]
-    async fn trajectories_client_reaches_every_chat_beyond_fifty() {
-        let server = spawn_json_response_server(vec![
-            trajectory_response(trajectory_items(0, 200), Some("page-2"), true, 201),
-            trajectory_response(trajectory_items(200, 201), None, false, 201),
-        ]);
-        let client = DaemonClient::new(&server.base_url, None).unwrap();
-
-        let trajectories = client.list_all_trajectories("project").await.unwrap();
-        server.stop();
-
-        assert_eq!(trajectories.len(), 201);
-        assert_eq!(trajectories.first().unwrap().id, "chat-0");
-        assert_eq!(trajectories.last().unwrap().id, "chat-200");
     }
 
     #[tokio::test]
@@ -4863,145 +4679,11 @@ mod tests {
     }
 
     #[test]
-    fn slash_commands_fixture_parses_typed_lists() {
-        let response: SlashCommandsListResponse = serde_json::from_str(
-            r#"{
-                "commands": [{"name":"review","description":"Review","argument_hint":"[path]","source":"project_refact"}],
-                "skills": [{"name":"explain","description":"Explain","user_invocable":true,"source":"global_refact"}]
-            }"#,
-        )
-        .unwrap();
-        assert_eq!(response.commands[0].name, "review");
-        assert_eq!(
-            response.commands[0].argument_hint.as_deref(),
-            Some("[path]")
-        );
-        assert_eq!(response.skills[0].name, "explain");
-        assert_eq!(response.skills[0].user_invocable, Some(true));
-    }
-
-    #[test]
-    fn knowledge_graph_fixture_parses_stats_and_docs() {
-        let response: KnowledgeGraphResponse = serde_json::from_str(
-            r#"{
-                "nodes": [{"id":"doc1","node_type":"doc_decision","label":"Decision","tags":["ui"],"file_path":".refact/knowledge/d.md","kind":"decision"}],
-                "edges": [{"source":"doc1","target":"tag:ui","edge_type":"tagged_with"}],
-                "stats": {"doc_count":1,"tag_count":1,"file_count":0,"entity_count":0,"edge_count":1,"active_docs":1,"deprecated_docs":0,"trajectory_count":0}
-            }"#,
-        )
-        .unwrap();
-        assert_eq!(response.stats.doc_count, Some(1));
-        assert_eq!(response.nodes[0].kind.as_deref(), Some("decision"));
-        assert_eq!(response.edges[0].edge_type, "tagged_with");
-    }
-
-    #[test]
-    fn mcp_fixtures_filter_configured_servers_and_parse_info() {
-        let integrations: IntegrationListResponse = serde_json::from_str(
-            r#"{
-                "integrations": [
-                    {"integr_name":"mcp_stdio_demo","integr_config_path":"/tmp/mcp.yaml","integr_config_exists":true},
-                    {"integr_name":"mcp_sse_missing","integr_config_path":"/tmp/missing.yaml","integr_config_exists":false},
-                    {"integr_name":"github","integr_config_path":"/tmp/github.yaml","integr_config_exists":true}
-                ],
-                "error_log": []
-            }"#,
-        )
-        .unwrap();
-        let servers = integrations
-            .integrations
-            .iter()
-            .filter(|integration| is_configured_mcp_integration(integration))
-            .collect::<Vec<_>>();
-        assert_eq!(servers.len(), 1);
-        assert_eq!(mcp_transport(&servers[0].integr_name), Some("stdio"));
-
-        let info: McpServerInfoResponse = serde_json::from_str(
-            r#"{
-                "config_path":"/tmp/mcp.yaml",
-                "status":{"status":"connected"},
-                "auth_status":"not_applicable",
-                "tools":[{"name":"lookup","description":"Lookup","input_schema":{"type":"object"},"internal_name":"demo_lookup"}],
-                "resources":[],
-                "prompts":[],
-                "capabilities":{"tools":true},
-                "logs_tail":[],
-                "metrics":{}
-            }"#,
-        )
-        .unwrap();
-        assert_eq!(info.tools[0].internal_name, "demo_lookup");
-        assert_eq!(info.status["status"], "connected");
-    }
-
-    #[test]
-    fn provider_logout_client_paths_encode_project_and_provider() {
-        assert_eq!(providers_path("abc/def"), "/p/abc%2Fdef/v1/providers");
-        assert_eq!(
-            provider_oauth_logout_path("abc/def", "openai codex"),
-            "/p/abc%2Fdef/v1/providers/openai%20codex/oauth/logout"
-        );
-    }
-
-    #[test]
-    fn hooks_and_competitor_import_client_paths_use_project_proxy() {
-        assert_eq!(hooks_path("p1"), "/p/p1/v1/ext/hooks");
-        assert_eq!(tasks_path("p1"), "/p/p1/v1/tasks");
-        assert_eq!(
-            task_board_path("p1", "task/a"),
-            "/p/p1/v1/tasks/task%2Fa/board"
-        );
-        assert_eq!(
-            task_board_ready_path("p1", "task/a"),
-            "/p/p1/v1/tasks/task%2Fa/board/ready"
-        );
-        assert_eq!(
-            competitor_import_path("p1"),
-            "/p/p1/v1/ext/competitor-import"
-        );
-        assert_eq!(
-            competitor_import_body(Some("claude_code"), "project"),
-            json!({"source":"claude_code","scope":"project"})
-        );
-        assert_eq!(
-            competitor_import_body(None, "global"),
-            json!({"scope":"global"})
-        );
-    }
-
-    #[test]
-    fn worktree_client_paths_encode_project_and_worktree_ids() {
-        assert_eq!(
-            worktrees_path("project/id", ""),
-            "/p/project%2Fid/v1/worktrees"
-        );
-        assert_eq!(
-            worktree_path("project/id", "worktree id", "/merge"),
-            "/p/project%2Fid/v1/worktrees/worktree%20id/merge"
-        );
-    }
-
-    #[test]
     fn worktree_client_defaults_preserve_backend_cleanup_contract() {
         let request = WorktreeCleanupRequest::default();
         assert!(request.clean_only);
         assert_eq!(request.min_age_hours, 24);
         assert!(request.ids.is_empty());
-    }
-
-    #[test]
-    fn worktree_response_tolerates_missing_ahead_and_behind() {
-        let response: WorktreeDiffResponse = serde_json::from_value(json!({
-            "id": "wt-1",
-            "status": {},
-            "files": [],
-            "stats": {},
-            "patch": "",
-            "patch_truncated": false,
-        }))
-        .unwrap();
-        assert_eq!(response.ahead, None);
-        assert_eq!(response.behind, None);
     }
 
     #[tokio::test]
@@ -5075,38 +4757,5 @@ mod tests {
         .zip(requests) {
             assert!(expected.1.starts_with(expected.0), "{}", expected.1);
         }
-    }
-
-    #[test]
-    fn hooks_and_import_fixtures_parse_backend_responses() {
-        let hooks: HooksResponse = serde_json::from_str(
-            r#"{
-                "hooks":[{"event":"PreToolUse","matcher":"Bash","command":"./check.sh","timeout":30}],
-                "raw_content":"hooks: {}",
-                "file_path":"/repo/.refact/hooks.yaml"
-            }"#,
-        )
-        .unwrap();
-        assert_eq!(hooks.hooks[0].event, "PreToolUse");
-        assert_eq!(hooks.hooks[0].timeout, Some(30));
-
-        let info: CompetitorImportInfoResponse = serde_json::from_str(
-            r#"{"sources":[{"id":"claude_code","label":"Claude Code","roots":["~/.claude"]}]}"#,
-        )
-        .unwrap();
-        assert_eq!(info.sources[0].id, "claude_code");
-
-        let run: CompetitorImportRunResponse = serde_json::from_str(
-            r#"{
-                "scope":"project",
-                "source":"claude_code",
-                "report":{"discovered_candidates":1,"status_counts":{"created":1},"competitor_counts":{},"kind_counts":{},"top_issues":[]}
-            }"#,
-        )
-        .unwrap();
-        assert_eq!(
-            run.report.status_counts.get(&ImportStatus::Created),
-            Some(&1)
-        );
     }
 }

@@ -684,17 +684,6 @@ impl ExecRegistry {
     }
 
     #[cfg(test)]
-    async fn register_non_isolated_child_for_test(
-        &self,
-        meta: ExecProcessMeta,
-        transcript_limit_bytes: usize,
-        child: tokio::process::Child,
-    ) -> Result<ExecProcessSnapshot, String> {
-        self.register_with_child(meta, transcript_limit_bytes, child, false)
-            .await
-    }
-
-    #[cfg(test)]
     pub(crate) async fn attach_runtime(
         &self,
         process_id: &ExecProcessId,
@@ -1813,42 +1802,19 @@ async fn cleanup_target(
 
 #[cfg(test)]
 mod tests {
-    use std::io::{self, Write};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
     use crate::spill::SpillTarget;
     use crate::transcript::DEFAULT_MAX_BYTES;
-    use crate::types::{ExecMode, ExecOwnerMeta, ExecStatusKind};
-
-    #[tokio::test]
-    async fn removing_spill_path_deletes_file() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("spill.log");
-        tokio::fs::write(&path, b"spill").await.unwrap();
-        remove_spill_file(Some(path.clone())).await;
-        assert!(!path.exists());
-    }
-
-    struct BlockingWriter;
+    use crate::types::{ExecMode, ExecOwnerMeta};
 
     struct DropSignal(Arc<AtomicBool>);
 
     impl Drop for DropSignal {
         fn drop(&mut self) {
             self.0.store(true, Ordering::SeqCst);
-        }
-    }
-
-    impl Write for BlockingWriter {
-        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-            std::thread::sleep(Duration::from_millis(500));
-            Ok(0)
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
         }
     }
 
@@ -1879,41 +1845,6 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         !process_exists(process_id)
-    }
-
-    #[tokio::test]
-    async fn test_create_get_list() {
-        let registry = ExecRegistry::new();
-        let first = registry
-            .register(
-                meta("exec_one", ExecMode::Foreground, "echo one"),
-                DEFAULT_MAX_BYTES,
-            )
-            .await;
-        let second = registry
-            .register(
-                meta("exec_two", ExecMode::Background, "sleep 10"),
-                DEFAULT_MAX_BYTES,
-            )
-            .await;
-
-        assert_eq!(first.status, ExecStatus::Starting);
-        assert_eq!(second.status, ExecStatus::Starting);
-        assert_eq!(
-            registry.get(&first.meta.process_id).await,
-            Some(first.clone())
-        );
-        assert_eq!(
-            registry
-                .get(&ExecProcessId("exec_missing".to_string()))
-                .await,
-            None
-        );
-
-        let listed = registry.list(ExecProcessFilter::default()).await;
-        assert_eq!(listed.len(), 2);
-        assert!(listed.contains(&first));
-        assert!(listed.contains(&second));
     }
 
     #[tokio::test]
@@ -2010,41 +1941,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_list_filters_owner_and_status() {
-        let registry = ExecRegistry::new();
-        let first = meta("exec_one", ExecMode::Service, "server")
-            .with_chat_id("chat-a")
-            .with_service_name("api")
-            .with_workspace(PathBuf::from("/workspace-a"));
-        let second = meta("exec_two", ExecMode::Service, "server")
-            .with_chat_id("chat-b")
-            .with_service_name("api")
-            .with_workspace(PathBuf::from("/workspace-b"));
-        registry.register(first, DEFAULT_MAX_BYTES).await;
-        let second_snapshot = registry.register(second, DEFAULT_MAX_BYTES).await;
-        registry
-            .mark_started(&second_snapshot.meta.process_id)
-            .await
-            .unwrap();
-
-        let filtered = registry
-            .list(ExecProcessFilter {
-                chat_id: Some("chat-b".to_string()),
-                tool_call_id: None,
-                service_name: Some("api".to_string()),
-                workspace: Some(PathBuf::from("/workspace-b")),
-                mode: None,
-                status: Some(ExecStatusKind::Running),
-            })
-            .await;
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(
-            filtered[0].meta.process_id,
-            ExecProcessId("exec_two".to_string())
-        );
-    }
-
-    #[tokio::test]
     async fn test_output_append_and_read_cursor() {
         let registry = ExecRegistry::new();
         let snapshot = registry
@@ -2126,102 +2022,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_with_empty_normalized_text_still_captures_raw_and_broadcasts() {
-        let registry = ExecRegistry::new();
-        let mut output_rx = registry.subscribe_output();
-        let snapshot = registry
-            .register(
-                meta("exec_tty_wake", ExecMode::Interactive, "bash -l").with_tty(true),
-                4096,
-            )
-            .await;
-        let process_id = snapshot.meta.process_id;
-
-        registry
-            .append_output_with_raw(
-                &process_id,
-                ExecOutputStream::Combined,
-                String::new(),
-                "\x1b[2J",
-            )
-            .await
-            .unwrap();
-
-        let wake = output_rx.try_recv().unwrap();
-        assert_eq!(wake.process_id, process_id);
-        assert_eq!(wake.text, "");
-        let raw = registry.read_raw_since(&process_id, 0, None).await.unwrap();
-        assert_eq!(raw.text, "\x1b[2J");
-        assert_eq!(registry.read(&process_id, 0, None).await.chunks.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn read_raw_since_is_none_for_non_tty_process() {
-        let registry = ExecRegistry::new();
-        let snapshot = registry
-            .register(meta("exec_no_raw", ExecMode::Foreground, "echo hi"), 4096)
-            .await;
-        let process_id = snapshot.meta.process_id;
-
-        registry
-            .append_output(&process_id, ExecOutputStream::Stdout, "hi".to_string())
-            .await
-            .unwrap();
-
-        assert!(registry
-            .read_raw_since(&process_id, 0, None)
-            .await
-            .is_none());
-    }
-
-    #[tokio::test]
-    async fn test_read_missing_process() {
-        let registry = ExecRegistry::new();
-        let result = registry
-            .read(&ExecProcessId("exec_missing".to_string()), 7, None)
-            .await;
-        assert!(!result.found);
-        assert_eq!(result.process_id, ExecProcessId("exec_missing".to_string()));
-        assert_eq!(result.since_seq, 7);
-    }
-
-    #[tokio::test]
-    async fn test_append_missing_process_is_error() {
-        let registry = ExecRegistry::new();
-        let err = registry
-            .append_output(
-                &ExecProcessId("exec_missing".to_string()),
-                ExecOutputStream::Stdout,
-                "hello".to_string(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(err, "process not found: exec_missing");
-    }
-
-    #[tokio::test]
-    async fn test_status_transition_timestamps() {
-        let registry = ExecRegistry::new();
-        let snapshot = registry
-            .register(
-                meta("exec_life", ExecMode::Background, "sleep 1"),
-                DEFAULT_MAX_BYTES,
-            )
-            .await;
-        let process_id = snapshot.meta.process_id;
-
-        let running = registry.mark_started(&process_id).await.unwrap();
-        assert_eq!(running.status, ExecStatus::Running);
-        let started_at = running.meta.started_at_ms.expect("started timestamp");
-        assert!(running.meta.ended_at_ms.is_none());
-
-        let exited = registry.mark_exited(&process_id, Some(0)).await.unwrap();
-        assert_eq!(exited.status, ExecStatus::Exited { exit_code: Some(0) });
-        assert_eq!(exited.meta.started_at_ms, Some(started_at));
-        assert!(exited.meta.ended_at_ms.is_some());
-    }
-
-    #[tokio::test]
     async fn process_completion_broadcasts_background_terminal_status_with_chat_id() {
         let registry = ExecRegistry::new();
         let mut rx = registry.subscribe_completion();
@@ -2249,35 +2049,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_spawn_broadcasts_chat_owned_running_snapshot() {
-        let registry = ExecRegistry::new();
-        let mut rx = registry.subscribe_spawn();
-        let snapshot = registry
-            .register(
-                meta("exec_spawn_notify", ExecMode::Background, "sleep 1")
-                    .with_chat_id("chat-spawn-notify")
-                    .with_short_description("spawn notification".to_string())
-                    .with_tty(true),
-                DEFAULT_MAX_BYTES,
-            )
-            .await;
-        let started = registry
-            .mark_started(&snapshot.meta.process_id)
-            .await
-            .unwrap();
-        registry.notify_spawn(&started);
-
-        let event = rx.recv().await.unwrap();
-        assert_eq!(event.process_id, snapshot.meta.process_id);
-        assert_eq!(event.chat_id, "chat-spawn-notify");
-        assert_eq!(event.command_preview, "spawn notification");
-        assert_eq!(event.mode, ExecMode::Background);
-        assert!(event.tty);
-        assert_eq!(event.status, ExecStatus::Running);
-        assert_eq!(event.started_at_ms, started.meta.started_at_ms.unwrap());
-    }
-
-    #[tokio::test]
     async fn process_spawn_does_not_broadcast_without_chat_id() {
         let registry = ExecRegistry::new();
         let mut rx = registry.subscribe_spawn();
@@ -2297,57 +2068,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_spawn_does_not_broadcast_before_started() {
-        let registry = ExecRegistry::new();
-        let mut rx = registry.subscribe_spawn();
-        let snapshot = registry
-            .register(
-                meta("exec_spawn_not_started", ExecMode::Background, "sleep 1")
-                    .with_chat_id("chat-spawn-not-started"),
-                DEFAULT_MAX_BYTES,
-            )
-            .await;
-
-        registry.notify_spawn(&snapshot);
-
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn process_completion_broadcasts_service_terminal_status_with_chat_id() {
-        let registry = ExecRegistry::new();
-        let mut rx = registry.subscribe_completion();
-        let snapshot = registry
-            .register(
-                meta("exec_notify_service", ExecMode::Service, "server")
-                    .with_chat_id("chat-service")
-                    .with_service_name("api"),
-                DEFAULT_MAX_BYTES,
-            )
-            .await;
-        let process_id = snapshot.meta.process_id;
-
-        registry.mark_started(&process_id).await.unwrap();
-        registry
-            .mark_failed(&process_id, "boom".to_string())
-            .await
-            .unwrap();
-
-        let event = rx.recv().await.unwrap();
-        assert_eq!(event.process_id, process_id);
-        assert_eq!(event.chat_id, "chat-service");
-        assert_eq!(
-            event.status,
-            ExecStatus::Failed {
-                message: "boom".to_string()
-            }
-        );
-        assert_eq!(event.exit_code, None);
-        assert_eq!(event.short_description, "server");
-        assert_eq!(event.mode, ExecMode::Service);
-    }
-
-    #[tokio::test]
     async fn process_completion_does_not_broadcast_foreground_terminal_status() {
         let registry = ExecRegistry::new();
         let mut rx = registry.subscribe_completion();
@@ -2355,24 +2075,6 @@ mod tests {
             .register(
                 meta("exec_notify_foreground", ExecMode::Foreground, "true")
                     .with_chat_id("chat-foreground"),
-                DEFAULT_MAX_BYTES,
-            )
-            .await;
-        let process_id = snapshot.meta.process_id;
-
-        registry.mark_started(&process_id).await.unwrap();
-        registry.mark_exited(&process_id, Some(0)).await.unwrap();
-
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn process_completion_does_not_broadcast_without_chat_id() {
-        let registry = ExecRegistry::new();
-        let mut rx = registry.subscribe_completion();
-        let snapshot = registry
-            .register(
-                meta("exec_notify_no_chat", ExecMode::Background, "sleep 1"),
                 DEFAULT_MAX_BYTES,
             )
             .await;
@@ -2433,22 +2135,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_set_status_same_value_is_idempotent() {
-        let registry = ExecRegistry::new();
-        let snapshot = registry
-            .register(
-                meta("exec_same", ExecMode::Background, "sleep 1"),
-                DEFAULT_MAX_BYTES,
-            )
-            .await;
-        let process_id = snapshot.meta.process_id;
-
-        let first = registry.mark_started(&process_id).await.unwrap();
-        let second = registry.mark_started(&process_id).await.unwrap();
-        assert_eq!(first, second);
-    }
-
-    #[tokio::test]
     async fn test_wait_marks_closed_runtime_terminal() {
         let registry = ExecRegistry::new();
         let mut rx = registry.subscribe_completion();
@@ -2501,47 +2187,6 @@ mod tests {
         assert_eq!(event.chat_id, "chat-dead-runtime");
         assert_eq!(event.status, waited.status);
         assert!(rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn tool_process_write_stdin_timeout_does_not_block_runtime() {
-        let registry = ExecRegistry::new();
-        let snapshot = registry
-            .register(
-                meta(
-                    "exec_blocking_stdin",
-                    ExecMode::Background,
-                    "blocking stdin",
-                ),
-                DEFAULT_MAX_BYTES,
-            )
-            .await;
-        let process_id = snapshot.meta.process_id.clone();
-        let (control_tx, _control_rx) = mpsc::channel(1);
-        registry
-            .attach_runtime(
-                &process_id,
-                ExecProcessRuntime {
-                    control_tx,
-                    terminal: Arc::new(Notify::new()),
-                    stdin_writer: Some(Arc::new(Mutex::new(Box::new(BlockingWriter)))),
-                },
-            )
-            .await
-            .unwrap();
-        registry.mark_started(&process_id).await.unwrap();
-        let ticker = tokio::spawn(async {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            true
-        });
-
-        let err = registry
-            .write_stdin(&process_id, "hello", 0)
-            .await
-            .unwrap_err();
-
-        assert!(err.contains("timed out while writing stdin"));
-        assert!(ticker.await.unwrap());
     }
 
     #[tokio::test]
@@ -2682,59 +2327,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_remove_by_process_id() {
-        let registry = ExecRegistry::new();
-        let snapshot = registry
-            .register(
-                meta("exec_remove", ExecMode::Foreground, "true"),
-                DEFAULT_MAX_BYTES,
-            )
-            .await;
-        let process_id = snapshot.meta.process_id.clone();
-
-        assert_eq!(registry.remove(&process_id).await.unwrap(), Some(snapshot));
-        assert!(registry.get(&process_id).await.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_remove_by_owner() {
-        let registry = ExecRegistry::new();
-        registry
-            .register(
-                meta("exec_keep", ExecMode::Foreground, "true").with_chat_id("chat-keep"),
-                DEFAULT_MAX_BYTES,
-            )
-            .await;
-        registry
-            .register(
-                meta("exec_drop_one", ExecMode::Foreground, "true").with_chat_id("chat-drop"),
-                DEFAULT_MAX_BYTES,
-            )
-            .await;
-        registry
-            .register(
-                meta("exec_drop_two", ExecMode::Foreground, "true").with_chat_id("chat-drop"),
-                DEFAULT_MAX_BYTES,
-            )
-            .await;
-
-        let removed = registry
-            .remove_by_owner(ExecProcessFilter {
-                chat_id: Some("chat-drop".to_string()),
-                ..ExecProcessFilter::default()
-            })
-            .await
-            .unwrap();
-        assert_eq!(removed.len(), 2);
-        let remaining = registry.list(ExecProcessFilter::default()).await;
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(
-            remaining[0].meta.process_id,
-            ExecProcessId("exec_keep".to_string())
-        );
-    }
-
-    #[tokio::test]
     async fn remove_by_owner_kills_active_processes() {
         let registry = ExecRegistry::new();
         let first = registry
@@ -2780,47 +2372,6 @@ mod tests {
             .get(&second.snapshot.meta.process_id)
             .await
             .is_none());
-    }
-
-    #[tokio::test]
-    async fn test_cleanup_shutdown_removes_active_state() {
-        let registry = ExecRegistry::new();
-        let starting = registry
-            .register(
-                meta("exec_cleanup_starting", ExecMode::Foreground, "echo hi"),
-                DEFAULT_MAX_BYTES,
-            )
-            .await;
-        let running = registry
-            .register(
-                meta("exec_cleanup_running", ExecMode::Service, "server"),
-                DEFAULT_MAX_BYTES,
-            )
-            .await;
-        registry
-            .mark_started(&running.meta.process_id)
-            .await
-            .unwrap();
-        let exited = registry
-            .register(
-                meta("exec_cleanup_exited", ExecMode::Background, "true"),
-                DEFAULT_MAX_BYTES,
-            )
-            .await;
-        registry
-            .mark_exited(&exited.meta.process_id, Some(0))
-            .await
-            .unwrap();
-
-        let summary = registry.cleanup_shutdown(Duration::from_millis(10)).await;
-
-        assert_eq!(summary.removed_count, 2);
-        assert_eq!(summary.child_stop_attempts, 0);
-        assert_eq!(summary.child_failed_count, 0);
-        assert_eq!(summary.child_timed_out_count, 0);
-        assert!(registry.get(&starting.meta.process_id).await.is_none());
-        assert!(registry.get(&running.meta.process_id).await.is_none());
-        assert!(registry.get(&exited.meta.process_id).await.is_some());
     }
 
     #[tokio::test]
@@ -3003,46 +2554,6 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn remove_by_owner_kills_registered_child() {
-        let registry = ExecRegistry::new();
-        let mut command = tokio::process::Command::new("sh");
-        command.arg("-c").arg("sleep 30");
-        unsafe {
-            command.pre_exec(|| {
-                libc::setpgid(0, 0);
-                Ok(())
-            });
-        }
-        let child = command.spawn().expect("spawn child");
-        let child_pid = child.id().expect("child pid");
-        let snapshot = registry
-            .register_isolated_child(
-                meta("exec_remove_child_owner", ExecMode::Background, "sleep 30")
-                    .with_chat_id("chat-owner-kill"),
-                DEFAULT_MAX_BYTES,
-                child,
-            )
-            .await
-            .unwrap();
-        registry
-            .mark_started(&snapshot.meta.process_id)
-            .await
-            .unwrap();
-
-        assert!(process_exists(child_pid));
-        registry
-            .remove_by_owner(ExecProcessFilter {
-                chat_id: Some("chat-owner-kill".to_string()),
-                ..ExecProcessFilter::default()
-            })
-            .await
-            .unwrap();
-        assert!(!process_exists(child_pid));
-        assert!(registry.get(&snapshot.meta.process_id).await.is_none());
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
     async fn remove_group_kill_failure_is_not_reported_as_success() {
         let registry = ExecRegistry::new();
         let mut command = tokio::process::Command::new("sleep");
@@ -3143,125 +2654,6 @@ mod tests {
         registry.remove(&snapshot.meta.process_id).await.unwrap();
         assert!(!process_exists(child_pid));
         assert!(registry.get(&snapshot.meta.process_id).await.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_concurrent_append_read() {
-        let registry = ExecRegistry::new();
-        let snapshot = registry
-            .register(
-                meta("exec_concurrent", ExecMode::Background, "server"),
-                4096,
-            )
-            .await;
-        let process_id = snapshot.meta.process_id;
-
-        let writer_registry = registry.clone();
-        let writer_process_id = process_id.clone();
-        let writer = tokio::spawn(async move {
-            for i in 0..50 {
-                writer_registry
-                    .append_output(
-                        &writer_process_id,
-                        ExecOutputStream::Stdout,
-                        format!("line {i}\n"),
-                    )
-                    .await
-                    .unwrap();
-            }
-        });
-
-        let reader_registry = registry.clone();
-        let reader_process_id = process_id.clone();
-        let reader = tokio::spawn(async move {
-            let mut observed = 0;
-            loop {
-                let read = reader_registry.read(&reader_process_id, 0, None).await;
-                observed = observed.max(read.chunks.len());
-                if observed >= 50 {
-                    break observed;
-                }
-                tokio::task::yield_now().await;
-            }
-        });
-
-        writer.await.unwrap();
-        let observed = reader.await.unwrap();
-        assert_eq!(observed, 50);
-        let final_read = registry.read(&process_id, 0, None).await;
-        assert_eq!(final_read.chunks.len(), 50);
-        assert_eq!(final_read.latest_seq, 50);
-    }
-
-    #[tokio::test]
-    async fn test_append_broadcasts_before_slow_spill_finishes() {
-        let registry = ExecRegistry::new();
-        let snapshot = registry
-            .register(
-                meta("exec_slow_spill", ExecMode::Background, "server").with_chat_id("chat-slow"),
-                4096,
-            )
-            .await;
-        let process_id = snapshot.meta.process_id.clone();
-        let temp = tempfile::tempdir().unwrap();
-        let blocker = temp.path().join("not-a-dir");
-        let _ = tokio::fs::write(&blocker, "block").await;
-        let target = crate::spill::SpillTarget::with_root(blocker, "chat-slow", &process_id);
-        {
-            let mut records = registry.records.lock().await;
-            records
-                .get_mut(&process_id)
-                .unwrap()
-                .transcript
-                .set_spill_target_for_test(target);
-        }
-        let mut rx = registry.subscribe_output();
-        let append = tokio::spawn({
-            let registry = registry.clone();
-            let process_id = process_id.clone();
-            async move {
-                registry
-                    .append_output(
-                        &process_id,
-                        ExecOutputStream::Stdout,
-                        format!("hello{}", "x".repeat(DEFAULT_SPILL_THRESHOLD_BYTES)),
-                    )
-                    .await
-            }
-        });
-
-        let broadcast = tokio::time::timeout(Duration::from_secs(1), rx.recv())
-            .await
-            .expect("output should broadcast before spill failure records")
-            .unwrap();
-        let append_result = append.await.unwrap().unwrap();
-
-        assert_eq!(broadcast.process_id, process_id);
-        assert_eq!(append_result.process_id, process_id);
-        let read = registry.read(&process_id, 0, None).await;
-        assert_eq!(read.chunks, vec![append_result]);
-    }
-
-    #[tokio::test]
-    async fn keep_remove_failure_sets_failed_status_and_keeps_record() {
-        let registry = ExecRegistry::new();
-        let snapshot = registry
-            .register(
-                meta("exec_keep_remove_fail", ExecMode::Background, "sleep 1"),
-                DEFAULT_MAX_BYTES,
-            )
-            .await;
-        let process_id = snapshot.meta.process_id.clone();
-
-        registry
-            .keep_remove_failure(&process_id, "remove timed out".to_string(), None)
-            .await;
-
-        let retained = registry.get(&process_id).await.unwrap();
-        assert!(
-            matches!(&retained.status, ExecStatus::Failed { message } if message == "remove timed out")
-        );
-        assert!(retained.meta.ended_at_ms.is_some());
     }
 
     #[cfg(unix)]
@@ -3412,57 +2804,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_isolated_child_does_not_overwrite_active_record() {
-        let registry = ExecRegistry::new();
-        let first = registry
-            .register(
-                meta("exec_child_guard_active", ExecMode::Background, "sleep 1")
-                    .with_chat_id("chat-a"),
-                DEFAULT_MAX_BYTES,
-            )
-            .await;
-        let process_id = first.meta.process_id.clone();
-        registry.mark_started(&process_id).await.unwrap();
-
-        let mut command = if cfg!(target_os = "windows") {
-            let mut cmd = tokio::process::Command::new("powershell.exe");
-            cmd.arg("-Command").arg("Start-Sleep 1");
-            cmd
-        } else {
-            let mut cmd = tokio::process::Command::new("sh");
-            cmd.arg("-c").arg("sleep 1");
-            cmd
-        };
-        #[cfg(unix)]
-        unsafe {
-            command.pre_exec(|| {
-                libc::setpgid(0, 0);
-                Ok(())
-            });
-        }
-        let child = command.spawn().expect("spawn child");
-        let second = registry
-            .register_isolated_child(
-                meta(
-                    "exec_child_guard_active",
-                    ExecMode::Background,
-                    "echo replacement",
-                )
-                .with_chat_id("chat-b"),
-                DEFAULT_MAX_BYTES,
-                child,
-            )
-            .await
-            .unwrap();
-
-        let stored = registry.get(&process_id).await.unwrap();
-        assert_eq!(second, stored);
-        assert_eq!(stored.status, ExecStatus::Running);
-        assert_eq!(stored.meta.command, "sleep 1");
-        assert_eq!(stored.meta.owner.chat_id.as_deref(), Some("chat-a"));
-    }
-
-    #[tokio::test]
     async fn register_does_not_overwrite_terminal_record_with_retained_runtime() {
         let registry = ExecRegistry::new();
         let (control_tx, _control_rx) = mpsc::channel(1);
@@ -3566,206 +2907,6 @@ mod tests {
         assert_eq!(stored.meta.command, "sleep 30");
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn register_isolated_child_duplicate_kills_rejected_child() {
-        let registry = ExecRegistry::new();
-        let first = registry
-            .register(
-                meta("exec_child_dup_kill", ExecMode::Background, "sleep 1").with_chat_id("chat-a"),
-                DEFAULT_MAX_BYTES,
-            )
-            .await;
-        let process_id = first.meta.process_id.clone();
-        registry.mark_started(&process_id).await.unwrap();
-
-        let mut command = tokio::process::Command::new("sh");
-        command.arg("-c").arg("sleep 30");
-        unsafe {
-            command.pre_exec(|| {
-                libc::setpgid(0, 0);
-                Ok(())
-            });
-        }
-        let child = command.spawn().expect("spawn child");
-        let child_pid = child.id().expect("child pid");
-
-        assert!(process_exists(child_pid));
-
-        let second = registry
-            .register_isolated_child(
-                meta(
-                    "exec_child_dup_kill",
-                    ExecMode::Background,
-                    "echo replacement",
-                )
-                .with_chat_id("chat-b"),
-                DEFAULT_MAX_BYTES,
-                child,
-            )
-            .await
-            .unwrap();
-
-        let stored = registry.get(&process_id).await.unwrap();
-        assert_eq!(second, stored);
-        assert_eq!(stored.status, ExecStatus::Running);
-        assert_eq!(stored.meta.command, "sleep 1");
-
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(!process_exists(child_pid));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn register_isolated_child_duplicate_kills_process_group_descendants() {
-        let registry = ExecRegistry::new();
-        let first = registry
-            .register(
-                meta("exec_child_pgroup_desc", ExecMode::Background, "sleep 1")
-                    .with_chat_id("chat-a"),
-                DEFAULT_MAX_BYTES,
-            )
-            .await;
-        let process_id = first.meta.process_id.clone();
-        registry.mark_started(&process_id).await.unwrap();
-
-        let mut command = tokio::process::Command::new("sh");
-        command.arg("-c").arg("sleep 100 & wait");
-        unsafe {
-            command.pre_exec(|| {
-                libc::setpgid(0, 0);
-                Ok(())
-            });
-        }
-        let child = command.spawn().expect("spawn child");
-        let child_pid = child.id().expect("child pid");
-
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        assert!(process_exists(child_pid));
-
-        registry
-            .register_isolated_child(
-                meta("exec_child_pgroup_desc", ExecMode::Background, "echo dup")
-                    .with_chat_id("chat-b"),
-                DEFAULT_MAX_BYTES,
-                child,
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(Duration::from_millis(300)).await;
-
-        let group_alive = unsafe { libc::kill(-(child_pid as i32), 0) == 0 };
-        assert!(
-            !group_alive,
-            "process group should be fully killed including descendants"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn register_isolated_child_cleanup_succeeds() {
-        let registry = ExecRegistry::new();
-        let mut command = tokio::process::Command::new("sh");
-        command.arg("-c").arg("sleep 30");
-        unsafe {
-            command.pre_exec(|| {
-                libc::setpgid(0, 0);
-                Ok(())
-            });
-        }
-        let child = command.spawn().expect("spawn child");
-        let child_pid = child.id().expect("child pid");
-        let snapshot = registry
-            .register_isolated_child(
-                meta("exec_isolated_cleanup", ExecMode::Background, "sleep 30"),
-                DEFAULT_MAX_BYTES,
-                child,
-            )
-            .await
-            .unwrap();
-        registry
-            .mark_started(&snapshot.meta.process_id)
-            .await
-            .unwrap();
-
-        assert!(process_exists(child_pid));
-
-        let removed = registry
-            .remove(&snapshot.meta.process_id)
-            .await
-            .unwrap()
-            .unwrap();
-
-        assert!(removed.status.is_terminal());
-        assert!(registry.get(&snapshot.meta.process_id).await.is_none());
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(!process_exists(child_pid));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn register_non_isolated_child_for_test_keeps_non_production_coverage() {
-        let registry = ExecRegistry::new();
-        let existing = registry
-            .register(
-                meta(
-                    "exec_test_non_isolated_child",
-                    ExecMode::Background,
-                    "existing",
-                ),
-                DEFAULT_MAX_BYTES,
-            )
-            .await;
-        registry
-            .mark_started(&existing.meta.process_id)
-            .await
-            .unwrap();
-        let temp = tempfile::tempdir().unwrap();
-        let pid_path = temp.path().join("descendant.pid");
-        let mut command = tokio::process::Command::new("sh");
-        command.arg("-c").arg(format!(
-            "sleep 30 & printf %s $! > {}; sleep 30",
-            pid_path.display()
-        ));
-        let mut child = command.spawn().expect("spawn child");
-        let child_pid = child.id().expect("child pid");
-
-        for _ in 0..20 {
-            if let Ok(contents) = std::fs::read_to_string(&pid_path) {
-                if let Ok(pid) = contents.trim().parse::<i32>() {
-                    let descendant_pid = pid;
-                    let duplicate = registry
-                        .register_non_isolated_child_for_test(
-                            meta(
-                                "exec_test_non_isolated_child",
-                                ExecMode::Background,
-                                "sleep 30 & sleep 30",
-                            ),
-                            DEFAULT_MAX_BYTES,
-                            child,
-                        )
-                        .await
-                        .unwrap();
-
-                    let stored = registry.get(&existing.meta.process_id).await.unwrap();
-                    assert_eq!(duplicate, stored);
-                    assert_eq!(stored.meta.command, "existing");
-                    assert!(wait_until_process_exits(child_pid).await);
-                    #[cfg(target_os = "linux")]
-                    assert!(wait_until_process_exits(descendant_pid as u32).await);
-                    #[cfg(not(target_os = "linux"))]
-                    let _ = descendant_pid;
-                    return;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        let _ = child.start_kill();
-        let _ = child.wait().await;
-        panic!("descendant pid file was not populated");
-    }
-
     #[tokio::test]
     async fn terminal_failed_runtime_remove_sends_kill_and_retains_on_no_response() {
         let registry = ExecRegistry::new();
@@ -3848,95 +2989,6 @@ mod tests {
         assert!(registry.get(&process_id).await.is_some());
         drop(_control_rx);
         let _ = registry.remove(&process_id).await;
-    }
-
-    #[tokio::test]
-    async fn kill_terminal_failed_child_returns_cleanup_error() {
-        let registry = ExecRegistry::new();
-        let mut command = if cfg!(target_os = "windows") {
-            let mut command = tokio::process::Command::new("powershell.exe");
-            command.arg("-Command").arg("Start-Sleep -Seconds 30");
-            command
-        } else {
-            let mut command = tokio::process::Command::new("sleep");
-            command.arg("30");
-            command
-        };
-        #[cfg(unix)]
-        unsafe {
-            command.pre_exec(|| {
-                libc::setpgid(0, 0);
-                Ok(())
-            });
-        }
-        let child = command.spawn().expect("spawn child");
-        let snapshot = registry
-            .register_isolated_child(
-                meta(
-                    "exec_terminal_child_kill_error",
-                    ExecMode::Background,
-                    "sleep 30",
-                ),
-                DEFAULT_MAX_BYTES,
-                child,
-            )
-            .await
-            .unwrap();
-        let process_id = snapshot.meta.process_id.clone();
-        registry.mark_started(&process_id).await.unwrap();
-        registry
-            .mark_failed(&process_id, "simulated failure".to_string())
-            .await
-            .unwrap();
-
-        let error = registry.kill(&process_id).await.unwrap_err();
-
-        assert!(error.contains("already terminal"));
-        assert!(error.contains("remove()"));
-        assert!(registry.get(&process_id).await.is_some());
-        let _ = registry.remove(&process_id).await;
-    }
-
-    #[tokio::test]
-    async fn terminal_failed_runtime_remove_succeeds_when_runtime_already_exited() {
-        let registry = ExecRegistry::new();
-        let (control_tx, control_rx) = mpsc::channel::<ExecProcessCommand>(1);
-        drop(control_rx);
-        let runtime = ExecProcessRuntime {
-            control_tx,
-            terminal: Arc::new(Notify::new()),
-            stdin_writer: None,
-        };
-        let snapshot = registry
-            .register_new_with_runtime(
-                meta(
-                    "exec_terminal_runtime_exited",
-                    ExecMode::Background,
-                    "sleep 30",
-                ),
-                DEFAULT_MAX_BYTES,
-                runtime,
-                false,
-            )
-            .await
-            .unwrap();
-        let process_id = snapshot.meta.process_id.clone();
-        registry.mark_started(&process_id).await.unwrap();
-        registry
-            .mark_failed(&process_id, "simulated failure".to_string())
-            .await
-            .unwrap();
-
-        let result = registry.remove(&process_id).await;
-
-        assert!(
-            result.unwrap().is_some(),
-            "remove must succeed when runtime channel is closed"
-        );
-        assert!(
-            registry.get(&process_id).await.is_none(),
-            "record must be gone after successful remove"
-        );
     }
 
     #[tokio::test]

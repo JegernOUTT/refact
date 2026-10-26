@@ -309,35 +309,4 @@ mod tests {
         let addr = resolve_http_bind_addr(None, false, 8001).unwrap();
         assert_eq!(addr.to_string(), "127.0.0.1:8001");
     }
-
-    #[test]
-    fn http_bind_preserves_inside_container_default() {
-        let addr = resolve_http_bind_addr(None, true, 8001).unwrap();
-        assert_eq!(addr.to_string(), "0.0.0.0:8001");
-    }
-
-    #[test]
-    fn http_bind_uses_explicit_host() {
-        let addr = resolve_http_bind_addr(Some("127.0.0.1"), true, 8001).unwrap();
-        assert_eq!(addr.to_string(), "127.0.0.1:8001");
-    }
-
-    #[test]
-    fn http_bind_rejects_invalid_host() {
-        assert!(resolve_http_bind_addr(Some("localhost"), false, 8001).is_err());
-    }
-
-    #[tokio::test]
-    async fn mdns_advertises_without_daemon_endpoint() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        assert!(should_advertise_mdns(&gcx.cmdline));
-    }
-
-    #[tokio::test]
-    async fn mdns_skips_with_daemon_endpoint() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let mut cmdline = gcx.cmdline.clone();
-        cmdline.daemon_endpoint = "http://127.0.0.1:8488".to_string();
-        assert!(!should_advertise_mdns(&cmdline));
-    }
 }

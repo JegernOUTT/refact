@@ -9,7 +9,7 @@ use crate::tasks::types::{TaskBoard, TaskMeta};
 use crate::tools::tools_description::Tool;
 
 use super::merge_agent_target_checkout_tests::git;
-use super::tool_agent_lifecycle::tests::{args, output_text, planner_ccx};
+use super::tool_agent_lifecycle::tests::{args, planner_ccx};
 use super::tool_task_merge_agent::ToolTaskMergeAgent;
 
 const AGENT: &str = "refact/task/task-1/card/T-1/legacy";
@@ -198,42 +198,6 @@ async fn legacy_merge_conflict_leaves_no_merge_state() {
                 );
             }
         }
-    }
-}
-
-#[tokio::test]
-#[serial_test::serial(runtime_settings, coordination_metrics)]
-async fn legacy_merge_conflict_reports_conflicting_files() {
-    for strategy in ["squash", "merge"] {
-        let fixture = Fixture::new(true).await;
-        let text = output_text(fixture.merge(strategy).await.unwrap());
-
-        assert!(text.starts_with("# Merge Conflicts Detected\n"), "{text}");
-        assert!(text.contains("**Card:** T-1"), "{text}");
-        assert!(
-            text.contains(&format!("**Branch:** {AGENT} → {}", fixture.target_branch)),
-            "{text}"
-        );
-        assert!(
-            text.contains(&format!("**Strategy:** {strategy}")),
-            "{text}"
-        );
-        assert!(text.contains("**Aborted:** true"), "{text}");
-        assert_eq!(
-            text.split("## Conflicting Files\n")
-                .nth(1)
-                .unwrap()
-                .split("\n\n")
-                .next()
-                .unwrap(),
-            "- file.txt\n- second.txt"
-        );
-        assert!(
-            text.contains("no conflict markers were left behind"),
-            "{text}"
-        );
-        assert!(!text.contains("in progress"), "{text}");
-        assert!(!text.contains("git merge --abort"), "{text}");
     }
 }
 

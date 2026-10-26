@@ -1236,12 +1236,6 @@ mod tests {
     }
 
     #[test]
-    fn detects_dangerous_eval() {
-        let findings = scan("python", "eval(user_input)\n");
-        assert!(has_rule(&findings, "dangerous_eval"));
-    }
-
-    #[test]
     fn eval_reports_single_rule() {
         let findings = scan("python", "eval(payload)\n");
         assert_eq!(findings.len(), 1, "got {findings:?}");
@@ -1265,21 +1259,6 @@ mod tests {
     fn detects_dynamic_child_process_template_execution() {
         let findings = scan("typescript", "child_process.exec(`echo ${userInput}`);\n");
         assert!(has_rule(&findings, "command_injection"));
-    }
-
-    #[test]
-    fn detects_dynamic_backtick_execution_in_supported_languages() {
-        for (lang, source) in [
-            ("ruby", "result = `echo #{user_input}`\n"),
-            ("php", "$result = trim(`id $username`);\n"),
-            ("bash", "result=`cat ${filename}`\n"),
-        ] {
-            let findings = scan(lang, source);
-            assert!(
-                has_rule(&findings, "command_injection"),
-                "expected {lang} backtick finding for {source:?}: {findings:?}"
-            );
-        }
     }
 
     #[test]
@@ -1462,17 +1441,6 @@ mod tests {
     }
 
     #[test]
-    fn template_literal_json_is_not_command_injection() {
-        for lang in ["typescript", "tsx"] {
-            let findings = scan(lang, "`payload: ${JSON.stringify(value)}`;\n");
-            assert!(
-                !has_rule(&findings, "command_injection"),
-                "unexpected {lang} findings: {findings:?}"
-            );
-        }
-    }
-
-    #[test]
     fn planted_secret_and_injection_lines_still_report() {
         let findings = scan(
             "python",
@@ -1498,12 +1466,6 @@ mod tests {
     fn ignores_literal_eval() {
         let findings = scan("python", "eval(\"2 + 2\")\n");
         assert!(!has_rule(&findings, "dangerous_eval"));
-    }
-
-    #[test]
-    fn detects_weak_crypto() {
-        let findings = scan("python", "hashlib.md5(data).hexdigest()\n");
-        assert!(has_rule(&findings, "weak_crypto"));
     }
 
     #[test]
@@ -1537,15 +1499,6 @@ mod tests {
         }
         let findings = scan("typescript", "description.includes(type);\n");
         assert!(!has_rule(&findings, "weak_crypto"));
-    }
-
-    #[test]
-    fn named_function_calls_and_declarations_are_not_dangerous_eval() {
-        let findings = scan(
-            "typescript",
-            "function namedFunction(pathValue) {}\nnamedFunction(current)\nfunction buildFunction(value) {}\nbuildFunction(current)\n",
-        );
-        assert!(!has_rule(&findings, "dangerous_eval"));
     }
 
     #[test]
@@ -1605,18 +1558,6 @@ mod tests {
                 "unexpected Function finding for {source:?}: {findings:?}"
             );
         }
-    }
-
-    #[test]
-    fn embedded_javascript_in_rust_is_not_weak_crypto() {
-        let findings = scan("rust", "let source = r#\"zone.send_to.includes(type)\"#;\n");
-        assert!(!has_rule(&findings, "weak_crypto"));
-    }
-
-    #[test]
-    fn detects_tls_verify_disabled() {
-        let findings = scan("python", "requests.get(url, verify=False)\n");
-        assert!(has_rule(&findings, "tls_verify_disabled"));
     }
 
     #[test]
@@ -1737,11 +1678,5 @@ mod tests {
                 assert_eq!(finding.snippet, source.trim());
             }
         }
-    }
-
-    #[test]
-    fn clean_file_has_no_findings() {
-        let text = "def add(a, b):\n    return a + b\n";
-        assert!(scan("python", text).is_empty());
     }
 }

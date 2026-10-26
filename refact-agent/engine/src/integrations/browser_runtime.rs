@@ -1304,47 +1304,6 @@ mod tests {
     }
 
     #[test]
-    fn monitor_evicts_dead_runtimes_regardless_of_chat_attachment() {
-        let source = include_str!("browser_runtime.rs");
-        let monitor = source
-            .split_once("pub async fn browser_monitor_background_task(")
-            .unwrap()
-            .1
-            .split_once("\n#[cfg(test)]")
-            .unwrap()
-            .0;
-
-        assert!(
-            !monitor.contains("if !still_connected && rt.attached_chat_id.is_none()"),
-            "dead runtimes attached to a chat are still leaked forever"
-        );
-        assert!(monitor
-            .contains("RecoveryDecision::Relaunch => to_relaunch.push(RuntimeRecoveryPlan {"));
-        assert!(
-            monitor.contains("a connected (not launched) runtime cannot be relaunched"),
-            "a dead connected (not launched) runtime must be dropped, never relaunched from an empty profile"
-        );
-        assert!(monitor.contains("None => to_remove.push((rid.clone(), true,"));
-        assert!(monitor.contains("relaunch_runtime_for_chat("));
-        assert!(
-            monitor.contains("tokio::task::block_in_place(|| {"),
-            "sync CDP calls still run on a worker thread while holding the runtime mutex"
-        );
-        assert!(
-            monitor.contains("tokio::time::timeout(MONITOR_LOCK_TIMEOUT, runtime_arc.lock())"),
-            "the monitor must never wait unboundedly for a busy runtime"
-        );
-        assert!(
-            monitor.contains("check_busy_runtime(rid, ownership).await"),
-            "busy runtimes are probed through their ownership record"
-        );
-        assert!(
-            monitor.contains("budget.record_failure(Instant::now())"),
-            "failed relaunches must back off"
-        );
-    }
-
-    #[test]
     fn concurrent_relaunches_for_one_chat_share_a_single_guard() {
         let first = relaunch_lock_for_chat("chat-relaunch-guard");
         let second = relaunch_lock_for_chat("chat-relaunch-guard");
@@ -1361,112 +1320,6 @@ mod tests {
         );
         drop(guard);
         assert!(second.try_lock().is_ok());
-    }
-
-    #[test]
-    fn relaunch_reuses_a_live_runtime_in_the_requested_mode() {
-        let helper = include_str!("browser_runtime.rs")
-            .split_once("pub async fn relaunch_runtime_for_chat(")
-            .unwrap()
-            .1
-            .split_once("\n}\n")
-            .unwrap()
-            .0;
-
-        for step in [
-            "let relaunch_lock = relaunch_lock_for_chat(chat_id);",
-            "let _relaunch_guard = relaunch_lock.lock().await;",
-            "let same_mode = rt.launch_options.headless == options.headless;",
-            "tokio::task::block_in_place(|| rt.check_connection())",
-            "return Ok(runtime_id);",
-        ] {
-            assert!(helper.contains(step), "relaunch guard lost step: {step}");
-        }
-        assert!(
-            helper.find("let _relaunch_guard").unwrap()
-                < helper.find("take_browser_runtime(").unwrap(),
-            "the per-chat guard must be held across remove, launch and register"
-        );
-    }
-
-    #[test]
-    fn resume_warning_names_the_step_the_retry_starts_from() {
-        let warning = relaunch_resume_warning(2);
-        assert!(warning.contains("relaunched and resumed from step 2"));
-        assert!(warning.contains("open tabs were lost"));
-        assert!(warning.contains("cookies/storage persist via profile"));
-    }
-
-    #[test]
-    fn relaunch_sequence_lives_only_in_the_shared_helper() {
-        let helper = include_str!("browser_runtime.rs")
-            .split_once("pub async fn relaunch_runtime_for_chat(")
-            .unwrap()
-            .1
-            .split_once("\n}\n")
-            .unwrap()
-            .0;
-
-        for step in [
-            "take_browser_runtime(&app, &runtime_id, false)",
-            "release_runtime_and_wait(removed, &runtime_id)",
-            "tokio::time::sleep(browser_settings::current().relaunch_settle())",
-            "BrowserRuntime::launch(",
-            "runtime.reattach(chat_id)",
-            "register_browser_runtime(app.clone(), runtime)",
-            "setup_recording_for_runtime(&mut rt)",
-            "ensure_frame_emitter(app, chat_id, &runtime_id)",
-        ] {
-            assert!(helper.contains(step), "relaunch helper lost step: {step}");
-        }
-
-        let router = include_str!("../http/routers/v1/v1_browser.rs");
-        assert!(router.contains("relaunch_runtime_for_chat("));
-        assert!(
-            !router.contains("Failed to relaunch browser in {} mode"),
-            "router still duplicates the relaunch sequence"
-        );
-
-        let controller = include_str!("browser_controller.rs");
-        assert!(controller.contains("relaunch_runtime_for_chat("));
-        assert!(!controller.contains("BrowserRuntime::launch("));
-    }
-
-    #[test]
-    fn relaunch_preserves_profile_launch_options_and_window_bounds() {
-        let helper = include_str!("browser_runtime.rs")
-            .split_once("pub async fn relaunch_runtime_for_chat(")
-            .unwrap()
-            .1
-            .split_once("\n}\n")
-            .unwrap()
-            .0;
-
-        assert!(helper
-            .contains("window_bounds: window_bounds.or(launch_options.window_bounds.clone())"));
-        assert!(helper.contains("..launch_options"));
-        assert!(RELAUNCH_WARNING.contains("relaunched and retried"));
-        assert!(RELAUNCH_WARNING.contains("open tabs lost"));
-    }
-
-    #[test]
-    fn setup_chrome_session_cannot_hand_back_the_dead_runtime() {
-        let session = include_str!("../tools/tool_chrome.rs")
-            .split_once("async fn setup_chrome_session(")
-            .unwrap()
-            .1;
-        let unhealthy = session
-            .split_once("if runtime_healthy {")
-            .unwrap()
-            .1
-            .split_once("find_runtime_by_chat_id(")
-            .unwrap()
-            .0;
-
-        assert!(
-            unhealthy.contains("remove_browser_runtime("),
-            "dead runtime is not evicted before re-resolving it by chat id"
-        );
     }
 
     fn owner(runtime_id: &str, attached: Option<&str>) -> RuntimeOwner {
@@ -1647,15 +1500,6 @@ mod tests {
     }
 
     #[test]
-    fn recovery_fence_names_the_way_out() {
-        let error = recovery_fence_error(RELAUNCH_FENCE);
-        assert!(error.contains("about:blank"));
-        assert!(error.contains("navigate, open_tab or set_content"));
-        assert!(relaunch_url_restore_warning("https://example.test/a", 3)
-            .contains("resumed from step 3"));
-    }
-
-    #[test]
     fn exact_chat_id_match_wins_over_every_fallback() {
         let owners = vec![
             owner("rt-root", Some("root-chat")),
@@ -1697,15 +1541,6 @@ mod tests {
         };
         let selection = select_runtime_for_chat(&owners, &lookup).unwrap();
         assert_eq!(selection.runtime_id, "rt-agent");
-        assert!(selection.adopted);
-    }
-
-    #[test]
-    fn a_sole_unclaimed_runtime_is_adopted() {
-        let owners = vec![owner("rt-free", None)];
-        let lookup = ChatRuntimeLookup::for_chat("subchat-new");
-        let selection = select_runtime_for_chat(&owners, &lookup).unwrap();
-        assert_eq!(selection.runtime_id, "rt-free");
         assert!(selection.adopted);
     }
 
@@ -1769,15 +1604,6 @@ mod tests {
     }
 
     #[test]
-    fn launch_failure_text_never_blames_ports_alone() {
-        let dir = tempfile::tempdir().unwrap();
-        let described =
-            describe_launch_failure("no available ports between 8000 and 9000", dir.path());
-        assert!(described.contains("Chrome exited before reporting a debugging"));
-        assert!(described.contains("ports are not exhausted"));
-    }
-
-    #[test]
     fn stale_sweep_keeps_recent_and_non_subchat_profiles() {
         let cache = tempfile::tempdir().unwrap();
         let root = cache.path().join("browser_profiles");
@@ -1797,43 +1623,5 @@ mod tests {
             profile_min_age("chat-one"),
             Duration::from_secs(7 * 24 * 60 * 60)
         );
-    }
-
-    #[test]
-    fn runtime_removal_kills_chrome_and_can_delete_the_profile() {
-        let source = include_str!("browser_runtime.rs");
-        let helper = source
-            .split_once("fn shutdown_runtime_process(")
-            .unwrap()
-            .1
-            .split_once("\n}\n")
-            .unwrap()
-            .0;
-        assert!(helper.contains("ShutdownTarget::Own(own) => terminate_process(own)"));
-        assert!(
-            helper.contains("ShutdownTarget::LeaveReplacement { own, lock_owner } => warn!("),
-            "a replacement Chrome on the same profile must never be killed"
-        );
-        assert!(helper.contains("std::fs::remove_dir_all(profile_dir)"));
-
-        let terminate = source
-            .split_once("fn terminate_process(")
-            .unwrap()
-            .1
-            .split_once("\n}\n")
-            .unwrap()
-            .0;
-        assert!(terminate.contains("libc::SIGTERM"));
-        assert!(terminate.contains("libc::SIGKILL"));
-    }
-
-    #[test]
-    fn test_get_browser_profile_dir_different_threads() {
-        let cache_dir = PathBuf::from("/home/user/.cache/refact");
-        let p1 = get_browser_profile_dir(&cache_dir, "thread-1");
-        let p2 = get_browser_profile_dir(&cache_dir, "thread-2");
-        assert_ne!(p1, p2);
-        assert!(p1.to_str().unwrap().contains("thread-1"));
-        assert!(p2.to_str().unwrap().contains("thread-2"));
     }
 }

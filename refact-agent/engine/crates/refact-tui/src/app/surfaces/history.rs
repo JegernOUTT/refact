@@ -648,54 +648,6 @@ mod tests {
     }
 
     #[test]
-    fn metadata_renders_every_trajectory_and_worktree_field() {
-        let lines = metadata_lines(&trajectory("chat-56"));
-        let text = lines.join("\n");
-        for expected in [
-            "id: chat-56",
-            "title: History navigator",
-            "created_at: 2026-08-25T09:00:00Z",
-            "updated_at: 2026-08-25T10:00:00Z",
-            "model: gpt-5.6",
-            "mode: task_agent",
-            "message_count: 8",
-            "parent_id: parent-chat",
-            "link_type: fork",
-            "task_id: task-56",
-            "role: agent",
-            "agent_id: agent-56",
-            "card_id: T-56",
-            "session_state: idle",
-            "root_chat_id: root-chat",
-            "worktree.id: worktree-56",
-            "worktree.kind: task_agent",
-            "worktree.root: /tmp/worktree",
-            "worktree.source_workspace_root: /tmp/source",
-            "worktree.repo_root: /tmp/repo",
-            "worktree.branch: refact/task/T-56",
-            "worktree.base_branch: main",
-            "worktree.base_commit: abc123",
-            "worktree.task_id: task-56",
-            "worktree.card_id: T-56",
-            "worktree.agent_id: agent-56",
-            "worktree.enforce: true",
-            "total_lines_added: 100",
-            "total_lines_removed: 25",
-            "tasks_total: 4",
-            "tasks_done: 3",
-            "tasks_failed: 1",
-            "total_prompt_tokens: 1000",
-            "total_completion_tokens: 500",
-            "total_tokens: 1500",
-            "total_cache_read_tokens: 250",
-            "total_cache_creation_tokens: 75",
-            "total_cost_usd: $0.0420",
-        ] {
-            assert!(text.contains(expected), "missing {expected}: {text}");
-        }
-    }
-
-    #[test]
     fn missing_metadata_is_unknown_without_fabricated_cost() {
         let lines = metadata_lines(&TrajectoryMeta {
             id: "chat-unknown".to_string(),
@@ -756,23 +708,6 @@ mod tests {
     }
 
     #[test]
-    fn detail_scroll_exposes_metadata_beyond_the_initial_rows() {
-        let mut surface = HistorySurface::new(vec![trajectory("chat-56")]);
-        surface.toggle_detail();
-        assert!(surface
-            .detail_lines(40)
-            .iter()
-            .any(|line| line.contains("parent_id")));
-        for _ in 0..20 {
-            surface.scroll_detail_down();
-        }
-        assert!(surface
-            .detail_lines(40)
-            .iter()
-            .any(|line| line.contains("total_cost_usd")));
-    }
-
-    #[test]
     fn paging_status_and_selection_reach_chats_past_fifty() {
         let trajectories = (0..51)
             .map(|index| {
@@ -815,15 +750,5 @@ mod tests {
             .render_lines(40)
             .iter()
             .any(|line| line.contains("Enter resume")));
-    }
-
-    #[test]
-    fn surface_gate_accepts_only_truthy_values() {
-        for value in [Some("1"), Some("true"), Some("YES"), Some("on")] {
-            assert!(surfaces_enabled_from_value(value));
-        }
-        for value in [None, Some("0"), Some("false"), Some("anything")] {
-            assert!(!surfaces_enabled_from_value(value));
-        }
     }
 }

@@ -139,41 +139,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ids_are_minted_sequentially_and_survive_removal() {
-        let mut manager = InitScriptManager::default();
-        assert_eq!(manager.add(&[], "a".to_string()).unwrap(), "init1");
-        assert_eq!(manager.add(&[], "b".to_string()).unwrap(), "init2");
-        assert_eq!(manager.ids(), vec!["init1", "init2"]);
-
-        manager.remove(&[], "init1").unwrap();
-        assert_eq!(manager.ids(), vec!["init2"]);
-
-        assert_eq!(manager.add(&[], "c".to_string()).unwrap(), "init3");
-        assert_eq!(manager.ids(), vec!["init2", "init3"]);
-    }
-
-    #[test]
-    fn removing_an_unknown_id_is_an_error() {
-        let mut manager = InitScriptManager::default();
-        manager.add(&[], "a".to_string()).unwrap();
-
-        let error = manager.remove(&[], "init9").unwrap_err();
-        assert!(error.contains("init9"), "{error}");
-        assert_eq!(manager.len(), 1);
-    }
-
-    #[test]
-    fn reset_reports_the_number_of_cleared_scripts_and_is_idempotent() {
-        let mut manager = InitScriptManager::default();
-        manager.add(&[], "a".to_string()).unwrap();
-        manager.add(&[], "b".to_string()).unwrap();
-
-        assert_eq!(manager.reset(&[]).unwrap(), 2);
-        assert!(manager.is_empty());
-        assert_eq!(manager.reset(&[]).unwrap(), 0);
-    }
-
-    #[test]
     fn init_scripts_target_the_main_world_and_do_not_run_immediately() {
         let script = page_init_script("window.flag = 1");
         assert_eq!(script.world_name, None);

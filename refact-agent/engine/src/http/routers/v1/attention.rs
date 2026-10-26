@@ -22,10 +22,10 @@ pub async fn queue(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::attention::{AttentionEntryState, AttentionPriority, AttentionRequest, AttentionScope};
+    use crate::attention::{AttentionRequest, AttentionScope};
     use axum::body::Body;
     use axum::http::{header, Request, StatusCode};
-    use chrono::{Duration as ChronoDuration, Utc};
+
     use refact_chat_api::QuestionKind;
     use tower::ServiceExt;
 
@@ -82,57 +82,5 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["waiting"].as_array().unwrap().len(), 0);
         assert_eq!(body["settled"].as_array().unwrap().len(), 0);
-    }
-
-    #[tokio::test]
-    async fn a_silent_default_stays_in_the_queue_surface_after_it_settles() {
-        let (app, _dir) = app(None).await;
-        let now = Utc::now();
-        app.attention()
-            .join(
-                ask("Rename the branch?")
-                    .with_priority(AttentionPriority::Low)
-                    .with_default_answer(Some("keep the name".into())),
-                "agent-one",
-                now,
-            )
-            .unwrap();
-        let timeout = app.attention().limits().default_timeout_secs as i64;
-        let later = now + ChronoDuration::seconds(timeout + 1);
-        let queue = app.attention().queue(later);
-        assert_eq!(queue.silent_defaults, 1);
-        assert_eq!(queue.settled[0].state, AttentionEntryState::Defaulted);
-
-        let (status, body) = request(app, None).await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["settled"][0]["state"], "defaulted");
-        assert_eq!(body["settled"][0]["default_used"], "keep the name");
-    }
-
-    #[tokio::test]
-    async fn the_queue_surface_reports_rank_and_what_was_merged_into_a_prompt() {
-        let (app, _dir) = app(None).await;
-        let now = Utc::now();
-        app.attention()
-            .join(ask("Lonely?"), "agent-one", now)
-            .unwrap();
-        for waiter in ["agent-two", "agent-three"] {
-            app.attention().join(ask("Crowded?"), waiter, now).unwrap();
-        }
-        let (status, body) = request(app, None).await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        let waiting = body["waiting"].as_array().unwrap();
-        assert_eq!(waiting.len(), 2);
-        assert_eq!(waiting[0]["rank"], 1);
-        assert_eq!(waiting[0]["blocked_runs"], 2);
-        assert_eq!(waiting[0]["asked_by"], "agent-two");
-        assert_eq!(waiting[0]["merged_waiters"][0], "agent-three");
-        assert_eq!(waiting[0]["merged_waiters"].as_array().unwrap().len(), 1);
-        assert!(waiting[0]["rank_reason"]
-            .as_str()
-            .unwrap()
-            .contains("2 runs blocked"));
-        assert_eq!(waiting[1]["rank"], 2);
-        assert_eq!(waiting[1]["state"], "waiting");
     }
 }

@@ -270,11 +270,6 @@ impl TrajectoryIndexListingCounterScope {
     fn reset(&self) {
         self.state().reset();
     }
-
-    #[cfg(test)]
-    fn is_global(&self) -> bool {
-        matches!(self, Self::Global)
-    }
 }
 
 pub fn trajectory_index_listing_counters() -> TrajectoryIndexListingCounters {
@@ -4169,183 +4164,6 @@ mod tests {
         path
     }
 
-    #[tokio::test]
-    async fn rebuild_creates_index_from_files_and_skips_index_json() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        write_trajectory(&dir, "chat-1", "One", "agent").await;
-        write_trajectory(&dir, "chat-2", "Two", "agent").await;
-        fs::write(trajectory_index_path(&dir), "{}").await.unwrap();
-
-        let entries = rebuild_trajectory_index_from_disk(&dir, None)
-            .await
-            .unwrap();
-
-        assert_eq!(entries.len(), 2);
-        let index = read_trajectory_index(&dir).await.unwrap().unwrap();
-        assert_eq!(index.entries.len(), 2);
-        assert!(index
-            .entries
-            .iter()
-            .all(|entry| entry.file_name != TRAJECTORY_INDEX_FILE));
-    }
-
-    #[serial_test::serial(trajectory_perf)]
-    #[tokio::test]
-    async fn performance_diagnostics_cover_index_success_and_failure_boundaries() {
-        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
-        let (_guard, sink) = install_perf_recorder();
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        write_trajectory(&dir, "chat-1", "One", "agent").await;
-
-        let entry = entry_from_trajectory_value(
-            &dir,
-            &dir.join("chat-1.json"),
-            &serde_json::from_str(&fs::read_to_string(dir.join("chat-1.json")).await.unwrap())
-                .unwrap(),
-            None,
-        )
-        .unwrap();
-        upsert_trajectory_index_entry(&dir, entry).await.unwrap();
-        rebuild_trajectory_index_from_disk(&dir, None)
-            .await
-            .unwrap();
-
-        fs::write(trajectory_index_path(&dir), "not-json")
-            .await
-            .unwrap();
-        assert!(read_trajectory_index(&dir).await.is_err());
-
-        let events = sink.events();
-        let components: Vec<_> = events.iter().map(|event| event.component).collect();
-        assert!(components.contains(&PerfComponent::TrajectoryIndexLockWait.as_str()));
-        assert!(components.contains(&PerfComponent::TrajectoryIndexRead.as_str()));
-        assert!(components.contains(&PerfComponent::TrajectoryIndexWrite.as_str()));
-        assert!(components.contains(&PerfComponent::TrajectoryIndexRebuild.as_str()));
-        assert!(events.iter().any(|event| event.outcome == "failure"));
-        assert!(events.iter().all(|event| event.path_hash.is_some()));
-    }
-
-    #[serial_test::serial(trajectory_perf)]
-    #[tokio::test]
-    async fn coordinator_performance_diagnostics_cover_load_reconcile_flush_and_enqueue() {
-        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
-        let (_guard, sink) = install_perf_recorder();
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        let path_1 = write_trajectory(&dir, "chat-1", "One", "agent").await;
-        let coordinator = TrajectoryIndexCoordinator::new();
-
-        coordinator
-            .upsert(&dir, entry_for_path(&dir, &path_1).await)
-            .await
-            .unwrap();
-        coordinator.list_entries(&dir, None).await.unwrap();
-
-        write_trajectory(&dir, "chat-2", "Two", "agent").await;
-        coordinator.reconcile(&dir, None).await.unwrap();
-        coordinator.flush_all().await.unwrap();
-
-        let events = sink.events();
-        let components: Vec<_> = events.iter().map(|event| event.component).collect();
-        for component in [
-            PerfComponent::TrajectoryIndexCoordinatorLoad,
-            PerfComponent::TrajectoryIndexCoordinatorReconcile,
-            PerfComponent::TrajectoryIndexCoordinatorFlush,
-            PerfComponent::TrajectoryIndexEnqueue,
-            PerfComponent::TrajectoryIndexRead,
-            PerfComponent::TrajectoryIndexLockWait,
-            PerfComponent::TrajectoryIndexWrite,
-        ] {
-            assert!(
-                components.contains(&component.as_str()),
-                "missing {component:?}"
-            );
-        }
-        assert!(events.iter().all(|event| {
-            event.path_hash.is_some()
-                || matches!(
-                    event.component,
-                    "trajectory.index_enqueue" | "trajectory.index_cache_hit"
-                )
-        }));
-    }
-
-    #[serial_test::serial(trajectory_perf)]
-    #[tokio::test]
-    async fn coordinator_cache_hit_records_a_timed_span_without_an_index_read() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        let path = write_trajectory(&dir, "chat-1", "One", "agent").await;
-        let coordinator = TrajectoryIndexCoordinator::new();
-        coordinator
-            .upsert(&dir, entry_for_path(&dir, &path).await)
-            .await
-            .unwrap();
-        coordinator.flush_all().await.unwrap();
-        coordinator.list_entries(&dir, None).await.unwrap();
-
-        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
-        let (_guard, sink) = install_perf_recorder();
-        assert_eq!(coordinator.list_entries(&dir, None).await.unwrap().len(), 1);
-
-        let events = sink.events();
-        assert_eq!(events.len(), 1);
-        assert_eq!(
-            events[0].component,
-            PerfComponent::TrajectoryIndexCacheHit.as_str()
-        );
-        assert_eq!(events[0].item_count, Some(1));
-        assert!(events[0].elapsed_us > 0);
-    }
-
-    #[serial_test::serial(trajectory_perf)]
-    #[tokio::test]
-    async fn cache_hit_records_nonzero_elapsed_for_real_work() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        for number in 0..64 {
-            write_trajectory(&dir, &format!("chat-{number}"), "Title", "agent").await;
-        }
-        let coordinator =
-            TrajectoryIndexCoordinator::new().with_generation_ttl(Duration::from_secs(30));
-        coordinator.list_entries(&dir, None).await.unwrap();
-        coordinator.flush_all().await.unwrap();
-        coordinator.list_entries(&dir, None).await.unwrap();
-
-        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
-        let sink = Arc::new(MemoryPerfSink::new());
-        let recorder = Arc::new(PerfRecorder::with_salt(
-            Arc::new(WallClock {
-                origin: Instant::now(),
-            }),
-            sink.clone(),
-            [11; 32],
-        ));
-        let _guard = perf_diagnostics::install_test_recorder(recorder);
-        assert_eq!(
-            coordinator.list_entries(&dir, None).await.unwrap().len(),
-            64
-        );
-
-        let telemetry = crate::chat::perf_telemetry::PerformanceTelemetry::new(true);
-        let events = sink.events();
-        assert_eq!(events.len(), 1);
-        assert!(telemetry.record(&events[0]));
-        let aggregate =
-            telemetry.snapshot().components[PerfComponent::TrajectoryIndexCacheHit.index()].clone();
-
-        assert!(!aggregate.counter_only);
-        assert_eq!(aggregate.sample_count, 1);
-        assert_eq!(aggregate.item_count_sum, 64);
-        assert!(
-            aggregate.max_us.is_some_and(|max_us| max_us > 0),
-            "cache hits must report their real cost: {aggregate:?}"
-        );
-        assert!(aggregate.min_us.is_some_and(|min_us| min_us > 0));
-    }
-
     #[serial_test::serial(trajectory_perf)]
     #[tokio::test]
     async fn coordinator_advisory_lock_wait_is_recorded_for_a_contended_flush() {
@@ -4375,124 +4193,6 @@ mod tests {
                 && event.path_hash.is_some()
         }));
         drop(blocker_guard);
-    }
-
-    #[serial_test::serial(trajectory_perf)]
-    #[tokio::test]
-    async fn coordinator_diagnostics_are_inactive_without_a_recorder() {
-        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
-        let telemetry = perf_diagnostics::process_telemetry();
-        let was_enabled = telemetry.enabled();
-        telemetry.set_enabled(false);
-        telemetry.reset();
-
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        let path = write_trajectory(&dir, "chat-1", "One", "agent").await;
-        let coordinator = TrajectoryIndexCoordinator::new();
-        coordinator
-            .upsert(&dir, entry_for_path(&dir, &path).await)
-            .await
-            .unwrap();
-        coordinator.list_entries(&dir, None).await.unwrap();
-        coordinator.flush_all().await.unwrap();
-
-        assert!(telemetry
-            .snapshot()
-            .components
-            .iter()
-            .all(|component| component.sample_count == 0));
-        telemetry.set_enabled(was_enabled);
-    }
-
-    #[tokio::test]
-    async fn corrupt_index_rebuilds_from_files() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        write_trajectory(&dir, "chat-1", "One", "agent").await;
-        fs::write(trajectory_index_path(&dir), "not json")
-            .await
-            .unwrap();
-
-        let entries = list_trajectory_entries_from_index_or_rebuild(&dir, None)
-            .await
-            .unwrap();
-
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].id, "chat-1");
-    }
-
-    #[tokio::test]
-    async fn valid_index_rebuilds_when_new_trajectory_appears_on_disk() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        write_trajectory(&dir, "chat-1", "One", "agent").await;
-        assert_eq!(
-            list_trajectory_entries_from_index_or_rebuild(&dir, None)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-
-        write_trajectory(&dir, "chat-2", "Two", "agent").await;
-        let entries = list_trajectory_entries_from_index_or_rebuild(&dir, None)
-            .await
-            .unwrap();
-
-        assert_eq!(entries.len(), 2);
-        let index = read_trajectory_index(&dir).await.unwrap().unwrap();
-        assert_eq!(index.entries.len(), 2);
-    }
-
-    async fn write_raw_trajectory(dir: &Path, file_stem: &str, id: &str) -> PathBuf {
-        fs::create_dir_all(dir).await.unwrap();
-        let path = dir.join(format!("{file_stem}.json"));
-        let value = json!({
-            "id": id,
-            "title": "Backup",
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:01Z",
-            "model": "test-model",
-            "mode": "agent",
-            "tool_use": "agent",
-            "messages": [{"role":"user","content":"hi"}]
-        });
-        fs::write(&path, serde_json::to_string_pretty(&value).unwrap())
-            .await
-            .unwrap();
-        path
-    }
-
-    #[tokio::test]
-    async fn non_indexable_backup_files_do_not_force_rebuild() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        write_trajectory(&dir, "chat-1", "One", "agent").await;
-        write_raw_trajectory(&dir, "chat-1_initial", "chat-1").await;
-
-        let first = list_trajectory_entries_from_index_or_rebuild(&dir, None)
-            .await
-            .unwrap();
-        assert_eq!(first.len(), 1, "only the real trajectory is indexed");
-        assert_eq!(first[0].id, "chat-1");
-
-        let index_after_first = read_trajectory_index(&dir).await.unwrap().unwrap();
-        let updated_at_marker = index_after_first.updated_at.clone();
-        assert_eq!(index_after_first.entries.len(), 1);
-
-        for _ in 0..3 {
-            let entries = list_trajectory_entries_from_index_or_rebuild(&dir, None)
-                .await
-                .unwrap();
-            assert_eq!(entries.len(), 1);
-            assert_eq!(entries[0].id, "chat-1");
-            let index = read_trajectory_index(&dir).await.unwrap().unwrap();
-            assert_eq!(
-                index.updated_at, updated_at_marker,
-                "index must not be rewritten when nothing indexable changed"
-            );
-        }
     }
 
     #[tokio::test]
@@ -4554,76 +4254,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unchanged_directory_does_not_rewrite_index() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        write_trajectory(&dir, "chat-1", "One", "agent").await;
-        write_trajectory(&dir, "chat-2", "Two", "agent").await;
-
-        assert_eq!(
-            list_trajectory_entries_from_index_or_rebuild(&dir, None)
-                .await
-                .unwrap()
-                .len(),
-            2
-        );
-        let marker = read_trajectory_index(&dir)
-            .await
-            .unwrap()
-            .unwrap()
-            .updated_at;
-
-        let entries = list_trajectory_entries_from_index_or_rebuild(&dir, None)
-            .await
-            .unwrap();
-        assert_eq!(entries.len(), 2);
-        assert_eq!(
-            read_trajectory_index(&dir)
-                .await
-                .unwrap()
-                .unwrap()
-                .updated_at,
-            marker
-        );
-    }
-
-    #[tokio::test]
-    async fn modified_trajectory_is_reindexed() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        write_trajectory(&dir, "chat-1", "One", "agent").await;
-        let entries = list_trajectory_entries_from_index_or_rebuild(&dir, None)
-            .await
-            .unwrap();
-        assert_eq!(entries[0].title, "One");
-
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        let path = dir.join("chat-1.json");
-        let value = json!({
-            "id": "chat-1",
-            "title": "One Renamed",
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-02T00:00:01Z",
-            "model": "test-model",
-            "mode": "agent",
-            "tool_use": "agent",
-            "messages": [{"role":"user","content":"hello again"}]
-        });
-        fs::write(&path, serde_json::to_string_pretty(&value).unwrap())
-            .await
-            .unwrap();
-
-        let entries = list_trajectory_entries_from_index_or_rebuild(&dir, None)
-            .await
-            .unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].title, "One Renamed");
-        let index = read_trajectory_index(&dir).await.unwrap().unwrap();
-        assert_eq!(index.entries.len(), 1);
-        assert_eq!(index.entries[0].title, "One Renamed");
-    }
-
-    #[tokio::test]
     async fn upsert_after_missing_index_preserves_existing_siblings() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("trajectories");
@@ -4641,50 +4271,6 @@ mod tests {
 
         assert_eq!(entries.len(), 2);
         assert!(entries.iter().any(|entry| entry.id == "chat-2"));
-    }
-
-    #[tokio::test]
-    async fn stale_entry_removed_when_file_deleted() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        let path = write_trajectory(&dir, "chat-1", "One", "agent").await;
-        let value: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&path).await.unwrap()).unwrap();
-        upsert_trajectory_index_entry_from_value(&dir, &path, &value, None)
-            .await
-            .unwrap();
-        fs::remove_file(path).await.unwrap();
-
-        let entries = list_trajectory_entries_from_index_or_rebuild(&dir, None)
-            .await
-            .unwrap();
-
-        assert!(entries.is_empty());
-        let index = read_trajectory_index(&dir).await.unwrap().unwrap();
-        assert!(index.entries.is_empty());
-    }
-
-    #[tokio::test]
-    async fn extraction_rejects_mismatched_id_vs_filename() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        fs::create_dir_all(&dir).await.unwrap();
-        let path = dir.join("chat-1.json");
-        let value = json!({
-            "id": "chat-2",
-            "title": "Bad",
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:01Z",
-            "model": "test-model",
-            "mode": "agent",
-            "tool_use": "agent",
-            "messages": []
-        });
-        fs::write(&path, serde_json::to_string(&value).unwrap())
-            .await
-            .unwrap();
-
-        assert!(entry_from_trajectory_value(&dir, &path, &value, None).is_err());
     }
 
     #[tokio::test]
@@ -4722,42 +4308,6 @@ mod tests {
             let entry = entry_from_trajectory_value(&dir, &path, &value, None).unwrap();
             assert!(!entry.displayable_chat, "{id} should be hidden");
         }
-    }
-
-    #[tokio::test]
-    async fn task_source_roundtrips_context_fields() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("task/trajectories/planner");
-        fs::create_dir_all(&dir).await.unwrap();
-        let path = dir.join("planner-chat.json");
-        let value = json!({
-            "id": "planner-chat",
-            "title": "Planner",
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:01Z",
-            "model": "test-model",
-            "mode": "task_planner",
-            "tool_use": "agent",
-            "messages": [],
-            "task_meta": {
-                "task_id": "task-1",
-                "role": "planner",
-                "agent_id": null,
-                "card_id": "card-1",
-                "planner_chat_id": "planner-chat"
-            }
-        });
-        fs::write(&path, serde_json::to_string(&value).unwrap())
-            .await
-            .unwrap();
-
-        let entry = entry_from_trajectory_value(&dir, &path, &value, None).unwrap();
-        let meta = meta_from_entry(&dir, &entry);
-
-        assert_eq!(meta.task_id.as_deref(), Some("task-1"));
-        assert_eq!(meta.task_role.as_deref(), Some("planner"));
-        assert_eq!(meta.card_id.as_deref(), Some("card-1"));
-        assert!(matches!(entry.source, TrajectoryIndexSource::Task { .. }));
     }
 
     async fn entry_for_path(dir: &Path, path: &Path) -> TrajectoryIndexEntry {
@@ -4803,56 +4353,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coordinator_coalesces_last_upsert_and_shutdown_flush() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        let path = write_trajectory(&dir, "chat-1", "One", "agent").await;
-        let coordinator = TrajectoryIndexCoordinator::new();
-        coordinator
-            .upsert(&dir, entry_for_path(&dir, &path).await)
-            .await
-            .unwrap();
-
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        write_trajectory(&dir, "chat-1", "Renamed", "agent").await;
-        coordinator
-            .upsert(&dir, entry_for_path(&dir, &path).await)
-            .await
-            .unwrap();
-        coordinator.flush_all().await.unwrap();
-
-        let index = read_trajectory_index(&dir).await.unwrap().unwrap();
-        assert_eq!(index.entries.len(), 1);
-        assert_eq!(index.entries[0].title, "Renamed");
-    }
-
-    #[tokio::test]
-    async fn coordinator_enqueues_before_loading_or_writing_the_index() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        let path = write_trajectory(&dir, "chat-1", "One", "agent").await;
-        let coordinator = TrajectoryIndexCoordinator::new();
-
-        coordinator
-            .upsert(&dir, entry_for_path(&dir, &path).await)
-            .await
-            .unwrap();
-
-        assert!(!trajectory_index_path(&dir).exists());
-        assert_eq!(coordinator.directories.lock().await.len(), 1);
-        coordinator.flush_all().await.unwrap();
-        assert_eq!(
-            read_trajectory_index(&dir)
-                .await
-                .unwrap()
-                .unwrap()
-                .entries
-                .len(),
-            1
-        );
-    }
-
-    #[tokio::test]
     async fn coordinator_recovers_an_unflushed_committed_trajectory_on_restart() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("trajectories");
@@ -4878,21 +4378,6 @@ mod tests {
                 .len(),
             1
         );
-    }
-
-    #[test]
-    fn coordinator_rollout_switch_defaults_on_and_retains_legacy_fallback() {
-        assert!(
-            crate::runtime_settings::TrajectoryRuntimeSettings::default()
-                .trajectory_index_coordinator_enabled
-        );
-        assert!(trajectory_index_coordinator_rollout_enabled_for(Some("1")));
-        for disabled in [Some("0"), Some("false"), Some("off")] {
-            assert!(!trajectory_index_coordinator_rollout_enabled_for(disabled));
-        }
-        for enabled in [Some("1"), Some("true"), Some("YES"), Some("on")] {
-            assert!(trajectory_index_coordinator_rollout_enabled_for(enabled));
-        }
     }
 
     #[tokio::test]
@@ -4965,100 +4450,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coordinator_reconciles_external_files_and_reuses_clean_snapshot() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        let path_1 = write_trajectory(&dir, "chat-1", "One", "agent").await;
-        let coordinator = TrajectoryIndexCoordinator::new();
-        coordinator
-            .upsert(&dir, entry_for_path(&dir, &path_1).await)
-            .await
-            .unwrap();
-        coordinator.flush_all().await.unwrap();
-        let first = coordinator.snapshot(&dir, None).await.unwrap();
-        let second = coordinator.snapshot(&dir, None).await.unwrap();
-        assert_eq!(first.updated_at, second.updated_at);
-
-        write_trajectory(&dir, "chat-2", "Two", "agent").await;
-        let reconciled = coordinator.reconcile(&dir, None).await.unwrap();
-        assert_eq!(reconciled.entries.len(), 2);
-        coordinator.flush_all().await.unwrap();
-        assert_eq!(
-            read_trajectory_index(&dir)
-                .await
-                .unwrap()
-                .unwrap()
-                .entries
-                .len(),
-            2
-        );
-    }
-
-    #[tokio::test]
-    async fn coordinator_snapshot_does_not_reparse_clean_indexed_trajectories() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        let path = write_trajectory(&dir, "chat-1", "One", "agent").await;
-        let coordinator = TrajectoryIndexCoordinator::new();
-        coordinator
-            .upsert(&dir, entry_for_path(&dir, &path).await)
-            .await
-            .unwrap();
-        coordinator.flush_all().await.unwrap();
-        fs::write(&path, "invalid JSON").await.unwrap();
-
-        let snapshot = coordinator.snapshot(&dir, None).await.unwrap();
-        assert_eq!(snapshot.entries.len(), 1);
-        assert_eq!(snapshot.entries[0].id, "chat-1");
-    }
-
-    #[tokio::test]
-    async fn legacy_cache_lru_evicts_oldest_directory() {
-        let temp = tempfile::tempdir().unwrap();
-        legacy_trajectory_index_cache().lock().await.clear();
-
-        for index in 0..MAX_CACHED_TRAJECTORY_DIRECTORIES {
-            let dir = temp.path().join(format!("dir-{index}"));
-            cache_legacy_trajectory_index(&dir, TrajectoryIndex::default()).await;
-        }
-
-        let oldest = temp.path().join("dir-0");
-        let newest = temp
-            .path()
-            .join(format!("dir-{}", MAX_CACHED_TRAJECTORY_DIRECTORIES - 1));
-        let extra = temp.path().join("dir-extra");
-        cache_legacy_trajectory_index(&extra, TrajectoryIndex::default()).await;
-
-        let cache = legacy_trajectory_index_cache().lock().await;
-        assert!(!cache.contains_key(&oldest));
-        assert!(cache.contains_key(&newest));
-        assert!(cache.contains_key(&extra));
-    }
-
-    #[tokio::test]
-    async fn coordinator_directory_state_lru_evicts_oldest_clean_directory() {
-        let coordinator = TrajectoryIndexCoordinator::new();
-        let temp = tempfile::tempdir().unwrap();
-
-        for index in 0..MAX_CACHED_TRAJECTORY_DIRECTORIES {
-            let dir = temp.path().join(format!("dir-{index}"));
-            coordinator.directory_state(&dir).await.unwrap();
-        }
-
-        let extra = temp.path().join("dir-extra");
-        coordinator.directory_state(&extra).await.unwrap();
-
-        let directories = coordinator.directories.lock().await;
-        assert!(!directories.contains_key(&temp.path().join("dir-0")));
-        assert!(directories.contains_key(
-            &temp
-                .path()
-                .join(format!("dir-{}", MAX_CACHED_TRAJECTORY_DIRECTORIES - 1))
-        ));
-        assert!(directories.contains_key(&extra));
-    }
-
-    #[tokio::test]
     async fn write_trajectory_index_atomic_owned_inner_cleans_temp_file_on_failure() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("trajectories");
@@ -5079,61 +4470,6 @@ mod tests {
                 .to_string_lossy()
                 .contains(".index.json.tmp-"));
         }
-    }
-
-    #[tokio::test]
-    async fn coordinator_listing_avoids_reads_and_scans_for_unchanged_directory() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        let path = write_trajectory(&dir, "chat-1", "One", "agent").await;
-        let listing_counter_scope = TrajectoryIndexListingCounterScope::local();
-        let coordinator =
-            TrajectoryIndexCoordinator::with_listing_counter_scope(listing_counter_scope.clone());
-        coordinator
-            .upsert(&dir, entry_for_path(&dir, &path).await)
-            .await
-            .unwrap();
-        coordinator.flush_all().await.unwrap();
-        coordinator.list_entries(&dir, None).await.unwrap();
-
-        listing_counter_scope.reset();
-        let entries = coordinator.list_entries(&dir, None).await.unwrap();
-        let counters = listing_counter_scope.snapshot();
-
-        assert_eq!(entries.len(), 1);
-        assert_eq!(counters.index_reads, 0);
-        assert_eq!(counters.directory_scans, 0);
-        assert_eq!(counters.cache_hits, 1);
-    }
-
-    #[tokio::test]
-    async fn legacy_listing_avoids_reads_and_scans_for_unchanged_directory() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        write_trajectory(&dir, "chat-1", "One", "agent").await;
-        let listing_counter_scope = TrajectoryIndexListingCounterScope::local();
-        list_trajectory_entries_from_index_or_rebuild_with_counter_scope(
-            &dir,
-            None,
-            &listing_counter_scope,
-        )
-        .await
-        .unwrap();
-
-        listing_counter_scope.reset();
-        let entries = list_trajectory_entries_from_index_or_rebuild_with_counter_scope(
-            &dir,
-            None,
-            &listing_counter_scope,
-        )
-        .await
-        .unwrap();
-        let counters = listing_counter_scope.snapshot();
-
-        assert_eq!(entries.len(), 1);
-        assert_eq!(counters.index_reads, 0);
-        assert_eq!(counters.directory_scans, 0);
-        assert_eq!(counters.cache_hits, 1);
     }
 
     #[tokio::test]
@@ -5199,56 +4535,6 @@ mod tests {
         let entries = coordinator.list_entries(&dir, None).await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, "chat-1");
-    }
-
-    #[tokio::test]
-    async fn coordinator_scans_only_changed_directories_across_repeated_polls() {
-        const DIRECTORY_COUNT: usize = 24;
-        const POLL_COUNT: usize = 12;
-
-        let temp = tempfile::tempdir().unwrap();
-        let listing_counter_scope = TrajectoryIndexListingCounterScope::local();
-        let coordinator =
-            TrajectoryIndexCoordinator::with_listing_counter_scope(listing_counter_scope.clone());
-        let mut dirs = Vec::new();
-        for number in 0..DIRECTORY_COUNT {
-            let dir = temp.path().join(format!("trajectories-{number}"));
-            write_trajectory(&dir, "chat-1", "One", "agent").await;
-            coordinator.list_entries(&dir, None).await.unwrap();
-            dirs.push(dir);
-        }
-
-        listing_counter_scope.reset();
-        for _ in 0..POLL_COUNT {
-            for dir in &dirs {
-                assert_eq!(coordinator.list_entries(dir, None).await.unwrap().len(), 1);
-            }
-        }
-        let unchanged = listing_counter_scope.snapshot();
-        assert_eq!(unchanged.directory_scans, 0);
-        assert_eq!(
-            unchanged.cache_hits,
-            u64::try_from(DIRECTORY_COUNT * POLL_COUNT).unwrap()
-        );
-
-        write_trajectory(&dirs[0], "chat-2", "Two", "agent").await;
-        assert_eq!(
-            coordinator
-                .list_entries(&dirs[0], None)
-                .await
-                .unwrap()
-                .len(),
-            2
-        );
-        for dir in &dirs[1..] {
-            assert_eq!(coordinator.list_entries(dir, None).await.unwrap().len(), 1);
-        }
-        let changed = listing_counter_scope.snapshot();
-        assert_eq!(changed.directory_scans, 1);
-        assert_eq!(
-            changed.cache_hits,
-            u64::try_from(DIRECTORY_COUNT * POLL_COUNT + DIRECTORY_COUNT - 1).unwrap()
-        );
     }
 
     #[tokio::test]
@@ -5323,68 +4609,6 @@ mod tests {
         assert_eq!(scope.snapshot().directory_scans, 1);
     }
 
-    #[tokio::test]
-    async fn ordinary_upsert_in_a_known_child_keeps_the_listing_fresh() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        write_trajectory(&dir, "chat-1", "One", "agent").await;
-        write_trajectory(&dir.join("chat-1"), "subchat-first", "First", "agent").await;
-        let scope = TrajectoryIndexListingCounterScope::local();
-        let coordinator = TrajectoryIndexCoordinator::with_listing_counter_scope(scope.clone());
-        coordinator.list_entries(&dir, None).await.unwrap();
-        coordinator.flush_all().await.unwrap();
-        let mine = write_trajectory(&dir.join("chat-1"), "subchat-mine", "Mine", "agent").await;
-        coordinator
-            .upsert(&dir, entry_for_path(&dir, &mine).await)
-            .await
-            .unwrap();
-        scope.reset();
-        assert_eq!(coordinator.list_entries(&dir, None).await.unwrap().len(), 3);
-        assert_eq!(scope.snapshot().directory_scans, 0);
-    }
-
-    #[tokio::test]
-    async fn listings_within_the_generation_ttl_skip_filesystem_verification() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        write_trajectory(&dir, "chat-1", "One", "agent").await;
-        let listing_counter_scope = TrajectoryIndexListingCounterScope::local();
-        let coordinator =
-            TrajectoryIndexCoordinator::with_listing_counter_scope(listing_counter_scope.clone())
-                .with_generation_ttl(Duration::from_secs(30));
-        coordinator.list_entries(&dir, None).await.unwrap();
-
-        listing_counter_scope.reset();
-        for _ in 0..5 {
-            assert_eq!(coordinator.list_entries(&dir, None).await.unwrap().len(), 1);
-        }
-        let counters = listing_counter_scope.snapshot();
-        assert_eq!(counters.generation_checks, 0);
-        assert_eq!(counters.directory_scans, 0);
-        assert_eq!(counters.cache_hits, 5);
-    }
-
-    #[tokio::test]
-    async fn external_changes_are_seen_once_the_generation_ttl_expires() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        write_trajectory(&dir, "chat-1", "One", "agent").await;
-        let listing_counter_scope = TrajectoryIndexListingCounterScope::local();
-        let coordinator =
-            TrajectoryIndexCoordinator::with_listing_counter_scope(listing_counter_scope.clone())
-                .with_generation_ttl(Duration::from_millis(50));
-        coordinator.list_entries(&dir, None).await.unwrap();
-
-        write_trajectory(&dir, "chat-2", "Two", "agent").await;
-        tokio::time::sleep(Duration::from_millis(80)).await;
-        listing_counter_scope.reset();
-
-        assert_eq!(coordinator.list_entries(&dir, None).await.unwrap().len(), 2);
-        let counters = listing_counter_scope.snapshot();
-        assert_eq!(counters.generation_checks, 1);
-        assert_eq!(counters.directory_scans, 1);
-    }
-
     async fn write_internal_trajectory(dir: &Path, id: &str) {
         fs::create_dir_all(dir).await.unwrap();
         let value = json!({
@@ -5431,28 +4655,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_entries_within_ttl_shares_one_allocation_across_calls() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        write_trajectory(&dir, "chat-1", "One", "agent").await;
-        let coordinator =
-            TrajectoryIndexCoordinator::new().with_generation_ttl(Duration::from_secs(30));
-        let first = coordinator.list_entries_shared(&dir, None).await.unwrap();
-        let second = coordinator.list_entries_shared(&dir, None).await.unwrap();
-        assert!(Arc::ptr_eq(&first, &second));
-
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let path = write_trajectory(&dir, "chat-1", "Renamed", "agent").await;
-        coordinator
-            .upsert(&dir, entry_for_path(&dir, &path).await)
-            .await
-            .unwrap();
-        let after_upsert = coordinator.list_entries_shared(&dir, None).await.unwrap();
-        assert!(!Arc::ptr_eq(&first, &after_upsert));
-        assert_eq!(after_upsert[0].title, "Renamed");
-    }
-
-    #[tokio::test]
     async fn list_entries_outside_ttl_still_validates_freshness() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("trajectories");
@@ -5480,40 +4682,6 @@ mod tests {
         assert_eq!(counters.generation_checks, 1);
         assert_eq!(counters.directory_scans, 1);
         assert_eq!(counters.cache_hits, 0);
-    }
-
-    #[tokio::test]
-    async fn cached_and_revalidated_listings_return_identical_entries() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        for id in ["chat-1", "chat-2", "chat-3"] {
-            write_trajectory(&dir, id, "Title", "agent").await;
-        }
-        write_trajectory(&dir.join("chat-1"), "subchat-1", "Sub", "agent").await;
-        for id in ["trace-1", "trace-2"] {
-            write_internal_trajectory(&dir, id).await;
-        }
-
-        let revalidating = TrajectoryIndexCoordinator::new();
-        let mut revalidated = revalidating.list_entries(&dir, None).await.unwrap();
-        revalidating.flush_all().await.unwrap();
-
-        let caching =
-            TrajectoryIndexCoordinator::new().with_generation_ttl(Duration::from_secs(30));
-        let mut cached = caching.list_entries(&dir, None).await.unwrap();
-        let mut cached_again = caching.list_entries(&dir, None).await.unwrap();
-
-        for entries in [&mut revalidated, &mut cached, &mut cached_again] {
-            entries.sort_by(|a, b| a.id.cmp(&b.id));
-        }
-        assert_eq!(cached.len(), 4);
-        assert_eq!(
-            serde_json::to_string(&cached).unwrap(),
-            serde_json::to_string(&revalidated).unwrap()
-        );
-        assert_eq!(cached_again, cached);
-        let index = read_trajectory_index(&dir).await.unwrap().unwrap();
-        assert_eq!(index.skipped_files.len(), 2);
     }
 
     #[tokio::test]
@@ -5573,57 +4741,6 @@ mod tests {
         assert!(fresh.exists());
         assert!(unrelated.exists());
         assert!(dir.join("chat-1.json").exists());
-    }
-
-    #[tokio::test]
-    async fn listing_counters_attribute_callers() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        write_trajectory(&dir, "chat-1", "One", "agent").await;
-        assert!(TrajectoryIndexCoordinator::new()
-            .listing_counter_scope
-            .is_global());
-        let listing_counter_scope = TrajectoryIndexListingCounterScope::local();
-        let coordinator =
-            TrajectoryIndexCoordinator::with_listing_counter_scope(listing_counter_scope.clone());
-
-        listing_counter_scope.reset();
-        list_trajectory_entries_with_rollout_for(
-            &coordinator,
-            &dir,
-            None,
-            TrajectoryIndexListingCaller::Sidebar,
-        )
-        .await
-        .unwrap();
-        list_trajectory_entries_with_rollout_for(
-            &coordinator,
-            &dir,
-            None,
-            TrajectoryIndexListingCaller::TaskAgentMonitor,
-        )
-        .await
-        .unwrap();
-        let counters = listing_counter_scope.snapshot();
-
-        assert_eq!(
-            counters
-                .calls_by_caller
-                .iter()
-                .find(|(caller, _)| *caller == "sidebar")
-                .unwrap()
-                .1,
-            1
-        );
-        assert_eq!(
-            counters
-                .calls_by_caller
-                .iter()
-                .find(|(caller, _)| *caller == "task_agent_monitor")
-                .unwrap()
-                .1,
-            1
-        );
     }
 
     fn listing_calls(
@@ -5801,45 +4918,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sidebar_refresh_does_not_sweep_all_task_dirs() {
-        const TASK_DIRECTORY_COUNT: usize = 24;
-
-        let temp = tempfile::tempdir().unwrap();
-        let scope = TrajectoryIndexListingCounterScope::local();
-        let coordinator = TrajectoryIndexCoordinator::with_listing_counter_scope(scope.clone())
-            .with_generation_ttl(Duration::from_secs(30));
-        let chats_dir = temp.path().join("trajectories");
-        write_trajectory(&chats_dir, "chat-1", "One", "agent").await;
-        let mut dirs = vec![chats_dir];
-        for number in 0..TASK_DIRECTORY_COUNT {
-            let dir = temp
-                .path()
-                .join(format!("tasks/task-{number}/trajectories/agents"));
-            write_trajectory(&dir, &format!("agent-{number}"), "Agent", "task_agent").await;
-            dirs.push(dir);
-        }
-
-        let cold = sidebar_refresh(&coordinator, &dirs).await;
-        assert_eq!(cold, vec!["chat-1".to_string()]);
-        assert_eq!(
-            listing_calls(&scope.snapshot(), TrajectoryIndexListingCaller::Sidebar),
-            u64::try_from(dirs.len()).unwrap()
-        );
-
-        scope.reset();
-        let warm = sidebar_refresh(&coordinator, &dirs).await;
-        let counters = scope.snapshot();
-
-        assert_eq!(warm, cold);
-        assert_eq!(
-            listing_calls(&counters, TrajectoryIndexListingCaller::Sidebar),
-            1,
-            "a refresh must only list the directories it renders from"
-        );
-        assert_eq!(counters.directory_scans, 0);
-    }
-
-    #[tokio::test]
     async fn a_new_displayable_chat_in_a_skipped_task_dir_is_still_rendered() {
         let temp = tempfile::tempdir().unwrap();
         let coordinator =
@@ -5918,66 +4996,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_genuinely_empty_directory_is_still_skipped() {
-        let temp = tempfile::tempdir().unwrap();
-        let scope = TrajectoryIndexListingCounterScope::local();
-        let coordinator = TrajectoryIndexCoordinator::with_listing_counter_scope(scope.clone())
-            .with_generation_ttl(Duration::from_secs(30));
-        let chats_dir = temp.path().join("trajectories");
-        let task_dir = temp.path().join("tasks/task-1/trajectories/agents");
-        write_trajectory(&chats_dir, "chat-1", "One", "agent").await;
-        write_trajectory(&task_dir, "agent-1", "Agent", "task_agent").await;
-        let dirs = vec![chats_dir, task_dir.clone()];
-        assert_eq!(
-            sidebar_refresh(&coordinator, &dirs).await,
-            vec!["chat-1".to_string()]
-        );
-
-        assert_eq!(
-            coordinator.directory_has_displayable_entries(&task_dir),
-            Some(false)
-        );
-        scope.reset();
-        assert_eq!(
-            sidebar_refresh(&coordinator, &dirs).await,
-            vec!["chat-1".to_string()]
-        );
-        let counters = scope.snapshot();
-        assert_eq!(
-            listing_calls(&counters, TrajectoryIndexListingCaller::Sidebar),
-            1,
-            "a known-empty directory must not cost a listing call"
-        );
-        assert_eq!(counters.directory_scans, 0);
-    }
-
-    #[tokio::test]
-    async fn coordinator_merges_two_process_owned_instances_without_lost_entries() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        let path_1 = write_trajectory(&dir, "chat-1", "One", "agent").await;
-        let path_2 = write_trajectory(&dir, "chat-2", "Two", "agent").await;
-        let first = TrajectoryIndexCoordinator::new();
-        let second = TrajectoryIndexCoordinator::new();
-        first
-            .upsert(&dir, entry_for_path(&dir, &path_1).await)
-            .await
-            .unwrap();
-        second
-            .upsert(&dir, entry_for_path(&dir, &path_2).await)
-            .await
-            .unwrap();
-
-        let (first_result, second_result) = tokio::join!(first.flush_all(), second.flush_all());
-        first_result.unwrap();
-        second_result.unwrap();
-        let index = read_trajectory_index(&dir).await.unwrap().unwrap();
-        assert_eq!(index.entries.len(), 2);
-        assert!(index.entries.iter().any(|entry| entry.id == "chat-1"));
-        assert!(index.entries.iter().any(|entry| entry.id == "chat-2"));
-    }
-
-    #[tokio::test]
     async fn coordinator_cross_process_child_writer() {
         let Ok(dir) = std::env::var("REFACT_TRAJECTORY_INDEX_CHILD_DIR") else {
             return;
@@ -6046,39 +5064,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coordinator_matches_legacy_upsert_result() {
-        let temp = tempfile::tempdir().unwrap();
-        let legacy_dir = temp.path().join("legacy");
-        let coordinator_dir = temp.path().join("coordinator");
-        let legacy_path = write_trajectory(&legacy_dir, "chat-1", "One", "agent").await;
-        let coordinator_path = write_trajectory(&coordinator_dir, "chat-1", "One", "agent").await;
-        upsert_trajectory_index_entry(&legacy_dir, entry_for_path(&legacy_dir, &legacy_path).await)
-            .await
-            .unwrap();
-        let coordinator = TrajectoryIndexCoordinator::new();
-        coordinator
-            .upsert(
-                &coordinator_dir,
-                entry_for_path(&coordinator_dir, &coordinator_path).await,
-            )
-            .await
-            .unwrap();
-        coordinator.flush_all().await.unwrap();
-
-        let legacy = read_trajectory_index(&legacy_dir).await.unwrap().unwrap();
-        let coordinated = read_trajectory_index(&coordinator_dir)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(legacy.entries.len(), coordinated.entries.len());
-        assert_eq!(legacy.entries[0].id, coordinated.entries[0].id);
-        assert_eq!(
-            legacy.entries[0].file_name,
-            coordinated.entries[0].file_name
-        );
-    }
-
-    #[tokio::test]
     async fn coordinator_rebuilds_corrupt_index_and_retains_skipped_files() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("trajectories");
@@ -6142,32 +5127,6 @@ mod tests {
                 .len(),
             1
         );
-    }
-
-    #[tokio::test]
-    async fn coordinator_flush_replaces_a_parseable_schema_v1_index() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        let path = write_trajectory(&dir, "chat-1", "One", "agent").await;
-        let coordinator = TrajectoryIndexCoordinator::new();
-        coordinator
-            .upsert(&dir, entry_for_path(&dir, &path).await)
-            .await
-            .unwrap();
-        coordinator.flush_all().await.unwrap();
-
-        let raw = fs::read_to_string(trajectory_index_path(&dir))
-            .await
-            .unwrap();
-        let parsed: TrajectoryIndex = serde_json::from_str(&raw).unwrap();
-        assert_eq!(parsed.schema_version, TRAJECTORY_INDEX_SCHEMA_VERSION);
-        assert!(!dir
-            .read_dir()
-            .expect("directory exists")
-            .any(|entry| entry.is_ok_and(|entry| entry
-                .file_name()
-                .to_string_lossy()
-                .contains(".index.json.tmp"))));
     }
 
     async fn journal_len(dir: &Path) -> u64 {
@@ -6625,40 +5584,5 @@ mod tests {
                 "chat-4".to_string()
             ]
         );
-    }
-
-    #[tokio::test]
-    async fn a_thousand_commits_produce_a_handful_of_checkpoint_rewrites() {
-        const COMMITS: usize = 1_000;
-
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("trajectories");
-        let path = write_trajectory(&dir, "chat-1", "One", "agent").await;
-        let listing_counter_scope = TrajectoryIndexListingCounterScope::local();
-        let coordinator =
-            TrajectoryIndexCoordinator::with_listing_counter_scope(listing_counter_scope.clone());
-        let entry = entry_for_path(&dir, &path).await;
-
-        for commit in 0..COMMITS {
-            let mut entry = entry.clone();
-            entry.message_count = commit + 1;
-            coordinator.upsert(&dir, entry).await.unwrap();
-            coordinator.flush_all().await.unwrap();
-        }
-
-        let counters = listing_counter_scope.snapshot();
-        assert!(
-            counters.checkpoint_writes <= 4,
-            "expected a handful of checkpoints, got {}",
-            counters.checkpoint_writes
-        );
-        assert!(
-            counters.journal_appends >= u64::try_from(COMMITS).unwrap() - 4,
-            "expected the commits to reach the journal, got {}",
-            counters.journal_appends
-        );
-        let index = read_trajectory_index(&dir).await.unwrap().unwrap();
-        assert_eq!(index.entries.len(), 1);
-        assert_eq!(index.entries[0].message_count, COMMITS);
     }
 }

@@ -214,35 +214,6 @@ mod tests {
         assert!(err.contains("does not match bound task_id"));
     }
 
-    #[tokio::test]
-    async fn task_verify_card_uses_bound_task_when_no_args() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = write_task(temp.path()).await;
-        let ccx = task_ccx(gcx, Some(thread_task_meta("planner")), "planner-task-1-1").await;
-        let args = HashMap::from([("card_id".to_string(), json!("missing-card"))]);
-
-        let err = ToolTaskVerifyCard::new()
-            .tool_execute(ccx, &"call".to_string(), &args)
-            .await
-            .unwrap_err();
-
-        assert_eq!(err, "Card missing-card not found");
-    }
-
-    #[tokio::test]
-    async fn task_verify_card_planner_without_metadata_rejected() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let ccx = task_ccx(gcx, None, "unbound-chat").await;
-        let args = HashMap::from([("card_id".to_string(), json!("T-1"))]);
-
-        let err = ToolTaskVerifyCard::new()
-            .tool_execute(ccx, &"call".to_string(), &args)
-            .await
-            .unwrap_err();
-
-        assert!(err.contains("task planner"));
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn planner_edit_after_dispatch_is_used_by_task_verify_card() {

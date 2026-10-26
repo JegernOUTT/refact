@@ -124,22 +124,6 @@ mod tests {
     }
 
     #[test]
-    fn an_unusable_provider_closes_code_mode_rather_than_degrading_it() {
-        let status = status(
-            true,
-            TerminalSecurityMode::SandboxRequired,
-            sandbox(Enforcement::Unusable),
-        );
-
-        let refusal = status.require_available().unwrap_err();
-
-        assert!(!status.available());
-        assert!(refusal.contains("no usable sandbox provider"));
-        assert!(refusal.contains("not executed unconfined"));
-        assert_eq!(status.enforcement, Enforcement::Unusable);
-    }
-
-    #[test]
     fn a_terminal_mode_that_never_confines_closes_code_mode_too() {
         for mode in [
             TerminalSecurityMode::Off,

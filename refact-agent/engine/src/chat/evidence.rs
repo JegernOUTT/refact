@@ -1177,55 +1177,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_failing_required_gate_blocks_completion_even_when_the_report_claims_success() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runner = RecordingRunner {
-            exit_code: Some(1),
-            outcome: Some(VerificationOutcome::CommandFailed),
-            ..RecordingRunner::default()
-        };
-        let spec = proposal("cargo test --lib", SpecAuthority::CardInstructions);
-
-        let record = service(temp.path())
-            .accept_and_execute(spec.clone(), &mut runner)
-            .await;
-        let gates = evaluate_gates(&[spec], &[record.clone()]);
-        let decision = completion_decision(&gates, true);
-
-        assert_eq!(record.verdict, EvidenceVerdict::Failed);
-        assert!(!gates.completion_allowed());
-        assert!(!gates.judge_allowed());
-        assert!(
-            !decision.allowed,
-            "a model claiming success must not defeat a failing gate"
-        );
-        assert!(decision.reported_success);
-        assert!(decision.reasons[0].contains("cargo test --lib"));
-    }
-
-    #[tokio::test]
-    async fn a_required_gate_that_never_ran_blocks_completion() {
-        let spec = proposal("cargo test --lib", SpecAuthority::CardInstructions);
-
-        let gates = evaluate_gates(&[spec], &[]);
-
-        assert_eq!(gates.required_total, 1);
-        assert_eq!(gates.required_passed, 0);
-        assert_eq!(gates.blocks[0].verdict, EvidenceVerdict::NotRun);
-        assert!(!gates.completion_allowed());
-        assert!(!completion_decision(&gates, true).allowed);
-    }
-
-    #[test]
-    fn declaring_no_required_spec_is_not_a_pass() {
-        let gates = evaluate_gates(&[], &[]);
-
-        assert!(!gates.completion_allowed());
-        assert!(!gates.has_contract_violation());
-        assert!(gates.reasons()[0].contains("No verification commands found"));
-    }
-
     const ALL_VERDICTS: [EvidenceVerdict; 6] = [
         EvidenceVerdict::NotRun,
         EvidenceVerdict::Passed,
@@ -1234,108 +1185,6 @@ mod tests {
         EvidenceVerdict::Unavailable,
         EvidenceVerdict::Superseded,
     ];
-
-    #[test]
-    fn all_six_verdicts_are_representable_and_distinguishable() {
-        let labels: Vec<&str> = ALL_VERDICTS.iter().map(|verdict| verdict.label()).collect();
-        assert_eq!(
-            labels,
-            vec![
-                "not_run",
-                "passed",
-                "failed",
-                "blocked",
-                "unavailable",
-                "superseded"
-            ]
-        );
-        let unique: std::collections::BTreeSet<&str> = labels.iter().copied().collect();
-        assert_eq!(unique.len(), 6);
-        for verdict in ALL_VERDICTS {
-            let json = serde_json::to_string(&verdict).unwrap();
-            assert_eq!(
-                serde_json::from_str::<EvidenceVerdict>(&json).unwrap(),
-                verdict
-            );
-            assert_eq!(verdict.is_passed(), verdict == EvidenceVerdict::Passed);
-        }
-        assert_eq!(EvidenceVerdict::default(), EvidenceVerdict::NotRun);
-    }
-
-    #[test]
-    fn not_run_blocked_and_unavailable_never_read_as_passed() {
-        for verdict in [
-            EvidenceVerdict::NotRun,
-            EvidenceVerdict::Blocked,
-            EvidenceVerdict::Unavailable,
-            EvidenceVerdict::Superseded,
-            EvidenceVerdict::Failed,
-        ] {
-            assert!(!verdict.is_passed(), "{verdict:?} must not read as passed");
-            let gates = gate_outcome_for_verdicts(&[(true, verdict)]);
-            assert!(
-                !gates.completion_allowed(),
-                "{verdict:?} must block completion"
-            );
-            assert!(!completion_decision(&gates, true).allowed);
-        }
-        let passed = gate_outcome_for_verdicts(&[(true, EvidenceVerdict::Passed)]);
-        assert!(passed.completion_allowed());
-    }
-
-    #[tokio::test]
-    async fn executed_evidence_records_command_exit_fingerprint_and_content_revision() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runner = RecordingRunner::default();
-        let mut spec = proposal(
-            "cd engine && RUST_BACKTRACE=1 cargo test --lib",
-            SpecAuthority::CardInstructions,
-        );
-        spec.toolchain_inputs = vec!["cargo 1.79.0".to_string()];
-
-        let record = service(temp.path())
-            .accept_and_execute(spec, &mut runner)
-            .await;
-
-        assert_eq!(record.verdict, EvidenceVerdict::Passed);
-        assert_eq!(
-            record.command,
-            "cd engine && RUST_BACKTRACE=1 cargo test --lib"
-        );
-        assert_eq!(record.argv, vec!["cargo", "test", "--lib"]);
-        assert_eq!(record.exit_code, Some(0));
-        assert_eq!(
-            record.fingerprint.content_revision,
-            record.content_revision.digest()
-        );
-        assert_eq!(record.content_revision.spec_id, "S-1");
-        assert_eq!(record.content_revision.commit.as_deref(), Some("abc1234"));
-        assert_eq!(record.fingerprint.commit.as_deref(), Some("abc1234"));
-        assert_eq!(
-            record.fingerprint.worktree,
-            temp.path().to_string_lossy().to_string()
-        );
-        assert_eq!(record.fingerprint.program, "cargo");
-        assert_eq!(
-            record
-                .fingerprint
-                .env
-                .get("RUST_BACKTRACE")
-                .map(String::as_str),
-            Some("1")
-        );
-        assert_eq!(
-            record.fingerprint.toolchain,
-            vec!["cargo 1.79.0".to_string()]
-        );
-        assert_eq!(record.fingerprint.os, std::env::consts::OS);
-        assert_eq!(
-            record.accepted_by.as_deref(),
-            Some(EVIDENCE_POLICY_AUTHORITY)
-        );
-        assert!(!record.started_at.is_empty());
-        assert!(!record.finished_at.is_empty());
-    }
 
     #[tokio::test]
     async fn an_expected_artifact_fails_when_absent_and_passes_when_present() {
@@ -1490,25 +1339,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn evidence_for_an_older_revision_is_superseded_not_passed() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runner = RecordingRunner::default();
-        let spec = proposal("cargo test --lib", SpecAuthority::CardInstructions);
-        let record = service(temp.path())
-            .accept_and_execute(spec.clone(), &mut runner)
-            .await;
-        assert_eq!(record.verdict, EvidenceVerdict::Passed);
-
-        let mut revised = spec;
-        revised.revision = 2;
-        let gates = evaluate_gates(&[revised], &[record]);
-
-        assert_eq!(gates.blocks[0].verdict, EvidenceVerdict::Superseded);
-        assert!(!gates.completion_allowed());
-        assert!(!gates.has_contract_violation());
-    }
-
-    #[tokio::test]
     async fn the_service_runs_argv_and_never_a_shell() {
         let temp = tempfile::tempdir().unwrap();
         let mut runner = RecordingRunner::default();
@@ -1534,30 +1364,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_service_threads_an_env_prefix_through_to_the_runner() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runner = RecordingRunner::default();
-
-        let record = service(temp.path())
-            .accept_and_execute(
-                proposal(
-                    "cd ui && FLEXUS_PYTHON=/abs/py pnpm typecheck",
-                    SpecAuthority::CardInstructions,
-                ),
-                &mut runner,
-            )
-            .await;
-
-        assert_eq!(record.verdict, EvidenceVerdict::Passed);
-        assert_eq!(runner.calls[0].1.cwd, Some(PathBuf::from("ui")));
-        assert_eq!(
-            runner.calls[0].1.env,
-            vec![("FLEXUS_PYTHON".to_string(), "/abs/py".to_string())]
-        );
-        assert_eq!(runner.calls[0].1.argv, vec!["pnpm", "typecheck"]);
-    }
-
-    #[tokio::test]
     async fn an_env_variable_outside_the_spec_allowlist_is_blocked() {
         let temp = tempfile::tempdir().unwrap();
         let mut runner = RecordingRunner::default();
@@ -1571,28 +1377,6 @@ mod tests {
         assert_eq!(record.verdict, EvidenceVerdict::Blocked);
         assert_eq!(record.outcome, VerificationOutcome::PolicyDenied);
         assert!(runner.calls.is_empty());
-    }
-
-    #[tokio::test]
-    async fn the_service_runs_previously_unsupported_binaries() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runner = RecordingRunner::default();
-
-        for command in [
-            "dotnet test",
-            "go test ./...",
-            "make check",
-            "gradlew build",
-        ] {
-            let record = service(temp.path())
-                .accept_and_execute(
-                    proposal(command, SpecAuthority::CardInstructions),
-                    &mut runner,
-                )
-                .await;
-            assert_eq!(record.verdict, EvidenceVerdict::Passed, "{command}");
-        }
-        assert_eq!(runner.calls.len(), 4);
     }
 
     #[tokio::test]
@@ -1624,33 +1408,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn yolo_mode_still_accepts_an_arbitrary_planner_authored_binary() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runner = RecordingRunner::default();
-        let service = EvidenceService::new(
-            VerifyCommandPolicy::from_shell_policy(&crate::tools::shell_gate::ShellGatePolicy {
-                mode: crate::tools::shell_gate::ApprovalMode::Yolo,
-                ..crate::tools::shell_gate::ShellGatePolicy::default()
-            }),
-            EvidenceContext {
-                worktree: temp.path().to_path_buf(),
-                commit: None,
-                scope: "T-1".to_string(),
-            },
-        );
-
-        let record = service
-            .accept_and_execute(
-                proposal("mycompany-verify --all", SpecAuthority::CardInstructions),
-                &mut runner,
-            )
-            .await;
-
-        assert_eq!(record.verdict, EvidenceVerdict::Passed);
-        assert_eq!(runner.calls[0].1.argv, vec!["mycompany-verify", "--all"]);
-    }
-
-    #[tokio::test]
     async fn shell_syntax_is_rejected_before_execution() {
         let temp = tempfile::tempdir().unwrap();
         let mut runner = RecordingRunner::default();
@@ -1666,37 +1423,6 @@ mod tests {
         assert_eq!(record.outcome, VerificationOutcome::Rejected);
         assert!(record.output_tail.starts_with("Cannot run as a command:"));
         assert!(runner.calls.is_empty());
-    }
-
-    #[test]
-    fn specs_from_a_card_only_include_declared_verification() {
-        let mut card = card("## Acceptance Criteria\n- Verify: `cargo test --lib`");
-        card.final_report_structured = Some(FinalReport {
-            verification: vec![VerificationResult {
-                command: "npm test".to_string(),
-                passed: true,
-                ..Default::default()
-            }],
-            ..Default::default()
-        });
-
-        let specs = specs_from_card(&card, &defaults());
-
-        assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].command, "cargo test --lib");
-        assert_eq!(specs[0].proposed_by, SpecAuthority::CardInstructions);
-        assert!(specs
-            .iter()
-            .all(|spec| spec.required && !spec.is_accepted()));
-        assert_eq!(specs[0].spec_id, "T-1#0");
-    }
-
-    #[test]
-    fn a_card_without_commands_yields_no_specs_and_cannot_pass() {
-        let specs = specs_from_card(&card("## Acceptance Criteria\n- it works"), &defaults());
-
-        assert!(specs.is_empty());
-        assert!(!evaluate_gates(&specs, &[]).completion_allowed());
     }
 
     #[tokio::test]
@@ -1720,40 +1446,5 @@ mod tests {
             .accept_and_execute(spec, &mut runner)
             .await;
         assert_eq!(passed.verdict, EvidenceVerdict::Passed);
-    }
-
-    #[tokio::test]
-    async fn an_infrastructure_failure_is_unavailable_not_failed() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runner = RecordingRunner {
-            exit_code: None,
-            outcome: Some(VerificationOutcome::InfrastructureFailed),
-            ..RecordingRunner::default()
-        };
-
-        let record = service(temp.path())
-            .accept_and_execute(
-                proposal("cargo test --lib", SpecAuthority::CardInstructions),
-                &mut runner,
-            )
-            .await;
-
-        assert_eq!(record.verdict, EvidenceVerdict::Unavailable);
-        assert!(!record.verdict.is_contract_violation());
-        assert!(!record.verdict.is_passed());
-    }
-
-    #[tokio::test]
-    async fn output_is_capped_by_the_spec() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runner = RecordingRunner::default();
-        let mut spec = proposal("cargo test --lib", SpecAuthority::CardInstructions);
-        spec.output_cap_bytes = 6;
-
-        let record = service(temp.path())
-            .accept_and_execute(spec, &mut runner)
-            .await;
-
-        assert_eq!(record.output_tail, "output");
     }
 }

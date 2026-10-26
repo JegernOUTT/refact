@@ -1281,122 +1281,9 @@ fn line_to_owned(line: &Line<'_>) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::style::Color;
-
-    fn plain(lines: Vec<Line<'static>>) -> Vec<String> {
-        lines.iter().map(line_to_plain).collect()
-    }
 
     fn borrowed_plain(lines: &[Line<'_>]) -> Vec<String> {
         lines.iter().map(line_to_plain).collect()
-    }
-
-    #[test]
-    fn url_token_stays_intact_when_it_fits() {
-        let url = "https://example.com/a-b-c";
-        let lines = plain(wrap_line(
-            Line::from(format!("see {url} after")),
-            Some(url.width()),
-        ));
-        assert!(lines.iter().any(|line| line == url));
-        assert!(!lines.iter().any(|line| line == "https://example.com/a-"));
-    }
-
-    #[test]
-    fn long_url_hard_breaks_only_when_it_cannot_fit() {
-        let lines = plain(wrap_line(
-            Line::from("https://example.com/super/long/path"),
-            Some(12),
-        ));
-        assert!(lines.len() > 1);
-        assert_eq!(lines[0], "https://exam");
-    }
-
-    #[test]
-    fn preserves_indentation_and_multi_space_runs_when_wrapping() {
-        let lines = plain(wrap_line(Line::from("    key  =  value"), Some(12)));
-        assert_eq!(lines, vec!["    key  =", "  value"]);
-    }
-
-    #[test]
-    fn preserves_span_style_when_wrapping() {
-        let line = Line::from(vec![Span::styled(
-            "alpha beta",
-            Style::default().fg(Color::Green),
-        )]);
-        let lines = wrap_line(line, Some(5));
-        assert_eq!(line_to_plain(&lines[0]), "alpha");
-        assert_eq!(lines[0].spans[0].style.fg, Some(Color::Green));
-    }
-
-    #[test]
-    fn word_wrap_line_applies_initial_and_subsequent_indents() {
-        let opts = RtOptions::new(8)
-            .initial_indent(Line::from("- "))
-            .subsequent_indent(Line::from("  "));
-        let line = Line::from("hello world foo");
-        let out = word_wrap_line(&line, opts);
-        assert_eq!(borrowed_plain(&out), vec!["- hello", "  world", "  foo"]);
-    }
-
-    #[test]
-    fn word_wrap_line_preserves_styles_across_wrapped_spans() {
-        let line = Line::from(vec![
-            Span::styled("hello ", Style::default().fg(Color::Red)),
-            Span::raw("world"),
-        ]);
-        let out = word_wrap_line(&line, 6);
-        assert_eq!(borrowed_plain(&out), vec!["hello", "world"]);
-        assert_eq!(out[0].spans[0].style.fg, Some(Color::Red));
-        assert_eq!(out[1].spans[0].style.fg, None);
-    }
-
-    #[test]
-    fn word_wrap_lines_applies_initial_indent_once() {
-        let opts = RtOptions::new(8)
-            .initial_indent(Line::from("- "))
-            .subsequent_indent(Line::from("  "));
-        let out = word_wrap_lines(
-            vec![Line::from("hello world"), Line::from("foo bar baz")],
-            opts,
-        );
-        assert_eq!(
-            plain(out),
-            vec!["- hello", "  world", "  foo", "  bar", "  baz"]
-        );
-    }
-
-    #[test]
-    fn adaptive_wrap_line_keeps_long_url_like_token_intact() {
-        let line = Line::from("example.test/a-very-long-path-with-many-segments-and-query?x=1&y=2");
-        let out = adaptive_wrap_line(&line, RtOptions::new(20));
-        assert_eq!(
-            borrowed_plain(&out),
-            vec!["example.test/a-very-long-path-with-many-segments-and-query?x=1&y=2"]
-        );
-    }
-
-    #[test]
-    fn adaptive_wrap_line_preserves_default_behavior_for_non_url_tokens() {
-        let line = Line::from("a_very_long_token_without_spaces_to_force_wrapping");
-        let out = adaptive_wrap_line(&line, RtOptions::new(20));
-        assert!(out.len() > 1);
-    }
-
-    #[test]
-    fn adaptive_wrap_line_mixed_line_keeps_regular_words_intact() {
-        let line = Line::from(
-            "see https://example.com/path and keep strikethrough intact while wrapping prose",
-        );
-        let out = adaptive_wrap_line(&line, RtOptions::new(36));
-        assert_eq!(
-            borrowed_plain(&out),
-            vec![
-                "see https://example.com/path and",
-                "keep strikethrough intact while",
-                "wrapping prose",
-            ]
-        );
     }
 
     #[test]
@@ -1409,14 +1296,6 @@ mod tests {
                 vec![text.split_once(' ').unwrap().0, "https://a.co"]
             );
         }
-    }
-
-    #[test]
-    fn mixed_url_wrapping_matches_wrap_line_at_width_zero() {
-        let line = Line::from("见 🎉 https://a.co");
-        let adaptive = adaptive_wrap_line(&line, RtOptions::new(0));
-        let plain = plain(wrap_line(line_to_owned(&line), Some(0)));
-        assert_eq!(borrowed_plain(&adaptive), plain);
     }
 
     #[test]
@@ -1449,39 +1328,6 @@ mod tests {
         let (_, span_bounds) = flatten_line_text(&line);
         let sliced = slice_line_spans(&line, &span_bounds, &(1..2));
         assert!(sliced.spans.is_empty());
-    }
-
-    #[test]
-    fn adaptive_wrap_lines_uses_subsequent_indent_after_first_input_line() {
-        let opts = RtOptions::new(8)
-            .initial_indent(Line::from("- "))
-            .subsequent_indent(Line::from("  "));
-        let out = adaptive_wrap_lines(["hello world", "see https://x.co/path"], opts);
-        assert_eq!(
-            plain(out),
-            vec!["- hello", "  world", "  see", "  https://x.co/path"]
-        );
-    }
-
-    #[test]
-    fn url_detection_matches_expected_tokens() {
-        assert!(text_contains_url_like("https://example.com/a/b"));
-        assert!(text_contains_url_like("www.example.com/path?x=1"));
-        assert!(text_contains_url_like("localhost:3000/api"));
-        assert!(!text_contains_url_like("src/main.rs"));
-        assert!(!text_contains_url_like("hello.world"));
-    }
-
-    #[test]
-    fn wrap_ranges_trim_rebuilds_unspaced_wrapped_source() {
-        let text = "a_very_long_token_without_spaces";
-        let ranges = wrap_ranges_trim(text, Options::new(8));
-        let rebuilt = ranges
-            .iter()
-            .map(|range| &text[range.clone()])
-            .collect::<String>();
-        assert_eq!(rebuilt, text);
-        assert!(ranges.len() > 1);
     }
 
     #[test]

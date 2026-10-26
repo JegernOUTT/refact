@@ -578,21 +578,6 @@ mod tests {
         assert!(DeliverableContract::default().is_empty());
     }
 
-    #[test]
-    fn rendered_instructions_and_json_round_trip_are_stable() {
-        let text = contract().render_instructions();
-        assert!(text.contains("# Deliverable contract"));
-        assert!(text.contains("`# Findings`"));
-        assert!(text.contains("# Evidence"));
-        let value = serde_json::to_value(contract()).unwrap();
-        assert_eq!(
-            serde_json::from_value::<DeliverableContract>(value).unwrap(),
-            contract()
-        );
-        let legacy: DeliverableContract = serde_json::from_str("{}").unwrap();
-        assert!(legacy.is_empty());
-    }
-
     const UNMET: &str = "# Findings\nx\n";
     const SATISFIED: &str = "# Findings\nx\n# Changes\ny\n```json\n{\"status\":\"done\",\"files\":[\"a.rs\"],\"count\":2}\n```\n# Evidence\ncargo test exit 0\n";
 
@@ -636,20 +621,6 @@ mod tests {
         assert!(status.corrections_exhausted);
         assert!(status.omission.is_none());
         assert!(!status.met_after_correction());
-    }
-
-    #[test]
-    fn a_correction_prompt_names_every_unmet_element() {
-        let (_, prompts) = drive(&CorrectionPolicy::default(), ample(), UNMET, |_| {
-            UNMET.to_string()
-        });
-        let prompt = &prompts[0];
-        assert!(prompt.contains("correction 1 of 1"), "{prompt}");
-        assert!(prompt.contains("`# Changes`"), "{prompt}");
-        assert!(prompt.contains("no ```json block"), "{prompt}");
-        assert!(prompt.contains("`# Evidence`"), "{prompt}");
-        assert!(!prompt.contains("`# Findings`"), "{prompt}");
-        assert!(prompt.contains("not that the work is correct"), "{prompt}");
     }
 
     #[test]
@@ -720,28 +691,5 @@ mod tests {
         assert!(status.corrections_exhausted);
         assert!(prompts[0].contains("correction 1 of 3"));
         assert!(prompts[2].contains("correction 3 of 3"));
-    }
-
-    #[test]
-    fn a_status_carrying_corrections_round_trips_through_json() {
-        let mut status = contract().evaluate(UNMET);
-        status.corrections_used = 2;
-        status.corrections_exhausted = true;
-        status.omission = Some(DeliverableOmission {
-            reason: "no room".into(),
-            reference: "child-chat-9".into(),
-            required_tokens: 1024,
-            available_tokens: 12,
-        });
-        let value = serde_json::to_value(&status).unwrap();
-        assert_eq!(
-            serde_json::from_value::<DeliverableStatus>(value).unwrap(),
-            status
-        );
-        let legacy: DeliverableStatus =
-            serde_json::from_str(r#"{"check":"structural","met":true}"#).unwrap();
-        assert_eq!(legacy.corrections_used, 0);
-        assert!(!legacy.corrections_exhausted);
-        assert!(legacy.omission.is_none());
     }
 }

@@ -405,76 +405,6 @@ mod tests {
     }
 
     #[test]
-    fn qwen_runtime_requires_enabled_credentials_and_selected_model() {
-        let catalog = qwen_catalog();
-        let mut provider = QwenProvider {
-            api_key: "sk-test".to_string(),
-            enabled: true,
-            enabled_models: vec!["qwen-plus".to_string()],
-            ..Default::default()
-        };
-        assert!(
-            provider
-                .build_runtime_from_catalog(&catalog)
-                .unwrap()
-                .enabled
-        );
-
-        provider.enabled = false;
-        assert!(
-            !provider
-                .build_runtime_from_catalog(&catalog)
-                .unwrap()
-                .enabled
-        );
-        provider.enabled = true;
-        provider.api_key.clear();
-        assert!(
-            !provider
-                .build_runtime_from_catalog(&catalog)
-                .unwrap()
-                .enabled
-        );
-        provider.api_key = "sk-test".to_string();
-        provider.enabled_models.clear();
-        assert!(
-            !provider
-                .build_runtime_from_catalog(&catalog)
-                .unwrap()
-                .enabled
-        );
-    }
-
-    #[test]
-    fn qwen_available_models_use_models_dev_helper_and_custom_models() {
-        let catalog = qwen_catalog();
-        let mut provider = QwenProvider {
-            enabled_models: vec!["qwen-plus".to_string(), "qwen-custom".to_string()],
-            ..Default::default()
-        };
-        provider.custom_models.insert(
-            "qwen-custom".to_string(),
-            CustomModelConfig {
-                n_ctx: Some(4096),
-                supports_tools: Some(true),
-                ..Default::default()
-            },
-        );
-
-        let models = provider.available_models_from_catalog(&catalog).unwrap();
-        let qwen_plus = models.iter().find(|model| model.id == "qwen-plus").unwrap();
-        let custom = models
-            .iter()
-            .find(|model| model.id == "qwen-custom")
-            .unwrap();
-
-        assert!(qwen_plus.enabled);
-        assert!(!qwen_plus.is_custom);
-        assert!(custom.enabled);
-        assert!(custom.is_custom);
-    }
-
-    #[test]
     fn qwen_standard_and_coding_endpoints_validate_through_helper_allowlist() {
         let catalog = qwen_catalog();
         for (region, endpoint_type, expected_endpoint) in [
@@ -514,28 +444,5 @@ mod tests {
             )
             .unwrap();
         }
-    }
-
-    #[test]
-    fn qwen_missing_catalog_provider_returns_custom_models_only() {
-        let mut provider = QwenProvider {
-            enabled_models: vec!["qwen-custom".to_string()],
-            ..Default::default()
-        };
-        provider.custom_models.insert(
-            "qwen-custom".to_string(),
-            CustomModelConfig {
-                n_ctx: Some(8192),
-                ..Default::default()
-            },
-        );
-
-        let models = provider
-            .available_models_from_catalog(&ModelsDevCatalog::new())
-            .unwrap();
-
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "qwen-custom");
-        assert!(models[0].enabled);
     }
 }

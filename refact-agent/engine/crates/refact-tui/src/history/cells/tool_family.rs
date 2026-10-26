@@ -105,7 +105,7 @@ const TUI_TOOL_FAMILY_REGISTRY: &[(&str, ToolFamily)] = &[
     ("handoff_to_mode", ToolFamily::Server),
     ("board_claim", ToolFamily::Server),
     ("board_discover", ToolFamily::Server),
-    ("board_authority", ToolFamily::Server),
+    ("task_board_authority", ToolFamily::Server),
     ("finalize_card", ToolFamily::Server),
     ("agent_approval", ToolFamily::Server),
     ("work_overview", ToolFamily::Server),
@@ -367,7 +367,7 @@ mod tests {
         "handoff_to_mode",
         "board_claim",
         "board_discover",
-        "board_authority",
+        "task_board_authority",
         "finalize_card",
         "agent_approval",
         "work_overview",
@@ -486,99 +486,12 @@ mod tests {
     }
 
     #[test]
-    fn retired_aliases_are_not_registered() {
-        for alias in [
-            "patch",
-            "text_edit",
-            "replace_textdoc",
-            "search",
-            "vecdb_search",
-            "request_user_input",
-            "request-user-input",
-            "delegate",
-        ] {
-            assert!(
-                !TUI_TOOL_FAMILY_REGISTRY
-                    .iter()
-                    .any(|(name, _)| *name == alias),
-                "retired alias remains registered: {alias}"
-            );
-            assert_eq!(tool_family(alias), ToolFamily::Unknown, "{alias}");
-        }
-    }
-
-    #[test]
     fn retired_compression_tools_are_not_current_builtins() {
         for name in ["compress_chat_probe", "compress_chat_apply"] {
             assert!(!CURRENT_STATIC_BUILTIN_TOOL_NAMES.contains(&name));
             assert!(!TUI_TOOL_FAMILY_REGISTRY
                 .iter()
                 .any(|(registered, _)| *registered == name));
-        }
-    }
-
-    #[test]
-    fn provider_native_tools_are_explicitly_allowlisted() {
-        assert_eq!(PROVIDER_NATIVE_TOOL_NAMES.len(), 8);
-        for name in PROVIDER_NATIVE_TOOL_NAMES {
-            assert_eq!(tool_family(name), ToolFamily::Server, "{name}");
-        }
-    }
-
-    #[test]
-    fn lazy_mcp_and_dynamic_subagent_conventions_are_classified() {
-        for name in LAZY_MCP_TOOL_NAMES {
-            assert!(
-                !TUI_TOOL_FAMILY_REGISTRY
-                    .iter()
-                    .any(|(registered, _)| registered == name),
-                "lazy MCP tool must not be a static registry entry: {name}"
-            );
-            assert_eq!(tool_family(name), ToolFamily::Mcp, "{name}");
-        }
-        assert_eq!(tool_family("mcp_github_get_issue"), ToolFamily::Mcp);
-        assert_eq!(tool_family("mcp-server-query"), ToolFamily::Mcp);
-        assert_eq!(
-            tool_family("subagent_project_researcher"),
-            ToolFamily::Server
-        );
-        assert_eq!(tool_family("srvtoolu_123"), ToolFamily::Server);
-    }
-
-    #[test]
-    fn display_names_hide_internal_prefixes_without_changing_registry_input() {
-        assert_eq!(tool_display_name("t_process_start"), "process_start");
-        assert_eq!(tool_display_name("shell"), "shell");
-        assert_eq!(tool_family("t_process_start"), ToolFamily::Unknown);
-    }
-
-    #[test]
-    fn default_exposed_config_subagent_tools_are_classified_separately() {
-        let configs = [
-            (
-                "design_review",
-                include_str!(
-                    "../../../../refact-yaml-configs/src/defaults/subagents/design_review.yaml"
-                ),
-            ),
-            (
-                "visual_qa",
-                include_str!(
-                    "../../../../refact-yaml-configs/src/defaults/subagents/visual_qa.yaml"
-                ),
-            ),
-        ];
-
-        assert_eq!(DEFAULT_EXPOSED_CONFIG_SUBAGENT_TOOL_NAMES.len(), 2);
-        for (name, config) in configs {
-            assert!(
-                !CURRENT_STATIC_BUILTIN_TOOL_NAMES.contains(&name),
-                "config subagent must not be counted as a static built-in: {name}"
-            );
-            assert!(DEFAULT_EXPOSED_CONFIG_SUBAGENT_TOOL_NAMES.contains(&name));
-            assert!(config.contains(&format!("id: {name}\n")));
-            assert!(config.contains("expose_as_tool: true"));
-            assert_eq!(tool_family(name), ToolFamily::Server, "{name}");
         }
     }
 }

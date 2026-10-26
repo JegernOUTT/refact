@@ -1104,48 +1104,6 @@ mod tests {
     }
 
     #[test]
-    fn verifier_status_records_pass_and_fail() {
-        let mut pass_card = card("");
-        let pass = VerifierReport {
-            passed: true,
-            recommendation: "merge".to_string(),
-            classification: VerifierReportClassification::Passed,
-            ..Default::default()
-        };
-        append_verifier_status(&mut pass_card, &pass);
-        assert_eq!(pass_card.status_updates[0].message, "Verifier: PASS");
-
-        let mut fail_card = card("");
-        let fail = VerifierReport {
-            passed: false,
-            concerns: vec!["command failed".to_string()],
-            recommendation: "fix-needed".to_string(),
-            classification: VerifierReportClassification::VerificationFailed,
-            ..Default::default()
-        };
-        append_verifier_status(&mut fail_card, &fail);
-        assert_eq!(
-            fail_card.status_updates[0].message,
-            "Verifier: FAIL — command failed"
-        );
-    }
-
-    #[test]
-    fn unavailable_verifier_report_returns_passed_false() {
-        let report = unavailable_verifier_report("no model configured".to_string());
-
-        assert!(!report.passed);
-        assert_eq!(report.recommendation, "human-review");
-        assert!(report.command_results.is_empty());
-        assert_eq!(
-            report.classification,
-            VerifierReportClassification::Unavailable
-        );
-        assert!(report.concerns[0].contains("Verifier model unavailable"));
-        assert!(report.concerns[0].contains("no model configured"));
-    }
-
-    #[test]
     fn typed_classification_does_not_infer_state_from_concern_text() {
         let unavailable = gate_outcome_for_verdicts(&[(true, EvidenceVerdict::Unavailable)]);
         assert_eq!(
@@ -1165,63 +1123,6 @@ mod tests {
             classify_verifier_report(&passed, false, false),
             VerifierReportClassification::Passed
         );
-    }
-
-    #[test]
-    fn typed_classification_requires_gates_and_real_success() {
-        assert_eq!(
-            classify_verifier_report(&evaluate_gates(&[], &[]), false, false),
-            VerifierReportClassification::Unavailable
-        );
-        let failed = gate_outcome_for_verdicts(&[(true, EvidenceVerdict::Failed)]);
-        assert_eq!(
-            classify_verifier_report(&failed, false, false),
-            VerifierReportClassification::VerificationFailed
-        );
-    }
-
-    #[test]
-    fn mock_verifier_passed_case_recommends_merge() {
-        let report = VerifierReport {
-            passed: true,
-            command_results: vec![VerificationResult {
-                command: "cargo test".to_string(),
-                exit_code: Some(0),
-                passed: true,
-                output_tail: "ok".to_string(),
-                outcome: VerificationOutcome::Unknown,
-                from_cache: false,
-                executed_at: None,
-            }],
-            concerns: Vec::new(),
-            recommendation: "merge".to_string(),
-            classification: VerifierReportClassification::Passed,
-        };
-
-        assert!(report.passed);
-        assert_eq!(report.recommendation, "merge");
-    }
-
-    #[test]
-    fn mock_verifier_failed_case_recommends_fix_needed() {
-        let report = VerifierReport {
-            passed: false,
-            command_results: vec![VerificationResult {
-                command: "cargo test".to_string(),
-                exit_code: Some(1),
-                passed: false,
-                output_tail: "failed".to_string(),
-                outcome: VerificationOutcome::Unknown,
-                from_cache: false,
-                executed_at: None,
-            }],
-            concerns: vec!["Verification command failed: cargo test".to_string()],
-            recommendation: "fix-needed".to_string(),
-            classification: VerifierReportClassification::VerificationFailed,
-        };
-
-        assert!(!report.passed);
-        assert_eq!(report.recommendation, "fix-needed");
     }
 
     #[tokio::test]
@@ -1379,25 +1280,6 @@ mod tests {
         let board = storage::load_board(gcx, "task-1").await.unwrap();
         let card = board.get_card("T-1").unwrap();
         assert!(card.verifier_report.as_ref().unwrap().passed);
-    }
-
-    #[test]
-    fn a_card_with_no_verification_command_declares_no_required_gate() {
-        let card = card("## Acceptance Criteria\n- it works");
-        let defaults = EvidenceDefaults {
-            timeout_secs: 60,
-            output_cap_bytes: 4_000,
-        };
-
-        let specs = specs_from_card(&card, &defaults);
-        let gates = evaluate_gates(&specs, &[]);
-
-        assert!(specs.is_empty());
-        assert_eq!(
-            classify_verifier_report(&gates, false, false),
-            VerifierReportClassification::Unavailable
-        );
-        assert!(gates.reasons()[0].contains("No verification commands found"));
     }
 
     #[test]

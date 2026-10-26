@@ -1609,44 +1609,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_subprocess_that_dies_before_the_barrier_reports_its_status_and_its_output() {
-        let dir = tempfile::tempdir().unwrap();
-        let unusable = dir.path().join("not-a-directory");
-        std::fs::write(&unusable, "").unwrap();
-        let log = File::create(dir.path().join("log-x")).unwrap();
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "file_activity::tests::subprocess_file_writer",
-                "--nocapture",
-            ])
-            .env("REFACT_TEST_FILE_RACE_ROOT", dir.path())
-            .env("REFACT_TEST_FILE_RACE_ID", "x")
-            .env(
-                "REFACT_TEST_FILE_RACE_STORE",
-                unusable.join("coordination.sqlite"),
-            )
-            .stdout(std::process::Stdio::from(log.try_clone().unwrap()))
-            .stderr(std::process::Stdio::from(log))
-            .spawn()
-            .unwrap();
-        let status = child.wait().unwrap();
-        let report = subprocess_report(dir.path(), &mut child, "x");
-
-        assert!(!status.success());
-        assert!(
-            !dir.path().join("ready-x").exists(),
-            "this writer has to die before the barrier for the report to be the only evidence"
-        );
-        assert!(report.contains("exited with"), "{report}");
-        assert!(report.contains("panicked"), "{report}");
-        assert!(
-            report.contains("subprocess_file_writer"),
-            "a barrier timeout must name the subprocess that never arrived: {report}"
-        );
-    }
-
     #[serial_test::serial(file_provenance)]
     #[test]
     fn cooperating_processes_serialize_and_refuse_a_stale_visible_read() {

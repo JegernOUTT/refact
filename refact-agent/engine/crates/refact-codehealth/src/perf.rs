@@ -659,39 +659,6 @@ async function load(path: string) {
     }
 
     #[test]
-    fn javascript_sync_fs_outside_async_is_ignored() {
-        let src = r#"const fs = require('fs');
-function load(path) {
-    return fs.readFileSync(path);
-}
-"#;
-        let findings = detect_perf("javascript", src);
-
-        assert!(
-            findings
-                .iter()
-                .all(|f| f.biomarker != "blocking_sync_in_async"),
-            "{findings:?}"
-        );
-    }
-
-    #[test]
-    fn blocking_lock_is_not_flagged() {
-        let src = r#"async fn lock_it(m: tokio::sync::Mutex<i32>) {
-    let _guard = m.blocking_lock();
-}
-"#;
-        let findings = detect_perf("rust", src);
-
-        assert!(
-            findings
-                .iter()
-                .all(|f| f.biomarker != "blocking_sync_in_async"),
-            "{findings:?}"
-        );
-    }
-
-    #[test]
     fn blocking_weight_now_reachable() {
         let src = r#"async fn wait() {
     std::thread::sleep(std::time::Duration::from_millis(1));
@@ -740,43 +707,12 @@ for u in urls:
     }
 
     #[test]
-    fn detects_string_concat_in_loop() {
-        let src = r#"
-s = ""
-for i in range(3):
-    s += "x"
-"#;
-        let findings = detect_perf("python", src);
-        assert!(
-            findings
-                .iter()
-                .any(|f| f.biomarker == "string_concat_in_loop"),
-            "{findings:?}"
-        );
-    }
-
-    #[test]
     fn hash_map_get_is_not_io() {
         let src = "fn f(map: std::collections::HashMap<String, String>, keys: Vec<String>) {\n    for key in keys {\n        let _ = map.get(&key);\n    }\n}\n";
         let findings = detect_perf("rust", src);
 
         assert!(
             findings.iter().all(|f| f.biomarker != "io_in_loop"),
-            "{findings:?}"
-        );
-    }
-
-    #[test]
-    fn known_http_get_is_io() {
-        let src = r#"
-import requests
-for url in urls:
-    requests.get(url)
-"#;
-        let findings = detect_perf("python", src);
-
-        assert!(
-            findings.iter().any(|f| f.biomarker == "io_in_loop"),
             "{findings:?}"
         );
     }

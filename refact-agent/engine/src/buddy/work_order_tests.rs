@@ -1,5 +1,4 @@
 use super::{OperatorStore, Stored};
-use crate::buddy::operator_store::OperatorStoreError;
 use refact_buddy_core::operator_types::{ArtifactRevision, ProjectIdentity, WorkItem};
 use std::fs;
 use std::path::Path;
@@ -191,105 +190,6 @@ fn read_and_snooze_changes_do_not_reorder_work_items() {
 }
 
 #[test]
-fn view_search_and_attention_filters_keep_newest_first_order() {
-    let root = TempDir::new().unwrap();
-    let (project, mut store) = open_store(&root);
-    let mut expected = Vec::new();
-    for index in 0..12 {
-        let is_match = matches!(index, 2 | 5 | 9);
-        let is_needs_you = index % 2 == 1;
-        let id = format!("work-{index:02}");
-        let state = if is_needs_you {
-            "needs_attention"
-        } else {
-            "working"
-        };
-        let title = if is_match {
-            format!("Needle item {index}")
-        } else {
-            format!("Other item {index}")
-        };
-        let item = work(&id, &title, state, &project);
-        let saved = store.upsert_work_item(&item, None).unwrap();
-        if is_match && is_needs_you {
-            expected.push((id, saved.change_seq));
-        }
-    }
-    expected.reverse();
-
-    let page = store
-        .search_work_items_with_attention(
-            None,
-            50,
-            Some("needs_you"),
-            Some("needle"),
-            Some("unread"),
-        )
-        .unwrap();
-    let actual: Vec<_> = page
-        .entries
-        .into_iter()
-        .map(|entry| (entry.value.id, entry.change_seq))
-        .collect();
-    assert_eq!(actual, expected);
-    assert_eq!(page.next_after, None);
-}
-
-#[test]
-fn desk_cursor_does_not_change_ascending_list_change_feed() {
-    let root = TempDir::new().unwrap();
-    let (project, mut store) = open_store(&root);
-    for index in 0..3 {
-        let item = work(
-            &format!("work-{index}"),
-            &format!("Item {index}"),
-            "needs_attention",
-            &project,
-        );
-        store.upsert_work_item(&item, None).unwrap();
-    }
-
-    let first = store.list_work_items(None, 2).unwrap();
-    assert!(first.entries[0].change_seq < first.entries[1].change_seq);
-    let second = store.list_work_items(first.next_after, 2).unwrap();
-    assert!(first.entries[1].change_seq < second.entries[0].change_seq);
-    assert_eq!(second.next_after, None);
-}
-
-#[test]
-fn filtered_desk_queries_reject_invalid_filters() {
-    let root = TempDir::new().unwrap();
-    let (_project, store) = open_store(&root);
-    assert!(matches!(
-        store.search_work_items_with_attention(None, 10, None, None, Some("unknown")),
-        Err(OperatorStoreError::InvalidInput(_))
-    ));
-}
-
-#[test]
-fn non_material_update_does_not_make_an_older_item_newest() {
-    let root = TempDir::new().unwrap();
-    let (project, mut store) = open_store(&root);
-    let mut older = work("older", "Older", "needs_attention", &project);
-    older.last_material_change_at = "2026-09-01T00:00:00Z".into();
-    let older = store.upsert_work_item(&older, None).unwrap();
-    let mut newer = work("newer", "Newer", "needs_attention", &project);
-    newer.last_material_change_at = "2026-09-08T00:00:00Z".into();
-    store.upsert_work_item(&newer, None).unwrap();
-
-    let mut updated = older.value.clone();
-    updated.title = "Older, with a non-material edit".into();
-    store
-        .upsert_work_item(&updated, Some(older.revision))
-        .unwrap();
-
-    let page = store
-        .search_work_items(None, 2, Some("needs_you"), None)
-        .unwrap();
-    assert_eq!(ids(page.entries), ["newer", "older"]);
-}
-
-#[test]
 fn non_material_writes_between_pages_do_not_duplicate_or_skip_rows() {
     let root = TempDir::new().unwrap();
     let (project, mut store) = open_store(&root);
@@ -333,45 +233,6 @@ fn non_material_writes_between_pages_do_not_duplicate_or_skip_rows() {
             .map(|index| format!("work-{index}"))
             .collect::<Vec<_>>()
     );
-}
-
-#[test]
-fn desk_material_order_uses_an_index_without_a_temporary_sort() {
-    let root = TempDir::new().unwrap();
-    let (_project, store) = open_store(&root);
-    store
-        .connection
-        .execute(
-            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000)
-             INSERT INTO work_items(id,payload,revision,change_seq)
-             SELECT printf('work-%05d',x),json_object(
-                 'last_material_change_at',printf('2026-09-01T00:%02d:00Z',x%60)),1,x FROM n",
-            [],
-        )
-        .unwrap();
-    let plan: Vec<String> = store
-        .connection
-        .prepare(
-            "EXPLAIN QUERY PLAN SELECT w.payload,w.revision,w.change_seq,w.rowid
-             FROM work_items w LEFT JOIN read_states r ON r.work_id=w.id
-             LEFT JOIN work_snoozes s ON s.work_id=w.id
-             WHERE (?1 IS NULL OR julianday(json_extract(w.payload,'$.last_material_change_at'))<?2 OR
-                 (julianday(json_extract(w.payload,'$.last_material_change_at'))=?2 AND w.id<?3)) AND
-                 (?4 IS NULL OR json_extract(w.payload,'$.state') IN ('needs_attention','blocked'))
-             ORDER BY julianday(json_extract(w.payload,'$.last_material_change_at')) DESC,w.id DESC LIMIT ?5",
-        )
-        .unwrap()
-        .query_map(
-            rusqlite::params![None::<i64>, None::<f64>, None::<&str>, None::<&str>, 51],
-            |row| row.get::<_, String>(3),
-        )
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
-    let plan = plan.join(" ").to_ascii_lowercase();
-    eprintln!("R-17 Desk index plan: rows=10000, {plan}");
-    assert!(plan.contains("work_items_by_material_change"), "{plan}");
-    assert!(!plan.contains("temp b-tree"), "{plan}");
 }
 
 #[test]

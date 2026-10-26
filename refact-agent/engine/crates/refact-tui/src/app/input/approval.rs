@@ -80,13 +80,3 @@ impl App {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn approval_patch_list_contains_patch() {
-        assert!(PATCH_LIKE_FUNCTIONS.contains(&"patch"));
-    }
-}

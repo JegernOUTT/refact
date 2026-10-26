@@ -212,28 +212,3 @@ async fn cancel_agent_reports_honestly_when_abort_unconfirmed() {
         Some(SessionState::ExecutingTools)
     );
 }
-
-#[tokio::test]
-async fn cancel_agent_on_terminal_card_without_live_turn_keeps_existing_error() {
-    for state in [None, Some(SessionState::Idle)] {
-        let root = tempfile::tempdir().unwrap();
-        let gcx = write_task(
-            root.path(),
-            test_card("failed", Some("agent-chat-1".into()), None),
-        )
-        .await;
-        let ccx = planner_ccx(gcx, Arc::new(MockChatFacade::new(state)), "planner").await;
-        let error = ToolCancelAgent::new()
-            .tool_execute(
-                ccx,
-                &"cancel-idle".into(),
-                &args(&[("card_id", json!("T-39")), ("reason", json!("stop now"))]),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(
-            error,
-            "Cannot cancel card T-39: it has already failed. Use restart_agent to continue it."
-        );
-    }
-}

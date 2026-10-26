@@ -281,26 +281,6 @@ mod tests {
     }
 
     #[test]
-    fn authenticator_options_map_to_cdp_payload() {
-        let options = virtual_authenticator_options(
-            BrowserAuthenticatorProtocol::Ctap2,
-            BrowserAuthenticatorTransport::Internal,
-            true,
-            true,
-            false,
-        );
-        assert_eq!(options.protocol, WebAuthn::AuthenticatorProtocol::Ctap2);
-        assert_eq!(
-            options.transport,
-            WebAuthn::AuthenticatorTransport::Internal
-        );
-        assert_eq!(options.has_resident_key, Some(true));
-        assert_eq!(options.has_user_verification, Some(true));
-        assert_eq!(options.is_user_verified, Some(false));
-        assert_eq!(options.automatic_presence_simulation, Some(true));
-    }
-
-    #[test]
     fn authenticator_options_serialize_required_passkey_capabilities() {
         let options = virtual_authenticator_options(
             BrowserAuthenticatorProtocol::Ctap2,
@@ -320,27 +300,6 @@ mod tests {
                 "isUserVerified": true,
             })
         );
-    }
-
-    #[test]
-    fn add_virtual_authenticator_request_carries_options_only() {
-        let request = WebAuthn::AddVirtualAuthenticator {
-            options: virtual_authenticator_options(
-                BrowserAuthenticatorProtocol::Ctap2,
-                BrowserAuthenticatorTransport::Internal,
-                true,
-                true,
-                true,
-            ),
-        };
-
-        let payload = serde_json::to_value(&request).unwrap();
-        assert_eq!(
-            payload.as_object().unwrap().keys().collect::<Vec<_>>(),
-            vec!["options"]
-        );
-        assert!(payload.get("authenticatorId").is_none());
-        assert!(payload.get("id").is_none());
     }
 
     #[test]

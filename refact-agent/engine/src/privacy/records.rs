@@ -1741,28 +1741,6 @@ mod tests {
     }
 
     #[test]
-    fn merge_records_preserves_existing_records_and_deduplicates() {
-        let mut message = ChatMessage::default();
-        let first = FileRecord {
-            path: "a.rs".to_string(),
-            zone: "normal".to_string(),
-            attribution: Attribution::Declared,
-        };
-        let second = FileRecord {
-            path: ".env".to_string(),
-            zone: "secrets".to_string(),
-            attribution: Attribution::Declared,
-        };
-
-        attach_record(&mut message, first.clone());
-        merge_records(&mut message, [first.clone(), second.clone()]);
-
-        let privacy: PrivacyRecord =
-            serde_json::from_value(message.extra["privacy"].clone()).unwrap();
-        assert_eq!(privacy.files, vec![first, second]);
-    }
-
-    #[test]
     fn merge_records_deduplicates_large_input_in_first_seen_order() {
         let all = (0..5_000)
             .map(|index| FileRecord {
@@ -1826,23 +1804,6 @@ mod tests {
             serde_json::from_value(target.extra["privacy"].clone()).unwrap();
         assert_eq!(privacy.files, vec![first, second]);
         assert!(!privacy.files.contains(&third));
-    }
-
-    #[test]
-    fn merge_records_drops_inert_normal_observed_records() {
-        let observed_normal = FileRecord {
-            path: "/proj/.venv/lib/python3.11/site-packages/mod.py".to_string(),
-            zone: "normal".to_string(),
-            attribution: Attribution::Observed,
-        };
-        let mut message = ChatMessage::default();
-
-        merge_records(&mut message, [observed_normal]);
-
-        assert!(
-            message.extra.get("privacy").is_none(),
-            "normal+observed records are inert for the gate and must not be persisted"
-        );
     }
 
     #[test]

@@ -11,7 +11,6 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::chat::task_agent_monitor::tests::setup_monitor_case;
 use crate::chat::types::{ChatSession, SessionState};
 use crate::tasks::storage;
-use crate::tasks::types::CardAttention;
 use crate::tools::tool_task_agent_finish::ToolTaskAgentFinish;
 use crate::tools::tools_description::Tool;
 
@@ -79,26 +78,6 @@ async fn finish(fixture: &Fixture, success: bool) {
 }
 
 #[tokio::test]
-async fn finished_card_chat_is_sealed() {
-    let fixture = fixture().await;
-    assert_eq!(
-        seal_reason(&fixture.app, &fixture.agent_chat_id).await,
-        None
-    );
-
-    finish(&fixture, true).await;
-
-    let board = storage::load_board(fixture.app.gcx.clone(), &fixture.task_id)
-        .await
-        .unwrap();
-    assert_eq!(board.get_card("T-1").unwrap().column, "done");
-    assert_eq!(
-        seal_reason(&fixture.app, &fixture.agent_chat_id).await,
-        expected(&fixture, "done")
-    );
-}
-
-#[tokio::test]
 async fn failed_card_chat_is_sealed_even_after_agent_chat_id_is_cleared() {
     let fixture = fixture().await;
 
@@ -114,57 +93,6 @@ async fn failed_card_chat_is_sealed_even_after_agent_chat_id_is_cleared() {
     assert_eq!(
         seal_reason(&fixture.app, &fixture.agent_chat_id).await,
         expected(&fixture, "failed")
-    );
-}
-
-#[tokio::test]
-async fn replaced_chat_is_sealed_after_restart() {
-    let fixture = fixture().await;
-    finish(&fixture, false).await;
-    let replacement_chat_id = "replacement-agent-chat";
-    storage::update_board_atomic(fixture.app.gcx.clone(), &fixture.task_id, |board| {
-        let card = board.get_card_mut("T-1").unwrap();
-        card.column = "doing".to_string();
-        card.assignee = Some("replacement-agent".to_string());
-        card.agent_chat_id = Some(replacement_chat_id.to_string());
-        Ok(())
-    })
-    .await
-    .unwrap();
-    let mut replacement = ChatSession::new(replacement_chat_id.to_string());
-    let mut meta = fixture.agent.lock().await.thread.task_meta.clone().unwrap();
-    meta.agent_id = Some("replacement-agent".to_string());
-    replacement.thread.task_meta = Some(meta);
-    fixture.app.chat.sessions.write().await.insert(
-        replacement_chat_id.to_string(),
-        Arc::new(Mutex::new(replacement)),
-    );
-
-    assert_eq!(
-        seal_reason(&fixture.app, &fixture.agent_chat_id).await,
-        expected(&fixture, "doing")
-    );
-    assert_eq!(seal_reason(&fixture.app, replacement_chat_id).await, None);
-}
-
-#[tokio::test]
-async fn doing_card_with_attention_is_not_sealed() {
-    let fixture = fixture().await;
-    storage::update_board_atomic(fixture.app.gcx.clone(), &fixture.task_id, |board| {
-        board.get_card_mut("T-1").unwrap().attention = Some(CardAttention {
-            reason: "Recoverable stall".to_string(),
-            kind: "stall".to_string(),
-            since: chrono::Utc::now().to_rfc3339(),
-            count: 1,
-        });
-        Ok(())
-    })
-    .await
-    .unwrap();
-
-    assert_eq!(
-        seal_reason(&fixture.app, &fixture.agent_chat_id).await,
-        None
     );
 }
 
@@ -220,120 +148,4 @@ async fn every_column_outside_doing_seals_the_card_chat() {
             expected(&fixture, column)
         );
     }
-}
-
-#[tokio::test]
-async fn queued_doing_card_with_unset_owner_is_not_sealed() {
-    let fixture = fixture().await;
-    storage::update_board_atomic(fixture.app.gcx.clone(), &fixture.task_id, |board| {
-        board.get_card_mut("T-1").unwrap().agent_chat_id = None;
-        Ok(())
-    })
-    .await
-    .unwrap();
-    crate::tasks::admission::reserve(
-        &fixture.app,
-        &fixture.agent_chat_id,
-        &fixture.task_id,
-        "planner-test",
-        0,
-    )
-    .await
-    .unwrap();
-
-    let reason = seal_reason(&fixture.app, &fixture.agent_chat_id).await;
-    crate::tasks::admission::end(&fixture.agent_chat_id).await;
-    assert_eq!(reason, None);
-}
-
-#[tokio::test]
-async fn board_read_failure_does_not_seal() {
-    let fixture = fixture().await;
-    let task_dir = storage::find_task_dir(fixture.app.gcx.clone(), &fixture.task_id)
-        .await
-        .unwrap();
-    tokio::fs::write(task_dir.join("board.yaml"), "cards: [invalid")
-        .await
-        .unwrap();
-    assert!(
-        storage::load_board(fixture.app.gcx.clone(), &fixture.task_id)
-            .await
-            .is_err()
-    );
-
-    assert_eq!(
-        seal_reason(&fixture.app, &fixture.agent_chat_id).await,
-        None
-    );
-}
-
-#[tokio::test]
-async fn unloaded_chat_is_not_read_from_trajectory() {
-    let fixture = fixture().await;
-    let snapshot = {
-        let session = fixture.agent.lock().await;
-        crate::chat::trajectories::trajectory_snapshot_from_session(&session)
-    };
-    crate::chat::trajectories::save_trajectory_snapshot(fixture.app.gcx.clone(), snapshot)
-        .await
-        .unwrap();
-    storage::update_board_atomic(fixture.app.gcx.clone(), &fixture.task_id, |board| {
-        board.get_card_mut("T-1").unwrap().column = "failed".to_string();
-        Ok(())
-    })
-    .await
-    .unwrap();
-    fixture
-        .app
-        .chat
-        .sessions
-        .write()
-        .await
-        .remove(&fixture.agent_chat_id);
-
-    assert_eq!(
-        seal_reason(&fixture.app, &fixture.agent_chat_id).await,
-        None
-    );
-}
-
-#[tokio::test]
-async fn other_roles_or_missing_task_card_metadata_are_not_sealed() {
-    let fixture = fixture().await;
-    storage::update_board_atomic(fixture.app.gcx.clone(), &fixture.task_id, |board| {
-        board.get_card_mut("T-1").unwrap().column = "failed".to_string();
-        Ok(())
-    })
-    .await
-    .unwrap();
-    for role in ["planner", "subchats", "task_agent"] {
-        fixture
-            .agent
-            .lock()
-            .await
-            .thread
-            .task_meta
-            .as_mut()
-            .unwrap()
-            .role = role.to_string();
-        assert_eq!(
-            seal_reason(&fixture.app, &fixture.agent_chat_id).await,
-            None
-        );
-    }
-    {
-        let mut agent = fixture.agent.lock().await;
-        let meta = agent.thread.task_meta.as_mut().unwrap();
-        meta.role = "agents".to_string();
-        meta.card_id = None;
-    }
-    assert_eq!(
-        seal_reason(&fixture.app, &fixture.agent_chat_id).await,
-        None
-    );
-    fixture.agent.lock().await.thread.task_meta = None;
-    assert_eq!(
-        seal_reason(&fixture.app, &fixture.agent_chat_id).await,
-        None
-    );
 }

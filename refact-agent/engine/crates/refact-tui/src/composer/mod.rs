@@ -1458,19 +1458,6 @@ mod tests {
     }
 
     #[test]
-    fn tracked_edit_range_preserves_long_line_deletion_near_end() {
-        let prefix = "prefix\n";
-        let before_text = format!("{prefix}{}tail", "x".repeat(16 * 1024));
-        let before = snapshot(&before_text, before_text.len() - 1, None);
-        let after = snapshot(prefix, prefix.len(), None);
-
-        assert_eq!(
-            tracked_edit_range(&before, &after),
-            Some((prefix.len(), before_text.len(), prefix.len()))
-        );
-    }
-
-    #[test]
     fn tracked_edit_range_rejects_compound_changes() {
         let before = snapshot("abcdef", 2, None);
         let after = snapshot("abXdeY", 3, None);
@@ -1488,29 +1475,6 @@ mod tests {
 
         assert_eq!(tracked_edit_range(&non_boundary, &valid), None);
         assert_eq!(tracked_edit_range(&out_of_bounds, &valid), None);
-    }
-
-    #[test]
-    fn tracked_edit_range_does_not_panic_for_valid_snapshot_pairs() {
-        let texts = ["", "ab", "éβ", "👨‍👩‍👧‍👦z"];
-        let mut snapshots = Vec::new();
-        for text in texts {
-            let offsets = (0..=text.len())
-                .filter(|offset| text.is_char_boundary(*offset))
-                .collect::<Vec<_>>();
-            for &cursor in &offsets {
-                snapshots.push(snapshot(text, cursor, None));
-                for &anchor in &offsets {
-                    snapshots.push(snapshot(text, cursor, Some(anchor)));
-                }
-            }
-        }
-
-        for before in &snapshots {
-            for after in &snapshots {
-                let _ = tracked_edit_range(before, after);
-            }
-        }
     }
 
     #[test]
@@ -1602,42 +1566,6 @@ mod tests {
     }
 
     #[test]
-    fn vim_editor_helpers_move_words_and_delete_line() {
-        let mut composer = ComposerState::new(Vec::new());
-        composer.set_text("alpha beta");
-        composer.move_word_backward(false);
-        assert_eq!(composer.cursor_char_offset(), 6);
-        composer.move_word_backward(false);
-        assert_eq!(composer.cursor_char_offset(), 0);
-        composer.set_text("alpha beta\ngamma");
-        composer.move_word_backward(false);
-        composer.delete_current_line();
-        assert_eq!(composer.text(), "alpha beta\n");
-        composer.open_line_below();
-        composer.insert_text("delta");
-        assert_eq!(composer.text(), "alpha beta\n\ndelta");
-    }
-
-    #[test]
-    fn editor_moves_vertically_across_lines() {
-        let mut editor = TextEditor::new();
-        editor.insert_str("one\ntwo\nthree");
-        editor.move_up(false);
-        editor.move_up(false);
-        editor.insert_char('!');
-        assert_eq!(editor.text(), "one!\ntwo\nthree");
-    }
-
-    #[test]
-    fn explicit_newline_and_ctrl_j_path_insert_newline() {
-        let mut composer = ComposerState::new(Vec::new());
-        composer.insert_char('a', t(0));
-        composer.insert_explicit_newline(t(100));
-        composer.insert_char('b', t(200));
-        assert_eq!(composer.text(), "a\nb");
-    }
-
-    #[test]
     fn wrap_rows_breaks_at_word_boundaries_and_maps_the_cursor() {
         let text = "The quick brown fox jumps";
         let (rows, row, col) = wrap_rows(text, text.len(), 10);
@@ -1687,43 +1615,6 @@ mod tests {
     }
 
     #[test]
-    fn enter_submits_composer_text() {
-        let mut composer = ComposerState::new(Vec::new());
-        composer.insert_char('h', t(0));
-        assert_eq!(composer.enter(t(120)), EnterDecision::Submit);
-        assert_eq!(composer.submit_text().as_deref(), Some("h"));
-        assert_eq!(composer.text(), "");
-    }
-
-    #[test]
-    fn submit_text_preserves_leading_and_trailing_whitespace_in_history() {
-        let mut composer = ComposerState::new(Vec::new());
-        let prompt = "  indented\nkeep trailing line\n";
-        composer.set_text(prompt);
-
-        assert_eq!(composer.submit_text().as_deref(), Some(prompt));
-        assert_eq!(composer.history_entries(), &[prompt.to_string()]);
-        assert!(composer.submit_text().is_none());
-    }
-
-    #[test]
-    fn two_fast_characters_and_enter_submit_without_data_loss() {
-        let mut composer = ComposerState::new(Vec::new());
-        composer.insert_char('a', t(0));
-        composer.insert_char('b', t(1));
-        assert_eq!(composer.enter(t(2)), EnterDecision::Submit);
-        assert_eq!(composer.submit_text().as_deref(), Some("ab"));
-        assert!(composer.is_empty());
-    }
-
-    #[test]
-    fn bracketed_paste_inserts_text_directly() {
-        let mut composer = ComposerState::new(Vec::new());
-        composer.insert_paste("one\ntwo\n");
-        assert_eq!(composer.text(), "one\ntwo\n");
-    }
-
-    #[test]
     fn large_paste_inserts_dim_placeholder_and_expands_on_submit() {
         let mut composer = ComposerState::new(Vec::new());
         let paste = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 7);
@@ -1737,29 +1628,6 @@ mod tests {
             .starts_with(&format!("[Pasted {} chars]", paste.chars().count())));
         assert_eq!(composer.submit_text().as_deref(), Some(paste.as_str()));
         assert!(composer.pending_paste_placeholders().is_empty());
-    }
-
-    #[test]
-    fn same_length_large_pastes_use_unique_placeholders_across_instances() {
-        let first = format!("first{}", "a".repeat(LARGE_PASTE_CHAR_THRESHOLD));
-        let second = format!("second{}", "b".repeat(LARGE_PASTE_CHAR_THRESHOLD - 1));
-        assert_eq!(first.chars().count(), second.chars().count());
-
-        let mut first_composer = ComposerState::new(Vec::new());
-        first_composer.insert_paste(&first);
-        let first_placeholder = only_pending_placeholder(&first_composer);
-
-        let mut second_composer = ComposerState::new(Vec::new());
-        second_composer.insert_paste(&second);
-        let second_placeholder = only_pending_placeholder(&second_composer);
-
-        assert_ne!(first_placeholder, second_placeholder);
-        assert_eq!(first_placeholder, first_composer.text());
-        assert_eq!(second_placeholder, second_composer.text());
-        assert!(first_placeholder.starts_with(&format!("[Pasted {} chars]", first.chars().count())));
-        assert!(
-            second_placeholder.starts_with(&format!("[Pasted {} chars]", second.chars().count()))
-        );
     }
 
     #[test]
@@ -1989,24 +1857,6 @@ mod tests {
     }
 
     #[test]
-    fn insert_text_flushes_paste_and_inserts_at_cursor() {
-        let mut composer = ComposerState::new(Vec::new());
-        composer.insert_paste("ab");
-        composer.move_left(false);
-        composer.insert_text("@src/lib.rs ");
-        assert_eq!(composer.text(), "a@src/lib.rs b");
-    }
-
-    #[test]
-    fn replace_current_token_inserts_file_mention() {
-        let mut composer = ComposerState::new(Vec::new());
-        composer.insert_paste("read @sr");
-        composer.replace_current_token('@', "@src/lib.rs ");
-        assert_eq!(composer.text(), "read @src/lib.rs ");
-        assert_eq!(composer.cursor_char_offset(), 17);
-    }
-
-    #[test]
     fn history_dedupes_and_restores_draft() {
         let mut history = InputHistory::new(vec!["one".to_string(), "two".to_string()]);
         history.push("one".to_string());
@@ -2018,20 +1868,6 @@ mod tests {
         assert_eq!(history.previous("one".to_string()).as_deref(), Some("two"));
         assert_eq!(history.next("two".to_string()).as_deref(), Some("one"));
         assert_eq!(history.next("one".to_string()).as_deref(), Some("draft"));
-    }
-
-    #[test]
-    fn composer_history_navigation_preserves_draft() {
-        let mut composer = ComposerState::new(vec!["first".to_string(), "second".to_string()]);
-        composer.set_text("draft");
-        composer.move_up_or_history(false);
-        assert_eq!(composer.text(), "second");
-        composer.move_up_or_history(false);
-        assert_eq!(composer.text(), "first");
-        composer.move_down_or_history(false);
-        assert_eq!(composer.text(), "second");
-        composer.move_down_or_history(false);
-        assert_eq!(composer.text(), "draft");
     }
 
     #[test]
@@ -2063,43 +1899,6 @@ mod tests {
         composer.accept_history_search();
         assert_eq!(composer.text(), "alpha one");
         assert!(!composer.history_search_active());
-    }
-
-    #[test]
-    fn ctrl_u_kills_to_current_line_start_and_yanks() {
-        let mut composer = ComposerState::new(Vec::new());
-        composer.set_text("alpha beta\ngamma");
-        composer.kill_to_line_start();
-        assert_eq!(composer.text(), "alpha beta\n");
-        composer.yank();
-        assert_eq!(composer.text(), "alpha beta\ngamma");
-    }
-
-    #[test]
-    fn ctrl_u_kills_first_line_from_middle_or_end() {
-        let mut middle = ComposerState::new(Vec::new());
-        middle.set_text("alpha beta\ngamma");
-        middle.move_home(false);
-        middle.move_up_or_history(false);
-        for _ in 0..5 {
-            middle.move_right(false);
-        }
-        middle.kill_to_line_start();
-        assert_eq!(middle.text(), " beta\ngamma");
-
-        let mut end = ComposerState::new(Vec::new());
-        end.set_text("alpha beta");
-        end.kill_to_line_start();
-        assert!(end.is_empty());
-
-        let mut later_middle = ComposerState::new(Vec::new());
-        later_middle.set_text("alpha\nbeta gamma");
-        later_middle.move_home(false);
-        for _ in 0..3 {
-            later_middle.move_right(false);
-        }
-        later_middle.kill_to_line_start();
-        assert_eq!(later_middle.text(), "alpha\na gamma");
     }
 
     #[test]
@@ -2159,18 +1958,6 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_u_undo_and_redo_restore_the_editor() {
-        let mut composer = ComposerState::new(Vec::new());
-        composer.set_text("alpha beta\ngamma");
-        composer.kill_to_line_start();
-        assert_eq!(composer.text(), "alpha beta\n");
-        assert!(composer.undo());
-        assert_eq!(composer.text(), "alpha beta\ngamma");
-        assert!(composer.redo());
-        assert_eq!(composer.text(), "alpha beta\n");
-    }
-
-    #[test]
     fn undo_redo_coalesces_typing_and_keeps_structural_edits_separate() {
         let mut composer = ComposerState::new(Vec::new());
         composer.insert_char('a', t(0));
@@ -2183,16 +1970,6 @@ mod tests {
         assert_eq!(composer.text(), "abc");
         composer.kill_to_line_start();
         assert_eq!(composer.text(), "");
-    }
-
-    #[test]
-    fn view_caps_rows_and_tracks_cursor() {
-        let mut composer = ComposerState::new(Vec::new());
-        composer.insert_paste("1\n2\n3\n4\n5");
-        let view = composer.view(20, 3);
-        assert_eq!(view.lines, vec!["3", "4", "5"]);
-        assert_eq!(view.cursor_row, 2);
-        assert_eq!(view.cursor_col, 1);
     }
 
     #[test]

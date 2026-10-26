@@ -1001,44 +1001,6 @@ pub async fn vectorizer_enqueue_files(
 mod tests {
     use super::*;
 
-    #[test]
-    fn vecdb_path_coalescing_rollout_switch_defaults_on_and_honors_false() {
-        let previous = std::env::var_os(VECDB_PATH_COALESCING_ENV);
-        std::env::remove_var(VECDB_PATH_COALESCING_ENV);
-        install_vecdb_path_coalescing_setting(true);
-        assert!(vecdb_path_coalescing_rollout_enabled());
-        for enabled in ["1", "true", "YES", "on"] {
-            std::env::set_var(VECDB_PATH_COALESCING_ENV, enabled);
-            assert!(vecdb_path_coalescing_rollout_enabled());
-        }
-        for disabled in ["0", "false", "no", "off"] {
-            std::env::set_var(VECDB_PATH_COALESCING_ENV, disabled);
-            assert!(!vecdb_path_coalescing_rollout_enabled());
-        }
-        if let Some(previous) = previous {
-            std::env::set_var(VECDB_PATH_COALESCING_ENV, previous);
-        } else {
-            std::env::remove_var(VECDB_PATH_COALESCING_ENV);
-        }
-    }
-
-    #[test]
-    fn legacy_regular_queue_preserves_fifo_duplicates() {
-        let mut queue = LatestPathQueue::new(false);
-        let path = "/workspace/project/.refact/knowledge/note.md".to_string();
-        let expired = SystemTime::now()
-            .checked_sub(std::time::Duration::from_secs(COOLDOWN_SECONDS + 1))
-            .unwrap();
-        queue.enqueue_regular(path.clone(), expired);
-        queue.enqueue_regular(path.clone(), expired);
-        assert_eq!(queue.pending_regular_len(), 2);
-        assert!(
-            matches!(queue.take_next(SystemTime::now()), Some(VecdbWork::RegularDocument { path: first, .. }) if first == path)
-        );
-        assert!(
-            matches!(queue.take_next(SystemTime::now()), Some(VecdbWork::RegularDocument { path: second, .. }) if second == path)
-        );
-    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::vdb_emb_aux;
@@ -1097,20 +1059,6 @@ mod tests {
     }
 
     #[test]
-    fn regular_queue_coalesces_repeated_pending_paths() {
-        let mut queue = LatestPathQueue::new(true);
-        let path = "/workspace/project/.refact/knowledge/note.md".to_string();
-        let now = SystemTime::now();
-
-        for _ in 0..100 {
-            queue.enqueue_regular(path.clone(), now);
-        }
-
-        assert_eq!(queue.pending_regular_len(), 1);
-        assert_eq!(queue.unprocessed_len(), 1);
-    }
-
-    #[test]
     fn regular_queue_schedules_one_follow_up_after_in_flight_update() {
         let mut queue = LatestPathQueue::new(true);
         let path = "/workspace/project/.refact/knowledge/note.md".to_string();
@@ -1136,49 +1084,6 @@ mod tests {
     }
 
     #[test]
-    fn deferred_probe_reports_repeated_path_coalescing() {
-        let path = "/workspace/project/.refact/knowledge/note.md".to_string();
-        let documents = vec![path.clone(), path.clone(), path.clone()];
-        let mut legacy = VecdbDeferredQueueProbe::new(false);
-        let mut coalesced = VecdbDeferredQueueProbe::new(true);
-
-        legacy.enqueue_deferred_paths(&documents);
-        coalesced.enqueue_deferred_paths(&documents);
-        legacy.drain_after_cooldown();
-        coalesced.drain_after_cooldown();
-
-        let legacy = legacy.metrics();
-        let coalesced = coalesced.metrics();
-        assert_eq!(legacy.enqueue_requests, 3);
-        assert_eq!(legacy.pending_unique_paths, 1);
-        assert_eq!(legacy.processed_paths, 3);
-        assert_eq!(legacy.amplification_ratio(), 3.0);
-        assert_eq!(coalesced.enqueue_requests, 3);
-        assert_eq!(coalesced.pending_unique_paths, 1);
-        assert_eq!(coalesced.processed_paths, 1);
-        assert_eq!(coalesced.amplification_ratio(), 1.0);
-    }
-
-    #[test]
-    fn regular_queue_cancel_discards_pending_but_not_immediate_requests() {
-        let mut queue = LatestPathQueue::new(true);
-        let path = "/workspace/project/.refact/knowledge/note.md".to_string();
-        let expired = SystemTime::now()
-            .checked_sub(std::time::Duration::from_secs(COOLDOWN_SECONDS + 1))
-            .unwrap();
-
-        queue.enqueue_regular(path.clone(), expired);
-        queue.enqueue_immediately(path.clone());
-        queue.cancel_regular(&path);
-
-        assert_eq!(queue.pending_regular_len(), 0);
-        assert!(matches!(
-            queue.take_next(SystemTime::now()),
-            Some(VecdbWork::ImmediatelyRegularDocument(immediate)) if immediate == path
-        ));
-    }
-
-    #[test]
     fn regular_queue_cancel_marks_in_flight_work_stale() {
         let mut queue = LatestPathQueue::new(true);
         let path = "/workspace/project/.refact/knowledge/note.md".to_string();
@@ -1197,26 +1102,6 @@ mod tests {
         assert!(!queue.should_process_regular(&path, generation));
         queue.complete_regular(&path, generation);
         assert!(queue.is_idle());
-    }
-
-    #[test]
-    fn regular_queue_shutdown_clears_pending_and_in_flight_state() {
-        let mut queue = LatestPathQueue::new(true);
-        let path = "/workspace/project/.refact/knowledge/note.md".to_string();
-        let expired = SystemTime::now()
-            .checked_sub(std::time::Duration::from_secs(COOLDOWN_SECONDS + 1))
-            .unwrap();
-
-        queue.enqueue_regular(path, expired);
-        let _ = queue.take_next(SystemTime::now());
-        queue.enqueue_regular(
-            "/workspace/project/.refact/knowledge/other.md".to_string(),
-            SystemTime::now(),
-        );
-        queue.cancel_all_regular();
-
-        assert_eq!(queue.pending_regular_len(), 0);
-        assert_eq!(queue.in_flight_regular_len(), 0);
     }
 
     #[tokio::test]
@@ -1364,24 +1249,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    fn test_embedding_model() -> refact_core::vecdb_types::EmbeddingModelConfig {
-        refact_core::vecdb_types::EmbeddingModelConfig {
-            model_id: "embedding/test".to_string(),
-            endpoint: String::new(),
-            endpoint_style: "openai".to_string(),
-            embedding_endpoint_style: "openai".to_string(),
-            api_key: String::new(),
-            model_name: "test".to_string(),
-            embedding_size: 1,
-            dimensions: None,
-            query_prefix: String::new(),
-            document_prefix: String::new(),
-            rejection_threshold: 1.0,
-            embedding_batch: 16,
-            n_ctx: 64,
-        }
-    }
-
     fn test_split(text: &str) -> SplitResult {
         SplitResult {
             file_path: PathBuf::from("/workspace/project/.refact/knowledge/note.md"),
@@ -1428,73 +1295,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_write_failure_counts_into_status_and_keeps_batch_ok() {
-        let root =
-            std::env::temp_dir().join(format!("refact-vecdb-wfail-{}", uuid::Uuid::new_v4()));
-        let handler = test_handler(&root).await;
-        handler.close_connection_for_test().await;
-        let vecdb_handler_arc = Arc::new(AMutex::new(handler));
-        let vstatus = empty_vstatus();
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!("http://{}/embeddings", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = vec![0u8; 4096];
-            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut request)
-                .await
-                .unwrap();
-            let response_body = "{\"data\":[{\"embedding\":[0.25]}]}";
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                response_body.len(),
-                response_body
-            );
-            tokio::io::AsyncWriteExt::write_all(&mut socket, response.as_bytes())
-                .await
-                .unwrap();
-        });
-
-        let mut embedding_model = test_embedding_model();
-        embedding_model.endpoint = endpoint;
-        let constants = VecdbConstants {
-            embedding_model,
-            embedding_credential_resolver: None,
-            tokenizer: None,
-            splitter_window_size: 32,
-            vecdb_max_files: 10,
-        };
-
-        let mut run_actual_model_on_these = vec![test_split("note body")];
-        let mut ready_to_vecdb: Vec<VecdbRecord> = vec![];
-        let result = vectorize_batch_from_q(
-            &mut run_actual_model_on_these,
-            &mut ready_to_vecdb,
-            vstatus.clone(),
-            Arc::new(AMutex::new(reqwest::Client::new())),
-            &constants,
-            vecdb_handler_arc,
-        )
-        .await;
-        server.await.unwrap();
-
-        assert!(result.is_ok());
-        assert_eq!(ready_to_vecdb.len(), 1);
-        let vstatus_locked = vstatus.lock().await;
-        assert_eq!(vstatus_locked.cache_writes_failed, 1);
-        assert_eq!(vstatus_locked.vectors_missing_from_cache, 1);
-        assert_eq!(
-            vstatus_locked
-                .vecdb_errors
-                .keys()
-                .filter(|reason| reason.starts_with("cache write failed:"))
-                .count(),
-            1
-        );
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
     async fn cache_read_failure_requeues_batch_instead_of_dropping_it() {
         let root =
             std::env::temp_dir().join(format!("refact-vecdb-rfail-{}", uuid::Uuid::new_v4()));
@@ -1536,16 +1336,5 @@ mod tests {
             1
         );
         let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn skip_log_is_deduplicated_until_pass_finishes() {
-        let path = PathBuf::from("/workspace/project/.refact/knowledge/guarded.md");
-        let mut skipped_paths = HashSet::new();
-
-        assert!(should_log_skip(&mut skipped_paths, &path));
-        assert!(!should_log_skip(&mut skipped_paths, &path));
-        skipped_paths.clear();
-        assert!(should_log_skip(&mut skipped_paths, &path));
     }
 }

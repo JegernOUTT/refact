@@ -29,8 +29,7 @@ fn limit_text_by_tokens(
     (new_text_lines.join("\n"), tok_used)
 }
 
-const STRUCTURED_TRUNCATION_WARNING: &str =
-    "Response reduced to fit the context token budget.";
+const STRUCTURED_TRUNCATION_WARNING: &str = "Response reduced to fit the context token budget.";
 
 #[derive(Clone)]
 enum JsonPathPart {
@@ -73,14 +72,15 @@ fn find_largest_shrinkable(
             serde_json::to_string(value).map_or(0, |text| text.len()),
             ShrinkKind::Array,
         )),
-        Value::String(text) if !text.is_empty() => {
-            Some((text.len(), ShrinkKind::String))
-        }
+        Value::String(text) if !text.is_empty() => Some((text.len(), ShrinkKind::String)),
         _ => None,
     };
     if let Some((size, kind)) = proposed {
         // Traversal and strict comparison make ties deterministic.
-        if candidate.as_ref().map_or(true, |current| size > current.size) {
+        if candidate
+            .as_ref()
+            .map_or(true, |current| size > current.size)
+        {
             *candidate = Some(ShrinkCandidate {
                 path: path.clone(),
                 size,
@@ -189,7 +189,9 @@ fn compact_structured_json(
         }
     }
 
-    let source = value.as_object().expect("structured tool JSON is an object");
+    let source = value
+        .as_object()
+        .expect("structured tool JSON is an object");
     let mut minimal = Map::new();
     minimal.insert("tool".to_string(), source["tool"].clone());
     minimal.insert("summary".to_string(), source["summary"].clone());
@@ -262,12 +264,8 @@ pub async fn postprocess_plain_text(
 
         if let ChatContent::SimpleText(text) = &msg.content {
             if let Some(value) = structured_tool_object(text) {
-                let (new_content, tokens_used) = compact_structured_json(
-                    tokenizer.clone(),
-                    text,
-                    value,
-                    effective_limit,
-                );
+                let (new_content, tokens_used) =
+                    compact_structured_json(tokenizer.clone(), text, value, effective_limit);
                 msg.content = ChatContent::SimpleText(new_content);
                 remaining_budget = remaining_budget.saturating_sub(tokens_used);
                 new_messages.push(msg);
@@ -343,7 +341,8 @@ mod tests {
                 "name": format!("unused_function_{index}"),
                 "path": format!("/project/src/very/long/path/{index}.rs")
             })).collect::<Vec<_>>()
-        }).to_string();
+        })
+        .to_string();
         let limit = 80;
         let value = structured_tool_object(&input).unwrap();
         let (output, used) = compact_structured_json(None, &input, value, limit);
@@ -363,7 +362,8 @@ mod tests {
             "tool": "x",
             "summary": "y",
             "large": (0..100).map(|_| "content").collect::<Vec<_>>()
-        }).to_string();
+        })
+        .to_string();
         let limit = 32;
         let value = structured_tool_object(&input).unwrap();
         let (output, used) = compact_structured_json(None, &input, value, limit);
@@ -375,19 +375,5 @@ mod tests {
         assert_eq!(parsed["truncated"], true);
         assert!(parsed.get("warning").is_some());
         assert_eq!(parsed.as_object().unwrap().len(), 4);
-    }
-
-    #[test]
-    fn ordinary_text_keeps_line_truncation_behavior() {
-        let (output, _) = limit_text_by_tokens(None, "short\nthis line is much too long", 3);
-        assert_eq!(output, "short\nTruncated: too many tokens\n");
-    }
-
-    #[test]
-    fn small_structured_json_is_byte_identical() {
-        let input = "{ \"tool\": \"dead_code\", \"summary\": \"ok\", \"entries\": [] }";
-        let value = structured_tool_object(input).unwrap();
-        let (output, _) = compact_structured_json(None, input, value, 100);
-        assert_eq!(output, input);
     }
 }

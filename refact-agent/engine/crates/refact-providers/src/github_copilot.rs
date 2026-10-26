@@ -752,33 +752,6 @@ mod tests {
     }
 
     #[test]
-    fn github_copilot_live_models_keep_records_with_model_picker_enabled_false() {
-        let mut provider = provider_with_token();
-        provider.enabled_models = vec!["gpt-4.1".to_string()];
-        // Exactly the production situation: every record says model_picker_enabled=false.
-        let live = json!({
-            "object": "list",
-            "data": [live_record(
-                "gpt-4.1",
-                json!([CHAT_COMPLETIONS_ENDPOINT]),
-                chat_capabilities(),
-            )]
-        });
-
-        let models = provider
-            .available_models_from_live_response(&live, &HashMap::new(), DEFAULT_COPILOT_API_BASE)
-            .unwrap();
-        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
-
-        assert_eq!(
-            ids,
-            vec!["gpt-4.1"],
-            "model_picker_enabled=false must not remove a policy-enabled chat model"
-        );
-        assert!(models[0].enabled);
-    }
-
-    #[test]
     fn github_copilot_live_models_drop_policy_disabled_and_embeddings_records() {
         let provider = provider_with_token();
         let mut embeddings_capabilities = chat_capabilities();

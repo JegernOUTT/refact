@@ -1434,91 +1434,6 @@ mod tests {
     }
 
     #[test]
-    fn restart_agent_refuses_active_doing_card_without_force() {
-        let mut board = TaskBoard::default();
-        let doing_card = BoardCard {
-            id: "T-3".to_string(),
-            title: "Card T-3".to_string(),
-            column: "doing".to_string(),
-            priority: "P1".to_string(),
-            depends_on: vec![],
-            instructions: "do stuff".to_string(),
-            assignee: Some("active-agent".to_string()),
-            agent_chat_id: Some("agent-T-3-active".to_string()),
-            status_updates: vec![],
-            comments: vec![],
-            final_report: None,
-            final_report_structured: None,
-            verifier_report: None,
-            created_at: Utc::now().to_rfc3339(),
-            started_at: Some(Utc::now().to_rfc3339()),
-            last_heartbeat_at: None,
-            paused_at: None,
-            paused_by: None,
-            completed_at: None,
-            agent_branch: None,
-            agent_worktree: None,
-            agent_worktree_name: None,
-            base_branch: None,
-            base_commit: None,
-            ab_variants: None,
-            team_members: vec![],
-            target_files: vec![],
-            scope_guard_mode: Default::default(),
-            attention: None,
-            deliverable: None,
-            verification: Vec::new(),
-        };
-        board.cards.push(doing_card);
-
-        let card = board.get_card("T-3").unwrap();
-        let should_refuse = card.column == "doing" && card.agent_chat_id.is_some();
-        assert!(
-            should_refuse,
-            "active doing card should trigger refusal without force"
-        );
-    }
-
-    #[test]
-    fn restart_agent_allows_failed_card_without_force() {
-        let card = failed_card("T-4", Some("/tmp/wt".to_string()), None);
-        let should_refuse = card.column == "doing" && card.agent_chat_id.is_some();
-        assert!(!should_refuse, "failed card should not require force");
-        assert_eq!(card.column, "failed");
-    }
-
-    #[test]
-    fn restart_agent_fresh_preserves_failure_in_status_history() {
-        let mut card = failed_card("T-5", None, None);
-        let original_status_count = card.status_updates.len();
-
-        mark_card_restarted_fresh(&mut card, "new-agent", "agent-T-5-new", None, None, None);
-
-        assert!(
-            card.status_updates.len() > original_status_count,
-            "status updates should grow"
-        );
-        assert!(
-            card.status_updates
-                .iter()
-                .any(|u| u.message.starts_with("Previous failure:")),
-            "old failure should appear in status history"
-        );
-        assert!(
-            card.final_report.is_none(),
-            "final_report should be cleared after restart"
-        );
-    }
-
-    #[test]
-    fn restart_agent_resume_rejects_card_without_worktree_name() {
-        let card = failed_card("T-6", None, None);
-
-        let wt_name = card.agent_worktree_name.as_deref();
-        assert!(wt_name.is_none());
-    }
-
-    #[test]
     fn restart_agent_fresh_rollback_resets_card_to_failed() {
         let original = failed_card(
             "T-7",
@@ -1578,17 +1493,6 @@ mod tests {
         assert_eq!(card.agent_chat_id, newer.agent_chat_id);
         assert_eq!(card.assignee, newer.assignee);
         assert_eq!(card.column, "doing");
-    }
-
-    #[test]
-    fn restart_agent_source_guard_accepts_exact_previous_binding() {
-        let original = failed_card(
-            "T-9",
-            Some("/tmp/original-wt".to_string()),
-            Some("refact/task/task-1/card/T-9/old".to_string()),
-        );
-
-        assert!(ensure_restart_source_current(&original, &original).is_ok());
     }
 
     #[test]

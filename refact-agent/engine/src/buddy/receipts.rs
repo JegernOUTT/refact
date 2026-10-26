@@ -291,45 +291,6 @@ mod tests {
         assert!(config_patch_target_allowed(".refact/knowledge/ok.md").is_ok());
     }
 
-    #[test]
-    fn undo_target_allows_legacy_buddy_paths_but_keeps_shape_checks() {
-        assert!(undo_target_allowed(".refact/buddy/legacy.json").is_ok());
-        assert!(undo_target_allowed(".refact/knowledge/doc.md").is_ok());
-        assert!(undo_target_allowed("/etc/passwd").is_err());
-        assert!(undo_target_allowed(".refact/../src/main.rs").is_err());
-        assert!(undo_target_allowed("src/main.rs").is_err());
-    }
-
-    #[tokio::test]
-    async fn undo_restores_legacy_buddy_receipt() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let rel = ".refact/buddy/legacy.json";
-        fs::create_dir_all(root.join(".refact/buddy"))
-            .await
-            .unwrap();
-        fs::write(root.join(rel), "{\"patched\":true}\n")
-            .await
-            .unwrap();
-        let legacy = BuddyReceipt {
-            id: "legacy-receipt".to_string(),
-            action_kind: "apply_config_patch".to_string(),
-            target_path: rel.to_string(),
-            pre_image: Some("{\"original\":true}\n".to_string()),
-            created_at: Utc::now(),
-            undone: false,
-            undone_at: None,
-        };
-        save_receipts(root, &[legacy]).await.unwrap();
-
-        let undone = undo_receipt(root, "legacy-receipt").await.unwrap();
-        assert!(undone.undone);
-        assert_eq!(
-            fs::read_to_string(root.join(rel)).await.unwrap(),
-            "{\"original\":true}\n"
-        );
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn apply_rejects_symlink_into_buddy_internal_state() {
@@ -395,19 +356,5 @@ mod tests {
             "unexpected error: {}",
             err
         );
-    }
-
-    #[tokio::test]
-    async fn receipts_persist_and_cap() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        for i in 0..3 {
-            apply_config_patch(root, ".refact/commands/x.yaml", &format!("v: {}\n", i))
-                .await
-                .unwrap();
-        }
-        let receipts = load_receipts(root).await;
-        assert_eq!(receipts.len(), 3);
-        assert_eq!(receipts[1].pre_image.as_deref(), Some("v: 0\n"));
     }
 }

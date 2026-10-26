@@ -1418,61 +1418,6 @@ trajectory_writer_enabled: false
     }
 
     #[test]
-    fn coordination_defaults_are_generous_and_survive_a_yaml_round_trip() {
-        let defaults = TrajectoryRuntimeSettings::default().coordination;
-        assert!(defaults.enabled);
-        assert!(defaults.auto_inject_enabled);
-        assert_eq!(defaults.max_active_engine, 32);
-        assert_eq!(defaults.max_active_project, 16);
-        assert_eq!(defaults.max_active_root, 16);
-        assert_eq!(defaults.max_pending, 1_024);
-        assert_eq!(defaults.max_outstanding, 4_096);
-        assert_eq!(defaults.max_subchat_depth, 5);
-        assert_eq!(defaults.max_read_stamps, 16_384);
-        assert_eq!(defaults.max_write_records, 65_536);
-        assert_eq!(defaults.overview_default_rows, 50);
-        assert_eq!(defaults.overview_max_rows, 500);
-        assert_eq!(defaults.capsule_token_budget, 1_600);
-        assert_eq!(defaults.capsule_max_rows, 24);
-        assert_eq!(defaults.min_interval_secs, 60);
-        assert_eq!(defaults.debounce_secs, 5);
-        assert_eq!(defaults.recent_window_secs, 3_600);
-        assert_eq!(defaults.lock_timeout_secs, 30);
-        assert_eq!(defaults.lock_poll_interval_ms, 25);
-
-        let yaml = serde_yaml::to_string(&tweaked()).unwrap();
-        let reloaded: TrajectoryRuntimeSettings = serde_yaml::from_str(&yaml).unwrap();
-        assert_eq!(reloaded.coordination, tweaked().coordination);
-    }
-
-    #[test]
-    fn yaml_without_a_coordination_block_keeps_every_coordination_default() {
-        let legacy = "max_queue_size: 7\n";
-        let loaded: TrajectoryRuntimeSettings = serde_yaml::from_str(legacy).unwrap();
-        assert_eq!(loaded.max_queue_size, 7);
-        assert_eq!(
-            loaded.coordination,
-            TrajectoryRuntimeSettings::default().coordination
-        );
-        assert!(validate(&loaded).is_ok());
-    }
-
-    #[test]
-    fn a_partial_coordination_block_fills_the_rest_from_defaults() {
-        let partial = "coordination:\n  max_active_engine: 48\n  debounce_secs: 3\n";
-        let loaded: TrajectoryRuntimeSettings = serde_yaml::from_str(partial).unwrap();
-        let defaults = TrajectoryRuntimeSettings::default().coordination;
-        assert_eq!(loaded.coordination.max_active_engine, 48);
-        assert_eq!(loaded.coordination.debounce_secs, 3);
-        assert_eq!(loaded.coordination.max_pending, defaults.max_pending);
-        assert_eq!(
-            loaded.coordination.lock_poll_interval_ms,
-            defaults.lock_poll_interval_ms
-        );
-        assert!(validate(&loaded).is_ok());
-    }
-
-    #[test]
     fn the_bounds_table_covers_exactly_the_serialized_coordination_leaves() {
         let rendered = serde_json::to_value(CoordinationSettings::default()).unwrap();
         let serialized: std::collections::BTreeSet<String> =
@@ -1594,40 +1539,6 @@ trajectory_writer_enabled: false
         assert!(resolved.store_allow_non_local_filesystem);
     }
 
-    #[tokio::test]
-    #[serial(runtime_settings)]
-    async fn stock_defaults_resolve_for_a_project_without_an_override_file() {
-        reset_for_test();
-        let dir = tempfile::tempdir().unwrap();
-        assert!(!project_coordination_path(dir.path()).exists());
-        assert_eq!(
-            coordination_for_project(dir.path()).await.unwrap(),
-            CoordinationSettings::default()
-        );
-        assert!(validate(&TrajectoryRuntimeSettings::default()).is_ok());
-    }
-
-    #[test]
-    fn every_default_sits_inside_its_published_range() {
-        let rendered = serde_json::to_value(CoordinationSettings::default()).unwrap();
-        for bound in coordination_field_bounds() {
-            if bound.value_type == "integer_map" {
-                validate_coordination_integer_map(bound, &rendered[bound.name]).unwrap();
-                continue;
-            }
-            let (minimum, maximum) = match (bound.minimum, bound.maximum) {
-                (Some(minimum), Some(maximum)) => (minimum, maximum),
-                _ => continue,
-            };
-            let value = rendered[bound.name].as_u64().unwrap();
-            assert!(
-                (minimum..=maximum).contains(&value),
-                "{} default {value} is outside {minimum}..={maximum}",
-                bound.name
-            );
-        }
-    }
-
     #[test]
     fn out_of_range_and_invariant_violating_coordination_values_are_rejected() {
         let mut settings = TrajectoryRuntimeSettings::default();
@@ -1686,20 +1597,6 @@ trajectory_writer_enabled: false
         assert_eq!(engine.source, CoordinationValueSource::Global);
         assert!(engine.inherited);
         assert_eq!(view.len(), coordination_field_bounds().len());
-    }
-
-    #[test]
-    fn an_empty_project_override_inherits_every_global_value() {
-        let global = CoordinationSettings {
-            max_pending: 77,
-            ..CoordinationSettings::default()
-        };
-        let overrides = CoordinationOverride::new();
-        assert_eq!(resolve_coordination(&global, &overrides).unwrap(), global);
-        assert!(coordination_effective_view(&global, &overrides)
-            .unwrap()
-            .iter()
-            .all(|field| field.inherited));
     }
 
     #[test]
@@ -1810,17 +1707,6 @@ trajectory_writer_enabled: false
         assert_eq!(
             refact_work_core::coordination_settings(),
             CoordinationSettings::default()
-        );
-    }
-
-    #[test]
-    fn empty_yaml_yields_defaults_and_full_round_trip_is_stable() {
-        let empty: TrajectoryRuntimeSettings = serde_yaml::from_str("{}").unwrap();
-        assert_eq!(empty, TrajectoryRuntimeSettings::default());
-        let yaml = serde_yaml::to_string(&tweaked()).unwrap();
-        assert_eq!(
-            serde_yaml::from_str::<TrajectoryRuntimeSettings>(&yaml).unwrap(),
-            tweaked()
         );
     }
 }

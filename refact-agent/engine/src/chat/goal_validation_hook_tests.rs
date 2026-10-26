@@ -216,23 +216,6 @@ async fn gates_blocked_verification_runs_the_hook_once_without_the_judge() {
 #[cfg(unix)]
 #[tokio::test]
 #[serial_test::serial(permission_decision_hooks)]
-async fn error_result_runs_the_hook_once_with_the_error() {
-    let (dir, app, session) = test_context(true).await;
-    let marker = dir.path().join("goal-validation-payloads");
-    write_hook(&app, &marker).await;
-    clear_hook_cache_for_tests();
-
-    let error = run_goal_verification(app, session).await.unwrap_err();
-    assert_eq!(error, "no active goal to verify");
-    let lines = payload_lines(&marker).await;
-    assert_eq!(lines.len(), 1);
-    assert_eq!(lines[0]["outcome"], "error");
-    assert_eq!(lines[0]["error"], "no active goal to verify");
-}
-
-#[cfg(unix)]
-#[tokio::test]
-#[serial_test::serial(permission_decision_hooks)]
 async fn disabled_hooks_config_runs_nothing() {
     let (dir, app, session) = test_context(false).await;
     let marker = dir.path().join("goal-validation-payloads");

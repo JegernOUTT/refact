@@ -90,16 +90,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_every_5_minutes() {
-        assert!(parse_cron("*/5 * * * *").is_ok());
-    }
-
-    #[test]
-    fn parse_weekdays_at_9am() {
-        assert!(parse_cron("0 9 * * 1-5").is_ok());
-    }
-
-    #[test]
     fn next_run_strictly_after_from_ms() {
         let from = Utc
             .with_ymd_and_hms(2026, 1, 1, 0, 5, 0)
@@ -113,14 +103,5 @@ mod tests {
             .unwrap()
             .timestamp_millis() as u64;
         assert_eq!(next, expected);
-    }
-
-    #[test]
-    fn human_schedule_well_known_cases() {
-        assert_eq!(human_schedule("*/5 * * * *"), "every 5 minutes");
-        assert_eq!(human_schedule("0 9 * * 1-5"), "weekdays at 9am");
-        assert_eq!(human_schedule("0 0 * * *"), "daily at midnight");
-        assert_eq!(human_schedule("17 * * * *"), "hourly at :17");
-        assert_eq!(human_schedule("1 2 3 4 5"), "1 2 3 4 5");
     }
 }

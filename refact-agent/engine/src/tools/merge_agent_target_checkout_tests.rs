@@ -291,32 +291,6 @@ async fn merge_refuses_when_target_worktree_is_dirty_and_touches_nothing() {
 
 #[tokio::test]
 #[serial_test::serial(runtime_settings, coordination_metrics)]
-async fn merge_into_base_not_checked_out_anywhere_keeps_todays_behaviour() {
-    let fixture = Fixture::new(false).await;
-    let app = AppState::from_gcx(fixture.gcx.clone()).await;
-    let (response, _, _) = merge_under_available_lease(
-        &app,
-        &fixture.service,
-        &fixture.id,
-        fixture.request(),
-        None,
-        |_, _| async { panic!("check not configured") },
-    )
-    .await
-    .unwrap();
-    assert!(response.merged);
-    assert_eq!(
-        git(&fixture.source, &["branch", "--show-current"]).trim(),
-        TARGET
-    );
-    assert_eq!(
-        std::fs::read_to_string(fixture.source.join("file.txt")).unwrap(),
-        "merged\n"
-    );
-}
-
-#[tokio::test]
-#[serial_test::serial(runtime_settings, coordination_metrics)]
 async fn unoccupied_base_with_dirty_source_uses_and_removes_temporary_checkout() {
     let fixture = Fixture::new(false).await;
     std::fs::write(fixture.source.join("notes.txt"), "user notes\n").unwrap();

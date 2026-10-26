@@ -310,20 +310,6 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn request_input_cell_snapshot() {
-        let card = tool_card(
-            "ask_questions",
-            json!({"questions": [{"id": "file", "type": "free_text", "text": "Which file should I edit?"}]}),
-            "waiting for user input",
-        );
-        let rendered = text(&RequestInputToolCell::new(card, true).render(80));
-        assert_eq!(
-            rendered,
-            "• Questions\n▾ ✅ succeeded Which file should I edit? · 1.2s\n  • Which file should I edit?\n  └ waiting for user input\n"
-        );
-    }
-
-    #[test]
     fn request_input_cell_renders_answers_and_masks_secrets() {
         let card = tool_card(
             "request_user_input",

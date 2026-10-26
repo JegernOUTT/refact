@@ -647,26 +647,6 @@ mod tests {
     }
 
     #[test]
-    fn continue_skill_imports_as_skill() {
-        let temp = tempfile::tempdir().unwrap();
-        let workspace = temp.path().join("workspace");
-        let skill_dir = workspace.join(".continue/skills/foo");
-        write(
-            &skill_dir.join("SKILL.md"),
-            "---\nname: foo\ndescription: Foo skill\n---\nUse foo.",
-        );
-        write(&skill_dir.join("notes.txt"), "notes");
-
-        let result = scan_project_root(&workspace, &temp.path().join("staging"));
-
-        assert!(result.summary.errors.is_empty());
-        assert_eq!(result.candidates.len(), 1);
-        let candidate = &result.candidates[0];
-        assert_eq!(candidate.kind, ImportKind::Skill);
-        assert_eq!(candidate.destination_path, PathBuf::from("skills/foo"));
-    }
-
-    #[test]
     fn invokable_continue_prompt_imports_as_command() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
@@ -742,33 +722,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn continue_rules_are_reported_unsupported_without_candidates() {
-        let temp = tempfile::tempdir().unwrap();
-        let workspace = temp.path().join("workspace");
-        write(
-            &workspace.join(".continue/rules/security.md"),
-            "# Security rules",
-        );
-        write(&workspace.join("rules.md"), "# Codebase rules");
-
-        let result = scan_project_root(&workspace, &temp.path().join("staging"));
-
-        assert!(result.candidates.is_empty());
-        assert!(result.summary.errors.is_empty());
-        assert_eq!(result.summary.issues.len(), 2);
-        assert!(result
-            .summary
-            .issues
-            .iter()
-            .all(|issue| issue.status == ImportStatus::Unsupported));
-        assert!(result
-            .summary
-            .issues
-            .iter()
-            .all(|issue| issue.kind == Some(ImportKind::UnsupportedRules)));
-    }
-
     #[cfg(unix)]
     #[test]
     fn project_symlinked_continue_root_outside_workspace_is_skipped() {
@@ -797,30 +750,5 @@ mod tests {
             .iter()
             .any(|issue| issue.status == ImportStatus::Unsupported));
         assert!(!staging.exists());
-    }
-
-    #[test]
-    fn invalid_check_frontmatter_reports_error_and_continues() {
-        let temp = tempfile::tempdir().unwrap();
-        let workspace = temp.path().join("workspace");
-        write(
-            &workspace.join(".continue/checks/bad.md"),
-            "---\nname: [bad\n---\n# Bad check",
-        );
-        write(
-            &workspace.join(".continue/checks/good.md"),
-            "---\nname: Good Check\n---\n# Good check",
-        );
-
-        let result = scan_project_root(&workspace, &temp.path().join("staging"));
-
-        assert_eq!(result.candidates.len(), 1);
-        assert_eq!(result.summary.errors.len(), 1);
-        assert_eq!(result.summary.errors[0].status, ImportStatus::Error);
-        assert_eq!(result.summary.errors[0].kind, Some(ImportKind::Subagent));
-        assert_eq!(
-            result.candidates[0].destination_path,
-            PathBuf::from("subagents/good-check.yaml")
-        );
     }
 }

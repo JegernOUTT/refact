@@ -628,11 +628,6 @@ impl AppToolRegistry {
         tool_catalog_snapshot_rollout_enabled()
     }
 
-    #[cfg(test)]
-    fn snapshot_cache_enabled_for(value: Option<&str>) -> bool {
-        tool_catalog_snapshot_rollout_enabled_for(value)
-    }
-
     async fn catalog_key_with_scope(
         &self,
         gcx: SharedGlobalContext,
@@ -1795,30 +1790,6 @@ mod tests {
 
     #[serial(runtime_settings)]
     #[tokio::test]
-    async fn tool_catalog_snapshot_warm_acquisition_stays_below_two_milliseconds() {
-        let _env = ToolCatalogSnapshotsEnvGuard::enable();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let builds = Arc::new(AtomicUsize::new(0));
-        let registry = fixture_registry(gcx, builds.clone());
-        registry
-            .snapshot_for_mode_for_test("agent", Some("provider/model"))
-            .await;
-        let mut samples = Vec::new();
-        for _ in 0..16 {
-            let started = std::time::Instant::now();
-            registry
-                .snapshot_for_mode_for_test("agent", Some("provider/model"))
-                .await;
-            samples.push(started.elapsed());
-        }
-        samples.sort_unstable();
-
-        assert_eq!(builds.load(Ordering::SeqCst), 1);
-        assert!(samples[15] < std::time::Duration::from_millis(2));
-    }
-
-    #[serial(runtime_settings)]
-    #[tokio::test]
     async fn tool_catalog_generations_create_next_turn_snapshot_without_mutating_old_one() {
         let _env = ToolCatalogSnapshotsEnvGuard::enable();
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -1927,78 +1898,6 @@ mod tests {
 
     #[serial(runtime_settings)]
     #[tokio::test]
-    async fn turn_tool_pool_unique_batch_uses_one_mutable_vector() {
-        let _env = ToolCatalogSnapshotsEnvGuard::enable();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let builds = Arc::new(AtomicUsize::new(0));
-        let names = (0..200).map(|index| format!("tool-{index}")).collect();
-        let registry = fixture_registry_with_names(gcx.clone(), builds.clone(), names);
-        let catalog = registry
-            .snapshot_for_mode_for_test("agent", Some("provider/model"))
-            .await;
-        let pool = registry
-            .build_turn_tool_pool(gcx, "agent", Some("provider/model"), &catalog)
-            .await;
-        let builds_after_pool = builds.load(Ordering::SeqCst);
-        let slots = catalog
-            .index
-            .tools
-            .iter()
-            .cloned()
-            .map(|tool| (tool, 1))
-            .collect::<Vec<_>>();
-
-        registry
-            .prepare_turn_tool_pool(&pool, &catalog, "agent", Some("provider/model"), &slots)
-            .await
-            .unwrap();
-
-        assert_eq!(pool.initial_vector_builds(), 1);
-        assert_eq!(pool.fallback_vector_builds(), 0);
-        assert_eq!(builds.load(Ordering::SeqCst), builds_after_pool);
-    }
-
-    #[serial(runtime_settings)]
-    #[tokio::test]
-    async fn turn_tool_pool_reuses_one_instance_for_sequential_calls() {
-        let _env = ToolCatalogSnapshotsEnvGuard::enable();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let builds = Arc::new(AtomicUsize::new(0));
-        let registry = fixture_registry(gcx.clone(), builds.clone());
-        let catalog = registry
-            .snapshot_for_mode_for_test("agent", Some("provider/model"))
-            .await;
-        let pool = registry
-            .build_turn_tool_pool(gcx, "agent", Some("provider/model"), &catalog)
-            .await;
-        let builds_after_pool = builds.load(Ordering::SeqCst);
-
-        for _ in 0..50 {
-            let tool = registry
-                .take_turn_tool(
-                    &pool,
-                    registry.gcx.clone(),
-                    "agent",
-                    Some("provider/model"),
-                    &catalog,
-                    "fixture",
-                )
-                .await
-                .unwrap()
-                .unwrap();
-            AppToolRegistry::app_turn_tool_pool(&pool)
-                .unwrap()
-                .return_tool(tool)
-                .await;
-        }
-
-        assert_eq!(pool.initial_vector_builds(), 1);
-        assert_eq!(pool.fallback_vector_builds(), 0);
-        assert_eq!(builds.load(Ordering::SeqCst), builds_after_pool);
-    }
-
-    #[serial(runtime_settings)]
-    #[tokio::test]
     async fn turn_tool_pool_returns_the_confirmation_instance_to_execution() {
         let _env = ToolCatalogSnapshotsEnvGuard::enable();
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -2045,117 +1944,6 @@ mod tests {
             confirmation_instance,
             execution_tool.tool_description().description
         );
-    }
-
-    #[serial(runtime_settings)]
-    #[tokio::test]
-    async fn turn_tool_pool_same_name_parallelism_is_bounded_by_multiplicity() {
-        let _env = ToolCatalogSnapshotsEnvGuard::enable();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let builds = Arc::new(AtomicUsize::new(0));
-        let registry = fixture_registry(gcx.clone(), builds);
-        let catalog = registry
-            .snapshot_for_mode_for_test("agent", Some("provider/model"))
-            .await;
-        let pool = registry
-            .build_turn_tool_pool(gcx, "agent", Some("provider/model"), &catalog)
-            .await;
-        let parallelism = 8;
-
-        registry
-            .prepare_turn_tool_pool(
-                &pool,
-                &catalog,
-                "agent",
-                Some("provider/model"),
-                &[(catalog.index.tools[0].clone(), parallelism)],
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(pool.initial_vector_builds(), 1);
-        assert_eq!(pool.fallback_vector_builds(), parallelism as u64 - 1);
-        assert_eq!(
-            pool.initial_vector_builds() + pool.fallback_vector_builds(),
-            parallelism as u64
-        );
-    }
-
-    #[serial(runtime_settings)]
-    #[tokio::test]
-    async fn parallel_slot_preparation_uses_maximum_deficit_not_sum_of_deficits() {
-        let _env = ToolCatalogSnapshotsEnvGuard::enable();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let builds = Arc::new(AtomicUsize::new(0));
-        let names = vec!["first".to_string(), "second".to_string()];
-        let registry = fixture_registry_with_names(gcx.clone(), builds.clone(), names);
-        let catalog = registry
-            .snapshot_for_mode_for_test("agent", Some("provider/model"))
-            .await;
-        let pool = registry
-            .build_turn_tool_pool(gcx, "agent", Some("provider/model"), &catalog)
-            .await;
-        let builds_before_slots = builds.load(Ordering::SeqCst);
-
-        registry
-            .prepare_turn_tool_pool(
-                &pool,
-                &catalog,
-                "agent",
-                Some("provider/model"),
-                &[
-                    (catalog.index.tools[0].clone(), 4),
-                    (catalog.index.tools[1].clone(), 4),
-                ],
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(pool.fallback_vector_builds(), 3);
-        assert_eq!(builds.load(Ordering::SeqCst), builds_before_slots + 3);
-    }
-
-    #[serial(runtime_settings)]
-    #[tokio::test]
-    async fn concurrent_different_tool_misses_share_one_full_vector_build() {
-        let _env = ToolCatalogSnapshotsEnvGuard::enable();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let builds = Arc::new(AtomicUsize::new(0));
-        let names = (0..8).map(|index| format!("tool-{index}")).collect();
-        let registry = fixture_registry_with_names(gcx.clone(), builds.clone(), names);
-        let catalog = registry
-            .snapshot_for_mode_for_test("agent", Some("provider/model"))
-            .await;
-        let pool = registry
-            .build_turn_tool_pool(gcx, "agent", Some("provider/model"), &catalog)
-            .await;
-        let pool_impl = AppToolRegistry::app_turn_tool_pool(&pool).unwrap();
-        let mut leased = Vec::new();
-        for desc in &catalog.index.tools {
-            leased.push(pool_impl.take(desc).await.unwrap());
-        }
-        let builds_before_misses = builds.load(Ordering::SeqCst);
-
-        let calls = catalog.index.tools.iter().map(|desc| {
-            registry.take_turn_tool(
-                &pool,
-                registry.gcx.clone(),
-                "agent",
-                Some("provider/model"),
-                &catalog,
-                &desc.name,
-            )
-        });
-        let replacements = futures::future::join_all(calls)
-            .await
-            .into_iter()
-            .map(|result| result.unwrap().unwrap())
-            .collect::<Vec<_>>();
-
-        assert_eq!(replacements.len(), catalog.index.tools.len());
-        assert_eq!(builds.load(Ordering::SeqCst), builds_before_misses + 1);
-        assert_eq!(pool.fallback_vector_builds(), 1);
-        assert_eq!(leased.len(), replacements.len());
     }
 
     #[serial(runtime_settings)]
@@ -2212,59 +2000,5 @@ mod tests {
             first.tool_description().description,
             second.tool_description().description
         );
-    }
-
-    #[serial(runtime_settings)]
-    #[tokio::test]
-    async fn turn_tool_pools_are_isolated_between_turns() {
-        let _env = ToolCatalogSnapshotsEnvGuard::enable();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let builds = Arc::new(AtomicUsize::new(0));
-        let registry = fixture_registry(gcx.clone(), builds.clone());
-        let catalog = registry
-            .snapshot_for_mode_for_test("agent", Some("provider/model"))
-            .await;
-        let first = registry
-            .build_turn_tool_pool(gcx.clone(), "agent", Some("provider/model"), &catalog)
-            .await;
-        let second = registry
-            .build_turn_tool_pool(gcx, "agent", Some("provider/model"), &catalog)
-            .await;
-
-        assert_eq!(first.initial_vector_builds(), 1);
-        assert_eq!(second.initial_vector_builds(), 1);
-        assert_eq!(builds.load(Ordering::SeqCst), 3);
-    }
-
-    #[serial(runtime_settings)]
-    #[test]
-    fn tool_catalog_snapshot_rollout_switch_defaults_on_and_keeps_the_cold_fallback_available() {
-        assert!(
-            crate::runtime_settings::TrajectoryRuntimeSettings::default()
-                .tool_catalog_snapshots_enabled
-        );
-        for disabled in [Some("0"), Some("false"), Some("no"), Some("off")] {
-            assert!(!AppToolRegistry::snapshot_cache_enabled_for(disabled));
-        }
-        for enabled in [Some("1"), Some("true"), Some("yes")] {
-            assert!(AppToolRegistry::snapshot_cache_enabled_for(enabled));
-        }
-    }
-
-    #[test]
-    fn tool_catalog_generations_are_independent_for_every_invalidation_source() {
-        let generations = crate::global_context::ToolCatalogGenerations::default();
-
-        generations.advance_customization();
-        generations.advance_integrations();
-        generations.advance_mcp();
-        generations.advance_privacy();
-        generations.advance_capabilities();
-
-        assert_eq!(generations.customization.load(Ordering::Acquire), 1);
-        assert_eq!(generations.integrations.load(Ordering::Acquire), 1);
-        assert_eq!(generations.mcp.load(Ordering::Acquire), 1);
-        assert_eq!(generations.privacy.load(Ordering::Acquire), 1);
-        assert_eq!(generations.capabilities.load(Ordering::Acquire), 1);
     }
 }

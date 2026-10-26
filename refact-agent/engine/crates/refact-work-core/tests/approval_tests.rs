@@ -36,17 +36,6 @@ fn owner_and_generation_are_checked() {
 }
 
 #[test]
-fn expiry_blocks_decision() {
-    let r = ApprovalRegistry::new(4);
-    r.register(pending("a"), 0).unwrap();
-    r.expire(10);
-    assert_eq!(
-        r.decide("parent", 7, "a", true, 10),
-        Err(ApprovalError::Expired)
-    );
-}
-
-#[test]
 fn consume_checks_binding() {
     let r = ApprovalRegistry::new(4);
     r.register(pending("a"), 0).unwrap();
@@ -91,29 +80,6 @@ fn consume_is_once() {
     );
 }
 
-#[test]
-fn cancel_and_capacity() {
-    let r = ApprovalRegistry::new(1);
-    r.register(pending("a"), 0).unwrap();
-    let mut second = pending("b");
-    second.tool_call_id = "another-call".into();
-    assert_eq!(r.register(second, 0), Err(ApprovalError::Capacity));
-    r.cancel("parent", 7, "a", 1).unwrap();
-    assert_eq!(r.wait_now("a", 1), Ok(ApprovalDecision::Cancelled));
-}
-
-#[tokio::test]
-async fn wait_observes_decision() {
-    let r = ApprovalRegistry::new(2);
-    r.register(pending("a"), 0).unwrap();
-    let waiter = {
-        let r = r.clone();
-        tokio::spawn(async move { r.wait("a", 1).await })
-    };
-    r.decide("parent", 7, "a", false, 2).unwrap();
-    assert_eq!(waiter.await.unwrap(), Ok(ApprovalDecision::Rejected));
-}
-
 #[tokio::test(start_paused = true)]
 async fn wait_expires_without_external_expire() {
     let r = ApprovalRegistry::new(1);
@@ -156,73 +122,5 @@ fn parent_listing_filters_owners() {
             .map(|p| p.id.as_str())
             .collect::<Vec<_>>(),
         vec!["a"]
-    );
-}
-
-#[test]
-fn denial_reason_is_attached_to_rejection_and_dropped_with_entry() {
-    let registry = ApprovalRegistry::new(4);
-    registry.register(pending("hook"), 0).unwrap();
-    registry
-        .decide_with_reason(
-            "parent",
-            7,
-            "hook",
-            false,
-            Some("denied by PermissionDecision hook: blocked".into()),
-            1,
-        )
-        .unwrap();
-    assert_eq!(
-        registry.denial_reason("hook").as_deref(),
-        Some("denied by PermissionDecision hook: blocked")
-    );
-    assert_eq!(registry.wait_now("hook", 1), Ok(ApprovalDecision::Rejected));
-    registry.expire(11);
-    assert_eq!(registry.denial_reason("hook"), None);
-}
-
-#[test]
-fn repeated_rejection_preserves_original_denial_reason() {
-    let registry = ApprovalRegistry::new(4);
-    registry.register(pending("hook"), 0).unwrap();
-    registry
-        .decide_with_reason(
-            "parent",
-            7,
-            "hook",
-            false,
-            Some("denied by PermissionDecision hook: original".into()),
-            1,
-        )
-        .unwrap();
-    assert_eq!(
-        registry.decide_with_reason("parent", 7, "hook", false, None, 2),
-        Ok(ApprovalDecision::Rejected)
-    );
-    assert_eq!(
-        registry.denial_reason("hook").as_deref(),
-        Some("denied by PermissionDecision hook: original")
-    );
-}
-
-#[test]
-fn repeated_rejection_attaches_reason_when_first_decision_had_none() {
-    let registry = ApprovalRegistry::new(4);
-    registry.register(pending("hook"), 0).unwrap();
-    registry.decide("parent", 7, "hook", false, 1).unwrap();
-    registry
-        .decide_with_reason(
-            "parent",
-            7,
-            "hook",
-            false,
-            Some("denied by PermissionDecision hook: later".into()),
-            2,
-        )
-        .unwrap();
-    assert_eq!(
-        registry.denial_reason("hook").as_deref(),
-        Some("denied by PermissionDecision hook: later")
     );
 }

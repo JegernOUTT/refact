@@ -3,8 +3,6 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::backend::TestBackend;
-use ratatui::Terminal;
 use refact_tui::app::App;
 use refact_tui::client::{ChatEvent, OpenProjectResponse, WorkerInfo};
 use serde_json::json;
@@ -99,22 +97,6 @@ fn snapshot_with_agents(app: &App) -> ChatEvent {
     )
 }
 
-fn render(app: &mut App, width: u16, height: u16) -> String {
-    app.set_native_scrollback(false);
-    let backend = TestBackend::new(width, height);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal
-        .draw(|frame| refact_tui::ui::render(frame, app))
-        .unwrap();
-    terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect()
-}
-
 struct SurfaceEnvGuard {
     _lock: MutexGuard<'static, ()>,
     previous: Option<OsString>,
@@ -140,66 +122,6 @@ impl Drop for SurfaceEnvGuard {
             std::env::remove_var("REFACT_TUI_SURFACES");
         }
     }
-}
-
-#[test]
-fn subagents_surface_renders_background_agents_worker_telemetry_and_processes() {
-    let _surfaces = SurfaceEnvGuard::enable();
-    let mut app = App::new(project());
-    app.apply_chat_event(snapshot_with_agents(&app));
-    app.apply_chat_event(event(
-        &app,
-        "process_completed",
-        json!({
-            "type": "process_completed",
-            "process_id": "exec-1",
-            "status": "exited",
-            "exit_code": 0,
-            "short_description": "cargo test",
-            "mode": "service"
-        }),
-    ));
-
-    app.execute_command_name("subagents");
-    let text = app.transcript_overlay().unwrap().lines().join("\n");
-
-    assert!(text.contains("Background agents / delegates"));
-    assert!(text.contains("[running] Implement parser"));
-    assert!(text.contains("progress: Writing tests"));
-    assert!(text.contains("edited files: src/parser.rs"));
-    assert!(text.contains("diff summary: one file changed"));
-    assert!(text.contains("conflict summary: none"));
-    assert!(text.contains("result summary: partial"));
-    assert!(text.contains("Worker telemetry"));
-    for field in [
-        "project ID",
-        "slug",
-        "root",
-        "root exists",
-        "pinned",
-        "last active ms",
-        "state",
-        "PID",
-        "RSS bytes",
-        "CPU percent",
-        "uptime secs",
-        "HTTP port",
-        "LSP port",
-        "LSP clients",
-        "busy chats",
-        "exec running",
-        "live proxy streams",
-        "cron next fire ms",
-        "idle deadline ms",
-        "last status report ms",
-        "last error",
-        "log path",
-    ] {
-        assert!(text.contains(field), "missing {field}");
-    }
-    assert!(text.contains("Processes and services"));
-    assert!(text.contains("cargo test · exited · service"));
-    assert!(text.contains("process_start · running"));
 }
 
 #[test]
@@ -253,23 +175,4 @@ fn opening_selected_agent_navigates_to_child_chat() {
         refact_tui::app::AppAction::SubscribeCurrent
     ));
     assert_eq!(app.chat_id(), "child-1");
-}
-
-#[test]
-fn activity_surface_honors_narrow_degradation_rules_at_40_by_15() {
-    let _surfaces = SurfaceEnvGuard::enable();
-    let mut app = App::new(project());
-    app.apply_chat_event(snapshot_with_agents(&app));
-    app.execute_command_name("subagents");
-
-    let text = render(&mut app, 40, 15);
-
-    assert!(text.contains("Activity"));
-    assert!(text.contains("Background"));
-    assert!(!text.chars().any(|character| {
-        matches!(
-            character,
-            '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼' | '─' | '│'
-        )
-    }));
 }

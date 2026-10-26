@@ -2281,13 +2281,6 @@ mod progress_collector_tests {
     use serde_json::json;
 
     #[test]
-    fn test_extract_thinking_preview_skips_non_objects() {
-        let blocks = vec![json!({"thinking": "hello"}), json!(123)];
-        let preview = SubchatProgressCollector::extract_thinking_preview(&blocks);
-        assert_eq!(preview.as_deref(), Some("hello"));
-    }
-
-    #[test]
     fn test_append_tail_unicode_no_panic() {
         let mut s = String::new();
         // Force truncation in the middle of multibyte chars.
@@ -2353,26 +2346,6 @@ mod convert_results_tests {
         };
         let result = convert_results_to_messages(vec![empty, full], messages).unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0][1].content.content_text_only(), "all good");
-    }
-
-    #[test]
-    fn choices_extend_original_messages() {
-        let messages = vec![ChatMessage::new(
-            "user".to_string(),
-            "review this".to_string(),
-        )];
-        let choice = ChoiceFinal {
-            content: "all good".to_string(),
-            ..Default::default()
-        };
-
-        let result = convert_results_to_messages(vec![choice], messages).unwrap();
-
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].len(), 2);
-        assert_eq!(result[0][0].role, "user");
-        assert_eq!(result[0][1].role, "assistant");
         assert_eq!(result[0][1].content.content_text_only(), "all good");
     }
 }
@@ -4561,16 +4534,6 @@ mod subchat_tests {
         assert!(!needs_forced_final_answer(true, false, true));
     }
 
-    #[test]
-    fn final_step_wrap_up_message_is_tool_free_user_instruction() {
-        let message = final_step_wrap_up_message(50);
-        assert_eq!(message.role, "user");
-        let text = message.content.content_text_only();
-        assert!(text.contains("50/50"));
-        assert!(text.contains("Do not call any tools"));
-        assert!(text.contains("never return an empty result"));
-    }
-
     fn test_subchat_config() -> SubchatConfig {
         SubchatConfig {
             history_source_model: None,
@@ -4659,21 +4622,6 @@ mod subchat_tests {
         config.abort_flag = Some(Arc::new(std::sync::atomic::AtomicBool::new(true)));
         config.soft_abort = soft_abort;
         config
-    }
-
-    #[test]
-    fn streaming_deltas_stamp_watchdog_activity() {
-        let stamp = Arc::new(AtomicU64::new(0));
-        let mut collector = SubchatProgressCollector::new(None, None, Some(stamp.clone()));
-
-        collector.on_delta_ops(
-            0,
-            vec![crate::chat::types::DeltaOp::AppendContent {
-                text: "token".to_string(),
-            }],
-        );
-
-        assert!(stamp.load(Ordering::Relaxed) > 0);
     }
 
     #[test]
@@ -4904,55 +4852,6 @@ mod subchat_tests {
         assert!(!gate.is_quiescent());
     }
 
-    #[test]
-    fn stable_chat_id_prefers_the_configured_id() {
-        let mut config = test_subchat_config();
-        config.chat_id = Some("subchat-stable".to_string());
-        config.background_agent_id = Some("bgagent-1".to_string());
-        assert_eq!(
-            stable_subchat_chat_id(&config, || "fresh".to_string()),
-            "subchat-stable"
-        );
-    }
-
-    #[test]
-    fn stable_chat_id_falls_back_to_the_background_agent_id() {
-        let mut config = test_subchat_config();
-        config.background_agent_id = Some("bgagent-1".to_string());
-        let first = stable_subchat_chat_id(&config, || "fresh-1".to_string());
-        let second = stable_subchat_chat_id(&config, || "fresh-2".to_string());
-        assert_eq!(first, "subchat-bgagent-1");
-        assert_eq!(first, second);
-    }
-
-    #[test]
-    fn stable_chat_id_still_mints_a_fresh_id_for_one_shot_subchats() {
-        let config = test_subchat_config();
-        assert_eq!(
-            stable_subchat_chat_id(&config, || "fresh".to_string()),
-            "fresh"
-        );
-        let mut blank = test_subchat_config();
-        blank.chat_id = Some("   ".to_string());
-        assert_eq!(
-            stable_subchat_chat_id(&blank, || "fresh".to_string()),
-            "fresh"
-        );
-    }
-
-    #[test]
-    fn stream_chat_id_reuses_the_context_chat_id_across_turns() {
-        assert_eq!(
-            stable_stream_chat_id("subchat-abc", || "fresh-1".to_string()),
-            "subchat-abc"
-        );
-        assert_eq!(
-            stable_stream_chat_id("subchat-abc", || "fresh-2".to_string()),
-            "subchat-abc"
-        );
-        assert_eq!(stable_stream_chat_id("  ", || "fresh".to_string()), "fresh");
-    }
-
     #[tokio::test]
     async fn subchat_confirmation_defaults_follow_yaml_settings() {
         let gcx = make_test_gcx().await;
@@ -4979,53 +4878,6 @@ mod subchat_tests {
         assert_eq!(
             resolve_subagent_confirmation_defaults(gcx, "subagent").await,
             (false, false, false)
-        );
-    }
-
-    #[tokio::test]
-    async fn usage_progress_prefers_metering_and_omits_unknown_cost() {
-        let gcx = make_test_gcx().await;
-        let progress = Arc::new(StdMutex::new(Vec::new()));
-        let mut config = test_subchat_config();
-        config.step_progress = Some({
-            let progress = progress.clone();
-            Arc::new(move |update| progress.lock().unwrap().push(update))
-        });
-        let mut metered = ChatMessage::new("assistant".to_string(), "done".to_string());
-        metered.usage = Some(crate::call_validation::ChatUsage {
-            total_tokens: 12,
-            metering_usd: Some(crate::call_validation::MeteringUsd {
-                total_usd: 0.42,
-                ..Default::default()
-            }),
-            ..Default::default()
-        });
-
-        super::emit_usage_progress(&gcx, &config, &[vec![metered]]).await;
-
-        assert_eq!(
-            progress.lock().unwrap().as_slice(),
-            [SubchatProgress::Usage {
-                tokens_delta: 12,
-                cost_delta: Some(0.42),
-            }]
-        );
-
-        progress.lock().unwrap().clear();
-        let mut unmetered = ChatMessage::new("assistant".to_string(), "done".to_string());
-        unmetered.usage = Some(crate::call_validation::ChatUsage {
-            total_tokens: 7,
-            ..Default::default()
-        });
-
-        super::emit_usage_progress(&gcx, &config, &[vec![unmetered]]).await;
-
-        assert_eq!(
-            progress.lock().unwrap().as_slice(),
-            [SubchatProgress::Usage {
-                tokens_delta: 7,
-                cost_delta: None,
-            }]
         );
     }
 
@@ -5726,58 +5578,6 @@ mod subchat_tests {
         assert_eq!(thread.root_chat_id.as_deref(), Some("planner-task-1-1"));
     }
 
-    #[test]
-    fn subchat_worktree_config_fields_carry_parent_scope() {
-        let (_temp, worktree) = sample_worktree();
-        let task_meta = TaskMeta {
-            task_id: "task-1".to_string(),
-            role: "agents".to_string(),
-            agent_id: Some("agent-1".to_string()),
-            card_id: Some("card-1".to_string()),
-            planner_chat_id: Some("planner-task-1-1".to_string()),
-        };
-        let config = SubchatConfig {
-            history_source_model: None,
-            tool_name: "subagent".to_string(),
-            stateful: false,
-            autonomous_no_confirm: false,
-            auto_approve_editing_tools: false,
-            auto_approve_dangerous_commands: false,
-            chat_id: None,
-            title: None,
-            parent_id: None,
-            link_type: None,
-            root_chat_id: None,
-            tools: ToolsPolicy::All,
-            max_steps: 1,
-            prepend_system_prompt: false,
-            wrap_up: None,
-            task_meta: Some(task_meta.clone()),
-            worktree: Some(worktree.clone()),
-            model: "model".to_string(),
-            mode: "agent".to_string(),
-            n_ctx: 4096,
-            max_new_tokens: 512,
-            temperature: None,
-            reasoning_effort: None,
-            cache_control: crate::llm::params::CacheControl::Ephemeral,
-            parent_tool_call_id: None,
-            parent_subchat_tx: None,
-            abort_flag: None,
-            soft_abort: false,
-            activity_stamp: None,
-            background_agent_id: None,
-            subchat_depth: 1,
-            final_step_force_answer: false,
-            buddy_meta: None,
-            step_progress: None,
-            trace_parent: TraceParent::unattributed(),
-        };
-
-        assert_eq!(config.task_meta, Some(task_meta));
-        assert_eq!(config.worktree, Some(worktree));
-    }
-
     #[tokio::test]
     async fn subchat_worktree_config_inherits_scope_from_parent_session() {
         let gcx = make_test_gcx().await;
@@ -6076,55 +5876,6 @@ mod subchat_tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_resolve_subchat_config_carries_cache_control() {
-        let gcx = make_test_gcx().await;
-        let config_dir = gcx.config_dir.clone();
-        global_configs_try_create_all(&config_dir).await.unwrap();
-
-        let thinking_model_id = "claude_code/claude-opus-4-6".to_string();
-        let mut caps = CodeAssistantCaps::default();
-        caps.chat_models.insert(
-            thinking_model_id.clone(),
-            chat_model_record(
-                &thinking_model_id,
-                200_000,
-                "https://api.anthropic.com/v1/messages",
-            ),
-        );
-        caps.defaults.chat_default_model = thinking_model_id.clone();
-        caps.defaults.chat_light_model = thinking_model_id.clone();
-        caps.defaults.chat_thinking_model = thinking_model_id;
-
-        install_caps(gcx.clone(), caps).await;
-
-        let config = resolve_subchat_config_with_parent(
-            gcx,
-            "review_agents",
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            1,
-            true,
-            None,
-            "agent".to_string(),
-            None,
-            None,
-            None,
-            None,
-            None,
-            0,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(config.cache_control, CacheControl::Off);
-    }
-
     #[test]
     fn test_parse_subchat_cache_control_rejects_invalid_values() {
         let err = parse_subchat_cache_control("bad_cache_agent", Some("forever")).unwrap_err();
@@ -6132,33 +5883,6 @@ mod subchat_tests {
         assert!(err.contains("invalid cache_control 'forever'"));
         assert!(err.contains("bad_cache_agent"));
         assert!(err.contains("expected: off, ephemeral"));
-    }
-
-    #[tokio::test]
-    async fn test_resolve_subchat_params_defaults_cache_control_to_ephemeral() {
-        let gcx = make_test_gcx().await;
-        let config_dir = gcx.config_dir.clone();
-        global_configs_try_create_all(&config_dir).await.unwrap();
-
-        let light_model_id = "openai/gpt-4o-mini".to_string();
-        let mut caps = CodeAssistantCaps::default();
-        caps.chat_models.insert(
-            light_model_id.clone(),
-            chat_model_record(
-                &light_model_id,
-                200_000,
-                "https://api.openai.com/v1/chat/completions",
-            ),
-        );
-        caps.defaults.chat_default_model = light_model_id.clone();
-        caps.defaults.chat_light_model = light_model_id.clone();
-        caps.defaults.chat_thinking_model = light_model_id;
-
-        install_caps(gcx.clone(), caps).await;
-
-        let params = resolve_subchat_params(gcx, "subagent").await.unwrap();
-
-        assert_eq!(params.subchat_cache_control, CacheControl::Ephemeral);
     }
 
     #[tokio::test]

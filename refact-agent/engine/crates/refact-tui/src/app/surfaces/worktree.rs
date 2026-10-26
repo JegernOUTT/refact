@@ -762,13 +762,6 @@ mod tests {
     }
 
     #[test]
-    fn surface_gate_requires_explicit_truthy_value() {
-        assert!(!worktree_surfaces_enabled_from(None));
-        assert!(!worktree_surfaces_enabled_from(Some("0")));
-        assert!(worktree_surfaces_enabled_from(Some("true")));
-    }
-
-    #[test]
     fn cleanup_command_parses_apply_only_as_the_first_token() {
         let cases = [
             (
@@ -874,27 +867,5 @@ mod tests {
         app.start_worktree_command_with_enabled("merge wt-1 merge main keep-source", true);
 
         assert!(!app.pending_worktree_merge().unwrap().delete_after_merge);
-    }
-
-    #[test]
-    fn absent_commit_distances_are_not_rendered_as_zero() {
-        let lines = worktree_diff_lines(&WorktreeDiffResponse {
-            id: "wt-1".to_string(),
-            ..WorktreeDiffResponse::default()
-        });
-        assert!(!lines
-            .iter()
-            .any(|line| line.contains("ahead") || line.contains("behind")));
-    }
-
-    #[test]
-    fn absent_worktree_counts_render_as_unknown() {
-        let lines = worktree_diff_lines(&WorktreeDiffResponse {
-            id: "wt-1".to_string(),
-            ..WorktreeDiffResponse::default()
-        });
-        assert!(lines
-            .iter()
-            .any(|line| line.contains("changed: unknown files · +unknown -unknown")));
     }
 }

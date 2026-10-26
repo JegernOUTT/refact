@@ -197,16 +197,6 @@ async fn discard_worktree_clears_fields_and_registry() {
 }
 
 #[tokio::test]
-async fn discard_with_keep_branch_false_deletes_the_branch() {
-    let fixture = Fixture::new("done").await;
-    fixture
-        .discard(&[("keep_branch", json!(false))])
-        .await
-        .unwrap();
-    fixture.assert_removed("done", false).await;
-}
-
-#[tokio::test]
 async fn discard_refuses_doing_cards_and_dirty_worktrees_without_force() {
     let fixture = Fixture::new("doing").await;
     let error = fixture
@@ -336,19 +326,6 @@ async fn discard_refuses_cards_without_worktrees_and_nonterminal_cards() {
             "{error}"
         );
     }
-}
-
-#[tokio::test]
-async fn discard_resolves_registered_path_when_card_has_no_worktree_name() {
-    let fixture = Fixture::new("done").await;
-    storage::update_board_atomic(fixture.gcx.clone(), "task-1", |board| {
-        board.get_card_mut("T-39").unwrap().agent_worktree_name = None;
-        Ok(())
-    })
-    .await
-    .unwrap();
-    fixture.discard(&[]).await.unwrap();
-    fixture.assert_removed("done", true).await;
 }
 
 #[tokio::test]

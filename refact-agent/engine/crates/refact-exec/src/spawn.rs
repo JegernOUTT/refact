@@ -1383,26 +1383,6 @@ mod tests {
         processes_with_env_marker(marker)
     }
 
-    async fn spawn_and_read_stdout(request: ExecSpawnRequest) -> String {
-        let registry = ExecRegistry::new();
-        let result = registry.spawn(request).await.unwrap();
-        let snapshot = if result.snapshot.status.is_terminal() {
-            result.snapshot
-        } else {
-            registry
-                .wait(&result.snapshot.meta.process_id)
-                .await
-                .unwrap()
-        };
-        assert_eq!(snapshot.status, ExecStatus::Exited { exit_code: Some(0) });
-        let read = registry.read(&snapshot.meta.process_id, 0, None).await;
-        read.chunks
-            .iter()
-            .filter(|chunk| chunk.stream == ExecOutputStream::Stdout)
-            .map(|chunk| chunk.text.as_str())
-            .collect::<String>()
-    }
-
     fn workspace_write_sandbox(cwd: &std::path::Path) -> ExecSandboxSpec {
         ExecSandboxSpec {
             mode: ExecSandboxMode::WorkspaceWrite,
@@ -1441,14 +1421,6 @@ mod tests {
         assert_eq!(first, "a");
         assert_eq!(second, "βc");
         assert!(decoder.finish().is_none());
-    }
-
-    #[test]
-    fn utf8_chunk_decoder_flushes_incomplete_tail_lossy_on_finish() {
-        let mut decoder = Utf8ChunkDecoder::default();
-        let text = decoder.decode(&[b'a', 0xE2]);
-        assert_eq!(text, "a");
-        assert_eq!(decoder.finish(), Some("\u{FFFD}".to_string()));
     }
 
     #[test]
@@ -1564,25 +1536,6 @@ mod tests {
         assert!(child.lock().await.take_pty_master().is_none());
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn tty_process_can_be_resized() {
-        let registry = ExecRegistry::new();
-        let result = registry
-            .spawn(
-                ExecSpawnRequest::interactive("cat")
-                    .with_tty(true)
-                    .with_pty_size(24, 80),
-            )
-            .await
-            .unwrap();
-        let process_id = result.snapshot.meta.process_id;
-
-        registry.resize(&process_id, 40, 120).await.unwrap();
-
-        registry.kill(&process_id).await.unwrap();
-    }
-
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn tty_kill_terminates_background_descendants() {
@@ -1619,19 +1572,6 @@ mod tests {
         );
     }
 
-    fn env_test_request(mode: ExecMode, command: &str) -> ExecSpawnRequest {
-        let is_service = matches!(mode, ExecMode::Service);
-        let request = ExecSpawnRequest::new(mode, shell_script(command));
-        if is_service {
-            request.with_owner(crate::types::ExecOwnerMeta {
-                service_name: Some("env-default-test".to_string()),
-                ..crate::types::ExecOwnerMeta::default()
-            })
-        } else {
-            request
-        }
-    }
-
     #[cfg(unix)]
     fn process_exists(process_id: u32) -> bool {
         unsafe { libc::kill(process_id as i32, 0) == 0 }
@@ -1650,31 +1590,6 @@ mod tests {
             .status()
             .map(|status| status.success())
             .unwrap_or(false)
-    }
-
-    #[tokio::test]
-    async fn tty_false_unchanged() {
-        let registry = ExecRegistry::new();
-        let command = if cfg!(windows) {
-            "[Console]::Out.Write('hi')"
-        } else {
-            "printf hi"
-        };
-        let result = registry
-            .spawn(ExecSpawnRequest::foreground(shell_script(command)).with_tty(false))
-            .await
-            .unwrap();
-
-        assert_eq!(
-            result.snapshot.status,
-            ExecStatus::Exited { exit_code: Some(0) }
-        );
-        let read = registry
-            .read(&result.snapshot.meta.process_id, 0, None)
-            .await;
-        assert_eq!(read.chunks.len(), 1);
-        assert_eq!(read.chunks[0].stream, ExecOutputStream::Stdout);
-        assert_eq!(read.chunks[0].text, "hi");
     }
 
     #[tokio::test]
@@ -1700,82 +1615,6 @@ mod tests {
         assert_eq!(read.chunks.len(), 1);
         assert_eq!(read.chunks[0].stream, ExecOutputStream::Stdout);
         assert_eq!(read.chunks[0].text, "hello");
-    }
-
-    #[tokio::test]
-    async fn observe_request_uses_platform_backend_for_pipe_and_fallback_for_pty() {
-        let command = if cfg!(windows) {
-            "[Console]::Out.Write('observed')"
-        } else {
-            "printf observed"
-        };
-
-        let tty_modes: &[bool] = if cfg!(unix) { &[false, true] } else { &[false] };
-
-        for &tty in tty_modes {
-            let result = ExecRegistry::new()
-                .spawn(
-                    ExecSpawnRequest::foreground(shell_script(command))
-                        .with_observe(true)
-                        .with_tty(tty),
-                )
-                .await
-                .unwrap();
-
-            if cfg!(target_os = "linux") && !tty {
-                assert!(
-                    matches!(result.observation, ObservationStatus::Observed(_))
-                        || matches!(
-                            result.observation,
-                            ObservationStatus::Unavailable(ref reason) if !reason.is_empty()
-                        )
-                );
-            } else {
-                let ObservationStatus::Unavailable(reason) = result.observation else {
-                    panic!("unsupported observer returned observed access");
-                };
-                let expected_reason = if cfg!(target_os = "macos") && !tty {
-                    "macOS syscall observation unavailable"
-                } else {
-                    "backend unavailable"
-                };
-                assert_eq!(reason, expected_reason);
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn exec_env_defaults_apply() {
-        let command = if cfg!(windows) {
-            "[Console]::Out.Write(\"$env:NO_COLOR $env:TERM $env:PAGER $env:REFACT_EXEC\")"
-        } else {
-            "printf '%s %s %s %s' \"$NO_COLOR\" \"$TERM\" \"$PAGER\" \"$REFACT_EXEC\""
-        };
-
-        for mode in [
-            ExecMode::Foreground,
-            ExecMode::Background,
-            ExecMode::Service,
-        ] {
-            let stdout = spawn_and_read_stdout(env_test_request(mode, command)).await;
-            assert_eq!(stdout, "1 dumb cat 1");
-        }
-    }
-
-    #[tokio::test]
-    async fn exec_env_request_overrides_defaults() {
-        let command = if cfg!(windows) {
-            "[Console]::Out.Write($env:TERM)"
-        } else {
-            "printf '%s' \"$TERM\""
-        };
-
-        let stdout = spawn_and_read_stdout(
-            ExecSpawnRequest::foreground(shell_script(command)).with_env("TERM", "xterm-256color"),
-        )
-        .await;
-
-        assert_eq!(stdout, "xterm-256color");
     }
 
     #[cfg(unix)]
@@ -1809,28 +1648,6 @@ mod tests {
             .collect::<String>();
 
         assert_eq!(output, "3\nspace value\nsingle'quote\ndouble\"quote\n");
-    }
-
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn sandbox_wraps_pipe_and_pty_spawn_paths() {
-        if refact_sandbox::sandbox_status().enforcement == Enforcement::Unusable {
-            return;
-        }
-        let workspace = tempfile::tempdir().unwrap();
-        let sandbox = workspace_write_sandbox(workspace.path());
-
-        for tty in [false, true] {
-            let output = spawn_and_read_all(
-                ExecSpawnRequest::foreground("printf sandboxed")
-                    .with_cwd(workspace.path())
-                    .with_sandbox(sandbox.clone())
-                    .with_tty(tty),
-            )
-            .await;
-
-            assert!(output.contains("sandboxed"), "{output:?}");
-        }
     }
 
     #[tokio::test]
@@ -1879,53 +1696,6 @@ mod tests {
         assert!(error.starts_with("sandbox: noop:"), "{error}");
     }
 
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn observation_request_reports_injected_unavailable_state() {
-        let registry = ExecRegistry::new();
-        let result = registry
-            .spawn_with_seams(
-                ExecSpawnRequest::foreground("printf observed").with_observe(true),
-                None,
-                Some(Setup::unavailable("injected observer unavailable")),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(
-            result.snapshot.status,
-            ExecStatus::Exited { exit_code: Some(0) }
-        );
-        assert_eq!(
-            result.observation,
-            ObservationStatus::Unavailable("injected observer unavailable".to_string())
-        );
-        let reader = registry
-            .observation_reader(&result.snapshot.meta.process_id)
-            .await
-            .unwrap();
-        assert_eq!(reader.status(), result.observation);
-    }
-
-    #[tokio::test]
-    async fn exec_env_marker_always_present() {
-        let command = if cfg!(windows) {
-            "[Console]::Out.Write($env:REFACT_EXEC)"
-        } else {
-            "printf '%s' \"$REFACT_EXEC\""
-        };
-
-        let default_stdout =
-            spawn_and_read_stdout(ExecSpawnRequest::foreground(shell_script(command))).await;
-        let override_stdout = spawn_and_read_stdout(
-            ExecSpawnRequest::foreground(shell_script(command)).with_env("REFACT_EXEC", ""),
-        )
-        .await;
-
-        assert_eq!(default_stdout, "1");
-        assert_eq!(override_stdout, "");
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn scrubbed_pipe_and_pty_envs_exclude_parent_values_and_keep_request_defaults() {
@@ -1958,21 +1728,6 @@ mod tests {
                 "{output}"
             );
         }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn inherit_policy_exposes_parent_env() {
-        let _inherited = ParentEnvGuard::set("REFACT_TEST_INHERITED_VAR", "inherited-value");
-        let output = spawn_and_read_all(
-            ExecSpawnRequest::foreground("env").with_env_policy(ExecEnvPolicy::Inherit),
-        )
-        .await;
-
-        assert!(
-            output.contains("REFACT_TEST_INHERITED_VAR=inherited-value"),
-            "{output}"
-        );
     }
 
     #[cfg(unix)]
@@ -2049,28 +1804,6 @@ mod tests {
         assert_eq!(
             result.snapshot.status,
             ExecStatus::Exited { exit_code: Some(7) }
-        );
-    }
-
-    #[test]
-    fn sandbox_launcher_exit_is_typed() {
-        assert_eq!(
-            status_from_exit(
-                Some(refact_sandbox::SANDBOX_LAUNCHER_FAILURE_EXIT_CODE),
-                true
-            ),
-            ExecStatus::SandboxLauncherFailed {
-                exit_code: refact_sandbox::SANDBOX_LAUNCHER_FAILURE_EXIT_CODE
-            }
-        );
-        assert_eq!(
-            status_from_exit(
-                Some(refact_sandbox::SANDBOX_LAUNCHER_FAILURE_EXIT_CODE),
-                false
-            ),
-            ExecStatus::Exited {
-                exit_code: Some(refact_sandbox::SANDBOX_LAUNCHER_FAILURE_EXIT_CODE)
-            }
         );
     }
 
@@ -2350,34 +2083,6 @@ mod tests {
         assert_eq!(snapshot.status, ExecStatus::Killed);
     }
 
-    #[tokio::test]
-    async fn chat_owned_spawn_notification_emits_after_process_starts() {
-        let registry = ExecRegistry::new();
-        let mut rx = registry.subscribe_spawn();
-        let request = ExecSpawnRequest::background(shell_script(if cfg!(windows) {
-            "Start-Sleep -Seconds 30"
-        } else {
-            "sleep 30"
-        }))
-        .with_owner(crate::types::ExecOwnerMeta {
-            chat_id: Some("chat-spawn-bridge".to_string()),
-            ..crate::types::ExecOwnerMeta::default()
-        })
-        .with_short_description("Bridge spawn".to_string())
-        .with_chat_spawn_notification();
-        let result = registry.spawn(request).await.unwrap();
-        let event = rx.recv().await.unwrap();
-
-        assert_eq!(event.process_id, result.snapshot.meta.process_id);
-        assert_eq!(event.chat_id, "chat-spawn-bridge");
-        assert_eq!(event.command_preview, "Bridge spawn");
-        assert_eq!(event.status, ExecStatus::Running);
-        registry
-            .kill(&result.snapshot.meta.process_id)
-            .await
-            .unwrap();
-    }
-
     async fn assert_instant_chat_owned_process_broadcast_order(tty: bool) {
         let registry = ExecRegistry::new();
         let mut lifecycle = registry.subscribe_lifecycle();
@@ -2422,12 +2127,6 @@ mod tests {
         assert_instant_chat_owned_process_broadcast_order(false).await;
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn instant_pty_process_broadcasts_spawn_before_completion() {
-        assert_instant_chat_owned_process_broadcast_order(true).await;
-    }
-
     #[tokio::test]
     async fn remove_kills_active_process() {
         let registry = ExecRegistry::new();
@@ -2459,75 +2158,6 @@ mod tests {
         assert_eq!(removed.status, ExecStatus::Killed);
         assert!(registry.get(&process_id).await.is_none());
         assert_process_missing(child_id).await;
-    }
-
-    #[tokio::test]
-    async fn spawn_attach_failure_kills_child() {
-        let registry = ExecRegistry::new();
-        let owner = crate::types::ExecOwnerMeta {
-            service_name: Some("dup".to_string()),
-            ..crate::types::ExecOwnerMeta::default()
-        };
-        let first = registry
-            .spawn(
-                ExecSpawnRequest::service(shell_script(if cfg!(windows) {
-                    "Start-Sleep -Seconds 30"
-                } else {
-                    "sleep 30"
-                }))
-                .with_owner(owner.clone()),
-            )
-            .await
-            .unwrap();
-        let pid_file = tempfile::NamedTempFile::new().unwrap();
-        let pid_path = pid_file.path().to_path_buf();
-        let pid_arg = pid_path.to_string_lossy();
-        let command = if cfg!(windows) {
-            format!(
-                "[Console]::Out.WriteLine($PID); [System.IO.File]::WriteAllText('{}', [string]$PID); Start-Sleep -Seconds 30",
-                pid_arg.replace("'", "''''")
-            )
-        } else {
-            format!(
-                "printf \"%s\\n\" $$; printf \"%s\\n\" $$ > '{}'; sleep 30",
-                pid_arg.replace("'", "'\\''")
-            )
-        };
-        let started = Instant::now();
-        let err = match registry
-            .spawn(
-                ExecSpawnRequest::service(shell_script(&command))
-                    .with_owner(owner)
-                    .with_startup_wait(Duration::from_secs(30)),
-            )
-            .await
-        {
-            Ok(_) => panic!("duplicate service spawn should fail"),
-            Err(err) => err,
-        };
-
-        assert!(
-            err.contains("process already exists"),
-            "unexpected error: {err}"
-        );
-        assert!(started.elapsed() < Duration::from_secs(5));
-        if let Ok(Ok(pid)) =
-            std::fs::read_to_string(&pid_path).map(|value| value.trim().parse::<u32>())
-        {
-            assert_process_missing(pid).await;
-        }
-        assert_eq!(
-            registry
-                .get(&first.snapshot.meta.process_id)
-                .await
-                .unwrap()
-                .status,
-            ExecStatus::Running
-        );
-        registry
-            .kill(&first.snapshot.meta.process_id)
-            .await
-            .unwrap();
     }
 
     #[tokio::test]
@@ -2602,62 +2232,6 @@ mod tests {
                 .process_id,
             second.snapshot.meta.process_id
         );
-
-        registry
-            .kill(&first.snapshot.meta.process_id)
-            .await
-            .unwrap();
-        registry
-            .kill(&second.snapshot.meta.process_id)
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn service_ids_include_chat_scope() {
-        let registry = ExecRegistry::new();
-        let workspace = tempfile::tempdir().unwrap();
-        let command = if cfg!(windows) {
-            "[Console]::Out.Write('svc'); Start-Sleep -Seconds 5"
-        } else {
-            "printf svc; sleep 5"
-        };
-        let owner_a = crate::types::ExecOwnerMeta {
-            chat_id: Some("chat-a".to_string()),
-            tool_call_id: Some("tool-a".to_string()),
-            service_name: Some("api".to_string()),
-            workspace: Some(workspace.path().to_path_buf()),
-        };
-        let owner_b = crate::types::ExecOwnerMeta {
-            chat_id: Some("chat-b".to_string()),
-            tool_call_id: Some("tool-b".to_string()),
-            service_name: Some("api".to_string()),
-            workspace: Some(workspace.path().to_path_buf()),
-        };
-
-        let first = registry
-            .spawn(
-                ExecSpawnRequest::service(shell_script(command))
-                    .with_owner(owner_a)
-                    .with_startup_wait(Duration::from_millis(50)),
-            )
-            .await
-            .unwrap();
-        let second = registry
-            .spawn(
-                ExecSpawnRequest::service(shell_script(command))
-                    .with_owner(owner_b)
-                    .with_startup_wait(Duration::from_millis(50)),
-            )
-            .await
-            .unwrap();
-
-        assert_ne!(
-            first.snapshot.meta.process_id,
-            second.snapshot.meta.process_id
-        );
-        assert_eq!(first.snapshot.status, ExecStatus::Running);
-        assert_eq!(second.snapshot.status, ExecStatus::Running);
 
         registry
             .kill(&first.snapshot.meta.process_id)

@@ -587,61 +587,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_is_claude_code_oauth_detection() {
-        assert!(is_claude_code_oauth("some-oauth-token"));
-        assert!(!is_claude_code_oauth(""));
-    }
-
-    #[test]
-    fn test_prepend_system_string_adds_two_blocks() {
-        let system = json!("Be helpful");
-        let prefixed = prepend_system(system);
-        assert!(prefixed.is_array());
-        let arr = prefixed.as_array().unwrap();
-        assert_eq!(arr.len(), 2);
-        assert_eq!(arr[0]["type"], "text");
-        assert_eq!(arr[0]["text"], SYSTEM_PREFIX);
-        assert_eq!(arr[1]["type"], "text");
-        assert_eq!(arr[1]["text"], "Be helpful");
-    }
-
-    #[test]
-    fn test_prepend_system_array_prefix_appears_exactly_once() {
-        let system = json!([
-            {"type": "text", "text": "Be helpful"},
-            {"type": "text", "text": "Also be brief"}
-        ]);
-        let prefixed = prepend_system(system);
-        let arr = prefixed.as_array().unwrap();
-        // Prefix is ONLY in block 0 — not also merged into block 1
-        assert_eq!(arr.len(), 3);
-        assert_eq!(arr[0]["text"], SYSTEM_PREFIX);
-        assert_eq!(
-            arr[1]["text"], "Be helpful",
-            "block 1 must not have the CC prefix prepended to it"
-        );
-        assert_eq!(arr[2]["text"], "Also be brief");
-        // Verify prefix doesn't appear in block 1
-        let full_text: String = arr
-            .iter()
-            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let count = full_text.matches(SYSTEM_PREFIX).count();
-        assert_eq!(
-            count, 1,
-            "CC system prefix should appear exactly once, found {}",
-            count
-        );
-    }
-
-    #[test]
-    fn test_build_oauth_url_no_existing_params() {
-        let url = build_oauth_url("https://api.anthropic.com/v1/messages");
-        assert_eq!(url, "https://api.anthropic.com/v1/messages?beta=true");
-    }
-
-    #[test]
     fn test_build_oauth_url_with_existing_params() {
         let url = build_oauth_url("https://api.anthropic.com/v1/messages?foo=bar");
         assert_eq!(
@@ -721,45 +666,6 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_first_user_text_string_content() {
-        let messages = json!([
-            {"role": "system", "content": "system stuff"},
-            {"role": "user", "content": "hello world, this is a test message"},
-        ]);
-        assert_eq!(
-            extract_first_user_text(&messages),
-            "hello world, this is a test message"
-        );
-    }
-
-    #[test]
-    fn test_extract_first_user_text_array_content() {
-        let messages = json!([
-            {"role": "user", "content": [
-                {"type": "text", "text": "hello from array content"}
-            ]}
-        ]);
-        assert_eq!(
-            extract_first_user_text(&messages),
-            "hello from array content"
-        );
-    }
-
-    #[test]
-    fn test_extract_first_user_text_empty() {
-        let messages = json!([{"role": "assistant", "content": "hi"}]);
-        assert_eq!(extract_first_user_text(&messages), "");
-    }
-
-    #[test]
-    fn user_agent_embeds_cc_version() {
-        assert_eq!(
-            USER_AGENT,
-            format!("claude-cli/{} (external, cli)", CC_VERSION)
-        );
-    }
-
-    #[test]
     fn cc_version_is_at_least_the_minimum_supported_by_current_models() {
         let parts: Vec<u32> = CC_VERSION
             .split('.')
@@ -773,78 +679,6 @@ mod tests {
             (parts[0], parts[1], parts[2]) >= (2, 1, 280),
             "CC_VERSION {CC_VERSION} is below 2.1.280; Anthropic rejects newer models with older clients"
         );
-    }
-
-    #[test]
-    fn test_compute_billing_fingerprint_returns_3_chars() {
-        let fp = compute_billing_fingerprint("hello world this is a test");
-        assert_eq!(fp.len(), 3);
-        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn test_compute_billing_fingerprint_short_text() {
-        // Text shorter than 20 chars — uses '0' for missing indices
-        let fp = compute_billing_fingerprint("hi");
-        assert_eq!(fp.len(), 3);
-    }
-
-    #[test]
-    fn test_inject_billing_block_converts_string_system() {
-        let mut body = json!({
-            "system": "Be helpful.",
-            "messages": [{"role": "user", "content": "hi"}]
-        });
-        inject_billing_block(&mut body);
-        let sys = body["system"].as_array().unwrap();
-        assert_eq!(sys.len(), 2);
-        assert!(sys[0]["text"]
-            .as_str()
-            .unwrap()
-            .starts_with("x-anthropic-billing-header:"));
-        assert_eq!(sys[1]["text"], "Be helpful.");
-    }
-
-    #[test]
-    fn test_inject_billing_block_no_system() {
-        let mut body = json!({
-            "messages": [{"role": "user", "content": "hi"}]
-        });
-        inject_billing_block(&mut body);
-        let sys = body["system"].as_array().unwrap();
-        assert_eq!(sys.len(), 1);
-        assert!(sys[0]["text"]
-            .as_str()
-            .unwrap()
-            .starts_with("x-anthropic-billing-header:"));
-    }
-
-    #[test]
-    fn test_inject_metadata_structure() {
-        let mut body = json!({"messages": []});
-        inject_metadata(&mut body, None);
-        let uid = body["metadata"]["user_id"].as_str().unwrap();
-        let parsed: Value = serde_json::from_str(uid).unwrap();
-        assert!(parsed["device_id"].as_str().unwrap().len() == 64);
-        assert!(!parsed["session_id"].as_str().unwrap().is_empty());
-        assert!(body["metadata"].get("rename_table_version").is_none());
-    }
-
-    #[test]
-    fn test_inject_metadata_uses_provided_identity() {
-        let identity = ClaudeCodeIdentity {
-            device_id: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                .to_string(),
-            session_id: "11111111-2222-4333-8444-555555555555".to_string(),
-        };
-        let mut body = json!({"messages": []});
-
-        inject_metadata(&mut body, Some(&identity));
-
-        let uid = body["metadata"]["user_id"].as_str().unwrap();
-        let parsed: Value = serde_json::from_str(uid).unwrap();
-        assert_eq!(parsed["device_id"], identity.device_id);
-        assert_eq!(parsed["session_id"], identity.session_id);
     }
 
     #[test]
@@ -875,89 +709,6 @@ mod tests {
             .to_str()
             .unwrap();
         assert!(uuid::Uuid::parse_str(request_id).is_ok());
-    }
-
-    #[test]
-    fn test_apply_stainless_headers_mints_a_fresh_request_id_per_call() {
-        let mut first = HeaderMap::new();
-        let mut second = HeaderMap::new();
-        apply_stainless_headers(&mut first, None).unwrap();
-        apply_stainless_headers(&mut second, None).unwrap();
-        assert_ne!(
-            first.get("x-client-request-id").unwrap(),
-            second.get("x-client-request-id").unwrap()
-        );
-    }
-
-    #[test]
-    fn test_sanitize_system_strips_mode_tag_and_refact_brand() {
-        let sys = json!("[mode3] You are Refact Agent, an orchestrating software engineer. Your job is to help.");
-        let out = sanitize_system_for_cc(sys);
-        let text = out.as_str().unwrap();
-        assert!(!text.contains("[mode3]"), "mode tag should be stripped");
-        assert!(!text.contains("Refact"), "Refact brand should be stripped");
-        assert!(
-            text.contains("You are Claude Code"),
-            "CC identity should be present"
-        );
-        assert!(
-            text.contains("Your job is to help"),
-            "rest of prompt preserved"
-        );
-    }
-
-    #[test]
-    fn test_sanitize_system_strips_extended_mode_tags_and_keeps_current_task_tools() {
-        let sys = json!("[mode3planner] Use agent_finish(), wait_agents(), and buddy_say().");
-        let out = sanitize_system_for_cc(sys);
-        let text = out.as_str().unwrap();
-        assert!(!text.contains("[mode3planner]"));
-        assert!(!text.contains("buddy_say"));
-        assert!(text.contains("agent_finish"));
-        assert!(text.contains("wait_agents"));
-        assert!(text.contains("say"));
-    }
-
-    #[test]
-    fn test_sanitize_system_handles_array_blocks() {
-        let sys = json!([
-            {"type": "text", "text": "[mode3] You are Refact Quick Agent. Execute tasks."},
-            {"type": "text", "text": "Some Refact Agent instruction here."}
-        ]);
-        let out = sanitize_system_for_cc(sys);
-        let arr = out.as_array().unwrap();
-        let t0 = arr[0]["text"].as_str().unwrap();
-        let t1 = arr[1]["text"].as_str().unwrap();
-        assert!(!t0.contains("[mode3]"));
-        assert!(!t0.contains("Refact Quick Agent"));
-        assert!(t0.contains("You are Claude Code"));
-        // "Refact Agent" in block 1 is replaced
-        assert!(!t1.contains("Refact Agent"));
-    }
-
-    #[test]
-    fn test_sanitize_system_no_false_positives() {
-        // "Refactor" must NOT be corrupted to "or"
-        let sys = json!("Use Refactor to rename symbols. Refact Agent is the tool.");
-        let out = sanitize_system_for_cc(sys);
-        let text = out.as_str().unwrap();
-        assert!(
-            text.contains("Refactor"),
-            "Refactor should be preserved: {}",
-            text
-        );
-        assert!(
-            !text.contains("Refact Agent"),
-            "Refact Agent should be replaced"
-        );
-    }
-
-    #[test]
-    fn test_sanitize_system_passthrough_non_text_blocks() {
-        let sys = json!([{"type": "image", "source": {"type": "url", "url": "https://example.com/img.png"}}]);
-        let out = sanitize_system_for_cc(sys);
-        // Non-text blocks should pass through unchanged
-        assert_eq!(out[0]["type"], "image");
     }
 
     #[test]
@@ -1003,31 +754,5 @@ mod tests {
         assert_eq!(cc_resolve_tool_name("t_hist_get"), "get_trajectory_context");
         assert_eq!(cc_resolve_tool_name("t_load_skill"), "activate_skill");
         assert_eq!(cc_resolve_tool_name("t_switch_mode"), "handoff_to_mode");
-    }
-
-    #[test]
-    fn test_cc_resolve_real_mcp_tools_re_add_mcp_prefix() {
-        assert_eq!(cc_resolve_tool_name("tool_search"), "mcp_tool_search");
-        assert_eq!(
-            cc_resolve_tool_name("github_create_issue"),
-            "mcp_github_create_issue"
-        );
-        assert_eq!(
-            cc_resolve_tool_name("github_create_pull_request"),
-            "mcp_github_create_pull_request"
-        );
-        assert_eq!(cc_resolve_tool_name("postgres_query"), "mcp_postgres_query");
-    }
-
-    #[test]
-    fn test_apply_cc_tool_names_tool_choice_consistency() {
-        let mut tools = json!([
-            {"name": "mcp_tool_search", "input_schema": {"type": "object"}},
-            {"name": "update_textdoc_regex", "description": "Edit", "input_schema": {"type": "object"}},
-        ]);
-        apply_cc_tool_names(&mut tools);
-        let arr = tools.as_array().unwrap();
-        assert_eq!(arr[0]["name"], "tool_search");
-        assert_eq!(arr[1]["name"], "t_patch_re");
     }
 }

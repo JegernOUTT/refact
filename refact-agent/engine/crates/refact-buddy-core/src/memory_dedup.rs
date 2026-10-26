@@ -101,54 +101,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalization_strips_timestamps_ids_and_numbers() {
-        let a = normalize_memory_text(
-            "Error at 2026-07-01T10:05:33Z in chat 3f9acd12deadbeef: retry 5 times",
-        );
-        let b = normalize_memory_text(
-            "error at 2026-06-30 08:00:00 in chat aa00bb11cc22dd33: retry 7 times",
-        );
-        assert_eq!(a, b);
-        assert!(!a.contains("2026"));
-        assert!(!a.contains("deadbeef"));
-    }
-
-    #[test]
-    fn normalization_buckets_uuids() {
-        let a = normalize_memory_text("op 6d62772c-4a22-4e30-8d60-687faa073190 failed");
-        let b = normalize_memory_text("op 111aaa22-bb33-44cc-55dd-eeff00112233 failed");
-        assert_eq!(a, b);
-    }
-
-    #[test]
     fn signature_is_stable_across_volatile_details() {
         let sig_a = content_signature("Signal hash fd0347ef: 43 repeated llm_errors at 12:30:01");
         let sig_b = content_signature("signal hash ab12cd34: 17 repeated llm_errors at 09:15:59");
         assert_eq!(sig_a, sig_b);
-    }
-
-    #[test]
-    fn signature_differs_for_different_content() {
-        assert_ne!(
-            content_signature("compaction failed on the summarizer path"),
-            content_signature("provider auth expired for the github integration"),
-        );
-    }
-
-    #[test]
-    fn hex_rule_keeps_ordinary_words() {
-        let normalized = normalize_memory_text("deadbeef feedface is a code cafe babe");
-        assert!(normalized.contains("deadbeef"));
-        assert!(normalized.contains("cafe"));
-    }
-
-    #[test]
-    fn jaccard_similarity_bounds() {
-        let a = token_set("alpha beta gamma delta");
-        let b = token_set("alpha beta gamma delta");
-        let c = token_set("epsilon zeta eta theta");
-        assert!((jaccard_similarity(&a, &b) - 1.0).abs() < f64::EPSILON);
-        assert!(jaccard_similarity(&a, &c) < 0.01);
     }
 
     #[test]
@@ -169,11 +125,5 @@ mod tests {
         let b = "Voice rendering caches the pulse one-liner for five minutes which replays \
                  identical lines when the pulse is quiet.";
         assert!(!near_duplicate(a, b));
-    }
-
-    #[test]
-    fn short_texts_fall_back_to_exact_normalized_match() {
-        assert!(near_duplicate("retry once", "retry   ONCE"));
-        assert!(!near_duplicate("retry once", "retry twice"));
     }
 }

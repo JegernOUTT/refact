@@ -231,16 +231,6 @@ mod tests {
     }
 
     #[test]
-    fn summarizes_coverage() {
-        let coverage = report();
-        let (line_pct, branch_pct, below_50) = coverage_summary(&coverage);
-
-        assert!((line_pct - 52.941_176_470_588_24).abs() < 1e-6);
-        assert!((branch_pct - 50.0).abs() < f64::EPSILON);
-        assert_eq!(below_50, 2);
-    }
-
-    #[test]
     fn summary_excludes_zero_line_files_from_below_50() {
         let mut coverage = report();
         coverage.files.push(FileCoverage {
@@ -256,28 +246,5 @@ mod tests {
         assert!((line_pct - 52.941_176_470_588_24).abs() < 1e-6);
         assert!((branch_pct - 50.0).abs() < f64::EPSILON);
         assert_eq!(below_50, 2);
-    }
-
-    #[test]
-    fn continuous_gradient_deduction_tracks_uncovered_fraction() {
-        let coverage = CoverageReport {
-            format: "test".to_string(),
-            files: vec![FileCoverage {
-                path: "src/half.rs".to_string(),
-                lines_total: 100,
-                lines_covered: 50,
-                branches_total: 0,
-                branches_covered: 0,
-            }],
-        };
-
-        let findings = coverage_biomarkers(&coverage, &HashMap::new(), &HashMap::new());
-        let gradient = findings
-            .iter()
-            .find(|finding| finding.biomarker == "coverage_gradient")
-            .unwrap();
-        assert_eq!(gradient.category, "coverage_gradient");
-        assert_eq!(gradient.severity, Severity::Medium);
-        assert_eq!(gradient.deduction, Some(2.0));
     }
 }

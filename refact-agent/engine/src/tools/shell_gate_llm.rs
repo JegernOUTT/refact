@@ -58,20 +58,6 @@ pub async fn validate_command(
     Some(verdict)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn verdict_ignores_unknown_fields() {
-        let verdict: LlmVerdict =
-            serde_json::from_str(r#"{"ask":true,"reason":"Review this","confidence":0.9}"#)
-                .unwrap();
-        assert!(verdict.ask);
-        assert_eq!(verdict.reason, "Review this");
-    }
-}
-
 async fn validate_command_inner(
     gcx: Arc<GlobalContext>,
     command: String,

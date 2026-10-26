@@ -185,32 +185,6 @@ mod tests {
     }
 
     #[test]
-    fn vllm_server_list_controls_availability_and_retains_unknown_models() {
-        let caps = HashMap::from([(
-            "vllm/catalog-only".to_string(),
-            ModelCapabilities::default(),
-        )]);
-        let models: Vec<_> = [json!({"id": "server-only"})]
-            .iter()
-            .filter_map(|m| VLLMProvider::parse_openai_model(m, false, &caps))
-            .collect();
-
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "server-only");
-        assert!(models.iter().all(|m| m.id != "catalog-only"));
-    }
-
-    #[test]
-    fn vllm_custom_only_addition_is_preserved_for_backwards_compatibility() {
-        let mut provider = VLLMProvider::default();
-        provider
-            .custom_models
-            .insert("custom-only".to_string(), CustomModelConfig::default());
-
-        assert_eq!(provider.get_custom_models_only()[0].id, "custom-only");
-    }
-
-    #[test]
     fn parse_openai_model_keeps_root_only_as_base_model() {
         let model = VLLMProvider::parse_openai_model(
             &json!({

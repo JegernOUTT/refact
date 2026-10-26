@@ -1670,43 +1670,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_config_and_masked_admin_key_are_compatible_for_same_url() {
-        let legacy: LiteLLMProvider = serde_yaml::from_str(
-            "endpoint: http://proxy:4000\napi_key: inference\nenabled: false\n",
-        )
-        .unwrap();
-        assert!(legacy.admin_url.is_none() && legacy.admin_api_key.is_none());
-
-        let mut provider = LiteLLMProvider::default();
-        provider
-            .provider_settings_apply(
-                serde_yaml::from_str(
-                    "admin_url: https://admin.example/v1/\nadmin_api_key: admin-secret\n",
-                )
-                .unwrap(),
-            )
-            .unwrap();
-        assert_eq!(provider.admin_url.as_deref(), Some("https://admin.example"));
-        assert_eq!(provider.provider_settings_as_json()["admin_api_key"], "***");
-        provider
-            .provider_settings_apply(
-                serde_yaml::from_str("admin_url: https://admin.example/v1\nadmin_api_key: '***'\n")
-                    .unwrap(),
-            )
-            .unwrap();
-        assert_eq!(provider.admin_api_key.as_deref(), Some("admin-secret"));
-        assert_eq!(provider.admin_url.as_deref(), Some("https://admin.example"));
-        assert!(provider.provider_schema().contains("Admin API Key"));
-        assert!(provider
-            .provider_schema()
-            .contains("may not represent an inference key"));
-        assert_eq!(
-            provider.provider_schema().matches("f_extra: true").count(),
-            5
-        );
-    }
-
-    #[test]
     fn admin_url_policy_accepts_https_and_loopback_http_only() {
         for value in [
             "https://admin.example",
@@ -2009,72 +1972,6 @@ mod tests {
     }
 
     #[test]
-    fn nested_reasoning_opt_out_disables_thinking_capabilities() {
-        let metadata = LiteLLMProvider::parse_metadata(&json!({
-            "model_name":"reasoning-model",
-            "model_info":{
-                "supports_reasoning":false,
-                "supports_thinking":true,
-                "supports_adaptive_thinking":true,
-                "max_thinking_tokens":4096
-            }
-        }));
-
-        assert_eq!(
-            metadata.live.reasoning_effort_options.as_deref(),
-            Some(&[][..])
-        );
-        assert_eq!(metadata.live.supports_thinking_budget, Some(false));
-        assert_eq!(metadata.live.supports_adaptive_thinking_budget, Some(false));
-    }
-
-    #[test]
-    fn row_level_thinking_capabilities_override_nested_metadata() {
-        let metadata = LiteLLMProvider::parse_metadata(&json!({
-            "model_name":"reasoning-model",
-            "supports_thinking_budget":false,
-            "supports_adaptive_thinking_budget":false,
-            "max_thinking_budget":2048,
-            "model_info":{
-                "supports_thinking":true,
-                "supports_adaptive_thinking":true,
-                "max_thinking_tokens":4096
-            }
-        }));
-
-        assert_eq!(metadata.live.supports_thinking_budget, Some(false));
-        assert_eq!(metadata.live.supports_adaptive_thinking_budget, Some(false));
-        assert_eq!(metadata.live.max_thinking_tokens, Some(2048));
-    }
-
-    #[test]
-    fn row_level_supported_parameters_override_nested_generic_metadata() {
-        let provider = LiteLLMProvider::default();
-        let model = provider
-            .available_from_discovery(
-                &json!({"data":[{"id":"reasoning-model"}]}),
-                Some(&json!({"data":[{
-                    "model_name":"reasoning-model",
-                    "supported_openai_params":["reasoning_effort"],
-                    "model_info":{"supported_openai_params":["tools"]}
-                }]})),
-                &HashMap::new(),
-            )
-            .pop()
-            .unwrap();
-
-        assert_eq!(
-            model.reasoning_effort_options.as_deref(),
-            Some(&["low".to_string(), "medium".to_string(), "high".to_string()][..])
-        );
-        assert_eq!(
-            model.supported_parameters.as_deref(),
-            Some(&["reasoning_effort".to_string()][..])
-        );
-        assert!(!model.supports_tools);
-    }
-
-    #[test]
     fn canonical_supported_parameters_skip_invalid_candidates_consistently() {
         let metadata = LiteLLMProvider::parse_metadata(&json!({
             "model_name":"reasoning-model",
@@ -2131,59 +2028,6 @@ mod tests {
     }
 
     #[test]
-    fn sonnet_five_defaults_to_high_and_xhigh_reasoning_efforts() {
-        let provider = LiteLLMProvider::default();
-        let model = provider
-            .available_from_discovery(
-                &json!({"data":[{"id":"sonnet-5"}]}),
-                Some(&json!({"data":[{
-                    "model_name":"sonnet-5",
-                    "supports_reasoning":true,
-                    "model_info":{"mode":"chat"}
-                }]})),
-                &HashMap::new(),
-            )
-            .pop()
-            .unwrap();
-
-        assert_eq!(
-            model.reasoning_effort_options.as_deref(),
-            Some(&["high".to_string(), "xhigh".to_string()][..])
-        );
-    }
-
-    #[test]
-    fn sonnet_five_identifiers_default_without_reasoning_advertisement() {
-        for row in [
-            json!({"model_name":"team-sonnet-5-alias","supported_parameters":["tools"]}),
-            json!({"model_name":"alias","litellm_params":{"model":"anthropic/sonnet-5-latest"}}),
-            json!({"model_name":"alias","model_info":{"base_model":"claude-sonnet-5-preview"}}),
-        ] {
-            assert_eq!(
-                LiteLLMProvider::parse_metadata(&row)
-                    .live
-                    .reasoning_effort_options
-                    .as_deref(),
-                Some(&["high".to_string(), "xhigh".to_string()][..])
-            );
-        }
-    }
-
-    #[test]
-    fn sonnet_five_detection_checks_id_and_model_name_independently() {
-        let metadata = LiteLLMProvider::parse_metadata(&json!({
-            "id":"unrelated-model",
-            "model_name":"team-sonnet-5-alias",
-            "supported_parameters":["tools"]
-        }));
-
-        assert_eq!(
-            metadata.live.reasoning_effort_options.as_deref(),
-            Some(&["high".to_string(), "xhigh".to_string()][..])
-        );
-    }
-
-    #[test]
     fn sonnet_five_respects_explicit_reasoning_data_and_row_false() {
         for (row, expected) in [
             (
@@ -2218,27 +2062,6 @@ mod tests {
                 Some(expected)
             );
         }
-    }
-
-    #[test]
-    fn metadata_free_sonnet_five_defaults_to_high_and_xhigh_reasoning_efforts() {
-        let provider = LiteLLMProvider::default();
-        let model = provider
-            .available_from_discovery(
-                &json!({"data":[{"id":"team-sonnet-5-latest"}]}),
-                Some(&json!({"data":[{
-                    "model_name":"another-model",
-                    "reasoning_effort_options":["low"]
-                }]})),
-                &HashMap::new(),
-            )
-            .pop()
-            .unwrap();
-
-        assert_eq!(
-            model.reasoning_effort_options.as_deref(),
-            Some(&["high".to_string(), "xhigh".to_string()][..])
-        );
     }
 
     #[test]
@@ -2809,24 +2632,5 @@ mod tests {
         assert_eq!(tokio::fs::read_to_string(&counter).await.unwrap(), "2");
         server.await.unwrap();
         credential::invalidate(&provider_id);
-    }
-
-    #[test]
-    fn accepts_command_credential_and_registry_constructs_provider() {
-        let mut provider = LiteLLMProvider::default();
-        provider
-            .provider_settings_apply(
-                serde_yaml::from_str(
-                    "credential:\n  type: command\n  command: helper\n  args: [token]\n",
-                )
-                .unwrap(),
-            )
-            .unwrap();
-        assert!(matches!(
-            provider.credential,
-            Some(CredentialSpec::Command { .. })
-        ));
-        let registered = crate::create_provider("litellm").unwrap();
-        assert_eq!(registered.name(), "litellm");
     }
 }

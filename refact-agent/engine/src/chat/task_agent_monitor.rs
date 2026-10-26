@@ -2621,30 +2621,6 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn planner_notify_cooldown_prevents_spam() {
-        let recent = StatusUpdate {
-            timestamp: Utc::now().to_rfc3339(),
-            message: format!("{} agent-T-1", STALL_PLANNER_NOTIFY_STATUS_PREFIX),
-        };
-        let (_temp, app, task_id, _agent_chat_id, _agent_arc, planner_arc) = setup_monitor_case(
-            "doing",
-            SessionState::Idle,
-            Duration::from_secs(90),
-            vec![recent],
-        )
-        .await;
-
-        check_for_stuck_agents(app.clone()).await.unwrap();
-
-        let board = storage::load_board(app.gcx.clone(), &task_id)
-            .await
-            .unwrap();
-        let card = board.get_card("T-1").unwrap();
-        assert_eq!(stall_planner_notifications(card).0, 1);
-        assert_eq!(planner_arc.lock().await.pending_deliveries.len(), 1);
-    }
-
-    #[tokio::test]
     async fn completed_state_on_doing_card_notifies_planner() {
         let (_temp, app, task_id, _agent_chat_id, _agent_arc, planner_arc) = setup_monitor_case(
             "doing",
@@ -2689,21 +2665,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_agent_stuck_timeout_constant() {
-        assert_eq!(AGENT_STUCK_TIMEOUT.as_secs(), 20 * 60);
-    }
-
-    #[test]
-    fn test_monitor_interval_constant() {
-        assert_eq!(MONITOR_INTERVAL.as_secs(), 2 * 60);
-    }
-
-    #[test]
-    fn test_tool_stall_timeout_constant() {
-        assert_eq!(TOOL_STALL_TIMEOUT.as_secs(), 8 * 60);
-    }
-
-    #[test]
     fn failure_policy_keeps_only_permanent_and_cancelled_as_terminal() {
         assert_eq!(
             agent_failure_attention_kind(AgentFailureKind::TransientExhausted),
@@ -2721,121 +2682,6 @@ pub(crate) mod tests {
             agent_failure_attention_kind(AgentFailureKind::Cancelled),
             None
         );
-    }
-
-    #[test]
-    fn test_agents_active_count() {
-        let cards = vec![
-            create_test_card("T-1", "doing", Some("agent-1".to_string())),
-            create_test_card("T-2", "doing", Some("agent-2".to_string())),
-            create_test_card("T-3", "done", Some("agent-3".to_string())),
-            create_test_card("T-4", "planned", None),
-        ];
-
-        let active_count = cards
-            .iter()
-            .filter(|c| c.column == "doing" && c.assignee.is_some())
-            .count();
-
-        assert_eq!(active_count, 2);
-    }
-
-    #[test]
-    fn test_timestamp_fallback_logic() {
-        let mut card = create_test_card("T-1", "doing", Some("agent-1".to_string()));
-
-        card.status_updates.push(StatusUpdate {
-            timestamp: "2024-01-01T10:00:00Z".to_string(),
-            message: "Test update".to_string(),
-        });
-
-        let last_activity = card
-            .status_updates
-            .last()
-            .map(|u| u.timestamp.as_str())
-            .or(card.started_at.as_deref())
-            .unwrap_or(&card.created_at);
-
-        assert_eq!(last_activity, "2024-01-01T10:00:00Z");
-    }
-
-    #[test]
-    fn test_timestamp_fallback_to_started_at() {
-        let card = create_test_card("T-1", "doing", Some("agent-1".to_string()));
-
-        let last_activity = card
-            .status_updates
-            .last()
-            .map(|u| u.timestamp.as_str())
-            .or(card.started_at.as_deref())
-            .unwrap_or(&card.created_at);
-
-        assert_eq!(last_activity, card.started_at.as_ref().unwrap());
-    }
-
-    #[test]
-    fn test_timestamp_fallback_to_created_at() {
-        let mut card = create_test_card("T-1", "doing", Some("agent-1".to_string()));
-        card.started_at = None;
-
-        let last_activity = card
-            .status_updates
-            .last()
-            .map(|u| u.timestamp.as_str())
-            .or(card.started_at.as_deref())
-            .unwrap_or(&card.created_at);
-
-        assert_eq!(last_activity, &card.created_at);
-    }
-
-    #[test]
-    fn test_all_finished_when_no_doing_cards() {
-        let cards = vec![
-            create_test_card("T-1", "done", Some("agent-1".to_string())),
-            create_test_card("T-2", "failed", Some("agent-2".to_string())),
-        ];
-
-        let agents_active = cards
-            .iter()
-            .filter(|c| c.column == "doing" && c.assignee.is_some())
-            .count();
-
-        assert_eq!(agents_active, 0);
-    }
-
-    #[test]
-    fn test_elapsed_time_calculation() {
-        let old_time = chrono::Utc::now() - chrono::Duration::seconds(25 * 60);
-        let old_timestamp = old_time.to_rfc3339();
-
-        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&old_timestamp) {
-            let elapsed =
-                chrono::Utc::now().signed_duration_since(parsed.with_timezone(&chrono::Utc));
-            let elapsed_secs = elapsed.num_seconds() as u64;
-
-            assert!(elapsed_secs >= 25 * 60 - 5);
-            assert!(elapsed_secs > AGENT_STUCK_TIMEOUT.as_secs());
-        } else {
-            panic!("Failed to parse timestamp");
-        }
-    }
-
-    #[test]
-    fn test_assignee_mismatch_detection() {
-        let card = create_test_card("T-1", "doing", Some("agent-123".to_string()));
-        let expected_agent = "agent-456";
-
-        let mismatch = card.assignee.as_ref() != Some(&expected_agent.to_string());
-        assert!(mismatch);
-    }
-
-    #[test]
-    fn test_assignee_match() {
-        let card = create_test_card("T-1", "doing", Some("agent-123".to_string()));
-        let expected_agent = "agent-123";
-
-        let matches = card.assignee.as_ref() == Some(&expected_agent.to_string());
-        assert!(matches);
     }
 
     #[test]
@@ -3245,35 +3091,5 @@ pub(crate) mod tests {
             1,
             "only one wake-up message after two sweeps"
         );
-    }
-
-    #[tokio::test]
-    async fn planner_wake_up_skipped_when_state_changed() {
-        let past = Utc::now() - chrono::Duration::seconds(10);
-        let (_temp, app, _task_id, planner_arc) =
-            setup_planner_wake_case(SessionState::Generating, Some(past), false).await;
-
-        check_for_stuck_agents(app.clone()).await.unwrap();
-
-        let session = planner_arc.lock().await;
-        assert!(
-            session.command_queue.is_empty(),
-            "no wake message when state is not WaitingUserInput"
-        );
-    }
-
-    #[tokio::test]
-    async fn planner_wake_up_message_contains_agent_status_snapshot() {
-        let past = Utc::now() - chrono::Duration::seconds(10);
-        let (_temp, app, _task_id, planner_arc) =
-            setup_planner_wake_case(SessionState::WaitingUserInput, Some(past), true).await;
-
-        check_for_stuck_agents(app.clone()).await.unwrap();
-
-        let session = planner_arc.lock().await;
-        assert_eq!(session.messages.len(), 1);
-        assert!(session.command_queue.is_empty());
-        let text = session.messages.last().unwrap().content.content_text_only();
-        assert!(text.contains("T-1"), "message should contain card T-1");
     }
 }

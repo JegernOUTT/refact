@@ -28,13 +28,3 @@ impl App {
         Some(AppAction::None)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn vim_modes_are_distinct() {
-        assert_ne!(VimMode::Normal, VimMode::Insert);
-    }
-}

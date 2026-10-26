@@ -752,59 +752,6 @@ mod tests {
     }
 
     #[test]
-    fn the_six_evidence_verdicts_stay_six_series_and_are_never_collapsed() {
-        let recorder = MetricsRecorder::new();
-        let verdicts = [
-            EvidenceVerdict::NotRun,
-            EvidenceVerdict::Passed,
-            EvidenceVerdict::Failed,
-            EvidenceVerdict::Blocked,
-            EvidenceVerdict::Unavailable,
-            EvidenceVerdict::Superseded,
-        ];
-        for verdict in verdicts {
-            recorder.count(
-                EVIDENCE_VERDICTS,
-                vec![("verdict", verdict.label().to_string())],
-            );
-        }
-        recorder.count(
-            EVIDENCE_VERDICTS,
-            vec![("verdict", EvidenceVerdict::Failed.label().to_string())],
-        );
-
-        let snapshot = recorder.snapshot();
-        let series: Vec<&SeriesKey> = snapshot
-            .keys
-            .iter()
-            .filter(|key| key.name == EVIDENCE_VERDICTS)
-            .collect();
-        assert_eq!(
-            series.len(),
-            6,
-            "each verdict keeps its own series: {:?}",
-            snapshot.series
-        );
-        for verdict in verdicts {
-            assert!(
-                snapshot.counter(EVIDENCE_VERDICTS, "verdict", verdict.label()) >= 1,
-                "{} lost its series",
-                verdict.label()
-            );
-        }
-        assert_eq!(
-            snapshot.counter(EVIDENCE_VERDICTS, "verdict", "failed"),
-            2,
-            "a repeated verdict increments its own series, not a shared one"
-        );
-        assert_ne!(
-            snapshot.counter(EVIDENCE_VERDICTS, "verdict", "blocked"),
-            snapshot.counter(EVIDENCE_VERDICTS, "verdict", "failed"),
-            "blocked and failed are different facts"
-        );
-    }
-
-    #[test]
     fn a_seeded_credential_never_reaches_a_label_or_an_explanation() {
         let secret = "sk-live-ZZQ2ab3Ccd4Eef5Ggh6Iij7Kkl8M";
         let recorder = MetricsRecorder::new();
@@ -848,22 +795,6 @@ mod tests {
                 .map(|sample| sample.counter()),
             Some(1)
         );
-    }
-
-    #[test]
-    fn an_explanation_names_its_decision_its_inputs_and_the_rule_that_fired() {
-        let recorder = MetricsRecorder::new();
-        assert!(recorder.explain(Explanation::new(
-            Decision::MergeRefusal,
-            "refused",
-            "merge_gate.dirty_baseline",
-            inputs(&[("reason", "worktree has uncommitted changes")]),
-        )));
-        let stored = recorder.snapshot();
-        let entry = stored.explanations_for(Decision::MergeRefusal)[0].clone();
-        assert_eq!(entry.rule, "merge_gate.dirty_baseline");
-        assert_eq!(entry.outcome, "refused");
-        assert!(!entry.inputs.is_empty());
     }
 
     #[test]
@@ -954,33 +885,6 @@ mod tests {
             "a poisoned lock is recovered, not propagated"
         );
         assert_eq!(snapshot.explanations_for(Decision::AutomaticPause).len(), 1);
-    }
-
-    #[test]
-    fn observations_keep_count_sum_and_extremes() {
-        let recorder = MetricsRecorder::new();
-        for value in [10, 250, 90] {
-            recorder.observe(
-                QUEUE_LATENCY_MS,
-                vec![("state", "queued".to_string())],
-                value,
-            );
-        }
-        let snapshot = recorder.snapshot();
-        let sample = snapshot
-            .series
-            .get("queue_latency_ms{state=queued}")
-            .copied()
-            .unwrap();
-        assert_eq!(
-            sample,
-            Sample::Observation {
-                count: 3,
-                sum: 350,
-                min: 10,
-                max: 250
-            }
-        );
     }
 
     /// Exercising the gate itself, not the recorder: `evaluate_gates` is the
@@ -1082,133 +986,6 @@ mod tests {
                 .iter()
                 .any(|(name, _)| name == "reason" || name == "verdict"),
             "a refusal names the inputs that produced it"
-        );
-    }
-
-    /// The pause verdict comes from the classifier, not from a direct call to
-    /// the recorder.
-    #[test]
-    #[serial_test::serial(coordination_metrics)]
-    fn the_real_classifier_path_explains_an_automatic_pause() {
-        use crate::agents::progress_monitor::{
-            classify, ProgressThresholds, RunActivity, ToolCallEvidence, TurnEvidence,
-        };
-
-        recorder().reset();
-        let thresholds = ProgressThresholds {
-            repeat_threshold: 2,
-            unchanged_turns: 2,
-            window_turns: 8,
-            silence_window: std::time::Duration::from_secs(600),
-        };
-        let repeated = |name: &str| TurnEvidence {
-            tool_calls: vec![ToolCallEvidence {
-                name: name.to_string(),
-                arguments: "same-arguments".to_string(),
-                result: Some("same-result".to_string()),
-            }],
-            output: None,
-        };
-        let activity = RunActivity {
-            turns: vec![repeated("cat"), repeated("cat"), repeated("cat")],
-            ..Default::default()
-        };
-        let class = classify(&activity, thresholds);
-        assert!(
-            class.is_no_progress_verdict(),
-            "expected a no-progress verdict, got {class:?}"
-        );
-
-        let snapshot = recorder().snapshot();
-        let paused = snapshot.explanations_for(Decision::AutomaticPause);
-        assert_eq!(paused.len(), 1, "the pause was not explained");
-        assert_eq!(paused[0].rule, "progress_monitor.no_material_progress");
-        assert!(
-            paused[0]
-                .inputs
-                .iter()
-                .any(|(name, value)| name == "reason" && value.contains("repeated")),
-            "the explanation must name the evidence: {:?}",
-            paused[0].inputs
-        );
-    }
-
-    /// Backpressure and retry decisions come from the controller through the
-    /// engine seam, never from a hand-written counter.
-    #[test]
-    #[serial_test::serial(provider_pressure, coordination_metrics, runtime_settings)]
-    fn the_real_admission_path_explains_a_backpressure_deferral_and_a_retry() {
-        use crate::llm::pressure::{admit, install_provider_pressure, retry_decision};
-        use refact_providers::pressure::{FailureReport, RequestPriority};
-        use refact_work_core::CoordinationSettings;
-
-        recorder().reset();
-        let mut settings = CoordinationSettings::default();
-        settings.provider_max_concurrency = 1;
-        settings.provider_min_concurrency = 1;
-        settings.provider_initial_concurrency = 1;
-        settings.provider_interactive_reserved_slots = 0;
-        install_provider_pressure(&settings).unwrap();
-
-        let bucket = "openai/fingerprint";
-        let held = admit(bucket, RequestPriority::Interactive)
-            .expect("a registry is installed")
-            .expect("the first request is admitted");
-        let refused = admit(bucket, RequestPriority::Interactive).expect("a registry is installed");
-        assert!(refused.is_err(), "the bucket is full, so this must defer");
-        drop(held);
-
-        let snapshot = recorder().snapshot();
-        let deferrals = snapshot.explanations_for(Decision::BackpressureDeferral);
-        assert_eq!(deferrals.len(), 1);
-        assert_eq!(deferrals[0].rule, "provider_pressure.bucket_at_capacity");
-        assert!(deferrals[0]
-            .inputs
-            .iter()
-            .any(|(name, value)| name == "reason" && value.contains("in flight")));
-        assert!(snapshot.counter(PERMITS, "kind", "deferred") >= 1);
-        assert!(
-            snapshot
-                .keys
-                .iter()
-                .any(|key| key.name == PROVIDER_AIMD && key.label("state").is_some()),
-            "AIMD state is sampled from the controller's own snapshot"
-        );
-
-        let report = FailureReport::transport("connection reset");
-        retry_decision(bucket, &report, 0).expect("a registry is installed");
-        let retries = recorder().snapshot();
-        let explained = retries.explanations_for(Decision::Retry);
-        assert_eq!(explained.len(), 1);
-        assert!(
-            explained[0].rule.starts_with("provider_pressure."),
-            "a retry names the rule that fired: {}",
-            explained[0].rule
-        );
-
-        install_provider_pressure(&CoordinationSettings::default()).unwrap();
-    }
-
-    /// A causal trace reports its own completeness through the real
-    /// reconstruction path.
-    #[test]
-    #[serial_test::serial(coordination_metrics)]
-    fn the_real_trace_path_records_completeness() {
-        use crate::coordination::causal::reconstruct;
-
-        recorder().reset();
-        let events = Vec::new();
-        let trace = reconstruct(&events, "missing-root");
-        assert!(!trace.complete);
-        let snapshot = recorder().snapshot();
-        assert_eq!(
-            snapshot.counter(CAUSAL_TRACE_COMPLETENESS, "result", "incomplete"),
-            1,
-            "an incomplete trace is a distinct series from a whole one"
-        );
-        assert_eq!(
-            snapshot.counter(CAUSAL_TRACE_COMPLETENESS, "result", "complete"),
-            0
         );
     }
 

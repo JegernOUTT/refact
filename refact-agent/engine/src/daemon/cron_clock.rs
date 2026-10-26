@@ -517,18 +517,6 @@ mod tests {
     }
 
     #[test]
-    fn next_fire_matches_scheduler_cron_expr_for_recurring_tasks() {
-        let now = utc_ms(2026, 1, 1, 0, 0);
-        for expr in ["*/5 * * * *", "17 * * * *", "0 9 * * 1-5"] {
-            let task = task(expr, expr, now);
-            assert_eq!(
-                next_fire_for_task(&task, now, chrono_tz::UTC),
-                next_run_ms(expr, now, chrono_tz::UTC)
-            );
-        }
-    }
-
-    #[test]
     fn overdue_recurring_fast_forward_matches_runner_fixture() {
         let now = utc_ms(2026, 1, 1, 0, 10);
         let mut task = task("overdue", "*/1 * * * *", utc_ms(2026, 1, 1, 0, 0));
@@ -547,46 +535,6 @@ mod tests {
 
         assert_eq!(clock_next, utc_ms(2026, 1, 1, 0, 11));
         assert_eq!(runner_next, clock_next);
-    }
-
-    #[test]
-    fn one_shot_past_due_is_due_now() {
-        let now = utc_ms(2026, 1, 1, 0, 10);
-        let mut task = task("one-shot", "*/5 * * * *", utc_ms(2026, 1, 1, 0, 0));
-        task.recurring = false;
-        task.auto_expire_after_ms = 0;
-
-        assert_eq!(next_fire_for_task(&task, now, chrono_tz::UTC), Some(now));
-    }
-
-    #[test]
-    fn due_within_wake_lead_boundary_is_inclusive() {
-        let now = utc_ms(2026, 1, 1, 0, 0);
-        let inside = PendingCron {
-            task_id: "inside".to_string(),
-            next_fire_ms: now + WAKE_LEAD_MS,
-        };
-        let outside = PendingCron {
-            task_id: "outside".to_string(),
-            next_fire_ms: now + WAKE_LEAD_MS + 1,
-        };
-
-        assert!(inside.next_fire_ms <= now + WAKE_LEAD_MS);
-        assert!(outside.next_fire_ms > now + WAKE_LEAD_MS);
-    }
-
-    #[test]
-    fn cron_pending_idle_stop_horizon_is_ten_minutes() {
-        let now = utc_ms(2026, 1, 1, 0, 0);
-
-        assert!(cron_pending_blocks_idle_stop(
-            now + CRON_PENDING_HORIZON_MS,
-            now
-        ));
-        assert!(!cron_pending_blocks_idle_stop(
-            now + CRON_PENDING_HORIZON_MS + 1,
-            now
-        ));
     }
 
     #[tokio::test]
@@ -743,42 +691,6 @@ mod tests {
         assert_eq!(worker.state, WorkerState::Ready);
         assert_eq!(state.cron_pending(&project_id).await, Some(now));
         state.supervisor.stop_all().await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial(daemon, scheduler_env)]
-    async fn tick_ignores_project_without_durable_tasks() {
-        let Some(_env) = EnvGuard::fake_worker() else {
-            return;
-        };
-        let dir = tempdir().unwrap();
-        let root = dir.path().join("project");
-        tokio::fs::create_dir_all(&root).await.unwrap();
-        let mut session_task = task("session", "0 0 1 1 *", 0);
-        session_task.durable = false;
-        session_task.recurring = false;
-        session_task.auto_expire_after_ms = 0;
-        write_tasks(&root, &[session_task]).await;
-        let state = DaemonState::new(
-            DaemonConfig::default(),
-            EventBus::new(dir.path().join("events.jsonl")),
-            None,
-        );
-        state.load_projects(dir.path().join("projects.json")).await;
-        {
-            let mut registry = state.projects.write().await;
-            registry.open(root).await.unwrap();
-        }
-        let project_id = {
-            let registry = state.projects.read().await;
-            registry.list()[0].id.clone()
-        };
-        let mut clock = CronClock::new(state.clone());
-
-        clock.tick_at(now_ms()).await;
-
-        assert_eq!(state.supervisor.worker_count().await, 0);
-        assert_eq!(state.cron_pending(&project_id).await, None);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

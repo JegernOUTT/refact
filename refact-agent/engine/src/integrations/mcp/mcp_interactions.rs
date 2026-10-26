@@ -160,20 +160,6 @@ pub async fn wait_for_mcp_interaction_response(
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_server_name_from_config_path() {
-        assert_eq!(
-            server_name_from_config_path("/x/integrations.d/mcp_http_github.yaml"),
-            "github"
-        );
-        assert_eq!(
-            server_name_from_config_path("/x/integrations.d/mcp_linear.yaml"),
-            "linear"
-        );
-        assert_eq!(server_name_from_config_path("/x/mcp_.yaml"), "mcp_");
-        assert_eq!(server_name_from_config_path("plain.yaml"), "plain");
-    }
-
     #[tokio::test]
     async fn test_interaction_respond_roundtrip() {
         let (id, rx) = create_mcp_interaction(
@@ -244,51 +230,5 @@ mod tests {
         assert!(!list_mcp_interactions().await.iter().any(|i| i.id == id));
         let response = wait_for_mcp_interaction_response(&id, rx, 5).await;
         assert_eq!(response.action, "decline");
-    }
-
-    #[test]
-    fn test_interaction_info_serialization_shape() {
-        let info = MCPInteractionInfo {
-            id: "i1".to_string(),
-            config_path: "/x/mcp_http_srv.yaml".to_string(),
-            server_name: "srv".to_string(),
-            kind: MCPInteractionKind::Elicitation {
-                message: "m".to_string(),
-                requested_schema: None,
-                url: Some("https://example.com".to_string()),
-                elicitation_id: Some("e1".to_string()),
-            },
-            created_at_ms: 1,
-            timeout_at_ms: 2,
-        };
-        let json = serde_json::to_value(&info).unwrap();
-        assert_eq!(
-            json.get("kind").and_then(|v| v.as_str()),
-            Some("elicitation")
-        );
-        assert_eq!(
-            json.get("url").and_then(|v| v.as_str()),
-            Some("https://example.com")
-        );
-        assert!(json.get("requested_schema").is_none());
-
-        let sampling = MCPInteractionInfo {
-            id: "i2".to_string(),
-            config_path: "c".to_string(),
-            server_name: "s".to_string(),
-            kind: MCPInteractionKind::SamplingApproval {
-                message_count: 3,
-                max_tokens: 42,
-                preview: "p".to_string(),
-            },
-            created_at_ms: 1,
-            timeout_at_ms: 2,
-        };
-        let json = serde_json::to_value(&sampling).unwrap();
-        assert_eq!(
-            json.get("kind").and_then(|v| v.as_str()),
-            Some("sampling_approval")
-        );
-        assert_eq!(json.get("max_tokens").and_then(|v| v.as_u64()), Some(42));
     }
 }

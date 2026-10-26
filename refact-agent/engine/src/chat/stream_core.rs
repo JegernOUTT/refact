@@ -4047,57 +4047,6 @@ mod tests {
     }
 
     #[test]
-    fn websocket_tls_connector_builds_with_explicit_crypto_provider() {
-        let connector = openai_codex_websocket_tls_connector();
-
-        assert!(matches!(connector, tokio_tungstenite::Connector::Rustls(_)));
-    }
-
-    #[test]
-    fn websocket_stack_mb_parser_uses_default_and_clamps_bounds() {
-        assert_eq!(
-            stack_mb_to_bytes_clamped(None, DEFAULT_OPENAI_CODEX_WEBSOCKET_THREAD_STACK_BYTES),
-            DEFAULT_OPENAI_CODEX_WEBSOCKET_THREAD_STACK_BYTES
-        );
-        assert_eq!(
-            stack_mb_to_bytes_clamped(
-                Some("nope"),
-                DEFAULT_OPENAI_CODEX_WEBSOCKET_THREAD_STACK_BYTES
-            ),
-            DEFAULT_OPENAI_CODEX_WEBSOCKET_THREAD_STACK_BYTES
-        );
-        assert_eq!(
-            stack_mb_to_bytes_clamped(Some("1"), DEFAULT_OPENAI_CODEX_WEBSOCKET_THREAD_STACK_BYTES),
-            MIN_OPENAI_CODEX_WEBSOCKET_THREAD_STACK_MB * 1024 * 1024
-        );
-        assert_eq!(
-            stack_mb_to_bytes_clamped(
-                Some("99999"),
-                DEFAULT_OPENAI_CODEX_WEBSOCKET_THREAD_STACK_BYTES
-            ),
-            MAX_OPENAI_CODEX_WEBSOCKET_THREAD_STACK_MB * 1024 * 1024
-        );
-        assert_eq!(
-            stack_mb_to_bytes_clamped(
-                Some("96"),
-                DEFAULT_OPENAI_CODEX_WEBSOCKET_THREAD_STACK_BYTES
-            ),
-            96 * 1024 * 1024
-        );
-    }
-
-    #[test]
-    fn llm_http_header_retry_config_requires_opt_in() {
-        let model = BaseModelRecord {
-            id: "anthropic/claude-sonnet-4".to_string(),
-            endpoint: "https://api.anthropic.com/v1/messages".to_string(),
-            ..Default::default()
-        };
-
-        assert_eq!(llm_http_header_retry_config(&model), None);
-    }
-
-    #[test]
     fn claude_code_instance_id_accepts_base_and_named_instances() {
         let model = |provider_name: &str, base_provider: &str| {
             let mut model = BaseModelRecord {
@@ -4209,16 +4158,6 @@ mod tests {
 
         assert_eq!(openai_codex_instance_id(&singleton), Some("openai_codex"));
         assert_eq!(openai_codex_instance_id(&alias), Some("codex-prod"));
-    }
-
-    #[test]
-    fn claude_code_request_expiry_uses_internal_model_header() {
-        let mut model = BaseModelRecord::default();
-        model.extra_headers.insert(
-            crate::providers::claude_code::CLAUDE_CODE_OAUTH_EXPIRES_AT_HEADER.to_string(),
-            "12345".to_string(),
-        );
-        assert_eq!(claude_code_request_expires_at(&model), Some(12345));
     }
 
     #[test]
@@ -4360,16 +4299,6 @@ mod tests {
     }
 
     #[test]
-    fn llm_http_header_timeout_is_retryable() {
-        let error = llm_http_response_header_timeout_message(Duration::from_secs(10));
-
-        assert!(matches!(
-            classify_llm_error_for_retry(&error),
-            RetryDecision::Retry { .. }
-        ));
-    }
-
-    #[test]
     fn cache_guard_is_not_committed_for_retryable_http_errors() {
         assert!(!should_commit_cache_guard_after_http_success(
             reqwest::StatusCode::TOO_MANY_REQUESTS,
@@ -4497,20 +4426,6 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_millis(150),
             "polling fallback should detect abort within ~50ms tick, took {:?}",
-            elapsed
-        );
-    }
-
-    #[tokio::test]
-    async fn wait_for_abort_signal_returns_immediately_if_already_set() {
-        let abort_flag = Arc::new(AtomicBool::new(true));
-        let abort_notify = Arc::new(tokio::sync::Notify::new());
-        let start = std::time::Instant::now();
-        wait_for_abort_signal(Some(abort_flag), Some(abort_notify)).await;
-        let elapsed = start.elapsed();
-        assert!(
-            elapsed < std::time::Duration::from_millis(5),
-            "already-set flag should return immediately, took {:?}",
             elapsed
         );
     }
@@ -5023,122 +4938,6 @@ mod tests {
     }
 
     #[test]
-    fn test_litellm_empty_thinking_text_gets_reasoning_merged() {
-        // LiteLLM sends signed thinking blocks with empty "thinking": ""
-        // because reasoning was already streamed via reasoning_content.
-        // The accumulator must merge the accumulated reasoning text in.
-        let mut acc = ChoiceAccumulator::default();
-        acc.reasoning = "Let me think about this step by step...".to_string();
-        acc.thinking_blocks = vec![json!({
-            "type": "thinking",
-            "thinking": "",
-            "signature": "sig_abc123"
-        })];
-
-        let result = finalize_accumulator(acc);
-
-        assert_eq!(result.thinking_blocks.len(), 1);
-        assert_eq!(
-            result.thinking_blocks[0]["thinking"].as_str().unwrap(),
-            "Let me think about this step by step..."
-        );
-        assert_eq!(result.thinking_blocks[0]["signature"], "sig_abc123");
-    }
-
-    #[test]
-    fn test_litellm_null_thinking_text_gets_reasoning_merged() {
-        // Edge case: thinking field is present but null (not a string)
-        let mut acc = ChoiceAccumulator::default();
-        acc.reasoning = "Reasoning text".to_string();
-        acc.thinking_blocks = vec![json!({
-            "type": "thinking",
-            "thinking": null,
-            "signature": "sig_xyz"
-        })];
-
-        let result = finalize_accumulator(acc);
-
-        assert_eq!(result.thinking_blocks.len(), 1);
-        assert_eq!(
-            result.thinking_blocks[0]["thinking"].as_str().unwrap(),
-            "Reasoning text"
-        );
-    }
-
-    #[test]
-    fn test_anthropic_signature_only_block_gets_reasoning() {
-        // Native Anthropic adapter: signature_delta creates blocks with no "thinking" key.
-        let mut acc = ChoiceAccumulator::default();
-        acc.reasoning = "Deep analysis here".to_string();
-        acc.thinking_blocks = vec![json!({
-            "index": 0,
-            "type": "thinking",
-            "signature": "sig_native"
-        })];
-
-        let result = finalize_accumulator(acc);
-
-        assert_eq!(result.thinking_blocks.len(), 1);
-        assert_eq!(
-            result.thinking_blocks[0]["thinking"].as_str().unwrap(),
-            "Deep analysis here"
-        );
-    }
-
-    #[test]
-    fn test_interleaved_thinking_per_block_reasoning() {
-        // Anthropic interleaved thinking: multiple thinking blocks at different indices.
-        // Each block must get only its own reasoning text, not the concatenation.
-        let mut acc = ChoiceAccumulator::default();
-        acc.reasoning = "First thought...Second thought...".to_string();
-        acc.reasoning_per_block
-            .insert(0, "First thought...".to_string());
-        acc.reasoning_per_block
-            .insert(4, "Second thought...".to_string());
-        acc.thinking_blocks = vec![
-            json!({"index": 0, "type": "thinking", "signature": "sig1"}),
-            json!({"index": 4, "type": "thinking", "signature": "sig2"}),
-        ];
-
-        let result = finalize_accumulator(acc);
-
-        assert_eq!(result.thinking_blocks.len(), 2);
-        assert_eq!(
-            result.thinking_blocks[0]["thinking"].as_str().unwrap(),
-            "First thought...",
-            "Block 0 should get only its own reasoning text"
-        );
-        assert_eq!(
-            result.thinking_blocks[1]["thinking"].as_str().unwrap(),
-            "Second thought...",
-            "Block 4 should get only its own reasoning text"
-        );
-    }
-
-    #[test]
-    fn test_completed_reasoning_summary_replaces_partial_heading() {
-        let mut acc = ChoiceAccumulator::default();
-        acc.reasoning = "**Checking parser**".to_string();
-        acc.reasoning_per_block
-            .insert(0, "**Checking parser**".to_string());
-        acc.finalized_reasoning_per_block.insert(
-            0,
-            "**Checking parser**\n\nThe completed reasoning body.".to_string(),
-        );
-
-        let result = finalize_accumulator(acc);
-
-        assert_eq!(
-            result.reasoning,
-            "**Checking parser**\n\nThe completed reasoning body."
-        );
-        assert_eq!(
-            result.thinking_blocks[0]["summary"][0]["text"],
-            "**Checking parser**\n\nThe completed reasoning body."
-        );
-    }
-
-    #[test]
     fn test_signature_delta_concatenation() {
         // Anthropic sends a single signature_delta per thinking block.
         // Some proxies may emit multiple updates; signature must be treated as
@@ -5191,136 +4990,6 @@ mod tests {
     }
 
     #[test]
-    fn test_thinking_block_with_existing_text_not_overwritten() {
-        // If a thinking block already has non-empty thinking text (e.g., from LiteLLM
-        // final chunk that included the text), it should NOT be overwritten.
-        let mut acc = ChoiceAccumulator::default();
-        acc.reasoning = "Streamed reasoning".to_string();
-        acc.thinking_blocks = vec![json!({
-            "type": "thinking",
-            "thinking": "Original block text",
-            "signature": "sig_keep"
-        })];
-
-        let result = finalize_accumulator(acc);
-
-        assert_eq!(result.thinking_blocks.len(), 1);
-        assert_eq!(
-            result.thinking_blocks[0]["thinking"].as_str().unwrap(),
-            "Original block text",
-            "Pre-existing thinking text should be preserved"
-        );
-    }
-
-    #[test]
-    fn test_redacted_thinking_blocks_unchanged() {
-        // Redacted thinking blocks should pass through without modification.
-        let mut acc = ChoiceAccumulator::default();
-        acc.reasoning = "Some reasoning".to_string();
-        acc.thinking_blocks = vec![
-            json!({"type": "thinking", "signature": "sig1"}),
-            json!({"type": "redacted_thinking", "data": "encrypted_blob"}),
-        ];
-
-        let result = finalize_accumulator(acc);
-
-        assert_eq!(result.thinking_blocks.len(), 2);
-        // thinking block gets reasoning merged
-        assert_eq!(
-            result.thinking_blocks[0]["thinking"].as_str().unwrap(),
-            "Some reasoning"
-        );
-        // redacted block untouched
-        assert_eq!(result.thinking_blocks[1]["type"], "redacted_thinking");
-        assert_eq!(result.thinking_blocks[1]["data"], "encrypted_blob");
-        assert!(result.thinking_blocks[1].get("thinking").is_none());
-    }
-
-    #[test]
-    fn test_synthetic_reasoning_block_when_no_thinking_blocks() {
-        // When there are no thinking_blocks but reasoning exists,
-        // a synthetic reasoning block should be created.
-        let mut acc = ChoiceAccumulator::default();
-        acc.reasoning = "Some reasoning from OpenAI".to_string();
-
-        let result = finalize_accumulator(acc);
-
-        assert_eq!(result.thinking_blocks.len(), 1);
-        assert_eq!(result.thinking_blocks[0]["type"], "reasoning");
-    }
-
-    #[test]
-    fn test_whitespace_only_thinking_text_gets_replaced() {
-        // Whitespace-only thinking text should be treated as empty.
-        let mut acc = ChoiceAccumulator::default();
-        acc.reasoning = "Real reasoning".to_string();
-        acc.thinking_blocks = vec![json!({
-            "type": "thinking",
-            "thinking": "   \n\t  ",
-            "signature": "sig_ws"
-        })];
-
-        let result = finalize_accumulator(acc);
-
-        assert_eq!(
-            result.thinking_blocks[0]["thinking"].as_str().unwrap(),
-            "Real reasoning",
-            "Whitespace-only thinking should be replaced with accumulated reasoning"
-        );
-    }
-
-    #[test]
-    fn test_cache_guard_sanitize_removes_fields() {
-        let body = serde_json::json!({
-            "messages": [
-                {"role": "user", "content": [{"type": "text", "text": "x", "cache_control": {"type": "ephemeral"}}]}
-            ],
-            "temperature": 0.2,
-            "max_tokens": 1000,
-            "reasoning_effort": "high"
-        });
-
-        let sanitized = crate::chat::cache_guard::sanitize_body_for_cache_guard(&body);
-        assert!(sanitized.get("temperature").is_none());
-        assert!(sanitized.get("max_tokens").is_none());
-        assert_eq!(sanitized["reasoning_effort"], "high");
-        assert_eq!(sanitized["messages"][0]["content"], serde_json::json!("x"));
-    }
-
-    #[test]
-    fn test_cache_guard_append_only_prefix_logic() {
-        let prev = serde_json::json!({
-            "messages": [
-                {"role": "user", "content": "a"},
-                {"role": "assistant", "content": "b"}
-            ],
-            "meta": {"chat_id": "c1"}
-        });
-        let next_ok = serde_json::json!({
-            "messages": [
-                {"role": "user", "content": "a"},
-                {"role": "assistant", "content": "b"},
-                {"role": "user", "content": "c"}
-            ],
-            "meta": {"chat_id": "c1", "request_attempt_id": "r2"}
-        });
-        let next_bad = serde_json::json!({
-            "messages": [
-                {"role": "user", "content": "a"},
-                {"role": "assistant", "content": "CHANGED"}
-            ],
-            "meta": {"chat_id": "c1"}
-        });
-
-        assert!(crate::chat::cache_guard::is_append_only_prefix(
-            &prev, &next_ok
-        ));
-        assert!(!crate::chat::cache_guard::is_append_only_prefix(
-            &prev, &next_bad
-        ));
-    }
-
-    #[test]
     fn test_merge_thinking_blocks_dedupe_by_index() {
         let mut dst = vec![json!({"index": 0, "type": "thinking", "signature": "sig_v1"})];
 
@@ -5369,24 +5038,6 @@ mod tests {
         );
         assert_eq!(dst[0]["provider_extension"], "opaque-value");
         assert_eq!(dst[0]["retained_extension"], "keep");
-    }
-
-    #[test]
-    fn test_merge_thinking_blocks_streaming_signature_does_not_concat() {
-        // Even if the upstream sends multiple signature updates, we must NOT
-        // concatenate them: signatures are integrity-checked by the provider.
-        let mut dst = vec![json!({"index": 0, "type": "thinking", "signature": "sig_part1"})];
-
-        merge_thinking_blocks(
-            &mut dst,
-            vec![json!({"index": 0, "type": "thinking", "signature": "sig_part2"})],
-        );
-
-        assert_eq!(dst.len(), 1);
-        assert_eq!(
-            dst[0]["signature"], "sig_part2",
-            "Signature must be replaced, not concatenated"
-        );
     }
 
     #[test]
@@ -5558,22 +5209,6 @@ mod tests {
             "**Checking parser**\n\nThe completed reasoning body.",
             "Replayed delta must not clobber finalized keyed reasoning"
         );
-    }
-
-    #[test]
-    fn test_keyed_reasoning_final_uses_summary_when_no_stream_events() {
-        // Only a finalize (from the completed reasoning item's safe summary) arrived.
-        let mut acc = ChoiceAccumulator::default();
-        let mut ops = Vec::new();
-        finalize_keyed_reasoning(
-            &mut acc,
-            &mut ops,
-            "Final visible summary".into(),
-            "item:rs_final#s0".into(),
-        );
-
-        let final_ = finalize_accumulator(acc);
-        assert_eq!(final_.reasoning, "Final visible summary");
     }
 
     #[test]

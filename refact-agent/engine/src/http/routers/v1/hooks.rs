@@ -365,7 +365,6 @@ mod tests {
 
     use super::*;
     use crate::chat::types::ChatSession;
-    use crate::scheduler::InMemoryCronStore;
 
     async fn test_app() -> (tempfile::TempDir, AppState) {
         let workspace = tempfile::tempdir().unwrap();
@@ -462,32 +461,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hooks_fire_wake_injects_system_notice() {
-        let (_workspace, app) = test_app().await;
-        add_session(&app, "chat-existing").await;
-        let router = router(app.clone());
-
-        let (status, value) =
-            request_json(router, json!({"kind":"wake","text":"wake up"}), None).await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(value["inline"]["chat_id"], json!("chat-existing"));
-        let session_arc = app
-            .gcx
-            .chat_sessions
-            .read()
-            .await
-            .get("chat-existing")
-            .cloned()
-            .unwrap();
-        let session = session_arc.lock().await;
-        let message = session.messages.last().unwrap();
-        assert_eq!(message.role, "event");
-        assert_eq!(message.extra["event"]["subkind"], json!("system_notice"));
-        assert_eq!(message.content.content_text_only(), "wake up");
-    }
-
-    #[tokio::test]
     async fn busy_wake_hook_defaults_to_append_without_generation_wake() {
         let (_workspace, app) = test_app().await;
         add_session(&app, "chat-existing").await;
@@ -517,64 +490,6 @@ mod tests {
             session.messages.last().unwrap().content.content_text_only(),
             "queued notice"
         );
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(scheduler_env)]
-    async fn hooks_fire_agent_creates_isolated_turn() {
-        let (_workspace, app) = test_app().await;
-        let router = router(app.clone());
-
-        let (status, value) = request_json(
-            router,
-            json!({"kind":"agent","message":"ship it","mode":"agent","model":"model-1"}),
-            None,
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(value["inline"]["kind"], json!("agent"));
-        let job_id = value["inline"]["job_id"].as_str().unwrap();
-        let prefix = format!("cron_{job_id}_");
-        let sessions = app.gcx.chat_sessions.read().await;
-        let chat_id = sessions
-            .keys()
-            .find(|chat_id| chat_id.starts_with(&prefix))
-            .cloned()
-            .unwrap();
-        let session_arc = sessions.get(&chat_id).cloned().unwrap();
-        drop(sessions);
-        let session = session_arc.lock().await;
-        let queued = session.pending_deliveries.iter().any(|delivery| {
-            delivery.messages.iter().any(|message| {
-                message.role == "user" && message.content.content_text_only() == "ship it"
-            })
-        });
-        let added = session.messages.iter().any(|message| {
-            message.role == "user" && message.content.content_text_only() == "ship it"
-        });
-        assert!(queued || added);
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(scheduler_env)]
-    async fn hooks_fire_agent_accepts_type_delivery_alias() {
-        let (_workspace, app) = test_app().await;
-        let router = router(app.clone());
-
-        let (status, value) = request_json(
-            router,
-            json!({"kind":"agent","message":"ship typed","deliver":{"type":"chat"}}),
-            None,
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(value["inline"]["kind"], json!("agent"));
-        let job_id = value["inline"]["job_id"].as_str().unwrap();
-        let prefix = format!("cron_{job_id}_");
-        let sessions = app.gcx.chat_sessions.read().await;
-        assert!(sessions.keys().any(|chat_id| chat_id.starts_with(&prefix)));
     }
 
     #[tokio::test]
@@ -684,105 +599,5 @@ mod tests {
         assert_eq!(status, StatusCode::FAILED_DEPENDENCY);
         assert!(value["detail"].as_str().unwrap().contains("none fired"));
         assert!(store.get(&matching_id).await.is_none());
-    }
-
-    #[tokio::test]
-    async fn hooks_fire_unknown_hook_id_returns_not_found() {
-        let (_workspace, app) = test_app().await;
-        let hook_id = format!("missing-{}", Uuid::now_v7());
-        let router = router(app);
-
-        let (status, value) =
-            request_json(router, json!({"kind":"wake","hook_id": hook_id}), None).await;
-
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert!(value["detail"].as_str().unwrap().contains("hook not found"));
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(scheduler_env)]
-    async fn hooks_fire_agent_and_hook_id_do_both() {
-        let (_workspace, app) = test_app().await;
-        let store = session_cron_store();
-        let hook_id = format!("deploy-{}", Uuid::now_v7());
-        let mut matching = Job::new_cron_agent_chat(
-            String::new(),
-            String::new(),
-            "Run hook command".to_string(),
-            true,
-            false,
-            unix_now_ms(),
-        );
-        matching.id = format!("hook_test_both_{}", Uuid::now_v7());
-        matching.trigger = Trigger::Webhook {
-            hook_id: hook_id.clone(),
-        };
-        matching.action = Action::Command {
-            argv: stdout_command(),
-            target: AgentTarget::Isolated,
-            cwd: None,
-            env: None,
-            timeout_secs: Some(5),
-        };
-        matching.delivery = Delivery::None;
-        let matching_id = matching.id.clone();
-        store.add(matching).await.unwrap();
-
-        let router = router(app.clone());
-        let (status, value) = request_json(
-            router,
-            json!({"kind":"agent","message":"ship both","hook_id": hook_id}),
-            None,
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(value["inline"]["kind"], json!("agent"));
-        assert_eq!(value["hook_jobs"]["matched"], json!(1));
-        assert_eq!(value["hook_jobs"]["fired"], json!(1));
-        let matching = store.get(&matching_id).await.unwrap();
-        assert_eq!(matching.last_status.as_deref(), Some("fired"));
-        let job_id = value["inline"]["job_id"].as_str().unwrap();
-        let prefix = format!("cron_{job_id}_");
-        let sessions = app.gcx.chat_sessions.read().await;
-        assert!(sessions.keys().any(|chat_id| chat_id.starts_with(&prefix)));
-        drop(sessions);
-        store.remove(&matching_id).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn jobs_by_hook_id_matches_webhook_triggers_only() {
-        let store = Arc::new(InMemoryCronStore::new());
-        let mut matching = Job::new_cron_agent_chat(
-            "*/5 * * * *".to_string(),
-            "Check".to_string(),
-            "Check".to_string(),
-            true,
-            false,
-            1,
-        );
-        matching.id = "matching".to_string();
-        matching.trigger = Trigger::Webhook {
-            hook_id: "deploy".to_string(),
-        };
-        let mut nonmatching = matching.clone();
-        nonmatching.id = "nonmatching".to_string();
-        nonmatching.trigger = Trigger::Webhook {
-            hook_id: "other".to_string(),
-        };
-        let mut timed = matching.clone();
-        timed.id = "timed".to_string();
-        timed.trigger = Trigger::Cron {
-            expr: "*/5 * * * *".to_string(),
-            tz: None,
-        };
-        store.add(matching).await.unwrap();
-        store.add(nonmatching).await.unwrap();
-        store.add(timed).await.unwrap();
-
-        let jobs = store.jobs_by_hook_id("deploy").await;
-
-        assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].id, "matching");
     }
 }

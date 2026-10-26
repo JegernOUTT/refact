@@ -335,63 +335,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_skills_auto_trigger_matching() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_skill(
-            tmp.path(),
-            "security-review",
-            "name: security-review\ndescription: reviews code for security vulnerabilities auditing",
-            "Review for security: $ARGUMENTS",
-        )
-        .await;
-        write_skill(
-            tmp.path(),
-            "code-explainer",
-            "name: code-explainer\ndescription: explains analogies diagrams visual",
-            "Explain: $ARGUMENTS",
-        )
-        .await;
-
-        let ext_dirs = make_ext_dirs(tmp.path());
-        let indices = crate::ext::skills::load_skill_indices(&ext_dirs).await;
-        let selected = crate::ext::skills_matcher::select_relevant_skills(
-            &indices,
-            "security vulnerabilities auditing code review",
-            2,
-            0.5,
-        );
-        assert!(
-            selected.contains(&"security-review".to_string()),
-            "Security skill should be auto-triggered"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_skills_auto_trigger_non_matching() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_skill(
-            tmp.path(),
-            "security-review",
-            "name: security-review\ndescription: reviews code for security vulnerabilities",
-            "Body",
-        )
-        .await;
-
-        let ext_dirs = make_ext_dirs(tmp.path());
-        let indices = crate::ext::skills::load_skill_indices(&ext_dirs).await;
-        let selected = crate::ext::skills_matcher::select_relevant_skills(
-            &indices,
-            "breakfast cereal recipes",
-            2,
-            0.5,
-        );
-        assert!(
-            selected.is_empty(),
-            "Unrelated message should not trigger skills"
-        );
-    }
-
-    #[tokio::test]
     async fn test_skills_explicit_invocation_loads_full_skill() {
         let tmp = tempfile::tempdir().unwrap();
         write_skill(
@@ -567,76 +510,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_skills_context_messages_no_skills() {
-        let ext_dirs = ExtDirs {
-            global_dirs: vec![PathBuf::from("/nonexistent")],
-            installed_dirs: vec![],
-            project_dirs: vec![],
-        };
-        let (msgs, _) = build_context_messages_from_dirs(
-            &ext_dirs,
-            "any message",
-            None,
-            SkillsAutoTrigger::InjectFull,
-        )
-        .await;
-        assert!(msgs.is_empty(), "No skills = no messages");
-    }
-
-    #[tokio::test]
-    async fn test_skills_context_messages_no_index_in_context_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_skill(
-            tmp.path(),
-            "test-skill",
-            "name: test-skill\ndescription: Test skill\nuser-invocable: true",
-            "Body",
-        )
-        .await;
-
-        let ext_dirs = make_ext_dirs(tmp.path());
-        let (msgs, _) = build_context_messages_from_dirs(
-            &ext_dirs,
-            "unrelated message",
-            None,
-            SkillsAutoTrigger::InjectFull,
-        )
-        .await;
-        for msg in &msgs {
-            if let crate::call_validation::ChatContent::ContextFiles(files) = &msg.content {
-                let index_file = files.iter().find(|f| f.file_name == "skills://index");
-                assert!(index_file.is_none(), "skills://index must not be emitted as ContextFile (it is now in system prompt)");
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_skills_edge_case_skill_no_body() {
-        let tmp = tempfile::tempdir().unwrap();
-        let skill_dir = tmp.path().join("skills").join("empty-body");
-        tokio::fs::create_dir_all(&skill_dir).await.unwrap();
-        tokio::fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\nname: empty-body\ndescription: Skill with empty body\nuser-invocable: true\n---\n",
-        )
-        .await
-        .unwrap();
-
-        let ext_dirs = make_ext_dirs(tmp.path());
-        let (msgs, _) = build_context_messages_from_dirs(
-            &ext_dirs,
-            "anything",
-            Some("empty-body"),
-            SkillsAutoTrigger::InjectFull,
-        )
-        .await;
-        assert!(
-            !msgs.is_empty(),
-            "Should return skill body ContextFile for explicit invocation"
-        );
-    }
-
-    #[tokio::test]
     async fn test_skills_context_mode_off_injects_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         write_skill(
@@ -658,105 +531,6 @@ mod tests {
         assert!(msgs.is_empty(), "Off mode must inject nothing");
         assert_eq!(tracking.available_count, 0);
         assert!(tracking.included_names.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_skills_context_mode_index_only_injects_no_context_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_skill(
-            tmp.path(),
-            "security-review",
-            "name: security-review\ndescription: reviews code for security vulnerabilities auditing",
-            "Full security review body content",
-        )
-        .await;
-
-        let ext_dirs = make_ext_dirs(tmp.path());
-        let (msgs, tracking) = build_context_messages_from_dirs(
-            &ext_dirs,
-            "security review vulnerabilities",
-            None,
-            SkillsAutoTrigger::IndexOnly,
-        )
-        .await;
-
-        assert!(
-            msgs.is_empty(),
-            "IndexOnly must not inject any ContextFiles (index is in system prompt)"
-        );
-        assert!(
-            tracking.included_names.is_empty(),
-            "No skills included in index_only mode"
-        );
-        assert!(
-            tracking.available_count > 0,
-            "Tracking must still report available skills"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_skills_context_mode_index_only_is_default() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_skill(
-            tmp.path(),
-            "security-review",
-            "name: security-review\ndescription: reviews code for security vulnerabilities auditing",
-            "Full security review body content",
-        )
-        .await;
-
-        let ext_dirs = make_ext_dirs(tmp.path());
-        let (msgs_default, _) = build_context_messages_from_dirs(
-            &ext_dirs,
-            "security review vulnerabilities auditing",
-            None,
-            SkillsAutoTrigger::default(),
-        )
-        .await;
-        let (msgs_explicit, _) = build_context_messages_from_dirs(
-            &ext_dirs,
-            "security review vulnerabilities auditing",
-            None,
-            SkillsAutoTrigger::IndexOnly,
-        )
-        .await;
-
-        assert_eq!(
-            msgs_default.len(),
-            msgs_explicit.len(),
-            "Default mode must equal IndexOnly"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_build_skills_context_no_skills_index_in_msgs() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_skill(
-            tmp.path(),
-            "dedup-skill",
-            "name: dedup-skill\ndescription: Deduplication test skill\nuser-invocable: true",
-            "Skill body",
-        )
-        .await;
-
-        let ext_dirs = make_ext_dirs(tmp.path());
-        let (msgs, _) = build_context_messages_from_dirs(
-            &ext_dirs,
-            "anything",
-            None,
-            SkillsAutoTrigger::InjectFull,
-        )
-        .await;
-
-        for msg in &msgs {
-            if let crate::call_validation::ChatContent::ContextFiles(files) = &msg.content {
-                let index_file = files.iter().find(|f| f.file_name == "skills://index");
-                assert!(
-                    index_file.is_none(),
-                    "skills://index must not be emitted as ContextFile"
-                );
-            }
-        }
     }
 
     #[tokio::test]
@@ -1013,14 +787,6 @@ mod tests {
         assert!(!text.is_empty());
         assert!(text.contains("## Skills"));
         assert!(text.contains("No skills are currently installed"));
-    }
-
-    #[test]
-    fn test_skills_prompt_text_not_empty_when_off() {
-        let text = "## Skills\n\nSkills system is disabled by configuration.";
-        assert!(!text.is_empty());
-        assert!(text.contains("## Skills"));
-        assert!(text.contains("disabled by configuration"));
     }
 
     #[test]

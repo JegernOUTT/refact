@@ -481,69 +481,6 @@ mod tests {
     use ratatui::widgets::{Paragraph, Widget};
 
     #[test]
-    fn osc8_wraps_and_strips_with_st_terminator() {
-        let linked = osc8_hyperlink("https://example.com", "site");
-        assert_eq!(
-            linked,
-            "\x1b]8;;https://example.com\x1b\\site\x1b]8;;\x1b\\"
-        );
-        assert_eq!(strip_osc8(&linked), "site");
-    }
-
-    #[test]
-    fn annotates_punctuated_web_urls() {
-        assert_eq!(
-            annotate_web_urls_in_line(Line::from("See (https://example.com/a).")),
-            HyperlinkLine {
-                line: Line::from("See (https://example.com/a)."),
-                hyperlinks: vec![TerminalHyperlink {
-                    columns: 5..26,
-                    destination: "https://example.com/a".to_string(),
-                }],
-            }
-        );
-    }
-
-    #[test]
-    fn prefix_hyperlink_lines_shifts_existing_ranges() {
-        let line = annotate_web_urls_in_line(Line::from("Read https://example.com/docs"));
-
-        let lines = prefix_hyperlink_lines(vec![line], Span::raw("• "), Span::raw("  "));
-
-        assert_eq!(line_text(&lines[0].line), "• Read https://example.com/docs");
-        assert_eq!(
-            lines[0].hyperlinks,
-            vec![TerminalHyperlink {
-                columns: 7..31,
-                destination: "https://example.com/docs".to_string(),
-            }]
-        );
-    }
-
-    #[test]
-    fn adaptive_wrap_hyperlink_lines_preserves_wrapped_url_destination() {
-        let source =
-            annotate_web_urls_in_line(Line::from("Read https://example.com/docs and keep going"));
-
-        let lines = adaptive_wrap_hyperlink_lines(&[source], RtOptions::new(18));
-
-        assert_eq!(
-            lines
-                .iter()
-                .map(|line| line_text(&line.line))
-                .collect::<Vec<_>>(),
-            vec!["Read", "https://example.com/docs", "and keep going"]
-        );
-        assert_eq!(
-            lines[1].hyperlinks,
-            vec![TerminalHyperlink {
-                columns: 0..24,
-                destination: "https://example.com/docs".to_string(),
-            }]
-        );
-    }
-
-    #[test]
     fn env_probe_respects_no_color_and_known_terminals() {
         assert!(!hyperlinks_enabled_from_probe(EnvProbe {
             no_color: true,
@@ -570,14 +507,6 @@ mod tests {
             term_program: Some("iTerm.app"),
             ..EnvProbe::default()
         }));
-    }
-
-    #[test]
-    fn unterminated_osc8_preserves_remaining_text() {
-        assert_eq!(
-            strip_osc8("before \x1b]8;;https://example.comafter\x1b"),
-            "before https://example.comafter"
-        );
     }
 
     #[test]

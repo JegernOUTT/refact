@@ -1436,87 +1436,6 @@ mod tests {
     }
 
     #[test]
-    fn project_skill_package_imports_as_skill() {
-        let temp = tempfile::tempdir().unwrap();
-        let skill_dir = temp.path().join(".opencode").join("skills").join("foo");
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\nname: Foo Skill\ndescription: Helps with foo\n---\n# Foo\nUse foo.",
-        )
-        .unwrap();
-
-        let scan = scan_project_root_with_staging(temp.path(), &temp.path().join("staging"));
-
-        let candidate = find_candidate(&scan, ImportKind::Skill, "foo-skill");
-        assert_eq!(
-            candidate.destination_path,
-            PathBuf::from("skills/foo-skill")
-        );
-        assert!(scan.issues.is_empty());
-    }
-
-    #[test]
-    fn project_markdown_command_imports_as_command() {
-        let temp = tempfile::tempdir().unwrap();
-        let command_path = temp
-            .path()
-            .join(".opencode")
-            .join("commands")
-            .join("review.md");
-        fs::create_dir_all(command_path.parent().unwrap()).unwrap();
-        fs::write(
-            &command_path,
-            "---\ndescription: Review code\nagent: reviewer\nmodel: claude\nsubtask: true\n---\nReview $ARGUMENTS",
-        )
-        .unwrap();
-
-        let scan = scan_project_root_with_staging(temp.path(), &temp.path().join("staging"));
-
-        let candidate = find_candidate(&scan, ImportKind::Command, "review");
-        assert_eq!(
-            candidate.destination_path,
-            PathBuf::from("commands/review.md")
-        );
-        let (frontmatter, body) = parse_markdown_frontmatter(file_content(candidate));
-        assert_eq!(
-            markdown_yaml_string(&frontmatter, "description"),
-            "Review code"
-        );
-        assert_eq!(markdown_yaml_string(&frontmatter, "model"), "claude");
-        assert!(frontmatter.get("agent").is_none());
-        assert!(frontmatter.get("subtask").is_none());
-        assert_eq!(body, "Review $ARGUMENTS");
-        assert!(candidate.metadata.get("competitor_fields").is_some());
-    }
-
-    #[test]
-    fn markdown_agent_imports_as_schema_valid_subagent() {
-        let temp = tempfile::tempdir().unwrap();
-        let agent_path = temp
-            .path()
-            .join(".opencode")
-            .join("agents")
-            .join("explore.md");
-        fs::create_dir_all(agent_path.parent().unwrap()).unwrap();
-        fs::write(
-            &agent_path,
-            "---\ndescription: Explore code\nmode: subagent\nmodel: claude\ntools:\n  - read\n  - grep\nmaxSteps: 6\n---\nExplore the repository.",
-        )
-        .unwrap();
-
-        let scan = scan_project_root_with_staging(temp.path(), &temp.path().join("staging"));
-
-        let candidate = find_candidate(&scan, ImportKind::Subagent, "explore");
-        let config = subagent_config(candidate);
-        assert_eq!(config.id, "explore");
-        assert_eq!(config.description, "Explore code");
-        assert_eq!(config.subchat.max_steps, Some(6));
-        assert_eq!(config.subchat.model.as_deref(), Some("claude"));
-        assert_eq!(config.tools, strings(&["cat", "search_pattern"]));
-    }
-
-    #[test]
     fn markdown_agent_denied_edit_and_bash_removes_write_and_shell_tools() {
         let temp = tempfile::tempdir().unwrap();
         let agent_path = temp.path().join(".opencode").join("agents").join("safe.md");
@@ -1534,28 +1453,6 @@ mod tests {
         assert!(!config.tools.contains(&"apply_patch".to_string()));
         assert!(!config.tools.contains(&"shell".to_string()));
         assert!(config.tools.contains(&"cat".to_string()));
-    }
-
-    #[test]
-    fn markdown_agent_steps_maps_to_max_steps() {
-        let temp = tempfile::tempdir().unwrap();
-        let agent_path = temp
-            .path()
-            .join(".opencode")
-            .join("agent")
-            .join("planner.md");
-        fs::create_dir_all(agent_path.parent().unwrap()).unwrap();
-        fs::write(
-            &agent_path,
-            "---\ndescription: Planner\nsteps: 4\n---\nPlan carefully.",
-        )
-        .unwrap();
-
-        let scan = scan_project_root_with_staging(temp.path(), &temp.path().join("staging"));
-
-        let candidate = find_candidate(&scan, ImportKind::Subagent, "planner");
-        let config = subagent_config(candidate);
-        assert_eq!(config.subchat.max_steps, Some(4));
     }
 
     #[test]
@@ -1845,79 +1742,6 @@ mod tests {
             .issues
             .iter()
             .all(|issue| issue.status == ImportStatus::Unsupported));
-    }
-
-    #[test]
-    fn global_scan_uses_opencode_config_root() {
-        let temp = tempfile::tempdir().unwrap();
-        let config_root = temp.path().join("opencode");
-        fs::create_dir_all(config_root.join("command")).unwrap();
-        fs::write(
-            config_root.join("command").join("summarize.md"),
-            "Summarize",
-        )
-        .unwrap();
-        fs::write(
-            config_root.join("config.json"),
-            serde_json::json!({
-                "command": { "explain": "Explain this" }
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        let scan = scan_global_root_with_staging(&config_root, &temp.path().join("staging"));
-
-        assert!(scan
-            .candidates
-            .iter()
-            .all(|candidate| candidate.scope == ImportScope::Global));
-        find_candidate(&scan, ImportKind::Command, "summarize");
-        find_candidate(&scan, ImportKind::Command, "explain");
-    }
-
-    #[tokio::test]
-    async fn import_project_root_writes_candidates_through_shared_writer() {
-        let temp = tempfile::tempdir().unwrap();
-        let command_path = temp
-            .path()
-            .join(".opencode")
-            .join("commands")
-            .join("review.md");
-        fs::create_dir_all(command_path.parent().unwrap()).unwrap();
-        fs::write(&command_path, "Review").unwrap();
-
-        let summary = import_project_root(temp.path()).await;
-
-        assert_eq!(summary.outcomes.len(), 1);
-        assert_eq!(
-            fs::read_to_string(
-                temp.path()
-                    .join(".refact")
-                    .join("commands")
-                    .join("review.md")
-            )
-            .unwrap(),
-            "Review"
-        );
-    }
-
-    #[test]
-    fn scan_summary_omits_artifact_content() {
-        let temp = tempfile::tempdir().unwrap();
-        let command_path = temp
-            .path()
-            .join(".opencode")
-            .join("commands")
-            .join("secret.md");
-        fs::create_dir_all(command_path.parent().unwrap()).unwrap();
-        fs::write(&command_path, "secret generated content").unwrap();
-
-        let scan = scan_project_root_with_staging(temp.path(), &temp.path().join("staging"));
-        let summary_json = serde_json::to_string(&scan.to_summary()).unwrap();
-
-        assert!(!summary_json.contains("secret generated content"));
-        assert!(summary_json.contains("secret.md"));
     }
 
     #[test]

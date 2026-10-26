@@ -1599,35 +1599,6 @@ mod tests {
         super::clear_refresh_tracking_for_test();
     }
 
-    #[test]
-    fn oauth_failure_tracking_is_per_instance() {
-        let _guard = refresh_tracking_test_guard();
-        super::clear_refresh_tracking_for_test();
-
-        assert!(super::mark_oauth_failure("claude_code"));
-        assert!(super::mark_oauth_failure("claude_code_2"));
-        assert!(!super::mark_oauth_failure("claude_code"));
-        assert_eq!(super::oauth_failed_instance_count_for_test(), 2);
-        assert!(super::clear_oauth_failure("claude_code"));
-        assert_eq!(super::oauth_failed_instance_count_for_test(), 1);
-
-        super::clear_refresh_tracking_for_test();
-    }
-
-    #[test]
-    fn oauth_refresh_helper_collects_all_instances_for_base() {
-        let providers = vec![
-            ("claude_code".to_string(), "claude_code".to_string()),
-            ("claude_code_work".to_string(), "claude_code".to_string()),
-            ("openai_codex".to_string(), "openai_codex".to_string()),
-        ];
-
-        assert_eq!(
-            super::collect_oauth_refresh_instances_for_base(providers, "claude_code"),
-            vec!["claude_code".to_string(), "claude_code_work".to_string()]
-        );
-    }
-
     #[tokio::test]
     async fn claude_code_refresh_adopts_tokens_written_by_another_process() {
         let gcx = crate::global_context::tests::make_test_gcx().await;

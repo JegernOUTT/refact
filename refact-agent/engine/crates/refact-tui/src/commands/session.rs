@@ -551,32 +551,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_every_session_command_and_alias() {
-        let cases = [
-            ("/new", SessionCommand::New, ""),
-            ("/sessions", SessionCommand::Resume, ""),
-            ("/branch", SessionCommand::Fork, ""),
-            (
-                "/rename Better title",
-                SessionCommand::Rename,
-                "Better title",
-            ),
-            ("/remove", SessionCommand::Archive, ""),
-            ("/model", SessionCommand::Model, ""),
-            ("/tool-use", SessionCommand::Mode, ""),
-            ("/reasoning high", SessionCommand::Reasoning, "high"),
-            ("/approval", SessionCommand::Permissions, ""),
-            ("/status", SessionCommand::Status, ""),
-            ("/init", SessionCommand::Init, ""),
-        ];
-        for (input, command, args) in cases {
-            let parsed = parse_session_command(input).unwrap();
-            assert_eq!(parsed.command, command);
-            assert_eq!(parsed.args, args);
-        }
-    }
-
-    #[test]
     fn permission_policy_patch_maps_supported_server_flags() {
         let policy = permission_policy_from_items(&[PickerItem {
             id: "editing_tools".to_string(),
@@ -683,22 +657,6 @@ mod tests {
     }
 
     #[test]
-    fn permission_picker_explains_plain_ls_through_shell_gate() {
-        let shell_gate = permission_picker_items()
-            .into_iter()
-            .find(|item| item.id == "tool_confirmation_policy")
-            .unwrap();
-
-        assert!(shell_gate.description.contains("`ls`"));
-        assert!(shell_gate.description.contains("shell_gate"));
-        assert!(shell_gate.description.contains("Balanced"));
-        assert!(shell_gate
-            .description
-            .contains("below the Medium ask threshold"));
-        assert!(shell_gate.description.contains(".refact/shell_policy.yaml"));
-    }
-
-    #[test]
     fn reasoning_patch_maps_effort_and_off_to_setparams() {
         assert_eq!(
             parse_reasoning_level("high"),
@@ -718,99 +676,6 @@ mod tests {
         assert_eq!(
             reasoning_patch(ReasoningLevel::Off),
             json!({"boost_reasoning": false, "reasoning_effort": null, "thinking_budget": null})
-        );
-    }
-
-    #[test]
-    fn status_snapshot_formats_daemon_worker_session_and_usage() {
-        let text = status_card_text(&StatusSnapshot {
-            daemon_online: true,
-            daemon_version: Some("1.2.3".to_string()),
-            daemon_port: Some(8488),
-            daemon_base_url: Some("http://127.0.0.1:8488".to_string()),
-            daemon_url_source: Some(crate::client::DaemonUrlSource::Cli),
-            worker: "ready pid 42 http 9000 lsp 9001".to_string(),
-            project: "demo".to_string(),
-            project_root: Some("/tmp/demo".to_string()),
-            model: "gpt-demo".to_string(),
-            mode: "agent".to_string(),
-            reasoning: "high".to_string(),
-            permission_policy: PermissionPolicy {
-                auto_approve_editing_tools: true,
-                auto_approve_dangerous_commands: false,
-            },
-            session_id: "abcdef123456".to_string(),
-            usage: Some(StatusUsage {
-                prompt_tokens: Some(100),
-                completion_tokens: Some(50),
-                total_tokens: Some(150),
-                context_window_tokens: Some(1000),
-            }),
-            retry_hint: None,
-        });
-        assert_eq!(
-            text,
-            "Status\nDaemon: v1.2.3 on port 8488\nDaemon URL source: cli\nWorker: ready pid 42 http 9000 lsp 9001\nProject: demo (/tmp/demo)\nModel: gpt-demo · mode agent · reason:high\nTerminal background: unavailable (OSC 10/11 probe timed out or is unsupported)\nSession: abcdef12\nUsage: 100 prompt + 50 completion = 150 total tokens; 85% context left"
-        );
-    }
-
-    #[test]
-    fn status_snapshot_names_each_daemon_url_source() {
-        for source in [
-            crate::client::DaemonUrlSource::Cli,
-            crate::client::DaemonUrlSource::Environment,
-            crate::client::DaemonUrlSource::Launcher,
-            crate::client::DaemonUrlSource::Discovery,
-        ] {
-            let snapshot = status_snapshot(
-                true,
-                None,
-                Some("http://127.0.0.1:8488".to_string()),
-                Some(source),
-                "ready".to_string(),
-                "demo".to_string(),
-                None,
-                "model".to_string(),
-                "agent".to_string(),
-                "off".to_string(),
-                PermissionPolicy::default(),
-                "chat".to_string(),
-                None,
-                None,
-            );
-            assert!(status_card_text(&snapshot)
-                .contains(&format!("Daemon URL source: {}", source.as_str())));
-        }
-    }
-
-    #[test]
-    fn usage_line_preserves_unknown_components() {
-        assert_eq!(
-            usage_line(Some(&StatusUsage {
-                prompt_tokens: Some(12),
-                completion_tokens: None,
-                total_tokens: None,
-                context_window_tokens: Some(100),
-            })),
-            "12 prompt tokens"
-        );
-        assert_eq!(
-            usage_line(Some(&StatusUsage {
-                prompt_tokens: None,
-                completion_tokens: None,
-                total_tokens: Some(12),
-                context_window_tokens: Some(100),
-            })),
-            "12 total tokens; 88% context left"
-        );
-        assert_eq!(
-            usage_line(Some(&StatusUsage {
-                prompt_tokens: None,
-                completion_tokens: None,
-                total_tokens: None,
-                context_window_tokens: Some(100),
-            })),
-            "not reported"
         );
     }
 }

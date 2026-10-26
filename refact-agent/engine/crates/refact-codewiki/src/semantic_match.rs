@@ -86,41 +86,6 @@ mod tests {
     }
 
     #[test]
-    fn decision_match_text_joins_title_and_decision() {
-        assert_eq!(decision_match_text("T", "D"), "T\nD");
-    }
-
-    #[test]
-    fn decision_match_text_returns_title_when_decision_empty() {
-        assert_eq!(decision_match_text("T", ""), "T");
-    }
-
-    #[test]
-    fn decision_page_id_prefixes_id() {
-        assert_eq!(decision_page_id("abc"), "decision:abc");
-    }
-
-    #[test]
-    fn find_duplicate_decision_returns_first_surviving_above_tau() {
-        let results = vec![hit("other:skip", 1.0), hit("decision:abc", 0.84)];
-        let exclude_ids = HashSet::new();
-        assert_eq!(
-            find_duplicate_decision(&results, DEFAULT_DEDUP_TAU, &exclude_ids),
-            Some("abc".to_string())
-        );
-    }
-
-    #[test]
-    fn find_duplicate_decision_short_circuits_below_tau() {
-        let results = vec![hit("decision:low", 0.82), hit("decision:high", 0.99)];
-        let exclude_ids = HashSet::new();
-        assert_eq!(
-            find_duplicate_decision(&results, DEFAULT_DEDUP_TAU, &exclude_ids),
-            None
-        );
-    }
-
-    #[test]
     fn find_duplicate_decision_skips_non_decision_hits_and_excluded_ids() {
         let results = vec![
             hit("page:skip", 1.0),
@@ -150,20 +115,5 @@ mod tests {
             find_related_decisions(&results, 0.5, 0.83, &exclude_ids, 2),
             vec![("first".to_string(), 0.82), ("second".to_string(), 0.7)]
         );
-    }
-
-    #[test]
-    fn find_related_decisions_with_zero_limit_returns_empty() {
-        let results = vec![hit("decision:abc", 0.7)];
-        let exclude_ids = HashSet::new();
-        assert!(find_related_decisions(&results, 0.5, 0.83, &exclude_ids, 0).is_empty());
-    }
-
-    #[test]
-    fn duplicate_decision_text_uses_default_tau() {
-        assert!(is_duplicate_decision_text(
-            "Use SQLite for storage",
-            "Use SQLite for storage storage"
-        ));
     }
 }

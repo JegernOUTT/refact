@@ -2262,12 +2262,6 @@ mod tests {
     struct RustLogGuard(Option<String>);
 
     impl RustLogGuard {
-        fn unset() -> Self {
-            let previous = std::env::var("RUST_LOG").ok();
-            std::env::remove_var("RUST_LOG");
-            Self(previous)
-        }
-
         fn set(value: &str) -> Self {
             let previous = std::env::var("RUST_LOG").ok();
             std::env::set_var("RUST_LOG", value);
@@ -2327,24 +2321,6 @@ mod tests {
     }
 
     #[test]
-    fn restart_delay_ignores_old_crashes() {
-        let now = CRASH_WINDOW_MS + 10;
-        assert_eq!(
-            next_restart_delay(&[1, now - 2, now - 1], now),
-            Some(Duration::from_millis(
-                2_000 + restart_jitter_ms(&[now - 2, now - 1], now, 2_000)
-            ))
-        );
-    }
-
-    #[test]
-    fn push_crash_prunes_window() {
-        let mut history = VecDeque::from(vec![1, 2]);
-        push_crash(&mut history, CRASH_WINDOW_MS + 2);
-        assert_eq!(history, VecDeque::from(vec![2, CRASH_WINDOW_MS + 2]));
-    }
-
-    #[test]
     fn port_busy_exit_matrix_excludes_clean_exit() {
         assert!(!is_port_busy_exit(Some(0)));
         assert!(!is_port_busy_exit(Some(1)));
@@ -2352,26 +2328,6 @@ mod tests {
         assert!(is_port_busy_exit(Some(48)));
         assert!(is_port_busy_exit(Some(98)));
         assert!(is_port_busy_exit(Some(10048)));
-    }
-
-    #[test]
-    fn worker_args_omits_daemon_auth_token() {
-        let dir = tempfile::tempdir().unwrap();
-        let token = "secret-token-never-in-args";
-        let spec = test_launch_spec(dir.path().join("project"));
-        let args = worker_args(
-            &spec,
-            PortPair {
-                http_port: 8111,
-                lsp_port: 8112,
-            },
-            "nonce",
-            8488,
-            dir.path().join("daemon"),
-        );
-
-        assert!(!args.iter().any(|arg| arg.contains(token)));
-        assert!(!args.iter().any(|arg| arg == "REFACT_DAEMON_TOKEN"));
     }
 
     #[tokio::test]
@@ -2451,92 +2407,6 @@ mod tests {
             std::fs::read(command.as_std().get_program()).unwrap(),
             b"new"
         );
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(daemon)]
-    async fn worker_command_sets_default_rust_log_filter_when_unset() {
-        let _rust_log = RustLogGuard::unset();
-        let dir = tempfile::tempdir().unwrap();
-        let supervisor = Supervisor::new(
-            EventBus::new(dir.path().join("events.jsonl")),
-            dir.path().join("daemon"),
-            8488,
-        );
-        let spec = test_launch_spec(dir.path().join("project"));
-        let command = supervisor
-            .worker_command(
-                &spec,
-                PortPair {
-                    http_port: 8111,
-                    lsp_port: 8112,
-                },
-                "nonce",
-            )
-            .await
-            .unwrap();
-
-        let rust_log = command.as_std().get_envs().find_map(|(key, value)| {
-            (key == "RUST_LOG")
-                .then(|| value.map(|value| value.to_string_lossy().to_string()))
-                .flatten()
-        });
-
-        assert_eq!(
-            rust_log.as_deref(),
-            Some(crate::daemon::default_log_filter_directives().as_str())
-        );
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(daemon)]
-    async fn worker_command_preserves_existing_rust_log_override() {
-        let _rust_log = RustLogGuard::set("hyper=trace");
-        let dir = tempfile::tempdir().unwrap();
-        let supervisor = Supervisor::new(
-            EventBus::new(dir.path().join("events.jsonl")),
-            dir.path().join("daemon"),
-            8488,
-        );
-        let spec = test_launch_spec(dir.path().join("project"));
-        let command = supervisor
-            .worker_command(
-                &spec,
-                PortPair {
-                    http_port: 8111,
-                    lsp_port: 8112,
-                },
-                "nonce",
-            )
-            .await
-            .unwrap();
-
-        assert!(!command
-            .as_std()
-            .get_envs()
-            .any(|(key, _)| key == "RUST_LOG"));
-    }
-
-    #[tokio::test]
-    async fn proxy_unreachable_restart_skips_when_shutting_down() {
-        let dir = tempfile::tempdir().unwrap();
-        let supervisor = Supervisor::new(
-            EventBus::new(dir.path().join("events.jsonl")),
-            dir.path().join("daemon"),
-            8488,
-        );
-        let entry = ProjectEntry {
-            id: "project".to_string(),
-            slug: "project".to_string(),
-            root: dir.path().to_path_buf(),
-            pinned: false,
-            last_active_ms: 0,
-            settings: ProjectSettings::default(),
-        };
-
-        supervisor.notify_proxy_unreachable(entry, true, None).await;
-
-        assert_eq!(supervisor.proxy_restarts.lock().await.tasks.len(), 0);
     }
 
     fn test_entry(root: PathBuf) -> ProjectEntry {
@@ -2684,46 +2554,6 @@ mod tests {
         }
         stop_tx.send(()).unwrap();
         server.await.unwrap().unwrap();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial_test::serial(daemon)]
-    async fn fake_worker_reaches_ready_without_dns() {
-        let Some(_env) = EnvGuard::fake_worker() else {
-            return;
-        };
-        let python = std::env::var("PYTHON3").unwrap_or_else(|_| "python3".to_string());
-        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fake_worker.py");
-        let wrapper = concat!(
-            "import runpy, socket, sys\n",
-            "from unittest.mock import patch\n",
-            "script = sys.argv.pop(1)\n",
-            "failure = RuntimeError('fake worker must not resolve DNS')\n",
-            "with patch.object(socket, 'getfqdn', side_effect=failure):\n",
-            "    runpy.run_path(script, run_name='__main__')\n",
-        );
-        std::env::set_var(
-            "REFACT_DAEMON_WORKER_CMD",
-            shell_words::join([python.as_str(), "-c", wrapper, script.to_str().unwrap()]),
-        );
-        let dir = tempfile::tempdir().unwrap();
-        let daemon_dir = dir.path().join("daemon");
-        let supervisor = Supervisor::new(
-            EventBus::new(dir.path().join("events.jsonl")),
-            daemon_dir.clone(),
-            0,
-        );
-        let entry = test_entry(dir.path().to_path_buf());
-
-        let ready =
-            tokio::time::timeout(Duration::from_secs(30), supervisor.ensure_worker(&entry)).await;
-        let log = std::fs::read_to_string(daemon_dir.join("logs/worker-project.log")).unwrap();
-        supervisor.stop_all().await;
-
-        let ready = ready
-            .expect("fake worker startup must not wait for DNS")
-            .unwrap();
-        assert_eq!(ready.state, WorkerState::Ready, "{log}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

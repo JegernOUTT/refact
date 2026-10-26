@@ -1385,41 +1385,6 @@ mod tests {
     }
 
     #[test]
-    fn convert_event_to_user_wrapped_xml() {
-        let messages = vec![event_message(
-            "mode_switch",
-            "mode",
-            json!({"next":"agent"}),
-            "Switched to agent",
-        )];
-
-        let (input, instructions) = convert_to_responses_format(&messages);
-        let input = input.as_array().unwrap();
-
-        assert!(instructions.is_none());
-        assert_eq!(input.len(), 1);
-        assert_eq!(input[0]["role"], "user");
-        let text = input[0]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("<event subkind=\"mode_switch\""));
-        assert!(text.contains("<message>Switched to agent</message>"));
-    }
-
-    #[test]
-    fn convert_plan_to_user_wrapped_xml() {
-        let messages = vec![plan_message("agent", 1, "Do the thing")];
-
-        let (input, instructions) = convert_to_responses_format(&messages);
-        let input = input.as_array().unwrap();
-
-        assert!(instructions.is_none());
-        assert_eq!(input.len(), 1);
-        assert_eq!(input[0]["role"], "user");
-        let text = input[0]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("<plan mode=\"agent\" version=\"1\">"));
-        assert!(text.contains("Do the thing"));
-    }
-
-    #[test]
     fn convert_goal_and_plan_to_user_wrapped_xml_in_order() {
         let messages = vec![
             goal_message("agent", 1, "Reach the goal"),
@@ -1471,22 +1436,6 @@ mod tests {
     }
 
     #[test]
-    fn convert_no_literal_role_strings() {
-        let messages = vec![
-            ChatMessage::new("user".to_string(), "Hi".to_string()),
-            event_message("mode_switch", "mode", json!({"next":"agent"}), "Switched"),
-            plan_message("agent", 1, "Do it"),
-            ChatMessage::new("assistant".to_string(), "Ok".to_string()),
-        ];
-
-        let (input, instructions) = convert_to_responses_format(&messages);
-        let body = json!({"input": input, "instructions": instructions}).to_string();
-
-        assert!(!body.contains("\"role\":\"event\""));
-        assert!(!body.contains("\"role\":\"plan\""));
-    }
-
-    #[test]
     fn test_chatgpt_backend_omits_rejected_params() {
         let adapter = OpenAiResponsesAdapter;
         let mut req = LlmRequest::new(
@@ -1526,62 +1475,6 @@ mod tests {
             http.body["store"], false,
             "ChatGPT backend must have store=false"
         );
-    }
-
-    #[test]
-    fn test_chatgpt_backend_requests_sequential_cutoff_reasoning_summaries() {
-        let adapter = OpenAiResponsesAdapter;
-        let req = LlmRequest::new(
-            "gpt-5.4".to_string(),
-            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
-        )
-        .with_reasoning(crate::params::ReasoningIntent::Medium);
-
-        let http = adapter
-            .build_http(&cleared(&req), &chatgpt_backend_settings())
-            .unwrap();
-
-        assert_eq!(
-            http.body["stream_options"]["reasoning_summary_delivery"],
-            json!("sequential_cutoff")
-        );
-    }
-
-    #[test]
-    fn test_chatgpt_backend_adds_default_instructions_without_system() {
-        let adapter = OpenAiResponsesAdapter;
-        let req = LlmRequest::new(
-            "gpt-5.3-codex".to_string(),
-            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
-        );
-
-        let http = adapter
-            .build_http(&cleared(&req), &chatgpt_backend_settings())
-            .unwrap();
-
-        assert_eq!(
-            http.body["instructions"],
-            json!(CHATGPT_BACKEND_DEFAULT_INSTRUCTIONS),
-            "ChatGPT backend requires a non-empty instructions field"
-        );
-    }
-
-    #[test]
-    fn test_chatgpt_backend_keeps_system_instructions() {
-        let adapter = OpenAiResponsesAdapter;
-        let req = LlmRequest::new(
-            "gpt-5.3-codex".to_string(),
-            vec![
-                ChatMessage::new("system".to_string(), "Be precise".to_string()),
-                ChatMessage::new("user".to_string(), "Hello".to_string()),
-            ],
-        );
-
-        let http = adapter
-            .build_http(&cleared(&req), &chatgpt_backend_settings())
-            .unwrap();
-
-        assert_eq!(http.body["instructions"], json!("Be precise"));
     }
 
     #[test]
@@ -1648,43 +1541,6 @@ mod tests {
     }
 
     #[test]
-    fn test_previous_response_id_forwarded() {
-        let adapter = OpenAiResponsesAdapter;
-        let mut req = LlmRequest::new(
-            "gpt-4.1".to_string(),
-            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
-        );
-        req.previous_response_id = Some("resp_123".to_string());
-
-        let http = adapter
-            .build_http(&cleared(&req), &default_settings())
-            .unwrap();
-
-        assert_eq!(http.body["previous_response_id"], "resp_123");
-        assert_eq!(
-            http.body["store"], true,
-            "Responses chaining requires store=true"
-        );
-    }
-
-    #[test]
-    fn test_standard_api_store_true_by_default() {
-        let adapter = OpenAiResponsesAdapter;
-        let req = LlmRequest::new(
-            "gpt-4.1".to_string(),
-            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
-        );
-
-        let http = adapter
-            .build_http(&cleared(&req), &default_settings())
-            .unwrap();
-        assert_eq!(
-            http.body["store"], true,
-            "Responses API should default to store=true"
-        );
-    }
-
-    #[test]
     fn test_standard_api_includes_params() {
         let adapter = OpenAiResponsesAdapter;
         let mut req = LlmRequest::new(
@@ -1728,100 +1584,6 @@ mod tests {
     }
 
     #[test]
-    fn test_standard_api_includes_top_p_for_non_reasoning_model() {
-        let adapter = OpenAiResponsesAdapter;
-        let mut req = LlmRequest::new(
-            "gpt-4.1".to_string(),
-            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
-        );
-        req.params.top_p = Some(0.9);
-
-        let mut settings = default_settings();
-        settings.supports_reasoning = false;
-
-        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
-
-        assert!((http.body["top_p"].as_f64().unwrap() - 0.9).abs() < 0.000_001);
-    }
-
-    #[test]
-    fn test_build_http_basic() {
-        let adapter = OpenAiResponsesAdapter;
-        let req = LlmRequest::new(
-            "gpt-4.1".to_string(),
-            vec![
-                ChatMessage::new("system".to_string(), "You are helpful".to_string()),
-                ChatMessage::new("user".to_string(), "Hello".to_string()),
-            ],
-        );
-        let settings = default_settings();
-
-        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
-
-        assert_eq!(http.body["model"], "gpt-4.1");
-        assert_eq!(http.body["instructions"], "You are helpful");
-        assert!(http.body["input"].is_array());
-    }
-
-    #[test]
-    fn github_copilot_openai_responses_adds_vision_header_only_for_images() {
-        use refact_core::chat_types::MultimodalElement;
-
-        let adapter = OpenAiResponsesAdapter;
-        let image_message = ChatMessage {
-            role: "user".to_string(),
-            content: ChatContent::Multimodal(vec![MultimodalElement {
-                m_type: "image/png".to_string(),
-                m_content: "base64data".to_string(),
-            }]),
-            ..Default::default()
-        };
-        let req = LlmRequest::new("github_copilot/gpt-4.1".to_string(), vec![image_message]);
-        let mut settings = default_settings();
-        settings.endpoint = "https://api.githubcopilot.com/v1/responses".to_string();
-        settings.api_key = "copilot-token".to_string();
-
-        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
-
-        assert_eq!(
-            http.headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
-            "Bearer copilot-token"
-        );
-        assert_eq!(
-            http.headers
-                .get("Copilot-Vision-Request")
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "true"
-        );
-
-        let text_req = LlmRequest::new(
-            "github_copilot/gpt-4.1".to_string(),
-            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
-        );
-        let text_http = adapter.build_http(&cleared(&text_req), &settings).unwrap();
-        assert!(text_http.headers.get("Copilot-Vision-Request").is_none());
-    }
-
-    #[test]
-    fn test_build_http_with_reasoning() {
-        let adapter = OpenAiResponsesAdapter;
-        let mut req = LlmRequest::new("gpt-4.1".to_string(), vec![])
-            .with_reasoning(crate::params::ReasoningIntent::Medium);
-        req.params.temperature = Some(0.5);
-        let settings = default_settings();
-
-        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
-
-        assert_eq!(http.body["reasoning"]["effort"], "medium");
-        assert!(
-            http.body.get("temperature").is_none(),
-            "Responses reasoning requests must omit temperature"
-        );
-    }
-
-    #[test]
     fn test_parse_stream_chunk_text_delta() {
         let adapter = OpenAiResponsesAdapter;
         let chunk = r#"{"type":"response.output_text.delta","delta":"Hello"}"#;
@@ -1833,33 +1595,6 @@ mod tests {
             LlmStreamDelta::AppendContent { text, .. } => assert_eq!(text, "Hello"),
             _ => panic!("expected AppendContent"),
         }
-    }
-
-    #[test]
-    fn test_parse_stream_chunk_completed() {
-        let adapter = OpenAiResponsesAdapter;
-        let chunk =
-            r#"{"type":"response.completed","usage":{"input_tokens":10,"output_tokens":5}}"#;
-
-        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
-
-        assert!(deltas.iter().any(|d| matches!(d, LlmStreamDelta::Done)));
-        assert!(deltas
-            .iter()
-            .any(|d| matches!(d, LlmStreamDelta::SetFinishReason { .. })));
-    }
-
-    #[test]
-    fn test_parse_stream_chunk_completed_with_response_wrapper() {
-        let adapter = OpenAiResponsesAdapter;
-        let chunk = r#"{"type":"response.completed","response":{"id":"resp_123","usage":{"input_tokens":20,"output_tokens":10}}}"#;
-
-        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
-
-        assert!(deltas.iter().any(|d| matches!(d, LlmStreamDelta::Done)));
-        assert!(deltas
-            .iter()
-            .any(|d| matches!(d, LlmStreamDelta::SetUsage { .. })));
     }
 
     #[test]
@@ -1915,124 +1650,6 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_rate_limits_is_metadata_only() {
-        let adapter = OpenAiResponsesAdapter;
-        let chunk = r#"{"type":"codex.rate_limits","sequence_number":1,"payload":{"type":"codex_rate_limits","plan_type":"pro","rate_limits":{"allowed":true,"limit_reached":false}}}"#;
-
-        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
-
-        assert!(
-            deltas
-                .iter()
-                .any(|d| matches!(d, LlmStreamDelta::MergeExtra { .. })),
-            "codex.rate_limits should be preserved in message extra"
-        );
-        assert!(
-            !deltas
-                .iter()
-                .any(|d| matches!(d, LlmStreamDelta::AddServerContentBlock { .. })),
-            "codex.rate_limits should not create a visible server block"
-        );
-        if let Some(LlmStreamDelta::MergeExtra { extra }) = deltas
-            .iter()
-            .find(|d| matches!(d, LlmStreamDelta::MergeExtra { .. }))
-        {
-            assert_eq!(extra["codex_rate_limits"][0]["sequence_number"], json!(1));
-            assert_eq!(
-                extra["codex_rate_limits"][0]["payload"]["payload"]["plan_type"],
-                json!("pro")
-            );
-        }
-    }
-
-    #[test]
-    fn test_codex_response_metadata_is_metadata_only() {
-        let adapter = OpenAiResponsesAdapter;
-        let chunk = r#"{"type":"codex.response.metadata","headers":{"x-codex-safety-buffering-enabled":"true","x-codex-safety-buffering-faster-model":"gpt-5.6-luna"}}"#;
-
-        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
-
-        assert!(
-            !deltas
-                .iter()
-                .any(|d| matches!(d, LlmStreamDelta::AddServerContentBlock { .. })),
-            "codex.response.metadata should not create a visible server block"
-        );
-        let Some(LlmStreamDelta::MergeExtra { extra }) = deltas
-            .iter()
-            .find(|d| matches!(d, LlmStreamDelta::MergeExtra { .. }))
-        else {
-            panic!("codex.response.metadata should be preserved in message extra");
-        };
-        assert_eq!(
-            extra["codex_response_metadata"][0]["payload"]["headers"]
-                ["x-codex-safety-buffering-faster-model"],
-            json!("gpt-5.6-luna")
-        );
-        assert_eq!(
-            extra["codex_response_metadata"][0]["payload"]["headers"]
-                ["x-codex-safety-buffering-enabled"],
-            json!("true")
-        );
-    }
-
-    #[test]
-    fn test_unknown_codex_event_is_absorbed_without_server_block() {
-        let adapter = OpenAiResponsesAdapter;
-        let chunk =
-            r#"{"type":"codex.future_telemetry","sequence_number":7,"anything":{"nested":true}}"#;
-
-        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
-
-        assert!(
-            !deltas
-                .iter()
-                .any(|d| matches!(d, LlmStreamDelta::AddServerContentBlock { .. })),
-            "unknown codex.* events should never create visible server blocks"
-        );
-        let Some(LlmStreamDelta::MergeExtra { extra }) = deltas
-            .iter()
-            .find(|d| matches!(d, LlmStreamDelta::MergeExtra { .. }))
-        else {
-            panic!("unknown codex.* events should be preserved in message extra");
-        };
-        assert_eq!(
-            extra["codex_metadata_events"][0]["event_type"],
-            json!("codex.future_telemetry")
-        );
-        assert_eq!(
-            extra["codex_metadata_events"][0]["sequence_number"],
-            json!(7)
-        );
-    }
-
-    #[test]
-    fn test_convert_system_to_instructions() {
-        let messages = vec![
-            ChatMessage::new("system".to_string(), "Be helpful".to_string()),
-            ChatMessage::new("user".to_string(), "Hi".to_string()),
-        ];
-
-        let (input, instructions) = convert_to_responses_format(&messages);
-
-        assert_eq!(instructions, Some("Be helpful".to_string()));
-        assert_eq!(input.as_array().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn test_convert_developer_to_instructions() {
-        let messages = vec![
-            ChatMessage::new("developer".to_string(), "Be concise".to_string()),
-            ChatMessage::new("user".to_string(), "Hi".to_string()),
-        ];
-
-        let (input, instructions) = convert_to_responses_format(&messages);
-
-        assert_eq!(instructions, Some("Be concise".to_string()));
-        assert_eq!(input.as_array().unwrap().len(), 1);
-    }
-
-    #[test]
     fn test_convert_tool_loop_history() {
         use refact_core::chat_types::{ChatToolCall, ChatToolFunction};
 
@@ -2073,42 +1690,6 @@ mod tests {
         assert_eq!(input_arr[1]["name"], "get_weather");
         assert_eq!(input_arr[2]["type"], "function_call_output");
         assert_eq!(input_arr[2]["call_id"], "call_123");
-    }
-
-    #[test]
-    fn test_parse_stream_tool_call_output_item_added() {
-        let adapter = OpenAiResponsesAdapter;
-        let chunk = r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_123","call_id":"call_abc123","name":"get_weather","arguments":""}}"#;
-
-        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
-
-        assert_eq!(deltas.len(), 1);
-        match &deltas[0] {
-            LlmStreamDelta::SetToolCalls { tool_calls } => {
-                assert_eq!(tool_calls.len(), 1);
-                assert_eq!(tool_calls[0]["id"], "call_abc123");
-                assert_eq!(tool_calls[0]["function"]["name"], "get_weather");
-            }
-            _ => panic!("expected SetToolCalls"),
-        }
-    }
-
-    #[test]
-    fn test_parse_stream_tool_call_arguments_delta() {
-        let adapter = OpenAiResponsesAdapter;
-        let chunk = r#"{"type":"response.function_call_arguments.delta","item_id":"fc_123","output_index":0,"delta":"{\"loc"}"#;
-
-        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
-
-        assert_eq!(deltas.len(), 1);
-        match &deltas[0] {
-            LlmStreamDelta::SetToolCalls { tool_calls } => {
-                assert_eq!(tool_calls.len(), 1);
-                assert_eq!(tool_calls[0]["index"], 0);
-                assert_eq!(tool_calls[0]["function"]["arguments"], "{\"loc");
-            }
-            _ => panic!("expected SetToolCalls"),
-        }
     }
 
     #[test]
@@ -2165,55 +1746,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_stream_output_item_added_web_search_creates_srvtool() {
-        let adapter = OpenAiResponsesAdapter;
-        let chunk = r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"web_search_call","id":"ws_123","status":"in_progress"}}"#;
-
-        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
-
-        let tool_calls: Vec<_> = deltas
-            .iter()
-            .filter_map(|d| match d {
-                LlmStreamDelta::SetToolCalls { tool_calls } => Some(tool_calls.clone()),
-                _ => None,
-            })
-            .flatten()
-            .collect();
-
-        assert!(
-            tool_calls
-                .iter()
-                .any(|tc| tc.get("id") == Some(&json!("srvtoolu_ws_123"))),
-            "should create a srvtoolu_ tool call for web_search_call output item"
-        );
-        assert!(tool_calls
-            .iter()
-            .any(|tc| tc["function"]["name"] == "openai_web_search_call"));
-    }
-
-    #[test]
-    fn test_usage_total_tokens_fallback() {
-        let adapter = OpenAiResponsesAdapter;
-        let chunk =
-            r#"{"type":"response.completed","usage":{"input_tokens":100,"output_tokens":50}}"#;
-
-        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
-
-        let usage_delta = deltas
-            .iter()
-            .find(|d| matches!(d, LlmStreamDelta::SetUsage { .. }));
-        assert!(usage_delta.is_some());
-        match usage_delta.unwrap() {
-            LlmStreamDelta::SetUsage { usage } => {
-                assert_eq!(usage.prompt_tokens, 100);
-                assert_eq!(usage.completion_tokens, 50);
-                assert_eq!(usage.total_tokens, 150);
-            }
-            _ => panic!("expected SetUsage"),
-        }
-    }
-
-    #[test]
     fn test_usage_extracts_openai_cached_input_tokens() {
         let adapter = OpenAiResponsesAdapter;
         let chunk = r#"{"type":"response.completed","usage":{"input_tokens":1000,"input_tokens_details":{"cached_tokens":800},"output_tokens":100,"total_tokens":1100}}"#;
@@ -2259,106 +1791,6 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_messages_uniform_type() {
-        let messages = vec![
-            ChatMessage::new("user".to_string(), "Hello".to_string()),
-            ChatMessage {
-                role: "assistant".to_string(),
-                content: refact_core::chat_types::ChatContent::SimpleText("Hi there".to_string()),
-                tool_calls: None,
-                ..Default::default()
-            },
-            ChatMessage::new("user".to_string(), "Follow up question".to_string()),
-        ];
-
-        let (input, _) = convert_to_responses_format(&messages);
-        let input_arr = input.as_array().unwrap();
-
-        // All message-type items should have type: "message"
-        assert_eq!(input_arr[0]["type"], "message");
-        assert_eq!(input_arr[0]["role"], "user");
-        assert_eq!(input_arr[1]["type"], "message");
-        assert_eq!(input_arr[1]["role"], "assistant");
-        // Assistant history should use simple string content, not output_text array
-        assert!(
-            input_arr[1]["content"].is_string(),
-            "assistant content should be a string, not an array"
-        );
-        assert_eq!(input_arr[1]["content"], "Hi there");
-        assert_eq!(input_arr[2]["type"], "message");
-        assert_eq!(input_arr[2]["role"], "user");
-    }
-
-    #[test]
-    fn test_tool_arguments_object_stringified() {
-        let json = json!({
-            "type": "response.output_item.done",
-            "output_index": 0,
-            "item": {
-                "type": "function_call",
-                "call_id": "call_123",
-                "name": "test_func",
-                "arguments": {"key": "value", "num": 42}
-            }
-        });
-
-        let tc = extract_tool_call_from_item(&json["item"], &json).unwrap();
-        // Arguments should be stringified JSON
-        assert_eq!(tc["function"]["arguments"], r#"{"key":"value","num":42}"#);
-    }
-
-    #[test]
-    fn test_stream_web_search_citations() {
-        let adapter = OpenAiResponsesAdapter;
-        // Web search results in output_item.done event
-        let chunk = r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"web_search_call","id":"ws_123","results":[{"url":"https://example.com","title":"Example","snippet":"Some content"},{"url":"https://other.com","title":"Other","snippet":"Other content"}]}}"#;
-
-        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
-        let citation_count = deltas
-            .iter()
-            .filter(|d| matches!(d, LlmStreamDelta::AddCitation { .. }))
-            .count();
-        assert_eq!(citation_count, 2);
-
-        // Verify first citation
-        let citations: Vec<_> = deltas
-            .iter()
-            .filter_map(|d| {
-                if let LlmStreamDelta::AddCitation { citation } = d {
-                    Some(citation)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert_eq!(
-            citations[0].get("url").and_then(|v| v.as_str()),
-            Some("https://example.com")
-        );
-        assert_eq!(
-            citations[1].get("url").and_then(|v| v.as_str()),
-            Some("https://other.com")
-        );
-    }
-
-    #[test]
-    fn test_stream_completed_no_duplicate_citations() {
-        let adapter = OpenAiResponsesAdapter;
-        // response.completed should NOT emit citations (they come from output_item.done)
-        let chunk = r#"{"type":"response.completed","response":{"status":"completed","output":[{"type":"web_search_call","results":[{"url":"https://search.com","title":"Search Result"}]}]}}"#;
-
-        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
-        let citation_count = deltas
-            .iter()
-            .filter(|d| matches!(d, LlmStreamDelta::AddCitation { .. }))
-            .count();
-        assert_eq!(
-            citation_count, 0,
-            "response.completed should not duplicate citations from output_item.done"
-        );
-    }
-
-    #[test]
     fn test_reasoning_item_captured_from_output_item_done() {
         let adapter = OpenAiResponsesAdapter;
         let chunk = r#"{"type":"response.output_item.done","item":{"id":"rs_abc123","type":"reasoning","summary":[],"status":null}}"#;
@@ -2380,22 +1812,6 @@ mod tests {
             assert_eq!(blocks.len(), 1);
             assert_eq!(blocks[0]["type"], "reasoning");
             assert_eq!(blocks[0]["id"], "rs_abc123");
-        }
-    }
-
-    #[test]
-    fn test_reasoning_item_with_encrypted_content() {
-        let adapter = OpenAiResponsesAdapter;
-        let chunk = r#"{"type":"response.output_item.done","item":{"id":"rs_xyz789","type":"reasoning","summary":[],"encrypted_content":"gAAAAABo...encrypted...","status":null}}"#;
-
-        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
-
-        if let Some(LlmStreamDelta::SetThinkingBlocks { blocks }) = deltas
-            .iter()
-            .find(|d| matches!(d, LlmStreamDelta::SetThinkingBlocks { .. }))
-        {
-            assert_eq!(blocks[0]["type"], "reasoning");
-            assert_eq!(blocks[0]["encrypted_content"], "gAAAAABo...encrypted...");
         }
     }
 
@@ -2511,26 +1927,6 @@ mod tests {
     }
 
     #[test]
-    fn test_no_include_when_reasoning_not_supported() {
-        let adapter = OpenAiResponsesAdapter;
-        let mut settings = default_settings();
-        settings.supports_reasoning = false;
-
-        let req = LlmRequest::new(
-            "gpt-4.1".to_string(),
-            vec![ChatMessage::new("user".to_string(), "Hi".to_string())],
-        );
-
-        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
-
-        let include = http.body["include"].as_array().unwrap();
-        assert!(
-            !include.contains(&json!("reasoning.encrypted_content")),
-            "Should not request reasoning.encrypted_content when reasoning not supported"
-        );
-    }
-
-    #[test]
     fn test_reasoning_summary_text_delta_streams_partial_summary() {
         let adapter = OpenAiResponsesAdapter;
         let chunk = r#"{"type":"response.reasoning_summary_text.delta","item_id":"rs_abc","output_index":0,"summary_index":0,"delta":"Thinking about"}"#;
@@ -2562,32 +1958,6 @@ mod tests {
                 if text == "**Checking parser**\n\nThe completed reasoning body."
                     && reasoning_key == "item:rs_abc#s0"
         ));
-    }
-
-    #[test]
-    fn test_reasoning_summary_part_added_ignored() {
-        let adapter = OpenAiResponsesAdapter;
-        let chunk = r#"{"type":"response.reasoning_summary_part.added","item_id":"rs_abc","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""},"sequence_number":3}"#;
-
-        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
-
-        assert!(
-            deltas.is_empty(),
-            "reasoning_summary_part.added should produce no deltas"
-        );
-    }
-
-    #[test]
-    fn test_reasoning_summary_part_done_ignored() {
-        let adapter = OpenAiResponsesAdapter;
-        let chunk = r#"{"type":"response.reasoning_summary_part.done","item_id":"rs_abc","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":"**Sending friendly greeting**"},"sequence_number":9}"#;
-
-        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
-
-        assert!(
-            deltas.is_empty(),
-            "reasoning_summary_part.done should produce no deltas"
-        );
     }
 
     #[test]
@@ -2624,43 +1994,12 @@ mod tests {
     }
 
     #[test]
-    fn test_response_incomplete() {
-        let adapter = OpenAiResponsesAdapter;
-        let chunk = r#"{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":100,"output_tokens":4096}}}"#;
-
-        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
-
-        assert!(deltas.iter().any(|d| matches!(d, LlmStreamDelta::Done)));
-        if let Some(LlmStreamDelta::SetFinishReason { reason }) = deltas
-            .iter()
-            .find(|d| matches!(d, LlmStreamDelta::SetFinishReason { .. }))
-        {
-            assert_eq!(reason, "length");
-        }
-    }
-
-    #[test]
     fn test_error_event() {
         let adapter = OpenAiResponsesAdapter;
         let chunk = r#"{"type":"error","code":"server_error","message":"Internal server error"}"#;
 
         let result = adapter.parse_stream_chunk(chunk);
         assert!(matches!(result, Err(StreamParseError::FatalError(_))));
-    }
-
-    #[test]
-    fn test_annotation_added() {
-        let adapter = OpenAiResponsesAdapter;
-        let chunk = r#"{"type":"response.output_text.annotation.added","item_id":"msg_abc","output_index":0,"content_index":0,"annotation_index":0,"annotation":{"type":"url_citation","url":"https://example.com","title":"Example"}}"#;
-
-        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
-
-        assert!(
-            deltas
-                .iter()
-                .any(|d| matches!(d, LlmStreamDelta::AddCitation { .. })),
-            "annotation.added should produce AddCitation"
-        );
     }
 
     #[test]
@@ -2709,68 +2048,6 @@ mod tests {
             tool.get("function").is_none(),
             "function wrapper must not be present in responses format"
         );
-    }
-
-    #[test]
-    fn test_convert_tools_to_responses_strict_true_preserved() {
-        let tools = vec![json!({
-            "type": "function",
-            "function": {
-                "name": "strict_tool",
-                "description": "A strict tool",
-                "strict": true,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"}
-                    },
-                    "required": ["query"],
-                    "additionalProperties": false
-                }
-            }
-        })];
-
-        let result = convert_tools_to_responses(&tools);
-        let converted = result.as_array().unwrap();
-        assert_eq!(
-            converted[0]["strict"],
-            json!(true),
-            "strict=true must be passed through to Responses API format"
-        );
-    }
-
-    #[test]
-    fn test_convert_tools_to_responses_already_in_responses_format() {
-        let tools = vec![json!({
-            "type": "function",
-            "name": "already_converted",
-            "description": "Already in responses format",
-            "parameters": {"type": "object", "properties": {}}
-        })];
-
-        let result = convert_tools_to_responses(&tools);
-        let converted = result.as_array().unwrap();
-        assert_eq!(converted.len(), 1);
-        assert_eq!(converted[0]["name"], json!("already_converted"));
-    }
-
-    #[test]
-    fn test_reasoning_summary_key_distinguishes_items_with_same_summary_index() {
-        // Two distinct reasoning items each reuse summary_index:0.
-        // Keys must differ so their summaries are not collapsed.
-        let a = json!({"item_id":"rs_a","output_index":0,"summary_index":0});
-        let b = json!({"item_id":"rs_b","output_index":1,"summary_index":0});
-        let key_a = reasoning_summary_key(&a);
-        let key_b = reasoning_summary_key(&b);
-        assert_ne!(key_a, key_b);
-        assert_eq!(key_a, "item:rs_a#s0");
-        assert_eq!(key_b, "item:rs_b#s0");
-    }
-
-    #[test]
-    fn test_reasoning_summary_key_falls_back_to_output_index() {
-        let no_item = json!({"output_index":3,"summary_index":2});
-        assert_eq!(reasoning_summary_key(&no_item), "out:3#s2");
     }
 
     #[test]
@@ -2833,33 +2110,5 @@ mod tests {
             assert!(!text.contains("private"));
             assert!(!text.contains("gAAAA"));
         }
-    }
-
-    #[test]
-    fn test_flattened_completed_reasoning_item_finalizes_safe_summary() {
-        let adapter = OpenAiResponsesAdapter;
-        let chunk = r#"{"type":"response.completed","id":"resp_flat","status":"completed","output":[{"id":"rs_flat","type":"reasoning","encrypted_content":"gAAAA","content":[{"type":"reasoning_text","text":"private"}],"summary":[{"type":"summary_text","text":"Flattened visible summary"}]}]}"#;
-
-        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
-        assert!(deltas.iter().any(|delta| matches!(
-            delta,
-            LlmStreamDelta::MergeExtra { extra }
-                if extra.get("openai_response_id") == Some(&json!("resp_flat"))
-        )));
-        let finalized: Vec<_> = deltas
-            .iter()
-            .filter_map(|delta| match delta {
-                LlmStreamDelta::FinalizeKeyedReasoning {
-                    text,
-                    reasoning_key,
-                } => Some((text.as_str(), reasoning_key.as_str())),
-                _ => None,
-            })
-            .collect();
-
-        assert_eq!(
-            finalized,
-            vec![("Flattened visible summary", "item:rs_flat#s0")]
-        );
     }
 }

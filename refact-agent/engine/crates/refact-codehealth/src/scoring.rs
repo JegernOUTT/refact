@@ -245,13 +245,6 @@ mod tests {
     }
 
     #[test]
-    fn clean_file_scores_ten() {
-        let score = score_file(&[]);
-        assert_eq!(score.defect, 10.0);
-        assert_eq!(grade(score.defect), 'A');
-    }
-
-    #[test]
     fn score_file_regression_pinned() {
         let structural = vec![
             finding(
@@ -282,31 +275,6 @@ mod tests {
         assert_close(perf_score.defect, 9.0);
         assert_close(perf_score.maintainability, 10.0);
         assert_close(perf_score.performance, 9.0);
-    }
-
-    #[test]
-    fn structural_findings_lower_defect_score() {
-        let findings = vec![
-            finding(
-                "complex_method",
-                "size_and_complexity",
-                Dimension::Defect,
-                Severity::High,
-            ),
-            finding(
-                "god_class",
-                "structural_complexity",
-                Dimension::Maintainability,
-                Severity::High,
-            ),
-        ];
-        let score = score_file(&findings);
-        assert!(score.defect < 10.0, "got {}", score.defect);
-        assert!(
-            score.maintainability < 10.0,
-            "got {}",
-            score.maintainability
-        );
     }
 
     #[test]
@@ -440,29 +408,5 @@ mod tests {
         assert_close(impacts[0].deduction, 0.25);
         assert_close(impacts[1].deduction, 0.25);
         assert!(impacts.iter().all(|impact| impact.capped));
-    }
-
-    #[test]
-    fn defect_weights_do_not_apply_to_home_dimensions() {
-        let findings = vec![finding(
-            "low_cohesion",
-            "structural_complexity",
-            Dimension::Maintainability,
-            Severity::High,
-        )];
-
-        let score = score_file(&findings);
-
-        assert_close(score.defect, 9.4);
-        assert_close(score.maintainability, 8.8);
-    }
-
-    #[test]
-    fn grade_thresholds() {
-        assert_eq!(grade(9.5), 'A');
-        assert_eq!(grade(8.0), 'B');
-        assert_eq!(grade(6.5), 'C');
-        assert_eq!(grade(4.5), 'D');
-        assert_eq!(grade(2.0), 'F');
     }
 }

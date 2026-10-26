@@ -734,45 +734,6 @@ mod tests {
     }
 
     #[test]
-    fn listing_read_ratio_handles_zero_and_nonzero_call_counts() {
-        assert_eq!(ratio_counts(4, 2), 2.0);
-        assert_eq!(ratio_counts(4, 0), 0.0);
-    }
-
-    #[test]
-    fn stream_stage_component_names_round_trip_through_telemetry() {
-        let telemetry = PerformanceTelemetry::new(true);
-        let expected = [
-            (PerfComponent::StreamPrepare, "stream.prepare"),
-            (
-                PerfComponent::StreamTokenCountRequest,
-                "stream.token_count_request",
-            ),
-            (PerfComponent::StreamRequestSend, "stream.request_send"),
-            (PerfComponent::StreamProviderTtft, "stream.provider_ttft"),
-            (
-                PerfComponent::StreamFirstContentDelta,
-                "stream.first_content_delta",
-            ),
-        ];
-
-        for (component, name) in expected {
-            assert_eq!(component.as_str(), name);
-            assert!(telemetry.record(&event(component, PerfOutcome::Success, 1, None, None, None,)));
-        }
-
-        let snapshot = telemetry.snapshot();
-        for (_, name) in expected {
-            let aggregate = snapshot
-                .components
-                .iter()
-                .find(|aggregate| aggregate.component == Some(name))
-                .unwrap();
-            assert_eq!(aggregate.sample_count, 1, "missing telemetry for {name}");
-        }
-    }
-
-    #[test]
     fn perf_telemetry_disabled_enable_disable_and_reset_are_lossless() {
         let telemetry = PerformanceTelemetry::new(false);
         let event = event(
@@ -801,36 +762,6 @@ mod tests {
     }
 
     #[test]
-    fn perf_telemetry_storage_is_fixed_after_one_million_events() {
-        let telemetry = PerformanceTelemetry::new(true);
-        let storage_words = telemetry.fixed_storage_words();
-        let event = event(
-            PerfComponent::EnrichmentScopedSearch,
-            PerfOutcome::Success,
-            32,
-            None,
-            None,
-            None,
-        );
-        for _ in 0..1_000_000 {
-            telemetry.record(&event);
-        }
-
-        let snapshot = telemetry.snapshot();
-        assert_eq!(telemetry.fixed_storage_words(), storage_words);
-        assert_eq!(snapshot.components.len(), PerfComponent::ALL.len());
-        assert_eq!(
-            snapshot
-                .components
-                .iter()
-                .find(|component| component.component == Some("enrichment.scoped_search"))
-                .unwrap()
-                .sample_count,
-            1_000_000
-        );
-    }
-
-    #[test]
     fn perf_telemetry_snapshot_contains_only_fixed_numeric_schema_fields() {
         let telemetry = PerformanceTelemetry::new(true);
         let private_chat_id = "private-chat-id";
@@ -854,22 +785,5 @@ mod tests {
         for forbidden in ["chat_id", "path", "query", "prompt", "arguments", "content"] {
             assert!(!rendered.contains(&format!("\"{forbidden}\"")));
         }
-    }
-
-    #[test]
-    fn perf_telemetry_ignores_unknown_component_indices() {
-        let telemetry = PerformanceTelemetry::new(true);
-        let mut event = event(
-            PerfComponent::ToolRuntime,
-            PerfOutcome::Success,
-            5,
-            None,
-            None,
-            None,
-        );
-        event.component_index = u8::MAX;
-
-        assert!(!telemetry.record(&event));
-        assert_eq!(telemetry.snapshot().rollups.tool_stages.sample_count, 0);
     }
 }

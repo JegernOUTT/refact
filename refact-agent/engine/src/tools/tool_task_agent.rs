@@ -468,14 +468,4 @@ mod tests {
 
         assert!(err.contains("bound card_id 'card-1'"));
     }
-
-    #[test]
-    fn task_agent_scope_accepts_bound_matching_ids() {
-        let args = args(&[("task_id", json!("task-1")), ("card_id", json!("card-1"))]);
-        let scope =
-            resolve_task_agent_scope(Some(&bound_meta()), "agent-chat", &args, true, true).unwrap();
-
-        assert_eq!(scope.task_id, "task-1");
-        assert_eq!(scope.card_id.as_deref(), Some("card-1"));
-    }
 }

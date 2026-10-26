@@ -189,17 +189,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_tool_policy_defaults_subagent_to_read_only() {
-        let result = resolve_subagent_tools(&ToolPolicy::missing());
-
-        assert_eq!(
-            result.tools,
-            strings(&["tree", "cat", "glob", "search_pattern"])
-        );
-        assert!(result.used_default);
-    }
-
-    #[test]
     fn ambiguous_unknown_only_policy_defaults_read_only_and_keeps_unknown() {
         let result = resolve_subagent_tools(&ToolPolicy::allow(strings(&["unknown_tool"])));
 

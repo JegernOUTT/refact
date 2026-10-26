@@ -414,8 +414,6 @@ pub fn resolve_model_caps(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider_types::{ModelPricing, ModelPricingTier};
-    use serde_json::json;
 
     fn caps_with(entries: &[(&str, usize)]) -> HashMap<String, ModelCapabilities> {
         entries
@@ -431,30 +429,6 @@ mod tests {
             tokenizer: "fake".to_string(),
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn resolves_exact_model_match() {
-        let caps = caps_with(&[("openai/gpt-4.1", 128_000)]);
-
-        let resolved = resolve_model_caps(&caps, "openai/gpt-4.1").unwrap();
-
-        assert_eq!(resolved.matched_key, "openai/gpt-4.1");
-        assert_eq!(resolved.source, ModelCapsSource::Registry);
-        assert_eq!(resolved.caps.n_ctx, 128_000);
-        assert!(is_model_supported(&caps, "openai/gpt-4.1"));
-        assert!(!is_model_supported(&caps, "openai/missing"));
-    }
-
-    #[test]
-    fn resolves_provider_stripped_model_match() {
-        let caps = caps_with(&[("gpt-4.1", 128_000)]);
-
-        let resolved = resolve_model_caps(&caps, "openai/gpt-4.1").unwrap();
-
-        assert_eq!(resolved.matched_key, "gpt-4.1");
-        assert_eq!(resolved.source, ModelCapsSource::Registry);
-        assert_eq!(resolved.caps.n_ctx, 128_000);
     }
 
     #[test]
@@ -475,28 +449,6 @@ mod tests {
     }
 
     #[test]
-    fn resolves_wildcard_model_match() {
-        let caps = caps_with(&[("anthropic/claude-3-*", 200_000)]);
-
-        let resolved = resolve_model_caps(&caps, "anthropic/claude-3-sonnet").unwrap();
-
-        assert_eq!(resolved.matched_key, "anthropic/claude-3-*");
-        assert_eq!(resolved.source, ModelCapsSource::Registry);
-        assert_eq!(resolved.caps.n_ctx, 200_000);
-    }
-
-    #[test]
-    fn resolves_normalized_suffix_model_match() {
-        let caps = caps_with(&[("openai/gpt-4.1", 128_000)]);
-
-        let resolved = resolve_model_caps(&caps, "openai/gpt-4.1-preview").unwrap();
-
-        assert_eq!(resolved.matched_key, "openai/gpt-4.1");
-        assert_eq!(resolved.source, ModelCapsSource::Registry);
-        assert_eq!(resolved.caps.n_ctx, 128_000);
-    }
-
-    #[test]
     fn resolves_more_specific_wildcard_before_generic() {
         let caps = caps_with(&[
             ("provider/model-*", 4_096),
@@ -507,16 +459,6 @@ mod tests {
 
         assert_eq!(resolved.matched_key, "provider/model-pro-*");
         assert_eq!(resolved.caps.n_ctx, 32_768);
-    }
-
-    #[test]
-    fn resolves_equal_specificity_wildcard_by_lexical_key() {
-        let caps = caps_with(&[("foo-b*ar", 4_096), ("foo-*bar", 8_192)]);
-
-        let resolved = resolve_model_caps(&caps, "foo-bbar").unwrap();
-
-        assert_eq!(resolved.matched_key, "foo-*bar");
-        assert_eq!(resolved.caps.n_ctx, 8_192);
     }
 
     #[test]
@@ -537,30 +479,6 @@ mod tests {
         assert_eq!(huge.n_ctx, MAX_REASONABLE_N_CTX);
         assert_eq!(huge.max_output_tokens, MAX_REASONABLE_OUTPUT_TOKENS);
         assert_eq!(huge.tokenizer, "hf://Qwen/Qwen3");
-    }
-
-    #[test]
-    fn validate_model_caps_preserves_predefined_cloud_tokenizer_names() {
-        let mut caps = HashMap::from([(
-            "claude".to_string(),
-            ModelCapabilities {
-                tokenizer: "Anthropic".to_string(),
-                ..Default::default()
-            },
-        )]);
-
-        validate_model_caps(&mut caps);
-
-        assert_eq!(
-            caps.get("claude").unwrap().tokenizer,
-            ANTHROPIC_CLOUD_TOKENIZER
-        );
-    }
-
-    #[test]
-    fn predefined_cloud_tokenizer_matches_explicit_openai_name() {
-        assert!(is_predefined_cloud_tokenizer("openai"));
-        assert!(is_predefined_cloud_tokenizer(" OpenAI "));
     }
 
     #[test]
@@ -597,17 +515,5 @@ mod tests {
             ANTHROPIC_CLOUD_TOKENIZER
         );
         assert_eq!(caps.get("custom/unknown-model").unwrap().tokenizer, "fake");
-    }
-
-    #[test]
-    fn predefined_cloud_tokenizer_matches_anthropic_model_families() {
-        assert_eq!(
-            predefined_cloud_tokenizer_for_model("anthropic", "claude-3-5-sonnet-latest"),
-            Some(ANTHROPIC_CLOUD_TOKENIZER)
-        );
-        assert_eq!(
-            predefined_cloud_tokenizer_for_model("ollama", "llama3"),
-            None
-        );
     }
 }

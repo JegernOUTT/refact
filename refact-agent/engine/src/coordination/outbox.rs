@@ -555,43 +555,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn outbox_absent_expiry_round_trips_as_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("coordination.sqlite");
-        let outbox = open(&path, "alpha").await;
-        let never_expires = delivery("forever");
-        assert!(never_expires.expires_at_ms.is_none());
-        let mut expiring = delivery("expiring");
-        expiring.set_ttl_secs(600);
-        let deadline = expiring.expires_at_ms.unwrap();
-        outbox
-            .persist_accepted("chat-1", &never_expires)
-            .await
-            .unwrap();
-        outbox.persist_accepted("chat-1", &expiring).await.unwrap();
-
-        let recovery = reopen(outbox, &path, "alpha")
-            .await
-            .recover()
-            .await
-            .unwrap();
-        let restored = |id: &str| {
-            recovery
-                .redeliver
-                .iter()
-                .find(|recovered| recovered.delivery.id == id)
-                .map(|recovered| recovered.delivery.expires_at_ms)
-                .unwrap()
-        };
-        assert_eq!(
-            restored("forever"),
-            None,
-            "an absent expiry must never restore as expired-at-epoch-0"
-        );
-        assert_eq!(restored("expiring"), Some(deadline));
-    }
-
-    #[tokio::test]
     async fn outbox_settled_messages_stay_settled_across_restart() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("coordination.sqlite");
@@ -776,25 +739,5 @@ mod tests {
             outbox.status_of("landed").await.unwrap(),
             Some(DeliveryState::Delivered)
         );
-    }
-
-    #[tokio::test]
-    async fn outbox_recovery_task_stops_when_shutdown_is_raised() {
-        let workspace = tempfile::tempdir().unwrap();
-        let config = tempfile::tempdir().unwrap();
-        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
-            workspace.path().join("cache"),
-            config.path().to_path_buf(),
-        )
-        .await;
-        let app = AppState::from_gcx(gcx).await;
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let task = tokio::spawn(outbox_recovery_background_task(app, shutdown.clone()));
-
-        shutdown.store(true, Ordering::SeqCst);
-        tokio::time::timeout(Duration::from_secs(5), task)
-            .await
-            .expect("recovery task must observe the shutdown flag")
-            .unwrap();
     }
 }

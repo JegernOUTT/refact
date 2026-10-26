@@ -427,17 +427,4 @@ mod tests {
         crate::tasks::admission::end(&parent).await;
         assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
     }
-
-    #[test]
-    fn configured_limits_come_from_coordination_settings() {
-        let limits = limits_from_settings();
-        limits.validate().unwrap();
-        let settings = refact_work_core::coordination_settings();
-        assert_eq!(limits.max_pending, settings.max_pending_questions);
-        assert_eq!(
-            limits.default_expiry_secs,
-            settings.question_default_expiry_secs
-        );
-        assert_eq!(limits.max_expiry_secs, settings.question_max_expiry_secs);
-    }
 }

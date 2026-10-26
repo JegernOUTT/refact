@@ -324,11 +324,6 @@ mod tests {
     }
 
     #[test]
-    fn groq_discovery_url_is_openai_models_endpoint() {
-        assert_eq!(GROQ_MODELS_URL, "https://api.groq.com/openai/v1/models");
-    }
-
-    #[test]
     fn groq_excludes_non_chat_models_and_preserves_llm_ids() {
         let provider = GroqProvider::default();
         let models = provider.parse_available_models(

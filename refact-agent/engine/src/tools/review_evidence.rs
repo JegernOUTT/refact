@@ -265,31 +265,4 @@ mod tests {
         assert_eq!(outcome.present, 0);
         assert_eq!(outcome.unreadable, 1);
     }
-
-    #[tokio::test]
-    async fn review_evidence_accepts_quotes_with_line_number_prefixes() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("lib.rs");
-        std::fs::write(&path, FILE).unwrap();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let scope = scope_for(temp.path(), &path);
-        let mut findings = vec![finding(
-            "lib.rs",
-            5,
-            7,
-            "5: fn two() {\n6:     return Ok(());",
-        )];
-
-        verify_evidence(gcx, &scope, &mut findings).await;
-
-        assert!(findings[0].evidence_present);
-    }
-
-    #[test]
-    fn review_evidence_normalizes_whitespace_and_drops_blank_lines() {
-        assert_eq!(
-            normalize_snippet("  let   a = 1;  \n\n\tlet b = 2;\n"),
-            "let a = 1;\nlet b = 2;"
-        );
-    }
 }

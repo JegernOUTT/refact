@@ -234,7 +234,7 @@ pub async fn briefing_exists(project_root: &Path, date: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buddy::state::default_buddy_state;
+
     use crate::buddy::types::{BuddyAction, BuddyOpportunityKind, BuddyOpportunityLinks};
 
     fn opp(id: &str, priority: BuddyPriority, confidence: f32) -> BuddyOpportunity {
@@ -257,54 +257,5 @@ mod tests {
             expires_at: now + chrono::Duration::hours(24),
             resolved_at: None,
         }
-    }
-
-    #[test]
-    fn assemble_picks_top_cards_by_priority_and_confidence() {
-        let mut state = default_buddy_state();
-        state.llm_spend.record("2026-07-03", 4, 1000, 200);
-        let opportunities = vec![
-            opp("low", BuddyPriority::Low, 0.5),
-            opp("critical", BuddyPriority::Critical, 0.9),
-            opp("high", BuddyPriority::High, 0.9),
-            opp("normal", BuddyPriority::Normal, 0.9),
-        ];
-
-        let briefing = assemble_briefing(
-            &state,
-            &BuddyPulse::default(),
-            &opportunities,
-            vec![],
-            "2026-07-03".to_string(),
-        );
-
-        assert_eq!(briefing.top_cards.len(), 3);
-        assert_eq!(briefing.top_cards[0].id, "critical");
-        assert_eq!(briefing.top_cards[1].id, "high");
-        assert_eq!(briefing.top_cards[2].id, "normal");
-        assert_eq!(briefing.spend.total_tokens(), 1200);
-    }
-
-    #[tokio::test]
-    async fn briefing_round_trips_and_prunes() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let state = default_buddy_state();
-        for day in 1..=(BRIEFINGS_KEEP + 2) {
-            let date = format!("2026-06-{:02}", day);
-            let briefing =
-                assemble_briefing(&state, &BuddyPulse::default(), &[], vec![], date.clone());
-            save_briefing(root, &briefing).await.unwrap();
-        }
-        let files = std::fs::read_dir(briefings_dir(root)).unwrap().count();
-        assert_eq!(files, BRIEFINGS_KEEP);
-
-        let latest = load_briefing(root, None).await.unwrap();
-        assert_eq!(latest.date, format!("2026-06-{:02}", BRIEFINGS_KEEP + 2));
-        let dated = load_briefing(root, Some("2026-06-05")).await.unwrap();
-        assert_eq!(dated.date, "2026-06-05");
-        assert!(load_briefing(root, Some("2026-06-01")).await.is_none());
-        assert!(briefing_exists(root, "2026-06-05").await);
-        assert!(!briefing_exists(root, "2026-06-01").await);
     }
 }

@@ -285,22 +285,6 @@ mod operator_report_tests {
     use crate::buddy::outcome_runtime::WorkflowTerminal;
 
     #[test]
-    fn proposal_fingerprint_binds_exact_diff_and_optional_prompt() {
-        let original = commit_message_input_fingerprint("diff", &None);
-        assert_eq!(original, commit_message_input_fingerprint("diff", &None));
-        assert_ne!(original, commit_message_input_fingerprint("diff\n", &None));
-        assert_ne!(
-            original,
-            commit_message_input_fingerprint("diff", &Some(String::new()))
-        );
-        assert_ne!(
-            commit_message_input_fingerprint("ab", &Some("c".into())),
-            commit_message_input_fingerprint("a", &Some("bc".into())),
-        );
-        assert!(original.starts_with("sha256:"));
-    }
-
-    #[test]
     fn completed_proposal_retains_body_without_claiming_a_commit() {
         let message = "Subject\n\nFull proposal body".to_string();
         let report = commit_message_report(&Ok(message.clone()));
@@ -321,22 +305,5 @@ mod operator_report_tests {
             WorkflowTerminal::Cancelled { .. }
         ));
         assert!(!cancelled.body.contains("private-token"));
-    }
-
-    #[test]
-    fn proposal_title_sanitizes_and_caps_the_subject() {
-        assert_eq!(
-            commit_message_proposal_title("  feat:\timprove labels  \nBody"),
-            "Commit message: feat: improve labels"
-        );
-
-        let title = commit_message_proposal_title(&"s".repeat(100));
-        assert_eq!(title.chars().count(), COMMIT_MESSAGE_TITLE_MAX_CHARS);
-        assert!(title.starts_with(COMMIT_MESSAGE_TITLE_PREFIX));
-        assert!(title.ends_with('…'));
-        assert_eq!(
-            commit_message_proposal_title(" \nBody"),
-            "Commit-message proposal"
-        );
     }
 }

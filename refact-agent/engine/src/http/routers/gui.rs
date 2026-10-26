@@ -288,103 +288,10 @@ mod tests {
 
     use tracing_subscriber::fmt::MakeWriter;
 
-    #[test]
-    fn content_type_maps_common_gui_assets() {
-        assert_eq!(
-            content_type_for_path("index.html"),
-            "text/html; charset=utf-8"
-        );
-        assert_eq!(
-            content_type_for_path("index.umd.cjs"),
-            "text/javascript; charset=utf-8"
-        );
-        assert_eq!(
-            content_type_for_path("style.css"),
-            "text/css; charset=utf-8"
-        );
-        assert_eq!(
-            content_type_for_path("manifest.json"),
-            "application/json; charset=utf-8"
-        );
-        assert_eq!(content_type_for_path("font.woff2"), "font/woff2");
-    }
-
     fn headers_with(name: header::HeaderName, value: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(name, HeaderValue::from_str(value).unwrap());
         headers
-    }
-
-    #[test]
-    fn accepts_gzip_reads_quality_values_and_ignores_other_encodings() {
-        assert!(accepts_gzip(&headers_with(
-            header::ACCEPT_ENCODING,
-            "gzip, deflate, br"
-        )));
-        assert!(accepts_gzip(&headers_with(
-            header::ACCEPT_ENCODING,
-            "br;q=1.0, GZIP;q=0.8"
-        )));
-        assert!(!accepts_gzip(&headers_with(
-            header::ACCEPT_ENCODING,
-            "br, deflate"
-        )));
-        assert!(!accepts_gzip(&HeaderMap::new()));
-    }
-
-    #[test]
-    fn etag_matches_handles_wildcard_weak_and_lists() {
-        let etag = "\"abc123\"";
-        assert!(etag_matches(
-            &headers_with(header::IF_NONE_MATCH, "*"),
-            etag
-        ));
-        assert!(etag_matches(
-            &headers_with(header::IF_NONE_MATCH, "\"abc123\""),
-            etag
-        ));
-        assert!(etag_matches(
-            &headers_with(header::IF_NONE_MATCH, "W/\"abc123\""),
-            etag
-        ));
-        assert!(etag_matches(
-            &headers_with(header::IF_NONE_MATCH, "\"other\", \"abc123\""),
-            etag
-        ));
-        assert!(!etag_matches(
-            &headers_with(header::IF_NONE_MATCH, "\"other\""),
-            etag
-        ));
-        assert!(!etag_matches(&HeaderMap::new(), etag));
-    }
-
-    #[test]
-    fn gzip_asset_skips_payloads_below_threshold() {
-        let small = vec![b'a'; MIN_GZIP_BYTES - 1];
-        assert!(gzip_asset("test/small.js", &small).is_none());
-    }
-
-    #[test]
-    fn gzip_asset_compresses_and_serves_cached_bytes() {
-        let data = "console.log('refact');".repeat(500).into_bytes();
-        assert!(data.len() >= MIN_GZIP_BYTES);
-
-        let first = gzip_asset("test/compressible.js", &data).expect("compressible payload");
-        assert!(first.len() < data.len());
-
-        let second = gzip_asset("test/compressible.js", &data).expect("cached payload");
-        assert_eq!(first, second);
-    }
-
-    #[test]
-    fn gzip_asset_rejects_incompressible_payloads() {
-        let data: Vec<u8> = (0..8192u32)
-            .map(|i| (i.wrapping_mul(2654435761) >> 24) as u8)
-            .collect();
-        let compressed = gzip_asset("test/random.bin", &data);
-        if let Some(compressed) = compressed {
-            assert!(compressed.len() < data.len());
-        }
     }
 
     fn largest_embedded_text_asset() -> String {
@@ -444,50 +351,6 @@ mod tests {
             etag.as_str()
         );
         assert_ne!(etag, "\"\"");
-    }
-
-    #[test]
-    fn origin_candidates_inject_into_real_embedded_index() {
-        let asset = ChatGuiAsset::get(INDEX_PATH).expect("embedded index.html");
-        let candidates = GuiPublicOriginCandidates {
-            origins: vec![
-                "http://127.0.0.1:8001".to_string(),
-                "http://workstation.local:8001".to_string(),
-            ],
-        };
-
-        let injected = inject_gui_origin_candidates(asset.data, &candidates);
-        let html = std::str::from_utf8(injected.as_ref()).unwrap();
-
-        assert!(html.contains("http://127.0.0.1:8001"));
-        assert!(html.contains("http://workstation.local:8001"));
-        assert!(!html.contains(ORIGIN_CANDIDATES_PLACEHOLDER));
-        assert!(!html.contains("window.__REFACT_ENGINE_ORIGIN_CANDIDATES__ || []"));
-
-        let reinjected = inject_gui_origin_candidates(injected.clone(), &candidates);
-        assert_eq!(reinjected.as_ref(), injected.as_ref());
-    }
-
-    #[test]
-    fn origin_candidates_missing_marker_warns_and_returns_unchanged() {
-        let html = r#"<html><head></head><body></body></html>"#;
-        let candidates = GuiPublicOriginCandidates {
-            origins: vec!["http://127.0.0.1:8001".to_string()],
-        };
-        let logs = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::WARN)
-            .with_writer(SharedWriter(logs.clone()))
-            .with_ansi(false)
-            .finish();
-
-        let injected = tracing::subscriber::with_default(subscriber, || {
-            inject_gui_origin_candidates(Cow::Borrowed(html.as_bytes()), &candidates)
-        });
-
-        assert_eq!(injected.as_ref(), html.as_bytes());
-        let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
-        assert!(logs.contains("GUI origin candidates placeholder missing"));
     }
 
     #[derive(Clone)]

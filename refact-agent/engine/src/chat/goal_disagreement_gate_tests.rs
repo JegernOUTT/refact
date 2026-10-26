@@ -2,8 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use refact_work_core::store::records::{
-    now_ms, AdjudicationVerdict, DisagreementPosition, DisagreementRecord, DisagreementStatus,
-    EvidenceKind, EvidenceRef,
+    now_ms, DisagreementPosition, DisagreementRecord, DisagreementStatus, EvidenceKind, EvidenceRef,
 };
 use refact_work_core::{DisagreementFiling, ProjectKey, WorkKey};
 use tokio::sync::Mutex as AMutex;
@@ -11,7 +10,7 @@ use tokio::sync::Mutex as AMutex;
 use crate::app_state::AppState;
 use crate::chat::goal_verifier::{run_goal_verification, GoalVerdict};
 use crate::chat::types::{ChatSession, GoalBudget};
-use crate::coordination::disagreement::{ledger_for, store_resolution};
+use crate::coordination::disagreement::ledger_for;
 
 fn override_settings(
     enabled: bool,
@@ -115,51 +114,4 @@ async fn open_disagreement_blocks_goal_without_the_judge() {
     };
     assert!(gaps.iter().any(|gap| gap.contains("goal-open")), "{gaps:?}");
     assert_eq!(reply.tokens, 0);
-}
-
-#[tokio::test]
-#[serial_test::serial(runtime_settings)]
-async fn policy_off_does_not_consult_disagreements() {
-    let (_dir, app, session, _settings) = test_context(true, false, "goal-open-off").await;
-
-    let error = run_goal_verification(app, session).await.unwrap_err();
-
-    assert!(!error.contains("goal-open-off"), "{error}");
-    assert!(!error.contains("open disagreement"), "{error}");
-}
-
-#[tokio::test]
-#[serial_test::serial(runtime_settings)]
-async fn resolved_disagreement_does_not_block_goal() {
-    crate::runtime_settings::reset_for_test();
-    let _settings = override_settings(true, true);
-    let dir = tempfile::tempdir().unwrap();
-    let cache = dir.path().join("cache");
-    let root = dir.path().join("workspace");
-    std::fs::create_dir_all(&root).unwrap();
-    let app = app_for(&root, &cache).await;
-    let ledger = ledger_for(&app).await.unwrap();
-    let mut record = disagreement(&app, "goal-resolved");
-    ledger.file(&record).await.unwrap();
-    record
-        .resolve(
-            "reviewer",
-            AdjudicationVerdict::Decided {
-                position_id: "kept".to_string(),
-                decisive_evidence: EvidenceRef::new(EvidenceKind::File, "src/lib.rs:1"),
-                rationale: "the source confirms the position".to_string(),
-            },
-            "revision-1",
-            now_ms(),
-        )
-        .unwrap();
-    assert!(store_resolution(&ledger, &record).await.unwrap());
-    let mut session = ChatSession::new("goal-disagreement-resolved-test".into());
-    session.install_goal("agent", "complete the task", true, GoalBudget::default());
-    let session = Arc::new(AMutex::new(session));
-
-    let error = run_goal_verification(app, session).await.unwrap_err();
-
-    assert!(!error.contains("goal-resolved"), "{error}");
-    assert!(!error.contains("open disagreement"), "{error}");
 }

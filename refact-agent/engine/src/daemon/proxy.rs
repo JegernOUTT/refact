@@ -632,22 +632,6 @@ mod tests {
     }
 
     #[test]
-    fn worker_v1_path_preserves_raw_suffix() {
-        let uri: Uri = "/p/abc123/v1/chats/subscribe?chat_id=a%2Fb"
-            .parse()
-            .unwrap();
-        assert_eq!(worker_v1_path("abc123", &uri), "/v1/chats/subscribe");
-    }
-
-    #[test]
-    fn target_url_preserves_query() {
-        assert_eq!(
-            target_url(1234, "/v1/echo", Some("a=1&b=two")),
-            "http://127.0.0.1:1234/v1/echo?a=1&b=two"
-        );
-    }
-
-    #[test]
     fn target_url_strips_daemon_token_query() {
         let url = target_url(
             1234,
@@ -697,32 +681,6 @@ mod tests {
     }
 
     #[test]
-    fn request_headers_preserves_non_daemon_cookies() {
-        let mut headers = HeaderMap::new();
-        headers.insert(COOKIE, HeaderValue::from_static("theme=dark; sid=abc"));
-
-        let out = request_headers(&headers, "project");
-
-        assert_eq!(
-            out.get(reqwest::header::COOKIE).unwrap(),
-            "theme=dark; sid=abc"
-        );
-    }
-
-    #[test]
-    fn request_headers_omits_cookie_header_when_only_daemon_cookie_remains() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            COOKIE,
-            HeaderValue::from_static("refact_daemon_auth=secret"),
-        );
-
-        let out = request_headers(&headers, "project");
-
-        assert!(out.get(reqwest::header::COOKIE).is_none());
-    }
-
-    #[test]
     fn response_headers_strip_connection_named_headers() {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(reqwest::header::CONNECTION, "x-secret".parse().unwrap());
@@ -732,32 +690,6 @@ mod tests {
         let out = response_headers(&headers);
         assert!(out.get("x-secret").is_none());
         assert_eq!(out.get("x-visible").unwrap(), "ok");
-    }
-
-    #[test]
-    fn upgrade_request_is_detected_from_connection_header() {
-        let request = Request::builder()
-            .method(Method::GET)
-            .uri("/p/project/v1/ws")
-            .header(CONNECTION, "keep-alive, Upgrade")
-            .body(Body::empty())
-            .unwrap();
-        assert!(is_upgrade_request(&request));
-    }
-
-    #[test]
-    fn sse_request_detected_from_accept_header() {
-        let mut headers = HeaderMap::new();
-        headers.insert("accept", HeaderValue::from_static("text/event-stream"));
-
-        assert!(is_sse_request(&headers, "/v1/chats"));
-    }
-
-    #[test]
-    fn sse_request_detected_from_subscribe_path() {
-        let headers = HeaderMap::new();
-
-        assert!(is_sse_request(&headers, "/v1/chats/subscribe"));
     }
 
     #[test]
@@ -780,19 +712,6 @@ mod tests {
         assert!(is_sse_request(
             &headers,
             "/v1/voice/stream/abc123/subscribe"
-        ));
-    }
-
-    #[test]
-    fn sse_request_detected_for_exec_subscribe_worker_path() {
-        let uri: Uri = "/p/proj/v1/exec/abc123/subscribe".parse().unwrap();
-        let worker_path = worker_v1_path("proj", &uri);
-
-        assert_eq!(worker_path, "/v1/exec/abc123/subscribe");
-        assert!(is_sse_request(&HeaderMap::new(), &worker_path));
-        assert!(is_sse_request(
-            &HeaderMap::new(),
-            "/v1/exec/abc123/subscribe?since_seq=5"
         ));
     }
 

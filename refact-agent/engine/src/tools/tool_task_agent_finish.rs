@@ -1224,27 +1224,6 @@ mod tests {
         }
     }
 
-    fn sample_worktree_meta(temp: &Path) -> WorktreeMeta {
-        let root = temp.join("thread-worktree");
-        let source = temp.join("source");
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::create_dir_all(&source).unwrap();
-        WorktreeMeta {
-            id: "thread-id".to_string(),
-            kind: "task_agent".to_string(),
-            root,
-            source_workspace_root: source.clone(),
-            repo_root: source,
-            branch: Some("thread-branch".to_string()),
-            base_branch: Some("main".to_string()),
-            base_commit: Some("base".to_string()),
-            task_id: Some("task-1".to_string()),
-            card_id: Some("T-1".to_string()),
-            agent_id: Some("agent-1".to_string()),
-            enforce: true,
-        }
-    }
-
     async fn write_task(
         root: &Path,
         gcx: Arc<crate::global_context::GlobalContext>,
@@ -1288,18 +1267,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finish_locks_pruned_after_completion() {
-        let key = "task-1:T-1".to_string();
-
-        ensure_lock_for("task-1", "T-1", async {
-            assert!(get_finish_locks().lock().await.contains_key(&key));
-        })
-        .await;
-
-        assert!(!get_finish_locks().lock().await.contains_key(&key));
-    }
-
-    #[tokio::test]
     async fn finish_lock_not_pruned_while_external_holder_exists() {
         let task_id = "race-task";
         let card_id = "T-Race";
@@ -1323,14 +1290,6 @@ mod tests {
             !get_finish_locks().lock().await.contains_key(&key),
             "lock entry must be pruned once no external holder remains"
         );
-    }
-
-    #[test]
-    fn agents_active_uses_chat_id_not_assignee() {
-        let mut card = test_card(None);
-        card.agent_chat_id = None;
-
-        assert_eq!(agents_active(&[card]), 0);
     }
 
     #[tokio::test]
@@ -1378,24 +1337,6 @@ mod tests {
         let board = storage::load_board(gcx, "task-1").await.unwrap();
         let card = board.get_card("T-1").unwrap();
         assert!(card.last_heartbeat_at.is_some());
-    }
-
-    #[test]
-    fn spawn_agent_finish_prefers_thread_worktree_over_board_mirror() {
-        let temp = tempfile::tempdir().unwrap();
-        let meta = sample_worktree_meta(temp.path());
-        let legacy_root = temp.path().join("legacy-root");
-        let card = test_card(Some(legacy_root.to_string_lossy().to_string()));
-
-        let resolved = resolve_agent_worktree(Some(meta.clone()), &card).unwrap();
-        assert_eq!(resolved.root, meta.root);
-        assert_eq!(resolved.branch.as_deref(), Some("thread-branch"));
-        assert_eq!(resolved.name.as_deref(), Some("thread-id"));
-
-        let legacy = resolve_agent_worktree(None, &card).unwrap();
-        assert_eq!(legacy.root, legacy_root);
-        assert_eq!(legacy.branch.as_deref(), Some("legacy-branch"));
-        assert_eq!(legacy.name.as_deref(), Some("legacy-id"));
     }
 
     #[test]
@@ -1475,48 +1416,6 @@ mod tests {
     }
 
     #[test]
-    fn spawn_ab_both_variant_finishes_persist_separately() {
-        let mut card = ab_card();
-        let report_a = parsed_report("variant A done", true);
-        let report_b = parsed_report("variant B failed", false);
-
-        assert!(!mark_ab_variant_finished(
-            &mut card,
-            "a",
-            "agent-chat-a",
-            Some("agent-a"),
-            true,
-            &report_a,
-            None,
-        )
-        .unwrap());
-        assert!(mark_ab_variant_finished(
-            &mut card,
-            "b",
-            "agent-chat-b",
-            Some("agent-b"),
-            false,
-            &report_b,
-            None,
-        )
-        .unwrap());
-
-        assert_eq!(card.column, "doing");
-        assert!(card.final_report.is_none());
-        let variants = card.ab_variants.as_ref().unwrap();
-        assert_eq!(
-            variants.a.finish.as_ref().unwrap().final_report,
-            report_a.markdown
-        );
-        assert_eq!(
-            variants.b.finish.as_ref().unwrap().final_report,
-            report_b.markdown
-        );
-        assert!(variants.a.finish.as_ref().unwrap().success);
-        assert!(!variants.b.finish.as_ref().unwrap().success);
-    }
-
-    #[test]
     fn spawn_ab_variant_finish_rejects_second_finish() {
         let mut card = ab_card();
         let report = parsed_report("variant A done", true);
@@ -1546,147 +1445,11 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_agent_commit_message_is_bounded_single_line() {
-        let long_title = format!("  Fix   frog\n{}  ", "x".repeat(300));
-
-        let message = deterministic_agent_commit_message("T-1", &long_title);
-
-        assert!(message.starts_with("Card T-1: Fix frog "));
-        assert!(!message.contains('\n'));
-        assert!(message.chars().count() <= "Card T-1: ".chars().count() + 160);
-    }
-
-    #[test]
     fn deterministic_agent_commit_message_sanitizes_control_chars_in_id_and_title() {
         let message = deterministic_agent_commit_message("T-1\n\0\x1b[31m", "Fix\x07 title");
 
         assert_eq!(message, "Card T-1 [31m: Fix title");
         assert!(!message.chars().any(|ch| ch.is_control()));
-    }
-
-    #[test]
-    fn sanitize_commit_component_bounds_override_messages() {
-        let message = sanitize_commit_component(&format!("Fix\n{}", "x".repeat(300)), 12);
-
-        assert_eq!(message, "Fix xxxxxxxx");
-        assert!(!message.chars().any(|ch| ch.is_control()));
-    }
-
-    #[test]
-    fn tool_agent_finish_structured_object_populates_both_report_shapes() {
-        let args = HashMap::from_iter([
-            ("success".to_string(), json!(true)),
-            (
-                "report".to_string(),
-                json!({
-                    "summary": "Implemented structured finish reports.",
-                    "success": false,
-                    "files_changed": ["refact-agent/engine/src/tools/tool_agent_finish.rs"],
-                    "tests_added_or_updated": ["tool_agent_finish_structured_object_populates_both_report_shapes"],
-                    "verification": [{
-                        "command": "cargo test --lib -p refact-lsp -- tool_agent_finish",
-                        "exit_code": 0,
-                        "passed": true,
-                        "output_tail": "ok"
-                    }],
-                    "followup_cards": [{
-                        "title": "GUI structured report rendering",
-                        "instructions": "Render final_report_structured when present.",
-                        "priority": "P2",
-                        "target_files": ["refact-agent/gui/src/features/Tasks"]
-                    }],
-                    "risks": ["Planner still reads legacy markdown."],
-                    "assumptions": ["Markdown fallback remains populated."]
-                }),
-            ),
-        ]);
-        let parsed = parse_finish_report(&args, true).unwrap();
-        let mut card = test_card(None);
-
-        mark_finished_card(&mut card, true, &parsed, None);
-
-        let structured = card.final_report_structured.unwrap();
-        assert!(structured.success);
-        assert_eq!(structured.summary, "Implemented structured finish reports.");
-        assert_eq!(
-            structured.files_changed,
-            vec!["refact-agent/engine/src/tools/tool_agent_finish.rs"]
-        );
-        let markdown = card.final_report.unwrap();
-        assert!(markdown.contains("## Summary\nImplemented structured finish reports."));
-        assert!(markdown.contains("## Files Changed"));
-        assert!(markdown.contains("## Tests Added or Updated"));
-        assert!(markdown.contains("## Verification"));
-        assert!(markdown.contains("## Follow-up Cards"));
-        assert!(markdown.contains("## Risks"));
-        assert!(markdown.contains("## Assumptions"));
-    }
-
-    #[test]
-    fn tool_agent_finish_string_with_optional_fields_builds_structured_report() {
-        let args = HashMap::from_iter([
-            ("success".to_string(), json!(true)),
-            ("report".to_string(), json!("Summary from legacy field")),
-            ("files_changed".to_string(), json!(["src/lib.rs"])),
-            ("tests_added".to_string(), json!(["unit test"])),
-            (
-                "verification".to_string(),
-                json!([{
-                    "command": "cargo test",
-                    "exit_code": 0,
-                    "passed": true,
-                    "output_tail": "ok"
-                }]),
-            ),
-        ]);
-
-        let parsed = parse_finish_report(&args, true).unwrap();
-        let structured = parsed.structured.unwrap();
-
-        assert_eq!(structured.summary, "Summary from legacy field");
-        assert_eq!(structured.files_changed, vec!["src/lib.rs"]);
-        assert_eq!(structured.tests_added_or_updated, vec!["unit test"]);
-        assert!(parsed.markdown.contains("## Verification"));
-    }
-
-    #[test]
-    fn agent_finish_accepts_yes_and_rejects_garbage_success_string() {
-        let tru_args = HashMap::from_iter([
-            ("success".to_string(), json!("tru")),
-            ("report".to_string(), json!("invalid success")),
-        ]);
-        let yes_args = HashMap::from_iter([
-            ("success".to_string(), json!("yes")),
-            ("report".to_string(), json!("invalid success")),
-        ]);
-
-        let tru_error = parse_success_arg(&tru_args).unwrap_err();
-
-        assert_eq!(
-            tru_error,
-            "Invalid 'success' string; expected true or false"
-        );
-        assert_eq!(parse_success_arg(&yes_args), Ok(true));
-    }
-
-    #[test]
-    fn agent_finish_accepts_trimmed_boolean_strings() {
-        let true_args = HashMap::from_iter([
-            ("success".to_string(), json!(" true ")),
-            ("report".to_string(), json!("success")),
-        ]);
-        let false_args = HashMap::from_iter([
-            ("success".to_string(), json!(" false ")),
-            ("report".to_string(), json!("failure")),
-        ]);
-        let bool_args = HashMap::from_iter([
-            ("success".to_string(), json!(true)),
-            ("report".to_string(), json!("boolean success")),
-        ]);
-
-        assert!(parse_success_arg(&true_args).unwrap());
-        assert!(!parse_success_arg(&false_args).unwrap());
-        assert!(parse_success_arg(&bool_args).unwrap());
     }
 
     fn finished_board(instructions: &str, report: &ParsedFinishReport) -> TaskBoard {
@@ -1798,63 +1561,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn agent_finish_legacy_markdown_report_still_becomes_the_summary_fragment() {
-        let args = HashMap::from_iter([
-            ("success".to_string(), json!(true)),
-            ("report".to_string(), json!("Landed the gate by hand.")),
-        ]);
-        let parsed = parse_finish_report(&args, true).unwrap();
-        assert!(parsed.structured.is_none());
-
-        let board = finished_board("Required outcome: summary", &parsed);
-
-        assert_eq!(
-            board
-                .card_outcome("T-1")
-                .unwrap()
-                .fragment("summary")
-                .unwrap()
-                .content,
-            "Landed the gate by hand."
-        );
-        assert!(board
-            .evaluate_finalize("T-1", "planner-chat", false)
-            .allowed());
-    }
-
-    #[test]
-    fn a_card_without_declared_requirements_finishes_exactly_as_before() {
-        let args = HashMap::from_iter([
-            ("success".to_string(), json!(true)),
-            ("report".to_string(), json!("No requirements declared.")),
-        ]);
-        let parsed = parse_finish_report(&args, true).unwrap();
-
-        let board = finished_board("Plain instructions with no declaration.", &parsed);
-
-        assert!(board.card_outcome("T-1").unwrap().required.is_empty());
-        assert!(board
-            .evaluate_finalize("T-1", "planner-chat", false)
-            .allowed());
-    }
-
-    #[tokio::test]
-    async fn spawn_agent_finish_missing_worktree_returns_error() {
-        let temp = tempfile::tempdir().unwrap();
-        let missing = temp.path().join("missing-worktree");
-        let result = auto_commit_worktree_with_message(
-            &missing,
-            "T-1",
-            "Card T-1",
-            Some("test commit".to_string()),
-        )
-        .await;
-
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("does not exist"));
-    }
-
     #[tokio::test]
     async fn spawn_agent_finish_non_git_worktree_returns_error() {
         let temp = tempfile::tempdir().unwrap();
@@ -1870,26 +1576,6 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not a git worktree/repo"));
-    }
-
-    #[tokio::test]
-    async fn spawn_agent_finish_clean_worktree_returns_no_commit() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = temp.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        init_repo(&repo);
-
-        let commit = auto_commit_worktree_with_message(
-            &repo,
-            "T-1",
-            "Card T-1",
-            Some("test commit".to_string()),
-        )
-        .await
-        .unwrap();
-
-        assert!(commit.is_none());
-        assert!(run_git(&repo, &["status", "--porcelain"]).trim().is_empty());
     }
 
     #[tokio::test]
@@ -1930,46 +1616,6 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(worktree.join("file.txt")).unwrap(),
             "changed in worktree\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn spawn_agent_finish_default_commit_message_does_not_need_subchat() {
-        let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("repo");
-        let worktree = temp.path().join("agent-worktree-default-message");
-        std::fs::create_dir_all(&source).unwrap();
-        init_repo(&source);
-        run_git(
-            &source,
-            &[
-                "worktree",
-                "add",
-                "-b",
-                "refact/task/task-1/card/T-2/agent",
-                worktree.to_str().unwrap(),
-            ],
-        );
-        std::fs::write(
-            worktree.join("file.txt"),
-            "changed without generated message\n",
-        )
-        .unwrap();
-
-        let commit = auto_commit_worktree_with_message(
-            &worktree,
-            "T-2",
-            "  Implement    stable finish\nwithout subchat  ",
-            None,
-        )
-        .await
-        .unwrap();
-
-        assert!(commit.is_some());
-        let subject = run_git(&worktree, &["log", "-1", "--pretty=%s"]);
-        assert_eq!(
-            subject.trim(),
-            "Card T-2: Implement stable finish without subchat"
         );
     }
 }

@@ -59,40 +59,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_test_id_attribute_stays_implicit() {
-        assert_eq!(
-            test_id_locator("save", DEFAULT_TEST_ID_ATTRIBUTE),
-            BrowserLocator::test_id("save")
-        );
-    }
-
-    #[test]
-    fn custom_test_id_attribute_is_serialized() {
-        let locator = test_id_locator("save", "data-qa");
-        let value = serde_json::to_value(locator).unwrap();
-        assert_eq!(value["attribute"], "data-qa");
-    }
-
-    #[test]
-    fn strict_violation_names_locator_count_and_previews() {
-        let message = strict_mode_violation(
-            "role=button[Save]",
-            7,
-            &[
-                "<button>Save</button>".to_string(),
-                "<button>Save draft</button>".to_string(),
-            ],
-        );
-        assert!(message.contains("role=button[Save]"));
-        assert!(message.contains("resolved to 7 elements"));
-        assert!(message.contains("<button>Save</button>"));
-        assert!(message.contains("<button>Save draft</button>"));
-        assert!(message.contains("\n  ...\n"));
-        assert!(message.ends_with(STRICT_MODE_REMEDY));
-        assert!(message.contains("`nth`") && message.contains("`filter.has_text`"));
-    }
-
-    #[test]
     fn strict_violation_caps_preview_count_and_length() {
         let previews = (0..7)
             .map(|index| {

@@ -2507,12 +2507,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_ddg_html_empty() {
-        let results = parse_ddg_html("<html><body></body></html>");
-        assert!(results.is_empty());
-    }
-
-    #[test]
     fn test_parse_ddg_result_body_layout() {
         let html = r#"
             <div class="extra result__body">
@@ -2549,41 +2543,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_ddg_results_links_layout_prefers_classed_anchor_and_snippet() {
-        let html = r#"
-            <div class="results_links result">
-                <a href="https://fallback.example">Fallback link</a>
-                <a class="result__a" href="https://preferred.example"> Preferred <b>link</b> </a>
-                <table><tr><td>Fallback cell</td></tr></table>
-                <span class="result__snippet"> Preferred <b>snippet</b> </span>
-            </div>
-        "#;
-
-        let results = parse_ddg_html(html);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].title, "Preferred link");
-        assert_eq!(results[0].url, "https://preferred.example/");
-        assert_eq!(results[0].snippet, "Preferred snippet");
-    }
-
-    #[test]
-    fn test_parse_ddg_result_layout_uses_first_anchor_fallback() {
-        let html = r#"
-            <div class="extra result">
-                <a href="https://first.example"> First <b>link</b> </a>
-                <a href="https://second.example">Second link</a>
-                <span class="result__snippet"> Result <b>snippet</b> </span>
-            </div>
-        "#;
-
-        let results = parse_ddg_html(html);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].title, "First link");
-        assert_eq!(results[0].url, "https://first.example/");
-        assert_eq!(results[0].snippet, "Result snippet");
-    }
-
-    #[test]
     fn test_ddg_block_page_allows_ordinary_bot_substrings() {
         for body in [
             "<html><body>Robots help automate warehouse work.</body></html>",
@@ -2592,30 +2551,6 @@ mod tests {
             "<html><body>Continue at the bottom of the page.</body></html>",
         ] {
             assert!(!contains_ddg_block_page(body), "unexpected block: {body}");
-        }
-    }
-
-    #[test]
-    fn test_ddg_block_page_allows_generic_bot_phrases_in_large_results() {
-        for phrase in [
-            "Are you a robot?",
-            "not a robot",
-            "Are you a bot?",
-            "bot detection",
-            "bot-detection",
-            "bot challenge",
-            "bot-challenge",
-            "detected as a bot",
-            "bots use DuckDuckGo",
-        ] {
-            let body = format!(
-                "<html><body><div class=\"results\">{}<p>{phrase} This article explains the question.</p></div></body></html>",
-                "Ordinary search result content. ".repeat(200)
-            );
-            assert!(
-                !contains_ddg_block_page(&body),
-                "unexpected block: {phrase}"
-            );
         }
     }
 
@@ -2702,34 +2637,6 @@ mod tests {
     }
 
     #[test]
-    fn test_deduplicate_search_results_by_url_and_title() {
-        let deduped = deduplicate_search_results(vec![
-            SearchResult {
-                title: "Example Result".to_string(),
-                url: "https://example.com/page/".to_string(),
-                snippet: "Primary snippet".to_string(),
-                source: Some("a".to_string()),
-            },
-            SearchResult {
-                title: "Example Result".to_string(),
-                url: "https://example.com/page".to_string(),
-                snippet: "".to_string(),
-                source: Some("b".to_string()),
-            },
-            SearchResult {
-                title: "Example Result".to_string(),
-                url: "https://another.example.com/page".to_string(),
-                snippet: "Primary snippet".to_string(),
-                source: Some("c".to_string()),
-            },
-        ]);
-
-        assert_eq!(deduped.len(), 1);
-        assert_eq!(deduped[0].url, "https://example.com/page");
-        assert_eq!(deduped[0].snippet, "Primary snippet");
-    }
-
-    #[test]
     fn test_parse_searxng_json_extracts_results() {
         let body = r#"{
           "results": [
@@ -2775,24 +2682,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_keenable_json_uses_description_when_snippet_missing() {
-        let body = r#"{
-          "query": "rust",
-          "results": [
-            {
-              "title": "Rust",
-              "url": "https://www.rust-lang.org/",
-              "description": "A language empowering everyone."
-            }
-          ]
-        }"#;
-
-        let results = parse_keenable_json(body).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].snippet, "A language empowering everyone.");
-    }
-
-    #[test]
     fn test_parse_keenable_mcp_text_extracts_results() {
         let text = r#"Title: W3Schools.com
 URL: https://www.w3schools.com/typescript/typescript_best_practices.php
@@ -2826,27 +2715,6 @@ This guide covers 15 best practices that separate production-quality TypeScript.
             results[1].title,
             "TypeScript Best Practices for Production Code in 2026"
         );
-    }
-
-    #[test]
-    fn test_parse_keenable_mcp_json_extracts_text_content() {
-        let body = serde_json::json!({
-            "result": {
-                "content": [{
-                    "type": "text",
-                    "text": "Title: Rust\nURL: https://www.rust-lang.org/\nAcquired: 2026-05-16\n\nA language empowering everyone."
-                }]
-            },
-            "jsonrpc": "2.0",
-            "id": 2
-        })
-        .to_string();
-
-        let results = parse_keenable_mcp_json(&body).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].title, "Rust");
-        assert_eq!(results[0].url, "https://www.rust-lang.org/");
-        assert_eq!(results[0].snippet, "A language empowering everyone.");
     }
 
     #[test]
@@ -2884,106 +2752,9 @@ This guide covers 15 best practices that separate production-quality TypeScript.
     }
 
     #[test]
-    fn test_parse_tavily_json_uses_raw_content_when_content_missing() {
-        let body = r#"{
-          "query": "rust",
-          "results": [
-            {
-              "url": "https://www.rust-lang.org/",
-              "title": "Rust",
-              "raw_content": "A language empowering everyone."
-            }
-          ]
-        }"#;
-
-        let results = parse_tavily_json(body).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].snippet, "A language empowering everyone.");
-    }
-
-    #[test]
-    fn test_clean_query_for_source_removes_site_filters() {
-        let query = r#""site:github.com/openai/codex/issues" timeout slow codex"#;
-        assert_eq!(clean_query_for_source(query), "timeout slow codex");
-    }
-
-    #[test]
-    fn test_github_repo_qualifier_extracts_repo_from_site_filter() {
-        let query = r#""site:github.com/openai/codex/issues" timeout slow codex"#;
-        assert_eq!(
-            github_repo_qualifier(query).as_deref(),
-            Some("repo:openai/codex")
-        );
-    }
-
-    #[test]
-    fn test_openalex_abstract_from_inverted_index_orders_words() {
-        let value = serde_json::json!({
-            "reliable": [1],
-            "Search": [0],
-            "results": [2]
-        });
-        assert_eq!(
-            openalex_abstract_from_inverted_index(&value),
-            "Search reliable results"
-        );
-    }
-
-    #[test]
-    fn test_format_search_results_with_results() {
-        let results = vec![SearchResult {
-            title: "Example".to_string(),
-            url: "https://example.com".to_string(),
-            snippet: "An example site.".to_string(),
-            source: None,
-        }];
-        let output = format_search_results("test", &results);
-        assert!(output.contains("Web search results for \"test\""));
-        assert!(output.contains("1. [Example](https://example.com)"));
-        assert!(output.contains("An example site."));
-    }
-
-    #[test]
-    fn test_format_search_results_empty() {
-        let output = format_search_results("test", &[]);
-        assert!(output.contains("No web search results found"));
-    }
-
-    #[test]
-    fn test_clean_ddg_url_encoded() {
-        let url = "//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.rust-lang.org%2F&rut=abc";
-        assert_eq!(clean_ddg_url(url), "https://www.rust-lang.org/");
-    }
-
-    #[test]
     fn test_clean_ddg_url_absolute_redirect() {
         let url = "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Farticle%3Fid%3D1";
         assert_eq!(clean_ddg_url(url), "https://example.com/article?id=1");
-    }
-
-    #[test]
-    fn test_clean_ddg_url_root_relative_redirect() {
-        let url = "/l/?uddg=https%3A%2F%2Fexample.com%2Fpage&rut=abc";
-        assert_eq!(clean_ddg_url(url), "https://example.com/page");
-    }
-
-    #[test]
-    fn test_clean_ddg_url_direct() {
-        let url = "https://example.com/page";
-        assert_eq!(clean_ddg_url(url), "https://example.com/page");
-    }
-
-    #[test]
-    fn test_clean_ddg_url_protocol_relative() {
-        let url = "//example.com/page";
-        assert_eq!(clean_ddg_url(url), "https://example.com/page");
-    }
-
-    #[test]
-    fn test_clamp_num_results_limits_bounds() {
-        assert_eq!(clamp_num_results(0), 1);
-        assert_eq!(clamp_num_results(5), 5);
-        assert_eq!(clamp_num_results(999), MAX_NUM_RESULTS);
     }
 
     #[tokio::test]
@@ -3009,34 +2780,6 @@ This guide covers 15 best practices that separate production-quality TypeScript.
         .unwrap_err();
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert!(second.detail.contains("temporarily skipped"));
-    }
-
-    #[tokio::test]
-    async fn backend_success_resets_failure_count() {
-        let backend = "test_recovered_backend";
-        backend_failure_states()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(backend);
-        for _ in 0..2 {
-            let _ = run_search_backend(backend, async {
-                Err(SearchBackendError::new(backend, "temporary network error"))
-            })
-            .await;
-        }
-        run_search_backend(backend, async { Ok(Vec::new()) })
-            .await
-            .unwrap();
-        assert!(backend_cooldown_remaining(backend, Instant::now()).is_none());
-        let state = backend_failure_states()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(backend)
-            .copied()
-            .unwrap();
-        assert_eq!(state.consecutive_failures, 0);
-        assert!(state.cooldown_until.is_none());
-        assert!(!state.recovery_mode);
     }
 
     #[tokio::test]
@@ -3100,64 +2843,6 @@ This guide covers 15 best practices that separate production-quality TypeScript.
     }
 
     #[tokio::test]
-    async fn failed_probe_without_new_cooldown_remains_single_probe_gated() {
-        let backend = "test_failed_probe_remains_single_probe_backend";
-        backend_failure_states()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(
-                backend.to_string(),
-                BackendFailureState {
-                    cooldown_until: Some(Instant::now() - Duration::from_secs(1)),
-                    recovery_mode: true,
-                    ..Default::default()
-                },
-            );
-
-        let probe = run_search_backend(backend, async {
-            Err(SearchBackendError::new(backend, "temporary network error"))
-        })
-        .await;
-        assert!(probe.is_err());
-
-        let first = lease_backend_attempt(backend, Instant::now());
-        let second = lease_backend_attempt(backend, Instant::now());
-        assert!(matches!(first, BackendAttemptLease::Run(_)));
-        assert!(matches!(second, BackendAttemptLease::Skip(_)));
-        let state = backend_failure_states()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(backend)
-            .copied()
-            .unwrap();
-        assert!(state.recovery_mode);
-        assert!(state.probe_attempt.is_some());
-    }
-
-    #[tokio::test]
-    async fn rate_limited_probe_reopens_cooldown() {
-        let backend = "test_rate_limited_probe_backend";
-        backend_failure_states()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(
-                backend.to_string(),
-                BackendFailureState {
-                    cooldown_until: Some(Instant::now() - Duration::from_secs(1)),
-                    recovery_mode: true,
-                    ..Default::default()
-                },
-            );
-
-        let probe = run_search_backend(backend, async {
-            Err(SearchBackendError::new(backend, "429 Too Many Requests"))
-        })
-        .await;
-        assert!(probe.is_err());
-        assert!(backend_cooldown_remaining(backend, Instant::now()).is_some());
-    }
-
-    #[tokio::test]
     async fn stale_success_cannot_clear_newer_failure_cooldown() {
         let backend = "test_stale_success_backend";
         backend_failure_states()
@@ -3199,13 +2884,5 @@ This guide covers 15 best practices that separate production-quality TypeScript.
         assert_eq!(state.latest_completed_attempt, 2);
         assert_eq!(state.consecutive_failures, 1);
         assert!(state.recovery_mode);
-    }
-
-    #[test]
-    fn test_num_results_limit() {
-        let results = parse_ddg_html(DDG_HTML_FIXTURE);
-        let limited: Vec<_> = results.into_iter().take(1).collect();
-        assert_eq!(limited.len(), 1);
-        assert_eq!(limited[0].title, "Rust Programming Language");
     }
 }

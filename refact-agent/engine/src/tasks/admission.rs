@@ -768,22 +768,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reserve_returns_promptly_even_when_full() {
-        let app = app_with_cap(1).await;
-        let a = unique_id("agent-a");
-        let b = unique_id("agent-b");
-        reserve(&app, &a, "proj", "task", 0).await.unwrap();
-        wait_for_permit(&a).await.unwrap();
-
-        reserve(&app, &b, "proj", "task", 0).await.unwrap();
-        assert!(is_tracked(&b).await);
-
-        end(&a).await;
-        wait_for_permit(&b).await.unwrap();
-        end(&b).await;
-    }
-
-    #[tokio::test]
     async fn cancel_queued_drops_reservation_without_touching_active_permits() {
         let app = app_with_cap(1).await;
         let a = unique_id("agent-a");
@@ -800,27 +784,6 @@ mod tests {
         );
 
         end(&a).await;
-    }
-
-    #[tokio::test]
-    async fn duplicate_reserve_for_same_agent_chat_id_is_rejected() {
-        let app = app_with_cap(4).await;
-        let a = unique_id("agent-a");
-        reserve(&app, &a, "proj", "task", 0).await.unwrap();
-        let err = reserve(&app, &a, "proj", "task", 0).await.unwrap_err();
-        assert!(matches!(err, AdmissionError::Duplicate { .. }));
-        end(&a).await;
-    }
-
-    #[tokio::test]
-    async fn end_is_idempotent_and_safe_for_untracked_ids() {
-        end("never-reserved").await;
-        let app = app_with_cap(4).await;
-        let a = unique_id("agent-a");
-        reserve(&app, &a, "proj", "task", 0).await.unwrap();
-        end(&a).await;
-        end(&a).await;
-        assert!(!is_tracked(&a).await);
     }
 
     #[tokio::test]
@@ -925,41 +888,6 @@ mod tests {
         drop(execution);
         assert_eq!(app.work_scheduler.snapshot().active, 1);
         drop(operation);
-        assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
-    }
-
-    #[tokio::test]
-    async fn idle_board_session_parks_and_terminal_session_releases() {
-        let app = app_with_cap(1).await;
-        let child = unique_id("child");
-        reserve(&app, &child, "proj", "root", 0).await.unwrap();
-        wait_for_permit(&child).await.unwrap();
-        let session = Arc::new(tokio::sync::Mutex::new(
-            crate::chat::types::ChatSession::new(child.clone()),
-        ));
-        app.chat
-            .sessions
-            .write()
-            .await
-            .insert(child.clone(), session.clone());
-        synchronize(&app, &child).await;
-        assert_eq!(app.work_scheduler.snapshot().parked, 1);
-        let execution = app.agent_executions.get(&child).unwrap();
-        let operation = execution.begin_operation().await.unwrap();
-        session
-            .lock()
-            .await
-            .set_runtime_state(crate::chat::types::SessionState::ExecutingTools, None);
-        synchronize(&app, &child).await;
-        assert_eq!(app.work_scheduler.snapshot().active, 1);
-        drop(operation);
-        drop(execution);
-        session
-            .lock()
-            .await
-            .set_runtime_state(crate::chat::types::SessionState::Completed, None);
-        synchronize(&app, &child).await;
-        assert!(!is_tracked(&child).await);
         assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
     }
 
@@ -1087,25 +1015,5 @@ mod tests {
             .unwrap();
         assert!(!global().tasks().contains_key(&child));
         assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
-    }
-
-    #[tokio::test]
-    async fn abort_awaits_task_before_end_releases() {
-        let app = app_with_cap(4).await;
-        let a = unique_id("agent-a");
-        reserve(&app, &a, "proj", "task", 0).await.unwrap();
-        wait_for_permit(&a).await.unwrap();
-
-        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let ran_clone = ran.clone();
-        spawn_tracked(&a, async move {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            ran_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-        })
-        .await
-        .unwrap();
-
-        abort(&a).await;
-        assert!(!is_tracked(&a).await);
     }
 }

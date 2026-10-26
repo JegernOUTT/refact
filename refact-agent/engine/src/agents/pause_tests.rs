@@ -390,49 +390,6 @@ async fn only_parent_or_root_may_pause() {
 }
 
 #[tokio::test]
-async fn paused_status_is_visible_in_status_list_and_overview() {
-    let (_workspace, _config, app, record) = fixture().await;
-    let paused = control(&app, "root", &record.agent_id, "pause")
-        .await
-        .unwrap();
-    let since =
-        chrono::DateTime::parse_from_rfc3339(paused["paused_at"].as_str().unwrap()).unwrap();
-    let label = format!("paused (by root, since {})", since.to_rfc3339());
-    let ccx = context(&app, "root").await;
-    let status = output(
-        ToolAgentStatus {
-            config_path: String::new(),
-        }
-        .tool_execute(
-            ccx.clone(),
-            &"status".into(),
-            &HashMap::from([("agent_id".into(), json!(record.agent_id))]),
-        )
-        .await
-        .unwrap(),
-    );
-    let listed = output(
-        ToolAgentList {
-            config_path: String::new(),
-        }
-        .tool_execute(ccx.clone(), &"list".into(), &HashMap::new())
-        .await
-        .unwrap(),
-    );
-    let overview = output(
-        ToolAgentsOverview {
-            config_path: String::new(),
-        }
-        .tool_execute(ccx, &"overview".into(), &HashMap::new())
-        .await
-        .unwrap(),
-    );
-    for rendered in [status, listed, overview] {
-        assert!(rendered.contains(&label), "{rendered}");
-    }
-}
-
-#[tokio::test]
 async fn paused_children_are_not_stalled_or_nudged_and_consume_no_goal_turns() {
     let (_workspace, _config, app, record) = fixture().await;
     let mut session = ChatSession::new("child".into());

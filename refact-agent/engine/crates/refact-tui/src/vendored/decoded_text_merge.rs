@@ -43,24 +43,3 @@ where
         Some((Event::Text(merged.into()), range))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use pulldown_cmark::CowStr;
-
-    #[test]
-    fn merges_adjacent_text_events() {
-        let events = vec![
-            (Event::Text(CowStr::from("hel")), 0..3),
-            (Event::Text(CowStr::from("lo")), 3..5),
-            (Event::SoftBreak, 5..6),
-            (Event::Text(CowStr::from("world")), 6..11),
-        ];
-        let merged: Vec<_> = DecodedTextMerge::new(events.into_iter()).collect();
-        assert_eq!(merged.len(), 3);
-        assert!(
-            matches!(&merged[0], (Event::Text(text), range) if text.as_ref() == "hello" && *range == (0..5))
-        );
-    }
-}

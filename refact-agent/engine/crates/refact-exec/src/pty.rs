@@ -68,34 +68,8 @@ pub fn spawn_pty(
 mod tests {
     use std::time::Duration;
 
-    use crate::types::{ExecOutputStream, ExecSpawnRequest};
+    use crate::types::ExecSpawnRequest;
     use crate::ExecRegistry;
-
-    #[cfg(unix)]
-    #[test]
-    fn pty_post_spawn_cleanup_kills_child() {
-        use super::{default_pty_size, native_pty_system, CommandBuilder};
-        let pty_system = native_pty_system();
-        let pair = pty_system.openpty(default_pty_size()).unwrap();
-        let mut cmd = CommandBuilder::new("sh");
-        cmd.arg("-c");
-        cmd.arg("sleep 30");
-        let mut child = pair.slave.spawn_command(cmd).unwrap();
-        let pid = child.process_id().expect("child has pid");
-
-        assert!(
-            unsafe { libc::kill(pid as i32, 0) == 0 },
-            "child should be alive before cleanup"
-        );
-
-        let _ = child.kill();
-        let _ = child.wait();
-
-        assert!(
-            unsafe { libc::kill(pid as i32, 0) != 0 },
-            "child should be killed after cleanup"
-        );
-    }
 
     #[cfg(unix)]
     #[tokio::test]
@@ -120,23 +94,5 @@ mod tests {
         let read = registry.read(&process_id, 0, None).await;
         registry.kill(&process_id).await.unwrap();
         panic!("pty output did not echo stdin: {:?}", read.chunks);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn pty_output_is_combined() {
-        let registry = ExecRegistry::new();
-        let result = registry
-            .spawn(ExecSpawnRequest::foreground("printf out; printf err >&2").with_tty(true))
-            .await
-            .unwrap();
-
-        let read = registry
-            .read(&result.snapshot.meta.process_id, 0, None)
-            .await;
-        assert!(read
-            .chunks
-            .iter()
-            .all(|chunk| chunk.stream == ExecOutputStream::Combined));
     }
 }

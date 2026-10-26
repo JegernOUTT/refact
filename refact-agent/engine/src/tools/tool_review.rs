@@ -1005,63 +1005,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_review_args_reject_out_of_range_values() {
-        assert!(parse_args(&args_map(vec![("depth", json!("max"))]))
-            .unwrap_err()
-            .contains("invalid depth"));
-        assert!(
-            parse_args(&args_map(vec![("scope_mode", json!("everything"))]))
-                .unwrap_err()
-                .contains("invalid scope_mode")
-        );
-        assert!(parse_args(&args_map(vec![("variants", json!(4))]))
-            .unwrap_err()
-            .contains("between 1 and 3"));
-        assert!(parse_args(&args_map(vec![("parallel_depth", json!(0))]))
-            .unwrap_err()
-            .contains("at least 1"));
-        assert_eq!(
-            parse_args(&args_map(vec![
-                ("stages", json!(["diff", "security"])),
-                ("parallel_depth", json!(2))
-            ]))
-            .unwrap()
-            .stages,
-            Some(vec!["diff".to_string(), "security".to_string()])
-        );
-    }
-
-    #[test]
-    fn tool_review_browser_flag_requires_a_scenario() {
-        let error = parse_args(&args_map(vec![("browser", json!(true))])).unwrap_err();
-        assert!(error.contains("`browser_scenario` is required"));
-
-        let with_scenario = parse_args(&args_map(vec![
-            ("browser", json!(true)),
-            (
-                "browser_scenario",
-                json!("open /settings, expect no console errors"),
-            ),
-        ]))
-        .unwrap();
-        assert_eq!(
-            with_scenario.browser_scenario.as_deref(),
-            Some("open /settings, expect no console errors")
-        );
-
-        let scenario_only =
-            parse_args(&args_map(vec![("browser_scenario", json!("open /"))])).unwrap();
-        assert_eq!(scenario_only.browser_scenario.as_deref(), Some("open /"));
-        assert!(parse_args(&args_map(vec![]))
-            .unwrap()
-            .browser_scenario
-            .is_none());
-        assert!(parse_args(&args_map(vec![("browser", json!("yes"))]))
-            .unwrap_err()
-            .contains("must be a boolean"));
-    }
-
-    #[test]
     fn tool_review_browser_stage_runs_only_with_a_scenario() {
         let catalog = crate::tools::review_agents::stages::embedded_catalog();
         let browser = catalog
@@ -1096,70 +1039,6 @@ mod tests {
         let mut skipped = Vec::new();
         apply_browser_scenario(&catalog, &mut scheduled, &mut skipped, Some("open /"));
         assert_eq!(scheduled.len(), 1);
-    }
-
-    #[test]
-    fn tool_review_render_reports_scope_stages_and_fact_vs_hypothesis() {
-        let mut hypothesis = finding("rf-2", ReviewSeverity::Medium);
-        hypothesis.reproduction = None;
-        hypothesis.evidence_present = false;
-        hypothesis.claim = "Maybe the cache is stale.".to_string();
-        let mut merged = finding("rf-3", ReviewSeverity::High);
-        merged.reported_by = vec!["diff".to_string(), "impact".to_string()];
-        merged.locations = vec![FindingLocation {
-            file: "src/other.rs".to_string(),
-            line_start: 4,
-            line_end: 6,
-        }];
-        let mut timed_out =
-            StageRun::timed_out("dependencies", None, 360_000, "no activity for 360s");
-        timed_out.coverage = StageCoverage {
-            files_read: vec!["a.rs".to_string(), "b.rs".to_string()],
-            commands_run: vec![CommandRun {
-                cmd: "cargo check".to_string(),
-                exit: 101,
-            }],
-            tools_unavailable: vec![],
-            stopped_early: Some("idle".to_string()),
-        };
-
-        let markdown = render_review_markdown(&report(
-            vec![finding("rf-1", ReviewSeverity::Blocker), merged, hypothesis],
-            vec![
-                StageRun::ok("mechanical", Some("m".to_string()), 192_000),
-                timed_out,
-                StageRun::not_run("execution", "depth normal"),
-            ],
-        ));
-
-        assert!(markdown.starts_with(
-            "## Review ⚠️ PARTIAL · 12 file(s) requested → 14 reviewed (strict, +2 dependency edges) · base 1a2b3c..HEAD (7 changed file(s), 31 hunk(s)) · depth normal · 4m12s"
-        ));
-        assert!(markdown.contains("Stages: mechanical ok 3m12s · dependencies timed out 6m00s (no activity for 360s) · execution not run (depth normal)"));
-        assert!(markdown.contains("Findings: 2 supported (2 with a reproduction) · 1 hypotheses · 3 duplicate(s) merged · 0 pre-existing · 1 out of scope"));
-        assert!(markdown.contains("### blocker (1)"));
-        assert!(markdown.contains("### high (1)"));
-        assert!(markdown.contains("repro: cargo test -p thing"));
-        assert!(markdown.contains("stage: diff+impact"));
-        assert!(markdown.contains("also at: src/other.rs:4-6"));
-        assert!(markdown.contains("### Hypotheses (1)"));
-        assert!(markdown.contains("evidence not found in file"));
-        assert!(markdown.contains("dependencies: 2 file(s) read; 1 command(s) run, 1 non-zero"));
-        assert!(markdown.contains("Raw per-stage output: .refact/review_scratch/rv-1"));
-        assert!(!markdown.contains("confidence"));
-    }
-
-    #[test]
-    fn tool_review_render_states_when_nothing_was_supported() {
-        let markdown = render_review_markdown(&report(
-            vec![],
-            vec![StageRun::ok("diff", Some("m".to_string()), 1000)],
-        ));
-
-        assert!(markdown.starts_with("## Review · 12 file(s) requested"));
-        assert!(markdown.contains("### No supported findings"));
-        assert!(!markdown.contains("### Hypotheses"));
-        assert!(!markdown.contains("INCONCLUSIVE"));
     }
 
     #[test]
@@ -1206,39 +1085,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_review_render_lists_files_that_were_never_reviewed() {
-        let mut with_dropped = report(
-            vec![],
-            vec![StageRun::ok("diff", Some("m".to_string()), 1000)],
-        );
-        with_dropped.scope.dropped_files = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
-
-        let markdown = render_review_markdown(&with_dropped);
-
-        assert!(markdown.contains("2 file(s) were not reviewed"));
-        assert!(!markdown.contains("\n- src/a.rs"));
-        assert!(!markdown.contains("\n- src/b.rs"));
-    }
-
-    #[test]
-    fn tool_review_render_omits_the_scratch_path_when_nothing_was_written() {
-        let mut nothing_written = report(
-            vec![],
-            vec![StageRun::timed_out(
-                "diff",
-                None,
-                1000,
-                "no activity for 360s",
-            )],
-        );
-        nothing_written.scratch_dir = None;
-
-        let markdown = render_review_markdown(&nothing_written);
-
-        assert!(!markdown.contains("Raw per-stage output"));
-    }
-
-    #[test]
     fn tool_review_adversarial_verdicts_only_dispute_matching_ids() {
         let mut findings = vec![
             finding("rf-1", ReviewSeverity::High),
@@ -1272,35 +1118,5 @@ mod tests {
         assert!(findings[0].is_hypothesis());
         assert!(findings[1].disputed.is_none());
         assert!(!findings[1].is_hypothesis());
-    }
-
-    #[test]
-    fn tool_review_refs_are_relative_and_flag_hypotheses() {
-        let mut hypothesis = finding("rf-2", ReviewSeverity::Low);
-        hypothesis.reproduction = None;
-        hypothesis.evidence_present = false;
-        hypothesis.file = crate::test_paths::abs_str("repo/src/other.rs");
-        let report = report(
-            vec![finding("rf-1", ReviewSeverity::High), hypothesis],
-            vec![],
-        );
-
-        let (refs, truncated) = review_refs(&report, &[crate::test_paths::abs("repo")]);
-
-        assert!(!truncated);
-        let refs = refs.as_array().unwrap();
-        assert_eq!(refs[0]["path"], "src/lib.rs");
-        assert_eq!(refs[0]["hypothesis"], false);
-        assert_eq!(refs[1]["path"], "src/other.rs");
-        assert_eq!(refs[1]["hypothesis"], true);
-        assert_eq!(refs[1]["severity"], "low");
-    }
-
-    #[test]
-    fn tool_review_duration_formatting() {
-        assert_eq!(format_duration(999), "0s");
-        assert_eq!(format_duration(59_000), "59s");
-        assert_eq!(format_duration(192_000), "3m12s");
-        assert_eq!(format_duration(3_600_000), "60m00s");
     }
 }

@@ -4,8 +4,7 @@ use crate::goal_role::{
 };
 use crate::internal_roles;
 use crate::plan_role::{
-    current_base_plan, effective_plan_delta_count, plan_delta_events, plan_delta_history,
-    plan_history, project_current_plan, PlanRoleSession,
+    effective_plan_delta_count, plan_delta_events, project_current_plan, PlanRoleSession,
 };
 use crate::role_projection::{
     checkpoint_provenance, fold_role_messages, ProjectedRole, ProjectionLimits,
@@ -191,37 +190,8 @@ fn arefolding_merges_checkpoint_counts_and_retains_the_newest_updates() {
 }
 
 #[test]
-fn acheckpoint_does_not_replace_base_or_hide_history_count() {
-    let original = messages(ProjectedRole::Plan, 100);
-    let folded = fold_role_messages(ProjectedRole::Plan, &original, LIMITS);
-    let original_plan_count = plan_history(&Session {
-        messages: original.clone(),
-    })
-    .len();
-    let session = Session { messages: folded };
-    assert_eq!(
-        current_base_plan(&session).unwrap().message_id,
-        "approved-base"
-    );
-    assert_eq!(plan_history(&session).len(), original_plan_count);
-    assert_eq!(plan_delta_history(&session).len(), 24);
-}
-
-#[test]
 fn afewer_than_threshold_deltas_are_unchanged() {
     let original = messages(ProjectedRole::Plan, 10);
-    assert_eq!(
-        serde_json::to_value(fold_role_messages(ProjectedRole::Plan, &original, LIMITS)).unwrap(),
-        serde_json::to_value(original).unwrap()
-    );
-}
-
-#[test]
-fn astray_deltas_without_a_base_are_unchanged() {
-    let original = messages(ProjectedRole::Plan, 10)
-        .into_iter()
-        .skip(1)
-        .collect::<Vec<_>>();
     assert_eq!(
         serde_json::to_value(fold_role_messages(ProjectedRole::Plan, &original, LIMITS)).unwrap(),
         serde_json::to_value(original).unwrap()

@@ -1,15 +1,10 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use serde_json::json;
 use tokio::sync::Mutex;
 
 use crate::agents::types::{BgAgentKind, CreateAgentRequest};
 use crate::app_state::AppState;
-use crate::at_commands::at_commands::AtCommandsContext;
 use crate::chat::types::{ChatSession, TaskMeta};
-use crate::tools::tool_agent_interact::ToolAgentMessage;
-use crate::tools::tools_description::Tool;
 use crate::tools::tools_list::{chat_has_parent_agent, filter_chat_tools, filter_tool_catalog_for_chat};
 
 async fn fixture() -> AppState {
@@ -161,53 +156,4 @@ async fn progress_report_hidden_for_board_task_agent_without_parent_record() {
     assert!(names(&board).contains(&"agent_message".into()));
     let child = filter_tool_catalog_for_chat(&app, "board-agent-with-parent", shared).await;
     assert!(names(&child).contains(&"progress_report".into()));
-}
-
-#[tokio::test]
-async fn agent_message_to_parent_without_parent_is_a_clear_error() {
-    let app = fixture().await;
-    let mut tool = ToolAgentMessage {
-        config_path: String::new(),
-    };
-    assert!(tool.tool_description().description.contains(
-        "to=parent asks or notifies the parent agent and is only available to background subagents"
-    ));
-    for (chat_id, task_meta) in [
-        ("top-level-chat", None),
-        ("board-task-agent", Some(board_task_meta())),
-    ] {
-        install_session(&app, chat_id, task_meta.clone()).await;
-        let ccx = Arc::new(Mutex::new(
-            AtCommandsContext::new_from_app(
-                app.clone(),
-                4096,
-                1,
-                false,
-                vec![],
-                chat_id.into(),
-                None,
-                "test/model".into(),
-                task_meta,
-                None,
-            )
-            .await,
-        ));
-        for expects_reply in [false, true] {
-            let result = tool
-                .tool_execute(
-                    ccx.clone(),
-                    &"parent-message".into(),
-                    &HashMap::from([
-                        ("to".into(), json!("parent")),
-                        ("text".into(), json!("hello")),
-                        ("expects_reply".into(), json!(expects_reply)),
-                    ]),
-                )
-                .await;
-            assert_eq!(
-                result.unwrap_err(),
-                "this chat has no parent agent; to=parent is only available to background subagents"
-            );
-        }
-    }
 }

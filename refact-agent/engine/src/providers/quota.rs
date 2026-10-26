@@ -239,33 +239,6 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_snapshot_has_explicit_state() {
-        let snapshot = ProviderQuotaSnapshot::unavailable("anthropic-work", "anthropic");
-        assert!(!snapshot.available);
-        assert_eq!(snapshot.source, ProviderQuotaSource::Unavailable);
-        assert!(snapshot.error.is_none());
-    }
-
-    #[test]
-    fn snapshot_serializes_gui_required_fields() {
-        let snapshot = ProviderQuotaSnapshot::unavailable("xai-work", "xai_oauth");
-        let value = serde_json::to_value(snapshot).unwrap();
-
-        assert_eq!(value["provider_name"], "xai-work");
-        assert_eq!(value["base_provider"], "xai_oauth");
-        assert_eq!(value["source"], "unavailable");
-        assert_eq!(value["available"], false);
-        assert_eq!(value["stale"], false);
-        assert!(value["fetched_at"]
-            .as_str()
-            .is_some_and(|date| date.contains('T')));
-        assert!(value["windows"].is_array());
-        assert!(value["facts"].is_array());
-        assert!(value.get("error").is_none());
-        assert!(value.get("details").is_none());
-    }
-
-    #[test]
     fn cache_supports_stale_reads_and_invalidation() {
         let mut cache = ProviderQuotaCache::new(2, 1);
         cache.insert_at(

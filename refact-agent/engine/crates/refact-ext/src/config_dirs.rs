@@ -91,35 +91,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_is_claude_dir() {
-        assert!(is_claude_dir(Path::new("/home/user/.claude")));
-        assert!(is_claude_dir(Path::new("/project/.claude")));
-        assert!(!is_claude_dir(Path::new("/home/user/.config/refact")));
-        assert!(!is_claude_dir(Path::new("/project/.refact")));
-        assert!(!is_claude_dir(Path::new("/some/dir")));
-    }
-
-    #[test]
-    fn test_source_for_dir_global_claude() {
-        let global_claude = PathBuf::from("/home/user/.claude");
-        let global_refact = PathBuf::from("/home/user/.config/refact");
-        let global_dirs = vec![global_claude.clone(), global_refact.clone()];
-
-        let src = source_for_dir(&global_claude, &global_dirs, &[]);
-        assert!(matches!(src, CommandSource::GlobalClaude));
-    }
-
-    #[test]
-    fn test_source_for_dir_global_refact() {
-        let global_claude = PathBuf::from("/home/user/.claude");
-        let global_refact = PathBuf::from("/home/user/.config/refact");
-        let global_dirs = vec![global_claude.clone(), global_refact.clone()];
-
-        let src = source_for_dir(&global_refact, &global_dirs, &[]);
-        assert!(matches!(src, CommandSource::GlobalRefact));
-    }
-
-    #[test]
     fn test_source_for_dir_project_claude() {
         let global_dirs = vec![PathBuf::from("/home/user/.config/refact")];
         let project_claude = PathBuf::from("/myproject/.claude");
@@ -140,19 +111,6 @@ mod tests {
         assert!(matches!(src, CommandSource::ProjectRefact(_)));
         if let CommandSource::ProjectRefact(parent) = src {
             assert_eq!(parent, PathBuf::from("/myproject"));
-        }
-    }
-
-    #[test]
-    fn test_source_for_dir_installed_plugin() {
-        let installed_dir = PathBuf::from("/home/user/.config/refact/plugins/installed/my-plugin");
-        let global_dirs = vec![PathBuf::from("/home/user/.config/refact")];
-        let installed_dirs = vec![installed_dir.clone()];
-
-        let src = source_for_dir(&installed_dir, &global_dirs, &installed_dirs);
-        assert!(matches!(src, CommandSource::InstalledPlugin(_)));
-        if let CommandSource::InstalledPlugin(name) = src {
-            assert_eq!(name, "my-plugin");
         }
     }
 

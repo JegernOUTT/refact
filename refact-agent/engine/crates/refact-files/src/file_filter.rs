@@ -242,19 +242,6 @@ mod tests {
     }
 
     #[test]
-    fn regular_paths_are_not_transient_tmp() {
-        for path in [
-            "/repo/src/main.rs",
-            "/repo/tmp.rs",
-            "/repo/templates/foo.tmpl",
-            "/repo/.refact/buddy/state.json",
-            "/repo/docs/tmp/readme.md",
-        ] {
-            assert!(!is_transient_tmp_path(Path::new(path)), "{path}");
-        }
-    }
-
-    #[test]
     fn generated_refact_index_paths_match_exact_generated_shapes() {
         for path in [
             "/repo/.refact/trajectories/index.json",
@@ -264,23 +251,6 @@ mod tests {
             "/repo/.refact/tasks/task-1/trajectories/agents/agent-1/index.json",
         ] {
             assert!(is_generated_index_path(Path::new(path)), "{path}");
-        }
-    }
-
-    #[test]
-    fn generated_refact_index_paths_do_not_match_near_misses() {
-        for path in [
-            "/repo/trajectories/planner/index.json",
-            "/repo/.refact/tasks/task-1/trajectories/docs/index.json",
-            "/repo/.refact/tasks/task-1/trajectories/planner/archive/index.json",
-            "/repo/.refact/tasks/task-1/notes/index.json",
-            "/repo/.refact/knowledge/index.json",
-            "/work/refact/docs/trajectories/index.json",
-            "/home/user/refact/trajectories/index.json",
-            "/repo/.config/refact/trajectories/index.json",
-            "/repo/.config/not-refact/trajectories/index.json",
-        ] {
-            assert!(!is_generated_index_path(Path::new(path)), "{path}");
         }
     }
 

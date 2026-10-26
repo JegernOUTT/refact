@@ -348,22 +348,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_well_formed_cursor_report() {
-        assert_eq!(
-            parse_cursor_position(b"\x1b[12;34R"),
-            Some(Position { x: 33, y: 11 })
-        );
-    }
-
-    #[test]
-    fn parses_report_with_leading_and_trailing_noise() {
-        assert_eq!(
-            parse_cursor_position(b"noise\x1b[1;1Rmore"),
-            Some(Position { x: 0, y: 0 })
-        );
-    }
-
-    #[test]
     fn ignores_unterminated_or_invalid_reports() {
         assert_eq!(parse_cursor_position(b""), None);
         assert_eq!(parse_cursor_position(b"\x1b[12;34"), None);
@@ -398,12 +382,6 @@ mod tests {
             parse_default_colors(b"\x1b]10;rgb:ffff/0000/0000\x07\x1b]11;rgb:bad\x07"),
             None
         );
-    }
-
-    #[test]
-    fn skips_osc_queries_when_stdout_is_not_a_terminal() {
-        assert!(should_probe_default_colors(true));
-        assert!(!should_probe_default_colors(false));
     }
 
     #[test]

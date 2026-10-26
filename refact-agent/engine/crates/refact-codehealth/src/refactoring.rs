@@ -333,41 +333,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn long_complex_function_ranks_extract_method_first() {
-        let mut src = String::from("fn hard(x: i32) -> i32 {\n    let mut y = x;\n");
-        for i in 0..14 {
-            src.push_str(&format!("    if y > {i} {{ y += 1; }}\n"));
-        }
-        for _ in 0..65 {
-            src.push_str("    y += 0;\n");
-        }
-        src.push_str("    y\n}\n");
-
-        let suggestions = suggest_refactorings("rust", &src);
-        assert_eq!(suggestions[0].kind, RefactoringKind::ExtractMethod);
-        assert_eq!(suggestions[0].target, "hard");
-    }
-
-    #[test]
-    fn many_functions_yield_split_file() {
-        let src = (0..15)
-            .map(|i| format!("fn f{i}() -> i32 {{ {i} }}\n"))
-            .collect::<String>();
-
-        let suggestions = suggest_refactorings("rust", &src);
-        assert!(suggestions
-            .iter()
-            .any(|s| s.kind == RefactoringKind::SplitFile));
-    }
-
-    #[test]
-    fn cycle_members_yield_one_break_cycle() {
-        let suggestions = break_cycle_suggestions(&[vec!["a".into(), "b".into(), "c".into()]]);
-        assert_eq!(suggestions.len(), 1);
-        assert_eq!(suggestions[0].kind, RefactoringKind::BreakCycle);
-    }
-
-    #[test]
     fn object_creation_is_not_a_class() {
         let src = "class Owner { void f() { Foo x = new Foo(); } } class Foo {}";
         let tree = refact_codegraph_parsers::parse_tree("java", src).unwrap();

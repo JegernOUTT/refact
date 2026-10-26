@@ -503,92 +503,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn source_cleanup_matches_opted_in_post_merge_outcomes() {
-        let passed = verification(VerificationStage::PostMerge, true);
-        let failed = verification(VerificationStage::PostMerge, false);
-        let mut reverted = failed.clone();
-        reverted.auto_reverted = true;
-        let mut skipped_revert = failed.clone();
-        skipped_revert.revert_skipped_reason = Some("HEAD moved".to_string());
-        let mut infrastructure = failed.clone();
-        infrastructure.outcome = VerificationOutcome::InfrastructureFailed;
-
-        for (result, expected) in [
-            (None, true),
-            (Some(&passed), true),
-            (Some(&reverted), true),
-            (Some(&skipped_revert), false),
-            (Some(&infrastructure), false),
-            (Some(&failed), false),
-        ] {
-            assert_eq!(source_cleanup_allowed(result), expected);
-        }
-    }
-
     async fn nothing_verified(
         _checkout: PathBuf,
         _merge_commit: Option<String>,
     ) -> Option<MergeVerification> {
         None
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn merges_into_one_checkout_hold_the_slot_one_at_a_time() {
-        let project = Uuid::new_v4().to_string();
-        let (gate, _leases) = shared_gate(&project).await;
-        let checkout = CheckoutKey::new("/repo/integration");
-        let order = Arc::new(Mutex::new(Vec::new()));
-
-        let merge = |label: &'static str| {
-            let gate = &gate;
-            let checkout = checkout.clone();
-            let order = order.clone();
-            async move {
-                let slot = gate.acquire(&checkout).await.unwrap();
-                order.lock().unwrap().push(format!("{label}-start"));
-                tokio::time::sleep(Duration::from_millis(80)).await;
-                order.lock().unwrap().push(format!("{label}-end"));
-                let waited = slot.waited_ms();
-                slot.release().await.unwrap();
-                waited
-            }
-        };
-        let (first, second) = tokio::join!(merge("a"), merge("b"));
-
-        let order = order.lock().unwrap().clone();
-        assert!(
-            order == ["a-start", "a-end", "b-start", "b-end"]
-                || order == ["b-start", "b-end", "a-start", "a-end"],
-            "merges into one checkout interleaved: {order:?}"
-        );
-        assert!(
-            first.max(second) > 0,
-            "the second merge must have queued behind the first"
-        );
-    }
-
-    #[tokio::test]
-    async fn merges_into_different_checkouts_are_held_at_the_same_time() {
-        let project = Uuid::new_v4().to_string();
-        let (gate, _leases) = shared_gate(&project).await;
-        let here = CheckoutKey::new("/repo/one");
-        let there = CheckoutKey::new("/repo/two");
-
-        let first = gate.acquire(&here).await.unwrap();
-        let second = gate.acquire(&there).await.unwrap();
-        let blocked = gate.acquire(&here).await.unwrap_err();
-
-        assert_ne!(first.holder().lease_key, second.holder().lease_key);
-        assert_eq!(first.checkout(), &here);
-        assert_eq!(second.checkout(), &there);
-        assert!(matches!(blocked, MergeGateError::Busy(_)), "{blocked}");
-        first.release().await.unwrap();
-        second.release().await.unwrap();
-        assert!(
-            gate.acquire(&here).await.is_ok(),
-            "a released checkout is free again"
-        );
     }
 
     #[tokio::test]

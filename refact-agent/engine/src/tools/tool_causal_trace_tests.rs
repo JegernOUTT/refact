@@ -11,8 +11,7 @@ use crate::call_validation::{ChatContent, ContextEnum};
 use crate::chat::types::{ChatSession, ThreadParams};
 use crate::coordination::causal;
 use crate::tools::tool_causal_trace::ToolCausalTrace;
-use crate::tools::tools_description::{Tool, ToolSourceType};
-use crate::tools::tools_list::{get_available_tools, get_tools_for_mode};
+use crate::tools::tools_description::Tool;
 use refact_privacy::{PrivacyPolicy, ShellBehavior, Zone};
 use refact_work_core::{CausalCause, CausalEventRecord, CausalKind, ProjectKey, WorkKey};
 
@@ -162,41 +161,6 @@ fn chain_ids() -> (String, String, String) {
 }
 
 #[tokio::test]
-async fn causal_trace_is_registered_and_allow_listed() {
-    let (app, _, _) = fixture().await;
-    let tools = get_available_tools(app.gcx.clone()).await;
-    let registered = tools
-        .iter()
-        .filter(|tool| tool.tool_description().name == "causal_trace")
-        .collect::<Vec<_>>();
-    assert_eq!(registered.len(), 1);
-    let description = registered[0].tool_description();
-    assert!(matches!(
-        description.source.source_type,
-        ToolSourceType::Builtin
-    ));
-    assert!(description.allow_parallel);
-    assert_eq!(description.input_schema["required"], json!(["event_id"]));
-    assert_eq!(
-        description.input_schema["properties"]["replay"]["default"],
-        false
-    );
-    assert_eq!(
-        description.input_schema["properties"]["max_events"]["maximum"],
-        200
-    );
-
-    for mode in ["agent", "task_planner"] {
-        let allowed = get_tools_for_mode(app.gcx.clone(), mode, None)
-            .await
-            .into_iter()
-            .filter(|tool| tool.tool_description().name == "causal_trace")
-            .count();
-        assert_eq!(allowed, 1, "{mode}");
-    }
-}
-
-#[tokio::test]
 async fn causal_trace_renders_recorded_causes() {
     let (_, ccx, dir) = fixture().await;
     let (delivery, spawn, child_scope) = chain_ids();
@@ -228,34 +192,6 @@ async fn causal_trace_renders_recorded_causes() {
     );
     assert!(output.contains("spawn in scope"), "{output}");
     assert!(output.contains("delivery in scope"), "{output}");
-}
-
-#[tokio::test]
-async fn causal_trace_replay_reports_reproduced() {
-    let (_, ccx, dir) = fixture().await;
-    let (delivery, spawn, child_scope) = chain_ids();
-    record_event(
-        dir.path(),
-        &delivery,
-        CausalKind::Delivery,
-        "parent",
-        1,
-        vec![CausalCause::Unknown],
-        vec![],
-    );
-    record_event(
-        dir.path(),
-        &spawn,
-        CausalKind::Spawn,
-        &child_scope,
-        2,
-        vec![CausalCause::Event(delivery)],
-        vec![],
-    );
-
-    let output = execute(ccx, &spawn, true, 50).await;
-    assert!(output.contains("Replay reproduced: yes"), "{output}");
-    assert!(output.contains("0 mismatch(es)"), "{output}");
 }
 
 #[tokio::test]

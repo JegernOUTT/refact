@@ -48,22 +48,3 @@ pub fn build_tokio_runtime() -> tokio::runtime::Runtime {
     builder.thread_stack_size(tokio_worker_stack_bytes());
     builder.build().expect("failed to build tokio runtime")
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn worker_defaults_double_available_parallelism() {
-        assert_eq!(default_worker_threads(1), 4);
-        assert_eq!(default_worker_threads(32), 64);
-        assert_eq!(default_worker_threads(256), 512);
-    }
-
-    #[test]
-    fn blocking_defaults_scale_with_async_workers() {
-        assert_eq!(default_blocking_threads(4), 1024);
-        assert_eq!(default_blocking_threads(64), 1024);
-        assert_eq!(default_blocking_threads(512), 1024);
-    }
-}

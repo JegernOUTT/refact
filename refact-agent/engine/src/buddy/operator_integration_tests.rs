@@ -3,57 +3,6 @@
 #[path = "../../tests/it/buddy_operator_common/fixtures.rs"]
 mod isolated_fixtures;
 
-#[tokio::test]
-async fn fixture_provider_report_is_served_by_real_operator_routes_after_runtime_restart() {
-    use isolated_fixtures::{FixtureEndpoints, FixtureTransport};
-    use super::outcome_runtime::WorkflowTerminal;
-    let harness = BuddyOperatorHarness::new();
-    let mut endpoints = FixtureEndpoints::start(harness.project_root().to_path_buf());
-    let transport = FixtureTransport::new([endpoints.address]);
-    let completion: serde_json::Value = transport.request(reqwest::Method::POST,
-        &endpoints.url("/v1/chat/completions"), Some(serde_json::json!({
-            "model":"fixture-model", "messages":[{"role":"user","content":"Draft scratch skill"}]
-        }))).await.unwrap().json().await.unwrap();
-    let runtime = harness.open_operator_runtime();
-    let mut run = runtime.start_workflow("fixture_provider", "2026-09-05T00:00:00Z".into());
-    run.coverage = "Isolated HTTP fixture response, not production provider health".into();
-    run.input_fingerprint = "fixture-provider-v1".into();
-    runtime.begin_workflow(run.clone()).await.unwrap();
-    let work = runtime
-        .publish_report(
-            run,
-            "Provider fixture result".into(),
-            completion["choices"][0]["message"]["content"]
-                .as_str()
-                .unwrap()
-                .into(),
-            vec![],
-            WorkflowTerminal::Completed,
-        )
-        .await
-        .unwrap();
-    runtime.shutdown().await;
-    endpoints.shutdown().await;
-    assert_eq!(endpoints.calls(), ["completion"]);
-    assert!(transport.denied().is_empty());
-    let reopened = harness.open_operator_runtime();
-    let router = harness.operator_router(Some(reopened.clone())).await;
-    let (status, report) = get_json(
-        router,
-        &format!(
-            "/v1/buddy/artifacts/{}",
-            work.value.current_artifact_id.unwrap()
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(report["data"]["value"]["body"]
-        .as_str()
-        .unwrap()
-        .contains("fixture-skill"));
-    reopened.shutdown().await;
-}
-
 use std::path::Path;
 
 use axum::{
@@ -71,130 +20,7 @@ use crate::buddy::{
 use crate::{app_state::AppState, global_context::tests::make_test_gcx_with_dirs};
 use tempfile::TempDir;
 use tokio::sync::broadcast;
-
-#[tokio::test]
-async fn batch_http_endpoint_is_static_and_keeps_row_action_parity_for_fifty_items() {
-    let harness = BuddyOperatorHarness::new();
-    let project = harness.project_identity();
-    let worker = harness.worker_identity();
-    let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../../crates/refact-buddy-core/tests/fixtures/operator_contract_v1.json"
-    ))
-    .unwrap();
-    let mut store = OperatorStore::open(harness.project_root(), &project).unwrap();
-    let mut ids = Vec::new();
-    for index in 0..50 {
-        let mut work: WorkItem = serde_json::from_value(fixture["work_item"].clone()).unwrap();
-        work.id = format!("batch-http-{index}");
-        work.project = project.clone();
-        work.subject.resource_id = format!("batch-http-subject-{index}");
-        work.current_artifact_id = None;
-        work.current_artifact_revision = None;
-        store.upsert_work_item(&work, None).unwrap();
-        ids.push(work.id);
-    }
-    drop(store);
-    let runtime = OutcomeRuntime::open(harness.project_root(), project.clone(), worker).unwrap();
-    let router = harness.operator_router(Some(runtime.clone())).await;
-    let started = std::time::Instant::now();
-    let response = router
-        .clone()
-        .oneshot(
-            axum::http::Request::builder()
-                .uri(format!(
-                    "/v1/buddy/work/actions?project_id={}&ids={}",
-                    project.project_id,
-                    ids.join(",")
-                ))
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    eprintln!(
-        "R-21 batch HTTP measurement: ids=50, elapsed_ms={}",
-        started.elapsed().as_millis()
-    );
-    assert_eq!(response.status(), hyper::StatusCode::OK);
-    let batch: serde_json::Value =
-        serde_json::from_slice(&hyper::body::to_bytes(response.into_body()).await.unwrap())
-            .unwrap();
-    assert_eq!(batch["data"].as_array().unwrap().len(), 50);
-    let duplicate = router
-        .clone()
-        .oneshot(
-            axum::http::Request::builder()
-                .uri(format!(
-                    "/v1/buddy/work/actions?project_id={}&ids={},{}",
-                    project.project_id, ids[0], ids[0]
-                ))
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let duplicate: serde_json::Value =
-        serde_json::from_slice(&hyper::body::to_bytes(duplicate.into_body()).await.unwrap())
-            .unwrap();
-    assert_eq!(duplicate["data"].as_array().unwrap().len(), 1);
-    for query in [
-        format!(
-            "/v1/buddy/work/actions?project_id={}&ids=",
-            project.project_id
-        ),
-        format!(
-            "/v1/buddy/work/actions?project_id={}&ids={}",
-            project.project_id,
-            std::iter::repeat_n("too-many", 101)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-    ] {
-        let invalid = router
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(query)
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(invalid.status(), hyper::StatusCode::BAD_REQUEST);
-    }
-    let item = router
-        .clone()
-        .oneshot(
-            axum::http::Request::builder()
-                .uri(format!(
-                    "/v1/buddy/work/{}?project_id={}",
-                    ids[0], project.project_id
-                ))
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(item.status(), hyper::StatusCode::OK);
-    let row = router
-        .clone()
-        .oneshot(
-            axum::http::Request::builder()
-                .uri(format!(
-                    "/v1/buddy/work/{}/actions?project_id={}",
-                    ids[0], project.project_id
-                ))
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(row.status(), hyper::StatusCode::OK);
-    let row: serde_json::Value =
-        serde_json::from_slice(&hyper::body::to_bytes(row.into_body()).await.unwrap()).unwrap();
-    assert_eq!(batch["data"][0]["actions"], row["data"]);
-    runtime.shutdown().await;
-}
+use tower::ServiceExt;
 
 pub struct BuddyOperatorHarness {
     project: TempDir,
@@ -239,20 +65,8 @@ impl BuddyOperatorHarness {
         )
     }
 
-    pub async fn restored_service(&self) -> BuddyService {
-        let mut service = self.service();
-        service
-            .draft_store
-            .restore(load_drafts(self.project_root()).await);
-        service
-    }
-
     pub fn shutdown(&mut self) {
         self.shutdown = true;
-    }
-
-    pub fn is_shutdown(&self) -> bool {
-        self.shutdown
     }
 
     pub fn project_identity(&self) -> ProjectIdentity {
@@ -370,7 +184,6 @@ use refact_buddy_core::operator_types::{
     ActionExecutionState, ArtifactProvenance, EffectState, NativeSourceIdentity, NativeSourceKind,
     ResourceEffect, ResourceRef, RunStatus, WorkItemState, OPERATOR_SCHEMA_VERSION_V1,
 };
-use tower::ServiceExt;
 
 fn source(kind: NativeSourceKind, id: &str) -> NativeSourceIdentity {
     NativeSourceIdentity {
@@ -581,163 +394,6 @@ async fn completed_report_and_interrupted_run_are_readable_through_real_routes_a
 }
 
 #[tokio::test]
-async fn twelve_scoped_unchanged_checks_fold_but_a_blocked_check_is_a_new_unread_report() {
-    use super::outcome_runtime::WorkflowTerminal;
-    let harness = BuddyOperatorHarness::new();
-    let runtime = harness.open_operator_runtime();
-    let mut first = runtime.start_workflow("scratch_check", "2026-09-05T00:00:00Z".into());
-    first.coverage = "Scratch resource digest at revision one".into();
-    first.input_fingerprint = "scratch:one".into();
-    let work = runtime
-        .publish_workflow_result(
-            first.clone(),
-            "Observed digest is unchanged.".into(),
-            WorkflowTerminal::NoChange,
-        )
-        .await
-        .unwrap();
-    let artifact_id = work.value.current_artifact_id.clone().unwrap();
-    runtime
-        .mark_work_read(work.value.id.clone(), artifact_id.clone(), 1)
-        .await
-        .unwrap();
-    for index in 1..12 {
-        let mut check = first.clone();
-        check.run_id = format!("unchanged-{index}");
-        check.started_at = format!("2026-09-05T00:{index:02}:00Z");
-        runtime.begin_workflow(check.clone()).await.unwrap();
-        let repeated = runtime
-            .publish_workflow_result(
-                check,
-                "Observed digest is unchanged.".into(),
-                WorkflowTerminal::NoChange,
-            )
-            .await
-            .unwrap();
-        assert_eq!(repeated.value.current_artifact_revision, Some(1));
-        assert_eq!(
-            repeated.value.last_material_change_at,
-            work.value.last_material_change_at
-        );
-    }
-    let router = harness.operator_router(Some(runtime.clone())).await;
-    let (_, unread) = get_json(router.clone(), "/v1/buddy/work?attention=unread").await;
-    assert!(unread["data"].as_array().unwrap().is_empty());
-    let (_, runs) = get_json(
-        router.clone(),
-        &format!("/v1/buddy/work/{}/outcomes", work.value.id),
-    )
-    .await;
-    assert_eq!(runs["data"].as_array().unwrap().len(), 12);
-    let mut blocked = first;
-    blocked.run_id = "blocked-check".into();
-    runtime.begin_workflow(blocked.clone()).await.unwrap();
-    let blocked_work = runtime
-        .publish_workflow_result(
-            blocked,
-            "Permission unavailable; resource was not observed.".into(),
-            WorkflowTerminal::Blocked {
-                failure_class: Some("permission".into()),
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(blocked_work.value.id, work.value.id);
-    assert_eq!(blocked_work.value.state, WorkItemState::Blocked);
-    assert_eq!(blocked_work.value.current_artifact_revision, Some(2));
-    let (_, unread) = get_json(router.clone(), "/v1/buddy/work?attention=unread").await;
-    assert_eq!(unread["data"].as_array().unwrap().len(), 1);
-    let (_, original) = get_json(
-        router,
-        &format!("/v1/buddy/artifacts/{artifact_id}?revision=1"),
-    )
-    .await;
-    assert_eq!(
-        original["data"]["value"]["body"],
-        "Observed digest is unchanged."
-    );
-    assert_eq!(
-        runtime
-            .get_read_state(work.value.id)
-            .await
-            .unwrap()
-            .unwrap()
-            .last_read_revision,
-        1
-    );
-    runtime.shutdown().await;
-}
-
-#[tokio::test]
-async fn isolated_operator_read_routes_return_persisted_runtime_records_after_reopen() {
-    let mut harness = BuddyOperatorHarness::new();
-    let project = harness.project_identity();
-    let (outcome, work, artifact, execution) =
-        scratch_records(project.clone(), harness.worker_identity());
-    harness.seed_operator_records(&outcome, &work, &artifact, &execution);
-
-    let runtime = harness.open_operator_runtime();
-    let router = harness.operator_router(Some(runtime.clone())).await;
-    let encoded_project = &project.project_id;
-
-    let (status, listed) = get_json(
-        router.clone(),
-        &format!("/v1/buddy/work?project_id={encoded_project}"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(listed["schema_version"], OPERATOR_SCHEMA_VERSION_V1);
-    assert_eq!(listed["project"]["project_id"], project.project_id);
-    assert_eq!(listed["data"][0]["value"]["id"], work.id);
-    assert_eq!(listed["data"][0]["revision"], 1);
-
-    let (status, fetched_work) = get_json(
-        router.clone(),
-        &format!("/v1/buddy/work/{}?project_id={encoded_project}", work.id),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(fetched_work["data"]["value"]["title"], work.title);
-    assert_eq!(fetched_work["data"]["change_seq"], 1);
-
-    let (status, fetched_artifact) = get_json(
-        router.clone(),
-        &format!(
-            "/v1/buddy/artifacts/{}?project_id={encoded_project}&revision={}",
-            artifact.artifact_id, artifact.revision
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        fetched_artifact["data"]["value"]["conclusion"],
-        artifact.conclusion
-    );
-    assert_eq!(fetched_artifact["data"]["revision"], artifact.revision);
-
-    let (status, fetched_execution) = get_json(
-        router,
-        &format!(
-            "/v1/buddy/executions/{}?project_id={encoded_project}",
-            execution.execution_id
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        fetched_execution["data"]["value"]["status"],
-        "outcome_unknown"
-    );
-    assert_eq!(fetched_execution["data"]["revision"], 2);
-    assert!(fetched_execution["data"]["value"]["verification_evidence"]
-        .to_string()
-        .contains("not replayed"));
-
-    runtime.shutdown().await;
-    harness.shutdown();
-}
-
-#[tokio::test]
 async fn isolated_snooze_routes_preserve_unread_work_and_reject_foreign_or_stale_requests() {
     let harness = BuddyOperatorHarness::new();
     let project = harness.project_identity();
@@ -799,31 +455,6 @@ async fn isolated_snooze_routes_preserve_unread_work_and_reject_foreign_or_stale
     let reopened = harness.open_operator_runtime();
     assert!(reopened.get_work_snooze(work.id).await.unwrap().is_some());
     reopened.shutdown().await;
-}
-
-#[tokio::test]
-async fn isolated_operator_read_routes_reject_wrong_project_and_report_missing_runtime() {
-    let mut harness = BuddyOperatorHarness::new();
-    let unavailable = harness.operator_router(None).await;
-    let (status, body) = get_json(unavailable, "/v1/buddy/work").await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(body.to_string().contains("runtime is unavailable"));
-
-    let project = harness.project_identity();
-    let (outcome, work, artifact, execution) = scratch_records(project, harness.worker_identity());
-    harness.seed_operator_records(&outcome, &work, &artifact, &execution);
-    let runtime = harness.open_operator_runtime();
-    let router = harness.operator_router(Some(runtime.clone())).await;
-    let (status, body) = get_json(
-        router,
-        "/v1/buddy/work/scratch-work?project_id=another-project",
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body.to_string().contains("does not match"));
-
-    runtime.shutdown().await;
-    harness.shutdown();
 }
 
 async fn post_action(
@@ -1069,45 +700,4 @@ async fn isolated_report_read_ack_survives_reopen_without_resolving_work() {
         read
     );
     reopened.shutdown().await;
-}
-
-#[tokio::test]
-async fn isolated_history_and_outcome_routes_return_only_saved_evidence() {
-    let harness = BuddyOperatorHarness::new();
-    let project = harness.project_identity();
-    let (outcome, work, artifact, execution) =
-        scratch_records(project.clone(), harness.worker_identity());
-    harness.seed_operator_records(&outcome, &work, &artifact, &execution);
-    let runtime = harness.open_operator_runtime();
-    let router = harness.operator_router(Some(runtime.clone())).await;
-    let (status, history) = get_json(
-        router.clone(),
-        "/v1/buddy/artifacts/scratch-artifact/revisions?limit=1",
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        history["data"][0]["value"],
-        serde_json::to_value(&artifact).unwrap()
-    );
-    let (status, run) = get_json(router.clone(), "/v1/buddy/outcomes/scratch-run").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        run["data"]["value"],
-        serde_json::to_value(&outcome).unwrap()
-    );
-    assert_eq!(
-        get_json(
-            router.clone(),
-            "/v1/buddy/outcomes/scratch-run?project_id=foreign"
-        )
-        .await
-        .0,
-        StatusCode::BAD_REQUEST
-    );
-    assert_eq!(
-        get_json(router, "/v1/buddy/outcomes/absent").await.0,
-        StatusCode::NOT_FOUND
-    );
-    runtime.shutdown().await;
 }

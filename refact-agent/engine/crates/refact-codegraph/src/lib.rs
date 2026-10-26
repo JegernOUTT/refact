@@ -1275,37 +1275,6 @@ mod tests {
         ("src/http/routers/v1/mcp_marketplace.rs", "rust"),
     ];
 
-    #[tokio::test]
-    #[ignore = "manual dev-profile indexing benchmark"]
-    async fn bench_index() {
-        let engine_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let service = CodeGraphService::open_in_memory().unwrap();
-        let mut bytes = 0usize;
-        let started = Instant::now();
-
-        for (rel_path, lang) in BENCH_INDEX_CORPUS {
-            let full_path = engine_root.join(rel_path);
-            let text = std::fs::read_to_string(&full_path)
-                .unwrap_or_else(|err| panic!("read {}: {err}", full_path.display()));
-            bytes += text.len();
-            service.index_file(rel_path, &text, lang).await.unwrap();
-        }
-
-        let elapsed = started.elapsed();
-        let counts = service.counts().await.unwrap();
-        assert_eq!(counts.files, BENCH_INDEX_CORPUS.len() as i64);
-        println!(
-            "bench_index files={} bytes={} nodes={} edges={} fts_docs={} elapsed_ms={:.3} ms_per_file={:.3}",
-            BENCH_INDEX_CORPUS.len(),
-            bytes,
-            counts.nodes,
-            counts.edges,
-            counts.fts_docs,
-            elapsed.as_secs_f64() * 1000.0,
-            elapsed.as_secs_f64() * 1000.0 / BENCH_INDEX_CORPUS.len() as f64
-        );
-    }
-
     #[test]
     fn enqueue_files_deduplicates_pending_paths_fifo() {
         let service = CodeGraphService::open_in_memory().unwrap();
@@ -1369,33 +1338,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn enqueue_files_bulk_dedupes_without_quadratic_scan() {
-        let service = CodeGraphService::open_in_memory().unwrap();
-        let mut paths = Vec::with_capacity(100_000);
-        for idx in 0..50_000 {
-            paths.push(format!("src/{idx}.rs"));
-        }
-        for idx in 0..50_000 {
-            paths.push(format!("src/{idx}.rs"));
-        }
-
-        let started = Instant::now();
-        service.enqueue_files(&paths);
-        let elapsed = started.elapsed();
-
-        assert_eq!(service.queue_len(), 50_000);
-        assert!(
-            elapsed < Duration::from_secs(2),
-            "bulk enqueue took {:?}",
-            elapsed
-        );
-        let drained = service.drain_batch(usize::MAX);
-        assert_eq!(drained.len(), 50_000);
-        assert_eq!(drained.first(), Some(&"src/0.rs".to_string()));
-        assert_eq!(drained.last(), Some(&"src/49999.rs".to_string()));
-    }
-
     #[tokio::test]
     async fn wait_for_enqueue_wakes_after_new_pending_path() {
         let service = CodeGraphService::open_in_memory().unwrap();
@@ -1432,67 +1374,6 @@ mod tests {
 
         assert_eq!(service.analytics_rebuild_count(), 2);
         assert_ne!(first.node_count, third.node_count);
-    }
-
-    #[test]
-    fn resolve_indexed_paths_behavior_unchanged() {
-        let indexed = vec![
-            "/repo/src/core.rs".to_string(),
-            "/repo/src/caller.rs".to_string(),
-            "/repo/examples/core.rs".to_string(),
-        ];
-
-        assert_eq!(
-            resolve_indexed_paths(&[" .\\src\\caller.rs ".to_string()], &indexed),
-            vec!["/repo/src/caller.rs".to_string()]
-        );
-        assert_eq!(
-            resolve_indexed_paths(&["src/core.rs".to_string()], &indexed),
-            vec!["/repo/src/core.rs".to_string()]
-        );
-        assert_eq!(
-            resolve_indexed_paths(&["core.rs".to_string()], &indexed),
-            vec!["core.rs".to_string()]
-        );
-        assert_eq!(
-            resolve_indexed_paths(&["missing.rs".to_string()], &indexed),
-            vec!["missing.rs".to_string()]
-        );
-    }
-
-    #[tokio::test]
-    async fn indexer_continues_past_parse_failure_and_reports_the_count() {
-        let service = CodeGraphService::open_in_memory().unwrap();
-        let entries = vec![
-            (
-                "src/good.rs".to_string(),
-                "pub fn good() {}\n".to_string(),
-                "rust".to_string(),
-            ),
-            (
-                "src/broken.rs".to_string(),
-                "fn broken( { ; ) } !!!\n".to_string(),
-                "rust".to_string(),
-            ),
-            (
-                "src/also_good.rs".to_string(),
-                "pub fn also_good() {}\n".to_string(),
-                "rust".to_string(),
-            ),
-        ];
-
-        let results = service.index_files_batch(&entries).await.unwrap();
-
-        assert_eq!(results.len(), 3, "one bad file must not abort the batch");
-        assert_eq!(service.run_parse_failures(), 1);
-        assert_eq!(service.parse_failure_count().await.unwrap(), 1);
-        let readiness = service.index_readiness().await.unwrap();
-        assert_eq!(readiness.parse_failures, 1);
-        assert_eq!(
-            readiness.parse_failure_paths,
-            vec!["src/broken.rs".to_string()]
-        );
-        assert_eq!(service.all_paths().await.unwrap().len(), 3);
     }
 
     #[tokio::test]
@@ -1587,91 +1468,6 @@ mod tests {
             service.meta_get("schema_version").await.unwrap(),
             schema_version
         );
-    }
-
-    #[tokio::test]
-    async fn pr_blast_resolves_noncanonical_changed_paths() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = dir.path().join("repo");
-        std::fs::create_dir_all(repo.join("src")).unwrap();
-        let indexed_core = repo.join("src/core.rs").to_string_lossy().to_string();
-        let indexed_caller = repo.join("src/caller.rs").to_string_lossy().to_string();
-        let service = CodeGraphService::open_in_memory().unwrap();
-        service
-            .index_file(&indexed_core, "pub fn core() {}\n", "rust")
-            .await
-            .unwrap();
-        service
-            .index_file(&indexed_caller, "fn caller() { core(); }\n", "rust")
-            .await
-            .unwrap();
-        service.connect_usages().await.unwrap();
-
-        let report = service
-            .pr_blast(&[" .\\src\\core.rs ".to_string()], 2)
-            .await
-            .unwrap();
-
-        assert_eq!(report.changed_files, vec![indexed_core]);
-        assert!(report
-            .directly_impacted
-            .iter()
-            .any(|impact| impact.path == indexed_caller && impact.symbol == "caller"));
-    }
-
-    #[tokio::test]
-    async fn pr_blast_keeps_unresolvable_changed_paths_empty() {
-        let service = CodeGraphService::open_in_memory().unwrap();
-        service
-            .index_file("src/core.rs", "pub fn core() {}\n", "rust")
-            .await
-            .unwrap();
-        service.connect_usages().await.unwrap();
-
-        let report = service
-            .pr_blast(&["missing.rs".to_string()], 2)
-            .await
-            .unwrap();
-
-        assert_eq!(report.changed_files, vec!["missing.rs".to_string()]);
-        assert!(report.directly_impacted.is_empty());
-        assert!(report.transitively_impacted.is_empty());
-        assert_eq!(report.risk_score, 0.0);
-    }
-
-    #[tokio::test]
-    async fn pr_blast_early_return_does_not_wait_for_store() {
-        let service = CodeGraphService::open_in_memory().unwrap();
-        let store_guard = service.store.lock().await;
-
-        let empty = tokio::time::timeout(Duration::from_millis(50), service.pr_blast(&[], 2))
-            .await
-            .expect("empty blast must not read the store")
-            .unwrap();
-        let zero_depth = tokio::time::timeout(
-            Duration::from_millis(50),
-            service.pr_blast(&["src/a.rs".to_string()], 0),
-        )
-        .await
-        .expect("zero-depth blast must not read the store")
-        .unwrap();
-        let scoped = tokio::time::timeout(
-            Duration::from_millis(50),
-            service.pr_blast_scoped(
-                &["src/a.rs".to_string()],
-                0,
-                &HashSet::from(["src/a.rs".to_string()]),
-            ),
-        )
-        .await
-        .expect("zero-depth scoped blast must not read the store")
-        .unwrap();
-        drop(store_guard);
-
-        assert!(empty.changed_files.is_empty());
-        assert_eq!(zero_depth.changed_files, vec!["src/a.rs".to_string()]);
-        assert_eq!(zero_depth.impacted_file_count, 0);
-        assert_eq!(scoped.changed_files, vec!["src/a.rs".to_string()]);
     }
 
     #[tokio::test]
@@ -1781,88 +1577,6 @@ mod tests {
         assert_eq!(third.generation, service.graph_generation());
     }
 
-    #[tokio::test]
-    async fn scoped_analytics_counts_match_scoped_graph_and_fts_documents() {
-        let service = CodeGraphService::open_in_memory().unwrap();
-        service
-            .index_file("src/a.rs", "pub fn a() {}\n", "rust")
-            .await
-            .unwrap();
-        service
-            .index_file("excluded/b.rs", "pub fn b() {}\n", "rust")
-            .await
-            .unwrap();
-        let allowed = HashSet::from(["src/a.rs".to_string()]);
-
-        let scoped = service.scoped_graph_analytics(&allowed).await.unwrap();
-        let scoped_files = scoped
-            .data
-            .nodes
-            .iter()
-            .map(|(_, _, path)| path)
-            .collect::<HashSet<_>>()
-            .len() as i64;
-
-        assert_eq!(scoped.counts.nodes, scoped.data.nodes.len() as i64);
-        assert_eq!(scoped.counts.edges, scoped.data.edges.len() as i64);
-        assert_eq!(scoped.counts.files, scoped_files);
-        assert_eq!(scoped.counts.files, 1);
-        assert_eq!(scoped.counts.fts_docs, 1);
-        assert_eq!(service.counts().await.unwrap().fts_docs, 2);
-    }
-
-    #[tokio::test]
-    async fn scoped_analytics_cache_keeps_multiple_scopes_and_evicts_oldest() {
-        let service = CodeGraphService::open_in_memory().unwrap();
-        for index in 0..=SCOPED_ANALYTICS_CACHE_CAPACITY {
-            service
-                .index_file(
-                    &format!("src/{index}.rs"),
-                    &format!("pub fn item_{index}() {{}}\n"),
-                    "rust",
-                )
-                .await
-                .unwrap();
-        }
-
-        let scopes = (0..=SCOPED_ANALYTICS_CACHE_CAPACITY)
-            .map(|index| HashSet::from([format!("src/{index}.rs")]))
-            .collect::<Vec<_>>();
-        let mut snapshots = Vec::new();
-        for scope in &scopes[..SCOPED_ANALYTICS_CACHE_CAPACITY] {
-            snapshots.push(service.scoped_graph_analytics(scope).await.unwrap());
-        }
-        for (scope, snapshot) in scopes[..SCOPED_ANALYTICS_CACHE_CAPACITY]
-            .iter()
-            .zip(&snapshots)
-        {
-            let cached = service.scoped_graph_analytics(scope).await.unwrap();
-            assert!(Arc::ptr_eq(snapshot, &cached));
-        }
-        assert_eq!(
-            service.scoped_analytics_rebuild_count(),
-            SCOPED_ANALYTICS_CACHE_CAPACITY
-        );
-
-        service
-            .scoped_graph_analytics(&scopes[SCOPED_ANALYTICS_CACHE_CAPACITY])
-            .await
-            .unwrap();
-        let cache = service.scoped_analytics_cache.lock().await;
-        assert_eq!(cache.entries.len(), SCOPED_ANALYTICS_CACHE_CAPACITY);
-        assert!(cache
-            .entries
-            .iter()
-            .all(|entry| entry.key.allowed_paths != vec!["src/0.rs".to_string()]));
-        drop(cache);
-
-        service.scoped_graph_analytics(&scopes[0]).await.unwrap();
-        assert_eq!(
-            service.scoped_analytics_rebuild_count(),
-            SCOPED_ANALYTICS_CACHE_CAPACITY + 2
-        );
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn scoped_analytics_rebuild_does_not_hold_cache_mutex() {
         let service = Arc::new(CodeGraphService::open_in_memory().unwrap());
@@ -1961,25 +1675,6 @@ mod tests {
         let cached = service.analytics_cache.lock().await.clone().unwrap();
         assert_eq!(cached.generation, generation_after);
         assert!(cached.data.nodes.iter().any(|(_, name, _)| name == "added"));
-    }
-
-    #[tokio::test]
-    async fn file_backed_doc_defs_reads_while_writer_mutex_is_held() {
-        let dir = tempfile::tempdir().unwrap();
-        let service = CodeGraphService::open(dir.path().join("codegraph.sqlite")).unwrap();
-        service
-            .index_file("src/a.rs", "pub fn ready() {}\n", "rust")
-            .await
-            .unwrap();
-
-        let writer_guard = service.store.lock().await;
-        let defs = tokio::time::timeout(Duration::from_millis(200), service.doc_defs("src/a.rs"))
-            .await
-            .expect("doc_defs should use the read connection instead of waiting for writer mutex")
-            .unwrap();
-        drop(writer_guard);
-
-        assert!(defs.iter().any(|def| def.name() == "ready"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

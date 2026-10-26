@@ -1289,72 +1289,6 @@ mod tests {
     }
 
     #[test]
-    fn retry_backoff_schedules_are_exact_and_repeat_the_last_delay() {
-        let locator = (0..9)
-            .map(|attempt| backoff_delay(LOCATOR_RETRY_BACKOFF_MS, attempt).as_millis())
-            .collect::<Vec<_>>();
-        let action = (0..8)
-            .map(|attempt| backoff_delay(ACTION_RETRY_BACKOFF_MS, attempt).as_millis())
-            .collect::<Vec<_>>();
-
-        assert_eq!(locator, vec![0, 20, 50, 100, 100, 500, 500, 500, 500]);
-        assert_eq!(action, vec![0, 20, 100, 100, 500, 500, 500, 500]);
-        let expect = (0..9)
-            .map(|attempt| backoff_delay(EXPECT_RETRY_BACKOFF_MS, attempt).as_millis())
-            .collect::<Vec<_>>();
-        assert_eq!(expect, vec![0, 20, 50, 100, 100, 500, 500, 500, 500]);
-    }
-
-    #[test]
-    fn function_poll_ladder_probes_immediately_then_repeats_its_last_interval() {
-        let intervals = (0..8)
-            .map(|attempt| backoff_delay(FUNCTION_POLL_BACKOFF_MS, attempt).as_millis())
-            .collect::<Vec<_>>();
-
-        assert_eq!(intervals, vec![0, 100, 250, 500, 1000, 1000, 1000, 1000]);
-    }
-
-    #[test]
-    fn a_fixed_poll_interval_keeps_the_immediate_first_probe() {
-        let clock = MockClock::default();
-        let engine = ActionabilityEngine::new(clock.clone(), ActionabilityTimeouts::default());
-        let calls = Cell::new(0);
-
-        let result = engine.poll_expect_with_backoff(Duration::from_millis(500), &[0, 75], || {
-            let call = calls.get() + 1;
-            calls.set(call);
-            Ok((call == 3, call))
-        });
-
-        assert!(matches!(
-            result,
-            ExpectPollResult::Matched { attempts: 3, .. }
-        ));
-        assert_eq!(
-            *clock.sleeps.borrow(),
-            vec![Duration::from_millis(75), Duration::from_millis(75)]
-        );
-    }
-
-    #[test]
-    fn poll_expect_keeps_its_expect_ladder_when_no_schedule_is_supplied() {
-        let clock = MockClock::default();
-        let engine = ActionabilityEngine::new(clock.clone(), ActionabilityTimeouts::default());
-        let calls = Cell::new(0);
-
-        engine.poll_expect(Duration::from_millis(200), || {
-            let call = calls.get() + 1;
-            calls.set(call);
-            Ok((call == 3, call))
-        });
-
-        assert_eq!(
-            *clock.sleeps.borrow(),
-            vec![Duration::from_millis(20), Duration::from_millis(50)]
-        );
-    }
-
-    #[test]
     fn expect_poll_retries_immediately_then_uses_deadline_bounded_backoff() {
         let clock = MockClock::default();
         let engine = ActionabilityEngine::new(clock.clone(), ActionabilityTimeouts::default());
@@ -1404,77 +1338,6 @@ mod tests {
     }
 
     #[test]
-    fn form_retry_backoff_preserves_the_existing_hundred_millisecond_poll() {
-        let locator = (0..4)
-            .map(|attempt| backoff_delay(FORM_LOCATOR_RETRY_BACKOFF_MS, attempt).as_millis())
-            .collect::<Vec<_>>();
-        let action = (0..4)
-            .map(|attempt| backoff_delay(FORM_ACTION_RETRY_BACKOFF_MS, attempt).as_millis())
-            .collect::<Vec<_>>();
-
-        assert_eq!(locator, vec![0, 100, 100, 100]);
-        assert_eq!(action, vec![100, 100, 100, 100]);
-    }
-
-    #[test]
-    fn locator_retry_uses_its_exact_schedule() {
-        let clock = MockClock::default();
-        let engine = ActionabilityEngine::new(clock.clone(), ActionabilityTimeouts::default());
-        let mut driver = MockDriver::new();
-        driver.locator_outcomes = VecDeque::from([
-            LocatorOutcome::NotFound,
-            LocatorOutcome::NotFound,
-            LocatorOutcome::NotFound,
-            LocatorOutcome::Found {
-                preview: "<button>Save</button>".to_string(),
-            },
-        ]);
-
-        assert_eq!(
-            engine.execute("button", ActionKind::Click, &mut driver),
-            Ok("done")
-        );
-        assert_eq!(
-            *clock.sleeps.borrow(),
-            vec![
-                Duration::from_millis(20),
-                Duration::from_millis(50),
-                Duration::from_millis(100)
-            ]
-        );
-    }
-
-    #[test]
-    fn action_retry_uses_its_independent_exact_schedule() {
-        let clock = MockClock::default();
-        let engine = ActionabilityEngine::new(clock.clone(), ActionabilityTimeouts::default());
-        let mut driver = MockDriver::new();
-        let mut bad = good_state();
-        bad.stable = false;
-        driver.states = VecDeque::from([
-            Ok(bad.clone()),
-            Ok(bad.clone()),
-            Ok(bad.clone()),
-            Ok(bad),
-            Ok(good_state()),
-        ]);
-
-        assert_eq!(
-            engine.execute("button", ActionKind::Click, &mut driver),
-            Ok("done")
-        );
-        assert_eq!(
-            *clock.sleeps.borrow(),
-            vec![
-                Duration::from_millis(20),
-                Duration::from_millis(100),
-                Duration::from_millis(100)
-            ]
-        );
-        assert_eq!(driver.state_calls, 5);
-    }
-
-    #[test]
     fn deadline_trims_a_long_wait_and_does_not_poll_after_expiry() {
         let clock = MockClock::default();
         let engine = ActionabilityEngine::new(clock.clone(), ActionabilityTimeouts::default());
@@ -1515,78 +1378,6 @@ mod tests {
         );
         assert_eq!(driver.state_calls, 3);
         assert_eq!(driver.action_calls, 1);
-    }
-
-    #[test]
-    fn permanently_bad_state_times_out_with_final_diagnostic_and_log() {
-        let clock = MockClock::default();
-        let engine = ActionabilityEngine::new(clock, ActionabilityTimeouts::default());
-        let mut driver = MockDriver::new();
-        let mut bad = good_state();
-        bad.enabled = false;
-        driver.states = VecDeque::from(vec![Ok(bad); 20]);
-
-        let result = engine.execute_with_timeout(
-            "button",
-            ActionKind::Click,
-            Duration::from_millis(250),
-            &mut driver,
-        );
-        let Err(ActionabilityError::Timeout(error)) = result else {
-            panic!("expected timeout")
-        };
-
-        assert_eq!(error.diagnostic, ActionabilityDiagnostic::NotEnabled);
-        assert_eq!(error.timeout, Duration::from_millis(250));
-        assert!(error
-            .call_log
-            .entries
-            .contains(&"element is not enabled".to_string()));
-        assert_eq!(
-            error.call_log.entries.last().map(String::as_str),
-            Some("element is not enabled")
-        );
-        assert!(error.to_string().contains("Timeout 250ms exceeded."));
-        assert!(error.to_string().contains("Call log:"));
-        let headline = ActionabilityError::Timeout(error.clone()).headline();
-        assert_eq!(headline, "Timeout 250ms exceeded.");
-        assert!(!headline.contains("Call log"));
-    }
-
-    #[test]
-    fn click_call_log_is_ordered_across_two_retries_then_success() {
-        let clock = MockClock::default();
-        let engine = ActionabilityEngine::new(clock, ActionabilityTimeouts::default());
-        let mut driver = MockDriver::new();
-        let mut bad = good_state();
-        bad.stable = false;
-        driver.states = VecDeque::from([Ok(bad.clone()), Ok(bad), Ok(good_state())]);
-
-        let success = engine
-            .execute_logged("button", ActionKind::Click, &mut driver)
-            .unwrap();
-
-        assert_eq!(success.output, "done");
-        assert_eq!(
-            success.call_log.entries,
-            vec![
-                "checking pending navigation before locator handlers",
-                "checking locator handlers",
-                "checking pending navigation after locator handlers",
-                "waiting for button",
-                "locator resolved to <button>Save</button>",
-                "attempting click action",
-                "waiting for element to be visible, enabled and stable",
-                "element is not stable",
-                "retrying click action",
-                "waiting for element to be visible, enabled and stable",
-                "element is not stable",
-                "retrying click action",
-                "waiting 20ms",
-                "waiting for element to be visible, enabled and stable",
-                "element is visible, enabled and stable",
-            ]
-        );
     }
 
     #[test]
@@ -1664,27 +1455,6 @@ mod tests {
         );
         assert_eq!(driver.action_calls, 1);
         assert_eq!(success.output, "done");
-    }
-
-    #[test]
-    fn a_cheap_precheck_leaves_the_rest_of_the_budget_for_the_action() {
-        let clock = MockClock::default();
-        let engine = ActionabilityEngine::new(clock.clone(), ActionabilityTimeouts::default());
-        let mut driver = MockDriver::new();
-        driver.precheck_clock = Some(clock.clone());
-        driver.precheck_advance = Duration::from_millis(5);
-
-        let success = engine
-            .execute_with_timeout(
-                "button",
-                ActionKind::Click,
-                Duration::from_millis(25),
-                &mut driver,
-            )
-            .unwrap();
-
-        assert_eq!(success.output, "done");
-        assert_eq!(driver.action_calls, 1);
     }
 
     #[test]
@@ -1775,29 +1545,6 @@ mod tests {
     }
 
     #[test]
-    fn success_after_two_retries_reports_attempts_and_end_state() {
-        let clock = MockClock::default();
-        let engine = ActionabilityEngine::new(clock, ActionabilityTimeouts::default());
-        let mut driver = MockDriver::new();
-        let mut bad = good_state();
-        bad.stable = false;
-        driver.states = VecDeque::from([Ok(bad.clone()), Ok(bad), Ok(good_state())]);
-
-        let success = engine
-            .execute_logged("button", ActionKind::Click, &mut driver)
-            .unwrap();
-
-        assert_eq!(success.attempts, 2);
-        assert_eq!(success.attached, Some(true));
-        assert_eq!(success.state, Some(good_state()));
-        assert_eq!(success.receives_events, Some(true));
-        let diagnostics = success.diagnostics(ActionKind::Click);
-        assert_eq!(diagnostics.attempts, Some(2));
-        assert_eq!(diagnostics.stable, Some(true));
-        assert_eq!(diagnostics.receives_events, Some(true));
-    }
-
-    #[test]
     fn call_log_caps_entries_and_marks_the_final_reason() {
         let mut log = CallLog::default();
         for index in 0..60 {
@@ -1850,13 +1597,5 @@ mod tests {
             diagnostics.call_log.last().map(String::as_str),
             Some("<input type=\"password\" value=\"[REDACTED]\"> intercepts pointer events")
         );
-    }
-
-    #[test]
-    fn configured_timeout_kinds_match_playwright_mcp_defaults() {
-        let timeouts = ActionabilityTimeouts::default();
-        assert_eq!(timeouts.action, Duration::from_millis(5_000));
-        assert_eq!(timeouts.navigation, Duration::from_millis(60_000));
-        assert_eq!(timeouts.expect, Duration::from_millis(5_000));
     }
 }

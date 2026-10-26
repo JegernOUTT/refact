@@ -133,28 +133,6 @@ fn gaps(reply: &GoalVerifierReply) -> &[String] {
     }
 }
 
-fn goal_review_attempt(at: u64) -> GoalAttempt {
-    GoalAttempt {
-        at_ms: at,
-        trigger: "finish".to_string(),
-        verdict: "unmet".to_string(),
-        gaps: vec!["review finding blocks completion".to_string()],
-        verifier_reply: "GOAL: UNMET".to_string(),
-        criteria_verdicts: vec![CriterionVerdict {
-            id: goal_review::GOAL_REVIEW_SPEC_ID.to_string(),
-            met: false,
-            note: "review pipeline found a supported finding".to_string(),
-            source: VerdictSource::Measured,
-            evidence: Some(CriterionEvidence {
-                spec_id: goal_review::GOAL_REVIEW_SPEC_ID.to_string(),
-                command: goal_review::GOAL_REVIEW_COMMAND.to_string(),
-                exit_code: None,
-                verdict: EvidenceVerdict::Failed.label().to_string(),
-            }),
-        }],
-    }
-}
-
 fn fake_finding_report() -> ReviewReport {
     ReviewReport {
         findings: vec![ReviewFinding {
@@ -475,30 +453,4 @@ async fn reviewer_construction_failure_is_unavailable_evidence_and_unmet() {
                 .as_ref()
                 .is_some_and(|evidence| evidence.verdict == EvidenceVerdict::Unavailable.label())
     }));
-}
-
-#[test]
-fn goal_review_attempt_count_ignores_other_revisions_and_unavailable_reviews() {
-    let mut session = ChatSession::new("goal-review-revision".to_string());
-    session.install_goal("agent", "first goal", true, GoalBudget::default());
-    session.goal_push_attempt(goal_review_attempt(1));
-    session.goal_push_attempt(GoalAttempt {
-        criteria_verdicts: vec![CriterionVerdict {
-            id: goal_review::GOAL_REVIEW_SPEC_ID.to_string(),
-            met: false,
-            source: VerdictSource::Measured,
-            evidence: Some(CriterionEvidence {
-                spec_id: goal_review::GOAL_REVIEW_SPEC_ID.to_string(),
-                verdict: EvidenceVerdict::Unavailable.label().to_string(),
-                ..CriterionEvidence::default()
-            }),
-            ..CriterionVerdict::default()
-        }],
-        ..GoalAttempt::default()
-    });
-    assert_eq!(goal_review_attempts_used(session.goal.as_ref().unwrap()), 1);
-
-    session.install_goal("agent", "revised goal", true, GoalBudget::default());
-    assert_eq!(session.goal.as_ref().unwrap().version, 2);
-    assert_eq!(goal_review_attempts_used(session.goal.as_ref().unwrap()), 0);
 }

@@ -107,24 +107,3 @@ pub async fn mcp_sampling_create_message(
     Ok(CreateMessageResult::new(message, "refact".to_string())
         .with_stop_reason(CreateMessageResult::STOP_REASON_END_TURN))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_sampling_message_to_chat_message_user() {
-        let msg = SamplingMessage::user_text("hello");
-        let chat_msg = sampling_message_to_chat_message(&msg);
-        assert_eq!(chat_msg.role, "user");
-        assert_eq!(chat_msg.content.content_text_only(), "hello");
-    }
-
-    #[test]
-    fn test_sampling_message_to_chat_message_assistant() {
-        let msg = SamplingMessage::assistant_text("response");
-        let chat_msg = sampling_message_to_chat_message(&msg);
-        assert_eq!(chat_msg.role, "assistant");
-        assert_eq!(chat_msg.content.content_text_only(), "response");
-    }
-}

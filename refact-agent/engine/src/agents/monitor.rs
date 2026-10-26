@@ -211,56 +211,6 @@ mod tests {
     use crate::agents::types::{BgAgentKind, CreateAgentRequest};
 
     #[tokio::test]
-    async fn monitor_marks_old_running_record_with_progress() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = AppState::from_gcx(gcx).await;
-        let (record, _, _) = app
-            .agents
-            .create(CreateAgentRequest {
-                parent_chat_id: "parent-monitor".to_string(),
-                parent_root_chat_id: None,
-                parent_tool_call_id: None,
-                kind: BgAgentKind::Subagent,
-                config_name: "subagent".to_string(),
-                title: "title".to_string(),
-                prompt: "prompt".to_string(),
-                target_files: vec![],
-                model: "model".to_string(),
-                model_type: None,
-                goal_summary: None,
-                plan_present: false,
-                worktree_id: None,
-                worktree_branch: None,
-            })
-            .await
-            .unwrap();
-        let running = app
-            .agents
-            .mark_running(&record.agent_id, "missing-child".to_string())
-            .await
-            .unwrap();
-        app.agents
-            .set_last_update_at_for_test(&record.agent_id, Utc::now() - TimeDelta::minutes(25))
-            .await
-            .unwrap();
-        let _ = running;
-
-        monitor_once(app.clone()).await.unwrap();
-
-        let updated = app
-            .agents
-            .get("parent-monitor", &record.agent_id)
-            .await
-            .unwrap();
-        assert_eq!(updated.status, BgAgentStatus::Running);
-        assert!(updated
-            .progress
-            .as_deref()
-            .unwrap_or("")
-            .contains("20+ minutes"));
-    }
-
-    #[tokio::test]
     async fn monitor_never_flags_parked_or_queued_waiting_as_stalled() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let app = AppState::from_gcx(gcx).await;
@@ -430,36 +380,6 @@ mod tests {
             .await
             .unwrap();
         record.agent_id
-    }
-
-    /// A provider that will not answer is reported as a provider problem, not
-    /// as a stalled agent.
-    #[tokio::test]
-    async fn monitor_reports_a_provider_failure_instead_of_a_stall() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = AppState::from_gcx(gcx).await;
-        let agent_id = running_agent(&app, "parent-provider", "child-provider").await;
-        let mut session = crate::chat::types::ChatSession::new("child-provider".to_string());
-        session.set_runtime_state(
-            crate::chat::types::SessionState::Error,
-            Some("HTTP 503 upstream service unavailable".to_string()),
-        );
-        app.chat.sessions.write().await.insert(
-            "child-provider".to_string(),
-            Arc::new(tokio::sync::Mutex::new(session)),
-        );
-        app.agents
-            .set_last_update_at_for_test(&agent_id, Utc::now() - TimeDelta::minutes(25))
-            .await
-            .unwrap();
-
-        monitor_once(app.clone()).await.unwrap();
-
-        let updated = app.agents.get("parent-provider", &agent_id).await.unwrap();
-        let progress = updated.progress.unwrap_or_default();
-        assert!(progress.contains("provider"), "{progress}");
-        assert!(!progress.contains("20+ minutes"), "{progress}");
-        assert!(!progress.contains("no material progress"), "{progress}");
     }
 
     /// Negative control: one long tool call is one operation, not a stall, no

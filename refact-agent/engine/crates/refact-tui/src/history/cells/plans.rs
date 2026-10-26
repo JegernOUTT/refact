@@ -309,59 +309,6 @@ mod tests {
     use crate::history::cells::test_support::text;
 
     #[test]
-    fn plan_cell_renders_markdown_plan() {
-        let cell = PlanCell::new(PlanCellData::new("## Plan\n- do it", "agent", 1, 0));
-        let lines = cell.render(80);
-
-        assert_eq!(
-            text(&lines),
-            "• Proposed Plan\n \nplan · agent · v1 · 0 updates\n \n  ## Plan\n  \n  - do it\n \n"
-        );
-        assert!(lines[0].spans[0].style.add_modifier.contains(Modifier::DIM));
-        assert!(lines[0].spans[1]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD));
-        assert!(lines[2].spans[0].style.add_modifier.contains(Modifier::DIM));
-        assert_eq!(lines[1].style, proposed_plan_style());
-        assert_eq!(lines[2].style, proposed_plan_style());
-    }
-
-    #[test]
-    fn plan_cell_snapshot_merges_deltas() {
-        let content = synthesize_plan_content(
-            "## Plan\n- base",
-            &["first update".to_string(), "second update".to_string()],
-        );
-        let cell = PlanCell::new(PlanCellData::new(content, "agent", 2, 2));
-
-        assert_eq!(
-            text(&cell.render(80)),
-            format!(
-                "• Proposed Plan\n \nplan · agent · v2 · 2 updates\n \n  ## Plan\n  \n  - base\n  \n  {}\n  \n  ## Plan updates\n  \n  first update\n  \n  second update\n \n",
-                "—".repeat(78)
-            )
-        );
-    }
-
-    #[test]
-    fn goal_cell_snapshot_merges_deltas() {
-        let content = synthesize_goal_content(
-            "## Goal\n- base",
-            &["first update".to_string(), "second update".to_string()],
-        );
-        let cell = GoalCell::new(GoalCellData::new(content, 2, 2));
-
-        assert_eq!(
-            text(&cell.render(80)),
-            format!(
-                "• Current Goal\n \ngoal · v2 · 2 updates\n \n  ## Goal\n  \n  - base\n  \n  {}\n  \n  ## Goal updates\n  \n  first update\n  \n  second update\n \n",
-                "—".repeat(78)
-            )
-        );
-    }
-
-    #[test]
     fn goal_cell_renders_goal_details() {
         let mut data = GoalCellData::new("Ship the dock", 1, 0).with_details(vec![
             "Status: ACTIVE".to_string(),

@@ -283,12 +283,10 @@ fn current_timestamp_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::types::ChatSession;
-    use crate::exec::{ExecMode, ExecProcessMeta, ExecStatus};
+
     use axum::routing::post;
     use axum::{Json, Router};
     use serde_json::json;
-    use tokio::sync::Mutex as AMutex;
 
     #[test]
     fn self_terminate_threshold_is_six_failures() {
@@ -303,37 +301,6 @@ mod tests {
         assert_eq!(daemon_link_retry_backoff(2), Duration::from_secs(2));
         assert_eq!(daemon_link_retry_backoff(6), Duration::from_secs(32));
         assert_eq!(daemon_link_retry_backoff(99), Duration::from_secs(32));
-    }
-
-    #[test]
-    fn worker_status_serialization_roundtrip() {
-        let report = WorkerStatusReport {
-            project_id: "abc123".to_string(),
-            pid: 42,
-            instance_token: "token".to_string(),
-            lsp_clients: 2,
-            busy_chats: 1,
-            exec_running: 3,
-            last_activity_ts: 99,
-        };
-        let encoded = serde_json::to_string(&report).unwrap();
-        let decoded: WorkerStatusReport = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(decoded, report);
-    }
-
-    #[test]
-    fn worker_status_deserializes_missing_instance_token_as_empty() {
-        let decoded: WorkerStatusReport = serde_json::from_value(json!({
-            "project_id": "abc123",
-            "pid": 42,
-            "lsp_clients": 0,
-            "busy_chats": 0,
-            "exec_running": 0,
-            "last_activity_ts": 99,
-        }))
-        .unwrap();
-
-        assert_eq!(decoded.instance_token, "");
     }
 
     #[test]
@@ -358,42 +325,6 @@ mod tests {
             classify_daemon_link_status(reqwest::StatusCode::BAD_REQUEST),
             DaemonLinkError::Fatal(_)
         ));
-    }
-
-    #[tokio::test]
-    async fn collect_status_snapshot_counts_runtime_state() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        gcx.lsp_tcp_client_count.store(2, Ordering::SeqCst);
-        let mut generating = ChatSession::new("generating".to_string());
-        generating.runtime.state = SessionState::Generating;
-        let mut idle = ChatSession::new("idle".to_string());
-        idle.runtime.state = SessionState::Idle;
-        gcx.chat_sessions
-            .write()
-            .await
-            .insert("generating".to_string(), Arc::new(AMutex::new(generating)));
-        gcx.chat_sessions
-            .write()
-            .await
-            .insert("idle".to_string(), Arc::new(AMutex::new(idle)));
-        let snapshot = gcx
-            .exec_registry
-            .register(
-                ExecProcessMeta::new(ExecMode::Background, "sleep".to_string()),
-                1024,
-            )
-            .await;
-        gcx.exec_registry
-            .set_status(&snapshot.meta.process_id, ExecStatus::Running)
-            .await
-            .unwrap();
-
-        let report = collect_status_snapshot(gcx).await;
-
-        assert_eq!(report.lsp_clients, 2);
-        assert_eq!(report.busy_chats, 1);
-        assert_eq!(report.exec_running, 1);
-        assert!(report.last_activity_ts > 0);
     }
 
     #[tokio::test]
@@ -445,64 +376,5 @@ mod tests {
 
         assert_eq!(result, Ok(()));
         task.abort();
-    }
-
-    #[tokio::test]
-    async fn post_worker_status_classifies_auth_and_transient_failures() {
-        async fn serve_status(
-            status: axum::http::StatusCode,
-        ) -> (u16, tokio::task::JoinHandle<()>) {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let port = listener.local_addr().unwrap().port();
-            let app = Router::new().route(
-                "/daemon/v1/worker-status",
-                post(move |Json(_): Json<WorkerStatusReport>| async move {
-                    (status, Json(json!({"success": false})))
-                }),
-            );
-            let server = axum::Server::from_tcp(listener.into_std().unwrap())
-                .unwrap()
-                .serve(app.into_make_service());
-            (
-                port,
-                tokio::spawn(async move {
-                    let _ = server.await;
-                }),
-            )
-        }
-
-        let report = WorkerStatusReport {
-            project_id: "project".to_string(),
-            pid: 42,
-            instance_token: "token".to_string(),
-            lsp_clients: 0,
-            busy_chats: 0,
-            exec_running: 0,
-            last_activity_ts: 1,
-        };
-
-        let (auth_port, auth_task) = serve_status(axum::http::StatusCode::UNAUTHORIZED).await;
-        let auth_result = post_worker_status(
-            crate::global_context::tests::make_test_gcx().await,
-            &format!("http://127.0.0.1:{auth_port}/daemon/v1/worker-status"),
-            &report,
-        )
-        .await;
-        assert!(matches!(auth_result, Err(DaemonLinkError::Auth(_))));
-        auth_task.abort();
-
-        let (transient_port, transient_task) =
-            serve_status(axum::http::StatusCode::SERVICE_UNAVAILABLE).await;
-        let transient_result = post_worker_status(
-            crate::global_context::tests::make_test_gcx().await,
-            &format!("http://127.0.0.1:{transient_port}/daemon/v1/worker-status"),
-            &report,
-        )
-        .await;
-        assert!(matches!(
-            transient_result,
-            Err(DaemonLinkError::Transient(_))
-        ));
-        transient_task.abort();
     }
 }

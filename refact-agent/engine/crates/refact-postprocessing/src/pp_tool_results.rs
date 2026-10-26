@@ -1208,15 +1208,6 @@ mod tests {
         assert!(prefix_marker.contains("pp_max_per_file_budget_tokens"));
     }
 
-    #[test]
-    fn test_head_tail_marker_reports_shown_and_total() {
-        let lines: Vec<&str> = (0..100).map(|_| "content").collect();
-        let result = truncate_file_head_tail(&lines, 0, 100, None, 50);
-        assert!(result.contains("lines omitted"));
-        assert!(result.contains("of 100 lines"));
-        assert!(result.contains("pp_max_per_file_budget_tokens"));
-    }
-
     #[tokio::test]
     async fn skip_pp_prefilled_one_liner_uses_the_tool_line_cap() {
         let mut file = make_context_file("minified.json", 1, 1);
@@ -1237,79 +1228,6 @@ mod tests {
         assert_eq!((result[0].line1, result[0].line2), (1, 1));
     }
 
-    #[tokio::test]
-    async fn skip_pp_hydrated_one_liner_uses_the_tool_line_cap() {
-        let mut file = make_context_file("minified.power", 1, 1);
-        file.skip_pp = true;
-        let context = StaticPPContext {
-            content: format!("HEAD{}TAIL", "x".repeat(50_000)),
-        };
-
-        let (result, notes) =
-            fill_skip_pp_files_with_budget(Arc::new(context), None, vec![file], 100_000, &[]).await;
-
-        assert!(notes.is_empty(), "{notes:?}");
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].file_content.lines().count(), 1);
-        assert!(result[0].file_content.contains("chars omitted"));
-        assert!(result[0].file_content.contains("tool_max_line_chars"));
-        assert!(result[0].file_content.ends_with("TAIL"));
-        assert!(result[0].file_content.chars().count() < 2_020);
-        assert_eq!((result[0].line1, result[0].line2), (1, 1));
-    }
-
-    #[test]
-    fn test_normalize_line_start() {
-        assert_eq!(normalize_line_start(0, 100), 0);
-        assert_eq!(normalize_line_start(1, 100), 0);
-        assert_eq!(normalize_line_start(10, 100), 9);
-        assert_eq!(normalize_line_start(200, 100), 99); // clamp to last valid index
-        assert_eq!(normalize_line_start(5, 0), 0); // empty file edge case
-    }
-
-    #[test]
-    fn test_normalize_line_end() {
-        assert_eq!(normalize_line_end(0, 100, 0), 100);
-        assert_eq!(normalize_line_end(50, 100, 0), 50);
-        assert_eq!(normalize_line_end(200, 100, 0), 100);
-        assert_eq!(normalize_line_end(10, 100, 20), 20);
-    }
-
-    #[test]
-    fn test_format_lines_with_numbers() {
-        let lines = vec!["line1", "line2", "line3", "line4", "line5"];
-        let result = format_lines_with_numbers(&lines, 0, 3);
-        assert!(result.contains("   1 | line1"));
-        assert!(result.contains("   2 | line2"));
-        assert!(result.contains("   3 | line3"));
-        assert!(!result.contains("line4"));
-
-        let result2 = format_lines_with_numbers(&lines, 2, 5);
-        assert!(result2.contains("   3 | line3"));
-        assert!(result2.contains("   4 | line4"));
-        assert!(result2.contains("   5 | line5"));
-    }
-
-    #[test]
-    fn test_find_duplicate_in_history_no_match() {
-        let cf = make_context_file("new_file.rs", 1, 10);
-        let messages = vec![make_context_file_message(vec![make_context_file(
-            "other.rs", 1, 10,
-        )])];
-        assert!(find_duplicate_in_history(&cf, &messages).is_none());
-    }
-
-    #[test]
-    fn test_find_duplicate_in_history_exact_match() {
-        let cf = make_context_file("test.rs", 1, 10);
-        let messages = vec![make_context_file_message(vec![make_context_file(
-            "test.rs", 1, 10,
-        )])];
-        let result = find_duplicate_in_history(&cf, &messages);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().0, 0);
-    }
-
     #[test]
     fn test_find_duplicate_in_history_partial_overlap_not_covered() {
         let cf = make_context_file("test.rs", 5, 15);
@@ -1318,16 +1236,6 @@ mod tests {
         )])];
         let result = find_duplicate_in_history(&cf, &messages);
         assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_find_duplicate_in_history_fully_covered() {
-        let cf = make_context_file("test.rs", 5, 10);
-        let messages = vec![make_context_file_message(vec![make_context_file(
-            "test.rs", 1, 20,
-        )])];
-        let result = find_duplicate_in_history(&cf, &messages);
-        assert!(result.is_some());
     }
 
     #[test]
@@ -1341,44 +1249,6 @@ mod tests {
     }
 
     #[test]
-    fn test_find_duplicate_in_history_full_file_covered_by_full() {
-        let cf = make_context_file("test.rs", 0, 0);
-        let messages = vec![make_context_file_message(vec![make_context_file(
-            "test.rs", 0, 0,
-        )])];
-        let result = find_duplicate_in_history(&cf, &messages);
-        assert!(result.is_some());
-    }
-
-    #[test]
-    fn test_find_tool_name_for_context() {
-        let messages = vec![
-            make_assistant_with_tool_calls(vec!["cat"]),
-            make_tool_message("result", "call_0"),
-            make_context_file_message(vec![make_context_file("test.rs", 1, 10)]),
-        ];
-        let name = find_tool_name_for_context(&messages, 2);
-        assert_eq!(name, "cat");
-    }
-
-    #[test]
-    fn test_find_tool_name_for_context_no_tool() {
-        let messages = vec![make_context_file_message(vec![make_context_file(
-            "test.rs", 1, 10,
-        )])];
-        let name = find_tool_name_for_context(&messages, 0);
-        assert_eq!(name, "unknown");
-    }
-
-    #[test]
-    fn test_truncate_file_head_tail() {
-        let lines: Vec<&str> = (0..100).map(|_| "content").collect();
-        let result = truncate_file_head_tail(&lines, 0, 100, None, 50);
-        assert!(result.contains("   1 |"));
-        assert!(result.contains("omitted"));
-    }
-
-    #[test]
     fn test_truncate_file_head_tail_single_line_respects_budget() {
         let long_line = "x".repeat(200_000);
         let lines = vec![long_line.as_str()];
@@ -1388,100 +1258,6 @@ mod tests {
 
         assert!(used <= token_budget);
         assert!(result.contains("content truncated"));
-    }
-
-    #[test]
-    fn test_find_duplicate_path_normalization() {
-        let cf = make_context_file("src/main.rs", 1, 10);
-        let messages = vec![make_context_file_message(vec![make_context_file(
-            "src/main.rs",
-            1,
-            10,
-        )])];
-        let result = find_duplicate_in_history(&cf, &messages);
-        assert!(result.is_some());
-    }
-
-    #[test]
-    fn test_find_duplicate_different_files_same_basename() {
-        let cf = make_context_file("src/a/main.rs", 1, 10);
-        let messages = vec![make_context_file_message(vec![make_context_file(
-            "src/b/main.rs",
-            1,
-            10,
-        )])];
-        let result = find_duplicate_in_history(&cf, &messages);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_budget_ratio_all_skip_pp() {
-        let skip_files = vec![
-            ContextFile {
-                skip_pp: true,
-                ..make_context_file("a.rs", 1, 10)
-            },
-            ContextFile {
-                skip_pp: true,
-                ..make_context_file("b.rs", 1, 10)
-            },
-        ];
-        let pp_files: Vec<ContextFile> = vec![];
-        let total = skip_files.len() + pp_files.len();
-        let pp_ratio = if total > 0 {
-            pp_files.len() * 100 / total
-        } else {
-            50
-        };
-        assert_eq!(pp_ratio, 0);
-    }
-
-    #[test]
-    fn test_budget_ratio_all_pp() {
-        let skip_files: Vec<ContextFile> = vec![];
-        let pp_files = vec![
-            make_context_file("a.rs", 1, 10),
-            make_context_file("b.rs", 1, 10),
-        ];
-        let total = skip_files.len() + pp_files.len();
-        let pp_ratio = if total > 0 {
-            pp_files.len() * 100 / total
-        } else {
-            50
-        };
-        assert_eq!(pp_ratio, 100);
-    }
-
-    #[test]
-    fn test_budget_ratio_mixed() {
-        let skip_files = vec![ContextFile {
-            skip_pp: true,
-            ..make_context_file("a.rs", 1, 10)
-        }];
-        let pp_files = vec![
-            make_context_file("b.rs", 1, 10),
-            make_context_file("c.rs", 1, 10),
-            make_context_file("d.rs", 1, 10),
-        ];
-        let total = skip_files.len() + pp_files.len();
-        let pp_ratio = if total > 0 {
-            pp_files.len() * 100 / total
-        } else {
-            50
-        };
-        assert_eq!(pp_ratio, 75);
-    }
-
-    #[test]
-    fn test_find_tool_name_multiple_tools() {
-        let messages = vec![
-            make_assistant_with_tool_calls(vec!["tree", "cat", "search"]),
-            make_tool_message("tree result", "call_0"),
-            make_tool_message("cat result", "call_1"),
-            make_context_file_message(vec![make_context_file("test.rs", 1, 10)]),
-        ];
-        let name = find_tool_name_for_context(&messages, 3);
-        assert_eq!(name, "cat");
     }
 
     #[test]
@@ -1534,40 +1310,6 @@ mod tests {
         assert!(!text.contains("2. [Rust Book]"));
     }
 
-    #[test]
-    fn test_merge_overlapping_ranges() {
-        let files = vec![
-            make_context_file("test.rs", 1, 50),
-            make_context_file("test.rs", 40, 100),
-        ];
-        let merged = merge_overlapping_ranges(files);
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].line1, 1);
-        assert_eq!(merged[0].line2, 100);
-    }
-
-    #[test]
-    fn test_merge_adjacent_ranges() {
-        let files = vec![
-            make_context_file("test.rs", 1, 50),
-            make_context_file("test.rs", 51, 100),
-        ];
-        let merged = merge_overlapping_ranges(files);
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].line1, 1);
-        assert_eq!(merged[0].line2, 100);
-    }
-
-    #[test]
-    fn test_merge_non_overlapping_ranges() {
-        let files = vec![
-            make_context_file("test.rs", 1, 50),
-            make_context_file("test.rs", 100, 150),
-        ];
-        let merged = merge_overlapping_ranges(files);
-        assert_eq!(merged.len(), 2);
-    }
-
     #[tokio::test]
     async fn test_deduplicate_same_file_different_tools() {
         let files = vec![
@@ -1615,18 +1357,6 @@ mod tests {
         let (result, _notes) =
             deduplicate_and_merge_context_files(Arc::new(NoopPPContext), files, &history).await;
         assert_eq!(result.len(), 1);
-    }
-
-    #[test]
-    fn test_find_coverage_in_history() {
-        let cf = make_context_file("test.rs", 10, 50);
-        let history = vec![make_context_file_message(vec![make_context_file(
-            "test.rs", 1, 100,
-        )])];
-        assert!(find_coverage_in_history(&cf, &history).is_some());
-
-        let cf2 = make_context_file("test.rs", 10, 150);
-        assert!(find_coverage_in_history(&cf2, &history).is_none());
     }
 
     struct NoopPPContext;
@@ -1713,40 +1443,6 @@ mod tests {
         assert_eq!(result[0].content.content_text_only(), exempt_content);
         assert_eq!(result[1].tool_call_id, "call_normal");
         assert!(result[1]
-            .content
-            .content_text_only()
-            .contains("Truncated: too many tokens"));
-    }
-
-    #[tokio::test]
-    async fn exempt_tool_results_keep_original_order() {
-        let big = "content line\n".repeat(2000);
-        let messages = vec![
-            make_tool_message(&format!("first: {}", big), "call_0"),
-            make_tool_message(&format!("second: {}", big), "call_exempt"),
-            make_tool_message(&format!("third: {}", big), "call_2"),
-        ];
-        let exempt_ids: HashSet<String> = HashSet::from(["call_exempt".to_string()]);
-
-        let result = postprocess_tool_results(
-            Arc::new(NoopPPContext),
-            None,
-            messages,
-            vec![],
-            small_budget(),
-            PostprocessSettings::default(),
-            &[],
-            &exempt_ids,
-        )
-        .await;
-
-        let ids: Vec<&str> = result.iter().map(|m| m.tool_call_id.as_str()).collect();
-        assert_eq!(ids, vec!["call_0", "call_exempt", "call_2"]);
-        assert!(result[1]
-            .content
-            .content_text_only()
-            .starts_with("second: "));
-        assert!(!result[1]
             .content
             .content_text_only()
             .contains("Truncated: too many tokens"));

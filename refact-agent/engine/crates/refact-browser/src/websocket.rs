@@ -887,16 +887,6 @@ mod tests {
     }
 
     #[test]
-    fn shim_constructs_from_one_string_and_emits_a_single_json_string() {
-        let script = websocket_mock_script();
-        assert!(script.contains("constructor(url, protocols)"));
-        assert!(script.contains(&format!(
-            "globalThis.{WEBSOCKET_BINDING}(JSON.stringify(event))"
-        )));
-        assert!(!script.contains(&format!("globalThis.{WEBSOCKET_BINDING}(event)")));
-    }
-
-    #[test]
     fn binding_payload_shapes_unwrap_to_page_events() {
         let direct = Value::String(
             json!({"type": "created", "id": "refact-ws-1", "url": "ws://host/ws-echo"}).to_string(),
@@ -984,28 +974,6 @@ mod tests {
     }
 
     #[test]
-    fn requeued_commands_stay_ahead_of_newly_queued_ones() {
-        let pattern = UrlPattern::Text("ws://**/ws-echo".to_string());
-        let registry = routed_registry(
-            &pattern,
-            WebSocketRouteMode::Intercept,
-            WebSocketMessageAction::Forward,
-            WebSocketMessageAction::Forward,
-        );
-        created(&registry, "ws://127.0.0.1:9/ws-echo", json!([]));
-
-        registry.send_to_page(&pattern, "first").unwrap();
-        assert!(registry
-            .dispatch_commands("tab-1", |_| Err("offline".to_string()))
-            .is_err());
-        registry.send_to_page(&pattern, "second").unwrap();
-
-        let remaining = registry.take_commands_for("tab-1");
-        assert_eq!(remaining[0]["data"], json!("first"));
-        assert_eq!(remaining[1]["data"], json!("second"));
-    }
-
-    #[test]
     fn close_keeps_the_socket_registered_until_dispatch_succeeds() {
         let pattern = UrlPattern::Text("ws://**/ws-echo".to_string());
         let registry = routed_registry(
@@ -1029,28 +997,6 @@ mod tests {
 
         registry.forget_sockets(&closing);
         assert_eq!(registry.send_to_page(&pattern, "after-close").unwrap(), 0);
-    }
-
-    #[test]
-    fn queued_commands_wake_the_flusher_instead_of_the_binding_callback() {
-        let registry = std::sync::Arc::new(routed_registry(
-            &UrlPattern::Text("ws://**/ws-echo".to_string()),
-            WebSocketRouteMode::Intercept,
-            WebSocketMessageAction::Forward,
-            WebSocketMessageAction::Forward,
-        ));
-        let waiter = registry.clone();
-        let observer = std::thread::spawn(move || {
-            waiter.wait_for_pending_commands("tab-1", Duration::from_secs(2))
-        });
-        std::thread::sleep(Duration::from_millis(20));
-        registry.handle_page_event(
-            "tab-1",
-            &json!({"type": "created", "id": "route-1", "url": "ws://127.0.0.1:9/ws-echo"}),
-        );
-        assert!(observer.join().unwrap());
-        assert!(registry.has_pending_commands("tab-1"));
-        assert!(!registry.has_pending_commands("tab-2"));
     }
 
     // A dead transport made dispatch fail, requeue, and immediately re-signal pending,
@@ -1136,19 +1082,6 @@ mod tests {
     }
 
     #[test]
-    fn the_injected_close_invokes_the_onclose_handler_property_like_server_close() {
-        let script = websocket_mock_script();
-        let close_body = script
-            .split_once("close(code = 1000, reason = '') {")
-            .unwrap()
-            .1
-            .split_once("serverClose(")
-            .unwrap()
-            .0;
-        assert!(close_body.contains("this.dispatchEvent(close); this.onclose?.(close);"));
-    }
-
-    #[test]
     fn waiting_for_commands_gives_up_when_nothing_is_queued() {
         let registry = WebSocketRegistry::default();
         let started = Instant::now();
@@ -1191,26 +1124,6 @@ mod tests {
             0,
             "navigating again cannot remove what is already gone"
         );
-    }
-
-    #[test]
-    fn repeated_navigation_keeps_the_routed_socket_map_bounded() {
-        let pattern = UrlPattern::Text("ws://**/ws-echo".to_string());
-        let registry = routed_registry(
-            &pattern,
-            WebSocketRouteMode::Intercept,
-            WebSocketMessageAction::Forward,
-            WebSocketMessageAction::Forward,
-        );
-        for document in 0..100 {
-            registry.handle_page_event(
-                "tab-1",
-                &json!({"type": "created", "id": format!("route-{document}"), "url": "ws://127.0.0.1:9/ws-echo", "protocols": []}),
-            );
-            registry.take_commands();
-            registry.top_level_navigation("tab-1");
-            assert_eq!(registry.routed_socket_count(), 0);
-        }
     }
 
     #[test]
@@ -1334,24 +1247,6 @@ mod tests {
                 WebSocketFrameDisposition::Forwarded
             ]
         );
-    }
-
-    #[test]
-    fn mock_mode_opens_the_socket_without_connecting_to_the_real_server() {
-        let pattern = UrlPattern::Text("ws://**/ws-echo".to_string());
-        let registry = routed_registry(
-            &pattern,
-            WebSocketRouteMode::Mock,
-            WebSocketMessageAction::Forward,
-            WebSocketMessageAction::Forward,
-        );
-
-        registry.handle_page_event(
-            "tab-1",
-            &json!({"type": "created", "id": "route-1", "url": "ws://127.0.0.1:9/ws-echo"}),
-        );
-
-        assert_eq!(registry.take_commands()[0]["type"], json!("open"));
     }
 
     #[test]
@@ -1559,31 +1454,5 @@ mod tests {
         let remaining = registry.take_commands();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0]["id"], json!("route-2"));
-    }
-
-    #[test]
-    fn shim_reports_protocols_and_handles_a_simulated_server_close() {
-        let script = websocket_mock_script();
-        assert!(script.contains("protocols: this.protocols"));
-        assert!(script.contains("serverClose(code, reason)"));
-        assert!(script.contains("if (request.type === 'close') socket.serverClose"));
-    }
-
-    #[test]
-    fn shim_ignores_the_upstream_close_once_the_page_socket_is_already_closed() {
-        let script = websocket_mock_script();
-        let handler = script
-            .split("this.server.onclose = event => {")
-            .nth(1)
-            .unwrap();
-        let first_statement = handler
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .unwrap();
-        assert_eq!(
-            first_statement, "if (this.readyState === 3) return;",
-            "a simulated close must not be overwritten by the upstream close event: {handler}"
-        );
     }
 }

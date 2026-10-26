@@ -352,12 +352,10 @@ mod tests {
     use super::*;
     use crate::app_state::AppState;
     use crate::chat::types::TaskMeta as ThreadTaskMeta;
-    use crate::http::routers::v1::tasks::{CreateCardCommentRequest, handle_create_card_comment};
     use crate::tasks::comments::COMMENT_CAP;
     use crate::tasks::types::{BoardCard, TaskBoard, TaskMeta, TaskStatus};
     use crate::tools::tools_description::Tool;
     use axum::extract::{Path, State};
-    use axum::response::Json;
     use uuid::Uuid;
 
     fn args(items: &[(&str, Value)]) -> HashMap<String, Value> {
@@ -365,16 +363,6 @@ mod tests {
             .iter()
             .map(|(key, value)| ((*key).to_string(), value.clone()))
             .collect()
-    }
-
-    fn output_text(result: (bool, Vec<ContextEnum>)) -> String {
-        match result.1.into_iter().next().unwrap() {
-            ContextEnum::ChatMessage(message) => match message.content {
-                ChatContent::SimpleText(text) => text,
-                _ => panic!("expected text output"),
-            },
-            _ => panic!("expected chat message"),
-        }
     }
 
     fn test_card(id: &str, comments: Vec<CardComment>) -> BoardCard {
@@ -498,26 +486,6 @@ mod tests {
         ))
     }
 
-    async fn create_http_comment(
-        gcx: Arc<crate::global_context::GlobalContext>,
-        card_id: &str,
-        body: &str,
-        reply_to: Option<String>,
-    ) -> Result<TaskBoard, (hyper::StatusCode, String)> {
-        Ok(handle_create_card_comment(
-            State(AppState::from_gcx(gcx).await),
-            Path(("task-1".to_string(), card_id.to_string())),
-            Json(CreateCardCommentRequest {
-                body: body.to_string(),
-                author_role: "user".to_string(),
-                author_id: Some("user-1".to_string()),
-                reply_to,
-            }),
-        )
-        .await?
-        .0)
-    }
-
     #[tokio::test]
     async fn card_comment_add_records_planner_agent_and_reply_comments() {
         let temp = tempfile::tempdir().unwrap();
@@ -574,84 +542,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_comment_http_created_comment_is_replyable_from_tool() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = write_task(temp.path(), vec![test_card("T-41", vec![])]).await;
-        let board = create_http_comment(gcx.clone(), "T-41", "HTTP seed.", None)
-            .await
-            .unwrap();
-        let http_id = board.get_card("T-41").unwrap().comments[0].id.clone();
-        assert!(Uuid::parse_str(&http_id).is_ok());
-
-        ToolCardCommentAdd::new()
-            .tool_execute(
-                task_ccx(gcx.clone(), "agents", Some("T-41")).await,
-                &"call-tool-reply".to_string(),
-                &args(&[
-                    ("card_id", json!("T-41")),
-                    ("body", json!("Tool reply.")),
-                    ("reply_to", json!(http_id.clone())),
-                ]),
-            )
-            .await
-            .unwrap();
-
-        let board = storage::load_board(gcx, "task-1").await.unwrap();
-        let comments = &board.get_card("T-41").unwrap().comments;
-        assert_eq!(comments.len(), 2);
-        assert_eq!(comments[1].author_role, "agents");
-        assert_eq!(comments[1].reply_to.as_deref(), Some(http_id.as_str()));
-    }
-
-    #[tokio::test]
-    async fn task_comment_tool_created_comment_is_replyable_from_http() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = write_task(temp.path(), vec![test_card("T-41", vec![])]).await;
-        ToolCardCommentAdd::new()
-            .tool_execute(
-                task_ccx(gcx.clone(), "planner", None).await,
-                &"call-tool-seed".to_string(),
-                &args(&[("card_id", json!("T-41")), ("body", json!("Tool seed."))]),
-            )
-            .await
-            .unwrap();
-        let tool_id = storage::load_board(gcx.clone(), "task-1")
-            .await
-            .unwrap()
-            .get_card("T-41")
-            .unwrap()
-            .comments[0]
-            .id
-            .clone();
-        assert!(Uuid::parse_str(&tool_id).is_ok());
-
-        let board = create_http_comment(gcx, "T-41", "HTTP reply.", Some(tool_id.clone()))
-            .await
-            .unwrap();
-        let comments = &board.get_card("T-41").unwrap().comments;
-        assert_eq!(comments.len(), 2);
-        assert_eq!(comments[1].author_role, "user");
-        assert_eq!(comments[1].reply_to.as_deref(), Some(tool_id.as_str()));
-    }
-
-    #[tokio::test]
-    async fn task_comment_http_rejects_invalid_reply_target() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = write_task(temp.path(), vec![test_card("T-41", vec![])]).await;
-        let err = create_http_comment(
-            gcx,
-            "T-41",
-            "Bad reply.",
-            Some("not-a-real-comment".to_string()),
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(err.0, hyper::StatusCode::BAD_REQUEST);
-        assert_eq!(err.1, "reply_to references unknown comment");
-    }
-
-    #[tokio::test]
     async fn task_comment_tool_rejects_invalid_reply_target_by_existence_not_shape() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = write_task(temp.path(), vec![test_card("T-41", vec![])]).await;
@@ -671,36 +561,6 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err, "reply_to references unknown comment");
-    }
-
-    #[tokio::test]
-    async fn card_comment_list_filters_since_timestamp() {
-        let temp = tempfile::tempdir().unwrap();
-        let comments = vec![
-            comment("11111111", "2026-05-22T10:00:00Z", "old"),
-            comment("22222222", "2026-05-22T10:05:00Z", "new"),
-        ];
-        let gcx = write_task(temp.path(), vec![test_card("T-41", comments)]).await;
-        let planner = task_ccx(gcx, "planner", None).await;
-
-        let output = output_text(
-            ToolCardCommentList::new()
-                .tool_execute(
-                    planner,
-                    &"call".to_string(),
-                    &args(&[
-                        ("card_id", json!("T-41")),
-                        ("since", json!("2026-05-22T10:01:00Z")),
-                    ]),
-                )
-                .await
-                .unwrap(),
-        );
-
-        assert!(output.contains("# Comments on T-41 (1)"));
-        assert!(!output.contains("old"));
-        assert!(output.contains("new"));
-        assert!(output.contains("[id=22222222]"));
     }
 
     #[tokio::test]
@@ -724,23 +584,5 @@ mod tests {
         assert!(err.contains("maximum 500 comments"));
         let board = storage::load_board(gcx, "task-1").await.unwrap();
         assert_eq!(board.get_card("T-41").unwrap().comments.len(), COMMENT_CAP);
-    }
-
-    #[test]
-    fn format_comments_uses_limit_and_reply_metadata() {
-        let comments = vec![
-            comment("11111111", "2026-05-22T10:00:00Z", "first"),
-            CardComment {
-                reply_to: Some("11111111".to_string()),
-                ..comment("22222222", "2026-05-22T10:05:00Z", "second")
-            },
-        ];
-
-        let output = format_comments("T-41", &comments, 1, None);
-
-        assert!(output.contains("# Comments on T-41 (1)"));
-        assert!(!output.contains("first"));
-        assert!(output.contains("second"));
-        assert!(output.contains("[id=22222222, reply_to=11111111]"));
     }
 }

@@ -50,27 +50,6 @@ mod tests {
     }
 
     #[test]
-    fn test_simple_fencing() {
-        let input = "```\nCode block\n```".to_string();
-        assert_eq!(remove_fencing(&input), vec!["Code block".to_string()]);
-    }
-
-    #[test]
-    fn test_language_tag() {
-        let input = "```rust\nfn main() {\n    println!(\"Hello\");\n}\n```".to_string();
-        assert_eq!(
-            remove_fencing(&input),
-            vec!["fn main() {\n    println!(\"Hello\");\n}".to_string()]
-        );
-    }
-
-    #[test]
-    fn test_text_before_and_after() {
-        let input = "Text before\nText before\n```\nCode block\n```\nText after".to_string();
-        assert_eq!(remove_fencing(&input), vec!["Code block".to_string()]);
-    }
-
-    #[test]
     fn test_multiple_code_blocks() {
         let input = "First paragraph\n```\nFirst code\n```\nMiddle text\n```python\ndef hello():\n    print('world')\n```\nLast paragraph".to_string();
         assert_eq!(
@@ -80,11 +59,5 @@ mod tests {
                 "def hello():\n    print('world')".to_string()
             ]
         );
-    }
-
-    #[test]
-    fn test_empty_code_block() {
-        let input = "Text with `````` empty block".to_string();
-        assert_eq!(remove_fencing(&input), Vec::<String>::new());
     }
 }

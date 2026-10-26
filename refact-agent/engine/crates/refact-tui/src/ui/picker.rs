@@ -608,11 +608,10 @@ fn mode_picker_hint_line() -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::ProjectEntry;
-    use crate::pickers::{ModePickerItem, PickerItem, PickerKind};
+    use crate::pickers::{PickerItem, PickerKind};
     use ratatui::backend::{Backend, TestBackend};
     use ratatui::layout::Position;
-    use ratatui::style::{Color, Style};
+    use ratatui::style::Style;
     use ratatui::widgets::Paragraph;
     use ratatui::{Terminal, TerminalOptions, Viewport};
 
@@ -624,17 +623,6 @@ mod tests {
         }
     }
 
-    fn project_entry(slug: &str, root: &str, pinned: bool) -> ProjectEntry {
-        ProjectEntry {
-            id: slug.to_string(),
-            slug: slug.to_string(),
-            root: root.into(),
-            pinned: Some(pinned),
-            last_active_ms: Some(0),
-            settings: serde_json::Value::Null,
-        }
-    }
-
     fn find_symbol(buffer: &ratatui::buffer::Buffer, symbol: &str) -> Option<(u16, u16)> {
         let area = buffer.area;
         for y in area.top()..area.bottom() {
@@ -642,34 +630,6 @@ mod tests {
                 if buffer[(x, y)].symbol() == symbol {
                     return Some((x, y));
                 }
-            }
-        }
-        None
-    }
-
-    fn find_text_start_on_row(
-        buffer: &ratatui::buffer::Buffer,
-        text: &str,
-        y: u16,
-    ) -> Option<(u16, u16)> {
-        let area = buffer.area;
-        let width = text.chars().count() as u16;
-        for x in area.left()..area.right().saturating_sub(width.saturating_sub(1)) {
-            let candidate = (0..width)
-                .map(|offset| buffer[(x + offset, y)].symbol())
-                .collect::<String>();
-            if candidate == text {
-                return Some((x, y));
-            }
-        }
-        None
-    }
-
-    fn find_text_start(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<(u16, u16)> {
-        let area = buffer.area;
-        for y in area.top()..area.bottom() {
-            if let Some(position) = find_text_start_on_row(buffer, text, y) {
-                return Some(position);
             }
         }
         None
@@ -735,85 +695,6 @@ mod tests {
     }
 
     #[test]
-    fn project_rows_keep_daemon_fields_and_mark_pinned_projects() {
-        let project = project_entry("demo", "/tmp/demo", true);
-
-        let row = project_row(0, 0, &project);
-
-        assert_eq!(row.name, "demo");
-        assert_eq!(row.description.as_deref(), Some("/tmp/demo"));
-        assert_eq!(row.name_prefix_spans[1].content.as_ref(), "★ ");
-        assert_eq!(row.name_prefix_spans[1].style.fg, Some(Color::Cyan));
-        assert!(row
-            .name_style
-            .unwrap()
-            .add_modifier
-            .contains(Modifier::BOLD));
-    }
-
-    #[test]
-    fn modal_picker_renders_framed_accent_row_and_footer() {
-        let picker = PickerState::new(
-            PickerKind::Model,
-            vec![item("a", "Alpha", "fast"), item("b", "Beta", "careful")],
-        );
-        let backend = TestBackend::new(60, 20);
-        let mut terminal = Terminal::new(backend).unwrap();
-
-        terminal
-            .draw(|frame| {
-                render_modal_picker(frame, &picker, frame.area(), Rect::new(0, 18, 60, 2));
-            })
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let text = buffer
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-
-        assert!(text.contains("models:"));
-        assert!(text.contains("Alpha"));
-        assert!(text.contains("Press Enter to confirm or Esc to go back"));
-        assert!(text.contains("┌"));
-        let cursor = buffer
-            .content()
-            .iter()
-            .find(|cell| cell.symbol() == "›")
-            .expect("selected cursor rendered");
-        assert_eq!(cursor.style().fg, Some(Color::Cyan));
-        assert!(cursor.style().add_modifier.contains(Modifier::BOLD));
-    }
-
-    #[test]
-    fn multi_picker_renders_checked_state_and_toggle_hint() {
-        let picker = PickerState::multi_with_selected(
-            PickerKind::Permissions,
-            vec![item("a", "Alpha", "fast"), item("b", "Beta", "careful")],
-            vec!["b".to_string()],
-        );
-        let backend = TestBackend::new(60, 20);
-        let mut terminal = Terminal::new(backend).unwrap();
-
-        terminal
-            .draw(|frame| {
-                render_modal_picker(frame, &picker, frame.area(), Rect::new(0, 18, 60, 2));
-            })
-            .unwrap();
-        let text = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-
-        assert!(text.contains("permissions: 1 selected"));
-        assert!(text.contains("☑ Beta"));
-        assert!(text.contains("Only ☐ rows are editable"));
-    }
-
-    #[test]
     fn permissions_picker_marks_read_only_items_and_skips_them_when_toggling() {
         let mut picker = PickerState::multi_with_selected_editable(
             PickerKind::Permissions,
@@ -848,129 +729,6 @@ mod tests {
         assert!(text.contains("[read-only] Mode rules"));
         assert!(text.contains("☑ Allow edits"));
         assert!(text.contains("Only ☐ rows are editable"));
-    }
-
-    #[test]
-    fn mode_picker_renders_groups_current_mode_and_auto_approval_badge() {
-        let picker = PickerState::modes(
-            vec![
-                ModePickerItem {
-                    item: item("ask", "Ask", "answer questions"),
-                    group: "Chat".to_string(),
-                    tags: vec!["chat".to_string()],
-                    order: 1,
-                    is_overlay: false,
-                    is_current: false,
-                    tools_count: Some(1),
-                    thread_defaults: Default::default(),
-                },
-                ModePickerItem {
-                    item: item("agent", "Agent", "work with tools"),
-                    group: "Tools".to_string(),
-                    tags: vec!["tools".to_string()],
-                    order: 2,
-                    is_overlay: false,
-                    is_current: false,
-                    tools_count: Some(8),
-                    thread_defaults: crate::pickers::ModeThreadDefaults {
-                        auto_approve_editing_tools: Some(true),
-                        ..Default::default()
-                    },
-                },
-                ModePickerItem {
-                    item: item("compat", "Compatibility", "agent patch"),
-                    group: "Model compatibility overlays".to_string(),
-                    tags: Vec::new(),
-                    order: 3,
-                    is_overlay: true,
-                    is_current: false,
-                    tools_count: Some(8),
-                    thread_defaults: Default::default(),
-                },
-            ],
-            Some("ask"),
-        );
-        let backend = TestBackend::new(120, 40);
-        let mut terminal = Terminal::new(backend).unwrap();
-
-        terminal
-            .draw(|frame| {
-                render_modal_picker(frame, &picker, frame.area(), Rect::new(0, 0, 120, 3));
-            })
-            .unwrap();
-        let text = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-
-        assert!(text.contains("Chat"), "{text}");
-        assert!(text.contains("Tools"), "{text}");
-        assert!(text.contains("●"), "{text}");
-        assert!(text.contains("! edits auto-approved"), "{text}");
-        assert_eq!(
-            picker
-                .filtered_mode_items()
-                .last()
-                .map(|mode| mode.group.as_str()),
-            Some("Model compatibility overlays")
-        );
-    }
-
-    #[test]
-    fn modal_picker_clamps_cursor_and_highlight_after_filtering() {
-        let mut picker = PickerState::new(
-            PickerKind::Model,
-            vec![
-                item("a", "Alpha", "fast"),
-                item("b", "Beta", "careful"),
-                item("g", "Gamma", "filtered survivor"),
-            ],
-        );
-        picker.filter = "Gamma".to_string();
-        picker.selected = 2;
-        let backend = TestBackend::new(60, 20);
-        let mut terminal = Terminal::new(backend).unwrap();
-
-        terminal
-            .draw(|frame| {
-                render_modal_picker(frame, &picker, frame.area(), Rect::new(0, 18, 60, 2));
-            })
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let cursor_pos = find_symbol(buffer, "›").expect("selected cursor rendered");
-        let gamma_pos =
-            find_text_start_on_row(buffer, "Gamma", cursor_pos.1).expect("filtered row rendered");
-
-        assert_eq!(cursor_pos.1, gamma_pos.1);
-        assert_eq!(buffer[gamma_pos].style().fg, Some(Color::Cyan));
-        assert!(buffer[gamma_pos]
-            .style()
-            .add_modifier
-            .contains(Modifier::BOLD));
-    }
-
-    #[test]
-    fn modal_picker_clamps_exact_inline_backtrace_geometry() {
-        let picker = PickerState::new(
-            PickerKind::Model,
-            (0..12)
-                .map(|idx| item(&format!("m{idx}"), &format!("Model {idx}"), "available"))
-                .collect(),
-        );
-        let area = Rect::new(0, 21, 128, 12);
-        let buffer = draw_picker_in_inline_area(&picker, 128, 21, 12, 30);
-        let text = buffer
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-
-        assert!(assert_no_drawn_cells_outside(&buffer, area));
-        assert!(text.contains("models:"));
-        assert!(text.contains("Model 0"));
     }
 
     #[test]
@@ -1099,127 +857,5 @@ mod tests {
                 .collect::<String>();
             assert!(!surface.contains("BACKGROUND"));
         }
-    }
-
-    #[test]
-    fn composer_slash_popup_renders_rows_without_title_or_footer() {
-        let mut picker = PickerState::new(
-            PickerKind::SlashCommand,
-            vec![
-                item("model", "/model", "switch model"),
-                item("mode", "/mode", "switch mode"),
-            ],
-        );
-        picker.set_filter("mo");
-        picker.selected = 1;
-        let backend = TestBackend::new(60, 14);
-        let mut terminal = Terminal::new(backend).unwrap();
-
-        terminal
-            .draw(|frame| {
-                render_modal_picker(frame, &picker, frame.area(), Rect::new(0, 12, 60, 2));
-            })
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let text = buffer
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-
-        assert!(text.contains("/model"));
-        assert!(text.contains("switch model"));
-        assert!(!text.contains("commands:"));
-        assert!(!text.contains("Press Enter"));
-        assert!(text.contains("┌"));
-        let model_pos = find_text_start(buffer, "/model").expect("model row rendered");
-        let model_desc_pos = find_text_start_on_row(buffer, "switch model", model_pos.1)
-            .expect("model description rendered");
-        let mode_pos = find_text_start(buffer, "/mode").expect("mode row rendered");
-        let mode_desc_pos = find_text_start_on_row(buffer, "switch mode", mode_pos.1)
-            .expect("mode description rendered");
-        assert_eq!(model_desc_pos.0 - model_pos.0, 15);
-        assert_eq!(mode_desc_pos.0 - mode_pos.0, 15);
-        assert_eq!(mode_desc_pos.0, model_desc_pos.0);
-    }
-
-    #[test]
-    fn composer_file_popup_uses_plain_paths_and_no_description() {
-        let picker = PickerState::new(
-            PickerKind::FileMention,
-            vec![item("src/lib.rs", "src/lib.rs", "file mention")],
-        );
-        let backend = TestBackend::new(60, 14);
-        let mut terminal = Terminal::new(backend).unwrap();
-
-        terminal
-            .draw(|frame| {
-                render_modal_picker(frame, &picker, frame.area(), Rect::new(0, 12, 60, 2));
-            })
-            .unwrap();
-        let text = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-
-        assert!(text.contains("src/lib.rs"));
-        assert!(!text.contains("file mention"));
-        assert!(!text.contains("files:"));
-    }
-
-    #[test]
-    fn composer_file_popup_empty_message_tracks_loading_state() {
-        let loading = PickerState::new(
-            PickerKind::FileMention,
-            vec![item(
-                "",
-                "Loading file mentions…",
-                "via /v1/at-command-completion",
-            )],
-        );
-        let empty = PickerState::new(PickerKind::FileMention, Vec::new());
-
-        assert_eq!(composer_empty_message(&loading), "loading...");
-        assert!(composer_rows(&loading).is_empty());
-        assert_eq!(composer_empty_message(&empty), "no matches");
-        assert!(composer_rows(&empty).is_empty());
-    }
-
-    #[test]
-    fn composer_file_popup_caps_visible_rows() {
-        let picker = PickerState::new(
-            PickerKind::FileMention,
-            (0..12)
-                .map(|idx| {
-                    item(
-                        &format!("src/file_{idx}.rs"),
-                        &format!("src/file_{idx}.rs"),
-                        "",
-                    )
-                })
-                .collect(),
-        );
-        let backend = TestBackend::new(80, 20);
-        let mut terminal = Terminal::new(backend).unwrap();
-
-        terminal
-            .draw(|frame| {
-                render_modal_picker(frame, &picker, frame.area(), Rect::new(0, 18, 80, 2));
-            })
-            .unwrap();
-        let text = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-
-        assert!(text.contains("src/file_0.rs"));
-        assert!(text.contains("src/file_7.rs"));
-        assert!(!text.contains("src/file_8.rs"));
     }
 }

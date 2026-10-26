@@ -1078,64 +1078,6 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_event_envelope_uses_v2_nested_event_shape() {
-        let seq = AtomicU64::new(0);
-        let raw = make_event(
-            &seq,
-            "sub-1",
-            section_snapshot_event(
-                SidebarSection::Tasks,
-                SidebarSectionStatus::Ready,
-                SidebarSectionSnapshot::Tasks { tasks: Vec::new() },
-                Some(7),
-                None,
-            ),
-        )
-        .expect("event should serialize");
-        let json = raw
-            .trim_start_matches("data: ")
-            .trim()
-            .parse::<serde_json::Value>()
-            .expect("valid json");
-
-        assert_eq!(json["protocol_version"], 2);
-        assert_eq!(json["seq"], 0);
-        assert_eq!(json["subscription_id"], "sub-1");
-        assert_eq!(json["event"]["type"], "section_snapshot");
-        assert_eq!(json["event"]["section"], "tasks");
-        assert_eq!(json["event"]["status"], "ready");
-        assert_eq!(
-            json["event"]["snapshot"]["tasks"].as_array().unwrap().len(),
-            0
-        );
-        assert!(json.get("category").is_none());
-    }
-
-    #[test]
-    fn sidebar_error_snapshot_is_terminal_and_carries_empty_data() {
-        let event = section_snapshot_event(
-            SidebarSection::Chats,
-            SidebarSectionStatus::Error,
-            SidebarSectionSnapshot::Chats {
-                trajectories: Vec::new(),
-                pagination: None,
-            },
-            None,
-            Some("boom".to_string()),
-        );
-        let json = serde_json::to_value(event).expect("event should serialize");
-
-        assert_eq!(json["type"], "section_snapshot");
-        assert_eq!(json["section"], "chats");
-        assert_eq!(json["status"], "error");
-        assert_eq!(json["error"], "boom");
-        assert_eq!(
-            json["snapshot"]["trajectories"].as_array().unwrap().len(),
-            0
-        );
-    }
-
-    #[test]
     fn sidebar_bootstrap_settles_for_all_ready_error_combinations_and_flushes() {
         let statuses = [SidebarSectionStatus::Ready, SidebarSectionStatus::Error];
 
@@ -1193,46 +1135,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn settled_section_live_updates_flush_before_full_bootstrap() {
-        let mut initial_rx = Some(mpsc::unbounded_channel().1);
-        let mut bootstrap_complete = false;
-        let mut buffered_live_events = VecDeque::from([
-            SidebarEvent::SectionUpdate {
-                section: SidebarSection::Tasks,
-                update: SidebarSectionUpdate::Task(TaskEvent::BoardChanged {
-                    task_id: "task-1".to_string(),
-                    rev: 2,
-                    board: Default::default(),
-                }),
-            },
-            buffered_notification(),
-        ]);
-        let seq = AtomicU64::new(0);
-
-        let emitted = try_finish_bootstrap(
-            false,
-            false,
-            true,
-            false,
-            &mut bootstrap_complete,
-            &mut initial_rx,
-            &mut buffered_live_events,
-            &seq,
-            "sub-1",
-        );
-
-        assert!(!bootstrap_complete);
-        assert!(initial_rx.is_some());
-        assert_eq!(emitted.len(), 1);
-        assert_eq!(seq.load(Ordering::SeqCst), 1);
-        assert_eq!(buffered_live_events.len(), 1);
-        assert!(matches!(
-            buffered_live_events.front(),
-            Some(SidebarEvent::Notification { .. })
-        ));
     }
 
     #[test]

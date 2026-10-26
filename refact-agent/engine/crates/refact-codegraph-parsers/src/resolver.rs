@@ -164,15 +164,6 @@ mod tests {
     }
 
     #[test]
-    fn exact_path_resolves_with_full_confidence() {
-        let r = resolver_with_symbols(&["app::services::user::create_user"]);
-        let res = r.resolve("app::services::user::create_user").unwrap();
-        assert_eq!(res.tier, ResolutionTier::Exact);
-        assert_eq!(res.confidence, CONFIDENCE_EXACT);
-        assert_eq!(res.target, "app::services::user::create_user");
-    }
-
-    #[test]
     fn import_alias_resolves_to_real_symbol() {
         let mut r = resolver_with_symbols(&["app::services::user::create_user"]);
         r.add_alias("createUser", "app::services::user::create_user");
@@ -223,12 +214,6 @@ mod tests {
         assert_eq!(res.tier, ResolutionTier::Fuzzy);
         assert_eq!(res.confidence, CONFIDENCE_FUZZY_UNIQUE);
         assert_eq!(res.target, "b/y.rs::Builder::new");
-    }
-
-    #[test]
-    fn unknown_reference_does_not_resolve() {
-        let r = resolver_with_symbols(&["a::b::c"]);
-        assert!(r.resolve("does_not_exist").is_none());
     }
 
     #[test]

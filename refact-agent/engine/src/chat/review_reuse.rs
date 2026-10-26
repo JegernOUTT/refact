@@ -218,15 +218,6 @@ pub async fn review_revision(worktree: &Path, base: Option<&str>) -> String {
 }
 
 #[cfg(test)]
-pub(crate) fn test_store() -> Mutex<ReviewReuseStore> {
-    Mutex::new(ReviewReuseStore::new(EvidenceCacheLimits {
-        max_entries: 64,
-        max_bytes: 1_048_576,
-        ttl_secs: 3_600,
-    }))
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::call_validation::{ChatModelType, SubchatParameters};

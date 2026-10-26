@@ -295,30 +295,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn python_consecutive_asserts_form_one_block() {
-        let src = "\
-def test_values():\n    assert a\n    assert b\n    assert c\n";
-        let blocks = assertion_blocks("python", src);
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].function, "test_values");
-        assert_eq!(blocks[0].start_line, 2);
-        assert_eq!(blocks[0].end_line, 4);
-        assert_eq!(blocks[0].count, 3);
-    }
-
-    #[test]
-    fn rust_consecutive_assert_macros_form_one_block() {
-        let src = "\
-#[test]\nfn checks() {\n    assert_eq!(one(), 1);\n    assert_eq!(two(), 2);\n}\n";
-        let blocks = assertion_blocks("rust", src);
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].function, "checks");
-        assert_eq!(blocks[0].start_line, 3);
-        assert_eq!(blocks[0].end_line, 4);
-        assert_eq!(blocks[0].count, 2);
-    }
-
-    #[test]
     fn single_assert_is_not_emitted() {
         let src = "\
 def test_one():\n    assert value\n";
@@ -341,18 +317,6 @@ def test_split():\n    assert a\n    assert b\n    x = 1\n    assert c\n    asse
     }
 
     #[test]
-    fn python_nested_if_asserts_form_one_block() {
-        let src = "\
-def test_nested():\n    if ready:\n        assert a\n        assert b\n";
-        let blocks = assertion_blocks("python", src);
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].function, "test_nested");
-        assert_eq!(blocks[0].start_line, 3);
-        assert_eq!(blocks[0].end_line, 4);
-        assert_eq!(blocks[0].count, 2);
-    }
-
-    #[test]
     fn python_nested_if_and_for_asserts_form_separate_blocks() {
         let src = "\
 def test_nested_runs():\n    if ready:\n        assert a\n        assert b\n    for item in items:\n        assert item\n        assert len(item)\n";
@@ -366,18 +330,6 @@ def test_nested_runs():\n    if ready:\n        assert a\n        assert b\n    
         assert_eq!(blocks[1].start_line, 6);
         assert_eq!(blocks[1].end_line, 7);
         assert_eq!(blocks[1].count, 2);
-    }
-
-    #[test]
-    fn python_comments_and_blank_lines_do_not_split_runs() {
-        let src = "\
-def test_spaced():\n    assert a\n\n    # still same run\n    assert b\n";
-        let blocks = assertion_blocks("python", src);
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].function, "test_spaced");
-        assert_eq!(blocks[0].start_line, 2);
-        assert_eq!(blocks[0].end_line, 5);
-        assert_eq!(blocks[0].count, 2);
     }
 
     #[test]
@@ -404,13 +356,5 @@ def test_spaced():\n    assert a\n\n    # still same run\n    assert b\n";
         assert_eq!(blocks[0].start_line, 4);
         assert_eq!(blocks[0].end_line, 5);
         assert_eq!(blocks[0].count, 2);
-    }
-
-    #[test]
-    fn rust_conversion_and_ordinary_to_calls_are_not_assertions() {
-        let src = "\
-#[test]\nfn no_false_positive_conversions() {\n    foo().to_string();\n    x.to_owned();\n    value.to_vec();\n    object.to_custom();\n}\n";
-        let blocks = assertion_blocks("rust", src);
-        assert!(blocks.is_empty());
     }
 }

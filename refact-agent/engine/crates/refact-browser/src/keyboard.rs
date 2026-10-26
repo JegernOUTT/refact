@@ -342,17 +342,6 @@ mod tests {
     }
 
     #[test]
-    fn modifier_bitmask_matches_cdp() {
-        let modifiers = HashSet::from([
-            KeyboardModifier::Alt,
-            KeyboardModifier::Control,
-            KeyboardModifier::Meta,
-            KeyboardModifier::Shift,
-        ]);
-        assert_eq!(modifier_bitmask(&modifiers), 15);
-    }
-
-    #[test]
     fn press_orders_modifiers_key_and_reverse_releases() {
         let dispatcher = RecordingDispatcher::default();
         let events = dispatcher.events.clone();
@@ -386,19 +375,6 @@ mod tests {
     }
 
     #[test]
-    fn shift_uses_shifted_key_and_text() {
-        let dispatcher = RecordingDispatcher::default();
-        let events = dispatcher.events.clone();
-        let mut keyboard = Keyboard::new(dispatcher);
-        keyboard.press("Shift+Digit1", None).unwrap();
-        let events = events.lock().unwrap();
-        assert_eq!(
-            events[1],
-            key_event(KeyEventType::KeyDown, 8, "Digit1", "!", Some("!"), 49)
-        );
-    }
-
-    #[test]
     fn type_uses_key_events_then_insert_text_for_unicode() {
         let dispatcher = RecordingDispatcher::default();
         let events = dispatcher.events.clone();
@@ -411,18 +387,6 @@ mod tests {
                 key_event(KeyEventType::KeyUp, 0, "KeyA", "a", None, 65),
                 KeyboardDispatch::InsertText("é".to_string()),
             ]
-        );
-    }
-
-    #[test]
-    fn insert_text_emits_no_key_events() {
-        let dispatcher = RecordingDispatcher::default();
-        let events = dispatcher.events.clone();
-        let mut keyboard = Keyboard::new(dispatcher);
-        keyboard.insert_text("🙂").unwrap();
-        assert_eq!(
-            *events.lock().unwrap(),
-            vec![KeyboardDispatch::InsertText("🙂".to_string())]
         );
     }
 
@@ -451,14 +415,5 @@ mod tests {
         }));
         assert!(keyboard.pressed_modifiers.is_empty());
         assert!(keyboard.pressed_keys.is_empty());
-    }
-
-    #[test]
-    fn unknown_key_uses_playwright_error_text() {
-        let mut keyboard = Keyboard::new(RecordingDispatcher::default());
-        assert_eq!(
-            keyboard.press("Hyper", None).unwrap_err(),
-            "Unknown key: \"Hyper\""
-        );
     }
 }

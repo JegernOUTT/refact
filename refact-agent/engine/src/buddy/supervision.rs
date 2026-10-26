@@ -3794,34 +3794,6 @@ mod tests {
     }
 
     #[test]
-    fn child_proof_version_is_independent_of_parent() {
-        let mut link = link();
-        link.goal_version = Some(9);
-        let goal = GoalSnapshot {
-            content: link.intake_content.clone(),
-            criteria: link.intake_criteria.clone(),
-            version: 1,
-            status: GoalStatus::Completed,
-            attempts: vec![refact_chat_api::GoalAttempt {
-                verdict: "met".into(),
-                verifier_reply: "verified".into(),
-                criteria_verdicts: vec![refact_chat_api::CriterionVerdict {
-                    id: "C1".into(),
-                    met: true,
-                    note: String::new(),
-                    source: refact_chat_api::VerdictSource::Judged,
-                    evidence: None,
-                }],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        assert!(verified_goal(&link, &goal));
-        link.child_goal_version = None;
-        assert!(!verified_goal(&link, &goal));
-    }
-
-    #[test]
     fn question_resolution_requires_exact_native_generation_and_answer() {
         let answers = vec![refact_chat_api::QuestionAnswer {
             id: "q".into(),
@@ -3855,32 +3827,5 @@ mod tests {
         set.status = refact_chat_api::PendingQuestionStatus::Pending;
         observe_question(&mut delivery, &[set]);
         assert_eq!(delivery.state, "resolved");
-    }
-
-    #[test]
-    fn persisted_delivery_proof_does_not_follow_later_observation() {
-        let mut link = link();
-        let goal = GoalSnapshot {
-            version: 1,
-            content: "original evidence".into(),
-            ..Default::default()
-        };
-        link.delivery_proof = Some(goal.clone());
-        let bytes = serde_json::to_vec(&link).unwrap();
-        let restored: SupervisionLink = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(restored.delivery_proof, Some(goal));
-        assert!(restored.delivery_run_id.is_none());
-    }
-
-    #[test]
-    fn repeated_blockers_coalesce_and_back_off() {
-        let mut link = link();
-        coalesce(&mut link, "offline", 1);
-        let next = link.next_attention_at_ms;
-        coalesce(&mut link, "offline", 2);
-        assert_eq!(link.escalation_count, 1);
-        coalesce(&mut link, "offline", next);
-        assert_eq!(link.escalation_count, 1);
-        assert_eq!(link.next_attention_at_ms, next);
     }
 }

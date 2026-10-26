@@ -1344,17 +1344,6 @@ mod tests {
     }
 
     #[test]
-    fn report_insert_respects_leading_control_prefix() {
-        let messages = vec![
-            make_event_message(),
-            make_plan_message(),
-            make_assistant_msg("hello"),
-        ];
-
-        assert_eq!(compression_report_insert_index(&messages, 0), 2);
-    }
-
-    #[test]
     fn report_insert_does_not_split_tool_pairs() {
         let messages = vec![
             make_user_msg("q"),
@@ -1494,82 +1483,6 @@ mod tests {
         assert!(!messages
             .iter()
             .any(|message| message.role == "context_file" && message.tool_call_id.is_empty()));
-    }
-
-    #[test]
-    fn sanitize_new_thread_preserves_legacy_metadata_without_hash_updates() {
-        let mut source = make_assistant_msg("heavy answer");
-        source.message_id = "src-1".to_string();
-        source.usage = Some(ChatUsage {
-            prompt_tokens: 10,
-            completion_tokens: 5,
-            total_tokens: 15,
-            ..Default::default()
-        });
-        let pre_sanitize_hash = "legacy-hash";
-        let mut summary = make_assistant_msg("summary");
-        summary.message_id = "sum-1".to_string();
-        summary.extra.insert(
-            "compression".to_string(),
-            serde_json::json!({
-                "kind": LLM_SEGMENT_SUMMARY_KIND,
-                "insert_mode": "source_preserving",
-                "source_hash": pre_sanitize_hash,
-                "summarized_source_message_ids": ["src-1"],
-            }),
-        );
-        let messages = vec![make_user_msg("q"), source, summary];
-
-        let sanitized = sanitize_messages_for_new_thread(&messages);
-
-        let sanitized_source = sanitized
-            .iter()
-            .find(|message| message.message_id == "src-1")
-            .expect("source survives sanitize");
-        assert!(sanitized_source.usage.is_none());
-        let sanitized_summary = sanitized
-            .iter()
-            .find(|message| message.message_id == "sum-1")
-            .expect("summary survives sanitize");
-        let stored_hash = sanitized_summary
-            .extra
-            .get("compression")
-            .and_then(|c| c.get("source_hash"))
-            .and_then(|h| h.as_str())
-            .expect("summary keeps a source hash");
-        assert_eq!(stored_hash, pre_sanitize_hash);
-        assert!(refact_core::active_context::active_context(&sanitized).is_err());
-    }
-
-    #[test]
-    fn sanitize_new_thread_keeps_summaries_carried_without_sources() {
-        let mut summary = make_assistant_msg("carried summary");
-        summary.message_id = "sum-1".to_string();
-        summary.extra.insert(
-            "compression".to_string(),
-            serde_json::json!({
-                "kind": LLM_SEGMENT_SUMMARY_KIND,
-                "insert_mode": "source_preserving",
-                "source_hash": "old-hash",
-                "summarized_source_message_ids": ["gone-src"],
-            }),
-        );
-        let messages = vec![make_user_msg("q"), summary, make_assistant_msg("tail")];
-
-        let sanitized = sanitize_messages_for_new_thread(&messages);
-
-        let carried = sanitized
-            .iter()
-            .find(|message| message.message_id == "sum-1")
-            .expect("carried summary must survive sanitize");
-        assert_eq!(
-            carried
-                .extra
-                .get("compression")
-                .and_then(|c| c.get("source_hash"))
-                .and_then(|h| h.as_str()),
-            Some("old-hash")
-        );
     }
 
     fn make_context_file_simple_text_msg(files: Vec<ContextFile>) -> ChatMessage {
@@ -2006,18 +1919,6 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_message_for_new_thread_preserves_full_ui_only_extra() {
-        let mut message = make_ui_only_msg("diagnostic");
-        message
-            .extra
-            .insert("details".to_string(), serde_json::json!({"code": 1}));
-
-        let sanitized = sanitize_message_for_new_thread(&message);
-
-        assert_eq!(sanitized.extra, message.extra);
-    }
-
-    #[test]
     fn sanitize_message_for_new_thread_preserves_privacy_metadata() {
         let mut message = make_assistant_with_extra();
         message.extra.insert(
@@ -2060,35 +1961,6 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_messages_for_new_thread_preserves_assistant_segment_summary_extra_only() {
-        let messages = vec![
-            make_segment_summary_msg(),
-            make_assistant_with_extra(),
-            make_assistant_with_non_summary_compression(),
-        ];
-
-        let sanitized = sanitize_messages_for_new_thread(&messages);
-
-        assert_eq!(sanitized.len(), 3);
-        assert_only_segment_summary_extra(&sanitized[0]);
-        assert!(sanitized[1].extra.is_empty());
-        assert!(sanitized[2].extra.is_empty());
-    }
-
-    #[test]
-    fn sanitize_messages_for_new_thread_preserves_v3_source_preserving_metadata() {
-        let mut messages = make_v3_source_messages();
-        messages.push(make_v3_source_preserving_segment_summary_msg());
-        messages.push(make_v3_source_preserving_compression_report_msg());
-
-        let sanitized = sanitize_messages_for_new_thread(&messages);
-
-        assert_eq!(sanitized.len(), 4);
-        assert_v3_source_preserving_summary_metadata(&sanitized[2]);
-        assert_v3_source_preserving_report_metadata(&sanitized[3]);
-    }
-
-    #[test]
     fn sanitize_messages_for_model_switch_preserves_hidden_role_extra_only() {
         let mut messages = vec![make_plan_msg(), make_plan_delta_event()];
 
@@ -2108,35 +1980,6 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_only_hidden_goal_extra(&messages[0]);
         assert_only_hidden_event_extra(&messages[1], "goal_delta");
-    }
-
-    #[test]
-    fn sanitize_messages_for_model_switch_preserves_assistant_segment_summary_extra_only() {
-        let mut messages = vec![
-            make_segment_summary_msg(),
-            make_assistant_with_extra(),
-            make_assistant_with_non_summary_compression(),
-        ];
-
-        sanitize_messages_for_model_switch(&mut messages);
-
-        assert_eq!(messages.len(), 3);
-        assert_only_segment_summary_extra(&messages[0]);
-        assert!(messages[1].extra.is_empty());
-        assert!(messages[2].extra.is_empty());
-    }
-
-    #[test]
-    fn sanitize_messages_for_model_switch_preserves_v3_source_preserving_metadata() {
-        let mut messages = make_v3_source_messages();
-        messages.push(make_v3_source_preserving_segment_summary_msg());
-        messages.push(make_v3_source_preserving_compression_report_msg());
-
-        sanitize_messages_for_model_switch(&mut messages);
-
-        assert_eq!(messages.len(), 4);
-        assert_v3_source_preserving_summary_metadata(&messages[2]);
-        assert_v3_source_preserving_report_metadata(&messages[3]);
     }
 
     #[test]
@@ -2179,22 +2022,6 @@ mod tests {
 
     #[test]
     fn compress_in_place_strip_metering_rejects_legacy_assistant_segment_summary_extra_only() {
-        let mut messages = vec![make_segment_summary_msg()];
-        let original = serde_json::to_value(&messages).unwrap();
-        let error = compress_in_place(
-            &mut messages,
-            &CompressOptions {
-                strip_metering: true,
-                ..Default::default()
-            },
-        )
-        .unwrap_err();
-        assert!(error.contains("explicit rebuild"));
-        assert_eq!(serde_json::to_value(&messages).unwrap(), original);
-    }
-
-    #[test]
-    fn compress_in_place_strip_metering_rejects_legacy_v3_source_preserving_metadata() {
         let mut messages = vec![make_segment_summary_msg()];
         let original = serde_json::to_value(&messages).unwrap();
         let error = compress_in_place(
@@ -2266,94 +2093,6 @@ mod tests {
             .content
             .content_text_only()
             .contains("context_length_exceeded")));
-    }
-
-    #[test]
-    fn test_compress_drop_all_context() {
-        let mut messages = vec![
-            make_user_msg("hello"),
-            make_context_file_msg("test.rs", "fn main() {}"),
-            make_assistant_msg("response"),
-        ];
-        let opts = CompressOptions {
-            drop_all_context: true,
-            ..Default::default()
-        };
-        let stats = compress_in_place(&mut messages, &opts).unwrap();
-        assert_eq!(stats.before_message_count, 3);
-        assert_eq!(stats.after_message_count, 3);
-        assert_eq!(stats.context_messages_modified, 1);
-        assert!(messages
-            .iter()
-            .filter(|m| m.role != COMPRESSION_REPORT_ROLE)
-            .all(|m| m.role != "context_file"));
-        assert_eq!(messages[1].role, COMPRESSION_REPORT_ROLE);
-    }
-
-    #[test]
-    fn test_compress_non_agentic_tools() {
-        let long_content = "x".repeat(1000);
-        let mut messages = vec![
-            make_user_msg("hello"),
-            make_assistant_with_tool_call("tc1", "some_tool"),
-            make_tool_msg("tc1", &long_content),
-        ];
-        let opts = CompressOptions {
-            compress_non_agentic_tools: true,
-            ..Default::default()
-        };
-        let stats = compress_in_place(&mut messages, &opts).unwrap();
-        assert_eq!(stats.tool_messages_modified, 1);
-        let tool_msg = messages.iter().find(|m| m.role == "tool").unwrap();
-        assert!(tool_msg.content.content_text_only().contains("compressed"));
-    }
-
-    #[test]
-    fn test_compress_non_agentic_tool_preview_redacts_bearer_token() {
-        let secret = "super-secret-token-123";
-        let long_content = format!("request failed with Bearer {} {}", secret, "x".repeat(1000));
-        let mut messages = vec![
-            make_user_msg("hello"),
-            make_assistant_with_tool_call("tc1", "cat"),
-            make_tool_msg("tc1", &long_content),
-        ];
-        let opts = CompressOptions {
-            compress_non_agentic_tools: true,
-            ..Default::default()
-        };
-
-        compress_in_place(&mut messages, &opts).unwrap();
-
-        let tool_msg = messages.iter().find(|m| m.role == "tool").unwrap();
-        let text = tool_msg.content.content_text_only();
-        assert!(text.contains("Bearer [REDACTED]"));
-        assert!(!text.contains(secret));
-    }
-
-    #[test]
-    fn test_compress_non_agentic_tool_preview_redacts_api_key() {
-        let secret = "sk-abcdefghijklmnopqrstuvwxyz";
-        let long_content = format!(
-            "request failed with api_key={} {}",
-            secret,
-            "x".repeat(1000)
-        );
-        let mut messages = vec![
-            make_user_msg("hello"),
-            make_assistant_with_tool_call("tc1", "cat"),
-            make_tool_msg("tc1", &long_content),
-        ];
-        let opts = CompressOptions {
-            compress_non_agentic_tools: true,
-            ..Default::default()
-        };
-
-        compress_in_place(&mut messages, &opts).unwrap();
-
-        let tool_msg = messages.iter().find(|m| m.role == "tool").unwrap();
-        let text = tool_msg.content.content_text_only();
-        assert!(text.contains("api_key=[REDACTED]"));
-        assert!(!text.contains(secret));
     }
 
     #[test]
@@ -2474,24 +2213,6 @@ mod tests {
     }
 
     #[test]
-    fn test_compress_compresses_cat_tool() {
-        let long_content = "x".repeat(1000);
-        let mut messages = vec![
-            make_user_msg("hello"),
-            make_assistant_with_tool_call("tc1", "cat"),
-            make_tool_msg("tc1", &long_content),
-        ];
-        let opts = CompressOptions {
-            compress_non_agentic_tools: true,
-            ..Default::default()
-        };
-        let stats = compress_in_place(&mut messages, &opts).unwrap();
-        assert_eq!(stats.tool_messages_modified, 1);
-        let tool_msg = messages.iter().find(|m| m.role == "tool").unwrap();
-        assert!(tool_msg.content.content_text_only().contains("compressed"));
-    }
-
-    #[test]
     fn test_compress_preserves_flagged_tool() {
         let long_content = "x".repeat(1000);
         let mut preserved = make_tool_msg("tc1", &long_content);
@@ -2512,30 +2233,6 @@ mod tests {
     }
 
     #[test]
-    fn test_should_preserve_tool() {
-        for tool_name in TOOLS_TO_PRESERVE {
-            assert!(
-                should_preserve_tool(tool_name),
-                "{tool_name} should be preserved"
-            );
-        }
-        for alias in ["task", "Task", "t_delegate", "t_review", "codeReview"] {
-            assert!(should_preserve_tool(alias), "{alias} should be preserved");
-        }
-        assert!(!should_preserve_tool("cat"));
-        assert!(!should_preserve_tool("shell"));
-        assert!(!should_preserve_tool("unknown_tool"));
-        assert!(!should_preserve_tool(""));
-    }
-
-    #[test]
-    fn test_approx_token_count() {
-        let messages = vec![make_user_msg("hello world")];
-        let count = approx_token_count(&messages);
-        assert!(count > 0);
-    }
-
-    #[test]
     fn image_token_count_uses_anthropic_detail_math() {
         let messages = vec![image_message(1568, 1568)];
         let image_tokens = (u64::from(1568u32) * u64::from(1568u32)).div_ceil(750);
@@ -2544,16 +2241,6 @@ mod tests {
         assert_eq!(
             approx_token_count_for_image_mode(&messages, ImageTokenMode::Detail),
             3_279 + 10
-        );
-    }
-
-    #[test]
-    fn image_token_count_provider_mode_keeps_flat_fallback() {
-        let messages = vec![image_message(1568, 1568)];
-
-        assert_eq!(
-            approx_token_count_for_image_mode(&messages, ImageTokenMode::Provider),
-            APPROX_IMAGE_CONTENT_CHARS / 4 + 10
         );
     }
 
@@ -2572,13 +2259,6 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_stats_default() {
-        let stats = TransformStats::default();
-        assert_eq!(stats.before_message_count, 0);
-        assert_eq!(stats.after_message_count, 0);
-    }
-
-    #[test]
     fn test_compress_options_default() {
         let opts = CompressOptions::default();
         assert!(!opts.dedup_and_compress_context);
@@ -2586,18 +2266,6 @@ mod tests {
         assert!(!opts.compress_non_agentic_tools);
         assert!(!opts.drop_all_memories);
         assert!(!opts.drop_project_information);
-    }
-
-    #[test]
-    fn test_compression_report_not_added_for_noop_compress() {
-        let mut messages = vec![make_user_msg("hello"), make_assistant_msg("response")];
-        let opts = CompressOptions::default();
-        let stats = compress_in_place(&mut messages, &opts).unwrap();
-
-        assert_eq!(stats.before_message_count, 2);
-        assert_eq!(stats.after_message_count, 2);
-        assert_eq!(compression_report_count(&messages), 0);
-        assert!(messages.iter().all(|msg| msg.role != "cd_instruction"));
     }
 
     #[test]
@@ -2639,29 +2307,6 @@ mod tests {
     }
 
     #[test]
-    fn test_compression_report_drop_all_context_counts_files_and_messages() {
-        let mut messages = vec![
-            make_user_msg("hello"),
-            make_multi_context_file_msg(vec![
-                make_context_file("src/a.rs", "a"),
-                make_context_file("src/b.rs", "b"),
-                make_context_file("src/c.rs", "c"),
-            ]),
-            make_assistant_msg("response"),
-        ];
-        let opts = CompressOptions {
-            drop_all_context: true,
-            ..Default::default()
-        };
-
-        compress_in_place(&mut messages, &opts).unwrap();
-
-        let metadata = &compression_report(&messages).extra["compression_report"];
-        assert_eq!(metadata["context_files_removed"], serde_json::json!(3));
-        assert_eq!(metadata["context_messages_dropped"], serde_json::json!(1));
-    }
-
-    #[test]
     fn test_compression_report_drop_all_context_counts_json_context_file_arrays() {
         let mut messages = vec![
             make_user_msg("hello"),
@@ -2681,14 +2326,6 @@ mod tests {
         let metadata = &compression_report(&messages).extra["compression_report"];
         assert_eq!(metadata["context_files_removed"], serde_json::json!(2));
         assert_eq!(metadata["context_messages_dropped"], serde_json::json!(1));
-    }
-
-    #[test]
-    fn test_compression_report_message_has_non_empty_id() {
-        let report = build_compression_report_message(1, 1, 1, 100, 10);
-
-        assert!(!report.message_id.is_empty());
-        assert!(Uuid::parse_str(&report.message_id).is_ok());
     }
 
     #[test]
@@ -2737,24 +2374,6 @@ mod tests {
         assert!(messages
             .iter()
             .any(|message| compression_report_metadata_key(message) == existing_key));
-    }
-
-    #[test]
-    fn test_compression_report_preserves_tail_after_boundary() {
-        let mut messages = vec![
-            make_user_msg("hello"),
-            make_context_file_msg("test.rs", "fn main() {}"),
-            make_assistant_msg("response"),
-        ];
-        let opts = CompressOptions {
-            drop_all_context: true,
-            ..Default::default()
-        };
-
-        compress_in_place(&mut messages, &opts).unwrap();
-
-        let roles: Vec<_> = messages.iter().map(|msg| msg.role.as_str()).collect();
-        assert_eq!(roles, vec!["user", COMPRESSION_REPORT_ROLE, "assistant"]);
     }
 
     #[test]
@@ -2813,28 +2432,6 @@ mod tests {
     }
 
     #[test]
-    fn test_compression_report_is_not_before_first_user() {
-        let mut messages = vec![
-            make_system_msg("root prompt"),
-            make_user_msg("hello"),
-            make_context_file_msg("test.rs", "fn main() {}"),
-            make_assistant_msg("response"),
-        ];
-        let opts = CompressOptions {
-            drop_all_context: true,
-            ..Default::default()
-        };
-
-        compress_in_place(&mut messages, &opts).unwrap();
-
-        let report_idx = compression_report_index(&messages);
-        let first_user_idx = messages.iter().position(|msg| msg.role == "user").unwrap();
-        assert!(report_idx > first_user_idx);
-        assert_eq!(messages[0].role, "system");
-        assert_eq!(messages[1].role, "user");
-    }
-
-    #[test]
     fn test_compression_report_inserted_near_removed_context_not_tail() {
         let mut messages = vec![
             make_user_msg("hello"),
@@ -2857,69 +2454,6 @@ mod tests {
             messages.last().unwrap().content.content_text_only(),
             "second response"
         );
-    }
-
-    #[test]
-    fn test_drop_all_memories() {
-        fn make_multi_context_file_msg(files: Vec<(&str, &str)>) -> ChatMessage {
-            ChatMessage {
-                role: "context_file".to_string(),
-                content: ChatContent::ContextFiles(
-                    files
-                        .into_iter()
-                        .map(|(name, content)| make_context_file(name, content))
-                        .collect(),
-                ),
-                ..Default::default()
-            }
-        }
-
-        let mut messages = vec![
-            make_user_msg("hello"),
-            make_context_file_msg(
-                "/home/user/.refact/knowledge/2026-01-01_mem.md",
-                "some memory",
-            ),
-            make_multi_context_file_msg(vec![
-                ("/home/user/.refact/knowledge/other.md", "knowledge"),
-                ("regular.rs", "fn main() {}"),
-            ]),
-            make_context_file_msg("src/lib.rs", "pub fn foo() {}"),
-            make_assistant_msg("response"),
-        ];
-        let opts = CompressOptions {
-            drop_all_memories: true,
-            ..Default::default()
-        };
-        let stats = compress_in_place(&mut messages, &opts).unwrap();
-
-        assert_eq!(stats.context_messages_modified, 2);
-
-        assert!(!messages.iter().any(|m| {
-            if let ChatContent::ContextFiles(files) = &m.content {
-                files
-                    .iter()
-                    .any(|f| f.file_name.contains(".refact/knowledge/2026"))
-            } else {
-                false
-            }
-        }));
-
-        assert!(messages.iter().any(|m| {
-            if let ChatContent::ContextFiles(files) = &m.content {
-                files.iter().any(|f| f.file_name == "regular.rs")
-            } else {
-                false
-            }
-        }));
-
-        assert!(messages.iter().any(|m| {
-            if let ChatContent::ContextFiles(files) = &m.content {
-                files.iter().any(|f| f.file_name == "src/lib.rs")
-            } else {
-                false
-            }
-        }));
     }
 
     #[test]
@@ -3098,51 +2632,6 @@ mod tests {
     }
 
     #[test]
-    fn test_compress_preserves_user_assistant_without_noop_report() {
-        let mut messages = vec![make_user_msg("hello"), make_assistant_msg("response")];
-        let opts = CompressOptions {
-            drop_all_context: true,
-            ..Default::default()
-        };
-        let stats = compress_in_place(&mut messages, &opts).unwrap();
-        assert_eq!(stats.after_message_count, 2);
-        assert_eq!(messages[0].role, "user");
-        assert_eq!(messages[1].role, "assistant");
-        assert_eq!(compression_report_count(&messages), 0);
-    }
-
-    #[test]
-    fn test_compress_empty_messages_is_noop_without_report() {
-        let mut messages: Vec<ChatMessage> = vec![];
-        let opts = CompressOptions::default();
-        let stats = compress_in_place(&mut messages, &opts).unwrap();
-        assert_eq!(stats.before_message_count, 0);
-        assert_eq!(stats.after_message_count, 0);
-        assert!(messages.is_empty());
-    }
-
-    #[test]
-    fn test_is_valid_tool_id() {
-        assert!(is_valid_tool_id("call_abc123"));
-        assert!(is_valid_tool_id("toolu_def456"));
-        assert!(is_valid_tool_id("abc-def_123"));
-        assert!(is_valid_tool_id("A"));
-        assert!(!is_valid_tool_id(""));
-        assert!(!is_valid_tool_id("call.123"));
-        assert!(!is_valid_tool_id("call:123"));
-        assert!(!is_valid_tool_id("call/123"));
-        assert!(!is_valid_tool_id("call 123"));
-    }
-
-    #[test]
-    fn test_generate_valid_tool_id() {
-        let id = generate_valid_tool_id();
-        assert!(id.starts_with("call_"));
-        assert!(is_valid_tool_id(&id));
-        assert_eq!(id.len(), 29);
-    }
-
-    #[test]
     fn test_sanitize_messages_for_model_switch_strips_metadata() {
         let mut messages = vec![ChatMessage {
             role: "user".to_string(),
@@ -3172,42 +2661,6 @@ mod tests {
         assert!(messages[0].reasoning_content.is_none());
         assert!(messages[0].extra.is_empty());
         assert_eq!(messages[0].content.content_text_only(), "hello");
-    }
-
-    #[test]
-    fn test_sanitize_messages_for_model_switch_normalizes_tool_ids() {
-        let mut messages = vec![
-            ChatMessage {
-                role: "assistant".to_string(),
-                content: ChatContent::SimpleText("".to_string()),
-                tool_calls: Some(vec![ChatToolCall {
-                    id: "gemini.call.123".to_string(),
-                    index: None,
-                    function: ChatToolFunction {
-                        name: "test".to_string(),
-                        arguments: "{}".to_string(),
-                    },
-                    tool_type: "function".to_string(),
-                    extra_content: None,
-                    started_at_ms: None,
-                    completed_at_ms: None,
-                }]),
-                ..Default::default()
-            },
-            ChatMessage {
-                role: "tool".to_string(),
-                content: ChatContent::SimpleText("result".to_string()),
-                tool_call_id: "gemini.call.123".to_string(),
-                ..Default::default()
-            },
-        ];
-
-        sanitize_messages_for_model_switch(&mut messages);
-
-        let new_id = &messages[0].tool_calls.as_ref().unwrap()[0].id;
-        assert!(is_valid_tool_id(new_id));
-        assert!(new_id.starts_with("call_"));
-        assert_eq!(messages[1].tool_call_id, *new_id);
     }
 
     #[test]

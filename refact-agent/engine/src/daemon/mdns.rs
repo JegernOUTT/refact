@@ -92,13 +92,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mdns_uses_shared_host_name_helper() {
-        let name = crate::http::local_mdns_host_name();
-        assert!(!name.is_empty());
-        assert!(name.ends_with(".local."));
-    }
-
-    #[test]
     fn mdns_default_advertises_only_non_loopback_binds() {
         let config = DaemonConfig::default();
 

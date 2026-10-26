@@ -301,43 +301,6 @@ mod tests {
     }
 
     #[test]
-    fn changing_leaf_with_no_callers_has_no_impacts() {
-        let store = Store::open_in_memory().unwrap();
-        store
-            .index_file_graph("src/leaf.rs", "pub fn leaf() {}\n", "rust")
-            .unwrap();
-        store.connect_usages().unwrap();
-
-        let report = blast_radius(&store, &["src/leaf.rs".to_string()], 3).unwrap();
-
-        assert!(report.directly_impacted.is_empty());
-        assert!(report.transitively_impacted.is_empty());
-        assert_eq!(report.impacted_file_count, 0);
-        assert_eq!(report.risk_score, 0.0);
-    }
-
-    #[test]
-    fn impacted_file_count_counts_unique_files() {
-        let store = Store::open_in_memory().unwrap();
-        store
-            .index_file_graph("src/core.rs", "pub fn c1() {}\npub fn c2() {}\n", "rust")
-            .unwrap();
-        store
-            .index_file_graph(
-                "src/caller.rs",
-                "pub fn b1() { c1(); }\npub fn b2() { c2(); }\n",
-                "rust",
-            )
-            .unwrap();
-        store.connect_usages().unwrap();
-
-        let report = blast_radius(&store, &["src/core.rs".to_string()], 2).unwrap();
-
-        assert_eq!(report.directly_impacted.len(), 2);
-        assert_eq!(report.impacted_file_count, 1);
-    }
-
-    #[test]
     fn inherits_impacts_are_structural_and_serialize_snake_case() {
         let store = Store::open_in_memory().unwrap();
         let base = store

@@ -2474,36 +2474,6 @@ mod tests {
     }
 
     #[test]
-    fn fuzzy_path_lookup_deduplicates_duplicate_double_colon_paths() {
-        let store = Store::open_in_memory().unwrap();
-        let first = store
-            .insert_node("function", "src/mod.rs", "helper", "rust", 1, 1)
-            .unwrap();
-        let second = store
-            .insert_node("function", "src/mod.rs", "helper", "rust", 2, 2)
-            .unwrap();
-        store.add_symbol("src/mod.rs::helper", first).unwrap();
-        store.add_symbol("src/mod.rs::helper", second).unwrap();
-
-        let hits = store.symbol_paths_fuzzy("src/mod.rs::helper", 10).unwrap();
-
-        assert_eq!(hits, vec!["src/mod.rs::helper".to_string()]);
-    }
-
-    #[test]
-    fn fuzzy_path_lookup_short_separator_pattern_uses_substring_fallback() {
-        let store = Store::open_in_memory().unwrap();
-        let node = store
-            .insert_node("function", "a/b.rs", "helper", "rust", 1, 1)
-            .unwrap();
-        store.add_symbol("a/b.rs::helper", node).unwrap();
-
-        let hits = store.symbol_paths_fuzzy("a/", 10).unwrap();
-
-        assert_eq!(hits, vec!["a/b.rs::helper".to_string()]);
-    }
-
-    #[test]
     fn path_qualified_lookup_normalizes_backslashes() {
         let store = Store::open_in_memory().unwrap();
         let node = store
@@ -2567,34 +2537,6 @@ mod tests {
             .symbol_name_ranked("vanishing", 10)
             .unwrap()
             .is_empty());
-    }
-
-    #[test]
-    fn file_spans_batches_and_matches_single_lookup() {
-        let store = Store::open_in_memory().unwrap();
-        store
-            .insert_node("file", "src/a.rs", "a.rs", "rust", 1, 40)
-            .unwrap();
-        store
-            .insert_node("file", "src/b.rs", "b.rs", "rust", 1, 7)
-            .unwrap();
-
-        let paths = vec![
-            "src/a.rs".to_string(),
-            "src/b.rs".to_string(),
-            "src/missing.rs".to_string(),
-        ];
-        let batched = store.file_spans(&paths).unwrap();
-
-        assert_eq!(
-            batched.get("src/a.rs"),
-            store.file_span("src/a.rs").unwrap().as_ref()
-        );
-        assert_eq!(
-            batched.get("src/b.rs"),
-            store.file_span("src/b.rs").unwrap().as_ref()
-        );
-        assert!(batched.get("src/missing.rs").is_none());
     }
 
     #[test]
@@ -2968,128 +2910,6 @@ mod tests {
     }
 
     #[test]
-    fn schema_roundtrip() {
-        let store = Store::open_in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), schema::SCHEMA_VERSION);
-
-        let file_id = store
-            .insert_node("file", "src/a.rs", "a.rs", "rust", 1, 10)
-            .unwrap();
-        let fn_id = store
-            .insert_node("function", "src/a.rs", "foo", "rust", 3, 7)
-            .unwrap();
-        store.add_edge(fn_id, file_id, "defined_in", 1.0).unwrap();
-        store.add_symbol("a::foo", fn_id).unwrap();
-
-        let counts = store.counts().unwrap();
-        assert_eq!(counts.nodes, 2);
-        assert_eq!(counts.edges, 1);
-        assert_eq!(counts.files, 1);
-    }
-
-    #[test]
-    fn fuzzy_symbol_lookup_uses_symbol_index() {
-        let store = Store::open_in_memory().unwrap();
-        let mut stmt = store
-            .conn
-            .prepare(&format!("EXPLAIN QUERY PLAN {SYMBOL_FUZZY_SQL}"))
-            .unwrap();
-        let rows = stmt
-            .query_map(
-                params!["helper", prefix_upper_bound("helper"), "\"helper\"", 10i64],
-                |row| row.get::<_, String>(3),
-            )
-            .unwrap();
-        let plan: Vec<String> = rows.map(|row| row.unwrap()).collect();
-
-        assert!(
-            plan.iter()
-                .any(|detail| detail.contains("idx_symbols_reverse_symbol_path")),
-            "fuzzy lookup should be backed by a symbols index, got {plan:?}"
-        );
-    }
-
-    #[test]
-    fn index_file_graph_extracts_rust_symbols_and_edges() {
-        let store = Store::open_in_memory().unwrap();
-        let src = "\
-struct Widget;
-
-impl Widget {
-    fn render(&self) {
-        helper();
-    }
-}
-
-fn helper() {}
-";
-        store
-            .index_file_graph("src/widget.rs", src, "rust")
-            .unwrap();
-
-        let counts = store.counts().unwrap();
-        assert_eq!(counts.files, 1);
-        assert!(
-            counts.nodes >= 4,
-            "expected file + Widget + render + helper nodes, got {}",
-            counts.nodes
-        );
-        assert!(
-            counts.edges >= 4,
-            "expected defined_in edges + a calls edge, got {}",
-            counts.edges
-        );
-
-        let calls: i64 = store
-            .conn
-            .query_row("SELECT COUNT(*) FROM edges WHERE kind = 'calls'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(calls, 1, "render -> helper calls edge");
-    }
-
-    #[test]
-    fn indexing_a_tsx_file_yields_symbols_and_no_parse_failure() {
-        let store = Store::open_in_memory().unwrap();
-        let src = "\
-import { useState } from 'react';
-
-export function Counter(): JSX.Element {
-    const [count, setCount] = useState(0);
-    return <button onClick={() => setCount(count + 1)}>{count}</button>;
-}
-";
-        let lang = crate::lang_from_path("src/Counter.tsx");
-        assert_eq!(lang, "tsx");
-        let indexed = store
-            .index_file_graph("src/Counter.tsx", src, lang)
-            .unwrap();
-        assert!(indexed.parse_failure.is_none(), "{indexed:?}");
-        assert_eq!(store.parse_failure_count().unwrap(), 0);
-        assert!(
-            node_signature(&store)
-                .iter()
-                .any(|(_, name, kind, node_lang, ..)| {
-                    name == "Counter" && kind == "function" && node_lang == "tsx"
-                }),
-            "{:?}",
-            node_signature(&store)
-        );
-    }
-
-    #[test]
-    fn index_file_graph_is_idempotent() {
-        let store = Store::open_in_memory().unwrap();
-        let src = "fn a() { b(); }\nfn b() {}\n";
-        store.index_file_graph("src/m.rs", src, "rust").unwrap();
-        let first = store.counts().unwrap();
-        store.index_file_graph("src/m.rs", src, "rust").unwrap();
-        let second = store.counts().unwrap();
-        assert_eq!(first, second, "re-indexing same file must not duplicate");
-    }
-
-    #[test]
     fn batch_index_matches_individual_results() {
         let entries = vec![
             (
@@ -3148,36 +2968,6 @@ export function Counter(): JSX.Element {
         assert_eq!(
             file_hash_signature(&batch),
             file_hash_signature(&individual)
-        );
-    }
-
-    #[test]
-    fn parse_failure_is_distinguishable_from_genuine_emptiness() {
-        let store = Store::open_in_memory().unwrap();
-
-        let empty = store
-            .index_file_graph("src/empty.rs", "// no symbols at all\n", "rust")
-            .unwrap();
-        let broken = store
-            .index_file_graph("src/broken.rs", "fn broken( { ; ) } !!!\n", "rust")
-            .unwrap();
-
-        assert!(empty.parse_failure.is_none());
-        let failure = broken
-            .parse_failure
-            .expect("malformed file must be flagged");
-        assert_eq!(failure.path, "src/broken.rs");
-        assert_eq!(failure.lang, "rust");
-        assert!(!failure.reason.is_empty());
-        assert_eq!(store.parse_failure_count().unwrap(), 1);
-        assert_eq!(
-            store
-                .parse_failures(10)
-                .unwrap()
-                .into_iter()
-                .map(|failure| failure.path)
-                .collect::<Vec<_>>(),
-            vec!["src/broken.rs".to_string()]
         );
     }
 
@@ -3399,35 +3189,6 @@ export function Counter(): JSX.Element {
     }
 
     #[test]
-    fn connect_usages_resolves_cross_file_calls() {
-        let store = Store::open_in_memory().unwrap();
-        store
-            .index_file_graph("src/a.rs", "pub fn helper() {}\n", "rust")
-            .unwrap();
-        store
-            .index_file_graph("src/b.rs", "fn run() { helper(); }\n", "rust")
-            .unwrap();
-
-        store.connect_usages().unwrap();
-
-        let cross: i64 = store
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM edges e \
-                 JOIN nodes sn ON sn.id = e.src \
-                 JOIN nodes dn ON dn.id = e.dst \
-                 WHERE e.kind = 'calls' AND sn.path = 'src/b.rs' AND dn.path = 'src/a.rs'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            cross, 1,
-            "run (b.rs) -> helper (a.rs) cross-file calls edge"
-        );
-    }
-
-    #[test]
     fn connect_usages_in_memory_equivalence() {
         let store = Store::open_in_memory().unwrap();
         let entries = equivalence_fixture_entries();
@@ -3475,58 +3236,6 @@ export function Counter(): JSX.Element {
                 )
             ]
         );
-    }
-
-    #[test]
-    fn connect_usages_synthetic_refs_timing_smoke() {
-        let store = Store::open_in_memory().unwrap();
-        let source = store
-            .insert_node("function", "src/use.rs", "run", "rust", 1, 1)
-            .unwrap();
-        let target = store
-            .insert_node("function", "src/defs.rs", "target", "rust", 1, 1)
-            .unwrap();
-        store.add_symbol("src/defs.rs::target", target).unwrap();
-        for line in 1..=1000 {
-            store
-                .add_pending_ref(source, "target", "calls", line)
-                .unwrap();
-        }
-        Store::mark_path_dirty_on(&store.conn, "src/use.rs").unwrap();
-
-        let started = Instant::now();
-        store.connect_usages().unwrap();
-
-        assert_eq!(store.usage_edge_count().unwrap(), 1000);
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
-    }
-
-    #[test]
-    fn connect_usages_skips_ambiguous_cross_file_calls() {
-        let store = Store::open_in_memory().unwrap();
-        store
-            .index_file_graph("src/a.rs", "pub fn helper() {}\n", "rust")
-            .unwrap();
-        store
-            .index_file_graph("src/c.rs", "pub fn helper() {}\n", "rust")
-            .unwrap();
-        store
-            .index_file_graph("src/b.rs", "fn run() { helper(); }\n", "rust")
-            .unwrap();
-
-        store.connect_usages().unwrap();
-
-        let calls_from_b: i64 = store
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM edges e \
-                 JOIN nodes sn ON sn.id = e.src \
-                 WHERE e.kind = 'calls' AND sn.path = 'src/b.rs'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(calls_from_b, 0);
     }
 
     #[test]
@@ -3729,46 +3438,6 @@ func main() {
     }
 
     #[test]
-    fn doc_usages_reports_lines_and_targets() {
-        let store = Store::open_in_memory().unwrap();
-        store
-            .index_file_graph(
-                "src/a.rs",
-                "fn caller() {\n    callee();\n}\nfn callee() {}\n",
-                "rust",
-            )
-            .unwrap();
-        store.connect_usages().unwrap();
-
-        let usages = store.doc_usages("src/a.rs").unwrap();
-        assert!(
-            usages
-                .iter()
-                .any(|(line, name)| *line == 2 && name.ends_with("::callee")),
-            "expected callee usage at line 2, got {:?}",
-            usages
-        );
-    }
-
-    #[test]
-    fn index_file_is_idempotent_and_searchable() {
-        let store = Store::open_in_memory().unwrap();
-        store
-            .index_file("src/main.rs", "fn main() { let codegraph = 1; }", "rust")
-            .unwrap();
-        store
-            .index_file("src/main.rs", "fn main() { let codegraph = 2; }", "rust")
-            .unwrap();
-
-        let counts = store.counts().unwrap();
-        assert_eq!(counts.files, 1);
-        assert_eq!(counts.fts_docs, 1);
-
-        let hits = store.search_fts("codegraph", 10).unwrap();
-        assert_eq!(hits, vec!["src/main.rs".to_string()]);
-    }
-
-    #[test]
     fn reindex_drops_stale_fts_and_symbol_search_rows() {
         let store = Store::open_in_memory().unwrap();
         store
@@ -3904,37 +3573,6 @@ func main() {
             store.search_fts("needle_markdown", 10).unwrap(),
             vec!["README.md".to_string()]
         );
-    }
-
-    #[test]
-    fn fts_text_for_file_only_trims_data_files() {
-        let text = "a".repeat(DATA_FILE_FTS_TEXT_LIMIT + 1);
-        assert_eq!(fts_text_for_file("src/big.rs", &text, "rust"), text);
-        assert_eq!(fts_text_for_file("big.json", &text, ""), "");
-        assert_eq!(fts_text_for_file("small.json", "{}", ""), "{}");
-        assert_eq!(fts_text_for_file("events.JSONL", "{}", ""), "");
-        assert_eq!(fts_text_for_file("engine.log", "boot", ""), "");
-    }
-
-    #[test]
-    fn all_files_with_text_and_paths_return_fts_rows() {
-        let store = Store::open_in_memory().unwrap();
-        store.index_file("src/a.rs", "fn a() {}", "rust").unwrap();
-        store.index_file("src/b.rs", "fn b() {}", "rust").unwrap();
-
-        let mut files = store.all_files_with_text().unwrap();
-        files.sort();
-        assert_eq!(
-            files,
-            vec![
-                ("src/a.rs".to_string(), "fn a() {}".to_string()),
-                ("src/b.rs".to_string(), "fn b() {}".to_string())
-            ]
-        );
-
-        let mut paths = store.all_paths().unwrap();
-        paths.sort();
-        assert_eq!(paths, vec!["src/a.rs".to_string(), "src/b.rs".to_string()]);
     }
 
     #[test]

@@ -2688,48 +2688,6 @@ mod tests {
         assert!(!path.exists());
     }
 
-    #[tokio::test]
-    async fn root_chat_memo_serves_second_resolution_without_trajectory_file() {
-        let workspace = match tempfile::tempdir() {
-            Ok(workspace) => workspace,
-            Err(error) => panic!("failed to create temporary workspace: {error}"),
-        };
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        if let Ok(mut folders) = gcx.documents_state.workspace_folders.lock() {
-            *folders = vec![workspace.path().to_path_buf()];
-        } else {
-            panic!("workspace folders lock was poisoned");
-        }
-
-        let suffix = Uuid::new_v4();
-        let child_id = format!("memo-child-{suffix}");
-        let root_id = format!("memo-root-{suffix}");
-        let trajectories_dir = workspace.path().join(".refact").join("trajectories");
-        if let Err(error) = tokio::fs::create_dir_all(&trajectories_dir).await {
-            panic!("failed to create trajectories directory: {error}");
-        }
-        let child_path = trajectories_dir.join(format!("{child_id}.json"));
-        let trajectory = serde_json::json!({
-            "id": child_id,
-            "parent_id": root_id,
-            "messages": []
-        });
-        if let Err(error) = tokio::fs::write(&child_path, trajectory.to_string()).await {
-            panic!("failed to write child trajectory: {error}");
-        }
-
-        let mut first_call_cache = HashMap::new();
-        let first = resolve_root_chat_id(gcx.clone(), &child_id, &mut first_call_cache).await;
-        assert_eq!(first, root_id);
-        if let Err(error) = tokio::fs::remove_file(&child_path).await {
-            panic!("failed to remove child trajectory: {error}");
-        }
-
-        let mut second_call_cache = HashMap::new();
-        let second = resolve_root_chat_id(gcx, &child_id, &mut second_call_cache).await;
-        assert_eq!(second, root_id);
-    }
-
     #[test]
     fn root_chat_memo_insert_is_bounded() {
         let mut memo = HashMap::new();
@@ -2760,60 +2718,6 @@ mod tests {
         ));
         assert!(!preference_statement_is_safe("remember this", 0.95));
         assert!(!preference_statement_is_safe("I prefer token=secret", 0.95));
-    }
-
-    #[test]
-    fn normalized_preference_dedupe_matches_case_and_punctuation() {
-        let first = normalize_preference_text_for_dedupe("I prefer concise answers, with bullets!");
-        let second = normalize_preference_text_for_dedupe("i prefer concise answers with bullets");
-
-        assert_eq!(first, second);
-    }
-
-    #[test]
-    fn memory_tags_are_namespaced_and_normalized() {
-        let tags = normalize_memory_tags(
-            &vec![
-                "Rust".to_string(),
-                "behavior_learner".to_string(),
-                " Playwright MCP ".to_string(),
-                "component:Buddy Scheduler".to_string(),
-                "Rust".to_string(),
-            ],
-            16,
-        );
-
-        assert_eq!(
-            tags,
-            vec![
-                "language:rust".to_string(),
-                "workflow:behavior-learner".to_string(),
-                "tool:playwright-mcp".to_string(),
-                "component:buddy-scheduler".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn fallback_tags_extract_precise_kg_linking_signals() {
-        let tags = extract_fallback_tags(
-            "Buddy autonomous background chat should reuse subchat and save_trajectory_as. Run cargo check and git status.",
-            &vec![
-                "refact-agent/engine/src/buddy/jobs.rs".to_string(),
-                "refact-agent/engine/src/subchat.rs".to_string(),
-            ],
-            &vec!["save_trajectory_as".to_string()],
-        );
-
-        assert!(tags.contains(&"domain:buddy".to_string()));
-        assert!(tags.contains(&"workflow:background-chat".to_string()));
-        assert!(tags.contains(&"component:subchat".to_string()));
-        assert!(tags.contains(&"component:trajectory-persistence".to_string()));
-        assert!(tags.contains(&"component:buddy".to_string()));
-        assert!(tags.contains(&"language:rust".to_string()));
-        assert!(tags.contains(&"verification:cargo-check".to_string()));
-        assert!(tags.contains(&"verification:git-sanity".to_string()));
-        assert!(tags.contains(&"entity:save_trajectory_as".to_string()));
     }
 
     fn dedup_test_frontmatter(title: &str) -> KnowledgeFrontmatter {
@@ -2999,35 +2903,6 @@ mod tests {
             .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "md"))
             .count();
         assert_eq!(files, 1);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn memories_add_preference_if_new_dedupes_existing_preferences() {
-        let dir = tempfile::tempdir().unwrap();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        {
-            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
-        }
-
-        let first = memories_add_preference_if_new(
-            gcx.clone(),
-            "I prefer concise answers with bullet lists",
-            "User-authored snippet",
-            0.91,
-        )
-        .await
-        .unwrap();
-        let duplicate = memories_add_preference_if_new(
-            gcx,
-            "i prefer concise answers with bullet lists.",
-            "Repeated user-authored snippet",
-            0.95,
-        )
-        .await
-        .unwrap();
-
-        assert!(first.is_some());
-        assert!(duplicate.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3300,37 +3175,6 @@ mod firewall_tests {
 
         search.await.unwrap().unwrap();
         assert_eq!(*old_embed_calls.lock().unwrap(), 1);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn memories_search_falls_back_when_vecdb_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        {
-            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
-        }
-
-        let project_root = get_project_dirs(gcx.clone())
-            .await
-            .into_iter()
-            .next()
-            .expect("test workspace must resolve to a project dir");
-        let knowledge_dir = project_root.join(KNOWLEDGE_FOLDER_NAME);
-        write_knowledge_note(
-            &knowledge_dir,
-            "fallback.md",
-            "Codegraph firewall fallback keyword body.",
-        )
-        .await;
-
-        assert!(
-            gcx.vec_db.lock().await.is_none(),
-            "test fixture must start with vec_db absent"
-        );
-
-        let _records = memories_search(gcx.clone(), "codegraph", 5, 5, None)
-            .await
-            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]

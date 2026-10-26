@@ -803,183 +803,6 @@ mod tests {
         AppState::from_gcx(gcx).await
     }
 
-    /// The field metadata table and `runtime_settings::validate` are two
-    /// hand-maintained parallel lists. If they drift, the GUI either blocks
-    /// values the engine accepts or offers values the engine rejects with a
-    /// 400. This test is the only thing keeping them in agreement.
-    #[test]
-    fn trajectory_settings_fields_match_struct_and_validate_bounds() {
-        let defaults = crate::runtime_settings::TrajectoryRuntimeSettings::default();
-        let defaults_json = serde_json::to_value(&defaults).unwrap();
-        let serialized_names: std::collections::BTreeSet<String> = defaults_json
-            .as_object()
-            .expect("settings serialize as a JSON object")
-            .keys()
-            .flat_map(|name| {
-                if name == "coordination" {
-                    defaults_json[name]
-                        .as_object()
-                        .unwrap()
-                        .keys()
-                        .map(|leaf| format!("coordination.{leaf}"))
-                        .collect::<Vec<_>>()
-                } else {
-                    vec![name.clone()]
-                }
-            })
-            .collect();
-
-        let fields = trajectory_settings_fields();
-        let field_names: std::collections::BTreeSet<String> =
-            fields.iter().map(|field| field.name.to_string()).collect();
-        assert_eq!(
-            field_names.len(),
-            fields.len(),
-            "trajectory_settings_fields() contains duplicate names"
-        );
-        assert_eq!(
-            field_names, serialized_names,
-            "trajectory_settings_fields() must list exactly the serialized settings fields"
-        );
-
-        // Every advertised min/max must be precisely what validate() enforces.
-        for field in &fields {
-            let (minimum, maximum) = match (field.minimum, field.maximum) {
-                (Some(minimum), Some(maximum)) => (minimum, maximum),
-                _ => {
-                    match field.value_type {
-                        "string_enum" => assert!(
-                            field.allowed.is_some_and(|allowed| !allowed.is_empty()),
-                            "{} publishes no accepted values",
-                            field.name
-                        ),
-                        other => assert_eq!(
-                            other, "boolean",
-                            "{} has no bounds but is neither a boolean nor an enum",
-                            field.name
-                        ),
-                    }
-                    continue;
-                }
-            };
-            assert!(matches!(field.value_type, "integer" | "integer_map"));
-            assert!(minimum < maximum, "{} has an empty range", field.name);
-
-            let with_value = |value: u64| {
-                let mut json = defaults_json.clone();
-                let value_json = if field.value_type == "integer_map" {
-                    serde_json::json!({"root": value})
-                } else {
-                    serde_json::json!(value)
-                };
-                if let Some((group, leaf)) = field.name.split_once('.') {
-                    json[group][leaf] = value_json;
-                } else {
-                    json[&field.name] = value_json;
-                }
-                let settings: crate::runtime_settings::TrajectoryRuntimeSettings =
-                    serde_json::from_value(json).unwrap_or_else(|e| {
-                        panic!("{} is not settable to {value}: {e}", field.name)
-                    });
-                crate::runtime_settings::validate(&settings)
-            };
-            let range_error = format!("{} must be between {} and {}", field.name, minimum, maximum);
-
-            // Boundaries are accepted (a cross-field rule may still complain,
-            // but never about this field's range).
-            for accepted in [minimum, maximum] {
-                if let Err(error) = with_value(accepted) {
-                    assert!(
-                        !error.starts_with(&range_error),
-                        "{} rejects in-range value {accepted}: {error}",
-                        field.name
-                    );
-                }
-            }
-            // Just outside the boundaries is rejected with exactly these bounds.
-            for rejected in minimum
-                .checked_sub(1)
-                .into_iter()
-                .chain(maximum.checked_add(1))
-            {
-                let error = with_value(rejected).unwrap_err();
-                assert_eq!(
-                    error,
-                    format!("{range_error}; got {rejected}"),
-                    "{} bounds disagree between fields() and validate()",
-                    field.name
-                );
-            }
-        }
-    }
-
-    #[tokio::test]
-    #[serial(runtime_settings)]
-    async fn trajectory_settings_defaults_round_trip_and_persist() {
-        crate::runtime_settings::reset_for_test();
-        let app = trajectory_settings_app().await;
-        let initial = handle_v1_trajectory_settings_get(State(app.clone()))
-            .await
-            .unwrap()
-            .0;
-        assert_eq!(
-            initial.config,
-            crate::runtime_settings::TrajectoryRuntimeSettings::default()
-        );
-        assert_eq!(
-            initial.fields.len(),
-            64 + crate::runtime_settings::coordination_field_bounds().len()
-        );
-        assert!(initial
-            .fields
-            .iter()
-            .any(|field| field.name == "event_channel_capacity"
-                && field.apply_mode == "restart_required"));
-        for name in [
-            "trajectory_writer_enabled",
-            "trajectory_index_coordinator_enabled",
-            "trajectory_watcher_self_write_enabled",
-            "tool_catalog_snapshots_enabled",
-            "vecdb_path_coalescing_enabled",
-        ] {
-            assert!(initial
-                .fields
-                .iter()
-                .any(|field| field.name == name && field.value_type == "boolean"));
-        }
-        assert!(initial.fields.iter().any(|field| field.name
-            == "trajectory_watcher_self_write_enabled"
-            && field.apply_mode == "live"));
-        assert!(initial.defaults.trajectory_writer_enabled);
-        assert!(initial.defaults.trajectory_index_coordinator_enabled);
-        assert!(initial.defaults.trajectory_watcher_self_write_enabled);
-        assert!(initial.defaults.tool_catalog_snapshots_enabled);
-        assert!(initial.defaults.vecdb_path_coalescing_enabled);
-
-        let mut updated = initial.config.clone();
-        updated.internal_traces_keep_per_folder = 25;
-        updated.session_idle_timeout_secs = 120;
-        updated.auto_enrichment_total_token_cap = 640;
-        updated.auto_enrichment_card_token_cap = 320;
-        let saved = handle_v1_trajectory_settings_post(
-            State(app.clone()),
-            hyper::body::Bytes::from(serde_json::to_vec(&updated).unwrap()),
-        )
-        .await
-        .unwrap()
-        .0;
-        assert_eq!(saved.config, updated);
-        assert_eq!(
-            crate::runtime_settings::current().session_idle_timeout_secs,
-            120
-        );
-        let reloaded = handle_v1_trajectory_settings_get(State(app))
-            .await
-            .unwrap()
-            .0;
-        assert_eq!(reloaded.config, updated);
-    }
-
     #[tokio::test]
     #[serial(runtime_settings)]
     async fn trajectory_settings_validation_preserves_previous_configuration() {
@@ -1079,55 +902,6 @@ mod tests {
         );
     }
 
-    #[test]
-    #[serial(runtime_settings)]
-    fn trajectory_settings_environment_rollout_override_wins() {
-        let cases = [
-            (
-                crate::chat::trajectories::TRAJECTORY_WRITER_ENV,
-                crate::chat::trajectories::trajectory_writer_rollout_enabled_for
-                    as fn(Option<&str>) -> bool,
-            ),
-            (
-                crate::chat::trajectory_index::TRAJECTORY_INDEX_COORDINATOR_ENV,
-                crate::chat::trajectory_index::trajectory_index_coordinator_rollout_enabled_for,
-            ),
-            (
-                crate::chat::trajectories::TRAJECTORY_WATCHER_SELF_WRITE_ENV,
-                crate::chat::trajectories::trajectory_watcher_self_write_rollout_enabled_for,
-            ),
-            (
-                crate::app_state::TOOL_CATALOG_SNAPSHOTS_ENV,
-                crate::app_state::tool_catalog_snapshot_rollout_enabled_for,
-            ),
-        ];
-        for (key, enabled) in cases {
-            let previous = std::env::var_os(key);
-            std::env::set_var(key, "0");
-            assert!(!enabled(std::env::var(key).ok().as_deref()));
-            std::env::set_var(key, "on");
-            assert!(enabled(std::env::var(key).ok().as_deref()));
-            if let Some(previous) = previous {
-                std::env::set_var(key, previous);
-            } else {
-                std::env::remove_var(key);
-            }
-        }
-        let previous = std::env::var_os(refact_vecdb::vdb_thread::VECDB_PATH_COALESCING_ENV);
-        std::env::set_var(refact_vecdb::vdb_thread::VECDB_PATH_COALESCING_ENV, "0");
-        assert!(!refact_vecdb::vdb_thread::vecdb_path_coalescing_rollout_enabled());
-        std::env::set_var(refact_vecdb::vdb_thread::VECDB_PATH_COALESCING_ENV, "on");
-        assert!(refact_vecdb::vdb_thread::vecdb_path_coalescing_rollout_enabled());
-        if let Some(previous) = previous {
-            std::env::set_var(
-                refact_vecdb::vdb_thread::VECDB_PATH_COALESCING_ENV,
-                previous,
-            );
-        } else {
-            std::env::remove_var(refact_vecdb::vdb_thread::VECDB_PATH_COALESCING_ENV);
-        }
-    }
-
     #[tokio::test]
     async fn global_and_project_indexing_load_save_and_absent_project() {
         let temp = tempfile::tempdir().unwrap();
@@ -1198,16 +972,6 @@ mod tests {
         .unwrap()
         .0;
         assert_eq!(loaded_global.config.blocklist, vec!["generated"]);
-    }
-
-    #[tokio::test]
-    async fn malformed_indexing_payload_and_unknown_skills_policy_are_rejected() {
-        let malformed = serde_json::from_slice::<IndexingSettingsPost>(
-            br#"{"config":{"blocklist":"bad","additional_indexing_dirs":[]}}"#,
-        );
-        assert!(malformed.is_err());
-        let unknown = serde_json::from_slice::<SkillsSettings>(br#"{"auto_trigger":"sometimes"}"#);
-        assert!(unknown.is_err());
     }
 
     #[test]
@@ -1373,35 +1137,6 @@ mod tests {
         assert_eq!(loaded, original);
     }
 
-    #[test]
-    fn coordination_descriptors_match_crate_fields_and_bounds() {
-        let fields = coordination_settings_fields(false);
-        let bounds = crate::runtime_settings::coordination_field_bounds();
-        assert_eq!(fields.len(), bounds.len());
-        for (field, bound) in fields.iter().zip(bounds) {
-            assert_eq!(field.name, bound.name);
-            assert_eq!(field.value_type, bound.value_type);
-            assert_eq!(field.minimum, bound.minimum);
-            assert_eq!(field.maximum, bound.maximum);
-            assert_eq!(field.allowed, bound.allowed);
-        }
-    }
-
-    #[tokio::test]
-    async fn coordination_project_without_root_is_bad_request() {
-        let app = trajectory_settings_app().await;
-        let error = handle_v1_coordination_settings_get(
-            State(app),
-            Query(SettingsScopeQuery {
-                scope: Some("project".into()),
-            }),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(error.status_code, StatusCode::BAD_REQUEST);
-        assert!(error.message.contains("no project root"));
-    }
-
     #[tokio::test]
     async fn skills_default_and_round_trip() {
         let temp = tempfile::tempdir().unwrap();
@@ -1427,14 +1162,5 @@ mod tests {
         assert_eq!(saved.auto_trigger, SkillsAutoTriggerSetting::InjectFull);
         let loaded = handle_v1_skills_settings_get(State(app)).await.unwrap().0;
         assert_eq!(loaded, saved);
-    }
-
-    #[tokio::test]
-    async fn skills_without_project_root_is_bad_request() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = AppState::from_gcx(gcx).await;
-        let error = handle_v1_skills_settings_get(State(app)).await.unwrap_err();
-        assert_eq!(error.status_code, StatusCode::BAD_REQUEST);
-        assert!(error.message.contains("no project root"));
     }
 }

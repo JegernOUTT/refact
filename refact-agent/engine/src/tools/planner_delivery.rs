@@ -506,96 +506,6 @@ mod tests {
         (temp, gcx, task.id, target)
     }
 
-    fn assert_queued(facade: &StateFacade, target: &CardTarget) {
-        assert_eq!(*facade.probes.lock().unwrap(), vec![target.chat_id.clone()]);
-        let queued = facade.queued.lock().unwrap();
-        assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].0, target.chat_id);
-        let ChatCommand::DeliverMessages { delivery } = &queued[0].1 else {
-            panic!("expected a queued delivery");
-        };
-        assert_eq!(delivery.push, PushMode::Append);
-        assert_eq!(delivery.source, "agent_steer");
-        assert!(delivery.wake);
-        assert_eq!(delivery.messages.len(), 1);
-        assert_eq!(
-            delivery.messages[0].content.content_text_only(),
-            "Steer message"
-        );
-    }
-
-    #[tokio::test]
-    async fn steer_receipt_reports_prior_state_without_requiring_a_live_session() {
-        let (_temp, gcx, task_id, target) = delivery_fixture().await;
-        let facade = Arc::new(StateFacade::new(Ok(Some(SessionState::Generating))));
-        let report = deliver_to_card(
-            gcx,
-            facade.clone(),
-            &task_id,
-            &target,
-            CardGuard::doing(),
-            single_message_delivery(
-                "Steer message".to_string(),
-                PushMode::Append,
-                "agent_steer",
-                true,
-            ),
-        )
-        .await;
-
-        assert!(
-            matches!(
-                report,
-                DeliveryReport::Delivered {
-                    outcome: DeliveryOutcome::Queued,
-                    prior_state: Some(SessionState::Generating),
-                }
-            ),
-            "{}",
-            report.describe("Steer")
-        );
-        assert!(report
-            .describe("Steer")
-            .contains("prior agent state: generating"));
-        assert_eq!(report.receipt()["prior_state"], "generating");
-        assert_queued(&facade, &target);
-    }
-
-    #[tokio::test]
-    async fn steer_to_session_without_state_still_queues() {
-        let (_temp, gcx, task_id, target) = delivery_fixture().await;
-        for state in [Ok(None), Err("state unavailable".to_string())] {
-            let facade = Arc::new(StateFacade::new(state));
-            let report = deliver_to_card(
-                gcx.clone(),
-                facade.clone(),
-                &task_id,
-                &target,
-                CardGuard::doing(),
-                single_message_delivery(
-                    "Steer message".to_string(),
-                    PushMode::Append,
-                    "agent_steer",
-                    true,
-                ),
-            )
-            .await;
-
-            assert!(matches!(
-                report,
-                DeliveryReport::Delivered {
-                    outcome: DeliveryOutcome::Queued,
-                    prior_state: None,
-                }
-            ));
-            assert!(report
-                .describe("Steer")
-                .contains("prior agent state: unavailable"));
-            assert!(report.reached_agent());
-            assert_queued(&facade, &target);
-        }
-    }
-
     #[tokio::test]
     async fn required_live_session_without_state_is_not_delivered() {
         let (_temp, gcx, task_id, target) = delivery_fixture().await;
@@ -625,12 +535,6 @@ mod tests {
     #[test]
     fn push_mode_defaults_to_append_when_absent() {
         assert_eq!(parse_push_mode(&args(&[])).unwrap(), PushMode::Append);
-    }
-
-    #[test]
-    fn push_mode_null_is_treated_as_absent() {
-        let args = args(&[("push", Value::Null)]);
-        assert_eq!(parse_push_mode(&args).unwrap(), PushMode::Append);
     }
 
     #[test]

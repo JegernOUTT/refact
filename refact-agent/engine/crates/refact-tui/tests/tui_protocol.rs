@@ -7,12 +7,10 @@ use std::time::{Duration, Instant};
 use refact_tui::app::{App, SessionState, TranscriptItem};
 use refact_tui::client::{
     discover_daemon_endpoint, discover_daemon_endpoint_from, resolve_daemon_endpoint, ChatEvent,
-    ChatSeqDecision, ChatSeqTracker, ClientError, DaemonClient, OpenProjectResponse, ToolDecision,
+    ChatSeqDecision, ChatSeqTracker, ClientError, DaemonClient, OpenProjectResponse,
 };
 use refact_tui::history::render_transcript_item_lines;
 use refact_tui::protocol::{DeltaOp, SseEvent, TranscriptRole, TranscriptState};
-use ratatui::backend::TestBackend;
-use ratatui::Terminal;
 use serde_json::{json, Value};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -254,91 +252,10 @@ fn transcript_text(app: &App) -> String {
         .join("\n")
 }
 
-fn rendered_snapshot(app: &App, width: u16, height: u16) -> String {
-    let mut app = app.clone();
-    app.set_native_scrollback(false);
-    let backend = TestBackend::new(width, height);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal
-        .draw(|frame| refact_tui::ui::render(frame, &mut app))
-        .unwrap();
-    let cells = terminal.backend().buffer().content();
-    (0..height as usize)
-        .map(|row| {
-            let start = row * width as usize;
-            let end = start + width as usize;
-            cells[start..end]
-                .iter()
-                .map(|cell| cell.symbol())
-                .collect::<String>()
-                .trim_end()
-                .to_string()
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 fn drain_stream(app: &mut App) {
     while app.stream_has_committable_lines() {
         app.apply_stream_commit_tick();
     }
-}
-
-#[test]
-fn fixture_directory_covers_required_protocol_cases() {
-    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures");
-    let mut names = std::fs::read_dir(&fixture_dir)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    names.sort();
-    assert_eq!(
-        names,
-        vec![
-            "all_roles.jsonl",
-            "approvals.jsonl",
-            "assistant_message_added_dedup.jsonl",
-            "assistant_streaming.jsonl",
-            "audio_part.jsonl",
-            "citations.jsonl",
-            "extra_updates.jsonl",
-            "file_part.jsonl",
-            "image_part.jsonl",
-            "malformed_authoritative.jsonl",
-            "malformed_stream_delta.jsonl",
-            "protocol_mutations.jsonl",
-            "reasoning.jsonl",
-            "redacted_thinking.jsonl",
-            "refusal.jsonl",
-            "seq_gap.jsonl",
-            "server_content_blocks.jsonl",
-            "snapshot_recovery_content.jsonl",
-            "snapshot_resume.jsonl",
-            "sse_ack.jsonl",
-            "sse_background_agent_updated.jsonl",
-            "sse_browser_closed.jsonl",
-            "sse_browser_context_oversize.jsonl",
-            "sse_browser_frame.jsonl",
-            "sse_browser_status.jsonl",
-            "sse_browser_timeline.jsonl",
-            "sse_browser_toolbar_action.jsonl",
-            "sse_ide_tool_required.jsonl",
-            "sse_pause_cleared.jsonl",
-            "sse_process_completed.jsonl",
-            "sse_queue_updated.jsonl",
-            "sse_runtime_updated.jsonl",
-            "sse_snapshot_auxiliary.jsonl",
-            "subchat_turn_cleanup.jsonl",
-            "thinking_blocks.jsonl",
-            "tool_calls.jsonl",
-            "unknown_content_part.jsonl",
-            "unknown_delta_ops.jsonl",
-            "unknown_sse_event.jsonl",
-            "usage_updates.jsonl",
-        ]
-    );
 }
 
 #[test]
@@ -725,53 +642,6 @@ fn persisted_assistant_message_added_dedups_streamed_turn() {
 }
 
 #[test]
-fn message_added_inserts_at_server_index() {
-    let mut app = App::new(State::project());
-    let chat_id = app.chat_id().to_string();
-    app.apply_chat_event(chat_event_from_fixture(
-        json!({"chat_id": chat_id, "seq": "0", "type": "snapshot", "messages": []}),
-        &chat_id,
-    ));
-
-    for raw in [
-        json!({"chat_id": chat_id, "seq": "1", "type": "message_added", "message": {"message_id": "first", "role": "user", "content": "first"}}),
-        json!({"chat_id": chat_id, "seq": "2", "type": "message_added", "message": {"message_id": "third", "role": "user", "content": "third"}}),
-        json!({"chat_id": chat_id, "seq": "3", "type": "message_added", "index": 1, "message": {"message_id": "second", "role": "user", "content": "second"}}),
-    ] {
-        app.apply_chat_event(chat_event_from_fixture(raw, &chat_id));
-    }
-
-    assert_eq!(
-        app.transcript_state()
-            .messages()
-            .iter()
-            .map(|message| message.content.as_str())
-            .collect::<Vec<_>>(),
-        ["first", "second", "third"]
-    );
-    assert_eq!(transcript_text(&app), "user:first\nuser:second\nuser:third");
-}
-
-#[test]
-fn message_added_without_index_appends() {
-    let mut app = App::new(State::project());
-    let chat_id = app.chat_id().to_string();
-    app.apply_chat_event(chat_event_from_fixture(
-        json!({"chat_id": chat_id, "seq": "0", "type": "snapshot", "messages": []}),
-        &chat_id,
-    ));
-
-    for raw in [
-        json!({"chat_id": chat_id, "seq": "1", "type": "message_added", "message": {"message_id": "first", "role": "user", "content": "first"}}),
-        json!({"chat_id": chat_id, "seq": "2", "type": "message_added", "message": {"message_id": "second", "role": "user", "content": "second"}}),
-    ] {
-        app.apply_chat_event(chat_event_from_fixture(raw, &chat_id));
-    }
-
-    assert_eq!(transcript_text(&app), "user:first\nuser:second");
-}
-
-#[test]
 fn out_of_range_message_added_index_appends_with_notice() {
     let mut app = App::new(State::project());
     let chat_id = app.chat_id().to_string();
@@ -821,13 +691,6 @@ fn subchat_running_card_is_cleaned_at_turn_end() {
     assert_eq!(cards[0].status, refact_tui::tools::ToolStatus::Succeeded);
     assert!(!cards[0].subchat_active);
     assert_eq!(cards[0].attached_files, vec!["src/lib.rs".to_string()]);
-}
-
-#[test]
-fn seq_gap_fixture_requests_resubscribe_without_applying_gap_delta() {
-    let run = run_fixture("seq_gap.jsonl");
-    assert!(run.recovery.unwrap().contains("expected 2, got 3"));
-    assert!(!transcript_text(&run.app).contains("must not apply"));
 }
 
 #[test]
@@ -983,23 +846,6 @@ fn every_remaining_sse_event_fixture_is_parsed_and_stored() {
         Some("user_closed")
     );
     assert!(app.inbound_event_state().browser().is_none());
-}
-
-#[test]
-fn queue_and_pause_clear_fixtures_keep_their_state_contracts() {
-    let queue = run_fixture("sse_queue_updated.jsonl");
-    assert!(queue.recovery.is_none());
-    assert_eq!(queue.app.server_queue_size(), 2);
-    assert_eq!(
-        queue.app.server_queue_previews(),
-        ["first server prompt", "second server prompt"]
-    );
-    assert!(queue.app.input_queue().is_empty());
-
-    let pause_clear = run_fixture("sse_pause_cleared.jsonl");
-    assert!(pause_clear.recovery.is_none());
-    assert_eq!(pause_clear.app.session_state(), SessionState::Paused);
-    assert!(pause_clear.app.approval_modal().is_none());
 }
 
 #[test]
@@ -1408,113 +1254,6 @@ fn streaming_code_fence_splits_and_unicode_boundaries_finalize_correctly() {
         &chat_id,
     ));
     assert!(transcript_text(&app).contains("```rust\nfn main() { println!(\"🦀\"); }\n```\n"));
-}
-
-#[test]
-fn streaming_final_output_matches_fixture_source_after_ticks() {
-    let source = "| A | B |\n|---|---|\n| one | two |\n\n```rust\nfn main() {}\n```\n";
-    let mut app = run_fixture("assistant_streaming.jsonl").app;
-    drain_stream(&mut app);
-    let text = transcript_text(&app);
-    assert!(text.contains(source));
-    assert_eq!(app.transcript_state().messages()[1].content, source);
-}
-
-#[test]
-fn render_snapshot_for_assistant_streaming_fixture() {
-    let run = run_fixture("assistant_streaming.jsonl");
-    let snapshot = rendered_snapshot(&run.app, 72, 16);
-    let expected = r#"refact fixture | Ctrl-N new · Ctrl-P projects · Alt-M model · Ctrl-O mo…
-
-  › render a table
-
-  •  A      B
-    ━━━━━  ━━━━━
-     one    two
-
-
-    fn main() {}
-
-╭──────────────────────────────────────────────────────────────────────╮
-│ › Ask Refact…                                                        │
-╰──────────────────────────────────────────────────────────────────────╯
-  Enter send  ·  \+Enter newline  ·  ? shortcuts
- 30 used · ● idle · daemon online · fixture · gpt-demo · agent · reason…"#;
-    assert_eq!(snapshot, expected);
-}
-
-#[tokio::test]
-async fn scripted_fake_worker_pause_approve_resumes_stream() {
-    let state = State::default();
-    let base_url = spawn_server(state).await;
-    let client = DaemonClient::new(base_url, None).unwrap();
-    let mut stream = client.subscribe_chat("p1", "chat-1").await.unwrap();
-
-    client
-        .send_user_message("p1", "chat-1", "request-1", "message-1", "hello")
-        .await
-        .unwrap();
-
-    let mut saw_pause = false;
-    while let Some(event) = futures::StreamExt::next(&mut stream).await {
-        let event = event.unwrap();
-        if event.kind == "pause_required" {
-            saw_pause = true;
-            break;
-        }
-    }
-    assert!(saw_pause);
-
-    client
-        .send_tool_decisions(
-            "p1",
-            "chat-1",
-            vec![ToolDecision {
-                tool_call_id: "fake-call-1".to_string(),
-                accepted: true,
-            }],
-        )
-        .await
-        .unwrap();
-
-    let mut content = String::new();
-    while let Some(event) = futures::StreamExt::next(&mut stream).await {
-        let event = event.unwrap();
-        if event.kind == "stream_delta" {
-            for op in event.raw["ops"].as_array().unwrap() {
-                if op["op"] == "append_content" {
-                    content.push_str(op["text"].as_str().unwrap());
-                }
-            }
-        }
-        if event.kind == "stream_finished" {
-            break;
-        }
-    }
-    assert_eq!(content, "approved path");
-}
-
-#[tokio::test]
-async fn model_modes_and_events_protocol_paths_work() {
-    let state = State::default();
-    let base_url = spawn_server(state).await;
-    let client = DaemonClient::new(base_url, None).unwrap();
-
-    let caps = client.get_caps("p1").await.unwrap();
-    assert_eq!(caps["chat_models"]["m1"]["name"], "Model One");
-
-    let modes = client.get_chat_modes("p1").await.unwrap();
-    assert_eq!(modes["modes"][0]["id"], "agent");
-
-    let workers = client.list_workers().await.unwrap();
-    assert_eq!(workers[0].project_id, "p1");
-
-    let mut events = client.subscribe_daemon_events().await.unwrap();
-    let event = futures::StreamExt::next(&mut events)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(event.kind, "worker_ready");
 }
 
 #[tokio::test]

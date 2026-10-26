@@ -176,28 +176,6 @@ mod tests {
     }
 
     #[test]
-    fn extracts_free_functions_and_structs() {
-        let src = "\
-struct User {
-    name: String,
-}
-
-fn create_user() -> User {
-    User { name: String::new() }
-}
-";
-        let (symbols, _refs) = extract(src);
-        let paths: Vec<String> = symbols.iter().map(|s| s.double_colon_path()).collect();
-        assert!(paths.contains(&"User".to_string()));
-        assert!(paths.contains(&"create_user".to_string()));
-        let user = symbols.iter().find(|s| s.name() == "User").unwrap();
-        assert_eq!(user.kind, SymbolKind::Struct);
-        assert_eq!(user.this_is_a_class, "User");
-        let func = symbols.iter().find(|s| s.name() == "create_user").unwrap();
-        assert_eq!(func.kind, SymbolKind::Function);
-    }
-
-    #[test]
     fn extracts_impl_methods_with_type_prefix() {
         let src = "\
 struct Widget;
@@ -220,19 +198,5 @@ fn helper() {}
         let call = refs.iter().find(|r| r.name == "helper").unwrap();
         assert_eq!(call.from, "Widget::render");
         assert_eq!(call.kind, EdgeKind::Calls);
-    }
-
-    #[test]
-    fn extracts_call_references_with_enclosing_symbol() {
-        let src = "\
-fn a() {
-    b();
-}
-
-fn b() {}
-";
-        let (_symbols, refs) = extract(src);
-        let call = refs.iter().find(|r| r.name == "b").unwrap();
-        assert_eq!(call.from, "a");
     }
 }

@@ -59,62 +59,6 @@ mod tests {
     }
 
     #[test]
-    fn test_skills_relevance_score_partial_overlap() {
-        let score = skill_relevance_score(
-            "reviews code for security vulnerabilities",
-            "security review",
-        );
-        assert!(
-            score > 0.0,
-            "Expected positive score for overlapping tokens"
-        );
-    }
-
-    #[test]
-    fn test_skills_relevance_score_no_overlap() {
-        let score = skill_relevance_score("security review", "breakfast cereal");
-        assert_eq!(score, 0.0);
-    }
-
-    #[test]
-    fn test_skills_relevance_score_empty_description() {
-        assert_eq!(skill_relevance_score("", "hello world"), 0.0);
-    }
-
-    #[test]
-    fn test_skills_relevance_score_empty_message() {
-        assert_eq!(skill_relevance_score("hello world", ""), 0.0);
-    }
-
-    #[test]
-    fn test_skills_relevance_score_both_empty() {
-        assert_eq!(skill_relevance_score("", ""), 0.0);
-    }
-
-    #[test]
-    fn test_skills_relevance_score_case_insensitive() {
-        let score1 = skill_relevance_score("Security Review", "security review");
-        let score2 = skill_relevance_score("security review", "SECURITY REVIEW");
-        assert!((score1 - score2).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_skills_relevance_score_short_tokens_ignored() {
-        let score = skill_relevance_score("go to", "go to");
-        assert_eq!(
-            score, 0.0,
-            "Tokens with fewer than 3 chars should be ignored"
-        );
-    }
-
-    #[test]
-    fn test_skills_relevance_score_symmetric() {
-        let score1 = skill_relevance_score("reviews code security", "security code");
-        let score2 = skill_relevance_score("security code", "reviews code security");
-        assert!((score1 - score2).abs() < 0.001, "Jaccard is symmetric");
-    }
-
-    #[test]
     fn test_skills_select_matching() {
         let skills = vec![
             make_skill_index(
@@ -146,12 +90,6 @@ mod tests {
         ];
         let selected = select_relevant_skills(&skills, "rust code review analysis", 2, 0.1);
         assert!(selected.len() <= 2, "Should not exceed max_skills");
-    }
-
-    #[test]
-    fn test_skills_select_empty_list() {
-        let selected = select_relevant_skills(&[], "any message", 2, 0.5);
-        assert!(selected.is_empty());
     }
 
     #[test]

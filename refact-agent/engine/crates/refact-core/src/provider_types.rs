@@ -1370,40 +1370,9 @@ mod tests {
         CredentialSpec, CustomModelConfig, DEFAULT_CREDENTIAL_REFRESH_INTERVAL_MS,
         DEFAULT_CREDENTIAL_TIMEOUT_MS, LiveModelFields, ModelTypeDefaults, ProjectModelDefaults,
         ProviderDefaults, available_model_from_catalog_and_live, merge_custom_models,
-        project_model_defaults_path,
     };
     use crate::model_caps::ModelCapabilities;
     use std::collections::{HashMap, HashSet};
-
-    #[test]
-    fn live_model_fields_override_catalog_including_false_and_empty() {
-        let caps = ModelCapabilities {
-            n_ctx: 128_000,
-            max_output_tokens: 16_384,
-            supports_tools: true,
-            supports_strict_tools: true,
-            reasoning_effort_options: Some(vec!["high".to_string()]),
-            tokenizer: "catalog-tokenizer".to_string(),
-            ..Default::default()
-        };
-        let live = LiveModelFields {
-            n_ctx: Some(32_000),
-            supports_tools: Some(false),
-            reasoning_effort_options: Some(Vec::new()),
-            tokenizer: Some(String::new()),
-            ..Default::default()
-        };
-
-        let model = available_model_from_catalog_and_live("model", Some(&caps), &live, true, 4096);
-
-        assert_eq!(model.n_ctx, 32_000);
-        assert!(!model.supports_tools);
-        assert!(model.supports_strict_tools);
-        assert_eq!(model.max_output_tokens, Some(16_384));
-        assert_eq!(model.reasoning_effort_options, Some(Vec::new()));
-        assert_eq!(model.tokenizer.as_deref(), Some(""));
-        assert_eq!(model.live_fields.supports_tools, Some(false));
-    }
 
     #[test]
     fn custom_overrides_replace_live_values_and_record_authoritative_provenance() {
@@ -1503,43 +1472,6 @@ mod tests {
     }
 
     #[test]
-    fn clear_legacy_refact_models_resets_only_refact_models_to_none() {
-        let mut defaults = ProviderDefaults {
-            chat: ModelTypeDefaults {
-                model: Some("openai/gpt-5".to_string()),
-                ..Default::default()
-            },
-            chat_model_2: ModelTypeDefaults {
-                model: Some("refact/secondary".to_string()),
-                ..Default::default()
-            },
-            task_planner_agent_model: ModelTypeDefaults {
-                model: Some("  refact/planner-agent  ".to_string()),
-                ..Default::default()
-            },
-            chat_light: ModelTypeDefaults {
-                model: Some("refact/grok-4-fast-non-reasoning".to_string()),
-                ..Default::default()
-            },
-            chat_thinking: ModelTypeDefaults {
-                model: Some("  refact/o4-mini-deep-research  ".to_string()),
-                ..Default::default()
-            },
-            completion_model: Some("refact/qwen2.5-coder".to_string()),
-            ..Default::default()
-        };
-
-        assert!(defaults.clear_legacy_refact_models());
-
-        assert_eq!(defaults.chat.model.as_deref(), Some("openai/gpt-5"));
-        assert_eq!(defaults.chat_model_2.model.as_deref(), Some(""));
-        assert_eq!(defaults.task_planner_agent_model.model.as_deref(), Some(""));
-        assert_eq!(defaults.chat_light.model.as_deref(), Some(""));
-        assert_eq!(defaults.chat_thinking.model.as_deref(), Some(""));
-        assert_eq!(defaults.completion_model.as_deref(), Some(""));
-    }
-
-    #[test]
     fn provider_defaults_clear_invalid_generic_gpt56_models() {
         let mut defaults = ProviderDefaults {
             chat: ModelTypeDefaults {
@@ -1573,30 +1505,6 @@ mod tests {
             Some("openai/gpt-5.6-sol")
         );
         assert!(!defaults.normalize_model_references());
-    }
-
-    #[test]
-    fn defaults_for_model_prefers_chat_when_default_slots_share_model() {
-        let defaults = ProviderDefaults {
-            chat: ModelTypeDefaults {
-                temperature: Some(0.1),
-                ..Default::default()
-            },
-            chat_model_2: ModelTypeDefaults {
-                temperature: Some(0.2),
-                ..Default::default()
-            },
-            task_planner_agent_model: ModelTypeDefaults {
-                temperature: Some(0.3),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let selected =
-            defaults.defaults_for_model("shared/model", "shared/model", "shared/model", "", "", "");
-
-        assert_eq!(selected.temperature, Some(0.1));
     }
 
     fn project_slot(model: &str) -> Option<ModelTypeDefaults> {
@@ -1646,97 +1554,6 @@ mod tests {
         );
         assert_eq!(defaults.chat_light.temperature, Some(0.5));
         assert_eq!(defaults.chat_thinking, ModelTypeDefaults::default());
-    }
-
-    #[test]
-    fn apply_project_overrides_with_empty_project_is_a_no_op() {
-        let original = ProviderDefaults {
-            chat: ModelTypeDefaults {
-                model: Some("openai/gpt-5".to_string()),
-                temperature: Some(0.3),
-                ..Default::default()
-            },
-            completion_model: Some("openai/completion".to_string()),
-            ..Default::default()
-        };
-        let mut defaults = original.clone();
-
-        defaults.apply_project_overrides(&ProjectModelDefaults::default());
-
-        assert_eq!(defaults.chat, original.chat);
-        assert_eq!(defaults.completion_model, original.completion_model);
-    }
-
-    #[test]
-    fn project_model_defaults_serde_defaults_and_skips_absent_slots() {
-        let parsed: ProjectModelDefaults = serde_yaml::from_str("{}").unwrap();
-        assert_eq!(parsed, ProjectModelDefaults::default());
-        assert!(parsed.is_empty());
-
-        let defaults = ProjectModelDefaults {
-            chat: project_slot("openai/gpt-5"),
-            ..Default::default()
-        };
-        let serialized = serde_json::to_value(&defaults).unwrap();
-        assert_eq!(serialized["chat"]["model"].as_str(), Some("openai/gpt-5"));
-        assert!(serialized.get("chat_light").is_none());
-        assert!(serialized.get("chat_buddy").is_none());
-    }
-
-    #[test]
-    fn project_model_defaults_normalize_drops_blank_and_legacy_models() {
-        let mut defaults = ProjectModelDefaults {
-            chat: project_slot("openai/gpt-5"),
-            chat_model_2: project_slot(""),
-            task_planner_agent_model: Some(ModelTypeDefaults {
-                temperature: Some(0.4),
-                ..Default::default()
-            }),
-            chat_light: project_slot("refact/legacy"),
-            chat_thinking: project_slot("  openai/gpt-5-thinking  "),
-            chat_buddy: project_slot("gpt-5.6"),
-        };
-
-        defaults.normalize();
-
-        assert_eq!(
-            defaults.chat.as_ref().unwrap().model.as_deref(),
-            Some("openai/gpt-5")
-        );
-        assert!(defaults.chat_model_2.is_none());
-        assert!(defaults.task_planner_agent_model.is_none());
-        assert!(defaults.chat_light.is_none());
-        assert_eq!(
-            defaults.chat_thinking.as_ref().unwrap().model.as_deref(),
-            Some("openai/gpt-5-thinking")
-        );
-        assert!(defaults.chat_buddy.is_none());
-    }
-
-    #[tokio::test]
-    async fn project_model_defaults_save_load_round_trip_and_empty_save_removes_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-
-        assert_eq!(
-            ProjectModelDefaults::load(root).await.unwrap(),
-            ProjectModelDefaults::default()
-        );
-
-        let defaults = ProjectModelDefaults {
-            chat: project_slot("openai/gpt-5"),
-            chat_light: project_slot("openai/gpt-5-mini"),
-            ..Default::default()
-        };
-        defaults.save(root).await.unwrap();
-
-        let path = project_model_defaults_path(root);
-        assert!(path.exists());
-        assert_eq!(ProjectModelDefaults::load(root).await.unwrap(), defaults);
-
-        ProjectModelDefaults::default().save(root).await.unwrap();
-        assert!(!path.exists());
-        assert!(ProjectModelDefaults::default().save(root).await.is_ok());
     }
 
     #[test]

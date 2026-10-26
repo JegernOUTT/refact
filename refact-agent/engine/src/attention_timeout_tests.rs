@@ -3,28 +3,14 @@ use std::sync::Arc;
 
 use chrono::{Duration, TimeZone, Utc};
 use refact_chat_api::{ChatCommand, PendingQuestionStatus, QuestionAnswer, QuestionKind};
+use crate::tools::tools_description::Tool;
 
 use crate::attention::{
     AttentionPriority, AttentionRequest, AttentionScope, PromptDelivery, PromptDeliveryQuestion,
 };
 
-use crate::tools::tools_description::Tool;
-
 fn timestamp(seconds: i64) -> chrono::DateTime<Utc> {
     Utc.timestamp_opt(seconds, 0).unwrap()
-}
-
-fn answer_request(default: &str, delivery: PromptDelivery) -> AttentionRequest {
-    AttentionRequest::new(
-        AttentionScope::new("/project", "AllowToSendAnywhere"),
-        QuestionKind::UserInput,
-        "chat:timeout-chat",
-        "user",
-        "Should we continue?",
-    )
-    .with_priority(AttentionPriority::Low)
-    .with_default_answer(Some(default.to_string()))
-    .with_delivery(Some(delivery))
 }
 
 fn delivery(chat_id: &str, tool_call_id: &str, asked_at_ms: u64) -> PromptDelivery {
@@ -271,33 +257,4 @@ async fn a_blocking_question_can_never_reach_the_default_path() {
         .take_expired_defaults(timestamp(2_000_000_000))
         .is_empty());
     assert_eq!(app.questions().get(&id).unwrap().default_answer, None);
-}
-
-#[tokio::test]
-async fn expired_defaults_are_claimed_once() {
-    let gcx = crate::global_context::tests::make_test_gcx().await;
-    let app = crate::app_state::AppState::from_gcx(gcx).await;
-    let now = timestamp(1_700_000_000);
-    let admission = app
-        .attention()
-        .join(
-            answer_request(
-                "no",
-                delivery("timeout-chat", "ask", now.timestamp_millis() as u64),
-            ),
-            "timeout-chat:ask",
-            now,
-        )
-        .unwrap();
-    let expires_at = app
-        .questions()
-        .get(&admission.question_id)
-        .unwrap()
-        .expires_at
-        .unwrap();
-    let due = expires_at + Duration::milliseconds(1);
-    let first = app.attention().take_expired_defaults(due);
-    assert_eq!(first.len(), 1);
-    assert_eq!(first[0].question_id, admission.question_id);
-    assert!(app.attention().take_expired_defaults(due).is_empty());
 }

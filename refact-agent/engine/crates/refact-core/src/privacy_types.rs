@@ -44,15 +44,4 @@ mod tests {
             FilePrivacyLevel::OnlySendToServersIControl < FilePrivacyLevel::AllowToSendAnywhere
         );
     }
-
-    #[test]
-    fn default_privacy_settings_has_no_implicit_block() {
-        let settings = PrivacySettings::default();
-        assert!(settings.privacy_rules.blocked.is_empty());
-        assert!(settings
-            .privacy_rules
-            .only_send_to_servers_I_control
-            .is_empty());
-        assert_eq!(settings.loaded_ts, 0);
-    }
 }

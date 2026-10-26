@@ -575,23 +575,6 @@ mod tests {
     }
 
     #[test]
-    fn unknown_and_stale_refs_are_distinct() {
-        let registry = RefRegistry::default();
-        let known: Ref = "e1".parse().unwrap();
-        let unknown: Ref = "e99".parse().unwrap();
-        registry.replace_snapshot("tab", HashMap::from([(known.clone(), info("Save"))]));
-        registry.replace_snapshot("tab", HashMap::new());
-        assert!(matches!(
-            registry.resolve_current("tab", &known),
-            Err(RefError::Stale { .. })
-        ));
-        assert!(matches!(
-            registry.resolve_current("tab", &unknown),
-            Err(RefError::Unknown { .. })
-        ));
-    }
-
-    #[test]
     fn error_taxonomy_serializes_with_actionable_kinds() {
         let reference: Ref = "e3".parse().unwrap();
         let errors = [

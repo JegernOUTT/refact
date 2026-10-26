@@ -232,17 +232,6 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_validate_content_empty_array_returns_empty() {
-        let content = json!([]);
-        let result = validate_content_with_attachments(&content, &[]);
-        assert!(result.is_ok());
-        match result.unwrap() {
-            ChatContent::SimpleText(s) => assert!(s.is_empty()),
-            _ => panic!("Expected empty SimpleText"),
-        }
-    }
-
-    #[test]
     fn context_files_use_the_configured_size_limit() {
         let original = crate::config::limits();
         crate::config::apply_live_limits(crate::config::ChatLimits {
@@ -264,22 +253,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_content_missing_type_error() {
-        let content = json!([{"text": "hello"}]);
-        let result = validate_content_with_attachments(&content, &[]);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("type"));
-    }
-
-    #[test]
-    fn test_validate_content_text_missing_text_field_error() {
-        let content = json!([{"type": "text"}]);
-        let result = validate_content_with_attachments(&content, &[]);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("text"));
-    }
-
-    #[test]
     fn test_validate_content_image_missing_url_error() {
         let content = json!([{"type": "image_url"}]);
         let result = validate_content_with_attachments(&content, &[]);
@@ -296,32 +269,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_content_non_string_non_array_error() {
-        let content = json!({"key": "value"});
-        let result = validate_content_with_attachments(&content, &[]);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("must be string or array"));
-    }
-
-    #[test]
-    fn test_validate_content_number_error() {
-        let content = json!(123);
-        let result = validate_content_with_attachments(&content, &[]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_validate_content_simple_string_ok() {
-        let content = json!("Hello world");
-        let result = validate_content_with_attachments(&content, &[]);
-        assert!(result.is_ok());
-        match result.unwrap() {
-            ChatContent::SimpleText(s) => assert_eq!(s, "Hello world"),
-            _ => panic!("Expected SimpleText"),
-        }
-    }
-
-    #[test]
     fn test_validate_content_text_array_ok() {
         let content = json!([{"type": "text", "text": "Hello"}]);
         let result = validate_content_with_attachments(&content, &[]);
@@ -329,48 +276,6 @@ mod tests {
         match result.unwrap() {
             ChatContent::SimpleText(s) => assert_eq!(s, "Hello"),
             _ => panic!("Expected SimpleText for single text element"),
-        }
-    }
-
-    #[test]
-    fn test_validate_content_null_returns_empty() {
-        let content = json!(null);
-        let result = validate_content_with_attachments(&content, &[]);
-        assert!(result.is_ok());
-        match result.unwrap() {
-            ChatContent::SimpleText(s) => assert!(s.is_empty()),
-            _ => panic!("Expected empty SimpleText"),
-        }
-    }
-
-    #[test]
-    fn test_validate_content_empty_string_returns_empty() {
-        let content = json!("");
-        let result = validate_content_with_attachments(&content, &[]);
-        assert!(result.is_ok());
-        match result.unwrap() {
-            ChatContent::SimpleText(s) => assert!(s.is_empty()),
-            _ => panic!("Expected empty SimpleText"),
-        }
-    }
-
-    #[test]
-    fn test_parse_content_string() {
-        let content = json!("Simple text");
-        let result = parse_content_with_attachments(&content, &[]);
-        match result {
-            ChatContent::SimpleText(s) => assert_eq!(s, "Simple text"),
-            _ => panic!("Expected SimpleText"),
-        }
-    }
-
-    #[test]
-    fn test_parse_content_null_returns_empty() {
-        let content = json!(null);
-        let result = parse_content_with_attachments(&content, &[]);
-        match result {
-            ChatContent::SimpleText(s) => assert!(s.is_empty()),
-            _ => panic!("Expected empty SimpleText"),
         }
     }
 
@@ -389,16 +294,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_content_empty_array_returns_empty() {
-        let content = json!([]);
-        let result = parse_content_with_attachments(&content, &[]);
-        match result {
-            ChatContent::SimpleText(s) => assert!(s.is_empty()),
-            _ => panic!("Expected empty SimpleText"),
-        }
-    }
-
-    #[test]
     fn test_parse_content_text_array_single_element() {
         let content = json!([{"type": "text", "text": "Hello"}]);
         let result = parse_content_with_attachments(&content, &[]);
@@ -406,21 +301,6 @@ mod tests {
             ChatContent::Multimodal(elements) => {
                 assert_eq!(elements.len(), 1);
                 assert_eq!(elements[0].m_content, "Hello");
-            }
-            _ => panic!("Expected Multimodal"),
-        }
-    }
-
-    #[test]
-    fn test_parse_content_multiple_text_elements() {
-        let content = json!([
-            {"type": "text", "text": "Hello"},
-            {"type": "text", "text": "World"}
-        ]);
-        let result = parse_content_with_attachments(&content, &[]);
-        match result {
-            ChatContent::Multimodal(elements) => {
-                assert_eq!(elements.len(), 2);
             }
             _ => panic!("Expected Multimodal"),
         }

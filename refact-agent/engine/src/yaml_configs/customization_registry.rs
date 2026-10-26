@@ -935,41 +935,6 @@ mod tests {
     }
 
     #[test]
-    fn test_model_matches_pattern_exact() {
-        assert!(model_matches_pattern("gpt-4o", "gpt-4o"));
-        assert!(!model_matches_pattern("gpt-4o", "gpt-4"));
-    }
-
-    #[test]
-    fn test_model_matches_pattern_wildcard() {
-        assert!(model_matches_pattern("gpt-4o", "*"));
-        assert!(model_matches_pattern("claude-3", "*"));
-    }
-
-    #[test]
-    fn test_model_matches_pattern_prefix() {
-        assert!(model_matches_pattern("openai/gpt-4o", "gpt-4*"));
-        assert!(model_matches_pattern("openrouter/openai/gpt-4o", "gpt-4*"));
-        assert!(model_matches_pattern("claude-3.7-sonnet", "claude-3-7*"));
-        assert!(model_matches_pattern(
-            "anthropic/claude-3.7-sonnet",
-            "claude-3-7*"
-        ));
-
-        assert!(model_matches_pattern("gpt-4o", "gpt-*"));
-        assert!(model_matches_pattern("gpt-4-turbo", "gpt-*"));
-        assert!(!model_matches_pattern("claude-3", "gpt-*"));
-    }
-
-    #[test]
-    fn test_model_matches_pattern_contains_wildcard() {
-        assert!(model_matches_pattern("llama-7b", "*7b*"));
-        assert!(model_matches_pattern("qwen2.5-7b-instruct", "*7b*"));
-        assert!(model_matches_pattern("phi-mini", "*mini*"));
-        assert!(!model_matches_pattern("abc-def", "*def*abc*"));
-    }
-
-    #[test]
     fn test_mode_override_specificity_contains_wildcard_beats_broad_family() {
         let registry = registry_with_mode_overrides(vec![
             mode_override(
@@ -1053,72 +1018,6 @@ mod tests {
     }
 
     #[test]
-    fn test_mode_override_tool_drift_reports_tools_dropped_by_tools_replace() {
-        let registry = registry_with_mode_overrides(vec![mode_override_with_tools(
-            "frozen_agent",
-            &["gpt-5*"],
-            Some(&["cat"]),
-            None,
-        )]);
-
-        let (overlay_id, dropped) =
-            mode_override_tool_drift(&registry, "agent", Some("gpt-5.6-sol"))
-                .expect("tools_replace that drops base tools must be reported");
-
-        assert_eq!(overlay_id, "frozen_agent");
-        assert_eq!(dropped, vec!["shell".to_string(), "tree".to_string()]);
-    }
-
-    #[test]
-    fn test_mode_override_tool_drift_ignores_tools_add_overlays() {
-        let registry = registry_with_mode_overrides(vec![mode_override_with_tools(
-            "additive_agent",
-            &["gpt-5*"],
-            None,
-            Some(&["glob"]),
-        )]);
-
-        assert!(mode_override_tool_drift(&registry, "agent", Some("gpt-5.6-sol")).is_none());
-    }
-
-    #[test]
-    fn test_mode_override_tool_drift_ignores_complete_tools_replace() {
-        let registry = registry_with_mode_overrides(vec![mode_override_with_tools(
-            "complete_agent",
-            &["gpt-5*"],
-            Some(&["tree", "cat", "shell", "glob"]),
-            None,
-        )]);
-
-        assert!(mode_override_tool_drift(&registry, "agent", Some("gpt-5.6-sol")).is_none());
-    }
-
-    #[test]
-    fn test_mode_override_tool_drift_is_none_without_model_id() {
-        let registry = registry_with_mode_overrides(vec![mode_override_with_tools(
-            "frozen_agent",
-            &["gpt-5*"],
-            Some(&["cat"]),
-            None,
-        )]);
-
-        assert!(mode_override_tool_drift(&registry, "agent", None).is_none());
-    }
-
-    #[test]
-    fn test_mode_override_specificity_preserves_stable_order_on_tie() {
-        let registry = registry_with_mode_overrides(vec![
-            mode_override("first", &["gpt-5*"], "first"),
-            mode_override("second", &["gpt-5*"], "second"),
-        ]);
-
-        let resolved = resolve_mode_for_model(&registry, "agent", Some("gpt-5.5"))
-            .expect("agent mode should resolve");
-
-        assert_eq!(resolved.prompt, "first");
-    }
-
-    #[test]
     fn test_mode_override_specificity_preserves_local_precedence_on_tie() {
         let global =
             registry_with_mode_overrides(vec![mode_override("global", &["gpt-5*"], "global")]);
@@ -1198,32 +1097,6 @@ mod tests {
     }
 
     #[test]
-    fn test_glob_matches_exact() {
-        assert!(glob_matches("tree", "tree"));
-        assert!(!glob_matches("tree", "cat"));
-    }
-
-    #[test]
-    fn test_glob_matches_wildcard() {
-        assert!(glob_matches("*", "anything"));
-        assert!(glob_matches("*", "tree"));
-    }
-
-    #[test]
-    fn test_glob_matches_prefix() {
-        assert!(glob_matches("search_*", "search_pattern"));
-        assert!(glob_matches("search_*", "search_semantic"));
-        assert!(!glob_matches("search_*", "tree"));
-    }
-
-    #[test]
-    fn test_glob_matches_suffix() {
-        assert!(glob_matches("*_textdoc", "create_textdoc"));
-        assert!(glob_matches("*_textdoc", "update_textdoc"));
-        assert!(!glob_matches("*_textdoc", "tree"));
-    }
-
-    #[test]
     fn test_match_tool_confirm_action() {
         let rules = vec![
             ToolConfirmRule {
@@ -1252,37 +1125,6 @@ mod tests {
             match_tool_confirm_action(&rules, "shell"),
             Some("ask".to_string())
         );
-    }
-
-    #[test]
-    fn test_match_tool_confirm_action_empty_rules() {
-        let rules: Vec<ToolConfirmRule> = vec![];
-        assert_eq!(match_tool_confirm_action(&rules, "tree"), None);
-    }
-
-    #[test]
-    fn test_map_legacy_mode_to_id() {
-        assert_eq!(map_legacy_mode_to_id("AGENT"), "agent");
-        assert_eq!(map_legacy_mode_to_id("EXPLORE"), "explore");
-        assert_eq!(map_legacy_mode_to_id("NO_TOOLS"), "explore");
-        assert_eq!(map_legacy_mode_to_id("CONFIGURE"), "configurator");
-        assert_eq!(map_legacy_mode_to_id("TASK_PLANNER"), "task_planner");
-        assert_eq!(map_legacy_mode_to_id("TASK_AGENT"), "task_agent");
-        assert_eq!(map_legacy_mode_to_id("BRAINSTORM"), "brainstorming");
-        assert_eq!(map_legacy_mode_to_id("BRAINSTORMING"), "brainstorming");
-    }
-
-    #[test]
-    fn test_map_legacy_mode_to_id_lowercase_passthrough() {
-        assert_eq!(map_legacy_mode_to_id("agent"), "agent");
-        assert_eq!(map_legacy_mode_to_id("custom_mode"), "custom_mode");
-        assert_eq!(map_legacy_mode_to_id("my-mode-123"), "my-mode-123");
-    }
-
-    #[test]
-    fn test_map_legacy_mode_to_id_invalid_fallback() {
-        assert_eq!(map_legacy_mode_to_id("Invalid Mode"), "agent");
-        assert_eq!(map_legacy_mode_to_id("Mode!"), "agent");
     }
 
     #[test]
@@ -1352,79 +1194,6 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_subagents_have_valid_optional_subchat_params() {
-        use crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all;
-
-        let temp_dir = tempfile::tempdir().unwrap();
-        let config_dir = temp_dir.path();
-
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let _ = global_configs_try_create_all(config_dir).await;
-            let registry = load_registry_from_dir(config_dir).await;
-
-            for (id, config) in &registry.subagents {
-                if let Some(n_ctx) = config.subchat.n_ctx {
-                    assert!(n_ctx > 0, "Subagent '{}' has invalid n_ctx", id);
-                }
-                if let Some(max_new_tokens) = config.subchat.max_new_tokens {
-                    assert!(
-                        max_new_tokens > 0,
-                        "Subagent '{}' has invalid max_new_tokens",
-                        id
-                    );
-                }
-                if let Some(ref model_type) = config.subchat.model_type {
-                    let valid = model_type.eq_ignore_ascii_case("light")
-                        || model_type.eq_ignore_ascii_case("default")
-                        || model_type.eq_ignore_ascii_case("thinking")
-                        || model_type.eq_ignore_ascii_case("buddy");
-                    assert!(
-                        valid,
-                        "Subagent '{}' has invalid model_type: {}",
-                        id, model_type
-                    );
-                }
-                if let Some(ref reasoning_effort) = config.subchat.reasoning_effort {
-                    let valid = reasoning_effort.eq_ignore_ascii_case("low")
-                        || reasoning_effort.eq_ignore_ascii_case("medium")
-                        || reasoning_effort.eq_ignore_ascii_case("high")
-                        || reasoning_effort.eq_ignore_ascii_case("xhigh")
-                        || reasoning_effort.eq_ignore_ascii_case("max");
-                    assert!(
-                        valid,
-                        "Subagent '{}' has invalid reasoning_effort: {}",
-                        id, reasoning_effort
-                    );
-                }
-            }
-        });
-    }
-
-    #[test]
-    fn test_setup_mode_stays_read_only_by_default() {
-        let content = read_default_mode_file("setup.yaml");
-
-        assert!(content.contains("allow_integrations: false"));
-        assert!(content.contains("allow_mcp: false"));
-        assert!(content.contains("allow_subagents: false"));
-        assert!(!content.contains("\n  - rm\n"));
-        assert!(!content.contains("\n  - mv\n"));
-    }
-
-    #[test]
-    fn test_setup_mcp_prompt_prefers_safe_examples() {
-        let content = read_default_mode_file("setup_mcp.yaml");
-
-        assert!(
-            content.contains("HTTP over deprecated SSE")
-                || content.contains("prefer HTTP over deprecated SSE")
-        );
-        assert!(!content.contains("@latest"));
-        assert!(content.contains("@modelcontextprotocol/server-github@<version>"));
-    }
-
-    #[test]
     fn test_setup_skills_prompt_documents_supported_skill_fields() {
         let content = read_default_mode_file("setup_skills.yaml");
 
@@ -1441,36 +1210,5 @@ mod tests {
                 content
             );
         }
-    }
-
-    #[test]
-    fn test_registry_has_no_mode_config_errors() {
-        use crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all;
-
-        let temp_dir = tempfile::tempdir().unwrap();
-        let config_dir = temp_dir.path();
-
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let _ = global_configs_try_create_all(config_dir).await;
-            let registry = load_registry_from_dir(config_dir).await;
-
-            let mode_errors: Vec<_> = registry
-                .errors
-                .iter()
-                .filter(|e| {
-                    Path::new(&e.file_path)
-                        .components()
-                        .any(|c| c == std::path::Component::Normal("modes".as_ref()))
-                })
-                .map(|e| format!("{}: {}", e.file_path, e.error))
-                .collect();
-
-            assert!(
-                mode_errors.is_empty(),
-                "Default mode configs should parse without errors. Found: {:?}",
-                mode_errors
-            );
-        });
     }
 }

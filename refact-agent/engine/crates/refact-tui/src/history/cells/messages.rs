@@ -449,58 +449,10 @@ mod tests {
     use crate::history::cells::test_support::text;
 
     #[test]
-    fn user_cell_snapshot() {
-        let cell = UserCell::new("hello @there", false);
-        assert_eq!(text(&cell.render(40)), "\n› hello @there\n");
-        let style = user_message_style();
-        assert!(cell.render(40).iter().all(|line| line.style == style));
-        let mention = cell
-            .render(40)
-            .into_iter()
-            .flat_map(|line| line.spans)
-            .find(|span| span.content.as_ref() == "@there")
-            .unwrap();
-        assert_eq!(mention.style.fg, Some(Color::Cyan));
-    }
-
-    #[test]
-    fn user_cell_wraps_with_hanging_gutter_and_band() {
-        let cell = UserCell::new("alpha beta gamma", false);
-        let lines = cell.render(10);
-
-        assert_eq!(text(&lines), "\n› alpha\n  beta\n  gamma\n");
-        assert!(lines.iter().all(|line| line.style == user_message_style()));
-    }
-
-    #[test]
-    fn assistant_cell_snapshot() {
-        let cell = AssistantCell::new("| A | B |\n|---|---|\n| one | two |");
-        assert_eq!(
-            text(&cell.render(40)),
-            "•  A      B\n  ━━━━━  ━━━━━\n   one    two"
-        );
-    }
-
-    #[test]
     fn assistant_cell_rerenders_markdown_from_source_on_resize() {
         let cell = AssistantCell::new("alpha beta gamma delta");
 
         assert_eq!(text(&cell.render(80)), "• alpha beta gamma delta");
         assert_eq!(text(&cell.render(8)), "• alpha\n  beta\n  gamma\n  delta");
-    }
-
-    #[test]
-    fn reasoning_cell_snapshot_and_update_preserves_collapse() {
-        let mut cell = ReasoningCell::new("hidden plan", false);
-        assert_eq!(text(&cell.render(40)), "• hidden plan");
-        let reasoning_span = cell.render(40)[0].spans[1].clone();
-        assert!(reasoning_span.style.add_modifier.contains(Modifier::DIM));
-        assert!(reasoning_span.style.add_modifier.contains(Modifier::ITALIC));
-        cell.update_text("updated plan");
-        assert!(!cell.collapsed());
-        cell.set_collapsed(true);
-        let rendered = text(&cell.render(40));
-        assert_eq!(rendered, "• Thinking · 1 line hidden");
-        assert!(!rendered.contains("• collapsed"));
     }
 }

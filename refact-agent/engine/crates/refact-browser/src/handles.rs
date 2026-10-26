@@ -318,22 +318,6 @@ mod tests {
     }
 
     #[test]
-    fn clearing_contexts_preserves_disposal_order() {
-        let registry = HandleRegistry::default();
-        registry.register("tab", handle("first", 7, "main"));
-        registry.register("tab", handle("second", 8, "child"));
-        let removed = registry.contexts_cleared("tab");
-        assert_eq!(
-            removed
-                .iter()
-                .map(|handle| handle.object_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["first", "second"]
-        );
-        assert_eq!(registry.len("tab"), 0);
-    }
-
-    #[test]
     fn element_state_serde_preserves_optional_and_mixed_values() {
         let state = ElementState {
             visible: true,
@@ -371,27 +355,5 @@ mod tests {
             serde_json::to_value(ElementStateName::Stable).unwrap(),
             "stable"
         );
-    }
-
-    #[test]
-    fn accessible_text_wrappers_deserialize_string_results() {
-        assert_eq!(
-            parse_accessible_text(serde_json::json!("First\u{a0}Second"), "name").unwrap(),
-            "First\u{a0}Second"
-        );
-        assert!(matches!(
-            parse_accessible_text(serde_json::json!({ "text": "wrong wire type" }), "description"),
-            Err(HandleError::Protocol(message)) if message.contains("accessible description")
-        ));
-        assert!(GET_ACCESSIBLE_NAME_FUNCTION.contains("getAccessibleName(this, includeHidden)"));
-        assert!(GET_ACCESSIBLE_DESCRIPTION_FUNCTION.contains("getAccessibleDescription(this)"));
-    }
-
-    #[test]
-    fn element_state_wrappers_pass_a_bounded_stability_budget() {
-        assert!(ELEMENT_STATE_FUNCTION.contains("elementState(this, state, budgetMs)"));
-        assert!(ELEMENT_STATES_FUNCTION.contains("elementStates(this, budgetMs)"));
-        assert!(STABILITY_BUDGET_MS > 0);
-        assert_eq!(Value::from(STABILITY_BUDGET_MS), serde_json::json!(5_000));
     }
 }

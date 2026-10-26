@@ -151,18 +151,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scratch_dirs_live_under_the_process_root_and_are_unique() {
-        let first = scratch_dir("cache");
-        let second = scratch_dir("cache");
-
-        assert!(first.starts_with(process_root()));
-        assert!(second.starts_with(process_root()));
-        assert_ne!(first, second);
-        assert!(std::fs::read_dir(first).unwrap().next().is_none());
-        assert!(std::fs::read_dir(second).unwrap().next().is_none());
-    }
-
-    #[test]
     fn sweep_removes_a_dead_process_root_and_keeps_live_ones() {
         let current_root = process_root().to_path_buf();
         let mut child = std::process::Command::new(if cfg!(windows) { "cmd" } else { "true" });

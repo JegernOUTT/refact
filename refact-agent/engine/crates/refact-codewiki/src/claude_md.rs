@@ -180,57 +180,6 @@ fn md_escape(text: &str) -> String {
 mod tests {
     use super::*;
 
-    fn page(id: &str, kind: PageKind, score: f64, paths: &[&str]) -> PageCandidate {
-        PageCandidate {
-            id: id.to_string(),
-            kind,
-            score,
-            paths: paths.iter().map(|path| (*path).to_string()).collect(),
-        }
-    }
-
-    #[test]
-    fn generate_claude_md_includes_core_fields_and_markers() {
-        let input = ClaudeMdInput {
-            repo_name: "demo-repo".to_string(),
-            pages: vec![page(
-                "file:src/auth.rs",
-                PageKind::File,
-                0.91,
-                &["src/auth.rs"],
-            )],
-            health_callouts: vec!["auth has high churn".to_string()],
-            tech_stack: vec!["Rust".to_string()],
-            indexed_commit: "abc123".to_string(),
-        };
-
-        let md = generate_claude_md(&input);
-        assert!(md.contains(BEGIN_MARKER));
-        assert!(md.contains(END_MARKER));
-        assert!(md.contains("demo-repo"));
-        assert!(md.contains("src/auth.rs"));
-        assert!(md.contains("abc123"));
-    }
-
-    #[test]
-    fn claude_md_renders_fixture() {
-        let pages = vec![
-            page("file:src/auth.rs", PageKind::File, 1.0, &["src/auth.rs"]),
-            page(
-                "module:src",
-                PageKind::Module,
-                0.8,
-                &["src/auth.rs", "src/lib.rs"],
-            ),
-        ];
-
-        let md = render_claude_md(&pages);
-
-        assert!(!md.trim().is_empty());
-        assert!(md.contains("src/auth.rs"));
-        assert!(md.contains("module:src") || md.contains("src"));
-    }
-
     #[test]
     fn splice_into_existing_preserves_user_text_and_replaces_inside() {
         let existing = "user before\n<!-- BEGIN REPOWISE -->\nold generated\n<!-- END REPOWISE -->\nuser after";

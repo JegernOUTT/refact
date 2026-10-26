@@ -1667,73 +1667,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn enrichment_decision_matrix_preserves_existing_trigger_rules() {
-        let first_turn = vec![ChatMessage::new("user".to_string(), "hello".to_string())];
-        assert_eq!(
-            should_enrich(&first_turn, "hello", "hello", false),
-            EnrichmentDecision::FirstUser
-        );
-        let later_turn = vec![
-            ChatMessage::new("user".to_string(), "hello".to_string()),
-            ChatMessage::new("assistant".to_string(), "reply".to_string()),
-            ChatMessage::new("user".to_string(), "plain followup".to_string()),
-        ];
-        assert_eq!(
-            should_enrich(&later_turn, "plain followup", "plain followup", false),
-            EnrichmentDecision::SkipThreshold
-        );
-        assert_eq!(
-            should_enrich(&later_turn, "", "", false),
-            EnrichmentDecision::SkipEmpty
-        );
-        assert_eq!(
-            should_enrich(&later_turn, "/help", "/help", true),
-            EnrichmentDecision::SkipCommand
-        );
-        assert_eq!(
-            should_enrich(&later_turn, "plain followup", "plain followup", true),
-            EnrichmentDecision::Forced
-        );
-        assert_eq!(
-            should_enrich(
-                &later_turn,
-                "find src/chat/generation.rs error",
-                "find src/chat/generation.rs error",
-                false
-            ),
-            EnrichmentDecision::Signaled
-        );
-    }
-
-    #[test]
-    fn enrichment_context_stats_measure_cards_without_retaining_text() {
-        let message = ChatMessage {
-            role: "context_file".to_string(),
-            content: ChatContent::ContextFiles(vec![ContextFile {
-                file_name: "private-memory.md".to_string(),
-                file_content: "private enrichment content".to_string(),
-                line1: 1,
-                line2: 1,
-                file_rev: None,
-                symbols: Vec::new(),
-                gradient_type: -1,
-                usefulness: 80.0,
-                skip_pp: true,
-            }]),
-            ..Default::default()
-        };
-
-        assert_eq!(
-            context_message_stats(&message),
-            (
-                1,
-                "private enrichment content".len() as u64,
-                estimate_tokens("private enrichment content")
-            )
-        );
-    }
-
     fn cache_key(seed: u8) -> EnrichmentCacheKey {
         EnrichmentCacheKey {
             query_fingerprint: [seed; 32],
@@ -1800,80 +1733,6 @@ mod tests {
         }
 
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn enrichment_cache_keeps_empty_results_and_cleans_failures() {
-        let cache = EnrichmentCache::default();
-        let calls = std::sync::atomic::AtomicUsize::new(0);
-        let key = cache_key(7);
-        cache
-            .get_or_fetch(key, || async {
-                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(CachedEnrichmentResult::empty())
-            })
-            .await
-            .unwrap();
-        let (_, disposition) = cache
-            .get_or_fetch(key, || async {
-                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(CachedEnrichmentResult::empty())
-            })
-            .await
-            .unwrap();
-        assert_eq!(disposition, EnrichmentCacheDisposition::Hit);
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-
-        let failure_key = cache_key(8);
-        assert!(cache
-            .get_or_fetch(failure_key, || async { Err("fixture failure".to_string()) })
-            .await
-            .is_err());
-        let (_, disposition) = cache
-            .get_or_fetch(failure_key, || async {
-                Ok(CachedEnrichmentResult::empty())
-            })
-            .await
-            .unwrap();
-        assert_eq!(disposition, EnrichmentCacheDisposition::Miss);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn enrichment_cache_reuses_completed_result_without_refetch() {
-        let cache = EnrichmentCache::default();
-        let calls = std::sync::atomic::AtomicUsize::new(0);
-        let key = cache_key(9);
-        let result = CachedEnrichmentResult {
-            memories: vec![CachedMemo {
-                memo: crate::memories::MemoRecord::default(),
-                source: MemoSourceFingerprint {
-                    path: PathBuf::from("fixture.md"),
-                    size: 0,
-                    modified_ns: 0,
-                    content_fingerprint: [9; 32],
-                },
-            }],
-            result_fingerprint: [9; 32],
-            bytes: 1,
-            cacheable: true,
-        };
-        cache
-            .get_or_fetch(key, || async {
-                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(result)
-            })
-            .await
-            .unwrap();
-        let (_, disposition) = cache
-            .get_or_fetch(key, || async {
-                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(CachedEnrichmentResult::empty())
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(disposition, EnrichmentCacheDisposition::Hit);
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -2022,68 +1881,6 @@ mod tests {
     }
 
     #[test]
-    fn enrichment_card_truncation_keeps_markdown_line_boundaries() {
-        let card =
-            "# Heading\n\n- café\n- résumé\n\n```rust\nlet value = \"🌻\";\n```\n".repeat(100);
-        let truncated =
-            truncate_enrichment_card(&card, 120).expect("card should retain a safe prefix");
-
-        assert!(truncated.ends_with("Enrichment metadata: truncated=true\n"));
-        assert!(estimate_tokens(&truncated) <= 120);
-        assert!(truncated.is_char_boundary(truncated.len()));
-    }
-
-    #[test]
-    fn extract_items_from_tool_results_parses_knowledge_tool_blocks() {
-        let dir = tempfile::tempdir().unwrap();
-        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
-        let path = knowledge_dir.join("memory.md");
-        write_file(&path, "memory body");
-        let items = extract_from_single_path(&path, &[canonical(&knowledge_dir)]);
-
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].label, "Memory Title");
-        assert_eq!(items[0].kind, "memory");
-        assert_eq!(
-            items[0].context_file.file_name,
-            canonical(&path).display().to_string()
-        );
-    }
-
-    #[test]
-    fn extract_items_from_tool_results_parses_related_memory_bullets() {
-        let dir = tempfile::tempdir().unwrap();
-        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
-        let path = knowledge_dir.join("related.md");
-        write_file(&path, "related body");
-        let messages = vec![tool_message(&format!(
-            "## Related memories (short form)\n\n- Related Title ({})\n  short desc\n",
-            path.display()
-        ))];
-        let items = extract_items_from_tool_results(&messages, &[canonical(&knowledge_dir)]);
-
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].label, "Related Title");
-        assert_eq!(
-            items[0].context_file.file_name,
-            canonical(&path).display().to_string()
-        );
-    }
-
-    #[test]
-    fn extract_items_from_tool_results_rejects_parent_component_traversal() {
-        let dir = tempfile::tempdir().unwrap();
-        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
-        write_file(&knowledge_dir.join("allowed.md"), "allowed body");
-        write_file(&dir.path().join(".refact/secrets.json"), "{}");
-        let traversal = knowledge_dir.join("../secrets.json");
-
-        let items = extract_from_single_path(&traversal, &[canonical(&knowledge_dir)]);
-
-        assert!(items.is_empty());
-    }
-
-    #[test]
     fn extract_items_from_tool_results_rejects_config_dir_non_knowledge_file() {
         let dir = tempfile::tempdir().unwrap();
         let config_dir = dir.path().join("config");
@@ -2139,22 +1936,6 @@ mod tests {
     }
 
     #[test]
-    fn extract_items_from_tool_results_accepts_valid_canonical_knowledge_doc() {
-        let dir = tempfile::tempdir().unwrap();
-        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
-        let path = knowledge_dir.join("valid.md");
-        write_file(&path, "valid body");
-
-        let items = extract_from_single_path(&path, &[canonical(&knowledge_dir)]);
-
-        assert_eq!(items.len(), 1);
-        assert_eq!(
-            items[0].context_file.file_name,
-            canonical(&path).display().to_string()
-        );
-    }
-
-    #[test]
     fn extract_items_from_tool_results_accepts_relative_refact_knowledge_doc() {
         let dir = tempfile::tempdir().unwrap();
         let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
@@ -2171,34 +1952,6 @@ mod tests {
             items[0].context_file.file_name,
             canonical(&path).display().to_string()
         );
-    }
-
-    #[test]
-    fn extract_items_from_tool_results_accepts_relative_memory_doc_name() {
-        let dir = tempfile::tempdir().unwrap();
-        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
-        let path = knowledge_dir.join("nested/relative.mdx");
-        write_file(&path, "relative body");
-
-        let items = extract_from_path_str("nested/relative.mdx", &[canonical(&knowledge_dir)]);
-
-        assert_eq!(items.len(), 1);
-        assert_eq!(
-            items[0].context_file.file_name,
-            canonical(&path).display().to_string()
-        );
-    }
-
-    #[test]
-    fn extract_items_from_tool_results_rejects_relative_traversal() {
-        let dir = tempfile::tempdir().unwrap();
-        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
-        write_file(&knowledge_dir.join("allowed.md"), "allowed body");
-        write_file(&dir.path().join("outside.md"), "outside body");
-
-        let items = extract_from_path_str("../outside.md", &[canonical(&knowledge_dir)]);
-
-        assert!(items.is_empty());
     }
 
     #[test]

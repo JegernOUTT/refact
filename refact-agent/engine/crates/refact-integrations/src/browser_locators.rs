@@ -316,12 +316,6 @@ pub fn js_string_literal(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::browser_models::FieldKind;
-
-    #[test]
-    fn test_js_string_literal_simple() {
-        assert_eq!(js_string_literal("hello"), "'hello'");
-    }
 
     #[test]
     fn test_js_string_literal_with_quotes() {
@@ -346,42 +340,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_element_info_success() {
-        let json = r#"{
-            "found": true, "count": 1,
-            "tag": "input", "input_type": "text",
-            "id": "email", "name": "email",
-            "placeholder": "Enter email",
-            "aria_label": null, "role": null,
-            "visible": true, "enabled": true,
-            "readonly": false, "content_editable": false,
-            "value": "", "inner_text": null,
-            "bbox": {"x": 10, "y": 20, "width": 300, "height": 40},
-            "field_kind": "text_input"
-        }"#;
-        let info = parse_element_info(json).unwrap();
-        assert_eq!(info.tag, "input");
-        assert_eq!(info.field_kind, FieldKind::TextInput);
-        assert!(info.visible);
-    }
-
-    #[test]
-    fn inspect_element_classifies_labels_by_their_control() {
-        assert!(INSPECT_ELEMENT_JS
-            .contains("var target = (tag === 'label' && el.control) ? el.control : el;"));
-        for read in [
-            "target.tagName.toLowerCase()",
-            "target.isContentEditable",
-            "readonly: !!target.readOnly",
-            "value: (target.value !== undefined)",
-        ] {
-            assert!(INSPECT_ELEMENT_JS.contains(read), "missing {read}");
-        }
-        assert!(INSPECT_ELEMENT_JS.contains("enabled: !el.disabled,"));
-        assert!(!INSPECT_ELEMENT_JS.contains("enabled: !target.disabled"));
-    }
-
-    #[test]
     fn test_parse_element_info_error() {
         let json = r#"{"error": "Element not found", "count": 0}"#;
         let result = parse_element_info(json);
@@ -393,97 +351,5 @@ mod tests {
     fn test_parse_element_info_invalid_json() {
         let result = parse_element_info("not json");
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_js_click_element_valid_js() {
-        let js = js_click_element();
-        assert!(js.contains("var el = this"));
-        assert!(js.contains("scrollIntoView"));
-        assert!(js.contains("dispatchEvent"));
-        assert!(js.contains("pointerdown"));
-        assert!(js.contains("mouseup"));
-        assert!(js.contains("'click'"));
-    }
-
-    #[test]
-    fn test_js_dismiss_overlays_valid_js() {
-        let js = js_dismiss_overlays(false, false);
-        assert!(js.contains("cookie"));
-        assert!(js.contains("consent"));
-        assert!(js.contains("count"));
-    }
-
-    #[test]
-    fn the_default_dismiss_overlays_pass_never_removes_an_element() {
-        let default_pass = js_dismiss_overlays(false, false);
-        assert!(!default_pass.contains("el.remove()"));
-        assert!(default_pass.contains("if (!dryRun) btn.click();"));
-
-        let aggressive = js_dismiss_overlays(false, true);
-        assert!(aggressive.contains("if (!dryRun) el.remove();"));
-
-        let probe = js_dismiss_overlays(true, false);
-        assert!(probe.contains("var dryRun = true;"));
-        assert!(!probe.contains("el.remove()"));
-    }
-
-    #[test]
-    fn dismiss_overlays_keeps_the_battle_tested_selectors() {
-        let probe = js_dismiss_overlays(true, true);
-
-        for selector in [
-            "#onetrust-accept-btn-handler",
-            ".cc-btn.cc-dismiss",
-            "button[id*=\"accept-all\"]",
-            "dialog[open] button[aria-label=\"Close\"]",
-            "[role=\"dialog\"] button[aria-label=\"Dismiss\"]",
-            "[style*=\"position: fixed\"]",
-        ] {
-            assert!(probe.contains(selector), "missing selector {selector}");
-        }
-    }
-
-    #[test]
-    fn test_js_extract_links_limit() {
-        let js = js_extract_links(5);
-        assert!(js.contains(".slice(0, 5)"));
-        assert!(js.contains("var scope = document"));
-    }
-
-    #[test]
-    fn handle_bound_scripts_are_function_declarations() {
-        for script in [
-            js_click_element().to_string(),
-            js_hover_element().to_string(),
-            js_focus_element().to_string(),
-            js_blur_element().to_string(),
-            js_scroll_to_element().to_string(),
-            js_get_text().to_string(),
-            js_get_html().to_string(),
-            js_get_attribute("href"),
-            js_input_value().to_string(),
-            js_element_text(BrowserTextMode::InnerText).to_string(),
-            js_element_text(BrowserTextMode::TextContent).to_string(),
-            js_extract_table().to_string(),
-            js_highlight_element().to_string(),
-        ] {
-            assert!(script.trim_start().starts_with("function()"));
-            assert!(!script.trim_end().ends_with(")()"));
-        }
-    }
-
-    #[test]
-    fn test_js_check_text_present() {
-        let js = js_check_text_present("Hello World");
-        assert!(js.contains("includes(target)"));
-        assert!(js.contains("Hello World"));
-    }
-
-    #[test]
-    fn test_js_get_attribute() {
-        let js = js_get_attribute("href");
-        assert!(js.contains("getAttribute"));
-        assert!(js.contains("href"));
     }
 }

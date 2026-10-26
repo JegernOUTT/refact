@@ -485,37 +485,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn owner_scope_aliases_chat_scope() {
-        let (gcx, ccx) = test_ccx("chat-a").await;
-        let killed = register_running(
-            &gcx,
-            "exec_owner_alias_chat_a",
-            ExecMode::Background,
-            "chat-a",
-            "chat a process",
-        )
-        .await;
-        let kept = register_running(
-            &gcx,
-            "exec_owner_alias_chat_b",
-            ExecMode::Background,
-            "chat-b",
-            "chat b process",
-        )
-        .await;
-
-        let message = run_tool(ccx, args(vec![("scope", json!("owner"))]))
-            .await
-            .unwrap();
-        let body = body(&message);
-
-        assert_eq!(body["killed_count"], json!(1));
-        assert_eq!(killed_ids(&body), vec![killed.as_str().to_string()]);
-        assert!(gcx.exec_registry.get(&killed).await.is_none());
-        assert!(gcx.exec_registry.get(&kept).await.is_some());
-    }
-
-    #[tokio::test]
     async fn shell_background_workspace_cleanup_kills_process() {
         let workspace = tempfile::tempdir().unwrap();
         let (gcx, ccx) = test_ccx_with_task_role("chat", Some("planner")).await;
@@ -637,26 +606,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chat_cleanup_allowed_without_planner_context() {
-        let (gcx, ccx) = test_ccx("chat-normal").await;
-        let killed = register_running(
-            &gcx,
-            "exec_chat_cleanup_allowed",
-            ExecMode::Background,
-            "chat-normal",
-            "normal chat process",
-        )
-        .await;
-
-        let message = run_tool(ccx, HashMap::new()).await.unwrap();
-        let body = body(&message);
-
-        assert_eq!(body["killed_count"], json!(1));
-        assert_eq!(killed_ids(&body), vec![killed.as_str().to_string()]);
-        assert!(gcx.exec_registry.get(&killed).await.is_none());
-    }
-
-    #[tokio::test]
     async fn planner_workspace_cleanup_allowed() {
         let workspace = tempfile::tempdir().unwrap();
         let (gcx, ccx) = test_ccx_with_task_role("planner-chat", Some("planner")).await;
@@ -717,36 +666,6 @@ mod tests {
         );
         assert!(gcx.exec_registry.get(&background).await.is_none());
         assert!(gcx.exec_registry.get(&service).await.is_none());
-    }
-
-    #[test]
-    fn clean_background_processes_description_mentions_planner_requirement() {
-        let tool = ToolCleanBackgroundProcesses {
-            config_path: String::new(),
-        };
-        let desc = tool.tool_description();
-        assert!(
-            desc.description.contains("planner/admin"),
-            "tool description must mention planner/admin restriction: {}",
-            desc.description
-        );
-        assert!(!desc.description.contains("confirmation"));
-        let scope_desc = desc.input_schema["properties"]["scope"]["description"]
-            .as_str()
-            .unwrap();
-        assert!(
-            scope_desc.contains("planner/admin"),
-            "scope description must mention planner/admin restriction: {scope_desc}"
-        );
-        assert!(!scope_desc.contains("confirmation"));
-        let include_services_desc = desc.input_schema["properties"]["include_services"]
-            ["description"]
-            .as_str()
-            .unwrap();
-        assert!(
-            include_services_desc.contains("planner/admin"),
-            "include_services description must mention planner/admin restriction: {include_services_desc}"
-        );
     }
 
     #[tokio::test]

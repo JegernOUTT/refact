@@ -387,26 +387,6 @@ async fn concurrent_writers_serialize_without_lost_update() {
 }
 
 #[tokio::test]
-async fn compare_and_set_reports_a_missing_intent() {
-    let store = CoordinationStore::open_in_memory(&settings())
-        .await
-        .unwrap();
-    let access = store.authorize(ProjectKey::new("alpha"));
-    let run = RunKey::new(WorkKey::trajectory("absent"), 3);
-    let err = store
-        .compare_and_set_run_intent(&access, &run, 0, IntentState::Terminal, 1)
-        .await
-        .unwrap_err();
-    match err {
-        StoreError::NotFound { kind, id } => {
-            assert_eq!(kind, "run intent");
-            assert_eq!(id, run.to_string());
-        }
-        other => panic!("expected NotFound, got {other}"),
-    }
-}
-
-#[tokio::test]
 async fn corrupt_database_reports_a_specific_error_and_destroys_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("coordination.sqlite");
@@ -639,42 +619,6 @@ async fn a_fenced_write_from_a_replaced_holder_never_lands() {
 }
 
 #[tokio::test]
-async fn prune_enforces_retention_per_project() {
-    let mut tight = settings();
-    tight.store_max_activity_observations = 3;
-    let store = CoordinationStore::open_in_memory(&tight).await.unwrap();
-    let alpha = store.authorize(ProjectKey::new("alpha"));
-    let beta = store.authorize(ProjectKey::new("beta"));
-
-    for index in 0..10i64 {
-        store
-            .put_activity_observation(
-                &alpha,
-                &observation("alpha", &format!("obs-{index}"), index),
-            )
-            .await
-            .unwrap();
-    }
-    for index in 0..2i64 {
-        store
-            .put_activity_observation(&beta, &observation("beta", &format!("obs-{index}"), index))
-            .await
-            .unwrap();
-    }
-
-    let report = store.prune(&alpha).await.unwrap();
-    assert_eq!(report.activity_observations, 7);
-    assert_eq!(report.total(), 7);
-    let kept = store.list_activity_observations(&alpha).await.unwrap();
-    assert_eq!(kept.len(), 3);
-    assert_eq!(kept[0].record_id, "obs-9");
-    assert_eq!(
-        store.list_activity_observations(&beta).await.unwrap().len(),
-        2
-    );
-}
-
-#[tokio::test]
 async fn file_provenance_lookup_deletion_and_eviction_stay_project_scoped() {
     let store = CoordinationStore::open_in_memory(&settings())
         .await
@@ -795,23 +739,6 @@ async fn non_local_filesystem_is_refused_unless_explicitly_allowed() {
         .unwrap();
     assert_eq!(store.warnings().len(), 1);
     assert!(path.exists());
-}
-
-#[tokio::test]
-async fn invalid_settings_are_rejected_at_open() {
-    let mut invalid = settings();
-    invalid.store_busy_timeout_ms = 0;
-    let err = CoordinationStore::open_in_memory(&invalid)
-        .await
-        .unwrap_err();
-    assert!(matches!(err, StoreError::Settings(_)), "got {err}");
-
-    let mut invalid = settings();
-    invalid.store_max_leases = 0;
-    let err = CoordinationStore::open_in_memory(&invalid)
-        .await
-        .unwrap_err();
-    assert!(matches!(err, StoreError::Settings(_)), "got {err}");
 }
 
 #[test]

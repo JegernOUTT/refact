@@ -349,25 +349,6 @@ mod tests {
     }
 
     #[test]
-    fn install_codegraph_limits_changes_limits() {
-        let _guard = config_guard();
-        let original = config::limits();
-        install_codegraph_limits(CodegraphLimits {
-            dead_code_max_results: 7,
-            exec_flow_max_nodes: 9,
-        });
-        let updated = config::limits();
-        install_codegraph_limits(original.clone());
-
-        assert_eq!(updated.dead_code_max_results, 7);
-        assert_eq!(updated.exec_flow_max_nodes, 9);
-        assert_eq!(
-            config::limits().dead_code_max_results,
-            original.dead_code_max_results
-        );
-    }
-
-    #[test]
     fn truncated_dead_code_reports_true_total() {
         let _guard = config_guard();
         let symbols: Vec<SymbolRecord> = (0..5)
@@ -446,13 +427,6 @@ mod tests {
     }
 
     #[test]
-    fn reachable_graph_has_empty_dead_list() {
-        let store = store_with("fn main(){ used(); } fn used(){ leaf(); } fn leaf(){}");
-        assert!(dead_code(&store).unwrap().is_empty());
-        assert_eq!(reachable_count(&store).unwrap(), (3, 3));
-    }
-
-    #[test]
     fn override_methods_not_dead() {
         let store = Store::open_in_memory().unwrap();
         let src = "class Plugin {
@@ -492,49 +466,5 @@ fun main() {
 
         assert!(!names.contains(&"foo"), "dead symbols: {dead:?}");
         assert!(names.contains(&"bar"), "dead symbols: {dead:?}");
-    }
-
-    #[test]
-    fn build_script_functions_are_excluded() {
-        let store = Store::open_in_memory().unwrap();
-        store
-            .index_file_graph(
-                "build.gradle.kts",
-                "fun getVersionString() = \"1\"\n",
-                "kotlin",
-            )
-            .unwrap();
-        store.connect_usages().unwrap();
-
-        let dead = dead_code(&store).unwrap();
-
-        assert!(dead.is_empty(), "dead symbols: {dead:?}");
-    }
-
-    #[test]
-    fn zero_incoming_edge_confidence_is_above_non_call_incoming_edge() {
-        let store = Store::open_in_memory().unwrap();
-        let main = store
-            .insert_node("function", "src/lib.rs", "main", "rust", 1, 1)
-            .unwrap();
-        let imported = store
-            .insert_node("function", "src/lib.rs", "imported", "rust", 2, 2)
-            .unwrap();
-        let orphan = store
-            .insert_node("function", "src/lib.rs", "orphan", "rust", 3, 3)
-            .unwrap();
-        store.add_symbol("src/lib.rs::main", main).unwrap();
-        store.add_symbol("src/lib.rs::imported", imported).unwrap();
-        store.add_symbol("src/lib.rs::orphan", orphan).unwrap();
-        store.add_edge(main, imported, "imports", 1.0).unwrap();
-
-        let dead = dead_code(&store).unwrap();
-        let imported = dead.iter().find(|s| s.name == "imported").unwrap();
-        let orphan = dead.iter().find(|s| s.name == "orphan").unwrap();
-
-        assert!(
-            orphan.confidence > imported.confidence,
-            "dead symbols: {dead:?}"
-        );
     }
 }

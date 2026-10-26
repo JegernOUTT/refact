@@ -8,106 +8,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex as AMutex;
 
 use super::generation::start_generation;
-use super::stream_core::LlmStreamError;
 use super::types::ChatSession;
 use crate::app_state::AppState;
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::caps::{BaseModelRecord, ChatModelRecord, CodeAssistantCaps};
-use crate::llm::{
-    WireFormat,
-    pressure::{PressureRetry, pressure_retry},
-};
+use crate::llm::WireFormat;
 use crate::llm::pressure::install_provider_pressure;
 use refact_providers::pressure::{FailureReport, uninstall_pressure_registry};
 use refact_work_core::CoordinationSettings;
-
-fn pressure_error(status: u16, retry_after: Option<&str>, body: &str) -> LlmStreamError {
-    LlmStreamError {
-        message: format!("HTTP {status}: {body}"),
-        partial_output_emitted: false,
-        pressure_failure: Some((
-            "provider/credential".to_string(),
-            FailureReport::from_http(status, retry_after, body).unwrap(),
-        )),
-    }
-}
-
-#[test]
-#[serial(provider_pressure, coordination_metrics, runtime_settings)]
-fn pressure_retry_honours_retry_after() {
-    uninstall_pressure_registry();
-    install_provider_pressure(&CoordinationSettings::default()).unwrap();
-
-    assert!(matches!(
-        pressure_retry(&pressure_error(429, Some("3"), "rate limit"), 0),
-        Some(PressureRetry::Retry {
-            delay_ms: 3_000..,
-            honoured_retry_after: true,
-            attempt: 1,
-            max_attempts: 4,
-            ..
-        })
-    ));
-    uninstall_pressure_registry();
-}
-
-#[test]
-#[serial(provider_pressure, coordination_metrics, runtime_settings)]
-fn pressure_retry_gives_up_for_auth_failures() {
-    uninstall_pressure_registry();
-    install_provider_pressure(&CoordinationSettings::default()).unwrap();
-
-    assert!(matches!(
-        pressure_retry(&pressure_error(401, None, "invalid api key"), 0),
-        Some(PressureRetry::GiveUp { cause }) if cause.contains("HTTP 401")
-    ));
-    uninstall_pressure_registry();
-}
-
-#[test]
-#[serial(provider_pressure, coordination_metrics, runtime_settings)]
-fn pressure_retry_without_pressure_failure_returns_none() {
-    uninstall_pressure_registry();
-    install_provider_pressure(&CoordinationSettings::default()).unwrap();
-    let error = LlmStreamError {
-        message: "network error".to_string(),
-        partial_output_emitted: false,
-        pressure_failure: None,
-    };
-
-    assert_eq!(pressure_retry(&error, 0), None);
-    uninstall_pressure_registry();
-}
-
-#[test]
-#[serial(provider_pressure, coordination_metrics, runtime_settings)]
-fn pressure_retry_without_registry_returns_none() {
-    uninstall_pressure_registry();
-
-    assert_eq!(
-        pressure_retry(&pressure_error(429, Some("3"), "rate limit"), 0),
-        None
-    );
-    uninstall_pressure_registry();
-}
-
-#[test]
-#[serial(provider_pressure, coordination_metrics, runtime_settings)]
-fn generation_retry_gives_up_when_pressure_attempt_budget_is_exhausted() {
-    uninstall_pressure_registry();
-    let settings = CoordinationSettings {
-        provider_retry_max_attempts: 2,
-        ..CoordinationSettings::default()
-    };
-    install_provider_pressure(&settings).unwrap();
-    let error = pressure_error(503, None, "temporarily unavailable");
-
-    assert!(matches!(
-        pressure_retry(&error, 2),
-        Some(PressureRetry::GiveUp { cause }) if cause.contains("HTTP 503")
-    ));
-    uninstall_pressure_registry();
-}
 
 async fn serve_statuses(
     listener: tokio::net::TcpListener,

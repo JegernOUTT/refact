@@ -2369,22 +2369,6 @@ mod worktree_merge_tool_tests {
     }
 
     #[test]
-    fn merge_agent_response_message_includes_warnings() {
-        let message = merge_response_message("T-1", &merged_response_with_warning(), None);
-
-        assert!(message.contains("## Warnings"));
-        assert!(message.contains("stash cleanup needs inspection"));
-    }
-
-    #[test]
-    fn merge_agent_response_message_includes_cleanup_warnings() {
-        let message = merge_response_message("T-1", &merged_response_with_cleanup_warning(), None);
-
-        assert!(message.contains("## Warnings"));
-        assert!(message.contains("branch deletion failed"));
-    }
-
-    #[test]
     fn post_merge_message_only_labels_command_failures_as_regressions() {
         use crate::chat::post_merge_check::PostMergeCheckResult;
         use crate::tasks::types::VerificationOutcome;
@@ -2427,45 +2411,6 @@ mod worktree_merge_tool_tests {
     }
 
     #[test]
-    fn post_merge_message_does_not_invent_fix_card() {
-        use crate::chat::post_merge_check::PostMergeCheckResult;
-        use crate::tasks::types::VerificationOutcome;
-
-        let result = PostMergeCheckResult {
-            checked: true,
-            auto_reverted: false,
-            command: Some("cargo test".to_string()),
-            exit_code: Some(1),
-            output_tail: "test failed".to_string(),
-            merge_commit: Some("abc".to_string()),
-            revert_commit: None,
-            fix_card_id: None,
-            skipped_reason: None,
-            revert_skipped_reason: Some("HEAD changed".to_string()),
-            outcome: VerificationOutcome::CommandFailed,
-        };
-        let mut message = String::new();
-        append_post_merge_check_message(&mut message, &result);
-
-        assert!(message.contains("Post-merge regression"));
-        assert!(!message.contains("Fix card"));
-    }
-
-    #[test]
-    fn merge_agent_strategy_arg_defaults_to_squash() {
-        assert_eq!(strategy_arg(&HashMap::new()).unwrap(), "squash");
-    }
-
-    #[test]
-    fn merge_agent_strategy_arg_rejects_non_string_values() {
-        let args = HashMap::from([("strategy".to_string(), Value::Bool(true))]);
-
-        assert!(strategy_arg(&args)
-            .unwrap_err()
-            .contains("must be a string"));
-    }
-
-    #[test]
     fn merge_agent_bool_args_accept_string_spellings_and_reject_garbage() {
         let args = HashMap::from([("force".to_string(), Value::String("false".to_string()))]);
 
@@ -2486,36 +2431,6 @@ mod worktree_merge_tool_tests {
     }
 
     #[test]
-    fn merge_agent_timeout_rejects_string_values() {
-        let args = HashMap::from([(
-            "auto_revert_timeout_secs".to_string(),
-            Value::String("120".to_string()),
-        )]);
-
-        assert!(parse_auto_revert_timeout(&args)
-            .unwrap_err()
-            .contains("positive integer"));
-    }
-
-    #[test]
-    fn merge_agent_card_id_rejects_non_string_values() {
-        let args = HashMap::from([("card_id".to_string(), Value::Bool(true))]);
-
-        assert!(required_string_arg(&args, "card_id")
-            .unwrap_err()
-            .contains("must be a string"));
-    }
-
-    #[test]
-    fn merge_agent_card_id_rejects_surrounding_whitespace() {
-        let args = HashMap::from([("card_id".to_string(), Value::String(" T-1 ".to_string()))]);
-
-        assert!(required_string_arg(&args, "card_id")
-            .unwrap_err()
-            .contains("leading or trailing whitespace"));
-    }
-
-    #[test]
     fn merge_agent_refuses_when_verifier_failed_without_force() {
         let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
         card.verifier_report = Some(VerifierReport {
@@ -2530,31 +2445,6 @@ mod worktree_merge_tool_tests {
         assert!(err.contains("verifier failed"));
         assert!(err.contains("cargo test failed"));
         assert!(err.contains("force=true"));
-    }
-
-    #[test]
-    fn merge_agent_force_allows_unavailable_verifier_model() {
-        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
-        card.verifier_report = Some(VerifierReport {
-            passed: false,
-            concerns: vec![
-                "Verifier model unavailable; infrastructure unavailable: configured model not found"
-                    .to_string(),
-            ],
-            recommendation: "human-review".to_string(),
-            classification: crate::tasks::types::VerifierReportClassification::Unavailable,
-            ..Default::default()
-        });
-
-        assert!(ensure_verifier_allows_merge(&card, false).is_err());
-        assert!(ensure_verifier_allows_merge(&card, true).unwrap().is_some());
-
-        card.verifier_report
-            .as_mut()
-            .unwrap()
-            .concerns
-            .push("Implementation does not satisfy the requested behavior".to_string());
-        assert!(ensure_verifier_allows_merge(&card, true).is_ok());
     }
 
     #[test]
@@ -2674,99 +2564,6 @@ mod worktree_merge_tool_tests {
         assert!(ensure_verifier_allows_merge(&card, true).is_err());
     }
 
-    #[test]
-    fn merge_agent_force_allows_typed_launch_failure_without_command_results() {
-        use crate::tasks::types::VerifierReportClassification;
-
-        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
-        let mut report = launch_failure_verifier_report();
-        report.classification = VerifierReportClassification::HumanReview;
-        card.verifier_report = Some(report);
-
-        assert!(ensure_verifier_allows_merge(&card, true).unwrap().is_some());
-    }
-
-    #[test]
-    fn merge_agent_force_allows_advisory_typed_infrastructure_human_review() {
-        use crate::tasks::types::{
-            VerificationOutcome, VerificationResult, VerifierReportClassification,
-        };
-
-        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
-        card.verifier_report = Some(VerifierReport {
-            passed: false,
-            concerns: vec!["Implementation does not satisfy the requested behavior".to_string()],
-            recommendation: "human-review".to_string(),
-            classification: VerifierReportClassification::HumanReview,
-            command_results: vec![VerificationResult {
-                command: "cargo test".to_string(),
-                passed: false,
-                outcome: VerificationOutcome::InfrastructureFailed,
-                ..Default::default()
-            }],
-        });
-
-        assert!(ensure_verifier_allows_merge(&card, true).is_ok());
-    }
-
-    #[test]
-    fn merge_agent_force_allows_passing_commands_with_advisory_concern() {
-        use crate::tasks::types::{
-            VerificationOutcome, VerificationResult, VerifierReportClassification,
-        };
-
-        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
-        card.verifier_report = Some(VerifierReport {
-            passed: false,
-            concerns: vec!["Implementation does not satisfy the requested behavior".to_string()],
-            recommendation: "human-review".to_string(),
-            classification: VerifierReportClassification::HumanReview,
-            command_results: vec![VerificationResult {
-                command: "cargo test".to_string(),
-                passed: true,
-                outcome: VerificationOutcome::Passed,
-                ..Default::default()
-            }],
-        });
-
-        assert!(ensure_verifier_allows_merge(&card, true).is_ok());
-    }
-
-    #[test]
-    fn merge_agent_force_allows_mixed_passed_and_infrastructure_human_review() {
-        use crate::tasks::types::{
-            VerificationOutcome, VerificationResult, VerifierReportClassification,
-        };
-
-        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
-        card.verifier_report = Some(VerifierReport {
-            passed: false,
-            concerns: vec![
-                "Verification command failed: cargo clippy".to_string(),
-                "Verifier review subchat unavailable; human review recommended: no model configured"
-                    .to_string(),
-            ],
-            recommendation: "human-review".to_string(),
-            classification: VerifierReportClassification::HumanReview,
-            command_results: vec![
-                VerificationResult {
-                    command: "cargo test".to_string(),
-                    passed: true,
-                    outcome: VerificationOutcome::Passed,
-                    ..Default::default()
-                },
-                VerificationResult {
-                    command: "cargo clippy".to_string(),
-                    passed: false,
-                    outcome: VerificationOutcome::InfrastructureFailed,
-                    ..Default::default()
-                },
-            ],
-        });
-
-        assert!(ensure_verifier_allows_merge(&card, true).unwrap().is_some());
-    }
-
     fn infrastructure_human_review_report(
         outcome: crate::tasks::types::VerificationOutcome,
     ) -> VerifierReport {
@@ -2787,35 +2584,6 @@ mod worktree_merge_tool_tests {
     }
 
     #[test]
-    fn merge_agent_force_allows_rejected_command_human_review() {
-        use crate::tasks::types::VerificationOutcome;
-
-        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
-        card.verifier_report = Some(infrastructure_human_review_report(
-            VerificationOutcome::Rejected,
-        ));
-
-        let warning = ensure_verifier_allows_merge(&card, true).unwrap();
-
-        assert!(warning.is_some());
-        assert!(warning.unwrap().contains("force=true"));
-        assert!(ensure_verifier_allows_merge(&card, false).is_err());
-    }
-
-    #[test]
-    fn merge_agent_force_allows_policy_denied_command_human_review() {
-        use crate::tasks::types::VerificationOutcome;
-
-        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
-        card.verifier_report = Some(infrastructure_human_review_report(
-            VerificationOutcome::PolicyDenied,
-        ));
-
-        assert!(ensure_verifier_allows_merge(&card, true).unwrap().is_some());
-        assert!(ensure_verifier_allows_merge(&card, false).is_err());
-    }
-
-    #[test]
     fn merge_agent_force_still_blocks_command_failed_result() {
         use crate::tasks::types::VerificationOutcome;
 
@@ -2828,79 +2596,6 @@ mod worktree_merge_tool_tests {
 
         assert!(err.contains("force=true cannot bypass verification failures"));
         assert!(err.contains("Verification command failed: cargo test"));
-    }
-
-    #[test]
-    fn merge_agent_force_allows_no_commands_for_human_review() {
-        use crate::tasks::types::{
-            VerificationOutcome, VerificationResult, VerifierReportClassification,
-        };
-
-        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
-        card.verifier_report = Some(VerifierReport {
-            passed: false,
-            concerns: vec![
-                "No verification commands found in card instructions or final report".to_string(),
-            ],
-            recommendation: "human-review".to_string(),
-            classification: VerifierReportClassification::HumanReview,
-            command_results: vec![VerificationResult {
-                command: "cargo test".to_string(),
-                passed: false,
-                outcome: VerificationOutcome::NoCommands,
-                ..Default::default()
-            }],
-        });
-
-        assert!(ensure_verifier_allows_merge(&card, true).is_ok());
-    }
-
-    #[test]
-    fn merge_agent_force_allows_mixed_passed_and_rejected_human_review() {
-        use crate::tasks::types::{
-            VerificationOutcome, VerificationResult, VerifierReportClassification,
-        };
-
-        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
-        card.verifier_report = Some(VerifierReport {
-            passed: false,
-            concerns: vec!["Verification command failed: cargo clippy".to_string()],
-            recommendation: "human-review".to_string(),
-            classification: VerifierReportClassification::HumanReview,
-            command_results: vec![
-                VerificationResult {
-                    command: "cargo test".to_string(),
-                    passed: true,
-                    outcome: VerificationOutcome::Passed,
-                    ..Default::default()
-                },
-                VerificationResult {
-                    command: "cargo clippy".to_string(),
-                    passed: false,
-                    outcome: VerificationOutcome::Rejected,
-                    ..Default::default()
-                },
-            ],
-        });
-
-        assert!(ensure_verifier_allows_merge(&card, true).unwrap().is_some());
-    }
-
-    #[test]
-    fn merge_agent_force_allows_rejected_command_with_advisory_concern() {
-        use crate::tasks::types::VerificationOutcome;
-
-        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
-        let mut report = infrastructure_human_review_report(VerificationOutcome::Rejected);
-        report
-            .concerns
-            .push("Implementation does not satisfy the requested behavior".to_string());
-        card.verifier_report = Some(report);
-
-        let err = ensure_verifier_allows_merge(&card, true).unwrap().unwrap();
-
-        assert!(err.contains("force=true"));
-        assert!(err.contains("Implementation does not satisfy the requested behavior"));
     }
 
     #[test]
@@ -2927,13 +2622,6 @@ mod worktree_merge_tool_tests {
             .unwrap()
             .is_none());
         assert!(ensure_verifier_allows_merge(&card, true).unwrap().is_none());
-    }
-
-    #[test]
-    fn merge_agent_allows_card_without_verifier_report() {
-        let card = test_card("wt", "agent", Path::new("/tmp/worktree"));
-
-        assert!(ensure_verifier_allows_merge(&card, false).is_ok());
     }
 
     #[test]
@@ -2983,25 +2671,6 @@ mod worktree_merge_tool_tests {
             err,
             "task_id override is not allowed from this planner chat"
         );
-    }
-
-    #[tokio::test]
-    async fn merge_agent_uses_bound_task_when_no_args() {
-        let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("repo");
-        std::fs::create_dir_all(&source).unwrap();
-        init_repo(&source);
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        write_task(gcx.clone(), &source, test_card("wt", "agent", &source)).await;
-        let ccx = planner_ccx(gcx).await;
-        let args = HashMap::from([("card_id".to_string(), json!("missing-card"))]);
-
-        let err = ToolTaskMergeAgent::new()
-            .tool_execute(ccx, &"call".to_string(), &args)
-            .await
-            .unwrap_err();
-
-        assert_eq!(err, "Card missing-card not found");
     }
 
     #[tokio::test]
@@ -3216,170 +2885,6 @@ mod worktree_merge_tool_tests {
     }
 
     #[tokio::test]
-    async fn merge_agent_with_commits_ahead_and_clean_worktree_cleans_up() {
-        let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("repo");
-        std::fs::create_dir_all(&source).unwrap();
-        init_repo(&source);
-        let agent_worktree = temp.path().join("agent-worktree-committed-clean");
-        let branch = "refact/task/task-1/card/T-1/agent-committed-clean";
-        create_legacy_agent_worktree(&source, &agent_worktree, branch);
-        run_git(
-            &agent_worktree,
-            &["commit", "--allow-empty", "-m", "agent empty change"],
-        );
-
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        set_workspace(gcx.clone(), &source).await;
-        write_task(
-            gcx.clone(),
-            &source,
-            test_card_with_branch(None, branch, &agent_worktree),
-        )
-        .await;
-        let ccx = planner_ccx(gcx.clone()).await;
-        let args = HashMap::from([("card_id".to_string(), json!("T-1"))]);
-
-        let result = ToolTaskMergeAgent::new()
-            .tool_execute(ccx, &"call".to_string(), &args)
-            .await
-            .unwrap();
-
-        assert!(!agent_worktree.exists());
-        assert!(!branch_exists(&source, branch));
-        let board = storage::load_board(gcx, "task-1").await.unwrap();
-        let card = board.get_card("T-1").unwrap();
-        assert!(card.agent_branch.is_none());
-        assert!(card.agent_worktree.is_none());
-        assert!(card.agent_worktree_name.is_none());
-        assert!(tool_text(&result).contains("cleaned up"));
-    }
-
-    #[tokio::test]
-    async fn merge_agent_legacy_regular_merge_ignores_gpgsign_config() {
-        let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("repo");
-        std::fs::create_dir_all(&source).unwrap();
-        init_repo(&source);
-        let agent_worktree = temp.path().join("agent-worktree-regular-gpg");
-        let branch = "refact/task/task-1/card/T-1/agent-regular-gpg";
-        create_legacy_agent_worktree(&source, &agent_worktree, branch);
-        run_git(
-            &agent_worktree,
-            &["commit", "--allow-empty", "-m", "agent empty change"],
-        );
-        run_git(&source, &["config", "commit.gpgsign", "true"]);
-
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        set_workspace(gcx.clone(), &source).await;
-        write_task(
-            gcx.clone(),
-            &source,
-            test_card_with_branch(None, branch, &agent_worktree),
-        )
-        .await;
-        let ccx = planner_ccx(gcx.clone()).await;
-        let args = HashMap::from([
-            ("card_id".to_string(), json!("T-1")),
-            ("strategy".to_string(), json!("merge")),
-        ]);
-
-        let result = ToolTaskMergeAgent::new()
-            .tool_execute(ccx, &"call".to_string(), &args)
-            .await
-            .unwrap();
-
-        assert!(tool_text(&result).contains("merged"));
-        assert!(!agent_worktree.exists());
-        assert!(!branch_exists(&source, branch));
-    }
-
-    #[tokio::test]
-    async fn merge_agent_legacy_squash_uses_refact_author_without_repo_identity() {
-        let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("repo");
-        std::fs::create_dir_all(&source).unwrap();
-        init_repo(&source);
-        let agent_worktree = temp.path().join("agent-worktree-squash-no-identity");
-        let branch = "refact/task/task-1/card/T-1/agent-squash-no-identity";
-        create_legacy_agent_worktree(&source, &agent_worktree, branch);
-        commit_file(
-            &agent_worktree,
-            "squash-no-identity.txt",
-            "agent change\n",
-            "agent file change",
-        );
-        run_git(&source, &["config", "--unset", "user.email"]);
-        run_git(&source, &["config", "--unset", "user.name"]);
-
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        set_workspace(gcx.clone(), &source).await;
-        write_task(
-            gcx.clone(),
-            &source,
-            test_card_with_branch(None, branch, &agent_worktree),
-        )
-        .await;
-        let ccx = planner_ccx(gcx.clone()).await;
-        let args = HashMap::from([("card_id".to_string(), json!("T-1"))]);
-
-        let result = ToolTaskMergeAgent::new()
-            .tool_execute(ccx, &"call".to_string(), &args)
-            .await
-            .unwrap();
-
-        assert!(tool_text(&result).contains("merged"));
-        assert_eq!(
-            run_git(&source, &["log", "-1", "--format=%an <%ae>"]).trim(),
-            "Refact Agent <agent@refact.ai>"
-        );
-        assert!(!agent_worktree.exists());
-        assert!(!branch_exists(&source, branch));
-    }
-
-    #[tokio::test]
-    async fn merge_agent_auto_commits_dirty_zero_commit_legacy_worktree() {
-        let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("repo");
-        std::fs::create_dir_all(&source).unwrap();
-        init_repo(&source);
-        let agent_worktree = temp.path().join("agent-worktree");
-        let branch = "refact/task/task-1/card/T-1/agent";
-        create_legacy_agent_worktree(&source, &agent_worktree, branch);
-        std::fs::write(agent_worktree.join("dirty.txt"), "uncommitted\n").unwrap();
-
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        set_workspace(gcx.clone(), &source).await;
-        write_task(
-            gcx.clone(),
-            &source,
-            test_card_with_branch(None, branch, &agent_worktree),
-        )
-        .await;
-        let ccx = planner_ccx(gcx.clone()).await;
-        let args = HashMap::from([("card_id".to_string(), json!("T-1"))]);
-
-        let result = ToolTaskMergeAgent::new()
-            .tool_execute(ccx, &"call".to_string(), &args)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(source.join("dirty.txt")).unwrap(),
-            "uncommitted\n"
-        );
-        assert!(!agent_worktree.exists());
-        assert!(!branch_exists(&source, branch));
-        let board = storage::load_board(gcx, "task-1").await.unwrap();
-        let card = board.get_card("T-1").unwrap();
-        assert!(card.agent_branch.is_none());
-        assert!(card.agent_worktree.is_none());
-        assert!(card.agent_worktree_name.is_none());
-        let text = tool_text(&result);
-        assert!(text.contains("Merged") || text.contains("merged"));
-    }
-
-    #[tokio::test]
     async fn merge_agent_legacy_dirty_main_blocks_before_agent_auto_commit() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
@@ -3416,42 +2921,6 @@ mod worktree_merge_tool_tests {
             "1"
         );
         assert!(run_git(&agent_worktree, &["status", "--porcelain"]).contains("dirty.txt"));
-    }
-
-    #[tokio::test]
-    async fn merge_agent_cleans_empty_zero_commit_legacy_worktree() {
-        let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("repo");
-        std::fs::create_dir_all(&source).unwrap();
-        init_repo(&source);
-        let agent_worktree = temp.path().join("agent-worktree-clean");
-        let branch = "refact/task/task-1/card/T-1/agent-clean";
-        create_legacy_agent_worktree(&source, &agent_worktree, branch);
-
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        set_workspace(gcx.clone(), &source).await;
-        write_task(
-            gcx.clone(),
-            &source,
-            test_card_with_branch(None, branch, &agent_worktree),
-        )
-        .await;
-        let ccx = planner_ccx(gcx.clone()).await;
-        let args = HashMap::from([("card_id".to_string(), json!("T-1"))]);
-
-        let result = ToolTaskMergeAgent::new()
-            .tool_execute(ccx, &"call".to_string(), &args)
-            .await
-            .unwrap();
-
-        assert!(!agent_worktree.exists());
-        assert!(!branch_exists(&source, branch));
-        let board = storage::load_board(gcx, "task-1").await.unwrap();
-        let card = board.get_card("T-1").unwrap();
-        assert!(card.agent_branch.is_none());
-        assert!(card.agent_worktree.is_none());
-        assert!(card.agent_worktree_name.is_none());
-        assert!(tool_text(&result).contains("Cleanup:"));
     }
 
     async fn write_task(gcx: Arc<GlobalContext>, source: &Path, card: BoardCard) {
@@ -3759,64 +3228,6 @@ mod worktree_merge_tool_tests {
         );
     }
 
-    #[tokio::test]
-    async fn worktree_merge_registry_reference_match_is_accepted_without_card_meta() {
-        let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("repo");
-        std::fs::create_dir_all(&source).unwrap();
-        init_repo(&source);
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        set_workspace(gcx.clone(), &source).await;
-        let cache_dir = gcx.cache_dir.clone();
-        let service = WorktreeService::new(cache_dir, source.canonicalize().unwrap()).unwrap();
-        let created = service
-            .create_worktree(CreateWorktreeRequest {
-                branch: Some("refact/task/task-1/card/T-1/reference-match".to_string()),
-                kind: Some("task_agent".to_string()),
-                task_id: Some("task-1".to_string()),
-                card_id: Some("T-1".to_string()),
-                agent_id: Some("agent-1".to_string()),
-                chat_id: Some("agent-chat-1".to_string()),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        let mut registry = service.load_registry().await.unwrap();
-        registry.records[0].meta.task_id = None;
-        registry.records[0].meta.card_id = None;
-        service.save_registry(&registry).await.unwrap();
-        let branch = created.worktree.meta.branch.clone().unwrap();
-        let root = created.worktree.meta.root.clone();
-        commit_file(&root, "file.txt", "reference match\n", "agent change");
-        write_task(
-            gcx.clone(),
-            &source,
-            test_card(&created.worktree.meta.id, &branch, &root),
-        )
-        .await;
-
-        let result = merge_registered_task_worktree(
-            gcx.clone(),
-            &source.canonicalize().unwrap(),
-            "task-1",
-            "T-1",
-            "squash",
-            "tool-call",
-            Some("reference merge".to_string()),
-            false,
-            false,
-            Duration::from_secs(5),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(source.join("file.txt")).unwrap(),
-            "reference match\n"
-        );
-        assert!(tool_text(&result).contains("merged"));
-    }
     #[test]
     fn merge_agent_refuses_doing_card_without_force() {
         let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
@@ -3862,19 +3273,6 @@ mod worktree_merge_tool_tests {
     }
 
     #[test]
-    fn merge_agent_force_finalize_clears_current_ownership() {
-        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
-
-        let changed =
-            finalize_force_merge_card_if_current(&mut card, Some("agent-1"), Some("agent-chat-1"));
-
-        assert!(changed);
-        assert!(card.assignee.is_none());
-        assert!(card.agent_chat_id.is_none());
-        assert_eq!(card.column, "done");
-    }
-
-    #[test]
     fn merge_agent_force_finalize_preserves_newer_ownership() {
         let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
         card.column = "doing".to_string();
@@ -3891,66 +3289,6 @@ mod worktree_merge_tool_tests {
         assert_eq!(card.column, "doing");
         assert!(card.completed_at.is_none());
         assert!(card.status_updates.is_empty());
-    }
-
-    #[test]
-    fn merge_agent_force_finalize_marks_active_card_done_with_audit() {
-        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
-        card.column = "doing".to_string();
-        card.final_report = None;
-        card.completed_at = None;
-
-        let changed =
-            finalize_force_merge_card_if_current(&mut card, Some("agent-1"), Some("agent-chat-1"));
-
-        assert!(changed);
-        assert_eq!(card.column, "done");
-        assert!(card.completed_at.is_some());
-        assert!(card.assignee.is_none());
-        assert!(card.agent_chat_id.is_none());
-        assert!(card.status_updates.iter().any(|update| update
-            .message
-            .contains("Force-merged by planner without the normal agent_finish path")));
-    }
-
-    #[tokio::test]
-    async fn registered_force_merge_finalizes_after_post_merge_check_passes() {
-        let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("repo");
-        std::fs::create_dir_all(&source).unwrap();
-        init_repo(&source);
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
-        card.column = "doing".to_string();
-        card.completed_at = None;
-        write_task(gcx.clone(), &source, card).await;
-        let mut response = merged_response_with_cleanup_warning();
-        response.cleanup.as_mut().unwrap().branch_deleted = true;
-
-        clear_board_mirrors_after_registered_merge(
-            gcx.clone(),
-            "task-1",
-            "T-1",
-            &response,
-            true,
-            true,
-            false,
-            None,
-            None,
-            Some("agent-1".to_string()),
-            Some("agent-chat-1".to_string()),
-        )
-        .await
-        .unwrap();
-
-        let board = storage::load_board(gcx, "task-1").await.unwrap();
-        let card = board.get_card("T-1").unwrap();
-        assert_eq!(card.column, "done");
-        assert!(card.assignee.is_none());
-        assert!(card.agent_chat_id.is_none());
-        assert!(card.agent_branch.is_none());
-        assert!(card.agent_worktree.is_none());
-        assert!(card.agent_worktree_name.is_none());
     }
 
     #[tokio::test]
@@ -4090,40 +3428,6 @@ mod worktree_merge_tool_tests {
         assert!(!force_merge_post_check_passed_or_absent(&Err(
             "verification unavailable".to_string()
         )));
-    }
-
-    #[test]
-    fn legacy_typed_failure_without_revert_clears_ownership_but_does_not_finalize() {
-        use crate::chat::post_merge_check::PostMergeCheckResult;
-        use crate::tasks::types::VerificationOutcome;
-
-        let result = Ok(Some(PostMergeCheckResult {
-            checked: true,
-            outcome: VerificationOutcome::InfrastructureFailed,
-            auto_reverted: false,
-            command: Some("cargo test".to_string()),
-            exit_code: None,
-            output_tail: "runner unavailable".to_string(),
-            merge_commit: Some("abc".to_string()),
-            revert_commit: None,
-            fix_card_id: None,
-            skipped_reason: None,
-            revert_skipped_reason: Some("not deterministic".to_string()),
-        }));
-        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
-        card.column = "doing".to_string();
-        card.completed_at = None;
-
-        let message = retained_post_merge_verification_failure(&result).unwrap();
-        assert!(!force_merge_post_check_passed_or_absent(&result));
-        assert!(retain_force_merge_without_finalizing(&mut card, &message));
-        assert_eq!(card.column, "doing");
-        assert!(card.completed_at.is_none());
-        assert!(card.assignee.is_none());
-        assert!(card.agent_chat_id.is_none());
-        assert!(card.status_updates[0]
-            .message
-            .contains("merged work is retained"));
     }
 
     #[tokio::test]
@@ -4347,121 +3651,5 @@ mod worktree_merge_tool_tests {
         let meta = storage::load_task_meta(gcx, "task-1").await.unwrap();
         assert_eq!(meta.cards_done, 1);
         assert_eq!(meta.agents_active, 0);
-    }
-
-    #[tokio::test]
-    async fn merge_agent_legacy_force_true_finishes_doing_card() {
-        let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("repo");
-        std::fs::create_dir_all(&source).unwrap();
-        init_repo(&source);
-        let agent_worktree = temp.path().join("agent-worktree-force-doing");
-        let branch = "refact/task/task-1/card/T-1/agent-force-doing-legacy";
-        create_legacy_agent_worktree(&source, &agent_worktree, branch);
-        commit_file(
-            &agent_worktree,
-            "file.txt",
-            "legacy force doing\n",
-            "agent change",
-        );
-
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        set_workspace(gcx.clone(), &source).await;
-        let mut card = test_card_with_branch(None, branch, &agent_worktree);
-        card.column = "doing".to_string();
-        card.final_report = None;
-        card.completed_at = None;
-        write_task(gcx.clone(), &source, card).await;
-        let ccx = planner_ccx(gcx.clone()).await;
-        let args = HashMap::from([
-            ("card_id".to_string(), json!("T-1")),
-            ("force".to_string(), json!(true)),
-        ]);
-
-        let result = ToolTaskMergeAgent::new()
-            .tool_execute(ccx, &"call".to_string(), &args)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(source.join("file.txt")).unwrap(),
-            "legacy force doing\n"
-        );
-        assert!(tool_text(&result).contains("Force-merged"));
-        assert!(!agent_worktree.exists());
-        assert!(!branch_exists(&source, branch));
-
-        let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
-        let card = board.get_card("T-1").unwrap();
-        assert_eq!(card.column, "done");
-        assert!(card.completed_at.is_some());
-        assert!(card.assignee.is_none());
-        assert!(card.agent_chat_id.is_none());
-        assert!(card.agent_branch.is_none());
-        assert!(card.agent_worktree.is_none());
-        assert!(card.agent_worktree_name.is_none());
-        assert!(card.status_updates.iter().any(|update| update
-            .message
-            .contains("Force-merged by planner without the normal agent_finish path")));
-        let ready = board.get_ready_cards();
-        assert!(ready.in_progress.is_empty());
-        assert_eq!(ready.completed, vec!["T-1".to_string()]);
-        let meta = storage::load_task_meta(gcx, "task-1").await.unwrap();
-        assert_eq!(meta.cards_done, 1);
-        assert_eq!(meta.agents_active, 0);
-    }
-
-    #[tokio::test]
-    async fn merge_agent_force_true_allows_failed_card_with_warning() {
-        let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("repo");
-        std::fs::create_dir_all(&source).unwrap();
-        init_repo(&source);
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        set_workspace(gcx.clone(), &source).await;
-        let cache_dir = gcx.cache_dir.clone();
-        let service = WorktreeService::new(cache_dir, source.canonicalize().unwrap()).unwrap();
-        let created = service
-            .create_worktree(CreateWorktreeRequest {
-                branch: Some("refact/task/task-1/card/T-1/agent-force-failed".to_string()),
-                kind: Some("task_agent".to_string()),
-                task_id: Some("task-1".to_string()),
-                card_id: Some("T-1".to_string()),
-                agent_id: Some("agent-1".to_string()),
-                chat_id: Some("agent-chat-1".to_string()),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        let branch = created.worktree.meta.branch.clone().unwrap();
-        let root = created.worktree.meta.root.clone();
-        commit_file(&root, "file.txt", "force failed\n", "agent change");
-        let mut card = test_card(&created.worktree.meta.id, &branch, &root);
-        card.column = "failed".to_string();
-        card.final_report = None;
-        write_task(gcx.clone(), &source, card).await;
-
-        let result = merge_registered_task_worktree(
-            gcx,
-            &source.canonicalize().unwrap(),
-            "task-1",
-            "T-1",
-            "squash",
-            "tool-call",
-            Some("force merge failed".to_string()),
-            true,
-            false,
-            Duration::from_secs(5),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(source.join("file.txt")).unwrap(),
-            "force failed\n"
-        );
-        let text = tool_text(&result);
-        assert!(text.contains("Force-merged"), "{text}");
     }
 }

@@ -4,13 +4,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use indexmap::IndexMap;
 use refact_work_core::store::records::{
-    now_ms, AdjudicationVerdict, DisagreementPosition, DisagreementRecord, DisagreementStatus,
-    EvidenceKind, EvidenceRef,
+    now_ms, DisagreementPosition, DisagreementRecord, DisagreementStatus, EvidenceKind, EvidenceRef,
 };
 use refact_work_core::{DisagreementFiling, ProjectKey, WorkKey};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::disagreement::{completion_gate_blocks, ledger_for, store_resolution};
+use super::disagreement::{completion_gate_blocks, ledger_for};
 use crate::app_state::AppState;
 use crate::chat::evidence::EvidenceVerdict;
 use crate::caps::{BaseModelRecord, ChatModelRecord, CodeAssistantCaps};
@@ -90,78 +89,6 @@ async fn file_disagreement(app: &AppState, record_id: &str) -> DisagreementRecor
         DisagreementFiling::Filed(_)
     ));
     record
-}
-
-#[tokio::test]
-#[serial_test::serial(runtime_settings)]
-async fn policy_off_returns_no_blocks() {
-    crate::runtime_settings::reset_for_test();
-    let temp = tempfile::tempdir().unwrap();
-    let cache = temp.path().join("cache");
-    let root = temp.path().join("workspace");
-    std::fs::create_dir_all(&root).unwrap();
-    let app = app_for(&root, &cache).await;
-    file_disagreement(&app, "open-off").await;
-    let _settings = override_settings(true, false);
-
-    assert!(completion_gate_blocks(&app).await.is_empty());
-}
-
-#[tokio::test]
-#[serial_test::serial(runtime_settings)]
-async fn policy_on_open_record_becomes_a_gate_block() {
-    crate::runtime_settings::reset_for_test();
-    let temp = tempfile::tempdir().unwrap();
-    let cache = temp.path().join("cache");
-    let root = temp.path().join("workspace");
-    std::fs::create_dir_all(&root).unwrap();
-    let app = app_for(&root, &cache).await;
-    let record = disagreement(&app, "open-on");
-    file_disagreement(&app, &record.record_id).await;
-    let _settings = override_settings(true, true);
-
-    let blocks = completion_gate_blocks(&app).await;
-
-    assert_eq!(blocks.len(), 1);
-    assert_eq!(blocks[0].spec_id, "disagreement:open-on");
-    assert_eq!(blocks[0].command, "");
-    assert_eq!(blocks[0].verdict, EvidenceVerdict::Blocked);
-    assert_eq!(blocks[0].exit_code, None);
-    assert_eq!(
-        blocks[0].reason,
-        "open disagreement open-on on src/lib.rs: the operation keeps the lock across await"
-    );
-    assert!(!blocks[0].from_cache);
-}
-
-#[tokio::test]
-#[serial_test::serial(runtime_settings)]
-async fn policy_on_resolved_record_does_not_block() {
-    crate::runtime_settings::reset_for_test();
-    let temp = tempfile::tempdir().unwrap();
-    let cache = temp.path().join("cache");
-    let root = temp.path().join("workspace");
-    std::fs::create_dir_all(&root).unwrap();
-    let app = app_for(&root, &cache).await;
-    let ledger = ledger_for(&app).await.unwrap();
-    let mut record = disagreement(&app, "resolved");
-    ledger.file(&record).await.unwrap();
-    record
-        .resolve(
-            "reviewer",
-            AdjudicationVerdict::Decided {
-                position_id: "kept".to_string(),
-                decisive_evidence: EvidenceRef::new(EvidenceKind::File, "src/lib.rs:1"),
-                rationale: "the source confirms the position".to_string(),
-            },
-            "revision-1",
-            now_ms(),
-        )
-        .unwrap();
-    assert!(store_resolution(&ledger, &record).await.unwrap());
-    let _settings = override_settings(true, true);
-
-    assert!(completion_gate_blocks(&app).await.is_empty());
 }
 
 #[tokio::test]

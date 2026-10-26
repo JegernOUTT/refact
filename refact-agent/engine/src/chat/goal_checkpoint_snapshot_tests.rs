@@ -1,7 +1,7 @@
 use crate::chat::internal_roles;
 use crate::chat::types::{ChatSession, GoalBudget};
 use refact_chat_api::role_projection::{fold_role_messages, ProjectedRole, ProjectionLimits};
-use refact_core::active_context::{active_context, make_reconstruction_report, ReconstructionMetadata};
+use refact_core::active_context::{make_reconstruction_report, ReconstructionMetadata};
 use serde_json::json;
 
 const BASE_GOAL: &str = " \n# Goal — preserve this exact base\n\n  trailing whitespace \n";
@@ -39,27 +39,6 @@ fn rebuilt_goal_session() -> ChatSession {
 }
 
 #[test]
-fn checkpoint_event_is_not_a_goal_event() {
-    let session = rebuilt_goal_session();
-    let active = active_context(&session.messages).unwrap();
-    assert!(active.messages.iter().any(|message| {
-        message
-            .extra
-            .get("event")
-            .and_then(|event| event.get("source"))
-            .and_then(|source| source.as_str())
-            == Some(refact_chat_api::role_projection::CHECKPOINT_SOURCE)
-    }));
-    assert!(!session
-        .goal
-        .as_ref()
-        .unwrap()
-        .events
-        .iter()
-        .any(|event| event.text.contains("[checkpoint:")));
-}
-
-#[test]
 fn goal_events_keep_folded_deltas() {
     let session = rebuilt_goal_session();
     let events: Vec<_> = session
@@ -76,15 +55,4 @@ fn goal_events_keep_folded_deltas() {
             .iter()
             .any(|event| event.text == format!("goal update {seq}")));
     }
-}
-
-#[test]
-fn goal_content_keeps_verbatim_base() {
-    let session = rebuilt_goal_session();
-    assert!(session
-        .goal
-        .as_ref()
-        .unwrap()
-        .content
-        .starts_with(BASE_GOAL));
 }

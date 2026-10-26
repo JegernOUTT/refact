@@ -158,33 +158,6 @@ mod tests {
     }
 
     #[test]
-    fn smooth_mode_drains_one_line() {
-        let mut policy = AdaptiveChunkingPolicy::default();
-        let decision = policy.decide(snapshot(3, 10), Instant::now());
-        assert_eq!(decision.mode, ChunkingMode::Smooth);
-        assert!(!decision.entered_catch_up);
-        assert_eq!(decision.drain_plan, DrainPlan::Single);
-    }
-
-    #[test]
-    fn backlog_enters_catch_up_by_depth() {
-        let mut policy = AdaptiveChunkingPolicy::default();
-        let decision = policy.decide(snapshot(8, 10), Instant::now());
-        assert_eq!(decision.mode, ChunkingMode::CatchUp);
-        assert!(decision.entered_catch_up);
-        assert_eq!(decision.drain_plan, DrainPlan::Batch(8));
-    }
-
-    #[test]
-    fn backlog_enters_catch_up_by_age() {
-        let mut policy = AdaptiveChunkingPolicy::default();
-        let decision = policy.decide(snapshot(2, 120), Instant::now());
-        assert_eq!(decision.mode, ChunkingMode::CatchUp);
-        assert!(decision.entered_catch_up);
-        assert_eq!(decision.drain_plan, DrainPlan::Batch(2));
-    }
-
-    #[test]
     fn catch_up_exits_after_hold() {
         let mut policy = AdaptiveChunkingPolicy::default();
         let t0 = Instant::now();

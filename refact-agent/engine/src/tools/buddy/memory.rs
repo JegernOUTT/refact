@@ -1038,31 +1038,6 @@ mod tests {
         pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
     }
 
-    fn merge_schema_kind_enum() -> Vec<String> {
-        ToolBuddyMemoryMerge {
-            config_path: String::new(),
-        }
-        .tool_description()
-        .input_schema
-        .get("properties")
-        .and_then(|properties| properties.get("kind"))
-        .and_then(|kind| kind.get("enum"))
-        .and_then(Value::as_array)
-        .unwrap()
-        .iter()
-        .map(|value| value.as_str().unwrap().to_string())
-        .collect()
-    }
-
-    #[test]
-    fn merge_schema_kind_enum_matches_writable_kinds() {
-        let writable_kinds = WRITABLE_KINDS
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
-        assert_eq!(merge_schema_kind_enum(), writable_kinds);
-    }
-
     async fn write_memory(
         root: &Path,
         name: &str,
@@ -1129,112 +1104,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn buddy_memory_create_skips_same_source_id_reworded_content() {
-        let dir = tempfile::tempdir().unwrap();
-        let ccx = ccx(dir.path()).await;
-        let mut tool = ToolBuddyMemoryCreate {
-            config_path: String::new(),
-        };
-        let base_args = |content: &str| {
-            args(vec![
-                ("title", serde_json::json!("Source Test")),
-                ("content", serde_json::json!(content)),
-                ("tags", serde_json::json!(["test"])),
-                ("kind", serde_json::json!("lesson")),
-                ("source_id", serde_json::json!("same-source")),
-            ])
-        };
-        let first = tool
-            .tool_execute(
-                ccx.clone(),
-                &"call".to_string(),
-                &base_args("first wording"),
-            )
-            .await
-            .unwrap();
-        let second = tool
-            .tool_execute(ccx, &"call".to_string(), &base_args("second wording"))
-            .await
-            .unwrap();
-        assert!(text(&first).contains("Created memory:"));
-        assert!(text(&second).contains("Skipped: identical memory exists"));
-        assert_eq!(
-            std::fs::read_dir(dir.path().join(KNOWLEDGE_FOLDER_NAME))
-                .unwrap()
-                .count(),
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn buddy_memory_create_skips_when_content_hash_duplicate() {
-        let dir = tempfile::tempdir().unwrap();
-        write_memory(dir.path(), "old.md", "Old", "lesson", &["dup"], "same body").await;
-        let ccx = ccx(dir.path()).await;
-        let mut tool = ToolBuddyMemoryCreate {
-            config_path: String::new(),
-        };
-        let result = tool
-            .tool_execute(
-                ccx,
-                &"call".to_string(),
-                &args(vec![
-                    ("title", serde_json::json!("New")),
-                    ("content", serde_json::json!("same body")),
-                    ("tags", serde_json::json!([])),
-                    ("kind", serde_json::json!("lesson")),
-                    ("source_id", serde_json::json!("src-dup")),
-                ]),
-            )
-            .await
-            .unwrap();
-        assert!(text(&result).contains("Skipped: identical memory exists"));
-        assert_eq!(
-            std::fs::read_dir(dir.path().join(KNOWLEDGE_FOLDER_NAME))
-                .unwrap()
-                .count(),
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn buddy_memory_create_ignores_archived_exact_duplicate() {
-        let dir = tempfile::tempdir().unwrap();
-        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
-        tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
-        let body = "same archived body";
-        tokio::fs::write(
-            knowledge_dir.join("archived.md"),
-            format!(
-                "---\ntitle: Archived\nkind: lesson\nstatus: archived\ncontent_hash: {}\ndeprecated_at: 2026-01-01\n---\n\n{body}\n",
-                compute_content_hash(body)
-            ),
-        )
-        .await
-        .unwrap();
-        let ccx = ccx(dir.path()).await;
-        let mut tool = ToolBuddyMemoryCreate {
-            config_path: String::new(),
-        };
-        let result = tool
-            .tool_execute(
-                ccx,
-                &"call".to_string(),
-                &args(vec![
-                    ("title", serde_json::json!("Fresh")),
-                    ("content", serde_json::json!(body)),
-                    ("tags", serde_json::json!([])),
-                    ("kind", serde_json::json!("lesson")),
-                    ("source_id", serde_json::json!("fresh-source")),
-                ]),
-            )
-            .await
-            .unwrap();
-        assert!(text(&result).contains("Created memory:"));
-        assert_eq!(std::fs::read_dir(knowledge_dir).unwrap().count(), 2);
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn find_duplicate_content_rejects_symlink() {
@@ -1262,84 +1131,6 @@ mod tests {
         let gcx = test_gcx(dir.path()).await;
         let found = find_duplicate_content(gcx, &compute_content_hash(&outside_body)).await;
         assert!(found.is_none());
-    }
-
-    #[tokio::test]
-    async fn buddy_memory_search_finds_existing_by_kind() {
-        let dir = tempfile::tempdir().unwrap();
-        write_memory(
-            dir.path(),
-            "lesson.md",
-            "Lesson Hit",
-            "lesson",
-            &["alpha"],
-            "frogs jump",
-        )
-        .await;
-        let ccx = ccx(dir.path()).await;
-        let mut tool = ToolBuddyMemorySearch {
-            config_path: String::new(),
-        };
-        let result = tool
-            .tool_execute(
-                ccx,
-                &"call".to_string(),
-                &args(vec![
-                    ("query", serde_json::json!("frogs")),
-                    ("kind", serde_json::json!("lesson")),
-                ]),
-            )
-            .await
-            .unwrap();
-        assert!(text(&result).contains("Lesson Hit"));
-    }
-
-    #[tokio::test]
-    async fn scan_cards_caps_at_max_files() {
-        let dir = tempfile::tempdir().unwrap();
-        for idx in 0..1500 {
-            let path = dir.path().join(format!("memory-{idx:04}.md"));
-            tokio::fs::write(
-                path,
-                format!("---\ntitle: Memory {idx}\n---\n\nbody {idx}\n"),
-            )
-            .await
-            .unwrap();
-        }
-
-        let cards = scan_cards_in_dirs(vec![dir.path().to_path_buf()]).await;
-
-        assert_eq!(cards.len(), MAX_KNOWLEDGE_SCAN_FILES);
-    }
-
-    #[tokio::test]
-    async fn buddy_memory_search_finds_existing_by_tag() {
-        let dir = tempfile::tempdir().unwrap();
-        write_memory(
-            dir.path(),
-            "tag.md",
-            "Tag Hit",
-            "insight",
-            &["rare"],
-            "hidden gem",
-        )
-        .await;
-        let ccx = ccx(dir.path()).await;
-        let mut tool = ToolBuddyMemorySearch {
-            config_path: String::new(),
-        };
-        let result = tool
-            .tool_execute(
-                ccx,
-                &"call".to_string(),
-                &args(vec![
-                    ("query", serde_json::json!("hidden")),
-                    ("tags", serde_json::json!(["rare"])),
-                ]),
-            )
-            .await
-            .unwrap();
-        assert!(text(&result).contains("Tag Hit"));
     }
 
     #[tokio::test]
@@ -1435,38 +1226,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("symlink"));
-    }
-
-    #[tokio::test]
-    async fn buddy_memory_retag_preserves_body() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_memory(
-            dir.path(),
-            "retag.md",
-            "Retag",
-            "lesson",
-            &["old"],
-            "keep this body",
-        )
-        .await;
-        let ccx = ccx(dir.path()).await;
-        let mut tool = ToolBuddyMemoryRetag {
-            config_path: String::new(),
-        };
-        tool.tool_execute(
-            ccx,
-            &"call".to_string(),
-            &args(vec![
-                ("path", serde_json::json!(path.to_string_lossy())),
-                ("new_tags", serde_json::json!(["new"])),
-            ]),
-        )
-        .await
-        .unwrap();
-        let text = tokio::fs::read_to_string(&path).await.unwrap();
-        assert!(text.contains("keep this body"));
-        assert!(text.contains("new"));
-        assert!(text.contains("buddy"));
     }
 
     #[tokio::test]

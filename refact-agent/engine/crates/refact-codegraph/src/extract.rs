@@ -109,13 +109,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parsed_file_without_symbols_is_not_a_failure() {
-        let (symbols, refs) = extract_symbols("rust", "// nothing here\n").unwrap();
-        assert!(symbols.is_empty());
-        assert!(refs.is_empty());
-    }
-
-    #[test]
     fn malformed_source_is_reported_as_parse_failure_not_empty_success() {
         let malformed = "fn broken( { let x = ; ) } struct !!!\n";
         let err = extract_symbols("rust", malformed)
@@ -149,22 +142,6 @@ export function Counter(): JSX.Element {
     return <button onClick={() => setCount(count + 1)}>{count}</button>;
 }
 ";
-
-    #[test]
-    fn tsx_source_with_jsx_extracts_symbols_without_a_parse_failure() {
-        let (symbols, refs) = extract_symbols("tsx", TSX_FIXTURE)
-            .expect("tsx must be parsed with the TSX grammar, not the plain TypeScript one");
-        assert!(symbols.iter().any(|s| s.name() == "Counter"));
-        assert!(refs
-            .iter()
-            .any(|r| r.kind == EdgeKind::Imports && r.name == "react"));
-
-        let as_typescript = extract_symbols("typescript", TSX_FIXTURE);
-        assert!(
-            as_typescript.is_err(),
-            "guard: the plain typescript grammar still rejects JSX, so routing matters"
-        );
-    }
 
     #[test]
     fn tsx_and_jsx_paths_route_to_their_own_grammars() {

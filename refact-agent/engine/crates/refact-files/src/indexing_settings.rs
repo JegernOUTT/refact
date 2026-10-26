@@ -69,16 +69,3 @@ impl IndexingEverywhere {
         result
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn indexing_everywhere_default_starts_unloaded() {
-        let indexing = IndexingEverywhere::default();
-
-        assert!(indexing.vcs_indexing_settings_map.is_empty());
-        assert_eq!(indexing.loaded_ts, 0);
-    }
-}

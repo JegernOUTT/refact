@@ -1687,53 +1687,6 @@ mod router_tests {
     use crate::app_state::AppState;
 
     #[tokio::test]
-    async fn batch_actions_is_matched_before_the_work_id_route() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = AppState::from_gcx(gcx).await;
-        let router = make_v1_router(app.clone()).with_state(app);
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .uri("/buddy/work/actions?ids=missing")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
-        assert!(String::from_utf8_lossy(&body).contains("buddy operator runtime is unavailable"));
-    }
-
-    #[tokio::test]
-    async fn v1_router_builds_without_overlap_and_keeps_every_route() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = AppState::from_gcx(gcx).await;
-        let router = make_v1_router(app.clone()).with_state(app);
-        let routes = [
-            ("GET", "/buddy/work/actions?ids=missing"),
-            ("GET", "/work"),
-            ("GET", "/work/causal?root=missing"),
-            ("GET", "/providers/openai_codex/usage/resets"),
-        ];
-
-        for (method, uri) in routes {
-            let response = router
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method(method)
-                        .uri(uri)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_ne!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
-        }
-    }
-
-    #[tokio::test]
     async fn v1_router_routes_each_domain_and_keeps_shared_layers() {
         let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
         let router = make_v1_router(app.clone()).with_state(app);

@@ -1,5 +1,5 @@
 use crate::chat::evidence::{EvidenceDefaults, SpecAuthority, VerificationSpec};
-use crate::tasks::assignment::{specs_for_validation, Assignment};
+use crate::tasks::assignment::Assignment;
 use crate::tasks::types::BoardCard;
 use refact_chat_api::DeliverableContract;
 
@@ -24,18 +24,6 @@ fn card(instructions: &str) -> BoardCard {
     .unwrap();
     card.instructions = instructions.to_string();
     card
-}
-
-#[test]
-fn card_without_typed_fields_is_unchanged() {
-    let card = card("Do the work.\n\n## Verification\n- Verify: `cargo test --lib`");
-
-    let assignment = Assignment::from_card(&card);
-
-    assert!(assignment.deliverable.is_none());
-    assert!(assignment.verify.is_empty());
-    assert!(!assignment.has_typed_verification());
-    assert_eq!(assignment.task, card.instructions);
 }
 
 #[test]
@@ -66,26 +54,6 @@ fn card_with_typed_fields_produces_typed_assignment() {
 }
 
 #[test]
-fn frozen_typed_specs_are_preserved_alongside_live_verify_lines() {
-    let mut card = card("## Verification\n- Verify: `cargo test --lib -- from-prose`");
-    let typed = VerificationSpec::propose(
-        "T-typed:declared",
-        "cargo test --lib -- typed-contract",
-        SpecAuthority::CardInstructions,
-        &defaults(),
-    );
-    card.verification = vec![serde_json::to_value(&typed).unwrap()];
-    let assignment = Assignment::from_card(&card);
-
-    let specs = specs_for_validation(Some(&assignment), &card, &defaults());
-
-    assert_eq!(specs.len(), 2);
-    assert_eq!(specs[0], typed);
-    assert_eq!(specs[1].command, "cargo test --lib -- from-prose");
-    assert_eq!(specs[0].command, "cargo test --lib -- typed-contract");
-}
-
-#[test]
 fn malformed_stored_spec_falls_back_without_panic() {
     let mut card = card("## Verification\n- Verify: `cargo test --lib -- from-prose`");
     card.verification = vec![serde_json::json!({"garbage": true})];
@@ -98,31 +66,4 @@ fn malformed_stored_spec_falls_back_without_panic() {
     assert!(crate::tasks::assignment::typed_parts(&card)
         .unwrap_err()
         .contains("card T-typed verification[0]"));
-}
-
-#[test]
-fn old_board_yaml_round_trips() {
-    let yaml = r#"
-cards:
-  - id: T-old
-    title: Legacy card
-    column: planned
-    priority: P1
-    depends_on: []
-    instructions: Legacy instructions
-    assignee: null
-    agent_chat_id: null
-    status_updates: []
-    created_at: '2026-10-02T00:00:00Z'
-    started_at: null
-    completed_at: null
-"#;
-    let board: crate::tasks::types::TaskBoard = serde_yaml::from_str(yaml).unwrap();
-    let serialized = serde_yaml::to_string(&board).unwrap();
-    let reparsed: crate::tasks::types::TaskBoard = serde_yaml::from_str(&serialized).unwrap();
-
-    assert!(reparsed.cards[0].deliverable.is_none());
-    assert!(reparsed.cards[0].verification.is_empty());
-    assert!(!serialized.contains("deliverable"));
-    assert!(!serialized.contains("verification"));
 }

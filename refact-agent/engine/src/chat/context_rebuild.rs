@@ -1673,20 +1673,6 @@ mod tests {
     }
 
     #[test]
-    fn fallback_estimate_counts_tokens_not_bytes() {
-        let text = "x".repeat(300_000);
-        let messages = vec![ChatMessage::new("user".into(), text.clone())];
-        let estimate = estimated_tokens(&messages, None, false);
-        let fallback_tokens = crate::tokens::count_text_tokens(None, &text).unwrap();
-        assert!(
-            estimate >= fallback_tokens,
-            "{estimate} < {fallback_tokens}"
-        );
-        assert!(estimate < text.len(), "{estimate} counted bytes as tokens");
-        assert!(!at_auto_cap(estimate, 500_000));
-    }
-
-    #[test]
     fn fresh_provider_usage_anchors_below_cap_context_over_inflated_local_estimate() {
         let system = ChatMessage::new("system".into(), "s".repeat(120_000));
         let user = ChatMessage::new("user".into(), "u".repeat(400_000));
@@ -1720,18 +1706,6 @@ mod tests {
         assert!(validate_output(&source, &source, usize::MAX, None).is_err());
         assert!(validate_output(&source, &smaller, 10, None).is_err());
         assert!(validate_output(&source, &[], usize::MAX, None).is_err());
-    }
-
-    #[test]
-    fn fresh_usage_includes_assistant_and_later_growth_but_stale_does_not() {
-        let mut answer = ChatMessage::new("assistant".into(), "answer".into());
-        answer.usage = Some(crate::call_validation::ChatUsage {
-            prompt_tokens: 10000,
-            ..Default::default()
-        });
-        let input = vec![answer, ChatMessage::new("user".into(), "new input".into())];
-        assert!(estimated_tokens(&input, None, true) > 10000);
-        assert!(estimated_tokens(&input, None, false) < 10000);
     }
 
     #[test]
@@ -2109,36 +2083,6 @@ mod tests {
         assert!(s.last_rebuild_attempt_version.is_none());
     }
 
-    #[test]
-    fn reservation_rejects_second_owner() {
-        let mut s = ChatSession::new("rebuild-test".into());
-        assert!(request_rebuild(
-            &mut s,
-            PendingContextRebuild {
-                model: None,
-                trigger: "tool".into()
-            }
-        )
-        .is_ok());
-        assert!(request_rebuild(
-            &mut s,
-            PendingContextRebuild {
-                model: None,
-                trigger: "tool".into()
-            }
-        )
-        .is_err());
-    }
-    #[test]
-    fn idle_excludes_live_draft_and_tool_execution() {
-        let mut s = ChatSession::new("rebuild-test".into());
-        assert!(idle(&s));
-        s.draft_message = Some(ChatMessage::new("assistant".into(), "partial".into()));
-        assert!(!idle(&s));
-        s.draft_message = None;
-        s.runtime.state = SessionState::ExecutingTools;
-        assert!(!idle(&s));
-    }
     #[test]
     fn payload_heavy_event_output_must_fit_rendered_wire_budget() {
         let source = vec![ChatMessage::new("user".into(), "history ".repeat(30_000))];

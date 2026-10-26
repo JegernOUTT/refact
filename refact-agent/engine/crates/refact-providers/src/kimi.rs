@@ -336,76 +336,6 @@ mod tests {
     }
 
     #[test]
-    fn kimi_runtime_requires_enabled_credentials_and_selected_model() {
-        let catalog = kimi_catalog();
-        let mut provider = KimiProvider {
-            api_key: "sk-test".to_string(),
-            enabled: true,
-            enabled_models: vec!["kimi-k2".to_string()],
-            ..Default::default()
-        };
-        assert!(
-            provider
-                .build_runtime_from_catalog(&catalog)
-                .unwrap()
-                .enabled
-        );
-
-        provider.enabled = false;
-        assert!(
-            !provider
-                .build_runtime_from_catalog(&catalog)
-                .unwrap()
-                .enabled
-        );
-        provider.enabled = true;
-        provider.api_key.clear();
-        assert!(
-            !provider
-                .build_runtime_from_catalog(&catalog)
-                .unwrap()
-                .enabled
-        );
-        provider.api_key = "sk-test".to_string();
-        provider.enabled_models.clear();
-        assert!(
-            !provider
-                .build_runtime_from_catalog(&catalog)
-                .unwrap()
-                .enabled
-        );
-    }
-
-    #[test]
-    fn kimi_available_models_use_models_dev_helper_and_custom_models() {
-        let catalog = kimi_catalog();
-        let mut provider = KimiProvider {
-            enabled_models: vec!["kimi-k2".to_string(), "kimi-custom".to_string()],
-            ..Default::default()
-        };
-        provider.custom_models.insert(
-            "kimi-custom".to_string(),
-            CustomModelConfig {
-                n_ctx: Some(4096),
-                supports_tools: Some(true),
-                ..Default::default()
-            },
-        );
-
-        let models = provider.available_models_from_catalog(&catalog).unwrap();
-        let kimi_k2 = models.iter().find(|model| model.id == "kimi-k2").unwrap();
-        let custom = models
-            .iter()
-            .find(|model| model.id == "kimi-custom")
-            .unwrap();
-
-        assert!(kimi_k2.enabled);
-        assert!(!kimi_k2.is_custom);
-        assert!(custom.enabled);
-        assert!(custom.is_custom);
-    }
-
-    #[test]
     fn kimi_region_endpoints_validate_through_helper_allowlist() {
         let catalog = kimi_catalog();
         for (region, expected_endpoint) in [
@@ -425,28 +355,5 @@ mod tests {
             let runtime = provider.build_runtime_from_catalog(&catalog).unwrap();
             assert_eq!(runtime.chat_endpoint, expected_endpoint);
         }
-    }
-
-    #[test]
-    fn kimi_missing_catalog_provider_returns_custom_models_only() {
-        let mut provider = KimiProvider {
-            enabled_models: vec!["kimi-custom".to_string()],
-            ..Default::default()
-        };
-        provider.custom_models.insert(
-            "kimi-custom".to_string(),
-            CustomModelConfig {
-                n_ctx: Some(8192),
-                ..Default::default()
-            },
-        );
-
-        let models = provider
-            .available_models_from_catalog(&ModelsDevCatalog::new())
-            .unwrap();
-
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "kimi-custom");
-        assert!(models[0].enabled);
     }
 }

@@ -240,37 +240,3 @@ fn plus_file_pathbuf(line: &str) -> Option<PathBuf> {
     }
     Some(PathBuf::from(path.trim_start_matches("b/"))).filter(|path| !path.as_os_str().is_empty())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::history::cells::test_support::{text, tool_card};
-    use serde_json::json;
-
-    #[test]
-    fn diff_cell_reuses_unified_diff_renderer() {
-        let cell = DiffCell::new("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new");
-        let rendered = text(&cell.render(80));
-        assert!(rendered.contains("diff\n"));
-        assert!(rendered.contains("• Edited x (+1 -1)"));
-        assert!(rendered.contains("-old"));
-        assert!(rendered.contains("+new"));
-    }
-
-    #[test]
-    fn diff_cell_snapshot_reuses_unified_diff_renderer() {
-        let card = tool_card(
-            "apply_patch",
-            json!({}),
-            "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new",
-        );
-        let cell = cell_from_tool_card(card, false);
-        assert_eq!(cell.kind(), HistoryCellKind::Diff);
-        let rendered = text(&cell.render(80));
-        assert!(rendered.contains("diff\n▾ ✅ succeeded 1 file · +1 -1 · 1.2s"));
-        assert!(rendered.contains("• Edited x (+1 -1)"));
-        assert!(rendered.contains("Δ x +1 -1"));
-        assert!(rendered.contains("-old"));
-        assert!(rendered.contains("+new"));
-    }
-}

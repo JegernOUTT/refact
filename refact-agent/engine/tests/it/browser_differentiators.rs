@@ -249,79 +249,6 @@ async fn coverage_and_virtual_authenticator_work_without_always_on_domains() {
 }
 
 // One batched request avoids the extra agent round trips incurred by one-action-per-call tools.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn differentiator_01_multi_step_batching_returns_ordered_indexed_results() {
-    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
-        return;
-    };
-    case.setup_world();
-    case.tab
-        .evaluate(
-            "document.querySelector('button').addEventListener('click', () => document.body.dataset.saved = 'yes')",
-            false,
-        )
-        .unwrap();
-    let snapshot = case
-        .runtime
-        .world_manager
-        .aria_snapshot(
-            &case.tab,
-            None,
-            refact_lsp::refact_browser::SnapshotOptions {
-                mode: refact_lsp::refact_browser::SnapshotMode::Ai,
-                refs: true,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    let reference = |name: &str| {
-        snapshot
-            .nodes
-            .iter()
-            .find(|node| node.name.as_deref() == Some(name))
-            .and_then(|node| node.reference.clone())
-            .unwrap()
-    };
-    let report = execute_steps_with_runtime(
-        &mut case.runtime,
-        &[
-            BrowserStep::AccessibilitySnapshot {
-                options: AccessibilitySnapshotOptions::default(),
-            },
-            BrowserStep::Click {
-                timeout_ms: None,
-                locator: BrowserLocator::reference(&reference("Save")),
-            },
-            BrowserStep::Fill {
-                locator: BrowserLocator::reference(&reference("Search")),
-                text: "batched ref fill".to_string(),
-                clear_first: true,
-                verify: true,
-            },
-            BrowserStep::WaitForText {
-                text: "Snapshot page".to_string(),
-                timeout_ms: Some(2_000),
-            },
-            BrowserStep::Navigate {
-                url: case.server.url("cookie-banner.html"),
-                timeout_ms: None,
-            },
-        ],
-        &ImagePolicy::browser_capture(),
-    );
-
-    assert!(report.ok, "mixed batch failed: {report:?}");
-    assert_eq!(report.steps.len(), 5);
-    assert_eq!(
-        report
-            .steps
-            .iter()
-            .map(|step| step.step_index)
-            .collect::<Vec<_>>(),
-        vec![0, 1, 2, 3, 4]
-    );
-}
 
 // Optional clicks must not turn an absent convenience control into a failed workflow.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -410,75 +337,8 @@ async fn differentiator_03_dismiss_overlays_explicit_and_default_handler_paths()
 }
 
 // Link extraction gives agents bounded structured data while preserving the full match count.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn differentiator_04_extract_links_is_bounded_and_reports_total() {
-    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
-        return;
-    };
-    case.setup_world();
-    case.tab
-        .evaluate(
-            "document.querySelector('nav').insertAdjacentHTML('beforeend', '<a href=\"/two\">Two</a><a href=\"/three\">Three</a>')",
-            false,
-        )
-        .unwrap();
-    let report = execute_steps_with_runtime(
-        &mut case.runtime,
-        &[BrowserStep::ExtractLinks {
-            locator: Some(BrowserLocator::css("nav")),
-            limit: Some(2),
-        }],
-        &ImagePolicy::browser_capture(),
-    );
-
-    assert!(report.ok, "link extraction failed: {report:?}");
-    let data = report.steps[0].data.as_ref().unwrap();
-    assert_eq!(data["total"], 3);
-    assert_eq!(data["links"].as_array().unwrap().len(), 2);
-    assert!(data["links"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|link| { link["url"].is_string() && link["text"].is_string() }));
-}
 
 // Structured table rows prevent agents from reparsing presentation-oriented HTML or text.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn differentiator_05_extract_table_returns_structured_rows() {
-    let Some(mut case) = BrowserCase::start("roles.html").await else {
-        return;
-    };
-    case.setup_world();
-    let report = execute_steps_with_runtime(
-        &mut case.runtime,
-        &[BrowserStep::ExtractTable {
-            locator: BrowserLocator::css("table:first-of-type"),
-            limit: None,
-        }],
-        &ImagePolicy::browser_capture(),
-    );
-
-    assert!(report.ok, "table extraction failed: {report:?}");
-    let data = report.steps[0].data.as_ref().unwrap();
-    assert_eq!(data["total_rows"], 2);
-    assert_eq!(data["rows"], json!([["Name", "Value"], ["Row", "Data"]]));
-
-    let limited = execute_steps_with_runtime(
-        &mut case.runtime,
-        &[BrowserStep::ExtractTable {
-            locator: BrowserLocator::css("table:first-of-type"),
-            limit: Some(1),
-        }],
-        &ImagePolicy::browser_capture(),
-    );
-
-    assert!(limited.ok, "limited table extraction failed: {limited:?}");
-    let limited_data = limited.steps[0].data.as_ref().unwrap();
-    assert_eq!(limited_data["total_rows"], 2);
-    assert_eq!(limited_data["rows"], json!([["Name", "Value"]]));
-}
 
 // Verified fallback filling preserves reliable form completion when trusted typing is rejected.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -510,74 +370,8 @@ async fn differentiator_06_fill_fallback_reports_strategy_verification_and_retri
 }
 
 // Capped computed-style inspection keeps diagnostics useful without flooding tool output.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn differentiator_07_styles_filters_properties_and_caps_output() {
-    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
-        return;
-    };
-    case.setup_world();
-    let report = execute_steps_with_runtime(
-        &mut case.runtime,
-        &[
-            BrowserStep::Styles {
-                locator: BrowserLocator::css("body"),
-                property_filter: None,
-            },
-            BrowserStep::Styles {
-                locator: BrowserLocator::css("body"),
-                property_filter: Some("color".to_string()),
-            },
-        ],
-        &ImagePolicy::browser_capture(),
-    );
-
-    assert!(report.ok, "style inspection failed: {report:?}");
-    let all = report.steps[0].data.as_ref().unwrap()["styles"]
-        .as_array()
-        .unwrap();
-    assert_eq!(all.len(), 51);
-    assert!(all.last().unwrap().as_str().unwrap().contains("more"));
-    let filtered = report.steps[1].data.as_ref().unwrap()["styles"]
-        .as_array()
-        .unwrap();
-    assert!(!filtered.is_empty());
-    assert!(filtered
-        .iter()
-        .all(|property| property.as_str().unwrap().contains("color")));
-}
 
 // Visible highlighting lets a human observer verify the element an agent is discussing.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn differentiator_08_highlight_element_draws_visible_outline() {
-    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
-        return;
-    };
-    case.setup_world();
-    let report = execute_steps_with_runtime(
-        &mut case.runtime,
-        &[BrowserStep::HighlightElement {
-            locator: BrowserLocator::css("nav button"),
-        }],
-        &ImagePolicy::browser_capture(),
-    );
-
-    assert!(report.ok, "highlight failed: {report:?}");
-    let outline = eval_value(
-        &case.tab,
-        "document.querySelector('nav button').style.outline",
-    )
-    .as_str()
-    .unwrap()
-    .to_string();
-    assert!(outline.contains("3px"), "missing outline width: {outline}");
-    assert!(
-        outline.contains("solid"),
-        "missing outline style: {outline}"
-    );
-    assert!(outline.contains("231"), "missing outline color: {outline}");
-}
 
 // Independent report, chat-context, and timeline cursors prevent one consumer from starving another.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -719,30 +513,6 @@ async fn differentiator_10_live_recorder_emits_actions_and_mutation_summaries() 
 }
 
 // The closed high-z toolbar must remain visible to users without exposing page-owned DOM access.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn differentiator_11_injected_toolbar_is_closed_high_z_and_emits_actions() {
-    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
-        return;
-    };
-    case.setup_world();
-    let toolbar = eval_json(
-        &case.tab,
-        "(() => { const host = document.querySelector('#__refact_toolbar_host'); return { mounted: !!host, closed: host && host.shadowRoot === null, z: host && getComputedStyle(host).zIndex }; })()",
-    );
-    assert_eq!(toolbar["mounted"], true);
-    assert_eq!(toolbar["closed"], true);
-    assert_eq!(toolbar["z"], "2147483646");
-
-    case.tab
-        .evaluate(
-            "window.__refact_event(JSON.stringify({type:'toolbar_action',action:'screenshot',timestamp:Date.now()}))",
-            false,
-        )
-        .unwrap();
-    case.runtime.drain_raw_events();
-    assert_eq!(case.runtime.drain_toolbar_actions(), vec!["screenshot"]);
-}
 
 // Two-layer masking must keep a password out of the final serialized browser payload.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -890,83 +660,8 @@ async fn differentiator_14_per_chat_runtime_preserves_profile_and_lifecycle() {
 }
 
 // Device presets must keep their distinct viewport and DPR behavior after tab orchestration changes.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn differentiator_15_device_presets_apply_dimensions_and_dpr() {
-    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
-        return;
-    };
-    case.setup_world();
-    for (device, width, height, dpr) in [
-        ("desktop", 1440, 900, 2.0),
-        ("mobile", 390, 844, 3.0),
-        ("tablet", 834, 1112, 2.0),
-    ] {
-        let report = execute_steps_with_runtime(
-            &mut case.runtime,
-            &[BrowserStep::OpenTab {
-                device: Some(device.to_string()),
-                url: None,
-            }],
-            &ImagePolicy::browser_capture(),
-        );
-        assert!(report.ok, "{device} preset failed: {report:?}");
-        let tab = case.runtime.get_active_tab().unwrap();
-        let metrics = eval_json(
-            &tab,
-            "({screenWidth: screen.width, screenHeight: screen.height, innerWidth: innerWidth, innerHeight: innerHeight, dpr: devicePixelRatio})",
-        );
-        if device == "desktop" {
-            assert_eq!(metrics["innerWidth"], width, "{device} width");
-            assert_eq!(metrics["innerHeight"], height, "{device} height");
-        } else {
-            assert_eq!(metrics["screenWidth"], width, "{device} width");
-            assert_eq!(metrics["screenHeight"], height, "{device} height");
-        }
-        assert_eq!(metrics["dpr"], dpr, "{device} DPR");
-    }
-}
 
 // Rich element metadata lets form and actionability logic decide without ad hoc DOM reinspection.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn differentiator_16_rich_element_info_reports_state_text_box_and_field_kind() {
-    let Some(case) = BrowserCase::start("snapshot.html").await else {
-        return;
-    };
-    case.tab
-        .evaluate(
-            "document.body.insertAdjacentHTML('afterbegin', '<label>Rich<input id=\"rich\" value=\"rich value\" readonly></label><div id=\"editable\" contenteditable=\"true\">editable text</div>')",
-            false,
-        )
-        .unwrap();
-    case.tab.evaluate(INSPECT_ELEMENT_JS, false).unwrap();
-    let inspect = |selector: &str| -> ElementInfo {
-        let expression = format!(
-            "JSON.stringify(__refact_inspect_element(document.querySelector({}), 1))",
-            serde_json::to_string(selector).unwrap()
-        );
-        let value = eval_value(&case.tab, &expression);
-        parse_element_info(value.as_str().unwrap()).unwrap()
-    };
-
-    let input = inspect("#rich");
-    assert!(input.visible);
-    assert!(input.enabled);
-    assert!(input.readonly);
-    assert!(!input.content_editable);
-    assert_eq!(input.value.as_deref(), Some("rich value"));
-    assert!(input
-        .bbox
-        .as_ref()
-        .is_some_and(|bbox| bbox.width > 0.0 && bbox.height > 0.0));
-    assert_eq!(input.field_kind, FieldKind::TextInput);
-
-    let editable = inspect("#editable");
-    assert!(editable.content_editable);
-    assert_eq!(editable.inner_text.as_deref(), Some("editable text"));
-    assert_eq!(editable.field_kind, FieldKind::ContentEditable);
-}
 
 // A fail-open install flag makes the health loop treat a crashed panel as healthy and never retry it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

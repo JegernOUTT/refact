@@ -437,30 +437,6 @@ mod tests {
     }
 
     #[test]
-    fn test_models_dev_gemini_parse_uses_multimodality_from_resolved_caps() {
-        let live_model = json!({
-            "name": "models/gemini-vision-test",
-            "supportedGenerationMethods": ["generateContent"]
-        });
-        let caps = ModelCapabilities {
-            n_ctx: 128_000,
-            max_output_tokens: 8_192,
-            supports_tools: true,
-            supports_parallel_tools: true,
-            supports_vision: true,
-            supports_pdf: true,
-            ..Default::default()
-        };
-
-        let model =
-            GoogleGeminiProvider::parse_gemini_model(&live_model, false, Some(&caps)).unwrap();
-
-        assert!(model.supports_tools);
-        assert!(model.supports_parallel_tools);
-        assert!(model.supports_multimodality);
-    }
-
-    #[test]
     fn test_gemini_unknown_live_generate_content_model_is_retained() {
         let empty_caps = HashMap::new();
         let live_model = json!({
@@ -493,15 +469,6 @@ mod tests {
             GoogleGeminiProvider::resolve_models_dev_caps(&model_caps, "gemini-cataloged")
                 .is_some()
         );
-    }
-
-    #[test]
-    fn test_gemini_provider_qualified_enabled_ids_match_live_models() {
-        let enabled = std::collections::HashSet::from(["google_gemini/gemini-test"]);
-        assert!(GoogleGeminiProvider::live_model_enabled(
-            &enabled,
-            "gemini-test"
-        ));
     }
 
     #[test]

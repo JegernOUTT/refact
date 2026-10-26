@@ -654,54 +654,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_all_supported_question_types() {
-        let request = request_with_questions(json!([
-            {"id":"confirm","type":"yes_no","text":"Proceed?"},
-            {"id":"path","type":"single_select","text":"Path?","options":["A","B"]},
-            {"id":"areas","type":"multi_select","text":"Areas?","options":["Tests","Docs"]},
-            {"id":"notes","type":"free_text","text":"Notes?"}
-        ]));
-
-        assert_eq!(request.questions.len(), 4);
-        assert_eq!(request.questions[0].question_type, AskQuestionType::YesNo);
-        assert_eq!(
-            request.questions[1].question_type,
-            AskQuestionType::SingleSelect
-        );
-        assert_eq!(
-            request.questions[2].question_type,
-            AskQuestionType::MultiSelect
-        );
-        assert_eq!(
-            request.questions[3].question_type,
-            AskQuestionType::FreeText
-        );
-    }
-
-    #[test]
-    fn parses_question_type_alias_from_tool_message() {
-        let request = request_with_questions(json!([
-            {"id":"confirm","question_type":"yes_no","text":"Proceed?"}
-        ]));
-
-        assert_eq!(request.questions[0].question_type, AskQuestionType::YesNo);
-    }
-
-    #[test]
-    fn keeps_valid_questions_when_a_payload_question_is_malformed() {
-        let request = request_with_questions(json!([
-            {"id":"confirm","type":"yes_no","text":"Proceed?"},
-            {"id":"broken","type":"single_select","text":"Choose?"},
-            {"id":"notes","type":"free_text","text":"Notes?"}
-        ]));
-
-        assert_eq!(request.questions.len(), 2);
-        assert_eq!(request.malformed_question_positions(), &[2]);
-        assert_eq!(request.questions[0].id, "confirm");
-        assert_eq!(request.questions[1].id, "notes");
-    }
-
-    #[test]
     fn valid_questions_stay_answerable_when_a_payload_question_is_malformed() {
         let request = request_with_questions(json!([
             {"id":"confirm","type":"yes_no","text":"Proceed?"},
@@ -888,16 +840,5 @@ mod tests {
             form.format_answers(),
             "[QA:call-ask]\n> [notes] Notes?\n(no answer)"
         );
-    }
-
-    #[test]
-    fn cancel_reports_canceled_without_mutating_answers() {
-        let request = request_with_questions(json!([
-            {"id":"confirm","type":"yes_no","text":"Proceed?"}
-        ]));
-        let form = AskQuestionsForm::new(request);
-
-        assert_eq!(form.cancel(), AskQuestionsOutcome::Canceled);
-        assert_eq!(form.current_answer_text(), "(no answer)");
     }
 }

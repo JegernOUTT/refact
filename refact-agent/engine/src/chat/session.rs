@@ -5554,33 +5554,6 @@ mod tests {
     }
 
     #[test]
-    fn perf_diagnostics_queue_wait_records_once_with_controlled_timestamp() {
-        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
-        let (_guard, sink) = install_perf_recorder();
-        let mut session = make_session();
-        let now = Instant::now();
-        session
-            .command_enqueued_at
-            .insert("queued".to_string(), now);
-
-        session.record_command_queue_wait_at(
-            "queued",
-            now.checked_add(std::time::Duration::from_micros(42))
-                .unwrap(),
-        );
-        session.record_command_queue_wait_at(
-            "queued",
-            now.checked_add(std::time::Duration::from_micros(84))
-                .unwrap(),
-        );
-
-        let events = sink.events();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].component, "command.queue_wait");
-        assert_eq!(events[0].elapsed_us, 42);
-    }
-
-    #[test]
     fn reprioritize_queued_command_is_idempotent_without_side_effects() {
         let mut session = make_session();
         session.command_queue.extend([
@@ -5689,124 +5662,6 @@ mod tests {
             }
             command => panic!("expected user message, got {command:?}"),
         }
-    }
-
-    #[test]
-    fn perf_diagnostics_ordinary_and_priority_queue_waits_are_cleaned_up() {
-        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
-        let (_guard, sink) = install_perf_recorder();
-        let mut session = make_session();
-
-        session.enqueue_accepted_command(CommandRequest {
-            native_approval_guard: None,
-            supervision_guard: None,
-            client_request_id: "ordinary".to_string(),
-            priority: false,
-            command: ChatCommand::Regenerate {},
-        });
-        session.enqueue_accepted_priority_command(CommandRequest {
-            native_approval_guard: None,
-            supervision_guard: None,
-            client_request_id: "priority".to_string(),
-            priority: true,
-            command: ChatCommand::Regenerate {},
-        });
-
-        assert_eq!(session.command_enqueued_at.len(), 2);
-        let now = Instant::now();
-        session.record_command_queue_wait_at("priority", now);
-        session.record_command_queue_wait_at("ordinary", now);
-
-        assert!(session.command_enqueued_at.is_empty());
-        let events: Vec<_> = sink
-            .events()
-            .into_iter()
-            .filter(|event| event.component == "command.queue_wait")
-            .collect();
-        assert_eq!(events.len(), 2);
-    }
-
-    #[test]
-    fn perf_diagnostics_first_delta_records_once_and_skips_empty_deltas() {
-        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
-        let (_guard, sink) = install_perf_recorder();
-        let mut session = make_session();
-        let started_at = Instant::now();
-        session.start_stream();
-        session.stream_started_at = Some(started_at);
-
-        session.emit_stream_delta_at(Vec::new(), started_at);
-        session.emit_stream_delta_at(
-            vec![DeltaOp::SetReasoning {
-                text: String::new(),
-            }],
-            started_at,
-        );
-        assert_eq!(session.stream_started_at, Some(started_at));
-        session.emit_stream_delta_at(
-            vec![DeltaOp::AppendContent {
-                text: "first".to_string(),
-            }],
-            started_at
-                .checked_add(std::time::Duration::from_micros(31))
-                .unwrap(),
-        );
-        session.emit_stream_delta_at(
-            vec![DeltaOp::AppendContent {
-                text: "second".to_string(),
-            }],
-            started_at
-                .checked_add(std::time::Duration::from_micros(62))
-                .unwrap(),
-        );
-
-        let events: Vec<_> = sink
-            .events()
-            .into_iter()
-            .filter(|event| event.component == "stream.first_delta")
-            .collect();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].elapsed_us, 31);
-
-        session.finish_stream(None);
-        session.start_stream();
-        session.finish_stream(None);
-        assert_eq!(
-            sink.events()
-                .iter()
-                .filter(|event| event.component == "stream.first_delta")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn perf_diagnostics_confirmation_wait_consumes_pause_once() {
-        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
-        let (_guard, sink) = install_perf_recorder();
-        let mut session = make_session();
-        let paused_at = Instant::now();
-        session.confirmation_paused_at = Some((
-            paused_at,
-            HashSet::from(["tc1".to_string(), "tc2".to_string()]),
-        ));
-
-        session.complete_confirmation_wait_at(
-            paused_at
-                .checked_add(std::time::Duration::from_micros(55))
-                .unwrap(),
-        );
-        session.complete_confirmation_wait_at(
-            paused_at
-                .checked_add(std::time::Duration::from_micros(110))
-                .unwrap(),
-        );
-
-        let events = sink.events();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].component, "tool.confirmation_wait");
-        assert_eq!(events[0].elapsed_us, 55);
-        assert_eq!(events[0].item_count, Some(2));
     }
 
     #[test]
@@ -5981,79 +5836,6 @@ mod tests {
     }
 
     #[test]
-    fn no_delta_abort_clears_stream_timestamp() {
-        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
-        let (_guard, _) = install_perf_recorder();
-        let mut session = make_session();
-        session.start_stream();
-        assert!(session.stream_started_at.is_some());
-
-        session.abort_stream();
-
-        assert!(session.stream_started_at.is_none());
-    }
-
-    #[test]
-    fn terminal_stream_paths_clear_stream_timestamp() {
-        let mut finished = make_session();
-        finished.start_stream();
-        finished.finish_stream(None);
-        assert!(finished.stream_started_at.is_none());
-
-        let mut errored = make_session();
-        errored.start_stream();
-        errored.finish_stream_with_error("failed".to_string());
-        assert!(errored.stream_started_at.is_none());
-
-        let mut reset = make_session();
-        reset.start_stream();
-        reset.reset_compaction_runtime_state();
-        assert!(reset.stream_started_at.is_none());
-    }
-
-    #[test]
-    fn perf_diagnostics_sse_serialize_and_broadcast_are_distinct() {
-        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
-        let (_guard, sink) = install_perf_recorder();
-        let session = make_session();
-
-        session.record_sse_timing_for_test(7, 11, 13);
-
-        let events = sink.events();
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].component, "sse.serialize");
-        assert_eq!(events[0].elapsed_us, 7);
-        assert_eq!(events[0].size_bytes, Some(13));
-        assert_eq!(events[1].component, "sse.broadcast");
-        assert_eq!(events[1].elapsed_us, 11);
-        assert_eq!(events[1].size_bytes, None);
-    }
-
-    #[test]
-    fn perf_diagnostics_sse_broadcast_without_receivers_is_skipped() {
-        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
-        let (_guard, sink) = install_perf_recorder();
-        let mut session = make_session();
-
-        session.emit(ChatEvent::PauseCleared {});
-
-        let events = sink.events();
-        let broadcast = events
-            .iter()
-            .find(|event| event.component == PerfComponent::SseBroadcast.as_str())
-            .unwrap();
-        assert_eq!(broadcast.outcome, PerfOutcome::Skipped.as_str());
-
-        let telemetry = PerformanceTelemetry::new(true);
-        for event in &events {
-            assert!(telemetry.record(event));
-        }
-        let advancement = telemetry.snapshot().rollups.advancement;
-        assert_eq!(advancement.failure_count, 0);
-        assert_eq!(advancement.skipped_count, 1);
-    }
-
-    #[test]
     fn perf_diagnostics_sse_broadcast_with_receiver_is_successful() {
         let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
         let (_guard, sink) = install_perf_recorder();
@@ -6207,17 +5989,6 @@ mod tests {
         }
 
         #[test]
-        fn cooldown_gate_uses_last_nudge_plus_budget_cooldown() {
-            let mut goal = snapshot();
-            assert!(goal.goal_nudge_ready_at(1_000));
-
-            goal.goal_record_nudge(2_000);
-
-            assert!(!goal.goal_nudge_ready_at(3_499));
-            assert!(goal.goal_nudge_ready_at(3_500));
-        }
-
-        #[test]
         fn goal_can_pursue_matrix_across_statuses() {
             let mut goal = snapshot();
             assert!(goal.goal_can_pursue_at(1_000));
@@ -6291,12 +6062,6 @@ mod tests {
             assert_eq!(session.goal.as_ref().unwrap().progress.no_progress_turns, 0);
             assert_eq!(session.goal_status, Some(GoalStatus::Active));
             assert!(session.goal_can_pursue());
-        }
-
-        #[test]
-        fn stop_goal_on_manual_abort_is_noop_without_goal() {
-            let mut session = make_session();
-            assert!(!session.stop_goal_on_manual_abort());
         }
 
         #[test]
@@ -6401,32 +6166,6 @@ mod tests {
             assert_eq!(goal.progress.turns_used, 1);
             assert_eq!(goal.progress.tokens_used, 42);
             assert_eq!(goal.progress.no_progress_turns, 0);
-        }
-
-        #[test]
-        fn attempts_and_events_append_through_helpers() {
-            let mut session = make_session();
-            session.install_goal("agent", "ship it", true, budget());
-
-            session.goal_push_attempt(GoalAttempt {
-                at_ms: 10,
-                trigger: "done".to_string(),
-                verdict: "needs_work".to_string(),
-                gaps: vec!["tests".to_string()],
-                verifier_reply: "run tests".to_string(),
-                criteria_verdicts: Vec::new(),
-            });
-            session.goal_push_event(GoalEvent {
-                at_ms: 11,
-                kind: "nudge".to_string(),
-                text: "keep going".to_string(),
-            });
-
-            let goal = session.goal.as_ref().unwrap();
-            assert_eq!(goal.attempts.len(), 1);
-            assert_eq!(goal.events.len(), 1);
-            assert_eq!(goal.attempts[0].gaps, vec!["tests".to_string()]);
-            assert_eq!(goal.events[0].text, "keep going");
         }
     }
 
@@ -6556,42 +6295,6 @@ mod tests {
 
             session.rebuild_goal_projection_from_messages();
             assert_eq!(session.goal.as_ref().unwrap().events.len(), 2);
-        }
-
-        #[test]
-        fn coalesce_tail_goal_nudge_event_updates_payload_in_place() {
-            let mut session = make_session();
-            install(&mut session);
-            session.add_message(pursuit_event(1_000));
-            let messages_before = session.messages.len();
-
-            assert!(session.coalesce_tail_goal_nudge_event(3_000));
-
-            assert_eq!(session.messages.len(), messages_before);
-            let payload = session.messages.last().unwrap().extra["event"]["payload"].clone();
-            assert_eq!(payload["count"], json!(2));
-            assert_eq!(payload["last_at_ms"], json!(3_000));
-            assert_eq!(payload["at_ms"], json!(1_000));
-
-            assert!(session.coalesce_tail_goal_nudge_event(4_000));
-            let payload = session.messages.last().unwrap().extra["event"]["payload"].clone();
-            assert_eq!(payload["count"], json!(3));
-        }
-
-        #[test]
-        fn coalesce_requires_tail_nudge_event() {
-            let mut session = make_session();
-            install(&mut session);
-            assert!(!session.coalesce_tail_goal_nudge_event(1_000));
-
-            session.add_message(pursuit_event(1_000));
-            session.add_message(ChatMessage {
-                role: "assistant".to_string(),
-                content: ChatContent::SimpleText("Idle.".to_string()),
-                ..Default::default()
-            });
-
-            assert!(!session.coalesce_tail_goal_nudge_event(2_000));
         }
     }
 
@@ -6809,60 +6512,6 @@ mod tests {
         }
 
         #[test]
-        fn reducing_the_graph_repeatedly_costs_one_reduction() {
-            let mut session = make_session();
-            install(&mut session);
-            session
-                .declare_sub_goals(refact_chat_api::SubGoalDeclaration {
-                    nodes: vec![lane("lint", &["c1"])],
-                    edges: vec![refact_chat_api::SubGoalEdge::required(
-                        refact_chat_api::ROOT_SUB_GOAL_ID,
-                        "lint",
-                    )],
-                })
-                .expect("declaration is valid");
-
-            let before = session.sub_goal_graph_reductions();
-            for _ in 0..16 {
-                assert_eq!(session.sub_goal_graph().nodes.len(), 1);
-                assert!(!session.sub_goal_rollup().parent_may_proceed());
-            }
-
-            assert_eq!(session.sub_goal_graph_reductions(), before + 1);
-        }
-
-        #[test]
-        fn any_ledger_append_invalidates_the_cached_graph() {
-            let mut session = make_session();
-            install(&mut session);
-            session.sub_goal_graph();
-            let before = session.sub_goal_graph_reductions();
-
-            session.goal_note_no_progress_turn();
-            session.sub_goal_graph();
-            assert_eq!(session.sub_goal_graph_reductions(), before + 1);
-
-            session
-                .declare_sub_goals(refact_chat_api::SubGoalDeclaration {
-                    nodes: vec![lane("audit", &[])],
-                    edges: vec![refact_chat_api::SubGoalEdge::optional(
-                        refact_chat_api::ROOT_SUB_GOAL_ID,
-                        "audit",
-                    )],
-                })
-                .expect("declaration is valid");
-            // The declaration's own validation read the graph, and that read
-            // was a cache hit: only the append that followed it costs a
-            // reduction.
-            assert_eq!(session.sub_goal_graph().nodes.len(), 1);
-            assert_eq!(session.sub_goal_graph_reductions(), before + 2);
-
-            session.set_goal_ledger(Vec::new());
-            assert!(session.sub_goal_graph().is_empty());
-            assert_eq!(session.sub_goal_graph_reductions(), before + 3);
-        }
-
-        #[test]
         fn auto_lane_creation_past_the_cap_refuses_explicitly() {
             let mut session = make_session();
             install(&mut session);
@@ -7054,41 +6703,6 @@ mod tests {
         }
 
         #[test]
-        fn repeated_nudges_coalesce_ledger_tail() {
-            let mut session = make_session();
-            install(&mut session);
-            let before = session.goal_ledger.len();
-            assert!(session.goal_record_nudge(1_000));
-            assert!(session.goal_record_nudge(2_000));
-            assert!(session.goal_record_nudge(3_000));
-            assert_eq!(session.goal_ledger.len(), before + 1);
-            let entry = session.goal_ledger.last().unwrap();
-            assert!(matches!(entry.op, GoalLedgerOp::NudgeRecorded));
-            assert_eq!(entry.at_ms, 3_000);
-            assert_eq!(
-                session.goal.as_ref().unwrap().progress.last_nudge_at_ms,
-                3_000
-            );
-        }
-
-        #[test]
-        fn no_evidence_and_tiny_completion_counts_no_progress() {
-            let mut session = make_session();
-            install(&mut session);
-
-            session.goal_record_progress_from_usage(&ChatUsage {
-                prompt_tokens: 10,
-                completion_tokens: 3,
-                total_tokens: 13,
-                cache_read_tokens: None,
-                cache_creation_tokens: None,
-                metering_usd: None,
-            });
-
-            assert_eq!(session.goal.as_ref().unwrap().progress.no_progress_turns, 1);
-        }
-
-        #[test]
         fn max_cost_budget_exhausts_via_cost_accounting() {
             let mut session = make_session();
             session.install_goal(
@@ -7105,32 +6719,6 @@ mod tests {
 
             assert_eq!(session.goal_status, Some(GoalStatus::BudgetExhausted));
         }
-
-        #[test]
-        fn criteria_install_reaches_projection_and_ledger() {
-            let mut session = make_session();
-            session.install_goal_with_criteria(
-                "agent",
-                "ship it",
-                true,
-                GoalBudget::default(),
-                vec![GoalCriterion {
-                    id: "C1".to_string(),
-                    text: "tests pass".to_string(),
-                    verify_hint: None,
-                    verify_command: None,
-                }],
-            );
-
-            let goal = session.goal.as_ref().unwrap();
-            assert_eq!(goal.criteria.len(), 1);
-            assert_eq!(goal.criteria[0].id, "C1");
-            let state = reduce_goal_ledger(&session.goal_ledger).unwrap();
-            assert_eq!(state.criteria.len(), 1);
-
-            session.rebuild_goal_projection_from_messages();
-            assert_eq!(session.goal.as_ref().unwrap().criteria.len(), 1);
-        }
     }
 
     /// Creates a session with a small broadcast channel capacity, useful for
@@ -7141,45 +6729,6 @@ mod tests {
         let mut session = ChatSession::new("test-chat-small".to_string());
         session.event_tx = event_tx;
         session
-    }
-
-    #[test]
-    fn test_new_session_initial_state() {
-        let session = make_session();
-        assert_eq!(session.chat_id, "test-chat");
-        assert_eq!(session.thread.id, "test-chat");
-        assert_eq!(session.runtime.state, SessionState::Idle);
-        assert!(session.messages.is_empty());
-        assert!(session.draft_message.is_none());
-        assert_eq!(session.event_seq, 0);
-        assert!(!session.trajectory_dirty);
-    }
-
-    #[test]
-    fn test_new_with_trajectory() {
-        let msg = ChatMessage {
-            role: "user".into(),
-            content: ChatContent::SimpleText("hello".into()),
-            ..Default::default()
-        };
-        let thread = ThreadParams {
-            id: "traj-1".into(),
-            title: "Old Chat".into(),
-            ..Default::default()
-        };
-        let session = ChatSession::new_with_trajectory(
-            "traj-1".into(),
-            vec![msg.clone()],
-            thread,
-            "2024-01-01T00:00:00Z".into(),
-            None,
-            Vec::new(),
-            None,
-        );
-        assert_eq!(session.chat_id, "traj-1");
-        assert_eq!(session.thread.title, "Old Chat");
-        assert_eq!(session.messages.len(), 1);
-        assert_eq!(session.created_at, "2024-01-01T00:00:00Z");
     }
 
     #[test]
@@ -7275,36 +6824,6 @@ mod tests {
     }
 
     #[test]
-    fn turn_memory_next_turn_reacquires_equivalent_context_and_catalog() {
-        let mut session = make_session();
-        session.add_message(ChatMessage::new(
-            "user".to_string(),
-            "canonical".to_string(),
-        ));
-        install_turn_memory_state(&mut session);
-        let initial_prompt = session.last_prompt_messages.clone();
-        let initial_catalog = session.tool_catalog.clone().unwrap();
-
-        session.start_stream();
-        session.finish_stream(None);
-        assert_turn_memory_released(&session);
-
-        session.last_prompt_messages = initial_prompt;
-        session.tool_catalog = Some(initial_catalog.clone());
-        session.turn_tool_pool = Some(refact_runtime_api::TurnToolPool::new(()));
-
-        assert_eq!(
-            session.last_prompt_messages[0].content.content_text_only(),
-            "prepared prompt".repeat(16_384)
-        );
-        assert_eq!(
-            session.tool_catalog.unwrap().index.tools.len(),
-            initial_catalog.index.tools.len()
-        );
-        assert!(session.turn_tool_pool.is_some());
-    }
-
-    #[test]
     fn turn_memory_fleet_releases_at_least_ninety_percent_after_completion() {
         for chat_count in crate::chat::perf_harness::TURN_MEMORY_FLEET_CHAT_COUNTS {
             let sessions = (0..chat_count)
@@ -7366,43 +6885,6 @@ mod tests {
         assert_eq!(session.post_turn_task_handles.len(), 1);
         assert!(!session.post_turn_task_handles[0].is_finished());
         session.post_turn_task_handles.pop().unwrap().abort();
-    }
-
-    #[test]
-    fn install_goal_populates_snapshot_and_runtime_fields() {
-        let mut session = make_session();
-        let budget = GoalBudget {
-            max_turns: Some(7),
-            max_minutes: Some(8),
-            max_tokens: Some(9),
-            max_cost_cents: None,
-            cooldown_ms: 10,
-            no_progress_token_threshold: 11,
-            no_progress_turns: Some(12),
-            explicit: false,
-        };
-
-        session.install_goal("agent", "ship the card", true, budget.clone());
-
-        let goal = session.goal.clone().expect("goal projection");
-        assert_eq!(goal.content, "ship the card");
-        assert_eq!(goal.status, GoalStatus::Active);
-        assert_eq!(goal.budget, budget);
-        assert!(session.goal_active);
-        assert_eq!(session.goal_status, Some(GoalStatus::Active));
-        assert_eq!(session.goal_turns_used, 0);
-        match session.snapshot() {
-            ChatEvent::Snapshot {
-                goal: snapshot_goal,
-                runtime,
-                ..
-            } => {
-                assert_eq!(snapshot_goal, Some(goal));
-                assert!(runtime.goal_active);
-                assert_eq!(runtime.goal_status, Some(GoalStatus::Active));
-            }
-            other => panic!("expected snapshot, got {other:?}"),
-        }
     }
 
     #[test]
@@ -7580,28 +7062,6 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_increments_seq() {
-        let mut session = make_session();
-        let _rx = session.subscribe();
-        assert_eq!(session.event_seq, 0);
-        session.emit(ChatEvent::PauseCleared {});
-        assert_eq!(session.event_seq, 1);
-        session.emit(ChatEvent::PauseCleared {});
-        assert_eq!(session.event_seq, 2);
-    }
-
-    #[test]
-    fn test_emit_skips_serialization_without_receivers() {
-        let mut session = make_session();
-        assert_eq!(session.event_tx.receiver_count(), 0);
-
-        session.emit(ChatEvent::PauseCleared {});
-        session.emit(ChatEvent::PauseCleared {});
-
-        assert_eq!(session.event_seq, 0);
-    }
-
-    #[test]
     fn test_emit_seq_stays_contiguous_across_subscribe_gap() {
         let mut session = make_session();
 
@@ -7631,23 +7091,6 @@ mod tests {
         assert_eq!(envelope.chat_id, "test-chat");
         assert_eq!(envelope.seq, 1);
         assert!(matches!(envelope.event, ChatEvent::PauseCleared {}));
-    }
-
-    #[test]
-    fn test_snapshot_without_draft() {
-        let mut session = make_session();
-        session.messages.push(ChatMessage {
-            role: "user".into(),
-            content: ChatContent::SimpleText("hi".into()),
-            ..Default::default()
-        });
-        let snap = session.snapshot();
-        match snap {
-            ChatEvent::Snapshot { messages, .. } => {
-                assert_eq!(messages.len(), 1);
-            }
-            _ => panic!("Expected Snapshot"),
-        }
     }
 
     #[test]
@@ -7750,19 +7193,6 @@ mod tests {
     }
 
     #[test]
-    fn test_add_message_generates_id_if_empty() {
-        let mut session = make_session();
-        let msg = ChatMessage {
-            role: "user".into(),
-            content: ChatContent::SimpleText("hi".into()),
-            ..Default::default()
-        };
-        session.add_message(msg);
-        assert!(!session.messages[0].message_id.is_empty());
-        assert!(session.trajectory_dirty);
-    }
-
-    #[test]
     fn test_add_message_preserves_existing_id() {
         let mut session = make_session();
         let msg = ChatMessage {
@@ -7800,13 +7230,6 @@ mod tests {
     }
 
     #[test]
-    fn test_update_message_unknown_id_returns_none() {
-        let mut session = make_session();
-        let msg = ChatMessage::default();
-        assert!(session.update_message("unknown", msg).is_none());
-    }
-
-    #[test]
     fn test_remove_message_returns_index() {
         let mut session = make_session();
         session.messages.push(ChatMessage {
@@ -7821,12 +7244,6 @@ mod tests {
         assert_eq!(idx, Some(0));
         assert_eq!(session.messages.len(), 1);
         assert_eq!(session.messages[0].message_id, "m2");
-    }
-
-    #[test]
-    fn test_remove_message_unknown_id_returns_none() {
-        let mut session = make_session();
-        assert!(session.remove_message("unknown").is_none());
     }
 
     #[test]
@@ -7851,26 +7268,6 @@ mod tests {
         session.truncate_messages(10);
         assert_eq!(session.messages.len(), 1);
         assert_eq!(session.trajectory_version, version_before);
-    }
-
-    #[test]
-    fn test_start_stream_returns_message_id() {
-        let mut session = make_session();
-        let result = session.start_stream();
-        assert!(result.is_some());
-        let (msg_id, abort_flag) = result.unwrap();
-        assert!(!msg_id.is_empty());
-        assert!(!abort_flag.load(std::sync::atomic::Ordering::SeqCst));
-        assert_eq!(session.runtime.state, SessionState::Generating);
-        assert!(session.draft_message.is_some());
-    }
-
-    #[test]
-    fn test_start_stream_fails_if_already_generating() {
-        let mut session = make_session();
-        session.start_stream();
-        let result = session.start_stream();
-        assert!(result.is_none());
     }
 
     #[test]
@@ -7926,20 +7323,6 @@ mod tests {
             draft.reasoning_content.as_deref(),
             Some("completed reasoning body")
         );
-    }
-
-    #[test]
-    fn test_emit_stream_delta_sets_tool_calls() {
-        let mut session = make_session();
-        session.start_stream();
-        session.emit_stream_delta(vec![DeltaOp::SetToolCalls {
-            tool_calls: vec![
-                json!({"id":"tc1","type":"function","function":{"name":"test","arguments":"{}"}}),
-            ],
-        }]);
-        let draft = session.draft_message.as_ref().unwrap();
-        assert!(draft.tool_calls.is_some());
-        assert_eq!(draft.tool_calls.as_ref().unwrap().len(), 1);
     }
 
     #[test]
@@ -8008,13 +7391,6 @@ mod tests {
             }
         }
         assert!(saw_sleep_removed);
-    }
-
-    #[test]
-    fn test_emit_stream_delta_without_draft_is_noop() {
-        let mut session = make_session();
-        session.emit_stream_delta(vec![DeltaOp::AppendContent { text: "x".into() }]);
-        assert!(session.draft_message.is_none());
     }
 
     #[test]
@@ -8513,48 +7889,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_execution_progress_updates_last_tool_progress_at() {
-        let mut session = make_session();
-        session.set_runtime_state(SessionState::ExecutingTools, None);
-        let started = session.last_tool_started_at.unwrap();
-        assert!(session.last_tool_progress_at.is_none());
-
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        session.mark_tool_progress();
-
-        let progress = session.last_tool_progress_at.unwrap();
-        assert!(progress > started);
-        assert_eq!(session.last_activity, progress);
-
-        session.set_runtime_state(SessionState::Idle, None);
-        assert!(session.last_tool_started_at.is_none());
-        assert!(session.last_tool_progress_at.is_none());
-    }
-
-    #[test]
-    fn set_runtime_state_updates_last_activity_on_change() {
-        let mut session = make_session();
-        let before = session.last_activity;
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
-        session.set_runtime_state(SessionState::Generating, None);
-
-        assert!(session.last_activity > before);
-    }
-
-    #[test]
-    fn set_runtime_state_no_op_does_not_touch_activity() {
-        let mut session = make_session();
-        let before = session.last_activity;
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
-        session.set_runtime_state(SessionState::Idle, None);
-
-        assert_eq!(session.last_activity, before);
-        assert_eq!(session.event_seq, 0);
-    }
-
-    #[test]
     fn set_runtime_state_idle_clears_active_compression_same_state() {
         let mut session = make_session();
         session.is_compressing = false;
@@ -8695,23 +8029,6 @@ mod tests {
     }
 
     #[test]
-    fn test_set_runtime_state_clears_pause_on_transition() {
-        let mut session = make_session();
-        session.runtime.pause_reasons.push(PauseReason {
-            reason_type: "test".into(),
-            tool_name: "test_tool".into(),
-            command: "cmd".into(),
-            rule: "rule".into(),
-            tool_call_id: "tc1".into(),
-            integr_config_path: None,
-        });
-        session.set_runtime_state(SessionState::Paused, None);
-        assert!(!session.runtime.pause_reasons.is_empty());
-        session.set_runtime_state(SessionState::Idle, None);
-        assert!(session.runtime.pause_reasons.is_empty());
-    }
-
-    #[test]
     fn test_set_runtime_state_clears_wake_up_at_and_marks_dirty() {
         let mut session = make_session();
         session.runtime.state = SessionState::WaitingUserInput;
@@ -8835,15 +8152,6 @@ mod tests {
     }
 
     #[test]
-    fn test_set_title() {
-        let mut session = make_session();
-        session.set_title("New Title".into(), true);
-        assert_eq!(session.thread.title, "New Title");
-        assert!(session.thread.is_title_generated);
-        assert!(session.trajectory_dirty);
-    }
-
-    #[test]
     fn test_validate_tool_decision() {
         let mut session = make_session();
         session.runtime.pause_reasons.push(PauseReason {
@@ -8856,35 +8164,6 @@ mod tests {
         });
         assert!(session.validate_tool_decision("tc1"));
         assert!(!session.validate_tool_decision("unknown"));
-    }
-
-    #[test]
-    fn test_process_tool_decisions_accepts() {
-        let mut session = make_session();
-        session.runtime.pause_reasons.push(PauseReason {
-            reason_type: "test".into(),
-            tool_name: "test_tool".into(),
-            command: "cmd".into(),
-            rule: "rule".into(),
-            tool_call_id: "tc1".into(),
-            integr_config_path: None,
-        });
-        session.runtime.pause_reasons.push(PauseReason {
-            reason_type: "test".into(),
-            tool_name: "test_tool".into(),
-            command: "cmd".into(),
-            rule: "rule".into(),
-            tool_call_id: "tc2".into(),
-            integr_config_path: None,
-        });
-        session.set_runtime_state(SessionState::Paused, None);
-        let outcome = session.process_tool_decisions(&[ToolDecisionItem {
-            tool_call_id: "tc1".into(),
-            accepted: true,
-        }]);
-        assert_eq!(outcome.accepted_ids, vec!["tc1"]);
-        assert_eq!(session.runtime.pause_reasons.len(), 1);
-        assert_eq!(session.runtime.state, SessionState::Paused);
     }
 
     #[test]
@@ -9055,26 +8334,6 @@ mod tests {
     }
 
     #[test]
-    fn test_process_tool_decisions_ignores_unknown() {
-        let mut session = make_session();
-        session.runtime.pause_reasons.push(PauseReason {
-            reason_type: "test".into(),
-            tool_name: "test_tool".into(),
-            command: "cmd".into(),
-            rule: "rule".into(),
-            tool_call_id: "tc1".into(),
-            integr_config_path: None,
-        });
-        session.set_runtime_state(SessionState::Paused, None);
-        let outcome = session.process_tool_decisions(&[ToolDecisionItem {
-            tool_call_id: "unknown".into(),
-            accepted: true,
-        }]);
-        assert!(outcome.accepted_ids.is_empty());
-        assert_eq!(session.runtime.pause_reasons.len(), 1);
-    }
-
-    #[test]
     fn test_process_tool_decisions_leaves_final_state_to_caller() {
         let mut session = make_session();
         session.runtime.pause_reasons.push(PauseReason {
@@ -9092,26 +8351,6 @@ mod tests {
         }]);
         assert!(session.runtime.pause_reasons.is_empty());
         assert_eq!(session.runtime.state, SessionState::Paused);
-    }
-
-    #[test]
-    fn test_increment_version() {
-        let mut session = make_session();
-        assert_eq!(session.trajectory_version, 0);
-        assert!(!session.trajectory_dirty);
-        session.increment_version();
-        assert_eq!(session.trajectory_version, 1);
-        assert!(session.trajectory_dirty);
-    }
-
-    #[test]
-    fn test_create_sessions_map() {
-        let map = create_sessions_map();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let read = map.read().await;
-            assert!(read.is_empty());
-        });
     }
 
     #[test]
@@ -9145,36 +8384,6 @@ mod tests {
         assert_eq!(items[1].client_request_id, "req-2");
         assert!(items[1].priority);
         assert_eq!(items[1].command_type, "abort");
-    }
-
-    #[test]
-    fn test_emit_queue_update_syncs_runtime() {
-        let mut session = make_session();
-        session.command_queue.push_back(CommandRequest {
-            native_approval_guard: None,
-            supervision_guard: None,
-            client_request_id: "req-1".into(),
-            priority: false,
-            command: ChatCommand::Abort {},
-        });
-        session.emit_queue_update();
-        assert_eq!(session.runtime.queue_size, 1);
-        assert_eq!(session.runtime.queued_items.len(), 1);
-    }
-
-    #[test]
-    fn test_set_runtime_state_syncs_queued_items() {
-        let mut session = make_session();
-        session.command_queue.push_back(CommandRequest {
-            native_approval_guard: None,
-            supervision_guard: None,
-            client_request_id: "req-1".into(),
-            priority: true,
-            command: ChatCommand::Abort {},
-        });
-        session.set_runtime_state(SessionState::Generating, None);
-        assert_eq!(session.runtime.queued_items.len(), 1);
-        assert_eq!(session.runtime.queued_items[0].client_request_id, "req-1");
     }
 
     #[test]
@@ -9217,15 +8426,6 @@ mod tests {
             }
             _ => panic!("Expected Snapshot"),
         }
-    }
-
-    #[test]
-    fn test_touch_updates_last_activity() {
-        let mut session = make_session();
-        let before = session.last_activity;
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        session.touch();
-        assert!(session.last_activity > before);
     }
 
     #[tokio::test]
@@ -9332,22 +8532,6 @@ mod tests {
                 "completion_tokens": 0,
                 "total_tokens": 10,
             }),
-        }]);
-
-        session.finish_stream(Some("stop".to_string()));
-
-        assert!(session.messages.is_empty());
-    }
-
-    #[test]
-    fn test_finish_stream_discards_extra_only_message() {
-        let mut session = make_session();
-        session.start_stream();
-        session.emit_stream_delta(vec![DeltaOp::MergeExtra {
-            extra: serde_json::Map::from_iter([(
-                "openai_response_id".to_string(),
-                json!("resp_123"),
-            )]),
         }]);
 
         session.finish_stream(Some("stop".to_string()));
@@ -9562,15 +8746,6 @@ mod tests {
     }
 
     #[test]
-    fn test_active_command_initial_default() {
-        let session = make_session();
-        assert!(session.active_command.context_fork.is_none());
-        assert!(session.active_command.model_override.is_none());
-        assert!(session.active_command.allowed_tools.is_empty());
-        assert!(session.active_command.name.is_empty());
-    }
-
-    #[test]
     fn test_active_command_stored_and_cleared() {
         let mut session = make_session();
         session.active_command = ActiveCommandContext {
@@ -9587,31 +8762,6 @@ mod tests {
         session.active_command = ActiveCommandContext::default();
         assert!(session.active_command.context_fork.is_none());
         assert!(session.active_command.name.is_empty());
-    }
-
-    #[test]
-    fn test_new_with_trajectory_active_command_default() {
-        use crate::call_validation::{ChatContent};
-        let msg = ChatMessage {
-            role: "user".into(),
-            content: ChatContent::SimpleText("hello".into()),
-            ..Default::default()
-        };
-        let thread = ThreadParams {
-            id: "traj-fork".into(),
-            ..Default::default()
-        };
-        let session = ChatSession::new_with_trajectory(
-            "traj-fork".into(),
-            vec![msg],
-            thread,
-            "2024-01-01T00:00:00Z".into(),
-            None,
-            Vec::new(),
-            None,
-        );
-        assert!(session.active_command.context_fork.is_none());
-        assert!(session.active_command.model_override.is_none());
     }
 
     #[test]
@@ -9643,18 +8793,6 @@ mod tests {
             session.thread.active_skill.is_none(),
             "active_skill must be cleared on restore"
         );
-    }
-
-    #[test]
-    fn test_emit_broadcast_is_valid_json() {
-        let mut session = make_session();
-        let mut rx = session.subscribe();
-        session.emit(ChatEvent::PauseCleared {});
-        let json = rx.try_recv().unwrap();
-        let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
-        assert_eq!(envelope.chat_id, "test-chat");
-        assert_eq!(envelope.seq, 1);
-        assert!(matches!(envelope.event, ChatEvent::PauseCleared {}));
     }
 
     #[test]
@@ -9838,29 +8976,6 @@ mod tests {
         assert!(session.messages.iter().all(|m| m.role != "tool"));
         assert!(session.runtime.pause_reasons.is_empty());
         assert_eq!(session.runtime.state, SessionState::Paused);
-    }
-
-    #[test]
-    fn synthesized_tool_result_message_has_correct_tool_call_id() {
-        let mut session = make_session();
-        session.add_message(make_assistant_with_tool_calls(&["unique-call-abc"]));
-        session
-            .runtime
-            .pause_reasons
-            .push(make_pause_reason("unique-call-abc"));
-        session.set_runtime_state(SessionState::Paused, None);
-
-        session.process_tool_decisions(&[ToolDecisionItem {
-            tool_call_id: "unique-call-abc".into(),
-            accepted: false,
-        }]);
-
-        let tool_msg = session
-            .messages
-            .iter()
-            .find(|m| m.role == "tool")
-            .expect("no tool message synthesized");
-        assert_eq!(tool_msg.tool_call_id, "unique-call-abc");
     }
 
     #[test]

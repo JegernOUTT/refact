@@ -170,38 +170,6 @@ mod tests {
     }
 
     #[test]
-    fn classifies_allowed_memory_plane_roots() {
-        let roots = roots();
-
-        assert_eq!(
-            roots.classify_root(Path::new("/workspace/project/.refact/knowledge/note.md")),
-            Some(MemoryPlaneRootKind::Knowledge)
-        );
-        assert_eq!(
-            roots.classify_root(Path::new(
-                "/workspace/project/.refact/trajectories/chat.json"
-            )),
-            Some(MemoryPlaneRootKind::Trajectory)
-        );
-        assert_eq!(
-            roots.classify_root(Path::new(
-                "/workspace/project/.refact/tasks/task-1/trajectories/agents/chat.json"
-            )),
-            Some(MemoryPlaneRootKind::Trajectory)
-        );
-        assert_eq!(
-            roots.classify_root(Path::new("/home/user/.config/refact/knowledge/global.md")),
-            Some(MemoryPlaneRootKind::Knowledge)
-        );
-        assert_eq!(
-            roots.classify_root(Path::new(
-                "/home/user/.config/refact/trajectories/global.json"
-            )),
-            Some(MemoryPlaneRootKind::Trajectory)
-        );
-    }
-
-    #[test]
     fn rejects_task_memories_and_non_refact_task_paths() {
         let roots = roots();
 

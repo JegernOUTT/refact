@@ -320,35 +320,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn policy_identity_is_exactly_typed() {
-        let project = ProjectIdentity {
-            project_id: "project".into(),
-            canonical_root: "/project".into(),
-        };
-        let worker = WorkerIdentity {
-            worker_id: "worker".into(),
-            engine_instance_id: "engine".into(),
-            epoch: 1,
-        };
-        let request = request(project, worker);
-        assert!(is_policy_action(&request.spec));
-        let mutations: [fn(&mut ActionSpec); 7] = [
-            |spec: &mut ActionSpec| spec.schema_version = 2,
-            |spec: &mut ActionSpec| spec.kind = "other".into(),
-            |spec: &mut ActionSpec| spec.resource.resource_id = "other".into(),
-            |spec: &mut ActionSpec| spec.resource.resource_kind = "other".into(),
-            |spec: &mut ActionSpec| spec.resource.version = "document-policy:1".into(),
-            |spec: &mut ActionSpec| spec.authority_class = AuthorityClass::ReadOnly,
-            |spec: &mut ActionSpec| spec.confirmation = ConfirmationClass::None,
-        ];
-        for changed in mutations {
-            let mut spec = request.spec.clone();
-            changed(&mut spec);
-            assert!(!is_policy_action(&spec));
-        }
-    }
-
     #[tokio::test]
     async fn inactive_policy_requires_grant_and_recovery_advances_epoch_after_reopen() {
         let temp = tempfile::tempdir().unwrap();

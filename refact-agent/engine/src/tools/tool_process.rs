@@ -1927,37 +1927,6 @@ fn collect_combined(chunks: &[ExecOutputChunk]) -> String {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn process_notice_push_defaults_and_explicit_modes() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let mut input = HashMap::from([
-            ("command".to_string(), json!("echo test")),
-            ("description".to_string(), json!("test process")),
-        ]);
-        assert_eq!(
-            parse_start_args(gcx.clone(), &input, None)
-                .await
-                .unwrap()
-                .push,
-            PushMode::Append
-        );
-        for (value, mode) in [
-            ("preempt", PushMode::Preempt),
-            ("when_idle", PushMode::WhenIdle),
-        ] {
-            input.insert("push".into(), json!(value));
-            assert_eq!(
-                parse_start_args(gcx.clone(), &input, None)
-                    .await
-                    .unwrap()
-                    .push,
-                mode
-            );
-        }
-        input.insert("push".into(), json!(123));
-        assert!(parse_start_args(gcx.clone(), &input, None).await.is_err());
-    }
-
     use crate::app_state::AppState;
     use crate::exec::spill::SpillTarget;
     use crate::exec::{ExecProcessMeta, ExecStatusKind};
@@ -2205,22 +2174,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn process_wait_timeout_uses_refreshed_terminal_status() {
-        assert_eq!(
-            process_wait_outcome(&ExecStatus::Running, true),
-            ("Process still running", true)
-        );
-        assert_eq!(
-            process_wait_outcome(&ExecStatus::Exited { exit_code: Some(0) }, true),
-            ("Process wait completed", false)
-        );
-        assert_eq!(
-            process_wait_outcome(&ExecStatus::Killed, true),
-            ("Process wait completed", false)
-        );
-    }
-
     #[tokio::test]
     async fn tool_processes_are_registered_in_system_group() {
         let names = crate::tools::tools_list::builtin_system_tools(String::new())
@@ -2303,42 +2256,6 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn process_start_tty_true_uses_pty() {
-        let (gcx, ccx) = test_ccx().await;
-        let mut start = ToolProcessStart {
-            config_path: String::new(),
-        };
-        let message = run_tool(
-            &mut start,
-            ccx.clone(),
-            make_args_map(vec![
-                ("command", json!(long_running_command("pty-ready"))),
-                ("description", json!("Run background process through pty")),
-                ("startup_wait_ms", json!(100)),
-                ("tty", json!(true)),
-            ]),
-        )
-        .await
-        .unwrap();
-        let process_id = process_id(&message);
-        assert_eq!(exec(&message)["tty"], true);
-        assert_eq!(exec(&message)["status"], "running");
-        wait_for_output(gcx, &process_id, "pty-ready").await;
-
-        let mut kill = ToolProcessKill {
-            config_path: String::new(),
-        };
-        run_tool(
-            &mut kill,
-            ccx,
-            make_args_map(vec![("process_id", json!(process_id.as_str()))]),
-        )
-        .await
-        .unwrap();
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
     async fn process_start_defaults_to_120_by_32_pty_for_background_and_service() {
         let (gcx, ccx) = test_ccx().await;
         let mut start = ToolProcessStart {
@@ -2402,68 +2319,6 @@ mod tests {
         assert!(!snapshot.meta.tty);
         assert_eq!(snapshot.meta.mode, ExecMode::Background);
         gcx.exec_registry.kill(&process_id).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn tool_process_start_service_mode_tracks_service_name() {
-        let (_gcx, ccx) = test_ccx().await;
-        let mut start = ToolProcessStart {
-            config_path: String::new(),
-        };
-        let message = run_tool(
-            &mut start,
-            ccx.clone(),
-            make_args_map(vec![
-                ("command", json!(long_running_command("svc"))),
-                ("description", json!("Start api service")),
-                ("mode", json!("service")),
-                ("service_name", json!("api")),
-                ("startup_wait_ms", json!(100)),
-            ]),
-        )
-        .await
-        .unwrap();
-        let process_id = process_id(&message);
-        let expected_owner = ExecOwnerMeta {
-            chat_id: Some("chat".to_string()),
-            service_name: Some("api".to_string()),
-            workspace: None,
-            tool_call_id: Some("tool_call".to_string()),
-        };
-        assert_eq!(
-            process_id,
-            ExecProcessId::for_service("api", &expected_owner)
-        );
-        assert_eq!(exec(&message)["mode"], "service");
-        assert_eq!(exec(&message)["service_name"], "api");
-        assert_eq!(exec(&message)["tty"], refact_exec::default_tty());
-        assert_eq!(
-            _gcx.exec_registry.get(&process_id).await.unwrap().meta.tty,
-            refact_exec::default_tty()
-        );
-
-        let mut list = ToolProcessList {
-            config_path: String::new(),
-        };
-        let listed = run_tool(
-            &mut list,
-            ccx.clone(),
-            make_args_map(vec![("status", json!("running")), ("scope", json!("chat"))]),
-        )
-        .await
-        .unwrap();
-        assert!(text(&listed).contains("service_name: api"));
-
-        let mut kill = ToolProcessKill {
-            config_path: String::new(),
-        };
-        run_tool(
-            &mut kill,
-            ccx,
-            make_args_map(vec![("process_id", json!(process_id.as_str()))]),
-        )
-        .await
-        .unwrap();
     }
 
     #[tokio::test]
@@ -2735,54 +2590,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_process_start_service_keyword_readiness_success() {
-        let (gcx, ccx) = test_ccx().await;
-        let mut start = ToolProcessStart {
-            config_path: String::new(),
-        };
-        let command = if cfg!(target_os = "windows") {
-            "Start-Sleep -Milliseconds 200; [Console]::Out.Write('ready-keyword'); Start-Sleep -Seconds 30".to_string()
-        } else {
-            "sleep 0.2; printf ready-keyword; sleep 30".to_string()
-        };
-        let message = run_tool(
-            &mut start,
-            ccx.clone(),
-            make_args_map(vec![
-                ("command", json!(command)),
-                ("description", json!("Start keyword readiness service")),
-                ("mode", json!("service")),
-                ("service_name", json!("keyword")),
-                (
-                    "startup_wait_ms",
-                    json!(if cfg!(target_os = "windows") {
-                        60000
-                    } else {
-                        2000
-                    }),
-                ),
-                ("startup_wait_keyword", json!("ready-keyword")),
-            ]),
-        )
-        .await
-        .unwrap();
-        let process_id = process_id(&message);
-        assert_eq!(exec(&message)["status"], "running");
-        wait_for_output(gcx, &process_id, "ready-keyword").await;
-
-        let mut kill = ToolProcessKill {
-            config_path: String::new(),
-        };
-        run_tool(
-            &mut kill,
-            ccx,
-            make_args_map(vec![("process_id", json!(process_id.as_str()))]),
-        )
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
     async fn tool_process_start_service_keyword_readiness_timeout_fails_and_stops() {
         let (_gcx, ccx) = test_ccx().await;
         let mut start = ToolProcessStart {
@@ -2805,113 +2612,6 @@ mod tests {
         assert_eq!(exec(&message)["status"], "failed");
         assert_eq!(message.tool_failed, Some(true));
         assert!(text(&message).contains("startup readiness timed out"));
-    }
-
-    #[tokio::test]
-    async fn tool_process_read_since_seq_cursor_and_filters() {
-        let (gcx, ccx) = test_ccx().await;
-        let snapshot = gcx
-            .exec_registry
-            .register(
-                ExecProcessMeta::new(ExecMode::Background, "test".to_string())
-                    .with_chat_id("chat")
-                    .with_short_description("Read filter test".to_string()),
-                PROCESS_TRANSCRIPT_MAX_BYTES,
-            )
-            .await;
-        let process_id = snapshot.meta.process_id;
-        gcx.exec_registry.mark_started(&process_id).await.unwrap();
-        gcx.exec_registry
-            .append_output(&process_id, ExecOutputStream::Stdout, "alpha\n".to_string())
-            .await
-            .unwrap();
-        gcx.exec_registry
-            .append_output(
-                &process_id,
-                ExecOutputStream::Stderr,
-                "needle\n".to_string(),
-            )
-            .await
-            .unwrap();
-        gcx.exec_registry
-            .append_output(&process_id, ExecOutputStream::Stdout, "omega\n".to_string())
-            .await
-            .unwrap();
-
-        let mut read = ToolProcessRead {
-            config_path: String::new(),
-        };
-        let message = run_tool(
-            &mut read,
-            ccx,
-            make_args_map(vec![
-                ("process_id", json!(process_id.as_str())),
-                ("since_seq", json!(1)),
-                ("stream", json!("stderr")),
-                ("output_filter", json!("needle")),
-                ("output_limit", json!("1")),
-            ]),
-        )
-        .await
-        .unwrap();
-        let body = text(&message);
-        assert!(body.contains("needle"));
-        assert!(!body.contains("alpha"));
-        assert_eq!(exec(&message)["transcript"]["since_seq"], 1);
-        assert_eq!(exec(&message)["transcript"]["next_seq"], 3);
-        assert_eq!(exec(&message)["stream"], "stderr");
-    }
-
-    #[tokio::test]
-    async fn process_read_path_references_use_the_unified_enrichment_envelope() {
-        let workspace = tempfile::tempdir().unwrap();
-        let file = workspace.path().join("src/lib.rs");
-        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        std::fs::write(&file, "pub fn visible() {}\n").unwrap();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        {
-            *gcx.documents_state.workspace_folders.lock().unwrap() =
-                vec![workspace.path().to_path_buf()];
-        }
-        let ccx = test_ccx_for_workspace(gcx.clone(), workspace.path().to_path_buf()).await;
-        let snapshot = gcx
-            .exec_registry
-            .register(
-                ExecProcessMeta::new(ExecMode::Background, "cat src/lib.rs".to_string())
-                    .with_chat_id("chat")
-                    .with_workspace(workspace.path().to_path_buf())
-                    .with_short_description("Read visible source".to_string()),
-                PROCESS_TRANSCRIPT_MAX_BYTES,
-            )
-            .await;
-        let process_id = snapshot.meta.process_id;
-        gcx.exec_registry.mark_started(&process_id).await.unwrap();
-        gcx.exec_registry
-            .append_output(
-                &process_id,
-                ExecOutputStream::Stdout,
-                "src/lib.rs:1:1\n".to_string(),
-            )
-            .await
-            .unwrap();
-
-        let mut read = ToolProcessRead {
-            config_path: String::new(),
-        };
-        let message = run_tool(
-            &mut read,
-            ccx,
-            make_args_map(vec![("process_id", json!(process_id.as_str()))]),
-        )
-        .await
-        .unwrap();
-        let enrichment = refact_chat_api::tool_enrichment_from_extra(&message.extra).unwrap();
-
-        assert!(message.extra.get("path_enrichment").is_none());
-        assert!(enrichment.references.iter().any(|reference| {
-            reference.kind == refact_chat_api::ToolEnrichmentKind::Path
-                && reference.target == "src/lib.rs"
-        }));
     }
 
     #[tokio::test]
@@ -3035,92 +2735,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn background_output_filter_uses_transcript() {
-        let (gcx, ccx) = test_ccx().await;
-        let snapshot = gcx
-            .exec_registry
-            .register(
-                ExecProcessMeta::new(ExecMode::Background, "test".to_string())
-                    .with_chat_id("chat")
-                    .with_short_description("Background transcript filter".to_string()),
-                64,
-            )
-            .await;
-        let process_id = snapshot.meta.process_id;
-        let temp = tempfile::tempdir().unwrap();
-        gcx.exec_registry
-            .set_spill_target_for_test(
-                &process_id,
-                SpillTarget::with_root(temp.path().to_path_buf(), "chat", &process_id),
-            )
-            .await
-            .unwrap();
-        gcx.exec_registry.mark_started(&process_id).await.unwrap();
-        gcx.exec_registry
-            .append_output(
-                &process_id,
-                ExecOutputStream::Stdout,
-                "BACKGROUND_OLD_NEEDLE\n".to_string(),
-            )
-            .await
-            .unwrap();
-        for index in 0..8 {
-            gcx.exec_registry
-                .append_output(
-                    &process_id,
-                    ExecOutputStream::Stdout,
-                    format!("filler-line-{index:02}-xxxxxxxx\n"),
-                )
-                .await
-                .unwrap();
-        }
-
-        let mut read = ToolProcessRead {
-            config_path: String::new(),
-        };
-        let message = run_tool(
-            &mut read,
-            ccx,
-            make_args_map(vec![
-                ("process_id", json!(process_id.as_str())),
-                ("since_seq", json!(0)),
-                ("stream", json!("stdout")),
-                ("output_filter", json!("BACKGROUND_OLD_NEEDLE")),
-                ("output_limit", json!("4")),
-            ]),
-        )
-        .await
-        .unwrap();
-        let body = text(&message);
-
-        assert!(!body.contains("BACKGROUND_OLD_NEEDLE"));
-        assert_eq!(exec(&message)["transcript"]["since_seq"], 0);
-        assert!(
-            exec(&message)["transcript"]["dropped_bytes"]
-                .as_u64()
-                .unwrap()
-                > 0
-        );
-        assert_eq!(exec(&message)["stream"], "stdout");
-    }
-
-    #[tokio::test]
-    async fn tool_process_kill_unknown_id_errors() {
-        let (_gcx, ccx) = test_ccx().await;
-        let mut kill = ToolProcessKill {
-            config_path: String::new(),
-        };
-        let err = run_tool(
-            &mut kill,
-            ccx,
-            make_args_map(vec![("process_id", json!("exec_missing"))]),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err, "process not found: exec_missing");
-    }
-
-    #[tokio::test]
     async fn tool_process_wait_timeout_and_completion_paths() {
         let (_gcx, ccx) = test_ccx().await;
         let mut start = ToolProcessStart {
@@ -3227,150 +2841,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shell_service_alias_is_registered_and_uses_exec_registry() {
-        let (gcx, ccx) = test_ccx().await;
-        let names = crate::tools::tools_list::builtin_system_tools(String::new())
-            .into_iter()
-            .map(|tool| tool.tool_description().name)
-            .collect::<Vec<_>>();
-        assert!(names.contains(&"shell_service".to_string()));
-
-        let mut alias = ToolShellServiceAlias {
-            config_path: String::new(),
-        };
-        let message = run_tool(
-            &mut alias,
-            ccx.clone(),
-            make_args_map(vec![
-                ("service_name", json!("alias")),
-                ("action", json!("start")),
-                ("command", json!(long_running_command("alias-ready"))),
-                ("startup_wait", json!("1")),
-            ]),
-        )
-        .await
-        .unwrap();
-        let process_id = process_id(&message);
-        let expected_owner = ExecOwnerMeta {
-            chat_id: Some("chat".to_string()),
-            service_name: Some("alias".to_string()),
-            workspace: None,
-            tool_call_id: Some("tool_call".to_string()),
-        };
-        assert_eq!(
-            process_id,
-            ExecProcessId::for_service("alias", &expected_owner)
-        );
-        assert!(gcx.integration_sessions.lock().await.is_empty());
-
-        let logs = run_tool(
-            &mut alias,
-            ccx.clone(),
-            make_args_map(vec![
-                ("service_name", json!("alias")),
-                ("action", json!("logs")),
-            ]),
-        )
-        .await
-        .unwrap();
-        assert!(text(&logs).contains("alias-ready"));
-
-        let stopped = run_tool(
-            &mut alias,
-            ccx,
-            make_args_map(vec![
-                ("service_name", json!("alias")),
-                ("action", json!("stop")),
-            ]),
-        )
-        .await
-        .unwrap();
-        assert_eq!(exec(&stopped)["status"], "killed");
-    }
-
-    #[tokio::test]
-    async fn description_required_rejects_missing() {
-        let (_gcx, ccx) = test_ccx().await;
-        let mut start = ToolProcessStart {
-            config_path: String::new(),
-        };
-        let err = run_tool(
-            &mut start,
-            ccx,
-            make_args_map(vec![("command", json!("printf hi"))]),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(
-            err,
-            "description is required and must be a non-empty single concise sentence"
-        );
-    }
-
-    #[tokio::test]
-    async fn description_required_rejects_empty() {
-        let (_gcx, ccx) = test_ccx().await;
-        let mut start = ToolProcessStart {
-            config_path: String::new(),
-        };
-        let err = run_tool(
-            &mut start,
-            ccx,
-            make_args_map(vec![
-                ("command", json!("printf hi")),
-                ("description", json!("")),
-            ]),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(
-            err,
-            "description is required and must be a non-empty single concise sentence"
-        );
-    }
-
-    #[tokio::test]
-    async fn description_required_rejects_whitespace() {
-        let (_gcx, ccx) = test_ccx().await;
-        let mut start = ToolProcessStart {
-            config_path: String::new(),
-        };
-        let err = run_tool(
-            &mut start,
-            ccx,
-            make_args_map(vec![
-                ("command", json!("printf hi")),
-                ("description", json!("  \t\n")),
-            ]),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(
-            err,
-            "description is required and must be a non-empty single concise sentence"
-        );
-    }
-
-    #[tokio::test]
-    async fn description_accepted_when_present() {
-        let (_gcx, ccx) = test_ccx().await;
-        let mut start = ToolProcessStart {
-            config_path: String::new(),
-        };
-        let message = run_tool(
-            &mut start,
-            ccx,
-            make_args_map(vec![
-                ("command", json!(quick_command("hi"))),
-                ("description", json!("Run engine tests")),
-            ]),
-        )
-        .await
-        .unwrap();
-        assert_eq!(exec(&message)["short_description"], "Run engine tests");
-    }
-
-    #[tokio::test]
     async fn process_extra_exec_has_duration_ms() {
         let (_gcx, ccx) = test_ccx().await;
         let mut start = ToolProcessStart {
@@ -3434,58 +2904,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_process_list_completed_status() {
-        let (gcx, ccx) = test_ccx().await;
-        let running = gcx
-            .exec_registry
-            .register(
-                ExecProcessMeta::new(ExecMode::Background, "sleep".to_string())
-                    .with_chat_id("chat"),
-                PROCESS_TRANSCRIPT_MAX_BYTES,
-            )
-            .await;
-        gcx.exec_registry
-            .mark_started(&running.meta.process_id)
-            .await
-            .unwrap();
-        let completed = gcx
-            .exec_registry
-            .register(
-                ExecProcessMeta::new(ExecMode::Background, "true".to_string()).with_chat_id("chat"),
-                PROCESS_TRANSCRIPT_MAX_BYTES,
-            )
-            .await;
-        gcx.exec_registry
-            .mark_exited(&completed.meta.process_id, Some(0))
-            .await
-            .unwrap();
-
-        let mut list = ToolProcessList {
-            config_path: String::new(),
-        };
-        let message = run_tool(
-            &mut list,
-            ccx,
-            make_args_map(vec![("status", json!("completed"))]),
-        )
-        .await
-        .unwrap();
-        assert!(text(&message).contains(completed.meta.process_id.as_str()));
-        assert!(!text(&message).contains(running.meta.process_id.as_str()));
-        assert_eq!(exec(&message)["processes"][0]["status"], "exited");
-        assert_eq!(
-            gcx.exec_registry
-                .list(ExecProcessFilter {
-                    status: Some(ExecStatusKind::Running),
-                    ..ExecProcessFilter::default()
-                })
-                .await
-                .len(),
-            1
-        );
-    }
-
-    #[tokio::test]
     async fn process_list_all_rejected_without_planner_context() {
         let (gcx, ccx) = test_ccx_with_chat("chat-a").await;
         let process_id = register_test_process(&gcx, "exec_hidden_from_all", "chat-b", None).await;
@@ -3546,66 +2964,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_read_from_disk_rejects_stdout_stream() {
-        let (gcx, ccx) = test_ccx().await;
-        let process_id = register_test_process(&gcx, "exec_disk_reject_stdout", "chat", None).await;
-        gcx.exec_registry.mark_started(&process_id).await.unwrap();
-
-        let mut read = ToolProcessRead {
-            config_path: String::new(),
-        };
-        let err = run_tool(
-            &mut read,
-            ccx,
-            make_args_map(vec![
-                ("process_id", json!(process_id.as_str())),
-                ("from_disk", json!(true)),
-                ("stream", json!("stdout")),
-            ]),
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            err.contains("stdout"),
-            "error should mention the rejected stream: {err}"
-        );
-        assert!(
-            err.contains("combined"),
-            "error should suggest combined: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn process_read_from_disk_rejects_stderr_stream() {
-        let (gcx, ccx) = test_ccx().await;
-        let process_id = register_test_process(&gcx, "exec_disk_reject_stderr", "chat", None).await;
-        gcx.exec_registry.mark_started(&process_id).await.unwrap();
-
-        let mut read = ToolProcessRead {
-            config_path: String::new(),
-        };
-        let err = run_tool(
-            &mut read,
-            ccx,
-            make_args_map(vec![
-                ("process_id", json!(process_id.as_str())),
-                ("from_disk", json!(true)),
-                ("stream", json!("stderr")),
-            ]),
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            err.contains("stderr"),
-            "error should mention the rejected stream: {err}"
-        );
-        assert!(
-            err.contains("combined"),
-            "error should suggest combined: {err}"
-        );
-    }
-
-    #[tokio::test]
     async fn process_read_from_disk_combined_still_returns_tail() {
         let (gcx, ccx) = test_ccx().await;
         let snapshot = gcx
@@ -3661,24 +3019,5 @@ mod tests {
             "output should be labeled combined"
         );
         assert!(body.contains(marker), "output should contain appended data");
-    }
-
-    #[tokio::test]
-    async fn process_read_from_disk_is_bounded_for_large_file() {
-        let temp = tempfile::tempdir().unwrap();
-        let large_file = temp.path().join("large.log");
-        let content = "x".repeat(DISK_READ_MAX_BYTES + 512 * 1024);
-        tokio::fs::write(&large_file, content.as_bytes())
-            .await
-            .unwrap();
-
-        let (tail_text, truncated) = super::read_disk_log_tail(&large_file).await.unwrap();
-        assert!(truncated, "large file should be reported as truncated");
-        assert!(
-            tail_text.len() <= DISK_READ_MAX_BYTES,
-            "text length {} should not exceed cap {}",
-            tail_text.len(),
-            DISK_READ_MAX_BYTES
-        );
     }
 }

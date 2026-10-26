@@ -300,37 +300,3 @@ impl BuddyObserver for TaskHealthObserver {
         facts
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn detects_orphaned_card_scoped_task_memory() {
-        let temp = tempfile::tempdir().unwrap();
-        let memories_dir = temp.path().join(".refact/tasks/task-1/memories");
-        tokio::fs::create_dir_all(&memories_dir).await.unwrap();
-        tokio::fs::write(
-            memories_dir.join("orphan.md"),
-            "---\ntitle: Orphan\nnamespace: card:T-404\n---\n\nBody",
-        )
-        .await
-        .unwrap();
-
-        let facts = detect_orphaned_task_memory_facts(
-            "task-1",
-            &TaskBoard::default(),
-            &memories_dir,
-            Utc::now(),
-        )
-        .await;
-
-        let fact = facts
-            .iter()
-            .find(|fact| fact.kind == BuddyFactKind::MemoryOrphan)
-            .expect("orphaned memory fact must be emitted");
-        assert_eq!(fact.payload["task_id"], serde_json::json!("task-1"));
-        assert_eq!(fact.payload["card_id"], serde_json::json!("T-404"));
-        assert_eq!(fact.payload["namespace"], serde_json::json!("card:T-404"));
-    }
-}

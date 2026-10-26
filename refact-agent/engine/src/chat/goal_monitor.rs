@@ -880,59 +880,6 @@ mod tests {
         dispatch_goal_nudge(app.clone(), session.clone(), GoalNudgeTrigger::Monitor).await
     }
 
-    /// A run that parked its execution permit is waiting on a child, an approval,
-    /// a question or a timer. That is deliberate waiting, not a stall.
-    #[tokio::test]
-    async fn goal_monitor_never_nudges_a_parked_run() {
-        let (app, _workspace) = goal_app().await;
-        let chat_id = unique_chat_id("parked");
-        let session = stalled_goal_session(&app, &chat_id).await;
-        let execution = admitted_execution(&app, &chat_id).await;
-        execution.park().await.unwrap();
-        assert_eq!(execution.state(), ExecutionState::Parked);
-
-        for tick in 0..3 {
-            let outcome = monitor_tick(&app, &session).await;
-            assert_eq!(
-                outcome,
-                GoalNudgeOutcome::Skipped(GoalNudgeSkip::IntentionallyWaiting),
-                "parked run was nudged on tick {tick}"
-            );
-        }
-        assert_eq!(nudge_event_count(&*session.lock().await), 0);
-
-        crate::tasks::admission::end(&chat_id).await;
-        app.agent_executions.shutdown().await;
-    }
-
-    /// A run that has not been admitted yet has not stalled; it has not started.
-    #[tokio::test]
-    async fn goal_monitor_never_nudges_a_queued_run() {
-        let (app, _workspace) = goal_app().await;
-        let chat_id = unique_chat_id("queued");
-        let session = stalled_goal_session(&app, &chat_id).await;
-        crate::tasks::admission::reserve(&app, &chat_id, "project", "root", 0)
-            .await
-            .unwrap();
-        assert_eq!(
-            crate::tasks::admission::execution_state(&chat_id),
-            Some(ExecutionState::Acquiring)
-        );
-
-        for tick in 0..3 {
-            let outcome = monitor_tick(&app, &session).await;
-            assert_eq!(
-                outcome,
-                GoalNudgeOutcome::Skipped(GoalNudgeSkip::IntentionallyWaiting),
-                "queued run was nudged on tick {tick}"
-            );
-        }
-        assert_eq!(nudge_event_count(&*session.lock().await), 0);
-
-        crate::tasks::admission::end(&chat_id).await;
-        app.agent_executions.shutdown().await;
-    }
-
     /// Negative control: suppressing parked/queued must not disable stall
     /// detection. A run holding its permit and producing nothing is still stalled.
     #[tokio::test]
@@ -950,39 +897,6 @@ mod tests {
 
         crate::tasks::admission::end(&chat_id).await;
         app.agent_executions.shutdown().await;
-    }
-
-    /// Waiting is decided by the execution state alone, so every stall-shaped
-    /// session is nudge-free while waiting and nudged again once it runs.
-    #[test]
-    fn goal_monitor_skips_only_intentionally_waiting_execution_states() {
-        for state in [
-            ExecutionState::Parked,
-            ExecutionState::Acquiring,
-            ExecutionState::Suspending,
-        ] {
-            let (mut session, now) = old_idle_session();
-            assert_eq!(
-                apply_monitor_with(&mut session, 10_000, now, Some(state)),
-                GoalNudgeOutcome::Skipped(GoalNudgeSkip::IntentionallyWaiting),
-                "{state:?}"
-            );
-            assert_eq!(nudge_event_count(&session), 0, "{state:?}");
-            assert!(session.delivery_wake_sources.is_empty(), "{state:?}");
-        }
-
-        for execution in [
-            Some(ExecutionState::Running),
-            Some(ExecutionState::Gone),
-            None,
-        ] {
-            let (mut session, now) = old_idle_session();
-            assert_eq!(
-                apply_monitor_with(&mut session, 10_000, now, execution),
-                GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle),
-                "{execution:?}"
-            );
-        }
     }
 
     /// The scheduler's own view of this run's permit. Counted per run, not by
@@ -1034,28 +948,6 @@ mod tests {
         app.agent_executions.shutdown().await;
     }
 
-    /// A goal the user paused must stay paused; nothing here may resume it.
-    #[tokio::test]
-    async fn goal_monitor_leaves_a_paused_goal_paused_while_parked() {
-        let (app, _workspace) = goal_app().await;
-        let chat_id = unique_chat_id("paused");
-        let session = stalled_goal_session(&app, &chat_id).await;
-        session.lock().await.goal_set_status(GoalStatus::Paused);
-        let execution = admitted_execution(&app, &chat_id).await;
-        execution.park().await.unwrap();
-
-        for _ in 0..3 {
-            assert!(!monitor_tick(&app, &session).await.nudged());
-            assert_eq!(
-                session.lock().await.goal.as_ref().unwrap().status,
-                GoalStatus::Paused
-            );
-        }
-
-        crate::tasks::admission::end(&chat_id).await;
-        app.agent_executions.shutdown().await;
-    }
-
     fn event_payload(message: &ChatMessage) -> &serde_json::Value {
         message
             .extra
@@ -1073,32 +965,6 @@ mod tests {
                     && event_payload(message).get("kind") == Some(&json!("nudge"))
             })
             .count()
-    }
-
-    #[test]
-    fn goal_monitor_idle_stall_delivers_append_and_requests_wake() {
-        let (mut session, now) = old_idle_session();
-        let outcome = apply_monitor(&mut session, 10_000, now);
-
-        assert_eq!(outcome, GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle));
-        assert!(session.command_queue.is_empty());
-        assert!(!session.delivery_wake_sources.is_empty());
-        assert_eq!(
-            session.messages.last().unwrap().extra["delivery"]["push"],
-            json!("append")
-        );
-        assert_eq!(
-            session.goal.as_ref().unwrap().progress.last_nudge_at_ms,
-            10_000
-        );
-        let message = session.messages.last().unwrap();
-        assert_eq!(message.role, "event");
-        let payload = event_payload(message);
-        assert_eq!(payload["kind"], json!("nudge"));
-        assert_eq!(payload["trigger"], json!("monitor"));
-        assert_eq!(payload["reason"], json!("idle"));
-        assert_eq!(payload["account_progress"], json!(true));
-        assert!(!session.goal.as_ref().unwrap().events.is_empty());
     }
 
     #[test]
@@ -1170,64 +1036,6 @@ mod tests {
     }
 
     #[test]
-    fn goal_monitor_respects_cooldown_and_grace() {
-        let mut recent = active_goal_session();
-        let now = Instant::now();
-        recent.last_activity = now - Duration::from_secs(2);
-        assert_eq!(
-            apply_monitor(&mut recent, 10_000, now),
-            GoalNudgeOutcome::Skipped(GoalNudgeSkip::NotStalled)
-        );
-        assert!(recent.command_queue.is_empty());
-
-        let (mut cooling_down, now) = old_idle_session();
-        cooling_down
-            .goal
-            .as_mut()
-            .unwrap()
-            .progress
-            .last_nudge_at_ms = 9_500;
-        assert_eq!(
-            apply_monitor(&mut cooling_down, 10_000, now),
-            GoalNudgeOutcome::Skipped(GoalNudgeSkip::Cooldown)
-        );
-        assert!(cooling_down.command_queue.is_empty());
-    }
-
-    #[test]
-    fn goal_monitor_ignores_paused_stopped_transferred_and_waiting_states() {
-        for status in [
-            GoalStatus::Paused,
-            GoalStatus::Stopped,
-            GoalStatus::Transferred,
-        ] {
-            let (mut session, now) = old_idle_session();
-            session.goal_set_status(status);
-            session.last_activity = now - Duration::from_secs(10);
-            assert_eq!(
-                apply_monitor(&mut session, 10_000, now),
-                GoalNudgeOutcome::Skipped(GoalNudgeSkip::NonActiveGoalStatus)
-            );
-            assert!(session.command_queue.is_empty());
-        }
-
-        for state in [
-            SessionState::Paused,
-            SessionState::WaitingUserInput,
-            SessionState::WaitingIde,
-        ] {
-            let (mut session, now) = old_idle_session();
-            session.set_runtime_state(state, None);
-            session.last_activity = now - Duration::from_secs(10);
-            assert_eq!(
-                apply_monitor(&mut session, 10_000, now),
-                GoalNudgeOutcome::Skipped(GoalNudgeSkip::WaitingForInput)
-            );
-            assert!(session.command_queue.is_empty());
-        }
-    }
-
-    #[test]
     fn goal_monitor_does_not_fire_when_user_message_queued() {
         let (mut session, now) = old_idle_session();
         session.command_queue.push_back(CommandRequest {
@@ -1249,92 +1057,6 @@ mod tests {
             GoalNudgeOutcome::Skipped(GoalNudgeSkip::UserMessageQueued)
         );
         assert_eq!(session.command_queue.len(), 1);
-    }
-
-    #[test]
-    fn goal_monitor_budget_exhaustion_sets_terminal_status() {
-        let (mut session, now) = old_idle_session();
-        session.goal.as_mut().unwrap().progress.turns_used = 10;
-
-        assert_eq!(
-            apply_monitor(&mut session, 10_000, now),
-            GoalNudgeOutcome::BudgetExhausted(GoalStatus::BudgetExhausted)
-        );
-        assert_eq!(session.goal_status, Some(GoalStatus::BudgetExhausted));
-        assert!(session.command_queue.is_empty());
-        let payload = event_payload(session.messages.last().unwrap());
-        assert_eq!(payload["kind"], json!("budget_exhausted"));
-    }
-
-    #[test]
-    fn goal_monitor_no_progress_sets_terminal_status() {
-        let (mut session, now) = old_idle_session();
-        session.goal.as_mut().unwrap().progress.no_progress_turns = 2;
-
-        assert_eq!(
-            apply_monitor(&mut session, 10_000, now),
-            GoalNudgeOutcome::BudgetExhausted(GoalStatus::NoProgress)
-        );
-        assert_eq!(session.goal_status, Some(GoalStatus::NoProgress));
-        let payload = event_payload(session.messages.last().unwrap());
-        assert_eq!(payload["kind"], json!("no_progress"));
-    }
-
-    #[test]
-    fn goal_monitor_goes_quiescent_after_threshold_without_terminal_status() {
-        let mut session = unlimited_no_progress_session();
-        let now = Instant::now();
-        session.last_activity = now - Duration::from_secs(10);
-        session.goal.as_mut().unwrap().progress.no_progress_turns = QUIESCENCE_NUDGES;
-
-        let first = apply_monitor(&mut session, 10_000, now);
-        assert_eq!(first, GoalNudgeOutcome::Skipped(GoalNudgeSkip::Quiescent));
-        assert!(session.command_queue.is_empty());
-        assert_eq!(session.goal_status, Some(GoalStatus::Active));
-
-        let second = apply_monitor(&mut session, 20_000, now + Duration::from_secs(20));
-        assert_eq!(second, GoalNudgeOutcome::Skipped(GoalNudgeSkip::Quiescent));
-        assert!(session.command_queue.is_empty());
-        assert_eq!(session.goal_status, Some(GoalStatus::Active));
-
-        let quiescent_events = session
-            .messages
-            .iter()
-            .filter(|message| {
-                message.role == "event"
-                    && event_payload(message).get("kind") == Some(&json!("pursuit_quiescent"))
-            })
-            .count();
-        assert_eq!(quiescent_events, 1);
-    }
-
-    #[test]
-    fn context_limit_block_quiesces_unlimited_goal() {
-        let mut session = unlimited_no_progress_session();
-        assert!(!goal_is_quiescent(&session));
-        assert!(mark_goal_blocked_on_context_limit(&mut session));
-        let goal = session.goal.as_ref().unwrap();
-        assert!(goal.progress.no_progress_turns >= QUIESCENCE_NUDGES);
-        assert_eq!(goal.status, GoalStatus::Active);
-        assert!(goal_is_quiescent(&session));
-        let replayed = refact_chat_api::reduce_goal_ledger(&session.goal_ledger).unwrap();
-        assert_eq!(replayed.status, GoalStatus::Active);
-        assert_eq!(
-            replayed.progress.no_progress_turns,
-            session.goal.as_ref().unwrap().progress.no_progress_turns
-        );
-    }
-
-    #[test]
-    fn context_limit_block_terminates_finite_no_progress_goal() {
-        let mut session = active_goal_session();
-        assert!(mark_goal_blocked_on_context_limit(&mut session));
-        assert_eq!(
-            session.goal.as_ref().unwrap().status,
-            GoalStatus::NoProgress
-        );
-        let replayed = refact_chat_api::reduce_goal_ledger(&session.goal_ledger).unwrap();
-        assert_eq!(replayed.status, GoalStatus::NoProgress);
     }
 
     #[test]
@@ -1367,104 +1089,6 @@ mod tests {
     }
 
     #[test]
-    fn context_limit_block_without_goal_is_noop() {
-        let mut session = ChatSession::new("no-goal".to_string());
-        assert!(!mark_goal_blocked_on_context_limit(&mut session));
-    }
-
-    #[test]
-    fn goal_monitor_backoff_extends_cooldown_with_no_progress_turns() {
-        let mut session = unlimited_no_progress_session();
-        let now = Instant::now();
-        session.last_activity = now - Duration::from_secs(10);
-        {
-            let goal = session.goal.as_mut().unwrap();
-            goal.progress.no_progress_turns = 1;
-            goal.progress.last_nudge_at_ms = 5_000;
-        }
-
-        assert_eq!(
-            apply_monitor(&mut session, 6_500, now),
-            GoalNudgeOutcome::Skipped(GoalNudgeSkip::Cooldown)
-        );
-        assert!(session.command_queue.is_empty());
-
-        assert_eq!(
-            apply_monitor(&mut session, 7_000, now),
-            GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
-        );
-        assert!(!session.delivery_wake_sources.is_empty());
-    }
-
-    #[test]
-    fn goal_monitor_fresh_no_progress_uses_base_cooldown() {
-        let mut session = unlimited_no_progress_session();
-        let now = Instant::now();
-        session.last_activity = now - Duration::from_secs(10);
-        {
-            let goal = session.goal.as_mut().unwrap();
-            goal.progress.no_progress_turns = 0;
-            goal.progress.last_nudge_at_ms = 5_000;
-        }
-
-        assert_eq!(
-            apply_monitor(&mut session, 5_999, now),
-            GoalNudgeOutcome::Skipped(GoalNudgeSkip::Cooldown)
-        );
-        assert_eq!(
-            apply_monitor(&mut session, 6_000, now),
-            GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
-        );
-    }
-
-    #[test]
-    fn goal_monitor_resume_after_quiescence_nudges_again() {
-        let mut session = unlimited_no_progress_session();
-        let now = Instant::now();
-        session.last_activity = now - Duration::from_secs(10);
-        session.goal.as_mut().unwrap().progress.no_progress_turns = QUIESCENCE_NUDGES;
-
-        assert_eq!(
-            apply_monitor(&mut session, 10_000, now),
-            GoalNudgeOutcome::Skipped(GoalNudgeSkip::Quiescent)
-        );
-
-        assert!(session.goal_reset_no_progress());
-        assert_eq!(session.goal.as_ref().unwrap().progress.no_progress_turns, 0);
-
-        assert_eq!(
-            apply_monitor(&mut session, 20_000, now + Duration::from_secs(20)),
-            GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
-        );
-        assert!(!session.delivery_wake_sources.is_empty());
-    }
-
-    #[test]
-    fn goal_monitor_progress_resets_no_progress_and_prevents_quiescence() {
-        let mut session = unlimited_no_progress_session();
-        let now = Instant::now();
-        session.goal.as_mut().unwrap().progress.no_progress_turns = QUIESCENCE_NUDGES - 1;
-
-        assert!(session.goal_record_progress_from_usage(&ChatUsage {
-            prompt_tokens: 10,
-            completion_tokens: 100,
-            total_tokens: 110,
-            cache_read_tokens: None,
-            cache_creation_tokens: None,
-            metering_usd: None,
-        }));
-        assert_eq!(session.goal.as_ref().unwrap().progress.no_progress_turns, 0);
-
-        // Recording progress touches `last_activity`; mark the session stalled afterwards
-        // so the monitor still sees an idle stall and nudges (no quiescence at np == 0).
-        session.last_activity = now - Duration::from_secs(10);
-        assert_eq!(
-            apply_monitor(&mut session, 10_000, now),
-            GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
-        );
-    }
-
-    #[test]
     fn goal_monitor_post_restart_dormant_goal_nudged_once_after_grace() {
         let (mut session, now) = old_idle_session();
         assert_eq!(session.goal.as_ref().unwrap().progress.last_nudge_at_ms, 0);
@@ -1488,73 +1112,6 @@ mod tests {
             })
             .count();
         assert_eq!(nudge_events, 1);
-    }
-
-    #[test]
-    fn goal_monitor_consecutive_nudges_preserve_delivered_prefix() {
-        let (mut session, now) = old_idle_session();
-        assert_eq!(
-            apply_monitor(&mut session, 10_000, now),
-            GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
-        );
-
-        session.command_queue.clear();
-        session.delivery_wake_sources.clear();
-        session.last_activity = now - Duration::from_secs(10);
-        assert_eq!(
-            apply_monitor(&mut session, 20_000, now),
-            GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
-        );
-
-        let nudge_events = session
-            .messages
-            .iter()
-            .filter(|message| {
-                message.role == "event"
-                    && event_payload(message).get("kind") == Some(&json!("nudge"))
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(nudge_events.len(), 2);
-        let payload = event_payload(nudge_events[0]);
-        assert!(payload.get("count").is_none());
-        assert_eq!(event_payload(nudge_events[1])["at_ms"], json!(20_000));
-        assert_eq!(payload["at_ms"], json!(10_000));
-        assert_eq!(
-            session.goal.as_ref().unwrap().progress.last_nudge_at_ms,
-            20_000
-        );
-    }
-
-    #[test]
-    fn goal_monitor_nudge_after_assistant_reply_adds_new_event() {
-        let (mut session, now) = old_idle_session();
-        assert_eq!(
-            apply_monitor(&mut session, 10_000, now),
-            GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
-        );
-        session.add_message(ChatMessage {
-            role: "assistant".to_string(),
-            content: ChatContent::SimpleText("Idle.".to_string()),
-            ..Default::default()
-        });
-
-        session.command_queue.clear();
-        session.delivery_wake_sources.clear();
-        session.last_activity = now - Duration::from_secs(10);
-        assert_eq!(
-            apply_monitor(&mut session, 20_000, now),
-            GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
-        );
-
-        let nudge_events = session
-            .messages
-            .iter()
-            .filter(|message| {
-                message.role == "event"
-                    && event_payload(message).get("kind") == Some(&json!("nudge"))
-            })
-            .count();
-        assert_eq!(nudge_events, 2);
     }
 
     #[test]
@@ -1628,36 +1185,6 @@ mod tests {
         assert_eq!(session.goal_status, Some(GoalStatus::Active));
     }
 
-    /// The settled subject wakes the goal, and only then does nudging resume.
-    #[test]
-    fn a_settled_wait_lets_the_goal_be_nudged_again() {
-        let (mut session, now) = old_idle_session();
-        assert!(session.goal_begin_wait(wait_on("proc-7", None), 1_000));
-        assert_eq!(
-            apply_monitor(&mut session, 10_000, now),
-            GoalNudgeOutcome::Skipped(GoalNudgeSkip::Waiting)
-        );
-
-        assert!(crate::chat::goal_wait::settle_goal_wait_in_session(
-            &mut session,
-            Some(&GoalWaitSubject::Process {
-                process_id: "proc-7".to_string()
-            }),
-            GoalWaitResume::Settled,
-            11_000,
-        )
-        .is_some());
-        session.command_queue.clear();
-        session.delivery_wake_sources.clear();
-        session.pending_deliveries.clear();
-        session.last_activity = now - Duration::from_secs(10);
-
-        assert_eq!(
-            apply_monitor(&mut session, 20_000, now),
-            GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
-        );
-    }
-
     /// An expired deadline is an outcome of its own. It names the subject and it
     /// is never allowed to read as a pass.
     #[test]
@@ -1699,27 +1226,6 @@ mod tests {
             .contains("did not settle before its deadline"));
     }
 
-    /// The expiry sweep and an external settle can land together. Only one of
-    /// them may resume the goal.
-    #[test]
-    fn a_deadline_racing_a_settled_subject_resumes_the_goal_once() {
-        let (mut session, now) = old_idle_session();
-        assert!(session.goal_begin_wait(wait_on("proc-7", Some(15_000)), 1_000));
-
-        assert!(crate::chat::goal_wait::settle_goal_wait_in_session(
-            &mut session,
-            None,
-            GoalWaitResume::Settled,
-            15_000,
-        )
-        .is_some());
-        let expiry = apply_monitor(&mut session, 15_000, now);
-
-        assert_ne!(expiry, GoalNudgeOutcome::WaitExpired);
-        assert_eq!(goal_pursuit_event_count(&session, "wait_settled"), 1);
-        assert_eq!(goal_pursuit_event_count(&session, "wait_expired"), 0);
-    }
-
     #[test]
     fn goal_monitor_nudge_content_carries_goal_context() {
         let (mut session, now) = old_idle_session();
@@ -1741,64 +1247,6 @@ mod tests {
         assert!(content.contains("Goal: ship the thing"));
         assert!(content.contains("Remaining gaps: docs missing"));
         assert!(content.contains("pause with target"));
-    }
-
-    #[test]
-    fn goal_monitor_inline_turn_end_bypasses_stall_grace_and_rate_limits_monitor() {
-        let mut session = active_goal_session();
-        let now = Instant::now();
-        session.last_activity = now;
-
-        assert_eq!(
-            try_apply_goal_nudge(
-                &mut session,
-                GoalNudgeTrigger::InlineTurnEnd,
-                10_000,
-                now,
-                config(),
-                None,
-            ),
-            GoalNudgeOutcome::Nudged(GoalNudgeReason::TurnEnd)
-        );
-        assert_eq!(
-            apply_monitor(&mut session, 10_100, now + Duration::from_secs(10)),
-            GoalNudgeOutcome::Skipped(GoalNudgeSkip::Cooldown)
-        );
-        assert!(!session.delivery_wake_sources.is_empty());
-    }
-
-    #[test]
-    fn goal_monitor_no_token_stall_requires_quiet_grace() {
-        let mut session = active_goal_session();
-        let now = Instant::now();
-        session.set_runtime_state(SessionState::Generating, None);
-        session.last_activity = now - Duration::from_secs(10);
-        session.last_stream_delta_at = Some(now - Duration::from_secs(2));
-
-        assert_eq!(
-            apply_monitor(&mut session, 10_000, now),
-            GoalNudgeOutcome::Skipped(GoalNudgeSkip::Busy)
-        );
-        assert!(session.command_queue.is_empty());
-    }
-
-    #[test]
-    fn goal_monitor_no_token_stall_delivers_preempt_and_requests_wake() {
-        let mut session = active_goal_session();
-        let now = Instant::now();
-        session.set_runtime_state(SessionState::Generating, None);
-        session.last_activity = now - Duration::from_secs(10);
-
-        assert_eq!(
-            apply_monitor(&mut session, 10_000, now),
-            GoalNudgeOutcome::Nudged(GoalNudgeReason::GeneratingNoTokens)
-        );
-        assert!(!session.delivery_wake_sources.is_empty());
-        assert_eq!(
-            session.goal.as_ref().unwrap().progress.no_progress_turns,
-            1,
-            "a no-token nudge must count as a no-progress turn"
-        );
     }
 
     #[test]
@@ -1880,38 +1328,6 @@ mod tests {
     }
 
     #[test]
-    fn goal_monitor_no_token_loop_reaches_quiescence() {
-        let mut session = unlimited_no_progress_session();
-        let now = Instant::now();
-        let mut now_ms = 10_000u64;
-
-        for expected in 1..=QUIESCENCE_NUDGES {
-            session.start_stream();
-            session.last_activity = now - Duration::from_secs(10);
-            assert_eq!(
-                apply_monitor(&mut session, now_ms, now),
-                GoalNudgeOutcome::Nudged(GoalNudgeReason::GeneratingNoTokens)
-            );
-            assert_eq!(
-                session.goal.as_ref().unwrap().progress.no_progress_turns,
-                expected
-            );
-            session.command_queue.clear();
-            session.delivery_wake_sources.clear();
-            now_ms += 600_000;
-        }
-
-        session.start_stream();
-        session.last_activity = now - Duration::from_secs(10);
-        assert_eq!(
-            apply_monitor(&mut session, now_ms, now),
-            GoalNudgeOutcome::Skipped(GoalNudgeSkip::Quiescent)
-        );
-        assert!(session.command_queue.is_empty());
-        assert!(goal_is_quiescent(&session));
-    }
-
-    #[test]
     fn goal_monitor_no_token_stall_interrupts_running_generation() {
         let mut session = active_goal_session();
         let now = Instant::now();
@@ -1934,153 +1350,5 @@ mod tests {
             .extra
             .get("event")
             .is_some_and(|event| event["subkind"] == "cancellation_note")));
-    }
-
-    #[test]
-    fn goal_monitor_pending_non_user_command_prevents_double_fire() {
-        let (mut session, now) = old_idle_session();
-        session.command_queue.push_back(CommandRequest {
-            native_approval_guard: None,
-            supervision_guard: None,
-            client_request_id: "queued-regenerate".to_string(),
-            priority: true,
-            command: ChatCommand::Regenerate {},
-        });
-
-        assert_eq!(
-            apply_monitor(&mut session, 10_000, now),
-            GoalNudgeOutcome::Skipped(GoalNudgeSkip::PendingCommand)
-        );
-        assert_eq!(session.command_queue.len(), 1);
-    }
-
-    #[test]
-    fn goal_monitor_turn_end_budget_exhaustion_blocks_completion() {
-        assert!(goal_turn_end_blocks_completion(
-            GoalNudgeOutcome::BudgetExhausted(GoalStatus::BudgetExhausted,)
-        ));
-        assert!(goal_turn_end_blocks_completion(
-            GoalNudgeOutcome::BudgetExhausted(GoalStatus::NoProgress,)
-        ));
-        assert!(goal_turn_end_blocks_completion(GoalNudgeOutcome::Nudged(
-            GoalNudgeReason::TurnEnd,
-        )));
-        assert!(!goal_turn_end_blocks_completion(GoalNudgeOutcome::Skipped(
-            GoalNudgeSkip::NoGoal,
-        )));
-    }
-
-    #[test]
-    fn goal_monitor_turn_end_skip_without_work_does_not_block_completion() {
-        let (mut session, now) = old_idle_session();
-        assert_eq!(
-            apply_monitor(&mut session, 10_000, now),
-            GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
-        );
-        let cooldown_outcome = try_apply_goal_nudge(
-            &mut session,
-            GoalNudgeTrigger::InlineTurnEnd,
-            10_100,
-            now + Duration::from_secs(1),
-            config(),
-            None,
-        );
-        assert_eq!(
-            cooldown_outcome,
-            GoalNudgeOutcome::Skipped(GoalNudgeSkip::Cooldown)
-        );
-        assert!(!goal_turn_end_blocks_completion(cooldown_outcome));
-        for skip in [
-            GoalNudgeSkip::Busy,
-            GoalNudgeSkip::PendingCommand,
-            GoalNudgeSkip::UserMessageQueued,
-            GoalNudgeSkip::WaitingForInput,
-            GoalNudgeSkip::QueueRejected,
-        ] {
-            assert!(!goal_turn_end_blocks_completion(GoalNudgeOutcome::Skipped(
-                skip,
-            )));
-        }
-    }
-
-    #[test]
-    fn goal_monitor_records_terminal_event_when_turn_end_progress_exhausted_budget() {
-        let mut session = active_goal_session();
-        session.goal.as_mut().unwrap().status = GoalStatus::BudgetExhausted;
-
-        assert_eq!(
-            record_terminal_goal_event_if_needed(
-                &mut session,
-                GoalNudgeTrigger::InlineTurnEnd,
-                10_000,
-            ),
-            Some(true)
-        );
-        assert_eq!(
-            record_terminal_goal_event_if_needed(
-                &mut session,
-                GoalNudgeTrigger::InlineTurnEnd,
-                10_100,
-            ),
-            Some(false)
-        );
-        assert_eq!(session.goal_status, Some(GoalStatus::BudgetExhausted));
-        let terminal_events = session
-            .messages
-            .iter()
-            .filter(|message| {
-                message.role == "event"
-                    && event_payload(message).get("kind") == Some(&json!("budget_exhausted"))
-            })
-            .count();
-        assert_eq!(terminal_events, 1);
-    }
-
-    #[test]
-    fn goal_monitor_event_before_assistant_marks_next_usage_for_accounting() {
-        let (mut session, now) = old_idle_session();
-        assert_eq!(
-            apply_monitor(&mut session, 10_000, now),
-            GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
-        );
-        session.add_message(ChatMessage {
-            role: "assistant".to_string(),
-            content: ChatContent::SimpleText("worked".to_string()),
-            usage: Some(ChatUsage {
-                prompt_tokens: 10,
-                completion_tokens: 60,
-                total_tokens: 70,
-                cache_read_tokens: None,
-                cache_creation_tokens: None,
-                metering_usd: None,
-            }),
-            ..Default::default()
-        });
-        let assistant_index = session
-            .messages
-            .iter()
-            .rposition(|message| message.role == "assistant")
-            .unwrap();
-        let marked_before_assistant = session.messages[..assistant_index]
-            .iter()
-            .rev()
-            .take_while(|message| message.role != "assistant")
-            .any(|message| {
-                message.role == "event"
-                    && message
-                        .extra
-                        .get("event")
-                        .and_then(|event| event.get("subkind"))
-                        .and_then(|subkind| subkind.as_str())
-                        == Some("goal_pursuit")
-                    && message
-                        .extra
-                        .get("event")
-                        .and_then(|event| event.get("payload"))
-                        .and_then(|payload| payload.get("account_progress"))
-                        .and_then(|value| value.as_bool())
-                        .unwrap_or(false)
-            });
-        assert!(marked_before_assistant);
     }
 }

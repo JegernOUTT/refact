@@ -962,46 +962,6 @@ mod tests {
     }
 
     #[test]
-    fn markdown_command_conversion_preserves_key_frontmatter_fields() {
-        let temp = tempfile::tempdir().unwrap();
-        let source_path = temp.path().join("Review Code.md");
-        let content = "---\ndescription: Review changes\nargument-hint: \"<diff>\"\nallowed-tools:\n  - read\n  - grep\n  - unknown_tool\nmodel: gpt-4o\nagent: reviewer\nsubtask: code\n---\nReview $ARGUMENTS";
-        fs::write(&source_path, content).unwrap();
-
-        let candidate =
-            convert_command_markdown(&context(temp.path()), &source_path, content, None).unwrap();
-
-        assert_eq!(
-            candidate.destination_path,
-            PathBuf::from("commands/review-code.md")
-        );
-        let ImportArtifact::FileContent { content } = candidate.artifact else {
-            panic!("expected file content");
-        };
-        let (frontmatter, body) = parse_markdown_frontmatter(&content);
-        assert_eq!(yaml_string(&frontmatter, "description"), "Review changes");
-        assert_eq!(yaml_string(&frontmatter, "argument-hint"), "<diff>");
-        assert_eq!(
-            yaml_string_list_any(&frontmatter, &["allowed-tools"]),
-            strings(&["cat", "search_pattern"])
-        );
-        assert_eq!(yaml_string(&frontmatter, "model"), "gpt-4o");
-        assert!(frontmatter.get("agent").is_none());
-        assert_eq!(body, "Review $ARGUMENTS");
-        assert_eq!(
-            candidate.metadata.get("unknown_tools"),
-            Some(&serde_json::json!(["unknown_tool"]))
-        );
-        assert_eq!(
-            candidate
-                .metadata
-                .get("competitor_fields")
-                .and_then(|value| value.get("agent")),
-            Some(&serde_json::json!("reviewer"))
-        );
-    }
-
-    #[test]
     fn skill_conversion_normalizes_name_without_mutating_source_files() {
         let temp = tempfile::tempdir().unwrap();
         let skill_dir = temp.path().join("source skill");

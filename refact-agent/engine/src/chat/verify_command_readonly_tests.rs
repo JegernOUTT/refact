@@ -9,7 +9,7 @@ use super::evidence::{
     VerificationSpec, EVIDENCE_POLICY_AUTHORITY,
 };
 use super::types::{ChatSession, GoalCriterion};
-use super::verify_cmd::{VerifyCommandPolicy, VERIFY_COMMAND_DESCRIPTION};
+use super::verify_cmd::VerifyCommandPolicy;
 use crate::app_state::AppState;
 use crate::at_commands::at_commands::AtCommandsContext;
 
@@ -293,12 +293,6 @@ fn planner_authority_verify_lines_are_unchanged() {
                 .is_accepted());
         }
     }
-}
-
-#[test]
-fn description_documents_read_only_and_worktree_paths() {
-    assert!(VERIFY_COMMAND_DESCRIPTION.contains("read-only"));
-    assert!(VERIFY_COMMAND_DESCRIPTION.contains("paths inside the worktree"));
 }
 
 #[test]

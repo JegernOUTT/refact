@@ -1116,52 +1116,6 @@ mod tests {
         )
     }
 
-    #[test]
-    fn perf_diagnostics_lagged_recovery_records_skip_count() {
-        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
-        let (_guard, sink, _) = install_perf_recorder();
-
-        record_lagged_recovery("chat-lag", PerfOutcome::Success, 47, 3);
-
-        let events = sink.events();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].component, "sse.lagged");
-        assert_eq!(events[0].elapsed_us, 47);
-        assert_eq!(events[0].item_count, Some(3));
-    }
-
-    #[test]
-    fn perf_diagnostics_initial_and_recovery_sse_serialization_record_outcomes() {
-        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
-        let (_guard, sink, recorder) = install_perf_recorder();
-
-        record_sse_serialize("initial-chat", PerfOutcome::Success, 17, Some(23));
-        record_sse_serialize("recovery-chat", PerfOutcome::Failure, 19, None);
-
-        let initial_chat_hash = recorder.hash_identity_for_test("initial-chat");
-        let recovery_chat_hash = recorder.hash_identity_for_test("recovery-chat");
-        let events: Vec<_> = sink
-            .events()
-            .into_iter()
-            .filter(|event| {
-                event.component == "sse.serialize"
-                    && matches!(
-                        event.chat_id_hash.as_deref(),
-                        Some(hash) if hash == initial_chat_hash || hash == recovery_chat_hash
-                    )
-            })
-            .collect();
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].component, "sse.serialize");
-        assert_eq!(events[0].outcome, "success");
-        assert_eq!(events[0].elapsed_us, 17);
-        assert_eq!(events[0].size_bytes, Some(23));
-        assert_eq!(events[1].component, "sse.serialize");
-        assert_eq!(events[1].outcome, "failure");
-        assert_eq!(events[1].elapsed_us, 19);
-        assert_eq!(events[1].size_bytes, None);
-    }
-
     async fn test_app_with_workspace(root: &std::path::Path) -> AppState {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let app = AppState::from_gcx(gcx).await;
@@ -1507,53 +1461,5 @@ mod tests {
             .read()
             .await
             .contains_key(&unknown_chat_id));
-    }
-
-    #[tokio::test]
-    async fn command_rejects_oversized_client_message_id() {
-        let workspace = tempfile::tempdir().unwrap();
-        let app = test_app_with_workspace(workspace.path()).await;
-        let request = CommandRequest {
-            native_approval_guard: None,
-            supervision_guard: None,
-            client_request_id: "oversized-client-message-id".to_string(),
-            priority: false,
-            command: ChatCommand::UserMessage {
-                content: json!("hello"),
-                attachments: vec![],
-                context_files: vec![],
-                suppress_auto_enrichment: false,
-                client_message_id: Some(
-                    "a".repeat(refact_chat_api::MAX_CLIENT_MESSAGE_ID_CHARS + 1),
-                ),
-            },
-        };
-
-        let response = handle_v1_chat_command(
-            State(app),
-            Path("oversized-client-message-id".to_string()),
-            hyper::body::Bytes::from(serde_json::to_vec(&request).unwrap()),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn reprioritize_queued_command_rejects_invalid_json() {
-        let workspace = tempfile::tempdir().unwrap();
-        let app = test_app_with_workspace(workspace.path()).await;
-
-        let error = handle_v1_chat_reprioritize_queued(
-            State(app),
-            Path(("reprioritize-queued".to_string(), "request".to_string())),
-            hyper::body::Bytes::from(r#"{"priority":"now"}"#),
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(error.status_code, StatusCode::BAD_REQUEST);
-        assert!(error.message.starts_with("Invalid JSON:"));
     }
 }

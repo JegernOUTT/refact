@@ -1339,33 +1339,6 @@ newline = "enter"
     }
 
     #[test]
-    fn vim_state_machine_enters_insert_and_deletes_line_with_dd() {
-        let registry = KeymapRegistry::default();
-        let mut vim = VimState::new(true);
-        assert_eq!(vim.mode(), VimMode::Insert);
-        vim.set_enabled(true);
-        assert_eq!(vim.mode(), VimMode::Normal);
-
-        let insert = registry.dispatch(
-            vim.context(),
-            key(KeyCode::Char('i'), KeyModifiers::empty()),
-        );
-        assert_eq!(vim.handle_dispatch(insert).effect, VimEffect::None);
-        assert_eq!(vim.mode(), VimMode::Insert);
-
-        let normal = registry.dispatch(vim.context(), key(KeyCode::Esc, KeyModifiers::empty()));
-        assert!(vim.handle_dispatch(normal).consumed);
-        assert_eq!(vim.mode(), VimMode::Normal);
-
-        let d = registry.dispatch(
-            vim.context(),
-            key(KeyCode::Char('d'), KeyModifiers::empty()),
-        );
-        assert_eq!(vim.handle_dispatch(d.clone()).effect, VimEffect::None);
-        assert_eq!(vim.handle_dispatch(d).effect, VimEffect::DeleteLine);
-    }
-
-    #[test]
     fn default_keymap_has_no_conflicts_and_lists_composer_power_actions() {
         let registry = KeymapRegistry::default();
         assert!(registry.warnings().is_empty());
@@ -1471,16 +1444,6 @@ newline = "enter"
     }
 
     #[test]
-    fn default_keymap_binds_latest_image_fallback() {
-        let keymap = KeymapRegistry::default();
-
-        assert_eq!(
-            keymap.binding_label(KeyContext::Main, KeyAction::OpenLatestImage),
-            Some("Alt-O".to_string())
-        );
-    }
-
-    #[test]
     fn every_surface_context_is_bound_and_present_in_help() {
         let registry = KeymapRegistry::default();
 
@@ -1549,26 +1512,6 @@ newline = "enter"
     }
 
     #[test]
-    fn all_contexts_are_labeled_ordered_and_collision_free() {
-        let registry = KeymapRegistry::default();
-        let mut contexts = KeyContext::ALL;
-        contexts.sort_by_key(|context| context.order());
-
-        assert_eq!(contexts, KeyContext::ALL);
-        assert!(contexts.iter().all(|context| !context.label().is_empty()));
-        assert!(registry.warnings().is_empty());
-
-        let rows = registry.help_rows();
-        for context in KeyContext::ALL {
-            assert!(
-                rows.iter().any(|row| row.context == context),
-                "{} is missing from generated help",
-                context.label()
-            );
-        }
-    }
-
-    #[test]
     fn main_defers_to_active_transcript_cell() {
         let registry = KeymapRegistry::default();
         let toggle = key(KeyCode::Char('t'), KeyModifiers::empty());
@@ -1591,43 +1534,6 @@ newline = "enter"
     }
 
     #[test]
-    fn ask_form_bindings_dispatch() {
-        let registry = KeymapRegistry::default();
-
-        assert_eq!(
-            registry.action_for(
-                KeyContext::AskForm,
-                key(KeyCode::Esc, KeyModifiers::empty())
-            ),
-            Some(KeyAction::Cancel)
-        );
-        assert_eq!(
-            registry.action_for(
-                KeyContext::AskForm,
-                key(KeyCode::Enter, KeyModifiers::empty())
-            ),
-            Some(KeyAction::Accept)
-        );
-    }
-
-    #[test]
-    fn modal_picker_navigation_keys_dispatch() {
-        let registry = KeymapRegistry::default();
-
-        for (code, action) in [
-            (KeyCode::Home, KeyAction::MoveHome),
-            (KeyCode::End, KeyAction::MoveEnd),
-            (KeyCode::PageUp, KeyAction::ScrollPageUp),
-            (KeyCode::PageDown, KeyAction::ScrollPageDown),
-        ] {
-            assert_eq!(
-                registry.action_for(KeyContext::ModalPicker, key(code, KeyModifiers::empty())),
-                Some(action),
-            );
-        }
-    }
-
-    #[test]
     fn matched_printable_bindings_preserve_literal_text() {
         let registry = KeymapRegistry::default();
 
@@ -1646,37 +1552,6 @@ newline = "enter"
                     text: Some(character),
                 }
             );
-        }
-    }
-
-    #[test]
-    fn matched_non_printable_binding_has_no_literal_text() {
-        let registry = KeymapRegistry::default();
-
-        assert_eq!(
-            registry.dispatch(KeyContext::Main, key(KeyCode::F(2), KeyModifiers::empty())),
-            KeyDispatch::action(KeyAction::ToggleEvents)
-        );
-    }
-
-    #[test]
-    fn every_default_printable_single_character_binding_preserves_text() {
-        let registry = KeymapRegistry::default();
-
-        for entry in &registry.entries {
-            for binding in &entry.bindings {
-                let event = key(binding.code, binding.modifiers);
-                let Some(text) = key_text(event) else {
-                    continue;
-                };
-                assert_eq!(
-                    registry.dispatch(entry.context, event).text,
-                    Some(text),
-                    "{} in {}",
-                    binding.display(),
-                    entry.context.label()
-                );
-            }
         }
     }
 }

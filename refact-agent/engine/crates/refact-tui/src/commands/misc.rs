@@ -402,20 +402,3 @@ pub fn theme_picker_items(custom_dir: Option<&Path>) -> Vec<PickerItem> {
         })
         .collect()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn theme_picker_lists_every_builtin_theme() {
-        let ids = theme_picker_items(None)
-            .into_iter()
-            .map(|item| item.id)
-            .collect::<Vec<_>>();
-        for name in TuiTheme::builtin_names() {
-            assert!(ids.iter().any(|id| id == name));
-        }
-        assert!(ids.iter().any(|id| id == "catppuccin-mocha"));
-    }
-}

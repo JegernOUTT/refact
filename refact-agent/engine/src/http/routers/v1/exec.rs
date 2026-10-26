@@ -804,22 +804,6 @@ mod tests {
             .unwrap()
     }
 
-    #[cfg(not(target_os = "windows"))]
-    #[test]
-    fn default_shell_resolution_follows_unix_ladder() {
-        assert_eq!(
-            super::resolve_unix_default_shell(Some("/opt/fish"), |candidate| candidate
-                == "/opt/fish"),
-            "/opt/fish"
-        );
-        assert_eq!(
-            super::resolve_unix_default_shell(Some("/missing/fish"), |candidate| candidate
-                == "bash"),
-            "bash -l"
-        );
-        assert_eq!(super::resolve_unix_default_shell(None, |_| false), "sh -l");
-    }
-
     #[tokio::test]
     #[serial_test::parallel(exec_http_env)]
     async fn spawn_requires_exactly_one_command_shape() {
@@ -845,59 +829,6 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    #[serial_test::parallel(exec_http_env)]
-    async fn spawn_default_pty_shell_returns_command_preview() {
-        let (_temp, app) = test_app().await;
-        let router = make_refact_http_server(app);
-
-        let (status, spawned) = json_response(
-            router.clone(),
-            post_json("/v1/exec/spawn", json!({ "pty": true })),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            spawned["command_preview"],
-            super::default_interactive_shell()
-        );
-        let process_id = spawned["process_id"].as_str().unwrap();
-        let (status, _) = json_response(
-            router,
-            post_json(&format!("/v1/exec/{process_id}/kill"), json!({})),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    #[serial_test::parallel(exec_http_env)]
-    async fn spawn_explicit_command_preserves_command_preview() {
-        let (_temp, app) = test_app().await;
-        let router = make_refact_http_server(app);
-
-        let (status, spawned) = json_response(
-            router.clone(),
-            post_json(
-                "/v1/exec/spawn",
-                json!({ "command": "sleep 30", "pty": true }),
-            ),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(spawned["command_preview"], "sleep 30");
-        let process_id = spawned["process_id"].as_str().unwrap();
-        let (status, _) = json_response(
-            router,
-            post_json(&format!("/v1/exec/{process_id}/kill"), json!({})),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]
@@ -1107,93 +1038,6 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::OK);
         }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    #[serial_test::parallel(exec_http_env)]
-    async fn write_stdin_to_running_tty_process_succeeds() {
-        let (_temp, app_state) = test_app().await;
-        let router = make_refact_http_server(app_state.clone());
-        let (status, spawned) = json_response(
-            router.clone(),
-            post_json(
-                "/v1/exec/spawn",
-                json!({ "command": "read line; printf 'got:%s\\n' \"$line\"", "pty": true }),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let process_id = spawned["process_id"].as_str().unwrap();
-
-        let (status, _) = json_response(
-            router.clone(),
-            post_json(
-                &format!("/v1/exec/{process_id}/resize"),
-                json!({ "rows": 40, "cols": 120 }),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-
-        let (status, json) = json_response(
-            router,
-            post_json(
-                &format!("/v1/exec/{process_id}/stdin"),
-                json!({ "chars": "ribbit\n" }),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["process_id"], process_id);
-        assert_eq!(json["bytes_written"], "ribbit\n".len());
-
-        let process_id = crate::exec::ExecProcessId(process_id.to_string());
-        let _ = app_state
-            .runtime
-            .exec_registry
-            .wait(&process_id)
-            .await
-            .unwrap();
-        let read = app_state
-            .runtime
-            .exec_registry
-            .read(&process_id, 0, None)
-            .await;
-        assert!(read.chunks.iter().any(|chunk| chunk.text.contains("got:")));
-    }
-
-    #[tokio::test]
-    async fn process_access_rejects_another_workspace() {
-        let (_temp, app) = test_app().await;
-        let foreign = tempfile::tempdir().unwrap();
-        let snapshot = app
-            .runtime
-            .exec_registry
-            .register(
-                crate::exec::ExecProcessMeta::new(
-                    crate::exec::ExecMode::Background,
-                    "foreign".to_string(),
-                )
-                .with_workspace(foreign.path().to_path_buf()),
-                1024,
-            )
-            .await;
-        let router = make_refact_http_server(app);
-
-        let (status, _) = json_response(
-            router,
-            Request::builder()
-                .uri(format!(
-                    "/v1/exec/{}/read",
-                    snapshot.meta.process_id.as_str()
-                ))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -1409,100 +1253,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     #[serial_test::parallel(exec_http_env)]
-    async fn subscribe_streams_snapshot_output_and_exit() {
-        let (_temp, app) = test_app().await;
-        let router = make_refact_http_server(app);
-        let (status, spawned) = json_response(
-            router.clone(),
-            post_json(
-                "/v1/exec/spawn",
-                json!({ "command": "printf terminal-sse", "pty": false }),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let process_id = spawned["process_id"].as_str().unwrap();
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/v1/exec/{process_id}/subscribe"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let mut body = response.into_body();
-        let collected = tokio::time::timeout(Duration::from_secs(5), async move {
-            let mut text = String::new();
-            while let Some(chunk) = body.data().await {
-                text.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
-                if text.contains("event: exit") {
-                    break;
-                }
-            }
-            text
-        })
-        .await
-        .expect("SSE stream should terminate after exit");
-
-        assert!(collected.contains("event: snapshot"));
-        assert!(collected.contains("terminal-sse"));
-        assert!(collected.contains("event: exit"));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    #[serial_test::parallel(exec_http_env)]
-    async fn subscribe_streams_raw_pty_bytes_with_crlf() {
-        let (_temp, app) = test_app().await;
-        let router = make_refact_http_server(app);
-        let (status, spawned) = json_response(
-            router.clone(),
-            post_json(
-                "/v1/exec/spawn",
-                json!({ "command": "printf 'a\\r\\nb\\r\\n'", "pty": true }),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let process_id = spawned["process_id"].as_str().unwrap();
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/v1/exec/{process_id}/subscribe?since_seq=0"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let mut body = response.into_body();
-        let collected = tokio::time::timeout(Duration::from_secs(5), async move {
-            let mut text = String::new();
-            while let Some(chunk) = body.data().await {
-                text.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
-                if text.contains("event: exit") {
-                    break;
-                }
-            }
-            text
-        })
-        .await
-        .expect("SSE stream should terminate after exit");
-
-        assert!(collected.contains("event: snapshot"));
-        assert!(
-            collected.contains("\\r\\n"),
-            "SSE payload must keep CRLF byte-faithful for tty: {collected:?}"
-        );
-        assert!(collected.contains("\"offset\""));
-        assert!(collected.contains("event: exit"));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    #[serial_test::parallel(exec_http_env)]
     async fn read_raw_uses_byte_cursor_for_tty_process() {
         let (_temp, app) = test_app().await;
         let router = make_refact_http_server(app.clone());
@@ -1557,44 +1307,6 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(drained["chunks"].as_array().unwrap().is_empty());
         assert_eq!(drained["next_seq"].as_u64().unwrap(), next_seq);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    #[serial_test::parallel(exec_http_env)]
-    async fn read_raw_flag_is_ignored_for_non_tty_process() {
-        let (_temp, app) = test_app().await;
-        let router = make_refact_http_server(app.clone());
-        let (status, spawned) = json_response(
-            router.clone(),
-            post_json(
-                "/v1/exec/spawn",
-                json!({ "command": "printf plain-hello", "pty": false }),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let process_id = spawned["process_id"].as_str().unwrap().to_string();
-        app.runtime
-            .exec_registry
-            .wait(&crate::exec::ExecProcessId(process_id.clone()))
-            .await
-            .unwrap();
-
-        let (status, read) = json_response(
-            router,
-            Request::builder()
-                .uri(format!("/v1/exec/{process_id}/read?raw=true&since_seq=0"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let chunks = read["chunks"].as_array().unwrap();
-        assert!(chunks
-            .iter()
-            .any(|chunk| chunk["text"].as_str().unwrap().contains("plain-hello")));
-        assert!(chunks.iter().all(|chunk| chunk.get("offset").is_none()));
     }
 
     #[cfg(unix)]

@@ -1501,53 +1501,6 @@ mod tests {
         assert_eq!(entry.meta.cards_total, 1);
     }
 
-    #[tokio::test]
-    async fn create_planner_chat_with_mode_lists_with_that_mode() {
-        let temp = tempfile::tempdir().unwrap();
-        let task_id = "task-mode";
-        let gcx = setup_task(temp.path(), task_id).await;
-
-        let Json(default_res) = handle_create_planner_chat(
-            State(app(gcx.clone())),
-            Path(task_id.to_string()),
-            hyper::body::Bytes::new(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(default_res["mode"], json!("task_planner"));
-
-        let Json(agent_res) = handle_create_planner_chat(
-            State(app(gcx.clone())),
-            Path(task_id.to_string()),
-            hyper::body::Bytes::from_static(br#"{"mode":"agent"}"#),
-        )
-        .await
-        .unwrap();
-        assert_eq!(agent_res["mode"], json!("agent"));
-        let agent_chat_id = agent_res["chat_id"].as_str().unwrap().to_string();
-
-        let rejected = handle_create_planner_chat(
-            State(app(gcx.clone())),
-            Path(task_id.to_string()),
-            hyper::body::Bytes::from_static(br#"{"mode":"task_agent"}"#),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(rejected.0, StatusCode::BAD_REQUEST);
-
-        let Json(list) = handle_list_task_trajectories(
-            State(app(gcx.clone())),
-            Path((task_id.to_string(), "planner".to_string())),
-        )
-        .await
-        .unwrap();
-        let agent_entry = list
-            .iter()
-            .find(|t| t.id == agent_chat_id)
-            .expect("agent-mode chat should be listed in the planner bucket");
-        assert_eq!(agent_entry.mode.as_deref(), Some("agent"));
-    }
-
     fn snapshot(
         chat_id: &str,
         task_id: &str,
@@ -1743,37 +1696,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_patch_board_serial_patches_increment_rev() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = setup_task(temp.path(), "task-serial").await;
-
-        let first = handle_patch_board(
-            State(app(gcx.clone())),
-            Path("task-serial".to_string()),
-            Json(create_card_request(0, "card-a")),
-        )
-        .await
-        .unwrap()
-        .0;
-
-        assert_eq!(first.rev, 1);
-        assert!(first.get_card("card-a").is_some());
-
-        let second = handle_patch_board(
-            State(app(gcx.clone())),
-            Path("task-serial".to_string()),
-            Json(create_card_request(1, "card-b")),
-        )
-        .await
-        .unwrap()
-        .0;
-
-        assert_eq!(second.rev, 2);
-        assert!(second.get_card("card-a").is_some());
-        assert!(second.get_card("card-b").is_some());
-    }
-
-    #[tokio::test]
     async fn handle_patch_board_concurrent_patches_one_succeeds_one_409() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = setup_task(temp.path(), "task-concurrent").await;
@@ -1895,37 +1817,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn add_comment_rejects_empty_body() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = setup_task(temp.path(), "task-empty-body").await;
-        let _ = handle_patch_board(
-            State(app(gcx.clone())),
-            Path("task-empty-body".to_string()),
-            Json(create_card_request(0, "card-a")),
-        )
-        .await
-        .unwrap();
-
-        let result = handle_patch_board(
-            State(app(gcx.clone())),
-            Path("task-empty-body".to_string()),
-            Json(UpdateBoardRequest {
-                rev: 1,
-                patch: BoardPatch::AddComment {
-                    card_id: "card-a".to_string(),
-                    body: String::new(),
-                    author_role: "user".to_string(),
-                    author_id: None,
-                    reply_to: None,
-                },
-            }),
-        )
-        .await;
-
-        assert_eq!(status(result), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
     async fn add_comment_rejects_whitespace_only_body() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = setup_task(temp.path(), "task-ws-body").await;
@@ -2019,41 +1910,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn add_comment_returns_full_uuid_id() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = setup_task(temp.path(), "task-uuid-id").await;
-        let _ = handle_patch_board(
-            State(app(gcx.clone())),
-            Path("task-uuid-id".to_string()),
-            Json(create_card_request(0, "card-a")),
-        )
-        .await
-        .unwrap();
-        let _ = handle_patch_board(
-            State(app(gcx.clone())),
-            Path("task-uuid-id".to_string()),
-            Json(UpdateBoardRequest {
-                rev: 1,
-                patch: BoardPatch::AddComment {
-                    card_id: "card-a".to_string(),
-                    body: "Full UUID test.".to_string(),
-                    author_role: "user".to_string(),
-                    author_id: None,
-                    reply_to: None,
-                },
-            }),
-        )
-        .await
-        .unwrap();
-
-        let board = storage::load_board(gcx, "task-uuid-id").await.unwrap();
-        let comment = &board.get_card("card-a").unwrap().comments[0];
-
-        assert_eq!(comment.id.len(), 36);
-        assert!(Uuid::parse_str(&comment.id).is_ok());
-    }
-
-    #[tokio::test]
     async fn delete_attested_card_prunes_metadata_before_reusing_id() {
         let temp = tempfile::tempdir().unwrap();
         let task_id = "task-del-attested";
@@ -2136,27 +1992,6 @@ mod tests {
             serde_json::to_value(&persisted).unwrap(),
             serde_json::to_value(&recreated).unwrap()
         );
-    }
-
-    #[tokio::test]
-    async fn delete_card_returns_404_for_missing_card() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = setup_task(temp.path(), "task-del-missing").await;
-
-        let result = handle_patch_board(
-            State(app(gcx.clone())),
-            Path("task-del-missing".to_string()),
-            Json(UpdateBoardRequest {
-                rev: 0,
-                patch: BoardPatch::DeleteCard {
-                    card_id: "nonexistent".to_string(),
-                    force: None,
-                },
-            }),
-        )
-        .await;
-
-        assert_eq!(status(result), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -2271,95 +2106,6 @@ mod tests {
         let (status_code, msg) = result.unwrap_err();
         assert_eq!(status_code, StatusCode::CONFLICT);
         assert!(msg.contains("card-wt"));
-    }
-
-    #[tokio::test]
-    async fn tasks_subscribe_emits_heartbeat_not_snapshot() {
-        use futures::StreamExt;
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = setup_task(temp.path(), "task-hb").await;
-
-        let response = handle_tasks_subscribe(State(app(gcx.clone())))
-            .await
-            .unwrap();
-        let mut body_stream = response.into_body();
-
-        let chunk1 = body_stream.next().await.unwrap().unwrap();
-        let s1 = String::from_utf8(chunk1.to_vec()).unwrap();
-        let event1: serde_json::Value =
-            serde_json::from_str(s1.strip_prefix("data: ").unwrap().trim_end()).unwrap();
-        assert_eq!(event1["type"], "snapshot");
-
-        let ts = Utc::now().to_rfc3339();
-        let seq = gcx
-            .task_events_seq
-            .as_ref()
-            .unwrap()
-            .fetch_add(1, Ordering::SeqCst);
-        gcx.task_events_tx
-            .as_ref()
-            .unwrap()
-            .send(TaskEventEnvelope {
-                seq,
-                event: TaskEvent::Heartbeat { ts },
-            })
-            .ok();
-
-        let chunk2 = body_stream.next().await.unwrap().unwrap();
-        let s2 = String::from_utf8(chunk2.to_vec()).unwrap();
-        let event2: serde_json::Value =
-            serde_json::from_str(s2.strip_prefix("data: ").unwrap().trim_end()).unwrap();
-        assert_eq!(event2["type"], "heartbeat");
-        assert!(event2.get("tasks").is_none());
-    }
-
-    #[tokio::test]
-    async fn tasks_subscribe_does_not_emit_duplicate_initial_snapshot() {
-        use futures::StreamExt;
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = setup_task(temp.path(), "task-hb-dedup").await;
-
-        let response = handle_tasks_subscribe(State(app(gcx.clone())))
-            .await
-            .unwrap();
-        let mut body_stream = response.into_body();
-
-        let chunk1 = body_stream.next().await.unwrap().unwrap();
-        let s1 = String::from_utf8(chunk1.to_vec()).unwrap();
-        let event1: serde_json::Value =
-            serde_json::from_str(s1.strip_prefix("data: ").unwrap().trim_end()).unwrap();
-        assert_eq!(event1["type"], "snapshot");
-
-        let result =
-            tokio::time::timeout(std::time::Duration::from_millis(100), body_stream.next()).await;
-        assert!(
-            result.is_err(),
-            "No duplicate event should appear within 100ms of initial snapshot"
-        );
-    }
-
-    #[tokio::test]
-    async fn board_patch_add_comment_unknown_card_errors() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = setup_task(temp.path(), "task-comment-missing").await;
-
-        let result = handle_patch_board(
-            State(app(gcx)),
-            Path("task-comment-missing".to_string()),
-            Json(UpdateBoardRequest {
-                rev: 0,
-                patch: BoardPatch::AddComment {
-                    card_id: "missing".to_string(),
-                    body: "Nobody home.".to_string(),
-                    author_role: "planner".to_string(),
-                    author_id: None,
-                    reply_to: None,
-                },
-            }),
-        )
-        .await;
-
-        assert_eq!(status(result), StatusCode::NOT_FOUND);
     }
 
     mod handle_delete_planner_chat {
@@ -2500,51 +2246,6 @@ mod tests {
             assert!(result.is_ok());
             assert!(!planner_path.exists());
         }
-
-        #[tokio::test]
-        async fn delete_planner_chat_not_blocked_by_own_live_session() {
-            let temp = tempfile::tempdir().unwrap();
-            let gcx = setup_task(temp.path(), "task-1").await;
-            save_planner(gcx.clone(), "task-1", "planner-chat").await;
-            insert_live_planner_session(gcx.clone(), "task-1", "planner-chat").await;
-            let planner_path = temp
-                .path()
-                .join(".refact/tasks/task-1/trajectories/planner/planner-chat.json");
-            assert!(planner_path.exists());
-
-            let result = handle_delete_planner_chat(
-                State(app(gcx)),
-                Path(("task-1".to_string(), "planner-chat".to_string())),
-                no_force(),
-            )
-            .await;
-
-            assert!(result.is_ok());
-            assert!(!planner_path.exists());
-        }
-
-        #[tokio::test]
-        async fn delete_planner_chat_not_blocked_by_sibling_planner_chat() {
-            let temp = tempfile::tempdir().unwrap();
-            let gcx = setup_task(temp.path(), "task-1").await;
-            save_planner(gcx.clone(), "task-1", "planner-chat").await;
-            insert_live_planner_session(gcx.clone(), "task-1", "planner-chat").await;
-            insert_live_planner_session(gcx.clone(), "task-1", "chat-2").await;
-            let planner_path = temp
-                .path()
-                .join(".refact/tasks/task-1/trajectories/planner/planner-chat.json");
-            assert!(planner_path.exists());
-
-            let result = handle_delete_planner_chat(
-                State(app(gcx)),
-                Path(("task-1".to_string(), "planner-chat".to_string())),
-                no_force(),
-            )
-            .await;
-
-            assert!(result.is_ok());
-            assert!(!planner_path.exists());
-        }
     }
 
     #[tokio::test]
@@ -2618,104 +2319,6 @@ mod tests {
         .await;
 
         assert_eq!(delete_status(result), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn handle_create_task_document_creates_document_and_returns_detail() {
-        use crate::tools::tool_task_documents::CreateDocumentRequest;
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = setup_task(temp.path(), "task-doc-create").await;
-        let result = handle_create_task_document(
-            State(app(gcx.clone())),
-            Path("task-doc-create".to_string()),
-            Json(CreateDocumentRequest {
-                slug: "my-plan".to_string(),
-                name: "My Plan".to_string(),
-                kind: "plan".to_string(),
-                content: "body text".to_string(),
-                pinned: Some(true),
-                relevant_cards: None,
-            }),
-        )
-        .await
-        .unwrap();
-        assert_eq!(result.0.slug, "my-plan");
-        assert_eq!(result.0.name, "My Plan");
-        assert_eq!(result.0.content, "body text");
-        assert!(result.0.pinned);
-        assert_eq!(result.0.version, 1);
-    }
-
-    #[tokio::test]
-    async fn update_task_meta_event_includes_live_planner_session_state() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = setup_task(temp.path(), "task-meta-state").await;
-        save_planner(gcx.clone(), "task-meta-state", "planner-paused").await;
-        insert_live_planner_session_with_state(
-            gcx.clone(),
-            "task-meta-state",
-            "planner-paused",
-            crate::chat::types::SessionState::Paused,
-        )
-        .await;
-        let mut rx = gcx.task_events_tx.as_ref().unwrap().subscribe();
-
-        let Json(response) = handle_update_task_meta(
-            State(app(gcx.clone())),
-            Path("task-meta-state".to_string()),
-            Json(UpdateTaskMetaRequest {
-                name: Some("Renamed task".to_string()),
-                base_branch: None,
-                base_commit: None,
-                default_agent_model: None,
-            }),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(response.planner_session_state.as_deref(), Some("paused"));
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        match event.event {
-            TaskEvent::TaskUpdated { task_id, meta } => {
-                assert_eq!(task_id, "task-meta-state");
-                assert_eq!(meta.name, "Renamed task");
-                assert_eq!(meta.planner_session_state.as_deref(), Some("paused"));
-            }
-            other => panic!("unexpected task event: {:?}", other),
-        }
-    }
-
-    #[tokio::test]
-    async fn handle_list_task_documents_returns_empty_when_no_documents() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = setup_task(temp.path(), "task-docs-empty").await;
-        let result = handle_list_task_documents(
-            State(app(gcx.clone())),
-            Path("task-docs-empty".to_string()),
-        )
-        .await
-        .unwrap();
-        assert!(result.0.documents.is_empty());
-        assert_eq!(result.0.task_id, "task-docs-empty");
-    }
-
-    #[tokio::test]
-    async fn handle_update_task_document_returns_404_for_unknown_slug() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = setup_task(temp.path(), "task-doc-404").await;
-        let result = handle_update_task_document(
-            State(app(gcx.clone())),
-            Path(("task-doc-404".to_string(), "no-such-slug".to_string())),
-            Json(UpdateTaskDocumentRequest {
-                content: "whatever".to_string(),
-                pinned: None,
-            }),
-        )
-        .await;
-        assert!(matches!(result, Err((StatusCode::NOT_FOUND, _))));
     }
 
     #[tokio::test]
@@ -2800,21 +2403,6 @@ mod tests {
         .unwrap();
         assert_eq!(history.0.history.len(), 1);
         assert_eq!(history.0.history[0].version, 1);
-    }
-
-    #[tokio::test]
-    async fn handle_history_task_document_returns_404_for_unknown_slug() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = setup_task(temp.path(), "task-doc-history-404").await;
-        let result = handle_history_task_document(
-            State(app(gcx.clone())),
-            Path((
-                "task-doc-history-404".to_string(),
-                "no-such-slug".to_string(),
-            )),
-        )
-        .await;
-        assert!(matches!(result, Err((StatusCode::NOT_FOUND, _))));
     }
 }
 

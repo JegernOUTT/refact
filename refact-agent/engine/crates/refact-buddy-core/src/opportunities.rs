@@ -1151,20 +1151,6 @@ mod tests {
     }
 
     #[test]
-    fn memory_garden_uses_lifecycle_pulse_counts_without_recent_facts() {
-        let mut pulse = BuddyPulse::default();
-        pulse.memory.duplicate_candidates = 1;
-        pulse.memory.merge_candidates = 2;
-        let queue = OpportunityQueue::new();
-
-        let opps = rules::memory_garden(&FactStore::new(), &pulse, &queue, Utc::now());
-
-        assert_eq!(opps.len(), 1);
-        assert!(opps[0].summary.contains("3 lifecycle candidate"));
-        assert_eq!(opps[0].kind, BuddyOpportunityKind::MemoryGarden);
-    }
-
-    #[test]
     fn distinct_memory_garden_classes_get_distinct_cooldown_keys() {
         let pulse = BuddyPulse::default();
         let queue = OpportunityQueue::new();

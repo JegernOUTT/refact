@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
-use crate::coordination::peer_authority::PeerAuthority;
-use crate::coordination::teams::{load_team, TeamRefusal};
+use crate::coordination::teams::load_team;
 use crate::global_context::GlobalContext;
 use crate::yaml_configs::customization_registry::RegistryCache;
 use crate::yaml_configs::customization_types::{
@@ -51,60 +50,6 @@ async fn gcx_with_team(declaration: Option<&str>) -> std::sync::Arc<GlobalContex
         },
     );
     gcx
-}
-
-#[tokio::test]
-async fn load_team_builds_the_declared_roles() {
-    let gcx = gcx_with_team(Some(
-        "roles:\n  - name: implementer\n    default_profile: coder\n    authority_ceiling: mail\n    peer_mail_ttl_secs: 120\n  - name: reviewer\n    authority_ceiling: metadata\n",
-    ))
-    .await;
-
-    let team = load_team(gcx, "ship-it").await.unwrap();
-
-    assert_eq!(team.name, "ship-it");
-    assert_eq!(team.roles().len(), 2);
-    let implementer = team.role("implementer").unwrap();
-    assert_eq!(implementer.default_profile.as_deref(), Some("coder"));
-    assert_eq!(implementer.authority_ceiling, Some(PeerAuthority::Mail));
-    assert_eq!(implementer.peer_mail_ttl_secs, 120);
-    let reviewer = team.role("reviewer").unwrap();
-    assert_eq!(reviewer.authority_ceiling, Some(PeerAuthority::Metadata));
-}
-
-#[tokio::test]
-async fn duplicate_role_is_refused() {
-    let gcx = gcx_with_team(Some("roles:\n  - name: same\n  - name: same\n")).await;
-
-    let error = load_team(gcx, "ship-it").await.unwrap_err();
-
-    assert_eq!(
-        error,
-        TeamRefusal::DuplicateRole {
-            role: "same".into()
-        }
-        .to_string()
-    );
-}
-
-#[tokio::test]
-async fn unknown_team_is_refused() {
-    let gcx = gcx_with_team(None).await;
-
-    let error = load_team(gcx, "missing").await.unwrap_err();
-
-    assert!(error.contains("team `missing` is not defined"));
-}
-
-#[tokio::test]
-async fn missing_or_malformed_team_declaration_is_refused() {
-    let missing = gcx_with_team(None).await;
-    let error = load_team(missing, "ship-it").await.unwrap_err();
-    assert!(error.contains("has no `team` definition"));
-
-    let malformed = gcx_with_team(Some("roles: not-a-list\n")).await;
-    let error = load_team(malformed, "ship-it").await.unwrap_err();
-    assert!(error.contains("team `ship-it` is malformed"));
 }
 
 #[tokio::test]

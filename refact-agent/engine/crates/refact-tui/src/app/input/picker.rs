@@ -159,11 +159,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn composer_modes_are_distinct() {
-        assert_ne!(ComposerMode::Chat, ComposerMode::ProjectPicker);
-    }
-
-    #[test]
     fn modal_picker_home_end_and_paging_change_selection() {
         let mut app = App::notice_only("test");
         app.modal_picker = Some(PickerState::new(

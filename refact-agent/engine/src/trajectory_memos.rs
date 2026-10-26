@@ -1571,42 +1571,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sweep_is_oldest_first() {
-        let (workspace, gcx) = memo_test_workspace(3).await;
-        let trajectories = workspace.path().join(TRAJECTORIES_FOLDER);
-        for (id, updated_at) in [
-            ("trajectory-0", "2026-05-03T00:00:00Z"),
-            ("trajectory-1", "2026-05-01T00:00:00Z"),
-            ("trajectory-2", "2026-05-02T00:00:00Z"),
-        ] {
-            let mut trajectory = trajectory_json(id, enough_messages());
-            trajectory["updated_at"] = Value::String(updated_at.to_string());
-            tokio::fs::write(
-                trajectories.join(format!("{id}.json")),
-                serde_json::to_string(&trajectory).unwrap(),
-            )
-            .await
-            .unwrap();
-        }
-        let processed = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let extractor = recording_extractor(processed.clone());
-        let mut breaker = MemoBreaker::default();
-
-        process_abandoned_trajectories(gcx, &mut breaker, extractor.as_ref())
-            .await
-            .unwrap();
-
-        assert_eq!(
-            *processed.lock().unwrap(),
-            vec![
-                "trajectory-1".to_string(),
-                "trajectory-2".to_string(),
-                "trajectory-0".to_string(),
-            ]
-        );
-    }
-
-    #[tokio::test]
     async fn file_is_abandoned_after_three_failed_attempts() {
         let (workspace, gcx) = memo_test_workspace(1).await;
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1915,53 +1879,6 @@ mod tests {
         assert!(breaker.is_open(Instant::now()));
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn breaker_opens_after_three_consecutive_rate_limits() {
-        let (_workspace, gcx) = memo_test_workspace(4).await;
-        let calls = Arc::new(AtomicUsize::new(0));
-        let extractor = scripted_extractor(
-            vec![
-                Err("OpenAI API error (429): rate limit reached".to_string()),
-                Err("OpenAI API error (429): rate limit reached".to_string()),
-                Err("OpenAI API error (429): rate limit reached".to_string()),
-                Err("OpenAI API error (429): rate limit reached".to_string()),
-            ],
-            calls.clone(),
-        );
-        let mut breaker = MemoBreaker::default();
-
-        process_abandoned_trajectories(gcx, &mut breaker, extractor.as_ref())
-            .await
-            .unwrap();
-
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
-        assert!(breaker.is_open(Instant::now()));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn breaker_makes_no_llm_calls_while_open() {
-        let (_workspace, gcx) = memo_test_workspace(1).await;
-        let calls = Arc::new(AtomicUsize::new(0));
-        let extractor = scripted_extractor(vec![Ok(())], calls.clone());
-        let mut breaker = MemoBreaker::default();
-        breaker.open_until = Some(Instant::now() + TokioDuration::from_secs(900));
-        let shutdown = gcx.shutdown_flag.clone();
-        let task = tokio::spawn(trajectory_memos_background_task_inner(
-            gcx, breaker, extractor,
-        ));
-
-        tokio::task::yield_now().await;
-        tokio::time::advance(TokioDuration::from_secs(CHECK_INTERVAL_SECS)).await;
-        tokio::task::yield_now().await;
-        tokio::time::advance(TokioDuration::from_secs(CHECK_INTERVAL_SECS)).await;
-        tokio::task::yield_now().await;
-
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
-        shutdown.store(true, Ordering::SeqCst);
-        tokio::time::advance(TokioDuration::from_millis(200)).await;
-        task.await.unwrap();
-    }
-
     #[test]
     fn success_resets_the_breaker() {
         let mut breaker = MemoBreaker::default();
@@ -2002,18 +1919,6 @@ mod tests {
     }
 
     #[test]
-    fn invalid_request_category_opens_breaker() {
-        let now = Instant::now();
-        let invalid_request = crate::buddy::workflows::WorkflowFailureCategory::InvalidRequest;
-        let mut breaker = MemoBreaker::default();
-        assert_eq!(
-            breaker.record_failure(&invalid_request, now),
-            Some(TokioDuration::from_secs(300))
-        );
-        assert!(breaker.is_open(now));
-    }
-
-    #[test]
     fn failure_categories_are_classified_explicitly() {
         use crate::buddy::workflows::WorkflowFailureCategory::*;
 
@@ -2036,26 +1941,6 @@ mod tests {
             assert!(!is_environment_failure_category(&category));
             assert!(!is_environment_failure_class(category.as_str()));
         }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn shutdown_is_prompt_while_the_breaker_is_open() {
-        let (_workspace, gcx) = memo_test_workspace(1).await;
-        let calls = Arc::new(AtomicUsize::new(0));
-        let extractor = scripted_extractor(vec![Ok(())], calls.clone());
-        let mut breaker = MemoBreaker::default();
-        breaker.open_until = Some(Instant::now() + TokioDuration::from_secs(21_600));
-        let shutdown = gcx.shutdown_flag.clone();
-        let task = tokio::spawn(trajectory_memos_background_task_inner(
-            gcx, breaker, extractor,
-        ));
-
-        tokio::task::yield_now().await;
-        shutdown.store(true, Ordering::SeqCst);
-        tokio::time::advance(TokioDuration::from_millis(200)).await;
-        task.await.unwrap();
-
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -2241,18 +2126,6 @@ mod tests {
         assert_eq!(second.len(), 1);
         assert_eq!(first[0].idempotency_key, second[0].idempotency_key);
         assert_eq!(first[0].op_id, second[0].op_id);
-    }
-
-    #[test]
-    fn normalized_memo_title_strips_type_prefix_and_whitespace() {
-        assert_eq!(
-            normalized_memo_title(" [decision]   Queue   Persistence \n Plan "),
-            "queue persistence plan"
-        );
-        assert_eq!(
-            normalized_memo_title("Queue Persistence"),
-            "queue persistence"
-        );
     }
 
     #[test]

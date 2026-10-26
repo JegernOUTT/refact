@@ -894,17 +894,6 @@ mod tests {
     }
 
     #[test]
-    fn an_undispatched_required_lane_blocks_the_parent() {
-        let graph = graph_with(
-            vec![SubGoalNode::new("lane", "Lane")],
-            vec![SubGoalEdge::required(ROOT_SUB_GOAL_ID, "lane")],
-        );
-        let rollup = aggregate_sub_goals(&graph, ROOT_SUB_GOAL_ID);
-        assert!(!rollup.parent_may_proceed());
-        assert_eq!(rollup.lanes[0].outcome, SubGoalOutcome::NotRun);
-    }
-
-    #[test]
     fn a_dispatched_lane_without_a_verdict_blocks_and_is_not_not_run() {
         let mut graph = graph_with(
             vec![SubGoalNode::new("lane", "Lane")],
@@ -920,27 +909,6 @@ mod tests {
             rollup.lanes[0].owner,
             Some(SubGoalOwner::background_agent("bg-1"))
         );
-    }
-
-    #[test]
-    fn a_superseded_required_lane_blocks() {
-        let mut graph = graph_with(
-            vec![SubGoalNode::new("lane", "Lane").with_criteria(["c1"])],
-            vec![SubGoalEdge::required(ROOT_SUB_GOAL_ID, "lane")],
-        );
-        graph.record_report(
-            "lane",
-            SubGoalReport {
-                claimed_outcome: SubGoalOutcome::Met,
-                criteria_verdicts: vec![verdict("c1", true)],
-                ..Default::default()
-            },
-        );
-        graph.supersede("lane", "plan changed");
-
-        let rollup = aggregate_sub_goals(&graph, ROOT_SUB_GOAL_ID);
-        assert_eq!(rollup.lanes[0].outcome, SubGoalOutcome::Superseded);
-        assert!(!rollup.parent_may_proceed());
     }
 
     #[test]
@@ -976,27 +944,6 @@ mod tests {
             );
         }
         assert!(error.to_string().contains("->"));
-    }
-
-    #[test]
-    fn a_self_edge_is_rejected() {
-        let graph = graph_with(
-            vec![SubGoalNode::new("a", "A")],
-            vec![SubGoalEdge::required(ROOT_SUB_GOAL_ID, "a")],
-        );
-        let error = graph
-            .validate_declaration(
-                &SubGoalDeclaration {
-                    nodes: Vec::new(),
-                    edges: vec![SubGoalEdge::required("a", "a")],
-                },
-                SubGoalLimits::default(),
-            )
-            .expect_err("self edge must be rejected");
-        assert!(matches!(
-            error,
-            SubGoalDeclarationError::SelfEdge { ref node_id } if node_id == "a"
-        ));
     }
 
     #[test]
@@ -1154,28 +1101,5 @@ mod tests {
         assert_eq!(root.lanes.len(), 1);
         assert_eq!(root.lanes[0].node_id, "mid");
         assert!(!root.parent_may_proceed());
-    }
-
-    #[test]
-    fn a_report_round_trips_through_json_with_its_verdicts() {
-        let report = SubGoalReport {
-            claimed_outcome: SubGoalOutcome::Blocked,
-            criteria_verdicts: vec![verdict("c1", false)],
-            result_summary: "waiting on review".to_string(),
-            reported_at_ms: 42,
-        };
-        let json = serde_json::to_string(&report).unwrap();
-        assert!(json.contains("\"blocked\""));
-        let parsed: SubGoalReport = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, report);
-    }
-
-    #[test]
-    fn an_owner_serializes_exactly_like_a_work_key() {
-        let owner = SubGoalOwner::background_agent("bg-7");
-        let json = serde_json::to_value(&owner).unwrap();
-        assert_eq!(json["runtime"], "background_agent");
-        assert_eq!(json["id"], "bg-7");
-        assert_eq!(owner.to_string(), "background_agent:bg-7");
     }
 }

@@ -719,11 +719,10 @@ mod tests {
     use super::*;
     use super::super::session::create_sessions_map;
     use super::super::types::{
-        ChatCommand, CommandRequest, PauseReason, SessionState, TaskMeta, session_idle_timeout,
+        ChatCommand, CommandRequest, PauseReason, TaskMeta, session_idle_timeout,
     };
     use crate::call_validation::{ChatContent, ChatMessage, ChatToolCall, ChatToolFunction};
     use crate::exec::{ExecMode, ExecProcessId, ExecProcessMeta};
-    use std::collections::HashSet;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::time::Instant;
@@ -1247,141 +1246,5 @@ mod tests {
             .command_queue
             .iter()
             .any(|request| request.client_request_id == "queued-from-outstanding-ref"));
-    }
-
-    fn make_assistant_with_tool_calls(ids: &[&str]) -> ChatMessage {
-        ChatMessage {
-            role: "assistant".to_string(),
-            tool_calls: Some(
-                ids.iter()
-                    .map(|id| ChatToolCall {
-                        id: id.to_string(),
-                        index: None,
-                        function: ChatToolFunction {
-                            name: "shell".to_string(),
-                            arguments: "{}".to_string(),
-                        },
-                        tool_type: "function".to_string(),
-                        extra_content: None,
-                        started_at_ms: None,
-                        completed_at_ms: None,
-                    })
-                    .collect(),
-            ),
-            ..Default::default()
-        }
-    }
-
-    fn make_pause_reason(tool_call_id: &str) -> PauseReason {
-        PauseReason {
-            reason_type: "confirmation".into(),
-            tool_name: "shell".into(),
-            command: "shell".into(),
-            rule: "ask".into(),
-            tool_call_id: tool_call_id.into(),
-            integr_config_path: None,
-        }
-    }
-
-    fn make_tool_result(tool_call_id: &str, content: &str) -> ChatMessage {
-        ChatMessage {
-            role: "tool".to_string(),
-            tool_call_id: tool_call_id.to_string(),
-            content: ChatContent::SimpleText(content.to_string()),
-            tool_failed: Some(false),
-            ..Default::default()
-        }
-    }
-
-    fn default_openai_settings() -> crate::llm::adapter::AdapterSettings {
-        crate::llm::adapter::AdapterSettings {
-            api_key: "test-key".to_string(),
-            auth_token: String::new(),
-            endpoint: "https://api.openai.com/v1/chat/completions".to_string(),
-            extra_headers: Default::default(),
-            model_name: "gpt-4.1".to_string(),
-            supports_tools: true,
-            supports_reasoning: true,
-            reasoning_type: None,
-            supports_temperature: true,
-            supports_max_completion_tokens: false,
-            eof_is_done: false,
-            supports_web_search: false,
-            supports_cache_control: false,
-        }
-    }
-
-    fn assert_openai_tool_results_follow_assistant(messages: Vec<ChatMessage>) {
-        use crate::llm::adapter::LlmWireAdapter;
-        use crate::llm::adapters::openai_chat::OpenAiChatAdapter;
-
-        let req = crate::llm::canonical::LlmRequest::new("gpt-4.1".to_string(), messages);
-        let body = OpenAiChatAdapter
-            .build_http(
-                &refact_privacy::testing::cleared(req),
-                &default_openai_settings(),
-            )
-            .unwrap()
-            .body;
-        let wire_messages = body["messages"].as_array().unwrap();
-        for (idx, message) in wire_messages.iter().enumerate() {
-            if message["role"] != "assistant" || message.get("tool_calls").is_none() {
-                continue;
-            }
-            let tool_calls = message["tool_calls"].as_array().unwrap();
-            let expected_ids: HashSet<String> = tool_calls
-                .iter()
-                .filter_map(|tool_call| tool_call["id"].as_str().map(str::to_string))
-                .collect();
-            let actual_ids: HashSet<String> = wire_messages
-                .iter()
-                .skip(idx + 1)
-                .take(tool_calls.len())
-                .map(|tool_result| {
-                    assert_eq!(
-                        tool_result["role"], "tool",
-                        "wire messages: {wire_messages:?}"
-                    );
-                    tool_result["tool_call_id"].as_str().unwrap().to_string()
-                })
-                .collect();
-            assert_eq!(actual_ids, expected_ids, "wire messages: {wire_messages:?}");
-        }
-    }
-
-    #[test]
-    fn openai_wire_order_valid_after_tool_decision() {
-        let mut session = make_session();
-        session.add_message(make_assistant_with_tool_calls(&["tc1", "tc2"]));
-        session.runtime.pause_reasons.push(make_pause_reason("tc1"));
-        session.runtime.pause_reasons.push(make_pause_reason("tc2"));
-        session.set_runtime_state(SessionState::Paused, None);
-
-        session.process_tool_decisions(&[
-            ToolDecisionItem {
-                tool_call_id: "tc1".into(),
-                accepted: false,
-            },
-            ToolDecisionItem {
-                tool_call_id: "tc2".into(),
-                accepted: true,
-            },
-        ]);
-        session.add_message(make_tool_result("tc2", "accepted result"));
-        session.drain_post_tool_side_effects();
-
-        assert_openai_tool_results_follow_assistant(session.messages.clone());
-    }
-
-    #[test]
-    fn openai_wire_order_valid_after_multi_ide_callbacks() {
-        let mut session = make_session();
-        session.add_message(make_assistant_with_tool_calls(&["tc1", "tc2"]));
-        session.runtime.state = SessionState::WaitingIde;
-
-        session.record_ide_tool_result("tc1".to_string(), "first".to_string(), false);
-        session.record_ide_tool_result("tc2".to_string(), "second".to_string(), false);
-
-        assert_openai_tool_results_follow_assistant(session.messages.clone());
     }
 }

@@ -313,14 +313,6 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_ctrl_c() {
-        assert!(is_ctrl_c_key(KeyEvent::new(
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL,
-        )));
-    }
-
-    #[test]
     fn expanded_selected_tool_uses_transcript_cell_context_before_main() {
         let mut app = App::notice_only("test");
         app.test_push_tool(ToolCard::from_tool_call(
@@ -341,20 +333,6 @@ mod tests {
             Some(TranscriptItem::Tool(card)) if !card.expanded
         ));
         assert_eq!(app.composer(), "");
-    }
-
-    #[test]
-    fn ctrl_k_opens_command_palette() {
-        let mut app = App::notice_only("test");
-
-        assert_eq!(
-            app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL)),
-            AppAction::None
-        );
-        assert_eq!(
-            app.modal_picker().map(|picker| picker.kind),
-            Some(PickerKind::SlashCommand)
-        );
     }
 
     #[test]

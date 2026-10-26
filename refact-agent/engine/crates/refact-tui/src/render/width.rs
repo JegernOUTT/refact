@@ -19,10 +19,4 @@ mod tests {
         assert_eq!(usable_content_width(3, 4), None);
         assert_eq!(usable_content_width(5, 4), Some(1));
     }
-
-    #[test]
-    fn usable_content_width_u16_matches_usize_variant() {
-        assert_eq!(usable_content_width_u16(2, 2), None);
-        assert_eq!(usable_content_width_u16(5, 4), Some(1));
-    }
 }

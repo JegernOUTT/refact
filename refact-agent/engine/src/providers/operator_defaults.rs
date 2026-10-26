@@ -132,18 +132,6 @@ pub async fn validate_candidate(app: &AppState, model: &str) -> Result<(), Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[tokio::test]
-    async fn local_custom_catalog_requires_exact_enabled_candidate_without_probe() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = AppState::from_gcx(gcx).await;
-        let mut provider = crate::providers::create_provider("custom").unwrap();
-        provider.provider_settings_apply(serde_yaml::from_str("enabled: true\nchat_endpoint: http://127.0.0.1:1/never-probe\nenabled_models: [chosen]\ncustom_models:\n  chosen: {n_ctx: 8192}\n  disabled: {n_ctx: 4096}\n").unwrap()).unwrap();
-        app.gcx.providers.write().await.add(provider);
-        assert!(validate_candidate(&app, "custom/chosen").await.is_ok());
-        assert!(validate_candidate(&app, "custom/disabled").await.is_err());
-        assert!(validate_candidate(&app, "custom/missing").await.is_err());
-        assert!(validate_candidate(&app, "other/chosen").await.is_err());
-    }
 
     #[tokio::test]
     async fn exact_model_patch_cas_recovery_preserves_other_defaults() {

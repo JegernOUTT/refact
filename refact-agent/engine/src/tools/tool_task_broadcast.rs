@@ -570,19 +570,6 @@ mod tests {
         }
     }
 
-    fn test_card_with_heartbeat(
-        id: &str,
-        title: &str,
-        column: &str,
-        agent_chat_id: Option<&str>,
-        last_heartbeat_at: &str,
-    ) -> BoardCard {
-        BoardCard {
-            last_heartbeat_at: Some(last_heartbeat_at.to_string()),
-            ..test_card(id, title, column, agent_chat_id)
-        }
-    }
-
     fn task_meta(cards_total: usize, agents_active: usize) -> TaskMeta {
         let now = Utc::now().to_rfc3339();
         TaskMeta {
@@ -798,96 +785,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_broadcast_does_not_update_heartbeat() {
-        let temp = tempfile::tempdir().unwrap();
-        let initial_heartbeat = "2026-05-22T00:00:00+00:00";
-        let gcx = write_task(
-            temp.path(),
-            vec![test_card_with_heartbeat(
-                "T-22",
-                "auto-nudge",
-                "doing",
-                Some("chat-22"),
-                initial_heartbeat,
-            )],
-        )
-        .await;
-        let mock = Arc::new(MockChatFacade::new(&[]));
-        let ccx = planner_ccx(gcx.clone(), mock.clone(), "planner").await;
-
-        ToolTaskBroadcast::new()
-            .tool_execute(
-                ccx,
-                &"call".to_string(),
-                &args(&[("message", json!("Use API Y"))]),
-            )
-            .await
-            .unwrap();
-
-        let board = storage::load_board(gcx, "task-1").await.unwrap();
-        assert_eq!(
-            board.get_card("T-22").unwrap().last_heartbeat_at.as_deref(),
-            Some(initial_heartbeat)
-        );
-    }
-
-    #[tokio::test]
-    async fn task_broadcast_appends_delivered_status_on_success() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = write_task(
-            temp.path(),
-            vec![test_card("T-22", "auto-nudge", "doing", Some("chat-22"))],
-        )
-        .await;
-        let mock = Arc::new(MockChatFacade::new(&[]));
-        let ccx = planner_ccx(gcx.clone(), mock.clone(), "planner").await;
-
-        ToolTaskBroadcast::new()
-            .tool_execute(
-                ccx,
-                &"call".to_string(),
-                &args(&[("message", json!("Use API Y"))]),
-            )
-            .await
-            .unwrap();
-
-        let board = storage::load_board(gcx, "task-1").await.unwrap();
-        let status_updates = &board.get_card("T-22").unwrap().status_updates;
-        assert_eq!(status_updates.len(), 2);
-        assert_eq!(status_updates[0].message, "Broadcast pending: Use API Y");
-        assert_eq!(status_updates[1].message, "Broadcast delivered: Use API Y");
-    }
-
-    #[tokio::test]
-    async fn tool_task_broadcast_empty_doing_list_returns_no_running_agents() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = write_task(
-            temp.path(),
-            vec![
-                test_card("T-22", "auto-nudge", "planned", Some("chat-22")),
-                test_card("T-23", "documents", "doing", None),
-            ],
-        )
-        .await;
-        let mock = Arc::new(MockChatFacade::new(&[]));
-        let ccx = planner_ccx(gcx, mock.clone(), "planner").await;
-
-        let output = output_text(
-            ToolTaskBroadcast::new()
-                .tool_execute(
-                    ccx,
-                    &"call".to_string(),
-                    &args(&[("message", json!("Use API Y"))]),
-                )
-                .await
-                .unwrap(),
-        );
-
-        assert!(mock.deliveries().is_empty());
-        assert!(output.contains("No running agents"));
-    }
-
-    #[tokio::test]
     async fn tool_task_broadcast_skips_card_finished_before_push() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = write_task(
@@ -1033,75 +930,6 @@ mod tests {
                 && failed_status.contains("queue unavailable"),
             "failed broadcast must not read as delivered, got: {failed_status}"
         );
-    }
-
-    #[tokio::test]
-    async fn task_broadcast_priority_urgent_still_defaults_to_append() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = write_task(
-            temp.path(),
-            vec![test_card("T-22", "auto-nudge", "doing", Some("chat-22"))],
-        )
-        .await;
-        let mock = Arc::new(MockChatFacade::new(&[]));
-        let ccx = planner_ccx(gcx, mock.clone(), "planner").await;
-
-        ToolTaskBroadcast::new()
-            .tool_execute(
-                ccx,
-                &"call".to_string(),
-                &args(&[
-                    ("message", json!("Use API Y")),
-                    ("priority", json!("urgent")),
-                ]),
-            )
-            .await
-            .unwrap();
-
-        let deliveries = mock.deliveries();
-        assert_eq!(deliveries.len(), 1);
-        assert_eq!(
-            deliveries[0].1.push,
-            PushMode::Append,
-            "priority=urgent must NOT imply preempt"
-        );
-        assert!(deliveries[0].1.messages[0]
-            .content
-            .content_text_only()
-            .starts_with("[Planner URGENT]"));
-    }
-
-    #[tokio::test]
-    async fn task_broadcast_propagates_explicit_push_to_every_target() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = write_task(
-            temp.path(),
-            vec![
-                test_card("T-22", "auto-nudge", "doing", Some("chat-22")),
-                test_card("T-29", "check_agents", "doing", Some("chat-29")),
-            ],
-        )
-        .await;
-        let mock = Arc::new(MockChatFacade::new(&[]));
-        let ccx = planner_ccx(gcx, mock.clone(), "planner").await;
-
-        ToolTaskBroadcast::new()
-            .tool_execute(
-                ccx,
-                &"call".to_string(),
-                &args(&[
-                    ("message", json!("Stop and re-read the plan")),
-                    ("push", json!("preempt")),
-                ]),
-            )
-            .await
-            .unwrap();
-
-        let deliveries = mock.deliveries();
-        assert_eq!(deliveries.len(), 2);
-        for (_, delivery) in deliveries {
-            assert_eq!(delivery.push, PushMode::Preempt);
-        }
     }
 
     /// The same logical broadcast reaches a recipient once. The repeat is

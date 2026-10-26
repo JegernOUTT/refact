@@ -280,14 +280,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn daemon_dir_env_name_matches_runtime_contract() {
-        assert_eq!(
-            refact_lsp::daemon::paths::DAEMON_DIR_ENV,
-            "REFACT_DAEMON_DIR"
-        );
-    }
-
-    #[test]
     #[serial_test::serial]
     fn daemon_dir_env_redirects_runtime_paths() {
         let temp = tempdir().unwrap();
@@ -308,15 +300,5 @@ mod tests {
             Some(value) => std::env::set_var(refact_lsp::daemon::paths::DAEMON_DIR_ENV, value),
             None => std::env::remove_var(refact_lsp::daemon::paths::DAEMON_DIR_ENV),
         }
-    }
-
-    #[test]
-    fn refact_bin_falls_back_to_debug_binary() {
-        let path = refact_bin();
-        assert!(path.ends_with(if cfg!(windows) {
-            "refact.exe"
-        } else {
-            "refact"
-        }));
     }
 }

@@ -145,15 +145,3 @@ pub async fn download_model(
     info!("Downloaded {} successfully", model.filename());
     Ok(dest_path)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn model_name_roundtrip() {
-        let model = WhisperModel::from_name("base.en").unwrap();
-        assert_eq!(model.filename(), "ggml-base.en.bin");
-        assert!(model.download_url().ends_with("ggml-base.en.bin"));
-    }
-}

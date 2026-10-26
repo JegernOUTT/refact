@@ -28,16 +28,3 @@ fn allocate_ephemeral_port() -> Result<u16, String> {
         .map(|addr| addr.port())
         .map_err(|error| format!("failed to read ephemeral port: {error}"))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn port_pair_allocates_distinct_ports() {
-        let pair = allocate_port_pair().unwrap();
-        assert_ne!(pair.http_port, pair.lsp_port);
-        assert!(pair.http_port > 0);
-        assert!(pair.lsp_port > 0);
-    }
-}

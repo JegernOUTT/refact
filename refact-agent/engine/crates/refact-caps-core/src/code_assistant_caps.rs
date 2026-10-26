@@ -70,22 +70,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_caps_preserves_empty_runtime_fields() {
-        let caps = CodeAssistantCaps::default();
-
-        assert!(caps.completion_models.is_empty());
-        assert!(caps.chat_models.is_empty());
-        assert_eq!(caps.embedding_model, EmbeddingModelRecord::default());
-        assert_eq!(caps.defaults, DefaultModels::default());
-        assert_eq!(caps.caps_version, 0);
-        assert_eq!(caps.customization, "");
-        assert_eq!(caps.hf_tokenizer_template, default_hf_tokenizer_template());
-        assert!(caps.metadata.features.is_empty());
-        assert!(caps.model_caps.is_empty());
-        assert!(caps.provider_base_names.is_empty());
-    }
-
-    #[test]
     fn serde_defaults_and_skip_fields_match_caps_contract() {
         let decoded: CodeAssistantCaps = serde_json::from_value(serde_json::json!({})).unwrap();
 

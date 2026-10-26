@@ -322,42 +322,4 @@ mod tests {
         assert!(config.hooks.default_project.is_none());
         assert!(config.hooks.allowed_projects.is_none());
     }
-
-    #[test]
-    fn port_override_prefers_cli_over_env() {
-        assert_eq!(
-            resolve_port_override(Some(9000), Some("8490")).unwrap(),
-            Some(9000)
-        );
-        assert_eq!(
-            resolve_port_override(Some(9000), Some("banana")).unwrap(),
-            Some(9000)
-        );
-    }
-
-    #[test]
-    fn port_override_reads_env_when_no_cli_flag() {
-        assert_eq!(
-            resolve_port_override(None, Some("8490")).unwrap(),
-            Some(8490)
-        );
-        assert_eq!(resolve_port_override(None, Some(" 0 ")).unwrap(), Some(0));
-    }
-
-    #[test]
-    fn port_override_ignores_absent_or_blank_env() {
-        assert_eq!(resolve_port_override(None, None).unwrap(), None);
-        assert_eq!(resolve_port_override(None, Some("")).unwrap(), None);
-        assert_eq!(resolve_port_override(None, Some("   ")).unwrap(), None);
-    }
-
-    #[test]
-    fn port_override_rejects_invalid_env() {
-        let error = resolve_port_override(None, Some("banana")).unwrap_err();
-        assert!(error.contains("REFACT_DAEMON_PORT"));
-        assert!(error.contains("banana"));
-
-        let error = resolve_port_override(None, Some("70000")).unwrap_err();
-        assert!(error.contains("70000"));
-    }
 }

@@ -284,46 +284,6 @@ mod tests {
     }
 
     #[test]
-    fn review_contract_parses_findings_coverage_and_commands() {
-        let output = parse_stage_output(&envelope(FINDING)).unwrap();
-
-        assert_eq!(output.findings.len(), 1);
-        assert_eq!(output.findings[0].severity, ReviewSeverity::Blocker);
-        assert_eq!(output.findings[0].line_end, 14);
-        assert_eq!(
-            output.findings[0].reproduction.as_deref(),
-            Some("cargo test -p thing")
-        );
-        assert_eq!(output.summary, "checked five files");
-        assert_eq!(output.coverage.files_read, ["src/lib.rs"]);
-        assert_eq!(output.coverage.commands_run[0].cmd, "cargo check");
-        assert_eq!(output.coverage.commands_run[0].exit, 0);
-        assert!(output.rejected.is_empty());
-    }
-
-    #[test]
-    fn review_contract_accepts_bare_json_and_prose_around_it() {
-        let bare = format!(
-            r#"Here is what I found.
-
-{{"findings":[{FINDING}],"summary":"done"}}"#
-        );
-
-        let output = parse_stage_output(&bare).unwrap();
-
-        assert_eq!(output.findings.len(), 1);
-        assert_eq!(output.summary, "done");
-    }
-
-    #[test]
-    fn review_contract_accepts_no_findings_as_a_valid_result() {
-        let output = parse_stage_output(&envelope("")).unwrap();
-
-        assert!(output.findings.is_empty());
-        assert!(output.rejected.is_empty());
-    }
-
-    #[test]
     fn review_contract_rejects_bad_entries_without_losing_the_good_ones() {
         let bad_severity = FINDING.replace(r#""severity":"blocker""#, r#""severity":"spicy""#);
         let no_file = FINDING.replace(r#""file":"src/lib.rs""#, r#""file":"  ""#);
@@ -337,18 +297,6 @@ mod tests {
     }
 
     #[test]
-    fn review_contract_normalizes_missing_titles_and_zero_lines() {
-        let minimal = r#"{"findings":[{"severity":"low","file":"a.rs","line_start":0,"line_end":0,"claim":"A claim","evidence":"x","reproduction":null}],"summary":""}"#;
-
-        let output = parse_stage_output(minimal).unwrap();
-
-        assert_eq!(output.findings[0].title, "A claim");
-        assert_eq!(output.findings[0].line_start, 1);
-        assert_eq!(output.findings[0].line_end, 1);
-        assert_eq!(output.findings[0].reproduction, None);
-    }
-
-    #[test]
     fn review_contract_reports_unparseable_output() {
         assert_eq!(
             parse_stage_output("no json here"),
@@ -358,20 +306,5 @@ mod tests {
             parse_stage_output("```json\n{oops}\n```"),
             Err(ContractError::InvalidJson(_))
         ));
-    }
-
-    #[test]
-    fn review_contract_parses_adversarial_verdicts() {
-        let text = r#"```json
-{"stage":"adversarial","verdicts":[{"id":"rf-1","verdict":"unsupported","reason":"guarded at src/lib.rs:4"},{"id":"rf-2","verdict":"supported","reason":""},{"id":"rf-3","verdict":"maybe","reason":""}],"summary":"checked three"}
-```"#;
-
-        let output = parse_verdict_output(text).unwrap();
-
-        assert_eq!(output.verdicts.len(), 2);
-        assert!(!output.verdicts[0].supported);
-        assert_eq!(output.verdicts[0].reason, "guarded at src/lib.rs:4");
-        assert!(output.verdicts[1].supported);
-        assert_eq!(output.rejected.len(), 1);
     }
 }

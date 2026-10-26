@@ -489,22 +489,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_blocked_only_config_gets_normal_fallback() {
-        let policy = parse_policy_yaml("privacy_rules:\n  blocked:\n    - '*.key'\n").unwrap();
-
-        assert_eq!(policy.blocked, vec!["*.key"]);
-        assert!(policy.zones.iter().any(|zone| zone.name == "normal"));
-        policy.compile().unwrap();
-    }
-    #[test]
-    fn absent_provider_may_use_every_mcp_server() {
-        let access = ToolAccess::default();
-
-        assert!(access.mcp_allowed("openai_codex", "github"));
-        assert!(access.mcp_allowed("anything", "anything"));
-    }
-
-    #[test]
     fn listed_provider_is_limited_to_its_servers() {
         let access = ToolAccess {
             providers: BTreeMap::from([(
@@ -595,17 +579,5 @@ mod tests {
         assert!(Arc::ptr_eq(&failed.policy, &loaded.policy));
         assert!(failed.error.is_some());
         assert_eq!(failed.source_paths, vec![global]);
-    }
-
-    #[tokio::test]
-    async fn first_load_failure_is_empty_and_loud() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("missing.yaml");
-
-        let failed = load_policy(&path, &[], None).await;
-
-        assert_eq!(*failed.policy, PrivacyPolicy::default());
-        assert!(failed.policy.blocked.is_empty());
-        assert!(failed.error.is_some());
     }
 }

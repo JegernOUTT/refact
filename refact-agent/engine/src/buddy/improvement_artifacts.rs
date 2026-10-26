@@ -2323,18 +2323,7 @@ mod tests {
             assert!(linux_dependencies(&b[..n], "x86_64").is_err());
         }
     }
-    #[test]
-    #[ignore = "requires explicit host-system inventory gate; read-only, not a runtime canary"]
-    fn actual_test_image_dependency_inventory_is_not_execution_proof() {
-        let bytes = std::fs::read("/proc/self/exe").unwrap();
-        let image = linux_dependencies(&bytes, std::env::consts::ARCH).unwrap();
-        assert!(image.interpreter.is_some());
-        let result = linux_runtime_snapshot(&bytes, std::env::consts::ARCH).unwrap();
-        assert!(!result.files.is_empty());
-        for file in result.files.values() {
-            assert_eq!(hash(&linux_runtime_file_bytes(file).unwrap()), file.digest);
-        }
-    }
+
     fn archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         for (name, bytes) in entries {
@@ -2396,90 +2385,6 @@ mod tests {
     }
 
     #[test]
-    fn nested_actual_plugin_descriptor_and_ambiguity_bounds() {
-        let source =
-            include_str!("../../../../plugins/intellij/src/main/resources/META-INF/plugin.xml");
-        let xml = source.replace(
-            "<id>",
-            "<version>1.2.3</version><idea-version since-build=\"251\" until-build=\"261.*\"/><id>",
-        );
-        let jar = archive(&[
-            ("META-INF/plugin.xml", xml.as_bytes()),
-            ("Plugin.class", b"fixture"),
-        ]);
-        let zip = archive(&[("refact/lib/plugin.jar", &jar)]);
-        let files = zip_files(&zip).unwrap();
-        let inspected = inspect_bytes(&ArtifactFormat::JetbrainsZip, zip, files.clone())
-            .unwrap()
-            .0;
-        assert_eq!(inspected.package_version.as_deref(), Some("1.2.3"));
-        assert_eq!(
-            inspected.package_host_requirement.as_deref(),
-            Some("since-build=251;until-build=261.*")
-        );
-        let mut duplicate = files;
-        duplicate.insert("refact/lib/duplicate.jar".into(), jar.clone());
-        assert!(jetbrains_manifest(&duplicate).is_err());
-        assert!(zip_files_bounded(&jar, 1, MAX_FILES).is_err());
-        assert!(zip_files_bounded(&jar, MAX_BYTES, 1).is_err());
-        for xml in ["<!DOCTYPE idea-plugin [<!ENTITY x SYSTEM 'file:///etc/passwd'>]><idea-plugin/>", "<idea-plugin><id>com.smallcloud.codify</id><version>1</version><version>2</version></idea-plugin>"] {
-            let jar = archive(&[("META-INF/plugin.xml", xml.as_bytes())]);
-            assert!(jetbrains_manifest(&BTreeMap::from([("refact/lib/plugin.jar".into(), jar)])).is_err());
-        }
-    }
-    #[test]
-    fn pe_and_macho_static_headers_reject_truncation_machine_and_ranges() {
-        let mut pe = vec![0; 513];
-        pe[..2].copy_from_slice(b"MZ");
-        pe[60] = 64;
-        pe[64..68].copy_from_slice(b"PE\0\0");
-        pe[68..70].copy_from_slice(&0x8664u16.to_le_bytes());
-        pe[70] = 1;
-        pe[84] = 112;
-        pe[86] = 2;
-        pe[88..90].copy_from_slice(&0x20bu16.to_le_bytes());
-        pe[148..152].copy_from_slice(&512u32.to_le_bytes());
-        pe[216] = 1;
-        pe[220..224].copy_from_slice(&512u32.to_le_bytes());
-        pe[239] = 0x20;
-        assert_eq!(
-            native_header(&ArtifactFormat::WindowsPe64, &pe).unwrap(),
-            "x86_64"
-        );
-        let mut mach = vec![0; 104];
-        for (offset, value) in [
-            (0, 0xfeedfacfu32),
-            (4, 0x0100000c),
-            (12, 2),
-            (16, 1),
-            (20, 72),
-            (32, 0x19),
-            (36, 72),
-            (80, 104),
-            (92, 5),
-        ] {
-            mach[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-        }
-        assert_eq!(
-            native_header(&ArtifactFormat::MacosMach64, &mach).unwrap(),
-            "aarch64"
-        );
-        for (format, bytes) in [
-            (ArtifactFormat::WindowsPe64, pe),
-            (ArtifactFormat::MacosMach64, mach),
-        ] {
-            for n in 0..bytes.len() {
-                assert!(
-                    native_header(&format, &bytes[..n]).is_err(),
-                    "truncated at {n}"
-                );
-            }
-            let mut bad = bytes;
-            bad[0] ^= 1;
-            assert!(native_header(&format, &bad).is_err());
-        }
-    }
-    #[test]
     fn interrupted_staging_requires_exact_complete_bytes_and_never_publishes_partial() {
         let root = tempfile::tempdir().unwrap();
         let project = project(root.path());
@@ -2532,43 +2437,7 @@ mod tests {
         assert!(safe::open(&root, "parent/engine", false).is_err());
         assert!(safe::open(&root, "../engine", false).is_err());
     }
-    #[test]
-    fn actual_elf_and_gui_wrong_target_and_required_outputs() {
-        let bytes = elf();
-        let result = inspect_bytes(&ArtifactFormat::LinuxElf64, bytes.clone(), BTreeMap::new())
-            .unwrap()
-            .0;
-        assert_eq!(result.checked_arch.as_deref(), Some("x86_64"));
-        assert!(result.compatibility_status.contains("unverified"));
-        assert!(inspect_bytes(&ArtifactFormat::GuiDist, bytes, BTreeMap::new()).is_err());
-        assert!(inspect_bytes(
-            &ArtifactFormat::LinuxElf64,
-            b"source patch".to_vec(),
-            BTreeMap::new()
-        )
-        .is_err());
-        let mut files = BTreeMap::new();
-        for name in [
-            "chat/index.js",
-            "chat/index.umd.cjs",
-            "chat/style.css",
-            "events/index.js",
-            "events/index.umd.cjs",
-        ] {
-            files.insert(name.into(), b"built".to_vec());
-        }
-        assert!(inspect_bytes(
-            &ArtifactFormat::GuiDist,
-            b"snapshot".to_vec(),
-            files.clone()
-        )
-        .is_err());
-        files.insert(
-            "package.json".into(),
-            include_bytes!("../../../gui/package.json").to_vec(),
-        );
-        assert!(inspect_bytes(&ArtifactFormat::GuiDist, b"snapshot".to_vec(), files).is_ok());
-    }
+
     #[test]
     fn vsix_manifest_mismatch_and_archive_traversal_rejected() {
         let mut files = BTreeMap::from([

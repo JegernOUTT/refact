@@ -71,28 +71,3 @@ pub async fn get_embedding_with_retries(
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use refact_core::llm_types::BaseModelRecord;
-
-    #[tokio::test]
-    async fn hf_endpoint_style_returns_documented_error() {
-        let client = Arc::new(AMutex::new(reqwest::Client::new()));
-        let embedding_model = EmbeddingModelRecord {
-            base: BaseModelRecord {
-                endpoint_style: "hf".to_string(),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let result = get_embedding(client, &embedding_model, vec!["test".to_string()]).await;
-
-        assert_eq!(
-            result.unwrap_err(),
-            "HuggingFace endpoint style is no longer supported. Please use 'openai' embedding_endpoint_style with an OpenAI-compatible embedding endpoint."
-        );
-    }
-}

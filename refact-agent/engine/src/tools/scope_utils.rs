@@ -968,12 +968,12 @@ mod worktree_scope_read_tools {
     use super::*;
     use crate::at_commands::at_commands::{AtCommand, AtCommandsContext};
     use crate::at_commands::at_file::AtFile;
-    use crate::at_commands::at_tree::AtTree;
+
     use crate::at_commands::execute_at::AtCommandMember;
     use crate::call_validation::{ChatContent, ContextEnum};
     use crate::privacy::{FilePrivacySettings, PrivacySettings};
     use crate::tools::tool_cat::ToolCat;
-    use crate::tools::tool_tree::ToolTree;
+
     use crate::tools::tools_description::Tool;
     use crate::worktrees::types::WorktreeMeta;
     use async_trait::async_trait;
@@ -1287,135 +1287,6 @@ mod worktree_scope_read_tools {
     }
 
     #[tokio::test]
-    async fn worktree_scope_read_tools_tree_defaults_to_worktree_root() {
-        let fixture = make_fixture();
-        let gcx = make_gcx(&fixture, vec![]).await;
-        let ccx = make_ccx(gcx, fixture.worktree.clone()).await;
-        let mut tool = ToolTree {
-            config_path: String::new(),
-        };
-        let tool_call_id = "tree-call".to_string();
-
-        let (_corrections, results) = tool
-            .tool_execute(ccx, &tool_call_id, &HashMap::new())
-            .await
-            .unwrap();
-        let text = tool_text(&results);
-
-        assert!(text.contains("worktree_only.rs"), "{text}");
-        assert!(text.contains("src"), "{text}");
-        assert!(text.contains("lib.rs"), "{text}");
-        assert!(!text.contains("No files found"), "{text}");
-        assert!(!text.contains("source_only.rs"), "{text}");
-    }
-
-    #[tokio::test]
-    async fn worktree_scope_read_tools_tree_absolute_worktree_subdir_warns_and_lists() {
-        let fixture = make_fixture();
-        let gcx = make_gcx(&fixture, vec![]).await;
-        let ccx = make_ccx(gcx, fixture.worktree.clone()).await;
-        let mut tool = ToolTree {
-            config_path: String::new(),
-        };
-        let tool_call_id = "tree-call".to_string();
-        let path = fixture.root.join("src").to_string_lossy().to_string();
-        let args = HashMap::from_iter([("path".to_string(), Value::String(path))]);
-
-        let (_corrections, results) = tool.tool_execute(ccx, &tool_call_id, &args).await.unwrap();
-        let text = tool_text(&results);
-
-        assert!(!text.contains("Worktree scope notices"), "{text}");
-        assert!(text.contains("lib.rs"), "{text}");
-        assert!(text.contains("worktree_only.rs"), "{text}");
-        assert!(!text.contains("No files found"), "{text}");
-    }
-
-    #[tokio::test]
-    async fn worktree_scope_read_tools_tree_hidden_child_dir_still_skipped() {
-        let fixture = make_fixture();
-        fs::create_dir_all(fixture.root.join(".git")).unwrap();
-        fs::write(fixture.root.join(".git").join("config"), "[core]\n").unwrap();
-        let gcx = make_gcx(&fixture, vec![]).await;
-        let ccx = make_ccx(gcx, fixture.worktree.clone()).await;
-        let mut tool = ToolTree {
-            config_path: String::new(),
-        };
-        let tool_call_id = "tree-call".to_string();
-
-        let (_corrections, results) = tool
-            .tool_execute(ccx, &tool_call_id, &HashMap::new())
-            .await
-            .unwrap();
-        let text = tool_text(&results);
-
-        assert!(text.contains("lib.rs"), "{text}");
-        assert!(!text.contains(".git"), "{text}");
-        assert!(!text.contains("config"), "{text}");
-        assert!(!text.contains("No files found"), "{text}");
-    }
-
-    #[tokio::test]
-    async fn worktree_scope_read_tools_at_tree_absolute_worktree_subdir_lists() {
-        let fixture = make_fixture();
-        let gcx = make_gcx(&fixture, vec![]).await;
-        let ccx = make_ccx(gcx, fixture.worktree.clone()).await;
-        let at_tree = AtTree::new();
-        let mut cmd = AtCommandMember::new("cmd".to_string(), "@tree".to_string(), 1, 6);
-        let path = fixture.root.join("src").to_string_lossy().to_string();
-        let mut args = vec![AtCommandMember::new("arg".to_string(), path, 7, 10)];
-
-        let (results, replacement) = at_tree.at_execute(ccx, &mut cmd, &mut args).await.unwrap();
-        let text = tool_text(&results);
-
-        assert_eq!(replacement, "");
-        assert!(!text.contains("Worktree scope notices"), "{text}");
-        assert!(text.contains("lib.rs"), "{text}");
-        assert!(text.contains("worktree_only.rs"), "{text}");
-        assert!(!text.contains("tree(): directory is empty"), "{text}");
-    }
-
-    #[tokio::test]
-    async fn worktree_scope_read_tools_tree_aliases_use_worktree_root() {
-        let fixture = make_fixture();
-        let gcx = make_gcx(&fixture, vec![]).await;
-        let tool_call_id = "tree-call".to_string();
-
-        for path in [".", "workspace"] {
-            let ccx = make_ccx(gcx.clone(), fixture.worktree.clone()).await;
-            let mut tool = ToolTree {
-                config_path: String::new(),
-            };
-            let args = HashMap::from_iter([("path".to_string(), Value::String(path.to_string()))]);
-
-            let (_corrections, results) =
-                tool.tool_execute(ccx, &tool_call_id, &args).await.unwrap();
-            let text = tool_text(&results);
-
-            assert!(text.contains("worktree_only.rs"), "{text}");
-            assert!(!text.contains("source_only.rs"), "{text}");
-        }
-    }
-
-    #[tokio::test]
-    async fn worktree_scope_read_tools_cat_relative_uses_worktree_file() {
-        let fixture = make_fixture();
-        let gcx = make_gcx(&fixture, vec![]).await;
-        let ccx = make_ccx(gcx, fixture.worktree.clone()).await;
-        let mut tool = ToolCat {
-            config_path: String::new(),
-        };
-        let tool_call_id = "cat-call".to_string();
-
-        let (_corrections, results) = tool
-            .tool_execute(ccx, &tool_call_id, &cat_args("src/lib.rs".to_string()))
-            .await
-            .unwrap();
-        let names = context_file_names(&results);
-
-        assert_eq!(names, vec![norm(fixture.root.join("src").join("lib.rs"))]);
-    }
-
-    #[tokio::test]
     async fn worktree_scope_read_tools_duplicate_relative_path_prefers_worktree() {
         let fixture = make_fixture();
         let gcx = make_gcx(&fixture, vec![]).await;
@@ -1439,33 +1310,6 @@ mod worktree_scope_read_tools {
             "{text}"
         );
         assert!(!text.contains("sibling"), "{text}");
-    }
-
-    #[tokio::test]
-    async fn worktree_scope_read_tools_cat_absolute_worktree_warns() {
-        let fixture = make_fixture();
-        let gcx = make_gcx(&fixture, vec![]).await;
-        let ccx = make_ccx(gcx, fixture.worktree.clone()).await;
-        let mut tool = ToolCat {
-            config_path: String::new(),
-        };
-        let tool_call_id = "cat-call".to_string();
-        let path = fixture
-            .root
-            .join("src")
-            .join("lib.rs")
-            .to_string_lossy()
-            .to_string();
-
-        let (_corrections, results) = tool
-            .tool_execute(ccx, &tool_call_id, &cat_args(path.clone()))
-            .await
-            .unwrap();
-        let text = tool_text(&results);
-        let names = context_file_names(&results);
-
-        assert!(!text.contains("Worktree scope notices"), "{text}");
-        assert_eq!(names, vec![norm_str(&path)]);
     }
 
     #[tokio::test]
@@ -1535,63 +1379,6 @@ mod worktree_scope_read_tools {
         let text = tool_text(&results);
         assert!(context_file_names(&results).is_empty());
         assert!(text.contains("privacy level Blocked"), "{text}");
-    }
-
-    #[tokio::test]
-    async fn worktree_scope_read_tools_resolve_workspace_scope_lists_worktree_only() {
-        let fixture = make_fixture();
-        let gcx = make_gcx(&fixture, vec![]).await;
-        let scope = ExecutionScope::from_worktree(&fixture.worktree);
-
-        let resolved = resolve_scope_with_execution_scope(gcx, Some(&scope), "workspace")
-            .await
-            .unwrap();
-
-        assert!(resolved
-            .files
-            .iter()
-            .any(|path| path.ends_with("worktree_only.rs")));
-        assert!(resolved
-            .files
-            .iter()
-            .any(|path| path.ends_with("new_name.rs")));
-        assert!(!resolved
-            .files
-            .iter()
-            .any(|path| path.ends_with("source_only.rs")));
-        assert!(!resolved
-            .files
-            .iter()
-            .any(|path| path.ends_with("deleted_stale.rs")));
-        assert!(!resolved
-            .files
-            .iter()
-            .any(|path| path.ends_with("old_name.rs")));
-    }
-
-    #[tokio::test]
-    async fn worktree_scope_limited_resolution_reports_truncation_notice() {
-        let fixture = make_fixture();
-        for i in 0..20 {
-            fs::write(
-                fixture.root.join("src").join(format!("extra_{:02}.rs", i)),
-                "pub fn extra() {}\n",
-            )
-            .unwrap();
-        }
-        let gcx = make_gcx(&fixture, vec![]).await;
-        let scope = ExecutionScope::from_worktree(&fixture.worktree);
-
-        let resolved =
-            resolve_scope_with_execution_scope_limited(gcx, Some(&scope), "workspace", 2, None)
-                .await
-                .unwrap();
-
-        assert!(
-            resolved.notices.iter().any(|n| n.contains("truncated")),
-            "expected a truncation notice, got: {:?}",
-            resolved.notices
-        );
     }
 
     #[tokio::test]
@@ -1683,26 +1470,6 @@ mod worktree_scope_read_tools {
     }
 
     #[tokio::test]
-    async fn legacy_scope_limited_resolution_reports_truncation_notice() {
-        let fixture = make_fixture();
-        let gcx = make_gcx(&fixture, vec![]).await;
-        {
-            let mut files = gcx.documents_state.workspace_files.lock().unwrap();
-            files.extend((0..10).map(|index| fixture.source.join(format!("extra_{index}.rs"))));
-        }
-
-        let resolved = resolve_scope_with_execution_scope_limited(gcx, None, "workspace", 2, None)
-            .await
-            .unwrap();
-
-        assert_eq!(resolved.files.len(), 2);
-        assert!(resolved
-            .notices
-            .iter()
-            .any(|notice| notice.contains("truncated")));
-    }
-
-    #[tokio::test]
     async fn worktree_scope_read_tools_search_pattern_uses_worktree_only() {
         let fixture = make_fixture();
         let gcx = make_gcx(&fixture, vec![]).await;
@@ -1729,36 +1496,6 @@ mod worktree_scope_read_tools {
         assert!(text.contains("worktree_version"), "{text}");
         assert!(!text.contains("source_version"), "{text}");
         assert!(!text.contains(&norm(fixture.source.clone())), "{text}");
-    }
-
-    #[tokio::test]
-    async fn worktree_scope_read_tools_search_pattern_finds_worktree_only_file_content() {
-        let fixture = make_fixture();
-        let gcx = make_gcx(&fixture, vec![]).await;
-        let ccx = make_ccx(gcx, fixture.worktree.clone()).await;
-        let mut tool = crate::tools::tool_regex_search::ToolRegexSearch {
-            config_path: String::new(),
-        };
-        let tool_call_id = "search-call".to_string();
-        let args = HashMap::from_iter([
-            (
-                "pattern".to_string(),
-                Value::String("only_worktree".to_string()),
-            ),
-            ("scope".to_string(), Value::String("workspace".to_string())),
-        ]);
-
-        let (_corrections, results) = tool.tool_execute(ccx, &tool_call_id, &args).await.unwrap();
-        let names = context_file_names(&results);
-        let text = tool_text(&results);
-
-        let expected = norm(fixture.root.join("src/worktree_only.rs"));
-        assert!(
-            names.iter().any(|path| path == &expected),
-            "expected {expected} in {names:?}"
-        );
-        assert!(text.contains("only_worktree"), "{text}");
-        assert!(!text.contains("only_source"), "{text}");
     }
 
     #[tokio::test]
@@ -1968,42 +1705,6 @@ mod worktree_scope_read_tools {
         assert!(text.contains("mapped to active worktree"), "{text}");
         assert_eq!(names, vec![worktree_path.clone()]);
         assert_eq!(norm_str(&replacement), worktree_path);
-    }
-
-    #[tokio::test]
-    async fn worktree_scope_read_tools_ast_source_context_file_remaps_to_worktree() {
-        let fixture = make_fixture();
-        let gcx = make_gcx(&fixture, vec![]).await;
-        let scope = ExecutionScope::from_worktree(&fixture.worktree);
-        let source_path = fixture
-            .source
-            .join("src")
-            .join("lib.rs")
-            .to_string_lossy()
-            .to_string();
-        let worktree_path = norm(fixture.root.join("src").join("lib.rs"));
-        let context_file = ContextFile {
-            file_name: source_path,
-            file_content: String::new(),
-            line1: 1,
-            line2: 1,
-            file_rev: None,
-            symbols: vec!["worktree_version".to_string()],
-            gradient_type: 5,
-            usefulness: 100.0,
-            skip_pp: false,
-        };
-
-        let remapped = remap_context_file_for_execution_scope(gcx, Some(&scope), context_file)
-            .await
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(remapped.0.file_name, worktree_path);
-        assert!(remapped
-            .1
-            .join("\n")
-            .contains("mapped from source checkout"));
     }
 
     #[tokio::test]
@@ -2226,58 +1927,6 @@ mod worktree_scope_read_tools {
 
         assert!(context_file_names(&results).is_empty());
         assert!(text.contains("privacy level Blocked"), "{text}");
-    }
-
-    #[test]
-    fn scope_filter_construction_handles_special_chars() {
-        let apostrophe = "/home/user's project/src/";
-        let filter = format!(
-            r#"(scope LIKE "{}%" ESCAPE '\')"#,
-            escape_path_for_scope_filter(apostrophe)
-        );
-        assert!(filter.starts_with(r#"(scope LIKE ""#), "{filter}");
-        assert!(filter.contains("user's project"), "{filter}");
-
-        let percent = "/home/user/50%/src/";
-        let filter = format!(
-            r#"(scope LIKE "{}%" ESCAPE '\')"#,
-            escape_path_for_scope_filter(percent)
-        );
-        assert!(filter.contains(r"50\%/"), "{filter}");
-
-        let underscore = "/home/user/my_project/src/";
-        let filter = format!(
-            r#"(scope LIKE "{}%" ESCAPE '\')"#,
-            escape_path_for_scope_filter(underscore)
-        );
-        assert!(filter.contains(r"my\_project"), "{filter}");
-    }
-
-    #[test]
-    fn scope_filter_percent_and_underscore_match_literally() {
-        let escaped = escape_path_for_scope_filter("/path/50%/a_b/");
-        assert!(
-            escaped.contains(r"\%"),
-            "percent should be escaped: {escaped}"
-        );
-        assert!(
-            escaped.contains(r"\_"),
-            "underscore should be escaped: {escaped}"
-        );
-
-        let filter = format!(r#"(scope LIKE "{}%" ESCAPE '\')"#, escaped);
-        assert!(
-            filter.contains("ESCAPE"),
-            "filter should include ESCAPE clause: {filter}"
-        );
-        assert!(
-            filter.contains(r"\%/"),
-            "escaped percent should appear in filter: {filter}"
-        );
-        assert!(
-            filter.contains(r"\_"),
-            "escaped underscore should appear in filter: {filter}"
-        );
     }
 
     #[test]

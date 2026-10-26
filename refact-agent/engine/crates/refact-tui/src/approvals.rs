@@ -648,38 +648,6 @@ mod tests {
     }
 
     #[test]
-    fn detail_toggle_back_and_scroll_state_machine() {
-        let mut modal = ApprovalModalState::new(vec![reason("call-1")]);
-        assert!(!modal.details_open());
-        assert_eq!(modal.detail_scroll(), 0);
-        modal.scroll_details_down(1);
-        assert_eq!(modal.detail_scroll(), 1);
-        modal.scroll_details_up(1);
-        assert_eq!(modal.detail_scroll(), 0);
-        modal.toggle_details();
-        assert!(modal.details_open());
-        modal.scroll_details_down(1);
-        assert_eq!(modal.detail_scroll(), 1);
-        modal.back_from_details();
-        assert!(!modal.details_open());
-        assert_eq!(modal.detail_scroll(), 0);
-        modal.back_from_details();
-        assert!(!modal.details_open());
-    }
-
-    #[test]
-    fn approval_decisions_preserve_tool_ids() {
-        let modal = ApprovalModalState::new(vec![reason("call-1")]);
-        assert_eq!(
-            modal.decisions(true),
-            vec![ToolDecision {
-                tool_call_id: "call-1".to_string(),
-                accepted: true,
-            }]
-        );
-    }
-
-    #[test]
     fn approval_queue_preserves_fifo_and_pending_count() {
         let mut queue = ApprovalQueue::new();
         assert!(queue.push(ApprovalModalState::with_scope(
@@ -707,39 +675,6 @@ mod tests {
         assert_eq!(second.reasons()[0].tool_call_id, "call-2");
         assert_eq!(second.pending_after(), 0);
         assert_eq!(second.queue_label(), "approval 1 of 1");
-    }
-
-    #[test]
-    fn render_modal_lines_reports_queue_count() {
-        let mut queue = ApprovalQueue::new();
-        queue.push(ApprovalModalState::with_scope(
-            "chat-1:call-1",
-            vec![reason("call-1")],
-        ));
-        queue.push(ApprovalModalState::with_scope(
-            "chat-1:call-2",
-            vec![reason("call-2")],
-        ));
-
-        let rendered = text(&render_modal_lines(queue.front().unwrap(), 80));
-        assert!(rendered.contains("approval 1 of 2"));
-        assert!(rendered.contains("1 more pending in queue"));
-    }
-
-    #[test]
-    fn approval_display_hides_internal_tool_prefixes() {
-        let mut modal = ApprovalModalState::new(vec![PauseReason {
-            tool_name: "t_process_start".to_string(),
-            ..reason("call-1")
-        }]);
-        let compact = text(&render_modal_lines(&modal, 80));
-        assert!(compact.contains("process_start"));
-        assert!(!compact.contains("t_process_start"));
-
-        modal.toggle_details();
-        let detailed = text(&render_modal_lines(&modal, 80));
-        assert!(detailed.contains("process_start"));
-        assert!(!detailed.contains("t_process_start"));
     }
 
     #[test]

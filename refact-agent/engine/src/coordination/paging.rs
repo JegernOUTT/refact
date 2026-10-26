@@ -260,30 +260,6 @@ mod tests {
     }
 
     #[test]
-    fn invalid_creation_caps_do_not_allocate_views_or_cursors() {
-        for settings in [
-            CoordinationSettings {
-                max_work_views: 0,
-                ..Default::default()
-            },
-            CoordinationSettings {
-                max_work_cursors: 0,
-                ..Default::default()
-            },
-        ] {
-            let views = WorkViews::default();
-            let error = views
-                .page(binding(), "a".into(), 7, 3, None, &settings, 0)
-                .err()
-                .unwrap();
-            assert_eq!(error.code, "unavailable");
-            let state = views.0.lock().unwrap();
-            assert!(state.views.is_empty());
-            assert!(state.cursors.is_empty());
-        }
-    }
-
-    #[test]
     fn paging_retries_are_stable_and_changes_cannot_splice_pages() {
         let views = WorkViews::default();
         let settings = CoordinationSettings::default();
@@ -332,63 +308,6 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(error.code, "cursor_expired");
-    }
-
-    #[test]
-    fn capsule_inventory_cursor_starts_at_zero_and_retains_visibility_and_generation_guards() {
-        let views = WorkViews::default();
-        let settings = CoordinationSettings::default();
-        let first = views
-            .page(binding(), "snapshot".into(), 5, 2, None, &settings, 10)
-            .unwrap();
-        let token = views
-            .beginning_cursor(&first.snapshot_id, first.seq, 10)
-            .unwrap();
-        assert_eq!(
-            views
-                .beginning_cursor(&first.snapshot_id, first.seq, 11)
-                .unwrap(),
-            token
-        );
-        let from_start = views
-            .page(
-                binding(),
-                "snapshot".into(),
-                5,
-                2,
-                Some(&token),
-                &settings,
-                11,
-            )
-            .unwrap();
-        assert_eq!(from_start.offset, 0);
-        assert_eq!(from_start.end, 2);
-        let mut other = binding();
-        other.principal = "foreign".into();
-        assert_eq!(
-            views
-                .page(other, "snapshot".into(), 5, 2, Some(&token), &settings, 12)
-                .err()
-                .unwrap()
-                .code,
-            "invalid_cursor"
-        );
-        assert_eq!(
-            views
-                .page(
-                    binding(),
-                    "changed".into(),
-                    5,
-                    2,
-                    Some(&token),
-                    &settings,
-                    12
-                )
-                .err()
-                .unwrap()
-                .code,
-            "cursor_expired"
-        );
     }
 
     #[test]

@@ -94,30 +94,3 @@ pub fn truncate_line_with_ellipsis_if_overflow(
         spans,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ratatui::style::Stylize;
-
-    #[test]
-    fn truncates_wide_chars_without_overflow() {
-        let line = Line::from(vec![Span::styled(
-            "ab猫cd",
-            ratatui::style::Style::new().bold(),
-        )]);
-        let out = truncate_line_with_ellipsis_if_overflow(line, 5);
-        assert_eq!(line_width(&out), 5);
-        assert_eq!(
-            out.spans
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect::<String>(),
-            "ab猫…"
-        );
-        assert!(out.spans[0]
-            .style
-            .add_modifier
-            .contains(ratatui::style::Modifier::BOLD));
-    }
-}

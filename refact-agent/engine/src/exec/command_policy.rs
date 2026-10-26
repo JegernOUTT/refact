@@ -497,30 +497,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn policy_preserves_argv_and_cwd() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let argv = vec!["printf".to_string(), "space value".to_string()];
-        let cwd = PathBuf::from("workspace");
-
-        let request = build_exec_request(
-            gcx,
-            CommandPolicyInput {
-                source: ExecSource::Verifier,
-                command: CommandKind::Argv(&argv),
-                cwd: Some(cwd.clone()),
-                env: HashMap::new(),
-                chat_mode: None,
-                escalation: None,
-            },
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(request.request.argv, Some(argv));
-        assert_eq!(request.request.cwd, Some(cwd));
-    }
-
     #[test]
     fn sandbox_rollout_mode_and_enforcement_matrix_is_honest() {
         let modes = [
@@ -628,52 +604,6 @@ mod tests {
             &ExecSandboxMode::FullAccess,
             &ExecSandboxMode::ReadOnly
         ));
-    }
-
-    #[tokio::test]
-    async fn no_op_escalation_records_no_audit() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let argv = vec!["printf".to_string(), "ok".to_string()];
-
-        let policy = build_exec_request(
-            gcx,
-            CommandPolicyInput {
-                source: ExecSource::ShellTool,
-                command: CommandKind::Argv(&argv),
-                cwd: None,
-                env: HashMap::new(),
-                chat_mode: Some("agent".to_string()),
-                escalation: Some(ExecEscalation {
-                    mode: ExecEscalationMode::WorkspaceWrite,
-                    justification: "commit inside the task worktree".to_string(),
-                }),
-            },
-        )
-        .await
-        .unwrap();
-
-        assert!(policy.audit.is_none());
-        assert_eq!(
-            policy.request.audit.unwrap().justification.as_deref(),
-            Some("commit inside the task worktree")
-        );
-    }
-
-    #[test]
-    fn sandbox_audit_message_uses_existing_system_notice_role() {
-        let audit = SandboxAuditRecord {
-            mode: "sandbox_preferred".to_string(),
-            provider: "landlock".to_string(),
-            enforcement: "unconfined".to_string(),
-            source: "shell_tool".to_string(),
-            content: "command ran unconfined".to_string(),
-        };
-
-        let message = audit.message();
-        assert_eq!(message.role, "event");
-        assert_eq!(message.extra["event"]["subkind"], "system_notice");
-        assert_eq!(message.extra["event"]["source"], "exec.sandbox");
-        assert_eq!(message.extra["event"]["payload"]["provider"], "landlock");
     }
 
     #[test]

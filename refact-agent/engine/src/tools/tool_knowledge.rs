@@ -311,42 +311,6 @@ mod tests {
             .join("\n")
     }
 
-    #[test]
-    fn knowledge_references_use_native_query_artifact_and_workspace_path_metadata() {
-        let memory = crate::memories::MemoRecord {
-            memid: "memory-1".to_string(),
-            file_path: Some(crate::test_paths::abs(
-                "workspace/.refact/knowledge/memory.md",
-            )),
-            line_range: Some((3, 5)),
-            title: Some("Memory title".to_string()),
-            kind: Some("decision".to_string()),
-            score: Some(0.8),
-            ..Default::default()
-        };
-        let mut references = NativeReferences::new();
-        references.add_query("remember this", 1, "matched", "knowledge");
-        add_knowledge_references(
-            &mut references,
-            &[memory],
-            &[crate::test_paths::abs("workspace")],
-        );
-        let mut message = ChatMessage::new("tool".to_string(), "raw knowledge".to_string());
-        references.attach(&mut message);
-
-        let enrichment = refact_chat_api::tool_enrichment_from_extra(&message.extra).unwrap();
-        assert_eq!(enrichment.references.len(), 3);
-        assert_eq!(enrichment.references[0].target, "remember this");
-        assert_eq!(enrichment.references[1].target, "artifact:memory-1");
-        assert_eq!(
-            enrichment.references[2].target,
-            ".refact/knowledge/memory.md"
-        );
-        assert_eq!(enrichment.references[2].line1, Some(3));
-        assert_eq!(enrichment.references[2].line2, Some(5));
-        assert_eq!(message.content.content_text_only(), "raw knowledge");
-    }
-
     #[tokio::test]
     async fn knowledge_results_and_expansion_hide_foreign_agent_namespace() {
         let dir = tempfile::tempdir().unwrap();

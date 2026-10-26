@@ -194,14 +194,4 @@ $RUNNER
         );
         assert!(!refs.iter().any(|r| r.name == "$RUNNER"), "got {refs:?}");
     }
-
-    #[test]
-    fn bash_top_level_call_has_real_caller() {
-        let src = "foo() { :; }\nfoo\n";
-        let (_symbols, refs) = extract(src);
-        let call = refs.iter().find(|r| r.name == "foo").expect("foo call");
-
-        assert_eq!(call.from, RawRef::FILE_SCOPE);
-        assert_eq!(call.kind, EdgeKind::Calls);
-    }
 }

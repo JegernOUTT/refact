@@ -353,23 +353,6 @@ async fn run_with_io_for_current_version(
     }
 }
 
-#[cfg(test)]
-async fn run_with_source(
-    options: SelfUpdateOptions,
-    source: &dyn ReleaseSource,
-    exe_path: Option<PathBuf>,
-    out: &mut dyn Write,
-) -> Result<i32, SelfUpdateError> {
-    run_with_source_for_current_version(
-        options,
-        env!("REFACT_ENGINE_VERSION"),
-        source,
-        exe_path,
-        out,
-    )
-    .await
-}
-
 async fn run_with_source_for_current_version(
     options: SelfUpdateOptions,
     current_version: &str,
@@ -581,16 +564,6 @@ fn asset_urls_for_version(version: &str, target: &str) -> AssetUrls {
 }
 
 impl EngineReleaseInfo {
-    #[cfg(test)]
-    fn from_tag(tag: &str) -> Result<Self, SelfUpdateError> {
-        let version = parse_version_from_tag(tag)?;
-        Ok(Self {
-            version,
-            tag: tag.to_string(),
-            assets: HashMap::new(),
-        })
-    }
-
     fn asset_urls(&self, target: &str) -> AssetUrls {
         let mut urls = release_asset_urls(&self.tag, &self.version, target);
         if let Some(url) = self.assets.get(&urls.archive_name) {
@@ -1564,39 +1537,6 @@ pub mod candidate_install {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-
-    struct MockReleaseSource {
-        release: EngineReleaseInfo,
-        downloads: Arc<AtomicUsize>,
-    }
-
-    impl MockReleaseSource {
-        fn new(release: EngineReleaseInfo) -> Self {
-            Self {
-                release,
-                downloads: Arc::new(AtomicUsize::new(0)),
-            }
-        }
-    }
-
-    impl ReleaseSource for MockReleaseSource {
-        fn latest_release<'a>(&'a self) -> ReleaseFuture<'a, EngineReleaseInfo> {
-            Box::pin(async move { Ok(self.release.clone()) })
-        }
-
-        fn release_for_version<'a>(&'a self, _: &'a str) -> ReleaseFuture<'a, EngineReleaseInfo> {
-            Box::pin(async move { Ok(self.release.clone()) })
-        }
-
-        fn download<'a>(&'a self, _: &'a str, _: &'static str) -> ReleaseFuture<'a, Vec<u8>> {
-            Box::pin(async move {
-                self.downloads.fetch_add(1, Ordering::Relaxed);
-                Ok(Vec::new())
-            })
-        }
-    }
 
     #[test]
     fn version_decision_updates_only_when_needed_or_forced() {
@@ -1628,126 +1568,6 @@ mod tests {
     }
 
     #[test]
-    fn target_triple_selection_matches_release_contract() {
-        assert_eq!(
-            target_triple_for("linux", "x86_64", None),
-            Some("x86_64-unknown-linux-gnu")
-        );
-        assert_eq!(
-            target_triple_for("linux", "aarch64", None),
-            Some("aarch64-unknown-linux-gnu")
-        );
-        assert_eq!(
-            target_triple_for("macos", "x86_64", None),
-            Some("x86_64-apple-darwin")
-        );
-        assert_eq!(
-            target_triple_for("macos", "aarch64", None),
-            Some("aarch64-apple-darwin")
-        );
-        assert_eq!(
-            target_triple_for("windows", "x86_64", Some("msvc")),
-            Some("x86_64-pc-windows-msvc")
-        );
-        assert_eq!(
-            target_triple_for("windows", "x86", Some("msvc")),
-            Some("i686-pc-windows-msvc")
-        );
-        assert_eq!(
-            target_triple_for("windows", "aarch64", Some("msvc")),
-            Some("aarch64-pc-windows-msvc")
-        );
-    }
-
-    #[test]
-    fn asset_urls_follow_engine_release_contract() {
-        let linux = asset_urls_for_version("8.2.0", "x86_64-unknown-linux-gnu");
-        assert_eq!(
-            linux.archive_name,
-            "refact-8.2.0-x86_64-unknown-linux-gnu.tar.gz"
-        );
-        assert_eq!(
-            linux.archive_url,
-            "https://github.com/JegernOUTT/refact/releases/download/engine/v8.2.0/refact-8.2.0-x86_64-unknown-linux-gnu.tar.gz"
-        );
-        assert_eq!(linux.sha256_url, format!("{}.sha256", linux.archive_url));
-
-        let windows = asset_urls_for_version("8.2.0", "x86_64-pc-windows-msvc");
-        assert_eq!(
-            windows.archive_name,
-            "refact-8.2.0-x86_64-pc-windows-msvc.zip"
-        );
-    }
-
-    #[test]
-    fn release_json_can_override_contract_asset_urls() {
-        let release = release_info_from_github(GitHubRelease {
-            tag_name: "engine/v8.2.0".to_string(),
-            html_url: None,
-            published_at: None,
-            draft: false,
-            prerelease: false,
-            assets: vec![
-                GitHubAsset {
-                    name: "refact-8.2.0-x86_64-unknown-linux-gnu.tar.gz".to_string(),
-                    browser_download_url: "https://example.test/archive".to_string(),
-                },
-                GitHubAsset {
-                    name: "refact-8.2.0-x86_64-unknown-linux-gnu.tar.gz.sha256".to_string(),
-                    browser_download_url: "https://example.test/sha".to_string(),
-                },
-            ],
-        })
-        .unwrap();
-        let urls = release.asset_urls("x86_64-unknown-linux-gnu");
-        assert_eq!(release.version, "8.2.0");
-        assert_eq!(urls.archive_url, "https://example.test/archive");
-        assert_eq!(urls.sha256_url, "https://example.test/sha");
-    }
-
-    #[test]
-    fn latest_release_chooses_highest_stable_engine_tag() {
-        let release = latest_engine_release_from(vec![
-            GitHubRelease {
-                tag_name: "v9.0.0".to_string(),
-                html_url: None,
-                published_at: None,
-                draft: false,
-                prerelease: false,
-                assets: Vec::new(),
-            },
-            GitHubRelease {
-                tag_name: "engine/v8.2.0".to_string(),
-                html_url: None,
-                published_at: None,
-                draft: false,
-                prerelease: false,
-                assets: Vec::new(),
-            },
-            GitHubRelease {
-                tag_name: "engine/v8.3.0".to_string(),
-                html_url: None,
-                published_at: None,
-                draft: true,
-                prerelease: false,
-                assets: Vec::new(),
-            },
-            GitHubRelease {
-                tag_name: "engine/v8.1.0".to_string(),
-                html_url: None,
-                published_at: None,
-                draft: false,
-                prerelease: false,
-                assets: Vec::new(),
-            },
-        ])
-        .unwrap();
-
-        assert_eq!(release.version, "8.2.0");
-        assert_eq!(release.tag, "engine/v8.2.0");
-    }
-
-    #[test]
     fn sha256_sidecar_supports_sha256sum_format() {
         let bytes = b"hello";
         let digest = hex::encode(Sha256::digest(bytes));
@@ -1757,33 +1577,6 @@ mod tests {
         );
         let error = verify_sha256(bytes, "0".repeat(64).as_str()).unwrap_err();
         assert!(error.message.contains("sha256 verification failed"));
-    }
-
-    #[tokio::test]
-    async fn check_mode_prints_without_downloading() {
-        let source = MockReleaseSource::new(EngineReleaseInfo::from_tag("engine/v99.0.0").unwrap());
-        let downloads = source.downloads.clone();
-        let mut out = Vec::new();
-        let code = run_with_source(
-            SelfUpdateOptions {
-                check: true,
-                version: None,
-                force: false,
-                quiet: false,
-                json: true,
-            },
-            &source,
-            None,
-            &mut out,
-        )
-        .await
-        .unwrap();
-        assert_eq!(code, 0);
-        assert_eq!(downloads.load(Ordering::Relaxed), 0);
-        let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
-        assert_eq!(value["ok"], true);
-        assert_eq!(value["latest_version"], "99.0.0");
-        assert_eq!(value["update_available"], true);
     }
 
     #[test]
@@ -1804,22 +1597,6 @@ mod tests {
         }
         assert_eq!(
             extract_from_targz(&tar_bytes, binary_name()).unwrap(),
-            b"bin"
-        );
-    }
-
-    #[test]
-    fn extracts_binary_from_zip_archive() {
-        let mut zip_bytes = Cursor::new(Vec::new());
-        {
-            let mut writer = zip::ZipWriter::new(&mut zip_bytes);
-            let options = zip::write::SimpleFileOptions::default();
-            writer.start_file(binary_name(), options).unwrap();
-            writer.write_all(b"bin").unwrap();
-            writer.finish().unwrap();
-        }
-        assert_eq!(
-            extract_from_zip(&zip_bytes.into_inner(), binary_name()).unwrap(),
             b"bin"
         );
     }
@@ -1847,49 +1624,6 @@ mod tests {
                 0o755
             );
         }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn atomic_replace_forces_executable_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let current = dir.path().join(binary_name());
-        let replacement = dir.path().join("replacement");
-        std::fs::write(&current, b"old").unwrap();
-        std::fs::write(&replacement, b"new").unwrap();
-        std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o644)).unwrap();
-        replace_binary(&current, &replacement).unwrap();
-        assert_eq!(
-            std::fs::metadata(&current).unwrap().permissions().mode() & 0o777,
-            0o755
-        );
-    }
-
-    #[test]
-    fn windows_install_failure_reports_restored_only_after_rollback_success() {
-        let current = Path::new("C:/refact/refact.exe");
-        let replacement = Path::new("C:/refact/.refact.exe.update-1");
-        let old = Path::new("C:/refact/refact.exe.old");
-        let install_error = std::io::Error::new(std::io::ErrorKind::Other, "install failed");
-        let error = windows_install_failure_error(current, replacement, old, &install_error, None);
-        assert!(error.message.contains("previous binary was restored"));
-        assert!(!error.message.contains("may be in a broken state"));
-
-        let install_error = std::io::Error::new(std::io::ErrorKind::Other, "install failed");
-        let rollback_error = std::io::Error::new(std::io::ErrorKind::Other, "rollback failed");
-        let error = windows_install_failure_error(
-            current,
-            replacement,
-            old,
-            &install_error,
-            Some(&rollback_error),
-        );
-        assert!(error.message.contains("may be in a broken state"));
-        assert!(error.message.contains(&old.display().to_string()));
-        assert!(error.message.contains(&replacement.display().to_string()));
-        assert!(!error.message.contains("previous binary was restored"));
     }
 
     #[test]

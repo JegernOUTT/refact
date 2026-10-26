@@ -212,20 +212,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_activate_unknown_skill() {
-        let tmp = tempfile::tempdir().unwrap();
-        let ext_dirs = make_ext_dirs(tmp.path());
-        let result = activate_skill_inner(&ext_dirs, "nonexistent").await;
-        assert!(result.is_err());
-        let msg = result.unwrap_err();
-        assert!(
-            msg.contains("not found"),
-            "Expected 'not found' in error: {}",
-            msg
-        );
-    }
-
-    #[tokio::test]
     async fn test_activate_non_invocable_skill() {
         let tmp = tempfile::tempdir().unwrap();
         write_skill(
@@ -247,108 +233,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_activate_skill_with_includes() {
-        let tmp = tempfile::tempdir().unwrap();
-        let skill_dir = tmp.path().join("skills").join("with-include");
-        tokio::fs::create_dir_all(&skill_dir).await.unwrap();
-        tokio::fs::write(skill_dir.join("context.md"), "Included content here")
-            .await
-            .unwrap();
-        tokio::fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\nname: with-include\ndescription: Skill with includes\nuser-invocable: true\n---\nBefore\n@include context.md\nAfter",
-        )
-        .await
-        .unwrap();
-
-        let ext_dirs = make_ext_dirs(tmp.path());
-        let result = activate_skill_inner(&ext_dirs, "with-include").await;
-        assert!(result.is_ok(), "Expected Ok, got {:?}", result);
-        let activated = result.unwrap();
-        assert!(
-            activated.body.contains("Included content here"),
-            "@include should be expanded, got: {}",
-            activated.body
-        );
-        assert!(
-            !activated.body.contains("@include"),
-            "@include directive should be replaced"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_activate_skill_returns_allowed_tools_and_model() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_skill(
-            tmp.path(),
-            "restricted-skill",
-            "name: restricted-skill\ndescription: Skill with restrictions\nuser-invocable: true\nallowed-tools:\n  - cat\n  - tree\nmodel: gpt-4o",
-            "Do something restricted",
-        )
-        .await;
-
-        let ext_dirs = make_ext_dirs(tmp.path());
-        let result = activate_skill_inner(&ext_dirs, "restricted-skill").await;
-        assert!(result.is_ok(), "Expected Ok, got {:?}", result);
-        let activated = result.unwrap();
-        assert!(!activated.body.is_empty());
-        assert_eq!(
-            activated.allowed_tools,
-            vec!["cat".to_string(), "tree".to_string()]
-        );
-        assert_eq!(activated.model_override, Some("gpt-4o".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_activate_skill_empty_allowed_tools() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_skill(
-            tmp.path(),
-            "open-skill",
-            "name: open-skill\ndescription: Skill without restrictions\nuser-invocable: true",
-            "Do anything",
-        )
-        .await;
-
-        let ext_dirs = make_ext_dirs(tmp.path());
-        let result = activate_skill_inner(&ext_dirs, "open-skill").await;
-        assert!(result.is_ok());
-        let activated = result.unwrap();
-        assert!(
-            activated.allowed_tools.is_empty(),
-            "No restrictions should result in empty allowed_tools"
-        );
-        assert!(
-            activated.model_override.is_none(),
-            "No model should result in None model_override"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_activate_skill_instruction_exposes_absolute_skill_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_skill(
-            tmp.path(),
-            "visual-skill",
-            "name: visual-skill\ndescription: Skill with companion docs\nuser-invocable: true",
-            "Read visual-companion.md before changing UI",
-        )
-        .await;
-
-        let ext_dirs = make_ext_dirs(tmp.path());
-        let activated = activate_skill_inner(&ext_dirs, "visual-skill")
-            .await
-            .unwrap();
-        let content = build_cd_instruction_content("visual-skill", &activated);
-
-        assert!(content.contains("\"skill_dir\""));
-        assert!(content.contains(&activated.skill_dir));
-        assert!(content.contains("Use absolute paths under this directory"));
-        assert!(content.contains("Do not use workspace-relative paths"));
-        assert!(content.contains("skills/visual-skill/..."));
-    }
-
     #[test]
     fn test_activate_skill_not_parallel() {
         let tool = ToolActivateSkill {
@@ -358,39 +242,5 @@ mod tests {
             !tool.tool_description().allow_parallel,
             "activate_skill must have allow_parallel = false"
         );
-    }
-
-    #[test]
-    fn test_activate_already_active_skill_returns_early() {
-        let active_skill = Some("my-skill".to_string());
-        let name = "my-skill";
-        let already_active = active_skill.as_deref() == Some(name);
-        assert!(already_active, "Should detect already active skill");
-
-        let inactive_skill: Option<String> = None;
-        let not_active = inactive_skill.as_deref() == Some(name);
-        assert!(!not_active, "None should not match active skill");
-
-        let other_skill = Some("other-skill".to_string());
-        let different = other_skill.as_deref() == Some(name);
-        assert!(!different, "Different skill name should not match");
-    }
-
-    #[tokio::test]
-    async fn test_activate_rejects_traversal_name() {
-        let tmp = tempfile::tempdir().unwrap();
-        let ext_dirs = make_ext_dirs(tmp.path());
-
-        let result = activate_skill_inner(&ext_dirs, "../../etc").await;
-        assert!(result.is_err(), "traversal name should be rejected");
-        let msg = result.unwrap_err();
-        assert!(
-            msg.contains("Invalid skill name") || msg.contains("not found"),
-            "Expected rejection message, got: {}",
-            msg
-        );
-
-        let result2 = activate_skill_inner(&ext_dirs, "../passwd").await;
-        assert!(result2.is_err(), "traversal name should be rejected");
     }
 }

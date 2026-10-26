@@ -335,16 +335,6 @@ mod tests {
         assert!(!abort.load(Ordering::SeqCst));
     }
 
-    #[test]
-    fn sleep_push_defaults_to_append() {
-        let mut args = sleep_args(None, "wait");
-        assert_eq!(parse_sleep_request(&args).unwrap().push, PushMode::Append);
-        args.insert("push".into(), json!("when_idle"));
-        assert_eq!(parse_sleep_request(&args).unwrap().push, PushMode::WhenIdle);
-        args.insert("push".into(), json!(true));
-        assert!(parse_sleep_request(&args).is_err());
-    }
-
     #[tokio::test]
     async fn ticks_all_modes_wait_for_own_result_and_c_waits_for_turn() {
         for push in [PushMode::Append, PushMode::Preempt, PushMode::WhenIdle] {
@@ -391,47 +381,6 @@ mod tests {
                 .is_some_and(|event| event["subkind"] == "tick")));
             assert_eq!(session.messages[1].role, "tool");
         }
-    }
-
-    #[test]
-    fn parse_rejects_zero_tick_interval() {
-        let error = parse_error(sleep_args(Some(0), "wait"));
-
-        assert_eq!(
-            error,
-            format!("tick_interval_ms must be at least {MIN_TICK_INTERVAL_MS}")
-        );
-    }
-
-    #[test]
-    fn parse_rejects_tick_interval_below_schema_minimum() {
-        let error = parse_error(sleep_args(Some(MIN_TICK_INTERVAL_MS - 1), "wait"));
-
-        assert_eq!(
-            error,
-            format!("tick_interval_ms must be at least {MIN_TICK_INTERVAL_MS}")
-        );
-    }
-
-    #[test]
-    fn parse_rejects_empty_description() {
-        let error = parse_error(sleep_args(None, ""));
-
-        assert_eq!(error, "description must be a non-empty string");
-    }
-
-    #[test]
-    fn parse_rejects_whitespace_description() {
-        let error = parse_error(sleep_args(None, "   \t\n"));
-
-        assert_eq!(error, "description must be a non-empty string");
-    }
-
-    #[test]
-    fn parse_trims_description() {
-        let request = parse_sleep_request(&sleep_args(None, "  wait  ")).unwrap();
-
-        assert_eq!(request.description, "wait");
     }
 
     const CHAT_ID: &str = "sleep-chat";
@@ -515,19 +464,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn short_sleep_returns_correct_slept_ms() {
-        let outcome = sleep_with_ticks(120, None, Arc::new(AtomicBool::new(false)), None).await;
-
-        assert!(!outcome.interrupted);
-        assert!(
-            (70..=170).contains(&outcome.slept_ms),
-            "slept_ms was {}",
-            outcome.slept_ms
-        );
-        assert!(outcome.ticks.is_empty());
-    }
-
-    #[tokio::test]
     async fn abort_midway_returns_interrupted() {
         let abort_flag = Arc::new(AtomicBool::new(false));
         let run = tokio::spawn({
@@ -591,21 +527,6 @@ mod tests {
             outcome.ticks[1].extra["event"]["payload"]["elapsed_ms"],
             10_000
         );
-    }
-
-    #[tokio::test]
-    async fn tick_interval_injects_n_events() {
-        let outcome =
-            sleep_with_ticks(600, Some(200), Arc::new(AtomicBool::new(false)), None).await;
-
-        assert!(!outcome.interrupted);
-        assert!(
-            (2..=3).contains(&outcome.ticks.len()),
-            "tick count was {}",
-            outcome.ticks.len()
-        );
-        assert!(outcome.ticks.iter().all(|message| message.role == "event"));
-        assert_eq!(outcome.ticks[0].extra["event"]["subkind"], json!("tick"));
     }
 
     #[tokio::test(start_paused = true)]

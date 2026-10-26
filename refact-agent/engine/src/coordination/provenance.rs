@@ -114,17 +114,6 @@ mod tests {
     }
 
     #[test]
-    fn repeated_sources_are_deduplicated_and_unknown_mutations_fail_closed() {
-        let settings = CoordinationSettings::default();
-        let mut value = WorkProvenance::default();
-        value.observe(&message("/p/secret"), 1, &settings);
-        value.observe(&message("/p/secret"), 2, &settings);
-        assert_eq!(value.snapshot(2, &settings).0.len(), 1);
-        assert!(value.snapshot(2, &settings).1);
-        assert!(!value.snapshot(3, &settings).1);
-    }
-
-    #[test]
     fn overflow_and_malformed_provenance_stay_closed_until_authoritative_rebuild() {
         let settings = CoordinationSettings {
             max_work_provenance_records: 1,

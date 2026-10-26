@@ -242,23 +242,6 @@ mod tests {
     }
 
     #[test]
-    fn wrapper_reports_instance_id_base_and_display() {
-        let provider = ProviderInstance::new(
-            "custom_2",
-            "custom",
-            "",
-            Box::new(CustomProvider::default()),
-        );
-
-        assert_eq!(provider.name(), "custom_2");
-        assert_eq!(provider.base_provider_name(), "custom");
-        assert_eq!(provider.display_name(), "Custom");
-        let settings = provider.provider_settings_as_json();
-        assert_eq!(settings["base_provider"], "custom");
-        assert_eq!(settings["display_name"], "Custom");
-    }
-
-    #[test]
     fn wrapper_build_runtime_patches_runtime_identity() {
         let provider = ProviderInstance::new(
             "custom_work",

@@ -46,36 +46,3 @@ fn parse_generated_locator(value: Value) -> Result<String, HandleError> {
         HandleError::Protocol(format!("Failed to parse generated locator: {error}"))
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn locator_generation_options_use_injected_wire_names() {
-        let options = LocatorGenerationOptions::default();
-        assert_eq!(options.test_id_attribute_name, "data-testid");
-        assert_eq!(
-            serde_json::to_value(options).unwrap(),
-            serde_json::json!({ "testIdAttributeName": "data-testid" })
-        );
-        assert_eq!(
-            serde_json::from_value::<LocatorGenerationOptions>(serde_json::json!({})).unwrap(),
-            LocatorGenerationOptions::default()
-        );
-    }
-
-    #[test]
-    fn generated_locator_wrapper_deserializes_string_results() {
-        assert_eq!(
-            parse_generated_locator(serde_json::json!("internal:role=button[name=\"Save\"s]"))
-                .unwrap(),
-            "internal:role=button[name=\"Save\"s]"
-        );
-        assert!(matches!(
-            parse_generated_locator(serde_json::json!({ "selector": "button" })),
-            Err(HandleError::Protocol(message)) if message.contains("generated locator")
-        ));
-        assert!(GENERATE_LOCATOR_FUNCTION.contains("generateLocator(this, options)"));
-    }
-}

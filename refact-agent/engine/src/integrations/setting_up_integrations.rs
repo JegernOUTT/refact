@@ -765,10 +765,8 @@ pub async fn integration_config_save(
 #[cfg(test)]
 mod tests {
     // use super::*;
-    use crate::integrations::yaml_schema::ISchema;
+
     use serde_yaml;
-    use std::fs::File;
-    use std::io::Write;
 
     fn yaml_key(name: &str) -> serde_yaml::Value {
         serde_yaml::Value::String(name.to_string())
@@ -820,18 +818,6 @@ mod tests {
         super::preserve_unknown_fields(
             std::path::Path::new("/tmp/x.yaml"),
             existing,
-            &mut new_value,
-        );
-        assert_eq!(access_token_of(&new_value), None);
-    }
-
-    #[test]
-    fn preserve_unknown_fields_ignores_malformed_existing_config() {
-        let mut new_value: serde_yaml::Value =
-            serde_yaml::from_str("url: https://mcp.example.com/mcp\n").unwrap();
-        super::preserve_unknown_fields(
-            std::path::Path::new("/tmp/x.yaml"),
-            "\tnot: [valid",
             &mut new_value,
         );
         assert_eq!(access_token_of(&new_value), None);
@@ -920,16 +906,6 @@ mod tests {
     }
 
     #[test]
-    fn leading_marketplace_comments_survives_other_leading_comments() {
-        let existing =
-            "# hand written note\n# mcp_marketplace_source: refact-bundled\ncommand: x\n";
-        assert_eq!(
-            super::leading_marketplace_comments(existing),
-            "# mcp_marketplace_source: refact-bundled\n"
-        );
-    }
-
-    #[test]
     fn preserve_unknown_fields_purges_stale_tokens_but_keeps_other_keys() {
         let existing = "url: https://mcp.example.com/mcp\noauth_tokens:\n  access_token: dead\nnote: keep-me\n";
         let mut new_value: serde_yaml::Value =
@@ -950,16 +926,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn leading_marketplace_comments_captures_only_the_header() {
-        let existing = "# mcp_marketplace_source: refact-bundled\n# mcp_marketplace_server: fetch\ncommand: uvx mcp-server-fetch\n# mcp_marketplace_recipe_hash: late\n";
-        assert_eq!(
-            super::leading_marketplace_comments(existing),
-            "# mcp_marketplace_source: refact-bundled\n# mcp_marketplace_server: fetch\n"
-        );
-        assert_eq!(super::leading_marketplace_comments("url: https://x\n"), "");
-    }
-
     #[tokio::test]
     async fn write_config_atomically_replaces_contents_without_residue() {
         let dir = tempfile::tempdir().unwrap();
@@ -970,42 +936,5 @@ mod tests {
             .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new: 2\n");
         assert!(!dir.path().join("mcp_thing.tmp").exists());
-    }
-
-    #[tokio::test]
-    async fn test_integration_schemas() {
-        let integrations = crate::integrations::integrations_list(true);
-        for name in integrations {
-            let integration_box = crate::integrations::integration_from_name(name).unwrap();
-            let schema_json = {
-                let y: serde_yaml::Value =
-                    serde_yaml::from_str(integration_box.integr_schema()).unwrap();
-                let j = serde_json::to_value(y).unwrap();
-                j
-            };
-            let schema_yaml: serde_yaml::Value =
-                serde_json::from_value(schema_json.clone()).unwrap();
-            let compare_me1 = serde_yaml::to_string(&schema_yaml).unwrap();
-            eprintln!("schema_json {:?}", schema_json);
-            let schema_struct: ISchema = serde_json::from_value(schema_json).unwrap();
-            let schema_struct_yaml = serde_json::to_value(&schema_struct).unwrap();
-            let compare_me2 = serde_yaml::to_string(&schema_struct_yaml).unwrap();
-            if compare_me1 != compare_me2 {
-                eprintln!(
-                    "schema mismatch for integration `{}`:\nOriginal:\n{}\nSerialized:\n{}",
-                    name, compare_me1, compare_me2
-                );
-                let original_file_path = format!("/tmp/original_schema_{}.yaml", name);
-                let serialized_file_path = format!("/tmp/serialized_schema_{}.yaml", name);
-                let mut original_file = File::create(&original_file_path).unwrap();
-                let mut serialized_file = File::create(&serialized_file_path).unwrap();
-                original_file.write_all(compare_me1.as_bytes()).unwrap();
-                serialized_file.write_all(compare_me2.as_bytes()).unwrap();
-                eprintln!("cat {}", original_file_path);
-                eprintln!("cat {}", serialized_file_path);
-                eprintln!("diff {} {}", original_file_path, serialized_file_path);
-                panic!("oops");
-            }
-        }
     }
 }

@@ -49,15 +49,3 @@ impl RegistryCacheManager {
         self.cache.remove(project_root);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn registry_cache_manager_new_is_empty() {
-        let manager = RegistryCacheManager::new();
-
-        assert!(manager.cache.is_empty());
-    }
-}

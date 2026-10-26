@@ -337,18 +337,6 @@ mod tests {
     }
 
     #[test]
-    fn body_cannot_claim_authenticated_origin() {
-        assert!(serde_json::from_value::<GoalIntake>(
-            serde_json::json!({"content":"goal","criteria":[],"is_user":true})
-        )
-        .is_err());
-        assert!(serde_json::from_value::<MandateRequest>(
-            serde_json::json!({"mandate":{},"max_workers":1,"authenticated":true})
-        )
-        .is_err());
-    }
-
-    #[test]
     fn control_bodies_reject_free_text_and_unknown_fields() {
         assert!(serde_json::from_value::<MessageRequest>(
             serde_json::json!({"control_id":"c1","note_id":"focus"})

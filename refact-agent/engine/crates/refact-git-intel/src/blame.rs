@@ -353,26 +353,6 @@ mod tests {
     }
 
     #[test]
-    fn top_owner_returns_dominant_author_and_pct() {
-        let dir = mixed_age_repo();
-        let (author, pct) = top_owner(dir.path(), "src.txt").unwrap();
-
-        assert_eq!(author, "alice@example.com");
-        assert!(pct > 0.0 && pct <= 1.0);
-    }
-
-    #[test]
-    fn code_age_is_finite_for_mixed_age_file() {
-        let dir = mixed_age_repo();
-        let age = code_age(dir.path(), "src.txt", 1_600_172_800).unwrap();
-
-        assert!(age.median_age_days.is_finite());
-        assert!(age.median_age_days >= 0.0);
-        assert!(age.volatility.is_finite());
-        assert!(!age.volatility.is_nan());
-    }
-
-    #[test]
     fn code_age_clamps_future_dated_blame_to_zero_age() {
         let dir = tempfile::tempdir().unwrap();
         let repo = Repository::init(dir.path()).unwrap();

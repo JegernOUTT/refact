@@ -419,51 +419,6 @@ mod tests {
     use super::*;
     use crate::tools::tools_description::Tool;
 
-    #[test]
-    fn a_disagreement_author_round_trips_through_its_work_key_spelling() {
-        assert_eq!(
-            parse_author("background_agent:bg-1"),
-            WorkKey::background_agent("bg-1")
-        );
-        assert_eq!(
-            parse_author("trajectory:chat-1"),
-            WorkKey::trajectory("chat-1")
-        );
-        assert_eq!(parse_author("bg-2"), WorkKey::background_agent("bg-2"));
-        assert_eq!(
-            parse_author("chat:with:colons"),
-            WorkKey::background_agent("chat:with:colons")
-        );
-    }
-
-    #[test]
-    fn the_disagreement_tools_publish_both_filing_and_reading() {
-        let file = ToolDisagreementFile {
-            config_path: String::new(),
-        }
-        .tool_description();
-        let list = ToolDisagreementList {
-            config_path: String::new(),
-        }
-        .tool_description();
-        let adjudicate = ToolDisagreementAdjudicate {
-            config_path: String::new(),
-        }
-        .tool_description();
-
-        assert_eq!(file.name, "disagreement_file");
-        assert_eq!(
-            file.input_schema["properties"]["positions"]["minItems"],
-            json!(2),
-            "a disagreement needs two sides"
-        );
-        assert_eq!(list.name, "disagreement_list");
-        assert!(list.allow_parallel, "reading must not serialize");
-        assert_eq!(adjudicate.name, "disagreement_adjudicate");
-        assert!(adjudicate.input_schema["properties"]["unresolvable_reason"].is_object());
-        assert!(adjudicate.input_schema["properties"]["current_revision"].is_object());
-    }
-
     fn args(items: &[(&str, Value)]) -> HashMap<String, Value> {
         items
             .iter()

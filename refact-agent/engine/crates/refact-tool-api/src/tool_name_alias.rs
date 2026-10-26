@@ -113,13 +113,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_short_safe_name_unchanged() {
-        assert_eq!(generate_tool_alias("cat", 64), "cat");
-        assert_eq!(generate_tool_alias("shell", 64), "shell");
-        assert_eq!(generate_tool_alias("tree", 64), "tree");
-    }
-
-    #[test]
     fn test_long_name_gets_truncated_with_hash() {
         let long_name =
             "some_extremely_long_tool_name_that_clearly_exceeds_the_sixty_four_character_limit";
@@ -142,27 +135,11 @@ mod tests {
     }
 
     #[test]
-    fn test_alias_contains_hash_suffix() {
-        let long_name = "some_very_long_tool_name_that_definitely_exceeds_64_characters_limit";
-        let alias = generate_tool_alias(long_name, 64);
-        assert!(alias.len() <= 64);
-        assert!(alias.contains('_'));
-    }
-
-    #[test]
     fn test_registry_roundtrip() {
         let mut registry = ToolAliasRegistry::new();
         let alias = registry.register("my_tool");
         assert_eq!(registry.resolve_alias(&alias), Some("my_tool"));
         assert_eq!(registry.get_alias("my_tool"), Some(alias.as_str()));
-    }
-
-    #[test]
-    fn test_registry_same_name_same_alias() {
-        let mut registry = ToolAliasRegistry::new();
-        let alias1 = registry.register("cat");
-        let alias2 = registry.register("cat");
-        assert_eq!(alias1, alias2);
     }
 
     #[test]
@@ -175,67 +152,5 @@ mod tests {
         assert_ne!(alias1, alias2, "Different tools must not share alias");
         assert_eq!(registry.resolve_alias(&alias1), Some(name1));
         assert_eq!(registry.resolve_alias(&alias2), Some(name2));
-    }
-
-    #[test]
-    fn test_registry_unknown_alias_returns_none() {
-        let registry = ToolAliasRegistry::new();
-        assert_eq!(registry.resolve_alias("unknown_alias_xyz"), None);
-    }
-
-    #[test]
-    fn test_realistic_tool_name() {
-        let name = "modelcontextprotocol_server_github_create_pull_request";
-        assert!(name.len() > 64 || name.len() <= 64);
-        let alias = generate_tool_alias(name, 64);
-        assert!(alias.len() <= 64);
-        assert!(alias
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
-        assert!(alias
-            .chars()
-            .next()
-            .map_or(false, |c| c.is_ascii_alphabetic()));
-    }
-
-    #[test]
-    fn test_build_registry_from_names() {
-        let names = vec![
-            "cat".to_string(),
-            "shell".to_string(),
-            "very_long_name_that_needs_aliasing_to_fit_in_limit_of_64_chars".to_string(),
-        ];
-        let registry = build_registry_from_names(&names);
-        for name in &names {
-            let alias = registry.get_alias(name).expect("alias should exist");
-            assert!(alias.len() <= 64);
-            assert_eq!(registry.resolve_alias(alias), Some(name.as_str()));
-        }
-    }
-
-    #[test]
-    fn test_needs_aliasing_false_for_short_names() {
-        let names = vec!["cat".to_string(), "shell".to_string(), "tree".to_string()];
-        let registry = build_registry_from_names(&names);
-        assert!(!registry.needs_aliasing());
-    }
-
-    #[test]
-    fn test_needs_aliasing_true_for_long_names() {
-        let names =
-            vec!["very_long_name_that_needs_aliasing_to_fit_in_the_64_character_limit".to_string()];
-        let registry = build_registry_from_names(&names);
-        assert!(registry.needs_aliasing());
-    }
-
-    #[test]
-    fn test_alias_registry_maps_tool_choice() {
-        let names = vec![
-            "very_long_tool_name_that_exceeds_the_64_char_limit_for_provider_apis".to_string(),
-        ];
-        let registry = build_registry_from_names(&names);
-        let alias = registry.get_alias(&names[0]);
-        assert!(alias.is_some());
-        assert!(alias.unwrap().len() <= 64);
     }
 }

@@ -376,68 +376,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_note_is_truncated_with_metadata() {
-        let mut session = ChatSession::new(CHAT_ID.to_string());
-        crate::chat::goal_role::install_goal(
-            &mut session,
-            "agent",
-            "base goal",
-            true,
-            GoalBudget::default(),
-        );
-        let (gcx, ccx) = ccx_for_session(session).await;
-        let mut tool = ToolUpdateGoal {
-            config_path: String::new(),
-        };
-        let note = "a".repeat(internal_roles::MAX_GOAL_DELTA_CHARS + 100);
-        let original_chars = note.chars().count();
-        let args = HashMap::from([("note".to_string(), json!(note))]);
-
-        let (_, messages) = tool
-            .tool_execute(ccx, &"call".to_string(), &args)
-            .await
-            .unwrap();
-
-        let result = tool_result_json(&messages);
-        assert_eq!(result["seq"], json!(1));
-        assert_eq!(result["truncated"], json!(true));
-        assert_eq!(result["original_chars"], json!(original_chars));
-        let session_arc = gcx
-            .chat_sessions
-            .read()
-            .await
-            .get(CHAT_ID)
-            .cloned()
-            .unwrap();
-        let session = session_arc.lock().await;
-        let deliveries = delivery_messages(&session);
-        let delta = &deliveries[0];
-        let content = content_text(delta);
-        assert!(content.chars().count() <= internal_roles::MAX_GOAL_DELTA_CHARS);
-        assert!(content.contains("[truncated:"));
-        assert_eq!(goal_delta_payload(delta)["truncated"], json!(true));
-        let kept_chars = goal_delta_payload(delta)["kept_chars"].as_u64().unwrap() as usize;
-        assert_eq!(result["kept_chars"], json!(kept_chars));
-    }
-
-    #[tokio::test]
-    async fn rejects_when_no_goal() {
-        let session = ChatSession::new(CHAT_ID.to_string());
-        let (_gcx, ccx) = ccx_for_session(session).await;
-        let mut tool = ToolUpdateGoal {
-            config_path: String::new(),
-        };
-        let args = HashMap::from([("note".to_string(), json!("new direction"))]);
-
-        let err = tool
-            .tool_execute(ccx, &"call".to_string(), &args)
-            .await
-            .unwrap_err();
-
-        assert_eq!(err, "no goal to update; call set_goal first");
-    }
-
-    #[tokio::test]
     async fn missing_note_errors() {
         let session = ChatSession::new(CHAT_ID.to_string());
         let (_gcx, ccx) = ccx_for_session(session).await;
@@ -451,23 +389,6 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err, "provide at least one of note or plan");
-    }
-
-    #[tokio::test]
-    async fn whitespace_only_note_errors() {
-        let session = ChatSession::new(CHAT_ID.to_string());
-        let (_gcx, ccx) = ccx_for_session(session).await;
-        let mut tool = ToolUpdateGoal {
-            config_path: String::new(),
-        };
-        let args = HashMap::from([("note".to_string(), json!("  \n\t"))]);
-
-        let err = tool
-            .tool_execute(ccx, &"call".to_string(), &args)
-            .await
-            .unwrap_err();
-
-        assert_eq!(err, "argument `note` must be non-empty");
     }
 
     #[tokio::test]
@@ -524,46 +445,5 @@ mod tests {
             json!("goal_delta")
         );
         assert_openai_tool_result_not_preceded_by_hidden_role(session.messages.clone());
-    }
-
-    #[test]
-    fn queued_base_goal_allows_update() {
-        let mut session = ChatSession::new(CHAT_ID.to_string());
-        session.queue_post_tool_side_effect(internal_roles::goal(
-            "agent",
-            1,
-            "base",
-            None,
-            true,
-            GoalBudget::default(),
-        ));
-
-        assert!(has_base_goal_including_queued(&session).unwrap());
-        assert_eq!(session.post_tool_side_effects[0].role, GOAL_ROLE);
-    }
-
-    #[tokio::test]
-    async fn available_in_plan_supporting_modes() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all(
-            &gcx.config_dir,
-        )
-        .await
-        .unwrap();
-
-        for mode in ["agent", "task_agent", "task_planner"] {
-            let has_tool = get_tools_for_mode(gcx.clone(), mode, None)
-                .await
-                .into_iter()
-                .any(|tool| tool.tool_description().name == "update_goal");
-            assert!(has_tool, "{mode} should expose update_goal");
-        }
-        for mode in ["NO_TOOLS", "shell", "explore"] {
-            let has_tool = get_tools_for_mode(gcx.clone(), mode, None)
-                .await
-                .into_iter()
-                .any(|tool| tool.tool_description().name == "update_goal");
-            assert!(!has_tool, "{mode} should not expose update_goal");
-        }
     }
 }

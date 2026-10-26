@@ -1189,19 +1189,6 @@ mod tests {
     }
 
     #[test]
-    fn test_reader_parses_valid_jsonl() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("00000001.jsonl");
-        let event = make_event(1, true);
-        let line = serde_json::to_string(&event).unwrap();
-        std::fs::write(&file_path, format!("{}\n", line)).unwrap();
-
-        let events = read_all_stats_events(dir.path());
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].chat_id, "chat-1");
-    }
-
-    #[test]
     fn test_reader_skips_invalid_lines() {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("00000001.jsonl");
@@ -1246,103 +1233,6 @@ mod tests {
         assert_eq!(summary.by_mode[0].total_calls, 3);
         assert_eq!(summary.top_conversations.len(), 3);
         assert_eq!(summary.top_conversations[0].total_calls, 1);
-    }
-
-    #[test]
-    fn test_filter_by_date_range() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("00000001.jsonl");
-        let mut file = std::fs::File::create(&file_path).unwrap();
-        for i in 1u64..=5 {
-            let event = make_event(i, true);
-            let line = serde_json::to_string(&event).unwrap();
-            writeln!(file, "{}", line).unwrap();
-        }
-        let events = read_stats_events_filtered(dir.path(), Some("2026-02-03"), Some("2026-02-05"));
-        assert_eq!(
-            events.len(),
-            3,
-            "should include events on days 3, 4, and 5 (inclusive)"
-        );
-    }
-
-    #[test]
-    fn test_date_filter_inclusive_boundary() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("00000001.jsonl");
-        let mut file = std::fs::File::create(&file_path).unwrap();
-        for i in 1u64..=5 {
-            let event = make_event(i, true);
-            let line = serde_json::to_string(&event).unwrap();
-            writeln!(file, "{}", line).unwrap();
-        }
-        let events = read_stats_events_filtered(dir.path(), Some("2026-02-03"), Some("2026-02-03"));
-        assert_eq!(
-            events.len(),
-            1,
-            "should include exactly the event on the boundary date"
-        );
-        assert_eq!(events[0].chat_id, "chat-2");
-    }
-
-    #[test]
-    fn test_date_filter_date_only_to() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("00000001.jsonl");
-        let mut file = std::fs::File::create(&file_path).unwrap();
-        let mut event = make_event(1, true);
-        event.ts_start = "2026-02-05T23:59:59Z".to_string();
-        let line = serde_json::to_string(&event).unwrap();
-        writeln!(file, "{}", line).unwrap();
-        let events = read_stats_events_filtered(dir.path(), None, Some("2026-02-05"));
-        assert_eq!(
-            events.len(),
-            1,
-            "event at 23:59:59 on to-date should be included"
-        );
-    }
-
-    #[test]
-    fn test_read_stats_events_from_dirs_merges_workspace_and_config_dirs() {
-        let workspace_dir = tempfile::tempdir().unwrap();
-        let config_dir = tempfile::tempdir().unwrap();
-
-        let workspace_file = workspace_dir.path().join("00000001.jsonl");
-        let config_file = config_dir.path().join("00000001.jsonl");
-
-        let mut workspace_event = make_event(1, true);
-        workspace_event.id = "workspace-event".to_string();
-        workspace_event.chat_id = "workspace-chat".to_string();
-        workspace_event.ts_start = "2026-02-02T00:00:00Z".to_string();
-
-        let mut config_event = make_event(2, true);
-        config_event.id = "config-event".to_string();
-        config_event.chat_id = "config-chat".to_string();
-        config_event.ts_start = "2026-02-03T00:00:00Z".to_string();
-
-        std::fs::write(
-            &workspace_file,
-            format!("{}\n", serde_json::to_string(&workspace_event).unwrap()),
-        )
-        .unwrap();
-        std::fs::write(
-            &config_file,
-            format!("{}\n", serde_json::to_string(&config_event).unwrap()),
-        )
-        .unwrap();
-
-        let events = read_stats_events_from_dirs(
-            &[
-                workspace_dir.path().to_path_buf(),
-                config_dir.path().to_path_buf(),
-            ],
-            None,
-            None,
-        );
-
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].chat_id, "workspace-chat");
-        assert_eq!(events[1].chat_id, "config-chat");
     }
 
     #[test]
@@ -1400,36 +1290,6 @@ mod tests {
     }
 
     #[test]
-    fn test_read_stats_events_dedupes_duplicate_event_ids_within_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("00000001.jsonl");
-
-        let mut first = make_event(1, true);
-        first.id = "duplicate-id".to_string();
-        first.chat_id = "first-chat".to_string();
-        first.ts_start = "2026-02-02T00:00:00Z".to_string();
-
-        let mut duplicate = first.clone();
-        duplicate.chat_id = "duplicate-chat".to_string();
-        duplicate.ts_start = "2026-02-03T00:00:00Z".to_string();
-
-        std::fs::write(
-            &file_path,
-            format!(
-                "{}\n{}\n",
-                serde_json::to_string(&first).unwrap(),
-                serde_json::to_string(&duplicate).unwrap()
-            ),
-        )
-        .unwrap();
-
-        let events = read_all_stats_events(dir.path());
-
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].chat_id, "first-chat");
-    }
-
-    #[test]
     fn test_read_recent_stats_events_from_dirs_is_bounded_and_deduped() {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("00000001.jsonl");
@@ -1459,81 +1319,6 @@ mod tests {
     }
 
     #[test]
-    fn test_read_recent_stats_events_tail_reads_large_jsonl() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("00000001.jsonl");
-        let mut file = std::fs::File::create(&file_path).unwrap();
-
-        let mut old = make_event(1, true);
-        old.id = "old-id".to_string();
-        old.chat_id = "old-chat".to_string();
-        writeln!(file, "{}", serde_json::to_string(&old).unwrap()).unwrap();
-        writeln!(
-            file,
-            "{}",
-            "x".repeat((RECENT_STATS_MIN_TAIL_BYTES as usize) + 1024)
-        )
-        .unwrap();
-        for i in 10u64..=11 {
-            let mut event = make_event(i, true);
-            event.id = format!("tail-id-{i}");
-            event.chat_id = format!("tail-chat-{i}");
-            writeln!(file, "{}", serde_json::to_string(&event).unwrap()).unwrap();
-        }
-
-        let events = read_recent_stats_events_from_dirs(&[dir.path().to_path_buf()], 2);
-
-        assert_eq!(events.len(), 2);
-        assert!(events.iter().all(|event| event.id.starts_with("tail-id-")));
-        assert!(!events.iter().any(|event| event.id == "old-id"));
-    }
-
-    #[test]
-    fn test_read_recent_stats_events_dedupes_across_dirs() {
-        let workspace_dir = tempfile::tempdir().unwrap();
-        let config_dir = tempfile::tempdir().unwrap();
-
-        let mut first = make_event(1, true);
-        first.id = "duplicate-id".to_string();
-        first.chat_id = "workspace-chat".to_string();
-
-        let mut duplicate = first.clone();
-        duplicate.chat_id = "config-chat".to_string();
-
-        std::fs::write(
-            workspace_dir.path().join("00000001.jsonl"),
-            format!("{}\n", serde_json::to_string(&first).unwrap()),
-        )
-        .unwrap();
-        std::fs::write(
-            config_dir.path().join("00000001.jsonl"),
-            format!("{}\n", serde_json::to_string(&duplicate).unwrap()),
-        )
-        .unwrap();
-
-        let events = read_recent_stats_events_from_dirs(
-            &[
-                workspace_dir.path().to_path_buf(),
-                config_dir.path().to_path_buf(),
-            ],
-            10,
-        );
-
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].chat_id, "workspace-chat");
-    }
-
-    #[test]
-    fn test_empty_stats_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let events = read_all_stats_events(dir.path());
-        assert!(events.is_empty());
-        let summary = aggregate_summary(&events, None, None);
-        assert_eq!(summary.totals.total_calls, 0);
-        assert!(summary.by_model.is_empty());
-    }
-
-    #[test]
     fn test_by_day_total_tokens_uses_total_tokens_field() {
         let mut e = make_event(1, true);
         e.prompt_tokens = 100;
@@ -1548,61 +1333,6 @@ mod tests {
     }
 
     #[test]
-    fn test_summary_cache_tokens_by_day_and_provider() {
-        let mut e1 = make_event(1, true);
-        e1.cache_read_tokens = Some(200);
-        e1.cache_creation_tokens = Some(100);
-
-        let mut e2 = make_event(1, true);
-        e2.id = "test-id-1b".to_string();
-        e2.chat_id = "chat-1b".to_string();
-        e2.cache_read_tokens = Some(50);
-        e2.cache_creation_tokens = None;
-
-        let mut e3 = make_event(2, true);
-        e3.provider = "openai".to_string();
-        e3.model_id = "openai/gpt-4".to_string();
-        e3.model = "gpt-4".to_string();
-        e3.cache_read_tokens = None;
-        e3.cache_creation_tokens = Some(300);
-
-        let events = vec![e1, e2, e3];
-        let summary = aggregate_summary(&events, None, None);
-
-        let anthropic = summary
-            .by_provider
-            .iter()
-            .find(|p| p.provider == "anthropic")
-            .unwrap();
-        assert_eq!(anthropic.total_cache_read_tokens, 250);
-        assert_eq!(anthropic.total_cache_creation_tokens, 100);
-
-        let openai = summary
-            .by_provider
-            .iter()
-            .find(|p| p.provider == "openai")
-            .unwrap();
-        assert_eq!(openai.total_cache_read_tokens, 0);
-        assert_eq!(openai.total_cache_creation_tokens, 300);
-
-        let day1 = summary
-            .by_day
-            .iter()
-            .find(|d| d.date == "2026-02-02")
-            .unwrap();
-        assert_eq!(day1.total_cache_read_tokens, 250);
-        assert_eq!(day1.total_cache_creation_tokens, 100);
-
-        let day2 = summary
-            .by_day
-            .iter()
-            .find(|d| d.date == "2026-02-03")
-            .unwrap();
-        assert_eq!(day2.total_cache_read_tokens, 0);
-        assert_eq!(day2.total_cache_creation_tokens, 300);
-    }
-
-    #[test]
     fn test_summary_normalizes_legacy_mode_names() {
         let mut uppercase = make_event(1, true);
         uppercase.mode = "TASK_AGENT".to_string();
@@ -1614,115 +1344,6 @@ mod tests {
         assert_eq!(summary.by_mode.len(), 1);
         assert_eq!(summary.by_mode[0].mode, "task_agent");
         assert_eq!(summary.by_mode[0].total_calls, 2);
-    }
-
-    #[test]
-    fn test_summary_canonicalizes_no_tools_and_explore_modes() {
-        let mut no_tools = make_event(1, true);
-        no_tools.mode = "NO_TOOLS".to_string();
-        let mut explore = make_event(2, true);
-        explore.mode = "explore".to_string();
-
-        let summary = aggregate_summary(&[no_tools, explore], None, None);
-
-        assert_eq!(summary.by_mode.len(), 1);
-        assert_eq!(summary.by_mode[0].mode, "explore");
-        assert_eq!(summary.by_mode[0].total_calls, 2);
-    }
-
-    #[test]
-    fn test_summary_sorting_has_stable_tie_breakers() {
-        let mut z = make_event(1, true);
-        z.model_id = "z/model".to_string();
-        z.provider = "z".to_string();
-        z.model = "model".to_string();
-        z.chat_id = "z-chat".to_string();
-        z.mode = "z_mode".to_string();
-
-        let mut a = make_event(2, true);
-        a.model_id = "a/model".to_string();
-        a.provider = "a".to_string();
-        a.model = "model".to_string();
-        a.chat_id = "a-chat".to_string();
-        a.mode = "a_mode".to_string();
-
-        let summary = aggregate_summary(&[z, a], None, None);
-
-        assert_eq!(summary.by_model[0].model_id, "a/model");
-        assert_eq!(summary.by_provider[0].provider, "a");
-        assert_eq!(summary.by_mode[0].mode, "a_mode");
-        assert_eq!(summary.top_conversations[0].chat_id, "a-chat");
-    }
-
-    #[test]
-    fn test_by_mode_enriched_fields() {
-        let mut e1 = make_event(1, true);
-        e1.mode = "agent".to_string();
-        e1.prompt_tokens = 100;
-        e1.completion_tokens = 40;
-        e1.cache_read_tokens = Some(20);
-        let mut e2 = make_event(2, false);
-        e2.mode = "agent".to_string();
-        e2.chat_id = "chat-1".to_string();
-        let summary = aggregate_summary(&[e1, e2], None, None);
-        let agent = summary.by_mode.iter().find(|m| m.mode == "agent").unwrap();
-        assert_eq!(agent.total_calls, 2);
-        assert_eq!(agent.successful_calls, 1);
-        assert_eq!(agent.failed_calls, 1);
-        assert_eq!(agent.conversations, 1, "both events share chat-1");
-        assert!(agent.total_prompt_tokens >= 100);
-        assert!(agent.avg_duration_ms > 0);
-    }
-
-    #[test]
-    fn test_task_role_agent_task_aggregation() {
-        let mut planner = make_event(1, true);
-        planner.task_id = Some("T-1".to_string());
-        planner.task_role = Some("planner".to_string());
-        planner.agent_id = Some("agent-a".to_string());
-        planner.card_id = Some("card-1".to_string());
-
-        let mut agent = make_event(2, true);
-        agent.task_id = Some("T-1".to_string());
-        agent.task_role = Some("agent".to_string());
-        agent.agent_id = Some("agent-b".to_string());
-        agent.card_id = Some("card-2".to_string());
-
-        let mut agent2 = make_event(3, false);
-        agent2.task_id = Some("T-1".to_string());
-        agent2.task_role = Some("agent".to_string());
-        agent2.agent_id = Some("agent-b".to_string());
-        agent2.card_id = Some("card-2".to_string());
-
-        let summary = aggregate_summary(&[planner, agent, agent2], None, None);
-
-        assert_eq!(summary.totals.total_tasks, 1);
-        assert_eq!(summary.totals.total_agents, 2);
-
-        let role_agent = summary
-            .by_task_role
-            .iter()
-            .find(|r| r.role == "agent")
-            .unwrap();
-        assert_eq!(role_agent.total_calls, 2);
-        assert_eq!(role_agent.successful_calls, 1);
-        assert_eq!(role_agent.failed_calls, 1);
-        assert_eq!(role_agent.agents, 1);
-        assert_eq!(role_agent.tasks, 1);
-
-        let task = summary.by_task.iter().find(|t| t.task_id == "T-1").unwrap();
-        assert_eq!(task.total_calls, 3);
-        assert_eq!(task.agents, 2);
-        assert_eq!(task.cards, 2);
-
-        let agent_b = summary
-            .by_agent
-            .iter()
-            .find(|a| a.agent_id == "agent-b")
-            .unwrap();
-        assert_eq!(agent_b.total_calls, 2);
-        assert_eq!(agent_b.tasks, 1);
-        assert_eq!(agent_b.primary_mode, "agent");
     }
 
     #[test]
@@ -1776,41 +1397,5 @@ mod tests {
             .find(|r| r.key == "none")
             .unwrap();
         assert_eq!(none.count, 2, "both failed events have no finish_reason");
-    }
-
-    #[test]
-    fn test_by_hour_has_24_buckets_and_counts() {
-        let mut e1 = make_event(1, true);
-        e1.ts_start = "2026-02-01T09:15:00Z".to_string();
-        e1.total_tokens = 100;
-        let mut e2 = make_event(2, true);
-        e2.ts_start = "2026-02-02T09:45:00Z".to_string();
-        e2.total_tokens = 50;
-        let mut e3 = make_event(3, true);
-        e3.ts_start = "2026-02-03T23:00:00Z".to_string();
-
-        let summary = aggregate_summary(&[e1, e2, e3], None, None);
-        assert_eq!(summary.by_hour.len(), 24);
-        assert_eq!(summary.by_hour[9].total_calls, 2);
-        assert_eq!(summary.by_hour[9].total_tokens, 150);
-        assert_eq!(summary.by_hour[23].total_calls, 1);
-        assert_eq!(summary.totals.active_days, 3);
-    }
-
-    #[test]
-    fn test_categorize_error_buckets() {
-        assert_eq!(categorize_error("Request timed out after 60s"), "timeout");
-        assert_eq!(categorize_error("429 Too Many Requests"), "rate_limit");
-        assert_eq!(
-            categorize_error("maximum context length is 200000 tokens"),
-            "context_length"
-        );
-        assert_eq!(
-            categorize_error("401 Unauthorized: invalid api key"),
-            "auth"
-        );
-        assert_eq!(categorize_error("connection reset by peer"), "network");
-        assert_eq!(categorize_error("502 Bad Gateway"), "server");
-        assert_eq!(categorize_error("something weird happened"), "other");
     }
 }

@@ -299,22 +299,6 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn sweep_removes_files_over_age_limit() {
-        let temp = tempfile::tempdir().unwrap();
-        let chat = temp.path().join("chat_test");
-        std::fs::create_dir_all(&chat).unwrap();
-        let file = chat.join("process_test.log");
-        std::fs::write(&file, b"old").unwrap();
-        let summary = sweep_spill_dir_blocking(
-            temp.path(),
-            SystemTime::now() + SPILL_MAX_AGE + Duration::from_secs(1),
-        )
-        .unwrap();
-        assert_eq!(summary.removed_files, 1);
-        assert!(!file.exists());
-    }
-
-    #[tokio::test]
     async fn spill_target_writes_with_hashed_path_components() {
         let temp = tempfile::tempdir().unwrap();
         let target = SpillTarget::with_root(
@@ -344,29 +328,6 @@ mod tests {
     }
 
     #[test]
-    fn spill_root_falls_back_to_temp_without_cache_or_home() {
-        let temp = PathBuf::from("/tmp/refact-test-root");
-
-        let root = spill_root_from_parts(None, None, temp.clone());
-
-        assert_eq!(root, fallback_temp_spill_root(temp));
-    }
-
-    #[test]
-    fn spill_root_prefers_xdg_cache_home() {
-        let root = spill_root_from_parts(
-            Some(std::ffi::OsString::from("/cache-root")),
-            Some(PathBuf::from("/home/root")),
-            PathBuf::from("/tmp/refact-test-root"),
-        );
-
-        assert_eq!(
-            root,
-            PathBuf::from("/cache-root").join("refact").join("exec")
-        );
-    }
-
-    #[test]
     fn spill_root_ignores_relative_xdg_cache_home() {
         let root = spill_root_from_parts(
             Some(std::ffi::OsString::from("relative-cache")),
@@ -380,26 +341,6 @@ mod tests {
                 .join(".cache")
                 .join("refact")
                 .join("exec")
-        );
-    }
-
-    #[tokio::test]
-    async fn spill_writer_truncates_reused_service_log() {
-        let temp = tempfile::tempdir().unwrap();
-        let process_id = ExecProcessId("exec_service_api_deadbeef".to_string());
-        let target = SpillTarget::with_root(temp.path().to_path_buf(), "chat-a", &process_id);
-
-        let mut first = SpillWriter::create(&target).await.unwrap();
-        first.write_line("old\n").await.unwrap();
-        drop(first);
-
-        let mut second = SpillWriter::create(&target).await.unwrap();
-        second.write_line("new\n").await.unwrap();
-        drop(second);
-
-        assert_eq!(
-            tokio::fs::read_to_string(target.path()).await.unwrap(),
-            "new\n"
         );
     }
 

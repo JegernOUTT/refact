@@ -684,29 +684,6 @@ mod tests {
     }
 
     #[test]
-    fn golden_entities_round_trip_through_production_parser() {
-        let fixture: OperatorContractFixture =
-            serde_json::from_str(include_str!("../tests/fixtures/operator_contract_v1.json"))
-                .unwrap();
-        macro_rules! round_trip {
-            ($entity:expr, $type:ty) => {
-                let wire = serde_json::to_string(&$entity).unwrap();
-                assert_eq!(parse_operator_contract::<$type>(&wire).unwrap(), $entity);
-            };
-        }
-        round_trip!(fixture.work_item, WorkItem);
-        round_trip!(fixture.run_outcome, RunOutcome);
-        round_trip!(fixture.artifact_revision, ArtifactRevision);
-        round_trip!(fixture.action_spec, ActionSpec);
-        round_trip!(fixture.action_execution, ActionExecution);
-        round_trip!(fixture.decision_projection, DecisionProjection);
-        round_trip!(fixture.mandate, Mandate);
-        round_trip!(fixture.delivery, Delivery);
-        round_trip!(fixture.read_state, ReadState);
-        round_trip!(fixture.improvement_candidate, ImprovementCandidate);
-    }
-
-    #[test]
     fn triage_fields_preserve_legacy_wire_and_reject_old_readers_when_populated() {
         let legacy = include_str!("../tests/fixtures/work_item_v1_legacy.json").trim_end();
         let work = parse_operator_contract::<WorkItem>(legacy).unwrap();

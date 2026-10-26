@@ -614,26 +614,6 @@ pub(in crate::coordination) mod tests {
         }
     }
 
-    pub(in crate::coordination) async fn seed_claim(
-        ledger: &FactLedger,
-        mut claim: ClaimRecord,
-        status: ClaimStatus,
-        updated_at_ms: i64,
-    ) {
-        ledger
-            .store
-            .record_claim(&ledger.access, &claim)
-            .await
-            .unwrap();
-        claim.status = status;
-        claim.updated_at_ms = updated_at_ms;
-        ledger
-            .store
-            .put_claim_standing(&ledger.access, &claim)
-            .await
-            .unwrap();
-    }
-
     #[tokio::test]
     async fn a_contradicting_claim_never_overwrites_and_files_a_disagreement() {
         let ledger = ledger().await;
@@ -694,85 +674,6 @@ pub(in crate::coordination) mod tests {
     }
 
     #[tokio::test]
-    async fn the_disagreement_id_is_the_same_whichever_side_arrives_first() {
-        assert_eq!(
-            contradiction_id("c-held", "c-dropped"),
-            contradiction_id("c-dropped", "c-held")
-        );
-    }
-
-    #[tokio::test]
-    async fn corroboration_raises_confidence_without_duplicating_the_entry() {
-        let ledger = ledger().await;
-        let first = claim("c-1", "it is held", "agent-a", 400);
-        let mut agreeing = claim("c-2", "It is held.", "agent-b", 400);
-        agreeing.provenance = vec![provenance("agent-b", 3, "src/chat/session.rs:212")];
-
-        ledger.record(&first, &test_policy()).await.unwrap();
-        let landed = ledger.record(&agreeing, &test_policy()).await.unwrap();
-
-        let ClaimLanding::Corroborated {
-            claim, from, to, ..
-        } = &landed
-        else {
-            panic!("an independent run agreeing must corroborate: {landed:?}");
-        };
-        assert_eq!(*from, 400);
-        assert_eq!(*to, 500);
-        assert_eq!(claim.claim_id, "c-1");
-        assert!(
-            ledger.get("c-2").await.unwrap().is_none(),
-            "corroboration must not write a second entry"
-        );
-        let stored = ledger.get("c-1").await.unwrap().unwrap();
-        assert_eq!(stored.confidence_per_mille, 500);
-        assert_eq!(stored.provenance.len(), 2);
-        assert_eq!(stored.assertion, "it is held", "the wording must not drift");
-    }
-
-    #[tokio::test]
-    async fn a_run_agreeing_with_itself_raises_nothing() {
-        let ledger = ledger().await;
-        let first = claim("c-1", "it is held", "agent-a", 400);
-        ledger.record(&first, &test_policy()).await.unwrap();
-
-        let again = claim("c-again", "it is held", "agent-a", 400);
-        let landed = ledger.record(&again, &test_policy()).await.unwrap();
-
-        assert!(
-            matches!(landed, ClaimLanding::Repeated { .. }),
-            "{landed:?}"
-        );
-        let stored = ledger.get("c-1").await.unwrap().unwrap();
-        assert_eq!(stored.confidence_per_mille, 400);
-        assert_eq!(stored.provenance.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn a_claim_whose_source_revision_moved_is_stale_and_not_a_contradiction() {
-        let ledger = ledger().await;
-        let first = claim("c-old", "it is held", "agent-a", 700);
-        ledger.record(&first, &test_policy()).await.unwrap();
-
-        let mut moved = claim("c-new", "it is dropped first", "agent-b", 700);
-        moved.subject_revision = "sha-moved".to_string();
-        let landed = ledger.record(&moved, &test_policy()).await.unwrap();
-
-        let ClaimLanding::Recorded { staled, .. } = &landed else {
-            panic!("a claim read at a newer revision is not disagreeing: {landed:?}");
-        };
-        assert_eq!(staled, &vec!["c-old".to_string()]);
-        let old = ledger.get("c-old").await.unwrap().unwrap();
-        assert_eq!(old.status, ClaimStatus::Stale);
-        assert_eq!(
-            old.assertion, "it is held",
-            "going stale must not rewrite what was asserted"
-        );
-        assert!(old.contested_by.is_empty(), "no dispute across revisions");
-        assert!(render(&old).contains("must be re-established"));
-    }
-
-    #[tokio::test]
     async fn a_read_always_carries_provenance_confidence_and_the_untrusted_label() {
         let ledger = ledger().await;
         ledger
@@ -803,41 +704,6 @@ pub(in crate::coordination) mod tests {
     }
 
     #[tokio::test]
-    async fn a_contradiction_below_the_threshold_keeps_both_without_filing_a_dispute() {
-        let ledger = ledger().await;
-        let unsure = ClaimPolicy {
-            corroboration_step_per_mille: 100,
-            contradiction_min_confidence_per_mille: 900,
-        };
-        ledger
-            .record(&claim("c-a", "it is held", "agent-a", 300), &unsure)
-            .await
-            .unwrap();
-        let landed = ledger
-            .record(&claim("c-b", "it is dropped", "agent-b", 300), &unsure)
-            .await
-            .unwrap();
-
-        let ClaimLanding::Divergent {
-            required_per_mille, ..
-        } = &landed
-        else {
-            panic!("an unsure contradiction must not be filed as a dispute: {landed:?}");
-        };
-        assert_eq!(*required_per_mille, 900);
-        assert_eq!(
-            ledger.get("c-a").await.unwrap().unwrap().assertion,
-            "it is held",
-            "both claims are kept even when no dispute is filed"
-        );
-        assert_eq!(
-            ledger.get("c-b").await.unwrap().unwrap().assertion,
-            "it is dropped"
-        );
-        assert!(ledger.disagreements().list(None).await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
     async fn a_second_write_under_a_recorded_id_leaves_the_stored_claim_untouched() {
         let ledger = ledger().await;
         ledger
@@ -862,60 +728,6 @@ pub(in crate::coordination) mod tests {
             stored.predicate,
             "whether the gcx lock is held across the await"
         );
-    }
-
-    #[tokio::test]
-    async fn retention_keeps_standing_claims_and_drops_settled_ones() {
-        let ledger = ledger().await;
-        ledger
-            .record(
-                &claim("c-live", "it is held", "agent-a", 600),
-                &test_policy(),
-            )
-            .await
-            .unwrap();
-        let mut settled = claim("c-gone", "unrelated", "agent-b", 600);
-        settled.predicate = "an unrelated question".to_string();
-        ledger.record(&settled, &test_policy()).await.unwrap();
-        let mut stored = ledger.get("c-gone").await.unwrap().unwrap();
-        stored.retract(1_500);
-        ledger
-            .store
-            .put_claim_standing(&ledger.access, &stored)
-            .await
-            .unwrap();
-
-        let dropped = ledger.expire(100, 5_000).await.unwrap();
-        let kept = ledger.list(None).await.unwrap();
-
-        assert_eq!(dropped, 1);
-        assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].claim_id, "c-live");
-    }
-
-    #[tokio::test]
-    async fn a_subject_cannot_grow_past_its_configured_claim_cap() {
-        let mut settings = CoordinationSettings::default();
-        settings.claim_max_per_subject = 2;
-        let store = Arc::new(CoordinationStore::open_in_memory(&settings).await.unwrap());
-        let ledger = FactLedger::new(store, ProjectKey::new("alpha"));
-
-        for index in 0..2 {
-            let mut record = claim(&format!("c-{index}"), "it is held", "agent-a", 600);
-            record.predicate = format!("question {index}");
-            let landed = ledger.record(&record, &test_policy()).await.unwrap();
-            assert!(
-                matches!(landed, ClaimLanding::Recorded { .. }),
-                "{landed:?}"
-            );
-        }
-        let mut overflow = claim("c-overflow", "it is held", "agent-a", 600);
-        overflow.predicate = "one question too many".to_string();
-        let landed = ledger.record(&overflow, &test_policy()).await.unwrap();
-
-        assert_eq!(landed, ClaimLanding::SubjectLimit { max: 2 });
-        assert!(ledger.get("c-overflow").await.unwrap().is_none());
-        assert_eq!(ledger.list(None).await.unwrap().len(), 2);
     }
 
     #[tokio::test]

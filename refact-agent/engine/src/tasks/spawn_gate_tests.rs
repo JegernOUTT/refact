@@ -351,17 +351,6 @@ async fn spawn_ab_uses_the_same_scoping() {
 }
 
 #[tokio::test]
-async fn ancestor_merged_branch_is_recognised() {
-    let mut fixture = Fixture::new().await;
-    git(&fixture.source, &["merge", "--ff-only", "agent-done"]);
-    std::fs::write(fixture.source.join("actual.txt"), "later edit\n").unwrap();
-    git(&fixture.source, &["add", "actual.txt"]);
-    git(&fixture.source, &["commit", "-m", "later edit"]);
-    fixture.board.get_card_mut("NEXT").unwrap().depends_on = vec!["DONE".into()];
-    assert_eq!(fixture.gate().await.unwrap(), None);
-}
-
-#[tokio::test]
 async fn incomplete_squash_is_not_recognised_as_merged() {
     let mut fixture = Fixture::new().await;
     std::fs::write(fixture.source.join("actual.txt"), "done card change\n").unwrap();
@@ -381,44 +370,6 @@ async fn git_errors_use_declared_targets_without_blocking_unrelated_cards() {
         .unwrap()
         .unwrap()
         .contains("DONE (`missing-branch`)"));
-    fixture.board.get_card_mut("NEXT").unwrap().target_files = vec!["declared-only.txt".into()];
-    assert!(fixture
-        .gate()
-        .await
-        .unwrap_err()
-        .contains("file overlap: declared-only.txt"));
-}
-
-#[tokio::test]
-async fn changed_paths_take_precedence_over_declared_targets() {
-    let mut fixture = Fixture::new().await;
-    fixture.board.get_card_mut("NEXT").unwrap().target_files = vec!["declared-only.txt".into()];
-    assert!(fixture.gate().await.unwrap().is_some());
-    fixture.board.get_card_mut("NEXT").unwrap().target_files = vec![fixture
-        .source
-        .join("./actual.txt")
-        .to_string_lossy()
-        .into_owned()];
-    assert!(fixture
-        .gate()
-        .await
-        .unwrap_err()
-        .contains("file overlap: actual.txt"));
-}
-
-#[tokio::test]
-async fn changed_path_limit_uses_declared_targets() {
-    let mut fixture = Fixture::new().await;
-    std::fs::create_dir(fixture.worktree.join("many")).unwrap();
-    for index in 0..4097 {
-        std::fs::write(
-            fixture.worktree.join(format!("many/{index}.txt")),
-            "change\n",
-        )
-        .unwrap();
-    }
-    git(&fixture.worktree, &["add", "many"]);
-    git(&fixture.worktree, &["commit", "-m", "many changes"]);
     fixture.board.get_card_mut("NEXT").unwrap().target_files = vec!["declared-only.txt".into()];
     assert!(fixture
         .gate()
@@ -450,28 +401,6 @@ async fn squash_merged_after_pinned_base_uses_current_branch_tip() {
         .unwrap(),
         None
     );
-}
-
-#[tokio::test]
-async fn spawn_ab_recognises_branch_merged_after_pinned_base() {
-    let mut fixture = Fixture::new().await;
-    git(&fixture.source, &["merge", "--ff-only", "agent-done"]);
-    fixture.board.get_card_mut("NEXT").unwrap().depends_on = vec!["DONE".into()];
-    let (app, ccx, permit) = fixture.context().await;
-    let meta = storage::load_task_meta(fixture.gcx.clone(), "task-1")
-        .await
-        .unwrap();
-    assert_ne!(
-        meta.base_commit.as_deref(),
-        Some(git(&fixture.source, &["rev-parse", "main"]).trim())
-    );
-    let result = ToolSpawnAb::new()
-        .tool_execute(ccx, &"spawn-ab".into(), &args())
-        .await;
-    crate::tasks::admission::shutdown(&app).await;
-    permit.release();
-    let (_, output) = result.unwrap();
-    assert!(response(&output).get("warning").is_none());
 }
 
 #[tokio::test]

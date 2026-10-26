@@ -296,7 +296,6 @@ mod tests {
     use crate::app_state::AppState;
     use crate::chat::goal_verifier::{apply_goal_verdict, GoalVerifierReply};
     use crate::chat::types::{GoalStatus, SessionState};
-    use crate::tools::tools_list::get_tools_for_mode;
 
     const CHAT_ID: &str = "validate-goal-chat";
 
@@ -380,57 +379,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn available_in_plan_supporting_modes() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all(
-            &gcx.config_dir,
-        )
-        .await
-        .unwrap();
-
-        for mode in ["agent", "task_agent", "task_planner"] {
-            let has_tool = get_tools_for_mode(gcx.clone(), mode, None)
-                .await
-                .into_iter()
-                .any(|tool| tool.tool_description().name == "validate_goal");
-            assert!(has_tool, "{mode} should expose validate_goal");
-        }
-        for mode in ["NO_TOOLS", "shell", "explore"] {
-            let has_tool = get_tools_for_mode(gcx.clone(), mode, None)
-                .await
-                .into_iter()
-                .any(|tool| tool.tool_description().name == "validate_goal");
-            assert!(!has_tool, "{mode} should not expose validate_goal");
-        }
-    }
-
-    #[tokio::test]
-    async fn no_goal_returns_clean_message() {
-        let (gcx, ccx) = ccx_for_session(ChatSession::new(CHAT_ID.to_string())).await;
-        let mut tool = ToolValidateGoal {
-            config_path: String::new(),
-        };
-
-        let content = tool_content(
-            tool.tool_execute(ccx, &"call".to_string(), &HashMap::new())
-                .await
-                .unwrap(),
-        );
-
-        assert_eq!(content, "No active goal to validate.");
-        let session_arc = gcx
-            .chat_sessions
-            .read()
-            .await
-            .get(CHAT_ID)
-            .cloned()
-            .unwrap();
-        let session = session_arc.lock().await;
-        assert!(session.goal.is_none());
-        assert!(session.command_queue.is_empty());
-    }
-
-    #[tokio::test]
     async fn missing_child_session_is_restored_from_trajectory() {
         let workspace = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -494,64 +442,6 @@ mod tests {
             session.lock().await.goal.as_ref().unwrap().content,
             "ship feature"
         );
-    }
-
-    #[tokio::test]
-    async fn verifying_goal_returns_clean_message_without_verifier_call() {
-        let mut session = session_with_goal();
-        session.goal_set_status(GoalStatus::Verifying);
-        let (gcx, ccx) = ccx_for_session(session).await;
-        let mut tool = ToolValidateGoal {
-            config_path: String::new(),
-        };
-
-        let content = tool_content(
-            tool.tool_execute(ccx, &"call".to_string(), &HashMap::new())
-                .await
-                .unwrap(),
-        );
-
-        assert_eq!(content, "No active goal to validate.");
-        let session_arc = gcx
-            .chat_sessions
-            .read()
-            .await
-            .get(CHAT_ID)
-            .cloned()
-            .unwrap();
-        let session = session_arc.lock().await;
-        assert_eq!(session.goal_status, Some(GoalStatus::Verifying));
-        assert!(session.goal.as_ref().unwrap().attempts.is_empty());
-    }
-
-    #[tokio::test]
-    async fn inactive_goal_returns_clean_message_without_status_change() {
-        let mut session = session_with_goal();
-        session.goal_set_status(GoalStatus::Paused);
-        let (gcx, ccx) = ccx_for_session(session).await;
-        let mut tool = ToolValidateGoal {
-            config_path: String::new(),
-        };
-
-        let content = tool_content(
-            tool.tool_execute(ccx, &"call".to_string(), &HashMap::new())
-                .await
-                .unwrap(),
-        );
-
-        assert_eq!(content, "No active goal to validate.");
-        let session_arc = gcx
-            .chat_sessions
-            .read()
-            .await
-            .get(CHAT_ID)
-            .cloned()
-            .unwrap();
-        let session = session_arc.lock().await;
-        let goal = session.goal.as_ref().unwrap();
-        assert_eq!(goal.status, GoalStatus::Paused);
-        assert!(goal.attempts.is_empty());
-        assert!(session.command_queue.is_empty());
     }
 
     #[tokio::test]

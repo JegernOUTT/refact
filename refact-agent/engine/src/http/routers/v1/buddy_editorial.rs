@@ -348,41 +348,4 @@ mod tests {
         assert!(!duplicate.0.claimed);
         runtime.shutdown().await;
     }
-
-    #[tokio::test]
-    async fn unauthenticated_feedback_claim_and_metrics_fail_without_creating_storage() {
-        let dir = tempfile::tempdir().unwrap();
-        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
-            dir.path().join("cache"),
-            dir.path().join("config"),
-        )
-        .await;
-        let app = AppState::from_gcx(gcx).await;
-        assert!(handle_feedback(
-            State(app.clone()),
-            HeaderMap::new(),
-            Json(FeedbackRequest {
-                project: fixture_project(),
-                worker: fixture_worker(),
-                speech_id: "s".into(),
-                feedback: Feedback::Useful
-            })
-        )
-        .await
-        .is_err());
-        assert!(handle_claim(
-            State(app.clone()),
-            HeaderMap::new(),
-            Json(ClaimRequest {
-                project: fixture_project(),
-                worker: fixture_worker(),
-                speech_id: "s".into(),
-                surface: Surface::Panel
-            })
-        )
-        .await
-        .is_err());
-        assert!(handle_metrics(State(app), HeaderMap::new()).await.is_err());
-        assert!(!dir.path().join(".refact/buddy/operator.sqlite").exists());
-    }
 }

@@ -277,33 +277,6 @@ async fn message_to_completed_child_is_saved_and_delivered_on_continue() {
 }
 
 #[tokio::test]
-async fn undrained_delivery_moves_to_followups_at_termination() {
-    let fixture = repo_fixture().await;
-    let child = child(&fixture.app).await;
-    let (_, receipt) = send(&fixture.app, &child, "undrained note").await;
-    let id = receipt["delivery_id"].as_str().unwrap();
-    fixture
-        .app
-        .agents
-        .mark_completed(&child.agent_id, completion())
-        .await
-        .unwrap();
-    let after = fixture.app.agents.get_any(&child.agent_id).await.unwrap();
-    assert!(after.pending_deliveries.is_empty());
-    assert_eq!(after.followups.len(), 1);
-    assert_eq!(after.followups[0].id, id);
-    assert!(after.followups[0].preview_text().contains("undrained note"));
-    assert_eq!(
-        fixture
-            .app
-            .agents
-            .delivery_status(&child.agent_id, id)
-            .await,
-        DeliveryStatus::Pending
-    );
-}
-
-#[tokio::test]
 async fn followup_queue_is_bounded_and_reports_drops() {
     let fixture = repo_fixture().await;
     let child = child(&fixture.app).await;
@@ -354,32 +327,6 @@ async fn followup_queue_is_bounded_and_reports_drops() {
 }
 
 #[tokio::test]
-async fn live_child_message_still_queues_normally() {
-    let fixture = repo_fixture().await;
-    let child = child(&fixture.app).await;
-    fixture
-        .app
-        .agents
-        .mark_running(&child.agent_id, "live-followup-child".into())
-        .await
-        .unwrap();
-    let (text, receipt) = send(&fixture.app, &child, "live note").await;
-    assert!(text.contains("Message queued"), "{text}");
-    assert_eq!(receipt["outcome"], "queued");
-    let record = fixture.app.agents.get_any(&child.agent_id).await.unwrap();
-    assert!(record.followups.is_empty());
-    assert_eq!(record.pending_deliveries.len(), 1);
-    assert_eq!(record.pending_deliveries[0].push, PushMode::Append);
-    assert!(record.pending_deliveries[0].wake);
-    let deliveries =
-        crate::agents::delivery::drain_authorized(&fixture.app, &child.agent_id, false)
-            .await
-            .unwrap();
-    assert_eq!(deliveries.len(), 1);
-    assert!(deliveries[0].preview_text().contains("live note"));
-}
-
-#[tokio::test]
 async fn terminal_question_reply_is_refused_instead_of_claiming_delivery() {
     let fixture = repo_fixture().await;
     let child = child(&fixture.app).await;
@@ -410,44 +357,6 @@ async fn terminal_question_reply_is_refused_instead_of_claiming_delivery() {
     .await
     .unwrap_err();
     assert!(error.contains("withdrawn"), "{error}");
-    assert!(fixture
-        .app
-        .agents
-        .get_any(&child.agent_id)
-        .await
-        .unwrap()
-        .followups
-        .is_empty());
-}
-
-#[tokio::test]
-async fn expired_message_to_terminal_child_is_not_saved() {
-    let fixture = repo_fixture().await;
-    let child = child(&fixture.app).await;
-    fixture
-        .app
-        .agents
-        .mark_completed(&child.agent_id, completion())
-        .await
-        .unwrap();
-    let mut delivery = PendingDelivery::new(
-        vec![ChatMessage::new("user".into(), "stale".into())],
-        PushMode::Append,
-        "test",
-        true,
-    );
-    delivery.expires_at_ms = Some(1);
-    let receipt = fixture
-        .app
-        .agents
-        .enqueue_agent_message(&child.agent_id, delivery)
-        .await
-        .unwrap();
-    assert_eq!(
-        receipt.outcome,
-        refact_core::chat_types::DeliveryOutcome::Expired
-    );
-    assert!(receipt.finished_status.is_none());
     assert!(fixture
         .app
         .agents

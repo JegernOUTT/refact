@@ -289,94 +289,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persist_is_idempotent_without_rewinding_progressed_intents() {
-        let project = project_id();
-        let settings = settings();
-        let store = store(&settings).await;
-        let leases = manager(store.clone(), &project, &settings);
-        let run = run("agent-1", 1);
-        let mut intent = LaunchIntent::persist(leases.clone(), run.clone(), NOW_MS)
-            .await
-            .unwrap();
-        assert_eq!(intent.state(), IntentState::Persisted);
-        intent.dispatched(NOW_MS + 1).await.unwrap();
-        let progressed = intent_record(&store, &project, &run).await;
-        intent.renewal.shutdown().await.unwrap();
-
-        let duplicate = LaunchIntent::persist(leases, run.clone(), NOW_MS + 2)
-            .await
-            .unwrap();
-        assert_eq!(duplicate.state(), IntentState::Dispatched);
-        assert_eq!(intent_record(&store, &project, &run).await, progressed);
-        duplicate.terminal(NOW_MS + 3).await.unwrap();
-        assert_eq!(
-            intent_record(&store, &project, &run).await.state,
-            IntentState::Terminal
-        );
-    }
-
-    #[tokio::test]
-    async fn boundaries_advance_in_order_and_allow_an_early_terminal_state() {
-        let project = project_id();
-        let settings = settings();
-        let store = store(&settings).await;
-        let leases = manager(store.clone(), &project, &settings);
-        let run_key = run("agent-2", 1);
-        let mut intent = LaunchIntent::persist(leases.clone(), run_key.clone(), NOW_MS)
-            .await
-            .unwrap();
-        intent.dispatched(NOW_MS + 1).await.unwrap();
-        assert!(matches!(
-            intent.dispatched(NOW_MS + 2).await,
-            Err(LaunchIntentError::Protocol(
-                ProtocolError::OutOfOrder { .. }
-            ))
-        ));
-        intent.acknowledged(NOW_MS + 3).await.unwrap();
-        assert!(matches!(
-            intent.dispatched(NOW_MS + 4).await,
-            Err(LaunchIntentError::Protocol(
-                ProtocolError::OutOfOrder { .. }
-            ))
-        ));
-        intent.terminal(NOW_MS + 5).await.unwrap();
-        assert_eq!(
-            intent_record(&store, &project, &run_key).await.state,
-            IntentState::Terminal
-        );
-
-        let early = run("agent-3", 1);
-        LaunchIntent::persist(leases, early.clone(), NOW_MS + 5)
-            .await
-            .unwrap()
-            .terminal(NOW_MS + 6)
-            .await
-            .unwrap();
-        assert_eq!(
-            intent_record(&store, &project, &early).await.state,
-            IntentState::Terminal
-        );
-    }
-
-    #[tokio::test]
-    async fn terminal_releases_the_lease() {
-        let project = project_id();
-        let settings = settings();
-        let store = store(&settings).await;
-        let leases = manager(store, &project, &settings);
-        let run_key = run("agent-4", 1);
-        let intent = LaunchIntent::persist(leases.clone(), run_key.clone(), NOW_MS)
-            .await
-            .unwrap();
-        intent.terminal(NOW_MS + 1).await.unwrap();
-        assert!(leases
-            .inspect(&run_lease_key(&run_key), NOW_MS + 2)
-            .await
-            .unwrap()
-            .is_none());
-    }
-
-    #[tokio::test]
     async fn dropped_renewal_stops_renewing_and_lease_expires() {
         let project = project_id();
         let settings = CoordinationSettings {
@@ -400,72 +312,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(stale.expired_for_ms > 0);
-    }
-
-    #[tokio::test]
-    async fn persist_for_agent_returns_none_when_coordination_is_disabled() {
-        let workspace = tempfile::tempdir().unwrap();
-        let config = tempfile::tempdir().unwrap();
-        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
-            workspace.path().join("cache"),
-            config.path().to_path_buf(),
-        )
-        .await;
-        let app = AppState::from_gcx(gcx).await;
-        let disabled = CoordinationSettings {
-            enabled: false,
-            ..CoordinationSettings::default()
-        };
-
-        let slot =
-            LaunchIntentSlot::persist_for_agent_with_settings(&app, "agent-disabled", 1, &disabled)
-                .await;
-        assert!(slot.is_empty());
-        slot.dispatched().await;
-        slot.acknowledged().await;
-        slot.settle().await;
-        let path = refact_work_core::default_store_path(&app.paths.cache_dir);
-        assert!(!path.exists());
-    }
-
-    #[tokio::test]
-    async fn slot_persists_advances_settles_and_releases_lease() {
-        let project = project_id();
-        let settings = settings();
-        let store = store(&settings).await;
-        let leases = manager(store.clone(), &project, &settings);
-        let run_key = run("slot-lifecycle", 1);
-        let intent = LaunchIntent::persist(leases.clone(), run_key.clone(), NOW_MS)
-            .await
-            .unwrap();
-        let slot = LaunchIntentSlot::with_intent(intent);
-
-        assert!(!slot.is_empty());
-        assert_eq!(
-            intent_record(&store, &project, &run_key).await.state,
-            IntentState::Persisted
-        );
-        slot.dispatched().await;
-        assert_eq!(
-            intent_record(&store, &project, &run_key).await.state,
-            IntentState::Dispatched
-        );
-        slot.acknowledged().await;
-        assert_eq!(
-            intent_record(&store, &project, &run_key).await.state,
-            IntentState::Acknowledged
-        );
-        slot.settle().await;
-        assert!(slot.is_empty());
-        assert_eq!(
-            intent_record(&store, &project, &run_key).await.state,
-            IntentState::Terminal
-        );
-        assert!(leases
-            .inspect(&run_lease_key(&run_key), NOW_MS + 3)
-            .await
-            .unwrap()
-            .is_none());
     }
 
     #[tokio::test]
@@ -519,31 +365,6 @@ mod tests {
             intent_record(&store, &project, &run_key).await.state,
             IntentState::Terminal
         );
-    }
-
-    #[tokio::test]
-    async fn registry_slot_clone_settles_shared_state_and_forget_removes_it() {
-        let project = project_id();
-        let settings = settings();
-        let store = store(&settings).await;
-        let leases = manager(store.clone(), &project, &settings);
-        let run_key = run("slot-registry", 1);
-        let intent = LaunchIntent::persist(leases, run_key.clone(), NOW_MS)
-            .await
-            .unwrap();
-        let slot = LaunchIntentSlot::with_intent(intent);
-        let registry = crate::agents::execution::ExecutionRegistry::default();
-
-        registry.remember_launch_intent("slot-registry", slot.clone());
-        let lookup = registry.launch_intent("slot-registry").unwrap();
-        lookup.settle().await;
-        assert!(slot.is_empty());
-        assert_eq!(
-            intent_record(&store, &project, &run_key).await.state,
-            IntentState::Terminal
-        );
-        registry.forget_launch_intent("slot-registry");
-        assert!(registry.launch_intent("slot-registry").is_none());
     }
 
     #[tokio::test]

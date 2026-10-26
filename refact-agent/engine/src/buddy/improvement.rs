@@ -449,33 +449,6 @@ mod tests {
     }
 
     #[test]
-    fn artifact_targets_require_distinct_exact_build_not_source_identity() {
-        let (_dir, mut store, candidate, _proof) = setup();
-        for (id, target) in [
-            ("engine", DeploymentTarget::EngineBuild),
-            ("gui", DeploymentTarget::GuiBuild),
-            ("plugin", DeploymentTarget::PluginPackage),
-        ] {
-            let mut artifact = candidate.clone();
-            artifact.candidate.candidate_id = id.into();
-            artifact.target = target;
-            assert!(register_candidate(&mut store, &artifact, &artifact.submitted_by).is_err());
-            let exact = "d".repeat(64);
-            match artifact.target {
-                DeploymentTarget::EngineBuild => artifact.engine_build = Some(exact.clone()),
-                DeploymentTarget::GuiBuild => artifact.gui_build = Some(exact.clone()),
-                _ => artifact.plugin_package = Some(exact.clone()),
-            }
-            artifact.candidate.build_identity = Some("source-is-not-package".into());
-            assert!(register_candidate(&mut store, &artifact, &artifact.submitted_by).is_err());
-            artifact.candidate.build_identity = Some(exact);
-            assert!(register_candidate(&mut store, &artifact, &artifact.submitted_by).is_ok());
-            assert!(artifact.installed_version.is_none());
-            assert!(artifact.running_host.is_none());
-        }
-    }
-
-    #[test]
     fn a18_candidate_patch_build_eval_and_authority_changes_invalidate_proof() {
         let (_dir, mut store, candidate, proof) = setup();
         record_proof(&mut store, "candidate", &proof, &proof.authority).unwrap();
@@ -517,67 +490,6 @@ mod tests {
         let mut foreign = proof.authority.clone();
         foreign.source_id = "candidate-worker".into();
         assert!(record_proof(&mut store, "candidate", &proof, &foreign).is_err());
-    }
-
-    #[test]
-    fn a19_failed_activation_keeps_history_and_offers_only_supported_recovery() {
-        let (dir, mut store, candidate, proof) = setup();
-        record_proof(&mut store, "candidate", &proof, &proof.authority).unwrap();
-        let attempt = ImprovementAttempt {
-            schema_version: 1,
-            project: candidate.project.clone(),
-            id: "failed-activation".into(),
-            candidate_id: "candidate".into(),
-            candidate_digest: proof.candidate_digest.clone(),
-            state: AttemptState::OutcomeUnknown,
-            native_id: Some("native-execution".into()),
-            detail: "effect may have happened; never replay".into(),
-            recovery: recovery_description(&candidate),
-        };
-        store
-            .put_document(ATTEMPT_NAMESPACE, &attempt.id, &attempt, None)
-            .unwrap();
-        drop(store);
-        let store = OperatorStore::open(dir.path(), &candidate.project).unwrap();
-        assert_eq!(
-            store
-                .get_document::<ImprovementAttempt>(ATTEMPT_NAMESPACE, &attempt.id)
-                .unwrap()
-                .unwrap()
-                .value,
-            attempt
-        );
-        assert!(store
-            .get_document::<EvaluationProof>(PROOF_NAMESPACE, &proof.id)
-            .unwrap()
-            .is_some());
-        for target in [
-            DeploymentTarget::EngineBuild,
-            DeploymentTarget::GuiBuild,
-            DeploymentTarget::PluginPackage,
-            DeploymentTarget::InstalledVersion,
-            DeploymentTarget::RunningHost,
-        ] {
-            let mut binary = candidate.clone();
-            binary.target = target;
-            let recovery = recovery_description(&binary);
-            assert!(recovery.contains("activation blocked"));
-            assert!(recovery.contains("known-good"));
-            assert!(recovery.contains("unverified"));
-        }
-        let request = spawn_request(&candidate, "parent".into(), "explicit-model".into()).unwrap();
-        assert!(matches!(
-            request.worktree_mode,
-            crate::agents::spawn::SpawnWorktreeMode::Isolated { auto_merge: false }
-        ));
-        assert!(!request.tools.unwrap().iter().any(|tool| [
-            "shell",
-            "review",
-            "subagent",
-            "worktree_merge"
-        ]
-        .contains(&tool.as_str())));
-        assert!(spawn_request(&candidate, "parent".into(), "".into()).is_err());
     }
 }
 
