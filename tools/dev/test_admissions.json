@@ -227,6 +227,146 @@
       "author": "chat:2f94f8e0-9e9c-408c-a1d8-41d7858da746",
       "reviewer": "background_agent:bgagent-8c2d7d13-a8d7-4a36-91bf-74495ed6c6e3",
       "review_evidence": "Independent semantic review subchat-6f8421d2-1dbb-424c-901c-b9aff86faef0 final report; inspected final Rust diff and executed negative/restored logs. Earlier independent reviews ca819700-ac2c-4173-a402-7cfc2e4d0b9c and eaa44de5-2937-453d-a880-c8f290ea5726; discovered persistence race fixed before final approval."
+    },
+    {
+      "fingerprint": "2b6dbf17cb8a6abc1ba7e1ec6c71090cb09ffc1dd8b0c4f954aea10b480ad408",
+      "occurrences": 1,
+      "failure_mode": "Budget fitter rewrites payloads already within budget, or fails to shrink an oversized opaque image under the base64 budget, or distorts aspect ratio.",
+      "importance": "Providers reject inline images over ~5MB base64; needless rewrites degrade quality.",
+      "nearest_retained": {
+        "fingerprint": "d0ce58abff3f235cef6c5586b717b060ad932a8403f142dcb98c0dc66b3b4f74",
+        "why_insufficient": "Retained resize test covers resize_to_policy dimension caps only, never base64 budget, early return or JPEG fallback."
+      },
+      "oracle": "Exact None at budget==len; at 30000: mime image/jpeg, len<=budget, dims strictly < 240x160, aspect within 0.02 of 1.5.",
+      "prerequisites": "Seeded opaque PNG is asserted greater than four times the requested budget; executed shipping fitter test confirmed all full-size JPEG candidates exceed 30000 and a downscaled image fits. Input byte size alone is not claimed to prove compression cannot fit.",
+      "shipping_implementation": "refact_core::image_policy::fit_image_base64_to_budget (shipping decode, EXIF orientation, alpha detection, PNG/JPEG re-encode, downscale loop); test only synthesizes inputs.",
+      "determinism": "Deterministic LCG-seeded in-memory synthetic images; no IO, clocks, sleeps, network or credentials.",
+      "layer": "refact-core unit",
+      "why_cheapest": "Pure function unit.",
+      "meaningful_cases": 2,
+      "critical": false,
+      "criticality_reason": "Ordinary outbound payload size/format contract; no authorization, privacy, durable-write, ownership or concurrency boundary; reviewers classified it ordinary.",
+      "removed_coverage": "None.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Removing the len<=budget early return fails assert_eq(None); no-downscale or over-budget output fails len/dimension asserts; non-uniform resize fails aspect.",
+        "evidence": "Parent execution exec_0662db92: cargo test -p refact-core image_policy, final source including exhaustion and EXIF, 5 passed 0 failed; warmed test execution 9.82s. Static counterfactual witness only, not an executed mutant. cargo fmt --check passed."
+      },
+      "author": "chat:388bfa0a-0218-4701-81ae-21f89628286f",
+      "reviewer": "review:rv-8178d7b9:tests",
+      "review_evidence": "Parent-attested independent pipeline reviews rv-e0a29631 (spec/tests) and rv-8178d7b9 (diff/simplicity/tests) approved all five tests as ordinary semantic contracts; rv-8178d7b9 requested the 16x16/budget-8 exhaustion assertion, added verbatim to the alpha test (no new physical test). Evidence provenance: parent-reviewed full tool report; review artifacts not read by this admission author."
+    },
+    {
+      "fingerprint": "951b7523cac015188ef16b29dd11b3a5eb99541d0f2c5bdd1a3e5a28bb52d517",
+      "occurrences": 1,
+      "failure_mode": "Fitter flattens visibly transparent images to JPEG, returns unattributed errors for undecodable payloads, or fails to terminate with an error when no encoding fits.",
+      "importance": "Transparent screenshots lose content when flattened; callers need diagnosable bounded failure.",
+      "nearest_retained": {
+        "fingerprint": "d0ce58abff3f235cef6c5586b717b060ad932a8403f142dcb98c0dc66b3b4f74",
+        "why_insufficient": "Retained resize test never uses alpha, undecodable input or an unreachable budget, and does not call the fitter."
+      },
+      "oracle": "Alpha at len/3: image/png, len<=budget, width<160, some alpha<255. 'A'*400 at 100: error contains 'cannot fit image/png image (400 base64 bytes) into 100'. 16x16 opaque PNG at 8: error ends with 'no re-encoding or downscale fits'.",
+      "prerequisites": "Alpha a/2 ensures visible transparency; undecodable payload exceeds budget so decode is reached; budget 8 is below any valid image so exhaustion reached at 1x1.",
+      "shipping_implementation": "refact_core::image_policy::fit_image_base64_to_budget (shipping decode, EXIF orientation, alpha detection, PNG/JPEG re-encode, downscale loop); test only synthesizes inputs.",
+      "determinism": "Deterministic LCG-seeded in-memory synthetic images; no IO, clocks, sleeps, network or credentials.",
+      "layer": "refact-core unit",
+      "why_cheapest": "Three branches of one pure function share a small helper.",
+      "meaningful_cases": 3,
+      "critical": false,
+      "criticality_reason": "Ordinary outbound payload size/format contract; no authorization, privacy, durable-write, ownership or concurrency boundary; reviewers classified it ordinary.",
+      "removed_coverage": "None.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Dropping the transparent guard yields image/jpeg (mime/alpha asserts fail); removing context wrapper fails contains; returning a candidate or missing terminal Err fails unwrap_err/ends_with.",
+        "evidence": "Parent execution exec_0662db92: cargo test -p refact-core image_policy, final source including exhaustion and EXIF, 5 passed 0 failed; warmed test execution 9.82s. Static counterfactual witness only, not an executed mutant. cargo fmt --check passed."
+      },
+      "author": "chat:388bfa0a-0218-4701-81ae-21f89628286f",
+      "reviewer": "review:rv-8178d7b9:tests",
+      "review_evidence": "Parent-attested independent pipeline reviews rv-e0a29631 (spec/tests) and rv-8178d7b9 (diff/simplicity/tests) approved all five tests as ordinary semantic contracts; rv-8178d7b9 requested the 16x16/budget-8 exhaustion assertion, added verbatim to the alpha test (no new physical test). Evidence provenance: parent-reviewed full tool report; review artifacts not read by this admission author."
+    },
+    {
+      "fingerprint": "7affa303e4e2473a3ce61895581beda6f7d075418dc7d263bc8e63219dba7e18",
+      "occurrences": 1,
+      "failure_mode": "Fitter re-encodes JPEG without applying EXIF orientation, so stripped metadata leaves images rotated.",
+      "importance": "Re-encoding drops EXIF; skipped orientation visibly rotates user photos.",
+      "nearest_retained": {
+        "fingerprint": "d0ce58abff3f235cef6c5586b717b060ad932a8403f142dcb98c0dc66b3b4f74",
+        "why_insufficient": "Retained resize test uses untagged images and not the budget path."
+      },
+      "oracle": "Output dims exactly (32,48) from 48x32 Rotate90 source, image/jpeg within 3000, top red-dominant, bottom blue-dominant.",
+      "prerequisites": "Payload asserted over budget; shipping decoder asserted to report Rotate90 first.",
+      "shipping_implementation": "refact_core::image_policy::fit_image_base64_to_budget (shipping decode, EXIF orientation, alpha detection, PNG/JPEG re-encode, downscale loop); test only synthesizes inputs.",
+      "determinism": "Deterministic LCG-seeded in-memory synthetic images; no IO, clocks, sleeps, network or credentials.",
+      "layer": "refact-core unit",
+      "why_cheapest": "Smallest deterministic EXIF JPEG; pure function.",
+      "meaningful_cases": 1,
+      "critical": false,
+      "criticality_reason": "Ordinary outbound payload size/format contract; no authorization, privacy, durable-write, ownership or concurrency boundary; reviewers classified it ordinary.",
+      "removed_coverage": "None.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Omitting apply_orientation keeps 48x32 and fails dims and color placement.",
+        "evidence": "Parent execution exec_0662db92: cargo test -p refact-core image_policy, final source including exhaustion and EXIF, 5 passed 0 failed; warmed test execution 9.82s. Static counterfactual witness only, not an executed mutant. cargo fmt --check passed."
+      },
+      "author": "chat:388bfa0a-0218-4701-81ae-21f89628286f",
+      "reviewer": "review:rv-8178d7b9:tests",
+      "review_evidence": "Parent-attested independent pipeline reviews rv-e0a29631 (spec/tests) and rv-8178d7b9 (diff/simplicity/tests) approved all five tests as ordinary semantic contracts; rv-8178d7b9 requested the 16x16/budget-8 exhaustion assertion, added verbatim to the alpha test (no new physical test). Evidence provenance: parent-reviewed full tool report; review artifacts not read by this admission author."
+    },
+    {
+      "fingerprint": "7fef438f859e2216d61ad168ca4aea1914b23064018fff357ef962ebe9139715",
+      "occurrences": 1,
+      "failure_mode": "prepare_chat_passthrough does not apply the outbound budget, or rewrites under-budget images.",
+      "importance": "Fitter unit tests do not prove the shipping request path invokes it.",
+      "nearest_retained": {
+        "fingerprint": "901f8f539c3f1dae18d974b8ad2cead3aed1af47c59a2493f51da4f59af3f516",
+        "why_insufficient": "Retained cache-stability prepare test uses text-only messages and cannot observe image fitting."
+      },
+      "oracle": "Prepared user message has 3 elements; text unchanged; oversized becomes image/jpeg, len<=5_000_000, probed dims (1500,1000); small PNG type and payload byte-identical.",
+      "prerequisites": "1500x1000 noise PNG asserted >5_000_000; multimodal caps installed so text-only replacement path is not taken.",
+      "shipping_implementation": "crate::chat::prepare::prepare_chat_passthrough with shipping fit_outbound_images_to_budget/OUTBOUND_IMAGE_BASE64_BUDGET; test gcx/fake tokenizer provide environment only.",
+      "determinism": "Seeded in-memory pixels and isolated test GlobalContext/caps with bundled fake tokenizer; no provider request or readiness sleeps. Existing setup initializes local test app state and records the current caps timestamp to avoid refresh. No ambient credentials or network are required for image decisions.",
+      "layer": "Engine library in-process",
+      "why_cheapest": "One prepare call is the cheapest wiring proof; no provider/HTTP.",
+      "meaningful_cases": 1,
+      "critical": false,
+      "criticality_reason": "Ordinary outbound payload size/format contract; no authorization, privacy, durable-write, ownership or concurrency boundary; reviewers classified it ordinary.",
+      "removed_coverage": "None.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Removing the fit call leaves image/png >5MB failing jpeg/len asserts; fitting all images fails small byte-identity.",
+        "evidence": "Parent execution exec_98a21373: compiled engine test binary refact_lsp-044e8643d5625d96 chat::prepare::tests --test-threads=1, 3 passed 0 failed in 2.82s, including actual preparation and tool-error tests. Full engine library suite exec_7e88be35 completed: 3661 passed, 0 failed, 11 ignored in 223.68s after compilation. cargo check passed exec_c820185e. No executed mutant witness."
+      },
+      "author": "chat:388bfa0a-0218-4701-81ae-21f89628286f",
+      "reviewer": "review:rv-8178d7b9:tests",
+      "review_evidence": "Parent-attested independent pipeline reviews rv-e0a29631 (spec/tests) and rv-8178d7b9 (diff/simplicity/tests) approved all five tests as ordinary semantic contracts; rv-8178d7b9 requested the 16x16/budget-8 exhaustion assertion, added verbatim to the alpha test (no new physical test). Evidence provenance: parent-reviewed full tool report; review artifacts not read by this admission author."
+    },
+    {
+      "fingerprint": "f16960d23b3fda74237aa701eaa58750f3e82a7460d672b1fb88c121fb7afe62",
+      "occurrences": 1,
+      "failure_mode": "Tool-message image fit failures are swallowed or reported without role/index context.",
+      "importance": "Screenshot tool results are the main oversized source; swallowed errors cause provider rejection or missing images.",
+      "nearest_retained": {
+        "fingerprint": "d0ce58abff3f235cef6c5586b717b060ad932a8403f142dcb98c0dc66b3b4f74",
+        "why_insufficient": "Retained resize_preserves_aspect_ratio_and_does_not_upscale calls only the pixel policy, never the outbound message wrapper or its error propagation; no retained prepare test exercises an invalid oversized tool image."
+      },
+      "oracle": "Err starts with 'outbound image in tool message #0: cannot fit image/png image (400 base64 bytes) into 100'.",
+      "prerequisites": "Tool multimodal element 400>100 and undecodable, so fitter is reached and fails.",
+      "shipping_implementation": "crate::chat::prepare::fit_outbound_images_to_budget over shipping fit_image_base64_to_budget.",
+      "determinism": "Fixed in-memory invalid base64 image payload and budget; no environment, IO, clock, sleep, network or credentials.",
+      "layer": "Engine unit",
+      "why_cheapest": "Direct shipping wrapper call; no gcx.",
+      "meaningful_cases": 1,
+      "critical": false,
+      "criticality_reason": "Ordinary outbound payload size/format contract; no authorization, privacy, durable-write, ownership or concurrency boundary; reviewers classified it ordinary.",
+      "removed_coverage": "None.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Replacing ? with skip makes unwrap_err panic; dropping role/index prefix fails starts_with.",
+        "evidence": "Parent execution exec_98a21373: compiled engine test binary refact_lsp-044e8643d5625d96 chat::prepare::tests --test-threads=1, 3 passed 0 failed in 2.82s, including actual preparation and tool-error tests. Full engine library suite exec_7e88be35 completed: 3661 passed, 0 failed, 11 ignored in 223.68s after compilation. cargo check passed exec_c820185e. No executed mutant witness."
+      },
+      "author": "chat:388bfa0a-0218-4701-81ae-21f89628286f",
+      "reviewer": "review:rv-8178d7b9:tests",
+      "review_evidence": "Parent-attested independent pipeline reviews rv-e0a29631 (spec/tests) and rv-8178d7b9 (diff/simplicity/tests) approved all five tests as ordinary semantic contracts; rv-8178d7b9 requested the 16x16/budget-8 exhaustion assertion, added verbatim to the alpha test (no new physical test). Evidence provenance: parent-reviewed full tool report; review artifacts not read by this admission author."
     }
   ],
   "classifications": [
@@ -4945,16 +5085,19 @@
     },
     {
       "path": "refact-agent/engine/src/chat/prepare.rs",
-      "before_sha256": "e828bb1553d6bcdf5705b736dbe2d3ffd66fd0089d06af0026866c11384a3176",
-      "after_sha256": "aa1379d787556c1a1272e8991b786f8376cfe7d00a1725d1d567f0581aa62e7c",
+      "before_sha256": "aa1379d787556c1a1272e8991b786f8376cfe7d00a1725d1d567f0581aa62e7c",
+      "after_sha256": "2c3adcdce4381a00bf0083b9890e4d0f5b56483ca7ded0cfb30202dd5a99783e",
       "affected_tests": [
-        "fbd8597b0ea556ed5d26b43a92dbb003db965d01a79b36efc572d9e5150d2390"
+        "7fef438f859e2216d61ad168ca4aea1914b23064018fff357ef962ebe9139715",
+        "f16960d23b3fda74237aa701eaa58750f3e82a7460d672b1fb88c121fb7afe62",
+        "fbd8597b0ea556ed5d26b43a92dbb003db965d01a79b36efc572d9e5150d2390",
+        "901f8f539c3f1dae18d974b8ad2cead3aed1af47c59a2493f51da4f59af3f516"
       ],
-      "impact": "refact-agent/engine/src/chat/prepare.rs: canonical non-test residue changes remove 1830 tokens and add 0 tokens. Cleanup evidence identifies unused import: `LlmWireAdapter`; unused import: `LlmWireAdapter`, unused import: `LlmWireAdapter`; unused import: `crate::llm::adapters::openai_chat::OpenAiChatAdapter`; make_model_record_effort; make_model_record_thinking_budget; make_model_record_adaptive; handoff_tool_desc; mode_config; gcx_with_modes; user_message; compression_report_message; frozen_prefix; caps_with_model; gcx_with_model_and_modes; segment_summary_message; reconstructed_report; prepare_with_prefix; try_prepare_with_prefix; default_settings; HashMap; ToolSource,ToolSourceType; COMPRESSION_REPORT_KIND; IndexMap; ModeConfig,ProjectRegistry; AdapterSettings. 12787→6186 global lexical definitions includes intentional coverage loss from case deletions; this support record does not claim strict duplication.",
-      "execution_context": "Same physical Rust path; no retained fingerprint/context relocation relative pinned main. Test-only ownership: inline cfg(test) modules or explicitly cfg(test) helper items; tests/ and *_tests.rs are test harness/module support. Removed dead helper/import/module scaffolding has no surviving intended executing consumer; conservative affected mapping lists surviving same-file tests for dependency review, not a claim all call deleted helpers. See exact residue token hunks and cleanup evidence references.",
-      "author": "support-impact-author-bgagent-1fd43f09",
-      "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
-      "review_evidence": "Independent source/hash review: refact-agent/engine/src/chat/prepare.rs: reviewed removal of {'names': ['unused import: `LlmWireAdapter`'], 'diagnostic_indices': [221], 'before_byte_span': [28472, 28473], 'removed_text': '{', 'evidence': 'rustc unused_imports MachineApplicable deletion; import in cfg(test) scope or test-only file'}, {'names': ['unused import: `LlmWireAdapter`', 'unused import: `LlmWireAdapter`'], 'diagnostic_indices': [221, 221], 'before_byte_span': [28488, 28505], 'removed_text': ', LlmWireAdapter}', 'evidence': 'rustc unused_imports MachineApplicable deletion; import in cfg(test) scope or test-only file'}, {'names': ['unused import: `crate::llm::adapters::openai_chat::OpenAiChatAdapter`'], 'diagnostic_indices': [222], 'before_byte_span': [28511, 28568], 'removed_text': 'use crate::llm::adapters::openai_chat::OpenAiChatAdapter;', 'evidence': 'rustc unused_imports MachineApplicable deletion; import in cfg(test) scope or test-only file'}, make_model_record_effort, make_model_record_thinking_budget, make_model_record_adaptive, handoff_tool_desc, mode_config, gcx_with_modes, user_message, compression_report_message, frozen_prefix, caps_with_model, gcx_with_model_and_modes, segment_summary_message, reconstructed_report, prepare_with_prefix, try_prepare_with_prefix, default_settings, HashMap, ToolSource,ToolSourceType, COMPRESSION_REPORT_KIND, IndexMap, ModeConfig,ProjectRegistry, AdapterSettings within explicit cfg(test) items/modules. 1 actual same-path retained cases keep complete attributed canonical body and enclosing-context hash against pinned MAIN. Conservative affected map contains exactly those current fingerprints."
+      "impact": "Scoped to base 54830275: prepare_chat_passthrough now fits multimodal image elements to the outbound base64 budget after frozen-prompt application and propagates errors. Under-budget and text-only content returns unchanged, so retained prepare callers (strip-thinking unit, cache-stability prepare tests, transitive generation/subchat/goal_verifier) keep semantics. Replaces the prior single-path row (before e828bb15 -> aa1379d7, reduction cleanup by support-impact-author-bgagent-1fd43f09) whose after-hash is this row's before-hash; path keys must be unique.",
+      "execution_context": "Default library/test module context; no hook, feature, ignore or shared fixture rewrite. Parent execution exec_98a21373: compiled engine test binary refact_lsp-044e8643d5625d96 chat::prepare::tests --test-threads=1, 3 passed 0 failed in 2.82s, including actual preparation and tool-error tests. Full engine library suite exec_7e88be35 completed: 3661 passed, 0 failed, 11 ignored in 223.68s after compilation. cargo check passed exec_c820185e. No executed mutant witness.",
+      "author": "chat:388bfa0a-0218-4701-81ae-21f89628286f",
+      "reviewer": "review:rv-8178d7b9:tests",
+      "review_evidence": "Parent-attested independent pipeline reviews rv-e0a29631 (spec/tests) and rv-8178d7b9 (diff/simplicity/tests) approved all five tests as ordinary semantic contracts; rv-8178d7b9 requested the 16x16/budget-8 exhaustion assertion, added verbatim to the alpha test (no new physical test). Evidence provenance: parent-reviewed full tool report; review artifacts not read by this admission author."
     },
     {
       "path": "refact-agent/engine/src/chat/review_reuse.rs",
@@ -7493,6 +7636,23 @@
       "author": "chat:2f94f8e0-9e9c-408c-a1d8-41d7858da746",
       "reviewer": "background_agent:bgagent-8c2d7d13-a8d7-4a36-91bf-74495ed6c6e3",
       "review_evidence": "Independent semantic review subchat-6f8421d2-1dbb-424c-901c-b9aff86faef0 final report; inspected final Rust diff and executed negative/restored logs. Earlier independent reviews ca819700-ac2c-4173-a402-7cfc2e4d0b9c and eaa44de5-2937-453d-a880-c8f290ea5726; discovered persistence race fixed before final approval."
+    },
+    {
+      "path": "refact-agent/engine/crates/refact-core/src/image_policy.rs",
+      "before_sha256": "df3db14befee3d645db22657cab60875f7aa05849effa9e19164acfb802acf94",
+      "after_sha256": "9f2d71433ce2717638885da9adb012c58c976ffd5e0e662209a5efbe55c0fa89",
+      "affected_tests": [
+        "2b6dbf17cb8a6abc1ba7e1ec6c71090cb09ffc1dd8b0c4f954aea10b480ad408",
+        "951b7523cac015188ef16b29dd11b3a5eb99541d0f2c5bdd1a3e5a28bb52d517",
+        "7affa303e4e2473a3ce61895581beda6f7d075418dc7d263bc8e63219dba7e18",
+        "4df7e89fd5f4b37675a3f6fbb3b5bdc07a514556df84625bcdfaef588b461258",
+        "d0ce58abff3f235cef6c5586b717b060ad932a8403f142dcb98c0dc66b3b4f74"
+      ],
+      "impact": "Adds production OUTBOUND_IMAGE_BASE64_BUDGET, fit_image_base64_to_budget and private encode helpers, ImageDecoder import, and cfg(test) noise/decode helpers. resize_to_policy and policy code unchanged; retained policy/resize tests keep bodies and semantics.",
+      "execution_context": "Default library/test module context; no hook, feature, ignore or shared fixture rewrite. Parent execution exec_0662db92: cargo test -p refact-core image_policy, final source including exhaustion and EXIF, 5 passed 0 failed; warmed test execution 9.82s. Static counterfactual witness only, not an executed mutant. cargo fmt --check passed.",
+      "author": "chat:388bfa0a-0218-4701-81ae-21f89628286f",
+      "reviewer": "review:rv-8178d7b9:tests",
+      "review_evidence": "Parent-attested independent pipeline reviews rv-e0a29631 (spec/tests) and rv-8178d7b9 (diff/simplicity/tests) approved all five tests as ordinary semantic contracts; rv-8178d7b9 requested the 16x16/budget-8 exhaustion assertion, added verbatim to the alpha test (no new physical test). Evidence provenance: parent-reviewed full tool report; review artifacts not read by this admission author."
     }
   ]
 }

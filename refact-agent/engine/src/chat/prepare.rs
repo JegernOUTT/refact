@@ -470,6 +470,10 @@ pub async fn prepare_chat_passthrough(
 
     limited_adapted_msgs =
         apply_frozen_system_prompt(limited_adapted_msgs, options.frozen_request_prefix.as_ref());
+    limited_adapted_msgs = fit_outbound_images_to_budget(
+        limited_adapted_msgs,
+        refact_core::image_policy::OUTBOUND_IMAGE_BASE64_BUDGET,
+    )?;
 
     // 10. Build LlmRequest
     // Enforce n=1 for chat - multi-choice not supported in streaming accumulation
@@ -762,6 +766,38 @@ fn replace_images_for_text_only_model(
         .collect()
 }
 
+fn fit_outbound_images_to_budget(
+    mut messages: Vec<ChatMessage>,
+    budget: usize,
+) -> Result<Vec<ChatMessage>, String> {
+    for (message_index, message) in messages.iter_mut().enumerate() {
+        let ChatContent::Multimodal(elements) = &mut message.content else {
+            continue;
+        };
+        for element in elements.iter_mut() {
+            if !element.m_type.starts_with("image/") {
+                continue;
+            }
+            let fitted = refact_core::image_policy::fit_image_base64_to_budget(
+                &element.m_type,
+                &element.m_content,
+                budget,
+            )
+            .map_err(|error| {
+                format!(
+                    "outbound image in {} message #{message_index}: {error}",
+                    message.role
+                )
+            })?;
+            if let Some((mime, payload)) = fitted {
+                element.m_type = mime;
+                element.m_content = payload;
+            }
+        }
+    }
+    Ok(messages)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -790,6 +826,181 @@ mod tests {
 
     fn plan_message(mode: &str, version: u32, content: &str) -> ChatMessage {
         crate::chat::internal_roles::plan(mode, version, content, None)
+    }
+
+    #[tokio::test]
+    async fn prepare_fits_oversized_outbound_image_without_touching_small_one() {
+        use base64::Engine;
+        use refact_core::chat_types::MultimodalElement;
+
+        let model_id = "test/vision";
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut caps = crate::caps::CodeAssistantCaps::default();
+        caps.chat_models.insert(
+            model_id.to_string(),
+            Arc::new(ChatModelRecord {
+                base: crate::caps::BaseModelRecord {
+                    id: model_id.to_string(),
+                    name: model_id.to_string(),
+                    n_ctx: 8192,
+                    tokenizer: "fake".to_string(),
+                    ..Default::default()
+                },
+                supports_multimodality: true,
+                ..Default::default()
+            }),
+        );
+        {
+            let app = AppState::from_gcx(gcx.clone()).await;
+            let mut state = app.model.caps.write().await;
+            state.caps = Some(Arc::new(caps));
+            state.last_attempted_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+        }
+
+        let mut seed = 0x9e37_79b9u32;
+        let noise = image::RgbImage::from_fn(1500, 1000, |_, _| {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            let [r, g, b, _] = seed.to_le_bytes();
+            image::Rgb([r, g, b])
+        });
+        let mut png = Vec::new();
+        noise
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let large = base64::engine::general_purpose::STANDARD.encode(png);
+        assert!(large.len() > 5_000_000);
+        let mut small_png = Vec::new();
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([10, 20, 30, 128]))
+            .write_to(
+                &mut std::io::Cursor::new(&mut small_png),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        let small = base64::engine::general_purpose::STANDARD.encode(small_png);
+        let element = |m_type: &str, m_content: &str| MultimodalElement {
+            m_type: m_type.to_string(),
+            m_content: m_content.to_string(),
+        };
+        let user = ChatMessage {
+            role: "user".to_string(),
+            content: ChatContent::Multimodal(vec![
+                element("text", "look"),
+                element("image/png", &large),
+                element("image/png", &small),
+            ]),
+            ..Default::default()
+        };
+        let messages = vec![user];
+
+        let app = AppState::from_gcx(gcx.clone()).await;
+        let ccx = AtCommandsContext::new_from_app(
+            app,
+            8192,
+            1,
+            false,
+            messages.clone(),
+            "image-budget-chat".to_string(),
+            None,
+            model_id.to_string(),
+            None,
+            None,
+        )
+        .await;
+        let tokenizer = crate::tokens::cached_tokenizer(
+            gcx.clone(),
+            &crate::caps::BaseModelRecord {
+                id: model_id.to_string(),
+                name: model_id.to_string(),
+                tokenizer: "fake".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let options = ChatPrepareOptions {
+            prepend_system_prompt: false,
+            allow_at_commands: false,
+            allow_tool_prerun: false,
+            ..Default::default()
+        };
+        let prepared = prepare_chat_passthrough(
+            gcx,
+            Arc::new(AMutex::new(ccx)),
+            &HasTokenizerAndEot::new(tokenizer),
+            messages,
+            &ThreadParams {
+                model: model_id.to_string(),
+                ..Default::default()
+            },
+            model_id,
+            "agent",
+            vec![],
+            &ChatMeta {
+                chat_id: "image-budget-chat".to_string(),
+                request_attempt_id: "attempt".to_string(),
+                chat_remote: false,
+                chat_mode: "agent".to_string(),
+                current_config_file: String::new(),
+                include_project_info: false,
+                context_tokens_cap: Some(8192),
+                worktree: None,
+            },
+            &mut make_sampling_params(),
+            &options,
+        )
+        .await
+        .unwrap();
+
+        let sent = prepared
+            .llm_request
+            .messages
+            .iter()
+            .find(|message| message.role == "user")
+            .unwrap();
+        let ChatContent::Multimodal(elements) = &sent.content else {
+            panic!("expected multimodal user content");
+        };
+        assert_eq!(elements.len(), 3);
+        assert_eq!(
+            (elements[0].m_type.as_str(), elements[0].m_content.as_str()),
+            ("text", "look")
+        );
+        assert_eq!(elements[1].m_type, "image/jpeg");
+        assert!(elements[1].m_content.len() <= 5_000_000);
+        let fitted = base64::engine::general_purpose::STANDARD
+            .decode(&elements[1].m_content)
+            .unwrap();
+        assert_eq!(
+            refact_core::chat_types::probe_image_dimensions(&fitted).unwrap(),
+            (1500, 1000)
+        );
+        assert_eq!(
+            (elements[2].m_type.as_str(), elements[2].m_content.as_str()),
+            ("image/png", small.as_str())
+        );
+    }
+
+    #[test]
+    fn outbound_image_budget_propagates_tool_image_errors() {
+        let message = ChatMessage {
+            role: "tool".to_string(),
+            tool_call_id: "screenshot".to_string(),
+            content: ChatContent::Multimodal(vec![refact_core::chat_types::MultimodalElement {
+                m_type: "image/png".to_string(),
+                m_content: "A".repeat(400),
+            }]),
+            ..Default::default()
+        };
+        let error = fit_outbound_images_to_budget(vec![message], 100).unwrap_err();
+        assert!(
+            error.starts_with(
+                "outbound image in tool message #0: cannot fit image/png image (400 base64 bytes) into 100"
+            ),
+            "{error}"
+        );
     }
 
     #[test]
