@@ -176,6 +176,7 @@ for (const width of [360, 1280]) {
     await page.goto(
       "/tests/e2e/route-showcase.html?route=buddy&operator=enabled",
     );
+    await page.getByRole("tab", { name: "Reports", exact: true }).click();
     await page.getByRole("button", { name: "Dismissed finding" }).click();
     await page
       .getByRole("region", { name: "Registered actions" })

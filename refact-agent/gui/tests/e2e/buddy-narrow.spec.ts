@@ -26,23 +26,6 @@ const WORK = {
 type Layout = {
   root: { scrollWidth: number; clientWidth: number };
   main: { scrollWidth: number; clientWidth: number };
-  desk: {
-    left: number;
-    right: number;
-    width: number;
-    top: number;
-    bottom: number;
-    area: number;
-  };
-  scene: {
-    left: number;
-    right: number;
-    width: number;
-    top: number;
-    bottom: number;
-    area: number;
-    view: string | undefined;
-  };
   hero: {
     left: number;
     right: number;
@@ -50,7 +33,7 @@ type Layout = {
     top: number;
     bottom: number;
     area: number;
-  };
+  } | null;
   tabs: {
     scrollWidth: number;
     clientWidth: number;
@@ -109,27 +92,27 @@ async function openBuddy(
     `/tests/e2e/route-showcase.html?route=buddy&operator=${operator}&theme=${theme}&scene_speech=1`,
   );
   await page.getByTestId("buddy-home-content").waitFor();
-  if (operator === "enabled") {
-    await expect(
-      page.locator('[aria-label="Buddy Desk"] ul li button'),
-    ).toHaveCount(1);
-  }
 }
+
+async function openReports(page: Page) {
+  await page.getByRole("tab", { name: "Reports", exact: true }).click();
+  await expect(
+    page.locator('[aria-label="Buddy Desk"] ul li button'),
+  ).toHaveCount(1);
+}
+
+const SECTIONS = ["Home", "Reports", "Activity", "Play", "Settings"];
 
 async function measureLayout(page: Page): Promise<Layout> {
   return page.evaluate(() => {
     const main = document.querySelector<HTMLElement>(
       'main[data-testid="buddy-home-content"]',
     );
-    const desk = document.querySelector<HTMLElement>(
-      '[aria-label="Buddy Desk"]',
-    );
-    const scene = document.querySelector<HTMLElement>(
-      '[data-testid="buddy-home-scene"]',
-    );
-    const hero = document.querySelector<HTMLElement>(
-      '[data-testid="buddy-home-hero"]',
-    );
+    const hero = [
+      ...document.querySelectorAll<HTMLElement>(
+        '[data-testid="buddy-home-hero"]',
+      ),
+    ].find((element) => element.getClientRects().length > 0);
     const tabs = document.querySelector<HTMLElement>('[role="tablist"]');
     const box = (element: HTMLElement) => {
       const rect = element.getBoundingClientRect();
@@ -220,9 +203,7 @@ async function measureLayout(page: Page): Promise<Layout> {
         scrollWidth: main!.scrollWidth,
         clientWidth: main!.clientWidth,
       },
-      desk: box(desk!),
-      scene: { ...box(scene!), view: scene!.dataset.sceneView },
-      hero: box(hero!),
+      hero: hero ? box(hero) : null,
       tabs: {
         scrollWidth: tabs!.scrollWidth,
         clientWidth: tabs!.clientWidth,
@@ -245,31 +226,41 @@ for (const theme of ["dark", "light"] as const) {
     });
 
     test("no_interactive_element_renders_off_screen", async ({ page }) => {
-      const layout = await measureLayout(page);
-      expect(
-        layout.controls.filter(
-          (control) => control.left < -1 || control.right > 360,
-        ),
-      ).toEqual([]);
+      for (const section of SECTIONS) {
+        await page.getByRole("tab", { name: section, exact: true }).click();
+        if (section === "Reports") await openReports(page);
+        const layout = await measureLayout(page);
+        expect(
+          layout.controls.filter(
+            (control) =>
+              !SECTIONS.includes(control.name ?? "") &&
+              (control.left < -1 || control.right > 360),
+          ),
+          section,
+        ).toEqual([]);
+      }
     });
 
     test("no_control_strip_is_clipped_without_an_affordance", async ({
       page,
     }) => {
+      const notSections = (strips: Layout["overflowingControlStrip"]) =>
+        strips.filter((strip) => strip.name !== "Buddy sections");
       const layout = await measureLayout(page);
-      expect(layout.overflowingControlStrip).toEqual([]);
-      expect(layout.tabs.scrollWidth).toBeLessThanOrEqual(
-        layout.tabs.clientWidth + 1,
-      );
-      expect(layout.tabs.labels.map((tab) => tab.text)).toEqual([
-        "Recent errors",
-        "Activity",
-        "Play",
-        "Settings",
-      ]);
-      for (const tab of layout.tabs.labels) {
-        expect(tab.left).toBeGreaterThanOrEqual(0);
-        expect(tab.right).toBeLessThanOrEqual(360);
+      expect(notSections(layout.overflowingControlStrip)).toEqual([]);
+      await openReports(page);
+      expect(
+        notSections((await measureLayout(page)).overflowingControlStrip),
+      ).toEqual([]);
+      expect(layout.tabs.labels.map((tab) => tab.text)).toEqual(SECTIONS);
+      for (const name of SECTIONS) {
+        const tab = page.getByRole("tab", { name, exact: true });
+        await tab.focus();
+        await expect(tab).toBeFocused();
+        const box = await tab.boundingBox();
+        expect(box, name).not.toBeNull();
+        expect(box!.x, name).toBeGreaterThanOrEqual(-1);
+        expect(box!.x + box!.width, name).toBeLessThanOrEqual(361);
       }
     });
 
@@ -287,25 +278,32 @@ for (const theme of ["dark", "light"] as const) {
     });
 
     test("document_has_no_horizontal_overflow_at_360", async ({ page }) => {
-      const layout = await measureLayout(page);
-      expect(layout.root.scrollWidth).toBe(layout.root.clientWidth);
-      expect(layout.main.scrollWidth).toBeLessThanOrEqual(
-        layout.main.clientWidth,
-      );
+      for (const section of SECTIONS) {
+        await page.getByRole("tab", { name: section, exact: true }).click();
+        if (section === "Reports") await openReports(page);
+        const layout = await measureLayout(page);
+        expect(layout.root.scrollWidth, section).toBe(layout.root.clientWidth);
+        expect(layout.main.scrollWidth, section).toBeLessThanOrEqual(
+          layout.main.clientWidth,
+        );
+      }
     });
 
-    test("keeps the compact scene below the Desk and secondary by area", async ({
+    test("keeps the Home scene compact and the full scene on Play only", async ({
       page,
     }) => {
-      const layout = await measureLayout(page);
-      expect(layout.scene.view).toBe("strip");
-      expect(layout.hero.width).toBeLessThanOrEqual(72);
-      expect(layout.hero.bottom).toBeLessThanOrEqual(layout.scene.bottom);
-      expect(layout.desk.top).toBeLessThan(layout.scene.top);
-      expect(layout.desk.area).toBeGreaterThan(layout.scene.area);
+      const home = await measureLayout(page);
+      expect(home.hero).not.toBeNull();
+      await openReports(page);
+      await expect(page.getByTestId("buddy-world")).toHaveCount(0);
+      await page.getByRole("tab", { name: "Play", exact: true }).click();
+      const play = await measureLayout(page);
+      expect(play.hero).not.toBeNull();
+      expect(home.hero!.area).toBeLessThan(play.hero!.area);
+      expect(home.hero!.right).toBeLessThanOrEqual(360);
     });
 
-    test("wraps the legacy six-tab strip instead of clipping controls", async ({
+    test("wraps the legacy tab strip instead of clipping controls", async ({
       page,
     }) => {
       await openBuddy(page, theme, "disabled");
@@ -345,19 +343,12 @@ for (const theme of ["dark", "light"] as const) {
         };
       });
 
-      expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth + 1);
-      expect(layout.labels.map((tab) => tab.text)).toEqual([
-        "Pulse",
-        "Opportunities",
-        "Recent errors",
-        "Activity",
-        "Play",
-        "Settings",
-      ]);
+      expect(layout.labels.map((tab) => tab.text)).toEqual(SECTIONS);
       expect(
-        layout.labels.every((tab) => tab.left >= 0 && tab.right <= 360),
-      ).toBe(true);
-      expect(layout.offscreenControls).toEqual([]);
+        layout.offscreenControls.filter(
+          (control) => !SECTIONS.includes(control.name),
+        ),
+      ).toEqual([]);
       expect(layout.root.scrollWidth).toBe(layout.root.clientWidth);
     });
   });

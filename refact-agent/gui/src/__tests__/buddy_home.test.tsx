@@ -375,15 +375,18 @@ describe("BuddyHome single work authority", () => {
       store.dispatch(setBuddySnapshot(makeSnapshot()));
       store.dispatch(push({ name: "buddy", draftId: "expired" }));
       const { user } = render(<BuddyHome />, { store });
+      expect(screen.getByRole("tab", { name: "Reports" })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
       if (mode === "enabled")
         await screen.findByRole("region", { name: "Buddy Desk" });
       else await screen.findByRole("button", { name: "Check work authority" });
-      // Pulse and Opportunities were one-line redirects to the Desk once the
-      // operator owns the work, so they are retired outside legacy mode.
-      for (const name of ["Pulse", "Opportunities"]) {
-        expect(screen.queryByRole("tab", { name })).toBeNull();
-      }
-      for (const name of ["Recent errors", "Activity", "Settings"]) {
+      expect(
+        screen.getByText(/Draft editing sessions may expire/),
+      ).toBeTruthy();
+      expect(screen.queryByTestId("buddy-pulse-card")).toBeNull();
+      for (const name of ["Home", "Reports", "Activity", "Settings"]) {
         await user.click(screen.getByRole("tab", { name }));
         expect(screen.queryByTestId("buddy-opportunities-feed")).toBeNull();
         expect(screen.queryByTestId("buddy-briefing-card")).toBeNull();
@@ -391,11 +394,9 @@ describe("BuddyHome single work authority", () => {
           screen.queryByRole("button", { name: "Dismiss draft" }),
         ).toBeNull();
       }
-      expect(
-        screen.getByText(/Draft editing sessions may expire/),
-      ).toBeTruthy();
       expect(legacyRequests).toBe(0);
-      expect(workRequests).toBe(mode === "enabled" ? 1 : 0);
+      if (mode === "enabled") expect(workRequests).toBeGreaterThan(0);
+      else expect(workRequests).toBe(0);
     },
   );
 });
@@ -1244,7 +1245,7 @@ describe("BuddyHome_renders_all_sections", () => {
     );
 
     const { user } = render(<BuddyHome />, { store });
-    await user.click(screen.getByRole("tab", { name: "Recent errors" }));
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
     const errorsPanel = await screen.findByTestId("buddy-recent-errors-panel");
     expect(within(errorsPanel).getByText("×3")).toBeInTheDocument();
     expect(dismissedIds).toHaveLength(0);
@@ -1327,7 +1328,7 @@ describe("BuddyHome_renders_all_sections", () => {
     );
 
     const { user } = render(<BuddyHome />, { store });
-    await user.click(screen.getByRole("tab", { name: "Recent errors" }));
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
     const errorsPanel = await screen.findByTestId("buddy-recent-errors-panel");
     expect(
       within(errorsPanel).getByText("Model Unavailable"),
@@ -1376,7 +1377,7 @@ describe("BuddyHome_renders_all_sections", () => {
       );
 
       render(<BuddyHome />, { store });
-      fireEvent.mouseDown(screen.getByRole("tab", { name: "Recent errors" }));
+      fireEvent.mouseDown(screen.getByRole("tab", { name: "Activity" }));
       const errorsPanel = await screen.findByTestId(
         "buddy-recent-errors-panel",
       );
@@ -1429,7 +1430,7 @@ describe("BuddyHome_renders_all_sections", () => {
       );
 
       render(<BuddyHome />, { store });
-      fireEvent.mouseDown(screen.getByRole("tab", { name: "Recent errors" }));
+      fireEvent.mouseDown(screen.getByRole("tab", { name: "Activity" }));
       const errorsPanel = await screen.findByTestId(
         "buddy-recent-errors-panel",
       );
@@ -1658,7 +1659,7 @@ describe("BuddyHome_layout_contract", () => {
     ),
   ];
 
-  it("keeps the scene above the tab strip on every tab", async () => {
+  it("mounts one scene at a time: a portrait on Home and the full scene on Play", async () => {
     server.use(
       ...layoutHandlers,
       http.get("*/v1/buddy/opportunities", () =>
@@ -1670,24 +1671,27 @@ describe("BuddyHome_layout_contract", () => {
 
     const { user } = render(<BuddyHome />, { store });
 
-    await screen.findByTestId("buddy-home-content");
-    const hero = screen.getByTestId("buddy-home-hero");
-    expect(screen.getByTestId("buddy-world")).toBeInTheDocument();
-    expect(hero.compareDocumentPosition(screen.getByRole("tablist"))).toBe(4);
+    const overview = await screen.findByTestId("buddy-home-overview");
+    expect(within(overview).getByTestId("buddy-world")).toBeInTheDocument();
+    expect(screen.getAllByTestId("buddy-world")).toHaveLength(1);
+    expect(
+      screen
+        .getByRole("tablist", { name: "Buddy sections" })
+        .compareDocumentPosition(screen.getByTestId("buddy-home-content")),
+    ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
 
-    for (const name of [
-      "Opportunities",
-      "Recent errors",
-      "Activity",
-      "Settings",
-    ]) {
+    for (const name of ["Reports", "Activity", "Settings"]) {
       await user.click(screen.getByRole("tab", { name }));
-      expect(screen.getByTestId("buddy-world")).toBeInTheDocument();
+      expect(screen.queryByTestId("buddy-world")).toBeNull();
     }
+    await user.click(screen.getByRole("tab", { name: "Play" }));
+    const play = screen.getByTestId("buddy-home-play");
+    expect(within(play).getByTestId("buddy-world")).toBeInTheDocument();
+    expect(screen.getAllByTestId("buddy-world")).toHaveLength(1);
   });
 
   it.each([
-    ["enabled", "On"],
+    ["enabled", "Enabled"],
     ["disabled", "Local only"],
     ["unavailable", "Not responding"],
   ] as const)(
@@ -1713,13 +1717,14 @@ describe("BuddyHome_layout_contract", () => {
       const store = setUpStore({ ...CONFIG_STATE });
       store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
 
-      render(<BuddyHome />, { store });
+      const { user } = render(<BuddyHome />, { store });
 
       const pill = await screen.findByTestId("buddy-operator-status");
       await waitFor(() => expect(pill).toHaveAttribute("data-state", mode));
       expect(pill).toHaveTextContent(label);
 
       if (mode === "enabled") {
+        await user.click(screen.getByRole("tab", { name: "Reports" }));
         expect(
           await screen.findByText("Nothing needs you right now."),
         ).toBeInTheDocument();
@@ -1805,7 +1810,7 @@ describe("BuddyHome_layout_contract", () => {
     const { user } = render(<BuddyHome />, { store });
 
     await screen.findByTestId("buddy-home-content");
-    await user.click(screen.getByRole("tab", { name: "Opportunities" }));
+    await user.click(screen.getByRole("tab", { name: "Reports" }));
 
     const feeds = await screen.findAllByTestId("buddy-opportunities-feed");
     expect(feeds).toHaveLength(1);
@@ -1894,7 +1899,7 @@ describe("BuddyHome_layout_contract", () => {
   it("sizes the tab strip so narrow viewports scroll instead of truncating", async () => {
     const css = await readGuiSource("features/Buddy/BuddyHome.module.css");
 
-    expect(readCssBlock(css, ".tabs .tabsList")).toContain(
+    expect(readCssBlock(css, ".sections .tabsList")).toContain(
       "grid-auto-columns: minmax(max-content, 1fr)",
     );
     const heroScene = readCssBlock(
@@ -1955,21 +1960,31 @@ describe("BuddyHome_operator_surface", () => {
     ),
   ];
 
-  it("leads with the Desk and demotes the scene when work is waiting", async () => {
-    let workRequests = 0;
+  it("previews at most three saved items on Home without mounting the Desk", async () => {
+    const workLimits: string[] = [];
+    const items = Array.from({ length: 5 }, (_, index) =>
+      record({
+        ...workItem(`desk-${index}`, `Saved finding ${index}`),
+        problem_summary: `Problem summary ${index}`,
+        scope: `scope-${index}`,
+      }),
+    );
     server.use(
       ...surfaceHandlers,
       http.get("*/v1/buddy/operator/status", () =>
         HttpResponse.json(operatorStatus("enabled")),
       ),
-      http.get("*/v1/buddy/work", () => {
-        workRequests += 1;
-        return HttpResponse.json(
-          envelope([
-            record(workItem("desk-a", "Flaky provider keeps retrying")),
-            record(workItem("desk-b", "Two worktrees drifted apart")),
-          ]),
+      http.get("*/v1/buddy/work", ({ request }) => {
+        const url = new URL(request.url);
+        workLimits.push(
+          `${url.searchParams.get("view")}:${url.searchParams.get("limit")}`,
         );
+        if (url.searchParams.get("view") === "delivered")
+          return HttpResponse.json(envelope([]));
+        return HttpResponse.json({
+          ...envelope(items),
+          next_cursor: 3,
+        });
       }),
     );
     const store = setUpStore({ ...CONFIG_STATE });
@@ -1977,29 +1992,239 @@ describe("BuddyHome_operator_surface", () => {
 
     render(<BuddyHome />, { store });
 
-    const desk = await screen.findByRole("region", { name: "Buddy Desk" });
+    const preview = await screen.findByRole("list", {
+      name: "Saved work preview",
+    });
+    expect(within(preview).getAllByRole("listitem")).toHaveLength(3);
+    expect(within(preview).getByText("Problem summary 0")).toBeInTheDocument();
+    expect(within(preview).getByText(/scope-0/)).toBeInTheDocument();
+    expect(within(preview).queryByText("Saved finding 3")).toBeNull();
     expect(
-      await within(desk).findByText("Flaky provider keeps retrying"),
+      within(screen.getByTestId("buddy-home-saved-work")).getByRole("button", {
+        name: "More reports",
+      }),
     ).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Buddy Desk" })).toBeNull();
+    expect(workLimits).toContain("needs_you:3");
+    expect(workLimits.some((entry) => entry.endsWith(":50"))).toBe(false);
     expect(
-      within(desk).getByText("Two worktrees drifted apart"),
-    ).toBeInTheDocument();
-    expect(desk.compareDocumentPosition(screen.getByRole("tablist"))).toBe(
-      Node.DOCUMENT_POSITION_FOLLOWING,
-    );
-    expect(
-      desk.compareDocumentPosition(screen.getByTestId("buddy-presence")),
-    ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
-    await waitFor(() =>
-      expect(screen.getByTestId("buddy-home-hero").className).toContain(
-        "heroCardDemoted",
+      await screen.findByText(
+        /No report to feature from the most recent saved runs/,
       ),
-    );
-    // The fold probe must reuse the Desk's own cache entry, never a second fetch.
-    expect(workRequests).toBe(1);
+    ).toBeInTheDocument();
   });
 
-  it("keeps the scene at full height when the Desk has nothing waiting", async () => {
+  it("features a delivered report instead of cancelled runs or housekeeping", async () => {
+    server.use(
+      ...surfaceHandlers,
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(operatorStatus("enabled")),
+      ),
+      http.get("*/v1/buddy/work", ({ request }) => {
+        const url = new URL(request.url);
+        if (url.searchParams.get("view") === "delivered")
+          return HttpResponse.json(
+            envelope([
+              record({
+                ...workItem("cancelled-run", "Cancelled run"),
+                state: "cancelled",
+              }),
+              record({
+                ...workItem("commit-run", "Generated commit message"),
+                subject: {
+                  resource_kind: "workflow",
+                  resource_id: "commit_message",
+                  version: "1",
+                },
+                state: "delivered",
+              }),
+              record({
+                ...workItem("real-report", "Real delivered report"),
+                state: "delivered",
+              }),
+            ]),
+          );
+        return HttpResponse.json(envelope([]));
+      }),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+    render(<BuddyHome />, { store });
+
+    const latest = await screen.findByTestId("buddy-home-latest-report");
+    expect(
+      await within(latest).findByText("Real delivered report"),
+    ).toBeInTheDocument();
+    expect(within(latest).queryByText("Cancelled run")).toBeNull();
+    expect(within(latest).queryByText("Generated commit message")).toBeNull();
+    expect(
+      await screen.findByText("Nothing saved needs a decision right now."),
+    ).toBeInTheDocument();
+  });
+
+  it("reports a project mismatch rather than presenting foreign previews as empty", async () => {
+    const foreignProject = {
+      project_id: "foreign-project",
+      canonical_root: "/scratch/foreign-project",
+    };
+    server.use(
+      ...surfaceHandlers,
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(operatorStatus("enabled")),
+      ),
+      http.get("*/v1/buddy/work", ({ request }) => {
+        const delivered =
+          new URL(request.url).searchParams.get("view") === "delivered";
+        return HttpResponse.json({
+          ...envelope([
+            record({
+              ...workItem("foreign-work", "Private foreign report"),
+              project: foreignProject,
+              state: delivered ? "delivered" : "needs_attention",
+            }),
+          ]),
+          project: foreignProject,
+        });
+      }),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+    render(<BuddyHome />, { store });
+    expect(
+      await screen.findByText(
+        "Saved work could not be loaded. This is a connection failure, not an empty queue.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        "Delivered reports could not be loaded right now.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Private foreign report")).toBeNull();
+    expect(
+      screen.queryByText("Nothing saved needs a decision right now."),
+    ).toBeNull();
+  });
+
+  it("opens a Home preview row in Reports with its work id", async () => {
+    const requested: string[] = [];
+    const item = workItem("preview-open", "Preview finding");
+    server.use(
+      ...surfaceHandlers,
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(operatorStatus("enabled")),
+      ),
+      http.get("*/v1/buddy/work", ({ request }) => {
+        const url = new URL(request.url);
+        if (url.searchParams.get("view") === "needs_you")
+          return HttpResponse.json(envelope([record(item)]));
+        return HttpResponse.json(envelope([]));
+      }),
+      http.get("*/v1/buddy/work/preview-open", () => {
+        requested.push("preview-open");
+        return HttpResponse.json(envelope(record(item)));
+      }),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+    const { user } = render(<BuddyHome />, { store });
+
+    await user.click(
+      await screen.findByRole("button", { name: "Open Preview finding" }),
+    );
+    expect(screen.getByRole("tab", { name: "Reports" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(
+      await screen.findByRole("region", { name: "Buddy Desk" }),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(requested).toContain("preview-open"));
+  });
+
+  it("opens Reports first when the page deep-links a work id", async () => {
+    const item = workItem("linked-work", "Linked finding");
+    server.use(
+      ...surfaceHandlers,
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(operatorStatus("enabled")),
+      ),
+      http.get("*/v1/buddy/work", () => HttpResponse.json(envelope([]))),
+      http.get("*/v1/buddy/work/linked-work", () =>
+        HttpResponse.json(envelope(record(item))),
+      ),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+    store.dispatch(
+      push({ name: "buddy", workId: "linked-work", workProjectId: "fixture" }),
+    );
+
+    render(<BuddyHome />, { store });
+
+    expect(screen.getByRole("tab", { name: "Reports" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(
+      await screen.findByRole("region", { name: "Buddy Desk" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("buddy-home-overview")).toBeNull();
+  });
+
+  it("returns to Home after a preview and honours a later deep link", async () => {
+    const first = workItem("first-preview", "First preview");
+    const linked = workItem("later-link", "Later link");
+    const requested: string[] = [];
+    server.use(
+      ...surfaceHandlers,
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(operatorStatus("enabled")),
+      ),
+      http.get("*/v1/buddy/work", ({ request }) => {
+        const url = new URL(request.url);
+        if (url.searchParams.get("view") === "needs_you")
+          return HttpResponse.json(envelope([record(first)]));
+        return HttpResponse.json(envelope([]));
+      }),
+      http.get("*/v1/buddy/work/:id", ({ params }) => {
+        requested.push(String(params.id));
+        return HttpResponse.json(
+          envelope(record(params.id === "later-link" ? linked : first)),
+        );
+      }),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+    const { user } = render(<BuddyHome />, { store });
+
+    await user.click(
+      await screen.findByRole("button", { name: "Open First preview" }),
+    );
+    await waitFor(() => expect(requested).toContain("first-preview"));
+    await user.click(screen.getByRole("tab", { name: "Home" }));
+    expect(screen.getByTestId("buddy-home-overview")).toBeInTheDocument();
+
+    act(() => {
+      store.dispatch(
+        push({
+          name: "buddy",
+          workId: "later-link",
+          workProjectId: "fixture",
+        }),
+      );
+    });
+    expect(screen.getByRole("tab", { name: "Reports" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await waitFor(() => expect(requested).toContain("later-link"));
+  });
+
+  it("shows the full scene at the top of Play with nothing stacked above it", async () => {
     server.use(
       ...surfaceHandlers,
       http.get("*/v1/buddy/operator/status", () =>
@@ -2010,13 +2235,65 @@ describe("BuddyHome_operator_surface", () => {
     const store = setUpStore({ ...CONFIG_STATE });
     store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
 
+    const { user } = render(<BuddyHome />, { store });
+
+    const content = await screen.findByTestId("buddy-home-content");
+    content.scrollTop = 900;
+    await user.click(screen.getByRole("tab", { name: "Play" }));
+    expect(content.scrollTop).toBe(0);
+    const play = screen.getByTestId("buddy-home-play");
+    expect(play.firstElementChild).toBe(screen.getByTestId("buddy-home-hero"));
+    expect(play.firstElementChild?.className).toContain("heroCardExpanded");
+    expect(within(play).getByTestId("buddy-world")).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Buddy Desk" })).toBeNull();
+    expect(screen.queryByTestId("buddy-home-saved-work")).toBeNull();
+    expect(document.activeElement).toBe(
+      screen.getByRole("tab", { name: "Play" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Leave Play" }));
+    const overview = screen.getByTestId("buddy-home-overview");
+    await waitFor(() => expect(document.activeElement).toBe(overview));
+    await user.click(
+      within(overview).getByRole("button", { name: "Open Play" }),
+    );
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByTestId("buddy-home-play"),
+      ),
+    );
+  });
+
+  it("keeps native questions on Home when saved work fails to load", async () => {
+    server.use(
+      ...surfaceHandlers,
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(operatorStatus("enabled")),
+      ),
+      http.get(
+        "*/v1/buddy/work",
+        () => new HttpResponse(null, { status: 503 }),
+      ),
+      http.get(
+        "*/v1/buddy/decisions/current",
+        () => new HttpResponse(null, { status: 503 }),
+      ),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
     render(<BuddyHome />, { store });
 
+    const saved = await screen.findByTestId("buddy-home-saved-work");
     expect(
-      await screen.findByText("Nothing needs you right now."),
+      await within(saved).findByText(/Saved work could not be loaded/),
     ).toBeInTheDocument();
-    expect(screen.getByTestId("buddy-home-hero").className).not.toContain(
-      "heroCardDemoted",
+    expect(within(saved).queryByText(/Nothing saved needs/)).toBeNull();
+    const native = screen.getByTestId("buddy-home-native");
+    expect(
+      await within(native).findByText(/Native questions could not be loaded/),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("buddy-operator-status")).toHaveTextContent(
+      "Enabled",
     );
   });
 
@@ -2069,7 +2346,7 @@ describe("BuddyHome_operator_surface", () => {
     actEnvironment.IS_REACT_ACT_ENVIRONMENT = true;
     try {
       const { user } = render(<BuddyHome />, { store });
-      await user.click(screen.getByRole("tab", { name: "Recent errors" }));
+      await user.click(screen.getByRole("tab", { name: "Activity" }));
       const list = await screen.findByRole("list", {
         name: "Recent warnings",
       });
@@ -2148,7 +2425,7 @@ describe("BuddyHome_operator_surface", () => {
     );
 
     const { user } = render(<BuddyHome />, { store });
-    await user.click(screen.getByRole("tab", { name: "Recent errors" }));
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
     const panel = await screen.findByTestId("buddy-recent-errors-panel");
     expect(panel.querySelectorAll("[data-priority]")).toHaveLength(2);
     expect(within(panel).getByText("Legacy warning first")).toBeInTheDocument();
@@ -2232,7 +2509,7 @@ describe("BuddyHome_operator_surface", () => {
     );
 
     const { user } = render(<BuddyHome />, { store });
-    await user.click(screen.getByRole("tab", { name: "Recent errors" }));
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
     const list = await screen.findByRole("list", { name: "Recent warnings" });
     expect(within(list).getAllByRole("listitem")).toHaveLength(1);
     expect(
@@ -2243,23 +2520,9 @@ describe("BuddyHome_operator_surface", () => {
     ).not.toBeInTheDocument();
   });
 
-  it.each([
-    [
-      "disabled",
-      [
-        "Pulse",
-        "Opportunities",
-        "Recent errors",
-        "Activity",
-        "Play",
-        "Settings",
-      ],
-    ],
-    ["enabled", ["Recent errors", "Activity", "Play", "Settings"]],
-    ["unavailable", ["Recent errors", "Activity", "Settings"]],
-  ] as const)(
-    "renders the %s tab set with no hollow signposts",
-    async (mode, tabs) => {
+  it.each(["disabled", "enabled", "unavailable"] as const)(
+    "renders the same five sections when %s and lands on Home",
+    async (mode) => {
       server.use(
         ...surfaceHandlers,
         http.get("*/v1/buddy/operator/status", () =>
@@ -2270,18 +2533,43 @@ describe("BuddyHome_operator_surface", () => {
       const store = setUpStore({ ...CONFIG_STATE });
       store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
 
-      render(<BuddyHome />, { store });
+      const { user } = render(<BuddyHome />, { store });
 
       await screen.findByTestId("buddy-home-content");
+      expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+        "Home",
+        "Reports",
+        "Activity",
+        "Play",
+        "Settings",
+      ]);
+      expect(screen.getByRole("tab", { selected: true })).toHaveTextContent(
+        "Home",
+      );
       await waitFor(() =>
+        expect(screen.getByTestId("buddy-operator-status")).toHaveAttribute(
+          "data-state",
+          mode,
+        ),
+      );
+      await user.click(screen.getByRole("tab", { name: "Reports" }));
+      if (mode === "disabled") {
         expect(
-          screen.getAllByRole("tab").map((tab) => tab.textContent),
-        ).toEqual([...tabs]),
-      );
-      const selected = screen.getByRole("tab", { selected: true });
-      expect(selected).toHaveTextContent(
-        mode === "disabled" ? "Pulse" : "Activity",
-      );
+          await screen.findByTestId("buddy-pulse-card"),
+        ).toBeInTheDocument();
+        expect(
+          await screen.findByTestId("buddy-opportunities-feed"),
+        ).toBeInTheDocument();
+      } else {
+        expect(screen.queryByTestId("buddy-pulse-card")).toBeNull();
+        expect(screen.queryByTestId("buddy-opportunities-feed")).toBeNull();
+      }
+      if (mode === "unavailable")
+        expect(
+          within(screen.getByTestId("buddy-home-reports")).getByText(
+            /connection failure, not an empty list/,
+          ),
+        ).toBeInTheDocument();
     },
   );
 
@@ -2360,7 +2648,7 @@ describe("BuddyHome_operator_surface", () => {
     const store = setUpStore({ ...CONFIG_STATE });
     store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
 
-    render(<BuddyHome />, { store });
+    const { user } = render(<BuddyHome />, { store });
 
     const banner = await screen.findByTestId("buddy-operator-degraded");
     expect(banner).toHaveAttribute("role", "alert");
@@ -2371,9 +2659,16 @@ describe("BuddyHome_operator_surface", () => {
     await waitFor(() =>
       expect(screen.queryByTestId("buddy-world")).not.toBeInTheDocument(),
     );
+    expect(
+      within(screen.getByTestId("buddy-home-saved-work")).getByText(
+        /connection failure, not an empty list/,
+      ),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Play" }));
     expect(screen.queryByTestId("buddy-summary-strip")).not.toBeInTheDocument();
     expect(screen.queryByText("View stats")).not.toBeInTheDocument();
 
+    await user.click(screen.getByRole("tab", { name: "Settings" }));
     const setupStrip = screen.getByTestId("buddy-setup-strip");
     expect(setupStrip).toHaveAttribute("data-disabled", "true");
     const setupButtons = within(setupStrip).getAllByRole("button");
@@ -2395,14 +2690,21 @@ describe("BuddyHome_operator_surface", () => {
     const store = setUpStore({ ...CONFIG_STATE });
     store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
 
-    render(<BuddyHome />, { store });
+    const { user } = render(<BuddyHome />, { store });
 
     await screen.findByTestId("buddy-home-content");
     expect(screen.getByTestId("buddy-world")).toBeInTheDocument();
-    expect(screen.getByTestId("buddy-summary-strip")).toBeInTheDocument();
     expect(
       screen.queryByTestId("buddy-operator-degraded"),
     ).not.toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("buddy-home-saved-work")).getByText(
+        /Saved reports are off in this project/,
+      ),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Play" }));
+    expect(screen.getByTestId("buddy-summary-strip")).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Settings" }));
     for (const button of within(
       screen.getByTestId("buddy-setup-strip"),
     ).getAllByRole("button")) {
@@ -5771,7 +6073,7 @@ describe("BuddyHome_bottom_row_bounded_scroll", () => {
     server.use(...commonHandlers);
 
     const { user } = render(<BuddyHome />, { store });
-    await user.click(screen.getByRole("tab", { name: "Recent errors" }));
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
     const panel = await screen.findByTestId("buddy-recent-errors-panel");
     expect(panel.className).not.toContain("panelScroll");
     expect(panel.className).toContain("glass");

@@ -195,6 +195,7 @@ async function openBuddy(
   await page.setViewportSize({ width, height: FOLD_PX });
   await page.goto(`${BUDDY_ROUTE}&theme=${theme}`);
   await page.getByTestId("buddy-home-content").waitFor();
+  await page.getByRole("tab", { name: "Reports", exact: true }).click();
   await expect(page.locator(`${DESK} ul li button`)).toHaveCount(8);
 }
 
@@ -218,7 +219,8 @@ async function deskMetrics(page: Page) {
     return {
       fill: (chevronBox.right - nameBox.left) / rowBox.width,
       gap: chevronBox.left - nameBox.right,
-      measure: Number.parseFloat(getComputedStyle(items).maxWidth),
+      listWidth: items.getBoundingClientRect().width,
+      listRight: items.getBoundingClientRect().right,
       rowWidth: rowBox.width,
       leftEdges,
       scrollWidth: document.documentElement.scrollWidth,
@@ -243,15 +245,15 @@ test.describe("Buddy Desk layout", () => {
           metrics.gap,
           `${width}px chevron gap ${metrics.gap}`,
         ).toBeLessThan(48);
-      if (width >= 1280) {
-        expect(metrics.measure, `${width}px 72ch row measure`).toBeGreaterThan(
-          0,
-        );
-        expect(
-          metrics.rowWidth,
-          `${width}px triaged row width ${metrics.rowWidth}`,
-        ).toBeLessThanOrEqual(metrics.measure);
-      }
+      expect(
+        metrics.rowWidth,
+        `${width}px row leaves unused list space: ${metrics.rowWidth}/${metrics.listWidth}`,
+      ).toBeGreaterThanOrEqual(metrics.listWidth * 0.9);
+      expect(
+        metrics.listRight,
+        `${width}px list ends past the viewport`,
+      ).toBeLessThanOrEqual(metrics.clientWidth + 1);
+      expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.clientWidth + 1);
     });
   }
 
@@ -323,41 +325,45 @@ test.describe("Buddy Desk layout", () => {
     );
     expect(selectionAfter.activeRow).toBe(true);
 
-    const before = await page.locator(CONTENT).evaluate((element) => ({
-      top: element.scrollTop,
-      height: element.scrollHeight,
-      desk: Math.round(
-        document
-          .querySelector<HTMLElement>("[aria-label='Buddy Desk']")!
-          .getBoundingClientRect().height,
-      ),
-    }));
+    const readGeometry = () =>
+      page.locator(CONTENT).evaluate((element) => {
+        const desk = document.querySelector<HTMLElement>(
+          "[aria-label='Buddy Desk']",
+        )!;
+        return {
+          top: element.scrollTop,
+          nav: Math.round(
+            desk.querySelector("nav")!.getBoundingClientRect().top,
+          ),
+          desk: Math.round(desk.getBoundingClientRect().height),
+          rows: desk.querySelectorAll("ul li button").length,
+        };
+      });
+    const before = await readGeometry();
     for (const view of ["Working on", "Delivered", "Watching", "Needs you"]) {
       await page
         .getByRole("button", { name: view, exact: true })
         .evaluate((button) => (button as HTMLButtonElement).click());
       await page.waitForTimeout(50);
-      const after = await page.locator(CONTENT).evaluate((element) => ({
-        top: element.scrollTop,
-        height: element.scrollHeight,
-        desk: Math.round(
-          document
-            .querySelector<HTMLElement>("[aria-label='Buddy Desk']")!
-            .getBoundingClientRect().height,
-        ),
-      }));
+      const after = await readGeometry();
       expect(
         Math.abs(after.top - before.top),
         `${view} scroll delta ${before.top} -> ${after.top}`,
       ).toBeLessThan(48);
       expect(
-        Math.abs(after.desk - before.desk),
-        `${view} Desk height delta ${before.desk} -> ${after.desk}`,
-      ).toBeLessThan(48);
-      expect(
-        Math.abs(after.height - before.height),
-        `${view} content height delta ${before.height} -> ${after.height}`,
-      ).toBeLessThan(48);
+        Math.abs(after.nav - before.nav),
+        `${view} view controls moved ${before.nav} -> ${after.nav}`,
+      ).toBeLessThan(2);
+      if (after.rows === 0)
+        expect(
+          after.desk,
+          `${view} empty Desk reserves ${after.desk}px`,
+        ).toBeLessThan(before.desk);
+      else if (after.rows === before.rows)
+        expect(
+          Math.abs(after.desk - before.desk),
+          `${view} Desk height delta ${before.desk} -> ${after.desk}`,
+        ).toBeLessThan(48);
     }
   });
 });

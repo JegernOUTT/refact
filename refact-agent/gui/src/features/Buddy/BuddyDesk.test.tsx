@@ -12,6 +12,7 @@ import {
 import { server } from "../../utils/mockServer";
 import { BuddyDesk } from "./BuddyDesk";
 import styles from "./BuddyDesk.module.css";
+import detailStyles from "./BuddyDeskDetail.module.css";
 import type {
   ActionExecution,
   ArtifactRevision,
@@ -646,11 +647,11 @@ describe("BuddyDesk", () => {
       }),
     ).toBeTruthy();
     const body = screen.getByText("Extra detail not in body");
-    expect(body.closest(`.${styles.disclosureBody}`)).toBeTruthy();
+    expect(body.closest(`.${detailStyles.disclosureBody}`)).toBeTruthy();
+    const writeUp = screen.getByText("The full write-up").closest("details");
+    if (!writeUp) throw new Error("report body disclosure missing");
     expect(
-      within(
-        screen.getByText("The full write-up").closest("details")!,
-      ).getAllByText("Extra detail not in body", { exact: true }),
+      within(writeUp).getAllByText("Extra detail not in body", { exact: true }),
     ).toHaveLength(1);
   });
 
@@ -824,7 +825,9 @@ describe("BuddyDesk", () => {
     ).toHaveLength(1);
     await waitFor(() => {
       const active = document.activeElement;
-      expect(active?.matches("ul li button") || active === refresh).toBe(true);
+      expect(
+        Boolean(active?.matches("ul li button")) || active === refresh,
+      ).toBe(true);
     });
     expect(document.activeElement).not.toBe(document.body);
   });
@@ -1521,7 +1524,7 @@ describe("BuddyDesk", () => {
         const search = new URL(request.url).searchParams.get("search");
         expect(new URL(request.url).searchParams.get("view")).toBe("needs_you");
         return HttpResponse.json(
-          cursor || search === "Second"
+          Boolean(cursor) || search === "Second"
             ? envelope([
                 record({ ...item, id: "work-2", title: "Second diagnosis" }),
               ])
@@ -2443,10 +2446,10 @@ describe("BuddyDesk", () => {
         [rows[2].id, action.label],
         [rows[3].id, "No action to take"],
       ]) {
+        const source = rows.find((candidate) => candidate.id === id);
+        if (!source) throw new Error(`Missing test row ${id}`);
         const row = screen.getByRole("button", {
-          name: new RegExp(
-            rows.find((candidate) => candidate.id === id)!.title,
-          ),
+          name: new RegExp(source.title),
         });
         expect(
           await within(row).findByText(verb, { exact: true }),
@@ -3036,5 +3039,317 @@ describe("BuddyDesk", () => {
     expect(
       screen.getByText("Three dependencies have known vulnerabilities."),
     ).toBeTruthy();
+  });
+
+  it("groups loaded records by typed subject without title-only merging and keeps every record reachable", async () => {
+    const sameSubject = (id: string, title: string) => ({
+      ...item,
+      id,
+      title,
+      state: "delivered" as const,
+      current_artifact_id: null,
+      current_artifact_revision: null,
+    });
+    const rows = [
+      sameSubject("work-latest", "Provider health latest"),
+      sameSubject("work-older", "Provider health older"),
+      {
+        ...sameSubject("work-same-title", "Provider health latest"),
+        subject: { ...item.subject, resource_id: "another subject" },
+      },
+      {
+        ...sameSubject("work-other-kind", "Provider health other kind"),
+        kind: "review",
+      },
+    ];
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(envelope(rows.map(record), 7)),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    fireEvent.click(await screen.findByRole("button", { name: "Delivered" }));
+    await screen.findByRole("button", { name: /Provider health other kind/ });
+    expect(screen.getByTestId("buddy-desk-count")).toHaveTextContent(
+      "4 records loaded · 3 subjects · more saved work not loaded yet",
+    );
+    expect(
+      screen.getAllByRole("button", { name: /Provider health latest/ }),
+    ).toHaveLength(2);
+    const history = screen
+      .getByText("1 other loaded record for this subject (2 loaded)")
+      .closest("details");
+    if (!history) throw new Error("history disclosure missing");
+    expect(history.open).toBe(false);
+    expect(
+      within(history).getByRole("button", {
+        name: /Provider health older/,
+        hidden: true,
+      }),
+    ).toBeTruthy();
+    expect(screen.queryByText(/superseded|replaced/i)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Run history" }));
+    expect(screen.getByRole("button", { name: "Run history" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(
+      screen
+        .getAllByTestId("buddy-desk-row-title")
+        .map((title) => title.textContent),
+    ).toEqual(rows.map((row) => row.title));
+  });
+
+  it("separates cancelled records from delivered results inside Delivered without dropping them", async () => {
+    const rows = [
+      {
+        ...item,
+        id: "work-delivered",
+        title: "Delivered review",
+        state: "delivered" as const,
+      },
+      {
+        ...item,
+        id: "work-cancel-1",
+        title: "Cancelled check one",
+        state: "cancelled" as const,
+        subject: { ...item.subject, resource_id: "one" },
+      },
+      {
+        ...item,
+        id: "work-cancel-2",
+        title: "Cancelled check two",
+        state: "cancelled" as const,
+        subject: { ...item.subject, resource_id: "two" },
+      },
+    ];
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(envelope(rows.map(record))),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    fireEvent.click(await screen.findByRole("button", { name: "Delivered" }));
+    await screen.findByRole("button", { name: /Delivered review/ });
+    const cancelled = screen.getByRole("group", { name: "Cancelled work" });
+    expect(cancelled).toHaveTextContent(
+      "Cancelled (2 loaded) — kept for history, not delivered results",
+    );
+    expect(
+      within(cancelled).getAllByRole("button", {
+        name: /Cancelled check/,
+        hidden: true,
+      }),
+    ).toHaveLength(2);
+    expect(
+      within(cancelled).queryByRole("button", {
+        name: /Delivered review/,
+        hidden: true,
+      }),
+    ).toBeNull();
+    expect(screen.getByTestId("buddy-desk-count")).toHaveTextContent(
+      "3 records loaded · 1 subject · 2 cancelled",
+    );
+  });
+
+  it("keeps the work list in a bounded scroll region instead of a tall fixed desk", async () => {
+    const css = await readGuiSource("features/Buddy/BuddyDesk.module.css");
+    expect(readCssBlock(css, ".desk")).not.toContain("min-height");
+    expect(readCssBlock(css, ".scroller")).toContain("max-height: 52vh;");
+    expect(readCssBlock(css, ".scroller")).toContain("overflow-y: auto;");
+    expect(readCssBlock(css, ".items")).not.toContain("max-width");
+    expect(css).toContain("@container (min-width: 720px)");
+  });
+
+  it("shows the finding and write-up before report management controls", async () => {
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(envelope([record(item)])),
+      ),
+      http.get("*/v1/buddy/artifacts/:id", () =>
+        HttpResponse.json(envelope(record(artifact))),
+      ),
+      http.get("*/v1/buddy/work/:id/actions", () =>
+        HttpResponse.json(envelope([action])),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
+    );
+    const finding = await screen.findByRole("region", { name: "Finding" });
+    const manage = screen.getByRole("region", { name: "Manage this report" });
+    await within(manage).findByRole("region", { name: "Registered actions" });
+    const writeUp = screen.getByText("The full write-up");
+    const evidence = screen.getByText(/^Evidence · revision 1/);
+    const follows = (a: Node, b: Node) =>
+      Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(follows(finding, writeUp)).toBe(true);
+    expect(follows(writeUp, evidence)).toBe(true);
+    expect(follows(evidence, manage)).toBe(true);
+    expect(
+      within(manage).getByRole("region", { name: "Report reading status" }),
+    ).toBeTruthy();
+    expect(
+      within(manage).getByRole("region", { name: "Work snooze" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/it does not prove the finding is correct/),
+    ).toBeTruthy();
+  });
+
+  it("refuses an artifact whose identity does not match the selected report revision", async () => {
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(
+          envelope([record({ ...item, current_artifact_revision: null })]),
+        ),
+      ),
+      http.get("*/v1/buddy/artifacts/:id", () =>
+        HttpResponse.json(
+          envelope(record({ ...artifact, artifact_id: "artifact-other" })),
+        ),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
+    );
+    const detail = await screen.findByRole("article", { name: "Work detail" });
+    await waitFor(() => expect(within(detail).getByRole("alert")).toBeTruthy());
+    expect(screen.queryByText("The token has expired.")).toBeNull();
+    expect(
+      screen.queryByRole("region", { name: "Manage this report" }),
+    ).toBeNull();
+  });
+
+  it("explains a deep link without a project instead of opening anything", async () => {
+    const linkRequests: string[] = [];
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(envelope([record(item)])),
+      ),
+      http.get("*/v1/buddy/work/work-1", ({ request }) => {
+        linkRequests.push(request.url);
+        return HttpResponse.json(envelope(record(item)));
+      }),
+    );
+    render(<BuddyDesk workId={item.id} />, { preloadedState: config });
+    expect(
+      await screen.findByText(/This link does not name a project/),
+    ).toBeTruthy();
+    expect(screen.queryByRole("article", { name: "Work detail" })).toBeNull();
+    expect(linkRequests).toHaveLength(0);
+  });
+
+  it("refuses a deep-linked work item whose record belongs to another project root", async () => {
+    server.use(
+      http.get("*/v1/buddy/work", () => HttpResponse.json(envelope([]))),
+      http.get("*/v1/buddy/work/work-1", () =>
+        HttpResponse.json(
+          envelope(
+            record({
+              ...item,
+              project: { ...project, canonical_root: "/scratch/other" },
+            }),
+          ),
+        ),
+      ),
+    );
+    render(<BuddyDesk workId={item.id} projectId={project.project_id} />, {
+      preloadedState: config,
+    });
+    expect(
+      await screen.findByText(/No other report was substituted/),
+    ).toBeTruthy();
+    expect(screen.queryByRole("article", { name: "Work detail" })).toBeNull();
+  });
+
+  it("opens the collapsed history group when a deep link selects an earlier loaded record", async () => {
+    const older = {
+      ...item,
+      id: "work-older",
+      title: "Older provider record",
+    };
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(
+          envelope([
+            record({
+              ...item,
+              id: "work-latest",
+              title: "Latest provider record",
+            }),
+            record(older),
+          ]),
+        ),
+      ),
+      http.get("*/v1/buddy/work/work-older", () =>
+        HttpResponse.json(envelope(record(older))),
+      ),
+      http.get("*/v1/buddy/artifacts/:id", () =>
+        HttpResponse.json(envelope(record(artifact))),
+      ),
+    );
+    render(<BuddyDesk workId={older.id} projectId={project.project_id} />, {
+      preloadedState: config,
+    });
+    expect(await screen.findByText("The token has expired.")).toBeTruthy();
+    const row = await screen.findByRole("button", {
+      name: /Older provider record/,
+    });
+    await waitFor(() => expect(row.closest("details")?.open).toBe(true));
+    expect(row).toHaveAttribute("aria-current", "true");
+  });
+
+  it("keeps the same scroller, row nodes and batch subscriptions when more than one action batch loads", async () => {
+    const rowsFor = (from: number, count: number) =>
+      Array.from({ length: count }, (_, index) => ({
+        ...item,
+        id: `paged-work-${from + index}`,
+        title: `Paged report ${from + index}`,
+        subject: { ...item.subject, resource_id: `subject ${from + index}` },
+        current_artifact_id: `paged-artifact-${from + index}`,
+      }));
+    const batches: string[][] = [];
+    server.use(
+      http.get("*/v1/buddy/work", ({ request }) => {
+        const cursor = new URL(request.url).searchParams.get("cursor");
+        return HttpResponse.json(
+          cursor
+            ? envelope(rowsFor(50, 50).map(record))
+            : envelope(rowsFor(0, 50).map(record), 50),
+        );
+      }),
+      http.get("*/v1/buddy/work/actions", ({ request }) => {
+        batches.push(
+          new URL(request.url).searchParams.get("ids")?.split(",") ?? [],
+        );
+        return HttpResponse.json(batchEnvelope(request));
+      }),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    const first = await screen.findByRole("button", {
+      name: /Paged report 0\b/,
+    });
+    const scroller = screen.getByTestId("buddy-desk-scroller");
+    await waitFor(() => expect(batches).toHaveLength(1));
+    fireEvent.click(screen.getByRole("button", { name: "Load more work" }));
+    await screen.findByRole("button", { name: /Paged report 99\b/ });
+    await waitFor(() => expect(batches).toHaveLength(2));
+    expect(screen.getByTestId("buddy-desk-scroller")).toBe(scroller);
+    expect(screen.getByRole("button", { name: /Paged report 0\b/ })).toBe(
+      first,
+    );
+    expect(batches[1]).toEqual(rowsFor(50, 50).map((row) => row.id));
+    expect(
+      within(scroller).getAllByTestId("buddy-desk-row-title"),
+    ).toHaveLength(100);
+    fireEvent.click(first);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Back to work list" }),
+    );
+    await waitFor(() => expect(document.activeElement).toBe(first));
+    expect(batches).toHaveLength(2);
   });
 });

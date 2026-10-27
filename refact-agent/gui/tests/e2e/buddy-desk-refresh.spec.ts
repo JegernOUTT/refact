@@ -56,6 +56,8 @@ test("refresh keeps an open report and safely closes it when it disappears", asy
     if (url.origin !== origin) return route.abort();
     if (!url.pathname.startsWith("/v1/")) return route.continue();
     if (url.pathname === "/v1/buddy/work") {
+      if (Number(url.searchParams.get("limit")) <= 10)
+        return route.fulfill({ json: envelope([]) });
       listRequests += 1;
       return route.fulfill({
         json: envelope(listRequests < 3 ? [record(work)] : []),
@@ -70,6 +72,7 @@ test("refresh keeps an open report and safely closes it when it disappears", asy
   await page.goto(
     "/tests/e2e/route-showcase.html?route=buddy&operator=enabled",
   );
+  await page.getByRole("tab", { name: "Reports", exact: true }).click();
   const row = page.getByRole("button", { name: /Security assessment/ });
   await row.click();
   const reportHeading = page.getByRole("heading", {

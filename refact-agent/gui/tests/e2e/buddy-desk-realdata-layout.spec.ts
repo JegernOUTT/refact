@@ -54,6 +54,7 @@ async function openDesk(page: Page, width: number) {
   );
   await page.goto(ROUTE);
   await workList;
+  await page.getByRole("tab", { name: "Reports", exact: true }).click();
   await expect(page.locator(`${DESK} ul li button`)).toHaveCount(rows.length);
 }
 

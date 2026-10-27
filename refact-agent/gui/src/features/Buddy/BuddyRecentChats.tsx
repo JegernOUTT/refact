@@ -156,6 +156,7 @@ interface BuddyRecentChatsProps {
   onViewAll?: () => void;
   title?: string;
   className?: string;
+  initialFilter?: FilterKind;
 }
 
 export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
@@ -165,9 +166,10 @@ export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
   onViewAll,
   title,
   className,
+  initialFilter = "all",
 }) => {
   const dispatch = useAppDispatch();
-  const [filter, setFilter] = useState<FilterKind>("all");
+  const [filter, setFilter] = useState<FilterKind>(initialFilter);
   const [visibleCount, setVisibleCount] = useState(HISTORY_PAGE_SIZE);
   const { data: conversationsList, isLoading } = useGetBuddyConversationsQuery(
     undefined,

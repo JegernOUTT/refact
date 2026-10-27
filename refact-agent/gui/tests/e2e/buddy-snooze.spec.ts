@@ -95,6 +95,7 @@ for (const width of [360, 1280]) {
       "/tests/e2e/route-showcase.html?route=buddy&operator=enabled",
       { waitUntil: "domcontentloaded" },
     );
+    await page.getByRole("tab", { name: "Reports", exact: true }).click();
     const row = page.getByRole("button", {
       name: /Error Detective assessment/,
     });
@@ -119,6 +120,7 @@ for (const width of [360, 1280]) {
     await attention.selectOption("snoozed");
     await expect(row).toBeVisible();
     await page.reload({ waitUntil: "domcontentloaded" });
+    await page.getByRole("tab", { name: "Reports", exact: true }).click();
     await page.getByRole("button", { name: "Browse saved work" }).click();
     await expect(
       page.getByRole("combobox", { name: "Report attention" }),

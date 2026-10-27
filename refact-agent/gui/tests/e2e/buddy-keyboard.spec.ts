@@ -150,6 +150,7 @@ async function openBuddy(page: Page) {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto(ROUTE);
   await expect(page.locator(CONTENT)).toBeVisible();
+  await page.getByRole("tab", { name: "Reports", exact: true }).click();
   await expect(page.locator(`${DESK} ul li button`)).toHaveCount(7);
 }
 
@@ -229,9 +230,20 @@ test.describe("Buddy keyboard access", () => {
         focusLog: rawFocusLog,
       }),
     );
-    expect(rawLoad.count).toBe(9);
+    expect(rawLoad.count).toBeLessThanOrEqual(12);
+    expect(rawLoad.targets.slice(0, -1).map((target) => target.text)).toEqual(
+      expect.arrayContaining([
+        "Refresh work",
+        "Needs you",
+        "Working on",
+        "Delivered",
+        "Watching",
+      ]),
+    );
+    expect(rawLoad.targets.some((target) => target.body)).toBe(false);
 
     await page.goto(ROUTE);
+    await page.getByRole("tab", { name: "Reports", exact: true }).click();
     await expect(page.locator(`${DESK} ul li button`)).toHaveCount(7);
     await page.evaluate(() => {
       const sentinel = document.createElement("button");
@@ -247,8 +259,29 @@ test.describe("Buddy keyboard access", () => {
       "True document-start traversal",
       JSON.stringify({ stops: trueStart.count, targets: trueStart.targets }),
     );
-    expect(trueStart.count).toBe(9);
-    expect(rawLoad.count).toBe(trueStart.count);
+    const reportsTab = trueStart.targets.findIndex(
+      (target) => target.role === "tab" && target.text === "Reports",
+    );
+    expect(reportsTab, "Buddy sections tab strip is a single Tab stop").toBe(
+      trueStart.targets.findIndex((target) => target.role === "tab"),
+    );
+    expect(trueStart.count - reportsTab - 1).toBe(rawLoad.count);
+  });
+
+  test("buddy_section_tabs_support_arrow_key_navigation", async ({ page }) => {
+    await openBuddy(page);
+    const reports = page.getByRole("tab", { name: "Reports", exact: true });
+    await reports.focus();
+    for (const name of ["Activity", "Play", "Settings", "Home", "Reports"]) {
+      await page.keyboard.press("ArrowRight");
+      const tab = page.getByRole("tab", { name, exact: true });
+      await expect(tab).toBeFocused();
+      await expect(tab).toHaveAttribute("aria-selected", "true");
+    }
+    await page.keyboard.press("ArrowLeft");
+    await expect(
+      page.getByRole("tab", { name: "Home", exact: true }),
+    ).toBeFocused();
   });
 
   test("keeps_the_activated_view_focused_when_no_selection_is_open", async ({

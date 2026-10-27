@@ -44,21 +44,49 @@ async function openDesk(page: Page, width: number, height: number) {
   );
   await page.goto(ROUTE);
   await workList;
+  await page.getByRole("tab", { name: "Reports", exact: true }).click();
   await expect(page.locator(`${DESK} ul li button`)).toHaveCount(rows.length);
+}
+
+async function expectFirstRowBelowControlsInTopHalf(
+  page: Page,
+  height: number,
+) {
+  const row = page.locator(`${DESK} ul li button`).first();
+  await expect(row).toBeVisible();
+  await expect(row).toBeInViewport();
+  const rowBox = await row.boundingBox();
+  expect(rowBox, "first work row has no layout box").not.toBeNull();
+  expect(rowBox!.y, `first work row starts at y=${rowBox!.y}`).toBeLessThan(
+    height / 2,
+  );
+  const controlsBottom = await page.evaluate((desk) => {
+    const root = document.querySelector<HTMLElement>(desk);
+    const list = root?.querySelector("ul");
+    if (!root || !list) throw new Error("Desk controls are missing");
+    return Math.max(
+      ...[...root.querySelectorAll<HTMLElement>("nav, input, select, button")]
+        .filter(
+          (control) =>
+            !list.contains(control) &&
+            control.compareDocumentPosition(list) &
+              Node.DOCUMENT_POSITION_FOLLOWING,
+        )
+        .map((control) => control.getBoundingClientRect().bottom),
+    );
+  }, DESK);
+  expect(
+    rowBox!.y,
+    `first work row overlaps controls ending at y=${controlsBottom}`,
+  ).toBeGreaterThanOrEqual(controlsBottom - 1);
 }
 
 test.describe("Buddy Desk narrow layout", () => {
   test("compacts the controls and first work row into the first half-screen at 360px", async ({
     page,
   }) => {
-    await openDesk(page, 360, 640);
-    const row = page.locator(`${DESK} ul li button`).first();
-    await expect(row).toBeVisible();
-    const rowBox = await row.boundingBox();
-    expect(rowBox, "first work row has no layout box").not.toBeNull();
-    expect(rowBox!.y, `first work row starts at y=${rowBox!.y}`).toBeLessThan(
-      320,
-    );
+    await openDesk(page, 360, 900);
+    await expectFirstRowBelowControlsInTopHalf(page, 900);
 
     const viewButtons = page
       .getByRole("navigation", { name: "Work views" })
@@ -119,14 +147,10 @@ test.describe("Buddy Desk narrow layout", () => {
     );
   });
 
-  test("preserves the 1280px first-row position from base 581d8d090", async ({
+  test("keeps the first work row below the Desk controls in the top half at 1280px", async ({
     page,
   }) => {
     await openDesk(page, 1280, 900);
-    const row = page.locator(`${DESK} ul li button`).first();
-    const rowBox = await row.boundingBox();
-    expect(rowBox, "first work row has no layout box").not.toBeNull();
-    // Base commit 581d8d090 measured 226px for this fixture at 1280×900.
-    expect(Math.abs(rowBox!.y - 226)).toBeLessThanOrEqual(2);
+    await expectFirstRowBelowControlsInTopHalf(page, 900);
   });
 });

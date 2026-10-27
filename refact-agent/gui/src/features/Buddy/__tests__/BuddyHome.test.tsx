@@ -296,7 +296,7 @@ describe("BuddyHome", () => {
     );
   });
 
-  it("renders major enabled home regions from store and RTK Query data", async () => {
+  it("renders every section of the legacy Buddy home from store and RTK Query data", async () => {
     installBuddyHomeHandlers();
     const store = setUpStore({ ...CONFIG_STATE });
     store.dispatch(setBuddySnapshot(makeSnapshot()));
@@ -307,55 +307,53 @@ describe("BuddyHome", () => {
     expect(
       screen.getByRole("tablist", { name: "Buddy sections" }),
     ).toBeInTheDocument();
-    // The scene is hoisted out of the Play tab, so it owns the character and
-    // the presence header no longer repeats a second avatar.
-    expect(screen.getByTestId("buddy-home-hero")).toBeInTheDocument();
-    expect(screen.getByTestId("buddy-world")).toBeInTheDocument();
+    const overview = screen.getByTestId("buddy-home-overview");
+    expect(within(overview).getByTestId("buddy-home-hero")).toBeInTheDocument();
+    expect(within(overview).getByTestId("buddy-world")).toBeInTheDocument();
+    expect(
+      within(overview).getByRole("button", { name: "Talk to Buddy" }),
+    ).toBeInTheDocument();
+    expect(within(overview).getByText("Keeping watch")).toBeInTheDocument();
     expect(
       screen.queryByTestId("buddy-presence-avatar"),
     ).not.toBeInTheDocument();
-    expect(screen.getByTestId("buddy-summary-strip")).toBeInTheDocument();
-    expect(screen.getByText("Project setup")).toBeInTheDocument();
+    expect(screen.queryByTestId("buddy-summary-strip")).toBeNull();
+    expect(screen.queryByTestId("buddy-setup-strip")).toBeNull();
     expect(
-      screen.getByRole("button", { name: "Run Setup" }),
+      await within(overview).findByText("Recent Buddy chat"),
     ).toBeInTheDocument();
 
-    // Pulse is both the leftmost and the default tab.
+    await user.click(screen.getByRole("tab", { name: "Reports" }));
     expect(await screen.findByTestId("buddy-pulse-card")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Close Play" }));
-    expect(screen.queryByTestId("buddy-world")).not.toBeInTheDocument();
-    expect(screen.getByTestId("buddy-presence-avatar")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Open Play" }));
-    expect(screen.getByTestId("buddy-world")).toBeInTheDocument();
-    expect(
-      screen.queryByTestId("buddy-presence-avatar"),
-    ).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("tab", { name: "Opportunities" }));
     expect(
       await screen.findByTestId("buddy-opportunities-feed"),
     ).toBeInTheDocument();
     expect(screen.getByText("Model config is broken")).toBeInTheDocument();
+    expect(screen.queryByTestId("buddy-world")).toBeNull();
 
     await user.click(screen.getByRole("tab", { name: "Activity" }));
     expect(
       await screen.findByTestId("buddy-activity-panel"),
     ).toBeInTheDocument();
     expect(screen.getByText("Task coach noticed pattern")).toBeInTheDocument();
-    expect(await screen.findByText("Recent Buddy chat")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("tab", { name: "Recent errors" }));
     expect(
       await screen.findByTestId("buddy-recent-errors-panel"),
     ).toBeInTheDocument();
     expect(screen.getByText("Model unavailable")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Play" }));
+    expect(screen.getByTestId("buddy-world")).toBeInTheDocument();
+    expect(screen.getByTestId("buddy-summary-strip")).toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: "Settings" }));
     expect(
       await screen.findByTestId("buddy-personality-panel"),
     ).toBeInTheDocument();
     expect(screen.getByText("Helper Sprite")).toBeInTheDocument();
+    expect(screen.getByText("Project setup")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Run Setup" }),
+    ).toBeInTheDocument();
   });
 
   it("shows disabled state and enables Buddy through the settings mutation", async () => {
@@ -472,7 +470,7 @@ describe("BuddyHome", () => {
     const { user } = render(<BuddyHome />, { store });
 
     await screen.findByTestId("buddy-home-content");
-    await user.click(screen.getByRole("tab", { name: "Pulse" }));
+    await user.click(screen.getByRole("tab", { name: "Reports" }));
 
     expect(await screen.findByTestId("buddy-pulse-card")).toHaveTextContent(
       "50 docs · 5 orphan · 1 conflict · 6 pending · 7 applied · 1 failed · 10 candidates",
@@ -540,7 +538,7 @@ describe("BuddyHome", () => {
 
     const { user } = render(<BuddyHome />, { store });
     await screen.findByTestId("buddy-home-content");
-    await user.click(screen.getByRole("tab", { name: "Recent errors" }));
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
 
     const list = await screen.findByRole("list", { name: "Recent warnings" });
     expect(within(list).getByText("Repeated warning")).toBeInTheDocument();

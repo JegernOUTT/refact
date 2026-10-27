@@ -75,6 +75,14 @@
   letter-spacing: 0.02em;
 }
 
+.topProject {
+  min-width: 0;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .statusPill {
   flex: 0 0 auto;
   white-space: nowrap;
@@ -94,61 +102,6 @@
 .topBarSpacer {
   flex: 0 0 auto;
   width: var(--rf-control-h);
-}
-
-.presenceSlot {
-  min-width: 0;
-}
-
-/* The scene block owns the whole Pixel region: diorama, presence line and the
- * one control that swaps between them. It follows the Desk and the decision
- * panels so nothing decorative separates a work row from the control that
- * acts on it. */
-.sceneBlock {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-2);
-  min-width: 0;
-}
-
-/* Collapsed: one ~56px strip — sprite small on the left, one line of state on
- * the right. This merges what used to be a 46px presence row plus a separate
- * scene card, so the default page costs one row, not two regions.
- *
- * flex-wrap, not a fixed grid: at 240px the three columns squeezed the
- * presence line to 27px against a 32px scroll width, so it wraps to its own
- * line instead of overflowing. */
-.sceneBlockStrip {
-  display: flex;
-  align-items: center;
-  flex-direction: row;
-  flex-wrap: wrap;
-  gap: var(--rf-space-2);
-}
-
-.sceneBlockStrip .presenceSlot {
-  flex: 1 1 12rem;
-  min-width: 0;
-}
-
-/* The presence section stacks by default; inside the strip its header is the
- * whole row, so speech collapses to a single truncated line. */
-.sceneBlockStrip [data-testid="buddy-presence"] > * {
-  min-width: 0;
-}
-
-.sceneBlockStrip [data-testid="buddy-presence"] p {
-  margin: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sceneSizeActions {
-  display: flex;
-  align-items: center;
-  flex: 0 0 auto;
-  min-width: 0;
 }
 
 /* Hero — the scene sits at the top of every tab, compact by default so the
@@ -176,28 +129,6 @@
 .heroCardExpanded.heroCardExpanded [data-testid="buddy-world"] {
   height: clamp(280px, 38vh, 430px);
   min-height: 240px;
-}
-
-/* When the Desk carries real work the scene drops to a strip: Pixel stays
- * visible, but decoration never outranks the work above it. */
-.heroCardDemoted.heroCardDemoted [data-testid="buddy-world"] {
-  height: clamp(112px, 13vh, 150px);
-  min-height: 104px;
-}
-
-/* Strip presentation: the diorama shrinks to a sprite-sized thumbnail on the
- * left of the row instead of claiming a full-width band. It stays mounted and
- * visible — Play, care actions and the character all keep working. Declared
- * last and triple-specificity so it wins over the demoted and base heights. */
-.heroCardStrip {
-  flex: 0 0 auto;
-  width: 72px;
-  padding: 0;
-}
-
-.heroCardStrip.heroCardStrip.heroCardStrip [data-testid="buddy-world"] {
-  height: 56px;
-  min-height: 56px;
 }
 
 /* Work authority failure banner. It leads the page so a total outage can
@@ -280,13 +211,6 @@
   min-width: 0;
 }
 
-/* Panels now live in tabs (reusing the shared kit Tabs strip). Each data
- * panel gets a bounded slot so its internal scroll list keeps working; the
- * Settings tab is a tall form that grows naturally with the page scroll. */
-.tabs {
-  min-width: 0;
-}
-
 /* Content-sized columns that only stretch to equal widths when there is room,
  * so narrow viewports scroll the strip instead of truncating every label.
  * The scrollbar is kept visible rather than hover-only: at 360px the strip is
@@ -316,12 +240,120 @@
   scroll-snap-align: start;
 }
 
-.tabs .tabsList {
+.sections .tabsList {
   grid-auto-columns: minmax(max-content, 1fr);
+}
+
+.sections {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.sections > .tabsList {
+  flex-shrink: 0;
+  box-sizing: border-box;
+  width: auto;
+  max-width: calc(100% - 2 * var(--rf-space-3));
+  margin: var(--rf-space-2) var(--rf-space-3) 0;
 }
 
 .tabContent {
   min-width: 0;
+}
+
+.tabContent:focus-visible,
+.section:focus-visible {
+  outline: none;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  min-width: 0;
+}
+
+.section > * {
+  flex-shrink: 0;
+}
+
+.identityCard {
+  display: grid;
+  grid-template-columns: minmax(200px, 320px) minmax(0, 1fr);
+  align-items: center;
+  gap: var(--rf-space-3);
+  min-width: 0;
+  padding: var(--rf-space-2);
+}
+
+.identityBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  min-width: 0;
+  padding: var(--rf-space-2);
+}
+
+.identityBody [data-testid="buddy-presence"] > header > :first-child {
+  flex: 1 1 12rem;
+}
+
+.portrait.portrait.portrait [data-testid="buddy-world"] {
+  height: clamp(160px, 22vh, 200px);
+  min-height: 140px;
+}
+
+.portrait [data-testid="buddy-world"] button,
+.portrait [data-testid="buddy-world"] [role="status"],
+.portrait [data-testid="buddy-world"] [class*="careDock"],
+.portrait [data-testid="buddy-world"] [class*="setupDock"],
+.portrait [data-testid="buddy-world"] [class*="objectLabel"],
+.portrait [data-testid="buddy-world"] [class*="objectValue"] {
+  visibility: hidden;
+}
+
+.homeColumns {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  align-items: start;
+  gap: var(--rf-space-3);
+  min-width: 0;
+}
+
+.homeMain,
+.homeAside {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  min-width: 0;
+}
+
+.nativeSlot {
+  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  max-height: clamp(240px, 45vh, 480px);
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.nativeSlot:empty {
+  display: none;
+}
+
+.noticeDetail {
+  min-width: 0;
+}
+
+.noticeDetail > summary {
+  cursor: pointer;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
 }
 
 .tabPanel {
@@ -388,10 +420,6 @@
   align-items: center;
   flex-wrap: wrap;
   gap: var(--rf-space-2);
-  min-width: 0;
-}
-
-.playHint {
   min-width: 0;
 }
 
@@ -520,6 +548,25 @@
     height: min(460px, 70vh);
   }
 
+  .identityCard,
+  .homeColumns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .homeMain,
+  .homeAside {
+    display: contents;
+  }
+
+  .nativeSlot {
+    order: -1;
+    max-height: 26vh;
+  }
+
+  .homeAside > [data-testid="buddy-recent-chats"] {
+    order: 1;
+  }
+
   .tabPanelSplit {
     flex-direction: column;
     height: min(620px, 84vh);
@@ -535,31 +582,35 @@
     gap: var(--rf-space-2);
   }
 
-  .sceneBlockStrip [data-testid="buddy-presence"] > header > :first-child {
-    flex-basis: 100%;
+  .sections .tabsList {
+    grid-auto-columns: minmax(max-content, 1fr);
   }
 
-  .heroCardStrip [data-testid="buddy-world"] button {
-    visibility: hidden;
+  .sections > .tabsList {
+    max-width: calc(100% - 2 * var(--rf-space-2));
+    margin: var(--rf-space-1) var(--rf-space-2) 0;
   }
 
-  .heroCardStrip [data-testid="buddy-world"] [class*="objectLabel"],
-  .heroCardStrip [data-testid="buddy-world"] [class*="objectValue"] {
-    visibility: hidden;
+  .identityCard {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--rf-space-1);
   }
 
-  /* The scene's hotspot buttons and labels are not offered at this width: the
-   * scene renders as a ~72px thumbnail, where a hotspot is not a usable target.
-   * They return when the scene is expanded, which drops .heroCardStrip. Do not
-   * add a :focus-within reveal here - visibility:hidden removes these buttons
-   * from the tab order, and .sceneSizeActions sits outside .heroCard, so
-   * nothing inside .heroCardStrip can ever take focus and fire it. */
+  .identityBody {
+    padding: var(--rf-space-1);
+  }
 
-  .tabs .tabsList {
-    grid-auto-columns: unset;
-    grid-auto-flow: row;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    overflow-x: hidden;
+  .portrait.portrait.portrait [data-testid="buddy-world"] {
+    height: clamp(112px, 18vh, 140px);
+    min-height: 112px;
+  }
+
+  .identityBody [data-testid="buddy-presence"] > header {
+    flex-wrap: wrap;
+  }
+
+  .identityBody [data-testid="buddy-presence"] > header > :first-child {
+    flex: 1 1 100%;
   }
 
   .heroCard {

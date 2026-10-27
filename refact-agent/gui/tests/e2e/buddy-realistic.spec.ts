@@ -516,6 +516,7 @@ async function openBuddy(
 }
 
 async function waitForDeskRows(page: Page, expected: number) {
+  await page.getByRole("tab", { name: "Reports", exact: true }).click();
   await expect(page.locator(`${DESK} ul li button`)).toHaveCount(expected);
 }
 
@@ -564,6 +565,12 @@ test.describe("Buddy with realistic saved work", () => {
     page,
   }) => {
     await openBuddy(page, { width: 1280 });
+    const preview = page
+      .getByTestId("buddy-home-saved-work")
+      .getByRole("listitem")
+      .first();
+    await expect(preview).toBeInViewport();
+    expect((await preview.boundingBox())!.y).toBeLessThan(FOLD_PX);
     await waitForDeskRows(page, NEEDS_YOU_TITLES.length);
 
     const rows = await readRows(page);

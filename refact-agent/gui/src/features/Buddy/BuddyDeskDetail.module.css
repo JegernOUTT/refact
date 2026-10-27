@@ -1,0 +1,131 @@
+.detail {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  overflow-wrap: anywhere;
+}
+
+.detail :is(button, summary) {
+  min-height: var(--rf-hit-min);
+  min-width: var(--rf-hit-min);
+}
+
+.back {
+  align-self: flex-start;
+}
+
+.note {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  align-items: flex-start;
+  padding: var(--rf-space-3);
+  border-radius: var(--rf-radius-ctl);
+}
+
+.headline {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-3);
+}
+
+.headlineMeta,
+.subject {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.title,
+.conclusion,
+.delta {
+  margin: 0;
+}
+
+.conclusion {
+  font-weight: var(--rf-weight-semibold);
+}
+
+.manage {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  padding-top: var(--rf-space-3);
+  border-top: var(--rf-hairline) solid var(--rf-border);
+  min-width: 0;
+}
+
+.embedded {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--rf-space-2);
+}
+
+.embedded section {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-3);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  min-width: 0;
+}
+
+.embedded p {
+  margin: 0;
+  font-size: var(--rf-text-1);
+  color: var(--rf-color-muted);
+  overflow-wrap: anywhere;
+}
+
+.disclosure {
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  min-width: 0;
+}
+
+.summary {
+  padding: var(--rf-space-2) var(--rf-space-3);
+  cursor: pointer;
+  font-size: var(--rf-text-1);
+  color: var(--rf-color-muted);
+  border-radius: var(--rf-radius-ctl);
+  overflow-wrap: anywhere;
+}
+
+.summary:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-color-accent);
+  outline-offset: var(--rf-space-1);
+}
+
+.disclosureBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  padding: 0 var(--rf-space-3) var(--rf-space-3);
+  min-width: 0;
+}
+
+.limits {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+}
+
+.evidence {
+  padding: 0;
+  margin: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+}
+
+.evidence li {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}

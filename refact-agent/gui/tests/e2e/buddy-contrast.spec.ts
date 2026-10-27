@@ -38,6 +38,7 @@ async function openBuddy(
   await page.setViewportSize({ width, height: 900 });
   await page.goto(`${BUDDY_ROUTE}&theme=${theme}`);
   await page.getByTestId("buddy-home-content").waitFor();
+  await page.getByRole("tab", { name: "Play", exact: true }).click();
   await expect(page.getByTestId("buddy-speech-bubble")).toBeVisible();
 }
 

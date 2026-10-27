@@ -13,13 +13,13 @@ import { expect, test, type Page } from "@playwright/test";
 const BUDDY_ROUTE =
   "/tests/e2e/route-showcase.html?route=buddy&operator=enabled";
 const DESK = "[aria-label='Buddy Desk']";
-const SCENE = "[data-testid='buddy-home-scene']";
+const SAVED = "[data-testid='buddy-home-saved-work']";
+const HOME_SCENE =
+  "[data-testid='buddy-home-overview'] [data-testid='buddy-home-hero']";
 const RECENT = "[data-testid='buddy-recent-chats']";
 
 const project = { project_id: "showcase", canonical_root: "/workspace/refact" };
 
-/** The collapsed strip merges the old 46px presence row; ~56px plus padding. */
-const STRIP_BUDGET_PX = 96;
 /** One conversation inside a 468px panel was ~400px of reserved nothing. */
 const ONE_ROW_PANEL_LIMIT_PX = 200;
 const MAX_EMPTY_RATIO = 0.4;
@@ -119,7 +119,9 @@ async function openBuddyWithWork(page: Page, width = 1280) {
   await page.goto(BUDDY_ROUTE);
   // The machine can be under load; gate on readiness, never on a longer clock.
   await page.getByTestId("buddy-home-content").waitFor();
-  await expect(page.locator(`${DESK} ul li button`).first()).toBeVisible();
+  await expect(
+    page.getByTestId("buddy-home-saved-work").getByRole("listitem").first(),
+  ).toBeVisible();
 }
 
 /** Rendered area in px², or null when the region is not on the page. */
@@ -139,72 +141,52 @@ test.describe("Buddy home prominence", () => {
     });
   });
 
-  test("desk_outranks_the_scene_by_area", async ({ page }) => {
+  test("saved_work_outranks_the_home_scene_by_area", async ({ page }) => {
     await openBuddyWithWork(page);
 
-    const deskArea = await areaOf(page, DESK);
-    const sceneArea = await areaOf(page, SCENE);
+    const workArea = await areaOf(page, SAVED);
+    const sceneArea = await areaOf(page, HOME_SCENE);
 
-    expect(deskArea, "the Desk must render when there is work").not.toBeNull();
+    expect(workArea, "Home must preview saved work").not.toBeNull();
     expect(
       sceneArea,
-      "the scene must stay on the page; this is a prominence change, not a removal",
+      "the compact scene must stay on Home; this is a prominence change, not a removal",
     ).not.toBeNull();
     expect(
-      deskArea,
-      `Desk ${deskArea}px² vs scene ${sceneArea}px²; the scene used to be rank 3 at ~328,160px² while the Desk was rank 2`,
+      workArea,
+      `saved work ${workArea}px² vs Home scene ${sceneArea}px²`,
     ).toBeGreaterThan(sceneArea ?? 0);
   });
 
-  test("scene_is_collapsed_by_default_and_expandable", async ({ page }) => {
+  test("home_scene_is_compact_and_play_expands_it", async ({ page }) => {
     await openBuddyWithWork(page);
 
-    const scene = page.locator(SCENE);
-    await expect(scene).toHaveAttribute("data-scene-view", "strip");
-
-    const stripHeight = await scene.evaluate((element) =>
-      Math.round(element.getBoundingClientRect().height),
-    );
-    expect(
-      stripHeight,
-      `collapsed scene strip is ${stripHeight}px tall; it replaces a 46px presence row plus a full scene card`,
-    ).toBeLessThanOrEqual(STRIP_BUDGET_PX);
-
-    // Collapsed still means mounted: the character keeps rendering.
+    await expect(page.getByTestId("buddy-world")).toHaveCount(1);
     await expect(page.getByTestId("buddy-world")).toBeVisible();
+    const homeWorldArea = await areaOf(page, "[data-testid='buddy-world']");
 
-    const collapsedWorldArea = await areaOf(
-      page,
-      "[data-testid='buddy-world']",
-    );
-
-    await page
-      .getByRole("button", { name: "Expand scene", exact: true })
-      .click();
-    await expect(scene).toHaveAttribute("data-scene-view", "scene");
-    const expandedWorldArea = await areaOf(page, "[data-testid='buddy-world']");
-    expect(
-      expandedWorldArea,
-      `expanding produced ${expandedWorldArea}px² against a collapsed ${collapsedWorldArea}px²`,
-    ).toBeGreaterThan(collapsedWorldArea ?? 0);
-
-    await page
-      .getByRole("button", { name: "Collapse scene", exact: true })
-      .click();
-    await expect(scene).toHaveAttribute("data-scene-view", "strip");
-
-    // The merged mount contract is untouched: same labels, same semantics.
-    await page.getByRole("button", { name: "Close Play", exact: true }).click();
-    await expect(page.getByTestId("buddy-world")).toHaveCount(0);
-    await expect(page.getByTestId("buddy-presence-avatar")).toBeVisible();
     await page.getByRole("button", { name: "Open Play", exact: true }).click();
-    await expect(page.getByTestId("buddy-world")).toBeVisible();
-    await expect(page.getByTestId("buddy-presence-avatar")).toHaveCount(0);
+    await expect(
+      page.getByRole("tab", { name: "Play", exact: true }),
+    ).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByTestId("buddy-world")).toHaveCount(1);
+    const playWorldArea = await areaOf(page, "[data-testid='buddy-world']");
+    expect(
+      playWorldArea,
+      `Play produced ${playWorldArea}px² against a Home ${homeWorldArea}px²`,
+    ).toBeGreaterThan(homeWorldArea ?? 0);
+    await expect(
+      page.getByRole("button", { name: "Close Play", exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Reset Buddy scene", exact: true }),
+    ).toBeVisible();
 
-    // The Play tab still reaches the full scene.
-    await page.getByRole("tab", { name: "Play", exact: true }).click();
-    await expect(scene).toHaveAttribute("data-scene-view", "scene");
-    await expect(page.getByTestId("buddy-world")).toBeVisible();
+    await page.getByRole("button", { name: "Leave Play", exact: true }).click();
+    await expect(
+      page.getByRole("tab", { name: "Home", exact: true }),
+    ).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByTestId("buddy-world")).toHaveCount(1);
   });
 
   test("recent_chats_does_not_reserve_empty_space", async ({ page }) => {
@@ -246,41 +228,14 @@ test.describe("Buddy home prominence", () => {
     ).toBeLessThanOrEqual(MAX_EMPTY_RATIO);
   });
 
-  test("work_precedes_the_scene_in_dom_order", async ({ page }) => {
+  test("reports_shows_the_desk_without_a_competing_scene", async ({ page }) => {
     await openBuddyWithWork(page);
-
-    const order = await page.evaluate(
-      ([desk, scene]: string[]) => {
-        const deskNode = document.querySelector(desk);
-        const sceneNode = document.querySelector(scene);
-        const tablist = document.querySelector("[role='tablist']");
-        if (!deskNode || !sceneNode || !tablist) return null;
-        return {
-          deskBeforeScene: Boolean(
-            deskNode.compareDocumentPosition(sceneNode) &
-              Node.DOCUMENT_POSITION_FOLLOWING,
-          ),
-          // The merged layout contract: the scene still leads the tab strip.
-          sceneBeforeTablist: Boolean(
-            sceneNode.compareDocumentPosition(tablist) &
-              Node.DOCUMENT_POSITION_FOLLOWING,
-          ),
-          deskTop: Math.round(deskNode.getBoundingClientRect().top),
-          sceneTop: Math.round(sceneNode.getBoundingClientRect().top),
-        };
-      },
-      [DESK, SCENE],
-    );
-
-    expect(order).not.toBeNull();
-    expect(
-      order?.deskBeforeScene,
-      "the Desk must precede the scene; reading order used to be work rows -> snack request -> seasonal poetry -> Grant a bounded mandate",
-    ).toBe(true);
-    expect(order?.sceneBeforeTablist).toBe(true);
-    expect(
-      order?.sceneTop,
-      `scene top ${order?.sceneTop} against Desk top ${order?.deskTop}`,
-    ).toBeGreaterThan(order?.deskTop ?? 0);
+    await page.getByRole("tab", { name: "Reports", exact: true }).click();
+    await expect(page.locator(`${DESK} ul li button`).first()).toBeVisible();
+    await expect(page.getByTestId("buddy-world")).toHaveCount(0);
+    const deskTop = await page
+      .locator(DESK)
+      .evaluate((element) => Math.round(element.getBoundingClientRect().top));
+    expect(deskTop, `Desk top ${deskTop}`).toBeLessThan(450);
   });
 });

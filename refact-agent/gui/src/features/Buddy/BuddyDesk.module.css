@@ -1,6 +1,6 @@
 .desk {
   min-width: 0;
-  min-height: min(720px, 80vh);
+  container-type: inline-size;
   display: flex;
   flex-direction: column;
   gap: var(--rf-space-3);
@@ -74,6 +74,20 @@
   grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr);
 }
 
+@container (min-width: 720px) {
+  .layout[data-split="true"] {
+    grid-template-columns: minmax(280px, 1fr) minmax(0, 1.6fr);
+  }
+
+  .detail,
+  .placeholder {
+    position: sticky;
+    top: 0;
+    max-height: 80vh;
+    overflow-y: auto;
+  }
+}
+
 .srOnly {
   position: absolute;
   width: 1px;
@@ -87,7 +101,6 @@
 }
 
 .list,
-.detail,
 .search {
   min-width: 0;
   display: flex;
@@ -100,12 +113,71 @@
   padding-left: calc(var(--rf-icon-sm) + var(--rf-space-2));
 }
 
+.listTools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rf-space-1);
+}
+
+.count {
+  min-width: 0;
+  flex: 1 1 16ch;
+  overflow-wrap: anywhere;
+}
+
+.scroller {
+  position: relative;
+  min-width: 0;
+  max-height: 52vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  border-radius: var(--rf-radius-ctl);
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.history,
+.cancelled {
+  min-width: 0;
+  padding-left: var(--rf-space-3);
+}
+
+.cancelled {
+  padding-top: var(--rf-space-2);
+  border-top: var(--rf-hairline) solid var(--rf-border);
+}
+
+.historySummary {
+  display: flex;
+  align-items: center;
+  padding: 0 var(--rf-space-2);
+  cursor: pointer;
+  font-size: var(--rf-text-1);
+  color: var(--rf-color-muted);
+  border-radius: var(--rf-radius-ctl);
+  overflow-wrap: anywhere;
+}
+
 .filters {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: var(--rf-space-2);
   width: 100%;
-  max-width: 72ch;
 }
 
 .search input,
@@ -129,7 +201,6 @@
   flex-direction: column;
   gap: var(--rf-space-1);
   width: 100%;
-  max-width: 72ch;
 }
 
 .item {
@@ -229,7 +300,7 @@
 }
 
 .item:focus-visible,
-.summary:focus-visible,
+.historySummary:focus-visible,
 .search input:focus-visible,
 .search select:focus-visible {
   outline: var(--rf-focus-ring-w) solid var(--rf-color-accent);
@@ -262,108 +333,6 @@
   gap: var(--rf-space-2);
   margin-left: calc(var(--rf-icon-sm) + var(--rf-space-2));
   padding: 0;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.back {
-  align-self: flex-start;
-}
-
-.headline {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-2);
-  padding: var(--rf-space-3);
-}
-
-.headlineMeta,
-.subject {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.title,
-.conclusion,
-.delta {
-  margin: 0;
-}
-
-.conclusion {
-  font-weight: var(--rf-weight-semibold);
-}
-
-.decide {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-2);
-}
-
-.embedded {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: var(--rf-space-2);
-}
-
-.embedded section {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--rf-space-1);
-  padding: var(--rf-space-3);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-ctl);
-  min-width: 0;
-}
-
-.embedded p {
-  margin: 0;
-  font-size: var(--rf-text-1);
-  color: var(--rf-color-muted);
-  overflow-wrap: anywhere;
-}
-
-.disclosure {
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-ctl);
-  min-width: 0;
-}
-
-.summary {
-  padding: var(--rf-space-2) var(--rf-space-3);
-  cursor: pointer;
-  font-size: var(--rf-text-1);
-  color: var(--rf-color-muted);
-  border-radius: var(--rf-radius-ctl);
-  overflow-wrap: anywhere;
-}
-
-.disclosureBody {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-2);
-  padding: 0 var(--rf-space-3) var(--rf-space-3);
-  min-width: 0;
-}
-
-.limits {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-1);
-}
-
-.evidence {
-  padding: 0;
-  margin: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-2);
-}
-
-.evidence li {
-  display: flex;
-  flex-direction: column;
   min-width: 0;
   overflow-wrap: anywhere;
 }

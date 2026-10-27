@@ -10,9 +10,7 @@ test.describe("Buddy Recent errors", () => {
     }) => {
       await page.setViewportSize({ width, height: 900 });
       await page.goto(ROUTE);
-      await page
-        .getByRole("tab", { name: "Recent errors", exact: true })
-        .click();
+      await page.getByRole("tab", { name: "Activity", exact: true }).click();
 
       const list = page.getByRole("list", { name: "Recent warnings" });
       await expect(list.getByRole("listitem")).toHaveCount(20);
@@ -55,7 +53,7 @@ test.describe("Buddy Recent errors", () => {
   }) => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(ROUTE);
-    await page.getByRole("tab", { name: "Recent errors", exact: true }).click();
+    await page.getByRole("tab", { name: "Activity", exact: true }).click();
 
     const list = page.getByRole("list", { name: "Recent warnings" });
     await expect(list.getByRole("listitem")).toHaveCount(20);

@@ -415,8 +415,8 @@ describe("buddy UI polish", () => {
     const world = await screen.findByTestId("buddy-world");
     expect(screen.getByTestId("buddy-world-canvas")).toBeInTheDocument();
     expect(screen.getByTestId("buddy-world-character")).toBeInTheDocument();
-    expect(screen.getByTestId("buddy-summary-strip")).toBeInTheDocument();
-    expect(world.compareDocumentPosition(screen.getByRole("tablist"))).toBe(
+    expect(screen.queryByTestId("buddy-summary-strip")).not.toBeInTheDocument();
+    expect(screen.getByRole("tablist").compareDocumentPosition(world)).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING,
     );
     expect(screen.getByTestId("buddy-world-character")).toHaveAttribute(
@@ -425,9 +425,8 @@ describe("buddy UI polish", () => {
     );
 
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
-      "Pulse",
-      "Opportunities",
-      "Recent errors",
+      "Home",
+      "Reports",
       "Activity",
       "Play",
       "Settings",
@@ -440,17 +439,17 @@ describe("buddy UI polish", () => {
         "false",
       );
     });
-    expect(screen.getByTestId("buddy-world")).toBe(world);
+    expect(screen.getByTestId("buddy-world")).not.toBe(world);
     expect(screen.getByTestId("buddy-world-canvas")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Close Play" }));
-    await waitFor(() => {
-      expect(screen.queryByTestId("buddy-world")).not.toBeInTheDocument();
-    });
-
-    await user.click(screen.getByRole("button", { name: "Open Play" }));
-    expect(await screen.findByTestId("buddy-world")).toBeInTheDocument();
     expect(screen.getByTestId("buddy-summary-strip")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Leave Play" }));
+    expect(screen.getByRole("tab", { name: "Home" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getAllByTestId("buddy-world")).toHaveLength(1);
+    expect(screen.queryByTestId("buddy-summary-strip")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: "Settings" }));
     expect(
@@ -463,8 +462,6 @@ describe("buddy UI polish", () => {
       await screen.findByTestId("buddy-activity-panel"),
     ).toBeInTheDocument();
     expect(screen.getByTestId("buddy-recent-chats")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("tab", { name: "Recent errors" }));
     expect(
       await screen.findByTestId("buddy-recent-errors-panel"),
     ).toBeInTheDocument();

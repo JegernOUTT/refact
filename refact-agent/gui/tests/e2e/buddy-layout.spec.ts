@@ -148,23 +148,13 @@ test.describe("Buddy layout", () => {
         await expect(page.getByTestId("buddy-world")).toBeVisible();
         await expect(page.getByTestId("buddy-home-hero")).toBeVisible();
 
-        const sceneBeforeTabs = await page.evaluate(() => {
-          const scene = document.querySelector("[data-testid='buddy-world']");
-          const tablist = document.querySelector("[role='tablist']");
-          if (!scene || !tablist) return null;
-          return Boolean(
-            scene.compareDocumentPosition(tablist) &
-              Node.DOCUMENT_POSITION_FOLLOWING,
-          );
-        });
-        expect(
-          sceneBeforeTabs,
-          "BuddyWorld must precede the tab strip in document order; it used to render inside <Tabs.Content value='play'>",
-        ).toBe(true);
-
+        await expect(page.getByTestId("buddy-world")).toHaveCount(1);
+        await expect(
+          page.getByTestId("buddy-home-overview").getByTestId("buddy-world"),
+        ).toBeVisible();
         await expect(
           page.getByRole("tab", { selected: true }),
-        ).not.toHaveAccessibleName("Play");
+        ).toHaveAccessibleName("Home");
 
         const scrollers = await page.evaluate(() => {
           const main = document.querySelector(
@@ -291,14 +281,21 @@ test.describe("Buddy layout", () => {
     ).toBeGreaterThanOrEqual(MIN_VISIBLE_CONTENT_PX);
   });
 
-  test("keeps the scene mounted while other tabs are active", async ({
+  test("mounts exactly one scene on Home and Play and none elsewhere", async ({
     page,
   }) => {
     await openBuddy(page, { width: 1280 });
 
-    for (const tab of ["Pulse", "Opportunities", "Activity", "Settings"]) {
+    for (const [tab, worlds] of [
+      ["Reports", 0],
+      ["Activity", 0],
+      ["Settings", 0],
+      ["Play", 1],
+      ["Home", 1],
+    ] as const) {
       await page.getByRole("tab", { name: tab, exact: true }).click();
-      await expect(page.getByTestId("buddy-world")).toBeVisible();
+      await expect(page.getByTestId("buddy-world")).toHaveCount(worlds);
+      if (worlds) await expect(page.getByTestId("buddy-world")).toBeVisible();
     }
   });
 
@@ -323,7 +320,7 @@ test.describe("Buddy layout", () => {
       page.getByText(OPPORTUNITY_TITLE, { exact: true }),
     ).toHaveCount(0);
 
-    await page.getByRole("tab", { name: "Opportunities", exact: true }).click();
+    await page.getByRole("tab", { name: "Reports", exact: true }).click();
     await page.getByTestId("buddy-opportunities-feed").waitFor();
 
     await expect(
@@ -338,6 +335,8 @@ test.describe("Buddy layout", () => {
     await openBuddy(page, { width: 1280, fixture: "unavailable" });
 
     for (const label of NATIVE_PANEL_LABELS) {
+      if (label === "Buddy supervision")
+        await page.getByRole("tab", { name: "Activity", exact: true }).click();
       const panel = page.getByLabel(label);
       await expect(panel).toHaveCount(1);
       await expect(panel.getByRole("alert")).toHaveCount(1);
@@ -358,6 +357,7 @@ test.describe("Buddy layout", () => {
     page,
   }) => {
     await openBuddy(page, { width: 1280, fixture: "supervision-blocked" });
+    await page.getByRole("tab", { name: "Activity", exact: true }).click();
     await page
       .getByRole("button", { name: "Grant a bounded mandate", exact: true })
       .click();

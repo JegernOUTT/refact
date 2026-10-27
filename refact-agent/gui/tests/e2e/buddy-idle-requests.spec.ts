@@ -113,6 +113,7 @@ async function openDesk(
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto(ROUTE);
   await page.bringToFront();
+  await page.getByRole("tab", { name: "Reports", exact: true }).click();
   await expect(
     page.locator('[aria-label="Buddy Desk"] ul li button'),
   ).toHaveCount(rows.length);
@@ -160,6 +161,7 @@ test.describe("Buddy idle request behavior", () => {
       document.dispatchEvent(new Event("visibilitychange"));
       window.dispatchEvent(new Event("visibilitychange"));
     });
+    await page.getByRole("tab", { name: "Home", exact: true }).click();
     const summary = page.getByText("Live chats, goals and workers");
     await summary.click();
     const detail = page.locator("details").filter({ has: summary });

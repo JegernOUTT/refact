@@ -3,11 +3,11 @@ import {
   useEffect,
   useId,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
 import {
-  ArrowLeft,
   ChevronRight,
   ClipboardList,
   FileSearch,
@@ -19,7 +19,6 @@ import { useAppSelector } from "../../hooks";
 import {
   useGetBuddyDeskActionsQuery,
   useGetBuddyDeskActionsBatchQuery,
-  useGetBuddyOperatorArtifactQuery,
   useGetBuddyOperatorWorkQuery,
   useGetBuddyOperatorWorkItemQuery,
   buddyOperatorIdentity,
@@ -29,12 +28,8 @@ import {
 import type { WorkItem, WorkItemState } from "./operatorTypes";
 import { humanizeIdentifier } from "../../utils/displayNames";
 import { useConfig } from "../../hooks/useConfig";
-import { BuddyDeskActions } from "./BuddyDeskActions";
-import { BuddyReportReadState } from "./BuddyReportReadState";
-import { BuddyArtifactBody } from "./BuddyArtifactBody";
-import { BuddyReportHistory } from "./BuddyReportHistory";
-import { BuddyWorkSnooze } from "./BuddyWorkSnooze";
-import { headline, sameText } from "./buddyUtils";
+import { BuddyDeskDetail } from "./BuddyDeskDetail";
+import { headline } from "./buddyUtils";
 import styles from "./BuddyDesk.module.css";
 
 const views = ["Needs you", "Working on", "Delivered", "Watching"] as const;
@@ -70,20 +65,100 @@ const ACTION_STATUS_UNAVAILABLE = "Action status unavailable";
 const ROW_GROUP_SIZE = 50;
 
 const opaqueIdentifier = /[0-9a-f]{24,}/i;
-const uuidLikeIdentifier = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+const ROW_SELECTOR = "button[data-desk-row]";
+const CANCELLED_GROUP = "cancelled";
 
-function readableSubject(item: WorkItem): string | null {
-  const subject = item.subject.resource_id.trim();
-  const machineToken = /^[a-z0-9_-]+$/.test(subject) && /[_-]/.test(subject);
-  if (
-    subject === "" ||
-    item.subject.resource_kind === "workflow" ||
-    opaqueIdentifier.test(subject) ||
-    uuidLikeIdentifier.test(subject) ||
-    machineToken
-  )
-    return null;
-  return subject;
+const listModes = ["Latest by subject", "Run history"] as const;
+type ListMode = (typeof listModes)[number];
+
+type DeskRecordGroup = {
+  key: string;
+  head: OperatorRecord<WorkItem>;
+  others: OperatorRecord<WorkItem>[];
+};
+
+function deskSubjectKey(item: WorkItem): string | null {
+  const kind = item.kind.trim();
+  const resourceKind = item.subject.resource_kind.trim();
+  const resourceId = item.subject.resource_id.trim();
+  if (kind === "" || resourceKind === "" || resourceId === "") return null;
+  return JSON.stringify([
+    item.project.project_id,
+    item.project.canonical_root,
+    kind,
+    resourceKind,
+    resourceId,
+  ]);
+}
+
+function groupDeskRecords(
+  records: OperatorRecord<WorkItem>[],
+): DeskRecordGroup[] {
+  const groups = new Map<string, DeskRecordGroup>();
+  for (const record of records) {
+    const key = deskSubjectKey(record.value) ?? `work:${record.value.id}`;
+    const group = groups.get(key);
+    if (group) group.others.push(record);
+    else groups.set(key, { key, head: record, others: [] });
+  }
+  return [...groups.values()];
+}
+
+function chunkWork(
+  records: OperatorRecord<WorkItem>[],
+  endpointIdentity: string,
+): { key: string; items: WorkItem[] }[] {
+  return Array.from(
+    { length: Math.ceil(records.length / ROW_GROUP_SIZE) },
+    (_, index) => {
+      const items = records
+        .slice(index * ROW_GROUP_SIZE, (index + 1) * ROW_GROUP_SIZE)
+        .map(({ value }) => value);
+      return {
+        key: JSON.stringify([
+          endpointIdentity,
+          ...items.map((value) => [
+            value.id,
+            value.project.project_id,
+            value.current_artifact_id,
+            value.current_artifact_revision,
+          ]),
+        ]),
+        items,
+      };
+    },
+  );
+}
+
+function sameChunkActions(
+  left: ChunkActions | undefined,
+  right: Record<string, RowActions>,
+): boolean {
+  if (!left) return false;
+  const keys = Object.keys(right);
+  if (Object.keys(left).length !== keys.length) return false;
+  return keys.every((id) => {
+    const a = left[id];
+    const b = right[id];
+    if (!(id in left) || a.mode !== b.mode) return false;
+    if (a.mode === "per_row" || b.mode === "per_row") return true;
+    return (
+      a.entry === b.entry &&
+      a.loaded === b.loaded &&
+      a.pending === b.pending &&
+      a.failed === b.failed
+    );
+  });
+}
+
+function visibleRows(list: HTMLElement | null): HTMLButtonElement[] {
+  return [
+    ...(list?.querySelectorAll<HTMLButtonElement>(ROW_SELECTOR) ?? []),
+  ].filter((row) => !row.closest("details:not([open])"));
+}
+
+function plural(count: number, one: string, many = `${one}s`): string {
+  return `${count} ${count === 1 ? one : many}`;
 }
 
 function meaningfulText(value: string | null | undefined): string | null {
@@ -138,22 +213,6 @@ function changedAtAbsolute(value: string): string | null {
   return new Date(parsed).toLocaleString();
 }
 
-function titleRemainder(title: string, body?: string): string | null {
-  const lines = title.split(/\r?\n/);
-  const headlineIndex = lines.findIndex((line) => line.trim() !== "");
-  if (headlineIndex < 0) return null;
-  const remainder = lines
-    .slice(headlineIndex + 1)
-    .join(" ")
-    .trim();
-  if (!remainder) return null;
-  const normalize = (value: string) =>
-    value.toLowerCase().replace(/\s+/g, " ").trim();
-  return body && normalize(body).includes(normalize(remainder))
-    ? null
-    : remainder;
-}
-
 function WorkRow({
   item,
   endpointIdentity,
@@ -168,15 +227,7 @@ function WorkRow({
   endpointIdentity: string;
   showState: boolean;
   showActionVerb: boolean;
-  rowActions:
-    | { mode: "per_row" }
-    | {
-        mode: "batch";
-        entry: DeskActionBatchEntry | undefined;
-        loaded: boolean;
-        pending: boolean;
-        failed: boolean;
-      };
+  rowActions: RowActions;
   selected: boolean;
   onOpen: (item: WorkItem, trigger: HTMLButtonElement) => void;
   onActionVerb: (id: string, verb: string) => void;
@@ -227,6 +278,7 @@ function WorkRow({
   return (
     <li>
       <button
+        data-desk-row={item.id}
         className={styles.item}
         aria-current={selected ? "true" : undefined}
         aria-describedby={absolute ? absoluteTimeId : undefined}
@@ -310,311 +362,74 @@ function WorkRow({
   );
 }
 
-function WorkRowGroup({
-  records,
+type RowActions =
+  | { mode: "per_row" }
+  | {
+      mode: "batch";
+      entry: DeskActionBatchEntry | undefined;
+      loaded: boolean;
+      pending: boolean;
+      failed: boolean;
+    };
+
+type ChunkActions = Record<string, RowActions>;
+
+function ActionBatchSubscriber({
+  chunkKey,
+  chunk,
   endpointIdentity,
-  showState,
-  showActionVerb,
-  selectedId,
-  onOpen,
-  onActionVerb,
+  onResult,
 }: {
-  records: OperatorRecord<WorkItem>[];
+  chunkKey: string;
+  chunk: WorkItem[];
   endpointIdentity: string;
-  showState: boolean;
-  showActionVerb: boolean;
-  selectedId: string | null;
-  onOpen: (item: WorkItem, trigger: HTMLButtonElement) => void;
-  onActionVerb: (id: string, verb: string) => void;
+  onResult: (key: string, result: ChunkActions | null) => void;
 }) {
-  const projectId = records[0].value.project.project_id;
-  const ids = records
+  const projectId = chunk[0]?.project.project_id ?? "";
+  const ids = chunk
     .filter(
-      ({ value }) =>
+      (value) =>
         Boolean(value.current_artifact_id) &&
         value.project.project_id === projectId,
     )
-    .map(({ value }) => value.id);
+    .map((value) => value.id);
   const batch = useGetBuddyDeskActionsBatchQuery(
     { ids, project_id: projectId, endpoint_identity: endpointIdentity },
     { skip: ids.length === 0 },
   );
-  const status =
-    batch.error && typeof batch.error === "object" && "status" in batch.error
-      ? batch.error.status
-      : undefined;
-  const perRow = status === 404 || status === 405;
-  return (
-    <>
-      {records.map(({ value }) => (
-        <WorkRow
-          key={value.id}
-          item={value}
-          endpointIdentity={endpointIdentity}
-          showState={showState}
-          showActionVerb={showActionVerb}
-          rowActions={
-            perRow
-              ? { mode: "per_row" }
-              : {
-                  mode: "batch",
-                  entry: batch.currentData?.data.find(
-                    (entry) => entry.work_id === value.id,
-                  ),
-                  loaded: batch.currentData !== undefined,
-                  pending: batch.isFetching && !batch.currentData,
-                  failed:
-                    batch.error !== undefined ||
-                    value.project.project_id !== projectId,
-                }
-          }
-          selected={selectedId === value.id}
-          onOpen={onOpen}
-          onActionVerb={onActionVerb}
-        />
-      ))}
-    </>
-  );
+  const { currentData, isFetching, error } = batch;
+  useEffect(() => {
+    const status =
+      error && typeof error === "object" && "status" in error
+        ? error.status
+        : undefined;
+    const perRow = status === 404 || status === 405;
+    const result: ChunkActions = {};
+    for (const item of chunk) {
+      result[item.id] = perRow
+        ? { mode: "per_row" }
+        : {
+            mode: "batch",
+            entry: currentData?.data.find((entry) => entry.work_id === item.id),
+            loaded: currentData !== undefined,
+            pending: isFetching && !currentData,
+            failed:
+              error !== undefined || item.project.project_id !== projectId,
+          };
+    }
+    onResult(chunkKey, result);
+  }, [chunk, chunkKey, currentData, error, isFetching, onResult, projectId]);
+  useEffect(() => () => onResult(chunkKey, null), [chunkKey, onResult]);
+  return null;
 }
 
-function WorkDetail({
-  item,
-  endpointIdentity,
-  onBack,
-  onSnoozeChange,
-  onDismiss,
-  onDismissPending,
-  onDismissFailure,
-}: {
-  item: WorkItem;
-  endpointIdentity: string;
-  onBack: () => void;
-  onSnoozeChange: () => void;
-  onDismiss: (item: WorkItem) => void;
-  onDismissPending: (item: WorkItem) => void;
-  onDismissFailure: (item: WorkItem) => void;
-}) {
-  const { currentData, isFetching, error, refetch } =
-    useGetBuddyOperatorArtifactQuery(
-      {
-        id: item.current_artifact_id ?? "",
-        revision: item.current_artifact_revision ?? undefined,
-        project_id: item.project.project_id,
-        endpoint_identity: endpointIdentity,
-      },
-      { skip: !item.current_artifact_id },
-    );
-  const artifact = currentData?.data.value;
-  const artifactMatches =
-    artifact?.project.project_id === item.project.project_id &&
-    artifact.project.canonical_root === item.project.canonical_root;
-  const artifactHeadline = artifact ? headline(artifact.title) : "";
-  const showConclusion =
-    Boolean(artifact?.conclusion.trim()) &&
-    !sameText(artifact?.conclusion ?? "", artifactHeadline);
-  let artifactBody: string | null = artifact?.body.trim() || null;
-  if (
-    artifactBody &&
-    (sameText(artifactBody, artifactHeadline) ||
-      sameText(artifactBody, artifact?.conclusion ?? ""))
-  ) {
-    artifactBody = null;
-  } else if (artifactBody) {
-    const paragraphBreak = /\r?\n[ \t]*\r?\n/.exec(artifactBody);
-    const firstParagraph = paragraphBreak
-      ? artifactBody.slice(0, paragraphBreak.index)
-      : artifactBody;
-    if (sameText(firstParagraph, artifactHeadline)) {
-      artifactBody = paragraphBreak
-        ? artifactBody
-            .slice(paragraphBreak.index + paragraphBreak[0].length)
-            .trim() || null
-        : null;
-    }
-    if (
-      artifactBody &&
-      (sameText(artifactBody, artifactHeadline) ||
-        sameText(artifactBody, artifact?.conclusion ?? ""))
-    ) {
-      artifactBody = null;
-    }
-  }
-  const backButton = useRef<HTMLButtonElement>(null);
-  const subject = readableSubject(item);
-  const remainder = artifact
-    ? titleRemainder(artifact.title, artifact.body)
-    : titleRemainder(item.title);
-  useEffect(() => {
-    backButton.current?.focus();
-  }, []);
-  return (
-    <article className={styles.detail} aria-label="Work detail">
-      <Button
-        ref={backButton}
-        className={styles.back}
-        variant="ghost"
-        size="sm"
-        leftIcon={ArrowLeft}
-        onClick={onBack}
-      >
-        Back to work list
-      </Button>
-      <div className={styles.headlineMeta}>
-        <Text size="1" color="gray" className={styles.subject}>
-          {subject
-            ? `${humanizeIdentifier(item.state)} · ${subject}`
-            : humanizeIdentifier(item.state)}
-        </Text>
-      </div>
-      {!item.current_artifact_id && remainder && (
-        <Text as="p" size="2" color="gray">
-          {remainder}
-        </Text>
-      )}
-      {!item.current_artifact_id && (
-        <Surface variant="surface-1" className={styles.note} role="status">
-          <Text size="2" color="gray">
-            {headline(item.title)} has not produced a result yet.
-          </Text>
-        </Surface>
-      )}
-      {isFetching && (
-        <Surface variant="surface-1" className={styles.note} role="status">
-          <Text size="2" color="gray">
-            Loading the result…
-          </Text>
-        </Surface>
-      )}
-      {error && (
-        <Surface variant="surface-1" className={styles.note} role="alert">
-          <Text size="2" color="red">
-            The result could not be loaded.
-          </Text>
-          <Button size="sm" onClick={() => void refetch()}>
-            Retry report
-          </Button>
-        </Surface>
-      )}
-      {artifact && !artifactMatches && (
-        <Surface variant="surface-1" className={styles.note} role="alert">
-          <Text size="2" color="red">
-            This result belongs to another project.
-          </Text>
-        </Surface>
-      )}
-      {artifact && artifactMatches && !error && (
-        <>
-          <Surface
-            variant="surface-1"
-            radius="card"
-            className={styles.headline}
-          >
-            <Text as="h3" size="3" weight="bold" className={styles.title}>
-              {artifactHeadline}
-            </Text>
-            {showConclusion && (
-              <Text as="p" size="3" className={styles.conclusion}>
-                {artifact.conclusion}
-              </Text>
-            )}
-            {artifact.delta && (
-              <Text as="p" size="2" color="gray" className={styles.delta}>
-                {artifact.delta}
-              </Text>
-            )}
-          </Surface>
-          <div className={styles.decide}>
-            <BuddyDeskActions
-              item={item}
-              artifact={artifact}
-              endpointIdentity={endpointIdentity}
-              onDismiss={onDismiss}
-              onDismissPending={onDismissPending}
-              onDismissFailure={onDismissFailure}
-            />
-            <div className={styles.embedded}>
-              <BuddyReportReadState
-                key={`read:${artifact.artifact_id}:${artifact.revision}`}
-                item={item}
-                artifact={artifact}
-                endpointIdentity={endpointIdentity}
-              />
-              <BuddyWorkSnooze
-                key={`snooze:${artifact.artifact_id}:${artifact.revision}`}
-                item={item}
-                artifact={artifact}
-                identity={endpointIdentity}
-                onChange={onSnoozeChange}
-              />
-            </div>
-          </div>
-          <details className={styles.disclosure} open>
-            <summary className={styles.summary}>The full write-up</summary>
-            <div className={styles.disclosureBody}>
-              {remainder && (
-                <Text as="p" size="2" color="gray">
-                  {remainder}
-                </Text>
-              )}
-              {artifactBody && <BuddyArtifactBody body={artifactBody} />}
-              {artifact.uncertainty && (
-                <section aria-label="Limitations" className={styles.limits}>
-                  <Text as="p" size="1" color="orange" weight="medium">
-                    What this did not cover
-                  </Text>
-                  <Text as="p" size="2" color="gray">
-                    {artifact.uncertainty}
-                  </Text>
-                </section>
-              )}
-            </div>
-          </details>
-          <details className={styles.disclosure}>
-            <summary className={styles.summary}>
-              Evidence · revision {artifact.revision}
-            </summary>
-            <div className={styles.disclosureBody}>
-              {artifact.evidence.length === 0 ? (
-                <Text as="p" size="2" color="gray">
-                  No evidence references were recorded.
-                </Text>
-              ) : (
-                <ul className={styles.evidence}>
-                  {artifact.evidence.map((evidence) => (
-                    <li key={evidence.evidence_id}>
-                      <Text size="2" weight="medium">
-                        {humanizeIdentifier(evidence.source.source_kind)}
-                      </Text>
-                      <Text size="1" color="gray">
-                        {evidence.locator}
-                      </Text>
-                      {changedAt(evidence.observed_at) && (
-                        <Text
-                          size="1"
-                          color="gray"
-                          title={
-                            changedAtAbsolute(evidence.observed_at) ?? undefined
-                          }
-                        >
-                          Observed {changedAt(evidence.observed_at)}
-                        </Text>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </details>
-          <BuddyReportHistory
-            item={item}
-            artifact={artifact}
-            identity={endpointIdentity}
-          />
-        </>
-      )}
-    </article>
-  );
-}
+const PENDING_ROW_ACTIONS: RowActions = {
+  mode: "batch",
+  entry: undefined,
+  loaded: false,
+  pending: true,
+  failed: false,
+};
 
 function DeskContent({
   endpointIdentity,
@@ -628,8 +443,41 @@ function DeskContent({
   const config = useConfig();
   const [cursor, setCursor] = useState<number>();
   const [previous, setPrevious] = useState<OperatorRecord<WorkItem>[]>([]);
-  const [actionVerbs, setActionVerbs] = useState<Record<string, string>>({});
+  const [actionVerbs, setActionVerbs] = useState<
+    Partial<Record<string, string>>
+  >({});
   const [view, setView] = useState<WorkView>(DEFAULT_VIEW);
+  const [listMode, setListMode] = useState<ListMode>("Latest by subject");
+  const [chunkActions, setChunkActions] = useState<
+    Partial<Record<string, ChunkActions>>
+  >({});
+  const recordChunkActions = useCallback(
+    (key: string, result: ChunkActions | null) => {
+      setChunkActions((current) => {
+        if (result === null) {
+          if (!(key in current)) return current;
+          return Object.fromEntries(
+            Object.entries(current).filter(([entry]) => entry !== key),
+          );
+        }
+        if (sameChunkActions(current[key], result)) return current;
+        return { ...current, [key]: result };
+      });
+    },
+    [],
+  );
+  const [openGroups, setOpenGroups] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const toggleGroup = useCallback((key: string, isOpen: boolean) => {
+    setOpenGroups((current) => {
+      if (current.has(key) === isOpen) return current;
+      const next = new Set(current);
+      if (isOpen) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+  }, []);
   const [selectedId, setSelectedId] = useState<string | null>(workId ?? null);
   const [selectedOverride, setSelectedOverride] = useState<WorkItem | null>(
     null,
@@ -685,25 +533,45 @@ function DeskContent({
     },
     { refetchOnMountOrArgChange: true },
   );
-  const compatiblePrevious = currentData
-    ? previous.filter(
-        (record) =>
-          record.value.project.project_id === currentData.project.project_id &&
-          record.value.project.canonical_root ===
-            currentData.project.canonical_root,
-      )
-    : previous;
-  const records = [
-    ...new Map(
-      [...compatiblePrevious, ...(currentData?.data ?? [])].map((record) => [
-        record.value.id,
-        record,
-      ]),
-    ).values(),
-  ];
+  const records = useMemo(() => {
+    const compatiblePrevious = currentData
+      ? previous.filter(
+          (record) =>
+            record.value.project.project_id ===
+              currentData.project.project_id &&
+            record.value.project.canonical_root ===
+              currentData.project.canonical_root,
+        )
+      : previous;
+    return [
+      ...new Map(
+        [...compatiblePrevious, ...(currentData?.data ?? [])].map((record) => [
+          record.value.id,
+          record,
+        ]),
+      ).values(),
+    ];
+  }, [currentData, previous]);
+  const linkedPage = linkedWork.currentData;
+  const linkedValue =
+    linkedPage &&
+    workId !== undefined &&
+    projectId !== undefined &&
+    linkedPage.data.value.id === workId &&
+    linkedPage.project.project_id === projectId &&
+    linkedPage.data.value.project.project_id === projectId &&
+    linkedPage.data.value.project.canonical_root ===
+      linkedPage.project.canonical_root
+      ? linkedPage.data.value
+      : undefined;
+  const linkedFailure =
+    workId !== undefined &&
+    (!projectId ||
+      Boolean(linkedWork.error) ||
+      (linkedPage !== undefined && linkedValue === undefined));
   const selected =
     selectedId === workId
-      ? linkedWork.currentData?.data.value
+      ? linkedValue
       : records.find((record) => record.value.id === selectedId)?.value ??
         (selectedOverride?.id === selectedId ? selectedOverride : undefined) ??
         (dismissSnapshotRef.current?.id === selectedId
@@ -714,6 +582,32 @@ function DeskContent({
     ({ value }) => viewForState[value.state] === view,
   );
   const distinctStates = new Set(filtered.map(({ value }) => value.state));
+  const primary = filtered.filter(({ value }) => value.state !== "cancelled");
+  const cancelled = filtered.filter(({ value }) => value.state === "cancelled");
+  const groups = groupDeskRecords(primary);
+  const repeatedSubjects = groups.filter((group) => group.others.length > 0);
+  const actionChunks = chunkWork(filtered, endpointIdentity);
+  const chunkByWork = new Map(
+    actionChunks.flatMap((chunk) =>
+      chunk.items.map((value) => [value.id, chunk.key] as const),
+    ),
+  );
+  const rowActionsFor = (id: string): RowActions => {
+    const chunkKey = chunkByWork.get(id);
+    const chunk = chunkKey === undefined ? undefined : chunkActions[chunkKey];
+    return chunk && id in chunk ? chunk[id] : PENDING_ROW_ACTIONS;
+  };
+  const moreAvailable = currentData?.next_cursor != null;
+  const selectedGroup =
+    selectedId === null
+      ? null
+      : cancelled.some(({ value }) => value.id === selectedId)
+        ? CANCELLED_GROUP
+        : listMode === "Latest by subject"
+          ? groups.find((group) =>
+              group.others.some(({ value }) => value.id === selectedId),
+            )?.key ?? null
+          : null;
   const actionVerbsReady =
     filtered.length > 0 &&
     filtered.every(({ value }) => actionVerbs[value.id] !== undefined);
@@ -749,15 +643,19 @@ function DeskContent({
   }, [currentData, previous]);
 
   useLayoutEffect(() => {
+    if (selectedGroup !== null) toggleGroup(selectedGroup, true);
+  }, [selectedGroup, toggleGroup]);
+
+  useLayoutEffect(() => {
     if (selectedId === null && trigger.current && !restoreViewFocus.current) {
-      trigger.current?.focus({ preventScroll: true });
+      trigger.current.focus({ preventScroll: true });
     }
   }, [selectedId]);
 
   useLayoutEffect(() => {
     if (selectedId !== null || !restoreViewFocus.current || isFetching) return;
     const firstRow =
-      listRef.current?.querySelector<HTMLButtonElement>("ul li button");
+      listRef.current?.querySelector<HTMLButtonElement>(ROW_SELECTOR);
     if (firstRow) firstRow.focus({ preventScroll: true });
     else viewTrigger.current?.focus({ preventScroll: true });
     restoreViewFocus.current = false;
@@ -820,7 +718,7 @@ function DeskContent({
   useLayoutEffect(() => {
     if (!refreshFocusPending.current || selectedId !== null) return;
     const firstRow =
-      listRef.current?.querySelector<HTMLButtonElement>("ul li button");
+      listRef.current?.querySelector<HTMLButtonElement>(ROW_SELECTOR);
     (firstRow ?? refreshButton.current ?? expandButton.current)?.focus({
       preventScroll: true,
     });
@@ -831,7 +729,7 @@ function DeskContent({
     if (!snoozeFocusPending.current || selectedId !== null || isFetching)
       return;
     const firstRow =
-      listRef.current?.querySelector<HTMLButtonElement>("ul li button");
+      listRef.current?.querySelector<HTMLButtonElement>(ROW_SELECTOR);
     (firstRow ?? refreshButton.current ?? expandButton.current)?.focus({
       preventScroll: true,
     });
@@ -846,9 +744,8 @@ function DeskContent({
       records.some(({ value }) => value.id === pending.id)
     )
       return;
-    const rows =
-      listRef.current?.querySelectorAll<HTMLButtonElement>("ul li button");
-    const target = rows?.[pending.index] ?? rows?.[pending.index - 1];
+    const rows = visibleRows(listRef.current);
+    const target = rows.at(pending.index) ?? rows.at(-1);
     (target ?? refreshButton.current ?? expandButton.current)?.focus({
       preventScroll: true,
     });
@@ -856,6 +753,8 @@ function DeskContent({
     dismissedSelectionId.current = null;
   }, [records, selectedId]);
 
+  const rowIndex = (id: string) =>
+    visibleRows(listRef.current).findIndex((row) => row.dataset.deskRow === id);
   const refresh = () => {
     setPrevious([]);
     refreshStartedAt.current = Date.now();
@@ -894,7 +793,7 @@ function DeskContent({
     updateLink(item);
   };
   const onDismissPending = (item: WorkItem) => {
-    const index = filtered.findIndex(({ value }) => value.id === item.id);
+    const index = rowIndex(item.id);
     dismissalPendingId.current = item.id;
     dismissalFocusPending.current = { id: item.id, index };
     dismissSnapshotRef.current = item;
@@ -914,7 +813,7 @@ function DeskContent({
     dismissSnapshotRef.current = null;
     dismissalFocusPending.current ??= {
       id: item.id,
-      index: filtered.findIndex(({ value }) => value.id === item.id),
+      index: rowIndex(item.id),
     };
     dismissedSelectionId.current = item.id;
     trigger.current = null;
@@ -1012,23 +911,29 @@ function DeskContent({
           </Text>
         </Surface>
       )}
-      {selectedId === workId && linkedWork.error && (
+      {selectedId === workId && linkedFailure && (
         <Surface variant="surface-1" className={styles.note} role="alert">
           <Text size="2" color="red">
-            The linked work is unavailable in this project. No other report was
-            substituted.
+            {projectId
+              ? "The linked work is unavailable in this project. No other report was substituted."
+              : "This link does not name a project, so the linked work was not opened. No other report was substituted."}
           </Text>
           <div className={styles.noteActions}>
-            <Button size="sm" onClick={() => void linkedWork.refetch()}>
-              Retry linked work
-            </Button>
+            {projectId && (
+              <Button size="sm" onClick={() => void linkedWork.refetch()}>
+                Retry linked work
+              </Button>
+            )}
             <Button size="sm" variant="ghost" onClick={back}>
               Back to work list
             </Button>
           </div>
         </Surface>
       )}
-      <div className={styles.layout}>
+      <div
+        className={styles.layout}
+        data-split={Boolean(selected) || filtered.length > 0}
+      >
         <div className={styles.list} ref={listRef}>
           <nav className={styles.views} aria-label="Work views">
             {views.map((label) => (
@@ -1099,6 +1004,53 @@ function DeskContent({
               </label>
             </div>
           )}
+          {!error && filtered.length > 0 && (
+            <div className={styles.listTools}>
+              {primary.length > 0 && (
+                <div
+                  className={styles.modes}
+                  role="group"
+                  aria-label="List layout"
+                >
+                  {listModes.map((label) => (
+                    <Button
+                      key={label}
+                      size="sm"
+                      variant={listMode === label ? "soft" : "ghost"}
+                      aria-pressed={listMode === label}
+                      onClick={() => setListMode(label)}
+                    >
+                      {label}
+                    </Button>
+                  ))}
+                </div>
+              )}
+              <Text
+                size="1"
+                color="gray"
+                className={styles.count}
+                data-testid="buddy-desk-count"
+              >
+                {[
+                  `${plural(filtered.length, "record")} loaded`,
+                  listMode === "Latest by subject" && primary.length > 0
+                    ? `${plural(groups.length, "subject")}`
+                    : null,
+                  cancelled.length > 0 ? `${cancelled.length} cancelled` : null,
+                  moreAvailable ? "more saved work not loaded yet" : null,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </Text>
+              {listMode === "Latest by subject" &&
+                repeatedSubjects.length > 0 && (
+                  <Text size="1" color="gray" className={styles.count}>
+                    Records are grouped only when they share the same work kind
+                    and saved subject. Grouping covers loaded records only.
+                  </Text>
+                )}
+            </div>
+          )}
           {isFetching && (
             <Text
               as="p"
@@ -1121,39 +1073,113 @@ function DeskContent({
             </Surface>
           ) : (
             <>
-              {currentData && filtered.length === 0 && (
+              {currentData && primary.length === 0 && (
                 <Text
                   as="p"
                   size="2"
                   color="gray"
                   className={styles.inlineStatus}
                 >
-                  {filtersApplied
-                    ? "Nothing here matches those filters."
-                    : emptyView[view]}
+                  {cancelled.length > 0
+                    ? "No delivered results among the loaded records. Cancelled work is listed separately."
+                    : filtersApplied
+                      ? "Nothing here matches those filters."
+                      : emptyView[view]}
                 </Text>
               )}
-              <ul className={styles.items}>
-                {Array.from(
-                  { length: Math.ceil(filtered.length / ROW_GROUP_SIZE) },
-                  (_, index) =>
-                    filtered.slice(
-                      index * ROW_GROUP_SIZE,
-                      (index + 1) * ROW_GROUP_SIZE,
-                    ),
-                ).map((group) => (
-                  <WorkRowGroup
-                    key={group[0].value.id}
-                    records={group}
+              {actionChunks.map((chunk) => (
+                <ActionBatchSubscriber
+                  key={chunk.key}
+                  chunkKey={chunk.key}
+                  chunk={chunk.items}
+                  endpointIdentity={endpointIdentity}
+                  onResult={recordChunkActions}
+                />
+              ))}
+              {(() => {
+                const row = (record: OperatorRecord<WorkItem>) => (
+                  <WorkRow
+                    key={record.value.id}
+                    item={record.value}
                     endpointIdentity={endpointIdentity}
                     showState={distinctStates.size > 1}
                     showActionVerb={showActionVerb}
-                    selectedId={selectedId}
+                    rowActions={rowActionsFor(record.value.id)}
+                    selected={selectedId === record.value.id}
                     onOpen={open}
                     onActionVerb={recordActionVerb}
                   />
-                ))}
-              </ul>
+                );
+                return (
+                  <div
+                    className={styles.scroller}
+                    data-testid="buddy-desk-scroller"
+                  >
+                    {primary.length > 0 && listMode === "Run history" && (
+                      <ul className={styles.items}>{primary.map(row)}</ul>
+                    )}
+                    {primary.length > 0 && listMode === "Latest by subject" && (
+                      <ul className={styles.items}>
+                        {groups.map((group) => (
+                          <li key={group.key} className={styles.group}>
+                            <ul className={styles.items}>{row(group.head)}</ul>
+                            {group.others.length > 0 && (
+                              <details
+                                className={styles.history}
+                                open={openGroups.has(group.key)}
+                                onToggle={(event) =>
+                                  toggleGroup(
+                                    group.key,
+                                    event.currentTarget.open,
+                                  )
+                                }
+                              >
+                                <summary className={styles.historySummary}>
+                                  {`${plural(
+                                    group.others.length,
+                                    "other loaded record",
+                                  )} for this subject (${
+                                    group.others.length + 1
+                                  } loaded)`}
+                                </summary>
+                                <ul className={styles.items}>
+                                  {group.others.map(row)}
+                                </ul>
+                              </details>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {cancelled.length > 0 && primary.length === 0 && (
+                      <section
+                        className={styles.cancelled}
+                        aria-label="Cancelled work"
+                      >
+                        <Text size="1" color="gray">
+                          {`Cancelled (${cancelled.length} loaded) — kept for history, not delivered results`}
+                        </Text>
+                        <ul className={styles.items}>{cancelled.map(row)}</ul>
+                      </section>
+                    )}
+                    {cancelled.length > 0 && primary.length > 0 && (
+                      <details
+                        className={styles.cancelled}
+                        aria-label="Cancelled work"
+                        open={openGroups.has(CANCELLED_GROUP)}
+                        onToggle={(event) =>
+                          toggleGroup(CANCELLED_GROUP, event.currentTarget.open)
+                        }
+                      >
+                        <summary className={styles.historySummary}>
+                          {`Cancelled (${cancelled.length} loaded) — kept for history, not delivered results`}
+                        </summary>
+                        <ul className={styles.items}>{cancelled.map(row)}</ul>
+                      </details>
+                    )}
+                  </div>
+                );
+              })()}
               {currentData?.next_cursor != null && (
                 <Button
                   size="sm"
@@ -1169,17 +1195,19 @@ function DeskContent({
             </>
           )}
         </div>
-        {selected && !(selectedId === workId ? linkedWork.error : error) ? (
-          <WorkDetail
-            key={`${selected.id}:${selected.current_artifact_revision ?? 0}`}
-            item={selected}
-            endpointIdentity={endpointIdentity}
-            onBack={back}
-            onSnoozeChange={onSnoozeChange}
-            onDismiss={onDismiss}
-            onDismissPending={onDismissPending}
-            onDismissFailure={onDismissFailure}
-          />
+        {selected && !(selectedId === workId ? linkedFailure : error) ? (
+          <div className={styles.detail}>
+            <BuddyDeskDetail
+              key={`${selected.id}:${selected.current_artifact_revision ?? 0}`}
+              item={selected}
+              endpointIdentity={endpointIdentity}
+              onBack={back}
+              onSnoozeChange={onSnoozeChange}
+              onDismiss={onDismiss}
+              onDismissPending={onDismissPending}
+              onDismissFailure={onDismissFailure}
+            />
+          </div>
         ) : (
           filtered.length > 0 && (
             <div className={styles.placeholder}>

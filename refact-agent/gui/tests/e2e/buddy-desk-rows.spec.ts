@@ -83,6 +83,7 @@ async function openDesk(page: Page, width: number) {
   await page.setViewportSize({ width, height: 900 });
   await page.goto(ROUTE);
   await page.getByTestId("buddy-home-content").waitFor();
+  await page.getByRole("tab", { name: "Reports", exact: true }).click();
   await expect(page.locator(`${DESK} ul li button`)).toHaveCount(rows.length);
   await expect(page.getByText("No result yet", { exact: true })).toBeVisible();
   await expect(
