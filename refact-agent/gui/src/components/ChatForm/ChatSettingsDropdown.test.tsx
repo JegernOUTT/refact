@@ -1,6 +1,7 @@
 import { describe, expect, test, beforeEach } from "vitest";
 import { http, HttpResponse } from "msw";
-import { fireEvent, screen } from "../../utils/test-utils";
+import { fireEvent, screen, waitFor } from "../../utils/test-utils";
+import { applyChatEvent } from "../../features/Chat/Thread/actions";
 import { render } from "../../utils/test-utils";
 import { server, goodCaps } from "../../utils/mockServer";
 import { createDefaultChatState } from "../../utils/test-utils";
@@ -159,6 +160,43 @@ describe("ChatSettingsDropdown", () => {
         .auto_compression_cap,
     ).toBe(180000);
     expect(screen.getByText("180000")).toBeInTheDocument();
+  });
+
+  test("allows auto-compression cap changes while waiting but not while streaming", async () => {
+    const chat = chatStateWithReasoning(false);
+    const runtime = chat.threads[chat.current_thread_id];
+    runtime.thread.auto_compression_cap = 8192;
+    runtime.waiting_for_response = true;
+    const { user, store } = render(<ChatSettingsDropdown />, {
+      preloadedState: { chat, config },
+    });
+
+    const trigger = await screen.findByRole("button", { name: /openai\/o1/ });
+    expect(trigger).toBeEnabled();
+    await user.click(trigger);
+    await user.click(screen.getByRole("button", { name: /Token limits/ }));
+    const reset = screen.getByRole("button", {
+      name: "Reset auto-compression cap",
+    });
+    expect(reset).toBeEnabled();
+    await user.click(reset);
+    expect(
+      store.getState().chat.threads[chat.current_thread_id]?.thread
+        .auto_compression_cap,
+    ).toBe(180000);
+
+    await user.keyboard("{Escape}");
+    store.dispatch(
+      applyChatEvent({
+        chat_id: chat.current_thread_id,
+        seq: "1",
+        type: "runtime_updated",
+        state: "generating",
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /openai\/o1/ })).toBeDisabled(),
+    );
   });
 
   test("sets and resets the auto-compression cap from the token limits disclosure", async () => {

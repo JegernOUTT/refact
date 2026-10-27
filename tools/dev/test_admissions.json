@@ -809,6 +809,370 @@
       "author": "bgagent-e2-engine-git (author subagent, wave E2)",
       "reviewer": "bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2",
       "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-a6ad015b-420c-465a-ae7d-a93b4abb0905 (APPROVE log test; REQUEST_CHANGES: vacuous forced delete in branch-ops test needing an always -d mutant, stale P1 mutant log, case accounting, English-stderr locale risk) then bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2 re-review VERDICT APPROVE for all three after the changes, verifying all 8 mutant diff sha256 against /tmp/e2_mutants_results.json, panic lines vs current source, byte restoration by cmp against /tmp/e2_final_*.rs, and case accounting."
+    },
+    {
+      "fingerprint": "eadd000957da04bcebb5dc40ea3fd6c8d6bf8e9de0fecfb0c4e6e278e3de456a",
+      "occurrences": 1,
+      "failure_mode": "Explicit user context operations reject non-streaming states because readiness is restricted to Idle.",
+      "importance": "User recovery and compression must remain available without clearing waiting, paused or cancellation state.",
+      "nearest_retained": {
+        "fingerprint": "2d1f69d197fdebaf662cc4981a459dc08cddfc208bb988b89305619a2db34bac",
+        "why_insufficient": "The retained test checks conflicting context-operation ownership, not the seven non-streaming states or no-draft Generating refusal."
+      },
+      "oracle": "Generating with no draft is rejected; each of seven other states is admitted without state/abort mutation and is rejected once a draft exists.",
+      "prerequisites": "Real shipping context/reservation helpers, stable nonempty message/call IDs and isolated in-process sessions; recovery fixtures have a genuinely owned question and no provider caps. No external provider, credentials or daemon.",
+      "shipping_implementation": "refact-agent/engine/src/chat/context_rebuild.rs production helper/commit path exercised by chat::context_rebuild::tests::explicit_nonstreaming_preserves_state_and_cancellation",
+      "determinism": "In-process deterministic fixtures; no provider network or wall-clock oracle. Reservation Drop cleanup uses yield polling under a five-second safety bound, not sleeps or speed assertions.",
+      "layer": "Focused Rust library regression against shipping decision/commit seams",
+      "why_cheapest": "Exercises the actual guard/consumer with minimal session data; no duplicated HTTP/provider end-to-end fixture. Nearest retained coverage misses the stated decision.",
+      "meaningful_cases": 8,
+      "critical": true,
+      "criticality_reason": "Live conversation integrity, cancellation ownership and stale-operation persistence are critical; executed shipping mutation refusal and restored final passing evidence are bound below.",
+      "removed_coverage": "Replaces completed_and_aborted_manual_retry_is_idle_without_resuming. Resetting Completed to Idle and refusing ExecutingTools are intentionally removed expectations under the approved streaming-only rule.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "refact-agent/engine/src/chat/context_rebuild.rs; refact-agent/engine/src/http/routers/v1/trajectory_ops.rs",
+        "before_fix": {
+          "reference": ".refact/mode-compression-witness/mutant-vs-final.patch",
+          "fingerprint": "c8efa35911091eb09c0275edcc62a49653df9e3ff6924c2c8be52f96552cf275"
+        },
+        "intended_diagnostic": "assertion failed: explicit_context_ready(&s); combined mutant rejects Error after accepting Idle. This witnesses non-streaming admission, not every state/draft branch independently.",
+        "failing": {
+          "command": [
+            "refact-agent/engine/target/ci-test/deps/refact_lsp-9d88ce252e1b593f",
+            "chat::context_rebuild::tests::explicit_nonstreaming_preserves_state_and_cancellation",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/mode-compression-witness/red-readiness.log; red-results.json; binary-hashes.json mutant-tests=1317b863b36797b16ed27955e0a7fcade8e26ad7251c2385e1f4687a0b0b8843"
+        },
+        "passing": {
+          "command": [
+            "refact-agent/engine/target/ci-test/deps/refact_lsp-9d88ce252e1b593f",
+            "chat::context_rebuild::tests::explicit_nonstreaming_preserves_state_and_cancellation",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/mode-compression-witness/green-readiness.log; green-results.json; final-source-hashes.json equals restored-source-hashes.json; binary-hashes.json final-tests=e7cd2601c569155b99dad0cd7d72a808c27b6f3e20aafef2bfde20fd26bcd97d"
+        }
+      },
+      "author": "chat:490caf4d-da9e-4d52-bc18-6f194a7da06c",
+      "reviewer": "background_agent:bgagent-c33999e7-e460-4fb0-b263-0674a217858e",
+      "review_evidence": "Independent final review subchat-4c715d09-85e2-49a5-9acd-3415f9ddc04a approved seven records / 27 meaningful cases after reading final bodies, six-file matching manifests, actual seven red/green logs and final module/full-library results. Earlier source and mutant semantic review subchat-7a144338-a6d2-423d-9639-0d25a3668a67. Approval is narrow as stated in witness diagnostics; no isolated tail-erasure or full provider reconstruction claim."
+    },
+    {
+      "fingerprint": "44fab69e5dc29351523132fe2a194a9599edfa52aa0718a25ce68d2ab993e47a",
+      "occurrences": 1,
+      "failure_mode": "The production reconstruction commit seam refuses a valid non-streaming live batch instead of committing completed context while retaining the batch.",
+      "importance": "Manual context recovery must not require canceling pending questions or confirmations; raw calls must remain executable after context replacement.",
+      "nearest_retained": {
+        "fingerprint": "28f3d077232ab3eb3651017f0b2e4c9d3e421ea33a81c10a06a62657c4145107",
+        "why_insufficient": "The retained idle-only case has no open tool batch, embedded live report payload or paused raw index to retain."
+      },
+      "oracle": "Commit succeeds for ExecutingTools, Paused and WaitingUserInput raw suffixes and an embedded WaitingUserInput payload; raw suffix/archive bytes stay identical, paused index rebases only in its valid case, and the active view retains exactly one live declaration.",
+      "prerequisites": "Real shipping context/reservation helpers, stable nonempty message/call IDs and isolated in-process sessions; recovery fixtures have a genuinely owned question and no provider caps. No external provider, credentials or daemon.",
+      "shipping_implementation": "refact-agent/engine/src/chat/context_rebuild.rs production helper/commit path exercised by chat::context_rebuild::tests::live_batch_commit_keeps_raw_suffix_executable_and_rebases_pause",
+      "determinism": "In-process deterministic fixtures; no provider network or wall-clock oracle. Reservation Drop cleanup uses yield polling under a five-second safety bound, not sleeps or speed assertions.",
+      "layer": "Focused Rust library regression against shipping decision/commit seams",
+      "why_cheapest": "Exercises the actual guard/consumer with minimal session data; no duplicated HTTP/provider end-to-end fixture. Nearest retained coverage misses the stated decision.",
+      "meaningful_cases": 4,
+      "critical": true,
+      "criticality_reason": "Live conversation integrity, cancellation ownership and stale-operation persistence are critical; executed shipping mutation refusal and restored final passing evidence are bound below.",
+      "removed_coverage": "None. Four explicit state/origin scenarios charged in one maintained seam test.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "refact-agent/engine/src/chat/context_rebuild.rs; refact-agent/engine/src/http/routers/v1/trajectory_ops.rs",
+        "before_fix": {
+          "reference": ".refact/mode-compression-witness/mutant-vs-final.patch",
+          "fingerprint": "c8efa35911091eb09c0275edcc62a49653df9e3ff6924c2c8be52f96552cf275"
+        },
+        "intended_diagnostic": "Result::unwrap() on Err Context rebuild canceled: session changed. Idle-only readiness fails before suffix assertions: executed witness establishes live-commit availability, NOT isolated tail-placement or rebase mutation sensitivity.",
+        "failing": {
+          "command": [
+            "refact-agent/engine/target/ci-test/deps/refact_lsp-9d88ce252e1b593f",
+            "chat::context_rebuild::tests::live_batch_commit_keeps_raw_suffix_executable_and_rebases_pause",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/mode-compression-witness/red-live_batch.log; red-results.json; binary-hashes.json mutant-tests=1317b863b36797b16ed27955e0a7fcade8e26ad7251c2385e1f4687a0b0b8843"
+        },
+        "passing": {
+          "command": [
+            "refact-agent/engine/target/ci-test/deps/refact_lsp-9d88ce252e1b593f",
+            "chat::context_rebuild::tests::live_batch_commit_keeps_raw_suffix_executable_and_rebases_pause",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/mode-compression-witness/green-live_batch.log; green-results.json; final-source-hashes.json equals restored-source-hashes.json; binary-hashes.json final-tests=e7cd2601c569155b99dad0cd7d72a808c27b6f3e20aafef2bfde20fd26bcd97d"
+        }
+      },
+      "author": "chat:490caf4d-da9e-4d52-bc18-6f194a7da06c",
+      "reviewer": "background_agent:bgagent-c33999e7-e460-4fb0-b263-0674a217858e",
+      "review_evidence": "Independent final review subchat-4c715d09-85e2-49a5-9acd-3415f9ddc04a approved seven records / 27 meaningful cases after reading final bodies, six-file matching manifests, actual seven red/green logs and final module/full-library results. Earlier source and mutant semantic review subchat-7a144338-a6d2-423d-9639-0d25a3668a67. Approval is narrow as stated in witness diagnostics; no isolated tail-erasure or full provider reconstruction claim."
+    },
+    {
+      "fingerprint": "38f317fcda931d0912882e12baf9e119b9c1f0dc219b1970ceec66f6da24758e",
+      "occurrences": 1,
+      "failure_mode": "Omitting captured live runtime/cancellation state from reconstruction CAS allows a changed source to reach persistence.",
+      "importance": "A stale compression operation must not durably publish after its live source or cancellation ownership changed.",
+      "nearest_retained": {
+        "fingerprint": "437fa6303865c5f150ed5b3e3f7928ebe52d62665dbff26b3d980b0884b96416",
+        "why_insufficient": "The retained test mutates the operation abort token, history, model or attempt owner; it does not mutate source session abort/runtime/pause metadata with unchanged messages."
+      },
+      "oracle": "After changing runtime state, source abort flag or pause anchor, commit returns an error, never invokes the panic-on-persist closure and leaves raw messages identical.",
+      "prerequisites": "Real shipping context/reservation helpers, stable nonempty message/call IDs and isolated in-process sessions; recovery fixtures have a genuinely owned question and no provider caps. No external provider, credentials or daemon.",
+      "shipping_implementation": "refact-agent/engine/src/chat/context_rebuild.rs production helper/commit path exercised by chat::context_rebuild::tests::live_source_changes_invalidate_reconstruction_cas",
+      "determinism": "In-process deterministic fixtures; no provider network or wall-clock oracle. Reservation Drop cleanup uses yield polling under a five-second safety bound, not sleeps or speed assertions.",
+      "layer": "Focused Rust library regression against shipping decision/commit seams",
+      "why_cheapest": "Exercises the actual guard/consumer with minimal session data; no duplicated HTTP/provider end-to-end fixture. Nearest retained coverage misses the stated decision.",
+      "meaningful_cases": 3,
+      "critical": true,
+      "criticality_reason": "Live conversation integrity, cancellation ownership and stale-operation persistence are critical; executed shipping mutation refusal and restored final passing evidence are bound below.",
+      "removed_coverage": "None. Three separate source-state adversaries are charged.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "refact-agent/engine/src/chat/context_rebuild.rs; refact-agent/engine/src/http/routers/v1/trajectory_ops.rs",
+        "before_fix": {
+          "reference": ".refact/mode-compression-witness/mutant-vs-final.patch",
+          "fingerprint": "c8efa35911091eb09c0275edcc62a49653df9e3ff6924c2c8be52f96552cf275"
+        },
+        "intended_diagnostic": "Changed live source must not reach persistence. Combined mutant masks the first state change with Idle-only admission, but source abort change reaches the panic persistence seam; only that executed omission branch is claimed.",
+        "failing": {
+          "command": [
+            "refact-agent/engine/target/ci-test/deps/refact_lsp-9d88ce252e1b593f",
+            "chat::context_rebuild::tests::live_source_changes_invalidate_reconstruction_cas",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/mode-compression-witness/red-live_cas.log; red-results.json; binary-hashes.json mutant-tests=1317b863b36797b16ed27955e0a7fcade8e26ad7251c2385e1f4687a0b0b8843"
+        },
+        "passing": {
+          "command": [
+            "refact-agent/engine/target/ci-test/deps/refact_lsp-9d88ce252e1b593f",
+            "chat::context_rebuild::tests::live_source_changes_invalidate_reconstruction_cas",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/mode-compression-witness/green-live_cas.log; green-results.json; final-source-hashes.json equals restored-source-hashes.json; binary-hashes.json final-tests=e7cd2601c569155b99dad0cd7d72a808c27b6f3e20aafef2bfde20fd26bcd97d"
+        }
+      },
+      "author": "chat:490caf4d-da9e-4d52-bc18-6f194a7da06c",
+      "reviewer": "background_agent:bgagent-c33999e7-e460-4fb0-b263-0674a217858e",
+      "review_evidence": "Independent final review subchat-4c715d09-85e2-49a5-9acd-3415f9ddc04a approved seven records / 27 meaningful cases after reading final bodies, six-file matching manifests, actual seven red/green logs and final module/full-library results. Earlier source and mutant semantic review subchat-7a144338-a6d2-423d-9639-0d25a3668a67. Approval is narrow as stated in witness diagnostics; no isolated tail-erasure or full provider reconstruction claim."
+    },
+    {
+      "fingerprint": "edd63edc0b1ec3fbd0b7d3384a1025dbc93fd8c17361747aa5a635eda3726e55",
+      "occurrences": 1,
+      "failure_mode": "HTTP mode reconstruction reuses the source abort Arc, so releasing the reconstruction reservation can cancel unrelated source tool work.",
+      "importance": "A user mode transition must own its cancellation independently and preserve all non-streaming source runtime states.",
+      "nearest_retained": {
+        "fingerprint": "d9e20c59297bdadd4c6f465cc8df0b6cceb86de61f9a1b686eb64db251cb05a8",
+        "why_insufficient": "The retained reservation case checks concurrent operation/settings conflicts, not independent cancellation identity or non-streaming state preservation."
+      },
+      "oracle": "All seven non-streaming states reserve successfully without runtime mutation; reservation abort Arc differs from source, dropping it clears only its marker within a bound and leaves source abort false.",
+      "prerequisites": "Real shipping context/reservation helpers, stable nonempty message/call IDs and isolated in-process sessions; recovery fixtures have a genuinely owned question and no provider caps. No external provider, credentials or daemon.",
+      "shipping_implementation": "refact-agent/engine/src/http/routers/v1/trajectory_ops.rs production helper/commit path exercised by http::routers::v1::trajectory_ops::tests::reservation_preserves_every_nonstreaming_state_and_never_aborts_source",
+      "determinism": "In-process deterministic fixtures; no provider network or wall-clock oracle. Reservation Drop cleanup uses yield polling under a five-second safety bound, not sleeps or speed assertions.",
+      "layer": "Focused Rust library regression against shipping decision/commit seams",
+      "why_cheapest": "Exercises the actual guard/consumer with minimal session data; no duplicated HTTP/provider end-to-end fixture. Nearest retained coverage misses the stated decision.",
+      "meaningful_cases": 7,
+      "critical": true,
+      "criticality_reason": "Live conversation integrity, cancellation ownership and stale-operation persistence are critical; executed shipping mutation refusal and restored final passing evidence are bound below.",
+      "removed_coverage": "None. Seven non-streaming states are charged; bounded cleanup polling is not a performance assertion.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "refact-agent/engine/src/chat/context_rebuild.rs; refact-agent/engine/src/http/routers/v1/trajectory_ops.rs",
+        "before_fix": {
+          "reference": ".refact/mode-compression-witness/mutant-vs-final.patch",
+          "fingerprint": "c8efa35911091eb09c0275edcc62a49653df9e3ff6924c2c8be52f96552cf275"
+        },
+        "intended_diagnostic": "assertion failed: !Arc::ptr_eq(&reservation.abort, &source.lock().await.abort_flag). This is an executed ownership-identity refusal, not an isolated executed Drop-side-effect mutation.",
+        "failing": {
+          "command": [
+            "refact-agent/engine/target/ci-test/deps/refact_lsp-9d88ce252e1b593f",
+            "http::routers::v1::trajectory_ops::tests::reservation_preserves_every_nonstreaming_state_and_never_aborts_source",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/mode-compression-witness/red-reservation.log; red-results.json; binary-hashes.json mutant-tests=1317b863b36797b16ed27955e0a7fcade8e26ad7251c2385e1f4687a0b0b8843"
+        },
+        "passing": {
+          "command": [
+            "refact-agent/engine/target/ci-test/deps/refact_lsp-9d88ce252e1b593f",
+            "http::routers::v1::trajectory_ops::tests::reservation_preserves_every_nonstreaming_state_and_never_aborts_source",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/mode-compression-witness/green-reservation.log; green-results.json; final-source-hashes.json equals restored-source-hashes.json; binary-hashes.json final-tests=e7cd2601c569155b99dad0cd7d72a808c27b6f3e20aafef2bfde20fd26bcd97d"
+        }
+      },
+      "author": "chat:490caf4d-da9e-4d52-bc18-6f194a7da06c",
+      "reviewer": "background_agent:bgagent-c33999e7-e460-4fb0-b263-0674a217858e",
+      "review_evidence": "Independent final review subchat-4c715d09-85e2-49a5-9acd-3415f9ddc04a approved seven records / 27 meaningful cases after reading final bodies, six-file matching manifests, actual seven red/green logs and final module/full-library results. Earlier source and mutant semantic review subchat-7a144338-a6d2-423d-9639-0d25a3668a67. Approval is narrow as stated in witness diagnostics; no isolated tail-erasure or full provider reconstruction claim."
+    },
+    {
+      "fingerprint": "d1a642e99698f3f251a82ff760c7b51be00d08b85d80161c8ac9b0f2c73ed8d1",
+      "occurrences": 1,
+      "failure_mode": "Transition reconstruction input contains a live executable tool call copied from the source rather than a source-only explanatory note.",
+      "importance": "Switching mode must not duplicate authority to execute an unanswered source question or tool call.",
+      "nearest_retained": {
+        "fingerprint": "4924954737b70b3131e4cec51f2cc6661a5281011f102b6013cc47c10bb17275",
+        "why_insufficient": "The retained test covers durable goal ownership, not input tool-call authority isolation or deterministic compaction of a live suffix."
+      },
+      "oracle": "Deterministic compaction retains the exact live raw message and one active declaration; transition input contains no executable calls and carries an explicit source-only pending-operation note.",
+      "prerequisites": "Real shipping context/reservation helpers, stable nonempty message/call IDs and isolated in-process sessions; recovery fixtures have a genuinely owned question and no provider caps. No external provider, credentials or daemon.",
+      "shipping_implementation": "refact-agent/engine/src/http/routers/v1/trajectory_ops.rs production helper/commit path exercised by http::routers::v1::trajectory_ops::tests::static_compression_and_transition_do_not_consume_live_calls",
+      "determinism": "In-process deterministic fixtures; no provider network or wall-clock oracle. Reservation Drop cleanup uses yield polling under a five-second safety bound, not sleeps or speed assertions.",
+      "layer": "Focused Rust library regression against shipping decision/commit seams",
+      "why_cheapest": "Exercises the actual guard/consumer with minimal session data; no duplicated HTTP/provider end-to-end fixture. Nearest retained coverage misses the stated decision.",
+      "meaningful_cases": 2,
+      "critical": true,
+      "criticality_reason": "Live conversation integrity, cancellation ownership and stale-operation persistence are critical; executed shipping mutation refusal and restored final passing evidence are bound below.",
+      "removed_coverage": "None. Two shipping consumer decisions share one fixture and are charged as two meaningful cases.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "refact-agent/engine/src/chat/context_rebuild.rs; refact-agent/engine/src/http/routers/v1/trajectory_ops.rs",
+        "before_fix": {
+          "reference": ".refact/mode-compression-witness/mutant-vs-final.patch",
+          "fingerprint": "c8efa35911091eb09c0275edcc62a49653df9e3ff6924c2c8be52f96552cf275"
+        },
+        "intended_diagnostic": "assertion failed: input.iter().all(|m| m.tool_calls.is_none()). The combined mutant altered transition input splitting, not static compression; this executed witness proves transition isolation only, NOT isolated deterministic tail-erasure sensitivity.",
+        "failing": {
+          "command": [
+            "refact-agent/engine/target/ci-test/deps/refact_lsp-9d88ce252e1b593f",
+            "http::routers::v1::trajectory_ops::tests::static_compression_and_transition_do_not_consume_live_calls",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/mode-compression-witness/red-static_tail.log; red-results.json; binary-hashes.json mutant-tests=1317b863b36797b16ed27955e0a7fcade8e26ad7251c2385e1f4687a0b0b8843"
+        },
+        "passing": {
+          "command": [
+            "refact-agent/engine/target/ci-test/deps/refact_lsp-9d88ce252e1b593f",
+            "http::routers::v1::trajectory_ops::tests::static_compression_and_transition_do_not_consume_live_calls",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/mode-compression-witness/green-static_tail.log; green-results.json; final-source-hashes.json equals restored-source-hashes.json; binary-hashes.json final-tests=e7cd2601c569155b99dad0cd7d72a808c27b6f3e20aafef2bfde20fd26bcd97d"
+        }
+      },
+      "author": "chat:490caf4d-da9e-4d52-bc18-6f194a7da06c",
+      "reviewer": "background_agent:bgagent-c33999e7-e460-4fb0-b263-0674a217858e",
+      "review_evidence": "Independent final review subchat-4c715d09-85e2-49a5-9acd-3415f9ddc04a approved seven records / 27 meaningful cases after reading final bodies, six-file matching manifests, actual seven red/green logs and final module/full-library results. Earlier source and mutant semantic review subchat-7a144338-a6d2-423d-9639-0d25a3668a67. Approval is narrow as stated in witness diagnostics; no isolated tail-erasure or full provider reconstruction claim."
+    },
+    {
+      "fingerprint": "01450c6b23215ce03dc1d1f67e9e02298fa9f6be0fd3c48fe89f62ee5a0b67f1",
+      "occurrences": 1,
+      "failure_mode": "Explicit rebuild apply still rejects runtime-owned pending questions at the old pending-tools gate.",
+      "importance": "Question waits must allow context recovery without consuming the live question or rewriting history.",
+      "nearest_retained": {
+        "fingerprint": "3fa1bb17c6a61cd874dd831eb7032f0e2a0716ea548b05bace0f072cc0ba926e",
+        "why_insufficient": "The retained normalization test verifies that live IDs are not fabricated as abandoned results; it does not drive rebuild admission."
+      },
+      "oracle": "With and without a runtime-owned historical question, actual rebuild proceeds beyond SKIP_PENDING_TOOLS; a later non-gate failure leaves raw messages unchanged and releases compression ownership. This oracle does not distinguish the downstream failure cause or establish successful model dispatch.",
+      "prerequisites": "Real shipping context/reservation helpers, stable nonempty message/call IDs and isolated in-process sessions; recovery fixtures have a genuinely owned question and no provider caps. No external provider, credentials or daemon.",
+      "shipping_implementation": "refact-agent/engine/src/chat/context_rebuild.rs::rebuild_session; exercised by context_rebuild_recovery_tests::apply_proceeds_past_live_question_and_abandoned_call_without_mutating_history",
+      "determinism": "In-process deterministic fixtures; no provider network or wall-clock oracle. Reservation Drop cleanup uses yield polling under a five-second safety bound, not sleeps or speed assertions.",
+      "layer": "Focused Rust library regression against shipping decision/commit seams",
+      "why_cheapest": "Exercises the actual guard/consumer with minimal session data; no duplicated HTTP/provider end-to-end fixture. Nearest retained coverage misses the stated decision.",
+      "meaningful_cases": 2,
+      "critical": true,
+      "criticality_reason": "Live conversation integrity, cancellation ownership and stale-operation persistence are critical; executed shipping mutation refusal and restored final passing evidence are bound below.",
+      "removed_coverage": "Replaces apply_blocks_runtime_owned_question_but_proceeds_past_abandoned_call. The old demand to reject an owned question is intentionally inverted; no claim of a successful model call is added.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "refact-agent/engine/src/chat/context_rebuild.rs; refact-agent/engine/src/http/routers/v1/trajectory_ops.rs",
+        "before_fix": {
+          "reference": ".refact/mode-compression-witness/mutant-vs-final.patch",
+          "fingerprint": "c8efa35911091eb09c0275edcc62a49653df9e3ff6924c2c8be52f96552cf275"
+        },
+        "intended_diagnostic": "left != right failed with Rebuild requires nonempty context and completed tool results. This proves passage beyond the former gate, not successful provider reconstruction.",
+        "failing": {
+          "command": [
+            "refact-agent/engine/target/ci-test/deps/refact_lsp-9d88ce252e1b593f",
+            "chat::context_rebuild_recovery_tests::apply_proceeds_past_live_question_and_abandoned_call_without_mutating_history",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/mode-compression-witness/red-apply_question.log; red-results.json; binary-hashes.json mutant-tests=1317b863b36797b16ed27955e0a7fcade8e26ad7251c2385e1f4687a0b0b8843"
+        },
+        "passing": {
+          "command": [
+            "refact-agent/engine/target/ci-test/deps/refact_lsp-9d88ce252e1b593f",
+            "chat::context_rebuild_recovery_tests::apply_proceeds_past_live_question_and_abandoned_call_without_mutating_history",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/mode-compression-witness/green-apply_question.log; green-results.json; final-source-hashes.json equals restored-source-hashes.json; binary-hashes.json final-tests=e7cd2601c569155b99dad0cd7d72a808c27b6f3e20aafef2bfde20fd26bcd97d"
+        }
+      },
+      "author": "chat:490caf4d-da9e-4d52-bc18-6f194a7da06c",
+      "reviewer": "background_agent:bgagent-c33999e7-e460-4fb0-b263-0674a217858e",
+      "review_evidence": "Independent final review subchat-4c715d09-85e2-49a5-9acd-3415f9ddc04a approved seven records / 27 meaningful cases after reading final bodies, six-file matching manifests, actual seven red/green logs and final module/full-library results. Earlier source and mutant semantic review subchat-7a144338-a6d2-423d-9639-0d25a3668a67. Approval is narrow as stated in witness diagnostics; no isolated tail-erasure or full provider reconstruction claim."
+    },
+    {
+      "fingerprint": "8ac90e9a76c8e2a31f98a8931a5c7b7f0cc7aab199ab8bc7a142dcbedd28954f",
+      "occurrences": 1,
+      "failure_mode": "Manual preview still treats a runtime-owned pending question as a completed-context prerequisite failure.",
+      "importance": "The GUI relies on preview eligibility/reason; it must be able to evaluate the summary model while questions are waiting.",
+      "nearest_retained": {
+        "fingerprint": "3fa1bb17c6a61cd874dd831eb7032f0e2a0716ea548b05bace0f072cc0ba926e",
+        "why_insufficient": "Normalization-only retention cannot show that manual preview passes its pending-context admission gate."
+      },
+      "oracle": "The real preview remains ineligible because the isolated fixture has no model, but its reason is not the pending-prefix refusal and no resolved model is fabricated.",
+      "prerequisites": "Real shipping context/reservation helpers, stable nonempty message/call IDs and isolated in-process sessions; recovery fixtures have a genuinely owned question and no provider caps. No external provider, credentials or daemon.",
+      "shipping_implementation": "refact-agent/engine/src/chat/context_rebuild.rs::preview_manual_context_rebuild; exercised by context_rebuild_recovery_tests::preview_checks_model_without_consuming_runtime_owned_calls",
+      "determinism": "In-process deterministic fixtures; no provider network or wall-clock oracle. Reservation Drop cleanup uses yield polling under a five-second safety bound, not sleeps or speed assertions.",
+      "layer": "Focused Rust library regression against shipping decision/commit seams",
+      "why_cheapest": "Exercises the actual guard/consumer with minimal session data; no duplicated HTTP/provider end-to-end fixture. Nearest retained coverage misses the stated decision.",
+      "meaningful_cases": 1,
+      "critical": true,
+      "criticality_reason": "Live conversation integrity, cancellation ownership and stale-operation persistence are critical; executed shipping mutation refusal and restored final passing evidence are bound below.",
+      "removed_coverage": "Replaces preview_rejects_historical_calls_still_owned_by_the_runtime. Intentionally removes its old mandatory pending-tools rejection.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "refact-agent/engine/src/chat/context_rebuild.rs; refact-agent/engine/src/http/routers/v1/trajectory_ops.rs",
+        "before_fix": {
+          "reference": ".refact/mode-compression-witness/mutant-vs-final.patch",
+          "fingerprint": "c8efa35911091eb09c0275edcc62a49653df9e3ff6924c2c8be52f96552cf275"
+        },
+        "intended_diagnostic": "left != right failed with Rebuild requires a non-streaming session and completed context prefix. This is a narrow admission-gate regression witness, not evidence of successful model dispatch or full compression.",
+        "failing": {
+          "command": [
+            "refact-agent/engine/target/ci-test/deps/refact_lsp-9d88ce252e1b593f",
+            "chat::context_rebuild_recovery_tests::preview_checks_model_without_consuming_runtime_owned_calls",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/mode-compression-witness/red-preview_question.log; red-results.json; binary-hashes.json mutant-tests=1317b863b36797b16ed27955e0a7fcade8e26ad7251c2385e1f4687a0b0b8843"
+        },
+        "passing": {
+          "command": [
+            "refact-agent/engine/target/ci-test/deps/refact_lsp-9d88ce252e1b593f",
+            "chat::context_rebuild_recovery_tests::preview_checks_model_without_consuming_runtime_owned_calls",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/mode-compression-witness/green-preview_question.log; green-results.json; final-source-hashes.json equals restored-source-hashes.json; binary-hashes.json final-tests=e7cd2601c569155b99dad0cd7d72a808c27b6f3e20aafef2bfde20fd26bcd97d"
+        }
+      },
+      "author": "chat:490caf4d-da9e-4d52-bc18-6f194a7da06c",
+      "reviewer": "background_agent:bgagent-c33999e7-e460-4fb0-b263-0674a217858e",
+      "review_evidence": "Independent final review subchat-4c715d09-85e2-49a5-9acd-3415f9ddc04a approved seven records / 27 meaningful cases after reading final bodies, six-file matching manifests, actual seven red/green logs and final module/full-library results. Earlier source and mutant semantic review subchat-7a144338-a6d2-423d-9639-0d25a3668a67. Approval is narrow as stated in witness diagnostics; no isolated tail-erasure or full provider reconstruction claim."
     }
   ],
   "classifications": [
@@ -8188,6 +8552,96 @@
       "author": "bgagent-e2-engine-git (author subagent, wave E2)",
       "reviewer": "bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2",
       "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-a6ad015b-420c-465a-ae7d-a93b4abb0905 (APPROVE log test; REQUEST_CHANGES: vacuous forced delete in branch-ops test needing an always -d mutant, stale P1 mutant log, case accounting, English-stderr locale risk) then bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2 re-review VERDICT APPROVE for all three after the changes, verifying all 8 mutant diff sha256 against /tmp/e2_mutants_results.json, panic lines vs current source, byte restoration by cmp against /tmp/e2_final_*.rs, and case accounting."
+    },
+    {
+      "path": "refact-agent/engine/src/chat/context_rebuild.rs",
+      "before_sha256": "da02aa84cc461e1f797dd43696b5f4f907392acb502e116c02a90de43dff0aab",
+      "after_sha256": "f1582513bc2233bfd3fa9d4d82f5c3f3d8f4762f60f4b91af0bc012ed1c4e417",
+      "affected_tests": [
+        "44fab69e5dc29351523132fe2a194a9599edfa52aa0718a25ce68d2ab993e47a",
+        "38f317fcda931d0912882e12baf9e119b9c1f0dc219b1970ceec66f6da24758e",
+        "eadd000957da04bcebb5dc40ea3fd6c8d6bf8e9de0fecfb0c4e6e278e3de456a",
+        "437fa6303865c5f150ed5b3e3f7928ebe52d62665dbff26b3d980b0884b96416",
+        "28f3d077232ab3eb3651017f0b2e4c9d3e421ea33a81c10a06a62657c4145107"
+      ],
+      "impact": "Live-prefix admission, normalization, origin-aware report placement, cancellation/runtime CAS and queue reservation drain behavior; automatic entry still uses strict idle.",
+      "execution_context": "Current worktree library tests in ci-test profile without default voice feature, RUST_MIN_STACK=16777216; final default-feature cargo check passed. Test helpers unchanged except explicit test-body expectation updates. Source/dependency mapping is bounded, not exhaustive cross-workspace reachability proof.",
+      "author": "chat:490caf4d-da9e-4d52-bc18-6f194a7da06c",
+      "reviewer": "background_agent:bgagent-c33999e7-e460-4fb0-b263-0674a217858e",
+      "review_evidence": "Independent final review subchat-4c715d09-85e2-49a5-9acd-3415f9ddc04a approved all six support mappings after source/body/evidence inspection and checking matching source manifests and recorded after hashes. Earlier source review subchat-7a144338-a6d2-423d-9639-0d25a3668a67. Stable-ID pause anchoring remains source-reviewed, not a new e2e resume guarantee."
+    },
+    {
+      "path": "refact-agent/engine/src/chat/context_rebuild_recovery_tests.rs",
+      "before_sha256": "cc7d729413946bc32b8c24e7e60a8214d313703c7dd9ccc73596482a3155529d",
+      "after_sha256": "9e61863155ad118ff2956b57b6c39532ddc76b23f299cf92f4c3045024c529ef",
+      "affected_tests": [
+        "8ac90e9a76c8e2a31f98a8931a5c7b7f0cc7aab199ab8bc7a142dcbedd28954f",
+        "01450c6b23215ce03dc1d1f67e9e02298fa9f6be0fd3c48fe89f62ee5a0b67f1"
+      ],
+      "impact": "Two existing tests intentionally invert obsolete mandatory rejection while retaining narrow model-failure/history-cleanup observations; no shared fixture behavior changed.",
+      "execution_context": "Current worktree library tests in ci-test profile without default voice feature, RUST_MIN_STACK=16777216; final default-feature cargo check passed. Test helpers unchanged except explicit test-body expectation updates. Source/dependency mapping is bounded, not exhaustive cross-workspace reachability proof.",
+      "author": "chat:490caf4d-da9e-4d52-bc18-6f194a7da06c",
+      "reviewer": "background_agent:bgagent-c33999e7-e460-4fb0-b263-0674a217858e",
+      "review_evidence": "Independent final review subchat-4c715d09-85e2-49a5-9acd-3415f9ddc04a approved all six support mappings after source/body/evidence inspection and checking matching source manifests and recorded after hashes. Earlier source review subchat-7a144338-a6d2-423d-9639-0d25a3668a67. Stable-ID pause anchoring remains source-reviewed, not a new e2e resume guarantee."
+    },
+    {
+      "path": "refact-agent/engine/src/http/routers/v1/trajectory_ops.rs",
+      "before_sha256": "44e047ac561f4ca163b3b1199e36cbcf1ac0b55e9d78f8e89e1d2db9bb28fd8e",
+      "after_sha256": "9916e81267825647b891da19478bf2fbb347d12d3ffd64f22e05adf31ec7498a",
+      "affected_tests": [
+        "edd63edc0b1ec3fbd0b7d3384a1025dbc93fd8c17361747aa5a635eda3726e55",
+        "d1a642e99698f3f251a82ff760c7b51be00d08b85d80161c8ac9b0f2c73ed8d1",
+        "d9e20c59297bdadd4c6f465cc8df0b6cceb86de61f9a1b686eb64db251cb05a8",
+        "4924954737b70b3131e4cec51f2cc6661a5281011f102b6013cc47c10bb17275"
+      ],
+      "impact": "HTTP streaming-only guards, independent reservation abort, completed-prefix transition input and deterministic live-suffix preservation/cache identity reset.",
+      "execution_context": "Current worktree library tests in ci-test profile without default voice feature, RUST_MIN_STACK=16777216; final default-feature cargo check passed. Test helpers unchanged except explicit test-body expectation updates. Source/dependency mapping is bounded, not exhaustive cross-workspace reachability proof.",
+      "author": "chat:490caf4d-da9e-4d52-bc18-6f194a7da06c",
+      "reviewer": "background_agent:bgagent-c33999e7-e460-4fb0-b263-0674a217858e",
+      "review_evidence": "Independent final review subchat-4c715d09-85e2-49a5-9acd-3415f9ddc04a approved all six support mappings after source/body/evidence inspection and checking matching source manifests and recorded after hashes. Earlier source review subchat-7a144338-a6d2-423d-9639-0d25a3668a67. Stable-ID pause anchoring remains source-reviewed, not a new e2e resume guarantee."
+    },
+    {
+      "path": "refact-agent/engine/src/chat/queue.rs",
+      "before_sha256": "bcf3cf2cedc16d3a0030f6e7f8ebdfca6aa3ed0c93c81c9e7c7f99159a60aed9",
+      "after_sha256": "467797997191a57f66560dfb85a4888cb0cc0dceb91d18e210dc8ba6f05dd856",
+      "affected_tests": [
+        "edd63edc0b1ec3fbd0b7d3384a1025dbc93fd8c17361747aa5a635eda3726e55",
+        "c6bace980d5e9800621e8f47509c3a05ee5797fcf82599b783f450f8b9e1040e"
+      ],
+      "impact": "Command selection holds while the HTTP transition marker owns the source, complementing existing streaming/compression/turn holds; no tool approval is granted.",
+      "execution_context": "Current worktree library tests in ci-test profile without default voice feature, RUST_MIN_STACK=16777216; final default-feature cargo check passed. Test helpers unchanged except explicit test-body expectation updates. Source/dependency mapping is bounded, not exhaustive cross-workspace reachability proof.",
+      "author": "chat:490caf4d-da9e-4d52-bc18-6f194a7da06c",
+      "reviewer": "background_agent:bgagent-c33999e7-e460-4fb0-b263-0674a217858e",
+      "review_evidence": "Independent final review subchat-4c715d09-85e2-49a5-9acd-3415f9ddc04a approved all six support mappings after source/body/evidence inspection and checking matching source manifests and recorded after hashes. Earlier source review subchat-7a144338-a6d2-423d-9639-0d25a3668a67. Stable-ID pause anchoring remains source-reviewed, not a new e2e resume guarantee."
+    },
+    {
+      "path": "refact-agent/engine/src/chat/tools.rs",
+      "before_sha256": "fdf021300fc0382d39ff491344a174d889f418129d24991c94089124930f573a",
+      "after_sha256": "98e35c5c586ba50c2610aeaddfb20b34225cce9f1b1fe008ba7f3e83bde521ec",
+      "affected_tests": [
+        "7e8911704d3aa54f40100b4dc10169a3a67255c68323ff447bedf08db8cfa5b9",
+        "44fab69e5dc29351523132fe2a194a9599edfa52aa0718a25ce68d2ab993e47a"
+      ],
+      "impact": "Capture assistant message_id before await; resolve current raw index under the same lock immediately before pause; missing source returns Stop. Independent source-only stable-ID reasoning, not new end-to-end resume proof.",
+      "execution_context": "Current worktree library tests in ci-test profile without default voice feature, RUST_MIN_STACK=16777216; final default-feature cargo check passed. Test helpers unchanged except explicit test-body expectation updates. Source/dependency mapping is bounded, not exhaustive cross-workspace reachability proof.",
+      "author": "chat:490caf4d-da9e-4d52-bc18-6f194a7da06c",
+      "reviewer": "background_agent:bgagent-9a040d14-c04e-47e7-94c3-74c31a71904e",
+      "review_evidence": "Independent final review subchat-4c715d09-85e2-49a5-9acd-3415f9ddc04a approved all six support mappings after source/body/evidence inspection and checking matching source manifests and recorded after hashes. Earlier source review subchat-7a144338-a6d2-423d-9639-0d25a3668a67. Stable-ID pause anchoring remains source-reviewed, not a new e2e resume guarantee. Independent integrated-source review background_agent:bgagent-9a040d14-c04e-47e7-94c3-74c31a71904e / subchat-cda537e2-8f35-41c5-9701-946b3bf27a12 approved combined source ddfc34bdb: main fresh dangerous-consent decision remains intact and stable-ID lookup occurs under the pause-state lock; before/after and supplemental integrated hashes verified. Source-only support approval, not an end-to-end resume claim."
+    },
+    {
+      "path": "refact-agent/engine/src/tools/tool_handoff_to_mode.rs",
+      "before_sha256": "3ab5426b34c661a71415c2755523e71c38320073bd1836e5f36741e4d49d79ca",
+      "after_sha256": "82dd3c8e347858b0f74c71e6420bb201f8d34b11430e525e095d320481ff1286",
+      "affected_tests": [
+        "9694dbbfca5824a69bac94b047cd662aeb9135dfd42c47e076c800fa221d8f46",
+        "1ded4c123c5d9310ef291b0ed20e86c4451a9a2fb61523124c72b9cc4f7cf1d9",
+        "4924954737b70b3131e4cec51f2cc6661a5281011f102b6013cc47c10bb17275"
+      ],
+      "impact": "Transition fingerprint includes live source state; committed goal transfer updates messages without wiping source tool pool/approval wrappers and publishes updated goal snapshot after cache invalidation.",
+      "execution_context": "Current worktree library tests in ci-test profile without default voice feature, RUST_MIN_STACK=16777216; final default-feature cargo check passed. Test helpers unchanged except explicit test-body expectation updates. Source/dependency mapping is bounded, not exhaustive cross-workspace reachability proof.",
+      "author": "chat:490caf4d-da9e-4d52-bc18-6f194a7da06c",
+      "reviewer": "background_agent:bgagent-c33999e7-e460-4fb0-b263-0674a217858e",
+      "review_evidence": "Independent final review subchat-4c715d09-85e2-49a5-9acd-3415f9ddc04a approved all six support mappings after source/body/evidence inspection and checking matching source manifests and recorded after hashes. Earlier source review subchat-7a144338-a6d2-423d-9639-0d25a3668a67. Stable-ID pause anchoring remains source-reviewed, not a new e2e resume guarantee."
     }
   ]
 }

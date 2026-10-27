@@ -13,6 +13,7 @@ import {
 } from "../services/refact/trajectory";
 import { trajectoriesApi } from "../services/refact/trajectories";
 import { requestSseRefresh } from "../features/Chat/Thread/actions";
+import { selectIsStreamingById } from "../features/Chat/Thread/selectors";
 
 export type TrajectoryTab = "compress" | "llm-compress";
 
@@ -23,6 +24,9 @@ export function useTrajectoryOps(
   const dispatch = useAppDispatch();
   const currentChatId = useAppSelector(selectChatId);
   const chatId = targetChatId ?? currentChatId;
+  const isStreaming = useAppSelector((state) =>
+    selectIsStreamingById(state, chatId),
+  );
   const [activeTab, setActiveTab] = useState<TrajectoryTab>(initialTab);
   const [transformOptions, setTransformOptions] = useState<TransformOptions>({
     dedup_and_compress_context: true,
@@ -61,7 +65,7 @@ export function useTrajectoryOps(
 
   const handlePreviewLlmCompress = useCallback(async () => {
     const previewChatId = chatId;
-    if (!previewChatId) return;
+    if (!previewChatId || isStreaming) return;
     const requestId = ++llmPreviewRequestId.current;
     setLlmCompressError(null);
     try {
@@ -86,10 +90,10 @@ export function useTrajectoryOps(
         );
       }
     }
-  }, [chatId, llmCompressOptions, previewLlmCompress]);
+  }, [chatId, isStreaming, llmCompressOptions, previewLlmCompress]);
 
   const handleApplyLlmCompress = useCallback(async () => {
-    if (!chatId || !llmCompressPreview) return false;
+    if (!chatId || !llmCompressPreview || isStreaming) return false;
     setLlmCompressError(null);
     try {
       const result = await applyLlmCompress({
@@ -122,12 +126,13 @@ export function useTrajectoryOps(
     applyLlmCompress,
     chatId,
     dispatch,
+    isStreaming,
     llmCompressOptions,
     llmCompressPreview,
   ]);
 
   const handlePreviewTransform = useCallback(async () => {
-    if (!chatId) return;
+    if (!chatId || isStreaming) return;
     try {
       const result = await previewTransform({
         chatId,
@@ -137,10 +142,10 @@ export function useTrajectoryOps(
     } catch {
       setTransformPreview(null);
     }
-  }, [chatId, transformOptions, previewTransform]);
+  }, [chatId, isStreaming, transformOptions, previewTransform]);
 
   const handleApplyTransform = useCallback(async () => {
-    if (!chatId) return false;
+    if (!chatId || isStreaming) return false;
     try {
       await applyTransform({ chatId, options: transformOptions }).unwrap();
       setTransformPreview(null);
@@ -149,7 +154,7 @@ export function useTrajectoryOps(
     } catch {
       return false;
     }
-  }, [chatId, transformOptions, applyTransform, dispatch]);
+  }, [chatId, isStreaming, transformOptions, applyTransform, dispatch]);
 
   const clearPreviews = useCallback(() => {
     llmPreviewRequestId.current += 1;
@@ -175,6 +180,7 @@ export function useTrajectoryOps(
 
   return {
     chatId,
+    isStreaming,
     activeTab,
     setActiveTab,
     transformOptions,

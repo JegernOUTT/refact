@@ -1521,6 +1521,10 @@ async fn select_next_command(session_arc: &Arc<AMutex<ChatSession>>) -> Option<S
     let is_busy = state == SessionState::Generating
         || state == SessionState::ExecutingTools
         || session.turn_depth > 0
+        || session
+            .pending_mode_handoff
+            .as_ref()
+            .is_some_and(|marker| marker.get("http_transition").is_some())
         || crate::chat::context_rebuild::compression_attempt_active(&session);
 
     let (command, waiter) = if is_busy {

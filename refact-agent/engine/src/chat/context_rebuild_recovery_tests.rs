@@ -418,7 +418,7 @@ fn token_cap_scales_down_when_characters_cost_multiple_tokens() {
 }
 
 #[tokio::test]
-async fn preview_rejects_historical_calls_still_owned_by_the_runtime() {
+async fn preview_checks_model_without_consuming_runtime_owned_calls() {
     let gcx = crate::global_context::tests::make_test_gcx().await;
     let mut s = ChatSession::new("preview-owned".into());
     for message in field_shape() {
@@ -436,7 +436,10 @@ async fn preview_rejects_historical_calls_still_owned_by_the_runtime() {
     )
     .await;
     assert!(!preview.eligible);
-    assert!(preview.reason.unwrap().contains("completed tool results"));
+    assert_ne!(
+        preview.reason.unwrap(),
+        "Rebuild requires a non-streaming session and completed context prefix"
+    );
     assert!(preview.resolved_model.is_none());
 }
 
@@ -548,7 +551,7 @@ fn queued_hook_veto_stays_nonfatal_and_redacts_its_notice() {
 }
 
 #[tokio::test]
-async fn apply_blocks_runtime_owned_question_but_proceeds_past_abandoned_call() {
+async fn apply_proceeds_past_live_question_and_abandoned_call_without_mutating_history() {
     let gcx = crate::global_context::tests::make_test_gcx().await;
     for owned in [true, false] {
         let mut s = ChatSession::new(format!("apply-{owned}"));
@@ -582,7 +585,7 @@ async fn apply_blocks_runtime_owned_question_but_proceeds_past_abandoned_call() 
         )
         .await
         .unwrap_err();
-        assert_eq!(error == SKIP_PENDING_TOOLS, owned, "{error}");
+        assert_ne!(error, SKIP_PENDING_TOOLS);
         let s = session.lock().await;
         assert_eq!(serde_json::to_string(&s.messages).unwrap(), before);
         assert!(!compression_attempt_active(&s));

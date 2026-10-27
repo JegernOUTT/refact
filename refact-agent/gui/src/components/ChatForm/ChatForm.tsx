@@ -873,9 +873,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                     />
                   </span>
                   <span className={styles.hideActionThird}>
-                    <AutoCompactToggleButton
-                      disabled={isStreaming || isWaiting}
-                    />
+                    <AutoCompactToggleButton disabled={isStreaming} />
                   </span>
                   <span className={styles.hideActionFourth}>
                     <WandButton

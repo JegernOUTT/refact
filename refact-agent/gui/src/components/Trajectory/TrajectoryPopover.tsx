@@ -26,6 +26,7 @@ export const TrajectoryPopoverContent: React.FC<
   TrajectoryPopoverContentProps
 > = ({ onClose, initialTab, chatId }) => {
   const {
+    isStreaming,
     activeTab,
     setActiveTab,
     transformOptions,
@@ -191,6 +192,7 @@ export const TrajectoryPopoverContent: React.FC<
               variant="soft"
               size="sm"
               loading={isPreviewingTransform}
+              disabled={isStreaming}
               onClick={() => {
                 void handlePreviewTransform();
               }}
@@ -203,7 +205,7 @@ export const TrajectoryPopoverContent: React.FC<
               onClick={() => {
                 void handleApplyTransformClick();
               }}
-              disabled={!transformPreview}
+              disabled={isStreaming || !transformPreview}
             >
               Apply
             </Button>
@@ -289,7 +291,7 @@ export const TrajectoryPopoverContent: React.FC<
               variant="soft"
               size="sm"
               loading={isPreviewingLlmCompress}
-              disabled={caps.usableModels.length === 0}
+              disabled={isStreaming || caps.usableModels.length === 0}
               onClick={() => {
                 void handlePreviewLlmCompress();
               }}
@@ -299,7 +301,7 @@ export const TrajectoryPopoverContent: React.FC<
             <Button
               size="sm"
               loading={isApplyingLlmCompress}
-              disabled={!llmCompressPreview?.eligible}
+              disabled={isStreaming || !llmCompressPreview?.eligible}
               onClick={() => {
                 void handleApplyLlmCompressClick();
               }}

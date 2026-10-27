@@ -194,6 +194,7 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
   } = useThinking();
 
   const isInteractionDisabled = (disabled ?? false) || isStreaming || isWaiting;
+  const isStreamingDisabled = (disabled ?? false) || isStreaming;
 
   // Model data
   const currentModelName = caps.currentModel || "Select model";
@@ -432,9 +433,9 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
           className={classNames(
             styles.trigger,
             compact && styles.compactTrigger,
-            isInteractionDisabled && styles.disabled,
+            isStreamingDisabled && styles.disabled,
           )}
-          disabled={isInteractionDisabled}
+          disabled={isStreamingDisabled}
           type="button"
         >
           {triggerContent}
@@ -706,7 +707,7 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
                               );
                               setLocalAutoCompressionCap(null);
                             }}
-                            disabled={isInteractionDisabled}
+                            disabled={isStreamingDisabled}
                             className={styles.slider}
                             aria-label="Auto-compression cap"
                           />
@@ -719,7 +720,7 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
                               type="button"
                               className={styles.resetButton}
                               onClick={handleAutoCompressionCapReset}
-                              disabled={isInteractionDisabled}
+                              disabled={isStreamingDisabled}
                               aria-label="Reset auto-compression cap"
                             >
                               <Icon icon={X} size="md" />

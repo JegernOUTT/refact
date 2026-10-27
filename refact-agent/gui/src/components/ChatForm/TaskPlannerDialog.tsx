@@ -17,6 +17,7 @@ import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { useAppSelector } from "../../hooks/useAppSelector";
 import { selectConfig, selectApiKey } from "../../features/Config/configSlice";
 import {
+  selectIsStreamingById,
   selectMessagesById,
   selectThreadWorktreeById,
 } from "../../features/Chat/Thread";
@@ -73,6 +74,9 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
   const sourceWorktree = useAppSelector((state) =>
     selectThreadWorktreeById(state, sourceChatId),
   );
+  const isStreaming = useAppSelector((state) =>
+    selectIsStreamingById(state, sourceChatId),
+  );
 
   const [error, setError] = useState<string | null>(null);
   // Cache the created task so retries after a planner-creation failure don't
@@ -92,7 +96,7 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
   const isLoading = isCreatingTask || isCreatingPlanner || isTransitioning;
 
   const handleApply = useCallback(async () => {
-    if (isLoading) return;
+    if (isLoading || isStreaming) return;
     setError(null);
     const now = new Date().toISOString();
     try {
@@ -184,6 +188,7 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
     }
   }, [
     isLoading,
+    isStreaming,
     isInTaskWorkspace,
     taskId,
     pendingTask,
@@ -288,7 +293,7 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
               variant="primary"
               size="md"
               onClick={() => void handleApply()}
-              disabled={isLoading}
+              disabled={isLoading || isStreaming}
             >
               {isLoading ? loadingLabel : buttonLabel}
             </Button>

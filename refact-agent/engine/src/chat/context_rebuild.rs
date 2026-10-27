@@ -143,7 +143,160 @@ pub(crate) fn live_tool_call_ids(session: &ChatSession) -> std::collections::Has
             .filter(|set| set.status == refact_chat_api::PendingQuestionStatus::Pending)
             .map(|set| set.tool_call_id.clone()),
     );
+    if matches!(
+        session.runtime.state,
+        SessionState::ExecutingTools
+            | SessionState::Paused
+            | SessionState::WaitingUserInput
+            | SessionState::WaitingIde
+    ) {
+        let messages = active_context(&session.messages)
+            .map(|v| v.messages)
+            .unwrap_or_else(|_| session.messages.clone());
+        if let Some(at) = messages
+            .iter()
+            .rposition(|m| m.role == "assistant" && m.tool_calls.is_some())
+        {
+            let answered: std::collections::HashSet<_> = messages[at + 1..]
+                .iter()
+                .filter(|m| matches!(m.role.as_str(), "tool" | "diff" | "context_file"))
+                .map(|m| m.tool_call_id.as_str())
+                .collect();
+            ids.extend(
+                messages[at]
+                    .tool_calls
+                    .iter()
+                    .flatten()
+                    .filter(|c| !answered.contains(c.id.as_str()))
+                    .map(|c| c.id.clone()),
+            );
+        }
+    }
     ids
+}
+
+pub(crate) fn explicit_context_ready(session: &ChatSession) -> bool {
+    session.runtime.state != SessionState::Generating
+        && session.draft_message.is_none()
+        && session.draft_usage.is_none()
+        && session.stream_started_at.is_none()
+        && !session.closed
+}
+
+pub(crate) fn split_live_suffix(
+    messages: &[ChatMessage],
+    live_ids: &std::collections::HashSet<String>,
+) -> (Vec<ChatMessage>, Vec<ChatMessage>) {
+    let at = messages
+        .iter()
+        .position(|m| {
+            m.tool_calls
+                .iter()
+                .flatten()
+                .any(|c| live_ids.contains(&c.id))
+        })
+        .unwrap_or(messages.len());
+    (messages[..at].to_vec(), messages[at..].to_vec())
+}
+
+pub(crate) fn place_report_before_live_suffix(
+    messages: &[ChatMessage],
+    live_ids: &std::collections::HashSet<String>,
+    report: &mut ChatMessage,
+) -> Result<usize, String> {
+    if live_ids.is_empty() {
+        return Ok(messages.len());
+    }
+    let active = match active_context(messages) {
+        Ok(active) => active,
+        Err(refact_core::active_context::ActiveContextError::NeedsExplicitRebuild) => {
+            let start = messages
+                .iter()
+                .rposition(|m| refact_core::active_context::is_reconstruction_report(m))
+                .map_or(0, |index| index + 1);
+            if start > 0 {
+                let previous = active_context(&messages[..start]).map_err(|e| e.to_string())?;
+                if previous.messages.iter().any(|m| {
+                    m.tool_calls
+                        .iter()
+                        .flatten()
+                        .any(|c| live_ids.contains(&c.id))
+                }) {
+                    return place_report_before_live_suffix(&messages[..start], live_ids, report);
+                }
+            }
+            return Ok(messages[start..]
+                .iter()
+                .position(|m| {
+                    m.tool_calls
+                        .iter()
+                        .flatten()
+                        .any(|c| live_ids.contains(&c.id))
+                })
+                .map(|index| index + start)
+                .unwrap_or(messages.len()));
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    let start = active
+        .messages
+        .iter()
+        .position(|m| {
+            m.tool_calls
+                .iter()
+                .flatten()
+                .any(|c| live_ids.contains(&c.id))
+        })
+        .unwrap_or(active.messages.len());
+    let mut at = messages.len();
+    let mut embedded = Vec::new();
+    for (message, origin) in active.messages[start..]
+        .iter()
+        .zip(&active.origins[start..])
+    {
+        match origin {
+            refact_core::active_context::MessageOrigin::Stored { message_index } => {
+                at = *message_index;
+                break;
+            }
+            refact_core::active_context::MessageOrigin::ReportPayload { .. } => {
+                embedded.push(message.clone())
+            }
+        }
+    }
+    if !embedded.is_empty() {
+        let payload = report
+            .extra
+            .get_mut("compression_report")
+            .and_then(|r| r.pointer_mut("/payload/messages"))
+            .and_then(serde_json::Value::as_array_mut)
+            .ok_or("Missing reconstruction payload")?;
+        let existing: std::collections::HashSet<String> = payload
+            .iter()
+            .filter_map(|m| {
+                m.get("message_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect();
+        embedded.retain(|message| !existing.contains(&message.message_id));
+        payload.extend(
+            embedded
+                .into_iter()
+                .map(serde_json::to_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?,
+        );
+    }
+    Ok(at)
+}
+
+pub(crate) fn live_state_fingerprint(session: &ChatSession) -> serde_json::Value {
+    serde_json::json!({"state": session.runtime.state, "pause_reasons": session.runtime.pause_reasons,
+        "paused_message_index": session.runtime.paused_message_index,
+        "questions": session.pending_questions, "approvals": session.approval_wrapper_calls,
+        "confirmation": session.confirmation_paused_at.as_ref().map(|(_, ids)| { let mut ids: Vec<_> = ids.iter().collect(); ids.sort(); ids }),
+        "abort": session.abort_flag.load(Ordering::SeqCst), "interrupt": session.user_interrupt_flag.load(Ordering::SeqCst)})
 }
 
 fn unique_message_id(base: String, used: &mut std::collections::HashSet<String>) -> String {
@@ -532,11 +685,13 @@ pub(crate) struct RebuildSource {
     messages: Vec<u8>,
     thread: Vec<u8>,
     task_goal: Vec<u8>,
+    live_state: serde_json::Value,
 }
 
 impl RebuildSource {
     pub(crate) fn capture(session: &ChatSession) -> Result<Self, String> {
         Ok(Self {
+            live_state: live_state_fingerprint(session),
             messages: serde_json::to_vec(&session.messages).map_err(|e| e.to_string())?,
             thread: serde_json::to_vec(&session.thread).map_err(|e| e.to_string())?,
             task_goal: serde_json::to_vec(&(
@@ -552,22 +707,6 @@ impl RebuildSource {
 
     fn matches(&self, session: &ChatSession) -> bool {
         Self::capture(session).is_ok_and(|current| current == *self)
-    }
-}
-
-fn prepare_explicit_idle(session: &mut ChatSession) {
-    if matches!(
-        session.runtime.state,
-        SessionState::Idle | SessionState::Error | SessionState::Completed
-    ) && !session.closed
-        && !compression_attempt_active(session)
-        && session.draft_message.is_none()
-        && session.draft_usage.is_none()
-        && session.stream_started_at.is_none()
-    {
-        // An explicit operation is a retry, never a request to resume generation.
-        session.abort_flag.store(false, Ordering::SeqCst);
-        session.set_runtime_state(SessionState::Idle, None);
     }
 }
 
@@ -765,7 +904,7 @@ impl ReconstructionMetrics {
 /// Shared transaction seam: persistence must succeed before publishing any report.
 async fn commit_report<F, Fut>(
     session: &mut ChatSession,
-    report: ChatMessage,
+    mut report: ChatMessage,
     source: &RebuildSource,
     attempt: u64,
     abort: &AtomicBool,
@@ -776,7 +915,7 @@ where
     Fut: std::future::Future<Output = Result<(), String>>,
 {
     if session.active_compression_attempt != Some(attempt)
-        || !idle(session)
+        || !explicit_context_ready(session)
         || abort.load(Ordering::SeqCst)
         || !source.matches(session)
     {
@@ -784,13 +923,22 @@ where
     }
     let version = session.trajectory_version.saturating_add(1);
     let mut snapshot = crate::chat::trajectories::trajectory_snapshot_from_session(session);
-    snapshot.messages.push(report.clone());
+    let live_ids = live_tool_call_ids(session);
+    let at = place_report_before_live_suffix(&session.messages, &live_ids, &mut report)?;
+    snapshot.messages.insert(at, report.clone());
+    active_context(&snapshot.messages).map_err(|e| e.to_string())?;
     snapshot.version = version;
     snapshot.previous_response_id = None;
     snapshot.frozen_request_prefix = None;
     snapshot.claude_code_identity = None;
     persist(snapshot).await?;
-    session.add_message(report);
+    session.messages.insert(at, report);
+    if let Some(index) = session.runtime.paused_message_index.as_mut() {
+        if *index >= at {
+            *index += 1;
+        }
+    }
+    session.touch();
     session.thread.previous_response_id = None;
     session.thread.frozen_request_prefix = None;
     session.thread.claude_code_identity = None;
@@ -802,6 +950,8 @@ where
     session.trajectory_dirty = false;
     session.trajectory_save_error = None;
     session.last_rebuild_attempt_version = Some(version);
+    let event = session.snapshot();
+    session.emit(event);
     Ok(())
 }
 
@@ -973,15 +1123,15 @@ pub async fn preview_manual_context_rebuild(
     };
     preview.source_messages = input.len();
     preview.approximate_source_tokens = crate::chat::trajectory_ops::approx_token_count(&input);
-    let (normalized, _) = normalize_rebuild_input(&input, live_ids);
-    if !matches!(
-        state,
-        SessionState::Idle | SessionState::Error | SessionState::Completed
-    ) || compression_active
+    let (prefix, _) = split_live_suffix(&input, live_ids);
+    let (normalized, _) = normalize_rebuild_input(&prefix, live_ids);
+    if state == SessionState::Generating
+        || compression_active
         || pending_tools(&normalized)
-        || input.is_empty()
+        || prefix.is_empty()
     {
-        preview.reason = Some("Rebuild requires an idle session and completed tool results".into());
+        preview.reason =
+            Some("Rebuild requires a non-streaming session and completed context prefix".into());
         return preview;
     }
     match resolve_model(gcx, thread, requested_model).await {
@@ -1048,16 +1198,22 @@ async fn rebuild_session_reserved(
         if session.pending_mode_handoff.is_some() || session.pending_context_rebuild.is_some() {
             return Err(SKIP_OTHER_PENDING.into());
         }
-        if explicit {
-            prepare_explicit_idle(&mut session);
-        }
-        if !idle(&session) || compression_attempt_active(&session) {
+        if !(if explicit {
+            explicit_context_ready(&session)
+        } else {
+            idle(&session)
+        }) || compression_attempt_active(&session)
+        {
             return Err(SKIP_NOT_IDLE.into());
         }
         if !explicit && requires_explicit_rebuild(&session.messages) {
             return Err("Legacy context requires an explicit rebuild".into());
         }
-        let mut messages = raw_rebuild_input(&session.messages, explicit)?;
+        let messages = raw_rebuild_input(&session.messages, explicit)?;
+        let (messages, abandoned) =
+            normalize_rebuild_input(&messages, &live_tool_call_ids(&session));
+        let (mut messages, _) = split_live_suffix(&messages, &live_tool_call_ids(&session));
+        messages.extend(abandoned_calls_note(&abandoned));
         if session.task_goal_messages.is_some() {
             messages.retain(|message| {
                 !matches!(message.role.as_str(), "goal" | "plan")
@@ -1137,7 +1293,11 @@ async fn rebuild_session_reserved(
         let mut session = session_arc.lock().await;
         if session.active_compression_attempt != Some(attempt)
             || abort.load(Ordering::SeqCst)
-            || !idle(&session)
+            || !(if explicit {
+                explicit_context_ready(&session)
+            } else {
+                idle(&session)
+            })
             || !source.matches(&session)
         {
             return Err(SKIP_CHANGED_DURING_HOOK.into());
@@ -1259,6 +1419,20 @@ async fn rebuild_session_reserved(
         live_agents.to_message(),
     );
     let notes = rebuild_notes(&rebuild_input, &abandoned);
+    let live_tail = {
+        let session = session_arc.lock().await;
+        let active = raw_rebuild_input(&session.messages, explicit)?;
+        split_live_suffix(&active, &live_tool_call_ids(&session)).1
+    };
+    let tail_tokens = if live_tail.is_empty() {
+        0
+    } else {
+        estimated_tokens(&live_tail, tokenizer.clone(), false)
+    };
+    let request_cap = request_cap
+        .checked_sub(tail_tokens)
+        .filter(|cap| *cap > 0)
+        .ok_or("Live tool context exceeds request cap")?;
     let builder_cap = request_cap
         .checked_sub(notes_tokens(&notes, tokenizer.clone()))
         .filter(|cap| *cap > 0)
@@ -1539,7 +1713,11 @@ pub async fn drain_pending(
 ) -> Result<bool, String> {
     let (rebuild, handoff) = {
         let mut s = session_arc.lock().await;
-        if !idle(&s) {
+        if !idle(&s)
+            || s.pending_mode_handoff
+                .as_ref()
+                .is_some_and(|marker| marker.get("http_transition").is_some())
+        {
             return Ok(false);
         }
         (
@@ -1582,6 +1760,112 @@ mod tests {
             make_reconstruction_report(vec![context], ReconstructionMetadata::default()).unwrap();
         let version = s.trajectory_version;
         (s, source, version, report)
+    }
+
+    #[tokio::test]
+    async fn live_batch_commit_keeps_raw_suffix_executable_and_rebases_pause() {
+        use crate::call_validation::{ChatToolCall, ChatToolFunction};
+        for (state, embedded) in [
+            (SessionState::ExecutingTools, false),
+            (SessionState::Paused, false),
+            (SessionState::WaitingUserInput, false),
+            (SessionState::WaitingUserInput, true),
+        ] {
+            let (mut session, _, _, report) = fixture();
+            let mut call = ChatMessage::new("assistant".into(), "pending batch".into());
+            call.message_id = "live-batch".into();
+            call.tool_calls = Some(vec![ChatToolCall {
+                id: "pending".into(),
+                index: None,
+                tool_type: "function".into(),
+                function: ChatToolFunction {
+                    name: "ask_questions".into(),
+                    arguments: "{}".into(),
+                },
+                extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
+            }]);
+            if embedded {
+                let payload = vec![session.messages[0].clone(), call];
+                session.messages =
+                    vec![make_reconstruction_report(payload, Default::default()).unwrap()];
+            } else {
+                session.messages.push(call);
+            }
+            session.runtime.state = state;
+            session.runtime.paused_message_index = if state == SessionState::Paused {
+                Some(1)
+            } else {
+                None
+            };
+            let archive = serde_json::to_value(&session.messages[0]).unwrap();
+            let suffix = serde_json::to_value(&session.messages[1..]).unwrap();
+            let source = RebuildSource::capture(&session).unwrap();
+            assert!(live_tool_call_ids(&session).contains("pending"));
+            commit_report(
+                &mut session,
+                report,
+                &source,
+                1,
+                &AtomicBool::new(false),
+                |_| async { Ok(()) },
+            )
+            .await
+            .unwrap();
+            if !embedded {
+                assert_eq!(
+                    serde_json::to_value(&session.messages[2..]).unwrap(),
+                    suffix
+                );
+            }
+            assert_eq!(
+                session.runtime.paused_message_index,
+                if state == SessionState::Paused {
+                    Some(2)
+                } else {
+                    None
+                }
+            );
+            assert_eq!(serde_json::to_value(&session.messages[0]).unwrap(), archive);
+            assert_eq!(session.runtime.state, state);
+            assert!(!session.abort_flag.load(Ordering::SeqCst));
+            let active = active_context(&session.messages).unwrap().messages;
+            assert_eq!(active.last().unwrap().message_id, "live-batch");
+            assert_eq!(
+                active
+                    .iter()
+                    .flat_map(|m| m.tool_calls.iter().flatten())
+                    .filter(|c| c.id == "pending")
+                    .count(),
+                1
+            );
+            assert!(!source.matches(&session));
+        }
+    }
+
+    #[tokio::test]
+    async fn live_source_changes_invalidate_reconstruction_cas() {
+        for change in 0..3 {
+            let (mut session, source, _, report) = fixture();
+            match change {
+                0 => session.runtime.state = SessionState::WaitingUserInput,
+                1 => session.abort_flag.store(true, Ordering::SeqCst),
+                _ => session.runtime.paused_message_index = Some(0),
+            }
+            let before = serde_json::to_value(&session.messages).unwrap();
+            assert!(commit_report(
+                &mut session,
+                report,
+                &source,
+                1,
+                &AtomicBool::new(false),
+                |_| async { panic!("Changed live source must not reach persistence") }
+            )
+            .await
+            .is_err());
+            assert_eq!(serde_json::to_value(&session.messages).unwrap(), before);
+        }
     }
 
     #[test]
@@ -1709,17 +1993,28 @@ mod tests {
     }
 
     #[test]
-    fn completed_and_aborted_manual_retry_is_idle_without_resuming() {
-        let mut s = ChatSession::new("manual-completed".into());
-        s.runtime.state = SessionState::Completed;
-        s.abort_flag.store(true, Ordering::SeqCst);
-        prepare_explicit_idle(&mut s);
-        assert!(idle(&s));
-        assert!(s.command_queue.is_empty());
-        s.runtime.state = SessionState::ExecutingTools;
-        s.abort_flag.store(true, Ordering::SeqCst);
-        prepare_explicit_idle(&mut s);
-        assert!(!idle(&s));
+    fn explicit_nonstreaming_preserves_state_and_cancellation() {
+        let mut generating = ChatSession::new("generating".into());
+        generating.runtime.state = SessionState::Generating;
+        assert!(!explicit_context_ready(&generating));
+        for state in [
+            SessionState::Idle,
+            SessionState::Error,
+            SessionState::Completed,
+            SessionState::Paused,
+            SessionState::WaitingUserInput,
+            SessionState::WaitingIde,
+            SessionState::ExecutingTools,
+        ] {
+            let mut s = ChatSession::new("manual".into());
+            s.runtime.state = state;
+            s.abort_flag.store(true, Ordering::SeqCst);
+            assert!(explicit_context_ready(&s));
+            assert_eq!(s.runtime.state, state);
+            assert!(s.abort_flag.load(Ordering::SeqCst));
+            s.draft_message = Some(ChatMessage::default());
+            assert!(!explicit_context_ready(&s));
+        }
     }
 
     #[tokio::test]

@@ -208,7 +208,7 @@ pub(crate) fn transition_report(
 
 pub(crate) fn transition_fingerprint(session: &crate::chat::types::ChatSession) -> Value {
     json!({"thread": session.thread, "goal": session.goal, "ledger": session.goal_ledger,
-        "deliveries": session.pending_deliveries_for_snapshot()})
+        "deliveries": session.pending_deliveries_for_snapshot(), "live": crate::chat::context_rebuild::live_state_fingerprint(session)})
 }
 
 fn handoff_completion_messages(
@@ -456,10 +456,18 @@ async fn persist_goal_transition(
                 snapshot.chat_id
             )
         })?;
-    source.replace_messages(source_snapshot.messages);
+    source.messages = source_snapshot.messages;
+    source.increment_version();
+    source.touch();
+    source.reset_cache_guard_snapshot();
+    source.thread.previous_response_id = None;
+    source.thread.frozen_request_prefix = None;
+    source.provider_usage_stale = true;
     source.goal_ledger = source_snapshot.goal_ledger;
     source.set_goal_projection(transfer.source_goal.clone());
     source.emit_goal_status();
+    let event = source.snapshot();
+    source.emit(event);
     let mut committed = snapshot.clone();
     committed.version += 1;
     save_trajectory_snapshot(gcx, committed).await.map_err(|e| {

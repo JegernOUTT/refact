@@ -34,11 +34,7 @@ impl TransitionReservation {
         session: Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
     ) -> Result<Self, ScratchError> {
         let mut source = session.lock().await;
-        if source.closed
-            || !matches!(
-                source.runtime.state,
-                SessionState::Idle | SessionState::Error | SessionState::Completed
-            )
+        if !crate::chat::context_rebuild::explicit_context_ready(&source)
             || compression_attempt_active(&source)
             || source.pending_mode_handoff.is_some()
             || source.pending_context_rebuild.is_some()
@@ -54,14 +50,10 @@ impl TransitionReservation {
                 "Source stream is not finished".into(),
             ));
         }
-        source
-            .abort_flag
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-        source.set_runtime_state(SessionState::Idle, None);
         let marker = serde_json::json!({"http_transition": Uuid::new_v4().to_string()});
         source.pending_mode_handoff = Some(marker.clone());
         let fingerprint = transition_fingerprint(&source);
-        let abort = source.abort_flag.clone();
+        let abort = Arc::new(std::sync::atomic::AtomicBool::new(false));
         drop(source);
         Ok(Self {
             session,
@@ -81,6 +73,7 @@ impl Drop for TransitionReservation {
             let mut source = session.lock().await;
             if source.pending_mode_handoff.as_ref() == Some(&marker) {
                 source.pending_mode_handoff = None;
+                source.queue_notify.notify_waiters();
             }
         });
     }
@@ -284,8 +277,14 @@ pub async fn handle_llm_compress_preview(
     let (state, active, messages, live_ids, thread, trajectory_version) = {
         let session = session_arc.lock().await;
         (
-            session.runtime.state,
-            compression_attempt_active(&session),
+            if crate::chat::context_rebuild::explicit_context_ready(&session) {
+                session.runtime.state
+            } else {
+                SessionState::Generating
+            },
+            compression_attempt_active(&session)
+                || session.pending_mode_handoff.is_some()
+                || session.pending_context_rebuild.is_some(),
             session.messages.clone(),
             live_tool_call_ids(&session),
             session.thread.clone(),
@@ -375,6 +374,86 @@ pub struct PlannerFromTransitionRequest {
     pub target_mode: Option<String>,
 }
 
+fn transition_completed_input(
+    messages: &[crate::call_validation::ChatMessage],
+    live_ids: &std::collections::HashSet<String>,
+) -> Result<Vec<crate::call_validation::ChatMessage>, String> {
+    let active =
+        refact_core::active_context::legacy_rebuild_input(messages).map_err(|e| e.to_string())?;
+    let (mut prefix, tail) = crate::chat::context_rebuild::split_live_suffix(&active, live_ids);
+    if !tail.is_empty() {
+        let detail = tail
+            .iter()
+            .map(|m| format!("{}: {}", m.role, m.content.content_text_only()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        prefix.push(crate::call_validation::ChatMessage::new("user".into(), format!("Source conversation has pending tools or questions. They remain executable only in the source chat; do not replay or answer them here. Pending source context:\n{detail}")));
+    }
+    Ok(prefix)
+}
+
+fn compress_preserving_live(
+    messages: &[crate::call_validation::ChatMessage],
+    live_ids: &std::collections::HashSet<String>,
+    options: &CompressOptions,
+) -> Result<(Vec<crate::call_validation::ChatMessage>, TransformStats), String> {
+    let active = refact_core::active_context::active_context(messages)
+        .map_err(|e| e.to_string())?
+        .messages;
+    let (mut prefix, tail) = crate::chat::context_rebuild::split_live_suffix(&active, live_ids);
+    if tail.is_empty() {
+        let mut output = messages.to_vec();
+        let stats = compress_in_place(&mut output, options)?;
+        return Ok((output, stats));
+    }
+    let mut stats = if prefix.is_empty() {
+        TransformStats {
+            before_message_count: 0,
+            after_message_count: 0,
+            before_approx_tokens: 0,
+            after_approx_tokens: 0,
+            context_messages_modified: 0,
+            tool_messages_modified: 0,
+        }
+    } else {
+        compress_in_place(&mut prefix, options)?
+    };
+    if prefix.is_empty() {
+        return Ok((
+            messages.to_vec(),
+            TransformStats {
+                before_message_count: active.len(),
+                after_message_count: active.len(),
+                before_approx_tokens: crate::chat::trajectory_ops::approx_token_count(&active),
+                after_approx_tokens: crate::chat::trajectory_ops::approx_token_count(&active),
+                context_messages_modified: 0,
+                tool_messages_modified: 0,
+            },
+        ));
+    }
+    for message in &mut prefix {
+        if message.message_id.is_empty() {
+            message.message_id = Uuid::new_v4().to_string();
+        }
+    }
+    let mut report =
+        refact_core::active_context::make_reconstruction_report(prefix, Default::default())
+            .map_err(|e| e.to_string())?;
+    let at = crate::chat::context_rebuild::place_report_before_live_suffix(
+        messages,
+        live_ids,
+        &mut report,
+    )?;
+    let mut output = messages.to_vec();
+    output.insert(at, report);
+    stats.before_message_count += tail.len();
+    stats.after_message_count += tail.len();
+    let tail_tokens = crate::chat::trajectory_ops::approx_token_count(&tail);
+    stats.before_approx_tokens += tail_tokens;
+    stats.after_approx_tokens += tail_tokens;
+    Ok((output, stats))
+}
+
 fn describe_transform_actions(opts: &CompressOptions) -> Vec<String> {
     let mut actions = Vec::new();
     if opts.drop_all_context {
@@ -415,12 +494,22 @@ pub async fn handle_transform_preview(
     )
     .await;
 
-    let (mut messages, trajectory_version) = {
+    let (messages, live_ids, trajectory_version) = {
         let session = session_arc.lock().await;
-        (session.messages.clone(), session.trajectory_version)
+        if !crate::chat::context_rebuild::explicit_context_ready(&session) {
+            return Err(ScratchError::new(
+                StatusCode::CONFLICT,
+                "Source stream is not finished".into(),
+            ));
+        }
+        (
+            session.messages.clone(),
+            live_tool_call_ids(&session),
+            session.trajectory_version,
+        )
     };
 
-    let stats = compress_in_place(&mut messages, &req.options)
+    let (_, stats) = compress_preserving_live(&messages, &live_ids, &req.options)
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let response = TransformPreviewResponse {
@@ -458,19 +547,19 @@ pub async fn handle_transform_apply(
     let stats = {
         let mut session = session_arc.lock().await;
 
-        if session.runtime.state != SessionState::Idle
-            && session.runtime.state != SessionState::Error
-        {
+        if !crate::chat::context_rebuild::explicit_context_ready(&session) {
             return Err(ScratchError::new(
                 StatusCode::CONFLICT,
                 format!(
-                    "Session is not idle or error, current state: {:?}",
+                    "Session has an active stream, current state: {:?}",
                     session.runtime.state
                 ),
             ));
         }
 
         if compression_attempt_active(&session)
+            || session.pending_mode_handoff.is_some()
+            || session.pending_context_rebuild.is_some()
             || req
                 .expected_trajectory_version
                 .is_some_and(|v| v != session.trajectory_version)
@@ -480,9 +569,30 @@ pub async fn handle_transform_apply(
                 "Trajectory changed or compression is active".to_string(),
             ));
         }
-        let stats = compress_in_place(&mut session.messages, &req.options)
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        let live_ids = live_tool_call_ids(&session);
+        let (messages, stats) =
+            compress_preserving_live(&session.messages, &live_ids, &req.options)
+                .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        let added_at = messages.iter().position(|m| {
+            m.role == "compression_report"
+                && !session
+                    .messages
+                    .iter()
+                    .any(|old| old.message_id == m.message_id)
+        });
+        session.messages = messages;
+        if let (Some(at), Some(index)) = (added_at, session.runtime.paused_message_index.as_mut()) {
+            if *index >= at {
+                *index += 1;
+            }
+        }
 
+        session.thread.previous_response_id = None;
+        session.thread.frozen_request_prefix = None;
+        session.thread.claude_code_identity = None;
+        session.openai_codex_websocket = Default::default();
+        session.reset_cache_guard_snapshot();
+        session.provider_usage_stale = true;
         session.increment_version();
         let snapshot = session.snapshot();
         session.emit(snapshot);
@@ -520,17 +630,14 @@ async fn commit_transition_snapshot(
 ) -> Result<(), String> {
     let mut session = session_arc.lock().await;
     if session.trajectory_version != source_version
-        || !matches!(
-            session.runtime.state,
-            SessionState::Idle | SessionState::Error
-        )
+        || !crate::chat::context_rebuild::explicit_context_ready(&session)
         || compression_attempt_active(&session)
         || session.closed
         || session.pending_context_rebuild.is_some()
         || reservation.is_some_and(|r| {
             session.pending_mode_handoff.as_ref() != Some(&r.marker)
                 || transition_fingerprint(&session) != r.fingerprint
-                || session.abort_flag.load(std::sync::atomic::Ordering::SeqCst)
+                || r.abort.load(std::sync::atomic::Ordering::SeqCst)
         })
         || (reservation.is_none() && session.pending_mode_handoff.is_some())
     {
@@ -613,8 +720,9 @@ pub async fn handle_mode_transition_apply(
             "Cannot transition an empty chat".to_string(),
         ));
     }
-    let reconstruction_input = refact_core::active_context::legacy_rebuild_input(&messages)
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let reconstruction_input =
+        transition_completed_input(&messages, &live_tool_call_ids(&*session_arc.lock().await))
+            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let rebuilt = reconstruct_context(
         gcx.clone(),
@@ -625,7 +733,7 @@ pub async fn handle_mode_transition_apply(
             parent_chat_id: Some(chat_id.as_str()),
             model_override: None,
             chat_model: Some(thread.model.clone()),
-            abort_flag: Some(session_arc.lock().await.abort_flag.clone()),
+            abort_flag: Some(reservation.abort.clone()),
             hints: None,
             target_budget_symbols: None,
             preserve_goal_messages: false,
@@ -810,8 +918,9 @@ pub async fn handle_planner_from_transition(
             "Cannot transition an empty chat".to_string(),
         ));
     }
-    let reconstruction_input = refact_core::active_context::legacy_rebuild_input(&messages)
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let reconstruction_input =
+        transition_completed_input(&messages, &live_tool_call_ids(&*session_arc.lock().await))
+            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     crate::tasks::goal::preflight_planner_transition(
         gcx.clone(),
@@ -831,7 +940,7 @@ pub async fn handle_planner_from_transition(
             parent_chat_id: Some(req.source_chat_id.as_str()),
             model_override: None,
             chat_model: Some(thread.model.clone()),
-            abort_flag: Some(session_arc.lock().await.abort_flag.clone()),
+            abort_flag: Some(reservation.abort.clone()),
             hints: None,
             target_budget_symbols: None,
             preserve_goal_messages: false,
@@ -972,6 +1081,92 @@ mod tests {
     use super::*;
     use refact_chat_api::{GoalAttempt, GoalBudget, GoalProgress, GoalStatus};
     use serde_json::json;
+
+    #[tokio::test]
+    async fn reservation_preserves_every_nonstreaming_state_and_never_aborts_source() {
+        for state in [
+            SessionState::Idle,
+            SessionState::Error,
+            SessionState::Completed,
+            SessionState::Paused,
+            SessionState::WaitingUserInput,
+            SessionState::WaitingIde,
+            SessionState::ExecutingTools,
+        ] {
+            let mut session = crate::chat::types::ChatSession::new("source".into());
+            session.runtime.state = state;
+            let source = Arc::new(tokio::sync::Mutex::new(session));
+            let reservation = TransitionReservation::acquire(source.clone())
+                .await
+                .unwrap();
+            assert_eq!(source.lock().await.runtime.state, state);
+            assert!(!Arc::ptr_eq(
+                &reservation.abort,
+                &source.lock().await.abort_flag
+            ));
+            drop(reservation);
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while source.lock().await.pending_mode_handoff.is_some() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("reservation cleanup must complete");
+            let session = source.lock().await;
+            assert_eq!(session.runtime.state, state);
+            assert!(!session.abort_flag.load(std::sync::atomic::Ordering::SeqCst));
+            assert!(session.pending_mode_handoff.is_none());
+        }
+    }
+
+    #[test]
+    fn static_compression_and_transition_do_not_consume_live_calls() {
+        use crate::call_validation::{ChatToolCall, ChatToolFunction};
+        let mut call = ChatMessage::new("assistant".into(), "question".into());
+        call.message_id = "pending-batch".into();
+        call.tool_calls = Some(vec![ChatToolCall {
+            id: "live".into(),
+            index: None,
+            tool_type: "function".into(),
+            function: ChatToolFunction {
+                name: "ask_questions".into(),
+                arguments: "{}".into(),
+            },
+            extra_content: None,
+            started_at_ms: None,
+            completed_at_ms: None,
+        }]);
+        let messages = vec![
+            ChatMessage::new("user".into(), "history".into()),
+            call.clone(),
+        ];
+        let live = std::collections::HashSet::from(["live".to_string()]);
+        let (output, _) =
+            compress_preserving_live(&messages, &live, &CompressOptions::default()).unwrap();
+        assert_eq!(
+            serde_json::to_value(output.last().unwrap()).unwrap(),
+            serde_json::to_value(&call).unwrap()
+        );
+        let active = refact_core::active_context::active_context(&output)
+            .unwrap()
+            .messages;
+        assert_eq!(
+            active
+                .iter()
+                .flat_map(|m| m.tool_calls.iter().flatten())
+                .filter(|c| c.id == "live")
+                .count(),
+            1
+        );
+        let input = transition_completed_input(&messages, &live).unwrap();
+        assert!(input.iter().all(|m| m.tool_calls.is_none()));
+        assert!(input
+            .last()
+            .unwrap()
+            .content
+            .content_text_only()
+            .contains("only in the source chat"));
+    }
 
     #[tokio::test]
     async fn transition_commit_rejects_stale_source_before_destination_save() {

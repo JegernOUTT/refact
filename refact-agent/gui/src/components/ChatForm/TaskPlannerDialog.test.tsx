@@ -3,6 +3,7 @@ import { http, HttpResponse } from "msw";
 import { render, screen, waitFor, within } from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
 import { createDefaultChatState } from "../../utils/test-utils";
+import { applyChatEvent } from "../../features/Chat/Thread/actions";
 import { TaskPlannerDialog } from "./TaskPlannerDialog";
 
 function deferred<T = void>() {
@@ -16,6 +17,48 @@ function deferred<T = void>() {
 }
 
 describe("TaskPlannerDialog", () => {
+  test("allows creating while waiting and disables creation while streaming", async () => {
+    const chat = createDefaultChatState();
+    const runtime = chat.threads[chat.current_thread_id];
+    runtime.waiting_for_response = true;
+    const { store } = render(
+      <TaskPlannerDialog
+        sourceChatId={chat.current_thread_id}
+        open
+        onOpenChange={vi.fn()}
+      />,
+      {
+        preloadedState: {
+          chat,
+          config: {
+            apiKey: "test",
+            host: "web",
+            dev: true,
+            lspPort: 8001,
+            themeProps: {},
+          },
+        },
+      },
+    );
+
+    expect(screen.getByRole("button", { name: "Create Task" })).toBeEnabled();
+
+    store.dispatch(
+      applyChatEvent({
+        chat_id: chat.current_thread_id,
+        seq: "1",
+        type: "runtime_updated",
+        state: "generating",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Create Task" }),
+      ).toBeDisabled(),
+    );
+  });
+
   test("shows one content spinner and no button spinner while creating a task", async () => {
     const taskGate = deferred();
     const onOpenChange = vi.fn();

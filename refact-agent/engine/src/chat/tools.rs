@@ -1857,12 +1857,11 @@ pub async fn process_tool_calls_once(
         server_tool_calls,
         messages,
         thread,
-        tool_message_index,
+        tool_message_id,
         allowed_tools,
         source_command,
     ) = {
         let session = session_arc.lock().await;
-        let msg_count = session.messages.len();
         let last_msg = session.messages.last();
         match last_msg {
             Some(m) if m.role == "assistant" && m.tool_calls.is_some() => {
@@ -1875,7 +1874,7 @@ pub async fn process_tool_calls_once(
                     server_calls,
                     session.messages.clone(),
                     session.thread.clone(),
-                    msg_count.saturating_sub(1),
+                    m.message_id.clone(),
                     session.active_command.allowed_tools.clone(),
                     session.active_command.name.clone(),
                 )
@@ -2101,6 +2100,13 @@ pub async fn process_tool_calls_once(
             .await;
 
             let mut session = session_arc.lock().await;
+            let Some(tool_message_index) = session
+                .messages
+                .iter()
+                .position(|message| message.message_id == tool_message_id)
+            else {
+                return ToolStepOutcome::Stop;
+            };
             session.set_paused_with_reasons_and_auto_approved(
                 remaining,
                 auto_approved_ids,

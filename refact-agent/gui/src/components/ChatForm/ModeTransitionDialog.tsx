@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useRef, useState } from "react";
 import { Flex, Text } from "@radix-ui/themes";
 import { LoaderCircle } from "lucide-react";
 import { Badge, Button, Dialog, Icon } from "../ui";
@@ -11,7 +11,13 @@ import {
   closeThread,
   updateChatRuntimeFromSessionState,
 } from "../../features/Chat/Thread/actions";
-import { selectThreadById } from "../../features/Chat/Thread/selectors";
+import {
+  selectIsStreamingById,
+  selectIsWaitingById,
+  selectPendingQuestionSetsById,
+  selectThreadById,
+  selectThreadPauseById,
+} from "../../features/Chat/Thread/selectors";
 import { push } from "../../features/Pages/pagesSlice";
 import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { useAppSelector } from "../../hooks/useAppSelector";
@@ -94,6 +100,22 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
     selectThreadById(state, chatId),
   );
   const sourceWorktree = sourceThread?.worktree;
+  const isStreaming = useAppSelector((state) =>
+    selectIsStreamingById(state, chatId),
+  );
+  const isWaiting = useAppSelector((state) =>
+    selectIsWaitingById(state, chatId),
+  );
+  const isPaused = useAppSelector((state) =>
+    selectThreadPauseById(state, chatId),
+  );
+  const hasPendingQuestions = useAppSelector((state) =>
+    selectPendingQuestionSetsById(state, chatId).some(
+      (set) => set.status === "pending",
+    ),
+  );
+  const keepSourceThreadRef = useRef(false);
+  keepSourceThreadRef.current = isWaiting || isPaused || hasPendingQuestions;
   const [error, setError] = useState<string | null>(null);
   const [phase, setPhase] = useState<TransitionPhase | null>(null);
   const [activeTransition, setActiveTransition] = useState<{
@@ -109,7 +131,8 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
   const isBusy = isApplying || phase !== null;
 
   const handleApply = useCallback(async () => {
-    if (isBusy) return;
+    if (isBusy || isStreaming) return;
+    const keepSourceAtStart = keepSourceThreadRef.current;
 
     const transition = {
       currentMode,
@@ -137,7 +160,9 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
       ).unwrap();
 
       setPhase("opening");
-      dispatch(closeThread({ id: chatId, force: true }));
+      if (!keepSourceAtStart && !keepSourceThreadRef.current) {
+        dispatch(closeThread({ id: chatId, force: true }));
+      }
       dispatch(
         createChatWithId({
           id: newChatId,
@@ -175,6 +200,7 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
     }
   }, [
     isBusy,
+    isStreaming,
     currentMode,
     currentModeTitle,
     chatId,
@@ -286,7 +312,7 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
               variant="primary"
               size="md"
               onClick={() => void handleApply()}
-              disabled={isBusy}
+              disabled={isBusy || isStreaming}
             >
               {isBusy
                 ? isSelf

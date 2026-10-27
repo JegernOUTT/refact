@@ -1020,6 +1020,51 @@ describe("ChatForm", () => {
     expect(fakeOnSubmit).toHaveBeenCalledWith("manual nudge\n", "after_flow");
   });
 
+  test("auto-compact toggle stays enabled while waiting and disables once generating", async () => {
+    const chat = chatStateWithThread({
+      model: "openai/gpt-4o",
+      messages: [{ role: "user", content: "earlier" }],
+    });
+    const threadId = chat.current_thread_id;
+    const { user, store } = render(<App />, {
+      preloadedState: { chat, ...engineConfigState },
+    });
+
+    store.dispatch(
+      applyChatEvent({
+        chat_id: threadId,
+        seq: "1",
+        type: "runtime_updated",
+        state: "executing_tools",
+      }),
+    );
+    const runtime = store.getState().chat.threads[threadId];
+    expect(runtime?.waiting_for_response).toBe(true);
+    expect(runtime?.streaming).toBe(false);
+    await waitFor(() =>
+      expect(screen.getByTestId("auto-compact-toggle")).toBeEnabled(),
+    );
+
+    store.dispatch(
+      applyChatEvent({
+        chat_id: threadId,
+        seq: "2",
+        type: "runtime_updated",
+        state: "generating",
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("auto-compact-toggle")).toBeDisabled(),
+    );
+    const pressedBefore = screen
+      .getByTestId("auto-compact-toggle")
+      .getAttribute("aria-pressed");
+    await user.click(screen.getByTestId("auto-compact-toggle"));
+    expect(
+      screen.getByTestId("auto-compact-toggle").getAttribute("aria-pressed"),
+    ).toBe(pressedBefore);
+  });
+
   test.each([
     "{Shift>}{enter>}{/enter}{/Shift}", // hold shift, hold enter, release enter, release shift,
     "{Shift>}{enter>}{/Shift}{/enter}", // hold shift, hold enter, release enter, release shift,
