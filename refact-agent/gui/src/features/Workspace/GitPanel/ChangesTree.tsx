@@ -78,6 +78,10 @@ export type ChangesTreeProps = {
   onToggleInclude: (node: ChangesTreeNode) => void;
   onShowDiff: (entry: ChangesTreeEntry) => void;
   renderContextMenu: (node: ChangesTreeNode) => ReactNode;
+  /** Read-only trees (commit details) hide the include checkboxes. */
+  checkable?: boolean;
+  label?: string;
+  renderEntryMeta?: (entry: ChangesTreeEntry) => ReactNode;
 };
 
 type RowProps = {
@@ -92,6 +96,8 @@ type RowProps = {
   onToggleInclude: (node: ChangesTreeNode) => void;
   onShowDiff: (entry: ChangesTreeEntry) => void;
   renderContextMenu: (node: ChangesTreeNode) => ReactNode;
+  checkable: boolean;
+  renderEntryMeta?: (entry: ChangesTreeEntry) => ReactNode;
 };
 
 function ChangesRow({
@@ -106,10 +112,12 @@ function ChangesRow({
   onToggleInclude,
   onShowDiff,
   renderContextMenu,
+  checkable: treeCheckable,
+  renderEntryMeta,
 }: RowProps) {
   const { node, depth } = row;
   const isFile = node.type === "file";
-  const checkable = isCheckable(node);
+  const checkable = treeCheckable && isCheckable(node);
   const checkState = checkable ? nodeCheckState(node, inclusion) : false;
   const tone = isFile ? entryTone(node.entry) : undefined;
   const EntryIcon = isFile
@@ -180,23 +188,25 @@ function ChangesRow({
               </button>
             )}
           </span>
-          <span
-            className={styles.checkSlot}
-            onClick={(event) => event.stopPropagation()}
-            onDoubleClick={(event) => event.stopPropagation()}
-          >
-            {checkable ? (
-              <Checkbox
-                aria-label={`Include ${nodePathLabel(node)} in commit`}
-                checked={checkState}
-                onCheckedChange={() => {
-                  onSelect(node.id);
-                  onToggleInclude(node);
-                }}
-                tabIndex={-1}
-              />
-            ) : null}
-          </span>
+          {treeCheckable ? (
+            <span
+              className={styles.checkSlot}
+              onClick={(event) => event.stopPropagation()}
+              onDoubleClick={(event) => event.stopPropagation()}
+            >
+              {checkable ? (
+                <Checkbox
+                  aria-label={`Include ${nodePathLabel(node)} in commit`}
+                  checked={checkState}
+                  onCheckedChange={() => {
+                    onSelect(node.id);
+                    onToggleInclude(node);
+                  }}
+                  tabIndex={-1}
+                />
+              ) : null}
+            </span>
+          ) : null}
           {EntryIcon ? (
             <Icon
               icon={EntryIcon}
@@ -217,7 +227,9 @@ function ChangesRow({
           {renamedHint ? (
             <span className={styles.treeHint}>{renamedHint}</span>
           ) : null}
-          {isFile ? null : (
+          {isFile ? (
+            renderEntryMeta?.(node.entry)
+          ) : (
             <span className={styles.treeCount}>
               {fileCountLabel(node.fileCount)}
             </span>
@@ -242,6 +254,9 @@ export function ChangesTree({
   onToggleInclude,
   onShowDiff,
   renderContextMenu,
+  checkable = true,
+  label = "Changes",
+  renderEntryMeta,
 }: ChangesTreeProps) {
   const treeId = useId();
   const treeRef = useRef<HTMLDivElement>(null);
@@ -340,7 +355,7 @@ export function ChangesTree({
           }
           break;
         case " ":
-          if (isCheckable(current)) onToggleInclude(current);
+          if (checkable && isCheckable(current)) onToggleInclude(current);
           break;
         case "Enter":
           if (current.type === "file") onShowDiff(current.entry);
@@ -355,6 +370,7 @@ export function ChangesTree({
       }
     },
     [
+      checkable,
       collapsed,
       onSelect,
       onSetExpanded,
@@ -379,7 +395,9 @@ export function ChangesTree({
       onSetExpanded={onSetExpanded}
       onShowDiff={onShowDiff}
       onToggleInclude={onToggleInclude}
+      checkable={checkable}
       renderContextMenu={renderContextMenu}
+      renderEntryMeta={renderEntryMeta}
       row={row}
       rowId={rowId(row.node.id)}
       selected={row.node.id === selectedId}
@@ -391,7 +409,7 @@ export function ChangesTree({
       aria-activedescendant={
         selectedIndex >= 0 ? rowId(rows[selectedIndex].node.id) : undefined
       }
-      aria-label="Changes"
+      aria-label={label}
       className={styles.tree}
       onKeyDown={handleKeyDown}
       ref={treeRef}

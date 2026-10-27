@@ -52,10 +52,25 @@ export type GitPanelContextState = {
   roots?: Record<string, GitRootViewState | undefined>;
 };
 
+export type GitWindowTab = "log" | "worktrees";
+
+export type GitLogLayout = {
+  tab: GitWindowTab;
+  branchesWidth: number;
+  detailsWidth: number;
+};
+
 export type GitPanelState = {
   contexts: Record<string, GitPanelContextState | undefined>;
   /** Optional so older persisted/preloaded states stay valid. */
   diffViewer?: GitDiffViewerPrefs;
+  logLayout?: GitLogLayout;
+};
+
+export const DEFAULT_GIT_LOG_LAYOUT: GitLogLayout = {
+  tab: "log",
+  branchesWidth: 240,
+  detailsWidth: 380,
 };
 
 export const DEFAULT_GIT_DIFF_VIEWER_PREFS: GitDiffViewerPrefs = {
@@ -163,6 +178,13 @@ export const gitPanelSlice = createSlice({
         ...action.payload,
       };
     },
+    setGitLogLayout: (state, action: PayloadAction<Partial<GitLogLayout>>) => {
+      state.logLayout = {
+        ...DEFAULT_GIT_LOG_LAYOUT,
+        ...state.logLayout,
+        ...action.payload,
+      };
+    },
   },
 });
 
@@ -170,6 +192,7 @@ export const {
   selectGitDiffTarget,
   setActiveGitRoot,
   setGitDiffViewerPrefs,
+  setGitLogLayout,
   updateGitRootView,
 } = gitPanelSlice.actions;
 
@@ -293,5 +316,8 @@ export const selectGitDiffViewerPrefs = (
   state: GitPanelRootState,
 ): GitDiffViewerPrefs =>
   state.gitPanel.diffViewer ?? DEFAULT_GIT_DIFF_VIEWER_PREFS;
+
+export const selectGitLogLayout = (state: GitPanelRootState): GitLogLayout =>
+  state.gitPanel.logLayout ?? DEFAULT_GIT_LOG_LAYOUT;
 
 export default gitPanelSlice.reducer;

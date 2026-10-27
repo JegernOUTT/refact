@@ -263,6 +263,26 @@ function installHandlers(options?: {
         skipped: [],
       });
     }),
+    http.get("*/v1/git/commit", ({ request }) => {
+      const params = new URL(request.url).searchParams;
+      return HttpResponse.json({
+        root: params.get("root"),
+        oid: params.get("oid"),
+        short_oid: "abc1234",
+        parents: [],
+        author_name: "Ada",
+        author_email: "ada@example.com",
+        author_time_ms: 1,
+        committer_name: "Ada",
+        committer_email: "ada@example.com",
+        committer_time_ms: 1,
+        message: "Initial commit\n\nBody line\n",
+        refs: [],
+        branches: ["main"],
+        files: [],
+        files_truncated: false,
+      });
+    }),
     http.post("*/v1/commit-message-from-diff", async ({ request }) => {
       options?.generateBodies?.push(await request.json());
       return HttpResponse.text(
@@ -326,6 +346,10 @@ const messageBox = () =>
   screen.getByRole("textbox", { name: "Commit message" });
 const commitButton = () => screen.getByRole("button", { name: "Commit" });
 
+async function openWorktreesTab(user: ReturnType<typeof renderPanel>["user"]) {
+  await user.click(await screen.findByRole("tab", { name: "Worktrees" }));
+}
+
 async function openMenu(
   user: ReturnType<typeof renderPanel>["user"],
   name: string,
@@ -349,7 +373,9 @@ describe("GitDock commit tool window", () => {
     expect(screen.getByText("main")).toBeInTheDocument();
     expect(screen.getByText("↑2 ↓1")).toBeInTheDocument();
     expect(screen.getByText("Merging")).toBeInTheDocument();
-    expect(screen.getByRole("toolbar")).toBeInTheDocument();
+    expect(
+      screen.getByRole("toolbar", { name: "Commit tool window actions" }),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Group by Directory" }),
     ).toHaveAttribute("aria-pressed", "true");
@@ -678,7 +704,9 @@ describe("GitDock commit tool window", () => {
     expect(
       await screen.findByText("No changes — working tree clean"),
     ).toBeInTheDocument();
-    expect(screen.queryByRole("tree")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("tree", { name: "Changes" }),
+    ).not.toBeInTheDocument();
     expect(commitButton()).toBeDisabled();
   });
 
@@ -741,6 +769,7 @@ describe("GitDock commit tool window", () => {
     }[] = [];
     installHandlers({ openCalls, deleteCalls });
     const { user } = renderPanel();
+    await openWorktreesTab(user);
 
     const section = await screen.findByRole("heading", { name: "Worktrees" });
     const worktreesSection = section.closest("section");
@@ -791,9 +820,10 @@ describe("GitDock commit tool window", () => {
         return HttpResponse.json({ roots: [{ root: "/repo", commits: [] }] });
       }),
     );
-    renderPanel(["/repo/refact-agent/engine"]);
+    const { user } = renderPanel(["/repo/refact-agent/engine"]);
 
     await waitFor(() => expect(branchRoots.length).toBeGreaterThan(0));
+    await openWorktreesTab(user);
     await waitFor(() => expect(logRoots.length).toBeGreaterThan(0));
     await waitFor(() => expect(worktreeCalls).toHaveLength(1));
     expect(branchRoots.every((root) => root === "/repo")).toBe(true);
@@ -822,6 +852,7 @@ describe("GitDock commit tool window", () => {
       }),
     );
     store.dispatch(openTab("chat:chat-b"));
+    await openWorktreesTab(user);
 
     const worktreesHeading = await screen.findByRole("heading", {
       name: "Worktrees",

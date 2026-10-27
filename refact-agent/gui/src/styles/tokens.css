@@ -39,6 +39,10 @@
   --rf-git-renamed: var(--rf-color-accent);
   --rf-git-untracked: var(--rf-color-warning);
   --rf-git-conflict: var(--rf-color-danger);
+  --rf-git-ref-head: var(--rf-color-accent);
+  --rf-git-ref-local: var(--rf-color-success);
+  --rf-git-ref-remote: var(--rf-chart-6);
+  --rf-git-ref-tag: var(--rf-color-warning);
 
   /* JetBrains-style diff palette (inserted green, deleted gray-red,
      modified blue); line tints are opaque mixes over --rf-bg so merge
@@ -203,6 +207,8 @@
   --rf-icon-sm: 13px;
   --rf-icon-lg: 18px;
   --rf-hairline: 1px;
+  --rf-git-graph-lane: 12px;
+  --rf-git-log-row-h: 26px;
   --rf-focus-ring-w: 2px;
   --rf-line: 1.5;
   --rf-rail-w: 44px;
@@ -350,6 +356,10 @@
   --rf-git-renamed: var(--rf-color-accent);
   --rf-git-untracked: var(--rf-color-warning);
   --rf-git-conflict: var(--rf-color-danger);
+  --rf-git-ref-head: var(--rf-color-accent);
+  --rf-git-ref-local: var(--rf-color-success);
+  --rf-git-ref-remote: var(--rf-chart-6);
+  --rf-git-ref-tag: var(--rf-color-warning);
 
   /* JetBrains-style diff palette (inserted green, deleted gray-red,
      modified blue); line tints are opaque mixes over --rf-bg so merge

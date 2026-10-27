@@ -20,6 +20,10 @@ import {
 } from "../../src/components/Tools/AgenticTool/launchFixtures";
 import { makeSurfaceKey } from "../../src/features/Workspace/surfaceKey";
 import {
+  openTab,
+  setActiveTab,
+} from "../../src/features/Workspace/workspaceSlice";
+import {
   openGitDiff,
   setGitDiffViewerPrefs,
 } from "../../src/features/Workspace/GitPanel/gitPanelSlice";
@@ -271,6 +275,261 @@ export const openGitDiff = (target: GitDiffTarget) => (dispatch) => {
 
 export default gitPanelSlice.reducer;
 `;
+type ShowcaseLogSeed = {
+  id: string;
+  parents: string[];
+  hours: number;
+  subject: string;
+  author: number;
+};
+const showcaseAuthors = [
+  ["Ada Lovelace", "ada@example.com"],
+  ["Grace Hopper", "grace@example.com"],
+  ["Linus Torvalds", "linus@example.com"],
+  ["Margaret Hamilton", "margaret@example.com"],
+] as const;
+const showcaseMainSubjects = [
+  "Initial project layout",
+  "Add engine HTTP router",
+  "Wire chat runtime to the GUI",
+  "Introduce workspace dock",
+  "Add files panel tree",
+  "Persist dock width",
+  "Add git status endpoint",
+  "Render status in the dock",
+  "Fix CRLF handling in diffs",
+  "Add commit tool window",
+  "Group changes by directory",
+  "Support amend in commit panel",
+  "Stage and unstage endpoints",
+  "Rollback dialog",
+  "Merge conflicts group",
+  "Polish keyboard navigation",
+  "Diff viewer as editor tab",
+  "Merge branch 'feature/log-graph'",
+  "Bump dependencies",
+  "Track ahead/behind counts",
+  "Add commit details endpoint",
+  "Show changed files in details",
+  "Remote branches in branches endpoint",
+  "Tags in branches endpoint",
+  "Refactor git read service",
+  "Merge branch 'feature/branch-pane'",
+  "Debounce log filters",
+  "Fix flaky log test",
+  "Document git tool window",
+  "Release 1.2",
+];
+function showcaseOid(id: string): string {
+  let hash = 2166136261;
+  let out = "";
+  for (let round = 0; out.length < 40; round += 1) {
+    for (const char of `${id}:${round}`) {
+      hash = Math.imul(hash ^ char.charCodeAt(0), 16777619) >>> 0;
+    }
+    out += hash.toString(16).padStart(8, "0");
+  }
+  return out.slice(0, 40);
+}
+function showcaseLogSeeds(): ShowcaseLogSeed[] {
+  const seeds: ShowcaseLogSeed[] = showcaseMainSubjects.map(
+    (subject, index) => ({
+      id: `M${index + 1}`,
+      parents: index === 0 ? [] : [`M${index}`],
+      hours: (index + 1) * 10,
+      subject,
+      author: index % showcaseAuthors.length,
+    }),
+  );
+  seeds[17].parents = ["M17", "A6"];
+  seeds[25].parents = ["M25", "B5"];
+  const branch = (
+    prefix: string,
+    from: string,
+    start: number,
+    step: number,
+    subjects: string[],
+    author: number,
+  ) =>
+    subjects.map((subject, index) => ({
+      id: `${prefix}${index + 1}`,
+      parents: [index === 0 ? from : `${prefix}${index}`],
+      hours: start + (index + 1) * step,
+      subject,
+      author,
+    }));
+  return [
+    ...seeds,
+    ...branch(
+      "A",
+      "M10",
+      100,
+      12,
+      [
+        "Commit graph layout module",
+        "Lane reuse and merge edges",
+        "Render graph cells as SVG",
+        "Colour lanes with chart tokens",
+        "Paging continuation for lanes",
+        "Graph unit tests",
+      ],
+      1,
+    ),
+    ...branch(
+      "B",
+      "M20",
+      200,
+      11,
+      [
+        "Branches pane skeleton",
+        "Group remotes by name",
+        "Collapse tags by default",
+        "Navigate log by ref",
+        "Branch search box",
+      ],
+      3,
+    ),
+    ...branch(
+      "C",
+      "M28",
+      280,
+      9,
+      [
+        "Spike: branch context actions",
+        "Checkout from branches pane",
+        "WIP rename branch dialog",
+      ],
+      2,
+    ),
+  ].sort((left, right) => right.hours - left.hours);
+}
+const showcaseLogRefs: Record<string, { name: string; kind: string }[]> = {
+  M30: [
+    { name: "HEAD", kind: "head" },
+    { name: "main", kind: "local" },
+    { name: "origin/main", kind: "remote" },
+    { name: "v1.2", kind: "tag" },
+  ],
+  C3: [
+    { name: "feature/branch-actions", kind: "local" },
+    { name: "origin/feature/branch-actions", kind: "remote" },
+  ],
+  A6: [{ name: "origin/feature/log-graph", kind: "remote" }],
+  M26: [{ name: "v1.1", kind: "tag" }],
+  M18: [{ name: "v1.0", kind: "tag" }],
+};
+const showcaseLogNow = Date.parse(now);
+const showcaseLogCommits = showcaseLogSeeds().map((seed) => {
+  const [authorName, authorEmail] = showcaseAuthors[seed.author];
+  const oid = showcaseOid(seed.id);
+  return {
+    oid,
+    short_oid: oid.slice(0, 8),
+    time_ms: showcaseLogNow - (320 - seed.hours) * 3_600_000,
+    author_name: authorName,
+    author_email: authorEmail,
+    message_first_line: seed.subject,
+    message: `${seed.subject}\n\nKeeps the JetBrains-style Git tool window in sync with the engine.\nCo-authored-by: Refact Agent <agent@refact.ai>`,
+    parents: seed.parents.map(showcaseOid),
+    refs: showcaseLogRefs[seed.id] ?? [],
+  };
+});
+const showcaseBranches = {
+  root: "/workspace/refact",
+  current: "main",
+  head_detached: false,
+  head_oid: showcaseOid("M30"),
+  branches: [
+    {
+      name: "main",
+      is_head: true,
+      upstream: "origin/main",
+      tip_oid: showcaseOid("M30"),
+      ahead: 0,
+      behind: 0,
+      upstream_gone: false,
+    },
+    {
+      name: "feature/branch-actions",
+      is_head: false,
+      upstream: "origin/feature/branch-actions",
+      tip_oid: showcaseOid("C3"),
+      ahead: 2,
+      behind: 1,
+      upstream_gone: false,
+    },
+    {
+      name: "feature/log-graph",
+      is_head: false,
+      upstream: "origin/feature/log-graph",
+      tip_oid: showcaseOid("A6"),
+      ahead: 0,
+      behind: 0,
+      upstream_gone: true,
+    },
+  ],
+  remotes: ["origin", "upstream"],
+  remote_branches: [
+    ["origin", "main", "M30"],
+    ["origin", "feature/branch-actions", "C3"],
+    ["origin", "feature/log-graph", "A6"],
+    ["upstream", "main", "M26"],
+  ].map(([remote, shortName, id]) => ({
+    name: `${remote}/${shortName}`,
+    remote,
+    short_name: shortName,
+    tip_oid: showcaseOid(id),
+  })),
+  tags: [
+    ["v1.2", "M30"],
+    ["v1.1", "M26"],
+    ["v1.0", "M18"],
+  ].map(([name, id]) => ({ name, target_oid: showcaseOid(id) })),
+};
+function showcaseCommitDetails(oid: string) {
+  const commit =
+    showcaseLogCommits.find((item) => item.oid === oid) ??
+    showcaseLogCommits[0];
+  const gitPanel = "refact-agent/gui/src/features/Workspace/GitPanel";
+  return {
+    root: "/workspace/refact",
+    oid: commit.oid,
+    short_oid: commit.short_oid,
+    parents: commit.parents,
+    author_name: commit.author_name,
+    author_email: commit.author_email,
+    author_time_ms: commit.time_ms,
+    committer_name: "GitHub",
+    committer_email: "noreply@github.com",
+    committer_time_ms: commit.time_ms + 600_000,
+    message: commit.message,
+    refs: commit.refs,
+    branches: ["main", "origin/main", "upstream/main"],
+    files: [
+      [`${gitPanel}/log/GitLog.tsx`, null, "ADDED", 148, 0],
+      [`${gitPanel}/log/commitGraphLayout.ts`, null, "ADDED", 162, 0],
+      [`${gitPanel}/GitPanel.tsx`, null, "MODIFIED", 64, 31],
+      [`${gitPanel}/GitPanel.module.css`, null, "MODIFIED", 58, 74],
+      [`${gitPanel}/BranchesLog.tsx`, null, "DELETED", 0, 108],
+      [
+        "refact-agent/gui/src/services/refact/gitRead.ts",
+        null,
+        "MODIFIED",
+        131,
+        12,
+      ],
+      ["docs/git-tool-window.md", "docs/git-panel.md", "RENAMED", 12, 4],
+    ].map(([path, oldPath, status, additions, deletions]) => ({
+      path,
+      old_path: oldPath,
+      status,
+      additions,
+      deletions,
+      binary: false,
+    })),
+    files_truncated: false,
+  };
+}
 const chatId = "showcase-chat";
 const splitChatId = "showcase-chat-b";
 const chatSurface = (id: string) => makeSurfaceKey("chat", id);
@@ -278,7 +537,9 @@ const route =
   new URLSearchParams(window.location.search).get("route") ?? "dashboard";
 const terminalDisabledRoute = route === "workspace-chrome-disabled";
 const workspaceGitDiffRoute = route === "workspace-git-diff";
-const workspaceGitRoute = route === "workspace-git" || workspaceGitDiffRoute;
+const workspaceGitLogRoute = route === "workspace-git-log";
+const workspaceGitRoute =
+  route === "workspace-git" || workspaceGitDiffRoute || workspaceGitLogRoute;
 const workspaceChromeRoute =
   route === "workspace-chrome" || terminalDisabledRoute || workspaceGitRoute;
 const chatRoute =
@@ -1837,6 +2098,36 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
   if (path === "/v1/git/status") {
     return Promise.resolve(jsonResponse({ roots: [showcaseGitStatus] }));
   }
+  if (path === "/v1/git/log" && workspaceGitLogRoute) {
+    const skip = Number(url.searchParams.get("skip") ?? "0");
+    const text = (url.searchParams.get("text") ?? "").toLowerCase();
+    const commits = showcaseLogCommits.filter(
+      (commit) =>
+        !text ||
+        commit.message.toLowerCase().includes(text) ||
+        commit.oid.startsWith(text),
+    );
+    return Promise.resolve(
+      jsonResponse({
+        roots: [
+          {
+            root: "/workspace/refact",
+            commits: skip === 0 ? commits : [],
+            head_oid: showcaseOid("M30"),
+            scan_truncated: false,
+          },
+        ],
+      }),
+    );
+  }
+  if (path === "/v1/git/branches") {
+    return Promise.resolve(jsonResponse({ roots: [showcaseBranches] }));
+  }
+  if (path === "/v1/git/commit" && method === "GET") {
+    return Promise.resolve(
+      jsonResponse(showcaseCommitDetails(url.searchParams.get("oid") ?? "")),
+    );
+  }
   if (path === "/v1/git/log") {
     return Promise.resolve(
       jsonResponse({
@@ -2145,7 +2436,7 @@ const preloadedState: Partial<RootState> = {
                   ? {
                       dock: workspaceGitRoute
                         ? {
-                            open: true,
+                            open: !workspaceGitLogRoute,
                             width: 420,
                             section: "git" as const,
                           }
@@ -2186,6 +2477,11 @@ const preloadedState: Partial<RootState> = {
 };
 
 const store = setUpStore(preloadedState);
+if (workspaceGitLogRoute) {
+  const gitSurface = makeSurfaceKey("git", "main");
+  store.dispatch(openTab(gitSurface));
+  store.dispatch(setActiveTab(gitSurface));
+}
 if (workspaceGitDiffRoute) {
   const diffMode = new URLSearchParams(window.location.search).get("diff_mode");
   if (diffMode === "unified") {

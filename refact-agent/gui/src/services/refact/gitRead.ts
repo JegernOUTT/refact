@@ -124,6 +124,13 @@ export type GitDiffRoot = {
   truncated: boolean;
 };
 
+export type GitRefKind = "head" | "local" | "remote" | "tag";
+
+export type GitRef = {
+  name: string;
+  kind: GitRefKind;
+};
+
 export type GitCommitLogEntry = {
   oid: string;
   short_oid: string;
@@ -132,23 +139,80 @@ export type GitCommitLogEntry = {
   author_email: string;
   message_first_line: string;
   message: string;
+  parents?: string[];
+  refs?: GitRef[];
 };
 
 export type GitLogRoot = {
   root: string;
   commits: GitCommitLogEntry[];
+  head_oid?: string | null;
+  scan_truncated?: boolean;
 };
 
 export type GitBranch = {
   name: string;
   is_head: boolean;
   upstream: string | null;
+  tip_oid?: string | null;
+  ahead?: number | null;
+  behind?: number | null;
+  upstream_gone?: boolean;
+};
+
+export type GitRemoteBranch = {
+  name: string;
+  remote: string;
+  short_name: string;
+  tip_oid: string | null;
+};
+
+export type GitTag = {
+  name: string;
+  target_oid: string | null;
 };
 
 export type GitBranchesRoot = {
   root: string;
   current: string | null;
   branches: GitBranch[];
+  head_detached?: boolean;
+  head_oid?: string | null;
+  remotes?: string[];
+  remote_branches?: GitRemoteBranch[];
+  tags?: GitTag[];
+};
+
+export type GitCommitFile = {
+  path: string;
+  old_path: string | null;
+  status: GitFileStatus;
+  additions: number;
+  deletions: number;
+  binary: boolean;
+};
+
+export type GitCommitDetails = {
+  root: string;
+  oid: string;
+  short_oid: string;
+  parents: string[];
+  author_name: string;
+  author_email: string;
+  author_time_ms: number;
+  committer_name: string;
+  committer_email: string;
+  committer_time_ms: number;
+  message: string;
+  refs: GitRef[];
+  branches: string[];
+  files: GitCommitFile[];
+  files_truncated: boolean;
+};
+
+export type GitCommitDetailsRequest = {
+  root: string;
+  oid: string;
 };
 
 export type GitRootsResponse<T> = {
@@ -163,10 +227,17 @@ export type GitDiffRequest = {
   against?: "head";
 };
 
+export type GitLogScope = "head" | "all";
+
 export type GitLogRequest = {
   root: string;
   limit: number;
   skip: number;
+  scope?: GitLogScope;
+  ref?: string;
+  text?: string;
+  author?: string;
+  path?: string;
 };
 
 export type GitPathsRequest = {
@@ -300,6 +371,34 @@ export function gitDiffQuery({
   return query;
 }
 
+export function gitLogQuery({
+  root,
+  limit,
+  skip,
+  scope,
+  ref,
+  text,
+  author,
+  path,
+}: GitLogRequest): URLSearchParams {
+  const query = new URLSearchParams({
+    root,
+    limit: String(limit),
+    skip: String(skip),
+  });
+  const optional: [string, string | undefined][] = [
+    ["scope", scope],
+    ["ref", ref],
+    ["text", text],
+    ["author", author],
+    ["path", path],
+  ];
+  for (const [key, value] of optional) {
+    if (value) query.set(key, value);
+  }
+  return query;
+}
+
 export const gitReadApi = createApi({
   reducerPath: "gitReadApi",
   baseQuery: fetchBaseQuery({
@@ -309,7 +408,14 @@ export const gitReadApi = createApi({
       return headers;
     },
   }),
-  tagTypes: ["GitStatus", "GitDiff", "GitLog", "GitBranches", "GitFile"],
+  tagTypes: [
+    "GitStatus",
+    "GitDiff",
+    "GitLog",
+    "GitBranches",
+    "GitCommit",
+    "GitFile",
+  ],
   endpoints: (builder) => ({
     getGitStatus: builder.query<GitRootsResponse<GitStatusRoot>, string[]>({
       queryFn: async (roots, api, _options, baseQuery) => {
@@ -361,18 +467,10 @@ export const gitReadApi = createApi({
       providesTags: (_result, _error, { root }) => [fileTag(root)],
     }),
     getGitLog: builder.query<GitRootsResponse<GitLogRoot>, GitLogRequest>({
-      queryFn: async ({ root, limit, skip }, api, _options, baseQuery) => {
+      queryFn: async (request, api, _options, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: gitUrl(
-            state,
-            "/git/log",
-            new URLSearchParams({
-              root,
-              limit: String(limit),
-              skip: String(skip),
-            }),
-          ),
+          url: gitUrl(state, "/git/log", gitLogQuery(request)),
         });
         if (result.error) return { error: result.error };
         return { data: result.data as GitRootsResponse<GitLogRoot> };
@@ -392,6 +490,22 @@ export const gitReadApi = createApi({
       },
       providesTags: (_result, _error, root) => [
         { type: "GitBranches", id: root },
+      ],
+    }),
+    getGitCommitDetails: builder.query<
+      GitCommitDetails,
+      GitCommitDetailsRequest
+    >({
+      queryFn: async ({ root, oid }, api, _options, baseQuery) => {
+        const state = api.getState() as RootState;
+        const result = await baseQuery({
+          url: gitUrl(state, "/git/commit", new URLSearchParams({ root, oid })),
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as GitCommitDetails };
+      },
+      providesTags: (_result, _error, { root }) => [
+        { type: "GitCommit", id: root },
       ],
     }),
     stageGitPaths: builder.mutation<GitStageResponse, GitPathsRequest>({
@@ -435,6 +549,7 @@ export const gitReadApi = createApi({
         ...worktreeTags(root),
         { type: "GitLog" as const, id: root },
         { type: "GitBranches" as const, id: root },
+        { type: "GitCommit" as const, id: root },
       ],
     }),
     rollbackGitPaths: builder.mutation<GitRollbackResponse, GitRollbackRequest>(
@@ -479,6 +594,7 @@ export const {
   useGetGitLogQuery,
   useLazyGetGitLogQuery,
   useGetGitBranchesQuery,
+  useGetGitCommitDetailsQuery,
   useStageGitPathsMutation,
   useUnstageGitPathsMutation,
   useCommitGitPathsMutation,

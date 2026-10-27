@@ -92,7 +92,7 @@ function splitPath(path: string): { name: string; directory: string } {
     : { name: path.slice(index + 1), directory: path.slice(0, index) };
 }
 
-function makeEntry(
+export function makeEntry(
   kind: ChangesEntryKind,
   path: string,
   absolutePath: string,
@@ -198,7 +198,7 @@ function buildDirNode(
   };
 }
 
-function groupChildren(
+export function groupChildren(
   group: ChangesGroupKind,
   entries: ChangesTreeEntry[],
   groupByDirectory: boolean,
@@ -252,7 +252,7 @@ export function buildChangesTree(
 }
 
 export function flattenChangesTree(
-  groups: ChangesGroupNode[],
+  groups: ChangesTreeNode[],
   collapsed: ReadonlySet<string>,
 ): VisibleChangesRow[] {
   const rows: VisibleChangesRow[] = [];
@@ -265,7 +265,7 @@ export function flattenChangesTree(
     if (node.type === "file" || collapsed.has(node.id)) return;
     for (const child of node.children) visit(child, depth + 1, node.id);
   };
-  for (const group of groups) visit(group, 0, null);
+  for (const node of groups) visit(node, 0, null);
   return rows;
 }
 

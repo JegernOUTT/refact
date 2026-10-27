@@ -106,9 +106,7 @@ describe("SurfacePane", () => {
 
     expect(await screen.findByTestId("git-main-panel")).toBeInTheDocument();
     expect(
-      screen.getByText(
-        "Select a changed file from the Git dock to inspect its diff.",
-      ),
+      screen.getByText("Open a folder inside a Git repository to see its log."),
     ).toBeInTheDocument();
   });
 

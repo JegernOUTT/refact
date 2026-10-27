@@ -1,0 +1,517 @@
+.logLayout {
+  display: grid;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  grid-template-columns:
+    var(--git-log-branches-w) auto minmax(0, 1fr) auto
+    var(--git-log-details-w);
+  overflow: hidden;
+}
+
+.pane {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.splitter {
+  position: relative;
+  width: var(--rf-hairline);
+  background: var(--rf-border);
+  cursor: col-resize;
+  outline: none;
+  touch-action: none;
+}
+
+.splitter::before {
+  position: absolute;
+  inset: 0 calc(-1 * var(--rf-space-1));
+  content: "";
+}
+
+.splitter:hover,
+.splitter[data-dragging="true"],
+.splitter:focus-visible {
+  background: var(--rf-color-accent);
+}
+
+/* Branches */
+
+.branchesPane,
+.commitsPane {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.searchInput,
+.filterInput {
+  min-width: 0;
+  height: var(--rf-control-h-sm);
+  padding: 0 var(--rf-space-2);
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
+}
+
+.searchInput {
+  margin: var(--rf-space-2);
+}
+
+.searchInput::placeholder,
+.filterInput::placeholder {
+  color: var(--rf-color-faint);
+}
+
+.searchInput:focus-visible,
+.filterInput:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: calc(-1 * var(--rf-hairline));
+}
+
+.tree {
+  composes: scrollbarThin from "../../../../components/shared/scrollbar.module.css";
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  outline: none;
+}
+
+.treeRow {
+  display: flex;
+  width: 100%;
+  min-width: max-content;
+  height: var(--rf-control-h-sm);
+  align-items: center;
+  gap: var(--rf-space-1);
+  padding: 0 var(--rf-space-2);
+  color: var(--rf-color-fg);
+  cursor: default;
+  user-select: none;
+}
+
+.treeRow:hover {
+  background: var(--rf-surface-2);
+}
+
+.treeRow[data-selected="true"] {
+  background: var(--rf-selected-bg);
+}
+
+.tree:focus-visible .treeRow[data-active="true"] {
+  box-shadow: inset var(--rf-focus-ring-w) 0 0 var(--rf-color-accent);
+}
+
+.indentation {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-self: stretch;
+}
+
+.indent {
+  width: var(--rf-space-3);
+  border-inline-start: var(--rf-hairline) solid var(--rf-border);
+}
+
+.chevronSlot {
+  display: inline-flex;
+  width: var(--rf-icon-md);
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+}
+
+.chevronButton {
+  display: inline-flex;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.treeName {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.treeName[data-current="true"] {
+  color: var(--rf-git-ref-head);
+  font-weight: var(--rf-weight-semibold);
+}
+
+.treeHint {
+  flex: 0 0 auto;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  white-space: nowrap;
+}
+
+/* Commits */
+
+.filterBar {
+  display: flex;
+  flex: 0 0 auto;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-2);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+}
+
+.filterBar > .filterInput:first-child {
+  flex: 2 1 0;
+}
+
+.filterBar > .filterInput {
+  flex: 1 1 0;
+}
+
+.branchFilter,
+.authorFilter {
+  min-width: 0;
+  flex: 1 1 0;
+}
+
+.branchFilter > *,
+.authorFilter > * {
+  width: 100%;
+}
+
+.commitList {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  outline: none;
+}
+
+.commitList > * {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.commitList :global(.rf-enter) {
+  animation: none;
+}
+
+.commitRow {
+  display: grid;
+  height: var(--rf-git-log-row-h);
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 9rem) 7rem 0;
+  margin-block: calc(-1 * var(--rf-space-2));
+  padding: 0 var(--rf-space-2);
+  color: var(--rf-color-fg);
+  cursor: default;
+  font-size: var(--rf-text-1);
+  user-select: none;
+}
+
+.commitRow:hover {
+  background: var(--rf-surface-2);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 9rem) 7rem 4rem;
+}
+
+.commitRow[data-selected="true"] {
+  background: var(--rf-selected-bg);
+}
+
+.commitList:focus-visible .commitRow[data-selected="true"] {
+  box-shadow: inset var(--rf-focus-ring-w) 0 0 var(--rf-color-accent);
+}
+
+.subjectCell {
+  display: flex;
+  height: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-1);
+}
+
+.subjectText,
+.authorCell,
+.dateCell,
+.hashCell {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.authorCell,
+.dateCell {
+  color: var(--rf-color-muted);
+}
+
+.hashCell {
+  color: var(--rf-color-faint);
+  font-family: var(--rf-font-mono);
+}
+
+.graph {
+  flex: 0 0 auto;
+  width: calc(var(--git-graph-lanes) * var(--rf-git-graph-lane));
+  height: 100%;
+  overflow: visible;
+}
+
+.graphEdge {
+  fill: none;
+  stroke: var(--git-graph-color);
+  stroke-width: 1.5;
+}
+
+.graphDot {
+  fill: var(--git-graph-color);
+}
+
+.graphEdge,
+.graphDot {
+  --git-graph-color: var(--rf-chart-1);
+}
+
+[data-color="1"].graphEdge,
+[data-color="1"].graphDot {
+  --git-graph-color: var(--rf-chart-2);
+}
+
+[data-color="2"].graphEdge,
+[data-color="2"].graphDot {
+  --git-graph-color: var(--rf-chart-3);
+}
+
+[data-color="3"].graphEdge,
+[data-color="3"].graphDot {
+  --git-graph-color: var(--rf-chart-4);
+}
+
+[data-color="4"].graphEdge,
+[data-color="4"].graphDot {
+  --git-graph-color: var(--rf-chart-5);
+}
+
+[data-color="5"].graphEdge,
+[data-color="5"].graphDot {
+  --git-graph-color: var(--rf-chart-6);
+}
+
+[data-color="6"].graphEdge,
+[data-color="6"].graphDot {
+  --git-graph-color: var(--rf-chart-7);
+}
+
+[data-color="7"].graphEdge,
+[data-color="7"].graphDot {
+  --git-graph-color: var(--rf-chart-8);
+}
+
+.refPills {
+  display: inline-flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  gap: var(--rf-space-2xs);
+  overflow: hidden;
+}
+
+.refPill {
+  --git-ref-color: var(--rf-color-muted);
+
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 12rem;
+  padding: 0 var(--rf-space-xs);
+  overflow: hidden;
+  color: var(--git-ref-color);
+  background: color-mix(in oklab, var(--git-ref-color) 14%, transparent);
+  border: var(--rf-hairline) solid
+    color-mix(in oklab, var(--git-ref-color) 36%, transparent);
+  border-radius: var(--rf-radius-chip);
+  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.refPill[data-kind="head"] {
+  --git-ref-color: var(--rf-git-ref-head);
+}
+
+.refPill[data-kind="local"] {
+  --git-ref-color: var(--rf-git-ref-local);
+}
+
+.refPill[data-kind="remote"] {
+  --git-ref-color: var(--rf-git-ref-remote);
+}
+
+.refPill[data-kind="tag"] {
+  --git-ref-color: var(--rf-git-ref-tag);
+}
+
+.loadingRow,
+.paneState {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  padding: var(--rf-space-2);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}
+
+.paneState {
+  flex: 1 1 auto;
+}
+
+/* Details */
+
+.details {
+  composes: scrollbarThin from "../../../../components/shared/scrollbar.module.css";
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: auto;
+}
+
+.detailsSection {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-3);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+}
+
+.detailsSection[data-grow="true"] {
+  flex: 1 0 auto;
+  border-bottom: 0;
+  padding-inline: 0;
+}
+
+.detailsSubject {
+  margin: 0;
+  font: var(--rf-weight-semibold) var(--rf-text-3) / var(--rf-line)
+    var(--rf-font-ui);
+  overflow-wrap: anywhere;
+}
+
+.detailsBody {
+  margin: 0;
+  color: var(--rf-color-fg);
+  font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-mono);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.metaRow {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-1);
+}
+
+.hash,
+.parentLink {
+  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-mono);
+}
+
+.hash {
+  color: var(--rf-color-accent);
+}
+
+.parentLink {
+  padding: 0;
+  color: var(--rf-color-accent);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: var(--rf-space-2xs);
+}
+
+.parentLink:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  border-radius: var(--rf-radius-chip);
+}
+
+.filesHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+  padding: 0 var(--rf-space-3);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}
+
+.detailsSection[data-grow="true"] > .mutedText {
+  padding: 0 var(--rf-space-3);
+}
+
+.filesTree {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.fileStat {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: var(--rf-space-1);
+  color: var(--rf-color-muted);
+  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-mono);
+}
+
+.fileStat [data-tone="added"] {
+  color: var(--rf-git-added);
+}
+
+.fileStat [data-tone="deleted"] {
+  color: var(--rf-color-danger);
+}
+
+.mutedText {
+  margin: 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}
+
+.errorText {
+  margin: var(--rf-space-2);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  color: var(--rf-color-danger);
+  background: color-mix(in oklab, var(--rf-color-danger) 10%, transparent);
+  border-radius: var(--rf-radius-ctl);
+}
+
+@media (max-width: 960px) {
+  .logLayout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .logLayout > .pane:first-child,
+  .splitter {
+    display: none;
+  }
+}
