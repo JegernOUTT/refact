@@ -19,6 +19,10 @@ import {
   launchPreviewReceipt,
 } from "../../src/components/Tools/AgenticTool/launchFixtures";
 import { makeSurfaceKey } from "../../src/features/Workspace/surfaceKey";
+import {
+  openGitDiff,
+  setGitDiffViewerPrefs,
+} from "../../src/features/Workspace/GitPanel/gitPanelSlice";
 import { TrajectoryButton } from "../../src/components/Trajectory";
 import { ModeSelect } from "../../src/components/ChatForm/ModeSelect";
 import {
@@ -148,13 +152,133 @@ const showcaseGitStatus = {
     },
   ],
 };
+const showcaseDiffHead = `import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
+
+import { makeSurfaceKey } from "../surfaceKey";
+import { openTab, setDockOpen } from "../workspaceSlice";
+
+export type GitDiffTarget = {
+  root: string;
+  path: string;
+  kind: "change" | "untracked";
+};
+
+type GitPanelState = {
+  selected: GitDiffTarget | null;
+  history: string[];
+};
+
+const initialState: GitPanelState = {
+  selected: null,
+  history: [],
+};
+
+export const gitPanelSlice = createSlice({
+  name: "gitPanel",
+  initialState,
+  reducers: {
+    selectTarget: (state, action: PayloadAction<GitDiffTarget>) => {
+      state.selected = action.payload;
+      state.history.push(action.payload.path);
+    },
+    clearTarget: (state) => {
+      state.selected = null;
+    },
+    trimHistory: (state) => {
+      state.history = state.history.slice(-20);
+    },
+  },
+});
+
+export const { selectTarget, clearTarget, trimHistory } =
+  gitPanelSlice.actions;
+
+function isMobile(): boolean {
+  return window.matchMedia("(max-width: 767px)").matches;
+}
+
+export const openGitDiff = (target: GitDiffTarget) => (dispatch) => {
+  dispatch(selectTarget(target));
+  dispatch(openTab(makeSurfaceKey("git", "main")));
+  if (isMobile()) dispatch(setDockOpen(false));
+};
+
+export default gitPanelSlice.reducer;
+`;
+const showcaseDiffWorktree = `import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
+
+import { makeGitDiffSurfaceKey } from "../surfaceKey";
+import { bindSurfaceToChat, openTab, setDockOpen } from "../workspaceSlice";
+import type { GitDiffDescriptor } from "./diff/gitDiffDescriptor";
+
+export type GitDiffTarget = {
+  root: string;
+  path: string;
+  old_path: string | null;
+  kind: "change" | "untracked" | "conflict";
+};
+
+type GitPanelState = {
+  selected: GitDiffTarget | null;
+  history: string[];
+};
+
+const initialState: GitPanelState = {
+  selected: null,
+  history: [],
+};
+
+export const gitPanelSlice = createSlice({
+  name: "gitPanel",
+  initialState,
+  reducers: {
+    selectTarget: (state, action: PayloadAction<GitDiffTarget>) => {
+      state.selected = action.payload;
+      state.history.push(action.payload.path);
+    },
+    trimHistory: (state) => {
+      state.history = state.history.slice(-50);
+    },
+  },
+});
+
+export const { selectTarget, trimHistory } = gitPanelSlice.actions;
+
+function isMobile(): boolean {
+  return window.matchMedia("(max-width: 767px)").matches;
+}
+
+export function workingDiffDescriptor(
+  target: GitDiffTarget,
+): GitDiffDescriptor {
+  return {
+    root: target.root,
+    path: target.path,
+    old_path: target.old_path,
+    left: { rev: "HEAD", path: target.old_path ?? target.path },
+    right: { rev: "WORKTREE", path: target.path },
+    kind: "working",
+  };
+}
+
+export const openGitDiff = (target: GitDiffTarget) => (dispatch) => {
+  const surfaceKey = makeGitDiffSurfaceKey(workingDiffDescriptor(target));
+  dispatch(selectTarget(target));
+  dispatch(openTab(surfaceKey));
+  dispatch(bindSurfaceToChat({ surfaceKey, chatId: "showcase" }));
+  if (isMobile()) dispatch(setDockOpen(false));
+};
+
+export default gitPanelSlice.reducer;
+`;
 const chatId = "showcase-chat";
 const splitChatId = "showcase-chat-b";
 const chatSurface = (id: string) => makeSurfaceKey("chat", id);
 const route =
   new URLSearchParams(window.location.search).get("route") ?? "dashboard";
 const terminalDisabledRoute = route === "workspace-chrome-disabled";
-const workspaceGitRoute = route === "workspace-git";
+const workspaceGitDiffRoute = route === "workspace-git-diff";
+const workspaceGitRoute = route === "workspace-git" || workspaceGitDiffRoute;
 const workspaceChromeRoute =
   route === "workspace-chrome" || terminalDisabledRoute || workspaceGitRoute;
 const chatRoute =
@@ -1692,6 +1816,24 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       }),
     );
   }
+  if (path === "/v1/git/file") {
+    const rev = url.searchParams.get("rev") ?? "HEAD";
+    const filePath = url.searchParams.get("path") ?? "";
+    const content =
+      rev === "WORKTREE" ? showcaseDiffWorktree : showcaseDiffHead;
+    return Promise.resolve(
+      jsonResponse({
+        root: "/workspace/refact",
+        path: filePath,
+        rev,
+        exists: true,
+        binary: false,
+        truncated: false,
+        size: content.length,
+        content,
+      }),
+    );
+  }
   if (path === "/v1/git/status") {
     return Promise.resolve(jsonResponse({ roots: [showcaseGitStatus] }));
   }
@@ -2044,6 +2186,21 @@ const preloadedState: Partial<RootState> = {
 };
 
 const store = setUpStore(preloadedState);
+if (workspaceGitDiffRoute) {
+  const diffMode = new URLSearchParams(window.location.search).get("diff_mode");
+  if (diffMode === "unified") {
+    store.dispatch(setGitDiffViewerPrefs({ mode: "unified" }));
+  }
+  store.dispatch(
+    openGitDiff({
+      root: "/workspace/refact",
+      path: "refact-agent/gui/src/features/Workspace/GitPanel/gitPanelSlice.ts",
+      old_path: null,
+      kind: "change",
+      status: "MODIFIED",
+    }),
+  );
+}
 if (recentErrorsFixtureParam) {
   Object.defineProperty(window, "__routeShowcaseBuddyStore", {
     get: () => store,

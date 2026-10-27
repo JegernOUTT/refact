@@ -5,7 +5,6 @@ import { Icon } from "../../../components/ui";
 import { useAppSelector } from "../../../hooks";
 import { useGetGitStatusQuery } from "../../../services/refact/gitRead";
 import { BranchesLog } from "./BranchesLog";
-import { DiffView } from "./DiffView";
 import {
   selectActiveGitRoot,
   selectGitDiffTargetForChat,
@@ -52,7 +51,6 @@ export function GitPanel() {
     : selected
       ? selected.root
       : "";
-  const selectedForRoot = selected?.root === resolvedRoot ? selected : null;
   const worktreesRoot = workspaceRootForGitRoot(
     configuredRoots,
     resolvedRoot,
@@ -66,7 +64,7 @@ export function GitPanel() {
           <Icon icon={GitBranch} size="md" />
           <div>
             <h1>Git</h1>
-            <p>Review changes, repository history, and worktrees.</p>
+            <p>Repository history and worktrees.</p>
           </div>
         </div>
       </header>
@@ -74,7 +72,6 @@ export function GitPanel() {
       <main className={styles.mainColumn}>
         {resolvedRoot ? (
           <>
-            <DiffView root={resolvedRoot} selected={selectedForRoot} />
             <BranchesLog key={`history-${resolvedRoot}`} root={resolvedRoot} />
             <WorktreesSection
               key={`worktrees-${worktreesRoot}`}

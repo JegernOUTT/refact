@@ -15,6 +15,7 @@ import { GitPanel } from "./GitPanel";
 import { selectGitDiffTargetForChat, setActiveGitRoot } from "./gitPanelSlice";
 import { createChatWithId } from "../../Chat/Thread/actions";
 import { openTab, setActiveTab } from "../workspaceSlice";
+import { gitDiffDescriptorFromSurfaceKey } from "../surfaceKey";
 import type { WorktreeMeta } from "../../../services/refact/worktrees";
 
 const APP_CHANGE: GitFileChange = {
@@ -611,8 +612,6 @@ describe("GitDock commit tool window", () => {
   });
 
   test("keyboard: arrows move, Space toggles include, Enter opens the HEAD diff", async () => {
-    const diffCalls: URLSearchParams[] = [];
-    installHandlers({ diffCalls });
     const { store, user } = renderPanel();
 
     const tree = await screen.findByRole("tree", { name: "Changes" });
@@ -642,23 +641,21 @@ describe("GitDock commit tool window", () => {
     );
     await user.keyboard("{ArrowRight}{ArrowRight}{Enter}");
 
-    expect(store.getState().workspace.activeTabId).toBe("git:main");
-    expect(selectGitDiffTargetForChat(store.getState(), null)).toEqual({
+    const activeTabId = store.getState().workspace.activeTabId ?? "";
+    expect(gitDiffDescriptorFromSurfaceKey(activeTabId)).toEqual({
+      root: "/repo",
+      path: "src/app.ts",
+      old_path: null,
+      left: { rev: "HEAD", path: "src/app.ts" },
+      right: { rev: "WORKTREE", path: "src/app.ts" },
+      kind: "working",
+    });
+    expect(selectGitDiffTargetForChat(store.getState(), null)).toMatchObject({
       root: "/repo",
       path: "src/app.ts",
       old_path: null,
       kind: "change",
     });
-    await waitFor(() =>
-      expect(
-        diffCalls.some(
-          (params) =>
-            params.get("against") === "head" &&
-            params.getAll("path").join() === "src/app.ts",
-        ),
-      ).toBe(true),
-    );
-    expect(await screen.findByText("+const value = 1;")).toBeInTheDocument();
   });
 
   test("degrades to legacy staged/unstaged status", async () => {

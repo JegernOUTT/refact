@@ -1,6 +1,6 @@
 import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
 
-import { makeSurfaceKey } from "../surfaceKey";
+import { makeGitDiffSurfaceKey } from "../surfaceKey";
 import {
   bindSurfaceToChat,
   openTab,
@@ -9,12 +9,33 @@ import {
   type WorkspaceState,
 } from "../workspaceSlice";
 import type { ChangesEntryKind } from "./changesTreeModel";
+import type { GitFileStatus } from "../../../services/refact/gitRead";
+import type { GitDiffDescriptor } from "./diff/gitDiffDescriptor";
 
 export type GitDiffTarget = {
   root: string;
   path: string;
   old_path: string | null;
   kind: ChangesEntryKind;
+  /** Working-tree status of the change; drives which diff side is missing. */
+  status?: GitFileStatus | null;
+};
+
+export type GitCommitDiffTarget = {
+  root: string;
+  path: string;
+  old_path: string | null;
+  status?: GitFileStatus | null;
+  commit: { oid: string; short_oid: string };
+  /** First parent oid; `null` for a root commit. */
+  parent_oid: string | null;
+};
+
+export type GitDiffViewMode = "side-by-side" | "unified";
+
+export type GitDiffViewerPrefs = {
+  mode: GitDiffViewMode;
+  collapseUnchanged: boolean;
 };
 
 export type GitRootViewState = {
@@ -33,10 +54,18 @@ export type GitPanelContextState = {
 
 export type GitPanelState = {
   contexts: Record<string, GitPanelContextState | undefined>;
+  /** Optional so older persisted/preloaded states stay valid. */
+  diffViewer?: GitDiffViewerPrefs;
+};
+
+export const DEFAULT_GIT_DIFF_VIEWER_PREFS: GitDiffViewerPrefs = {
+  mode: "side-by-side",
+  collapseUnchanged: true,
 };
 
 const initialState: GitPanelState = {
   contexts: {},
+  diffViewer: DEFAULT_GIT_DIFF_VIEWER_PREFS,
 };
 
 const EMPTY_GIT_PANEL_CONTEXT: GitPanelContextState = {
@@ -124,11 +153,25 @@ export const gitPanelSlice = createSlice({
       };
       context.roots = roots;
     },
+    setGitDiffViewerPrefs: (
+      state,
+      action: PayloadAction<Partial<GitDiffViewerPrefs>>,
+    ) => {
+      state.diffViewer = {
+        ...DEFAULT_GIT_DIFF_VIEWER_PREFS,
+        ...state.diffViewer,
+        ...action.payload,
+      };
+    },
   },
 });
 
-export const { selectGitDiffTarget, setActiveGitRoot, updateGitRootView } =
-  gitPanelSlice.actions;
+export const {
+  selectGitDiffTarget,
+  setActiveGitRoot,
+  setGitDiffViewerPrefs,
+  updateGitRootView,
+} = gitPanelSlice.actions;
 
 type GitPanelDispatch = (
   action:
@@ -142,20 +185,80 @@ type GitPanelThunkState = {
   workspace: WorkspaceState;
 };
 
+/**
+ * Working-tree diff: HEAD (old path for renames) against the working tree.
+ * Untracked/added files have no left side, deleted files no right side;
+ * conflicted files compare HEAD with the conflicted working copy.
+ */
+export function workingDiffDescriptor(
+  target: GitDiffTarget,
+): GitDiffDescriptor {
+  const leftPath = target.old_path ?? target.path;
+  const missingLeft =
+    target.kind === "untracked" ||
+    (target.kind === "change" && target.status === "ADDED");
+  const missingRight = target.kind === "change" && target.status === "DELETED";
+  return {
+    root: target.root,
+    path: target.path,
+    old_path: target.old_path,
+    left: missingLeft ? null : { rev: "HEAD", path: leftPath },
+    right: missingRight ? null : { rev: "WORKTREE", path: target.path },
+    kind: "working",
+  };
+}
+
+/** Commit diff: first parent (old path for renames) against the commit. */
+export function commitDiffDescriptor(
+  target: GitCommitDiffTarget,
+): GitDiffDescriptor {
+  const leftPath = target.old_path ?? target.path;
+  const missingLeft = target.parent_oid === null || target.status === "ADDED";
+  const missingRight = target.status === "DELETED";
+  return {
+    root: target.root,
+    path: target.path,
+    old_path: target.old_path,
+    left:
+      missingLeft || target.parent_oid === null
+        ? null
+        : { rev: target.parent_oid, path: leftPath },
+    right: missingRight ? null : { rev: target.commit.oid, path: target.path },
+    kind: "commit",
+    commit: target.commit,
+  };
+}
+
+function openDiffSurface(
+  descriptor: GitDiffDescriptor,
+  dispatch: GitPanelDispatch,
+  chatId: string | null,
+) {
+  const surfaceKey = makeGitDiffSurfaceKey(descriptor);
+  dispatch(openTab(surfaceKey));
+  if (chatId) dispatch(bindSurfaceToChat({ surfaceKey, chatId }));
+  if (
+    typeof window !== "undefined" &&
+    window.matchMedia("(max-width: 767px)").matches
+  ) {
+    dispatch(setDockOpen(false));
+  }
+  return surfaceKey;
+}
+
 export const openGitDiff =
   (target: GitDiffTarget) =>
   (dispatch: GitPanelDispatch, getState: () => GitPanelThunkState) => {
     const chatId = selectFocusedWorkspaceChatId(getState());
-    const surfaceKey = makeSurfaceKey("git", "main");
     dispatch(selectGitDiffTarget({ chatId, selection: target }));
-    dispatch(openTab(surfaceKey));
-    if (chatId) dispatch(bindSurfaceToChat({ surfaceKey, chatId }));
-    if (
-      typeof window !== "undefined" &&
-      window.matchMedia("(max-width: 767px)").matches
-    ) {
-      dispatch(setDockOpen(false));
-    }
+    return openDiffSurface(workingDiffDescriptor(target), dispatch, chatId);
+  };
+
+export const openGitCommitDiff =
+  (target: GitCommitDiffTarget) =>
+  (dispatch: GitPanelDispatch, getState: () => GitPanelThunkState) => {
+    const chatId = selectFocusedWorkspaceChatId(getState());
+    return openDiffSurface(commitDiffDescriptor(target), dispatch, chatId);
   };
 
 type GitPanelRootState = {
@@ -185,5 +288,10 @@ export const selectGitRootView = (
   root: string,
 ): GitRootViewState =>
   selectGitPanelContext(state, chatId).roots?.[root] ?? DEFAULT_GIT_ROOT_VIEW;
+
+export const selectGitDiffViewerPrefs = (
+  state: GitPanelRootState,
+): GitDiffViewerPrefs =>
+  state.gitPanel.diffViewer ?? DEFAULT_GIT_DIFF_VIEWER_PREFS;
 
 export default gitPanelSlice.reducer;

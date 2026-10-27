@@ -122,24 +122,6 @@
   white-space: nowrap;
 }
 
-.diffScroller {
-  min-width: 0;
-  border-radius: var(--rf-radius-ctl);
-  background: var(--rf-surface-2);
-}
-
-.diffScroller > div {
-  min-width: max-content;
-}
-
-.loadingBlock {
-  display: flex;
-  min-height: calc(var(--rf-control-h-lg) * 2);
-  align-items: center;
-  justify-content: center;
-  gap: var(--rf-space-2);
-}
-
 .branchList li,
 .commitList li {
   align-items: center;

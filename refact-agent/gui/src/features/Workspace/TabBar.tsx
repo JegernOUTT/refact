@@ -1,5 +1,12 @@
 import classNames from "classnames";
-import { FileText, Layers, Menu as MenuIcon, Palette, X } from "lucide-react";
+import {
+  FileDiff,
+  FileText,
+  Layers,
+  Menu as MenuIcon,
+  Palette,
+  X,
+} from "lucide-react";
 import {
   ComponentProps,
   DragEvent,
@@ -65,12 +72,17 @@ import {
   type PaneGroup,
 } from "./workspaceSlice";
 import {
+  gitDiffDescriptorFromSurfaceKey,
   isMainSurfaceKind,
   makeSurfaceKey,
   parseSurfaceKey,
   type MainSurfaceKind,
   type SurfaceKey,
 } from "./surfaceKey";
+import {
+  gitDiffTitle,
+  gitDiffTooltip,
+} from "./GitPanel/diff/gitDiffDescriptor";
 import { resolveWorkspaceDockAvailability } from "./workspaceAvailability";
 import { getStatusFromSessionState } from "../../utils/sessionStatus";
 import styles from "./TabBar.module.css";
@@ -85,6 +97,7 @@ type TabSurfaceKind =
   | "dashboard"
   | "design"
   | "file"
+  | "gitdiff"
   | MainSurfaceKind;
 
 const MAIN_SURFACE_INFO = { git: { title: "Git" } } as const;
@@ -96,6 +109,7 @@ const pathBasename = (path: string): string => {
 
 type DisplayInfo = {
   title: string;
+  tooltip?: string;
   kind: TabSurfaceKind;
   session_state?: string;
   is_buddy_chat?: boolean;
@@ -130,6 +144,7 @@ function fallbackSurfaceTitle(surfaceKey: SurfaceKey): string {
     const parsed = parseSurfaceKey(surfaceKey);
     if (parsed.kind === "dashboard") return "Dashboard";
     if (parsed.kind === "buddy") return "Buddy";
+    if (parsed.kind === "gitdiff") return "Diff";
     const prefix = parsed.kind[0].toUpperCase();
     return `${prefix}${parsed.kind.slice(1)} ${parsed.id}`;
   } catch {
@@ -173,6 +188,7 @@ function tabDragPayloadForSurface(surfaceKey: SurfaceKey): {
       parsed.kind === "dashboard" ||
       parsed.kind === "design" ||
       parsed.kind === "file" ||
+      parsed.kind === "gitdiff" ||
       isMainSurfaceKind(parsed.kind)
     ) {
       return { type: "surface", id: surfaceKey };
@@ -238,6 +254,16 @@ function displayInfoForSurface(
     return {
       title: pathBasename(parsed.id),
       kind: "file",
+      unreadNotificationCount: 0,
+    };
+  }
+
+  if (parsed.kind === "gitdiff") {
+    const descriptor = gitDiffDescriptorFromSurfaceKey(surfaceKey);
+    return {
+      title: descriptor ? gitDiffTitle(descriptor) : "Diff",
+      tooltip: descriptor ? gitDiffTooltip(descriptor) : undefined,
+      kind: "gitdiff",
       unreadNotificationCount: 0,
     };
   }
@@ -375,6 +401,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
         return {
           id: tabId,
           title: display.title,
+          tooltip: display.tooltip,
           kind: display.kind,
           status: getStatusFromSessionState(display.session_state),
           unreadNotificationCount,
@@ -417,6 +444,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
       if (
         parsed.kind === "design" ||
         parsed.kind === "file" ||
+        parsed.kind === "gitdiff" ||
         isMainSurfaceKind(parsed.kind)
       ) {
         dispatch(setActiveTab(tabId));
@@ -810,7 +838,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
                 : tab.unreadNotificationCount;
             const tabTitle = tab.isGroup
               ? `${tab.title} · ${tab.paneCount} panes`
-              : tab.title;
+              : tab.tooltip ?? tab.title;
 
             return (
               <div
@@ -853,6 +881,8 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
                   <span className={styles.tabStatus}>
                     {tab.kind === "file" ? (
                       <Icon icon={FileText} size="sm" tone="muted" />
+                    ) : tab.kind === "gitdiff" ? (
+                      <Icon icon={FileDiff} size="sm" tone="muted" />
                     ) : tab.kind === "design" ? (
                       <Icon icon={Palette} size="sm" tone="muted" />
                     ) : (

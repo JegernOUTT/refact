@@ -224,6 +224,7 @@ function CommitToolWindow({
           path: entry.path,
           old_path: entry.oldPath,
           kind: entry.kind,
+          status: entry.status,
         }),
       ),
     [dispatch, root],

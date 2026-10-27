@@ -1,0 +1,305 @@
+.viewer {
+  display: flex;
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--rf-color-fg);
+  background: var(--rf-bg);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
+}
+
+.toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-1) var(--rf-space-3);
+  border-bottom: 1px solid var(--rf-border);
+  background: var(--rf-surface-1);
+  overflow-x: auto;
+}
+
+.toolbarGroup {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--rf-space-1);
+}
+
+.toolbarDivider {
+  flex: 0 0 auto;
+  width: 1px;
+  height: var(--rf-space-4);
+  background: var(--rf-border);
+}
+
+.count {
+  flex: 0 0 auto;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  white-space: nowrap;
+}
+
+.toolbarSpacer {
+  flex: 1 1 auto;
+  min-width: var(--rf-space-2);
+}
+
+.title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--rf-color-muted);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--rf-space-1);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.toggle input {
+  margin: 0;
+  accent-color: var(--rf-color-accent);
+}
+
+.banner {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-1) var(--rf-space-3);
+  border-bottom: 1px solid var(--rf-border);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}
+
+.bannerInserted {
+  background: var(--rf-diff-inserted-bg);
+}
+
+.bannerDeleted {
+  background: var(--rf-diff-deleted-bg);
+}
+
+.bannerInfo {
+  background: var(--rf-diff-modified-bg);
+}
+
+.bannerWarning {
+  background: var(--rf-color-warning-soft);
+}
+
+.paneHeaders {
+  display: flex;
+  flex: 0 0 auto;
+  min-width: 0;
+  border-bottom: 1px solid var(--rf-border);
+  background: var(--rf-surface-1);
+}
+
+.paneHeader {
+  display: flex;
+  flex: 1 1 0;
+  min-width: 0;
+  align-items: baseline;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-1) var(--rf-space-3);
+  font-size: var(--rf-text-1);
+}
+
+.paneHeader + .paneHeader {
+  border-left: 1px solid var(--rf-border);
+}
+
+.paneRev {
+  flex: 0 0 auto;
+  color: var(--rf-color-fg);
+  font-weight: var(--rf-weight-medium);
+}
+
+.panePath {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--rf-color-muted);
+  font-family: var(--rf-font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.body {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.host {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.state {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-4);
+  color: var(--rf-color-muted);
+  text-align: center;
+}
+
+.stateTitle {
+  margin: 0;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-3);
+}
+
+.stateText {
+  margin: 0;
+}
+
+.errorText {
+  margin: 0;
+  color: var(--rf-color-danger);
+}
+
+/* CodeMirror merge view: scroll container + JetBrains palette. */
+.host :global(.cm-mergeView) {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+  overflow-y: auto;
+}
+
+.host > :global(.cm-editor) {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+}
+
+.host :global(.cm-mergeViewEditor + .cm-mergeViewEditor) {
+  border-left: 1px solid var(--rf-border);
+}
+
+.host :global(.cm-editor .cm-line.rf-diff-inserted) {
+  background: var(--rf-diff-inserted-bg);
+}
+
+.host :global(.cm-editor .cm-line.rf-diff-deleted) {
+  background: var(--rf-diff-deleted-bg);
+}
+
+.host :global(.cm-editor .cm-line.rf-diff-modified) {
+  background: var(--rf-diff-modified-bg);
+}
+
+.host :global(.cm-editor .cm-line.rf-diff-inserted .cm-changedText),
+.host :global(.cm-editor .cm-line.rf-diff-deleted .cm-changedText) {
+  background: none;
+}
+
+.host :global(.cm-editor .cm-line.rf-diff-modified .cm-changedText) {
+  border-radius: var(--rf-space-2xs);
+  background: var(--rf-diff-modified-inline);
+}
+
+.host :global(.cm-editor .cm-gutterElement.rf-diff-gutter-inserted) {
+  background: var(--rf-diff-inserted-bg);
+  box-shadow: inset var(--rf-space-2xs) 0 0 var(--rf-diff-inserted-marker);
+}
+
+.host :global(.cm-editor .cm-gutterElement.rf-diff-gutter-deleted) {
+  background: var(--rf-diff-deleted-bg);
+  box-shadow: inset var(--rf-space-2xs) 0 0 var(--rf-diff-deleted-marker);
+}
+
+.host :global(.cm-editor .cm-gutterElement.rf-diff-gutter-modified) {
+  background: var(--rf-diff-modified-bg);
+  box-shadow: inset var(--rf-space-2xs) 0 0 var(--rf-diff-modified-marker);
+}
+
+/* Unified mode: deleted lines are rendered as a block widget before the
+   new lines; tint it blue when it belongs to a modified chunk. */
+.host :global(.cm-editor .cm-deletedChunk) {
+  padding-left: 0;
+  background: var(--rf-diff-deleted-bg);
+  box-shadow: inset var(--rf-space-2xs) 0 0 var(--rf-diff-deleted-marker);
+}
+
+.host :global(.cm-editor .cm-deletedChunk:has(+ .cm-line.rf-diff-modified)) {
+  background: var(--rf-diff-modified-bg);
+  box-shadow: inset var(--rf-space-2xs) 0 0 var(--rf-diff-modified-marker);
+}
+
+.host :global(.cm-editor .cm-deletedChunk .cm-deletedLine) {
+  padding: 0 var(--rf-space-2) 0 var(--rf-space-1);
+}
+
+.host :global(.cm-editor .cm-deletedChunk .cm-deletedText) {
+  background: none;
+}
+
+.host
+  :global(
+    .cm-editor .cm-deletedChunk:has(+ .cm-line.rf-diff-modified) .cm-deletedText
+  ) {
+  border-radius: var(--rf-space-2xs);
+  background: var(--rf-diff-deleted-inline);
+}
+
+.host :global(.cm-editor .cm-mergeSpacer) {
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent 0 var(--rf-space-1),
+    var(--rf-surface-2) var(--rf-space-1) var(--rf-space-2)
+  );
+}
+
+.host :global(.cm-editor .cm-collapsedLines) {
+  padding: var(--rf-space-1) var(--rf-space-3);
+  border-block: 1px solid var(--rf-border);
+  color: var(--rf-color-muted);
+  background: var(--rf-diff-collapsed-bg);
+  font-family: var(--rf-font-ui);
+  font-size: var(--rf-text-1);
+}
+
+.host :global(.cm-editor .cm-collapsedLines::before),
+.host :global(.cm-editor .cm-collapsedLines::after) {
+  content: none;
+}
+
+.host :global(.cm-editor .cm-collapsedLines:hover) {
+  color: var(--rf-color-fg);
+}
+
+.host :global(.cm-editor .cm-insertedLine),
+.host :global(.cm-editor .cm-deletedLine),
+.host :global(.cm-editor .cm-deletedLine del) {
+  text-decoration: none;
+}

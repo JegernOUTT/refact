@@ -39,6 +39,56 @@
   --rf-git-renamed: var(--rf-color-accent);
   --rf-git-untracked: var(--rf-color-warning);
   --rf-git-conflict: var(--rf-color-danger);
+
+  /* JetBrains-style diff palette (inserted green, deleted gray-red,
+     modified blue); line tints are opaque mixes over --rf-bg so merge
+     spacers and gutters stay aligned with the editor background. */
+  --rf-diff-inserted-bg: color-mix(
+    in oklab,
+    var(--rf-color-success) 20%,
+    var(--rf-bg)
+  );
+  --rf-diff-deleted-bg: color-mix(
+    in oklab,
+    color-mix(in oklab, var(--rf-color-muted) 75%, var(--rf-color-danger)) 26%,
+    var(--rf-bg)
+  );
+  --rf-diff-modified-bg: color-mix(
+    in oklab,
+    var(--rf-color-accent) 22%,
+    var(--rf-bg)
+  );
+  --rf-diff-inserted-inline: color-mix(
+    in oklab,
+    var(--rf-color-success) 42%,
+    var(--rf-bg)
+  );
+  --rf-diff-deleted-inline: color-mix(
+    in oklab,
+    color-mix(in oklab, var(--rf-color-muted) 55%, var(--rf-color-danger)) 48%,
+    var(--rf-bg)
+  );
+  --rf-diff-modified-inline: color-mix(
+    in oklab,
+    var(--rf-color-accent) 44%,
+    var(--rf-bg)
+  );
+  --rf-diff-inserted-marker: color-mix(
+    in oklab,
+    var(--rf-color-success) 80%,
+    var(--rf-bg)
+  );
+  --rf-diff-deleted-marker: color-mix(
+    in oklab,
+    var(--rf-color-muted) 85%,
+    var(--rf-bg)
+  );
+  --rf-diff-modified-marker: color-mix(
+    in oklab,
+    var(--rf-color-accent) 80%,
+    var(--rf-bg)
+  );
+  --rf-diff-collapsed-bg: var(--rf-surface-2);
   --rf-chart-1: #7f93d8;
   --rf-chart-2: #5fae8b;
   --rf-chart-3: #cda04e;
@@ -300,6 +350,56 @@
   --rf-git-renamed: var(--rf-color-accent);
   --rf-git-untracked: var(--rf-color-warning);
   --rf-git-conflict: var(--rf-color-danger);
+
+  /* JetBrains-style diff palette (inserted green, deleted gray-red,
+     modified blue); line tints are opaque mixes over --rf-bg so merge
+     spacers and gutters stay aligned with the editor background. */
+  --rf-diff-inserted-bg: color-mix(
+    in oklab,
+    var(--rf-color-success) 26%,
+    var(--rf-bg)
+  );
+  --rf-diff-deleted-bg: color-mix(
+    in oklab,
+    color-mix(in oklab, var(--rf-color-muted) 75%, var(--rf-color-danger)) 26%,
+    var(--rf-bg)
+  );
+  --rf-diff-modified-bg: color-mix(
+    in oklab,
+    var(--rf-color-accent) 20%,
+    var(--rf-bg)
+  );
+  --rf-diff-inserted-inline: color-mix(
+    in oklab,
+    var(--rf-color-success) 42%,
+    var(--rf-bg)
+  );
+  --rf-diff-deleted-inline: color-mix(
+    in oklab,
+    color-mix(in oklab, var(--rf-color-muted) 55%, var(--rf-color-danger)) 48%,
+    var(--rf-bg)
+  );
+  --rf-diff-modified-inline: color-mix(
+    in oklab,
+    var(--rf-color-accent) 44%,
+    var(--rf-bg)
+  );
+  --rf-diff-inserted-marker: color-mix(
+    in oklab,
+    var(--rf-color-success) 80%,
+    var(--rf-bg)
+  );
+  --rf-diff-deleted-marker: color-mix(
+    in oklab,
+    var(--rf-color-muted) 85%,
+    var(--rf-bg)
+  );
+  --rf-diff-modified-marker: color-mix(
+    in oklab,
+    var(--rf-color-accent) 80%,
+    var(--rf-bg)
+  );
+  --rf-diff-collapsed-bg: var(--rf-surface-2);
   --rf-color-accent-soft: rgba(0, 106, 220, 0.12);
   --rf-selected-bg: rgba(0, 106, 220, 0.1);
   --rf-selected-border: rgba(0, 106, 220, 0.7);

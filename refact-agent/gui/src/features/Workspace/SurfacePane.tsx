@@ -1,6 +1,6 @@
 import classNames from "classnames";
 import { MessageSquare } from "lucide-react";
-import { Suspense, useCallback } from "react";
+import { lazy, Suspense, useCallback } from "react";
 
 import { EmptyState, Spinner } from "../../components/ui";
 import { useAppSelector, useConfig } from "../../hooks";
@@ -10,9 +10,16 @@ import { selectCapabilities } from "../Config/configSlice";
 import { DesignSurface } from "../Design";
 import { FileViewer } from "./FilesPanel";
 import { GitPanel } from "./GitPanel";
-import { isGitSurface, parseSurfaceKey, type SurfaceKey } from "./surfaceKey";
+import {
+  gitDiffDescriptorFromSurfaceKey,
+  isGitSurface,
+  parseSurfaceKey,
+  type SurfaceKey,
+} from "./surfaceKey";
 import { selectPanelsForced } from "./workspaceSlice";
 import styles from "./SurfacePane.module.css";
+
+const GitDiffViewer = lazy(() => import("./GitPanel/diff/GitDiffViewer"));
 
 export type SurfacePaneProps = {
   surfaceKey?: SurfaceKey | null;
@@ -74,6 +81,26 @@ export function SurfacePane({ surfaceKey }: SurfacePaneProps) {
           data-surface-key={surfaceKey}
         >
           <DesignSurface surfaceId={parsed.id} />
+        </div>
+      );
+    }
+
+    if (parsed.kind === "gitdiff") {
+      if (!capabilities.gitPanel && !panelsForced) return null;
+      const descriptor = gitDiffDescriptorFromSurfaceKey(surfaceKey);
+      if (!descriptor) return null;
+      return (
+        <div
+          className={classNames(styles.surfacePane, styles.panelSurface)}
+          data-surface-key={surfaceKey}
+        >
+          <Suspense fallback={<Spinner label="Loading diff viewer" />}>
+            <GitDiffViewer
+              key={surfaceKey}
+              descriptor={descriptor}
+              surfaceKey={surfaceKey}
+            />
+          </Suspense>
         </div>
       );
     }
