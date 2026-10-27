@@ -3,7 +3,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use axum::extract::{Query, State};
+use axum::extract::{Query, RawQuery, State};
 use axum::response::Json;
 use git2::{DiffOptions, Repository};
 use hyper::StatusCode;
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::app_state::AppState;
-use crate::git::operations::{get_diff_statuses, list_branches, stage_changes, unstage_changes};
+use crate::git::operations::{list_branches, stage_changes, unstage_changes};
 use crate::git::{FileChange, FileChangeStatus};
 use crate::global_context::GlobalContext;
 
@@ -26,14 +26,38 @@ pub struct RootQuery {
     pub root: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default)]
 pub struct DiffQuery {
-    #[serde(default)]
     pub root: Option<String>,
-    #[serde(default)]
-    pub path: Option<String>,
-    #[serde(default)]
+    pub paths: Vec<String>,
     pub staged: bool,
+    pub against_head: bool,
+}
+
+fn parse_query_bool(value: &str) -> Result<bool, String> {
+    match value {
+        "true" | "1" => Ok(true),
+        "false" | "0" | "" => Ok(false),
+        _ => Err(format!("Invalid boolean query value: {}", value)),
+    }
+}
+
+fn parse_diff_query(raw: Option<&str>) -> Result<DiffQuery, String> {
+    let mut query = DiffQuery::default();
+    for (key, value) in url::form_urlencoded::parse(raw.unwrap_or_default().as_bytes()) {
+        match key.as_ref() {
+            "root" => query.root = Some(value.into_owned()),
+            "path" => query.paths.push(value.into_owned()),
+            "staged" => query.staged = parse_query_bool(&value)?,
+            "against" => match value.as_ref() {
+                "head" | "HEAD" => query.against_head = true,
+                "index" | "" => query.against_head = false,
+                other => return Err(format!("Unsupported diff base: {}", other)),
+            },
+            _ => {}
+        }
+    }
+    Ok(query)
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,6 +98,38 @@ pub struct GitStatusRoot {
     pub staged: Vec<FileChangeJson>,
     pub unstaged: Vec<FileChangeJson>,
     pub untracked_included: bool,
+    pub head_oid: Option<String>,
+    pub upstream: Option<String>,
+    pub repo_state: String,
+    pub truncated: bool,
+    pub changes: Vec<GitChangeJson>,
+    pub untracked: Vec<GitPathJson>,
+    pub conflicted: Vec<GitConflictJson>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct GitChangeJson {
+    pub relative_path: String,
+    pub absolute_path: String,
+    pub old_path: Option<String>,
+    pub status: String,
+    pub staged: bool,
+    pub unstaged: bool,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct GitPathJson {
+    pub relative_path: String,
+    pub absolute_path: String,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct GitConflictJson {
+    pub relative_path: String,
+    pub absolute_path: String,
+    pub ours: bool,
+    pub theirs: bool,
+    pub ancestor: bool,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -129,19 +185,32 @@ fn default_log_limit() -> usize {
     50
 }
 
-fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<Value>) {
-    let code = match status {
-        StatusCode::BAD_REQUEST => "bad_request",
-        StatusCode::NOT_FOUND => "not_found",
-        _ => "git_error",
-    };
+pub(super) fn api_error_code(
+    status: StatusCode,
+    code: &str,
+    message: impl Into<String>,
+) -> (StatusCode, Json<Value>) {
     (
         status,
         Json(json!({ "code": code, "error": message.into() })),
     )
 }
 
-fn internal_error(message: impl Into<String>) -> (StatusCode, Json<Value>) {
+pub(super) fn api_error(
+    status: StatusCode,
+    message: impl Into<String>,
+) -> (StatusCode, Json<Value>) {
+    let code = match status {
+        StatusCode::BAD_REQUEST => "bad_request",
+        StatusCode::NOT_FOUND => "not_found",
+        StatusCode::SERVICE_UNAVAILABLE => "git_unavailable",
+        StatusCode::GATEWAY_TIMEOUT => "timeout",
+        _ => "git_error",
+    };
+    api_error_code(status, code, message)
+}
+
+pub(super) fn internal_error(message: impl Into<String>) -> (StatusCode, Json<Value>) {
     api_error(StatusCode::INTERNAL_SERVER_ERROR, message)
 }
 
@@ -206,7 +275,7 @@ async fn effective_git_roots(
         .map_err(|error| internal_error(format!("Git root discovery task failed: {}", error)))
 }
 
-async fn selected_roots(
+pub(super) async fn selected_roots(
     gcx: Arc<GlobalContext>,
     requested: Option<String>,
 ) -> Result<Vec<PathBuf>, (StatusCode, Json<Value>)> {
@@ -247,7 +316,7 @@ pub(super) async fn resolve_requested_root(
         .ok_or_else(|| "Git root not found".to_string())
 }
 
-fn repo_relative_paths(paths: Vec<String>) -> Result<Vec<PathBuf>, String> {
+pub(super) fn repo_relative_paths(paths: Vec<String>) -> Result<Vec<PathBuf>, String> {
     let mut unique = BTreeSet::new();
     for raw_path in paths {
         let path = PathBuf::from(raw_path);
@@ -280,23 +349,259 @@ fn file_change_json(change: FileChange) -> FileChangeJson {
     }
 }
 
+const MAX_STATUS_ENTRIES: usize = 10_000;
+
+fn repo_state_name(state: git2::RepositoryState) -> &'static str {
+    use git2::RepositoryState as State;
+    match state {
+        State::Clean => "clean",
+        State::Merge => "merge",
+        State::Rebase | State::RebaseInteractive | State::RebaseMerge => "rebase",
+        State::CherryPick | State::CherryPickSequence => "cherry_pick",
+        State::Revert | State::RevertSequence => "revert",
+        State::Bisect => "bisect",
+        State::ApplyMailbox => "apply_mailbox",
+        State::ApplyMailboxOrRebase => "other",
+    }
+}
+
+fn path_bytes_string(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).replace('\\', "/")
+}
+
+fn legacy_change(workdir: &Path, relative: &str, status: FileChangeStatus) -> FileChangeJson {
+    file_change_json(FileChange {
+        relative_path: PathBuf::from(relative),
+        absolute_path: workdir.join(relative),
+        status,
+    })
+}
+
+const INDEX_FLAGS: git2::Status = git2::Status::INDEX_NEW
+    .union(git2::Status::INDEX_MODIFIED)
+    .union(git2::Status::INDEX_DELETED)
+    .union(git2::Status::INDEX_RENAMED)
+    .union(git2::Status::INDEX_TYPECHANGE);
+const WT_FLAGS: git2::Status = git2::Status::WT_NEW
+    .union(git2::Status::WT_MODIFIED)
+    .union(git2::Status::WT_DELETED)
+    .union(git2::Status::WT_RENAMED)
+    .union(git2::Status::WT_TYPECHANGE);
+
+pub(super) struct StatusSnapshot {
+    pub staged: Vec<FileChangeJson>,
+    pub unstaged: Vec<FileChangeJson>,
+    pub changes: Vec<GitChangeJson>,
+    pub untracked: Vec<GitPathJson>,
+    pub conflicted: Vec<GitConflictJson>,
+    pub truncated: bool,
+}
+
+pub(super) fn read_status_snapshot(repository: &Repository) -> Result<StatusSnapshot, String> {
+    let repo_workdir = repository
+        .workdir()
+        .ok_or_else(|| "Failed to get workdir from repository".to_string())?
+        .to_path_buf();
+    let workdir = dunce::canonicalize(&repo_workdir).unwrap_or_else(|_| repo_workdir.clone());
+    let mut options = git2::StatusOptions::new();
+    options
+        .disable_pathspec_match(true)
+        .include_ignored(false)
+        .include_unmodified(false)
+        .include_unreadable(false)
+        .include_untracked(true)
+        .recurse_ignored_dirs(false)
+        .recurse_untracked_dirs(true)
+        .renames_head_to_index(true)
+        .update_index(false)
+        .show(git2::StatusShow::IndexAndWorkdir);
+    let statuses = repository
+        .statuses(Some(&mut options))
+        .map_err(|error| format!("Failed to get statuses: {}", error))?;
+
+    let mut snapshot = StatusSnapshot {
+        staged: Vec::new(),
+        unstaged: Vec::new(),
+        changes: Vec::new(),
+        untracked: Vec::new(),
+        conflicted: Vec::new(),
+        truncated: false,
+    };
+    let mut new_entries = 0usize;
+    for entry in statuses.iter() {
+        let status = entry.status();
+        if status.is_conflicted() || status.is_ignored() {
+            continue;
+        }
+        let path = path_bytes_string(entry.path_bytes());
+        if path.ends_with('/') && repo_workdir.join(&path).join(".git").exists() {
+            continue;
+        }
+        let renamed = entry.head_to_index().filter(|_| status.is_index_renamed());
+        let (current, old_path) = match renamed {
+            Some(delta) => (
+                delta
+                    .new_file()
+                    .path_bytes()
+                    .map(path_bytes_string)
+                    .unwrap_or_else(|| path.clone()),
+                delta.old_file().path_bytes().map(path_bytes_string),
+            ),
+            None => (path.clone(), None),
+        };
+        let in_index = status.intersects(INDEX_FLAGS);
+        let in_wt = status.intersects(WT_FLAGS);
+
+        if let Some(old) = &old_path {
+            snapshot
+                .staged
+                .push(legacy_change(&workdir, old, FileChangeStatus::DELETED));
+            snapshot
+                .staged
+                .push(legacy_change(&workdir, &current, FileChangeStatus::ADDED));
+        } else if in_index {
+            snapshot.staged.push(legacy_change(
+                &workdir,
+                &current,
+                if status.is_index_new() {
+                    FileChangeStatus::ADDED
+                } else if status.is_index_deleted() {
+                    FileChangeStatus::DELETED
+                } else {
+                    FileChangeStatus::MODIFIED
+                },
+            ));
+        }
+        if in_wt {
+            snapshot.unstaged.push(legacy_change(
+                &workdir,
+                &current,
+                if status.is_wt_new() {
+                    FileChangeStatus::ADDED
+                } else if status.is_wt_deleted() {
+                    FileChangeStatus::DELETED
+                } else {
+                    FileChangeStatus::MODIFIED
+                },
+            ));
+        }
+
+        if !in_index && !in_wt {
+            continue;
+        }
+        if new_entries >= MAX_STATUS_ENTRIES {
+            snapshot.truncated = true;
+            continue;
+        }
+        if status.is_wt_new() && !in_index {
+            new_entries += 1;
+            snapshot.untracked.push(GitPathJson {
+                absolute_path: workdir.join(&current).to_string_lossy().to_string(),
+                relative_path: current,
+            });
+            continue;
+        }
+        if status.is_index_new() && status.is_wt_deleted() {
+            continue;
+        }
+        let (relative, old_path, combined) = if let Some(old) = old_path {
+            if status.is_wt_deleted() {
+                (old, None, "DELETED")
+            } else {
+                (current, Some(old), "RENAMED")
+            }
+        } else if status.is_index_new() {
+            (current, None, "ADDED")
+        } else if status.is_index_deleted() && !status.is_wt_new() {
+            (current, None, "DELETED")
+        } else if status.is_wt_deleted() {
+            (current, None, "DELETED")
+        } else if status.is_index_typechange() || status.is_wt_typechange() {
+            (current, None, "TYPECHANGE")
+        } else {
+            (current, None, "MODIFIED")
+        };
+        new_entries += 1;
+        snapshot.changes.push(GitChangeJson {
+            absolute_path: workdir.join(&relative).to_string_lossy().to_string(),
+            relative_path: relative,
+            old_path,
+            status: combined.to_string(),
+            staged: in_index,
+            unstaged: in_wt,
+        });
+    }
+    snapshot
+        .staged
+        .sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    snapshot
+        .unstaged
+        .sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+
+    let index = repository
+        .index()
+        .map_err(|error| format!("Failed to read index: {}", error))?;
+    if index.has_conflicts() {
+        let conflicts = index
+            .conflicts()
+            .map_err(|error| format!("Failed to read conflicts: {}", error))?;
+        for conflict in conflicts {
+            let conflict =
+                conflict.map_err(|error| format!("Failed to read conflict: {}", error))?;
+            let Some(path) = [&conflict.our, &conflict.their, &conflict.ancestor]
+                .into_iter()
+                .flatten()
+                .next()
+                .map(|entry| path_bytes_string(&entry.path))
+            else {
+                continue;
+            };
+            if new_entries >= MAX_STATUS_ENTRIES {
+                snapshot.truncated = true;
+                break;
+            }
+            new_entries += 1;
+            snapshot.conflicted.push(GitConflictJson {
+                absolute_path: workdir.join(&path).to_string_lossy().to_string(),
+                relative_path: path,
+                ours: conflict.our.is_some(),
+                theirs: conflict.their.is_some(),
+                ancestor: conflict.ancestor.is_some(),
+            });
+        }
+    }
+    Ok(snapshot)
+}
+
 fn status_for_repo(root: &Path) -> Result<GitStatusRoot, String> {
     let repository =
         Repository::open(root).map_err(|error| format!("Failed to open repo: {}", error))?;
-    let (staged, unstaged) =
-        get_diff_statuses(git2::StatusShow::IndexAndWorkdir, &repository, true)?;
+    let snapshot = read_status_snapshot(&repository)?;
     let head_detached = repository.head_detached().unwrap_or(false);
-    let branch = repository
-        .head()
-        .ok()
+    let head = repository.head().ok();
+    let head_oid = head
+        .as_ref()
+        .and_then(|head| head.target())
+        .map(|oid| oid.to_string());
+    let branch = head
+        .as_ref()
         .filter(|head| head.is_branch())
         .and_then(|head| head.shorthand().map(ToString::to_string));
-    let (ahead, behind) = branch
+    let local_branch = branch
         .as_deref()
-        .and_then(|name| repository.find_branch(name, git2::BranchType::Local).ok())
-        .and_then(|branch| {
+        .and_then(|name| repository.find_branch(name, git2::BranchType::Local).ok());
+    let upstream_branch = local_branch
+        .as_ref()
+        .and_then(|branch| branch.upstream().ok());
+    let upstream = upstream_branch
+        .as_ref()
+        .and_then(|upstream| upstream.name().ok().flatten().map(ToString::to_string));
+    let (ahead, behind) = local_branch
+        .as_ref()
+        .zip(upstream_branch.as_ref())
+        .and_then(|(branch, upstream)| {
             let local_oid = branch.get().peel_to_commit().ok()?.id();
-            let upstream_oid = branch.upstream().ok()?.get().peel_to_commit().ok()?.id();
+            let upstream_oid = upstream.get().peel_to_commit().ok()?.id();
             repository.graph_ahead_behind(local_oid, upstream_oid).ok()
         })
         .map(|(ahead, behind)| (Some(ahead), Some(behind)))
@@ -308,21 +613,24 @@ fn status_for_repo(root: &Path) -> Result<GitStatusRoot, String> {
         head_detached,
         ahead,
         behind,
-        staged: staged.into_iter().map(file_change_json).collect(),
-        unstaged: unstaged.into_iter().map(file_change_json).collect(),
+        staged: snapshot.staged,
+        unstaged: snapshot.unstaged,
         untracked_included: true,
+        head_oid,
+        upstream,
+        repo_state: repo_state_name(repository.state()).to_string(),
+        truncated: snapshot.truncated,
+        changes: snapshot.changes,
+        untracked: snapshot.untracked,
+        conflicted: snapshot.conflicted,
     })
 }
 
-fn validate_diff_path(path: Option<&str>) -> Result<Option<PathBuf>, String> {
-    path.map(|path| {
-        repo_relative_paths(vec![path.to_string()]).and_then(|mut paths| {
-            paths
-                .pop()
-                .ok_or_else(|| "Git diff path cannot be empty".to_string())
-        })
-    })
-    .transpose()
+fn validate_diff_paths(paths: &[String]) -> Result<Vec<PathBuf>, String> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    repo_relative_paths(paths.to_vec())
 }
 
 fn append_patch_text(patch: &mut String, content: &str, truncated: &mut bool) {
@@ -342,22 +650,57 @@ fn append_patch_text(patch: &mut String, content: &str, truncated: &mut bool) {
     *truncated = true;
 }
 
-fn diff_for_repo(root: &Path, path: Option<&str>, staged: bool) -> Result<GitDiffRoot, String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffBase {
+    IndexToWorkdir,
+    HeadToIndex,
+    HeadToWorkdir,
+}
+
+impl From<bool> for DiffBase {
+    fn from(staged: bool) -> Self {
+        if staged {
+            DiffBase::HeadToIndex
+        } else {
+            DiffBase::IndexToWorkdir
+        }
+    }
+}
+
+fn diff_for_repo<'a>(
+    root: &Path,
+    paths: impl IntoIterator<Item = &'a str>,
+    base: impl Into<DiffBase>,
+) -> Result<GitDiffRoot, String> {
     let repository =
         Repository::open(root).map_err(|error| format!("Failed to open repo: {}", error))?;
-    let path = validate_diff_path(path)?;
+    let paths = validate_diff_paths(&paths.into_iter().map(str::to_string).collect::<Vec<_>>())?;
+    let base = base.into();
     let mut options = DiffOptions::new();
     options.include_typechange(true);
-    if let Some(path) = &path {
-        options.pathspec(path);
+    if !paths.is_empty() {
+        options.disable_pathspec_match(true);
+        for path in &paths {
+            options.pathspec(path.to_string_lossy().replace('\\', "/"));
+        }
     }
-    let diff = if staged {
-        let head_tree = repository
+    let head_tree = || {
+        repository
             .head()
             .ok()
-            .and_then(|head| head.peel_to_tree().ok());
+            .and_then(|head| head.peel_to_tree().ok())
+    };
+    let diff = if base == DiffBase::HeadToWorkdir {
+        options
+            .include_untracked(true)
+            .recurse_untracked_dirs(true)
+            .show_untracked_content(true);
         repository
-            .diff_tree_to_index(head_tree.as_ref(), None, Some(&mut options))
+            .diff_tree_to_workdir_with_index(head_tree().as_ref(), Some(&mut options))
+            .map_err(|error| format!("Failed to generate HEAD diff: {}", error))?
+    } else if base == DiffBase::HeadToIndex {
+        repository
+            .diff_tree_to_index(head_tree().as_ref(), None, Some(&mut options))
             .map_err(|error| format!("Failed to generate staged diff: {}", error))?
     } else {
         options
@@ -512,12 +855,20 @@ pub async fn handle_v1_git_status(
 
 pub async fn handle_v1_git_diff(
     State(app): State<AppState>,
-    Query(query): Query<DiffQuery>,
+    RawQuery(raw): RawQuery,
 ) -> ApiResult<RootsResponse<GitDiffRoot>> {
+    let query = parse_diff_query(raw.as_deref())
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))?;
+    validate_diff_paths(&query.paths).map_err(|error| api_error(StatusCode::BAD_REQUEST, error))?;
     let roots = selected_roots(app.gcx.clone(), query.root).await?;
-    let path = query.path;
+    let paths = query.paths;
+    let base = if query.against_head {
+        DiffBase::HeadToWorkdir
+    } else {
+        DiffBase::from(query.staged)
+    };
     collect_roots(roots, move |root| {
-        diff_for_repo(root, path.as_deref(), query.staged)
+        diff_for_repo(root, paths.iter().map(String::as_str), base)
     })
     .await
 }
@@ -554,6 +905,8 @@ pub async fn handle_v1_git_stage(
     })?;
     let paths = repo_relative_paths(request.paths)
         .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))?;
+    let lock = crate::git::cli::repo_mutation_lock(&root);
+    let _guard = lock.lock().await;
     tokio::task::spawn_blocking(move || {
         let repository =
             Repository::open(root).map_err(|error| format!("Failed to open repo: {}", error))?;
@@ -583,6 +936,8 @@ pub async fn handle_v1_git_unstage(
     })?;
     let paths = repo_relative_paths(request.paths)
         .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))?;
+    let lock = crate::git::cli::repo_mutation_lock(&root);
+    let _guard = lock.lock().await;
     tokio::task::spawn_blocking(move || {
         let repository =
             Repository::open(root).map_err(|error| format!("Failed to open repo: {}", error))?;

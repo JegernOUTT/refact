@@ -367,6 +367,296 @@
       "author": "chat:388bfa0a-0218-4701-81ae-21f89628286f",
       "reviewer": "review:rv-8178d7b9:tests",
       "review_evidence": "Parent-attested independent pipeline reviews rv-e0a29631 (spec/tests) and rv-8178d7b9 (diff/simplicity/tests) approved all five tests as ordinary semantic contracts; rv-8178d7b9 requested the 16x16/budget-8 exhaustion assertion, added verbatim to the alpha test (no new physical test). Evidence provenance: parent-reviewed full tool report; review artifacts not read by this admission author."
+    },
+    {
+      "fingerprint": "cbd09b87002cf00a073ca1842e3854b79f4dc4f143f97ec73edf40ee209615c0",
+      "occurrences": 1,
+      "failure_mode": "POST /v1/git/commit commits the whole real index (or omits worktree changes of listed paths), so an unrelated staged file is silently committed, a listed untracked file is not added, a listed deleted file stays in the tree, amend drops/changes parents, or a first commit on unborn HEAD fails.",
+      "importance": "Durable data integrity of user commits: committing content the user did not select (or losing selected content) rewrites history in a way that is costly to undo.",
+      "nearest_retained": {
+        "fingerprint": "38ee10e7b9168b634decbf62c010861becd39b287780250374917237ec3a8221",
+        "why_insufficient": "Retained git_commit_maps_plain_workspace_subdir_to_enclosing_repo drives only legacy POST /v1/git-commit root mapping; it never exercises the new endpoint, --only tree construction, untracked add, deletion removal, amend parents, unborn HEAD or nothing_to_commit."
+      },
+      "oracle": "Exact commit-tree blob contents per path (keep.txt stays HEAD v1, mod.txt v2, new.txt added, del.txt absent), exact parent ids == [base] for both normal and amend commits, amended tree id == partial tree id, real-index blob for keep.txt still \"keep staged\", unborn commit has 0 parents and omits unlisted later.txt, second identical commit returns 409 code nothing_to_commit with HEAD unchanged.",
+      "prerequisites": "Asserts keep.txt is staged with distinct content before the request; base commit exists with del.txt; new.txt is untracked; unborn repo has no HEAD; hooksPath points at an empty dir and gpgsign false so the git2 path is taken (asserted used_git_cli false).",
+      "shipping_implementation": "crate::http::routers::v1::git_write::handle_v1_git_commit_v2 -> plan_commit_paths/prepare_commit_tree/commit_with_git2 through the registered /v1/git/commit route.",
+      "determinism": "Isolated tempdirs, git2-only fixture setup, local repo config identity, no network, clock-independent assertions.",
+      "layer": "Engine HTTP route via make_refact_http_server + tower oneshot over a real tempdir git2 repository",
+      "why_cheapest": "One route scenario covers the --only contract end to end; the tree builder has no lower seam that also proves the real index write-back.",
+      "meaningful_cases": 4,
+      "critical": true,
+      "criticality_reason": "Durable data integrity of git commits (critical class per policy). Cases: unborn first commit, partial --only commit, nothing_to_commit refusal, message-only amend.",
+      "removed_coverage": "None; no retained test removed or changed.",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "cargo",
+            "test",
+            "--lib",
+            "http::routers::v1::git_write::tests::git_commit_only_commits_listed_worktree_paths_and_keeps_other_staged_entries",
+            "--",
+            "--exact"
+          ],
+          "exit_code": 101,
+          "evidence": "Mutant 1 applied to the final shipping source by /tmp/e1_mutants.py, focused test FAILED (0 passed; 1 failed). mutant writes commit tree from the full real index: panicked at git_write.rs:1143 (keep.txt commit-tree assertion) left Some(\"keep staged\\n\") right Some(\"keep v1\\n\") (unrelated staged entry committed). Log /tmp/e1_mut1.log in author worktree. "
+        },
+        "passing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "cargo",
+            "test",
+            "--lib",
+            "git_write::tests"
+          ],
+          "exit_code": 0,
+          "evidence": "All mutants reverted by the harness (cmp of git_write.rs, git_read.rs and cli.rs against saved final copies succeeded); git_write::tests 5 passed 0 failed on the final source (archived /tmp/e1_passing.log)."
+        },
+        "intended_diagnostic": "mutant writes commit tree from the full real index: panicked at git_write.rs:1143 (keep.txt commit-tree assertion) left Some(\"keep staged\\n\") right Some(\"keep v1\\n\") (unrelated staged entry committed)",
+        "production_target": "src/http/routers/v1/git_write.rs prepare_commit_tree (commit tree source)",
+        "before_fix": {
+          "reference": "unified diff mutant /tmp/e1_mut1.diff against the final source",
+          "fingerprint": "8041f311016bd410f08c1d5c0b0604f5837e13e5735bf2c96370569a89179a6c"
+        }
+      },
+      "author": "bgagent-b2-e1-engine-git (author subagent, wave E1)",
+      "reviewer": "bgagent-82a388bc-802b-40c3-9883-6963cf278298",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-d03eb62b-0492-447a-9ec4-c2d5404c70df (REQUEST_CHANGES on rollback default flags, hook redaction/reset witnesses, Windows gate and case accounting for file/diff test; approved commit and status tests) then bgagent-82a388bc-802b-40c3-9883-6963cf278298 re-review VERDICT APPROVE for all five tests after the requested changes, verifying mutant diff hashes, failing lines and restoration by cmp. Witnesses re-executed after a final 3-line production change (all-skipped in-progress commit now 400); every failing line shifted by exactly +3 with identical diagnostics."
+    },
+    {
+      "fingerprint": "4387bbb8eabde346b846b8cca51c7467b3075ed7e79c601a825b32bb6d734cb5",
+      "occurrences": 1,
+      "failure_mode": "POST /v1/git/rollback deletes a file outside the repository through a symlinked parent directory, deletes directories, accepts traversal, mis-classifies paths (restore vs unstage vs untracked), or leaves the index/worktree un-restored.",
+      "importance": "Destructive filesystem operation: an escaped delete removes user data outside the workspace; wrong classification destroys or keeps the wrong changes.",
+      "nearest_retained": {
+        "fingerprint": "39c50d9c5d8171245f1abbb05a3a79064daa613d406e924d7b38958fb608cea4",
+        "why_insufficient": "Retained auth_matrix_git_stage_rejects_non_relative_paths checks only lexical ../ and absolute rejection on /v1/git/stage; it cannot detect symlink-parent escape, directory deletion, or rollback classification/restore effects."
+      },
+      "oracle": "Default-flags request (no delete flags): unstaged [added.txt], deleted [], skipped exactly [untracked.txt=untracked], both files still on disk. Full-flags request: exact restored/unstaged/deleted arrays and exact sorted skipped list (dir=directory, dir/inner.txt=unchanged, link/victim.txt=symlink_parent); outside victim file content unchanged and link still present; tracked.txt index+worktree equal HEAD; added.txt removed from index and disk; untracked.txt deleted; ../escape.txt returns 400.",
+      "prerequisites": "Victim file exists outside the root before the call; link is a real symlink to the outside dir; tracked.txt has distinct staged and worktree edits; added.txt staged and not in HEAD; untracked.txt exists; dir/inner.txt unchanged and tracked.",
+      "shipping_implementation": "crate::http::routers::v1::git_write::handle_v1_git_rollback with contained_leaf/safe_remove_file and the hardened git CLI runner (git restore) via /v1/git/rollback.",
+      "determinism": "Isolated tempdirs, unix-only symlink fixture (#[cfg(unix)]), local git CLI with prompts disabled, no network.",
+      "layer": "Engine HTTP route via make_refact_http_server + tower oneshot over a real tempdir git2 repository",
+      "why_cheapest": "Containment depends on real filesystem symlinks and the route-level classification; one scenario covers all branches without separate unit cases.",
+      "meaningful_cases": 3,
+      "critical": true,
+      "criticality_reason": "Destructive filesystem operation with a path-containment boundary (critical class per policy). Cases: lexical traversal refusal, default (non-destructive) flags, full delete flags with symlink-parent/directory/unchanged refusals.",
+      "removed_coverage": "None; no retained test removed or changed.",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "cargo",
+            "test",
+            "--lib",
+            "http::routers::v1::git_write::tests::git_rollback_restores_unstages_and_never_deletes_through_symlinked_parent",
+            "--",
+            "--exact"
+          ],
+          "exit_code": 101,
+          "evidence": "Mutant 2 applied to the final shipping source by /tmp/e1_mutants.py, focused test FAILED (0 passed; 1 failed). mutant follows symlinks (fs::metadata) and drops canonical containment: deleted assertion (final-source git_write.rs:1271; log reports 1269 because the mutant removes two lines above) left [added.txt, link/victim.txt, untracked.txt] right [added.txt, untracked.txt] (outside file deleted). Log /tmp/e1_mut2.log in author worktree. Second executed mutant 2b (/tmp/e1_mut2b.diff sha256 7dcae8b3ee408e69e2cdfa9490c46661b9e95387ab2ca803140e07091130512c): ignore delete_untracked=false; focused test exit 101 at git_write.rs:1243 deleted left [untracked.txt] right [] (default flags delete an untracked file)."
+        },
+        "passing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "cargo",
+            "test",
+            "--lib",
+            "git_write::tests"
+          ],
+          "exit_code": 0,
+          "evidence": "All mutants reverted by the harness (cmp of git_write.rs, git_read.rs and cli.rs against saved final copies succeeded); git_write::tests 5 passed 0 failed on the final source (archived /tmp/e1_passing.log)."
+        },
+        "intended_diagnostic": "mutant follows symlinks (fs::metadata) and drops canonical containment: deleted assertion (final-source git_write.rs:1271; log reports 1269 because the mutant removes two lines above) left [added.txt, link/victim.txt, untracked.txt] right [added.txt, untracked.txt] (outside file deleted)",
+        "production_target": "src/http/routers/v1/git_write.rs contained_leaf (symlink parent + canonical containment guard)",
+        "before_fix": {
+          "reference": "unified diff mutant /tmp/e1_mut2.diff against the final source",
+          "fingerprint": "bb3f6e19d58b51497787738f48bee22e315d1f61ba6faa5e8d45bf2e440c96c0"
+        }
+      },
+      "author": "bgagent-b2-e1-engine-git (author subagent, wave E1)",
+      "reviewer": "bgagent-82a388bc-802b-40c3-9883-6963cf278298",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-d03eb62b-0492-447a-9ec4-c2d5404c70df (REQUEST_CHANGES on rollback default flags, hook redaction/reset witnesses, Windows gate and case accounting for file/diff test; approved commit and status tests) then bgagent-82a388bc-802b-40c3-9883-6963cf278298 re-review VERDICT APPROVE for all five tests after the requested changes, verifying mutant diff hashes, failing lines and restoration by cmp. Witnesses re-executed after a final 3-line production change (all-skipped in-progress commit now 400); every failing line shifted by exactly +3 with identical diagnostics."
+    },
+    {
+      "fingerprint": "f7f068e882425881ec82652b61ba5165c2d085f29062df567533f92e5f29c628",
+      "occurrences": 1,
+      "failure_mode": "(Note: when hooks exist any CLI commit failure is reported as hook_failed per the endpoint contract.) With an executable pre-commit hook, the commit bypasses hooks via git2, or a rejected hook still moves HEAD, leaves the pre-added untracked path staged, loses unrelated staged entries, or leaks credentials from hook output; a passing hook path commits unrelated staged entries.",
+      "importance": "Bypassing repository hooks violates user/team policy (lint, secret scanning); a failed hook must leave repo state intact; hook output may contain credentials.",
+      "nearest_retained": {
+        "fingerprint": "38ee10e7b9168b634decbf62c010861becd39b287780250374917237ec3a8221",
+        "why_insufficient": "Retained legacy git-commit test uses git2 only and has no hooks; nothing retained exercises CLI routing, hook failure rollback, or output redaction."
+      },
+      "oracle": "Failing hook: 422 code hook_failed, error contains hook text but not the URL password, HEAD == base, fresh.txt absent from reloaded index, keep.txt index blob unchanged. Passing hook: used_git_cli true, hooks_ran true, parents == [base], tree has fresh.txt and keep.txt at HEAD v1, keep.txt still staged.",
+      "prerequisites": "Hook file is executable (0755) under the configured core.hooksPath; keep.txt staged with distinct content; fresh.txt untracked; secret string present in hook stderr before redaction is asserted.",
+      "shipping_implementation": "handle_v1_git_commit_v2 -> commit_hooks_present -> commit_with_cli -> crate::git::cli::run_git_cli (git commit --only, pre-add/undo, redact_git_output).",
+      "determinism": "Isolated tempdir, unix-only shell hook (#[cfg(unix)]), local git CLI, GIT_TERMINAL_PROMPT=0, no network.",
+      "layer": "Engine HTTP route via make_refact_http_server + tower oneshot over a real tempdir git2 repository",
+      "why_cheapest": "Hook execution requires the real git CLI; a single route scenario covers fail and pass branches.",
+      "meaningful_cases": 2,
+      "critical": true,
+      "criticality_reason": "Policy enforcement and repository integrity on commit plus secret redaction in returned output; treated as critical. Cases: failing hook, passing hook.",
+      "removed_coverage": "None; no retained test removed or changed.",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "cargo",
+            "test",
+            "--lib",
+            "http::routers::v1::git_write::tests::git_commit_with_hooks_uses_cli_and_failed_hook_leaves_head_and_index_unchanged",
+            "--",
+            "--exact"
+          ],
+          "exit_code": 101,
+          "evidence": "Mutant 3 applied to the final shipping source by /tmp/e1_mutants.py, focused test FAILED (0 passed; 1 failed). mutant disables CLI routing when hooks exist: panicked at git_write.rs:1326 left 200 right 422 (hook bypassed, commit created with used_git_cli false). Log /tmp/e1_mut3.log in author worktree. Additional executed mutants: 3b (/tmp/e1_mut3b.diff sha256 617159a14f31c62c9e8c2218ef8f1d400ca1c3453526972b94fd367c44c98fc6) bypasses redact_git_output in src/git/cli.rs run_git_cli, focused test exit 101 at git_write.rs:1330 !error.contains(hunter2pass) with the raw credential URL in the message; 3c (/tmp/e1_mut3c.diff sha256 05a29c57861d68122c6a598ffe3fa449d41364990d27dda21ad4084496330ba3) removes the post-failure git reset of pre-added untracked paths, exit 101 at git_write.rs:1332 left Some(fresh) right None."
+        },
+        "passing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "cargo",
+            "test",
+            "--lib",
+            "git_write::tests"
+          ],
+          "exit_code": 0,
+          "evidence": "All mutants reverted by the harness (cmp of git_write.rs, git_read.rs and cli.rs against saved final copies succeeded); git_write::tests 5 passed 0 failed on the final source (archived /tmp/e1_passing.log)."
+        },
+        "intended_diagnostic": "mutant disables CLI routing when hooks exist: panicked at git_write.rs:1326 left 200 right 422 (hook bypassed, commit created with used_git_cli false)",
+        "production_target": "src/http/routers/v1/git_write.rs handle_v1_git_commit_v2 hook routing",
+        "before_fix": {
+          "reference": "unified diff mutant /tmp/e1_mut3.diff against the final source",
+          "fingerprint": "d32a2799fa822a65bf0f5b19fa771ade19a5f1a3318440135697b747834c91be"
+        }
+      },
+      "author": "bgagent-b2-e1-engine-git (author subagent, wave E1)",
+      "reviewer": "bgagent-82a388bc-802b-40c3-9883-6963cf278298",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-d03eb62b-0492-447a-9ec4-c2d5404c70df (REQUEST_CHANGES on rollback default flags, hook redaction/reset witnesses, Windows gate and case accounting for file/diff test; approved commit and status tests) then bgagent-82a388bc-802b-40c3-9883-6963cf278298 re-review VERDICT APPROVE for all five tests after the requested changes, verifying mutant diff hashes, failing lines and restoration by cmp. Witnesses re-executed after a final 3-line production change (all-skipped in-progress commit now 400); every failing line shifted by exactly +3 with identical diagnostics."
+    },
+    {
+      "fingerprint": "57dcfb6e8dae5159447013c04821b619bca11b168938654fe7d16eb562d2d827",
+      "occurrences": 1,
+      "failure_mode": "GET /v1/git/file returns the wrong revision content (HEAD/INDEX/WORKTREE/commit-ish confusion), errors instead of exists:false, returns binary bytes as text, or accepts an unknown rev; GET /v1/git/diff against=head ignores repeated path params, treats a* as a glob (pulling ab.txt), shows index instead of worktree, or omits untracked content.",
+      "importance": "The Git UI diff viewer and file viewer render these; wrong revision or glob-expanded diffs show users incorrect changes before commit/rollback decisions.",
+      "nearest_retained": {
+        "fingerprint": "b23767686cb96a6d8f90a31f3b603fe026a3d5f6bd81259f0e7057a7811f138e",
+        "why_insufficient": "Retained diff_for_repo_preserves_content_prefixes_and_cleans_metadata_origins covers only unstaged index->workdir patch line prefixes with no pathspec; it cannot detect HEAD-base selection, literal pathspec handling, repeated path parsing or the file endpoint."
+      },
+      "oracle": "Exact content per rev for a*.txt (HEAD star v2, INDEX star index, WORKTREE star worktree, first commit star v1); missing file exists false 200; blob.bin binary true content empty; unknown rev 404 not_found; diff patch contains -star v2/+star worktree and +untracked body and excludes ab worktree and star index.",
+      "prerequisites": "Four distinct versions of a*.txt exist across commits/index/worktree; ab.txt has a worktree change that a glob a* would match; new.txt untracked; blob.bin contains NUL.",
+      "shipping_implementation": "crate::http::routers::v1::git_write::handle_v1_git_file/read_revision_file and git_read::handle_v1_git_diff/parse_diff_query/diff_for_repo via registered routes.",
+      "determinism": "Isolated tempdir, git2-only setup, no network or clock dependence.",
+      "layer": "Engine HTTP route via make_refact_http_server + tower oneshot over a real tempdir git2 repository",
+      "why_cheapest": "One fixture serves both read endpoints that share revision/pathspec semantics; separate tests would duplicate fixture cost.",
+      "meaningful_cases": 8,
+      "critical": false,
+      "criticality_reason": "Read-only endpoints; incorrect output is user-visible but not destructive, privacy or durable-write. Ordinary, with an executed witness anyway. Cases (explicit table accounting): 4 revision rows (HEAD, INDEX, WORKTREE, commit-ish), missing file, binary file, unknown rev 404, diff against=head with repeated literal paths. #[cfg(unix)] because a*.txt is not a valid Windows filename.",
+      "removed_coverage": "None; no retained test removed or changed.",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "cargo",
+            "test",
+            "--lib",
+            "http::routers::v1::git_write::tests::git_file_revisions_and_head_diff_use_literal_repeated_paths",
+            "--",
+            "--exact"
+          ],
+          "exit_code": 101,
+          "evidence": "Mutant 4 applied to the final shipping source by /tmp/e1_mutants.py, focused test FAILED (0 passed; 1 failed). mutant removes disable_pathspec_match: panicked at git_write.rs:1431 assertion !patch.contains(\"ab worktree\") failed (a* globbed ab.txt). Log /tmp/e1_mut4.log in author worktree. "
+        },
+        "passing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "cargo",
+            "test",
+            "--lib",
+            "git_write::tests"
+          ],
+          "exit_code": 0,
+          "evidence": "All mutants reverted by the harness (cmp of git_write.rs, git_read.rs and cli.rs against saved final copies succeeded); git_write::tests 5 passed 0 failed on the final source (archived /tmp/e1_passing.log)."
+        },
+        "intended_diagnostic": "mutant removes disable_pathspec_match: panicked at git_write.rs:1431 assertion !patch.contains(\"ab worktree\") failed (a* globbed ab.txt)",
+        "production_target": "src/http/routers/v1/git_read.rs diff_for_repo literal pathspec (disable_pathspec_match)",
+        "before_fix": {
+          "reference": "unified diff mutant /tmp/e1_mut4.diff against the final source",
+          "fingerprint": "10413dc43b4c13626d2bfa36a79cf22d55e1358330fdff9bb263c04e12598109"
+        }
+      },
+      "author": "bgagent-b2-e1-engine-git (author subagent, wave E1)",
+      "reviewer": "bgagent-82a388bc-802b-40c3-9883-6963cf278298",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-d03eb62b-0492-447a-9ec4-c2d5404c70df (REQUEST_CHANGES on rollback default flags, hook redaction/reset witnesses, Windows gate and case accounting for file/diff test; approved commit and status tests) then bgagent-82a388bc-802b-40c3-9883-6963cf278298 re-review VERDICT APPROVE for all five tests after the requested changes, verifying mutant diff hashes, failing lines and restoration by cmp. Witnesses re-executed after a final 3-line production change (all-skipped in-progress commit now 400); every failing line shifted by exactly +3 with identical diagnostics."
+    },
+    {
+      "fingerprint": "13f1fd9daeff766ba0b2af33f459fbe84b6349c81c4fb2931ab688da1b68412d",
+      "occurrences": 1,
+      "failure_mode": "The extended /v1/git/status changes legacy staged/unstaged semantics (renames collapsed instead of DELETED+ADDED, conflicted paths leaking, untracked missing as ADDED) or produces wrong new fields (combined status/staged/unstaged flags, RENAMED old_path, untracked list, conflict ours/theirs/ancestor, repo_state, head_oid).",
+      "importance": "DaemonDashboard GitTab and ActivityRail consume the legacy lists; the new Commit tool window relies on the new fields to decide what to commit or roll back.",
+      "nearest_retained": {
+        "fingerprint": "d7bf0a828644cac5f4c956c094592916fd48b2713d2cd40cbdd26f39c42b7548",
+        "why_insufficient": "Retained untracked_external_symlink_status_keeps_absolute_path_in_repo exercises shared get_diff_statuses, which the route no longer uses; it cannot detect regressions in the route-specific single-pass status, rename splitting, conflicts or new fields."
+      },
+      "oracle": "Exact ordered legacy staged/unstaged (path,status) pairs with absolute paths, exact sorted changes array objects, exact untracked and conflicted arrays, repo_state merge, truncated false, head_oid equals HEAD.",
+      "prerequisites": "Real git merge leaves conflict.txt with all three stages (merge asserted to fail); staged rename via git mv; index-new+worktree-modified both.txt; worktree-deleted gone.txt; untracked u/x.txt inside an untracked dir.",
+      "shipping_implementation": "crate::http::routers::v1::git_read::handle_v1_git_status -> status_for_repo -> read_status_snapshot via /v1/git/status.",
+      "determinism": "Isolated tempdir, local git CLI for merge/mv with fixed branch flow, no network.",
+      "layer": "Engine HTTP route via make_refact_http_server + tower oneshot over a real tempdir git2 repository",
+      "why_cheapest": "Conflicts and renames need a real repository state; one scenario covers all categories at the consumed boundary.",
+      "meaningful_cases": 1,
+      "critical": false,
+      "criticality_reason": "Read-only status projection; not destructive, privacy or durable-write. Ordinary, with an executed witness anyway.",
+      "removed_coverage": "None; no retained test removed or changed.",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "cargo",
+            "test",
+            "--lib",
+            "http::routers::v1::git_write::tests::git_status_reports_changes_untracked_conflicts_and_unchanged_legacy_lists",
+            "--",
+            "--exact"
+          ],
+          "exit_code": 101,
+          "evidence": "Mutant 5 applied to the final shipping source by /tmp/e1_mutants.py, focused test FAILED (0 passed; 1 failed). mutant disables rename splitting: panicked at git_write.rs:1508 legacy staged left [(both.txt,ADDED),(renamed.txt,MODIFIED),(staged.txt,MODIFIED)] right [... (old.txt,DELETED),(renamed.txt,ADDED) ...]. Log /tmp/e1_mut5.log in author worktree. "
+        },
+        "passing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "cargo",
+            "test",
+            "--lib",
+            "git_write::tests"
+          ],
+          "exit_code": 0,
+          "evidence": "All mutants reverted by the harness (cmp of git_write.rs, git_read.rs and cli.rs against saved final copies succeeded); git_write::tests 5 passed 0 failed on the final source (archived /tmp/e1_passing.log)."
+        },
+        "intended_diagnostic": "mutant disables rename splitting: panicked at git_write.rs:1508 legacy staged left [(both.txt,ADDED),(renamed.txt,MODIFIED),(staged.txt,MODIFIED)] right [... (old.txt,DELETED),(renamed.txt,ADDED) ...]",
+        "production_target": "src/http/routers/v1/git_read.rs read_status_snapshot legacy rename split",
+        "before_fix": {
+          "reference": "unified diff mutant /tmp/e1_mut5.diff against the final source",
+          "fingerprint": "8cb29caf87693a4e79e353b0d30a0de28f8d92fe16aa86c6e9287d068db9fafd"
+        }
+      },
+      "author": "bgagent-b2-e1-engine-git (author subagent, wave E1)",
+      "reviewer": "bgagent-82a388bc-802b-40c3-9883-6963cf278298",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-d03eb62b-0492-447a-9ec4-c2d5404c70df (REQUEST_CHANGES on rollback default flags, hook redaction/reset witnesses, Windows gate and case accounting for file/diff test; approved commit and status tests) then bgagent-82a388bc-802b-40c3-9883-6963cf278298 re-review VERDICT APPROVE for all five tests after the requested changes, verifying mutant diff hashes, failing lines and restoration by cmp. Witnesses re-executed after a final 3-line production change (all-skipped in-progress commit now 400); every failing line shifted by exactly +3 with identical diagnostics."
     }
   ],
   "classifications": [
@@ -5851,22 +6141,6 @@
       "no_tests_reason": "No current Rust test definitions remain at this path; actual diff removes all-CUT test-only scaffolding/dead helpers or imports, not a retained executable fixture. No production deletion is authorized by this record."
     },
     {
-      "path": "refact-agent/engine/src/http/routers/v1/git_read.rs",
-      "before_sha256": "066f669ab16331f055a1120e86a50ed6a3744c7055e9dd85ff2107097eeb0836",
-      "after_sha256": "22694afa5f515d43f83d0d2ff1ea60225725c631d7c7dfd1c576c5957c7860b3",
-      "affected_tests": [
-        "39c50d9c5d8171245f1abbb05a3a79064daa613d406e924d7b38958fb608cea4",
-        "78432c914e73f5cb4b41664473c078ac57348b0f5a3ad7860ae3fb049fc00951",
-        "9cd16bf8f1e563ebb288ae0f40fc109aef357edd2648e6b5059cbff9a6f50cb0",
-        "b23767686cb96a6d8f90a31f3b603fe026a3d5f6bd81259f0e7057a7811f138e"
-      ],
-      "impact": "refact-agent/engine/src/http/routers/v1/git_read.rs: canonical non-test residue changes remove 152 tokens and add 0 tokens. Cleanup evidence identifies commit_file; ServiceExt. 12787→6186 global lexical definitions includes intentional coverage loss from case deletions; this support record does not claim strict duplication.",
-      "execution_context": "Same physical Rust path; no retained fingerprint/context relocation relative pinned main. Test-only ownership: inline cfg(test) modules or explicitly cfg(test) helper items; tests/ and *_tests.rs are test harness/module support. Removed dead helper/import/module scaffolding has no surviving intended executing consumer; conservative affected mapping lists surviving same-file tests for dependency review, not a claim all call deleted helpers. See exact residue token hunks and cleanup evidence references.",
-      "author": "support-impact-author-bgagent-1fd43f09",
-      "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
-      "review_evidence": "Independent source/hash review: refact-agent/engine/src/http/routers/v1/git_read.rs: reviewed removal of commit_file, ServiceExt within explicit cfg(test) items/modules. 4 actual same-path retained cases keep complete attributed canonical body and enclosing-context hash against pinned MAIN. Conservative affected map contains exactly those current fingerprints. Compiler-proven repair reviewed: use tower::ServiceExt; restores trait resolution only, not retained assertions."
-    },
-    {
       "path": "refact-agent/engine/src/http/routers/v1/hooks.rs",
       "before_sha256": "f629da5c97e24708faf20366f01d8c1d6f81d95c23e468d3e13f9be2a1edb6f8",
       "after_sha256": "31e06125860538ad82ba91c72d579ce33b90085d0a7c65f6132ef7905f2eaa45",
@@ -7653,6 +7927,85 @@
       "author": "chat:388bfa0a-0218-4701-81ae-21f89628286f",
       "reviewer": "review:rv-8178d7b9:tests",
       "review_evidence": "Parent-attested independent pipeline reviews rv-e0a29631 (spec/tests) and rv-8178d7b9 (diff/simplicity/tests) approved all five tests as ordinary semantic contracts; rv-8178d7b9 requested the 16x16/budget-8 exhaustion assertion, added verbatim to the alpha test (no new physical test). Evidence provenance: parent-reviewed full tool report; review artifacts not read by this admission author."
+    },
+    {
+      "path": "refact-agent/engine/src/git/cli.rs",
+      "before_sha256": null,
+      "after_sha256": "f58826c3d702ba9320724715e8e2ef273ec92b4756f01e88fe6130ecc7adf5be",
+      "affected_tests": [
+        "f7f068e882425881ec82652b61ba5165c2d085f29062df567533f92e5f29c628",
+        "4387bbb8eabde346b846b8cca51c7467b3075ed7e79c601a825b32bb6d734cb5"
+      ],
+      "impact": "New hardened async git CLI runner (timeouts, kill_on_drop, prompt-disabling env, BatchMode ssh, literal pathspecs, capped redacted output) and per-root mutation lock. No test helpers; consumed by commit CLI path and rollback restore.",
+      "execution_context": "Default engine library test context (cargo test --lib); unix-gated tests for hooks/symlinks; no features, ignores or shared-fixture rewrites. Focused git_write::tests 5 passed; existing git_read tests pass unchanged.",
+      "author": "bgagent-b2-e1-engine-git (author subagent, wave E1)",
+      "reviewer": "bgagent-82a388bc-802b-40c3-9883-6963cf278298",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-d03eb62b-0492-447a-9ec4-c2d5404c70df (REQUEST_CHANGES on rollback default flags, hook redaction/reset witnesses, Windows gate and case accounting for file/diff test; approved commit and status tests) then bgagent-82a388bc-802b-40c3-9883-6963cf278298 re-review VERDICT APPROVE for all five tests after the requested changes, verifying mutant diff hashes, failing lines and restoration by cmp. Witnesses re-executed after a final 3-line production change (all-skipped in-progress commit now 400); every failing line shifted by exactly +3 with identical diagnostics."
+    },
+    {
+      "path": "refact-agent/engine/src/git/mod.rs",
+      "before_sha256": "55898542001d29cb439e9902020c07596c519eeb2fd2fbb82578b49f73a0c748",
+      "after_sha256": "ce684504f877f8b47b1ad891bc497aff664b103cfd65d20104465288bd00b89d",
+      "affected_tests": [
+        "f7f068e882425881ec82652b61ba5165c2d085f29062df567533f92e5f29c628"
+      ],
+      "impact": "Adds pub mod cli declaration only.",
+      "execution_context": "Default engine library test context (cargo test --lib); unix-gated tests for hooks/symlinks; no features, ignores or shared-fixture rewrites. Focused git_write::tests 5 passed; existing git_read tests pass unchanged.",
+      "author": "bgagent-b2-e1-engine-git (author subagent, wave E1)",
+      "reviewer": "bgagent-82a388bc-802b-40c3-9883-6963cf278298",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-d03eb62b-0492-447a-9ec4-c2d5404c70df (REQUEST_CHANGES on rollback default flags, hook redaction/reset witnesses, Windows gate and case accounting for file/diff test; approved commit and status tests) then bgagent-82a388bc-802b-40c3-9883-6963cf278298 re-review VERDICT APPROVE for all five tests after the requested changes, verifying mutant diff hashes, failing lines and restoration by cmp. Witnesses re-executed after a final 3-line production change (all-skipped in-progress commit now 400); every failing line shifted by exactly +3 with identical diagnostics."
+    },
+    {
+      "path": "refact-agent/engine/src/http/routers/v1.rs",
+      "before_sha256": "6fb841159d2c901a10eb4cf1b2a4489178bfbebd6228e343283fc9919556f150",
+      "after_sha256": "b575beb063f2f0bdf1995a1305cae42cb7c8e431d937800cdba9d79285958b8b",
+      "affected_tests": [
+        "cbd09b87002cf00a073ca1842e3854b79f4dc4f143f97ec73edf40ee209615c0",
+        "4387bbb8eabde346b846b8cca51c7467b3075ed7e79c601a825b32bb6d734cb5",
+        "f7f068e882425881ec82652b61ba5165c2d085f29062df567533f92e5f29c628",
+        "57dcfb6e8dae5159447013c04821b619bca11b168938654fe7d16eb562d2d827",
+        "13f1fd9daeff766ba0b2af33f459fbe84b6349c81c4fb2931ab688da1b68412d"
+      ],
+      "impact": "Registers /git/commit, /git/rollback, /git/file routes and git_write module; existing route test body unchanged.",
+      "execution_context": "Default engine library test context (cargo test --lib); unix-gated tests for hooks/symlinks; no features, ignores or shared-fixture rewrites. Focused git_write::tests 5 passed; existing git_read tests pass unchanged.",
+      "author": "bgagent-b2-e1-engine-git (author subagent, wave E1)",
+      "reviewer": "bgagent-82a388bc-802b-40c3-9883-6963cf278298",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-d03eb62b-0492-447a-9ec4-c2d5404c70df (REQUEST_CHANGES on rollback default flags, hook redaction/reset witnesses, Windows gate and case accounting for file/diff test; approved commit and status tests) then bgagent-82a388bc-802b-40c3-9883-6963cf278298 re-review VERDICT APPROVE for all five tests after the requested changes, verifying mutant diff hashes, failing lines and restoration by cmp. Witnesses re-executed after a final 3-line production change (all-skipped in-progress commit now 400); every failing line shifted by exactly +3 with identical diagnostics."
+    },
+    {
+      "path": "refact-agent/engine/src/http/routers/v1/git_read.rs",
+      "before_sha256": "22694afa5f515d43f83d0d2ff1ea60225725c631d7c7dfd1c576c5957c7860b3",
+      "after_sha256": "80a7ae6c4e7a70aabd43e7b77921484cf33b62ed4238b49823fcebbfa4719160",
+      "affected_tests": [
+        "13f1fd9daeff766ba0b2af33f459fbe84b6349c81c4fb2931ab688da1b68412d",
+        "57dcfb6e8dae5159447013c04821b619bca11b168938654fe7d16eb562d2d827",
+        "b23767686cb96a6d8f90a31f3b603fe026a3d5f6bd81259f0e7057a7811f138e",
+        "39c50d9c5d8171245f1abbb05a3a79064daa613d406e924d7b38958fb608cea4",
+        "78432c914e73f5cb4b41664473c078ac57348b0f5a3ad7860ae3fb049fc00951",
+        "9cd16bf8f1e563ebb288ae0f40fc109aef357edd2648e6b5059cbff9a6f50cb0"
+      ],
+      "impact": "Route-specific single-pass status (update_index false) with new fields; diff gains against=head and repeated literal paths; helpers made pub(super); stage/unstage take the repo mutation lock. Existing test module bytes are identical to base (diff_for_repo keeps a compatible None/bool call shape).",
+      "execution_context": "Default engine library test context (cargo test --lib); unix-gated tests for hooks/symlinks; no features, ignores or shared-fixture rewrites. Focused git_write::tests 5 passed; existing git_read tests pass unchanged.",
+      "author": "bgagent-b2-e1-engine-git (author subagent, wave E1)",
+      "reviewer": "bgagent-82a388bc-802b-40c3-9883-6963cf278298",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-d03eb62b-0492-447a-9ec4-c2d5404c70df (REQUEST_CHANGES on rollback default flags, hook redaction/reset witnesses, Windows gate and case accounting for file/diff test; approved commit and status tests) then bgagent-82a388bc-802b-40c3-9883-6963cf278298 re-review VERDICT APPROVE for all five tests after the requested changes, verifying mutant diff hashes, failing lines and restoration by cmp. Witnesses re-executed after a final 3-line production change (all-skipped in-progress commit now 400); every failing line shifted by exactly +3 with identical diagnostics."
+    },
+    {
+      "path": "refact-agent/engine/src/http/routers/v1/git_write.rs",
+      "before_sha256": null,
+      "after_sha256": "bfcdf67cfb83e02d65db371cf4c2c42dc8f3bc4274ad0bb76197085c7fe335b7",
+      "affected_tests": [
+        "cbd09b87002cf00a073ca1842e3854b79f4dc4f143f97ec73edf40ee209615c0",
+        "4387bbb8eabde346b846b8cca51c7467b3075ed7e79c601a825b32bb6d734cb5",
+        "f7f068e882425881ec82652b61ba5165c2d085f29062df567533f92e5f29c628",
+        "57dcfb6e8dae5159447013c04821b619bca11b168938654fe7d16eb562d2d827",
+        "13f1fd9daeff766ba0b2af33f459fbe84b6349c81c4fb2931ab688da1b68412d"
+      ],
+      "impact": "New commit/rollback/file handlers plus the five admitted tests and their private fixture helpers (git, init_repo, commit_all, router_for, send, tree_text, index_text).",
+      "execution_context": "Default engine library test context (cargo test --lib); unix-gated tests for hooks/symlinks; no features, ignores or shared-fixture rewrites. Focused git_write::tests 5 passed; existing git_read tests pass unchanged.",
+      "author": "bgagent-b2-e1-engine-git (author subagent, wave E1)",
+      "reviewer": "bgagent-82a388bc-802b-40c3-9883-6963cf278298",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-d03eb62b-0492-447a-9ec4-c2d5404c70df (REQUEST_CHANGES on rollback default flags, hook redaction/reset witnesses, Windows gate and case accounting for file/diff test; approved commit and status tests) then bgagent-82a388bc-802b-40c3-9883-6963cf278298 re-review VERDICT APPROVE for all five tests after the requested changes, verifying mutant diff hashes, failing lines and restoration by cmp. Witnesses re-executed after a final 3-line production change (all-skipped in-progress commit now 400); every failing line shifted by exactly +3 with identical diagnostics."
     }
   ]
 }

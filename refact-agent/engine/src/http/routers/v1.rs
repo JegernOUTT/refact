@@ -38,6 +38,9 @@ use crate::http::routers::v1::git_read::{
     handle_v1_git_branches, handle_v1_git_diff, handle_v1_git_log, handle_v1_git_stage,
     handle_v1_git_status, handle_v1_git_unstage,
 };
+use crate::http::routers::v1::git_write::{
+    handle_v1_git_commit_v2, handle_v1_git_file, handle_v1_git_rollback,
+};
 use crate::http::routers::v1::graceful_shutdown::handle_v1_graceful_shutdown;
 use crate::http::routers::v1::hooks::handle_v1_hooks_fire;
 use crate::http::routers::v1::links::handle_v1_links;
@@ -172,6 +175,7 @@ mod file_edit_tools;
 mod files;
 mod git;
 mod git_read;
+mod git_write;
 pub mod graceful_shutdown;
 mod gui_help_handlers;
 mod hooks;
@@ -569,6 +573,9 @@ fn git_routes() -> Router<AppState> {
         .route("/git/branches", get(handle_v1_git_branches))
         .route("/git/stage", post(handle_v1_git_stage))
         .route("/git/unstage", post(handle_v1_git_unstage))
+        .route("/git/commit", post(handle_v1_git_commit_v2))
+        .route("/git/rollback", post(handle_v1_git_rollback))
+        .route("/git/file", get(handle_v1_git_file))
         .route("/checkpoints-preview", post(handle_v1_checkpoints_preview))
         .route("/checkpoints-restore", post(handle_v1_checkpoints_restore))
 }

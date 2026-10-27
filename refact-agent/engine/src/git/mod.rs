@@ -1,5 +1,6 @@
 pub mod checkpoints;
 pub mod cleanup;
+pub mod cli;
 pub mod commit_info;
 pub mod operations;
 
