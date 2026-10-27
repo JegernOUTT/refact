@@ -265,3 +265,176 @@ test("row entry motion honors reduced motion", async ({ page }) => {
     ),
   ).toBe(0);
 });
+type QueueRequest = { path: string; method: string; body: unknown };
+async function queueRequests(page: Page) {
+  return page.evaluate(() =>
+    (
+      window as unknown as { __routeShowcaseRequests: QueueRequest[] }
+    ).__routeShowcaseRequests.filter(
+      (request) =>
+        request.path.includes("/queue/") || request.path.endsWith("/commands"),
+    ),
+  );
+}
+async function routeRejections(page: Page) {
+  return page.evaluate(
+    () =>
+      (window as unknown as { __routeShowcaseQueueRouteRejections: string[] })
+        .__routeShowcaseQueueRouteRejections,
+  );
+}
+async function expectModeOptions(page: Page, item: Locator, names: string[]) {
+  await item.getByRole("combobox").click();
+  const options = page.getByRole("option");
+  await expect(options).toHaveCount(names.length);
+  for (const [index, name] of names.entries()) {
+    await expect(options.nth(index)).toContainText(name);
+  }
+  await page.keyboard.press("Escape");
+  await expect(options).toHaveCount(0);
+}
+const commandRows = [
+  ["queued-question-1", /submit question response/i],
+  ["queued-regenerate-1", /regenerate/i],
+  ["queued-tool-1", /tool decision/i],
+] as const;
+test("mixed queued commands use priority routes, deliveries keep timing", async ({
+  page,
+}) => {
+  await page.goto(`${route}&queue_commands=1`);
+  await expect(page.getByTestId("queued-item")).toHaveCount(8);
+  for (const [id, title] of commandRows) {
+    const item = page.locator(`[data-delivery-id="${id}"]`);
+    await expect(item.getByRole("combobox")).toHaveAccessibleName(
+      /^Queue priority for /,
+    );
+    await expectModeOptions(page, item, ["Send next", "In order"]);
+    await expect(
+      item.getByRole("button", { name: "Click to edit queued message" }),
+    ).toHaveCount(0);
+    await item
+      .getByRole("button", { name: new RegExp(`^\\d+ ${title.source}`, "i") })
+      .click();
+    await expect(item.getByRole("radio")).toHaveCount(2);
+    await expect(item.getByRole("radio", { name: "When idle" })).toHaveCount(0);
+    await expect(
+      item.getByRole("button", { name: "Edit queued message text" }),
+    ).toHaveCount(0);
+    await expect(
+      item.getByRole("button", { name: "Remove from queue" }),
+    ).toBeVisible();
+    await item
+      .getByRole("button", { name: new RegExp(`^\\d+ ${title.source}`, "i") })
+      .click();
+  }
+  const delivery = page.locator('[data-delivery-id="delivery-agent-1"]');
+  await expectModeOptions(page, delivery, [
+    "Interrupt now",
+    "After current step",
+    "When idle",
+  ]);
+
+  const question = page.locator('[data-delivery-id="queued-question-1"]');
+  await chooseTiming(page, question, "Send next");
+  await expect(question).toHaveAttribute("data-push", "preempt");
+  const regenerate = page.locator('[data-delivery-id="queued-regenerate-1"]');
+  await expect(regenerate).toHaveAttribute("data-push", "preempt");
+  await chooseTiming(page, regenerate, "In order");
+  await expect(regenerate).toHaveAttribute("data-push", "append");
+  await page
+    .locator('[data-delivery-id="queued-tool-1"]')
+    .getByRole("button", { name: /^Cancel queued command: /i })
+    .click();
+  await expect(page.locator('[data-delivery-id="queued-tool-1"]')).toHaveCount(
+    0,
+  );
+  await question
+    .getByRole("button", { name: /^Cancel queued command: /i })
+    .click();
+  await expect(question).toHaveCount(0);
+  await chooseTiming(page, delivery, "When idle");
+  await expect(delivery).toHaveAttribute("data-push", "when_idle");
+  await delivery
+    .getByRole("button", { name: /Cancel pending delivery/ })
+    .click();
+  await expect(delivery).toHaveCount(0);
+
+  expect(await routeRejections(page)).toEqual([]);
+  const requests = await queueRequests(page);
+  const queuePath = (id: string) => `/v1/chats/showcase-chat/queue/${id}`;
+  expect(requests).toEqual([
+    {
+      path: queuePath("queued-question-1"),
+      method: "PATCH",
+      body: { priority: true },
+    },
+    {
+      path: queuePath("queued-regenerate-1"),
+      method: "PATCH",
+      body: { priority: false },
+    },
+    { path: queuePath("queued-tool-1"), method: "DELETE", body: null },
+    { path: queuePath("queued-question-1"), method: "DELETE", body: null },
+    {
+      path: "/v1/chats/showcase-chat/commands",
+      method: "POST",
+      body: expect.objectContaining({
+        type: "update_pending_delivery",
+        delivery_id: "delivery-agent-1",
+        push: "when_idle",
+      }),
+    },
+    {
+      path: "/v1/chats/showcase-chat/commands",
+      method: "POST",
+      body: expect.objectContaining({
+        type: "update_pending_delivery",
+        delivery_id: "delivery-agent-1",
+        cancel: true,
+      }),
+    },
+  ]);
+  await expect(page.getByTestId("queued-item")).toHaveCount(5);
+});
+test("mixed queue mock rejects crossed delivery and command routes", async ({
+  page,
+}) => {
+  await page.goto(`${route}&queue_commands=1`);
+  await expect(page.getByTestId("queued-item")).toHaveCount(8);
+  const statuses = await page.evaluate(async () => {
+    const base = "/v1/chats/showcase-chat";
+    const post = (body: unknown) =>
+      fetch(`${base}/commands`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    return Promise.all([
+      fetch(`${base}/queue/delivery-agent-1`, { method: "DELETE" }),
+      fetch(`${base}/queue/delivery-agent-1`, {
+        method: "PATCH",
+        body: JSON.stringify({ priority: true }),
+      }),
+      post({
+        type: "update_pending_delivery",
+        delivery_id: "queued-question-1",
+        cancel: true,
+      }),
+      post({
+        type: "update_pending_delivery",
+        delivery_id: "queued-regenerate-1",
+        push: "when_idle",
+      }),
+      fetch(`${base}/queue/queued-tool-1`, {
+        method: "PATCH",
+        body: JSON.stringify({ push: "when_idle" }),
+      }),
+    ]).then((responses) => responses.map((response) => response.status));
+  });
+  expect(statuses).toEqual([409, 409, 409, 409, 409]);
+  expect(await routeRejections(page)).toHaveLength(5);
+  await expect(page.getByTestId("queued-item")).toHaveCount(8);
+  await expect(
+    page.locator('[data-delivery-id="queued-regenerate-1"]'),
+  ).toHaveAttribute("data-push", "preempt");
+});

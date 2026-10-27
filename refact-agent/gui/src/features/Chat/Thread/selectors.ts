@@ -234,6 +234,17 @@ export const selectCommandAckByThreadAndId = (
     ? state.chat.threads[chatId]?.command_acks?.[clientRequestId]
     : undefined;
 
+export const selectCommandCancelledByThreadAndId = (
+  state: RootState,
+  chatId: string,
+  clientRequestId: string | null,
+): boolean =>
+  clientRequestId
+    ? state.chat.threads[chatId]?.cancelled_command_ids?.includes(
+        clientRequestId,
+      ) === true
+    : false;
+
 export const selectBackgroundAgentsByThread = (
   state: RootState,
   threadId: string,

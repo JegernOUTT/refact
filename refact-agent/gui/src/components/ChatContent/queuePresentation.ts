@@ -94,27 +94,27 @@ export type QueueModeOption = {
  * the two states that boolean can express, on the same `PushMode` values the
  * row already reports through `data-push`.
  */
-const USER_MESSAGE_MODES: Record<
+const PRIORITY_MODES: Record<
   "preempt" | "append",
   { label: string; description: string }
 > = {
   preempt: {
     label: "Send next",
-    description: "Delivered before the rest of the queue.",
+    description: "Moves ahead of the rest of the queue.",
   },
   append: {
     label: "In order",
-    description: "Delivered in the order it was queued.",
+    description: "Runs in the order it was queued.",
   },
 };
 
-export function queueModeOptions(isUserMessage: boolean): QueueModeOption[] {
-  if (isUserMessage) {
+export function queueModeOptions(isDelivery: boolean): QueueModeOption[] {
+  if (!isDelivery) {
     return (["preempt", "append"] as const).map((mode) => ({
       value: mode,
-      label: USER_MESSAGE_MODES[mode].label,
-      shortLabel: USER_MESSAGE_MODES[mode].label,
-      description: USER_MESSAGE_MODES[mode].description,
+      label: PRIORITY_MODES[mode].label,
+      shortLabel: PRIORITY_MODES[mode].label,
+      description: PRIORITY_MODES[mode].description,
       tone: pushModeTone(mode),
       icon: pushModeIcon(mode),
     }));
@@ -131,7 +131,7 @@ export function queueModeOptions(isUserMessage: boolean): QueueModeOption[] {
 
 /** `append` is the default: the engine treats a missing push the same way. */
 export function queuedItemPushMode(item: QueuedItem): PushMode {
-  if (item.push) return item.push;
+  if (item.command_type === "delivery" && item.push) return item.push;
   return item.priority ? "preempt" : "append";
 }
 
@@ -192,7 +192,7 @@ export function describeQueuedItem(item: QueuedItem): QueuedItemPresentation {
     icon,
     tone,
     isUserMessage,
-    isDelivery: !isUserMessage,
+    isDelivery: item.command_type === "delivery",
     push: queuedItemPushMode(item),
     processId: queuedItemProcessId(item),
   };

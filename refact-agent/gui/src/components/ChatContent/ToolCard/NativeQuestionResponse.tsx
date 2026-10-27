@@ -22,7 +22,10 @@ import {
   selectApiKey,
   selectConfig,
 } from "../../../features/Config/configSlice";
-import { selectCommandAckByThreadAndId } from "../../../features/Chat/Thread/selectors";
+import {
+  selectCommandAckByThreadAndId,
+  selectCommandCancelledByThreadAndId,
+} from "../../../features/Chat/Thread/selectors";
 import { requestSseRefresh } from "../../../features/Chat/Thread/actions";
 import { submitQuestionResponse } from "../../../services/refact/chatCommands";
 import { getEngineEndpointIdentity } from "../../../services/refact/apiUrl";
@@ -121,8 +124,12 @@ function ResponseInstance({
   const [requestId, setRequestId] = useState<string | null>(null);
   const lock = useRef(false);
   const retry = useRef<{ id: string; payload: string } | null>(null);
+  const cancelledId = useRef<string | null>(null);
   const ack = useAppSelector((s) =>
     selectCommandAckByThreadAndId(s, threadId, requestId),
+  );
+  const cancelled = useAppSelector((s) =>
+    selectCommandCancelledByThreadAndId(s, threadId, requestId),
   );
   const pending = set.status === "pending";
 
@@ -145,6 +152,16 @@ function ResponseInstance({
     dispatch(requestSseRefresh({ chatId: threadId }));
   }, [ack, dispatch, threadId]);
 
+  useEffect(() => {
+    if (!cancelled) return;
+    cancelledId.current = requestId;
+    lock.current = false;
+    retry.current = null;
+    setSent(false);
+    setError(null);
+    setRequestId(null);
+  }, [cancelled, requestId]);
+
   const submit = useCallback(
     async (response: QuestionResponse) => {
       if (lock.current || !pending) return;
@@ -166,10 +183,12 @@ function ResponseInstance({
           config,
           apiKey ?? undefined,
         );
+        if (cancelledId.current === id) return;
         setSent(true);
         dispatch(requestSseRefresh({ chatId: threadId }));
       } catch (e) {
         lock.current = false;
+        if (cancelledId.current === id) return;
         setError(
           e instanceof Error
             ? e.message

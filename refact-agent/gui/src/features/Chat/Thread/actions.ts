@@ -582,6 +582,11 @@ export const requestSseRefresh = createAction<{ chatId: string }>(
   "chatThread/requestSseRefresh",
 );
 
+export const markQueuedCommandCancelled = createAction<{
+  chatId: string;
+  clientRequestId: string;
+}>("chatThread/markQueuedCommandCancelled");
+
 export const setAutoEnrichmentEnabled = createAction<PayloadWithChatAndBoolean>(
   "chatThread/setAutoEnrichmentEnabled",
 );

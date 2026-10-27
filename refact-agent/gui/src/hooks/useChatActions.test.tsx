@@ -20,6 +20,8 @@ const commandMocks = vi.hoisted(() => {
     updateMessage: vi.fn(() => Promise.resolve()),
     removeMessage: vi.fn(() => Promise.resolve()),
     cancelQueuedItem: vi.fn(() => Promise.resolve(true)),
+    updateQueuedItemPriority: vi.fn(() => Promise.resolve(true)),
+    updatePendingDelivery: vi.fn(() => Promise.resolve()),
   };
 });
 
@@ -159,5 +161,78 @@ describe("useChatActions", () => {
       expect.any(Object),
       undefined,
     );
+  });
+
+  test("successful queue cancel records the request id only for the target thread", async () => {
+    const store = makeStore();
+    const { result } = renderUseChatActions(store);
+
+    await expect(result.current.cancelQueued("queued-1")).resolves.toBe(true);
+
+    const state = store.getState();
+    expect(state.chat.threads["thread-B"]?.cancelled_command_ids).toEqual([
+      "queued-1",
+    ]);
+    expect(
+      state.chat.threads["thread-A"]?.cancelled_command_ids,
+    ).toBeUndefined();
+    expect(state.chat.sse_refresh_requested).toBeNull();
+  });
+
+  test("rejected queue cancel records no cancellation and requests a refresh", async () => {
+    commandMocks.cancelQueuedItem.mockResolvedValueOnce(false);
+    const store = makeStore();
+    const { result } = renderUseChatActions(store);
+
+    await expect(result.current.cancelQueued("queued-1")).resolves.toBe(false);
+
+    const state = store.getState();
+    expect(
+      state.chat.threads["thread-B"]?.cancelled_command_ids,
+    ).toBeUndefined();
+    expect(state.chat.sse_refresh_requested).toBe("thread-B");
+  });
+
+  test("network failure during queue cancel records no cancellation", async () => {
+    commandMocks.cancelQueuedItem.mockRejectedValueOnce(new Error("offline"));
+    const store = makeStore();
+    const { result } = renderUseChatActions(store);
+
+    await expect(result.current.cancelQueued("queued-1")).rejects.toThrow(
+      "offline",
+    );
+
+    expect(
+      store.getState().chat.threads["thread-B"]?.cancelled_command_ids,
+    ).toBeUndefined();
+  });
+
+  test("rejected priority change requests a refresh and returns false", async () => {
+    commandMocks.updateQueuedItemPriority.mockResolvedValueOnce(false);
+    const store = makeStore();
+    const { result } = renderUseChatActions(store);
+
+    await expect(
+      result.current.setQueuedPriority("queued-1", true),
+    ).resolves.toBe(false);
+
+    expect(store.getState().chat.sse_refresh_requested).toBe("thread-B");
+    expect(
+      store.getState().chat.threads["thread-B"]?.cancelled_command_ids,
+    ).toBeUndefined();
+  });
+
+  test("rejected pending delivery update refreshes and rethrows", async () => {
+    commandMocks.updatePendingDelivery.mockRejectedValueOnce(
+      new Error("unknown delivery"),
+    );
+    const store = makeStore();
+    const { result } = renderUseChatActions(store);
+
+    await expect(
+      result.current.updatePendingDelivery("delivery-1", { cancel: true }),
+    ).rejects.toThrow("unknown delivery");
+
+    expect(store.getState().chat.sse_refresh_requested).toBe("thread-B");
   });
 });

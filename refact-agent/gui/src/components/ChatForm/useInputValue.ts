@@ -17,7 +17,6 @@ export function useInputValue(
   boolean,
   React.Dispatch<React.SetStateAction<boolean>>,
 ] {
-  const { value, setValue } = useDraftMessage();
   const [isSendImmediately, setIsSendImmediately] =
     React.useState<boolean>(false);
   const dispatch = useAppDispatch();
@@ -31,6 +30,17 @@ export function useInputValue(
       dispatch(change(chatPage));
     }
   }, [dispatch, pages]);
+
+  const handleQueuedMessageEdit = useCallback(
+    (previousValue: string) => {
+      setUpIfNotReady();
+      if (!previousValue.trim()) uncheckCheckboxes();
+      setIsSendImmediately(false);
+    },
+    [setUpIfNotReady, uncheckCheckboxes],
+  );
+
+  const { value, setValue } = useDraftMessage(handleQueuedMessageEdit);
 
   const handleEvent = useCallback(
     (event: MessageEvent) => {

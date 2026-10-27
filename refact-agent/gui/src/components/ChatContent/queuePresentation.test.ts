@@ -92,6 +92,31 @@ describe("describeQueuedItem", () => {
     expect(presentation.isUserMessage).toBe(true);
     expect(presentation.isDelivery).toBe(false);
   });
+
+  it.each(["answer_questions", "regenerate", "tool_decision", "set_params"])(
+    "classifies %s as a queued command, not a pending delivery",
+    (commandType) => {
+      const presentation = describeQueuedItem(
+        deliveryItem({ command_type: commandType, push: "when_idle" }),
+      );
+      expect(presentation.isUserMessage).toBe(false);
+      expect(presentation.isDelivery).toBe(false);
+      expect(presentation.push).toBe("append");
+      expect(
+        describeQueuedItem(
+          deliveryItem({ command_type: commandType, priority: true }),
+        ).push,
+      ).toBe("preempt");
+    },
+  );
+
+  it("keeps actual deliveries on three-way timing", () => {
+    const presentation = describeQueuedItem(
+      deliveryItem({ push: "when_idle" }),
+    );
+    expect(presentation.isDelivery).toBe(true);
+    expect(presentation.push).toBe("when_idle");
+  });
 });
 
 const statusItem: QueuedItem = {
@@ -114,15 +139,18 @@ describe("queue presentation", () => {
     );
   });
   it("keeps legacy priority options distinct", () => {
-    expect(queueModeOptions(true).map((o) => o.label)).toEqual([
+    expect(queueModeOptions(false).map((o) => o.label)).toEqual([
       "Send next",
       "In order",
     ]);
-    expect(queueModeOptions(false).map((o) => o.shortLabel)).toEqual([
+    expect(queueModeOptions(true).map((o) => o.shortLabel)).toEqual([
       "Interrupt now",
       "After step",
       "When idle",
     ]);
+    expect(queueModeOptions(false).some((o) => o.value === "when_idle")).toBe(
+      false,
+    );
   });
   it("extracts process navigation and agent labels", () => {
     expect(

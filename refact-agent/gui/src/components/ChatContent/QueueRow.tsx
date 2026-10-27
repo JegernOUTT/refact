@@ -10,7 +10,7 @@ import { ExternalLink, Pencil, X } from "lucide-react";
 import type { PushMode, QueuedItem } from "../../features/Chat";
 import { useChatActions } from "../../hooks/useChatActions";
 import { useThreadId } from "../../features/Chat/Thread";
-import { setInputValue } from "../ChatForm/actions";
+import { handOffQueuedMessageEdit } from "../../utils/queuedMessageEdit";
 import { Button, Icon, IconButton, SegmentedControl, Select } from "../ui";
 import { describeQueuedItem, queueModeOptions } from "./queuePresentation";
 import { revealProcessOutput } from "./revealProcessOutput";
@@ -26,17 +26,6 @@ export type QueueRowProps = {
 const UPDATE_ERROR =
   "Could not update this queued item. Try the control again.";
 const TIMING_ERROR = "Could not change delivery timing. Try choosing it again.";
-
-function postInputValue(
-  chatId: string,
-  text: string,
-  sendImmediately: boolean,
-) {
-  window.postMessage(
-    setInputValue({ chatId, value: text, send_immediately: sendImmediately }),
-    window.location.origin || "*",
-  );
-}
 
 export const QueueRow: React.FC<QueueRowProps> = ({
   queuedItem,
@@ -63,7 +52,7 @@ export const QueueRow: React.FC<QueueRowProps> = ({
   const presentation = describeQueuedItem(queuedItem);
   const content = queuedItem.content ?? "";
   const isEditable = presentation.isUserMessage && content.length > 0;
-  const options = queueModeOptions(presentation.isUserMessage);
+  const options = queueModeOptions(presentation.isDelivery);
   const active =
     options.find((option) => option.value === presentation.push) ?? options[0];
 
@@ -101,7 +90,7 @@ export const QueueRow: React.FC<QueueRowProps> = ({
     try {
       const ok = await cancelQueued(queuedItem.client_request_id);
       if (!ok) throw new Error("Cancel failed");
-      postInputValue(chatId, content, queuedItem.priority);
+      handOffQueuedMessageEdit(chatId, content);
     } catch {
       setActionError(UPDATE_ERROR);
       return;
@@ -114,7 +103,6 @@ export const QueueRow: React.FC<QueueRowProps> = ({
     cancelQueued,
     chatId,
     queuedItem.client_request_id,
-    queuedItem.priority,
     content,
   ]);
 
@@ -124,7 +112,7 @@ export const QueueRow: React.FC<QueueRowProps> = ({
       setIsWorking(true);
       setActionError(null);
       try {
-        if (presentation.isUserMessage) {
+        if (!presentation.isDelivery) {
           const ok = await setQueuedPriority(
             queuedItem.client_request_id,
             next === "preempt",
@@ -145,7 +133,7 @@ export const QueueRow: React.FC<QueueRowProps> = ({
     [
       isWorking,
       presentation.push,
-      presentation.isUserMessage,
+      presentation.isDelivery,
       setQueuedPriority,
       updatePendingDelivery,
       queuedItem.client_request_id,
@@ -154,8 +142,12 @@ export const QueueRow: React.FC<QueueRowProps> = ({
 
   const cancelLabel = presentation.isDelivery
     ? `Cancel pending delivery: ${presentation.title}`
-    : "Cancel queued message";
-  const modeLabel = `Delivery timing for ${presentation.title}`;
+    : presentation.isUserMessage
+      ? "Cancel queued message"
+      : `Cancel queued command: ${presentation.title}`;
+  const modeLabel = presentation.isDelivery
+    ? `Delivery timing for ${presentation.title}`
+    : `Queue priority for ${presentation.title}`;
 
   return (
     <div
@@ -272,7 +264,7 @@ export const QueueRow: React.FC<QueueRowProps> = ({
               options={options.map((option) => ({
                 value: option.value,
                 label:
-                  option.value === "preempt" && !presentation.isUserMessage
+                  option.value === "preempt" && presentation.isDelivery
                     ? "Interrupt"
                     : option.shortLabel,
                 ariaLabel: option.label,
@@ -304,7 +296,9 @@ export const QueueRow: React.FC<QueueRowProps> = ({
                 variant="plain"
                 onClick={() => void handleCancel()}
               >
-                Cancel delivery
+                {presentation.isDelivery
+                  ? "Cancel delivery"
+                  : "Remove from queue"}
               </Button>
             </div>
           </div>

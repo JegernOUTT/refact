@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { waitFor } from "@testing-library/react";
+import { act } from "react-dom/test-utils";
+import { handOffQueuedMessageEdit } from "../../utils/queuedMessageEdit";
 import {
   createDefaultChatState,
   postMessage,
@@ -53,5 +55,39 @@ describe("useInputValue", () => {
     expect(document.querySelector('[data-testid="current"]')).toHaveTextContent(
       "",
     );
+  });
+
+  it("restores queued edits as drafts without auto-send", async () => {
+    localStorage.clear();
+    const chat = createDefaultChatState();
+    const chatId = chat.current_thread_id;
+    let setSend: ((value: boolean) => void) | null = null;
+    function SendProbe() {
+      const [value, , isSendImmediately, setIsSendImmediately] = useInputValue(
+        () => undefined,
+      );
+      setSend = setIsSendImmediately;
+      return (
+        <div data-testid="probe" data-send={String(isSendImmediately)}>
+          {value}
+        </div>
+      );
+    }
+    render(
+      <ChatThreadProvider chatId={chatId}>
+        <SendProbe />
+      </ChatThreadProvider>,
+      { preloadedState: { chat } },
+    );
+    const probe = () => document.querySelector('[data-testid="probe"]');
+
+    act(() => setSend?.(true));
+    expect(probe()).toHaveAttribute("data-send", "true");
+    act(() => handOffQueuedMessageEdit(chatId, "priority text"));
+
+    await waitFor(() => {
+      expect(probe()).toHaveTextContent("priority text");
+    });
+    expect(probe()).toHaveAttribute("data-send", "false");
   });
 });

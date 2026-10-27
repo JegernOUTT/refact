@@ -20,6 +20,8 @@ import type {
 import { clearAskQuestionsDraft } from "../../../utils/chatUiPersistence";
 import { CollapsibleStoreProvider } from "../useStoredOpen";
 import { applyChatEvent } from "../../../features/Chat/Thread";
+import { markQueuedCommandCancelled } from "../../../features/Chat/Thread/actions";
+import { act } from "react-dom/test-utils";
 
 function toolCall(): ToolCall {
   return {
@@ -139,6 +141,156 @@ describe("AskQuestionsTool", () => {
     expect(
       screen.getByRole("button", { name: "Submit Answers" }),
     ).toBeDisabled();
+  });
+
+  test("legacy native answers unlock with kept draft after confirmed queue cancellation only", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    const chat = createDefaultChatState();
+    const runtime = chat.threads[chat.current_thread_id];
+    const chatId = runtime.thread.id;
+    runtime.thread.pending_questions = [
+      {
+        tool_call_id: "ask-questions-single-select",
+        asked_at_ms: 1,
+        status: "pending",
+        questions: [
+          {
+            id: "scope",
+            type: "single_select",
+            text: "Choose scope",
+            options: ["GUI", "Engine"],
+          },
+        ],
+      },
+    ];
+    const { user, store } = render(<AskQuestionsTool toolCall={toolCall()} />, {
+      preloadedState: { chat },
+    });
+    await user.click(screen.getByRole("radio", { name: "GUI" }));
+    await user.click(screen.getByRole("button", { name: "Submit Answers" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const first = (
+      JSON.parse(
+        String((fetchMock.mock.calls[0] as [string, RequestInit])[1].body),
+      ) as { client_request_id: string }
+    ).client_request_id;
+    act(() => {
+      store.dispatch(
+        markQueuedCommandCancelled({ chatId, clientRequestId: "unrelated" }),
+      );
+    });
+    expect(screen.getByRole("radio", { name: "GUI" })).toBeDisabled();
+    act(() => {
+      store.dispatch(
+        markQueuedCommandCancelled({ chatId, clientRequestId: first }),
+      );
+    });
+    expect(screen.getByRole("radio", { name: "GUI" })).toBeEnabled();
+    expect(screen.getByRole("radio", { name: "GUI" })).toBeChecked();
+    expect(
+      screen.queryByText("Answers sent, awaiting confirmation."),
+    ).toBeNull();
+    await user.click(screen.getByRole("radio", { name: "Engine" }));
+    await user.click(screen.getByRole("button", { name: "Submit Answers" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const second = JSON.parse(
+      String((fetchMock.mock.calls[1] as [string, RequestInit])[1].body),
+    ) as { client_request_id: string; answers: unknown };
+    expect(second.client_request_id).not.toBe(first);
+    expect(second.answers).toEqual([{ id: "scope", answer: "Engine" }]);
+  });
+
+  test("a delayed legacy submission and its cancellation cannot affect a replacement question", async () => {
+    let resolveOld!: (response: { ok: boolean }) => void;
+    const fetchMock = vi
+      .fn()
+      .mockReturnValueOnce(
+        new Promise<{ ok: boolean }>((resolve) => {
+          resolveOld = resolve;
+        }),
+      )
+      .mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    const chat = createDefaultChatState();
+    const chatId = chat.current_thread_id;
+    const runtime = chat.threads[chatId];
+    const questionSet: PendingQuestionSet = {
+      tool_call_id: toolCall().id ?? "",
+      asked_at_ms: 1,
+      status: "pending",
+      questions: [
+        {
+          id: "scope",
+          type: "single_select",
+          text: "Choose scope",
+          options: ["GUI", "Engine"],
+        },
+      ],
+    };
+    runtime.thread.pending_questions = [questionSet];
+    const { user, store } = render(<AskQuestionsTool toolCall={toolCall()} />, {
+      preloadedState: { chat },
+    });
+    await user.click(screen.getByRole("radio", { name: "GUI" }));
+    await user.click(screen.getByRole("button", { name: "Submit Answers" }));
+    const old = JSON.parse(
+      String((fetchMock.mock.calls[0] as [string, RequestInit])[1].body),
+    ) as { client_request_id: string };
+    act(() => {
+      store.dispatch(
+        applyChatEvent({
+          type: "snapshot",
+          chat_id: chatId,
+          seq: "1",
+          thread: {
+            id: chatId,
+            title: "Questions",
+            model: "",
+            mode: "agent",
+            tool_use: "agent",
+            boost_reasoning: false,
+            context_tokens_cap: null,
+            include_project_info: true,
+            checkpoints_enabled: true,
+            is_title_generated: false,
+          },
+          runtime: {
+            state: "idle",
+            paused: false,
+            error: null,
+            queue_size: 0,
+            pause_reasons: [],
+            queued_items: [],
+          },
+          messages: [],
+          background_agents: [],
+          pending_questions: [{ ...questionSet, asked_at_ms: 2 }],
+        }),
+      );
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("radio", { name: "Engine" })).toBeEnabled(),
+    );
+    await user.click(screen.getByRole("radio", { name: "Engine" }));
+    await user.click(screen.getByRole("button", { name: "Submit Answers" }));
+    await screen.findByText("Answers sent, awaiting confirmation.");
+    await act(async () => {
+      resolveOld({ ok: true });
+      await Promise.resolve();
+    });
+    act(() => {
+      store.dispatch(
+        markQueuedCommandCancelled({
+          chatId,
+          clientRequestId: old.client_request_id,
+        }),
+      );
+    });
+    expect(screen.getByRole("radio", { name: "Engine" })).toBeDisabled();
+    expect(
+      screen.getByText("Answers sent, awaiting confirmation."),
+    ).toBeVisible();
   });
 
   test("renders answered and cancelled native questions without a submit button", () => {

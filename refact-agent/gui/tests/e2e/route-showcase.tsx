@@ -818,7 +818,38 @@ const queueItems: ChatThreadRuntime["queued_items"] = [
 
 // Opt-in stress data stays in this browser fixture, never production props.
 const queueParams = new URLSearchParams(window.location.search);
-const queueCount = Math.min(100, Number(queueParams.get("queue_count")) || 5);
+const queueCommandsFixture = queueParams.get("queue_commands") === "1";
+if (queueCommandsFixture) {
+  queueItems.push(
+    {
+      client_request_id: "queued-question-1",
+      priority: false,
+      command_type: "submit_question_response",
+      preview: "Answer: use the dark palette",
+      content: "use the dark palette",
+      enqueued_at_ms: Date.parse(now) + 5000,
+    },
+    {
+      client_request_id: "queued-regenerate-1",
+      priority: true,
+      command_type: "regenerate",
+      preview: "Regenerate the last answer",
+      enqueued_at_ms: Date.parse(now) + 6000,
+    },
+    {
+      client_request_id: "queued-tool-1",
+      priority: false,
+      command_type: "tool_decision",
+      preview: "Approve shell tool call",
+      content: "approve",
+      enqueued_at_ms: Date.parse(now) + 7000,
+    },
+  );
+}
+const queueCount = Math.min(
+  100,
+  Number(queueParams.get("queue_count")) || queueItems.length,
+);
 for (let index = queueItems.length; index < queueCount; index++) {
   queueItems.push({
     client_request_id: `delivery-stress-${index + 1}`,
@@ -1558,6 +1589,13 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       if (queueParams.get("queue_error") === "1") {
         return new Response("Queue update failed", { status: 500 });
       }
+    }
+    const routeRejection = queueCommandsFixture
+      ? showcaseQueueRouteRejection(path, method, body)
+      : null;
+    if (routeRejection) {
+      showcaseQueueRouteRejections.push(routeRejection);
+      return new Response(routeRejection, { status: 409 });
     }
     applyShowcaseQueueMutation(path, method, body);
     return Promise.resolve(jsonResponse({ ok: true }));
@@ -2299,6 +2337,51 @@ Object.defineProperty(window, "__routeShowcaseDeliveryState", {
     queue: showcaseQueue,
   }),
 });
+
+const showcaseQueueRouteRejections: string[] = [];
+Object.assign(window, {
+  __routeShowcaseQueueRouteRejections: showcaseQueueRouteRejections,
+});
+
+function showcaseQueueRouteRejection(
+  path: string,
+  method: string,
+  body: unknown,
+): string | null {
+  const findItem = (id: unknown) =>
+    showcaseQueue.find((item) => item.client_request_id === id);
+  const queueMatch = /\/queue\/([^/]+)$/.exec(path);
+  if (queueMatch) {
+    const id = decodeURIComponent(queueMatch[1]);
+    const item = findItem(id);
+    if (!item) return `unknown queue item ${id}`;
+    if (item.command_type === "delivery") {
+      return `delivery ${id} must use update_pending_delivery`;
+    }
+    if (method === "DELETE") return null;
+    if (
+      method === "PATCH" &&
+      typeof body === "object" &&
+      body !== null &&
+      Object.keys(body).length === 1 &&
+      typeof (body as { priority?: unknown }).priority === "boolean"
+    ) {
+      return null;
+    }
+    return `invalid ${method} for queued command ${id}`;
+  }
+  if (!path.endsWith("/commands")) return null;
+  if (typeof body !== "object" || body === null) return null;
+  const command = body as { type?: unknown; delivery_id?: unknown };
+  if (command.type !== "update_pending_delivery") return null;
+  const item = findItem(command.delivery_id);
+  if (!item || item.command_type !== "delivery") {
+    return `update_pending_delivery rejected for ${String(
+      command.delivery_id,
+    )}`;
+  }
+  return null;
+}
 
 function applyShowcaseQueueMutation(
   path: string,

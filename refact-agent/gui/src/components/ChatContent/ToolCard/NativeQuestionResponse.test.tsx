@@ -9,6 +9,7 @@ import { AskQuestionsTool } from "./AskQuestionsTool";
 import type { PendingQuestionSet } from "../../../services/refact/types";
 import { act } from "react-dom/test-utils";
 import { applyChatEvent } from "../../../features/Chat/Thread";
+import { markQueuedCommandCancelled } from "../../../features/Chat/Thread/actions";
 import { selectPendingQuestionSetsById } from "../../../features/Chat/Thread/selectors";
 import { CollapsibleStoreProvider } from "../useStoredOpen";
 
@@ -191,6 +192,17 @@ describe("flexible question responses", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+function requestIds(fetchMock: ReturnType<typeof vi.fn>): string[] {
+  return fetchMock.mock.calls.map(
+    (c) =>
+      (
+        JSON.parse(String((c[1] as RequestInit).body)) as {
+          client_request_id: string;
+        }
+      ).client_request_id,
+  );
+}
 
 function updateQuestion(
   store: ReturnType<typeof setup>["store"],
@@ -524,6 +536,113 @@ describe("compact protocol-v2 question responses", () => {
     ) as { client_request_id: string; asked_at_ms: number };
     expect(next.client_request_id).not.toBe(old.client_request_id);
     expect(next.asked_at_ms).toBe(43);
+  });
+
+  test("confirmed queue cancellation unlocks the kept draft and resubmits with a new identity", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    const { user, store } = setup({
+      questions: [{ id: "yes", type: "yes_no", text: "Continue?" }],
+    });
+    await user.click(screen.getByRole("radio", { name: "No" }));
+    await user.click(screen.getByRole("button", { name: "Submit response" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("radio", { name: "No" })).toBeDisabled();
+    const first = requestIds(fetchMock)[0];
+    act(() => {
+      store.dispatch(
+        markQueuedCommandCancelled({
+          chatId: "other-thread",
+          clientRequestId: first,
+        }),
+      );
+      store.dispatch(
+        markQueuedCommandCancelled({
+          chatId: "questions-test",
+          clientRequestId: "unrelated",
+        }),
+      );
+    });
+    expect(screen.getByRole("radio", { name: "No" })).toBeDisabled();
+    act(() => {
+      store.dispatch(
+        markQueuedCommandCancelled({
+          chatId: "questions-test",
+          clientRequestId: first,
+        }),
+      );
+    });
+    expect(screen.getByRole("radio", { name: "No" })).toBeEnabled();
+    expect(screen.getByRole("radio", { name: "No" })).toBeChecked();
+    expect(
+      screen.queryByText("Response sent, awaiting confirmation."),
+    ).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Submit response" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(requestIds(fetchMock)[1]).not.toBe(first);
+  });
+
+  test("a response POST settling after confirmed cancellation does not relock", async () => {
+    let resolvePost: (value: { ok: boolean }) => void = () => undefined;
+    const fetchMock = vi.fn().mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolvePost = resolve;
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { user, store } = setup({
+      questions: [{ id: "yes", type: "yes_no", text: "Continue?" }],
+    });
+    await user.click(screen.getByRole("radio", { name: "No" }));
+    await user.click(screen.getByRole("button", { name: "Submit response" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    act(() => {
+      store.dispatch(
+        markQueuedCommandCancelled({
+          chatId: "questions-test",
+          clientRequestId: requestIds(fetchMock)[0],
+        }),
+      );
+    });
+    await act(async () => {
+      resolvePost({ ok: true });
+      await Promise.resolve();
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("radio", { name: "No" })).toBeEnabled(),
+    );
+    expect(
+      screen.queryByText("Response sent, awaiting confirmation."),
+    ).toBeNull();
+  });
+
+  test("stale cancellation of an old request cannot unlock a replacement instance", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    const { user, store } = setup({
+      questions: [{ id: "yes", type: "yes_no", text: "Continue?" }],
+    });
+    await user.click(screen.getByRole("radio", { name: "No" }));
+    await user.click(screen.getByRole("button", { name: "Submit response" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    updateQuestion(store, { asked_at_ms: 43 });
+    await user.click(screen.getByRole("radio", { name: "Yes" }));
+    await user.click(screen.getByRole("button", { name: "Submit response" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const [old, next] = requestIds(fetchMock);
+    expect(next).not.toBe(old);
+    act(() => {
+      store.dispatch(
+        markQueuedCommandCancelled({
+          chatId: "questions-test",
+          clientRequestId: old,
+        }),
+      );
+    });
+    expect(screen.getByRole("radio", { name: "Yes" })).toBeDisabled();
+    expect(
+      screen.getByText("Response sent, awaiting confirmation."),
+    ).toBeInTheDocument();
   });
 
   test("unrecognized historical state is neutral, escaped and never offers live controls", async () => {

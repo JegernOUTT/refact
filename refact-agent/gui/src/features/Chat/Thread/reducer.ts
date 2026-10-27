@@ -69,6 +69,7 @@ import {
   resetThreadTextFiles,
   applyChatEvent,
   requestSseRefresh,
+  markQueuedCommandCancelled,
   clearSseRefreshRequest,
   setTaskWidgetExpanded,
   setTaskGoalExpanded,
@@ -1640,6 +1641,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
             ? event.runtime.queued_items
             : [],
           command_acks: existingRuntime?.command_acks ?? {},
+          cancelled_command_ids: existingRuntime?.cancelled_command_ids,
           send_immediately: existingRuntime?.send_immediately ?? false,
           attached_images: existingRuntime?.attached_images ?? [],
           attached_text_files: existingRuntime?.attached_text_files ?? [],
@@ -2268,6 +2270,16 @@ export const chatReducer = createReducer(initialState, (builder) => {
 
   builder.addCase(requestSseRefresh, (state, action) => {
     state.sse_refresh_requested = action.payload.chatId;
+  });
+
+  builder.addCase(markQueuedCommandCancelled, (state, action) => {
+    const rt = state.threads[action.payload.chatId];
+    if (!rt) return;
+    const ids = (rt.cancelled_command_ids ?? []).filter(
+      (id) => id !== action.payload.clientRequestId,
+    );
+    ids.push(action.payload.clientRequestId);
+    rt.cancelled_command_ids = ids.slice(-50);
   });
 
   builder.addCase(clearSseRefreshRequest, (state) => {

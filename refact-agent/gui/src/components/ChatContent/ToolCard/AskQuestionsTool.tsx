@@ -20,6 +20,7 @@ import {
   selectPendingQuestionSetsById,
   selectHasPendingQuestionsCapabilityById,
   selectCommandAckByThreadAndId,
+  selectCommandCancelledByThreadAndId,
 } from "../../../features/Chat/Thread/selectors";
 import { useThreadId } from "../../../features/Chat/Thread";
 import { requestSseRefresh } from "../../../features/Chat/Thread/actions";
@@ -28,6 +29,7 @@ import {
   selectConfig,
 } from "../../../features/Config/configSlice";
 import { answerQuestions } from "../../../services/refact/chatCommands";
+import { getEngineEndpointIdentity } from "../../../services/refact/apiUrl";
 import {
   ToolCall,
   PendingQuestion,
@@ -336,11 +338,30 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
   const submissionAck = useAppSelector((state) =>
     selectCommandAckByThreadAndId(state, threadId, submissionRequestId),
   );
+  const submissionCancelled = useAppSelector((state) =>
+    selectCommandCancelledByThreadAndId(state, threadId, submissionRequestId),
+  );
 
   const nativeQuestionSet = useMemo(
     () => pendingQuestionSets.find((set) => set.tool_call_id === toolCall.id),
     [pendingQuestionSets, toolCall.id],
   );
+  const questionInstance = JSON.stringify([
+    getEngineEndpointIdentity(config),
+    threadId,
+    toolCall.id,
+    nativeQuestionSet?.asked_at_ms,
+  ]);
+  const currentQuestionInstance = useRef(questionInstance);
+  currentQuestionInstance.current = questionInstance;
+  const submissionInstance = useRef<string | null>(null);
+
+  useEffect(() => {
+    setIsSubmitting(false);
+    setSubmissionSent(false);
+    setSubmissionRequestId(null);
+    setSubmitError(null);
+  }, [questionInstance]);
 
   const data = useMemo((): AskQuestionsResult | null => {
     if (!maybeResult || typeof maybeResult.content !== "string") return null;
@@ -470,6 +491,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
       });
     setIsSubmitting(true);
     setSubmitError(null);
+    submissionInstance.current = questionInstance;
     try {
       const clientRequestId = await answerQuestions(
         threadId,
@@ -479,14 +501,17 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
         apiKey ?? undefined,
         nativeQuestionSet.asked_at_ms,
       );
+      if (currentQuestionInstance.current !== questionInstance) return;
       setSubmissionRequestId(clientRequestId);
       setSubmissionSent(true);
     } catch (error) {
+      if (currentQuestionInstance.current !== questionInstance) return;
       setSubmitError(
         error instanceof Error ? error.message : "Unable to submit answers",
       );
     } finally {
-      setIsSubmitting(false);
+      if (currentQuestionInstance.current === questionInstance)
+        setIsSubmitting(false);
     }
   }, [
     answers,
@@ -494,6 +519,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
     config,
     isSubmitting,
     nativeQuestionSet,
+    questionInstance,
     submissionSent,
     threadId,
   ]);
@@ -506,12 +532,25 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
   }, [nativeQuestionSet?.status]);
 
   useEffect(() => {
-    if (!submissionAck || submissionAck.accepted) return;
+    if (
+      !submissionAck ||
+      submissionAck.accepted ||
+      submissionInstance.current !== questionInstance
+    )
+      return;
     setSubmissionSent(false);
     setSubmissionRequestId(null);
     setSubmitError("The server rejected these answers. Please try again.");
     dispatch(requestSseRefresh({ chatId: threadId }));
-  }, [dispatch, submissionAck, threadId]);
+  }, [dispatch, questionInstance, submissionAck, threadId]);
+
+  useEffect(() => {
+    if (!submissionCancelled || submissionInstance.current !== questionInstance)
+      return;
+    setSubmissionSent(false);
+    setSubmissionRequestId(null);
+    setSubmitError(null);
+  }, [questionInstance, submissionCancelled]);
 
   const syncRefreshRequestedRef = useRef(false);
   useEffect(() => {

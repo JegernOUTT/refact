@@ -17,7 +17,11 @@ import {
   setSendImmediately,
   clearManualPreviewItems,
 } from "../features/Chat/Thread";
-import { buildThreadParamsPatch } from "../features/Chat/Thread/actions";
+import {
+  buildThreadParamsPatch,
+  markQueuedCommandCancelled,
+  requestSseRefresh,
+} from "../features/Chat/Thread/actions";
 import {
   sendUserMessage,
   retryFromIndex as retryFromIndexApi,
@@ -357,28 +361,36 @@ export function useChatActions(explicitChatId?: string) {
   const cancelQueued = useCallback(
     async (clientRequestId: string) => {
       if (!chatId) return false;
-      return cancelQueuedItem(
+      const cancelled = await cancelQueuedItem(
         chatId,
         clientRequestId,
         config,
         apiKey ?? undefined,
       );
+      dispatch(
+        cancelled
+          ? markQueuedCommandCancelled({ chatId, clientRequestId })
+          : requestSseRefresh({ chatId }),
+      );
+      return cancelled;
     },
-    [chatId, config, apiKey],
+    [chatId, config, apiKey, dispatch],
   );
 
   const setQueuedPriority = useCallback(
     async (clientRequestId: string, priority: boolean) => {
       if (!chatId) return false;
-      return updateQueuedItemPriority(
+      const updated = await updateQueuedItemPriority(
         chatId,
         clientRequestId,
         priority,
         config,
         apiKey ?? undefined,
       );
+      if (!updated) dispatch(requestSseRefresh({ chatId }));
+      return updated;
     },
-    [chatId, config, apiKey],
+    [chatId, config, apiKey, dispatch],
   );
 
   const updatePendingDelivery = useCallback(
@@ -387,15 +399,20 @@ export function useChatActions(explicitChatId?: string) {
       update: { push?: PushMode; cancel?: boolean },
     ) => {
       if (!chatId) return;
-      await updatePendingDeliveryApi(
-        chatId,
-        deliveryId,
-        update,
-        config,
-        apiKey ?? undefined,
-      );
+      try {
+        await updatePendingDeliveryApi(
+          chatId,
+          deliveryId,
+          update,
+          config,
+          apiKey ?? undefined,
+        );
+      } catch (error) {
+        dispatch(requestSseRefresh({ chatId }));
+        throw error;
+      }
     },
-    [chatId, config, apiKey],
+    [chatId, config, apiKey, dispatch],
   );
 
   return {

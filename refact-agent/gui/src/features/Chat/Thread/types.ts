@@ -213,6 +213,7 @@ export type ChatThreadRuntime = {
   error: string | null;
   queued_items: QueuedItem[];
   command_acks?: Record<string, { accepted: boolean; result: unknown }>;
+  cancelled_command_ids?: string[];
   send_immediately: boolean;
   attached_images: ImageFile[];
   attached_text_files: TextFile[];
