@@ -99,33 +99,22 @@ async fn proxy_to_worker(
         Err(response) => return response,
     };
 
-    let url = target_url(worker.http_port, &worker_path, parts.uri.query());
-    let method = match reqwest::Method::from_bytes(parts.method.as_str().as_bytes()) {
-        Ok(method) => method,
-        Err(error) => {
-            return json_response(
-                StatusCode::BAD_REQUEST,
-                json!({"error": format!("invalid request method: {error}")}),
-            );
-        }
-    };
-    let headers = request_headers(&parts.headers, &project_id);
     let client = if use_stream_client {
         &state.proxy_stream_client
     } else {
         &state.proxy_client
     };
-    let request = client
-        .request(method, url)
-        .headers(headers)
-        .body(body.to_vec());
-    let request = if worker_path == "/v1/work" || worker_path.starts_with("/v1/work/") {
-        match crate::daemon::hooks::worker_forward_token(&state) {
-            Some(token) => request.bearer_auth(token),
-            None => request,
-        }
-    } else {
-        request
+    let request = match worker_request(
+        client,
+        &project_id,
+        worker.http_port,
+        &worker_path,
+        &parts,
+        body,
+        crate::daemon::hooks::worker_forward_token(&state),
+    ) {
+        Ok(request) => request,
+        Err(response) => return response,
     };
     let response = send_worker_request(request, use_stream_client).await;
 
@@ -148,6 +137,62 @@ async fn proxy_to_worker(
             )
             .await
         }
+    }
+}
+
+fn worker_request(
+    client: &reqwest::Client,
+    project_id: &str,
+    port: u16,
+    worker_path: &str,
+    parts: &axum::http::request::Parts,
+    body: hyper::body::Bytes,
+    token: Option<&str>,
+) -> Result<reqwest::RequestBuilder, Response<Body>> {
+    let method =
+        reqwest::Method::from_bytes(parts.method.as_str().as_bytes()).map_err(|error| {
+            json_response(
+                StatusCode::BAD_REQUEST,
+                json!({"error": format!("invalid request method: {error}")}),
+            )
+        })?;
+    let url =
+        reqwest::Url::parse(&target_url(port, worker_path, parts.uri.query())).map_err(|_| {
+            json_response(
+                StatusCode::BAD_REQUEST,
+                json!({"error": "invalid worker request URL"}),
+            )
+        })?;
+    let protected = requires_worker_authorization(&method, url.path());
+    let request = client
+        .request(method, url)
+        .headers(request_headers(&parts.headers, project_id))
+        .body(body.to_vec());
+    Ok(match token.filter(|_| protected) {
+        Some(token) => request.bearer_auth(token),
+        None => request,
+    })
+}
+
+fn requires_worker_authorization(method: &reqwest::Method, path: &str) -> bool {
+    match method.as_str() {
+        "GET" | "HEAD" => {
+            matches!(
+                path,
+                "/v1/work"
+                    | "/v1/work/subscribe"
+                    | "/v1/work/wait-graph"
+                    | "/v1/work/causal"
+                    | "/v1/work/causal/subscribe"
+                    | "/v1/attention"
+                    | "/v1/metrics"
+                    | "/v1/hooks"
+            ) || path
+                .strip_prefix("/v1/work/")
+                .is_some_and(|id| !id.is_empty() && !id.contains('/') && id != "provenance")
+        }
+        "DELETE" => path == "/v1/work/provenance",
+        _ => false,
     }
 }
 
@@ -667,17 +712,89 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer daemon-token"),
+            HeaderValue::from_static("Bearer malicious-browser-token"),
         );
         headers.insert(
             COOKIE,
             HeaderValue::from_static("refact_daemon_auth=secret; theme=dark"),
         );
 
-        let out = request_headers(&headers, "project");
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        for token in [Some("worker-token"), None] {
+            for (method, path, protected) in [
+                (Method::GET, "/v1/work", true),
+                (Method::GET, "/v1/work/run-1", true),
+                (Method::GET, "/v1/work/subscribe", true),
+                (Method::GET, "/v1/work/wait-graph", true),
+                (Method::GET, "/v1/work/causal", true),
+                (Method::GET, "/v1/work/causal/subscribe", true),
+                (Method::DELETE, "/v1/work/provenance", true),
+                (Method::GET, "/v1/attention", true),
+                (Method::GET, "/v1/metrics", true),
+                (Method::GET, "/v1/hooks", true),
+                (Method::HEAD, "/v1/hooks", true),
+                (Method::GET, "/v1/worktrees", false),
+                (Method::GET, "/v1/hooks-evil", false),
+                (Method::POST, "/v1/hooks/fire", false),
+                (Method::GET, "/v1/attention/action", false),
+                (Method::POST, "/v1/attention", false),
+                (Method::GET, "/v1/metrics-extra", false),
+                (Method::GET, "/v1/work/run-1/extra", false),
+                (Method::GET, "/v1/work/provenance", false),
+                (Method::POST, "/v1/work", false),
+                (Method::GET, "/v1/work/.", false),
+                (Method::GET, "/v1/work/%2e%2e", false),
+                (Method::GET, "/v1/chat/completions", false),
+            ] {
+                let mut incoming = Request::builder()
+                    .method(method.clone())
+                    .uri(format!(
+                        "http://browser.invalid/p/project{path}?daemon_token=browser-query&limit=3"
+                    ))
+                    .body(Body::empty())
+                    .unwrap();
+                *incoming.headers_mut() = headers.clone();
+                let (parts, _) = incoming.into_parts();
+                let worker_path = worker_v1_path("project", &parts.uri);
+                let outgoing = worker_request(
+                    &client,
+                    "project",
+                    1234,
+                    &worker_path,
+                    &parts,
+                    hyper::body::Bytes::new(),
+                    token,
+                )
+                .unwrap()
+                .build()
+                .unwrap();
 
-        assert!(out.get(reqwest::header::AUTHORIZATION).is_none());
-        assert_eq!(out.get(reqwest::header::COOKIE).unwrap(), "theme=dark");
+                assert_eq!(outgoing.method().as_str(), method.as_str());
+                let normalized_path = match path {
+                    "/v1/work/." => "/v1/work/",
+                    "/v1/work/%2e%2e" => "/v1/",
+                    _ => path,
+                };
+                assert_eq!(
+                    outgoing.url().as_str(),
+                    format!("http://127.0.0.1:1234{normalized_path}?limit=3")
+                );
+                let authorization = outgoing
+                    .headers()
+                    .get(reqwest::header::AUTHORIZATION)
+                    .map(|value| value.to_str().unwrap());
+                assert_eq!(
+                    authorization,
+                    token.filter(|_| protected).map(|_| "Bearer worker-token"),
+                    "{method} {path}"
+                );
+                assert_eq!(outgoing.headers().get(PROJECT_HEADER).unwrap(), "project");
+                assert_eq!(
+                    outgoing.headers().get(reqwest::header::COOKIE).unwrap(),
+                    "theme=dark"
+                );
+            }
+        }
     }
 
     #[test]

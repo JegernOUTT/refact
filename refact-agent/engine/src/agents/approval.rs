@@ -80,6 +80,78 @@ pub fn now_ms() -> u64 {
     chrono::Utc::now().timestamp_millis().max(0) as u64
 }
 
+pub(crate) async fn dangerous_confirmation_enabled(app: &AppState, chat_id: &str) -> bool {
+    let mut current = chat_id.to_string();
+    let mut visited = std::collections::HashSet::new();
+    let max_depth = crate::runtime_settings::current()
+        .coordination
+        .max_subchat_depth;
+    while visited.len() < max_depth && visited.insert(current.clone()) {
+        let Some(session) = app.chat.sessions.read().await.get(&current).cloned() else {
+            return false;
+        };
+        let thread = {
+            let session = session.lock().await;
+            if session.closed || !session.thread.auto_approve_dangerous_commands {
+                return false;
+            }
+            session.thread.clone()
+        };
+        if let Some(agent_id) = app.agents.find_agent_id_by_child_chat_id(&current).await {
+            let Ok(target) = super::approval_target::ApprovalTarget::resolve(app, &agent_id).await
+            else {
+                return false;
+            };
+            let Some(config) = app.agent_executions.saved_config(&agent_id) else {
+                return false;
+            };
+            if app.agent_executions.get(&current).is_none_or(|run| {
+                run.is_cancelled() || run.state() == super::execution::ExecutionState::Gone
+            }) || app
+                .agents
+                .abort_flag(&agent_id)
+                .await
+                .is_none_or(|abort| abort.load(std::sync::atomic::Ordering::Relaxed))
+                || !config.stateful
+                || !config.auto_approve_dangerous_commands
+                || matches!(
+                    config.tools,
+                    crate::subchat::ToolsPolicy::All
+                        | crate::subchat::ToolsPolicy::Supervised { .. }
+                )
+                || config.chat_id.as_deref() != Some(current.as_str())
+                || config.parent_id.as_deref() != Some(target.parent_id.as_str())
+                || thread.parent_id != config.parent_id
+                || thread.root_chat_id != config.root_chat_id
+            {
+                return false;
+            }
+            current = target.parent_id;
+        } else if thread
+            .task_meta
+            .as_ref()
+            .is_some_and(|meta| matches!(meta.role.as_str(), "agent" | "agents"))
+        {
+            let Ok(target) =
+                super::approval_target::ApprovalTarget::resolve(app, &format!("board:{current}"))
+                    .await
+            else {
+                return false;
+            };
+            if thread.parent_id.as_deref() != Some(target.parent_id.as_str()) {
+                return false;
+            }
+            current = target.parent_id;
+        } else {
+            return !matches!(
+                thread.link_type.as_deref(),
+                Some("subagent" | "delegate" | "task_agent")
+            );
+        }
+    }
+    false
+}
+
 pub async fn request(
     app: &AppState,
     ccx: &Arc<Mutex<AtCommandsContext>>,
@@ -348,6 +420,14 @@ pub async fn parent_command_policy(
     ),
     String,
 > {
+    if now_ms() >= pending.expires_at {
+        return Err("approval request expired".into());
+    }
+    match app.agent_approvals.wait_now(&pending.id, now_ms()) {
+        Err(refact_work_core::ApprovalError::NotApproved) => {}
+        Ok(ApprovalDecision::Expired) => return Err("approval request expired".into()),
+        _ => return Err("approval request is no longer pending".into()),
+    }
     let session = app
         .chat
         .sessions
@@ -356,7 +436,13 @@ pub async fn parent_command_policy(
         .get(&pending.parent_chat_id)
         .cloned()
         .ok_or("parent session unavailable")?;
-    let allowed_tools = session.lock().await.active_command.allowed_tools.clone();
+    let allowed_tools = {
+        let session = session.lock().await;
+        if session.closed || session.thread.id != parent.id || parent.id != pending.parent_chat_id {
+            return Err("parent approval authority unavailable".into());
+        }
+        session.active_command.allowed_tools.clone()
+    };
     let target =
         super::approval_target::ApprovalTarget::resolve(app, &pending.child_work_id).await?;
     target.check(pending)?;
@@ -369,13 +455,53 @@ pub async fn parent_command_policy(
         .get(&child_chat_id)
         .cloned()
         .ok_or("child execution scope unavailable")?;
-    let child_worktree = child_session.lock().await.thread.worktree.clone();
+    let child_thread = {
+        let child = child_session.lock().await;
+        if child.closed || child.abort_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("child approval execution was cancelled".into());
+        }
+        child.thread.clone()
+    };
+    if app
+        .agent_executions
+        .get(&child_chat_id)
+        .is_some_and(|run| run.is_cancelled())
+    {
+        return Err("child approval execution was cancelled".into());
+    }
+    let child_worktree = child_thread.worktree.clone();
     if child_worktree
         .as_ref()
         .map(|worktree| worktree.root.to_string_lossy().into_owned())
         != pending.digest
     {
         return Err("child approval execution scope no longer matches the request".into());
+    }
+    let mode = crate::yaml_configs::customization_registry::get_mode_config(
+        app.gcx.clone(),
+        &parent.mode,
+        Some(&parent.model),
+    )
+    .await
+    .ok_or("parent approval mode unavailable")?;
+    if crate::yaml_configs::customization_registry::match_tool_confirm_action(
+        &mode.tool_confirm.rules,
+        "agent_approval",
+    )
+    .as_deref()
+        == Some("deny")
+    {
+        return Err("parent mode denies command approval".into());
+    }
+    let ceiling = super::tool_authority::current_ceiling(
+        app,
+        &pending.parent_chat_id,
+        &parent.model,
+        &parent.mode,
+    )
+    .await?;
+    if !ceiling.allows_tool("agent_approval") || !ceiling.allows_tool(&pending.tool_name) {
+        return Err("parent is not authorized to approve the requested child tool".into());
     }
     let mut effective = parent.clone();
     effective.worktree = child_worktree;
@@ -404,6 +530,35 @@ pub async fn parent_command_policy(
     let call: ChatToolCall = serde_json::from_value(serde_json::json!({
         "id":pending.tool_call_id,"type":"function","function":{"name":pending.tool_name,"arguments":serde_json::to_string(&pending.args).map_err(|e| e.to_string())?}
     })).map_err(|e| e.to_string())?;
+    let child_context = Arc::new(Mutex::new(
+        AtCommandsContext::new_from_app(
+            app.clone(),
+            1000,
+            1,
+            false,
+            vec![],
+            child_chat_id,
+            child_thread.root_chat_id,
+            child_thread.model,
+            child_thread.task_meta,
+            child_thread.worktree,
+        )
+        .await,
+    ));
+    super::tool_authority::ensure_context_tool(&child_context, &pending.tool_name).await?;
+    let binding = super::command_approval::prepare(
+        &child_context,
+        &call,
+        pending
+            .execution
+            .as_ref()
+            .map(|execution| execution.reason.as_str())
+            .unwrap_or(""),
+    )
+    .await?;
+    if binding != pending.execution {
+        return Err("child approval execution binding changed".into());
+    }
     Ok(crate::chat::tools::check_tools_confirmation(
         app.clone(),
         &[call],
@@ -948,6 +1103,51 @@ pub(crate) mod tests {
             .cloned()
             .unwrap();
         let call = fixture.call("shell");
+        let parent = fixture
+            .app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get("parent")
+            .cloned()
+            .unwrap();
+        parent.lock().await.thread.auto_approve_dangerous_commands = true;
+        {
+            let mut child = session.lock().await;
+            child.thread.parent_id = Some("parent".into());
+            child.thread.auto_approve_dangerous_commands = true;
+        }
+        let thread = session.lock().await.thread.clone();
+        let (asks, denials) = crate::chat::tools::check_tools_confirmation(
+            fixture.app.clone(),
+            &[call.clone()],
+            &[],
+            &thread,
+            None,
+            "task_agent",
+            Some("test/model"),
+            &[],
+            "test",
+        )
+        .await;
+        assert!(asks.is_empty(), "{asks:?}");
+        assert!(denials.is_empty(), "{denials:?}");
+        parent.lock().await.thread.auto_approve_dangerous_commands = false;
+        let (asks, denials) = crate::chat::tools::check_tools_confirmation(
+            fixture.app.clone(),
+            &[call.clone()],
+            &[],
+            &thread,
+            None,
+            "task_agent",
+            Some("test/model"),
+            &[],
+            "test",
+        )
+        .await;
+        assert_eq!(asks.len(), 1);
+        assert!(denials.is_empty(), "{denials:?}");
         session.lock().await.add_message(ChatMessage {
             role: "assistant".into(),
             tool_calls: Some(vec![call.clone()]),
@@ -1635,6 +1835,51 @@ pub(crate) mod tests {
             )
             .await
             .is_err());
+            let parent = fixture
+                .app
+                .chat
+                .sessions
+                .read()
+                .await
+                .get("parent")
+                .cloned()
+                .unwrap();
+            parent.lock().await.thread.auto_approve_dangerous_commands = true;
+            let context = Arc::new(Mutex::new(
+                AtCommandsContext::new_from_app(
+                    fixture.app.clone(),
+                    1000,
+                    1,
+                    false,
+                    vec![],
+                    "parent".into(),
+                    None,
+                    "test/model".into(),
+                    None,
+                    None,
+                )
+                .await,
+            ));
+            assert!(fixture
+                .app
+                .tool_registry
+                .execute_tool(
+                    &context,
+                    "agent",
+                    Some("test/model"),
+                    "stale-approve",
+                    "agent_approval",
+                    serde_json::json!({"action":"approve", "request_id":pending.id})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                )
+                .await
+                .is_err());
+            assert_eq!(
+                fixture.app.agent_approvals.wait_now(&pending.id, now_ms()),
+                Err(refact_work_core::ApprovalError::NotApproved)
+            );
             drop(request);
             assert!(!fixture.dir.path().join("approval.txt").exists());
             crate::tasks::admission::end(&child_id).await;
@@ -1677,7 +1922,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn parent_requires_user_grant_and_cannot_expand_its_tool_authority() {
+    async fn auto_approve_wrapper_requires_current_consent_and_cannot_expand_tool_authority() {
         let fixture = fixture().await;
         let call = fixture.call("shell");
         let mut future = Box::pin(request(&fixture.app, &fixture.ccx, &call, "needs decision"));
@@ -1719,7 +1964,7 @@ pub(crate) mod tests {
         let thread = parent_session.lock().await.thread.clone();
         let (asks, denials) = crate::chat::tools::check_tools_confirmation(
             fixture.app.clone(),
-            &[wrapper],
+            &[wrapper.clone()],
             &[],
             &thread,
             None,
@@ -1761,17 +2006,96 @@ pub(crate) mod tests {
             fixture.app.agent_approvals.wait_now(&pending.id, now_ms()),
             Err(refact_work_core::ApprovalError::NotApproved)
         );
+        parent_session
+            .lock()
+            .await
+            .thread
+            .auto_approve_dangerous_commands = true;
+        let thread = parent_session.lock().await.thread.clone();
+        let mut protected = vec![wrapper];
+        for (name, args) in [
+            (
+                "agent_lifecycle",
+                serde_json::json!({"agent_id": fixture.agent_id, "action": "close"}),
+            ),
+            (
+                "pause",
+                serde_json::json!({"target":{"kind":"child", "agent_id":fixture.agent_id}, "expected_run_generation":fixture.generation}),
+            ),
+            (
+                "resume",
+                serde_json::json!({"target":{"kind":"child", "agent_id":fixture.agent_id}, "expected_run_generation":fixture.generation}),
+            ),
+        ] {
+            protected.push(serde_json::from_value(serde_json::json!({
+                "id":name, "type":"function", "function":{"name":name, "arguments":args.to_string()}
+            })).unwrap());
+        }
+        let (asks, denials) = crate::chat::tools::check_tools_confirmation(
+            fixture.app.clone(),
+            &protected,
+            &[],
+            &thread,
+            None,
+            "agent",
+            Some("test/model"),
+            &[],
+            "test",
+        )
+        .await;
+        assert!(asks.is_empty(), "{asks:?}");
+        assert!(denials.is_empty(), "{denials:?}");
+        let mut foreign = crate::chat::types::ChatSession::new("foreign".into());
+        foreign.thread.auto_approve_dangerous_commands = true;
         fixture
             .app
-            .agent_approvals
-            .grant_user_once(
-                "parent",
-                &pending.id,
-                fixture.generation,
+            .chat
+            .sessions
+            .write()
+            .await
+            .insert("foreign".into(), Arc::new(Mutex::new(foreign)));
+        parent_ccx.lock().await.chat_id = "foreign".into();
+        assert!(fixture
+            .app
+            .tool_registry
+            .execute_tool(
+                &parent_ccx,
+                "agent",
+                Some("test/model"),
                 "wrapper",
-                now_ms(),
+                "agent_approval",
+                args.clone(),
             )
-            .unwrap();
+            .await
+            .err()
+            .unwrap()
+            .contains("NotOwner"));
+        parent_ccx.lock().await.chat_id = "parent".into();
+        parent_session
+            .lock()
+            .await
+            .thread
+            .auto_approve_dangerous_commands = false;
+        assert!(fixture
+            .app
+            .tool_registry
+            .execute_tool(
+                &parent_ccx,
+                "agent",
+                Some("test/model"),
+                "wrapper",
+                "agent_approval",
+                args.clone(),
+            )
+            .await
+            .err()
+            .unwrap()
+            .contains("explicit user approval"));
+        parent_session
+            .lock()
+            .await
+            .thread
+            .auto_approve_dangerous_commands = true;
         let parent = fixture
             .app
             .chat
@@ -1798,7 +2122,7 @@ pub(crate) mod tests {
             .unwrap()
             .contains("not authorized"));
         parent.lock().await.active_command.allowed_tools.clear();
-        fixture
+        let approved = fixture
             .app
             .tool_registry
             .execute_tool(
@@ -1812,6 +2136,10 @@ pub(crate) mod tests {
             .await
             .unwrap()
             .unwrap();
+        let response: serde_json::Value =
+            serde_json::from_str(&approved.messages[0].content.content_text_only()).unwrap();
+        assert_eq!(response["decision"], "approved");
+        assert_eq!(response["approval_source"], "parent_policy");
         assert!(future.await.unwrap());
         let repeated = fixture
             .app
@@ -1831,6 +2159,56 @@ pub(crate) mod tests {
             .content
             .content_text_only()
             .contains("already_decided"));
+        for (state, expected) in [
+            (ApprovalDecision::Rejected, "no longer pending"),
+            (ApprovalDecision::Expired, "expired"),
+        ] {
+            let mut terminal = pending.clone();
+            terminal.id = format!("terminal-{state:?}");
+            terminal.tool_call_id = terminal.id.clone();
+            terminal.created_at = now_ms();
+            terminal.expires_at = terminal.created_at + 60_000;
+            fixture
+                .app
+                .agent_approvals
+                .register(terminal.clone(), now_ms())
+                .unwrap();
+            if state == ApprovalDecision::Rejected {
+                fixture
+                    .app
+                    .agent_approvals
+                    .decide("parent", fixture.generation, &terminal.id, false, now_ms())
+                    .unwrap();
+            } else {
+                fixture.app.agent_approvals.expire(terminal.expires_at);
+            }
+            assert_eq!(
+                fixture.app.agent_approvals.wait_now(&terminal.id, now_ms()),
+                Ok(state)
+            );
+            assert!(fixture
+                .app
+                .tool_registry
+                .execute_tool(
+                    &parent_ccx,
+                    "agent",
+                    Some("test/model"),
+                    "terminal-wrapper",
+                    "agent_approval",
+                    serde_json::json!({"action":"approve", "request_id":terminal.id})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                )
+                .await
+                .err()
+                .unwrap()
+                .contains(expected));
+            assert_eq!(
+                fixture.app.agent_approvals.wait_now(&terminal.id, now_ms()),
+                Ok(state)
+            );
+        }
         assert!(!fixture.dir.path().join("approval.txt").exists());
     }
 }

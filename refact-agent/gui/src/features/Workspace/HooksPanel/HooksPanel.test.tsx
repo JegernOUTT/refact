@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
-import { render, screen } from "../../../utils/test-utils";
+import { render, screen, fireEvent } from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
 import { HooksPanel } from "./HooksPanel";
 import type {
@@ -35,6 +35,8 @@ const registration = (
   source: "global refact",
   trust: "global",
   runs: true,
+  matcher: null,
+  blocked_reason: null,
   ...overrides,
 });
 
@@ -58,6 +60,9 @@ const activity = (overrides: Partial<HookActivity> = {}): HookActivity => ({
   event: "PreToolUse",
   kind: "control",
   verdict: "allow",
+  decided_by: null,
+  reason: null,
+  tool: null,
   runs: [],
   at_ms: 1_000,
   ...overrides,
@@ -74,6 +79,12 @@ describe("Hooks panel", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Hooks unavailable",
     );
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Authentication is required",
+    );
+    surfaceHandler(surface());
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(await screen.findByText("No hooks registered")).toBeInTheDocument();
     expect(screen.queryByLabelText("Registered hooks")).toBeNull();
   });
 
@@ -145,6 +156,7 @@ describe("Hooks panel", () => {
                 source: "project refact /repo",
                 trust: "untrusted_project",
                 outcome: "allow",
+                detail: null,
                 decided: false,
               },
             ],
@@ -175,6 +187,7 @@ describe("Hooks panel", () => {
                 source: "global refact",
                 trust: "global",
                 outcome: "allow",
+                detail: null,
                 decided: false,
               },
               {
@@ -232,6 +245,19 @@ describe("Hooks panel", () => {
     ).toBeInTheDocument();
   });
 
+  it("still refuses null authority fields instead of inventing hook trust", async () => {
+    surfaceHandler({
+      ...surface(),
+      registrations: [{ ...registration(), trust: null }],
+      registered: 1,
+    });
+    renderPanel();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "unreadable snapshot",
+    );
+    expect(screen.queryByText("check.sh")).not.toBeInTheDocument();
+  });
+
   it("says no hook objected when nothing decided an allow", async () => {
     surfaceHandler(
       surface({
@@ -244,6 +270,7 @@ describe("Hooks panel", () => {
                 source: "global refact",
                 trust: "global",
                 outcome: "allow",
+                detail: null,
                 decided: false,
               },
             ],

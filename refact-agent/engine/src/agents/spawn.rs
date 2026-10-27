@@ -407,7 +407,7 @@ pub(crate) async fn recover_run_config(
     config.auto_approve_editing_tools &= seed.config.auto_approve_editing_tools
         && (parent_thread.auto_approve_editing_tools || parent_thread.autonomous_no_confirm);
     config.auto_approve_dangerous_commands &= seed.config.auto_approve_dangerous_commands
-        && (parent_thread.auto_approve_dangerous_commands || parent_thread.autonomous_no_confirm);
+        && super::approval::dangerous_confirmation_enabled(app, parent_chat_id).await;
     let ceiling =
         super::tool_authority::current_ceiling(app, parent_chat_id, &config.model, &config.mode)
             .await?;
@@ -1348,6 +1348,18 @@ async fn prepare_launch(
     let mut config = config_result?;
     config.model = req.model.clone();
     config.history_source_model = req.history_source_model.clone();
+    let configured_consent = crate::yaml_configs::customization_registry::get_subagent_config(
+        app.gcx.clone(),
+        &req.config_name,
+        None,
+    )
+    .await
+    .map(|config| config.subchat.auto_approve_dangerous_commands != Some(false))
+    .unwrap_or(false);
+    #[cfg(test)]
+    let configured_consent = configured_consent || req.config_name == "test_spawn";
+    config.auto_approve_dangerous_commands = configured_consent
+        && super::approval::dangerous_confirmation_enabled(app, &req.parent_chat_id).await;
     if let Some(profile) = &req.profile {
         if let Some(effort) = &profile.reasoning_effort {
             config.reasoning_effort = Some(effort.clone());
@@ -1494,10 +1506,12 @@ mod accepted_launch_tests {
             .await
             .unwrap();
         parent.lock().await.active_command.allowed_tools = vec!["cat".into(), "shell".into()];
+        parent.lock().await.thread.auto_approve_dangerous_commands = true;
         let captured = Arc::new(std::sync::Mutex::new(None));
         let capture = captured.clone();
         let _runner = install_test_runner(Arc::new(move |_gcx, messages, config| {
-            *capture.lock().unwrap() = Some(config.tools.clone());
+            *capture.lock().unwrap() =
+                Some((config.tools.clone(), config.auto_approve_dangerous_commands));
             Box::pin(async move {
                 Ok(SubchatResult {
                     messages,
@@ -1539,6 +1553,7 @@ mod accepted_launch_tests {
             .await
             .unwrap();
         let seed: PreparedLaunch = bytes.decode().unwrap();
+        assert!(seed.config.auto_approve_dangerous_commands);
         assert!(seed.config.tools.allows_tool("shell"));
         assert!(!seed.config.tools.allows_tool("tasks_set"));
         let req = super::super::tests::subagent_spawn_request("narrow-parent", "src/a.rs");
@@ -1551,6 +1566,7 @@ mod accepted_launch_tests {
         }
         parent.lock().await.work_project_root = Some(root);
         parent.lock().await.active_command.allowed_tools = vec!["cat".into(), "tasks_set".into()];
+        parent.lock().await.thread.auto_approve_dangerous_commands = false;
         drop(blocker);
         let record = tokio::time::timeout(Duration::from_secs(5), handle.completion_rx)
             .await
@@ -1560,7 +1576,8 @@ mod accepted_launch_tests {
             record.status,
             crate::agents::types::BgAgentStatus::Completed
         );
-        let policy = captured.lock().unwrap().clone().unwrap();
+        let (policy, dangerous) = captured.lock().unwrap().clone().unwrap();
+        assert!(!dangerous);
         assert!(policy.allows_tool("cat"));
         assert!(!policy.allows_tool("shell"));
         assert!(!policy.allows_tool("tasks_set"));
@@ -1574,6 +1591,7 @@ mod accepted_launch_tests {
             .await
             .unwrap();
         assert!(!recovered.authority_migrated);
+        assert!(!recovered.config.auto_approve_dangerous_commands);
         assert!(!recovered.config.tools.allows_tool("shell"));
         assert!(!recovered.config.tools.allows_tool("tasks_set"));
         parent.lock().await.work_project_root = None;
@@ -1817,6 +1835,7 @@ mod accepted_launch_tests {
         assert!(plain_value.get("profile").is_none());
         assert_eq!(plain.config.max_steps, 9);
         assert!(plain.config.autonomous_no_confirm);
+        assert!(plain.config.auto_approve_dangerous_commands);
         assert!(plain.config.reasoning_effort.is_none());
         assert!(plain.profile.is_none());
         assert!(!plain.messages.iter().any(|message| message
@@ -1875,8 +1894,9 @@ async fn narrow_parent_approval(app: &AppState, req: &SpawnRequest, config: &mut
         config.autonomous_no_confirm &= parent.thread.autonomous_no_confirm;
         config.auto_approve_editing_tools &=
             parent.thread.auto_approve_editing_tools || parent.thread.autonomous_no_confirm;
+        drop(parent);
         config.auto_approve_dangerous_commands &=
-            parent.thread.auto_approve_dangerous_commands || parent.thread.autonomous_no_confirm;
+            super::approval::dangerous_confirmation_enabled(app, &req.parent_chat_id).await;
     } else {
         config.autonomous_no_confirm = false;
         config.auto_approve_editing_tools = false;
@@ -2150,7 +2170,7 @@ pub(super) async fn resume_agent_inner(
     config.auto_approve_editing_tools &=
         parent.auto_approve_editing_tools || parent.autonomous_no_confirm;
     config.auto_approve_dangerous_commands &=
-        parent.auto_approve_dangerous_commands || parent.autonomous_no_confirm;
+        super::approval::dangerous_confirmation_enabled(&app, parent_chat_id).await;
     let caps = crate::global_context::try_load_caps_quickly_if_not_present(app.gcx.clone(), 0)
         .await
         .map_err(|_| {

@@ -404,6 +404,9 @@ fn is_tool_result_truncation_exempt(tool_name: &str) -> bool {
 }
 
 fn should_auto_approve_confirmation(thread: &ThreadParams, tool_name: &str) -> bool {
+    if thread.auto_approve_dangerous_commands {
+        return true;
+    }
     if matches!(
         tool_name,
         "agent_approval" | "agent_lifecycle" | "pause" | "resume"
@@ -413,8 +416,7 @@ fn should_auto_approve_confirmation(thread: &ThreadParams, tool_name: &str) -> b
     if thread.autonomous_no_confirm {
         return true;
     }
-    thread.auto_approve_dangerous_commands
-        || (thread.auto_approve_editing_tools && is_editing_tool(tool_name))
+    thread.auto_approve_editing_tools && is_editing_tool(tool_name)
 }
 
 async fn record_tool_activity(
@@ -1545,14 +1547,26 @@ mod tests {
     }
 
     #[test]
-    fn child_approval_escalation_cannot_be_auto_approved_by_wrapper_policy() {
-        let thread = ThreadParams {
+    fn child_approval_auto_approve_requires_dangerous_consent() {
+        let mut thread = ThreadParams {
             autonomous_no_confirm: true,
-            auto_approve_dangerous_commands: true,
             auto_approve_editing_tools: true,
             ..Default::default()
         };
         assert!(!should_auto_approve_confirmation(&thread, "agent_approval"));
+        assert_eq!(
+            compute_final_action(
+                &MatchConfirmDenyResult::CONFIRMATION,
+                Some("auto"),
+                false,
+                "agent_approval"
+            ),
+            "ask"
+        );
+        thread.auto_approve_dangerous_commands = true;
+        for name in ["agent_approval", "agent_lifecycle", "pause", "resume"] {
+            assert!(should_auto_approve_confirmation(&thread, name));
+        }
         for mode in [None, Some("auto"), Some("ask")] {
             assert_eq!(
                 compute_final_action(
@@ -1561,7 +1575,7 @@ mod tests {
                     true,
                     "agent_approval"
                 ),
-                "ask"
+                "auto"
             );
         }
         assert_eq!(
@@ -1627,10 +1641,12 @@ mod tests {
         let app = AppState::from_gcx(gcx).await;
         let thread = ThreadParams {
             id: "escalation-invalid".to_string(),
+            auto_approve_dangerous_commands: true,
             model: "model".to_string(),
             ..Default::default()
         };
-        let session = ChatSession::new(thread.id.clone());
+        let mut session = ChatSession::new(thread.id.clone());
+        session.thread = thread.clone();
         app.chat
             .sessions
             .write()
@@ -2045,9 +2061,12 @@ pub async fn process_tool_calls_once(
         std::collections::HashSet::new();
 
     if !confirmations.is_empty() {
+        let mut current_thread = thread.clone();
+        current_thread.auto_approve_dangerous_commands =
+            crate::agents::approval::dangerous_confirmation_enabled(&app, &thread.id).await;
         let (auto_approved, remaining): (Vec<_>, Vec<_>) =
             confirmations.into_iter().partition(|confirmation| {
-                should_auto_approve_confirmation(&thread, &confirmation.tool_name)
+                should_auto_approve_confirmation(&current_thread, &confirmation.tool_name)
             });
 
         for confirmation in &auto_approved {
@@ -2460,6 +2479,7 @@ fn compute_final_action(
         tool_name,
         "agent_approval" | "agent_lifecycle" | "pause" | "resume"
     ) && *tool_result == MatchConfirmDenyResult::CONFIRMATION
+        && !is_auto_approved
     {
         return "ask";
     }
@@ -2517,6 +2537,10 @@ async fn check_tools_confirmation_with_pool(
     _source_command: &str,
     turn_tool_pool: Option<&TurnToolPool>,
 ) -> (Vec<PauseReason>, Vec<PauseReason>) {
+    let mut effective_thread = thread.clone();
+    effective_thread.auto_approve_dangerous_commands &=
+        crate::agents::approval::dangerous_confirmation_enabled(&app, &thread.id).await;
+    let thread = &effective_thread;
     let preflight_span =
         perf_diagnostics::span(PerfComponent::ToolConfirmationPreflight, None, None);
     let item_count = tool_calls.len() as u64;
@@ -2676,15 +2700,18 @@ async fn check_tools_confirmation_with_pool(
                 }
 
                 let is_auto_approved =
-                    should_auto_approve_confirmation(thread, &tool_call.function.name)
-                        || (!allowed_tools.is_empty()
+                    should_auto_approve_confirmation(thread, &resolved_tool_name)
+                        || (!matches!(
+                            resolved_tool_name.as_str(),
+                            "agent_approval" | "agent_lifecycle" | "pause" | "resume"
+                        ) && !allowed_tools.is_empty()
                             && (allowed_tools.contains(&tool_call.function.name)
                                 || allowed_tools.contains(&resolved_tool_name)));
                 let mut final_action = compute_final_action(
                     &result.result.result,
                     mode_action.as_deref(),
                     is_auto_approved,
-                    &tool_call.function.name,
+                    &resolved_tool_name,
                 );
                 if final_action != "deny"
                     && !is_auto_approved

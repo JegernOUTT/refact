@@ -4,11 +4,12 @@ import {
   type CausalPage,
 } from "./causalTypes";
 import { subscribeToSnapshots } from "./snapshotStream";
+import type { SnapshotFailure } from "./snapshotError";
 
 export type CausalStreamOptions = {
   timeoutMs: number;
   onSnapshot: (page: CausalPage) => void;
-  onError: (reason: string) => void;
+  onError: (reason: string, failure?: SnapshotFailure) => void;
 };
 
 export function subscribeToCausalTrace(

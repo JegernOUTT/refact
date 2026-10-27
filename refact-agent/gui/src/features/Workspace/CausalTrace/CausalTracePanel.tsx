@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { GitBranch, RefreshCw } from "lucide-react";
 import {
   Badge,
@@ -8,9 +8,10 @@ import {
   IconButton,
   LoadingState,
 } from "../../../components/ui";
-import { useConfig } from "../../../hooks/useConfig";
-import { getEngineEndpointIdentity } from "../../../services/refact/apiUrl";
-import { useGetCausalTraceQuery } from "../../../services/refact/causal";
+import {
+  causalApi,
+  useGetCausalTraceQuery,
+} from "../../../services/refact/causal";
 import {
   causeIds,
   hasUnknownCause,
@@ -21,6 +22,9 @@ import {
   type ReplayReport,
 } from "../../../services/refact/causalTypes";
 import { humanizeIdentifier } from "../../../utils/displayNames";
+import { isExpiredCursor, panelErrorDescription } from "../panelError";
+import { useAppDispatch } from "../../../hooks";
+import { usePanelScope } from "../usePanelScope";
 import styles from "./CausalTracePanel.module.css";
 import { useCausalStream } from "./useCausalStream";
 
@@ -161,11 +165,10 @@ export function CausalTracePanel({
   chatId?: string;
   onNavigate?: (id: string) => void;
 }) {
-  const config = useConfig();
-  const endpoint = getEngineEndpointIdentity(config);
+  const endpoint = usePanelScope();
   return (
     <CausalTraceContents
-      key={endpoint}
+      key={`${endpoint}:${chatId ?? ""}`}
       endpoint={endpoint}
       chatId={chatId}
       onNavigate={onNavigate}
@@ -182,6 +185,7 @@ function CausalTraceContents({
   chatId?: string;
   onNavigate?: (id: string) => void;
 }) {
+  const dispatch = useAppDispatch();
   const [draft, setDraft] = useState("");
   const [root, setRoot] = useState("");
   const [cursor, setCursor] = useState<string>();
@@ -190,19 +194,64 @@ function CausalTraceContents({
     isFetching,
     error,
     refetch,
+    fulfilledTimeStamp,
   } = useGetCausalTraceQuery(
     { endpoint, root, chatId, cursor },
-    { skip: root === "" },
+    { skip: root === "", refetchOnMountOrArgChange: true },
   );
-  const { error: streamError, retry: retryStream } = useCausalStream(
+  const {
+    error: streamError,
+    retry: retryStream,
+    reconnecting,
+    blocked,
+  } = useCausalStream(
     { endpoint, root, chatId },
-    root !== "" && cursor === undefined && page !== undefined,
+    root !== "" && cursor === undefined && page !== undefined && !error,
+    fulfilledTimeStamp,
   );
+  useEffect(
+    () => () => {
+      dispatch(
+        causalApi.util.getRunningQueryThunk("getCausalTrace", {
+          endpoint,
+          root,
+          chatId,
+          cursor,
+        }),
+      )?.abort();
+    },
+    [dispatch, endpoint, root, chatId, cursor],
+  );
+  useEffect(() => {
+    if (!error) return;
+    dispatch(
+      causalApi.util.updateQueryData(
+        "getCausalTrace",
+        { endpoint, root, chatId, cursor },
+        (draft) => {
+          draft.events = [];
+          draft.gaps = [];
+          draft.total = 0;
+          draft.returned = 0;
+          draft.gap_count = 0;
+          draft.complete = false;
+          draft.replay.findings = [];
+          draft.replay.finding_count = 0;
+          draft.replay.steps = 0;
+          delete draft.next_cursor;
+        },
+      ),
+    );
+  }, [error, dispatch, endpoint, root, chatId, cursor]);
   const refresh = () => {
     retryStream();
     setCursor(undefined);
     if (cursor === undefined && root !== "") void refetch();
   };
+  useEffect(() => {
+    if (cursor && isExpiredCursor(error)) setCursor(undefined);
+  }, [cursor, error]);
+  const stale = streamError && !blocked && page !== undefined && !error;
   return (
     <section className={styles.panel} aria-label="Causal trace">
       <header className={styles.heading}>
@@ -238,8 +287,18 @@ function CausalTraceContents({
           Trace
         </Button>
       </form>
-      {streamError && (
-        <p role="status">{streamError}. Reconnecting for a fresh snapshot.</p>
+      {isFetching && page && !error && !blocked && !streamError && (
+        <p role="status">
+          Refreshing snapshot. Previously loaded data may be stale.
+        </p>
+      )}
+      {stale && (
+        <p role="status">
+          Updates interrupted. Showing a stale snapshot.
+          {reconnecting
+            ? " Reconnecting for a fresh snapshot."
+            : " Automatic retries stopped. Refresh to try again."}
+        </p>
       )}
       {root === "" ? (
         <EmptyState
@@ -248,10 +307,12 @@ function CausalTraceContents({
           description="Enter a recorded event id to reconstruct what caused it."
           variant="compact"
         />
-      ) : error ?? streamError ? (
+      ) : error !== undefined || blocked || (streamError !== null && !page) ? (
         <ErrorState
           title="Trace unavailable"
-          description="The snapshot is unavailable, denied or expired. Refresh to request a new snapshot."
+          description={panelErrorDescription(
+            blocked ? streamError : error ?? streamError,
+          )}
           retry={<Button onClick={refresh}>Refresh</Button>}
         />
       ) : !page ? (

@@ -1,4 +1,5 @@
 import { WorkFrameDecoder } from "./workSse";
+import { SnapshotVisibilityError, type SnapshotFailure } from "./snapshotError";
 
 export type SnapshotStreamOptions<T> = {
   timeoutMs: number;
@@ -7,7 +8,7 @@ export type SnapshotStreamOptions<T> = {
   /** "reset" abandons the stream so the caller reconnects for a fresh snapshot. */
   sequence: (previous: T | null, next: T) => "accept" | "duplicate" | "reset";
   onSnapshot: (snapshot: T) => void;
-  onError: (reason: string) => void;
+  onError: (reason: string, failure?: SnapshotFailure) => void;
   unavailable: string;
   timedOut: string;
   disconnected: string;
@@ -24,21 +25,38 @@ export function subscribeToSnapshots<T>(
   const isStopped = () => state.stopped;
   let previous: T | null = null;
   let timeout: ReturnType<typeof setTimeout> | undefined;
-  const fail = (reason: string) => {
+  const fail = (reason: string, failure: SnapshotFailure) => {
     if (state.stopped) return;
     state.stopped = true;
     abort.abort();
-    options.onError(reason);
+    options.onError(reason, failure);
   };
   const resetTimeout = () => {
     clearTimeout(timeout);
-    timeout = setTimeout(() => fail(options.timedOut), options.timeoutMs);
+    timeout = setTimeout(
+      () => fail(options.timedOut, { kind: "transport" }),
+      options.timeoutMs,
+    );
   };
   const consumeBlock = (block: string) => {
-    const snapshot = options.parse(block);
+    let snapshot: T | null;
+    try {
+      snapshot = options.parse(block);
+    } catch (error) {
+      fail(
+        options.unavailable,
+        error instanceof SnapshotVisibilityError
+          ? error.failure
+          : { kind: "malformed", status: "CUSTOM_ERROR" },
+      );
+      return;
+    }
     if (!snapshot) return;
     const action = options.sequence(previous, snapshot);
-    if (action === "reset") throw new Error(options.outOfSequence);
+    if (action === "reset") {
+      fail(options.outOfSequence, { kind: "reset" });
+      return;
+    }
     if (action === "accept") {
       previous = snapshot;
       options.onSnapshot(snapshot);
@@ -50,7 +68,17 @@ export function subscribeToSnapshots<T>(
   void (async () => {
     try {
       const response = await fetch(url, { headers, signal: abort.signal });
-      if (!response.ok || !response.body) throw new Error(options.unavailable);
+      if (!response.ok) {
+        fail(options.unavailable, { kind: "http", status: response.status });
+        return;
+      }
+      if (!response.body) {
+        fail(options.unavailable, {
+          kind: "malformed",
+          status: "CUSTOM_ERROR",
+        });
+        return;
+      }
       const reader = response.body.getReader();
       const decoder = new WorkFrameDecoder();
       try {
@@ -67,8 +95,8 @@ export function subscribeToSnapshots<T>(
       } finally {
         await reader.cancel().catch(() => undefined);
       }
-    } catch (error) {
-      fail(error instanceof Error ? error.message : options.unavailable);
+    } catch {
+      fail(options.disconnected, { kind: "transport" });
     } finally {
       clearTimeout(timeout);
     }

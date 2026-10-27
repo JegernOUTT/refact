@@ -1,10 +1,20 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act } from "react-dom/test-utils";
 import { http, HttpResponse } from "msw";
-import { render, screen, fireEvent, waitFor } from "../../../utils/test-utils";
+import {
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+  within,
+} from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
 import { WorkPanel } from "./WorkPanel";
 import { workFixture } from "../../../services/refact/workFixtures";
+import { setChatModel } from "../../Chat/Thread/actions";
+import { selectCurrentThreadId } from "../../Chat/Thread/selectors";
+import { updateConfig } from "../../Config/configSlice";
+import { AgentWorkSection } from "./AgentWorkSection";
 import { workApi } from "../../../services/refact/work";
 import * as subscription from "../../../services/refact/workSubscription";
 
@@ -322,6 +332,9 @@ describe("Work panel", () => {
       "Work unavailable",
     );
     expect(screen.queryByText("Board work")).not.toBeInTheDocument();
+    expect(JSON.stringify(view.store.getState().workApi)).not.toContain(
+      "Board work",
+    );
     view.unmount();
     view.store.dispatch(workApi.util.resetApiState());
   });
@@ -361,6 +374,7 @@ describe("Work panel", () => {
     act(() => {
       streams[0].onError(
         "Work visibility changed or service became unavailable",
+        { kind: "visibility", data: { code: "policy_unavailable" } },
       );
     });
     await screen.findByRole("alert");
@@ -388,5 +402,245 @@ describe("Work panel", () => {
     expect(screen.queryByText("Board work")).not.toBeInTheDocument();
     view.unmount();
     view.store.dispatch(workApi.util.resetApiState());
+  });
+
+  it("rejects a REST completion dispatched before a stream denial until an explicit fresh request", async () => {
+    const streams: subscription.WorkStreamOptions[] = [];
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let requests = 0;
+    vi.spyOn(subscription, "subscribeToWork").mockImplementation(
+      (_url, _token, options) => {
+        streams.push(options);
+        return vi.fn();
+      },
+    );
+    server.use(
+      http.get("*/v1/coordination-settings", () =>
+        HttpResponse.json({
+          effective: {
+            work_stream_timeout_ms: 60_000,
+            work_reconnect_max_ms: 60_000,
+          },
+        }),
+      ),
+      http.get("*/v1/work", async () => {
+        requests += 1;
+        if (requests === 2) await pending;
+        return HttpResponse.json(workFixture);
+      }),
+    );
+    const view = renderPanel();
+    await screen.findByText("Board work");
+    await waitFor(() => expect(streams).toHaveLength(1));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh project work" }),
+    );
+    await waitFor(() => expect(requests).toBe(2));
+    act(() =>
+      streams[streams.length - 1].onError("denied", {
+        kind: "http",
+        status: 401,
+      }),
+    );
+    await screen.findByRole("alert");
+    release();
+    await waitFor(() =>
+      expect(
+        view.store.dispatch(workApi.util.getRunningQueriesThunk()),
+      ).toHaveLength(0),
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Authentication is required",
+    );
+    expect(JSON.stringify(view.store.getState().workApi)).not.toContain(
+      "Board work",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(await screen.findByText("Board work")).toBeInTheDocument();
+    expect(requests).toBe(3);
+    view.unmount();
+    view.store.dispatch(workApi.util.resetApiState());
+  });
+
+  it("keeps only same-scope transport failures readable and drops late callbacks after token and endpoint changes", async () => {
+    const streams: subscription.WorkStreamOptions[] = [];
+    const stopped = vi.fn();
+    const requests: { url: string; authorization: string | null }[] = [];
+    vi.spyOn(subscription, "subscribeToWork").mockImplementation(
+      (_url, _token, options) => {
+        streams.push(options);
+        return stopped;
+      },
+    );
+    server.use(
+      http.get("*/v1/coordination-settings", () =>
+        HttpResponse.json({
+          effective: {
+            work_stream_timeout_ms: 60_000,
+            work_reconnect_max_ms: 60_000,
+          },
+        }),
+      ),
+      http.get("*/v1/work", ({ request }) => {
+        requests.push({
+          url: request.url,
+          authorization: request.headers.get("Authorization"),
+        });
+        return HttpResponse.json(workFixture);
+      }),
+    );
+    const view = renderPanel();
+    await screen.findByText("Board work");
+    await waitFor(() => expect(streams).toHaveLength(1));
+    act(() => streams[0].onError("private raw failure", { kind: "transport" }));
+    expect(screen.getByText("Board work")).toBeInTheDocument();
+    expect(screen.getByText(/Showing a stale snapshot/)).toHaveTextContent(
+      "Reconnecting",
+    );
+    expect(screen.queryByText("private raw failure")).not.toBeInTheDocument();
+    act(() => {
+      view.store.dispatch(
+        updateConfig({
+          lspUrl: "http://localhost:9123/project/new",
+          apiKey: "new-token",
+        }),
+      );
+    });
+    await waitFor(() => expect(streams).toHaveLength(2));
+    expect(stopped).toHaveBeenCalledOnce();
+    act(() => {
+      view.store.dispatch(
+        setChatModel({
+          model: "different/model",
+          chatId: selectCurrentThreadId(view.store.getState()),
+        }),
+      );
+    });
+    await waitFor(() => expect(streams).toHaveLength(3));
+    act(() =>
+      streams[0].onSnapshot({
+        ...workFixture,
+        rows: [{ ...workFixture.rows[0], title: "Late private row" }],
+      }),
+    );
+    expect(screen.queryByText("Late private row")).not.toBeInTheDocument();
+    expect(requests[requests.length - 1]).toEqual({
+      url: "http://localhost:9123/project/new/v1/work",
+      authorization: "Bearer new-token",
+    });
+    act(() =>
+      streams[2].onError("secret path /private", { kind: "http", status: 401 }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Authentication is required",
+    );
+    expect(screen.queryByText("Board work")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Showing a stale snapshot/),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("secret path /private")).not.toBeInTheDocument();
+    view.unmount();
+  });
+
+  it("refetches an expired cursor from the first page without repeating the expired request", async () => {
+    settingsHandler();
+    const cursors: (string | null)[] = [];
+    server.use(
+      http.get("*/v1/work", ({ request }) => {
+        const cursor = new URL(request.url).searchParams.get("cursor");
+        cursors.push(cursor);
+        return cursor
+          ? HttpResponse.json(
+              { code: "cursor_expired", message: "private" },
+              { status: 409 },
+            )
+          : HttpResponse.json({ ...workFixture, next_cursor: "expired" });
+      }),
+    );
+    renderPanel();
+    await screen.findByText("Board work");
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+    await waitFor(() => expect(cursors).toEqual([null, "expired", null]));
+    expect(await screen.findByText("Board work")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("keeps every exact dock label keyboard reachable and mounts only the selected view", async () => {
+    const requests: string[] = [];
+    server.use(
+      http.get("*/v1/:surface", ({ request, params }) => {
+        if (
+          !["work", "attention", "hooks", "metrics"].includes(
+            String(params.surface),
+          )
+        )
+          return HttpResponse.json({});
+        expect(request.headers.get("Authorization")).toBe("Bearer dock-token");
+        requests.push(request.url);
+        return HttpResponse.json(
+          { code: "unauthorized", message: "/private/token" },
+          { status: 401 },
+        );
+      }),
+    );
+    settingsHandler();
+    const { user } = render(<AgentWorkSection chatId={null} />, {
+      preloadedState: {
+        config: {
+          host: "ide",
+          lspPort: 8001,
+          lspUrl: "http://localhost:9124/project/dock",
+          apiKey: "dock-token",
+          themeProps: { appearance: "dark" },
+        },
+      },
+    });
+    const nav = screen.getByRole("group", { name: "Agent work scope" });
+    const labels = [
+      "This chat",
+      "Project work",
+      "Causality",
+      "Attention",
+      "Hooks",
+      "Metrics",
+    ];
+    expect(
+      within(nav)
+        .getAllByRole("button")
+        .map((button) => button.textContent),
+    ).toEqual(labels);
+    expect(requests).toEqual([]);
+    within(nav).getByRole("button", { name: "This chat" }).focus();
+    for (const label of labels.slice(1)) {
+      await user.tab();
+      expect(within(nav).getByRole("button", { name: label })).toHaveFocus();
+      await user.keyboard("{Enter}");
+      expect(within(nav).getByRole("button", { name: label })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      if (label === "Causality") {
+        expect(
+          await screen.findByText("No event selected"),
+        ).toBeInTheDocument();
+      } else {
+        expect(await screen.findByRole("alert")).toHaveTextContent(
+          "Authentication is required",
+        );
+      }
+      expect(screen.queryByText("/private/token")).not.toBeInTheDocument();
+    }
+    expect(requests.map((url) => new URL(url).pathname)).toEqual([
+      "/project/dock/v1/work",
+      "/project/dock/v1/attention",
+      "/project/dock/v1/hooks",
+      "/project/dock/v1/metrics",
+    ]);
+    expect(
+      screen.queryByRole("region", { name: "Project work" }),
+    ).not.toBeInTheDocument();
   });
 });

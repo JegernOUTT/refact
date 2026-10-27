@@ -806,7 +806,7 @@ async fn run_queued_board_agent(
         .with_suggested_steps(suggested_steps);
     assignment::record_assignment(gcx.clone(), &task_id, &assignment).await;
 
-    let thread = build_agent_thread_params(
+    let mut thread = build_agent_thread_params(
         &agent_chat_id,
         &card_title,
         &model,
@@ -816,6 +816,8 @@ async fn run_queued_board_agent(
         &planner_chat_id,
         prepared_worktree.meta.clone(),
     );
+    thread.auto_approve_dangerous_commands =
+        crate::agents::approval::dangerous_confirmation_enabled(&app, &planner_chat_id).await;
     let user_prompt = assignment.render_prompt();
     let user_msg = event(
         EventSubkind::SystemNotice,

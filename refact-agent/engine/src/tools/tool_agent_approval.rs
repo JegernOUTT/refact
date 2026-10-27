@@ -81,8 +81,8 @@ impl Tool for ToolAgentApproval {
                 MatchConfirmDenyResult::PASS
             },
             command: format!(
-                "Approve child {} command: {} {}",
-                pending.child_work_id, pending.tool_name, pending.args
+                "Approve child {} request {}",
+                pending.child_work_id, pending.id
             ),
             rule: denials
                 .first()
@@ -156,6 +156,7 @@ impl Tool for ToolAgentApproval {
             if target.parent_id != chat_id || generation != pending.run_generation {
                 return Err("approval request belongs to a stale or unauthorized child run".into());
             }
+            let mut approval_source = "rejection";
             if action == "approve" {
                 let session = app
                     .chat
@@ -173,8 +174,11 @@ impl Tool for ToolAgentApproval {
                 }
                 if !asks.is_empty() {
                     app.agent_approvals.consume_user_once(
-                        &chat_id, id, pending.run_generation, tool_call_id, now,
+                        &chat_id, id, pending.run_generation, tool_call_id, crate::agents::approval::now_ms(),
                     ).map_err(|_| "This command requires explicit user approval; the parent cannot approve beyond its delegated command authority.".to_string())?;
+                    approval_source = "user_once";
+                } else {
+                    approval_source = "parent_policy";
                 }
             }
             let (session_id, project_dir) = {
@@ -193,7 +197,6 @@ impl Tool for ToolAgentApproval {
                     crate::ext::hooks_runner::get_project_dir_string(app.clone()).await;
                 (session_id, project_dir)
             };
-            let decision_at = crate::agents::approval::now_ms();
             let hook_decision = crate::ext::hooks_runner::apply_permission_decision(
                 app.clone(),
                 session_id,
@@ -202,13 +205,44 @@ impl Tool for ToolAgentApproval {
                     tool_name: pending.tool_name.clone(),
                     tool_input: pending.args.clone(),
                     accepted: action == "approve",
-                    source: "child_approval".into(),
+                    source: format!("child_approval:{approval_source}"),
                     request_id: Some(id.to_string()),
                     tool_call_id: pending.tool_call_id.clone(),
                     reason_type: "agent_approval".into(),
                 },
             )
             .await;
+            let decision_at = crate::agents::approval::now_ms();
+            let current = app
+                .agent_approvals
+                .get(&chat_id, id, decision_at)
+                .map_err(|e| format!("approval request: {e:?}"))?;
+            if current != pending || decision_at >= pending.expires_at {
+                return Err("approval request expired or changed before decision".into());
+            }
+            let current_target = crate::agents::approval_target::ApprovalTarget::resolve(
+                &app,
+                &pending.child_work_id,
+            )
+            .await?;
+            current_target.check(&pending)?;
+            if hook_decision.accepted {
+                crate::agents::tool_authority::ensure_context_tool(&ccx, "agent_approval").await?;
+                let session = app
+                    .chat
+                    .sessions
+                    .read()
+                    .await
+                    .get(&chat_id)
+                    .cloned()
+                    .ok_or("parent session unavailable")?;
+                let thread = session.lock().await.thread.clone();
+                let (asks, denials) =
+                    crate::agents::approval::parent_command_policy(&app, &thread, &pending).await?;
+                if !denials.is_empty() || (!asks.is_empty() && approval_source != "user_once") {
+                    return Err("parent command approval policy changed before decision".into());
+                }
+            }
             let decision = app
                 .agent_approvals
                 .decide_with_reason(
@@ -217,10 +251,10 @@ impl Tool for ToolAgentApproval {
                     id,
                     hook_decision.accepted,
                     hook_decision.denial_reason.clone(),
-                    decision_at,
+                    crate::agents::approval::now_ms(),
                 )
                 .map_err(|e| format!("approval decision: {e:?}"))?;
-            let mut response = serde_json::json!({"request_id":id,"agent_id":pending.child_work_id,"decision":format!("{decision:?}").to_lowercase(),"scope":"once"});
+            let mut response = serde_json::json!({"request_id":id,"agent_id":pending.child_work_id,"decision":format!("{decision:?}").to_lowercase(),"scope":"once","approval_source":approval_source});
             if let Some(reason) = hook_decision.denial_reason {
                 response["hook_overrode_approval"] = serde_json::Value::Bool(true);
                 response["denial_reason"] = serde_json::Value::String(reason);

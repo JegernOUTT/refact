@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Activity, RefreshCw } from "lucide-react";
 import {
   Badge,
@@ -8,14 +8,15 @@ import {
   IconButton,
   LoadingState,
 } from "../../../components/ui";
-import { useConfig } from "../../../hooks/useConfig";
-import { useGetWorkQuery } from "../../../services/refact/work";
-import { getEngineEndpointIdentity } from "../../../services/refact/apiUrl";
+import { workApi, useGetWorkQuery } from "../../../services/refact/work";
 import { humanizeIdentifier } from "../../../utils/displayNames";
 import {
   withheldRowCount,
   type WorkRow,
 } from "../../../services/refact/workTypes";
+import { isExpiredCursor, panelErrorDescription } from "../panelError";
+import { useAppDispatch } from "../../../hooks";
+import { usePanelScope } from "../usePanelScope";
 import styles from "./WorkPanel.module.css";
 import { useWorkStream } from "./useWorkStream";
 
@@ -163,8 +164,7 @@ export function WorkPanel({
 }: {
   onNavigate?: (id: string) => void;
 }) {
-  const config = useConfig();
-  const endpoint = getEngineEndpointIdentity(config);
+  const endpoint = usePanelScope();
   return (
     <WorkPanelContents
       key={endpoint}
@@ -181,22 +181,58 @@ function WorkPanelContents({
   endpoint: string;
   onNavigate?: (id: string) => void;
 }) {
+  const dispatch = useAppDispatch();
   const [cursor, setCursor] = useState<string>();
   const {
     currentData: page,
     isFetching,
     error,
     refetch,
-  } = useGetWorkQuery({ endpoint, cursor });
-  const { error: streamError, retry: retryStream } = useWorkStream(
-    { endpoint },
-    cursor === undefined && page !== undefined,
+    fulfilledTimeStamp,
+  } = useGetWorkQuery(
+    { endpoint, cursor },
+    { refetchOnMountOrArgChange: true },
   );
+  const {
+    error: streamError,
+    retry: retryStream,
+    reconnecting,
+    blocked,
+  } = useWorkStream(
+    { endpoint },
+    cursor === undefined && page !== undefined && !error,
+    fulfilledTimeStamp,
+  );
+  useEffect(
+    () => () => {
+      dispatch(
+        workApi.util.getRunningQueryThunk("getWork", { endpoint, cursor }),
+      )?.abort();
+    },
+    [dispatch, endpoint, cursor],
+  );
+  useEffect(() => {
+    if (!error) return;
+    dispatch(
+      workApi.util.updateQueryData("getWork", { endpoint, cursor }, (draft) => {
+        draft.rows = [];
+        draft.roots = [];
+        draft.total = 0;
+        draft.returned = 0;
+        delete draft.withheld_rows;
+        delete draft.next_cursor;
+      }),
+    );
+  }, [error, dispatch, endpoint, cursor]);
   const refresh = () => {
     retryStream();
     setCursor(undefined);
     if (cursor === undefined) void refetch();
   };
+  useEffect(() => {
+    if (cursor && isExpiredCursor(error)) setCursor(undefined);
+  }, [cursor, error]);
+  const stale = streamError && !blocked && page !== undefined && !error;
   return (
     <section className={styles.panel} aria-label="Project work">
       <header className={styles.heading}>
@@ -214,13 +250,25 @@ function WorkPanelContents({
         Chats and board agents in this engine. Discovery does not grant control
         authority.
       </p>
-      {streamError && (
-        <p role="status">{streamError}. Reconnecting for a fresh snapshot.</p>
+      {isFetching && page && !error && !blocked && !streamError && (
+        <p role="status">
+          Refreshing snapshot. Previously loaded data may be stale.
+        </p>
       )}
-      {error ?? streamError ? (
+      {stale && (
+        <p role="status">
+          Updates interrupted. Showing a stale snapshot.
+          {reconnecting
+            ? " Reconnecting for a fresh snapshot."
+            : " Automatic retries stopped. Refresh to try again."}
+        </p>
+      )}
+      {error !== undefined || blocked || (streamError !== null && !page) ? (
         <ErrorState
           title="Work unavailable"
-          description="The snapshot is unavailable, denied or expired. Refresh to request a new snapshot."
+          description={panelErrorDescription(
+            blocked ? streamError : error ?? streamError,
+          )}
           retry={<Button onClick={refresh}>Refresh</Button>}
         />
       ) : !page ? (

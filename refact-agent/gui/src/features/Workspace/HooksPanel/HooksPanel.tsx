@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { RefreshCw, Webhook } from "lucide-react";
 import {
   Badge,
@@ -7,9 +8,10 @@ import {
   IconButton,
   LoadingState,
 } from "../../../components/ui";
-import { useConfig } from "../../../hooks/useConfig";
-import { getEngineEndpointIdentity } from "../../../services/refact/apiUrl";
-import { useGetHookSurfaceQuery } from "../../../services/refact/hookSurface";
+import {
+  hookSurfaceApi,
+  useGetHookSurfaceQuery,
+} from "../../../services/refact/hookSurface";
 import {
   decidingRun,
   isDenial,
@@ -18,6 +20,9 @@ import {
   type HookSurface,
 } from "../../../services/refact/hookSurfaceTypes";
 import { humanizeIdentifier } from "../../../utils/displayNames";
+import { panelErrorDescription } from "../panelError";
+import { useAppDispatch } from "../../../hooks";
+import { usePanelScope } from "../usePanelScope";
 import styles from "./HooksPanel.module.css";
 
 function verdictLabel(activity: HookActivity): string {
@@ -123,18 +128,45 @@ function SurfaceSummary({ surface }: { surface: HookSurface }) {
 }
 
 export function HooksPanel() {
-  const config = useConfig();
-  const endpoint = getEngineEndpointIdentity(config);
+  const endpoint = usePanelScope();
   return <HooksContents key={endpoint} endpoint={endpoint} />;
 }
 
 function HooksContents({ endpoint }: { endpoint: string }) {
+  const dispatch = useAppDispatch();
   const {
     currentData: surface,
     isFetching,
     error,
     refetch,
   } = useGetHookSurfaceQuery({ endpoint });
+  useEffect(
+    () => () => {
+      dispatch(
+        hookSurfaceApi.util.getRunningQueryThunk("getHookSurface", {
+          endpoint,
+        }),
+      )?.abort();
+    },
+    [dispatch, endpoint],
+  );
+  useEffect(() => {
+    if (!error) return;
+    dispatch(
+      hookSurfaceApi.util.updateQueryData(
+        "getHookSurface",
+        { endpoint },
+        (draft) => {
+          draft.registrations = [];
+          draft.recent = [];
+          draft.registered = 0;
+          draft.runnable = 0;
+          draft.blocked = 0;
+          draft.denials = 0;
+        },
+      ),
+    );
+  }, [error, dispatch, endpoint]);
   return (
     <section className={styles.panel} aria-label="Hooks">
       <header className={styles.heading}>
@@ -155,10 +187,10 @@ function HooksContents({ endpoint }: { endpoint: string }) {
       {error ? (
         <ErrorState
           title="Hooks unavailable"
-          description="The snapshot is unavailable, denied or expired. Refresh to request a new snapshot."
+          description={panelErrorDescription(error)}
           retry={<Button onClick={() => void refetch()}>Refresh</Button>}
         />
-      ) : !surface ? (
+      ) : !surface || isFetching ? (
         <LoadingState label="Loading hooks" />
       ) : (
         <>

@@ -1,11 +1,12 @@
 import { workSequence, type WorkPage } from "./workTypes";
 import { parseWorkFrame } from "./workSse";
 import { subscribeToSnapshots } from "./snapshotStream";
+import type { SnapshotFailure } from "./snapshotError";
 
 export type WorkStreamOptions = {
   timeoutMs: number;
   onSnapshot: (page: WorkPage) => void;
-  onError: (reason: string) => void;
+  onError: (reason: string, failure?: SnapshotFailure) => void;
 };
 
 export function subscribeToWork(

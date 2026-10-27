@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
-import { render, screen } from "../../../utils/test-utils";
+import { render, screen, fireEvent } from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
 import { MetricsPanel } from "./MetricsPanel";
 import type { MetricsPage } from "../../../services/refact/metricsTypes";
@@ -68,6 +68,14 @@ describe("Metrics panel", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Metrics unavailable",
     );
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Authentication is required",
+    );
+    metricsHandler(page());
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(
+      await screen.findByText("No metrics recorded yet"),
+    ).toBeInTheDocument();
     expect(screen.queryByLabelText("Metrics entries")).toBeNull();
   });
 
@@ -132,5 +140,19 @@ describe("Metrics panel", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Metrics unavailable",
     );
+    expect(screen.getByRole("alert")).toHaveTextContent("unreadable snapshot");
+    server.use(
+      http.get("*/v1/metrics", () =>
+        HttpResponse.json(
+          { code: "unavailable", message: "/private/secret" },
+          { status: 503 },
+        ),
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(
+      await screen.findByText(/not ready to provide this view/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("/private/secret")).not.toBeInTheDocument();
   });
 });

@@ -25,11 +25,11 @@ export type AttentionEntry = {
   merged_waiters: string[];
   presented: boolean;
   irreversible: boolean;
-  default_answer?: string;
-  default_used?: string;
+  default_answer?: string | null;
+  default_used?: string | null;
   project: string;
   asked_at_ms: number;
-  settled_at_ms?: number;
+  settled_at_ms?: number | null;
 };
 
 export type AttentionQueue = {
@@ -49,8 +49,8 @@ const strings = (value: unknown): value is string[] =>
   Array.isArray(value) && value.every((entry) => typeof entry === "string");
 const integer = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-const optionalString = (value: unknown): value is string | undefined =>
-  value === undefined || typeof value === "string";
+const optionalString = (value: unknown): value is string | null | undefined =>
+  value === undefined || value === null || typeof value === "string";
 
 export function isAttentionEntry(value: unknown): value is AttentionEntry {
   return (
@@ -73,7 +73,9 @@ export function isAttentionEntry(value: unknown): value is AttentionEntry {
     optionalString(value.default_used) &&
     typeof value.project === "string" &&
     integer(value.asked_at_ms) &&
-    (value.settled_at_ms === undefined || integer(value.settled_at_ms))
+    (value.settled_at_ms === undefined ||
+      value.settled_at_ms === null ||
+      integer(value.settled_at_ms))
   );
 }
 
@@ -97,11 +99,21 @@ export function parseAttentionQueue(value: unknown): AttentionQueue | null {
   if (
     value.settled.some(
       (entry) =>
-        entry.state === "defaulted" && entry.default_used === undefined,
+        entry.state === "defaulted" && typeof entry.default_used !== "string",
     )
   )
     return null;
-  return value as AttentionQueue;
+  const normalize = (entry: AttentionEntry): AttentionEntry => ({
+    ...entry,
+    default_answer: entry.default_answer ?? undefined,
+    default_used: entry.default_used ?? undefined,
+    settled_at_ms: entry.settled_at_ms ?? undefined,
+  });
+  return {
+    ...(value as AttentionQueue),
+    waiting: value.waiting.map(normalize),
+    settled: value.settled.map(normalize),
+  };
 }
 
 /** Settled questions nobody consented to: a default was applied instead. */

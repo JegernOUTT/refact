@@ -1,3 +1,5 @@
+import { SnapshotVisibilityError } from "./snapshotError";
+
 export const causalKinds = [
   "delivery",
   "spawn",
@@ -191,7 +193,10 @@ export function parseCausalFrame(block: string): CausalPage | null {
     if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
   }
   if (event === "work_error")
-    throw new Error("Trace visibility changed or service became unavailable");
+    throw new SnapshotVisibilityError(
+      "Trace visibility changed or service became unavailable",
+      data.join("\n"),
+    );
   if (data.length === 0) return null;
   let parsed: unknown;
   try {

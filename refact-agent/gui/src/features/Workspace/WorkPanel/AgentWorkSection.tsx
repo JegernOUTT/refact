@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { SegmentedControl } from "../../../components/ui";
+import { Button } from "../../../components/ui";
 import { AgentsSection } from "../../AgentsPanel";
 import { AttentionPanel } from "../AttentionPanel/AttentionPanel";
 import { CausalTracePanel } from "../CausalTrace/CausalTracePanel";
@@ -18,19 +18,31 @@ export function AgentWorkSection({
   const [view, setView] = useState("agents");
   return (
     <div className={styles.section}>
-      <SegmentedControl
+      <div
+        className={styles.navigation}
+        role="group"
         aria-label="Agent work scope"
-        value={view}
-        onValueChange={setView}
-        options={[
+      >
+        {[
           { value: "agents", label: "This chat" },
           { value: "work", label: "Project work" },
           { value: "causal", label: "Causality" },
           { value: "attention", label: "Attention" },
           { value: "hooks", label: "Hooks" },
           { value: "metrics", label: "Metrics" },
-        ]}
-      />
+        ].map(({ value, label }) => (
+          <Button
+            key={value}
+            className={styles.viewButton}
+            size="sm"
+            variant={view === value ? "soft" : "ghost"}
+            aria-pressed={view === value}
+            onClick={() => setView(value)}
+          >
+            {label}
+          </Button>
+        ))}
+      </div>
       {view === "agents" && (
         <AgentsSection chatId={chatId} onNavigate={onNavigate} />
       )}

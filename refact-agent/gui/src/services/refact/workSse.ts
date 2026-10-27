@@ -1,4 +1,5 @@
 import { parseWorkPage, type WorkPage } from "./workTypes";
+import { SnapshotVisibilityError } from "./snapshotError";
 
 export class WorkFrameDecoder {
   private readonly decoder = new TextDecoder();
@@ -29,7 +30,10 @@ export function parseWorkFrame(block: string): WorkPage | null {
     if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
   }
   if (event === "work_error")
-    throw new Error("Work visibility changed or service became unavailable");
+    throw new SnapshotVisibilityError(
+      "Work visibility changed or service became unavailable",
+      data.join("\n"),
+    );
   if (data.length === 0) return null;
   let parsed: unknown;
   try {

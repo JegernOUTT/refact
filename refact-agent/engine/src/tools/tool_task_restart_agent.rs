@@ -908,7 +908,7 @@ impl ToolTaskRestartAgent {
             return Err("restart setup cancelled".into());
         }
 
-        let thread = build_agent_thread_params(
+        let mut thread = build_agent_thread_params(
             agent_chat_id,
             card_title,
             model,
@@ -918,6 +918,8 @@ impl ToolTaskRestartAgent {
             planner_chat_id,
             worktree_meta.clone(),
         );
+        thread.auto_approve_dangerous_commands =
+            crate::agents::approval::dangerous_confirmation_enabled(&app, planner_chat_id).await;
 
         let scope = storage::load_board(gcx.clone(), task_id)
             .await
@@ -1098,6 +1100,15 @@ mod tests {
         ));
         let facade = Arc::new(RecordingFacade::default());
         app.chat.facade = facade.clone();
+        let parent = Arc::new(AMutex::new(crate::chat::types::ChatSession::new(
+            "planner".into(),
+        )));
+        parent.lock().await.thread.auto_approve_dangerous_commands = true;
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("planner".into(), parent);
         let project = crate::coordination::roots::project_identity(&source);
         let holder = app
             .work_scheduler
@@ -1159,6 +1170,7 @@ mod tests {
         assert!(queued.get_card("T-1").unwrap().started_at.is_none());
         holder.release();
         await_started(&facade, 1).await;
+        assert_eq!(*facade.confirmation_flags.lock().unwrap(), vec![true]);
         let chat = response["agent_chat_id"].as_str().unwrap();
         assert_eq!(
             facade.started.lock().unwrap().as_slice(),

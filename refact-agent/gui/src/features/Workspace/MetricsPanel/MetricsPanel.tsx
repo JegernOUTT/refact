@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Activity, RefreshCw } from "lucide-react";
 import {
   Badge,
@@ -7,9 +8,10 @@ import {
   IconButton,
   LoadingState,
 } from "../../../components/ui";
-import { useConfig } from "../../../hooks/useConfig";
-import { getEngineEndpointIdentity } from "../../../services/refact/apiUrl";
-import { useGetMetricsQuery } from "../../../services/refact/metrics";
+import {
+  metricsApi,
+  useGetMetricsQuery,
+} from "../../../services/refact/metrics";
 import {
   sampleLabel,
   seriesLabel,
@@ -19,6 +21,9 @@ import {
   type MetricsPage,
 } from "../../../services/refact/metricsTypes";
 import { humanizeIdentifier } from "../../../utils/displayNames";
+import { panelErrorDescription } from "../panelError";
+import { useAppDispatch } from "../../../hooks";
+import { usePanelScope } from "../usePanelScope";
 import styles from "./MetricsPanel.module.css";
 
 function SeriesItem({ series }: { series: MetricSeries }) {
@@ -71,18 +76,39 @@ function Summary({ page }: { page: MetricsPage }) {
 }
 
 export function MetricsPanel() {
-  const config = useConfig();
-  const endpoint = getEngineEndpointIdentity(config);
+  const endpoint = usePanelScope();
   return <MetricsContents key={endpoint} endpoint={endpoint} />;
 }
 
 function MetricsContents({ endpoint }: { endpoint: string }) {
+  const dispatch = useAppDispatch();
   const {
     currentData: page,
     isFetching,
     error,
     refetch,
   } = useGetMetricsQuery({ endpoint });
+  useEffect(
+    () => () => {
+      dispatch(
+        metricsApi.util.getRunningQueryThunk("getMetrics", { endpoint }),
+      )?.abort();
+    },
+    [dispatch, endpoint],
+  );
+  useEffect(() => {
+    if (!error) return;
+    dispatch(
+      metricsApi.util.updateQueryData("getMetrics", { endpoint }, (draft) => {
+        draft.entries = [];
+        draft.total = 0;
+        draft.returned = 0;
+        draft.series_total = 0;
+        draft.explanations_total = 0;
+        delete draft.next_cursor;
+      }),
+    );
+  }, [error, dispatch, endpoint]);
   return (
     <section className={styles.panel} aria-label="Metrics and explanations">
       <header className={styles.heading}>
@@ -103,10 +129,10 @@ function MetricsContents({ endpoint }: { endpoint: string }) {
       {error ? (
         <ErrorState
           title="Metrics unavailable"
-          description="The metrics snapshot is unavailable, denied or malformed. Refresh to request a new snapshot."
+          description={panelErrorDescription(error)}
           retry={<Button onClick={() => void refetch()}>Refresh</Button>}
         />
-      ) : !page ? (
+      ) : !page || isFetching ? (
         <LoadingState label="Loading metrics" />
       ) : (
         <>

@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Inbox, RefreshCw } from "lucide-react";
 import {
   Badge,
@@ -7,9 +8,10 @@ import {
   IconButton,
   LoadingState,
 } from "../../../components/ui";
-import { useConfig } from "../../../hooks/useConfig";
-import { getEngineEndpointIdentity } from "../../../services/refact/apiUrl";
-import { useGetAttentionQueueQuery } from "../../../services/refact/attention";
+import {
+  attentionApi,
+  useGetAttentionQueueQuery,
+} from "../../../services/refact/attention";
 import {
   isSaturated,
   silentDefaults,
@@ -17,6 +19,9 @@ import {
   type AttentionQueue,
 } from "../../../services/refact/attentionTypes";
 import { humanizeIdentifier } from "../../../utils/displayNames";
+import { panelErrorDescription } from "../panelError";
+import { useAppDispatch } from "../../../hooks";
+import { usePanelScope } from "../usePanelScope";
 import styles from "./AttentionPanel.module.css";
 
 function MergedWaiters({ entry }: { entry: AttentionEntry }) {
@@ -93,18 +98,43 @@ function SilentDefaultNotice({ queue }: { queue: AttentionQueue }) {
 }
 
 export function AttentionPanel() {
-  const config = useConfig();
-  const endpoint = getEngineEndpointIdentity(config);
+  const endpoint = usePanelScope();
   return <AttentionContents key={endpoint} endpoint={endpoint} />;
 }
 
 function AttentionContents({ endpoint }: { endpoint: string }) {
+  const dispatch = useAppDispatch();
   const {
     currentData: queue,
     isFetching,
     error,
     refetch,
   } = useGetAttentionQueueQuery({ endpoint });
+  useEffect(
+    () => () => {
+      dispatch(
+        attentionApi.util.getRunningQueryThunk("getAttentionQueue", {
+          endpoint,
+        }),
+      )?.abort();
+    },
+    [dispatch, endpoint],
+  );
+  useEffect(() => {
+    if (!error) return;
+    dispatch(
+      attentionApi.util.updateQueryData(
+        "getAttentionQueue",
+        { endpoint },
+        (draft) => {
+          draft.waiting = [];
+          draft.settled = [];
+          draft.outstanding = 0;
+          draft.silent_defaults = 0;
+        },
+      ),
+    );
+  }, [error, dispatch, endpoint]);
   return (
     <section className={styles.panel} aria-label="Attention queue">
       <header className={styles.heading}>
@@ -125,10 +155,10 @@ function AttentionContents({ endpoint }: { endpoint: string }) {
       {error ? (
         <ErrorState
           title="Attention queue unavailable"
-          description="The snapshot is unavailable, denied or expired. Refresh to request a new snapshot."
+          description={panelErrorDescription(error)}
           retry={<Button onClick={() => void refetch()}>Refresh</Button>}
         />
-      ) : !queue ? (
+      ) : !queue || isFetching ? (
         <LoadingState label="Loading attention queue" />
       ) : (
         <>

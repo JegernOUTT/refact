@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
-import { render, screen, fireEvent } from "../../../utils/test-utils";
+import { render, screen, fireEvent, waitFor } from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
+import { act } from "react-dom/test-utils";
+import * as subscription from "../../../services/refact/causalSubscription";
+import { causalApi } from "../../../services/refact/causal";
 import { CausalTracePanel } from "./CausalTracePanel";
 import { causalPageFixture } from "../../../services/refact/causalFixtures";
 import type {
@@ -230,5 +233,125 @@ describe("Causal trace panel", () => {
       expect(copy).not.toMatch(claim);
     }
     expect(copy).toMatch(/coordination decisions only/);
+  });
+
+  it("rejects a REST completion dispatched before a stream denial until an explicit fresh request", async () => {
+    const streams: subscription.CausalStreamOptions[] = [];
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let requests = 0;
+    vi.spyOn(subscription, "subscribeToCausalTrace").mockImplementation(
+      (_url, _token, options) => {
+        streams.push(options);
+        return vi.fn();
+      },
+    );
+    server.use(
+      http.get("*/v1/coordination-settings", () =>
+        HttpResponse.json({
+          effective: {
+            work_stream_timeout_ms: 60_000,
+            work_reconnect_max_ms: 60_000,
+          },
+        }),
+      ),
+      http.get("*/v1/work/causal", async () => {
+        requests += 1;
+        if (requests === 2) await pending;
+        return HttpResponse.json(causalPageFixture);
+      }),
+    );
+    const view = renderPanel();
+    fireEvent.change(screen.getByLabelText("Root event id"), {
+      target: { value: "decision:d" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Trace" }));
+    await screen.findByText("decision:d");
+    await waitFor(() => expect(streams).toHaveLength(1));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh causal trace" }),
+    );
+    await waitFor(() => expect(requests).toBe(2));
+    act(() =>
+      streams[streams.length - 1].onError("denied", {
+        kind: "http",
+        status: 403,
+      }),
+    );
+    await screen.findByRole("alert");
+    release();
+    await waitFor(() =>
+      expect(
+        view.store.dispatch(causalApi.util.getRunningQueriesThunk()),
+      ).toHaveLength(0),
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Access is denied for this scope",
+    );
+    expect(JSON.stringify(view.store.getState().causalApi)).not.toContain(
+      '"event_id":"decision:d"',
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(await screen.findByText("decision:d")).toBeInTheDocument();
+    expect(requests).toBe(3);
+    view.unmount();
+    view.store.dispatch(causalApi.util.resetApiState());
+  });
+
+  it("retains a stale trace on transport loss but clears it on scope denial and ignores an old root", async () => {
+    const streams: subscription.CausalStreamOptions[] = [];
+    vi.spyOn(subscription, "subscribeToCausalTrace").mockImplementation(
+      (_url, _token, options) => {
+        streams.push(options);
+        return vi.fn();
+      },
+    );
+    server.use(
+      http.get("*/v1/coordination-settings", () =>
+        HttpResponse.json({
+          effective: {
+            work_stream_timeout_ms: 60_000,
+            work_reconnect_max_ms: 60_000,
+          },
+        }),
+      ),
+      http.get("*/v1/work/causal", ({ request }) => {
+        const root = new URL(request.url).searchParams.get("root");
+        return HttpResponse.json({ ...causalPageFixture, root });
+      }),
+    );
+    trace();
+    await screen.findByText("decision:d");
+    await waitFor(() => expect(streams).toHaveLength(1));
+    act(() => streams[0].onError("raw private error", { kind: "transport" }));
+    expect(screen.getByText("decision:d")).toBeInTheDocument();
+    expect(screen.getByText(/Showing a stale snapshot/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Root event id"), {
+      target: { value: "other" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Trace" }));
+    await waitFor(() => expect(streams).toHaveLength(2));
+    act(() =>
+      streams[0].onSnapshot({
+        ...causalPageFixture,
+        events: [{ ...causalPageFixture.events[0], event_id: "late:private" }],
+        total: 1,
+        returned: 1,
+      }),
+    );
+    expect(screen.queryByText("late:private")).not.toBeInTheDocument();
+    act(() => streams[1].onError("secret", { kind: "http", status: 403 }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Access is denied for this scope",
+    );
+    expect(screen.queryByText("decision:d")).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Replay of recorded decisions"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Showing a stale snapshot/),
+    ).not.toBeInTheDocument();
   });
 });

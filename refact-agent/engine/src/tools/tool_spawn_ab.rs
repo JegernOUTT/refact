@@ -298,7 +298,7 @@ async fn create_variant_session(
     variant: &PreparedAbVariant,
     worktree: WorktreeMeta,
 ) -> Result<(), String> {
-    let thread = build_agent_thread_params(
+    let mut thread = build_agent_thread_params(
         &variant.chat_id,
         card_title,
         &variant.model,
@@ -308,6 +308,8 @@ async fn create_variant_session(
         planner_chat_id,
         worktree,
     );
+    thread.auto_approve_dangerous_commands =
+        crate::agents::approval::dangerous_confirmation_enabled(&app, planner_chat_id).await;
     let prompt_instructions = ab_prompt_instructions(card_instructions, spec);
     assignment::clear_assignment(app.gcx.clone(), task_id, card_id).await;
     let user_prompt = Assignment::new(card_id, card_title, &prompt_instructions)
@@ -1379,6 +1381,7 @@ pub(crate) mod tests {
     #[derive(Default)]
     pub(crate) struct RecordingFacade {
         pub(crate) created: std::sync::Mutex<Vec<String>>,
+        pub(crate) confirmation_flags: std::sync::Mutex<Vec<bool>>,
         pub(crate) started: std::sync::Mutex<Vec<String>>,
         notify: tokio::sync::Notify,
     }
@@ -1400,6 +1403,10 @@ pub(crate) mod tests {
         }
         async fn create_session(&self, request: CreateSessionRequest) -> Result<(), String> {
             assert!(request.thread.worktree.as_ref().unwrap().root.is_dir());
+            self.confirmation_flags
+                .lock()
+                .unwrap()
+                .push(request.thread.auto_approve_dangerous_commands);
             self.created.lock().unwrap().push(request.chat_id);
             Ok(())
         }
@@ -1505,6 +1512,15 @@ pub(crate) mod tests {
         ));
         let facade = Arc::new(RecordingFacade::default());
         app.chat.facade = facade.clone();
+        let parent = Arc::new(AMutex::new(crate::chat::types::ChatSession::new(
+            "planner".into(),
+        )));
+        parent.lock().await.thread.auto_approve_dangerous_commands = true;
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("planner".into(), parent.clone());
         let project = crate::coordination::roots::project_identity(&source);
         let holder = app
             .work_scheduler
@@ -1550,8 +1566,14 @@ pub(crate) mod tests {
         };
         assert!(crate::tasks::admission::is_queued(other).await);
         assert_eq!(app.work_scheduler.snapshot().active, 1);
+        assert_eq!(*facade.confirmation_flags.lock().unwrap(), vec![true]);
+        parent.lock().await.thread.auto_approve_dangerous_commands = false;
         crate::tasks::admission::end(&first).await;
         await_started(&facade, 2).await;
+        assert_eq!(
+            *facade.confirmation_flags.lock().unwrap(),
+            vec![true, false]
+        );
         assert_eq!(app.work_scheduler.snapshot().active, 1);
         crate::tasks::admission::end(other).await;
         let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();

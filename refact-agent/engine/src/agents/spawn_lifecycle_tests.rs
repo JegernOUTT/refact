@@ -365,6 +365,42 @@ async fn spawned_subchat_approval_defaults_never_exceed_parent_authority() {
                     .await
                     .thread
                     .clone();
+                if config.parent_id.as_deref() == Some("dangerous-parent") {
+                    assert!(
+                        crate::agents::approval::dangerous_confirmation_enabled(&app, chat_id)
+                            .await
+                    );
+                    let mut grandchild = spawn_request(chat_id, BgAgentKind::Subagent);
+                    grandchild.parent_root_chat_id = Some("dangerous-parent".into());
+                    grandchild.subchat_depth = config.subchat_depth;
+                    let completed = await_completion(
+                        crate::agents::spawn::spawn_background_agent(app.clone(), grandchild)
+                            .await
+                            .unwrap(),
+                    )
+                    .await;
+                    assert_eq!(completed.status, BgAgentStatus::Completed);
+                } else if config.root_chat_id.as_deref() == Some("dangerous-parent") {
+                    assert!(thread.auto_approve_dangerous_commands);
+                    assert!(
+                        crate::agents::approval::dangerous_confirmation_enabled(&app, chat_id)
+                            .await
+                    );
+                    let root = app
+                        .chat
+                        .sessions
+                        .read()
+                        .await
+                        .get("dangerous-parent")
+                        .cloned()
+                        .unwrap();
+                    root.lock().await.thread.auto_approve_dangerous_commands = false;
+                    assert!(
+                        !crate::agents::approval::dangerous_confirmation_enabled(&app, chat_id)
+                            .await
+                    );
+                    root.lock().await.thread.auto_approve_dangerous_commands = true;
+                }
                 *observed.lock().await = Some((
                     thread.autonomous_no_confirm,
                     thread.auto_approve_editing_tools,
@@ -390,7 +426,12 @@ async fn spawned_subchat_approval_defaults_never_exceed_parent_authority() {
         (
             "autonomous-parent",
             Some((true, false, false)),
-            (true, true, true),
+            (true, true, false),
+        ),
+        (
+            "dangerous-parent",
+            Some((false, false, true)),
+            (false, false, true),
         ),
     ] {
         if let Some((autonomous, editing, dangerous)) = authority {

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
-import { render, screen } from "../../../utils/test-utils";
+import { render, screen, fireEvent } from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
 import { AttentionPanel } from "./AttentionPanel";
 import type {
@@ -39,6 +39,9 @@ const entry = (overrides: Partial<AttentionEntry> = {}): AttentionEntry => ({
   merged_waiters: [],
   presented: false,
   irreversible: false,
+  default_answer: null,
+  default_used: null,
+  settled_at_ms: null,
   project: "/project",
   asked_at_ms: 1_000,
   ...overrides,
@@ -67,6 +70,14 @@ describe("Attention panel", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Attention queue unavailable",
     );
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Authentication is required",
+    );
+    queueHandler(queue());
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(
+      await screen.findByText("Nothing is waiting on you"),
+    ).toBeInTheDocument();
     expect(screen.queryByLabelText("Waiting questions")).toBeNull();
   });
 
@@ -83,6 +94,7 @@ describe("Attention panel", () => {
     queueHandler(queue({ waiting: [entry()], outstanding: 1 }));
     renderPanel();
     expect(await screen.findByText("Rank 1")).toBeInTheDocument();
+    expect(screen.queryByText(/Defaults to/)).not.toBeInTheDocument();
     expect(screen.getByLabelText("Rank reason 1")).toHaveTextContent(
       "1 run blocked · normal priority",
     );
@@ -214,6 +226,18 @@ describe("Attention panel", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Attention queue unavailable",
     );
+  });
+
+  it("still refuses null required fields rather than treating them as an empty queue", async () => {
+    queueHandler({
+      ...queue({ waiting: [entry()], outstanding: 1 }),
+      cap: null,
+    });
+    renderPanel();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "unreadable snapshot",
+    );
+    expect(screen.queryByText("Ship it?")).not.toBeInTheDocument();
   });
 
   it("says the human is saturated when the cap is reached", async () => {

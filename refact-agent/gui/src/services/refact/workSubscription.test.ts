@@ -40,6 +40,7 @@ describe("Work subscription", () => {
     expect(snapshots).toHaveBeenCalledTimes(2);
     expect(errors).toHaveBeenCalledWith(
       "Work sequence changed; fresh snapshot required",
+      { kind: "reset" },
     );
     expect(fetchMock).toHaveBeenCalledWith(
       "/v1/work/subscribe",
@@ -133,8 +134,37 @@ describe("Work subscription", () => {
     await vi.advanceTimersByTimeAsync(100);
     stream.enqueue(new TextEncoder().encode(frame(1)));
     await vi.advanceTimersByTimeAsync(0);
-    expect(errors).toHaveBeenCalledExactlyOnceWith("Work stream timed out");
+    expect(errors).toHaveBeenCalledExactlyOnceWith("Work stream timed out", {
+      kind: "transport",
+    });
     expect(snapshots).not.toHaveBeenCalled();
+    stop();
+  });
+
+  it("carries HTTP authorization status without publishing the response body", async () => {
+    const privateBody = vi
+      .fn()
+      .mockResolvedValue({ message: "/private/secret", code: "scope_denied" });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: false, status: 403, json: privateBody }),
+    );
+    let finish!: () => void;
+    const completed = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const errors = vi.fn(() => finish());
+    const stop = subscribeToWork("/project/a/v1/work/subscribe", "test-token", {
+      timeoutMs: 30_000,
+      onSnapshot: vi.fn(),
+      onError: errors,
+    });
+    await completed;
+    expect(errors).toHaveBeenCalledExactlyOnceWith("Work stream unavailable", {
+      kind: "http",
+      status: 403,
+    });
+    expect(privateBody).not.toHaveBeenCalled();
     stop();
   });
 });

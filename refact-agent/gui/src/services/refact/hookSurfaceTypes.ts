@@ -32,12 +32,12 @@ export type HookVerdict = (typeof hookVerdicts)[number];
 export type HookRegistration = {
   event: string;
   kind: string;
-  matcher?: string;
+  matcher?: string | null;
   command: string;
   source: string;
   trust: HookTrust;
   runs: boolean;
-  blocked_reason?: string;
+  blocked_reason?: string | null;
 };
 
 export type HookRun = {
@@ -45,7 +45,7 @@ export type HookRun = {
   source: string;
   trust: HookTrust;
   outcome: HookOutcome;
-  detail?: string;
+  detail?: string | null;
   decided: boolean;
 };
 
@@ -53,9 +53,9 @@ export type HookActivity = {
   event: string;
   kind: string;
   verdict: HookVerdict;
-  decided_by?: string;
-  reason?: string;
-  tool?: string;
+  decided_by?: string | null;
+  reason?: string | null;
+  tool?: string | null;
   runs: HookRun[];
   at_ms: number;
 };
@@ -76,8 +76,8 @@ const object = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 const integer = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-const optionalString = (value: unknown): value is string | undefined =>
-  value === undefined || typeof value === "string";
+const optionalString = (value: unknown): value is string | null | undefined =>
+  value === undefined || value === null || typeof value === "string";
 
 export function isHookRegistration(value: unknown): value is HookRegistration {
   return (
@@ -150,7 +150,24 @@ export function parseHookSurface(value: unknown): HookSurface | null {
     )
   )
     return null;
-  return value as HookSurface;
+  return {
+    ...(value as HookSurface),
+    registrations: value.registrations.map((entry) => ({
+      ...entry,
+      matcher: entry.matcher ?? undefined,
+      blocked_reason: entry.blocked_reason ?? undefined,
+    })),
+    recent: value.recent.map((activity) => ({
+      ...activity,
+      decided_by: activity.decided_by ?? undefined,
+      reason: activity.reason ?? undefined,
+      tool: activity.tool ?? undefined,
+      runs: activity.runs.map((run) => ({
+        ...run,
+        detail: run.detail ?? undefined,
+      })),
+    })),
+  };
 }
 
 /** The hook whose answer deny precedence actually selected, if any. */

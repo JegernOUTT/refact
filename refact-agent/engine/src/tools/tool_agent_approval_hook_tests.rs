@@ -53,7 +53,9 @@ async fn execute_decision(fixture: &Fixture, pending_id: &str, action: &str) -> 
     let args = serde_json::json!({"action": action, "request_id": pending_id});
     let args: HashMap<String, Value> = args.as_object().unwrap().clone().into_iter().collect();
     let ccx = parent_context(fixture).await;
-    if action == "approve" {
+    if action == "approve"
+        && !crate::agents::approval::dangerous_confirmation_enabled(&fixture.app, "parent").await
+    {
         fixture
             .app
             .agent_approvals
@@ -97,6 +99,16 @@ async fn wait_for_request<F: Future<Output = Result<bool, String>>>(
 #[serial_test::serial(permission_decision_hooks)]
 async fn approve_plus_deny_hook_rejects_and_the_child_sees_the_hook_reason() {
     let fixture = fixture().await;
+    let parent = fixture
+        .app
+        .chat
+        .sessions
+        .read()
+        .await
+        .get("parent")
+        .cloned()
+        .unwrap();
+    parent.lock().await.thread.auto_approve_dangerous_commands = true;
     let counter = fixture.dir.path().join("deny-count");
     install_hook(
         &fixture,
@@ -129,6 +141,7 @@ async fn approve_plus_deny_hook_rejects_and_the_child_sees_the_hook_reason() {
         "{child_error}"
     );
     assert_eq!(invocation_count(&counter), 1);
+    assert_eq!(response["approval_source"], "parent_policy");
     assert_eq!(response["hook_overrode_approval"], true);
     assert!(response["denial_reason"]
         .as_str()
