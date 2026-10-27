@@ -96,7 +96,8 @@ export function useTrajectoryOps(
         chatId,
         options: {
           ...llmCompressOptions,
-          expected_trajectory_version: llmCompressPreview.trajectory_version,
+          expected_trajectory_version:
+            llmCompressPreview.trajectory_version ?? undefined,
         },
       }).unwrap();
       if (!result.applied) {

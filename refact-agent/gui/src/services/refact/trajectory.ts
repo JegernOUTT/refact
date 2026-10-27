@@ -43,12 +43,12 @@ export type TransformApplyResponse = {
 
 export type LlmCompressPreviewResponse = {
   eligible: boolean;
-  trajectory_version?: number;
-  resolved_model?: string;
-  context_window?: number;
+  trajectory_version?: number | null;
+  resolved_model?: string | null;
+  context_window?: number | null;
   source_messages: number;
   approximate_source_tokens: number;
-  reason?: string;
+  reason?: string | null;
 };
 
 export type LlmCompressApplyResponse = {

@@ -263,7 +263,7 @@ export const TrajectoryPopoverContent: React.FC<
                     Model: {llmCompressPreview.resolved_model}
                   </Text>
                 )}
-                {llmCompressPreview.context_window !== undefined && (
+                {llmCompressPreview.context_window != null && (
                   <Text size="1" color="gray">
                     Context window:{" "}
                     {formatContextWindow(llmCompressPreview.context_window)}
