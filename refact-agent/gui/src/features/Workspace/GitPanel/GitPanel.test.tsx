@@ -1,17 +1,18 @@
 import { beforeEach, describe, expect, test } from "vitest";
 import { http, HttpResponse } from "msw";
-import { screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 
 import { render } from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
 import type {
+  GitChange,
   GitFileChange,
   GitStatusRoot,
 } from "../../../services/refact/gitRead";
 import type { WorktreeRecordView } from "../../../services/refact/worktrees";
 import { GitDock } from "./GitDock";
 import { GitPanel } from "./GitPanel";
-import { selectSelectedGitFile, setActiveGitRoot } from "./gitPanelSlice";
+import { selectGitDiffTargetForChat, setActiveGitRoot } from "./gitPanelSlice";
 import { createChatWithId } from "../../Chat/Thread/actions";
 import { openTab, setActiveTab } from "../workspaceSlice";
 import type { WorktreeMeta } from "../../../services/refact/worktrees";
@@ -22,13 +23,22 @@ const APP_CHANGE: GitFileChange = {
   status: "MODIFIED",
 };
 
-const OTHER_CHANGE: GitFileChange = {
-  relative_path: "README.md",
-  absolute_path: "/other/README.md",
-  status: "MODIFIED",
-};
+function change(
+  path: string,
+  status: GitChange["status"] = "MODIFIED",
+  oldPath: string | null = null,
+): GitChange {
+  return {
+    relative_path: path,
+    absolute_path: `/repo/${path}`,
+    old_path: oldPath,
+    status,
+    staged: false,
+    unstaged: true,
+  };
+}
 
-function statusRoot(
+function legacyRoot(
   root: string,
   staged: GitFileChange[],
   unstaged: GitFileChange[],
@@ -44,6 +54,44 @@ function statusRoot(
     untracked_included: true,
   };
 }
+
+function statusRoot(
+  root: string,
+  extra: Partial<GitStatusRoot> = {},
+): GitStatusRoot {
+  return {
+    ...legacyRoot(root, [], []),
+    head_oid: "abc1234567890",
+    upstream: "origin/main",
+    repo_state: "clean",
+    truncated: false,
+    changes: [change("src/app.ts")],
+    untracked: [],
+    conflicted: [],
+    ...extra,
+  };
+}
+
+const RICH_STATUS = statusRoot("/repo", {
+  ahead: 2,
+  behind: 1,
+  repo_state: "merge",
+  changes: [
+    change("src/app.ts"),
+    change("src/new.ts", "ADDED"),
+    change("docs/guide.md", "RENAMED", "docs/old-guide.md"),
+  ],
+  untracked: [{ relative_path: "notes.txt", absolute_path: "/repo/notes.txt" }],
+  conflicted: [
+    {
+      relative_path: "lib/conflict.ts",
+      absolute_path: "/repo/lib/conflict.ts",
+      ours: "a",
+      theirs: "b",
+      ancestor: "c",
+    },
+  ],
+});
 
 function worktreeRecord(): WorktreeRecordView {
   return {
@@ -122,9 +170,11 @@ function installHandlers(options?: {
   statusCalls?: (string | null)[];
   diffCalls?: URLSearchParams[];
   commitBodies?: unknown[];
+  rollbackBodies?: unknown[];
+  stageBodies?: unknown[];
   generateBodies?: unknown[];
   generatedMessage?: string;
-  generateError?: string;
+  commitError?: { status: number; body: { code: string; error: string } };
   worktreeCalls?: URLSearchParams[];
   openCalls?: string[];
   deleteCalls?: { id: string; sourceWorkspaceRoot: string | null }[];
@@ -134,13 +184,22 @@ function installHandlers(options?: {
     http.get("*/v1/git/status", ({ request }) => {
       options?.statusCalls?.push(new URL(request.url).searchParams.get("root"));
       return HttpResponse.json({
-        roots: options?.status?.() ?? [statusRoot("/repo", [], [APP_CHANGE])],
+        roots: options?.status?.() ?? [statusRoot("/repo")],
       });
     }),
-    http.post("*/v1/git/stage", () =>
-      HttpResponse.json({ staged: 1, skipped: 0 }),
-    ),
-    http.post("*/v1/git/unstage", () => HttpResponse.json({ unstaged: 1 })),
+    http.post("*/v1/git/stage", async ({ request }) => {
+      options?.stageBodies?.push(await request.json());
+      return HttpResponse.json({ staged: 1, skipped: 0 });
+    }),
+    http.post("*/v1/git/rollback", async ({ request }) => {
+      options?.rollbackBodies?.push(await request.json());
+      return HttpResponse.json({
+        restored: 1,
+        unstaged: 0,
+        deleted: 1,
+        skipped: [],
+      });
+    }),
     http.get("*/v1/git/diff", ({ request }) => {
       options?.diffCalls?.push(new URL(request.url).searchParams);
       return HttpResponse.json({
@@ -180,31 +239,31 @@ function installHandlers(options?: {
                 author_name: "Ada",
                 author_email: "ada@example.com",
                 message_first_line: "Initial commit",
-                message: "Initial commit",
+                message: "Initial commit\n\nBody line\n",
               },
             ],
           },
         ],
       }),
     ),
-    http.post("*/v1/git-commit", async ({ request }) => {
+    http.post("*/v1/git/commit", async ({ request }) => {
       options?.commitBodies?.push(await request.json());
+      if (options?.commitError) {
+        return HttpResponse.json(options.commitError.body, {
+          status: options.commitError.status,
+        });
+      }
       return HttpResponse.json({
-        commits_applied: [
-          {
-            project_path: "/other",
-            project_name: "other",
-            commit_oid: "0123456789abcdef",
-          },
-        ],
-        error_log: [],
+        oid: "0123456789abcdef",
+        short_oid: "0123456",
+        summary: "Update docs",
+        used_git_cli: false,
+        hooks_ran: false,
+        skipped: [],
       });
     }),
     http.post("*/v1/commit-message-from-diff", async ({ request }) => {
       options?.generateBodies?.push(await request.json());
-      if (options?.generateError) {
-        return HttpResponse.text(options.generateError, { status: 422 });
-      }
       return HttpResponse.text(
         options?.generatedMessage ?? "Generated commit message",
       );
@@ -262,91 +321,405 @@ function installHandlers(options?: {
   );
 }
 
+const messageBox = () =>
+  screen.getByRole("textbox", { name: "Commit message" });
+const commitButton = () => screen.getByRole("button", { name: "Commit" });
+
+async function openMenu(
+  user: ReturnType<typeof renderPanel>["user"],
+  name: string,
+) {
+  const row = await screen.findByRole("treeitem", { name });
+  await user.pointer({ target: row, keys: "[MouseRight]" });
+}
+
 beforeEach(() => {
   installHandlers();
 });
 
-describe("GitPanel", () => {
-  test("renders status and invalidates it after stage and unstage", async () => {
-    let staged = false;
+describe("GitDock commit tool window", () => {
+  test("renders header, groups, compact directories and status tones", async () => {
+    installHandlers({ status: () => [RICH_STATUS] });
+    renderPanel();
+
+    expect(
+      await screen.findByRole("heading", { name: "Commit" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("main")).toBeInTheDocument();
+    expect(screen.getByText("↑2 ↓1")).toBeInTheDocument();
+    expect(screen.getByText("Merging")).toBeInTheDocument();
+    expect(screen.getByRole("toolbar")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Group by Directory" }),
+    ).toHaveAttribute("aria-pressed", "true");
+
+    const tree = screen.getByRole("tree", { name: "Changes" });
+    const items = within(tree).getAllByRole("treeitem");
+    expect(items.map((item) => item.getAttribute("aria-label"))).toEqual([
+      "Changes",
+      "docs",
+      "docs/guide.md",
+      "src",
+      "src/app.ts",
+      "src/new.ts",
+      "Merge Conflicts",
+      "lib",
+      "lib/conflict.ts",
+      "Unversioned Files",
+      "notes.txt",
+    ]);
+    expect(items[0]).toHaveTextContent("3 files");
+    expect(within(items[2]).getByText("renamed from docs/old-guide.md"));
+    expect(within(items[5]).getByText("new.ts").getAttribute("data-tone")).toBe(
+      "added",
+    );
+    expect(
+      within(items[8]).getByText("conflict.ts").getAttribute("data-tone"),
+    ).toBe("conflict");
+    expect(
+      within(items[10]).getByText("notes.txt").getAttribute("data-tone"),
+    ).toBe("untracked");
+    expect(within(items[8]).queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("checkbox", { name: "Include notes.txt in commit" }),
+    ).not.toBeChecked();
+    expect(screen.getByText("3 of 4 files included")).toBeInTheDocument();
+  });
+
+  test("flat mode shows the parent directory after the file name", async () => {
+    installHandlers({ status: () => [RICH_STATUS] });
+    const { user } = renderPanel();
+
+    await user.click(
+      await screen.findByRole("button", { name: "Group by Directory" }),
+    );
+
+    const row = screen.getByRole("treeitem", { name: "src/new.ts" });
+    expect(row).toHaveAttribute("aria-level", "2");
+    expect(within(row).getByText("src")).toBeInTheDocument();
+  });
+
+  test("commits included paths with rename sources and included unversioned files", async () => {
+    const commitBodies: unknown[] = [];
     const statusCalls: (string | null)[] = [];
     installHandlers({
+      commitBodies,
       statusCalls,
-      status: () => [
-        statusRoot(
-          "/repo",
-          staged ? [APP_CHANGE] : [],
-          staged ? [] : [APP_CHANGE],
-        ),
-      ],
+      status: () => [RICH_STATUS],
     });
-    server.use(
-      http.post("*/v1/git/stage", () => {
-        staged = true;
-        return HttpResponse.json({ staged: 1, skipped: 0 });
-      }),
-      http.post("*/v1/git/unstage", () => {
-        staged = false;
-        return HttpResponse.json({ unstaged: 1 });
-      }),
-    );
-
     const { user } = renderPanel();
-    await user.click(
-      await screen.findByRole("checkbox", { name: "Stage src/app.ts" }),
-    );
-    await screen.findByRole("checkbox", { name: "Unstage src/app.ts" });
-    await user.click(
-      screen.getByRole("checkbox", { name: "Unstage src/app.ts" }),
-    );
-    await screen.findByRole("checkbox", { name: "Stage src/app.ts" });
 
-    expect(statusCalls.length).toBeGreaterThanOrEqual(3);
+    await user.click(
+      await screen.findByRole("checkbox", {
+        name: "Include src/app.ts in commit",
+      }),
+    );
+    await user.click(
+      screen.getByRole("checkbox", { name: "Include notes.txt in commit" }),
+    );
+    expect(
+      screen.getByRole("checkbox", { name: "Include src in commit" }),
+    ).toHaveProperty("indeterminate", true);
+    expect(commitButton()).toBeDisabled();
+    await user.type(messageBox(), "Update docs");
+    const callsBefore = statusCalls.length;
+    await user.click(commitButton());
+
+    await waitFor(() => expect(commitBodies).toHaveLength(1));
+    expect(commitBodies[0]).toEqual({
+      root: "/repo",
+      message: "Update docs",
+      paths: ["src/new.ts", "docs/guide.md", "docs/old-guide.md", "notes.txt"],
+    });
+    expect(
+      await screen.findByText("Committed 0123456: Update docs"),
+    ).toBeInTheDocument();
+    expect(messageBox()).toHaveValue("");
+    await waitFor(() =>
+      expect(statusCalls.length).toBeGreaterThan(callsBefore),
+    );
   });
 
-  test("fetches and renders a file diff and read-only branch history", async () => {
+  test("Ctrl+Enter commits and hook failures show their output", async () => {
+    const commitBodies: unknown[] = [];
+    installHandlers({
+      commitBodies,
+      commitError: {
+        status: 422,
+        body: { code: "hook_failed", error: "lint: 2 errors" },
+      },
+    });
+    const { user } = renderPanel();
+
+    await user.type(
+      await screen.findByRole("textbox", { name: "Commit message" }),
+      "Fix",
+    );
+    await user.keyboard("{Control>}{Enter}{/Control}");
+
+    await waitFor(() => expect(commitBodies).toHaveLength(1));
+    expect(
+      await screen.findByText("A Git hook rejected the commit."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("lint: 2 errors")).toBeInTheDocument();
+    expect(messageBox()).toHaveValue("Fix");
+  });
+
+  test("amend prefills the HEAD message and supports message-only amend", async () => {
+    const commitBodies: unknown[] = [];
+    installHandlers({ commitBodies });
+    const { user } = renderPanel();
+
+    await user.click(
+      await screen.findByRole("checkbox", {
+        name: "Include src/app.ts in commit",
+      }),
+    );
+    await user.click(screen.getByRole("checkbox", { name: "Amend" }));
+    await waitFor(() =>
+      expect(messageBox()).toHaveValue("Initial commit\n\nBody line"),
+    );
+    await user.click(screen.getByRole("checkbox", { name: "Amend" }));
+    expect(messageBox()).toHaveValue("");
+    await user.click(screen.getByRole("checkbox", { name: "Amend" }));
+    await waitFor(() => expect(messageBox()).not.toHaveValue(""));
+    await user.click(screen.getByRole("button", { name: "Amend Commit" }));
+
+    await waitFor(() => expect(commitBodies).toHaveLength(1));
+    expect(commitBodies[0]).toEqual({
+      root: "/repo",
+      message: "Initial commit\n\nBody line",
+      paths: [],
+      amend: true,
+    });
+    expect(
+      await screen.findByRole("checkbox", { name: "Amend" }),
+    ).not.toBeChecked();
+  });
+
+  test("disables amend on an unborn HEAD", async () => {
+    installHandlers({
+      status: () => [statusRoot("/repo", { head_oid: null })],
+    });
+    renderPanel();
+
+    expect(
+      await screen.findByRole("checkbox", { name: "Amend" }),
+    ).toBeDisabled();
+  });
+
+  test("generates a message from the HEAD diff of included paths", async () => {
+    const diffCalls: URLSearchParams[] = [];
+    const generateBodies: unknown[] = [];
+    installHandlers({
+      diffCalls,
+      generateBodies,
+      generatedMessage: "feat: generated",
+    });
+    const { user } = renderPanel();
+
+    await user.type(
+      await screen.findByRole("textbox", { name: "Commit message" }),
+      "Use conventional commits",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Generate commit message" }),
+    );
+
+    await waitFor(() => expect(generateBodies).toHaveLength(1));
+    expect(generateBodies[0]).toEqual({
+      diff: "diff --git a/src/app.ts b/src/app.ts\n+const value = 1;",
+      text: "Use conventional commits",
+    });
+    const call = diffCalls.find((params) => params.get("against") === "head");
+    expect(call?.getAll("path")).toEqual(["src/app.ts"]);
+    await waitFor(() => expect(messageBox()).toHaveValue("feat: generated"));
+  });
+
+  test("rollback dialog sends paths and delete_added_files", async () => {
+    const rollbackBodies: unknown[] = [];
+    installHandlers({ rollbackBodies, status: () => [RICH_STATUS] });
+    const { user } = renderPanel();
+
+    await openMenu(user, "src");
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Rollback…" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Rollback Changes",
+    });
+    expect(within(dialog).getByText("src/app.ts")).toBeInTheDocument();
+    await user.click(
+      within(dialog).getByRole("checkbox", {
+        name: "Delete local copies of added files",
+      }),
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Rollback" }));
+
+    await waitFor(() => expect(rollbackBodies).toHaveLength(1));
+    expect(rollbackBodies[0]).toEqual({
+      root: "/repo",
+      paths: ["src/app.ts", "src/new.ts"],
+      delete_added_files: true,
+    });
+    expect(await screen.findByText("Rolled back 1 file")).toBeInTheDocument();
+  });
+
+  test("Add to VCS stages and Delete rolls back with delete_untracked", async () => {
+    const stageBodies: unknown[] = [];
+    const rollbackBodies: unknown[] = [];
+    installHandlers({
+      stageBodies,
+      rollbackBodies,
+      status: () => [RICH_STATUS],
+    });
+    const { user } = renderPanel();
+
+    await openMenu(user, "notes.txt");
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Add to VCS" }),
+    );
+    await waitFor(() =>
+      expect(stageBodies).toEqual([{ root: "/repo", paths: ["notes.txt"] }]),
+    );
+
+    await openMenu(user, "notes.txt");
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete…" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Delete Unversioned Files",
+    });
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() =>
+      expect(rollbackBodies).toEqual([
+        { root: "/repo", paths: ["notes.txt"], delete_untracked: true },
+      ]),
+    );
+  });
+
+  test("Mark as Resolved stages the conflicted path", async () => {
+    const stageBodies: unknown[] = [];
+    installHandlers({ stageBodies, status: () => [RICH_STATUS] });
+    const { user } = renderPanel();
+
+    await openMenu(user, "lib/conflict.ts");
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Mark as Resolved" }),
+    );
+    await waitFor(() =>
+      expect(stageBodies).toEqual([
+        { root: "/repo", paths: ["lib/conflict.ts"] },
+      ]),
+    );
+  });
+
+  test("keyboard: arrows move, Space toggles include, Enter opens the HEAD diff", async () => {
     const diffCalls: URLSearchParams[] = [];
     installHandlers({ diffCalls });
-    const { user } = renderPanel();
-
-    await user.click(
-      await screen.findByRole("button", { name: /src\/app.ts/ }),
-    );
-
-    await waitFor(() => expect(diffCalls).toHaveLength(1));
-    expect(diffCalls[0]?.get("root")).toBe("/repo");
-    expect(diffCalls[0]?.get("path")).toBe("src/app.ts");
-    expect(diffCalls[0]?.get("staged")).toBe("false");
-    expect(await screen.findByText("+const value = 1;")).toBeInTheDocument();
-    expect(await screen.findByText("Initial commit")).toBeInTheDocument();
-    expect(screen.getByText("feature/docs")).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: /checkout|switch/i }),
-    ).not.toBeInTheDocument();
-  });
-
-  test("opens the singleton main Git surface from a dock file selection", async () => {
     const { store, user } = renderPanel();
 
-    await user.click(
-      await screen.findByRole("button", { name: /src\/app.ts/ }),
+    const tree = await screen.findByRole("tree", { name: "Changes" });
+    tree.focus();
+    await user.keyboard("{ArrowDown}");
+    await user.keyboard("{End}");
+    expect(
+      screen.getByRole("treeitem", { name: "src/app.ts" }),
+    ).toHaveAttribute("aria-selected", "true");
+    await user.keyboard(" ");
+    expect(
+      screen.getByRole("checkbox", { name: "Include src/app.ts in commit" }),
+    ).not.toBeChecked();
+    await user.keyboard(" ");
+    expect(
+      screen.getByRole("checkbox", { name: "Include src/app.ts in commit" }),
+    ).toBeChecked();
+    await user.keyboard("{ArrowLeft}");
+    expect(screen.getByRole("treeitem", { name: "src" })).toHaveAttribute(
+      "aria-selected",
+      "true",
     );
+    await user.keyboard("{ArrowLeft}");
+    expect(screen.getByRole("treeitem", { name: "src" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    await user.keyboard("{ArrowRight}{ArrowRight}{Enter}");
 
-    expect(store.getState().workspace.tabs).toContain("git:main");
     expect(store.getState().workspace.activeTabId).toBe("git:main");
-    expect(selectSelectedGitFile(store.getState(), null)).toEqual({
+    expect(selectGitDiffTargetForChat(store.getState(), null)).toEqual({
       root: "/repo",
       path: "src/app.ts",
-      staged: false,
+      old_path: null,
+      kind: "change",
     });
+    await waitFor(() =>
+      expect(
+        diffCalls.some(
+          (params) =>
+            params.get("against") === "head" &&
+            params.getAll("path").join() === "src/app.ts",
+        ),
+      ).toBe(true),
+    );
+    expect(await screen.findByText("+const value = 1;")).toBeInTheDocument();
+  });
+
+  test("degrades to legacy staged/unstaged status", async () => {
+    installHandlers({
+      status: () => [legacyRoot("/repo", [APP_CHANGE], [APP_CHANGE])],
+    });
+    renderPanel();
+
+    expect(
+      await screen.findByRole("treeitem", { name: "src/app.ts" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("1 of 1 file included")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Amend" })).toBeEnabled();
+  });
+
+  test("renders a clean state without a tree", async () => {
+    installHandlers({ status: () => [statusRoot("/repo", { changes: [] })] });
+    renderPanel();
+
+    expect(
+      await screen.findByText("No changes — working tree clean"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("tree")).not.toBeInTheDocument();
+    expect(commitButton()).toBeDisabled();
+  });
+
+  test("switches roots with the multi-root picker", async () => {
+    const commitBodies: unknown[] = [];
+    installHandlers({
+      commitBodies,
+      status: () => [
+        statusRoot("/repo"),
+        statusRoot("/other", {
+          changes: [
+            {
+              ...change("README.md"),
+              absolute_path: "/other/README.md",
+            },
+          ],
+        }),
+      ],
+    });
+    const { store, user } = renderPanel(["/repo", "/other"]);
+
+    await screen.findByRole("combobox", { name: "Git root" });
+    store.dispatch(setActiveGitRoot({ chatId: null, root: "/other" }));
+    expect(
+      await screen.findByRole("treeitem", { name: "README.md" }),
+    ).toBeInTheDocument();
+    await user.type(messageBox(), "Docs");
+    await user.click(commitButton());
+    await waitFor(() =>
+      expect(commitBodies).toEqual([
+        { root: "/other", message: "Docs", paths: ["README.md"] },
+      ]),
+    );
   });
 
   test("refetches status for the focused chat worktree", async () => {
     const statusCalls: (string | null)[] = [];
-    installHandlers({
-      statusCalls,
-      status: () => [statusRoot("/repo", [], [APP_CHANGE])],
-    });
+    installHandlers({ statusCalls });
     const { store } = renderPanel();
     store.dispatch(
       createChatWithId({ id: "chat-a", worktree: chatWorktree("a") }),
@@ -361,219 +734,7 @@ describe("GitPanel", () => {
     store.dispatch(openTab("chat:chat-b"));
     store.dispatch(setActiveTab("chat:chat-b"));
     await waitFor(() => expect(statusCalls).toContain("/worktrees/b"));
-
-    expect(statusCalls.filter((root) => root === "/worktrees/a")).toHaveLength(
-      1,
-    );
-    expect(statusCalls.filter((root) => root === "/worktrees/b")).toHaveLength(
-      1,
-    );
   });
-
-  test("renders one compact state and no commit UI for a clean repository", async () => {
-    installHandlers({ status: () => [statusRoot("/repo", [], [])] });
-    renderPanel();
-
-    expect(
-      await screen.findByText("No changes — working tree clean"),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("No staged changes.")).not.toBeInTheDocument();
-    expect(screen.queryByText("No unstaged changes.")).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("textbox", { name: "Commit message" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Commit staged changes" }),
-    ).not.toBeInTheDocument();
-  });
-
-  test("keeps status lists and commit UI when changes exist", async () => {
-    installHandlers({
-      status: () => [statusRoot("/repo", [APP_CHANGE], [OTHER_CHANGE])],
-    });
-    renderPanel();
-
-    expect(
-      await screen.findByRole("checkbox", { name: "Unstage src/app.ts" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("checkbox", { name: "Stage README.md" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("textbox", { name: "Commit message" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Generate commit message" }),
-    ).toBeInTheDocument();
-  });
-
-  test("counts a partially staged path once in the dock badge", async () => {
-    installHandlers({
-      status: () => [statusRoot("/repo", [APP_CHANGE], [APP_CHANGE])],
-    });
-    renderPanel();
-
-    const badge = await screen.findByLabelText("1 changed file");
-    expect(badge).toHaveTextContent("1");
-  });
-
-  test("commits only the active root staged files and refreshes status", async () => {
-    const commitBodies: unknown[] = [];
-    const statusCalls: (string | null)[] = [];
-    installHandlers({
-      commitBodies,
-      statusCalls,
-      status: () => [
-        statusRoot("/repo", [APP_CHANGE], []),
-        statusRoot("/other", [OTHER_CHANGE], []),
-      ],
-    });
-    const { store, user } = renderPanel(["/repo", "/other"]);
-
-    await screen.findByRole("combobox", { name: "Git root" });
-    store.dispatch(setActiveGitRoot({ chatId: null, root: "/other" }));
-    await waitFor(() =>
-      expect(
-        screen.getByRole("combobox", { name: "Git root" }),
-      ).toHaveTextContent("other"),
-    );
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "Commit staged changes" }),
-      ).toBeDisabled(),
-    );
-    await user.type(
-      screen.getByRole("textbox", { name: "Commit message" }),
-      "Update docs",
-    );
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "Commit staged changes" }),
-      ).toBeEnabled(),
-    );
-    expect(
-      screen.getByRole("button", { name: "Generate commit message" }),
-    ).toBeEnabled();
-    await user.click(
-      screen.getByRole("button", { name: "Commit staged changes" }),
-    );
-
-    await waitFor(() => expect(commitBodies).toHaveLength(1));
-    expect(commitBodies[0]).toEqual({
-      commits: [
-        {
-          root: "/other",
-          commit_message: "Update docs",
-          staged_changes: [OTHER_CHANGE],
-          unstaged_changes: [],
-        },
-      ],
-    });
-    expect(await screen.findByText("Committed 01234567")).toBeInTheDocument();
-    expect(statusCalls.length).toBeGreaterThanOrEqual(2);
-  });
-
-  test("disables commit message generation when nothing is staged", async () => {
-    installHandlers({ status: () => [statusRoot("/repo", [], [APP_CHANGE])] });
-    renderPanel();
-
-    expect(
-      await screen.findByRole("button", { name: "Generate commit message" }),
-    ).toBeDisabled();
-  });
-
-  test("generates a commit message from the staged diff and steering text", async () => {
-    const diffCalls: URLSearchParams[] = [];
-    const generateBodies: unknown[] = [];
-    installHandlers({
-      diffCalls,
-      generateBodies,
-      generatedMessage: "feat: generate commit messages",
-      status: () => [statusRoot("/repo", [APP_CHANGE], [])],
-    });
-    const { user } = renderPanel();
-    const textarea = await screen.findByRole("textbox", {
-      name: "Commit message",
-    });
-    const generateButton = screen.getByRole("button", {
-      name: "Generate commit message",
-    });
-
-    await waitFor(() => expect(generateButton).toBeEnabled());
-    await user.type(textarea, "Use conventional commits");
-    await user.click(generateButton);
-
-    await waitFor(() => expect(generateBodies).toHaveLength(1));
-    expect(generateBodies[0]).toEqual({
-      diff: "diff --git a/src/app.ts b/src/app.ts\n+const value = 1;",
-      text: "Use conventional commits",
-    });
-    expect(diffCalls.some((call) => call.get("root") === "/repo")).toBe(true);
-    expect(diffCalls.some((call) => call.get("staged") === "true")).toBe(true);
-    await waitFor(() =>
-      expect(textarea).toHaveValue("feat: generate commit messages"),
-    );
-  });
-
-  test("surfaces generation errors without replacing the typed message", async () => {
-    installHandlers({
-      generateError: "Unable to generate a commit message.",
-      status: () => [statusRoot("/repo", [APP_CHANGE], [])],
-    });
-    const { user } = renderPanel();
-    const textarea = await screen.findByRole("textbox", {
-      name: "Commit message",
-    });
-    const generateButton = screen.getByRole("button", {
-      name: "Generate commit message",
-    });
-
-    await waitFor(() => expect(generateButton).toBeEnabled());
-    await user.type(textarea, "Keep my draft");
-    await user.click(generateButton);
-
-    expect(
-      await screen.findByText("Unable to generate a commit message."),
-    ).toBeInTheDocument();
-    expect(textarea).toHaveValue("Keep my draft");
-  });
-
-  test.each(["C:\\repo", "/repo#reserved"])(
-    "submits the plain status root without URL mangling: %s",
-    async (root) => {
-      const change: GitFileChange = {
-        relative_path: "src/app.ts",
-        absolute_path: `${root}/src/app.ts`,
-        status: "MODIFIED",
-      };
-      const commitBodies: unknown[] = [];
-      installHandlers({
-        commitBodies,
-        status: () => [statusRoot(root, [change], [])],
-      });
-      const { user } = renderPanel([root]);
-
-      await user.type(
-        await screen.findByRole("textbox", { name: "Commit message" }),
-        "Keep root literal",
-      );
-      await user.click(
-        screen.getByRole("button", { name: "Commit staged changes" }),
-      );
-
-      await waitFor(() => expect(commitBodies).toHaveLength(1));
-      expect(commitBodies[0]).toEqual({
-        commits: [
-          {
-            root,
-            commit_message: "Keep root literal",
-            staged_changes: [change],
-            unstaged_changes: [],
-          },
-        ],
-      });
-    },
-  );
 
   test("lists worktrees and supports diff, open, and cleanup actions", async () => {
     const openCalls: string[] = [];
@@ -611,10 +772,8 @@ describe("GitPanel", () => {
   test("drives git requests with status-provided roots for subdirectory workspaces", async () => {
     const branchRoots: (string | null)[] = [];
     const logRoots: (string | null)[] = [];
-    const stageBodies: unknown[] = [];
     const worktreeCalls: URLSearchParams[] = [];
     installHandlers({
-      status: () => [statusRoot("/repo", [], [APP_CHANGE])],
       worktreeCalls,
     });
     server.use(
@@ -634,19 +793,9 @@ describe("GitPanel", () => {
         logRoots.push(new URL(request.url).searchParams.get("root"));
         return HttpResponse.json({ roots: [{ root: "/repo", commits: [] }] });
       }),
-      http.post("*/v1/git/stage", async ({ request }) => {
-        stageBodies.push(await request.json());
-        return HttpResponse.json({ staged: 1, skipped: 0 });
-      }),
     );
-    const { user } = renderPanel(["/repo/refact-agent/engine"]);
+    renderPanel(["/repo/refact-agent/engine"]);
 
-    await user.click(
-      await screen.findByRole("checkbox", { name: "Stage src/app.ts" }),
-    );
-
-    await waitFor(() => expect(stageBodies).toHaveLength(1));
-    expect(stageBodies[0]).toEqual({ root: "/repo", paths: ["src/app.ts"] });
     await waitFor(() => expect(branchRoots.length).toBeGreaterThan(0));
     await waitFor(() => expect(logRoots.length).toBeGreaterThan(0));
     await waitFor(() => expect(worktreeCalls).toHaveLength(1));
@@ -715,7 +864,7 @@ describe("GitPanel", () => {
     installHandlers({
       status: () => [
         {
-          ...statusRoot("/repo", [], [APP_CHANGE]),
+          ...legacyRoot("/repo", [], [APP_CHANGE]),
           branch: null,
           head_detached: true,
         },

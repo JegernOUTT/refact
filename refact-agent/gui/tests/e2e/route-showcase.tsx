@@ -79,14 +79,84 @@ import { WithheldOutputCard } from "../../src/features/Privacy/WithheldOutputCar
 import "../../src/lib/render/web.css";
 
 const now = "2026-06-07T10:00:00Z";
+
+const showcaseGitChange = (
+  relativePath: string,
+  status: "ADDED" | "MODIFIED" | "DELETED" | "RENAMED",
+  oldPath: string | null = null,
+) => ({
+  relative_path: relativePath,
+  absolute_path: `/workspace/refact/${relativePath}`,
+  old_path: oldPath,
+  status,
+  staged: false,
+  unstaged: true,
+});
+
+const showcaseGitStatus = {
+  root: "/workspace/refact",
+  branch: "feature/commit-window",
+  head_detached: false,
+  head_oid: "9f1c2ab3d4e5f60718293a4b5c6d7e8f90a1b2c3",
+  upstream: "origin/feature/commit-window",
+  ahead: 2,
+  behind: 1,
+  repo_state: "merge",
+  truncated: false,
+  staged: [],
+  unstaged: [
+    {
+      relative_path: "README.md",
+      absolute_path: "/workspace/refact/README.md",
+      status: "MODIFIED",
+    },
+  ],
+  untracked_included: true,
+  changes: [
+    showcaseGitChange("README.md", "MODIFIED"),
+    showcaseGitChange(
+      "refact-agent/gui/src/features/Workspace/GitPanel/GitDock.tsx",
+      "MODIFIED",
+    ),
+    showcaseGitChange(
+      "refact-agent/gui/src/features/Workspace/GitPanel/ChangesTree.tsx",
+      "ADDED",
+    ),
+    showcaseGitChange(
+      "refact-agent/gui/src/features/Workspace/GitPanel/StatusList.tsx",
+      "DELETED",
+    ),
+    showcaseGitChange(
+      "docs/commit-window.md",
+      "RENAMED",
+      "docs/changes-panel.md",
+    ),
+  ],
+  untracked: [
+    {
+      relative_path: "notes/todo.txt",
+      absolute_path: "/workspace/refact/notes/todo.txt",
+    },
+  ],
+  conflicted: [
+    {
+      relative_path: "refact-agent/engine/src/git/mod.rs",
+      absolute_path: "/workspace/refact/refact-agent/engine/src/git/mod.rs",
+      ours: "a1",
+      theirs: "b2",
+      ancestor: "c3",
+    },
+  ],
+};
 const chatId = "showcase-chat";
 const splitChatId = "showcase-chat-b";
 const chatSurface = (id: string) => makeSurfaceKey("chat", id);
 const route =
   new URLSearchParams(window.location.search).get("route") ?? "dashboard";
 const terminalDisabledRoute = route === "workspace-chrome-disabled";
+const workspaceGitRoute = route === "workspace-git";
 const workspaceChromeRoute =
-  route === "workspace-chrome" || terminalDisabledRoute;
+  route === "workspace-chrome" || terminalDisabledRoute || workspaceGitRoute;
 const chatRoute =
   route === "chat" ||
   route === "chat-split" ||
@@ -1623,24 +1693,25 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     );
   }
   if (path === "/v1/git/status") {
+    return Promise.resolve(jsonResponse({ roots: [showcaseGitStatus] }));
+  }
+  if (path === "/v1/git/log") {
     return Promise.resolve(
       jsonResponse({
         roots: [
           {
             root: "/workspace/refact",
-            branch: "main",
-            head_detached: false,
-            ahead: 0,
-            behind: 0,
-            staged: [],
-            unstaged: [
+            commits: [
               {
-                relative_path: "README.md",
-                absolute_path: "/workspace/refact/README.md",
-                status: "MODIFIED",
+                oid: "9f1c2ab3d4e5f60718293a4b5c6d7e8f90a1b2c3",
+                short_oid: "9f1c2ab",
+                time_ms: Date.parse(now),
+                author_name: "Ada",
+                author_email: "ada@example.com",
+                message_first_line: "Add commit tool window",
+                message: "Add commit tool window",
               },
             ],
-            untracked_included: true,
           },
         ],
       }),
@@ -1930,12 +2001,18 @@ const preloadedState: Partial<RootState> = {
                   : {}),
                 ...(workspaceChromeRoute
                   ? {
-                      dock: {
-                        open: true,
-                        width: 280,
-                        section: "files" as const,
-                      },
-                      drawer: { open: true, height: 280 },
+                      dock: workspaceGitRoute
+                        ? {
+                            open: true,
+                            width: 420,
+                            section: "git" as const,
+                          }
+                        : {
+                            open: true,
+                            width: 280,
+                            section: "files" as const,
+                          },
+                      drawer: { open: !workspaceGitRoute, height: 280 },
                     }
                   : {}),
               },

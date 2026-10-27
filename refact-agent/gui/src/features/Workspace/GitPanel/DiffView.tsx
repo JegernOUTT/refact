@@ -3,13 +3,13 @@ import { skipToken } from "@reduxjs/toolkit/query";
 import { Badge, Spinner } from "../../../components/ui";
 import { Markdown } from "../../../components/Markdown";
 import { useGetGitDiffQuery } from "../../../services/refact/gitRead";
-import { worktreeErrorText } from "../../Worktrees/worktreeError";
-import type { SelectedGitFile } from "./StatusList";
+import { gitErrorText } from "./gitErrors";
+import type { GitDiffTarget } from "./gitPanelSlice";
 import styles from "./GitPanel.module.css";
 
 type DiffViewProps = {
   root: string;
-  selected: SelectedGitFile | null;
+  selected: GitDiffTarget | null;
 };
 
 function diffMarkdown(patch: string): string {
@@ -17,9 +17,15 @@ function diffMarkdown(patch: string): string {
   return `\`\`\`diff\n${safePatch}\n\`\`\``;
 }
 
+function diffPaths(selected: GitDiffTarget): string[] {
+  return selected.old_path && selected.old_path !== selected.path
+    ? [selected.old_path, selected.path]
+    : [selected.path];
+}
+
 export function DiffView({ root, selected }: DiffViewProps) {
   const request = selected
-    ? { root, path: selected.path, staged: selected.staged }
+    ? { root, paths: diffPaths(selected), against: "head" as const }
     : skipToken;
   const { data, isLoading, isFetching, error } = useGetGitDiffQuery(request);
   const result = data?.roots[0];
@@ -31,9 +37,7 @@ export function DiffView({ root, selected }: DiffViewProps) {
           <h2 id="git-diff-heading">Diff</h2>
           <p>
             {selected
-              ? `${selected.staged ? "Staged" : "Working tree"} · ${
-                  selected.path
-                }`
+              ? `HEAD → working tree · ${selected.path}`
               : "Select a changed file to inspect its patch."}
           </p>
         </div>
@@ -47,7 +51,7 @@ export function DiffView({ root, selected }: DiffViewProps) {
         </div>
       ) : error ? (
         <p className={styles.errorText} role="alert">
-          {worktreeErrorText(error)}
+          {gitErrorText(error).message}
         </p>
       ) : result?.patch ? (
         <div className={`${styles.diffScroller} scrollX`}>

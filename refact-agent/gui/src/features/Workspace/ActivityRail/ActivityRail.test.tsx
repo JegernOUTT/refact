@@ -302,6 +302,56 @@ describe("ActivityRail", () => {
     });
   });
 
+  it("badges changes, untracked and conflicted files from the extended status", async () => {
+    server.use(
+      http.get("*/v1/git/status", () =>
+        HttpResponse.json({
+          roots: [
+            {
+              root: "/repo",
+              branch: "main",
+              head_detached: false,
+              ahead: 0,
+              behind: 0,
+              staged: [],
+              unstaged: [],
+              untracked_included: true,
+              changes: [
+                {
+                  relative_path: "a",
+                  absolute_path: "/repo/a",
+                  old_path: null,
+                  status: "MODIFIED",
+                  staged: true,
+                  unstaged: true,
+                },
+              ],
+              untracked: [{ relative_path: "b", absolute_path: "/repo/b" }],
+              conflicted: [
+                {
+                  relative_path: "c",
+                  absolute_path: "/repo/c",
+                  ours: null,
+                  theirs: null,
+                  ancestor: null,
+                },
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    const store = createRailStore();
+    store.dispatch(setPanelsForced(true));
+    renderRail(store);
+
+    const gitSlot = screen.getByRole("button", { name: "Git" }).closest("div");
+    if (!gitSlot) throw new Error("missing git rail slot");
+    await waitFor(() => {
+      expect(gitSlot).toHaveTextContent("3");
+    });
+  });
+
   it("keeps rail badges out of the accessibility tree", async () => {
     const store = createRailStore([agent("agent-1")]);
     renderRail(store);

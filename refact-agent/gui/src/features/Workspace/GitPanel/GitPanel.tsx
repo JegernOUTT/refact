@@ -6,7 +6,10 @@ import { useAppSelector } from "../../../hooks";
 import { useGetGitStatusQuery } from "../../../services/refact/gitRead";
 import { BranchesLog } from "./BranchesLog";
 import { DiffView } from "./DiffView";
-import { selectActiveGitRoot, selectSelectedGitFile } from "./gitPanelSlice";
+import {
+  selectActiveGitRoot,
+  selectGitDiffTargetForChat,
+} from "./gitPanelSlice";
 import { workspaceRootForGitRoot } from "./gitRoots";
 import { WorktreesSection } from "./WorktreesSection";
 import {
@@ -35,7 +38,7 @@ export function GitPanel() {
     selectActiveGitRoot(state, chatId),
   );
   const selected = useAppSelector((state) =>
-    selectSelectedGitFile(state, chatId),
+    selectGitDiffTargetForChat(state, chatId),
   );
   const statusQuery = useGetGitStatusQuery(contextRoots);
   const roots = useMemo(

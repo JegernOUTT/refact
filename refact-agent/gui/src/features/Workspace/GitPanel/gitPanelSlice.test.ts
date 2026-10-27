@@ -4,75 +4,79 @@ import { setUpStore } from "../../../app/store";
 import { createChatWithId } from "../../Chat/Thread";
 import { openTab, setActiveTab } from "../workspaceSlice";
 import {
-  openGitFile,
+  DEFAULT_GIT_ROOT_VIEW,
+  openGitDiff,
   selectActiveGitRoot,
-  selectSelectedGitFile,
+  selectGitDiffTargetForChat,
+  selectGitRootView,
   setActiveGitRoot,
+  updateGitRootView,
+  type GitDiffTarget,
 } from "./gitPanelSlice";
 
+const target = (path: string): GitDiffTarget => ({
+  root: "/repo",
+  path,
+  old_path: null,
+  kind: "change",
+});
+
 describe("gitPanelSlice", () => {
-  it("opens and focuses one main Git surface for selected files", () => {
+  it("opens and focuses one main Git surface for diff targets", () => {
     const store = setUpStore();
 
-    store.dispatch(
-      openGitFile({ root: "/repo", path: "src/app.ts", staged: false }),
-    );
-    store.dispatch(
-      openGitFile({ root: "/repo", path: "src/lib.ts", staged: true }),
-    );
+    store.dispatch(openGitDiff(target("src/app.ts")));
+    store.dispatch(openGitDiff(target("src/lib.ts")));
 
     expect(store.getState().workspace.tabs).toEqual(["git:main"]);
     expect(store.getState().workspace.activeTabId).toBe("git:main");
-    expect(selectSelectedGitFile(store.getState(), null)).toEqual({
-      root: "/repo",
-      path: "src/lib.ts",
-      staged: true,
-    });
+    expect(selectGitDiffTargetForChat(store.getState(), null)).toEqual(
+      target("src/lib.ts"),
+    );
   });
 
-  it("clears a selected file when the active root changes", () => {
+  it("clears the diff target but keeps per-root view state when the root changes", () => {
     const store = setUpStore();
+    store.dispatch(openGitDiff(target("src/app.ts")));
     store.dispatch(
-      openGitFile({ root: "/repo", path: "src/app.ts", staged: false }),
+      updateGitRootView({
+        chatId: null,
+        root: "/repo",
+        patch: { excludedChanges: ["src/app.ts"] },
+      }),
     );
 
     store.dispatch(setActiveGitRoot({ chatId: null, root: "/other" }));
 
     expect(selectActiveGitRoot(store.getState(), null)).toBe("/other");
-    expect(selectSelectedGitFile(store.getState(), null)).toBeNull();
+    expect(selectGitDiffTargetForChat(store.getState(), null)).toBeNull();
+    expect(selectGitRootView(store.getState(), null, "/repo")).toEqual({
+      ...DEFAULT_GIT_ROOT_VIEW,
+      excludedChanges: ["src/app.ts"],
+    });
+    expect(selectGitRootView(store.getState(), null, "/other")).toBe(
+      DEFAULT_GIT_ROOT_VIEW,
+    );
   });
 
-  it("restores Git selection independently for chats sharing one repository root", () => {
+  it("keeps diff targets independent per chat sharing one repository root", () => {
     const store = setUpStore();
     store.dispatch(createChatWithId({ id: "chat-a" }));
     store.dispatch(createChatWithId({ id: "chat-b" }));
     store.dispatch(openTab("chat:chat-a"));
-    store.dispatch(
-      openGitFile({ root: "/repo", path: "src/a.ts", staged: false }),
-    );
+    store.dispatch(openGitDiff(target("src/a.ts")));
 
     store.dispatch(openTab("chat:chat-b"));
     store.dispatch(setActiveTab("chat:chat-b"));
     expect(selectActiveGitRoot(store.getState(), "chat-b")).toBe("");
-    expect(selectSelectedGitFile(store.getState(), "chat-b")).toBeNull();
-    store.dispatch(
-      openGitFile({ root: "/repo", path: "src/b.ts", staged: true }),
+    expect(selectGitDiffTargetForChat(store.getState(), "chat-b")).toBeNull();
+    store.dispatch(openGitDiff(target("src/b.ts")));
+
+    expect(selectGitDiffTargetForChat(store.getState(), "chat-a")).toEqual(
+      target("src/a.ts"),
     );
-
-    store.dispatch(setActiveTab("chat:chat-a"));
-    expect(selectActiveGitRoot(store.getState(), "chat-a")).toBe("/repo");
-    expect(selectSelectedGitFile(store.getState(), "chat-a")).toEqual({
-      root: "/repo",
-      path: "src/a.ts",
-      staged: false,
-    });
-
-    store.dispatch(setActiveTab("chat:chat-b"));
-    expect(selectActiveGitRoot(store.getState(), "chat-b")).toBe("/repo");
-    expect(selectSelectedGitFile(store.getState(), "chat-b")).toEqual({
-      root: "/repo",
-      path: "src/b.ts",
-      staged: true,
-    });
+    expect(selectGitDiffTargetForChat(store.getState(), "chat-b")).toEqual(
+      target("src/b.ts"),
+    );
   });
 });

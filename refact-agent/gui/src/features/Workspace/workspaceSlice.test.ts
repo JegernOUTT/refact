@@ -179,7 +179,7 @@ describe("workspaceSlice", () => {
 
     expect(selectWorkspaceDock(rootState(state))).toEqual({
       open: false,
-      width: 400,
+      width: 640,
       section: "tasks",
     });
     expect(selectWorkspaceDrawer(rootState(state))).toEqual({

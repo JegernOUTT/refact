@@ -11,7 +11,7 @@ import {
   waitFor,
 } from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
-import { setDockOpen, setDockSection } from "../workspaceSlice";
+import { DOCK_MAX_WIDTH, setDockOpen, setDockSection } from "../workspaceSlice";
 import { updateConfig } from "../../Config/configSlice";
 import { Dock } from "./Dock";
 import sheetStyles from "../../../components/ui/Sheet/Sheet.module.css";
@@ -236,7 +236,7 @@ describe("Dock", () => {
     fireEvent.pointerMove(window, { clientX: 900 });
     fireEvent.pointerUp(window, { clientX: 900 });
 
-    expect(store.getState().workspace.dock?.width).toBe(400);
+    expect(store.getState().workspace.dock?.width).toBe(DOCK_MAX_WIDTH);
   });
 
   it("clamps a persisted resize width to the dock minimum", () => {

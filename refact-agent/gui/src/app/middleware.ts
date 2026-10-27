@@ -253,10 +253,10 @@ function scheduleWorkspaceDiffRefresh(
       type: "Tree" as const,
       id,
     }));
-    const gitTags = [...queue.gitRoots].map((id) => ({
-      type: "GitStatus" as const,
-      id,
-    }));
+    const gitTags = [...queue.gitRoots].flatMap((id) => [
+      { type: "GitStatus" as const, id },
+      { type: "GitDiff" as const, id },
+    ]);
     queue.parentPaths.clear();
     queue.gitRoots.clear();
     if (treeTags.length > 0) dispatch(filesApi.util.invalidateTags(treeTags));
@@ -2772,7 +2772,10 @@ startListening({
         void listenerApi.dispatch(
           tasksApi.util.upsertQueryData("listTasks", undefined, event.tasks),
         );
-        if (!taskRecoveryScope(state) && hasUsableEngineEndpoint(state.config)) {
+        if (
+          !taskRecoveryScope(state) &&
+          hasUsableEngineEndpoint(state.config)
+        ) {
           void listenerApi.dispatch(tasksApi.util.invalidateTags(["Board"]));
         }
         break;

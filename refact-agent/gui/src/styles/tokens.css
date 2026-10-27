@@ -33,6 +33,12 @@
   --rf-color-danger-soft: rgba(216, 115, 109, 0.12);
   --rf-color-info: var(--rf-color-accent);
   --rf-focus-ring: rgba(127, 147, 216, 0.55);
+  --rf-git-modified: var(--rf-color-accent);
+  --rf-git-added: var(--rf-color-success);
+  --rf-git-deleted: var(--rf-color-muted);
+  --rf-git-renamed: var(--rf-color-accent);
+  --rf-git-untracked: var(--rf-color-warning);
+  --rf-git-conflict: var(--rf-color-danger);
   --rf-chart-1: #7f93d8;
   --rf-chart-2: #5fae8b;
   --rf-chart-3: #cda04e;
@@ -191,6 +197,16 @@
       var(--rf-color-accent) 55%,
       transparent
     );
+    --rf-git-untracked: color-mix(
+      in oklab,
+      var(--rf-color-danger) 55%,
+      var(--rf-color-warning)
+    );
+    --rf-git-deleted: color-mix(
+      in oklab,
+      var(--rf-color-muted) 80%,
+      var(--rf-color-fg)
+    );
   }
 }
 
@@ -278,6 +294,12 @@
   --rf-color-warning-soft: rgba(143, 94, 8, 0.16);
   --rf-color-danger-soft: rgba(193, 60, 51, 0.16);
   --rf-color-accent: var(--accent-9, #006adc);
+  --rf-git-modified: var(--rf-color-accent);
+  --rf-git-added: var(--rf-color-success);
+  --rf-git-deleted: var(--rf-color-muted);
+  --rf-git-renamed: var(--rf-color-accent);
+  --rf-git-untracked: var(--rf-color-warning);
+  --rf-git-conflict: var(--rf-color-danger);
   --rf-color-accent-soft: rgba(0, 106, 220, 0.12);
   --rf-selected-bg: rgba(0, 106, 220, 0.1);
   --rf-selected-border: rgba(0, 106, 220, 0.7);
@@ -325,6 +347,16 @@
       in oklab,
       var(--rf-color-accent) 50%,
       transparent
+    );
+    --rf-git-untracked: color-mix(
+      in oklab,
+      var(--rf-color-danger) 55%,
+      var(--rf-color-warning)
+    );
+    --rf-git-deleted: color-mix(
+      in oklab,
+      var(--rf-color-muted) 80%,
+      var(--rf-color-fg)
     );
   }
 }
