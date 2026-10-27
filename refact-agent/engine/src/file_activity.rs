@@ -475,7 +475,20 @@ async fn create_exclusively(target: &Path, contents: &[u8]) -> Result<(), String
     Ok(())
 }
 
-async fn write_temp_then_rename(
+#[cfg(test)]
+pub(crate) struct DurableRenameBarrier {
+    pub target: PathBuf,
+    pub staged: Arc<tokio::sync::Notify>,
+    pub release: Arc<tokio::sync::Notify>,
+    pub fail: bool,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static BEFORE_DURABLE_RENAME: DurableRenameBarrier;
+}
+
+pub(crate) async fn write_temp_then_rename(
     target: &Path,
     contents: &[u8],
     permissions: Option<std::fs::Permissions>,
@@ -505,6 +518,22 @@ async fn write_temp_then_rename(
             tokio::fs::set_permissions(&tmp, permissions)
                 .await
                 .map_err(|e| format!("Failed to set permissions on {:?}: {}", tmp, e))?;
+        }
+        #[cfg(test)]
+        if let Ok(Some((staged, release, fail))) = BEFORE_DURABLE_RENAME.try_with(|barrier| {
+            (barrier.target == target).then(|| {
+                (
+                    barrier.staged.clone(),
+                    barrier.release.clone(),
+                    barrier.fail,
+                )
+            })
+        }) {
+            staged.notify_one();
+            release.notified().await;
+            if fail {
+                return Err("injected failure before durable rename".to_string());
+            }
         }
         #[cfg(test)]
         if durable_fault::triggered(durable_fault::AFTER_TEMP_WRITE, target) {

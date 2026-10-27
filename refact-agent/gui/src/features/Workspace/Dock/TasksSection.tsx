@@ -2,13 +2,13 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Badge, Button, LoadingState, StatusDot } from "../../../components/ui";
 import { useAppDispatch } from "../../../hooks";
+import { useInternalNavigation } from "../../../hooks/useInternalNavigation";
 import {
   type TaskBoard,
   useGetBoardQuery,
   useListTasksQuery,
 } from "../../../services/refact/tasks";
 import { push } from "../../Pages/pagesSlice";
-import { openTask } from "../../Tasks/tasksSlice";
 import { setDockOpen } from "../../Workspace/workspaceSlice";
 import styles from "./TasksSection.module.css";
 import {
@@ -32,12 +32,17 @@ type BoardState = {
 
 const statusDot: Record<
   TaskDockAgentStatus,
-  { label: string; status: "running" | "warning" | "error" | "success" }
+  {
+    label: string;
+    status: "running" | "warning" | "error" | "success" | "paused";
+  }
 > = {
   running: { label: "Running agent", status: "running" },
   stuck: { label: "Stuck agent", status: "warning" },
   failed: { label: "Failed agent", status: "error" },
   done: { label: "Done agent", status: "success" },
+  paused: { label: "Paused agent", status: "paused" },
+  regressed: { label: "Regressed agent", status: "error" },
 };
 
 const statusBadgeTone: Record<
@@ -48,6 +53,8 @@ const statusBadgeTone: Record<
   stuck: "warning",
   failed: "danger",
   done: "success",
+  paused: "warning",
+  regressed: "danger",
 };
 
 export function TasksSectionView({
@@ -58,7 +65,10 @@ export function TasksSectionView({
 }: TasksSectionViewProps) {
   const orderedEntries = useMemo(() => sortTaskDockEntries(entries), [entries]);
   const hasAttention = orderedEntries.some(
-    (entry) => entry.agentStatus === "stuck" || entry.agentStatus === "failed",
+    (entry) =>
+      entry.agentStatus === "stuck" ||
+      entry.agentStatus === "failed" ||
+      entry.agentStatus === "regressed",
   );
   const hasRunning = orderedEntries.some(
     (entry) => entry.agentStatus === "running",
@@ -158,6 +168,7 @@ function TaskBoardLoader({
 
 export function TasksSection() {
   const dispatch = useAppDispatch();
+  const navigation = useInternalNavigation();
   const { data: tasks = [], isLoading: tasksLoading } = useListTasksQuery(
     undefined,
     { pollingInterval: 0 },
@@ -216,15 +227,19 @@ export function TasksSection() {
   }, [dispatch]);
   const handleOpenTask = useCallback(
     (entry: TaskDockEntry) => {
-      dispatch(setDockOpen(false));
-      dispatch(openTask({ id: entry.taskId, name: entry.taskName }));
-      dispatch(push({ name: "task workspace", taskId: entry.taskId }));
+      void navigation
+        .navigate(`refact://task/${entry.taskId}/card/${entry.cardId}`)
+        .then((opened) => {
+          if (opened) dispatch(setDockOpen(false));
+        });
     },
-    [dispatch],
+    [dispatch, navigation],
   );
 
   return (
     <>
+      {navigation.pending && <div role="status">Opening linked target...</div>}
+      {navigation.error && <div role="alert">{navigation.error}</div>}
       {activeTasks.map((task) => (
         <TaskBoardLoader
           key={task.id}

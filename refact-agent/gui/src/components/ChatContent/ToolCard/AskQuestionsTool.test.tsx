@@ -69,13 +69,23 @@ describe("AskQuestionsTool", () => {
     const runtime = chat.threads[chat.current_thread_id];
     runtime.thread.messages = [toolMessage()];
 
-    const { user } = render(<AskQuestionsTool toolCall={toolCall()} />, {
-      preloadedState: { chat },
-    });
+    const { user, container } = render(
+      <AskQuestionsTool toolCall={toolCall()} />,
+      {
+        preloadedState: { chat },
+      },
+    );
 
     const radiogroup = screen.getByRole("radiogroup", {
       name: "Choose the rollout path",
     });
+    expect(container.querySelector("section")).toHaveAttribute(
+      "data-open",
+      "true",
+    );
+    expect(
+      screen.queryByRole("button", { name: "Questions for you" }),
+    ).toBeNull();
     const radios = within(radiogroup).getAllByRole("radio");
 
     expect(radios).toHaveLength(3);
@@ -351,13 +361,19 @@ describe("AskQuestionsTool", () => {
     await user.keyboard("{Enter}");
     expect(row).toHaveAttribute("aria-expanded", "true");
     expect(screen.queryByRole("button", { name: "More details" })).toBeNull();
-    const submit = screen.getByRole("button", { name: "Submit Answers" });
+    let submit = screen.getByRole("button", { name: "Submit Answers" });
     expect(submit).toBeDisabled();
     await user.tab();
     expect(screen.getByRole("radio", { name: "GUI" })).toHaveFocus();
     await user.keyboard(" ");
     expect(screen.getByRole("radio", { name: "GUI" })).toBeChecked();
     expect(fetchMock).not.toHaveBeenCalled();
+    await user.click(row);
+    expect(row).toHaveAttribute("aria-expanded", "false");
+    await user.click(row);
+    expect(screen.getByRole("radio", { name: "GUI" })).toBeChecked();
+    submit = screen.getByRole("button", { name: "Submit Answers" });
+    screen.getByRole("radio", { name: "GUI" }).focus();
     await user.tab();
     expect(submit).toHaveFocus();
     await user.keyboard("{Enter}");
@@ -476,6 +492,18 @@ describe("AskQuestionsTool", () => {
     expect(
       screen.getByRole("button", { name: "Submit Answers" }),
     ).toBeInTheDocument();
+    const radios = screen.getAllByRole("radio");
+    await user.click(radios[0]);
+    await user.type(
+      screen.getByPlaceholderText("Add any extra context..."),
+      "Keep my context",
+    );
+    await user.click(row);
+    await user.click(row);
+    expect(screen.getAllByRole("radio")[0]).toBeChecked();
+    expect(screen.getByPlaceholderText("Add any extra context...")).toHaveValue(
+      "Keep my context",
+    );
     await user.click(row);
     store.dispatch(
       backUpMessages({

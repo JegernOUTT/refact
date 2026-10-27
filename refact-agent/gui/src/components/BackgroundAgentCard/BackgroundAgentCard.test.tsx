@@ -195,7 +195,11 @@ describe("BackgroundAgentCard", () => {
   it("hides the trajectory button without a child chat", () => {
     render(
       <BackgroundAgentCard
-        agent={makeAgent({ child_chat_id: null })}
+        agent={makeAgent({
+          child_chat_id: null,
+          goal_summary: null,
+          plan_present: false,
+        })}
         onOpenTrajectory={vi.fn()}
       />,
     );
@@ -207,6 +211,9 @@ describe("BackgroundAgentCard", () => {
     expect(
       screen.queryByRole("button", { name: "Open trajectory" }),
     ).not.toBeInTheDocument();
+    expect(screen.getByText("refact/task/T-8/card")).toBeVisible();
+    expect(screen.queryByText("🎯 Goal")).toBeNull();
+    expect(screen.queryByText("📋 Plan")).toBeNull();
   });
 
   it("shows the running step indicator once in expanded details", () => {
@@ -536,6 +543,8 @@ describe("inline background agents", () => {
       merge_status: "merged",
       edited_files: ["src/a.ts", "src/b.ts"],
       result_summary: "Updated animation and tests",
+      goal_summary: null,
+      plan_present: false,
       deliverable_status: {
         check: "structural",
         met: true,
@@ -566,7 +575,7 @@ describe("inline background agents", () => {
     toggle.focus();
     await user.keyboard("{Enter}");
     expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(container.querySelectorAll("dt")).toHaveLength(3);
+    expect(container.querySelectorAll("dt")).toHaveLength(2);
     const more = screen.getByRole("button", { name: "More details" });
     expect(more).toHaveAttribute("aria-expanded", "false");
     expect(
@@ -589,7 +598,8 @@ describe("inline background agents", () => {
     expect(screen.getByText("Local merge: Merged")).toBeInTheDocument();
     expect(screen.getByText("12.3k tok · $0.04")).toBeInTheDocument();
     expect(screen.getByText("refact/task/T-8/card")).toBeInTheDocument();
-    expect(screen.getByText("📋 Plan")).toBeInTheDocument();
+    expect(screen.queryByText("🎯 Goal")).toBeNull();
+    expect(screen.queryByText("📋 Plan")).toBeNull();
     expect(
       screen.getByTestId("background-agent-deliverable"),
     ).toHaveTextContent("Deliverable met");

@@ -1,4 +1,4 @@
-import React, { Key, useMemo } from "react";
+import React, { Key, useMemo, useState } from "react";
 import ReactMarkdown, { Components } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import classNames from "classnames";
@@ -95,6 +95,7 @@ const _Markdown: React.FC<MarkdownProps> = ({
   isStreaming,
 }) => {
   const internalLinkContext = useInternalLinkHandler();
+  const [linkError, setLinkError] = useState<string | null>(null);
 
   const components: Partial<Components> = useMemo(() => {
     return {
@@ -183,9 +184,26 @@ const _Markdown: React.FC<MarkdownProps> = ({
               {...props}
               href={href}
               onClick={(e: React.MouseEvent) => {
-                if (internalLinkContext?.handleInternalLink(href)) {
-                  e.preventDefault();
+                e.preventDefault();
+                setLinkError(null);
+                if (!internalLinkContext) {
+                  setLinkError("Internal link navigation is unavailable here.");
+                  return;
                 }
+                void (async () => {
+                  try {
+                    const opened =
+                      await internalLinkContext.handleInternalLink(href);
+                    if (!opened)
+                      setLinkError(
+                        "This internal link could not be opened. The current view has been kept.",
+                      );
+                  } catch {
+                    setLinkError(
+                      "This internal link could not be opened. The current view has been kept.",
+                    );
+                  }
+                })();
               }}
               style={{ cursor: "pointer" }}
             />
@@ -260,17 +278,20 @@ const _Markdown: React.FC<MarkdownProps> = ({
       : normalizedChildren;
 
   return (
-    <ReactMarkdown
-      className={classNames(styles.markdown, styles[`variant_${variant}`])}
-      remarkPlugins={REMARK_PLUGINS}
-      rehypePlugins={REHYPE_PLUGINS}
-      urlTransform={transformMarkdownUrl}
-      allowedElements={allowedElements}
-      unwrapDisallowed={unwrapDisallowed}
-      components={components}
-    >
-      {renderedChildren}
-    </ReactMarkdown>
+    <>
+      {linkError && <span role="alert">{linkError}</span>}
+      <ReactMarkdown
+        className={classNames(styles.markdown, styles[`variant_${variant}`])}
+        remarkPlugins={REMARK_PLUGINS}
+        rehypePlugins={REHYPE_PLUGINS}
+        urlTransform={transformMarkdownUrl}
+        allowedElements={allowedElements}
+        unwrapDisallowed={unwrapDisallowed}
+        components={components}
+      >
+        {renderedChildren}
+      </ReactMarkdown>
+    </>
   );
 };
 

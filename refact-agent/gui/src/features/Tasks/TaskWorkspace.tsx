@@ -25,7 +25,7 @@ import { AgentStatusDot } from "./AgentStatusDot";
 import { ScrollArea } from "../../components/ScrollArea";
 import { ChatLoading } from "../../components/ChatContent/ChatLoading";
 import { useAppDispatch, useAppSelector } from "../../hooks";
-import { pop, popBackTo, push } from "../Pages/pagesSlice";
+import { pop } from "../Pages/pagesSlice";
 import { KanbanBoard } from "./KanbanBoard";
 import {
   useGetTaskQuery,
@@ -35,11 +35,15 @@ import {
   useDeletePlannerChatMutation,
   BoardCard,
   tasksApi,
+  taskErrorMessage,
+  type TaskBoard,
 } from "../../services/refact/tasks";
+import { getEngineEndpointIdentity } from "../../services/refact/apiUrl";
 import { Markdown } from "../../components/Markdown";
 import { ModeMenuItem } from "../../components/ChatForm/ModeSelect";
 import modeSelectStyles from "../../components/ChatForm/ModeSelect.module.css";
 import styles from "./Tasks.module.css";
+import cardManagementStyles from "./CardManagement.module.css";
 import { Chat } from "../Chat";
 import { selectConfig } from "../Config/configSlice";
 import {
@@ -51,7 +55,6 @@ import {
   openTask,
   addPlannerChat,
   removePlannerChat,
-  restorePlannerChat,
   selectOpenTasksFromRoot,
   setTaskActiveChat,
   selectTaskActiveChat,
@@ -59,7 +62,6 @@ import {
   PlannerInfo,
 } from "./tasksSlice";
 import {
-  selectBackgroundAgentsByThread,
   selectCurrentThreadId,
   selectRuntimeById,
   selectThreadById,
@@ -67,14 +69,15 @@ import {
 import { getStatusFromSessionState } from "../../utils/sessionStatus";
 import { useGetChatModesQuery } from "../../services/refact/chatModes";
 import { InternalLinkProvider } from "../../contexts/InternalLinkContext";
+import type { InternalLinkOrigin } from "../../contexts/InternalLinkContext";
 import { parseRefactLink } from "../../contexts/internalLinkUtils";
-import { resolveChatLink } from "./internalLinkResolver";
+import { useInternalNavigation } from "../../hooks/useInternalNavigation";
 import {
   useDeleteWorktreeMutation,
   useListWorktreesQuery,
   useOpenWorktreeMutation,
   type MergeWorktreeResponse,
-  type BackgroundAgentSummary,
+  type WorktreeRecordView,
 } from "../../services/refact";
 import {
   sendUserMessage,
@@ -99,6 +102,10 @@ import { MemoryInboxPanel } from "./TaskMemories/MemoryInboxPanel";
 import { DocumentsPanel } from "./TaskDocuments/DocumentsPanel";
 import { TaskGoalPanel } from "./TaskGoalPanel";
 import { CardCommentsSection } from "./CardComments";
+import { CardEditorDialog } from "./CardEditorDialog";
+import { CardEvidencePanel } from "./CardEvidencePanel";
+import { CardWorkflowRequests } from "./CardWorkflowRequests";
+import type { CardEditTarget } from "./cardForm";
 import {
   isActionableWorktree,
   resolveCardWorktree,
@@ -113,8 +120,6 @@ type ActiveChat =
 
 const LEGACY_WORKTREE_TOOLTIP =
   "This worktree was created before the registry; recreate it via `restart_agent(mode=fresh)` to enable actions.";
-const EMPTY_BACKGROUND_AGENTS: Record<string, BackgroundAgentSummary> =
-  Object.freeze({});
 const EMPTY_LINKED_CARDS: string[] = [];
 
 interface PlannerPanelProps {
@@ -123,6 +128,7 @@ interface PlannerPanelProps {
   linkedCardsByPlanner: Map<string, string[]>;
   onSelectPlanner: (chatId: string) => void;
   onRemovePlanner: (chatId: string) => void;
+  removeDisabled?: boolean;
 }
 
 interface PlannerItemProps {
@@ -131,6 +137,7 @@ interface PlannerItemProps {
   linkedCardIds?: string[];
   onSelect: () => void;
   onRemove: () => void;
+  removeDisabled?: boolean;
 }
 
 function formatPlannerDate(dateStr: string): string {
@@ -155,28 +162,32 @@ function formatAgentChatTitle(
   return cardId ? `Agent: ${cardId} ${cardTitle}` : `Agent: ${cardTitle}`;
 }
 
-type AgentRef = { chat_id: string };
-
 function parsePlannerDeleteError(err: unknown): string {
-  if (typeof err === "object" && err && "status" in err) {
-    const e = err as {
-      status: number;
-      data?: { error?: string; agent_refs?: AgentRef[] };
-    };
-    if (e.status === 409 && e.data?.agent_refs) {
-      const ids = e.data.agent_refs
-        .map((r) => r.chat_id)
-        .slice(0, 3)
+  if (typeof err === "object" && err && "status" in err && err.status === 409) {
+    let references = "";
+    if (
+      "data" in err &&
+      typeof err.data === "object" &&
+      err.data &&
+      "agent_refs" in err.data &&
+      Array.isArray(err.data.agent_refs)
+    ) {
+      references = err.data.agent_refs
+        .flatMap((ref: unknown) =>
+          typeof ref === "object" &&
+          ref &&
+          "chat_id" in ref &&
+          typeof ref.chat_id === "string"
+            ? [ref.chat_id]
+            : [],
+        )
         .join(", ");
-      const extra =
-        e.data.agent_refs.length > 3
-          ? ` (+${e.data.agent_refs.length - 3} more)`
-          : "";
-      return `${e.data.error ?? "Conflict"}: ${ids}${extra}`;
     }
-    if (e.data?.error) return e.data.error;
+    return `${taskErrorMessage(err)}${
+      references ? `: ${references}` : ""
+    }. Keep this planner while agents reference it. Review the linked agent chats before deleting it.`;
   }
-  return "Unknown error";
+  return taskErrorMessage(err);
 }
 
 function sameWaitingCards(a?: string[], b?: string[]): boolean {
@@ -218,6 +229,7 @@ export const PlannerItem: React.FC<PlannerItemProps> = ({
   linkedCardIds = EMPTY_LINKED_CARDS,
   onSelect,
   onRemove,
+  removeDisabled,
 }) => {
   const thread = useAppSelector((state) => selectThreadById(state, planner.id));
   const runtime = useAppSelector((state) =>
@@ -333,6 +345,8 @@ export const PlannerItem: React.FC<PlannerItemProps> = ({
             variant="ghost"
             aria-label="Delete chat"
             icon={X}
+            disabled={removeDisabled}
+            onKeyDown={(e) => e.stopPropagation()}
             onClick={(e) => {
               e.stopPropagation();
               onRemove();
@@ -350,6 +364,7 @@ const PlannerPanel: React.FC<PlannerPanelProps> = ({
   linkedCardsByPlanner,
   onSelectPlanner,
   onRemovePlanner,
+  removeDisabled,
 }) => {
   return (
     <Box className={styles.panelList}>
@@ -380,6 +395,7 @@ const PlannerPanel: React.FC<PlannerPanelProps> = ({
                   }
                   onSelect={() => onSelectPlanner(planner.id)}
                   onRemove={() => onRemovePlanner(planner.id)}
+                  removeDisabled={removeDisabled}
                 />
               ))}
             </Flex>
@@ -390,7 +406,7 @@ const PlannerPanel: React.FC<PlannerPanelProps> = ({
   );
 };
 
-type AgentChatStatus = "doing" | "done" | "failed";
+type AgentChatStatus = "doing" | "done" | "failed" | "regressed" | "paused";
 
 interface AgentChatEntry {
   card: BoardCard;
@@ -398,11 +414,21 @@ interface AgentChatEntry {
 }
 
 function agentChatEntries(cards: BoardCard[]): AgentChatEntry[] {
-  const byColumn = (column: AgentChatStatus): AgentChatEntry[] =>
+  const byColumn = (
+    column: Exclude<AgentChatStatus, "paused">,
+  ): AgentChatEntry[] =>
     cards
       .filter((card) => card.column === column && card.agent_chat_id)
-      .map((card) => ({ card, status: column }));
-  return [...byColumn("doing"), ...byColumn("done"), ...byColumn("failed")];
+      .map((card) => ({
+        card,
+        status: card.column === "doing" && card.paused_at ? "paused" : column,
+      }));
+  return [
+    ...byColumn("doing"),
+    ...byColumn("done"),
+    ...byColumn("failed"),
+    ...byColumn("regressed"),
+  ];
 }
 
 interface AgentItemProps {
@@ -435,7 +461,17 @@ const AgentItem: React.FC<AgentItemProps> = ({
       }}
     >
       <div className={styles.panelItemLead}>
-        <AgentStatusDot status={status} size="medium" />
+        {status === "paused" || status === "regressed" ? (
+          <StatusDot
+            status={status === "paused" ? "paused" : "error"}
+            size="medium"
+            aria-label={
+              status === "paused" ? "Paused agent" : "Regressed agent"
+            }
+          />
+        ) : (
+          <AgentStatusDot status={status} size="medium" />
+        )}
       </div>
       <Flex align="center" gap="1" className={styles.panelItemContent}>
         <Badge tone="muted" className={styles.agentItemBadge}>
@@ -444,6 +480,11 @@ const AgentItem: React.FC<AgentItemProps> = ({
         <Text size="1" className={styles.panelItemTitle}>
           {card.title}
         </Text>
+        {(status === "paused" || status === "regressed") && (
+          <Badge tone={status === "paused" ? "warning" : "danger"}>
+            {status === "paused" ? "Paused" : "Regressed"}
+          </Badge>
+        )}
       </Flex>
     </Box>
   );
@@ -508,6 +549,7 @@ interface BoardRailProps {
   linkedCardsByPlanner: Map<string, string[]>;
   onSelectPlanner: (chatId: string) => void;
   onRemovePlanner: (chatId: string) => void;
+  removeDisabled?: boolean;
   onSelectAgent: (cardId: string, chatId: string) => void;
 }
 
@@ -518,6 +560,7 @@ const BoardRail: React.FC<BoardRailProps> = ({
   linkedCardsByPlanner,
   onSelectPlanner,
   onRemovePlanner,
+  removeDisabled,
   onSelectAgent,
 }) => {
   const agentChats = cards.filter((card) => card.agent_chat_id);
@@ -544,6 +587,7 @@ const BoardRail: React.FC<BoardRailProps> = ({
         linkedCardsByPlanner={linkedCardsByPlanner}
         onSelectPlanner={onSelectPlanner}
         onRemovePlanner={onRemovePlanner}
+        removeDisabled={removeDisabled}
       />
       <div className={styles.railGroupHeader}>
         <Text
@@ -577,6 +621,7 @@ interface ChatSwitcherProps {
   linkedCardsByPlanner: Map<string, string[]>;
   onSelectPlanner: (chatId: string) => void;
   onRemovePlanner: (chatId: string) => void;
+  removeDisabled?: boolean;
   onSelectAgent: (cardId: string, chatId: string) => void;
 }
 
@@ -588,6 +633,7 @@ const ChatSwitcher: React.FC<ChatSwitcherProps> = ({
   linkedCardsByPlanner,
   onSelectPlanner,
   onRemovePlanner,
+  removeDisabled,
   onSelectAgent,
 }) => {
   const [open, setOpen] = useState(false);
@@ -606,9 +652,21 @@ const ChatSwitcher: React.FC<ChatSwitcherProps> = ({
           aria-label="Switch chat"
           title="Switch chat"
         >
-          {activeAgent && (
-            <AgentStatusDot status={activeAgent.status} size="small" />
-          )}
+          {activeAgent &&
+            (activeAgent.status === "paused" ||
+            activeAgent.status === "regressed" ? (
+              <StatusDot
+                status={activeAgent.status === "paused" ? "paused" : "error"}
+                size="small"
+                aria-label={
+                  activeAgent.status === "paused"
+                    ? "Paused agent"
+                    : "Regressed agent"
+                }
+              />
+            ) : (
+              <AgentStatusDot status={activeAgent.status} size="small" />
+            ))}
           <Text size="1" className={styles.chatSwitcherLabel}>
             {label}
           </Text>
@@ -650,7 +708,11 @@ const ChatSwitcher: React.FC<ChatSwitcherProps> = ({
                   setOpen(false);
                   onSelectPlanner(planner.id);
                 }}
-                onRemove={() => onRemovePlanner(planner.id)}
+                onRemove={() => {
+                  setOpen(false);
+                  onRemovePlanner(planner.id);
+                }}
+                removeDisabled={removeDisabled}
               />
             ))}
           </Flex>
@@ -769,11 +831,14 @@ const NewChatModeButton: React.FC<NewChatModeButtonProps> = ({
 interface CardDetailProps {
   taskId: string;
   card: BoardCard;
+  board: TaskBoard;
+  onOpenOwner: (chatId: string) => void;
   worktree: CardWorktreeTarget | null;
   worktreeLabel: string | null;
   isWorktreeLoading: boolean;
-  onClose: () => void;
-  onInternalLink?: (url: string) => boolean;
+  navigationPending: boolean;
+  navigationError: string | null;
+  onManageCard: (target: CardEditTarget) => void;
   onViewDiff: (worktree: CardWorktreeTarget) => void;
   onMerge: (worktree: CardWorktreeTarget) => void;
   onOpenWorktree: (worktree: CardWorktreeTarget) => void;
@@ -783,11 +848,14 @@ interface CardDetailProps {
 const CardDetail: React.FC<CardDetailProps> = ({
   taskId,
   card,
+  board,
+  onOpenOwner,
   worktree,
   worktreeLabel,
   isWorktreeLoading,
-  onClose,
-  onInternalLink,
+  navigationPending,
+  navigationError,
+  onManageCard,
   onViewDiff,
   onMerge,
   onOpenWorktree,
@@ -821,6 +889,10 @@ const CardDetail: React.FC<CardDetailProps> = ({
       maxWidth="720px"
     >
       <div className={styles.cardDetailRoot}>
+        {navigationPending && (
+          <Text role="status">Opening linked target...</Text>
+        )}
+        {navigationError && <Text role="alert">{navigationError}</Text>}
         <div className={styles.cardDetailHeader}>
           <div className={styles.cardDetailTitleGroup}>
             <Badge tone="muted">{card.id}</Badge>
@@ -1010,22 +1082,9 @@ const CardDetail: React.FC<CardDetailProps> = ({
               </Text>
             </div>
             <Box className={styles.cardDetailSection}>
-              {onInternalLink ? (
-                <InternalLinkProvider
-                  onInternalLink={(url) => {
-                    onClose();
-                    return onInternalLink(url);
-                  }}
-                >
-                  <Markdown canHaveInteractiveElements={false}>
-                    {card.instructions}
-                  </Markdown>
-                </InternalLinkProvider>
-              ) : (
-                <Markdown canHaveInteractiveElements={false}>
-                  {card.instructions}
-                </Markdown>
-              )}
+              <Markdown canHaveInteractiveElements={false}>
+                {card.instructions}
+              </Markdown>
             </Box>
           </section>
         )}
@@ -1033,9 +1092,9 @@ const CardDetail: React.FC<CardDetailProps> = ({
         {card.final_report && (
           <section className={styles.cardDetailSectionBlock}>
             <div className={styles.cardDetailSectionHeader}>
-              <Icon icon={FileText} size="sm" tone="success" />
+              <Icon icon={FileText} size="sm" tone="muted" />
               <Text size="2" weight="medium">
-                Final Report
+                Agent-reported final report (not verification)
               </Text>
             </div>
             <Box
@@ -1047,6 +1106,15 @@ const CardDetail: React.FC<CardDetailProps> = ({
             </Box>
           </section>
         )}
+
+        <CardEvidencePanel card={card} board={board} />
+        <CardWorkflowRequests
+          key={card.id}
+          taskId={taskId}
+          card={card}
+          board={board}
+          onOpenOwner={onOpenOwner}
+        />
 
         {card.status_updates.length > 0 && (
           <section className={styles.cardDetailSectionBlock}>
@@ -1078,7 +1146,30 @@ const CardDetail: React.FC<CardDetailProps> = ({
           comments={card.comments ?? []}
         />
 
-        <div className={styles.cardDetailFooter}>
+        <div
+          className={`${styles.cardDetailFooter} ${cardManagementStyles.actions}`}
+        >
+          <Button
+            size="sm"
+            variant="soft"
+            onClick={() => onManageCard({ mode: "edit", card })}
+          >
+            Edit card
+          </Button>
+          <Button
+            size="sm"
+            variant="soft"
+            onClick={() => onManageCard({ mode: "move", card })}
+          >
+            Move card
+          </Button>
+          <Button
+            size="sm"
+            variant="danger"
+            onClick={() => onManageCard({ mode: "delete", card })}
+          >
+            Delete card
+          </Button>
           <Dialog.Close asChild>
             <Button variant="soft">Close</Button>
           </Dialog.Close>
@@ -1090,9 +1181,29 @@ const CardDetail: React.FC<CardDetailProps> = ({
 
 interface TaskWorkspaceProps {
   taskId: string;
+  cardId?: string;
 }
 
-export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
+export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({
+  taskId,
+  cardId,
+}) => {
+  const config = useAppSelector(selectConfig);
+  return (
+    <TaskWorkspaceContent
+      key={`${taskId}:${getEngineEndpointIdentity(config)}:${
+        config.apiKey ?? ""
+      }`}
+      taskId={taskId}
+      cardId={cardId}
+    />
+  );
+};
+
+const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
+  taskId,
+  cardId: linkedCardId,
+}) => {
   const [goalOpen, setGoalOpen] = useState(false);
   const dispatch = useAppDispatch();
   const config = useAppSelector(selectConfig);
@@ -1100,13 +1211,18 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
     data: task,
     isLoading: taskLoading,
     isError: taskError,
+    error: taskQueryError,
+    refetch: refetchTask,
   } = useGetTaskQuery(taskId, {
     pollingInterval: 0,
   });
   const {
     data: board,
     isLoading: boardLoading,
+    isFetching: boardFetching,
     isError: boardError,
+    error: boardQueryError,
+    refetch: refetchBoard,
   } = useGetBoardQuery(taskId, {
     pollingInterval: 0,
   });
@@ -1116,18 +1232,46 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
   const [deleteWorktree, deleteWorktreeState] = useDeleteWorktreeMutation();
   const copyToClipboard = useCopyToClipboard();
   const { openFolderInNewWindow } = useEventsBusForIDE();
-  const { data: savedPlanners, isLoading: savedPlannersLoading } =
-    useListTaskTrajectoriesQuery({
-      taskId,
-      role: "planner",
-    });
-  const { data: savedAgents } = useListTaskTrajectoriesQuery({
+  const {
+    data: savedPlanners,
+    isLoading: savedPlannersLoading,
+    isFetching: plannersFetching,
+    error: plannersError,
+    refetch: refetchPlanners,
+  } = useListTaskTrajectoriesQuery({
+    taskId,
+    role: "planner",
+  });
+  const {
+    data: savedAgents,
+    isFetching: agentsFetching,
+    error: agentsError,
+    refetch: refetchAgents,
+  } = useListTaskTrajectoriesQuery({
     taskId,
     role: "agents",
   });
   const [createPlannerChat, { isLoading: isCreatingPlanner }] =
     useCreatePlannerChatMutation();
-  const [deletePlannerChat] = useDeletePlannerChatMutation();
+  const [deletePlannerChat, { isLoading: isDeletingPlanner }] =
+    useDeletePlannerChatMutation();
+  const [plannerDeleteTarget, setPlannerDeleteTarget] =
+    useState<PlannerInfo | null>(null);
+  const [plannerDeleteError, setPlannerDeleteError] = useState<string | null>(
+    null,
+  );
+  const [plannerCreateError, setPlannerCreateError] = useState<string | null>(
+    null,
+  );
+  const createPlannerInFlight = React.useRef(false);
+  const deletePlannerInFlight = React.useRef(false);
+  const mounted = React.useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const openTasks = useAppSelector(selectOpenTasksFromRoot);
   const currentTaskUI = openTasks.find((t) => t.id === taskId);
   const plannerChats = useMemo(
@@ -1159,16 +1303,16 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
   const activeChat = useAppSelector((state) =>
     selectTaskActiveChat(state, taskId),
   );
+  const activeChatRef = React.useRef(activeChat);
+  activeChatRef.current = activeChat;
   const hasActiveChatRuntime = useAppSelector((state) =>
     activeChat ? Boolean(selectRuntimeById(state, activeChat.chatId)) : false,
   );
   const currentThreadId = useAppSelector(selectCurrentThreadId);
-  const activeChatBackgroundAgents = useAppSelector((state) =>
-    activeChat
-      ? selectBackgroundAgentsByThread(state, activeChat.chatId)
-      : EMPTY_BACKGROUND_AGENTS,
-  );
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
+  const [cardEditTarget, setCardEditTarget] = useState<CardEditTarget | null>(
+    null,
+  );
   const selectedCard = useMemo(
     () =>
       selectedCardId
@@ -1216,6 +1360,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
   // Just-created chats are protected from reconciliation until the saved
   // trajectory list refetch includes them (prevents bouncing to old planner).
   const pendingCreatedPlannerIdsRef = React.useRef<Set<string>>(new Set());
+  const deletedPlannerIdsRef = React.useRef<Set<string>>(new Set());
   const worktreeRecords = useMemo(
     () => worktreesData?.worktrees ?? [],
     [worktreesData?.worktrees],
@@ -1259,7 +1404,12 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
   useEffect(() => {
     if (!savedPlanners || !currentTaskUI) return;
 
-    const savedPlannerIds = new Set(savedPlanners.map((planner) => planner.id));
+    const retainedPlanners = savedPlanners.filter(
+      (planner) => !deletedPlannerIdsRef.current.has(planner.id),
+    );
+    const savedPlannerIds = new Set(
+      retainedPlanners.map((planner) => planner.id),
+    );
 
     const pendingCreatedIds = pendingCreatedPlannerIdsRef.current;
     for (const id of Array.from(pendingCreatedIds)) {
@@ -1275,13 +1425,14 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
       }
     }
 
-    for (const traj of savedPlanners) {
+    for (const traj of retainedPlanners) {
       dispatch(
         createChatWithId({
           id: traj.id,
           title: traj.title,
           isTaskChat: true,
           openTab: false,
+          activate: false,
           mode: traj.mode ?? "TASK_PLANNER",
           taskMeta: {
             task_id: taskId,
@@ -1337,8 +1488,8 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
     }
 
     const mostRecentPlanner =
-      savedPlanners.length > 0
-        ? savedPlanners.reduce((latest, planner) =>
+      retainedPlanners.length > 0
+        ? retainedPlanners.reduce((latest, planner) =>
             planner.updated_at > latest.updated_at ? planner : latest,
           )
         : null;
@@ -1464,6 +1615,11 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
     setSelectedCardId(card.id);
   }, []);
 
+  const handleManageCard = useCallback((target: CardEditTarget) => {
+    setSelectedCardId(null);
+    setCardEditTarget(target);
+  }, []);
+
   const showNotification = useCallback((message: string) => {
     setNotification(message);
     if (notificationTimerRef.current)
@@ -1487,12 +1643,49 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
     handleWorkspaceTabChange("chat");
   }, [handleWorkspaceTabChange]);
 
+  const openLinkedCard = useCallback(
+    (_taskId: string, cardId: string) => {
+      handleWorkspaceTabChange("board");
+      setSelectedCardId(cardId);
+    },
+    [handleWorkspaceTabChange],
+  );
+  const openLinkedWorktree = useCallback((record: WorktreeRecordView) => {
+    setDiffTarget({
+      id: record.meta.id,
+      meta: record.meta,
+      record,
+      label: record.meta.branch ?? record.meta.id,
+      legacy: false,
+      stale: !record.status.path_exists,
+    });
+  }, []);
+  const navigation = useInternalNavigation({
+    scope: `${taskId}:${activeChat?.chatId ?? ""}:${selectedCardId ?? ""}`,
+    onChatOpened: openChatTab,
+    onCardOpened: openLinkedCard,
+    onWorktreeOpened: openLinkedWorktree,
+  });
+  const appliedCardLink = React.useRef<string | undefined>();
+  useEffect(() => {
+    if (!linkedCardId || !board || appliedCardLink.current === linkedCardId)
+      return;
+    appliedCardLink.current = linkedCardId;
+    if (board.cards.some((card) => card.id === linkedCardId))
+      openLinkedCard(taskId, linkedCardId);
+    else showNotification(`Card not found on this task: ${linkedCardId}`);
+  }, [board, linkedCardId, openLinkedCard, showNotification, taskId]);
+
   const createTaskChat = useCallback(
     (mode: string) => {
-      if (isCreatingPlanner) return;
+      if (createPlannerInFlight.current) return;
+      createPlannerInFlight.current = true;
+      setPlannerCreateError(null);
+      const originatingChat = activeChatRef.current;
       createPlannerChat({ taskId, mode })
         .unwrap()
         .then((result) => {
+          if (!mounted.current) return;
           const newChatId = result.chat_id;
           const resolvedMode = result.mode ?? mode;
           const now = new Date().toISOString();
@@ -1523,32 +1716,31 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
               },
             }),
           );
-          dispatch(
-            setTaskActiveChat({
-              taskId,
-              activeChat: { type: "planner", chatId: newChatId },
-            }),
-          );
-          openChatTab();
+          if (activeChatRef.current?.chatId === originatingChat?.chatId) {
+            dispatch(
+              setTaskActiveChat({
+                taskId,
+                activeChat: { type: "planner", chatId: newChatId },
+              }),
+            );
+            openChatTab();
+          }
         })
         .catch((err: unknown) => {
+          if (!mounted.current) return;
           dispatch(
             tasksApi.util.invalidateTags([
               { type: "TaskGoal", id: taskId },
               { type: "TaskTrajectories", id: `${taskId}/planner` },
             ]),
           );
-          showNotification(`Create failed: ${parsePlannerDeleteError(err)}`);
+          setPlannerCreateError(`Create failed: ${taskErrorMessage(err)}`);
+        })
+        .finally(() => {
+          createPlannerInFlight.current = false;
         });
     },
-    [
-      dispatch,
-      taskId,
-      createPlannerChat,
-      isCreatingPlanner,
-      openChatTab,
-      showNotification,
-    ],
+    [dispatch, taskId, createPlannerChat, openChatTab],
   );
 
   const handleNewPlanner = useCallback(() => {
@@ -1557,137 +1749,98 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
 
   const handleRemovePlanner = useCallback(
     (chatId: string) => {
-      const previous = plannerChats.find((p) => p.id === chatId);
+      if (deletePlannerInFlight.current) return;
+      setPlannerDeleteError(null);
+      setPlannerDeleteTarget(plannerChats.find((p) => p.id === chatId) ?? null);
+    },
+    [plannerChats],
+  );
+
+  const handleConfirmRemovePlanner = useCallback(async () => {
+    if (!plannerDeleteTarget || deletePlannerInFlight.current) return;
+    const chatId = plannerDeleteTarget.id;
+    deletePlannerInFlight.current = true;
+    setPlannerDeleteError(null);
+    try {
+      const result = await deletePlannerChat({ taskId, chatId }).unwrap();
+      if (!mounted.current) return;
+      if (!result.deleted)
+        throw new Error("The server did not confirm deletion.");
+      deletedPlannerIdsRef.current.add(chatId);
       pendingCreatedPlannerIdsRef.current.delete(chatId);
       dispatch(removePlannerChat({ taskId, chatId }));
-      if (activeChat?.type === "planner" && activeChat.chatId === chatId) {
-        const remaining = plannerChats.filter((p) => p.id !== chatId);
-        dispatch(
-          setTaskActiveChat({
-            taskId,
-            activeChat: remaining[0]
-              ? { type: "planner", chatId: remaining[0].id }
-              : null,
-          }),
-        );
+      if (
+        activeChatRef.current?.type === "planner" &&
+        activeChatRef.current.chatId === chatId
+      ) {
+        dispatch(setTaskActiveChat({ taskId, activeChat: null }));
       }
-      void deletePlannerChat({ taskId, chatId })
-        .unwrap()
-        .then(() => {
-          showNotification("Planner chat deleted.");
-        })
-        .catch((err: unknown) => {
-          if (previous)
-            dispatch(restorePlannerChat({ taskId, planner: previous }));
-          showNotification(`Delete failed: ${parsePlannerDeleteError(err)}`);
-        });
-    },
-    [
-      dispatch,
-      taskId,
-      activeChat,
-      plannerChats,
-      deletePlannerChat,
-      showNotification,
-    ],
-  );
+      setPlannerDeleteTarget(null);
+      showNotification("Planner chat deleted.");
+    } catch (err) {
+      if (mounted.current)
+        setPlannerDeleteError(`Delete failed: ${parsePlannerDeleteError(err)}`);
+    } finally {
+      deletePlannerInFlight.current = false;
+    }
+  }, [
+    plannerDeleteTarget,
+    deletePlannerChat,
+    dispatch,
+    taskId,
+    showNotification,
+  ]);
 
   const handleSelectPlanner = useCallback(
     (chatId: string) => {
-      dispatch(
-        setTaskActiveChat({ taskId, activeChat: { type: "planner", chatId } }),
-      );
-      openChatTab();
+      void navigation.navigate(`refact://chat/${chatId}`, { taskId });
     },
-    [dispatch, taskId, openChatTab],
+    [navigation, taskId],
   );
 
   const handleSelectAgent = useCallback(
     (cardId: string, chatId: string) => {
       const card = board?.cards.find((c) => c.id === cardId);
-      const cardTitle = card?.title ?? `Card ${cardId}`;
-
-      dispatch(
-        createChatWithId({
-          id: chatId,
-          title: formatAgentChatTitle(cardId, cardTitle),
-          isTaskChat: true,
-          openTab: false,
-          mode: "TASK_AGENT",
-          taskMeta: {
-            task_id: taskId,
-            role: "agents",
-            card_id: cardId,
-          },
-        }),
-      );
-
-      dispatch(
-        setTaskActiveChat({
-          taskId,
-          activeChat: { type: "agent", cardId, chatId },
-        }),
-      );
-      openChatTab();
+      if (!card || card.agent_chat_id !== chatId) {
+        showNotification("This chat is not the current agent for this card.");
+        return;
+      }
+      void navigation.navigate(`refact://chat/${chatId}`, { taskId, cardId });
     },
-    [board, taskId, dispatch, openChatTab],
+    [board, taskId, navigation, showNotification],
   );
 
   const handleCardAgentClick = useCallback(
     (card: BoardCard) => {
       if (!card.agent_chat_id) return;
-      handleSelectAgent(card.id, card.agent_chat_id);
-      setSelectedCardId(null);
+      void navigation
+        .navigate(`refact://chat/${card.agent_chat_id}`, {
+          taskId,
+          cardId: card.id,
+        })
+        .then((opened) => {
+          if (opened) setSelectedCardId(null);
+        });
     },
-    [handleSelectAgent],
+    [navigation, taskId],
   );
 
   const handleInternalLink = useCallback(
-    (url: string): boolean => {
-      const parsed = parseRefactLink(url);
-      if (!parsed) return false;
-
-      if (parsed.type !== "chat" || !parsed.id) return false;
-
-      const action = resolveChatLink(parsed.id, plannerChats, board);
-      switch (action.kind) {
-        case "planner":
-          handleSelectPlanner(action.chatId);
-          return true;
-        case "agent":
-          handleSelectAgent(action.cardId, action.chatId);
-          return true;
-        case "unknown": {
-          const agent = Object.values(activeChatBackgroundAgents).find(
-            (candidate) => candidate.child_chat_id === action.chatId,
-          );
-          if (!agent) showNotification(`Chat not found: ${action.chatId}`);
-          dispatch(
-            createChatWithId({
-              id: action.chatId,
-              parentId: activeChat?.chatId,
-              linkType:
-                agent?.kind ??
-                (activeChat?.type === "agent" ? "delegate" : "subagent"),
-            }),
-          );
-          dispatch(switchToThread({ id: action.chatId }));
-          dispatch(popBackTo({ name: "history" }));
-          dispatch(push({ name: "chat" }));
-          return true;
-        }
-      }
+    async (url: string, origin?: InternalLinkOrigin): Promise<boolean> => {
+      const opened = await navigation.navigate(url, {
+        ...origin,
+        taskId,
+        cardId: selectedCardId ?? origin?.cardId,
+      });
+      const target = parseRefactLink(url);
+      if (
+        opened &&
+        !(target?.type === "task" && target.id === taskId && target.cardId)
+      )
+        setSelectedCardId(null);
+      return opened;
     },
-    [
-      activeChat,
-      activeChatBackgroundAgents,
-      board,
-      dispatch,
-      plannerChats,
-      handleSelectPlanner,
-      handleSelectAgent,
-      showNotification,
-    ],
+    [navigation, selectedCardId, taskId],
   );
 
   useEffect(() => {
@@ -1918,14 +2071,34 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
     ],
   );
 
-  if (taskError || boardError) {
+  if ((taskError || boardError) && (!cardEditTarget || !task || !board)) {
     return (
       <Flex
         align="center"
         justify="center"
         className={styles.fullHeightEmptyState}
       >
-        <Text color="gray">Task is no longer available.</Text>
+        <Flex direction="column" gap="2">
+          <Text role="alert">
+            {taskQueryError &&
+            typeof taskQueryError === "object" &&
+            "status" in taskQueryError &&
+            taskQueryError.status === 404
+              ? "Task is no longer available."
+              : `Failed to load task workspace: ${taskErrorMessage(
+                  taskQueryError ?? boardQueryError,
+                )}`}
+          </Text>
+          <Button
+            variant="soft"
+            onClick={() => {
+              void refetchTask();
+              void refetchBoard();
+            }}
+          >
+            Retry workspace
+          </Button>
+        </Flex>
       </Flex>
     );
   }
@@ -1943,7 +2116,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
           board.cards.find((c) => c.id === activeChat.cardId)?.title ?? "",
         );
   const runningAgentCount = board.cards.filter(
-    (card) => card.column === "doing" && card.agent_chat_id,
+    (card) => card.column === "doing" && card.agent_chat_id && !card.paused_at,
   ).length;
   const waitingPlannerCount = plannerChats.filter(
     (planner) => planner.sessionState === "waiting_user_input",
@@ -1951,6 +2124,57 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
 
   return (
     <Box className={styles.taskWorkspace}>
+      {(taskError || boardError) && (
+        <Flex role="alert" gap="2" align="center" wrap="wrap">
+          Failed to refresh task workspace:{" "}
+          {taskErrorMessage(taskQueryError ?? boardQueryError)}
+          <Button
+            variant="soft"
+            disabled={boardFetching}
+            onClick={() => {
+              void refetchTask();
+              void refetchBoard();
+            }}
+          >
+            Retry workspace
+          </Button>
+        </Flex>
+      )}
+      {!selectedCard && navigation.pending && (
+        <Text role="status">Opening linked target...</Text>
+      )}
+      {!selectedCard && navigation.error && (
+        <Text role="alert">{navigation.error}</Text>
+      )}
+      {plannersError && (
+        <Flex role="alert" gap="2" align="center">
+          Failed to load planner chats: {taskErrorMessage(plannersError)}
+          <Button
+            variant="soft"
+            disabled={plannersFetching}
+            onClick={() => void refetchPlanners()}
+          >
+            Retry planner chats
+          </Button>
+        </Flex>
+      )}
+      {agentsError && (
+        <Flex role="alert" gap="2" align="center">
+          Failed to load agent chat references: {taskErrorMessage(agentsError)}
+          <Button
+            variant="soft"
+            disabled={agentsFetching}
+            onClick={() => void refetchAgents()}
+          >
+            Retry agent references
+          </Button>
+        </Flex>
+      )}
+      {plannerCreateError && <Text role="alert">{plannerCreateError}</Text>}
+      {plannersFetching && (
+        <Text role="status">Refreshing planner chats...</Text>
+      )}
+      {isCreatingPlanner && <Text role="status">Creating planner chat...</Text>}
       <Tabs
         value={workspaceTab}
         onValueChange={handleWorkspaceTabChange}
@@ -2025,6 +2249,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
               linkedCardsByPlanner={linkedCardsByPlanner}
               onSelectPlanner={handleSelectPlanner}
               onRemovePlanner={handleRemovePlanner}
+              removeDisabled={isDeletingPlanner}
               onSelectAgent={handleSelectAgent}
             />
           </div>
@@ -2040,6 +2265,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
                   linkedCardsByPlanner={linkedCardsByPlanner}
                   onSelectPlanner={handleSelectPlanner}
                   onRemovePlanner={handleRemovePlanner}
+                  removeDisabled={isDeletingPlanner}
                   onSelectAgent={handleSelectAgent}
                 />
                 <Box className={styles.boardArea}>
@@ -2047,6 +2273,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
                     board={board}
                     onCardClick={handleCardClick}
                     onAgentClick={handleCardAgentClick}
+                    onManageCard={handleManageCard}
                   />
                 </Box>
               </div>
@@ -2094,6 +2321,59 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
         </Box>
       </Tabs>
 
+      {cardEditTarget && (
+        <CardEditorDialog
+          key={
+            cardEditTarget.mode === "create"
+              ? "create"
+              : `${cardEditTarget.mode}:${cardEditTarget.card.id}`
+          }
+          taskId={taskId}
+          board={board}
+          target={cardEditTarget}
+          boardFetching={boardFetching}
+          boardUnavailable={boardError || taskError}
+          onReload={() => refetchBoard().unwrap()}
+          onClose={() => setCardEditTarget(null)}
+        />
+      )}
+
+      <Dialog
+        open={Boolean(plannerDeleteTarget)}
+        onOpenChange={(open) => {
+          if (!open && !deletePlannerInFlight.current)
+            setPlannerDeleteTarget(null);
+        }}
+      >
+        <Dialog.Content maxWidth="420px">
+          <Dialog.Title>Delete planner chat</Dialog.Title>
+          <Dialog.Description>
+            Delete “
+            {plannerDeleteTarget?.title
+              ? plannerDeleteTarget.title
+              : plannerDeleteTarget?.id}
+            ”? This cannot be undone. A planner referenced by agents cannot be
+            deleted here.
+          </Dialog.Description>
+          {plannerDeleteError && <Text role="alert">{plannerDeleteError}</Text>}
+          <Dialog.Footer>
+            <Dialog.Close asChild>
+              <Button variant="soft" disabled={isDeletingPlanner}>
+                Cancel
+              </Button>
+            </Dialog.Close>
+            <Button
+              variant="danger"
+              disabled={isDeletingPlanner}
+              loading={isDeletingPlanner}
+              onClick={() => void handleConfirmRemovePlanner()}
+            >
+              {isDeletingPlanner ? "Deleting..." : "Delete planner chat"}
+            </Button>
+          </Dialog.Footer>
+        </Dialog.Content>
+      </Dialog>
+
       <Dialog open={goalOpen} onOpenChange={setGoalOpen}>
         <Dialog.Content
           maxWidth="760px"
@@ -2116,19 +2396,32 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
         }}
       >
         {selectedCard && (
-          <CardDetail
-            taskId={taskId}
-            card={selectedCard}
-            worktree={selectedCardWorktree}
-            worktreeLabel={selectedCardWorktreeLabel}
-            isWorktreeLoading={worktreesLoading}
-            onClose={() => setSelectedCardId(null)}
-            onInternalLink={handleInternalLink}
-            onViewDiff={handleViewCardDiff}
-            onMerge={handleMergeCardWorktree}
-            onOpenWorktree={(worktree) => void handleOpenCardWorktree(worktree)}
-            onDeleteWorktree={handleDeleteCardWorktree}
-          />
+          <InternalLinkProvider onInternalLink={handleInternalLink}>
+            <CardDetail
+              taskId={taskId}
+              card={selectedCard}
+              board={board}
+              onOpenOwner={(chatId) => {
+                void navigation
+                  .navigate(`refact://chat/${chatId}`, { taskId })
+                  .then((opened) => {
+                    if (opened) setSelectedCardId(null);
+                  });
+              }}
+              worktree={selectedCardWorktree}
+              worktreeLabel={selectedCardWorktreeLabel}
+              isWorktreeLoading={worktreesLoading}
+              navigationPending={navigation.pending}
+              navigationError={navigation.error}
+              onManageCard={handleManageCard}
+              onViewDiff={handleViewCardDiff}
+              onMerge={handleMergeCardWorktree}
+              onOpenWorktree={(worktree) =>
+                void handleOpenCardWorktree(worktree)
+              }
+              onDeleteWorktree={handleDeleteCardWorktree}
+            />
+          </InternalLinkProvider>
         )}
       </Dialog>
 

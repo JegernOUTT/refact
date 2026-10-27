@@ -150,7 +150,22 @@ async fn refusal_happens_before_ceiling_computation() {
         .tool_execute(ccx, &"sandbox-refusal".into(), &args("pass"))
         .await
         .unwrap_err();
-    assert!(error.contains("never confines"), "{error}");
+    let sandbox = refact_sandbox::sandbox_status();
+    let reason = match sandbox.enforcement {
+        Enforcement::Unusable => format!(
+            "no usable sandbox provider is available ({}: unusable)",
+            sandbox.provider
+        ),
+        Enforcement::Full | Enforcement::Partial => {
+            "terminal security mode `approval_only` never confines execution".to_string()
+        }
+    };
+    assert_eq!(
+        error,
+        format!(
+            "code mode is unavailable: {reason}. Orchestration code is not executed unconfined."
+        )
+    );
     assert!(!error.contains("capabilities"), "{error}");
     assert!(app
         .runtime

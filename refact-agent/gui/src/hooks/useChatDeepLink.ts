@@ -1,14 +1,7 @@
 import { useEffect, useRef } from "react";
 
-import { restoreChat } from "../features/Chat/Thread";
-import type { ChatHistoryItem } from "../features/History/historySlice";
-import { push } from "../features/Pages/pagesSlice";
-import {
-  trajectoriesApi,
-  trajectoryDataToChatThread,
-} from "../services/refact";
-import { useAppDispatch } from "./useAppDispatch";
 import { useConfig } from "./useConfig";
+import { useInternalNavigation } from "./useInternalNavigation";
 
 export function consumeChatDeepLinkChatId(): string | null {
   const params = new URLSearchParams(window.location.search);
@@ -25,7 +18,8 @@ export function consumeChatDeepLinkChatId(): string | null {
 }
 
 export function useChatDeepLink(ready: boolean) {
-  const dispatch = useAppDispatch();
+  const navigation = useInternalNavigation();
+  const { navigate } = navigation;
   const config = useConfig();
   const handledRef = useRef(false);
   const isEngineServedWeb =
@@ -37,26 +31,7 @@ export function useChatDeepLink(ready: boolean) {
     handledRef.current = true;
     const chatId = consumeChatDeepLinkChatId();
     if (chatId === null) return;
-    const request = dispatch(
-      trajectoriesApi.endpoints.getTrajectory.initiate(chatId, {
-        forceRefetch: true,
-        subscribe: false,
-      }),
-    );
-    void request
-      .unwrap()
-      .then((result) => {
-        const thread = trajectoryDataToChatThread(result);
-        const historyItem: ChatHistoryItem = {
-          ...thread,
-          createdAt: result.created_at,
-          updatedAt: result.updated_at,
-          title: result.title,
-          isTitleGenerated: result.isTitleGenerated,
-        };
-        dispatch(restoreChat(historyItem));
-        dispatch(push({ name: "chat" }));
-      })
-      .catch(() => undefined);
-  }, [dispatch, isEngineServedWeb, ready]);
+    void navigate(`refact://chat/${chatId}`);
+  }, [navigate, isEngineServedWeb, ready]);
+  return navigation;
 }

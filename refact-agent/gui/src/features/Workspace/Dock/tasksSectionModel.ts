@@ -6,7 +6,13 @@ import type {
 
 const AGENT_STUCK_AFTER_MS = 20 * 60 * 1000;
 
-export type TaskDockAgentStatus = "running" | "stuck" | "failed" | "done";
+export type TaskDockAgentStatus =
+  | "running"
+  | "stuck"
+  | "failed"
+  | "done"
+  | "paused"
+  | "regressed";
 
 export type TaskDockEntry = {
   cardId: string;
@@ -19,7 +25,7 @@ export type TaskDockEntry = {
 };
 
 const attentionRank = (status: TaskDockAgentStatus): number =>
-  status === "stuck" || status === "failed" ? 0 : 1;
+  status === "stuck" || status === "failed" || status === "regressed" ? 0 : 1;
 
 export const sortTaskDockEntries = (
   entries: TaskDockEntry[],
@@ -52,8 +58,10 @@ const agentStatusForCard = (
 ): TaskDockAgentStatus | null => {
   if (!card.assignee && !card.agent_chat_id) return null;
   if (card.column === "failed") return "failed";
+  if (card.column === "regressed") return "regressed";
   if (card.column === "done") return "done";
   if (card.column !== "doing") return null;
+  if (card.paused_at) return "paused";
 
   const heartbeatAt = parseTimestamp(card.last_heartbeat_at);
   return heartbeatAt > 0 && nowMs - heartbeatAt >= AGENT_STUCK_AFTER_MS
@@ -84,7 +92,10 @@ export const buildTaskDockEntries = (
           taskId: task.id,
           taskName: task.name,
           title: card.title,
-          columnLabel: columnLabel(board, card.column),
+          columnLabel:
+            agentStatus === "paused"
+              ? "Paused"
+              : columnLabel(board, card.column),
           agentStatus,
           recencyAt: cardRecency(card),
         },

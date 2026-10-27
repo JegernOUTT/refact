@@ -143,9 +143,63 @@ describe("TasksSection", () => {
     expect(view.store.getState().pages.at(-1)).toEqual({ name: "tasks list" });
   });
 
+  it("paused_cards_never_look_running_or_stuck_and_regressed_cards_need_attention", () => {
+    const pausedEntries = buildTaskDockEntries(
+      [task()],
+      {
+        "task-a": board([card({ paused_at: "2026-07-23T00:30:00Z" })]),
+      },
+      Date.parse("2026-07-23T01:00:01Z"),
+    );
+    expect(pausedEntries).toEqual([
+      expect.objectContaining({ agentStatus: "paused", columnLabel: "Paused" }),
+    ]);
+    const view = render(
+      <TasksSectionView
+        entries={pausedEntries}
+        isLoading={false}
+        onOpenBoard={vi.fn()}
+        onOpenTask={vi.fn()}
+      />,
+    );
+    expect(screen.getByLabelText("Paused agent")).not.toHaveClass(
+      "rf-status-pulse",
+    );
+    expect(screen.queryByLabelText("Tasks running")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Stuck agent")).not.toBeInTheDocument();
+    const regressedEntries = buildTaskDockEntries(
+      [task()],
+      {
+        "task-a": board([
+          card({ column: "regressed", title: "Regressed work" }),
+        ]),
+      },
+      Date.parse("2026-07-23T01:00:01Z"),
+    );
+    expect(regressedEntries).toEqual([
+      expect.objectContaining({ agentStatus: "regressed" }),
+    ]);
+    view.rerender(
+      <TasksSectionView
+        entries={regressedEntries}
+        isLoading={false}
+        onOpenBoard={vi.fn()}
+        onOpenTask={vi.fn()}
+      />,
+    );
+    expect(screen.getByLabelText("Regressed agent")).toHaveClass(
+      statusDotStyles.danger,
+    );
+    expect(screen.getByLabelText("Tasks need attention")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Regressed work/ }),
+    ).toBeInTheDocument();
+  });
+
   it("opens the selected card's existing TaskWorkspace board surface", async () => {
     server.use(
       http.get("*/v1/tasks", () => HttpResponse.json([task()])),
+      http.get("*/v1/tasks/task-a", () => HttpResponse.json({ meta: task() })),
       http.get("*/v1/tasks/task-a/board", () =>
         HttpResponse.json(
           board([
@@ -166,6 +220,7 @@ describe("TasksSection", () => {
       expect(view.store.getState().pages.at(-1)).toEqual({
         name: "task workspace",
         taskId: "task-a",
+        cardId: "W-4",
       });
     });
     expect(view.store.getState().tasksUI.openTasks).toEqual([

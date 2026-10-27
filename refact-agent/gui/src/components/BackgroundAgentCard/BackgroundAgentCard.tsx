@@ -421,7 +421,9 @@ const ExpandedDetail: React.FC<{
         <ShortIdChip agentId={agent.agent_id} />
       </div>
 
-      {(agent.goal_summary ?? agent.plan_present ?? agent.worktree_branch) && (
+      {(Boolean(agent.goal_summary) ||
+        Boolean(agent.plan_present) ||
+        Boolean(agent.worktree_branch)) && (
         <div className={styles.chipRow}>
           {agent.goal_summary && (
             <Badge

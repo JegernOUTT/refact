@@ -173,18 +173,50 @@ describe("LaunchPreviewTool", () => {
   ])(
     "rejects malformed and legacy metadata without a success claim",
     (extra) => {
-      render(
+      const diagnostic = `Original preview diagnostic ${"x".repeat(
+        9000,
+      )}ERROR_TAIL`;
+      const { container } = renderComponent(
         <LaunchPreviewTool
           toolCall={launchPreviewCall}
+          rawContent={diagnostic}
           extra={extra}
           hasResult
           failed={false}
         />,
       );
+      const outer = screen.getByRole("button", { expanded: false });
+      expect(outer).toHaveTextContent("Preview unavailable");
+      fireEvent.click(outer);
+      const raw = screen.getByLabelText("Full response content");
+      expect(raw.closest("[inert]")).not.toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "More details" }));
       expect(screen.getByRole("alert")).toHaveTextContent(
         "does not confirm a launch",
       );
       expect(screen.queryByText("Context resolved")).toBeNull();
+      expect(raw.closest("[inert]")).not.toBeNull();
+      fireEvent.click(
+        screen.getByRole("button", { name: "Technical details" }),
+      );
+      expect(raw.closest("[inert]")).toBeNull();
+      expect(raw).toHaveTextContent("Original preview diagnostic");
+      const next = within(
+        screen.getByLabelText("Full response pages"),
+      ).getByRole("button", { name: "Next section" });
+      fireEvent.click(next);
+      fireEvent.click(next);
+      expect(raw).toHaveTextContent("ERROR_TAIL");
+      expect(next).toBeDisabled();
+      expect(screen.getByLabelText("Raw arguments content").textContent).toBe(
+        launchPreviewCall.function.arguments,
+      );
+      expect(
+        JSON.parse(
+          screen.getByLabelText("Response metadata content").textContent ?? "",
+        ),
+      ).toEqual(extra);
+      expect(container.querySelector("button button")).toBeNull();
     },
   );
 
@@ -299,6 +331,7 @@ describe("LaunchPreviewTool", () => {
     const props = {
       toolCall: launchPreviewCall,
       extra: launchPreviewReceipt().extra,
+      rawContent: "Original request failure: missing required source id",
     };
     const { rerender } = render(
       <LaunchPreviewTool {...props} hasResult={false} failed={false} />,
@@ -308,6 +341,14 @@ describe("LaunchPreviewTool", () => {
     );
     rerender(<LaunchPreviewTool {...props} hasResult failed />);
     expect(screen.getByRole("alert")).toBeInTheDocument();
+    const raw = screen.getByLabelText("Full response content");
+    expect(raw.closest("[inert]")).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Technical details" }));
+    expect(raw.closest("[inert]")).toBeNull();
+    expect(raw).toHaveTextContent(
+      "Original request failure: missing required source id",
+    );
+    expect(screen.queryByLabelText("Effective launch settings")).toBeNull();
   });
 
   test("bounds source text and renders markup as text", () => {
@@ -329,7 +370,9 @@ describe("LaunchPreviewTool", () => {
         failed={false}
       />,
     );
-    const label = screen.getByText(/<script>unsafe/u);
+    const label = within(
+      screen.getByLabelText("Launch context source"),
+    ).getByText(/<script>unsafe/u);
     expect(label.textContent?.length).toBeLessThanOrEqual(241);
     expect(container.querySelector("script")).toBeNull();
   });

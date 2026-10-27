@@ -11,6 +11,7 @@ import {
 import * as chatCommands from "../../services/refact/chatCommands";
 import type { ToolCall, ToolMessage } from "../../services/refact/types";
 import { applyChatEvent } from "../../features/Chat/Thread";
+import { PAGE_CHARS } from "../Tools/AgenticTool/PagedText";
 import { CollapsibleStoreProvider } from "./useStoredOpen";
 import {
   filterAgentStatusRows,
@@ -42,6 +43,7 @@ function renderStatus(
   content: string | null,
   toolFailed = false,
   waiting = false,
+  toolCall = TOOL_CALL,
 ) {
   const chat = createDefaultChatState();
   const threadId = chat.current_thread_id;
@@ -49,7 +51,7 @@ function renderStatus(
     content === null ? [] : [statusMessage(content, toolFailed)];
   chat.threads[threadId].waiting_for_response = waiting;
   return {
-    ...render(<AgentStatusView toolCall={TOOL_CALL} />, {
+    ...render(<AgentStatusView toolCall={toolCall} />, {
       preloadedState: { chat },
     }),
     threadId,
@@ -62,7 +64,7 @@ P0 🔄  T-1   implement-render       | generating |  3m ago | last: cat
 P1 🔴  T-2   fix-tests              | STUCK 18m   | needs attention
 P2 ❌  T-3   broken-card            | failed     | 2h ago
 P1 ✅  T-4   done-card              | done       | 4m ago
-P1 ⏸️  T-5   paused-card            | paused     | 10m ago
+P1 ⏸️  T-5   paused-card            | paused     | 10m ago | approval
 showing 5 of 5; no more pages
 `;
 
@@ -76,7 +78,7 @@ describe("AgentStatusView parsing", () => {
   it("parses compact one-line agent rows", () => {
     const report = parsedReport();
 
-    expect(report.alerts).toEqual({ stuck: 1, failed: 1, paused: 1 });
+    expect(report.alerts).toEqual({ stuck: 1, failed: 1, approval: 1 });
     expect(report.rows).toHaveLength(5);
     expect(report.rows[0]).toMatchObject({
       priority: "P0",
@@ -254,6 +256,242 @@ describe("AgentStatusContent", () => {
 });
 
 describe("AgentStatusView compact route", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("keeps queued, parked and planner-paused A/B rows distinct without inventing approval", async () => {
+    const send = vi
+      .spyOn(chatCommands, "sendChatCommand")
+      .mockResolvedValue(undefined);
+    const output = `⚠️  Alerts: 0 stuck, 0 failed, 1 needing approval, 1 needing attention
+
+Delta since seq 42
+
+P1 ⏳  T-AB/a queued-variant | queued | waiting for capacity
+P1 ⏸️  T-AB/b parked-variant | parked | capacity released | ⚠ needs attention: awaiting dependency (since 2026-05-21T23:30:00Z, ×3)
+P1 ⏸️  T-PAUSE manual-pause | paused by planner-test since 2026-05-21T23:55:00Z
+showing 3 of 8; pass offset=3 for next page
+`;
+    const { user } = renderStatus(output);
+    await user.click(
+      screen.getByRole("button", {
+        name: "3 agent rows shown Snapshot received",
+      }),
+    );
+    expect(
+      screen.getByText("0 stuck, 0 failed, 0 needing approval"),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "More details" }));
+    const table = screen.getByRole("table");
+    const variantA = within(table).getByText("T-AB/a").closest("article");
+    const variantB = within(table).getByText("T-AB/b").closest("article");
+    if (!variantA || !variantB) throw new Error("expected both variant cards");
+    expect(within(variantA).getByText("queued")).toBeInTheDocument();
+    expect(within(variantA).getByText("Queued")).toBeInTheDocument();
+    expect(within(variantB).getByText("parked")).toBeInTheDocument();
+    expect(within(variantB).getByText("Parked")).toBeInTheDocument();
+    expect(within(variantA).getByText("unknown")).toBeInTheDocument();
+    expect(within(variantB).getByText("unknown")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Queued 1" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Parked 1" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Paused 1" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Steer T-AB/a")).toBeDisabled();
+    expect(screen.getByLabelText("Cancel agent T-AB/b")).toBeDisabled();
+    expect(
+      screen.getByText(
+        /Variant steering and cancellation are unavailable; inspection targets T-AB\/b only\./u,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Full response content").textContent).toBe(
+      output,
+    );
+    expect(send).not.toHaveBeenCalled();
+    await user.click(screen.getByLabelText("View pulse T-AB/a"));
+    await waitFor(() =>
+      expect(send).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.anything(),
+        undefined,
+        { type: "user_message", content: 'agent_pulse(card_id="T-AB/a")' },
+        true,
+      ),
+    );
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    await user.click(screen.getByLabelText("View diff T-AB/b"));
+    await waitFor(() =>
+      expect(send).toHaveBeenLastCalledWith(
+        expect.any(String),
+        expect.anything(),
+        undefined,
+        { type: "user_message", content: 'agent_diff(card_id="T-AB/b")' },
+        true,
+      ),
+    );
+  });
+
+  it("preserves JSON unknown and cancelled states, exact variant IDs and explicit approval evidence", async () => {
+    const output = JSON.stringify({
+      agents: [
+        {
+          card_id: "T-AB",
+          variant_key: "a",
+          title: "Unknown variant",
+          status: "future_state",
+        },
+        { card_id: "T-CANCEL", title: "Cancelled worker", status: "cancelled" },
+        { card_id: "T-PAUSE", title: "Planner pause", status: "paused" },
+        {
+          card_id: "T-APPROVE",
+          title: "Explicit approval",
+          status: "waiting_for_approval",
+          approval_required: true,
+        },
+      ],
+      alerts: { paused: 4 },
+      omitted: "JSON omission sentinel",
+    });
+    const { user } = renderStatus(output);
+    await user.click(
+      screen.getByRole("button", {
+        name: "4 agent rows shown Approval needed",
+      }),
+    );
+    expect(
+      screen.getByText("0 stuck, 0 failed, 1 needing approval", {
+        selector: "dd",
+      }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "More details" }));
+    expect(screen.getByRole("tab", { name: "Unknown 1" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: "Cancelled 1" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Paused 2" })).toBeInTheDocument();
+    const unknown = within(screen.getByRole("table"))
+      .getByText("T-AB/a")
+      .closest("article");
+    if (!unknown) throw new Error("expected unknown variant card");
+    expect(within(unknown).getByText("future_state")).toBeInTheDocument();
+    expect(within(unknown).getByText("Unknown")).toBeInTheDocument();
+    expect(within(unknown).queryByText("Running")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Full response content").textContent).toBe(
+      output,
+    );
+  });
+
+  it("recovers the complete detail body and arguments with bounded paging after both disclosures", async () => {
+    const args = '{"format":"detail","card_ids":["T-AB/a"],"offset":2}';
+    const output = `⚠️  Alerts: 0 stuck, 0 failed, 0 needing approval, 1 needing attention
+
+# Agent Status Detail
+
+Showing 1 of 4 agents.
+
+### ⏸️ Detailed worker [A/B A] (T-AB/a)
+**Status:** Parked / waiting without execution capacity | **Column:** doing | **Priority:** P1 | **Chat:** \`agent-chat-a\`
+⚠ needs attention: external dependency (since 2026-05-21T23:30:00Z, ×3)
+**A/B variant:** A
+**Last tool:** \`cat\`
+
+**Last Update:** ${"x".repeat(PAGE_CHARS)}
+DETAIL_SENTINEL
+
+---
+
+showing 1 of 4; pass offset=3 for next page
+`;
+    const { user } = renderStatus(output, false, false, {
+      ...TOOL_CALL,
+      function: { name: "check_agents", arguments: args },
+    });
+    expect(
+      screen.queryByLabelText("Full response content"),
+    ).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", {
+        name: "Check agent status Roster not parsed",
+      }),
+    );
+    const details = screen.getByRole("button", { name: "More details" });
+    expect(details).toHaveAttribute("aria-expanded", "false");
+    await user.click(details);
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("No agents match the selected filters."),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Roster not parsed. Inspect the full response below."),
+    ).toBeInTheDocument();
+    const raw = screen.getByLabelText("Full response content");
+    expect(raw.textContent).toBe(output.slice(0, PAGE_CHARS));
+    expect(raw).not.toHaveTextContent("DETAIL_SENTINEL");
+    await user.click(
+      within(
+        screen.getByRole("navigation", { name: "Full response pages" }),
+      ).getByRole("button", { name: "Next section" }),
+    );
+    expect(raw.textContent).toBe(output.slice(PAGE_CHARS));
+    expect(raw).toHaveTextContent("DETAIL_SENTINEL");
+    expect(raw).toHaveTextContent("pass offset=3 for next page");
+    expect(screen.getByLabelText("Arguments content").textContent).toBe(args);
+  });
+
+  it("keeps the current summary and attention text instead of substituting an empty roster", async () => {
+    const output = `⚠️  Alerts: 0 stuck, 0 failed, 1 needing approval, 1 needing attention
+
+Total: 3 | Running: 0 | Stuck: 0 | Failed: 0 | Done: 0 | Paused: 1 | Queued: 1 | Parked: 1
+By priority: P1=3
+T-PAUSE: paused by planner-test since 2026-05-21T23:55:00Z
+T-AB: ⚠ needs attention: summary attention sentinel (since 2026-05-21T23:30:00Z, ×3)
+`;
+    const { user } = renderStatus(output);
+    await user.click(
+      screen.getByRole("button", {
+        name: "Check agent status Roster not parsed",
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "More details" }));
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Full response content").textContent).toBe(
+      output,
+    );
+    expect(
+      screen.getByText("0 stuck, 0 failed, 0 needing approval"),
+    ).toBeInTheDocument();
+  });
+
+  it("makes malformed bodies inspectable and distinguishes them from a legitimate empty roster", async () => {
+    const { user, unmount } = renderStatus(
+      '{"agents":[{}],"note":"malformed sentinel"}',
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Check agent status Status unknown" }),
+    );
+    await user.click(screen.getByRole("button", { name: "More details" }));
+    expect(screen.getByLabelText("Full response content")).toHaveTextContent(
+      "malformed sentinel",
+    );
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    unmount();
+    renderStatus('{"agents":[]}');
+    await user.click(
+      screen.getByRole("button", {
+        name: "0 agent rows shown Snapshot received",
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "More details" }));
+    expect(
+      screen.getByText("No agent rows returned in this response."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Roster not parsed. Inspect the full response below."),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Full response content").textContent).toBe(
+      '{"agents":[]}',
+    );
+  });
+
   it("starts closed with observed counts and visible alert state, with inert secondary controls", async () => {
     const { container, user } = renderStatus(
       COMPACT_OUTPUT.replace(
@@ -270,7 +508,7 @@ describe("AgentStatusView compact route", () => {
     await user.click(outer);
     expect(container.querySelectorAll("dt")).toHaveLength(3);
     expect(
-      screen.getByText("Returned rows only; total unknown"),
+      screen.getByText("showing 5 of 50; pass offset=5 for next page"),
     ).toBeInTheDocument();
     const details = screen.getByRole("button", { name: "More details" });
     const pulse = screen.getByLabelText("View pulse T-1");
@@ -320,7 +558,7 @@ describe("AgentStatusView compact route", () => {
       "⚠️ Alerts: 0 stuck, 0 failed, 0 needing approval",
       false,
       false,
-      "Check agent status Snapshot received",
+      "Check agent status Roster not parsed",
       "idle",
     ],
   ])(

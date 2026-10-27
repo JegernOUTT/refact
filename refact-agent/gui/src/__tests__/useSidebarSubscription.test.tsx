@@ -420,9 +420,11 @@ describe("useSidebarSubscription", () => {
     expect(store.getState().sidebar.sections.tasks.status).toBe("loading");
     expect(store.getState().sidebar.sections.buddy.status).toBe("loading");
 
-    expect(
-      tasksApi.endpoints.listTasks.select(undefined)(store.getState()).data,
-    ).toEqual([]);
+    const tasks = tasksApi.endpoints.listTasks.select(undefined)(
+      store.getState(),
+    );
+    expect(tasks.data).toBeUndefined();
+    expect(tasks.isUninitialized).toBe(true);
   });
 
   it("settles after a same-subscription workspace switch receives replacement section snapshots", async () => {
@@ -674,9 +676,11 @@ describe("useSidebarSubscription", () => {
     expect(store.getState().sidebar.sections.chats.status).toBe("loading");
     expect(store.getState().sidebar.sections.tasks.status).toBe("loading");
     expect(store.getState().sidebar.sections.buddy.status).toBe("loading");
-    expect(
-      tasksApi.endpoints.listTasks.select(undefined)(store.getState()).data,
-    ).toEqual([]);
+    const tasks = tasksApi.endpoints.listTasks.select(undefined)(
+      store.getState(),
+    );
+    expect(tasks.data).toBeUndefined();
+    expect(tasks.isUninitialized).toBe(true);
   });
 
   it("settles a same-port workspace switch from backend workspace-first snapshots", async () => {

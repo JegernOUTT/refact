@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import classNames from "classnames";
 import { ChevronDown, Search } from "lucide-react";
@@ -21,7 +27,8 @@ import {
   usePinTaskMemoryMutation,
   useTriageTaskMemoriesMutation,
 } from "../../../services/refact/taskMemoriesApi";
-import { useAppDispatch } from "../../../hooks";
+import { useAppDispatch, useAppSelector } from "../../../hooks";
+import { getEngineEndpointIdentity } from "../../../services/refact/apiUrl";
 import { MemoryCard } from "./MemoryCard";
 import styles from "./MemoryInboxPanel.module.css";
 
@@ -42,6 +49,20 @@ const MEMORY_KINDS = [
 
 type MemoryInboxPanelProps = {
   taskId: string;
+};
+
+type ActionStatus = "pending" | "success" | "error";
+type MemoryActionKind = "pin" | "unpin" | "archive";
+type MemoryAction = {
+  memory: TaskMemoryEntry;
+  kind: MemoryActionKind;
+  status: ActionStatus;
+};
+
+const ACTION_LABELS = {
+  pin: "pinning",
+  unpin: "unpinning",
+  archive: "archiving",
 };
 
 function clientMatches(memory: TaskMemoryEntry, query: string): boolean {
@@ -70,11 +91,21 @@ function useDebouncedValue(value: string, delayMs: number): string {
   return debounced;
 }
 
-function optimisticKey(taskId: string, filename: string): string {
-  return `${taskId}:${filename}`;
-}
-
 export const MemoryInboxPanel: React.FC<MemoryInboxPanelProps> = ({
+  taskId,
+}) => {
+  const endpoint = useAppSelector((state) =>
+    getEngineEndpointIdentity(state.config),
+  );
+  return (
+    <ScopedMemoryInboxPanel
+      key={JSON.stringify([endpoint, taskId])}
+      taskId={taskId}
+    />
+  );
+};
+
+const ScopedMemoryInboxPanel: React.FC<MemoryInboxPanelProps> = ({
   taskId,
 }) => {
   const dispatch = useAppDispatch();
@@ -89,17 +120,21 @@ export const MemoryInboxPanel: React.FC<MemoryInboxPanelProps> = ({
   const [expandedMemoryFilename, setExpandedMemoryFilename] = useState<
     string | null
   >(null);
-  const [pendingMemoryKeys, setPendingMemoryKeys] = useState<
-    ReadonlySet<string>
-  >(() => new Set());
+  const [memoryActions, setMemoryActions] = useState<
+    ReadonlyMap<string, MemoryAction>
+  >(() => new Map());
+  const [triageStatus, setTriageStatus] = useState<ActionStatus | null>(null);
+  const pendingMemories = useRef(new Set<string>());
+  const triagePending = useRef(false);
+  const active = useRef(true);
   const debouncedSearch = useDebouncedValue(search, 200);
 
   useEffect(() => {
-    setPendingMemoryKeys(new Set());
-    setExpandedMemoryFilename(null);
-    setTagCloudOpen(false);
-    setTagSearch("");
-  }, [taskId]);
+    active.current = true;
+    return () => {
+      active.current = false;
+    };
+  }, []);
 
   const serverSearch = debouncedSearch.trim();
   const query = useMemo(
@@ -111,11 +146,11 @@ export const MemoryInboxPanel: React.FC<MemoryInboxPanelProps> = ({
     }),
     [kind, namespace, serverSearch, taskId],
   );
-  const { data, isFetching, error } = useListTaskMemoriesQuery(query);
+  const { data, isFetching, error, refetch } = useListTaskMemoriesQuery(query);
   const { data: facets } = useGetTaskMemoryFacetsQuery({ taskId });
   const [pinMemory] = usePinTaskMemoryMutation();
   const [archiveMemory] = useArchiveTaskMemoryMutation();
-  const [triageDone, triageState] = useTriageTaskMemoriesMutation();
+  const [triageDone] = useTriageTaskMemoriesMutation();
 
   const namespaces = useMemo(
     () => facets?.namespaces ?? [],
@@ -137,25 +172,27 @@ export const MemoryInboxPanel: React.FC<MemoryInboxPanelProps> = ({
   const hasSelectedTags = selectedTagList.length > 0;
 
   const visibleMemories = useMemo(() => {
-    return (data?.memories ?? []).filter((memory) => {
+    const memories = [...(data?.memories ?? [])];
+    for (const action of memoryActions.values()) {
+      if (
+        action.kind === "archive" &&
+        action.status !== "success" &&
+        !memories.some((memory) => memory.filename === action.memory.filename)
+      ) {
+        memories.push(action.memory);
+      }
+    }
+    return memories.filter((memory) => {
+      if (kind !== ALL_VALUE && memory.kind !== kind) return false;
+      if (namespace !== ALL_VALUE && memory.namespace !== namespace)
+        return false;
       if (!clientMatches(memory, search)) return false;
       for (const tag of selectedTags) {
         if (!memory.tags.includes(tag)) return false;
       }
       return true;
     });
-  }, [data?.memories, search, selectedTags]);
-
-  useEffect(() => {
-    if (
-      expandedMemoryFilename &&
-      !visibleMemories.some(
-        (memory) => memory.filename === expandedMemoryFilename,
-      )
-    ) {
-      setExpandedMemoryFilename(null);
-    }
-  }, [expandedMemoryFilename, visibleMemories]);
+  }, [data?.memories, kind, memoryActions, namespace, search, selectedTags]);
 
   const handleToggleTag = useCallback((tag: string) => {
     setSelectedTags((previous) => {
@@ -180,48 +217,99 @@ export const MemoryInboxPanel: React.FC<MemoryInboxPanelProps> = ({
     [],
   );
 
-  const handlePin = useCallback(
-    async (filename: string, pinned: boolean) => {
-      const key = optimisticKey(taskId, filename);
-      setPendingMemoryKeys((previous) => new Set(previous).add(key));
+  const handleMemoryAction = useCallback(
+    async (filename: string, kind: MemoryActionKind) => {
+      if (pendingMemories.current.has(filename) || triagePending.current)
+        return;
+      const memory =
+        data?.memories.find((entry) => entry.filename === filename) ??
+        memoryActions.get(filename)?.memory;
+      if (!memory) return;
+      pendingMemories.current.add(filename);
+      const action = { memory, kind };
+      setMemoryActions((previous) =>
+        new Map(previous).set(filename, { ...action, status: "pending" }),
+      );
       try {
-        await pinMemory({ taskId, filename, pinned }).unwrap();
+        if (kind === "archive") {
+          const response = await archiveMemory({ taskId, filename }).unwrap();
+          if (
+            (response.ok as unknown) !== true ||
+            response.filename !== filename ||
+            !response.archived_filename
+          ) {
+            throw new Error("Archive response was not confirmed");
+          }
+        } else {
+          const pinned = kind === "pin";
+          const response = await pinMemory({
+            taskId,
+            filename,
+            pinned,
+          }).unwrap();
+          if (
+            (response.ok as unknown) !== true ||
+            response.filename !== filename ||
+            response.pinned !== pinned
+          ) {
+            throw new Error("Pin response was not confirmed");
+          }
+        }
+        if (!active.current) return;
+        setMemoryActions((previous) =>
+          new Map(previous).set(filename, { ...action, status: "success" }),
+        );
+        if (kind === "archive") {
+          setExpandedMemoryFilename((current) =>
+            current === filename ? null : current,
+          );
+        }
       } catch {
-        // Rollback is handled by onQueryStarted in taskMemoriesApi
+        if (!active.current) return;
+        setMemoryActions((previous) =>
+          new Map(previous).set(filename, { ...action, status: "error" }),
+        );
       } finally {
-        setPendingMemoryKeys((previous) => {
-          const next = new Set(previous);
-          next.delete(key);
-          return next;
-        });
+        pendingMemories.current.delete(filename);
       }
     },
-    [pinMemory, taskId],
+    [archiveMemory, data?.memories, memoryActions, pinMemory, taskId],
+  );
+
+  const handlePin = useCallback(
+    (filename: string, pinned: boolean) =>
+      handleMemoryAction(filename, pinned ? "pin" : "unpin"),
+    [handleMemoryAction],
   );
 
   const handleArchive = useCallback(
-    async (filename: string) => {
-      const key = optimisticKey(taskId, filename);
-      setPendingMemoryKeys((previous) => new Set(previous).add(key));
-      setExpandedMemoryFilename((current) =>
-        current === filename ? null : current,
-      );
-      try {
-        await archiveMemory({ taskId, filename }).unwrap();
-      } catch {
-        // Rollback is handled by onQueryStarted in taskMemoriesApi
-      } finally {
-        setPendingMemoryKeys((previous) => {
-          const next = new Set(previous);
-          next.delete(key);
-          return next;
-        });
-      }
-    },
-    [archiveMemory, taskId],
+    (filename: string) => handleMemoryAction(filename, "archive"),
+    [handleMemoryAction],
   );
 
+  const handleRefresh = useCallback(async () => {
+    try {
+      await refetch().unwrap();
+      if (!active.current) return;
+      setMemoryActions(
+        (previous) =>
+          new Map(
+            [...previous].filter(
+              ([filename, action]) =>
+                action.status !== "error" ||
+                action !== memoryActions.get(filename),
+            ),
+          ),
+      );
+    } catch {
+      return;
+    }
+  }, [memoryActions, refetch]);
+
   const handleTriageDone = useCallback(async () => {
+    if (triagePending.current) return;
+    triagePending.current = true;
+    setTriageStatus("pending");
     const cursor = new Date().toISOString();
     const patch = dispatch(
       taskMemoriesApi.util.updateQueryData(
@@ -234,7 +322,15 @@ export const MemoryInboxPanel: React.FC<MemoryInboxPanelProps> = ({
       ),
     );
     try {
-      await triageDone({ taskId, cursor }).unwrap();
+      const response = await triageDone({ taskId, cursor }).unwrap();
+      if (
+        (response.ok as unknown) !== true ||
+        typeof response.cursor !== "string"
+      ) {
+        throw new Error("Triage response was not confirmed");
+      }
+      if (!active.current) return;
+      setTriageStatus("success");
       dispatch(
         taskMemoriesApi.util.invalidateTags([
           { type: "TaskMemories", id: taskId },
@@ -242,6 +338,9 @@ export const MemoryInboxPanel: React.FC<MemoryInboxPanelProps> = ({
       );
     } catch {
       patch.undo();
+      if (active.current) setTriageStatus("error");
+    } finally {
+      triagePending.current = false;
     }
   }, [dispatch, query, taskId, triageDone]);
 
@@ -256,13 +355,17 @@ export const MemoryInboxPanel: React.FC<MemoryInboxPanelProps> = ({
             {visibleMemories.length} memories shown
             {isFetching ? " · refreshing" : ""}
           </Text>
+          <Text size="1" as="div" className={styles.mutedText}>
+            Mark all triaged updates the cursor for this entire task, including
+            memories hidden by filters. It does not archive memories.
+          </Text>
         </div>
         <Button
           size="md"
           variant="soft"
           onClick={() => void handleTriageDone()}
-          disabled={triageState.isLoading}
-          loading={triageState.isLoading}
+          disabled={triageStatus === "pending"}
+          loading={triageStatus === "pending"}
         >
           Mark all triaged
         </Button>
@@ -434,22 +537,83 @@ export const MemoryInboxPanel: React.FC<MemoryInboxPanelProps> = ({
       )}
 
       <Flex direction="column" gap="2" className={`${styles.list} rf-stagger`}>
+        {triageStatus === "error" ? (
+          <ErrorState
+            title="Could not confirm task-wide triage."
+            className={styles.errorState}
+            description="The previous cursor view was restored. Check your connection and permissions, refresh memories, then use Mark all triaged to retry."
+            retry={
+              <Button
+                size="sm"
+                variant="soft"
+                onClick={() => void handleRefresh()}
+              >
+                Refresh memories
+              </Button>
+            }
+          />
+        ) : triageStatus ? (
+          <Text size="1" role="status" className={styles.actionFeedback}>
+            {triageStatus === "pending"
+              ? "Marking memories triaged for the entire task… Not yet confirmed."
+              : "Server confirmed task-wide triage. Filters did not limit its scope."}
+          </Text>
+        ) : null}
+        {[...memoryActions.values()].map((action) =>
+          action.status === "error" ? (
+            <ErrorState
+              key={action.memory.filename}
+              className={styles.errorState}
+              title={`Could not confirm ${ACTION_LABELS[action.kind]} “${
+                action.memory.filename
+              }”.`}
+              description={`Check your connection and permissions, then refresh memories to check the server state. ${
+                action.kind === "archive"
+                  ? "Use Archive and Confirm archive to retry."
+                  : `Use ${action.kind === "pin" ? "Pin" : "Unpin"} to retry.`
+              }`}
+              retry={
+                <Button
+                  size="sm"
+                  variant="soft"
+                  onClick={() => void handleRefresh()}
+                >
+                  Refresh memories
+                </Button>
+              }
+            />
+          ) : (
+            <Text
+              key={action.memory.filename}
+              size="1"
+              role="status"
+              className={styles.actionFeedback}
+            >
+              {action.status === "pending"
+                ? `Request pending: ${ACTION_LABELS[action.kind]} “${
+                    action.memory.filename
+                  }”. Not yet confirmed.`
+                : `Server confirmed ${ACTION_LABELS[action.kind]} “${
+                    action.memory.filename
+                  }”.`}
+            </Text>
+          ),
+        )}
         {isFetching && !data ? (
           <div className={styles.loadingState}>
             <Spinner />
           </div>
         ) : visibleMemories.length > 0 ? (
           visibleMemories.map((memory) => {
-            const pending = pendingMemoryKeys.has(
-              optimisticKey(taskId, memory.filename),
-            );
+            const pending =
+              memoryActions.get(memory.filename)?.status === "pending";
             return (
               <MemoryCard
                 key={memory.filename}
                 memory={memory}
                 onPin={handlePin}
                 onArchive={handleArchive}
-                disabled={triageState.isLoading || pending}
+                disabled={triageStatus === "pending" || pending}
                 pending={pending}
                 expanded={expandedMemoryFilename === memory.filename}
                 onExpandedChange={handleExpandedChange}

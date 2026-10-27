@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { TriangleAlert } from "lucide-react";
 import {
   Badge,
@@ -17,7 +23,6 @@ import {
   type WorktreeRecordView,
 } from "../../services/refact";
 import { tasksApi } from "../../services/refact/tasks";
-import { dialogNonInteractiveCloseHandlers } from "../../utils/dialogPointerClose";
 import { mergeConflictFiles } from "./worktreeConflict";
 import { worktreeErrorText } from "./worktreeError";
 import styles from "./Worktrees.module.css";
@@ -36,7 +41,6 @@ type MergeWorktreeModalProps = {
     response: MergeWorktreeResponse,
   ) => void | Promise<void>;
   onOpenWorktree?: () => void | Promise<void>;
-  closeOnNonInteractiveContentClick?: boolean;
 };
 
 function displayWorktreeLabel(
@@ -99,9 +103,10 @@ function responseWarnings(response: MergeWorktreeResponse): string[] {
 function resultTone(
   merged: boolean,
   conflicted: boolean,
+  hasWarnings: boolean,
 ): React.ComponentProps<typeof Badge>["tone"] {
+  if (conflicted || hasWarnings) return "warning";
   if (merged) return "success";
-  if (conflicted) return "warning";
   return "muted";
 }
 
@@ -116,7 +121,6 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
   onMerged,
   onAskRefact,
   onOpenWorktree,
-  closeOnNonInteractiveContentClick = false,
 }) => {
   const dispatch = useAppDispatch();
   const [strategy, setStrategy] = useState<WorktreeMergeStrategy>("squash");
@@ -125,14 +129,31 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
   const [targetBranch, setTargetBranch] = useState(
     initialTargetBranch(record, worktree, defaultTargetBranch),
   );
-  const [result, setResult] = useState<MergeWorktreeResponse | null>(null);
+  const [completedResult, setCompletedResult] = useState<{
+    response: MergeWorktreeResponse;
+    id: string;
+    label: string;
+  } | null>(null);
+  const result = completedResult?.response ?? null;
   const [error, setError] = useState<string | null>(null);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
+  const wasOpen = useRef(false);
   const [mergeWorktree, mergeState] = useMergeWorktreeMutation();
   const queryId = worktreeId ?? record?.meta.id ?? worktree?.id ?? "";
   const sourceWorkspaceRoot =
     record?.meta.source_workspace_root ?? worktree?.source_workspace_root;
-  const label = displayWorktreeLabel(worktree, record);
+  const label =
+    completedResult?.label ?? displayWorktreeLabel(worktree, record);
+  const canActOnWorktree =
+    queryId.length > 0 &&
+    (!completedResult || completedResult.id === queryId) &&
+    !result?.cleanup?.worktree_deleted &&
+    !result?.cleanup?.registry_deleted &&
+    !result?.deleted &&
+    !record?.meta.deleted &&
+    !record?.status.deleted &&
+    !worktree?.status?.deleted &&
+    !worktree?.deleted;
   const conflictFiles = useMemo(
     () => (result ? mergeConflictFiles(result) : []),
     [result],
@@ -144,12 +165,17 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
   const resolvedTaskId = taskId ?? record?.meta.task_id ?? worktree?.task_id;
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      wasOpen.current = false;
+      return;
+    }
+    if (wasOpen.current) return;
+    wasOpen.current = true;
     setStrategy("squash");
     setDeleteAfterMerge(true);
     setIncludeUncommitted(true);
     setTargetBranch(initialTargetBranch(record, worktree, defaultTargetBranch));
-    setResult(null);
+    setCompletedResult(null);
     setError(null);
     setActionFeedback(null);
   }, [defaultTargetBranch, open, record, worktree]);
@@ -166,11 +192,8 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
   }, [dispatch, resolvedTaskId]);
 
   const handleMerge = useCallback(async () => {
-    if (!queryId) {
-      setError("No worktree selected.");
-      return;
-    }
-    setResult(null);
+    if (!canActOnWorktree || mergeState.isLoading) return;
+    setCompletedResult(null);
     setError(null);
     setActionFeedback(null);
     try {
@@ -185,7 +208,7 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
         include_uncommitted: includeUncommitted,
         generate_commit_message: true,
       }).unwrap();
-      setResult(response);
+      setCompletedResult({ response, id: queryId, label });
       invalidateTask();
       if (isMerged(response) || didCleanupNoop(response)) {
         onMerged?.(response);
@@ -194,9 +217,12 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
       setError(worktreeErrorText(mergeError));
     }
   }, [
+    canActOnWorktree,
     deleteAfterMerge,
     includeUncommitted,
     invalidateTask,
+    label,
+    mergeState.isLoading,
     mergeWorktree,
     onMerged,
     queryId,
@@ -206,7 +232,7 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
   ]);
 
   const handleAskRefact = useCallback(async () => {
-    if (!result || !onAskRefact) return;
+    if (!result || !onAskRefact || !canActOnWorktree) return;
     setActionFeedback(null);
     try {
       await onAskRefact(conflictFiles, result);
@@ -214,10 +240,10 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
     } catch (askError) {
       setActionFeedback(`Could not ask Refact: ${worktreeErrorText(askError)}`);
     }
-  }, [conflictFiles, onAskRefact, result]);
+  }, [canActOnWorktree, conflictFiles, onAskRefact, result]);
 
   const handleOpenWorktree = useCallback(async () => {
-    if (!onOpenWorktree) return;
+    if (!onOpenWorktree || !canActOnWorktree) return;
     setActionFeedback(null);
     try {
       await onOpenWorktree();
@@ -226,7 +252,7 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
         `Could not open worktree: ${worktreeErrorText(openError)}`,
       );
     }
-  }, [onOpenWorktree]);
+  }, [canActOnWorktree, onOpenWorktree]);
 
   const conflicted = result ? hasMergeConflict(result) : false;
   const merged = result ? isMerged(result) : false;
@@ -234,11 +260,7 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <Dialog.Content className={styles.mergeDialog} maxWidth="900px">
-        <div
-          {...(closeOnNonInteractiveContentClick
-            ? dialogNonInteractiveCloseHandlers(() => onOpenChange(false))
-            : {})}
-        >
+        <div>
           <Dialog.Title>Merge worktree</Dialog.Title>
           <Dialog.Description>
             Merge {label} into a target branch.
@@ -256,7 +278,7 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
                 onChange={(value) =>
                   setStrategy(value as WorktreeMergeStrategy)
                 }
-                disabled={mergeState.isLoading}
+                disabled={mergeState.isLoading || !canActOnWorktree}
                 aria-label="Merge strategy"
               />
             </div>
@@ -267,7 +289,7 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
                 id="worktree-target-branch"
                 value={targetBranch}
                 onChange={setTargetBranch}
-                disabled={mergeState.isLoading}
+                disabled={mergeState.isLoading || !canActOnWorktree}
               />
             </label>
 
@@ -279,7 +301,7 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
                   onChange={(event) =>
                     setDeleteAfterMerge(event.currentTarget.checked)
                   }
-                  disabled={mergeState.isLoading}
+                  disabled={mergeState.isLoading || !canActOnWorktree}
                 />
                 Delete worktree after merge or if there is nothing to merge
               </label>
@@ -290,7 +312,7 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
                   onChange={(event) =>
                     setIncludeUncommitted(event.currentTarget.checked)
                   }
-                  disabled={mergeState.isLoading}
+                  disabled={mergeState.isLoading || !canActOnWorktree}
                 />
                 Include uncommitted changes by auto-committing first
               </label>
@@ -315,7 +337,9 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
             {result && (
               <div className={styles.resultBox}>
                 <div className={styles.badgeRow}>
-                  <Badge tone={resultTone(merged, conflicted)}>
+                  <Badge
+                    tone={resultTone(merged, conflicted, warnings.length > 0)}
+                  >
                     {result.status ?? (merged ? "merged" : "finished")}
                   </Badge>
                   {result.strategy && (
@@ -324,7 +348,7 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
                 </div>
                 <p
                   className={`${styles.resultSummary} ${
-                    conflicted
+                    conflicted || warnings.length > 0
                       ? styles.resultWarning
                       : merged
                         ? styles.resultSuccess
@@ -347,7 +371,9 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
                   <p className={styles.metaText}>
                     Cleanup: worktree{" "}
                     {result.cleanup.worktree_deleted ? "deleted" : "kept"},
-                    branch {result.cleanup.branch_deleted ? "deleted" : "kept"}
+                    branch {result.cleanup.branch_deleted ? "deleted" : "kept"},
+                    registry{" "}
+                    {result.cleanup.registry_deleted ? "deleted" : "kept"}
                   </p>
                 )}
                 {conflicted && (
@@ -365,7 +391,7 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
                         size="sm"
                         variant="soft"
                         onClick={() => void handleAskRefact()}
-                        disabled={!onAskRefact}
+                        disabled={!onAskRefact || !canActOnWorktree}
                       >
                         Ask Refact to resolve conflicts
                       </Button>
@@ -373,7 +399,7 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
                         size="sm"
                         variant="soft"
                         onClick={() => void handleOpenWorktree()}
-                        disabled={!onOpenWorktree}
+                        disabled={!onOpenWorktree || !canActOnWorktree}
                       >
                         Open worktree
                       </Button>
@@ -408,7 +434,7 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
             <Button
               variant="primary"
               onClick={() => void handleMerge()}
-              disabled={mergeState.isLoading || queryId.length === 0}
+              disabled={mergeState.isLoading || !canActOnWorktree}
               loading={mergeState.isLoading}
             >
               Merge

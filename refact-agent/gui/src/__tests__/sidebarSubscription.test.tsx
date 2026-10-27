@@ -1,5 +1,6 @@
 import { http, HttpResponse } from "msw";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { act } from "react-dom/test-utils";
 import { render, screen, waitFor } from "../utils/test-utils";
 import { server } from "../utils/mockServer";
 import { useSidebarSubscription } from "../hooks/useSidebarSubscription";
@@ -10,11 +11,15 @@ import {
   type SidebarSubscriptionCallbacks,
 } from "../services/refact/sidebarSubscription";
 import {
+  tasksApi,
   type BoardCard,
   type TaskBoard,
   type TaskMeta,
   useGetBoardQuery,
 } from "../services/refact/tasks";
+import { taskDocumentsApi } from "../services/refact/taskDocumentsApi";
+import { taskMemoriesApi } from "../services/refact/taskMemoriesApi";
+import { updateConfig } from "../features/Config/configSlice";
 import { KanbanBoard } from "../features/Tasks/KanbanBoard";
 
 const CONFIG_STATE = {
@@ -674,6 +679,409 @@ describe("useSidebarSubscription", () => {
       ]);
       expect(store.getState().sidebar.sections.tasks.status).toBe("ready");
     });
+  });
+
+  it("recovers lost board and detail events with one bounded subscribed-query batch after reconnect", async () => {
+    let stream: ReadableStreamDefaultController<Uint8Array> | undefined;
+    let connections = 0;
+    const requests: string[] = [];
+    let revision = 1;
+    const document = () => ({
+      slug: "main-plan",
+      name: "Plan",
+      kind: "plan",
+      pinned: false,
+      version: revision,
+      content: `Version ${revision}`,
+      created_at: taskA.created_at,
+      updated_at: taskA.updated_at,
+      author_role: "planner",
+      relevant_cards: [],
+    });
+    server.use(
+      http.get("*/v1/sidebar/subscribe", () => {
+        connections++;
+        return new HttpResponse(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              stream = controller;
+            },
+          }),
+          { headers: { "Content-Type": "text/event-stream" } },
+        );
+      }),
+      http.get("*/v1/tasks/:taskId", ({ request, params }) => {
+        requests.push(new URL(request.url).pathname);
+        if (params.taskId === "task-deleted" && revision === 2) {
+          return HttpResponse.json({ detail: "Not found" }, { status: 404 });
+        }
+        return HttpResponse.json({
+          meta: { ...taskA, name: `Task ${revision}` },
+        });
+      }),
+      http.get("*/v1/tasks/:taskId/board", ({ request }) => {
+        requests.push(new URL(request.url).pathname);
+        return HttpResponse.json({
+          ...testBoard,
+          rev: revision,
+          card_outcomes: {
+            "T-1": {
+              required: [
+                { fragment: `Evidence ${revision}`, requires_evidence: true },
+              ],
+              fragments: [],
+              finalized: null,
+            },
+          },
+        });
+      }),
+      http.get("*/v1/tasks/:taskId/goal", ({ request }) => {
+        requests.push(new URL(request.url).pathname);
+        return HttpResponse.json({
+          content: `Goal ${revision}`,
+          status: "paused",
+        });
+      }),
+      http.get(
+        "*/v1/tasks/:taskId/trajectories/:role",
+        ({ request, params }) => {
+          requests.push(new URL(request.url).pathname);
+          return HttpResponse.json([
+            { id: `${String(params.role)}-${revision}` },
+          ]);
+        },
+      ),
+      http.get("*/v1/task/:taskId/documents", ({ request, params }) => {
+        requests.push(new URL(request.url).pathname);
+        return HttpResponse.json({
+          task_id: params.taskId,
+          documents: [document()],
+        });
+      }),
+      http.get("*/v1/task/:taskId/documents/:slug", ({ request }) => {
+        requests.push(new URL(request.url).pathname);
+        return HttpResponse.json(document());
+      }),
+      http.get(
+        "*/v1/task/:taskId/documents/:slug/history",
+        ({ request, params }) => {
+          requests.push(new URL(request.url).pathname);
+          return HttpResponse.json({
+            task_id: params.taskId,
+            slug: params.slug,
+            history: [{ version: revision }],
+          });
+        },
+      ),
+      http.get("*/v1/task/:taskId/memories", ({ request, params }) => {
+        requests.push(new URL(request.url).pathname);
+        return HttpResponse.json({
+          task_id: params.taskId,
+          since: "",
+          new_count: revision,
+          memories: [],
+          warnings: [],
+        });
+      }),
+      http.get("*/v1/task/:taskId/memories/facets", ({ request, params }) => {
+        requests.push(new URL(request.url).pathname);
+        return HttpResponse.json({
+          task_id: params.taskId,
+          namespaces: [],
+          tags: [],
+          kinds: [],
+          total_count: revision,
+          pinned_count: 0,
+        });
+      }),
+    );
+    const send = (events: unknown[]) =>
+      act(() => {
+        for (const event of events)
+          stream?.enqueue(
+            new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`),
+          );
+      });
+    const { store, unmount } = render(<TestHarness />, {
+      preloadedState: CONFIG_STATE,
+    });
+    await waitFor(() => expect(connections).toBe(1));
+    send([sectionSnapshot(0, "workspace", { workspace_roots: ["/repo"] })]);
+    await waitFor(() =>
+      expect(store.getState().sidebar.sections.workspace.status).toBe("ready"),
+    );
+    const detailArgs = { taskId: taskA.id, slug: "main-plan" };
+    const memoryArgs = {
+      taskId: taskA.id,
+      kind: "decision",
+      search: "keep-filter",
+    };
+    const subscriptions = [
+      store.dispatch(tasksApi.endpoints.getTask.initiate(taskA.id)),
+      store.dispatch(tasksApi.endpoints.getTask.initiate("task-deleted")),
+      store.dispatch(tasksApi.endpoints.getBoard.initiate(taskA.id)),
+      store.dispatch(tasksApi.endpoints.getTaskGoal.initiate(taskA.id)),
+      store.dispatch(
+        tasksApi.endpoints.listTaskTrajectories.initiate({
+          taskId: taskA.id,
+          role: "planner",
+        }),
+      ),
+      store.dispatch(
+        tasksApi.endpoints.listTaskTrajectories.initiate({
+          taskId: taskA.id,
+          role: "agents",
+        }),
+      ),
+      store.dispatch(
+        taskDocumentsApi.endpoints.listTaskDocuments.initiate({
+          taskId: taskA.id,
+        }),
+      ),
+      store.dispatch(
+        taskDocumentsApi.endpoints.getTaskDocument.initiate(detailArgs),
+      ),
+      store.dispatch(
+        taskDocumentsApi.endpoints.getTaskDocumentHistory.initiate(detailArgs),
+      ),
+      store.dispatch(
+        taskMemoriesApi.endpoints.listTaskMemories.initiate(memoryArgs),
+      ),
+      store.dispatch(
+        taskMemoriesApi.endpoints.getTaskMemoryFacets.initiate({
+          taskId: taskA.id,
+        }),
+      ),
+    ];
+    try {
+      await Promise.all(subscriptions.map((query) => query.unwrap()));
+      const inactive = store.dispatch(
+        tasksApi.endpoints.getBoard.initiate(taskB.id),
+      );
+      await inactive.unwrap();
+      inactive.unsubscribe();
+      expect(
+        tasksApi.endpoints.getBoard.select(taskA.id)(store.getState()).data
+          ?.rev,
+      ).toBe(1);
+      expect(
+        taskDocumentsApi.endpoints.getTaskDocument.select(detailArgs)(
+          store.getState(),
+        ).data?.content,
+      ).toBe("Version 1");
+      revision = 2;
+      act(() => stream?.close());
+      await waitFor(() => expect(connections).toBe(2));
+      requests.length = 0;
+      send([
+        sectionSnapshot(0, "tasks", { tasks: [taskA] }),
+        sectionSnapshot(1, "tasks", { tasks: [taskA] }),
+        sectionSnapshot(2, "workspace", { workspace_roots: ["/repo"] }),
+        sectionSnapshot(3, "tasks", { tasks: [taskA] }),
+      ]);
+      await waitFor(() => {
+        const state = store.getState();
+        expect(
+          tasksApi.endpoints.getBoard.select(taskA.id)(state).data?.rev,
+        ).toBe(2);
+        expect(
+          tasksApi.endpoints.getBoard.select(taskA.id)(state).data
+            ?.card_outcomes?.["T-1"].required[0].fragment,
+        ).toBe("Evidence 2");
+        expect(
+          tasksApi.endpoints.getTask.select(taskA.id)(state).data?.name,
+        ).toBe("Task 2");
+        expect(
+          tasksApi.endpoints.getTask.select("task-deleted")(state).error,
+        ).toMatchObject({ status: 404 });
+        expect(
+          tasksApi.endpoints.getTaskGoal.select(taskA.id)(state).data?.content,
+        ).toBe("Goal 2");
+        expect(
+          tasksApi.endpoints.listTaskTrajectories.select({
+            taskId: taskA.id,
+            role: "planner",
+          })(state).data?.[0].id,
+        ).toBe("planner-2");
+        expect(
+          tasksApi.endpoints.listTaskTrajectories.select({
+            taskId: taskA.id,
+            role: "agents",
+          })(state).data?.[0].id,
+        ).toBe("agents-2");
+        expect(
+          taskDocumentsApi.endpoints.listTaskDocuments.select({
+            taskId: taskA.id,
+          })(state).data?.documents[0].version,
+        ).toBe(2);
+        expect(
+          taskDocumentsApi.endpoints.getTaskDocument.select(detailArgs)(state)
+            .data?.content,
+        ).toBe("Version 2");
+        expect(
+          taskDocumentsApi.endpoints.getTaskDocumentHistory.select(detailArgs)(
+            state,
+          ).data?.history[0].version,
+        ).toBe(2);
+        expect(
+          taskMemoriesApi.endpoints.listTaskMemories.select(memoryArgs)(state)
+            .data?.new_count,
+        ).toBe(2);
+        expect(
+          taskMemoriesApi.endpoints.getTaskMemoryFacets.select({
+            taskId: taskA.id,
+          })(state).data?.total_count,
+        ).toBe(2);
+      });
+      expect(requests.sort()).toEqual(
+        [
+          "/v1/tasks/task-a",
+          "/v1/tasks/task-deleted",
+          "/v1/tasks/task-a/board",
+          "/v1/tasks/task-a/goal",
+          "/v1/tasks/task-a/trajectories/planner",
+          "/v1/tasks/task-a/trajectories/agents",
+          "/v1/task/task-a/documents",
+          "/v1/task/task-a/documents/main-plan",
+          "/v1/task/task-a/documents/main-plan/history",
+          "/v1/task/task-a/memories",
+          "/v1/task/task-a/memories/facets",
+        ].sort(),
+      );
+      expect(
+        tasksApi.endpoints.getBoard.select(taskB.id)(store.getState()).data
+          ?.rev,
+      ).toBe(1);
+    } finally {
+      unmount();
+      subscriptions.forEach((query) => query.unsubscribe());
+      store.dispatch(tasksApi.util.resetApiState());
+      store.dispatch(taskDocumentsApi.util.resetApiState());
+      store.dispatch(taskMemoriesApi.util.resetApiState());
+    }
+  });
+
+  it("does not revalidate old-endpoint document variants or unknown persisted task IDs", async () => {
+    const requests: string[] = [];
+    let stream: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const detail = {
+      slug: "plan",
+      name: "Plan",
+      kind: "plan",
+      pinned: false,
+      version: 1,
+      content: "old",
+      created_at: taskA.created_at,
+      updated_at: taskA.updated_at,
+    };
+    server.use(
+      http.get(
+        "*/v1/sidebar/subscribe",
+        () =>
+          new HttpResponse(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                stream = controller;
+              },
+            }),
+            { headers: { "Content-Type": "text/event-stream" } },
+          ),
+      ),
+      http.get("*/v1/task/:taskId/documents/:slug", ({ request }) => {
+        requests.push(request.url);
+        return HttpResponse.json({
+          ...detail,
+          content: request.url.includes("remote.example.com") ? "new" : "old",
+        });
+      }),
+    );
+    const { store, unmount } = render(<TestHarness />, {
+      preloadedState: {
+        ...CONFIG_STATE,
+        tasksUI: {
+          openTasks: [
+            {
+              id: "persisted-foreign",
+              name: "Foreign",
+              plannerChats: [],
+              activeChat: null,
+            },
+          ],
+        },
+      },
+    });
+    const snapshot = () =>
+      act(() => {
+        stream?.enqueue(
+          new TextEncoder().encode(
+            `data: ${JSON.stringify(
+              sectionSnapshot(0, "workspace", { workspace_roots: ["/repo"] }),
+            )}\n\n`,
+          ),
+        );
+      });
+    await waitFor(() => expect(stream).toBeDefined());
+    snapshot();
+    await waitFor(() =>
+      expect(store.getState().sidebar.sections.workspace.status).toBe("ready"),
+    );
+    const oldArgs = { taskId: taskA.id, slug: "plan", version: 1 };
+    const newArgs = { taskId: taskA.id, slug: "plan" };
+    const oldQuery = store.dispatch(
+      taskDocumentsApi.endpoints.getTaskDocument.initiate(oldArgs),
+    );
+    await oldQuery.unwrap();
+    stream = undefined;
+    act(() => {
+      store.dispatch(
+        updateConfig({
+          engineServed: false,
+          lspUrl: "https://remote.example.com",
+        }),
+      );
+    });
+    await waitFor(() => expect(stream).toBeDefined());
+    snapshot();
+    await waitFor(() =>
+      expect(store.getState().sidebar.sections.workspace.status).toBe("ready"),
+    );
+    const newQuery = store.dispatch(
+      taskDocumentsApi.endpoints.getTaskDocument.initiate(newArgs),
+    );
+    try {
+      await newQuery.unwrap();
+      requests.length = 0;
+      act(() => {
+        stream?.enqueue(
+          new TextEncoder().encode(
+            `data: ${JSON.stringify(
+              sectionSnapshot(1, "tasks", { tasks: [taskA] }),
+            )}\n\n`,
+          ),
+        );
+      });
+      await waitFor(() =>
+        expect(requests).toEqual([
+          "https://remote.example.com/v1/task/task-a/documents/plan",
+        ]),
+      );
+      expect(
+        taskDocumentsApi.endpoints.getTaskDocument.select(oldArgs)(
+          store.getState(),
+        ).isUninitialized,
+      ).toBe(true);
+      expect(
+        taskDocumentsApi.endpoints.getTaskDocument.select(newArgs)(
+          store.getState(),
+        ).data?.content,
+      ).toBe("new");
+    } finally {
+      unmount();
+      oldQuery.unsubscribe();
+      newQuery.unsubscribe();
+      store.dispatch(tasksApi.util.resetApiState());
+      store.dispatch(taskDocumentsApi.util.resetApiState());
+    }
   });
 
   it("resync snapshots replace chats and tasks without reconnecting", async () => {

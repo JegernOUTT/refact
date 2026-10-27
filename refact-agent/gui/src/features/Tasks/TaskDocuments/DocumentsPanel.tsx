@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useMemo, useRef, useState } from "react";
 import classNames from "classnames";
 import { Clock, Pencil, Pin, Plus, Trash2 } from "lucide-react";
 import { Markdown } from "../../../components/Markdown";
@@ -63,11 +63,15 @@ type DocumentRowProps = {
   isExpanded: boolean;
   expandedContent?: string;
   isExpandedLoading: boolean;
+  isExpandedError: boolean;
+  onRetryExpanded: () => void;
+  isActionPending: boolean;
+  hasDeleteError: boolean;
   onToggleExpand: () => void;
   onPin: (slug: string, pinned: boolean) => void | Promise<void>;
   onEdit: (slug: string) => void;
   onHistory: (slug: string) => void;
-  onDelete: (slug: string) => void | Promise<void>;
+  onDelete: (slug: string) => Promise<boolean>;
 };
 
 const DocumentRow: React.FC<DocumentRowProps> = ({
@@ -75,6 +79,10 @@ const DocumentRow: React.FC<DocumentRowProps> = ({
   isExpanded,
   expandedContent,
   isExpandedLoading,
+  isExpandedError,
+  onRetryExpanded,
+  isActionPending,
+  hasDeleteError,
   onToggleExpand,
   onPin,
   onEdit,
@@ -82,6 +90,7 @@ const DocumentRow: React.FC<DocumentRowProps> = ({
   onDelete,
 }) => {
   const pinned = document.pinned;
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const { shouldRender, isAnimatingOpen } = useDelayedUnmount(
     isExpanded,
     COLLAPSE_ANIMATION_MS,
@@ -110,6 +119,7 @@ const DocumentRow: React.FC<DocumentRowProps> = ({
               variant="plain"
               aria-label={pinned ? "Unpin" : "Pin"}
               icon={Pin}
+              disabled={isActionPending}
               className={classNames(
                 styles.rowIconButton,
                 pinned && styles.iconButtonPinned,
@@ -144,6 +154,7 @@ const DocumentRow: React.FC<DocumentRowProps> = ({
               variant="plain"
               aria-label="Edit"
               icon={Pencil}
+              disabled={isActionPending}
               className={styles.rowIconButton}
               onClick={(e) => {
                 e.stopPropagation();
@@ -164,7 +175,12 @@ const DocumentRow: React.FC<DocumentRowProps> = ({
               }}
             />
           </Tooltip>
-          <Popover>
+          <Popover
+            open={deleteOpen}
+            onOpenChange={(open) => {
+              if (!isActionPending) setDeleteOpen(open);
+            }}
+          >
             <Tooltip content="Delete">
               <Popover.Trigger asChild>
                 <IconButton
@@ -172,6 +188,7 @@ const DocumentRow: React.FC<DocumentRowProps> = ({
                   variant="plain"
                   aria-label="Delete"
                   icon={Trash2}
+                  disabled={isActionPending}
                   className={classNames(
                     styles.rowIconButton,
                     styles.dangerIcon,
@@ -181,22 +198,34 @@ const DocumentRow: React.FC<DocumentRowProps> = ({
               </Popover.Trigger>
             </Tooltip>
             <Popover.Content className={styles.confirmPopover}>
-              <Flex direction="column" gap="3">
+              <Flex
+                direction="column"
+                gap="3"
+                onClick={(event) => event.stopPropagation()}
+              >
                 <Text size="2">Delete this document?</Text>
+                {hasDeleteError && (
+                  <ErrorState title="Delete failed. Please try again or cancel." />
+                )}
                 <Flex gap="2" wrap="wrap">
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    disabled={isActionPending}
+                    onClick={() => {
+                      void onDelete(document.slug).then((deleted) => {
+                        if (deleted) setDeleteOpen(false);
+                      });
+                    }}
+                  >
+                    Confirm delete
+                  </Button>
                   <Popover.Close asChild>
                     <Button
                       size="sm"
-                      variant="danger"
-                      onClick={() => {
-                        void onDelete(document.slug);
-                      }}
+                      variant="plain"
+                      disabled={isActionPending}
                     >
-                      Confirm delete
-                    </Button>
-                  </Popover.Close>
-                  <Popover.Close asChild>
-                    <Button size="sm" variant="plain">
                       Cancel
                     </Button>
                   </Popover.Close>
@@ -214,7 +243,23 @@ const DocumentRow: React.FC<DocumentRowProps> = ({
           data-state={isAnimatingOpen ? "open" : "closed"}
         >
           <div className={styles.content}>
-            {isExpandedLoading ? (
+            {isExpandedError ? (
+              <ErrorState
+                title={`Failed to load document ${document.slug}.`}
+                retry={
+                  <Button
+                    variant="soft"
+                    disabled={isExpandedLoading}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onRetryExpanded();
+                    }}
+                  >
+                    Retry content
+                  </Button>
+                }
+              />
+            ) : isExpandedLoading ? (
               <div className={styles.inlineLoading}>
                 <Spinner size="sm" />
               </div>
@@ -251,12 +296,18 @@ export const DocumentsPanel: React.FC<DocumentsPanelProps> = ({ taskId }) => {
     number | null
   >(null);
 
-  const { data, isFetching, error } = useListTaskDocumentsQuery({ taskId });
+  const {
+    currentData: data,
+    isFetching,
+    error,
+    refetch: refetchDocuments,
+  } = useListTaskDocumentsQuery({ taskId });
 
   const {
     currentData: requestedExpandedDoc,
     isFetching: isExpandedFetching,
     isError: isExpandedError,
+    refetch: refetchExpanded,
   } = useGetTaskDocumentQuery(
     { taskId, slug: expandedSlug ?? "" },
     { skip: !expandedSlug },
@@ -266,16 +317,21 @@ export const DocumentsPanel: React.FC<DocumentsPanelProps> = ({ taskId }) => {
       ? requestedExpandedDoc
       : undefined;
 
-  const { currentData: historyData, isFetching: isHistoryFetching } =
-    useGetTaskDocumentHistoryQuery(
-      { taskId, slug: historySlug ?? "" },
-      { skip: !historySlug || !historyOpen },
-    );
+  const {
+    currentData: historyData,
+    isFetching: isHistoryFetching,
+    isError: isHistoryError,
+    refetch: refetchHistory,
+  } = useGetTaskDocumentHistoryQuery(
+    { taskId, slug: historySlug ?? "" },
+    { skip: !historySlug || !historyOpen },
+  );
 
   const {
     currentData: selectedHistoryDoc,
     isFetching: isHistoryDocFetching,
     isError: isHistoryDocError,
+    refetch: refetchHistoryDoc,
   } = useGetTaskDocumentQuery(
     {
       taskId,
@@ -316,6 +372,14 @@ export const DocumentsPanel: React.FC<DocumentsPanelProps> = ({ taskId }) => {
 
   const [pinDocument] = usePinTaskDocumentMutation();
   const [deleteDocument] = useDeleteTaskDocumentMutation();
+  const actionPending = useRef(false);
+  const [isActionPending, setIsActionPending] = useState(false);
+  const [actionError, setActionError] = useState<{
+    taskId: string;
+    slug: string;
+    action: "pin" | "delete";
+    message: string;
+  } | null>(null);
 
   const sorted = useMemo(() => {
     return [...(data?.documents ?? [])].sort((a, b) => {
@@ -338,9 +402,25 @@ export const DocumentsPanel: React.FC<DocumentsPanelProps> = ({ taskId }) => {
 
   const handlePin = useCallback(
     async (slug: string, pinned: boolean) => {
-      await pinDocument({ taskId, slug, pinned })
-        .unwrap()
-        .catch(() => undefined);
+      if (actionPending.current) return;
+      actionPending.current = true;
+      setIsActionPending(true);
+      setActionError(null);
+      try {
+        await pinDocument({ taskId, slug, pinned }).unwrap();
+      } catch {
+        setActionError({
+          taskId,
+          slug,
+          action: "pin",
+          message: `Failed to ${
+            pinned ? "pin" : "unpin"
+          } document ${slug} in task ${taskId}. Please try again.`,
+        });
+      } finally {
+        actionPending.current = false;
+        setIsActionPending(false);
+      }
     },
     [pinDocument, taskId],
   );
@@ -359,9 +439,25 @@ export const DocumentsPanel: React.FC<DocumentsPanelProps> = ({ taskId }) => {
 
   const handleDelete = useCallback(
     async (slug: string) => {
-      await deleteDocument({ taskId, slug })
-        .unwrap()
-        .catch(() => undefined);
+      if (actionPending.current) return false;
+      actionPending.current = true;
+      setIsActionPending(true);
+      setActionError(null);
+      try {
+        await deleteDocument({ taskId, slug }).unwrap();
+        return true;
+      } catch {
+        setActionError({
+          taskId,
+          slug,
+          action: "delete",
+          message: `Failed to delete document ${slug} in task ${taskId}. Please try again.`,
+        });
+        return false;
+      } finally {
+        actionPending.current = false;
+        setIsActionPending(false);
+      }
     },
     [deleteDocument, taskId],
   );
@@ -386,10 +482,12 @@ export const DocumentsPanel: React.FC<DocumentsPanelProps> = ({ taskId }) => {
           size="sm"
           variant="soft"
           leftIcon={Plus}
+          disabled={isActionPending}
           onClick={handleNewDocument}
         >
           New
         </Button>
+        {isActionPending && <Spinner size="sm" label="Updating document" />}
       </Flex>
 
       <Surface
@@ -428,6 +526,23 @@ export const DocumentsPanel: React.FC<DocumentsPanelProps> = ({ taskId }) => {
           title="Failed to load documents."
           variant="compact"
           className={styles.errorState}
+          retry={
+            <Button
+              variant="soft"
+              disabled={isFetching}
+              onClick={() => void refetchDocuments()}
+            >
+              Retry documents
+            </Button>
+          }
+        />
+      )}
+
+      {actionError?.taskId === taskId && (
+        <ErrorState
+          title={actionError.message}
+          variant="compact"
+          className={styles.errorState}
         />
       )}
 
@@ -439,7 +554,7 @@ export const DocumentsPanel: React.FC<DocumentsPanelProps> = ({ taskId }) => {
         ) : visible.length > 0 ? (
           visible.map((doc) => (
             <DocumentRow
-              key={doc.slug}
+              key={`${taskId}:${doc.slug}`}
               document={doc}
               isExpanded={expandedSlug === doc.slug}
               expandedContent={
@@ -452,6 +567,14 @@ export const DocumentsPanel: React.FC<DocumentsPanelProps> = ({ taskId }) => {
                 (isExpandedFetching ||
                   (!isExpandedError && expandedDoc?.slug !== doc.slug))
               }
+              isExpandedError={expandedSlug === doc.slug && isExpandedError}
+              onRetryExpanded={() => void refetchExpanded()}
+              isActionPending={isActionPending}
+              hasDeleteError={
+                actionError?.taskId === taskId &&
+                actionError.slug === doc.slug &&
+                actionError.action === "delete"
+              }
               onToggleExpand={() => handleToggleExpand(doc.slug)}
               onPin={handlePin}
               onEdit={handleEdit}
@@ -459,11 +582,11 @@ export const DocumentsPanel: React.FC<DocumentsPanelProps> = ({ taskId }) => {
               onDelete={handleDelete}
             />
           ))
-        ) : (
+        ) : !error ? (
           <Text as="div" className={styles.emptyState}>
             No documents yet. Click + New to create a plan or design doc.
           </Text>
-        )}
+        ) : null}
       </Flex>
 
       <DocumentEditor
@@ -483,7 +606,20 @@ export const DocumentsPanel: React.FC<DocumentsPanelProps> = ({ taskId }) => {
           <Dialog.Title>History: {historySlug}</Dialog.Title>
           <Flex gap="3" className={styles.historyBody}>
             <Flex direction="column" gap="2" className={styles.historyList}>
-              {isHistoryFetching && historyRows === undefined ? (
+              {isHistoryError ? (
+                <ErrorState
+                  title={`Failed to load history for ${historySlug ?? ""}.`}
+                  retry={
+                    <Button
+                      variant="soft"
+                      disabled={isHistoryFetching}
+                      onClick={() => void refetchHistory()}
+                    >
+                      Retry history
+                    </Button>
+                  }
+                />
+              ) : isHistoryFetching && historyRows === undefined ? (
                 <div className={styles.inlineLoading}>
                   <Spinner size="sm" />
                 </div>
@@ -523,6 +659,21 @@ export const DocumentsPanel: React.FC<DocumentsPanelProps> = ({ taskId }) => {
                 <Text size="2" className={styles.mutedText}>
                   Select a version to view its content.
                 </Text>
+              ) : isHistoryDocError ? (
+                <ErrorState
+                  title={`Failed to load historical content for ${
+                    historySlug ?? ""
+                  } v${selectedHistoryVersion}.`}
+                  retry={
+                    <Button
+                      variant="soft"
+                      disabled={isHistoryDocFetching}
+                      onClick={() => void refetchHistoryDoc()}
+                    >
+                      Retry historical content
+                    </Button>
+                  }
+                />
               ) : isHistoryContentLoading ? (
                 <div className={styles.inlineLoading}>
                   <Spinner size="sm" />

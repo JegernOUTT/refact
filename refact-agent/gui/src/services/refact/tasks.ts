@@ -69,13 +69,190 @@ export interface CardAttention {
   count: number;
 }
 
+export interface CardVerificationResult {
+  command: string;
+  exit_code?: number | null;
+  passed?: boolean;
+  output_tail?: string;
+  outcome?:
+    | "unknown"
+    | "passed"
+    | "command_failed"
+    | "rejected"
+    | "policy_denied"
+    | "infrastructure_failed"
+    | "no_commands";
+  from_cache?: boolean;
+  executed_at?: string | null;
+}
+
+export interface CardFinalReport {
+  summary?: string;
+  success?: boolean;
+  files_changed?: string[];
+  tests_added_or_updated?: string[];
+  verification?: CardVerificationResult[];
+  followup_cards?: {
+    title: string;
+    instructions: string;
+    priority: string;
+    target_files: string[];
+  }[];
+  risks?: string[];
+  assumptions?: string[];
+}
+
+export interface CardVerifierReport {
+  passed?: boolean;
+  command_results?: CardVerificationResult[];
+  concerns?: string[];
+  recommendation?: string;
+  classification?:
+    | "unknown"
+    | "passed"
+    | "verification_failed"
+    | "human_review"
+    | "unavailable";
+}
+
+export interface CardClaimView {
+  claimant_chat_id: string;
+  claimed_at: string;
+}
+
+export interface CardReviewAttestation {
+  reviewer_chat_id: string;
+  reviewed_at: string;
+  report: CardVerifierReport;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function taskErrorMessage(error: unknown): string {
+  if (isRecord(error)) {
+    if (typeof error.data === "string" && error.data.trim()) return error.data;
+    if (isRecord(error.data)) {
+      if (typeof error.data.error === "string") return error.data.error;
+      if (typeof error.data.detail === "string") return error.data.detail;
+    }
+    if (typeof error.error === "string") return error.error;
+    if (typeof error.message === "string") return error.message;
+  }
+  return "Request failed. Please try again.";
 }
 
 function isStringArray(value: unknown): value is string[] {
   return (
     Array.isArray(value) && value.every((item) => typeof item === "string")
+  );
+}
+
+function optionalField(
+  value: Record<string, unknown>,
+  key: string,
+  validate: (field: unknown) => boolean,
+): boolean {
+  return value[key] === undefined || validate(value[key]);
+}
+
+function isVerificationResult(value: unknown): value is CardVerificationResult {
+  return (
+    isRecord(value) &&
+    typeof value.command === "string" &&
+    optionalField(value, "exit_code", (field) =>
+      field === null ? true : Number.isInteger(field),
+    ) &&
+    optionalField(value, "passed", (field) => typeof field === "boolean") &&
+    optionalField(value, "output_tail", (field) => typeof field === "string") &&
+    optionalField(value, "outcome", (field) =>
+      [
+        "unknown",
+        "passed",
+        "command_failed",
+        "rejected",
+        "policy_denied",
+        "infrastructure_failed",
+        "no_commands",
+      ].includes(String(field)),
+    ) &&
+    optionalField(value, "from_cache", (field) => typeof field === "boolean") &&
+    optionalField(
+      value,
+      "executed_at",
+      (field) => field === null || typeof field === "string",
+    )
+  );
+}
+
+function isVerifierReport(value: unknown): value is CardVerifierReport {
+  return (
+    isRecord(value) &&
+    optionalField(value, "passed", (field) => typeof field === "boolean") &&
+    optionalField(
+      value,
+      "command_results",
+      (field) => Array.isArray(field) && field.every(isVerificationResult),
+    ) &&
+    optionalField(value, "concerns", isStringArray) &&
+    optionalField(
+      value,
+      "recommendation",
+      (field) => typeof field === "string",
+    ) &&
+    optionalField(value, "classification", (field) =>
+      [
+        "unknown",
+        "passed",
+        "verification_failed",
+        "human_review",
+        "unavailable",
+      ].includes(String(field)),
+    )
+  );
+}
+
+function isFinalReport(value: unknown): value is CardFinalReport {
+  return (
+    isRecord(value) &&
+    optionalField(value, "summary", (field) => typeof field === "string") &&
+    optionalField(value, "success", (field) => typeof field === "boolean") &&
+    ["files_changed", "tests_added_or_updated", "risks", "assumptions"].every(
+      (key) => optionalField(value, key, isStringArray),
+    ) &&
+    optionalField(
+      value,
+      "verification",
+      (field) => Array.isArray(field) && field.every(isVerificationResult),
+    ) &&
+    optionalField(
+      value,
+      "followup_cards",
+      (field) =>
+        Array.isArray(field) &&
+        field.every(
+          (entry: unknown) =>
+            isRecord(entry) &&
+            typeof entry.title === "string" &&
+            typeof entry.instructions === "string" &&
+            typeof entry.priority === "string" &&
+            isStringArray(entry.target_files),
+        ),
+    )
+  );
+}
+
+function normalizeRecord<T>(
+  value: unknown,
+  parse: (entry: unknown) => T | undefined,
+): Record<string, T> | undefined {
+  if (!isRecord(value)) return undefined;
+  return Object.fromEntries(
+    Object.entries(value).flatMap(([key, entry]) => {
+      const parsed = parse(entry);
+      return parsed === undefined ? [] : [[key, parsed]];
+    }),
   );
 }
 
@@ -168,7 +345,47 @@ export function normalizeTaskBoard(value: unknown): TaskBoard | null {
         typeof card.paused_at === "string" ? card.paused_at : undefined,
       paused_by:
         typeof card.paused_by === "string" ? card.paused_by : undefined,
+      final_report_structured: isFinalReport(card.final_report_structured)
+        ? card.final_report_structured
+        : undefined,
+      verifier_report: isVerifierReport(card.verifier_report)
+        ? card.verifier_report
+        : undefined,
     })),
+    owner_chat_id:
+      typeof value.owner_chat_id === "string" && value.owner_chat_id.trim()
+        ? value.owner_chat_id
+        : undefined,
+    reviewer_chat_ids: isStringArray(value.reviewer_chat_ids)
+      ? value.reviewer_chat_ids
+      : undefined,
+    review_policy:
+      value.review_policy === "owner_allowed" ||
+      value.review_policy === "independent_required"
+        ? value.review_policy
+        : undefined,
+    card_claims: normalizeRecord(value.card_claims, (entry) =>
+      isRecord(entry) &&
+      typeof entry.claimant_chat_id === "string" &&
+      typeof entry.claimed_at === "string"
+        ? {
+            claimant_chat_id: entry.claimant_chat_id,
+            claimed_at: entry.claimed_at,
+          }
+        : undefined,
+    ),
+    review_attestations: normalizeRecord(value.review_attestations, (entry) =>
+      isRecord(entry) &&
+      typeof entry.reviewer_chat_id === "string" &&
+      typeof entry.reviewed_at === "string" &&
+      isVerifierReport(entry.report)
+        ? {
+            reviewer_chat_id: entry.reviewer_chat_id,
+            reviewed_at: entry.reviewed_at,
+            report: entry.report,
+          }
+        : undefined,
+    ),
     card_outcomes: normalizeCardOutcomes(value.card_outcomes),
   };
 }
@@ -198,6 +415,8 @@ export interface BoardCard {
   agent_chat_id: string | null;
   status_updates: StatusUpdate[];
   final_report: string | null;
+  final_report_structured?: CardFinalReport;
+  verifier_report?: CardVerifierReport;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
@@ -237,8 +456,53 @@ export interface TaskBoard {
   rev: number;
   columns: BoardColumn[];
   cards: BoardCard[];
+  owner_chat_id?: string;
+  reviewer_chat_ids?: string[];
+  review_policy?: "owner_allowed" | "independent_required";
+  card_claims?: Record<string, CardClaimView>;
+  review_attestations?: Record<string, CardReviewAttestation>;
   card_outcomes?: Record<string, CardOutcome>;
 }
+
+export type BoardPatch =
+  | {
+      action: "create_card";
+      id: string;
+      title: string;
+      priority?: string;
+      depends_on?: string[];
+      instructions?: string;
+      target_files?: string[];
+    }
+  | {
+      action: "update_card";
+      id: string;
+      title?: string;
+      priority?: string;
+      depends_on?: string[];
+      instructions?: string;
+      target_files?: string[];
+    }
+  | { action: "move_card"; id: string; column: string }
+  | {
+      action: "assign_agent";
+      card_id: string;
+      agent_id: string;
+      agent_chat_id: string;
+    }
+  | { action: "add_status_update"; card_id: string; message: string }
+  | {
+      action: "add_comment";
+      card_id: string;
+      body: string;
+      author_role: string;
+      author_id?: string | null;
+      reply_to?: string | null;
+    }
+  | { action: "set_final_report"; card_id: string; report: string }
+  | { action: "delete_card"; card_id: string; force?: boolean };
+
+export type UpdateBoardRequest = { rev: number } & BoardPatch;
 
 export interface ReadyCardsResult {
   ready: string[];
@@ -399,21 +663,30 @@ export const tasksApi = createApi({
 
     patchBoard: builder.mutation<
       TaskBoard,
-      { taskId: string; board: Partial<TaskBoard> }
+      { taskId: string; patch: UpdateBoardRequest }
     >({
-      queryFn: async ({ taskId, board }, api, _opts, baseQuery) => {
+      queryFn: async ({ taskId, patch }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: buildApiUrlFromState(state, `/v1/tasks/${taskId}/board`),
+          url: buildApiUrlFromState(
+            state,
+            `/v1/tasks/${encodeURIComponent(taskId)}/board`,
+          ),
           method: "POST",
-          body: board,
+          body: patch,
+          responseHandler: "content-type",
         });
         if (result.error) return { error: result.error };
         return { data: result.data as TaskBoard };
       },
-      invalidatesTags: (_result, _error, { taskId }) => [
-        { type: "Board", id: taskId },
-      ],
+      invalidatesTags: (result, _error, { taskId }) =>
+        result
+          ? [
+              { type: "Board", id: taskId },
+              { type: "Tasks", id: taskId },
+              "Tasks",
+            ]
+          : [],
     }),
 
     getReadyCards: builder.query<ReadyCardsResult, string>({
@@ -513,19 +786,22 @@ export const tasksApi = createApi({
           url: buildApiUrlFromState(
             state,
             `/v1/tasks/${taskId}/planner-chats/${chatId}`,
-            { force: "true" },
           ),
           method: "DELETE",
         });
         if (result.error) return { error: result.error };
         return { data: result.data as { deleted: boolean } };
       },
-      invalidatesTags: (_result, _error, { taskId }) => [
-        { type: "TaskTrajectories", id: `${taskId}/planner` },
-        { type: "Board", id: taskId },
-        { type: "Tasks", id: taskId },
-        "Tasks",
-      ],
+      invalidatesTags: (result, _error, { taskId }) =>
+        result?.deleted
+          ? [
+              { type: "TaskTrajectories", id: `${taskId}/planner` },
+              { type: "Board", id: taskId },
+              { type: "Tasks", id: taskId },
+              { type: "TaskGoal", id: taskId },
+              "Tasks",
+            ]
+          : [],
     }),
 
     createPlannerChatFromTransition: builder.mutation<

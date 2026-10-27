@@ -24,7 +24,8 @@ use crate::tools::tool_task_documents::{
     CreateDocumentRequest, TaskDocumentDetail, TaskDocumentHistoryResponse,
     TaskDocumentListResponse, append_task_document_for_api, create_task_document_for_api,
     delete_task_document_for_api, get_task_document_for_api, history_task_document_for_api,
-    list_task_documents_for_api, pin_task_document_for_api, update_task_document_for_api,
+    list_task_documents_for_api, pin_task_document_for_api,
+    update_task_document_for_api_with_version, TaskDocumentUpdateError,
 };
 use crate::tools::tool_task_memory::{
     MemoryKind, MemoryNamespace, TaskMemoriesApiResponse, TaskMemoryArchiveApiResponse,
@@ -1308,6 +1309,7 @@ pub struct GetDocumentQuery {
 pub struct UpdateTaskDocumentRequest {
     pub content: String,
     pub pinned: Option<bool>,
+    pub expected_version: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -1370,11 +1372,33 @@ pub async fn handle_update_task_document(
     State(app): State<AppState>,
     Path((task_id, slug)): Path<(String, String)>,
     Json(req): Json<UpdateTaskDocumentRequest>,
-) -> Result<Json<TaskDocumentDetail>, (StatusCode, String)> {
-    let result =
-        update_task_document_for_api(app.gcx.clone(), &task_id, &slug, req.content, req.pinned)
-            .await
-            .map_err(map_doc_error)?;
+) -> Result<Json<TaskDocumentDetail>, axum::response::Response> {
+    use axum::response::IntoResponse;
+
+    let result = update_task_document_for_api_with_version(
+        app.gcx.clone(),
+        &task_id,
+        &slug,
+        req.content,
+        req.pinned,
+        req.expected_version,
+    )
+    .await
+    .map_err(|error| match error {
+        TaskDocumentUpdateError::VersionConflict {
+            expected_version,
+            actual_version,
+        } => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "code": "task_document_version_conflict",
+                "expected_version": expected_version,
+                "actual_version": actual_version,
+            })),
+        )
+            .into_response(),
+        TaskDocumentUpdateError::Other(error) => map_doc_error(error).into_response(),
+    })?;
     Ok(Json(result))
 }
 
@@ -2356,6 +2380,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_update_task_document_concurrent_same_version_one_winner() {
+        let temp = tempfile::tempdir().unwrap();
+        let task_id = "task-doc-concurrent";
+        let gcx = setup_task(temp.path(), task_id).await;
+        handle_create_task_document(
+            State(app(gcx.clone())),
+            Path(task_id.to_string()),
+            Json(CreateDocumentRequest {
+                slug: "shared".to_string(),
+                name: "Shared".to_string(),
+                kind: "spec".to_string(),
+                content: "original".to_string(),
+                pinned: Some(false),
+                relevant_cards: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let mut events = gcx.task_events_tx.as_ref().unwrap().subscribe();
+        let sequence_before = gcx.task_events_seq.as_ref().unwrap().load(Ordering::SeqCst);
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let write = |content: &'static str, pinned: bool| {
+            let gcx = gcx.clone();
+            let barrier = barrier.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                handle_update_task_document(
+                    State(app(gcx)),
+                    Path((task_id.to_string(), "shared".to_string())),
+                    Json(UpdateTaskDocumentRequest {
+                        content: content.to_string(),
+                        pinned: Some(pinned),
+                        expected_version: Some(1),
+                    }),
+                )
+                .await
+            })
+        };
+        let mut first = write("first body", true);
+        let mut second = write("second body", false);
+        let results = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let (first, second, _) = tokio::join!(&mut first, &mut second, barrier.wait());
+            (first.unwrap(), second.unwrap())
+        })
+        .await;
+        let (winner, conflict) = match results {
+            Ok((Ok(Json(winner)), Err(conflict))) | Ok((Err(conflict), Ok(Json(winner)))) => {
+                (winner, conflict)
+            }
+            Ok(other) => panic!("expected one document winner and one conflict: {:?}", other),
+            Err(_) => {
+                first.abort();
+                second.abort();
+                let _ = tokio::join!(first, second);
+                panic!("document mutations did not complete");
+            }
+        };
+        assert_eq!(winner.version, 2);
+        assert!(
+            (winner.content == "first body" && winner.pinned)
+                || (winner.content == "second body" && !winner.pinned)
+        );
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let body = hyper::body::to_bytes(conflict.into_body()).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!({
+                "code": "task_document_version_conflict",
+                "expected_version": 1,
+                "actual_version": 2,
+            })
+        );
+        let stored = get_task_document_for_api(gcx.clone(), task_id, "shared", None)
+            .await
+            .unwrap();
+        assert_eq!(stored.version, 2);
+        assert_eq!(stored.content, winner.content);
+        assert_eq!(stored.pinned, winner.pinned);
+        let history = history_task_document_for_api(gcx.clone(), task_id, "shared")
+            .await
+            .unwrap();
+        assert_eq!(history.history.len(), 1);
+        assert_eq!(history.history[0].version, 1);
+        let old = get_task_document_for_api(gcx.clone(), task_id, "shared", Some(1))
+            .await
+            .unwrap();
+        assert_eq!(old.content, "original");
+        assert!(!old.pinned);
+        let event = events.try_recv().unwrap();
+        assert_eq!(event.seq, sequence_before);
+        assert!(matches!(event.event,
+            TaskEvent::TaskDocumentChanged { task_id: id, slug: Some(slug) }
+                if id == task_id && slug == "shared"
+        ));
+        assert!(matches!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            gcx.task_events_seq.as_ref().unwrap().load(Ordering::SeqCst),
+            sequence_before + 1
+        );
+    }
+
+    #[tokio::test]
     async fn handle_update_task_document_accepts_pinned_in_same_request() {
         use crate::tools::tool_task_documents::CreateDocumentRequest;
         let temp = tempfile::tempdir().unwrap();
@@ -2384,6 +2513,7 @@ mod tests {
             Json(UpdateTaskDocumentRequest {
                 content: "v2".to_string(),
                 pinned: Some(false),
+                expected_version: Some(1),
             }),
         )
         .await
@@ -2403,6 +2533,107 @@ mod tests {
         .unwrap();
         assert_eq!(history.0.history.len(), 1);
         assert_eq!(history.0.history[0].version, 1);
+
+        use crate::at_commands::at_commands::AtCommandsContext;
+        use crate::tools::tool_task_documents::ToolDocPin;
+        use crate::tools::tools_description::Tool;
+        let context = AtCommandsContext::new_from_app(
+            app(gcx.clone()),
+            4096,
+            20,
+            false,
+            vec![],
+            "planner-chat".to_string(),
+            None,
+            "model".to_string(),
+            Some(ChatTaskMeta {
+                task_id: "task-doc-update-pin".to_string(),
+                role: "planner".to_string(),
+                agent_id: None,
+                card_id: None,
+                planner_chat_id: None,
+            }),
+            None,
+        )
+        .await;
+        let mut tool = ToolDocPin::new();
+        tool.tool_execute(
+            Arc::new(tokio::sync::Mutex::new(context)),
+            &"pin-call".to_string(),
+            &std::collections::HashMap::from([
+                ("slug".to_string(), json!("combined-plan")),
+                ("pinned".to_string(), json!(true)),
+            ]),
+        )
+        .await
+        .unwrap();
+        let mut events = gcx.task_events_tx.as_ref().unwrap().subscribe();
+        let sequence_before = gcx.task_events_seq.as_ref().unwrap().load(Ordering::SeqCst);
+        let conflict = handle_update_task_document(
+            State(app(gcx.clone())),
+            Path((
+                "task-doc-update-pin".to_string(),
+                "combined-plan".to_string(),
+            )),
+            Json(UpdateTaskDocumentRequest {
+                content: "stale body".to_string(),
+                pinned: Some(false),
+                expected_version: Some(2),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(conflict.headers()["content-type"], "application/json");
+        let body = hyper::body::to_bytes(conflict.into_body()).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!({
+                "code": "task_document_version_conflict",
+                "expected_version": 2,
+                "actual_version": 3,
+            })
+        );
+        let current =
+            get_task_document_for_api(gcx.clone(), "task-doc-update-pin", "combined-plan", None)
+                .await
+                .unwrap();
+        assert_eq!(current.version, 3);
+        assert_eq!(current.content, "v2");
+        assert!(current.pinned);
+        assert!(matches!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            gcx.task_events_seq.as_ref().unwrap().load(Ordering::SeqCst),
+            sequence_before
+        );
+        let history =
+            history_task_document_for_api(gcx.clone(), "task-doc-update-pin", "combined-plan")
+                .await
+                .unwrap();
+        assert_eq!(history.history.len(), 2);
+        assert_eq!(history.history[1].version, 2);
+
+        let legacy: UpdateTaskDocumentRequest = serde_json::from_value(json!({
+            "content": "legacy body",
+            "pinned": true,
+        }))
+        .unwrap();
+        let result = handle_update_task_document(
+            State(app(gcx)),
+            Path((
+                "task-doc-update-pin".to_string(),
+                "combined-plan".to_string(),
+            )),
+            Json(legacy),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.0.version, 4);
+        assert_eq!(result.0.content, "legacy body");
+        assert!(result.0.pinned);
     }
 }
 

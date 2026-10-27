@@ -274,19 +274,140 @@ pub async fn load_task_meta(gcx: Arc<GlobalContext>, task_id: &str) -> Result<Ta
     load_task_meta_from_path(&meta_path).await
 }
 
+#[cfg(windows)]
+async fn task_meta_windows_link_count(path: &Path) -> Result<u32, String> {
+    use std::os::windows::io::AsRawHandle;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct FileStandardInfo {
+        allocation_size: i64,
+        end_of_file: i64,
+        number_of_links: u32,
+        delete_pending: u8,
+        directory: u8,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFileInformationByHandleEx(
+            file: std::os::windows::io::RawHandle,
+            class: i32,
+            info: *mut std::ffi::c_void,
+            size: u32,
+        ) -> i32;
+    }
+
+    const FILE_STANDARD_INFO_CLASS: i32 = 1;
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || -> std::io::Result<u32> {
+        let file = std::fs::File::open(path)?;
+        let mut info = FileStandardInfo::default();
+        let result = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FILE_STANDARD_INFO_CLASS,
+                std::ptr::from_mut(&mut info).cast(),
+                std::mem::size_of::<FileStandardInfo>() as u32,
+            )
+        };
+        if result == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(info.number_of_links)
+    })
+    .await
+    .map_err(|error| format!("Failed to query task metadata links: {error}"))?
+    .map_err(|error| format!("Failed to query task metadata links: {error}"))
+}
+
 pub async fn save_task_meta(
     gcx: Arc<GlobalContext>,
     task_id: &str,
     meta: &TaskMeta,
 ) -> Result<(), String> {
-    let task_dir = find_task_dir(gcx, task_id).await?;
-    let meta_path = task_dir.join("meta.yaml");
-    let content = serde_yaml::to_string(meta).map_err(|e| e.to_string())?;
-    fs::write(&meta_path, content)
+    let (task_dir, _guard) = locked_task_dir(gcx, task_id)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| format!("Failed to lock task metadata {task_id}: {error}"))?;
+    let meta_path = task_dir.join("meta.yaml");
+    let permissions = match fs::symlink_metadata(&meta_path).await {
+        Ok(metadata) => {
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "Task metadata is not a regular non-symlink file: {}",
+                    meta_path.display()
+                ));
+            }
+            #[cfg(unix)]
+            let link_count = {
+                use std::os::unix::fs::MetadataExt;
+                metadata.nlink()
+            };
+            #[cfg(windows)]
+            let link_count = u64::from(task_meta_windows_link_count(&meta_path).await.map_err(
+                |error| {
+                    format!(
+                        "Failed to inspect task metadata {}: {error}",
+                        meta_path.display()
+                    )
+                },
+            )?);
+            #[cfg(any(unix, windows))]
+            if link_count != 1 {
+                return Err(format!(
+                    "Atomic publication of hardlinked task metadata is unsupported: {}",
+                    meta_path.display()
+                ));
+            }
+            #[cfg(not(any(unix, windows)))]
+            return Err(format!(
+                "Atomic publication of task metadata is unsupported on this platform: {}",
+                meta_path.display()
+            ));
+            #[cfg(any(unix, windows))]
+            {
+                Some(metadata.permissions())
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(format!(
+                "Failed to inspect task metadata {}: {error}",
+                meta_path.display()
+            ));
+        }
+    };
+    let content = serde_yaml::to_string(meta).map_err(|error| {
+        format!(
+            "Failed to serialize task metadata {}: {error}",
+            meta_path.display()
+        )
+    })?;
+    crate::file_activity::write_temp_then_rename(&meta_path, content.as_bytes(), permissions)
+        .await
+        .map_err(|error| {
+            format!(
+                "Failed to publish task metadata {}: {error}",
+                meta_path.display()
+            )
+        })?;
+    crate::file_activity::sync_dir(&task_dir)
+        .await
+        .map_err(|error| {
+            format!(
+                "Task metadata {} was published but directory sync failed: {error}",
+                meta_path.display()
+            )
+        })?;
     if let Some(tasks_dir) = task_dir.parent() {
-        super::index::upsert_task_index_entry(tasks_dir, meta).await?;
+        super::index::upsert_task_index_entry(tasks_dir, meta)
+            .await
+            .map_err(|error| {
+                format!(
+                    "Task metadata {} was published but index update failed: {error}",
+                    meta_path.display()
+                )
+            })?;
     }
     Ok(())
 }
@@ -1668,6 +1789,140 @@ mod tests {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.to_path_buf()];
         gcx
+    }
+
+    async fn save_meta_at_barrier(
+        gcx: Arc<GlobalContext>,
+        task_dir: &Path,
+        meta: &TaskMeta,
+        fail: bool,
+        observe: impl std::future::Future<Output = ()>,
+    ) -> Result<(), String> {
+        let staged = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let barrier = crate::file_activity::DurableRenameBarrier {
+            target: board_lock::canonical_dir(task_dir)
+                .await
+                .unwrap()
+                .join("meta.yaml"),
+            staged: staged.clone(),
+            release: release.clone(),
+            fail,
+        };
+        let save = crate::file_activity::BEFORE_DURABLE_RENAME
+            .scope(barrier, save_task_meta(gcx, &meta.id, meta));
+        let mut reader = Box::pin(async {
+            staged.notified().await;
+            let staged_files = std::fs::read_dir(task_dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "durable-tmp"))
+                .collect::<Vec<_>>();
+            assert_eq!(staged_files.len(), 1);
+            assert_eq!(
+                fs::read_to_string(&staged_files[0]).await.unwrap(),
+                serde_yaml::to_string(meta).unwrap()
+            );
+            observe.await;
+            release.notify_one();
+        });
+        assert!(futures::poll!(reader.as_mut()).is_pending());
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            tokio::join!(save, reader).0
+        })
+        .await
+        .expect("metadata save and reader must reach the publication barrier")
+    }
+
+    #[tokio::test]
+    async fn task_meta_publication_keeps_complete_documents_and_preserves_old_on_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = setup_workspace(temp.path()).await;
+        let task_id = "task-meta-publication";
+        let task_dir = temp.path().join(".refact/tasks").join(task_id);
+        fs::create_dir_all(&task_dir).await.unwrap();
+        let meta_path = task_dir.join("meta.yaml");
+        let index_path = task_dir.parent().unwrap().join("index.json");
+        let mut old = test_meta(task_id, "Original", "2026-01-01T00:00:00Z");
+        old.status = TaskStatus::Active;
+        old.cards_total = 7;
+        old.cards_done = 2;
+        old.cards_failed = 1;
+        old.agents_active = 3;
+        old.base_branch = Some("main".into());
+        old.base_commit = Some("base-commit".into());
+        old.default_agent_model = Some("provider/model".into());
+        old.is_name_generated = true;
+        old.last_agents_summary_at = Some("2026-01-01T00:00:00Z".into());
+        old.planner_session_state = Some("idle".into());
+        let old_content = serde_yaml::to_string(&old).unwrap();
+
+        save_meta_at_barrier(gcx.clone(), &task_dir, &old, false, async {
+            assert_eq!(
+                fs::read(&meta_path).await.unwrap_err().kind(),
+                std::io::ErrorKind::NotFound
+            );
+            assert!(!index_path.exists());
+        })
+        .await
+        .unwrap();
+        assert_eq!(fs::read_to_string(&meta_path).await.unwrap(), old_content);
+        let old_index = fs::read(&index_path).await.unwrap();
+        let index = super::super::index::read_task_index(task_dir.parent().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(index.entries.len(), 1);
+        assert_eq!(
+            serde_yaml::to_string(&index.entries[0].meta).unwrap(),
+            old_content
+        );
+        let mut new = old.clone();
+        new.name = "Replacement".into();
+        new.updated_at = "2026-01-02T00:00:00Z".into();
+        let new_content = serde_yaml::to_string(&new).unwrap();
+        assert_ne!(new_content, old_content);
+
+        let error = save_meta_at_barrier(gcx.clone(), &task_dir, &new, true, async {
+            let loaded = load_task_meta(gcx.clone(), task_id).await.unwrap();
+            assert_eq!(serde_yaml::to_string(&loaded).unwrap(), old_content);
+            assert_eq!(fs::read(&index_path).await.unwrap(), old_index);
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            error.contains("injected failure before durable rename"),
+            "{error}"
+        );
+        assert!(error.contains("Failed to publish task metadata"), "{error}");
+        assert_eq!(fs::read_to_string(&meta_path).await.unwrap(), old_content);
+        assert_eq!(fs::read(&index_path).await.unwrap(), old_index);
+
+        save_meta_at_barrier(gcx.clone(), &task_dir, &new, false, async {
+            let loaded = load_task_meta(gcx.clone(), task_id).await.unwrap();
+            assert_eq!(serde_yaml::to_string(&loaded).unwrap(), old_content);
+            assert_eq!(fs::read(&index_path).await.unwrap(), old_index);
+        })
+        .await
+        .unwrap();
+        let loaded = load_task_meta(gcx, task_id).await.unwrap();
+        assert_eq!(serde_yaml::to_string(&loaded).unwrap(), new_content);
+        let index = super::super::index::read_task_index(task_dir.parent().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(index.entries.len(), 1);
+        assert_eq!(
+            serde_yaml::to_string(&index.entries[0].meta).unwrap(),
+            new_content
+        );
+        assert!(std::fs::read_dir(&task_dir).unwrap().all(|entry| {
+            entry
+                .unwrap()
+                .path()
+                .extension()
+                .is_none_or(|ext| ext != "durable-tmp")
+        }));
     }
 
     async fn task_with_board(root: &std::path::Path, task_id: &str) -> Arc<GlobalContext> {

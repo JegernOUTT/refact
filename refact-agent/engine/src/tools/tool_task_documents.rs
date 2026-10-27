@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -13,7 +14,7 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::global_context::GlobalContext;
 use crate::postprocessing::pp_command_output::OutputFilter;
-use crate::tasks::storage;
+use crate::tasks::{board_lock, storage};
 use crate::tools::tools_description::{
     json_schema_from_params, Tool, ToolDesc, ToolSource, ToolSourceType,
 };
@@ -21,6 +22,7 @@ use crate::tools::tools_description::{
 const DOCUMENTS_DIR: &str = "documents";
 const HISTORY_DIR: &str = ".history";
 const DELETED_DIR: &str = "_deleted";
+const DOCUMENTS_LOCK_FILE: &str = "documents.lock";
 const HISTORY_CAP: usize = 20;
 const VALID_KINDS: [&str; 6] = ["plan", "design", "runbook", "brief", "postmortem", "spec"];
 
@@ -51,6 +53,73 @@ struct HistoryItem {
     snapshot_at: String,
     path: PathBuf,
     deleted: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum TaskDocumentUpdateError {
+    VersionConflict {
+        expected_version: u64,
+        actual_version: u64,
+    },
+    Other(String),
+}
+
+impl From<String> for TaskDocumentUpdateError {
+    fn from(error: String) -> Self {
+        Self::Other(error)
+    }
+}
+
+impl std::fmt::Display for TaskDocumentUpdateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::VersionConflict {
+                expected_version,
+                actual_version,
+            } => write!(
+                f,
+                "task document version conflict: expected {}, actual {}",
+                expected_version, actual_version
+            ),
+            Self::Other(error) => f.write_str(error),
+        }
+    }
+}
+
+type DocumentNotification = (Arc<GlobalContext>, String, String);
+
+async fn mutate_documents<T, E, F>(
+    documents_dir: &Path,
+    notification: Option<DocumentNotification>,
+    mutation: F,
+) -> Result<T, E>
+where
+    T: Send + 'static,
+    E: From<String> + Send + 'static,
+    F: FnOnce(PathBuf) -> Result<T, E> + Send + 'static,
+{
+    let task_dir = documents_dir
+        .parent()
+        .ok_or_else(|| "task documents directory has no parent".to_string())?;
+    let guard = board_lock::acquire(task_dir, DOCUMENTS_LOCK_FILE).await?;
+    let runtime = tokio::runtime::Handle::current();
+    let transaction = tokio::task::spawn_blocking(move || {
+        let result = mutation(guard.dir().join(DOCUMENTS_DIR));
+        if result.is_ok() {
+            if let Some((gcx, task_id, slug)) = notification {
+                runtime.block_on(crate::tasks::events::emit_task_document_changed(
+                    gcx,
+                    &task_id,
+                    Some(&slug),
+                ));
+            }
+        }
+        drop(guard);
+        result
+    });
+    transaction
+        .await
+        .map_err(|e| E::from(format!("document mutation worker failed: {}", e)))?
 }
 
 fn make_source() -> ToolSource {
@@ -166,52 +235,55 @@ fn parse_document(raw: &str) -> Result<TaskDocument, String> {
     })
 }
 
-async fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .await
-            .map_err(|e| format!("failed to create directory {}: {}", parent.display(), e))?;
+fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "document destination has no parent".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("failed to create document directory: {}", e))?;
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".task-document-").suffix(".tmp");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o666));
     }
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| format!("invalid destination path {}", path.display()))?;
-    let tmp_path = path.with_file_name(format!(".{}.tmp", file_name));
-    fs::write(&tmp_path, content).await.map_err(|e| {
-        format!(
-            "failed to write temporary file {}: {}",
-            tmp_path.display(),
-            e
-        )
-    })?;
-    #[cfg(windows)]
-    if path.exists() {
-        fs::remove_file(path)
-            .await
-            .map_err(|e| format!("failed to replace {}: {}", path.display(), e))?;
+    let mut temporary = builder
+        .tempfile_in(parent)
+        .map_err(|e| format!("failed to create temporary document: {}", e))?;
+    if let Ok(metadata) = std::fs::metadata(path) {
+        temporary
+            .as_file()
+            .set_permissions(metadata.permissions())
+            .map_err(|e| format!("failed to preserve document permissions: {}", e))?;
     }
-    fs::rename(&tmp_path, path).await.map_err(|e| {
-        format!(
-            "failed to rename {} to {}: {}",
-            tmp_path.display(),
-            path.display(),
-            e
-        )
-    })
+    temporary
+        .write_all(content.as_bytes())
+        .map_err(|e| format!("failed to write temporary document: {}", e))?;
+    temporary
+        .persist(path)
+        .map_err(|e| format!("failed to replace document: {}", e.error))?;
+    Ok(())
 }
 
 async fn read_document(path: &Path) -> Result<TaskDocument, String> {
-    let raw = fs::read_to_string(path)
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || read_document_blocking(&path))
         .await
+        .map_err(|e| format!("document read worker failed: {}", e))?
+}
+
+fn read_document_blocking(path: &Path) -> Result<TaskDocument, String> {
+    let raw = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
     parse_document(&raw)
 }
 
-async fn write_document(path: &Path, document: &TaskDocument) -> Result<(), String> {
-    atomic_write(path, &render_document(document)).await
+fn write_document(path: &Path, document: &TaskDocument) -> Result<(), String> {
+    atomic_write(path, &render_document(document))
 }
 
-async fn list_history_files_in(
+fn list_history_files_in(
     dir: &Path,
     slug: &str,
     deleted: bool,
@@ -220,15 +292,11 @@ async fn list_history_files_in(
         return Ok(Vec::new());
     }
     let mut items = Vec::new();
-    let mut entries = fs::read_dir(dir)
-        .await
-        .map_err(|e| format!("failed to read {}: {}", dir.display(), e))?;
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("failed to read {}: {}", dir.display(), e))?;
     let prefix = format!("{}__", slug);
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|e| format!("failed to read {}: {}", dir.display(), e))?
-    {
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("failed to read {}: {}", dir.display(), e))?;
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -240,7 +308,7 @@ async fn list_history_files_in(
             continue;
         }
         let snapshot_at = file_name[prefix.len()..file_name.len() - 3].to_string();
-        let document = read_document(&path).await?;
+        let document = read_document_blocking(&path)?;
         items.push(HistoryItem {
             version: document.frontmatter.version,
             updated_at: document.frontmatter.updated_at,
@@ -253,22 +321,26 @@ async fn list_history_files_in(
     Ok(items)
 }
 
-async fn list_history_files(documents_dir: &Path, slug: &str) -> Result<Vec<HistoryItem>, String> {
-    let mut items = list_history_files_in(&history_dir(documents_dir), slug, false).await?;
-    items.extend(list_history_files_in(&deleted_dir(documents_dir), slug, true).await?);
+fn list_history_files(documents_dir: &Path, slug: &str) -> Result<Vec<HistoryItem>, String> {
+    let mut items = list_history_files_in(&history_dir(documents_dir), slug, false)?;
+    items.extend(list_history_files_in(
+        &deleted_dir(documents_dir),
+        slug,
+        true,
+    )?);
     items.sort_by(|a, b| a.snapshot_at.cmp(&b.snapshot_at));
     Ok(items)
 }
 
-async fn cap_history(documents_dir: &Path, slug: &str) -> Result<(), String> {
-    let mut items = list_history_files_in(&history_dir(documents_dir), slug, false).await?;
+fn cap_history(documents_dir: &Path, slug: &str) -> Result<(), String> {
+    let mut items = list_history_files_in(&history_dir(documents_dir), slug, false)?;
     if items.len() <= HISTORY_CAP {
         return Ok(());
     }
     items.sort_by(|a, b| a.snapshot_at.cmp(&b.snapshot_at));
     let remove_count = items.len() - HISTORY_CAP;
     for item in items.into_iter().take(remove_count) {
-        fs::remove_file(&item.path).await.map_err(|e| {
+        std::fs::remove_file(&item.path).map_err(|e| {
             format!(
                 "failed to remove old history {}: {}",
                 item.path.display(),
@@ -279,21 +351,19 @@ async fn cap_history(documents_dir: &Path, slug: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn snapshot_existing(documents_dir: &Path, slug: &str) -> Result<(), String> {
+fn snapshot_existing(documents_dir: &Path, slug: &str) -> Result<(), String> {
     let path = document_path(documents_dir, slug);
     if !path.exists() {
         return Err(format!("document `{}` does not exist", slug));
     }
-    let raw = fs::read_to_string(&path)
-        .await
+    let raw = std::fs::read_to_string(&path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
     let history = history_dir(documents_dir);
-    fs::create_dir_all(&history)
-        .await
+    std::fs::create_dir_all(&history)
         .map_err(|e| format!("failed to create history directory: {}", e))?;
     let history_path = history.join(format!("{}__{}.md", slug, now_filename_stamp()));
-    atomic_write(&history_path, &raw).await?;
-    cap_history(documents_dir, slug).await
+    atomic_write(&history_path, &raw)?;
+    cap_history(documents_dir, slug)
 }
 
 pub(crate) async fn create_document_at(
@@ -306,10 +376,66 @@ pub(crate) async fn create_document_at(
     relevant_cards: Vec<String>,
     author_role: &str,
 ) -> Result<TaskDocument, String> {
+    create_document_with_notification_at(
+        documents_dir,
+        slug,
+        name,
+        kind,
+        content,
+        pinned,
+        relevant_cards,
+        author_role,
+        None,
+    )
+    .await
+}
+
+async fn create_document_with_notification_at(
+    documents_dir: &Path,
+    slug: &str,
+    name: &str,
+    kind: &str,
+    content: &str,
+    pinned: bool,
+    relevant_cards: Vec<String>,
+    author_role: &str,
+    notification: Option<DocumentNotification>,
+) -> Result<TaskDocument, String> {
+    let (slug, name, kind, content, author_role) = (
+        slug.to_string(),
+        name.to_string(),
+        kind.to_string(),
+        content.to_string(),
+        author_role.to_string(),
+    );
+    mutate_documents(documents_dir, notification, move |dir| {
+        create_document_unlocked(
+            &dir,
+            &slug,
+            &name,
+            &kind,
+            &content,
+            pinned,
+            relevant_cards,
+            &author_role,
+        )
+    })
+    .await
+}
+
+fn create_document_unlocked(
+    documents_dir: &Path,
+    slug: &str,
+    name: &str,
+    kind: &str,
+    content: &str,
+    pinned: bool,
+    relevant_cards: Vec<String>,
+    author_role: &str,
+) -> Result<TaskDocument, String> {
     validate_slug(slug)?;
     validate_kind(kind)?;
-    fs::create_dir_all(documents_dir)
-        .await
+    std::fs::create_dir_all(documents_dir)
         .map_err(|e| format!("failed to create documents directory: {}", e))?;
     let path = document_path(documents_dir, slug);
     if path.exists() {
@@ -330,7 +456,7 @@ pub(crate) async fn create_document_at(
         },
         content: content.to_string(),
     };
-    write_document(&path, &document).await?;
+    write_document(&path, &document)?;
     Ok(document)
 }
 
@@ -383,20 +509,32 @@ async fn get_document_at(
     slug: &str,
     version: Option<u64>,
 ) -> Result<TaskDocument, String> {
+    let dir = documents_dir.to_path_buf();
+    let slug = slug.to_string();
+    tokio::task::spawn_blocking(move || get_document_blocking(&dir, &slug, version))
+        .await
+        .map_err(|e| format!("document read worker failed: {}", e))?
+}
+
+fn get_document_blocking(
+    documents_dir: &Path,
+    slug: &str,
+    version: Option<u64>,
+) -> Result<TaskDocument, String> {
     validate_slug(slug)?;
     let path = document_path(documents_dir, slug);
     if version.is_none() {
-        return read_document(&path).await;
+        return read_document_blocking(&path);
     }
     let version = version.unwrap();
     if path.exists() {
-        let document = read_document(&path).await?;
+        let document = read_document_blocking(&path)?;
         if document.frontmatter.version == version {
             return Ok(document);
         }
     }
-    for item in list_history_files(documents_dir, slug).await? {
-        let document = read_document(&item.path).await?;
+    for item in list_history_files(documents_dir, slug)? {
+        let document = read_document_blocking(&item.path)?;
         if document.frontmatter.version == version {
             return Ok(document);
         }
@@ -409,22 +547,49 @@ async fn replace_document_content_at(
     slug: &str,
     content: String,
     pinned: Option<bool>,
-) -> Result<TaskDocument, String> {
+    expected_version: Option<u64>,
+    notification: Option<DocumentNotification>,
+) -> Result<TaskDocument, TaskDocumentUpdateError> {
+    let slug = slug.to_string();
+    mutate_documents(documents_dir, notification, move |dir| {
+        replace_document_content_unlocked(&dir, &slug, content, pinned, expected_version)
+    })
+    .await
+}
+
+fn replace_document_content_unlocked(
+    documents_dir: &Path,
+    slug: &str,
+    content: String,
+    pinned: Option<bool>,
+    expected_version: Option<u64>,
+) -> Result<TaskDocument, TaskDocumentUpdateError> {
     validate_slug(slug)?;
     let path = document_path(documents_dir, slug);
-    let mut document = read_document(&path).await?;
+    if !path.exists() {
+        return Err(format!("document `{}` does not exist", slug).into());
+    }
+    let mut document = read_document_blocking(&path)?;
+    if let Some(expected_version) = expected_version {
+        if expected_version != document.frontmatter.version {
+            return Err(TaskDocumentUpdateError::VersionConflict {
+                expected_version,
+                actual_version: document.frontmatter.version,
+            });
+        }
+    }
     let pinned_changed = pinned.is_some_and(|pinned| pinned != document.frontmatter.pinned);
     if document.content == content && !pinned_changed {
         return Ok(document);
     }
-    snapshot_existing(documents_dir, slug).await?;
+    snapshot_existing(documents_dir, slug)?;
     document.content = content;
     if let Some(pinned) = pinned {
         document.frontmatter.pinned = pinned;
     }
     document.frontmatter.version += 1;
     document.frontmatter.updated_at = now_rfc3339();
-    write_document(&path, &document).await?;
+    write_document(&path, &document)?;
     Ok(document)
 }
 
@@ -432,16 +597,39 @@ async fn update_document_at(
     documents_dir: &Path,
     slug: &str,
     content: &str,
+    notification: Option<DocumentNotification>,
 ) -> Result<TaskDocument, String> {
-    replace_document_content_at(documents_dir, slug, content.to_string(), None).await
+    replace_document_content_at(
+        documents_dir,
+        slug,
+        content.to_string(),
+        None,
+        None,
+        notification,
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 async fn append_document_at(
     documents_dir: &Path,
     slug: &str,
     section: &str,
+    notification: Option<DocumentNotification>,
 ) -> Result<TaskDocument, String> {
-    let document = get_document_at(documents_dir, slug, None).await?;
+    let (slug, section) = (slug.to_string(), section.to_string());
+    mutate_documents(documents_dir, notification, move |dir| {
+        append_document_unlocked(&dir, &slug, &section)
+    })
+    .await
+}
+
+fn append_document_unlocked(
+    documents_dir: &Path,
+    slug: &str,
+    section: &str,
+) -> Result<TaskDocument, String> {
+    let document = get_document_blocking(documents_dir, slug, None)?;
     let trimmed = section.trim();
     let block = if trimmed.starts_with("## ") {
         trimmed.to_string()
@@ -454,38 +642,59 @@ async fn append_document_at(
     }
     content.push_str(&block);
     content.push('\n');
-    replace_document_content_at(documents_dir, slug, content, None).await
+    replace_document_content_unlocked(documents_dir, slug, content, None, None)
+        .map_err(|e| e.to_string())
 }
 
 async fn pin_document_at(
     documents_dir: &Path,
     slug: &str,
     pinned: bool,
+    notification: Option<DocumentNotification>,
 ) -> Result<TaskDocument, String> {
-    let document = get_document_at(documents_dir, slug, None).await?;
-    replace_document_content_at(documents_dir, slug, document.content, Some(pinned)).await
+    let slug = slug.to_string();
+    mutate_documents(documents_dir, notification, move |dir| {
+        let document = get_document_blocking(&dir, &slug, None)?;
+        replace_document_content_unlocked(&dir, &slug, document.content, Some(pinned), None)
+            .map_err(|e| e.to_string())
+    })
+    .await
 }
 
-async fn delete_document_at(documents_dir: &Path, slug: &str) -> Result<PathBuf, String> {
+async fn delete_document_at(
+    documents_dir: &Path,
+    slug: &str,
+    notification: Option<DocumentNotification>,
+) -> Result<PathBuf, String> {
+    let slug = slug.to_string();
+    mutate_documents(documents_dir, notification, move |dir| {
+        delete_document_unlocked(&dir, &slug)
+    })
+    .await
+}
+
+fn delete_document_unlocked(documents_dir: &Path, slug: &str) -> Result<PathBuf, String> {
     validate_slug(slug)?;
     let path = document_path(documents_dir, slug);
     if !path.exists() {
         return Err(format!("document `{}` does not exist", slug));
     }
     let deleted = deleted_dir(documents_dir);
-    fs::create_dir_all(&deleted)
-        .await
+    std::fs::create_dir_all(&deleted)
         .map_err(|e| format!("failed to create deleted history directory: {}", e))?;
     let deleted_path = deleted.join(format!("{}__{}.md", slug, now_filename_stamp()));
-    fs::rename(&path, &deleted_path)
-        .await
+    std::fs::rename(&path, &deleted_path)
         .map_err(|e| format!("failed to move deleted document: {}", e))?;
     Ok(deleted_path)
 }
 
 async fn history_document_at(documents_dir: &Path, slug: &str) -> Result<Vec<HistoryItem>, String> {
     validate_slug(slug)?;
-    list_history_files(documents_dir, slug).await
+    let dir = documents_dir.to_path_buf();
+    let slug = slug.to_string();
+    tokio::task::spawn_blocking(move || list_history_files(&dir, &slug))
+        .await
+        .map_err(|e| format!("document history worker failed: {}", e))?
 }
 
 fn format_document(document: &TaskDocument) -> String {
@@ -768,7 +977,7 @@ pub async fn create_task_document_for_api(
     request: CreateDocumentRequest,
 ) -> Result<TaskDocumentDetail, String> {
     let documents_dir = documents_dir_for_task(gcx.clone(), task_id).await?;
-    let document = create_document_at(
+    let document = create_document_with_notification_at(
         &documents_dir,
         &request.slug,
         &request.name,
@@ -777,11 +986,10 @@ pub async fn create_task_document_for_api(
         request.pinned.unwrap_or(false),
         request.relevant_cards.unwrap_or_default(),
         "user",
+        Some((gcx, task_id.to_string(), request.slug.clone())),
     )
     .await?;
-    let detail = document_to_detail(document);
-    crate::tasks::events::emit_task_document_changed(gcx, task_id, Some(&detail.slug)).await;
-    Ok(detail)
+    Ok(document_to_detail(document))
 }
 
 pub async fn update_task_document_for_api(
@@ -791,14 +999,30 @@ pub async fn update_task_document_for_api(
     content: String,
     pinned: Option<bool>,
 ) -> Result<TaskDocumentDetail, String> {
+    update_task_document_for_api_with_version(gcx, task_id, slug, content, pinned, None)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+pub async fn update_task_document_for_api_with_version(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    slug: &str,
+    content: String,
+    pinned: Option<bool>,
+    expected_version: Option<u64>,
+) -> Result<TaskDocumentDetail, TaskDocumentUpdateError> {
     let documents_dir = documents_dir_for_task(gcx.clone(), task_id).await?;
-    if !document_path(&documents_dir, slug).exists() {
-        return Err(format!("document `{}` does not exist", slug));
-    }
-    let document = replace_document_content_at(&documents_dir, slug, content, pinned).await?;
-    let detail = document_to_detail(document);
-    crate::tasks::events::emit_task_document_changed(gcx, task_id, Some(&detail.slug)).await;
-    Ok(detail)
+    let document = replace_document_content_at(
+        &documents_dir,
+        slug,
+        content,
+        pinned,
+        expected_version,
+        Some((gcx, task_id.to_string(), slug.to_string())),
+    )
+    .await?;
+    Ok(document_to_detail(document))
 }
 
 pub async fn append_task_document_for_api(
@@ -808,13 +1032,14 @@ pub async fn append_task_document_for_api(
     section: String,
 ) -> Result<TaskDocumentDetail, String> {
     let documents_dir = documents_dir_for_task(gcx.clone(), task_id).await?;
-    if !document_path(&documents_dir, slug).exists() {
-        return Err(format!("document `{}` does not exist", slug));
-    }
-    let document = append_document_at(&documents_dir, slug, &section).await?;
-    let detail = document_to_detail(document);
-    crate::tasks::events::emit_task_document_changed(gcx, task_id, Some(&detail.slug)).await;
-    Ok(detail)
+    let document = append_document_at(
+        &documents_dir,
+        slug,
+        &section,
+        Some((gcx, task_id.to_string(), slug.to_string())),
+    )
+    .await?;
+    Ok(document_to_detail(document))
 }
 
 pub async fn delete_task_document_for_api(
@@ -823,8 +1048,12 @@ pub async fn delete_task_document_for_api(
     slug: &str,
 ) -> Result<(), String> {
     let documents_dir = documents_dir_for_task(gcx.clone(), task_id).await?;
-    delete_document_at(&documents_dir, slug).await?;
-    crate::tasks::events::emit_task_document_changed(gcx, task_id, Some(slug)).await;
+    delete_document_at(
+        &documents_dir,
+        slug,
+        Some((gcx, task_id.to_string(), slug.to_string())),
+    )
+    .await?;
     Ok(())
 }
 
@@ -835,13 +1064,14 @@ pub async fn pin_task_document_for_api(
     pinned: bool,
 ) -> Result<TaskDocumentDetail, String> {
     let documents_dir = documents_dir_for_task(gcx.clone(), task_id).await?;
-    if !document_path(&documents_dir, slug).exists() {
-        return Err(format!("document `{}` does not exist", slug));
-    }
-    let document = pin_document_at(&documents_dir, slug, pinned).await?;
-    let detail = document_to_detail(document);
-    crate::tasks::events::emit_task_document_changed(gcx, task_id, Some(&detail.slug)).await;
-    Ok(detail)
+    let document = pin_document_at(
+        &documents_dir,
+        slug,
+        pinned,
+        Some((gcx, task_id.to_string(), slug.to_string())),
+    )
+    .await?;
+    Ok(document_to_detail(document))
 }
 
 pub async fn history_task_document_for_api(
@@ -991,7 +1221,7 @@ impl Tool for ToolDocCreate {
         let pinned = optional_bool_arg(args, "pinned")?.unwrap_or(true);
         let relevant_cards = optional_cards_arg(args, "relevant_cards")?;
         let documents_dir = documents_dir_for_task(gcx.clone(), &task_id).await?;
-        let document = create_document_at(
+        let document = create_document_with_notification_at(
             &documents_dir,
             &slug,
             &name,
@@ -1000,14 +1230,9 @@ impl Tool for ToolDocCreate {
             pinned,
             relevant_cards,
             &author_role,
+            Some((gcx, task_id.clone(), slug.clone())),
         )
         .await?;
-        crate::tasks::events::emit_task_document_changed(
-            gcx,
-            &task_id,
-            Some(&document.frontmatter.slug),
-        )
-        .await;
         Ok((
             false,
             tool_message(tool_call_id, format_document(&document)),
@@ -1069,13 +1294,13 @@ impl Tool for ToolDocUpdate {
         let slug = string_arg(args, "slug")?;
         let content = string_arg(args, "content")?;
         let documents_dir = documents_dir_for_task(gcx.clone(), &task_id).await?;
-        let document = update_document_at(&documents_dir, &slug, &content).await?;
-        crate::tasks::events::emit_task_document_changed(
-            gcx,
-            &task_id,
-            Some(&document.frontmatter.slug),
+        let document = update_document_at(
+            &documents_dir,
+            &slug,
+            &content,
+            Some((gcx, task_id.clone(), slug.clone())),
         )
-        .await;
+        .await?;
         Ok((
             false,
             tool_message(tool_call_id, format_document(&document)),
@@ -1117,13 +1342,13 @@ impl Tool for ToolDocAppend {
         let slug = string_arg(args, "slug")?;
         let section = string_arg(args, "section")?;
         let documents_dir = documents_dir_for_task(gcx.clone(), &task_id).await?;
-        let document = append_document_at(&documents_dir, &slug, &section).await?;
-        crate::tasks::events::emit_task_document_changed(
-            gcx,
-            &task_id,
-            Some(&document.frontmatter.slug),
+        let document = append_document_at(
+            &documents_dir,
+            &slug,
+            &section,
+            Some((gcx, task_id.clone(), slug.clone())),
         )
-        .await;
+        .await?;
         Ok((
             false,
             tool_message(tool_call_id, format_document(&document)),
@@ -1163,8 +1388,12 @@ impl Tool for ToolDocDelete {
         let (gcx, task_id, _) = task_context(&ccx, args).await?;
         let slug = string_arg(args, "slug")?;
         let documents_dir = documents_dir_for_task(gcx.clone(), &task_id).await?;
-        let deleted_path = delete_document_at(&documents_dir, &slug).await?;
-        crate::tasks::events::emit_task_document_changed(gcx, &task_id, Some(&slug)).await;
+        let deleted_path = delete_document_at(
+            &documents_dir,
+            &slug,
+            Some((gcx, task_id.clone(), slug.clone())),
+        )
+        .await?;
         Ok((
             false,
             tool_message(
@@ -1213,13 +1442,13 @@ impl Tool for ToolDocPin {
         let pinned = optional_bool_arg(args, "pinned")?
             .ok_or_else(|| "argument `pinned` is required".to_string())?;
         let documents_dir = documents_dir_for_task(gcx.clone(), &task_id).await?;
-        let document = pin_document_at(&documents_dir, &slug, pinned).await?;
-        crate::tasks::events::emit_task_document_changed(
-            gcx,
-            &task_id,
-            Some(&document.frontmatter.slug),
+        let document = pin_document_at(
+            &documents_dir,
+            &slug,
+            pinned,
+            Some((gcx, task_id.clone(), slug.clone())),
         )
-        .await;
+        .await?;
         Ok((
             false,
             tool_message(tool_call_id, format_document(&document)),
@@ -1322,8 +1551,8 @@ mod tests {
         )
         .await
         .unwrap();
-        update_document_at(&dir, "spec", "v2").await.unwrap();
-        update_document_at(&dir, "spec", "v3").await.unwrap();
+        update_document_at(&dir, "spec", "v2", None).await.unwrap();
+        update_document_at(&dir, "spec", "v3", None).await.unwrap();
 
         let latest = get_document_at(&dir, "spec", None).await.unwrap();
         assert_eq!(latest.frontmatter.version, 3);
@@ -1355,7 +1584,7 @@ mod tests {
         .await
         .unwrap();
 
-        let deleted_path = delete_document_at(&dir, "postmortem").await.unwrap();
+        let deleted_path = delete_document_at(&dir, "postmortem", None).await.unwrap();
         assert!(!document_path(&dir, "postmortem").exists());
         assert!(deleted_path.exists());
         assert!(deleted_path.starts_with(deleted_dir(&dir)));
@@ -1457,12 +1686,13 @@ mod tests {
         .await
         .unwrap();
 
-        let updated = update_task_document_for_api(
+        let updated = update_task_document_for_api_with_version(
             gcx.clone(),
             tid,
             "combined",
             "v2".to_string(),
             Some(false),
+            Some(1),
         )
         .await
         .unwrap();
@@ -1475,6 +1705,46 @@ mod tests {
             .unwrap();
         assert_eq!(hist.history.len(), 1);
         assert_eq!(hist.history[0].version, 1);
+
+        let dir = documents_dir_for_task(gcx.clone(), tid).await.unwrap();
+        let before = fs::read(document_path(&dir, "combined")).await.unwrap();
+        let history_before = history_document_at(&dir, "combined").await.unwrap();
+        let mut events = gcx.task_events_tx.as_ref().unwrap().subscribe();
+        let sequence = gcx.task_events_seq.as_ref().unwrap();
+        let sequence_before = sequence.load(std::sync::atomic::Ordering::SeqCst);
+        let conflict = update_task_document_for_api_with_version(
+            gcx.clone(),
+            tid,
+            "combined",
+            "v2".to_string(),
+            Some(false),
+            Some(1),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            conflict,
+            TaskDocumentUpdateError::VersionConflict {
+                expected_version: 1,
+                actual_version: 2,
+            }
+        );
+        assert_eq!(
+            fs::read(document_path(&dir, "combined")).await.unwrap(),
+            before
+        );
+        assert_eq!(
+            history_document_at(&dir, "combined").await.unwrap(),
+            history_before
+        );
+        assert_eq!(
+            sequence.load(std::sync::atomic::Ordering::SeqCst),
+            sequence_before
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
 
         let unchanged = update_task_document_for_api(
             gcx.clone(),

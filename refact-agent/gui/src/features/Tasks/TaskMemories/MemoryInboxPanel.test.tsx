@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { act } from "react-dom/test-utils";
 import { within } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import {
@@ -12,7 +13,11 @@ import { setUpStore } from "../../../app/store";
 import { tasksApi } from "../../../services/refact/tasks";
 import { MemoryInboxPanel } from "./MemoryInboxPanel";
 import { TaskWorkspace } from "../TaskWorkspace";
-import type { TaskMemoriesResponse } from "../../../services/refact/taskMemoriesApi";
+import {
+  taskMemoriesApi,
+  type TaskMemoriesResponse,
+} from "../../../services/refact/taskMemoriesApi";
+import { updateConfig } from "../../Config/configSlice";
 
 HTMLElement.prototype.hasPointerCapture = () => false;
 
@@ -369,6 +374,7 @@ describe("MemoryInboxPanel", () => {
   });
 
   it("isolates optimistic pin state across task ids", async () => {
+    let resolvePin: (response: HttpResponse) => void = () => undefined;
     server.use(
       http.get("*/v1/task/:taskId/memories", ({ params }) =>
         HttpResponse.json({
@@ -382,20 +388,29 @@ describe("MemoryInboxPanel", () => {
           ],
         }),
       ),
-      http.post(
-        "*/v1/task/:taskId/memories/:filename/pin",
-        () => new Promise<HttpResponse>(() => undefined),
-      ),
+      http.post("*/v1/task/:taskId/memories/:filename/pin", async () => {
+        const response = await new Promise<HttpResponse>((resolve) => {
+          resolvePin = resolve;
+        });
+        return response;
+      }),
     );
 
-    const { rerender, user } = render(<MemoryInboxPanel taskId="task-1" />, {
-      preloadedState: CONFIG_STATE,
-    });
+    const { rerender, user, store } = render(
+      <MemoryInboxPanel taskId="task-1" />,
+      {
+        preloadedState: CONFIG_STATE,
+      },
+    );
 
     await user.click(await screen.findByRole("button", { name: "Pin" }));
     expect(
       await screen.findByRole("button", { name: "Unpin" }),
     ).toBeInTheDocument();
+    const requests = store.dispatch(
+      taskMemoriesApi.util.getRunningMutationsThunk(),
+    );
+    expect(requests).toHaveLength(1);
 
     rerender(<MemoryInboxPanel taskId="task-2" />);
 
@@ -405,6 +420,14 @@ describe("MemoryInboxPanel", () => {
     expect(
       screen.queryByRole("button", { name: "Unpin" }),
     ).not.toBeInTheDocument();
+    await act(async () => {
+      resolvePin(
+        HttpResponse.json({ error: "old task failed" }, { status: 500 }),
+      );
+      await Promise.all(requests);
+    });
+    expect(screen.queryByText(/Could not confirm/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Pin" })).toBeEnabled();
   });
 
   it("memory_inbox_pin_disabled_while_in_flight", async () => {
@@ -575,6 +598,7 @@ describe("MemoryInboxPanel", () => {
   });
 
   it("pin_failure_rolls_back_to_previous_value", async () => {
+    let pinRequests = 0;
     server.use(
       http.get("*/v1/task/:taskId/memories", () =>
         HttpResponse.json({
@@ -592,9 +616,10 @@ describe("MemoryInboxPanel", () => {
           pinned_count: 1,
         }),
       ),
-      http.post("*/v1/task/:taskId/memories/:filename/pin", () =>
-        HttpResponse.json({ error: "server error" }, { status: 500 }),
-      ),
+      http.post("*/v1/task/:taskId/memories/:filename/pin", () => {
+        pinRequests += 1;
+        return HttpResponse.json({ error: "server error" }, { status: 500 });
+      }),
     );
 
     const { user } = render(<MemoryInboxPanel taskId="task-1" />, {
@@ -604,11 +629,27 @@ describe("MemoryInboxPanel", () => {
     expect(
       await screen.findByRole("button", { name: "Unpin" }),
     ).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Search memories"), "stale");
+    await user.click(
+      screen.getByRole("button", { name: /Expand memory Archive stale notes/ }),
+    );
     await user.click(screen.getByRole("button", { name: "Unpin" }));
 
+    expect(
+      await screen.findByText("Could not confirm unpinning “risk.md”."),
+    ).toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Unpin" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Unpin" })).toBeEnabled();
     });
+    expect(screen.getByLabelText("Search memories")).toHaveValue("stale");
+    expect(
+      screen.getByRole("button", {
+        name: /Collapse memory Archive stale notes/,
+      }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(pinRequests).toBe(1);
+    await user.click(screen.getByRole("button", { name: "Unpin" }));
+    await waitFor(() => expect(pinRequests).toBe(2));
   });
 
   it("archive_success_removes_entry_until_server_resurrects", async () => {
@@ -655,25 +696,35 @@ describe("MemoryInboxPanel", () => {
   });
 
   it("archive_failure_rolls_back", async () => {
+    let resolveArchive: (response: HttpResponse) => void = () => undefined;
+    let archiveRequests = 0;
+    let archived = false;
+    mockMemories();
     server.use(
       http.get("*/v1/task/:taskId/memories", () =>
         HttpResponse.json({
           ...memoriesResponse,
-          memories: [{ ...memoriesResponse.memories[0], pinned: false }],
+          memories: archived
+            ? [memoriesResponse.memories[1]]
+            : memoriesResponse.memories,
         }),
       ),
-      http.get("*/v1/task/:taskId/memories/facets", ({ params }) =>
-        HttpResponse.json({
-          task_id: String(params.taskId),
-          namespaces: ["task"],
-          tags: [],
-          kinds: ["decision"],
-          total_count: 1,
-          pinned_count: 0,
-        }),
-      ),
-      http.post("*/v1/task/:taskId/memories/:filename/archive", () =>
-        HttpResponse.json({ error: "server error" }, { status: 500 }),
+      http.post(
+        "*/v1/task/:taskId/memories/:filename/archive",
+        ({ params }) => {
+          archiveRequests += 1;
+          if (archiveRequests === 1) {
+            return new Promise<HttpResponse>((resolve) => {
+              resolveArchive = resolve;
+            });
+          }
+          archived = true;
+          return HttpResponse.json({
+            ok: true,
+            filename: params.filename,
+            archived_filename: `archived/${String(params.filename)}`,
+          });
+        },
       ),
     );
 
@@ -681,16 +732,83 @@ describe("MemoryInboxPanel", () => {
       preloadedState: CONFIG_STATE,
     });
 
-    await screen.findByText("Use scoped memory index");
-
-    await user.click(screen.getAllByRole("button", { name: "Archive" })[0]);
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Expand memory Use scoped memory index/,
+      }),
+    );
+    await user.click(
+      within(screen.getByTestId("memory-card-decision.md")).getByRole(
+        "button",
+        {
+          name: "Archive",
+        },
+      ),
+    );
     await user.click(
       await screen.findByRole("button", { name: "Confirm archive" }),
     );
 
+    await waitFor(() => expect(archiveRequests).toBe(1));
+    expect(
+      screen.getByText(
+        "Request pending: archiving “decision.md”. Not yet confirmed.",
+      ),
+    ).toBeInTheDocument();
+    const pendingCard = screen.getByTestId("memory-card-decision.md");
+    expect(
+      within(pendingCard).getByRole("button", { name: "Archive" }),
+    ).toBeDisabled();
+    expect(
+      within(pendingCard).getByRole("button", { name: "Pin" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Unpin" })).toBeEnabled();
+    expect(screen.getByLabelText("Search memories")).toBeEnabled();
+    resolveArchive(
+      HttpResponse.json({ error: "server error" }, { status: 500 }),
+    );
+
+    expect(
+      await screen.findByText("Could not confirm archiving “decision.md”."),
+    ).toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.getByText("Use scoped memory index")).toBeInTheDocument();
+      expect(
+        within(screen.getByTestId("memory-card-decision.md")).getByRole(
+          "button",
+          {
+            name: "Archive",
+          },
+        ),
+      ).toBeEnabled();
     });
+    expect(
+      screen.getByRole("button", {
+        name: /Collapse memory Use scoped memory index/,
+      }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(archiveRequests).toBe(1);
+    await user.click(
+      within(screen.getByTestId("memory-card-decision.md")).getByRole(
+        "button",
+        {
+          name: "Archive",
+        },
+      ),
+    );
+    expect(archiveRequests).toBe(1);
+    await user.click(
+      await screen.findByRole("button", { name: "Confirm archive" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("memory-card-decision.md"),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("memory-card-risk.md")).toBeInTheDocument();
+    expect(
+      screen.getByText("Server confirmed archiving “decision.md”."),
+    ).toBeInTheDocument();
+    expect(archiveRequests).toBe(2);
   });
 
   it("pending_spinner_appears_during_in_flight_pin_mutation", async () => {
@@ -735,12 +853,23 @@ describe("MemoryInboxPanel", () => {
 
   it("mark all triaged calls triage mutation", async () => {
     const triageRequests: unknown[] = [];
+    let resolveTriage: (response: HttpResponse) => void = () => undefined;
+    let triaged = false;
     mockMemories();
     server.use(
+      http.get("*/v1/task/:taskId/memories", () =>
+        HttpResponse.json({ ...memoriesResponse, new_count: triaged ? 0 : 5 }),
+      ),
       http.post(
         "*/v1/task/:taskId/memories/triage-done",
         async ({ request }) => {
           triageRequests.push(await request.json());
+          if (triageRequests.length === 1) {
+            return new Promise<HttpResponse>((resolve) => {
+              resolveTriage = resolve;
+            });
+          }
+          triaged = true;
           return HttpResponse.json({
             ok: true,
             cursor: "2026-05-22T03:00:00.000Z",
@@ -753,6 +882,16 @@ describe("MemoryInboxPanel", () => {
       preloadedState: CONFIG_STATE,
     });
 
+    await screen.findByText("Use scoped memory index");
+    await user.type(screen.getByLabelText("Search memories"), "stale");
+    await waitFor(() =>
+      expect(
+        screen.queryByText("Use scoped memory index"),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.getByText(/including memories hidden by filters/),
+    ).toBeInTheDocument();
     await user.click(
       await screen.findByRole("button", { name: "Mark all triaged" }),
     );
@@ -762,5 +901,72 @@ describe("MemoryInboxPanel", () => {
       const request = triageRequests[0] as { cursor?: unknown };
       expect(typeof request.cursor).toBe("string");
     });
+    expect(
+      screen.getByRole("button", { name: "Mark all triaged" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByText(
+        "Marking memories triaged for the entire task… Not yet confirmed.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Search memories")).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Mark all triaged" }));
+    expect(triageRequests).toHaveLength(1);
+    resolveTriage(HttpResponse.json({ ok: false }));
+    expect(
+      await screen.findByText("Could not confirm task-wide triage."),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/5 new since/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Search memories")).toHaveValue("stale");
+    expect(triageRequests).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "Mark all triaged" }));
+    expect(
+      await screen.findByText(
+        "Server confirmed task-wide triage. Filters did not limit its scope.",
+      ),
+    ).toBeInTheDocument();
+    expect(triageRequests).toHaveLength(2);
+    await screen.findByText(/0 new since/);
+  });
+
+  it("fences memory feedback when the engine endpoint changes", async () => {
+    let resolvePin: (response: HttpResponse) => void = () => undefined;
+    mockMemories({
+      ...memoriesResponse,
+      memories: [memoriesResponse.memories[0]],
+    });
+    server.use(
+      http.post("*/v1/task/:taskId/memories/:filename/pin", async () => {
+        const response = await new Promise<HttpResponse>((resolve) => {
+          resolvePin = resolve;
+        });
+        return response;
+      }),
+    );
+    const { user, store } = render(<MemoryInboxPanel taskId="task-1" />, {
+      preloadedState: CONFIG_STATE,
+    });
+    await user.click(await screen.findByRole("button", { name: "Pin" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Unpin" })).toBeDisabled(),
+    );
+    const requests = store.dispatch(
+      taskMemoriesApi.util.getRunningMutationsThunk(),
+    );
+    expect(requests).toHaveLength(1);
+    act(() => {
+      store.dispatch(updateConfig({ lspUrl: "http://new-engine.local:8001" }));
+    });
+    expect(screen.queryByText(/Request pending:/)).not.toBeInTheDocument();
+    await act(async () => {
+      resolvePin(
+        HttpResponse.json({ error: "old endpoint failed" }, { status: 500 }),
+      );
+      await Promise.all(requests);
+    });
+    expect(screen.queryByText(/Could not confirm/)).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Mark all triaged" }),
+    ).toBeEnabled();
   });
 });

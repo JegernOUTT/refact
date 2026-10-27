@@ -1,7 +1,17 @@
-import React, { useCallback } from "react";
+import React, { useCallback, useId, useState } from "react";
 import classNames from "classnames";
-import { FileText, Link2, User } from "lucide-react";
-import { Badge, Card, Icon } from "../../components/ui";
+import { FileText, Link2, MoreHorizontal, Plus, User } from "lucide-react";
+import {
+  Badge,
+  Button,
+  Card,
+  Field,
+  FieldSelect,
+  FieldText,
+  Icon,
+  IconButton,
+  Menu,
+} from "../../components/ui";
 import type {
   TaskBoard,
   BoardCard,
@@ -11,6 +21,8 @@ import { BranchIcon } from "../Worktrees/BranchIcon";
 import { CardOutcomeBadge } from "./CardOutcomeBadge";
 import { CardAttentionBadge } from "./CardAttentionBadge";
 import styles from "./Tasks.module.css";
+import managementStyles from "./CardManagement.module.css";
+import type { CardEditTarget } from "./cardForm";
 
 type BadgeTone = React.ComponentProps<typeof Badge>["tone"];
 
@@ -45,6 +57,7 @@ interface KanbanCardProps {
   cardOutcomes?: TaskBoard["card_outcomes"];
   onClick?: (card: BoardCard) => void;
   onAgentClick?: (card: BoardCard) => void;
+  onManageCard?: (target: CardEditTarget) => void;
 }
 
 const KanbanCard: React.FC<KanbanCardProps> = ({
@@ -52,6 +65,7 @@ const KanbanCard: React.FC<KanbanCardProps> = ({
   cardOutcomes,
   onClick,
   onAgentClick,
+  onManageCard,
 }) => {
   const handleClick = useCallback(() => {
     onClick?.(card);
@@ -72,23 +86,57 @@ const KanbanCard: React.FC<KanbanCardProps> = ({
   const worktree = cardWorktreeLabel(card);
 
   return (
-    <Card
-      animated="rise"
-      className={classNames(
-        styles.kanbanCard,
-        onClick && styles.kanbanCardClickable,
-        onClick && "rf-pressable",
-      )}
-      interactive={Boolean(onClick)}
-      onClick={handleClick}
-    >
+    <Card animated="rise" className={styles.kanbanCard}>
       <div className={styles.kanbanCardFrame}>
         <div className={styles.kanbanCardTopRow}>
           <Badge tone="muted">{card.id}</Badge>
           <Badge tone={priorityTone(card.priority)}>{card.priority}</Badge>
+          {onManageCard && (
+            <Menu>
+              <Menu.Trigger asChild>
+                <IconButton
+                  size="sm"
+                  icon={MoreHorizontal}
+                  aria-label={`Manage card ${card.id}`}
+                />
+              </Menu.Trigger>
+              <Menu.Content align="end">
+                <Menu.Item
+                  onSelect={() => onManageCard({ mode: "edit", card })}
+                >
+                  Edit card
+                </Menu.Item>
+                <Menu.Item
+                  onSelect={() => onManageCard({ mode: "move", card })}
+                >
+                  Move card
+                </Menu.Item>
+                <Menu.Separator />
+                <Menu.Item
+                  onSelect={() => onManageCard({ mode: "delete", card })}
+                >
+                  Delete card
+                </Menu.Item>
+              </Menu.Content>
+            </Menu>
+          )}
         </div>
 
-        <span className={styles.kanbanCardTitle}>{card.title}</span>
+        {onClick ? (
+          <button
+            type="button"
+            className={classNames(
+              styles.kanbanCardTitle,
+              managementStyles.cardTitleButton,
+            )}
+            aria-label={`Open card ${card.id}: ${card.title}`}
+            onClick={handleClick}
+          >
+            {card.title}
+          </button>
+        ) : (
+          <span className={styles.kanbanCardTitle}>{card.title}</span>
+        )}
 
         <div className={styles.kanbanCardBadges}>
           {hasAgent &&
@@ -137,17 +185,21 @@ const KanbanCard: React.FC<KanbanCardProps> = ({
 interface KanbanColumnProps {
   column: BoardColumn;
   cards: BoardCard[];
+  totalCards: number;
   cardOutcomes?: TaskBoard["card_outcomes"];
   onCardClick?: (card: BoardCard) => void;
   onAgentClick?: (card: BoardCard) => void;
+  onManageCard?: (target: CardEditTarget) => void;
 }
 
 const KanbanColumn: React.FC<KanbanColumnProps> = ({
   column,
   cards,
+  totalCards,
   cardOutcomes,
   onCardClick,
   onAgentClick,
+  onManageCard,
 }) => {
   return (
     <section
@@ -159,7 +211,14 @@ const KanbanColumn: React.FC<KanbanColumnProps> = ({
     >
       <header className={styles.kanbanColumnHeader}>
         <h3 className={styles.kanbanColumnTitle}>{column.title}</h3>
-        <Badge tone="muted">{cards.length}</Badge>
+        <Badge
+          tone="muted"
+          title={`${cards.length} shown of ${totalCards} loaded cards`}
+        >
+          {cards.length === totalCards
+            ? totalCards
+            : `${cards.length}/${totalCards}`}
+        </Badge>
       </header>
       <div className={classNames(styles.kanbanColumnContent, "rf-stagger")}>
         {cards.map((card) => (
@@ -169,6 +228,7 @@ const KanbanColumn: React.FC<KanbanColumnProps> = ({
             cardOutcomes={cardOutcomes}
             onClick={onCardClick}
             onAgentClick={onAgentClick}
+            onManageCard={onManageCard}
           />
         ))}
       </div>
@@ -180,13 +240,34 @@ interface KanbanBoardProps {
   board: TaskBoard;
   onCardClick?: (card: BoardCard) => void;
   onAgentClick?: (card: BoardCard) => void;
+  onManageCard?: (target: CardEditTarget) => void;
 }
 
 export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   board,
   onCardClick,
   onAgentClick,
+  onManageCard,
 }) => {
+  const fieldId = useId();
+  const [filter, setFilter] = useState("");
+  const [sort, setSort] = useState("board");
+  const query = filter.trim().toLowerCase();
+  const visibleCards = board.cards.filter((card) =>
+    `${card.id} ${card.title} ${card.priority} ${
+      card.instructions
+    } ${card.target_files.join(" ")}`
+      .toLowerCase()
+      .includes(query),
+  );
+  if (sort === "priority")
+    visibleCards.sort(
+      (left, right) =>
+        left.priority.localeCompare(right.priority) ||
+        left.id.localeCompare(right.id),
+    );
+  if (sort === "title")
+    visibleCards.sort((left, right) => left.title.localeCompare(right.title));
   const getCardsForColumn = useCallback(
     (columnId: string): BoardCard[] => {
       return board.cards.filter((card) => card.column === columnId);
@@ -195,17 +276,65 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   );
 
   return (
-    <div className={classNames(styles.kanbanBoard, "rf-enter")}>
-      {board.columns.map((column) => (
-        <KanbanColumn
-          key={column.id}
-          column={column}
-          cards={getCardsForColumn(column.id)}
-          cardOutcomes={board.card_outcomes}
-          onCardClick={onCardClick}
-          onAgentClick={onAgentClick}
-        />
-      ))}
-    </div>
+    <>
+      <div className={managementStyles.toolbar}>
+        {onManageCard && (
+          <Button
+            size="sm"
+            variant="soft"
+            leftIcon={Plus}
+            onClick={() => onManageCard({ mode: "create" })}
+          >
+            Create card
+          </Button>
+        )}
+        <Field
+          label="Filter cards"
+          htmlFor={`${fieldId}-filter`}
+          className={managementStyles.filter}
+        >
+          <FieldText
+            id={`${fieldId}-filter`}
+            value={filter}
+            onChange={setFilter}
+            placeholder="ID, title, priority, or path"
+          />
+        </Field>
+        <Field
+          label="Sort cards"
+          htmlFor={`${fieldId}-sort`}
+          className={managementStyles.sort}
+        >
+          <FieldSelect
+            id={`${fieldId}-sort`}
+            value={sort}
+            onChange={setSort}
+            options={[
+              { value: "board", label: "Board order" },
+              { value: "priority", label: "Priority" },
+              { value: "title", label: "Title" },
+            ]}
+          />
+        </Field>
+        <div className={managementStyles.summary} role="status">
+          Showing {visibleCards.length} of {board.cards.length} loaded cards.
+          Counts describe this response, not hidden or unavailable cards.
+        </div>
+      </div>
+      <div className={classNames(styles.kanbanBoard, "scrollX", "rf-enter")}>
+        {board.columns.map((column) => (
+          <KanbanColumn
+            key={column.id}
+            column={column}
+            cards={visibleCards.filter((card) => card.column === column.id)}
+            totalCards={getCardsForColumn(column.id).length}
+            cardOutcomes={board.card_outcomes}
+            onCardClick={onCardClick}
+            onAgentClick={onAgentClick}
+            onManageCard={onManageCard}
+          />
+        ))}
+      </div>
+    </>
   );
 };

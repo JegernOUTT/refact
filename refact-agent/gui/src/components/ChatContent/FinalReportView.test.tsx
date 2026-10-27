@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { within } from "@testing-library/react";
 import {
   createDefaultChatState,
   fireEvent,
@@ -177,13 +178,38 @@ describe("FinalReportView", () => {
   });
 
   it("renders followup cards read-only", () => {
-    render(<FinalReportView content={structuredPayload} />);
+    const instructions = `Keep every instruction ${"x".repeat(
+      9000,
+    )}FOLLOWUP_TAIL`;
+    const { container } = render(
+      <FinalReportView
+        content={JSON.stringify({
+          summary: "Long followup report",
+          success: true,
+          followup_cards: [
+            { title: "Add create-card actions", priority: "P2", instructions },
+          ],
+        })}
+      />,
+    );
     expect(screen.getByText("Add create-card actions")).toBeInTheDocument();
     expect(screen.getByText("P2")).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /create/i }),
     ).not.toBeInTheDocument();
     expect(screen.queryByText("+")).not.toBeInTheDocument();
+    expect(container.textContent).not.toContain("FOLLOWUP_TAIL");
+    fireEvent.click(screen.getByRole("button", { name: "Full instructions" }));
+    const content = screen.getByLabelText(
+      "Instructions for Add create-card actions content",
+    );
+    const next = within(
+      screen.getByLabelText("Instructions for Add create-card actions pages"),
+    ).getByRole("button", { name: "Next section" });
+    fireEvent.click(next);
+    fireEvent.click(next);
+    expect(content).toHaveTextContent("FOLLOWUP_TAIL");
+    expect(next).toBeDisabled();
   });
 
   it("keeps verification output tails expandable", () => {
@@ -236,8 +262,11 @@ describe("FinalReportView", () => {
   });
 
   it("compact view shows three facts and preserves full sections behind deeper disclosure", async () => {
+    const payload = `${structuredPayload.slice(0, -1)},"extra":"${"x".repeat(
+      9000,
+    )}REPORT_TAIL"}`;
     const { container, user } = render(
-      <FinalReportView compact content={structuredPayload} />,
+      <FinalReportView compact content={payload} />,
     );
     expect(container.querySelectorAll("dt")).toHaveLength(3);
     expect(screen.getByText("Success (self-reported)")).toBeInTheDocument();
@@ -259,6 +288,17 @@ describe("FinalReportView", () => {
     await user.click(screen.getByRole("button", { name: "Technical details" }));
     expect(container.textContent).toContain('"success":true');
     expect(container.textContent).toContain('"output_tail":"lint failed"');
+    const raw = screen.getByLabelText("Full response content");
+    expect(raw.closest("[inert]")).toBeNull();
+    expect(raw).not.toHaveTextContent("REPORT_TAIL");
+    const next = within(screen.getByLabelText("Full response pages")).getByRole(
+      "button",
+      { name: "Next section" },
+    );
+    await user.click(next);
+    await user.click(next);
+    expect(raw).toHaveTextContent("REPORT_TAIL");
+    expect(next).toBeDisabled();
     expect(container.querySelector("button button")).toBeNull();
   });
 
@@ -268,11 +308,15 @@ describe("FinalReportView", () => {
       screen.getByText("No structured outcome or verification evidence"),
     ).toBeInTheDocument();
     expect(
-      screen.getByText("PASS! verified by prose only").closest("[inert]"),
+      screen
+        .getByText("PASS! verified by prose only", { selector: "p" })
+        .closest("[inert]"),
     ).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "More details" }));
     expect(
-      screen.getByText("PASS! verified by prose only").closest("[inert]"),
+      screen
+        .getByText("PASS! verified by prose only", { selector: "p" })
+        .closest("[inert]"),
     ).toBeNull();
   });
 

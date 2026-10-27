@@ -8,10 +8,12 @@ import {
 import { registerBuddySpeechTtlListener } from "../features/Buddy/buddySpeechTtl";
 import type { RootState, AppDispatch } from "./store";
 import {
+  createAction,
   createListenerMiddleware,
   isAnyOf,
   isRejected,
 } from "@reduxjs/toolkit";
+import { QueryStatus } from "@reduxjs/toolkit/query";
 import {
   newChatAction,
   restoreChat,
@@ -2421,6 +2423,336 @@ function invalidateDeletedTaskCaches(
   );
 }
 
+type TaskRecoveryScope = {
+  endpointIdentity: string;
+  projectRoot: string;
+};
+
+type TaskRecoveryQuery = {
+  api: typeof tasksApi | typeof taskDocumentsApi | typeof taskMemoriesApi;
+  queryCacheKey: string;
+  requestId: string;
+  refetch: (dispatch: AppDispatch) => void;
+};
+
+type TaskRecoveryState = {
+  scope: string;
+  queries: Map<string, TaskRecoveryQuery>;
+};
+
+const taskRecoveryStates = new WeakMap<AppDispatch, TaskRecoveryState>();
+
+export const taskSnapshotRevalidationRequested = createAction<
+  TaskRecoveryScope & { subscriptionId: string }
+>("tasks/snapshotRevalidationRequested");
+
+export const taskSnapshotRevalidationCancelled = createAction(
+  "tasks/snapshotRevalidationCancelled",
+);
+
+function taskRecoveryScope(state: RootState): string | null {
+  const projectRoot = resolveProjectRoot(
+    state.current_project.projectRoot,
+    state.current_project.workspaceRoots,
+  );
+  if (!projectRoot || !hasUsableEngineEndpoint(state.config)) return null;
+  return JSON.stringify({
+    endpointIdentity: getEngineEndpointIdentity(state.config),
+    projectRoot,
+  });
+}
+
+function taskQuerySubscriptions(
+  dispatch: AppDispatch,
+  api: TaskRecoveryQuery["api"],
+) {
+  return dispatch(
+    api.internalActions.internal_getRTKQSubscriptions(),
+  ) as unknown as { getSubscriptionCount: (queryCacheKey: string) => number };
+}
+
+startListening({
+  matcher: isAnyOf(updateConfig, setCurrentProjectInfo),
+  effect: (_action, listenerApi) => {
+    const previous = listenerApi.getOriginalState();
+    const current = listenerApi.getState();
+    const cacheScopeChanged =
+      getEngineEndpointIdentity(previous.config) !==
+        getEngineEndpointIdentity(current.config) ||
+      resolveProjectRoot(
+        previous.current_project.projectRoot,
+        previous.current_project.workspaceRoots,
+      ) !==
+        resolveProjectRoot(
+          current.current_project.projectRoot,
+          current.current_project.workspaceRoots,
+        ) ||
+      previous.config.apiKey !== current.config.apiKey;
+    if (
+      taskRecoveryScope(previous) !== taskRecoveryScope(current) ||
+      cacheScopeChanged
+    ) {
+      taskRecoveryStates.delete(listenerApi.dispatch);
+    }
+    if (cacheScopeChanged) {
+      listenerApi.dispatch(tasksApi.util.resetApiState());
+      listenerApi.dispatch(taskDocumentsApi.util.resetApiState());
+      listenerApi.dispatch(taskMemoriesApi.util.resetApiState());
+    }
+  },
+});
+
+startListening({
+  matcher: isAnyOf(
+    tasksApi.endpoints.getTask.matchPending,
+    tasksApi.endpoints.getBoard.matchPending,
+    tasksApi.endpoints.getTaskGoal.matchPending,
+    tasksApi.endpoints.listTaskTrajectories.matchPending,
+    taskDocumentsApi.endpoints.listTaskDocuments.matchPending,
+    taskDocumentsApi.endpoints.getTaskDocument.matchPending,
+    taskDocumentsApi.endpoints.getTaskDocumentHistory.matchPending,
+    taskMemoriesApi.endpoints.listTaskMemories.matchPending,
+    taskMemoriesApi.endpoints.getTaskMemoryFacets.matchPending,
+  ),
+  effect: (action, listenerApi) => {
+    const scope = taskRecoveryScope(listenerApi.getState());
+    if (!scope) return;
+    let recovery = taskRecoveryStates.get(listenerApi.dispatch);
+    if (recovery?.scope !== scope) {
+      recovery = { scope, queries: new Map() };
+      taskRecoveryStates.set(listenerApi.dispatch, recovery);
+    }
+    const options = { forceRefetch: true, subscribe: false };
+    let api: TaskRecoveryQuery["api"];
+    let refetch: TaskRecoveryQuery["refetch"];
+    if (tasksApi.endpoints.getTask.matchPending(action)) {
+      api = tasksApi;
+      refetch = (dispatch) => {
+        void dispatch(
+          tasksApi.endpoints.getTask.initiate(
+            action.meta.arg.originalArgs,
+            options,
+          ),
+        );
+      };
+    } else if (tasksApi.endpoints.getBoard.matchPending(action)) {
+      api = tasksApi;
+      refetch = (dispatch) => {
+        void dispatch(
+          tasksApi.endpoints.getBoard.initiate(
+            action.meta.arg.originalArgs,
+            options,
+          ),
+        );
+      };
+    } else if (tasksApi.endpoints.getTaskGoal.matchPending(action)) {
+      api = tasksApi;
+      refetch = (dispatch) => {
+        void dispatch(
+          tasksApi.endpoints.getTaskGoal.initiate(
+            action.meta.arg.originalArgs,
+            options,
+          ),
+        );
+      };
+    } else if (tasksApi.endpoints.listTaskTrajectories.matchPending(action)) {
+      api = tasksApi;
+      refetch = (dispatch) => {
+        void dispatch(
+          tasksApi.endpoints.listTaskTrajectories.initiate(
+            action.meta.arg.originalArgs,
+            options,
+          ),
+        );
+      };
+    } else if (
+      taskDocumentsApi.endpoints.listTaskDocuments.matchPending(action)
+    ) {
+      api = taskDocumentsApi;
+      refetch = (dispatch) => {
+        void dispatch(
+          taskDocumentsApi.endpoints.listTaskDocuments.initiate(
+            action.meta.arg.originalArgs,
+            options,
+          ),
+        );
+      };
+    } else if (
+      taskDocumentsApi.endpoints.getTaskDocument.matchPending(action)
+    ) {
+      api = taskDocumentsApi;
+      refetch = (dispatch) => {
+        void dispatch(
+          taskDocumentsApi.endpoints.getTaskDocument.initiate(
+            action.meta.arg.originalArgs,
+            options,
+          ),
+        );
+      };
+    } else if (
+      taskDocumentsApi.endpoints.getTaskDocumentHistory.matchPending(action)
+    ) {
+      api = taskDocumentsApi;
+      refetch = (dispatch) => {
+        void dispatch(
+          taskDocumentsApi.endpoints.getTaskDocumentHistory.initiate(
+            action.meta.arg.originalArgs,
+            options,
+          ),
+        );
+      };
+    } else if (
+      taskMemoriesApi.endpoints.listTaskMemories.matchPending(action)
+    ) {
+      api = taskMemoriesApi;
+      refetch = (dispatch) => {
+        void dispatch(
+          taskMemoriesApi.endpoints.listTaskMemories.initiate(
+            action.meta.arg.originalArgs,
+            options,
+          ),
+        );
+      };
+    } else if (
+      taskMemoriesApi.endpoints.getTaskMemoryFacets.matchPending(action)
+    ) {
+      api = taskMemoriesApi;
+      refetch = (dispatch) => {
+        void dispatch(
+          taskMemoriesApi.endpoints.getTaskMemoryFacets.initiate(
+            action.meta.arg.originalArgs,
+            options,
+          ),
+        );
+      };
+    } else {
+      return;
+    }
+    if (
+      !action.meta.arg.subscribe &&
+      taskQuerySubscriptions(listenerApi.dispatch, api).getSubscriptionCount(
+        action.meta.arg.queryCacheKey,
+      ) === 0
+    )
+      return;
+    recovery.queries.set(
+      `${api.reducerPath}:${action.meta.arg.queryCacheKey}`,
+      {
+        api,
+        queryCacheKey: action.meta.arg.queryCacheKey,
+        requestId: action.meta.requestId,
+        refetch,
+      },
+    );
+  },
+});
+
+startListening({
+  matcher: isAnyOf(
+    tasksApi.internalActions.removeQueryResult,
+    taskDocumentsApi.internalActions.removeQueryResult,
+    taskMemoriesApi.internalActions.removeQueryResult,
+    tasksApi.util.resetApiState,
+    taskDocumentsApi.util.resetApiState,
+    taskMemoriesApi.util.resetApiState,
+  ),
+  effect: (action, listenerApi) => {
+    const recovery = taskRecoveryStates.get(listenerApi.dispatch);
+    if (!recovery) return;
+    for (const [key, query] of recovery.queries) {
+      if (
+        query.api.util.resetApiState.match(action) ||
+        (query.api.internalActions.removeQueryResult.match(action) &&
+          action.payload.queryCacheKey === query.queryCacheKey)
+      )
+        recovery.queries.delete(key);
+    }
+  },
+});
+
+startListening({
+  matcher: isAnyOf(
+    taskSnapshotRevalidationRequested,
+    taskSnapshotRevalidationCancelled,
+    resetSidebarState,
+    tasksApi.util.resetApiState,
+    taskDocumentsApi.util.resetApiState,
+    taskMemoriesApi.util.resetApiState,
+    updateConfig,
+    setCurrentProjectInfo,
+  ),
+  effect: async (action, listenerApi) => {
+    if (!taskSnapshotRevalidationRequested.match(action)) {
+      if (
+        !isAnyOf(updateConfig, setCurrentProjectInfo)(action) ||
+        taskRecoveryScope(listenerApi.getOriginalState()) !==
+          taskRecoveryScope(listenerApi.getState()) ||
+        listenerApi.getOriginalState().config.apiKey !==
+          listenerApi.getState().config.apiKey
+      )
+        listenerApi.cancelActiveListeners();
+      return;
+    }
+    listenerApi.cancelActiveListeners();
+    const scope = taskRecoveryScope(listenerApi.getState());
+    if (
+      scope !==
+      JSON.stringify({
+        endpointIdentity: action.payload.endpointIdentity,
+        projectRoot: action.payload.projectRoot,
+      })
+    )
+      return;
+    const recovery = taskRecoveryStates.get(listenerApi.dispatch);
+    if (!recovery || recovery.scope !== scope) return;
+    await listenerApi.delay(50);
+    const isCurrent = () => {
+      const state = listenerApi.getState();
+      return (
+        taskRecoveryStates.get(listenerApi.dispatch) === recovery &&
+        taskRecoveryScope(state) === scope &&
+        state.sidebar.subscriptionId === action.payload.subscriptionId &&
+        state.sidebar.sections.workspace.status === "ready" &&
+        state.sidebar.sections.tasks.status === "ready"
+      );
+    };
+    if (!isCurrent()) return;
+    await Promise.all(
+      [...recovery.queries].map(async ([key, query]) => {
+        const cachedQuery = () =>
+          listenerApi.getState()[query.api.reducerPath].queries[
+            query.queryCacheKey
+          ];
+        const subscriptions = taskQuerySubscriptions(
+          listenerApi.dispatch,
+          query.api,
+        );
+        const isSubscribed = () =>
+          subscriptions.getSubscriptionCount(query.queryCacheKey) > 0;
+        if (!isSubscribed()) {
+          recovery.queries.delete(key);
+          return;
+        }
+        if (cachedQuery()?.status === QueryStatus.pending) {
+          await listenerApi.condition(
+            () =>
+              !isCurrent() ||
+              !isSubscribed() ||
+              recovery.queries.get(key) !== query ||
+              cachedQuery()?.status !== QueryStatus.pending,
+          );
+        }
+        if (!isCurrent() || recovery.queries.get(key) !== query) return;
+        if (cachedQuery()?.requestId !== query.requestId || !isSubscribed()) {
+          recovery.queries.delete(key);
+          return;
+        }
+        query.refetch(listenerApi.dispatch);
+      }),
+    );
+  },
+});
+
 startListening({
   matcher: tasksApi.endpoints.deleteTask.matchFulfilled,
   effect: (action, listenerApi) => {
@@ -2435,12 +2767,16 @@ startListening({
   effect: (action, listenerApi) => {
     const event = action.payload;
     switch (event.type) {
-      case "snapshot":
+      case "snapshot": {
+        const state = listenerApi.getState();
         void listenerApi.dispatch(
           tasksApi.util.upsertQueryData("listTasks", undefined, event.tasks),
         );
-        void listenerApi.dispatch(tasksApi.util.invalidateTags(["Board"]));
+        if (!taskRecoveryScope(state) && hasUsableEngineEndpoint(state.config)) {
+          void listenerApi.dispatch(tasksApi.util.invalidateTags(["Board"]));
+        }
         break;
+      }
       case "task_created": {
         const result = listenerApi.dispatch(
           tasksApi.util.updateQueryData("listTasks", undefined, (draft) => {

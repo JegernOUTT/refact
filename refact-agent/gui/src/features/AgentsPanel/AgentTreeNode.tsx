@@ -7,7 +7,7 @@ import {
   MessageSquare,
   Send,
 } from "lucide-react";
-import { useState } from "react";
+import { useId, useState } from "react";
 
 import {
   Badge,
@@ -89,14 +89,28 @@ function formatCost(cost: number | null | undefined): string | null {
 }
 
 function detailFiles(agent: BackgroundAgentSummary): string[] {
-  return [...new Set([...agent.edited_files, ...agent.target_files])].slice(
-    0,
-    4,
-  );
+  return [...new Set([...agent.edited_files, ...agent.target_files])];
 }
 
 function errorText(error: unknown): string {
-  if (error instanceof Error) return error.message;
+  if (typeof error === "string" && error.trim()) return error;
+  if (typeof error === "object" && error !== null) {
+    const data = "data" in error ? error.data : error;
+    if (typeof data === "string" && data.trim()) return data;
+    if (typeof data === "object" && data !== null) {
+      const fields = data as Record<string, unknown>;
+      for (const key of ["detail", "message", "error"] as const) {
+        const value = fields[key];
+        if (typeof value === "string" && value.trim()) return value;
+      }
+    }
+    if ("message" in error && typeof error.message === "string") {
+      return error.message;
+    }
+    if ("error" in error && typeof error.error === "string") {
+      return error.error;
+    }
+  }
   return "Agent action failed.";
 }
 
@@ -114,6 +128,8 @@ export function AgentTreeNode({
   const [messageOpen, setMessageOpen] = useState(false);
   const [message, setMessage] = useState("");
   const [copied, setCopied] = useState<"id" | "branch" | null>(null);
+  const detailsId = useId();
+  const messageId = useId();
   const [cancelAgent, cancelState] = useCancelBackgroundAgentMutation();
   const [messageAgent, messageState] = useMessageBackgroundAgentMutation();
   const terminal = isTerminal(agent);
@@ -121,6 +137,22 @@ export function AgentTreeNode({
   const cost = formatCost(agent.cost_usd);
   const files = detailFiles(agent);
   const questions = agent.questions ?? [];
+  const hasDetails = [
+    hasChildren,
+    agent.progress,
+    agent.goal_summary,
+    agent.error,
+    agent.result_summary,
+    agent.diff_summary,
+    agent.conflict_summary,
+    files.length,
+    questions.length,
+    agent.worktree_branch,
+    agent.merge_status,
+    agent.started_at,
+    agent.finished_at,
+    agent.last_activity,
+  ].some(Boolean);
   const title = displayAgentTitle(agent);
   const rawTitle = agent.title || agent.agent_id;
   const showMessageForm = messageOpen && !terminal;
@@ -139,7 +171,9 @@ export function AgentTreeNode({
       onNavigate(agent.child_chat_id);
       return;
     }
-    internalLinks?.handleInternalLink(`refact://chat/${agent.child_chat_id}`);
+    void internalLinks?.handleInternalLink(
+      `refact://chat/${agent.child_chat_id}`,
+    );
   };
 
   const handleCopy = (target: "id" | "branch", value: string) => {
@@ -152,6 +186,7 @@ export function AgentTreeNode({
   };
 
   const handleCancel = async () => {
+    if (cancelState.isLoading) return;
     try {
       await cancelAgent({
         agentId: agent.agent_id,
@@ -168,12 +203,12 @@ export function AgentTreeNode({
 
   const handleMessage = async () => {
     const text = message.trim();
-    if (!text) return;
+    if (!text || messageState.isLoading) return;
     try {
       await messageAgent({ agentId: agent.agent_id, chatId, text }).unwrap();
       setMessage("");
       setMessageOpen(false);
-      dispatch(setInformation("Message sent to agent."));
+      dispatch(setInformation("Message accepted for delivery to agent."));
     } catch (error) {
       dispatch(setError(errorText(error)));
     }
@@ -184,7 +219,6 @@ export function AgentTreeNode({
       <div
         className={styles.nodeRow}
         data-testid={`agent-row-${agent.agent_id}`}
-        onClick={navigate}
       >
         <div className={styles.titleLine}>
           <StatusDot
@@ -198,9 +232,7 @@ export function AgentTreeNode({
             className={styles.nodeTitle}
             disabled={!agent.child_chat_id}
             title={rawTitle}
-            onClick={() => {
-              navigate();
-            }}
+            onClick={navigate}
           >
             {title}
           </button>
@@ -209,6 +241,7 @@ export function AgentTreeNode({
               <Tooltip content="Send message">
                 <IconButton
                   aria-expanded={messageOpen}
+                  aria-controls={messageId}
                   aria-label={`Message ${rawTitle}`}
                   icon={MessageSquare}
                   size="sm"
@@ -305,10 +338,11 @@ export function AgentTreeNode({
               {agent.pending_questions}
             </Badge>
           )}
-          {hasChildren && (
+          {hasDetails && (
             <button
               type="button"
               aria-expanded={expanded}
+              aria-controls={detailsId}
               aria-label={`${expanded ? "Collapse" : "Expand"} ${rawTitle}`}
               className={styles.expandChip}
               onClick={(event) => {
@@ -321,7 +355,7 @@ export function AgentTreeNode({
                 className={styles.expandChevron}
                 size={12}
               />
-              {`${children.length} agents`}
+              {hasChildren ? `${children.length} agents` : "Details"}
             </button>
           )}
         </div>
@@ -333,8 +367,11 @@ export function AgentTreeNode({
       </div>
       {renderMessageForm && (
         <div
+          id={messageId}
           className="rf-expand-grid"
           data-open={messageMotion.isAnimatingOpen}
+          aria-hidden={!showMessageForm}
+          {...(!showMessageForm ? { inert: "" } : {})}
         >
           <div>
             <form
@@ -367,13 +404,22 @@ export function AgentTreeNode({
       )}
       {renderDetails && (
         <div
+          id={detailsId}
           className="rf-expand-grid"
           data-open={expandedMotion.isAnimatingOpen}
+          aria-hidden={!expanded}
+          {...(!expanded ? { inert: "" } : {})}
         >
           <div>
             <div className={styles.nodeDetails}>
               {agent.progress && <p>{agent.progress}</p>}
               {agent.goal_summary && <p>{agent.goal_summary}</p>}
+              {agent.error && (
+                <p className={styles.errorSummary}>{agent.error}</p>
+              )}
+              {agent.result_summary && <p>{agent.result_summary}</p>}
+              {agent.diff_summary && <p>{agent.diff_summary}</p>}
+              {agent.conflict_summary && <p>{agent.conflict_summary}</p>}
               {files.length > 0 && (
                 <div className={styles.fileList}>
                   {files.map((file) => (

@@ -23,6 +23,7 @@ export interface TasksListPage {
 export interface TaskWorkspacePage {
   name: "task workspace";
   taskId: string;
+  cardId?: string;
 }
 
 export interface TaskAgentPage {

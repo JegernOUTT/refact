@@ -3,9 +3,7 @@ import React, { useMemo } from "react";
 import { Flex, Text, Box } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
-import { useAppSelector } from "../../../hooks/useAppSelector";
-import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/selectors";
-import { useThreadId } from "../../../features/Chat/Thread";
+import { useToolCallActivity } from "./useToolCallActivity";
 import { ToolCall } from "../../../services/refact/types";
 import styles from "./TasksTool.module.css";
 
@@ -51,10 +49,7 @@ export const TasksTool: React.FC<TasksToolProps> = ({ toolCall }) => {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey);
 
-  const threadId = useThreadId();
-  const maybeResult = useAppSelector((state) =>
-    selectToolResultByThreadAndId(state, threadId, toolCall.id),
-  );
+  const { result: maybeResult, isRunning } = useToolCallActivity(toolCall.id);
 
   const tasks = useMemo((): Task[] => {
     try {
@@ -66,7 +61,7 @@ export const TasksTool: React.FC<TasksToolProps> = ({ toolCall }) => {
   }, [toolCall.function.arguments]);
 
   const status: ToolStatus = useMemo(() => {
-    if (!maybeResult) return "running";
+    if (!maybeResult) return isRunning ? "running" : "idle";
     if (
       typeof maybeResult === "object" &&
       "tool_failed" in maybeResult &&
@@ -75,7 +70,7 @@ export const TasksTool: React.FC<TasksToolProps> = ({ toolCall }) => {
       return "error";
     }
     return "success";
-  }, [maybeResult]);
+  }, [maybeResult, isRunning]);
 
   const stats = useMemo(() => {
     const completed = tasks.filter((t) => t.status === "completed").length;
@@ -97,8 +92,9 @@ export const TasksTool: React.FC<TasksToolProps> = ({ toolCall }) => {
 
   return (
     <ToolCard
-      icon={<CircleCheck />}
+      icon={maybeResult ? <CircleCheck /> : <Circle />}
       summary={summary}
+      meta={!maybeResult && !isRunning ? "Result not recorded" : undefined}
       status={status}
       isOpen={isOpen}
       onToggle={handleToggle}

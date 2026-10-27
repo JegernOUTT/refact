@@ -198,6 +198,23 @@ fn preflight(
     draft: &InstallationDraft,
     executable: &std::path::Path,
 ) -> Result<Option<InstallationRecord>, OperatorStoreError> {
+    preflight_with_inventory(
+        store,
+        spec,
+        draft,
+        executable,
+        &crate::exec::ExecRegistry::new(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn preflight_with_inventory(
+    store: &OperatorStore,
+    spec: &ActionSpec,
+    draft: &InstallationDraft,
+    executable: &std::path::Path,
+    inventory: &dyn CanaryExecutor,
+) -> Result<Option<InstallationRecord>, OperatorStoreError> {
     validate_spec(spec, draft)?;
     let candidate = super::activation_gate(
         store,
@@ -214,7 +231,8 @@ fn preflight(
     }
     let dynamic = static_host_image(&bytes, &artifact.attested_arch).is_err();
     if draft.operation == Operation::Canary || dynamic {
-        let snapshot = super::artifacts::linux_runtime_snapshot(&bytes, &artifact.attested_arch)
+        let snapshot = inventory
+            .runtime_snapshot(&bytes, &artifact.attested_arch)
             .map_err(conflict)?;
         if draft.operation != Operation::Canary {
             let key = canary_key(draft, &snapshot, &artifact.attested_version)?;
@@ -346,6 +364,21 @@ pub(crate) fn consume(
     request: &NativeRequest,
     executable: &std::path::Path,
 ) -> Result<InstallationRecord, OperatorStoreError> {
+    consume_with_inventory(
+        store,
+        request,
+        executable,
+        &crate::exec::ExecRegistry::new(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn consume_with_inventory(
+    store: &mut OperatorStore,
+    request: &NativeRequest,
+    executable: &std::path::Path,
+    inventory: &dyn CanaryExecutor,
+) -> Result<InstallationRecord, OperatorStoreError> {
     use refact_self_update::candidate_install::{Installer, ImageReceipt, running_digest};
     if !valid_digest(&request.prepared_hash) {
         return Err(conflict("hash"));
@@ -412,7 +445,7 @@ pub(crate) fn consume(
         }
         return Ok(previous.value);
     }
-    let original = preflight(store, spec, &draft, executable)?;
+    let original = preflight_with_inventory(store, spec, &draft, executable, inventory)?;
     let (_, bytes) = super::artifacts::installation_image(
         store,
         &super::candidate(store, &draft.candidate_id)?.value,
@@ -439,7 +472,8 @@ pub(crate) fn consume(
             &super::candidate(store, &draft.candidate_id)?.value,
         )
         .map_err(conflict)?;
-        let snapshot = super::artifacts::linux_runtime_snapshot(&bytes, &artifact.attested_arch)
+        let snapshot = inventory
+            .runtime_snapshot(&bytes, &artifact.attested_arch)
             .map_err(conflict)?;
         slots.push((
             CANARY_NAMESPACE,
@@ -607,6 +641,22 @@ type CanaryOutput = (
 #[cfg(target_os = "linux")]
 #[async_trait::async_trait]
 pub(crate) trait CanaryExecutor: Send + Sync {
+    fn runtime_snapshot(
+        &self,
+        bytes: &[u8],
+        arch: &str,
+    ) -> Result<super::artifacts::LinuxRuntimeSnapshot, crate::buddy::resources::ResourceError>
+    {
+        super::artifacts::linux_runtime_snapshot(bytes, arch)
+    }
+
+    fn runtime_file_bytes(
+        &self,
+        file: &super::artifacts::LinuxRuntimeFile,
+    ) -> Result<Vec<u8>, crate::buddy::resources::ResourceError> {
+        super::artifacts::linux_runtime_file_bytes(file)
+    }
+
     async fn execute(
         &self,
         command: crate::exec::ExecSpawnRequest,
@@ -679,6 +729,7 @@ impl DaemonInstallationAdapter {
         let key = self.request.prepared_hash.clone();
         let claim_key = key.clone();
         let draft = record.draft.clone();
+        let inventory = self.registry.clone();
         // CAS to executing is irrevocable. Dropping this future cannot authorize replay.
         let (artifact, bytes, snapshot) = self
             .runtime
@@ -712,9 +763,9 @@ impl DaemonInstallationAdapter {
                     &draft.candidate_digest,
                     &draft.proof_id,
                 )?;
-                let snapshot =
-                    super::artifacts::linux_runtime_snapshot(&bytes, &artifact.attested_arch)
-                        .map_err(conflict)?;
+                let snapshot = inventory
+                    .runtime_snapshot(&bytes, &artifact.attested_arch)
+                    .map_err(conflict)?;
                 Ok((artifact, bytes, snapshot))
             })
             .await?;
@@ -755,7 +806,7 @@ impl DaemonInstallationAdapter {
                 .map_err(conflict)?;
             std::fs::write(
                 &path,
-                super::artifacts::linux_runtime_file_bytes(file).map_err(conflict)?,
+                self.registry.runtime_file_bytes(file).map_err(conflict)?,
             )
             .map_err(conflict)?;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500))
@@ -793,7 +844,9 @@ impl DaemonInstallationAdapter {
             .collect();
         let passed = output_passes
             && !self.shutdown.load(std::sync::atomic::Ordering::SeqCst)
-            && super::artifacts::linux_runtime_snapshot(&bytes, &artifact.attested_arch)
+            && self
+                .registry
+                .runtime_snapshot(&bytes, &artifact.attested_arch)
                 .map_err(conflict)?
                 == snapshot;
         record.phase = if passed {
@@ -913,6 +966,7 @@ impl crate::buddy::resources::AsyncResourceAdapter for DaemonInstallationAdapter
         }
         let checked = spec.clone();
         let path = self.executable.clone();
+        let inventory = self.registry.clone();
         let proposed = self
             .runtime
             .with_store(move |store| {
@@ -926,7 +980,13 @@ impl crate::buddy::resources::AsyncResourceAdapter for DaemonInstallationAdapter
                 if draft.value.project != *store.identity() {
                     return Err(conflict("foreign draft"));
                 }
-                preflight(store, &checked, &draft.value.payload, &path)?;
+                preflight_with_inventory(
+                    store,
+                    &checked,
+                    &draft.value.payload,
+                    &path,
+                    inventory.as_ref(),
+                )?;
                 Ok((
                     draft.value.payload.artifact_digest,
                     draft.value.payload.operation,
@@ -957,9 +1017,12 @@ impl crate::buddy::resources::AsyncResourceAdapter for DaemonInstallationAdapter
         }
         let request = self.request.clone();
         let path = self.executable.clone();
+        let inventory = self.registry.clone();
         let mut record = self
             .runtime
-            .with_store(move |store| consume(store, &request, &path))
+            .with_store(move |store| {
+                consume_with_inventory(store, &request, &path, inventory.as_ref())
+            })
             .await
             .map_err(|e| ResourceError::ValidationFailed(e.to_string()))?;
         if record.draft.operation == Operation::Canary {
@@ -1751,31 +1814,141 @@ pub(crate) mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn canary_failed_executor_never_publishes_proof_or_replays() {
-        use std::sync::{
-            Arc,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
-        };
-        use crate::buddy::{outcome_runtime::OutcomeRuntime, resources::AsyncResourceAdapter};
-        use refact_buddy_core::operator_types::WorkerIdentity;
-        use std::os::unix::fs::PermissionsExt;
-        struct FailedExecutor {
-            calls: AtomicUsize,
-        }
-        #[async_trait::async_trait]
-        impl CanaryExecutor for FailedExecutor {
-            async fn execute(
-                &self,
-                _: crate::exec::ExecSpawnRequest,
-                _: Arc<AtomicBool>,
-                _: Arc<AtomicBool>,
-            ) -> Result<CanaryOutput, String> {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                Err("deterministic spawn failure".into())
+    const FIXTURE_LOADER_BYTES: &[u8] = b"fixture loader bytes, never executable";
+    const CHANGED_FIXTURE_LOADER_BYTES: &[u8] = b"changed fixture loader bytes, never executable";
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum CanaryIoEvent {
+        Snapshot(super::super::artifacts::LinuxRuntimeSnapshot),
+        Copy(super::super::artifacts::LinuxRuntimeFile),
+        Executed,
+    }
+
+    struct FixtureCanaryExecutor {
+        image: Vec<u8>,
+        snapshot: super::super::artifacts::LinuxRuntimeSnapshot,
+        events: std::sync::Mutex<Vec<CanaryIoEvent>>,
+        result: std::sync::Mutex<Option<Result<CanaryOutput, String>>>,
+        change_after_execution: bool,
+        completed: std::sync::atomic::AtomicBool,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl CanaryExecutor for FixtureCanaryExecutor {
+        fn runtime_snapshot(
+            &self,
+            bytes: &[u8],
+            arch: &str,
+        ) -> Result<
+            super::super::artifacts::LinuxRuntimeSnapshot,
+            crate::buddy::resources::ResourceError,
+        > {
+            use sha2::{Digest, Sha256};
+            assert_eq!(bytes, self.image);
+            assert_eq!(arch, self.snapshot.arch);
+            let mut snapshot = self.snapshot.clone();
+            if self.completed.load(std::sync::atomic::Ordering::SeqCst)
+                && self.change_after_execution
+            {
+                snapshot
+                    .files
+                    .get_mut(&snapshot.interpreter)
+                    .unwrap()
+                    .digest = hex::encode(Sha256::digest(CHANGED_FIXTURE_LOADER_BYTES));
             }
+            self.events
+                .lock()
+                .unwrap()
+                .push(CanaryIoEvent::Snapshot(snapshot.clone()));
+            Ok(snapshot)
         }
-        // The fake cannot run any image. The real loader inventory is only read.
+
+        fn runtime_file_bytes(
+            &self,
+            file: &super::super::artifacts::LinuxRuntimeFile,
+        ) -> Result<Vec<u8>, crate::buddy::resources::ResourceError> {
+            if Some(file) != self.snapshot.files.get(&self.snapshot.interpreter) {
+                return Err(crate::buddy::resources::ResourceError::ValidationFailed(
+                    "fixture runtime fingerprint changed".into(),
+                ));
+            }
+            self.events
+                .lock()
+                .unwrap()
+                .push(CanaryIoEvent::Copy(file.clone()));
+            Ok(FIXTURE_LOADER_BYTES.to_vec())
+        }
+
+        async fn execute(
+            &self,
+            command: crate::exec::ExecSpawnRequest,
+            shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+            cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        ) -> Result<CanaryOutput, String> {
+            use std::sync::atomic::Ordering;
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let root = command.cwd.as_ref().unwrap();
+            assert_eq!(std::fs::read(root.join("refact-lsp")).unwrap(), self.image);
+            assert_eq!(
+                std::fs::read(root.join(self.snapshot.interpreter.strip_prefix('/').unwrap()))
+                    .unwrap(),
+                FIXTURE_LOADER_BYTES
+            );
+            let roots = super::super::artifacts::linux_library_roots(&self.snapshot.arch)
+                .unwrap()
+                .join(":");
+            assert_eq!(
+                command.argv.unwrap(),
+                [
+                    "/usr/bin/bwrap",
+                    "--unshare-all",
+                    "--die-with-parent",
+                    "--new-session",
+                    "--cap-drop",
+                    "ALL",
+                    "--clearenv",
+                    "--ro-bind",
+                    root.to_str().unwrap(),
+                    "/",
+                    "--proc",
+                    "/proc",
+                    "--dev",
+                    "/dev",
+                    "--tmpfs",
+                    "/tmp",
+                    "--dir",
+                    "/home",
+                    "--setenv",
+                    "HOME",
+                    "/home",
+                    "--setenv",
+                    "LD_BIND_NOW",
+                    "1",
+                    "--setenv",
+                    "LANG",
+                    "C",
+                    "--chdir",
+                    "/",
+                    "--",
+                    &self.snapshot.interpreter,
+                    "--inhibit-cache",
+                    "--library-path",
+                    &roots,
+                    "/refact-lsp",
+                    "--version",
+                ]
+                .map(String::from)
+            );
+            assert!(!shutdown.load(Ordering::SeqCst));
+            assert!(!cancelled.load(Ordering::SeqCst));
+            self.events.lock().unwrap().push(CanaryIoEvent::Executed);
+            self.completed.store(true, Ordering::SeqCst);
+            self.result.lock().unwrap().take().unwrap()
+        }
+    }
+
+    fn dynamic_elf() -> Vec<u8> {
         let mut bytes = elf();
         bytes.resize(512, 0);
         bytes[16] = 3;
@@ -1799,6 +1972,29 @@ pub(crate) mod tests {
         bytes[184..192].copy_from_slice(&400u64.to_le_bytes());
         bytes[208..216].copy_from_slice(&(loader.len() as u64).to_le_bytes());
         bytes[400..400 + loader.len()].copy_from_slice(loader.as_bytes());
+        bytes
+    }
+
+    struct FullCanaryFixture {
+        _directory: tempfile::TempDir,
+        draft: InstallationDraft,
+        request: crate::buddy::action_execution::ActionRequest,
+        executor: std::sync::Arc<FixtureCanaryExecutor>,
+        adapter: DaemonInstallationAdapter,
+    }
+
+    async fn full_canary_fixture(
+        result: Result<CanaryOutput, String>,
+        change_after_execution: bool,
+    ) -> FullCanaryFixture {
+        use std::sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicUsize},
+        };
+        use crate::buddy::outcome_runtime::OutcomeRuntime;
+        use refact_buddy_core::operator_types::WorkerIdentity;
+        use std::os::unix::fs::PermissionsExt;
+        use sha2::{Digest, Sha256};
         let dir = tempfile::Builder::new()
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir()
@@ -1818,11 +2014,34 @@ pub(crate) mod tests {
         )
         .unwrap();
         let target = dir.path().join("never-installed");
-        let (mut draft, _) = seed_image(&runtime, &target, bytes, "1".into(), true).await;
+        let bytes = dynamic_elf();
+        let (mut draft, _) = seed_image(&runtime, &target, bytes.clone(), "1".into(), true).await;
         draft.operation = Operation::Canary;
         let (request, native, _) =
             prepare_fixture(&runtime, &target, &draft, "failed-canary").await;
-        let executor = Arc::new(FailedExecutor {
+        let interpreter = if std::env::consts::ARCH == "aarch64" {
+            "/lib/ld-linux-aarch64.so.1"
+        } else {
+            "/lib64/ld-linux-x86-64.so.2"
+        };
+        let executor = Arc::new(FixtureCanaryExecutor {
+            image: bytes,
+            snapshot: super::super::artifacts::LinuxRuntimeSnapshot {
+                arch: std::env::consts::ARCH.into(),
+                interpreter: interpreter.into(),
+                kernel_release: "fixture-only-no-host-inventory".into(),
+                files: std::collections::BTreeMap::from([(
+                    interpreter.into(),
+                    super::super::artifacts::LinuxRuntimeFile {
+                        canonical_path: "/usr/lib/refact-fixture-loader".into(),
+                        digest: hex::encode(Sha256::digest(FIXTURE_LOADER_BYTES)),
+                    },
+                )]),
+            },
+            events: Mutex::new(Vec::new()),
+            result: Mutex::new(Some(result)),
+            change_after_execution,
+            completed: AtomicBool::new(false),
             calls: AtomicUsize::new(0),
         });
         let adapter = DaemonInstallationAdapter {
@@ -1833,16 +2052,78 @@ pub(crate) mod tests {
             executable: target.clone(),
             spec: request.spec.clone(),
         };
-        assert!(adapter.apply(&request.spec).await.is_err());
-        assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+        FullCanaryFixture {
+            _directory: dir,
+            draft,
+            request,
+            executor,
+            adapter,
+        }
+    }
+
+    #[tokio::test]
+    async fn canary_failed_executor_never_publishes_proof_or_replays() {
+        use std::sync::atomic::Ordering;
+        use crate::buddy::resources::AsyncResourceAdapter;
+        let FullCanaryFixture {
+            _directory,
+            draft,
+            request,
+            executor,
+            adapter,
+        } = full_canary_fixture(Err("deterministic spawn failure".into()), false).await;
+        let runtime = &adapter.runtime;
+        let native = &adapter.request;
+        let result = adapter.apply(&request.spec).await;
+        assert!(result.is_err(), "{result:?}");
         assert_eq!(
-            retained_installation(&runtime, &native)
+            executor.calls.load(Ordering::SeqCst),
+            1,
+            "apply={result:?}; (claim_phase, any_canary_proof)={:?}; fixture IO prerequisite recheck (not real host trust or original error chain)={:?}",
+            {
+                let key = native.prepared_hash.clone();
+                runtime
+                    .with_store(move |store| {
+                        Ok((
+                            store
+                                .get_document::<InstallationRecord>(NAMESPACE, &key)
+                                .map(|claim| claim.map(|claim| claim.value.phase)),
+                            store
+                                .list_documents::<CanaryProof>(CANARY_NAMESPACE, None, 1)
+                                .map(|proofs| !proofs.entries.is_empty()),
+                        ))
+                    })
+                    .await
+            },
+            executor.runtime_snapshot(&executor.image, std::env::consts::ARCH)
+                .map(|_| ())
+        );
+        assert_eq!(
+            *executor.events.lock().unwrap(),
+            [
+                CanaryIoEvent::Snapshot(executor.snapshot.clone()),
+                CanaryIoEvent::Snapshot(executor.snapshot.clone()),
+                CanaryIoEvent::Snapshot(executor.snapshot.clone()),
+                CanaryIoEvent::Copy(
+                    executor.snapshot.files[&executor.snapshot.interpreter].clone()
+                ),
+                CanaryIoEvent::Executed,
+            ]
+        );
+        assert_eq!(
+            retained_installation(runtime, native)
                 .await
                 .unwrap()
                 .value
                 .phase,
             "canary_executing_outcome_unknown"
         );
+        assert!(runtime
+            .with_store(|store| store.list_documents::<CanaryProof>(CANARY_NAMESPACE, None, 1))
+            .await
+            .unwrap()
+            .entries
+            .is_empty());
         assert!(!adapter
             .verify(&request.spec, &draft.artifact_digest)
             .await
@@ -1850,9 +2131,112 @@ pub(crate) mod tests {
         assert!(adapter.apply(&request.spec).await.is_err());
         assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
         assert_eq!(
-            std::fs::read(target).unwrap(),
+            std::fs::read(&adapter.executable).unwrap(),
             b"scratch known-good executable bytes"
         );
+    }
+
+    #[tokio::test]
+    async fn canary_full_apply_rechecks_inventory_before_publishing_proof() {
+        use crate::buddy::resources::AsyncResourceAdapter;
+        use std::sync::atomic::Ordering;
+        use sha2::{Digest, Sha256};
+        for changed in [false, true] {
+            let output = fake_canary_output(
+                crate::exec::ExecStatus::Exited { exit_code: Some(0) },
+                "refact-lsp 1\n",
+                true,
+                false,
+            );
+            assert!(canary_output_passes(&output, "1"));
+            let process_id = output.0.to_string();
+            let FullCanaryFixture {
+                _directory,
+                draft,
+                request,
+                executor,
+                adapter,
+            } = full_canary_fixture(Ok(output), changed).await;
+            let snapshot = executor.snapshot.clone();
+            let proof_key = canary_key(&draft, &snapshot, "1").unwrap();
+            let receipt = adapter.apply(&request.spec).await.unwrap();
+            assert_eq!(receipt.expected_post_version, draft.artifact_digest);
+            let key = proof_key.clone();
+            let proof = adapter
+                .runtime
+                .with_store(move |s| s.get_document::<CanaryProof>(CANARY_NAMESPACE, &key))
+                .await
+                .unwrap();
+            if changed {
+                assert!(
+                    proof.is_none(),
+                    "changed runtime must not publish a successful canary proof"
+                );
+                assert!(adapter
+                    .runtime
+                    .with_store(|s| s.list_documents::<CanaryProof>(CANARY_NAMESPACE, None, 1))
+                    .await
+                    .unwrap()
+                    .entries
+                    .is_empty());
+            } else {
+                let proof = proof.unwrap().value;
+                assert_eq!(proof.schema_version, 1);
+                assert_eq!(proof.project, draft.project);
+                assert_eq!(proof.binding, proof_key);
+                assert_eq!(proof.prepared_hash, adapter.request.prepared_hash);
+                assert_eq!(proof.runtime, snapshot);
+                assert_eq!(proof.process_id, process_id);
+                assert_eq!(proof.output_digest, digest(&"refact-lsp 1\n").unwrap());
+                assert!(proof.passed);
+            }
+            let retained = retained_installation(&adapter.runtime, &adapter.request)
+                .await
+                .unwrap();
+            assert_eq!(
+                retained.value.phase,
+                if changed {
+                    "canary_failed"
+                } else {
+                    "canary_passed"
+                }
+            );
+            assert_eq!(retained.value.draft, draft);
+            assert_eq!(retained.value.grant_id, adapter.request.grant_id);
+            assert_eq!(
+                adapter
+                    .verify(&request.spec, &draft.artifact_digest)
+                    .await
+                    .unwrap(),
+                !changed
+            );
+            let mut final_snapshot = snapshot.clone();
+            if changed {
+                final_snapshot
+                    .files
+                    .get_mut(&snapshot.interpreter)
+                    .unwrap()
+                    .digest = hex::encode(Sha256::digest(CHANGED_FIXTURE_LOADER_BYTES));
+                assert_ne!(final_snapshot, snapshot);
+            }
+            assert_eq!(
+                *executor.events.lock().unwrap(),
+                [
+                    CanaryIoEvent::Snapshot(snapshot.clone()),
+                    CanaryIoEvent::Snapshot(snapshot.clone()),
+                    CanaryIoEvent::Snapshot(snapshot.clone()),
+                    CanaryIoEvent::Copy(snapshot.files[&snapshot.interpreter].clone()),
+                    CanaryIoEvent::Executed,
+                    CanaryIoEvent::Snapshot(final_snapshot),
+                ]
+            );
+            assert!(adapter.apply(&request.spec).await.is_err());
+            assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                std::fs::read(&adapter.executable).unwrap(),
+                b"scratch known-good executable bytes"
+            );
+        }
     }
 
     #[test]

@@ -64,7 +64,14 @@ describe("flexible question responses", () => {
   test("submits custom text, explicit none, skip, explanations and overall comments without coercion", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal("fetch", fetchMock);
-    const { user } = setup();
+    const { user, container } = setup();
+    expect(container.querySelector("section")).toHaveAttribute(
+      "data-open",
+      "true",
+    );
+    expect(
+      screen.queryByRole("button", { name: "Questions for you" }),
+    ).toBeNull();
     await user.click(
       screen.getAllByRole("button", { name: "Write my own answer" })[0],
     );
@@ -452,6 +459,26 @@ describe("compact protocol-v2 question responses", () => {
     expect(
       screen.getByRole("textbox", { name: "Your answer to question 1" }),
     ).toHaveValue("A kept draft");
+    updateQuestion(view.store, {
+      questions: [
+        {
+          id: "one",
+          type: "single_select",
+          text: "Choose an updated direction",
+          options: ["A", "B"],
+        },
+      ],
+    });
+    const restoredRow = screen.getByRole("button", {
+      name: /Choose an updated direction/,
+      expanded: true,
+    });
+    expect(
+      screen.getByRole("textbox", { name: "Your answer to question 1" }),
+    ).toHaveValue("A kept draft");
+    await restored.user.click(restoredRow);
+    updateQuestion(view.store, {});
+    expect(restoredRow).toHaveAttribute("aria-expanded", "false");
   });
 
   test("send failures and retry controls remain directly accessible and request identity stays stable", async () => {

@@ -16,8 +16,8 @@ import {
   useDelayedUnmount,
 } from "../../../components/shared/useDelayedUnmount";
 import { useAppDispatch, useAppSelector } from "../../../hooks";
+import { useInternalNavigation } from "../../../hooks/useInternalNavigation";
 import { AgentWorkSection } from "../WorkPanel/AgentWorkSection";
-import { switchToThread } from "../../Chat/Thread";
 import { selectCapabilities } from "../../Config/configSlice";
 import { FilesPanel } from "../FilesPanel";
 import { GitDock } from "../GitPanel";
@@ -45,6 +45,7 @@ export function Dock() {
   const panelsForced = useAppSelector(selectPanelsForced);
   const dock = useAppSelector(selectWorkspaceDock);
   const focusedChatId = useAppSelector(selectFocusedWorkspaceChatId);
+  const navigation = useInternalNavigation({ scope: focusedChatId ?? "" });
   const isNarrow = useMediaQuery(WORKSPACE_NARROW_QUERY);
   const dockRef = useRef<HTMLElement>(null);
   const liveWidthRef = useRef(dock.width);
@@ -73,9 +74,15 @@ export function Dock() {
 
   const handleAgentNavigation = useCallback(
     (childChatId: string) => {
-      dispatch(switchToThread({ id: childChatId }));
+      void navigation
+        .navigate(`refact://chat/${childChatId}`, {
+          chatId: focusedChatId ?? undefined,
+        })
+        .then((opened) => {
+          if (opened && isNarrow) dispatch(setDockOpen(false));
+        });
     },
-    [dispatch],
+    [dispatch, focusedChatId, isNarrow, navigation],
   );
 
   const handleResizePointerDown = useCallback(
@@ -146,6 +153,10 @@ export function Dock() {
         data-testid="workspace-dock-section"
         data-section={activeSection}
       >
+        {navigation.pending && (
+          <div role="status">Opening linked target...</div>
+        )}
+        {navigation.error && <div role="alert">{navigation.error}</div>}
         {activeSection === "files" ? <FilesPanel /> : null}
         {activeSection === "git" ? <GitDock /> : null}
         {activeSection === "agents" ? (

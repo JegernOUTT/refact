@@ -3,13 +3,7 @@ import React, { useMemo, useState } from "react";
 import { Badge, Box, Button, Flex } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
-import { useAppSelector } from "../../../hooks/useAppSelector";
-import {
-  selectToolResultByThreadAndId,
-  selectIsStreamingById,
-  selectIsWaitingById,
-} from "../../../features/Chat/Thread/selectors";
-import { useThreadId } from "../../../features/Chat/Thread";
+import { useToolCallActivity } from "./useToolCallActivity";
 import {
   getToolEnrichment,
   type ToolCall,
@@ -96,21 +90,10 @@ export const GenericTool: React.FC<GenericToolProps> = ({ toolCall }) => {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey);
   const [showFullOutput, setShowFullOutput] = useState(false);
-  const threadId = useThreadId();
-  const isStreaming = useAppSelector((state) =>
-    selectIsStreamingById(state, threadId),
-  );
-  const isWaiting = useAppSelector((state) =>
-    selectIsWaitingById(state, threadId),
-  );
-
-  const maybeResult = useAppSelector((state) =>
-    selectToolResultByThreadAndId(state, threadId, toolCall.id),
-  );
+  const { result: maybeResult, isRunning } = useToolCallActivity(toolCall.id);
 
   const status: ToolStatus = useMemo(() => {
-    if (!maybeResult && (isStreaming || isWaiting)) return "running";
-    if (!maybeResult) return "running";
+    if (!maybeResult) return isRunning ? "running" : "idle";
     if (
       typeof maybeResult === "object" &&
       "tool_failed" in maybeResult &&
@@ -119,7 +102,7 @@ export const GenericTool: React.FC<GenericToolProps> = ({ toolCall }) => {
       return "error";
     }
     return "success";
-  }, [maybeResult, isStreaming, isWaiting]);
+  }, [maybeResult, isRunning]);
 
   const content =
     maybeResult && typeof maybeResult.content === "string"
@@ -162,6 +145,7 @@ export const GenericTool: React.FC<GenericToolProps> = ({ toolCall }) => {
       <ToolCard
         icon={<Settings />}
         summary={summary}
+        meta={!maybeResult && !isRunning ? "Result not recorded" : undefined}
         status={status}
         isOpen={isOpen}
         onToggle={handleToggle}

@@ -21,9 +21,8 @@ import { useThreadId } from "../../features/Chat/Thread";
 import { selectApiKey, selectConfig } from "../../features/Config/configSlice";
 import { sendChatCommand } from "../../services/refact/chatCommands";
 import type { ToolCall } from "../../services/refact/types";
-import { ShikiCodeBlock } from "../Markdown";
 import { CompactToolDetails } from "../Tools/AgenticTool/CompactToolDetails";
-import { readCompactRecord } from "../Tools/AgenticTool/compactPresentation";
+import { PagedText } from "../Tools/AgenticTool/PagedText";
 import {
   Badge,
   Button,
@@ -58,7 +57,7 @@ import {
 } from "./AgentStatusModel";
 import styles from "./AgentStatusView.module.css";
 
-const EMPTY_ALERTS = { stuck: 0, failed: 0, paused: 0 };
+const EMPTY_ALERTS = { stuck: 0, failed: 0, approval: 0 };
 
 type AgentStatusContentProps = {
   report: AgentStatusReport;
@@ -107,6 +106,11 @@ function stateClass(state: AgentStatusState): string {
       return styles.statePaused;
     case "running":
       return styles.stateRunning;
+    case "queued":
+    case "parked":
+    case "cancelled":
+    case "unknown":
+      return styles.mutedValue;
   }
 }
 
@@ -123,6 +127,11 @@ function stateStatus(
       return "warning";
     case "running":
       return "running";
+    case "queued":
+    case "parked":
+    case "cancelled":
+    case "unknown":
+      return "idle";
   }
 }
 
@@ -137,6 +146,10 @@ function tabLabel(tab: AgentStatusTab): string {
       return "All";
     case "running":
       return "Running";
+    case "queued":
+      return "Queued";
+    case "parked":
+      return "Parked";
     case "stuck":
       return "Stuck";
     case "failed":
@@ -145,6 +158,10 @@ function tabLabel(tab: AgentStatusTab): string {
       return "Done";
     case "paused":
       return "Paused";
+    case "cancelled":
+      return "Cancelled";
+    case "unknown":
+      return "Unknown";
   }
 }
 
@@ -183,6 +200,7 @@ function AgentRowCard({
   onCancel: (row: AgentStatusRow) => void;
 }) {
   const disabled = actionsDisabled || isSubmitting;
+  const isVariant = /[/:]/u.test(row.cardId);
   const detailsId = React.useId();
   const { shouldRender, isAnimatingOpen } = useDelayedUnmount(
     isExpanded,
@@ -239,7 +257,7 @@ function AgentRowCard({
         </div>
         <div>
           <span className={styles.cellLabel}>State</span>
-          <span className={styles.cellValue}>{row.state}</span>
+          <span className={styles.cellValue}>{tabLabel(row.state)}</span>
         </div>
       </div>
 
@@ -262,21 +280,38 @@ function AgentRowCard({
         />
         <IconButton
           aria-label={`Steer ${row.cardId}`}
+          title={
+            isVariant
+              ? "Variant steering is unavailable"
+              : "Request planner steering"
+          }
           icon={Hand}
           size="sm"
           variant="ghost"
-          disabled={disabled}
+          disabled={disabled || isVariant}
           onClick={() => onSteer(row)}
         />
         <IconButton
           aria-label={`Cancel agent ${row.cardId}`}
+          title={
+            isVariant
+              ? "Variant cancellation is unavailable"
+              : "Request planner cancellation"
+          }
           icon={CircleStop}
           size="sm"
           variant="danger"
-          disabled={disabled}
+          disabled={disabled || isVariant}
           onClick={() => onCancel(row)}
         />
       </div>
+
+      {isVariant && (
+        <div className={styles.emptyState}>
+          Variant steering and cancellation are unavailable; inspection targets{" "}
+          {row.cardId} only.
+        </div>
+      )}
 
       {shouldRenderDetails && (
         <div
@@ -333,7 +368,7 @@ export const AgentStatusContent: React.FC<AgentStatusContentProps> = ({
     () => mergeAgentAlerts(report.alerts, countAgentAlerts(report.rows)),
     [report.alerts, report.rows],
   );
-  const alertCount = alerts.stuck + alerts.failed + alerts.paused;
+  const alertCount = alerts.stuck + alerts.failed + alerts.approval;
   const minAgeMinutes = ageFilter === "all" ? null : Number(ageFilter);
 
   const visibleRows = useMemo(
@@ -444,7 +479,7 @@ export const AgentStatusContent: React.FC<AgentStatusContentProps> = ({
               tone={alerts.failed > 0 ? "danger" : "warning"}
             />
             <span>
-              {alerts.stuck} stuck, {alerts.failed} failed, {alerts.paused}{" "}
+              {alerts.stuck} stuck, {alerts.failed} failed, {alerts.approval}{" "}
               needing approval
             </span>
           </div>
@@ -498,13 +533,17 @@ export const AgentStatusContent: React.FC<AgentStatusContentProps> = ({
         </label>
       </div>
 
+      <div className={styles.emptyState}>
+        Actions send requests to the planner chat, not direct tool executions.
+      </div>
+
       <div className={classNames(styles.cards, "rf-stagger")} role="table">
         {visibleRows.map((row) => (
           <AgentRowCard
             key={row.cardId}
             row={row}
             isExpanded={expandedRows.has(row.cardId)}
-            actionsDisabled={actionsDisabled}
+            actionsDisabled={actionsDisabled || !onSubmitCommand}
             isSubmitting={isSubmitting}
             onToggle={toggleExpanded}
             onPulse={(selectedRow) => {
@@ -527,7 +566,9 @@ export const AgentStatusContent: React.FC<AgentStatusContentProps> = ({
 
       {visibleRows.length === 0 && (
         <div className={styles.emptyState}>
-          No agents match the selected filters.
+          {report.roster === "empty"
+            ? "No agent rows returned in this response."
+            : "No agents match the selected filters."}
         </div>
       )}
 
@@ -540,7 +581,11 @@ export const AgentStatusContent: React.FC<AgentStatusContentProps> = ({
             <>
               <Dialog.Title>{dialog.title}</Dialog.Title>
               <Dialog.Description>
-                The command was sent through the chat queue.
+                {isSubmitting
+                  ? "Submitting a request to the planner chat queue."
+                  : dialogError
+                    ? "The request could not be submitted."
+                    : "Request sent to the planner chat queue; execution is not confirmed."}
               </Dialog.Description>
               <div className={styles.commandPreview}>{dialog.command}</div>
             </>
@@ -550,7 +595,7 @@ export const AgentStatusContent: React.FC<AgentStatusContentProps> = ({
             <>
               <Dialog.Title>Steer {dialog.row.cardId}</Dialog.Title>
               <Dialog.Description>
-                Send a planner steering message to this agent.
+                Ask the planner to send a steering message to this agent.
               </Dialog.Description>
               <FieldTextarea
                 aria-label="Steering message"
@@ -566,7 +611,8 @@ export const AgentStatusContent: React.FC<AgentStatusContentProps> = ({
             <>
               <Dialog.Title>Cancel {dialog.row.cardId}</Dialog.Title>
               <Dialog.Description>
-                Confirm cancellation and optionally edit the reason.
+                Request cancellation from the planner and optionally edit the
+                reason.
               </Dialog.Description>
               <FieldText
                 aria-label="Cancel reason"
@@ -648,20 +694,9 @@ export const AgentStatusView: React.FC<AgentStatusViewProps> = ({
   const alerts = report
     ? mergeAgentAlerts(report.alerts, countAgentAlerts(report.rows))
     : EMPTY_ALERTS;
-  const resultRecord = readCompactRecord(content);
-  const resultRows =
-    resultRecord?.agents ?? resultRecord?.statuses ?? resultRecord?.rows;
-  const emptyRows = Array.isArray(resultRows) && resultRows.length === 0;
-  const hasSnapshot = report !== null || emptyRows;
+  const hasSnapshot = report !== null;
   const rowCount =
-    report && report.rows.length > 0
-      ? report.rows.length
-      : emptyRows ||
-          /^No agents have been spawned yet for this task\.$/mu.test(
-            content ?? "",
-          )
-        ? 0
-        : null;
+    report && report.roster !== "unparsed" ? report.rows.length : null;
   const isRequestRunning = !maybeResult && (isStreaming || isWaiting);
   const status: ToolStatus = maybeResult?.tool_failed
     ? "error"
@@ -676,15 +711,17 @@ export const AgentStatusView: React.FC<AgentStatusViewProps> = ({
       ? "Checking"
       : !hasSnapshot
         ? "Status unknown"
-        : alerts.failed > 0 && alerts.paused > 0
+        : alerts.failed > 0 && alerts.approval > 0
           ? "Failed / approval"
           : alerts.failed > 0
             ? "Agents failed"
-            : alerts.paused > 0
+            : alerts.approval > 0
               ? "Approval needed"
               : alerts.stuck > 0
                 ? "Agents stuck"
-                : "Snapshot received";
+                : report.roster === "unparsed"
+                  ? "Roster not parsed"
+                  : "Snapshot received";
   const facts = hasSnapshot
     ? [
         {
@@ -694,15 +731,14 @@ export const AgentStatusView: React.FC<AgentStatusViewProps> = ({
               ? "Agent count unknown"
               : `${rowCount} agent rows in this response`,
         },
-        { label: "Coverage", value: "Returned rows only; total unknown" },
-        ...(report
-          ? [
-              {
-                label: "Reported alerts",
-                value: `${alerts.stuck} stuck, ${alerts.failed} failed, ${alerts.paused} needing approval`,
-              },
-            ]
-          : []),
+        {
+          label: "Coverage",
+          value: report.coverage ?? "Returned rows only; total unknown",
+        },
+        {
+          label: "Observed alerts",
+          value: `${alerts.stuck} stuck, ${alerts.failed} failed, ${alerts.approval} needing approval`,
+        },
       ]
     : [{ label: "Result", value: "Agent status unavailable" }];
 
@@ -733,15 +769,23 @@ export const AgentStatusView: React.FC<AgentStatusViewProps> = ({
         toolCall={toolCall}
       >
         <CompactToolDetails facts={facts}>
-          {report ? (
-            <AgentStatusContent
-              report={report}
-              onSubmitCommand={handleSubmitCommand}
-              actionsDisabled={!chatId}
-            />
-          ) : content ? (
-            <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
-          ) : null}
+          <div className={styles.receiptDetails}>
+            {report && report.roster !== "unparsed" ? (
+              <AgentStatusContent
+                report={report}
+                onSubmitCommand={handleSubmitCommand}
+                actionsDisabled={!chatId || maybeResult?.tool_failed === true}
+              />
+            ) : content ? (
+              <div className={styles.emptyState}>
+                Roster not parsed. Inspect the full response below.
+              </div>
+            ) : null}
+            {content !== null && (
+              <PagedText label="Full response" body={content} />
+            )}
+            <PagedText label="Arguments" body={toolCall.function.arguments} />
+          </div>
         </CompactToolDetails>
       </ToolCard>
     </>

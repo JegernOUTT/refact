@@ -1,12 +1,13 @@
 import { useState } from "react";
-import { Badge, Button, Icon } from "../../ui";
+import { Badge, Button, Icon, ToolCard as DetailsCard } from "../../ui";
 import { agenticIcon } from "./agenticIcons";
 import { ToolCard } from "../../ChatContent/ToolCard";
 import { useStoredOpen } from "../../ChatContent/useStoredOpen";
-import type { ToolCall } from "../../../services/refact/types";
+import type { ToolCall, ToolResult } from "../../../services/refact/types";
 import { humanizeIdentifier } from "../../../utils/displayNames";
 import { CompactToolDetails } from "./CompactToolDetails";
 import { compactText, readCompactRecord } from "./compactPresentation";
+import { PagedText } from "./PagedText";
 import styles from "./AgenticTool.module.css";
 
 type Source = {
@@ -196,11 +197,13 @@ function bounded(value: string | number): string {
 
 export function LaunchPreviewTool({
   toolCall,
+  rawContent,
   extra,
   hasResult,
   failed,
 }: {
   toolCall: ToolCall;
+  rawContent?: ToolResult["content"];
   extra: unknown;
   hasResult: boolean;
   failed: boolean;
@@ -527,6 +530,25 @@ export function LaunchPreviewTool({
             </>
           )}
         </section>
+        <DetailsCard title="Technical details" defaultOpen={false}>
+          <PagedText label="Raw arguments" body={toolCall.function.arguments} />
+          {rawContent !== undefined && (
+            <PagedText
+              label="Full response"
+              body={
+                typeof rawContent === "string"
+                  ? rawContent
+                  : JSON.stringify(rawContent, null, 2)
+              }
+            />
+          )}
+          {extra !== undefined && (
+            <PagedText
+              label="Response metadata"
+              body={JSON.stringify(extra, null, 2)}
+            />
+          )}
+        </DetailsCard>
       </CompactToolDetails>
     </ToolCard>
   );

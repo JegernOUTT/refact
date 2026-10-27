@@ -68,7 +68,7 @@ function looksLikeMarkdown(text: string): boolean {
 }
 
 export type ReportVariant = "taskDone" | "plan" | "report";
-type ToolStatus = "running" | "success" | "error";
+type ToolStatus = "idle" | "running" | "success" | "error";
 
 export interface ReportData {
   summary?: string;
@@ -135,12 +135,6 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
         ? "running"
         : "pending");
 
-  const status: ToolStatus = useMemo(() => {
-    if (!maybeResult) return "running";
-    if (maybeResult.tool_failed) return "error";
-    return "success";
-  }, [maybeResult]);
-
   const content =
     maybeResult && typeof maybeResult.content === "string"
       ? maybeResult.content
@@ -154,6 +148,50 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
     }
     return { markdown: content };
   }, [content, extractReport]);
+
+  const structured =
+    (compact || variant === "taskDone") && content
+      ? parseFinalReport(content)
+      : null;
+  const reportedSuccess = structured?.success ?? reportData?.success;
+  const reportFailed =
+    transport === "failed" ||
+    Boolean(maybeResult?.tool_failed) ||
+    reportedSuccess === false;
+  const stateLabel =
+    transport === "failed" || maybeResult?.tool_failed
+      ? "Request failed"
+      : !maybeResult
+        ? variant === "taskDone" && transport !== "running"
+          ? "State unknown"
+          : "Awaiting report"
+        : reportedSuccess === false
+          ? "Reported failure"
+          : reportedSuccess === true
+            ? "Reported success"
+            : "Report unverified";
+  const outcomeStatus = reportFailed
+    ? "error"
+    : transport === "running"
+      ? "running"
+      : "idle";
+  const status: ToolStatus =
+    variant === "taskDone"
+      ? outcomeStatus
+      : !maybeResult
+        ? "running"
+        : maybeResult.tool_failed
+          ? "error"
+          : "success";
+  const outcomeIcon =
+    variant === "taskDone" && (reportFailed || reportedSuccess === true) ? (
+      <Icon
+        icon={reportFailed ? CircleX : CircleCheck}
+        tone={reportFailed ? "danger" : "muted"}
+      />
+    ) : (
+      icon
+    );
 
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, , setOpen] = useStoredOpen(storeKey, defaultOpen);
@@ -307,7 +345,9 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
   ]);
 
   const showActions =
-    (compact || status === "success") && isOpen && !!deferredReportMarkdown;
+    (compact || variant === "taskDone" || status === "success") &&
+    isOpen &&
+    !!deferredReportMarkdown;
   const showSaveButton = isIdeHost();
   const variantClass = REPORT_VARIANT_CLASSES[variant];
   const hasReportBody = !!deferredReportMarkdown && bodyReady;
@@ -349,7 +389,7 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
             tone="accent"
           />
         ) : (
-          icon
+          outcomeIcon
         )}
       </span>
       <span
@@ -357,7 +397,8 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
           styles.summary,
           status === "error" && styles.error,
           variant === "taskDone" &&
-            status === "success" &&
+            reportedSuccess === true &&
+            !reportFailed &&
             styles.summaryTaskDone,
         )}
       >
@@ -367,6 +408,9 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
           summary
         )}
       </span>
+      {variant === "taskDone" && (
+        <span className={styles.meta}>{stateLabel}</span>
+      )}
       {meta && <span className={styles.meta}>{meta}</span>}
       {status === "error" && <span className={styles.errorBadge}>failed</span>}
     </span>
@@ -460,26 +504,10 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
   ) : null;
 
   if (compact) {
-    const structured = content ? parseFinalReport(content) : null;
     const presentation = finalReportPresentation(
       content,
       !!maybeResult?.tool_failed,
     );
-    const reportedSuccess = structured?.success ?? reportData?.success;
-    const reportFailed =
-      transport === "failed" ||
-      Boolean(maybeResult?.tool_failed) ||
-      reportedSuccess === false;
-    const stateLabel =
-      transport === "failed" || maybeResult?.tool_failed
-        ? "Request failed"
-        : !maybeResult
-          ? "Awaiting report"
-          : reportedSuccess === false
-            ? "Reported failure"
-            : reportedSuccess === true
-              ? "Reported success"
-              : "Report unverified";
     const facts = structured
       ? presentation.facts
       : [
@@ -505,17 +533,7 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
     return (
       <ToolCard
         density="compact"
-        icon={
-          variant === "taskDone" &&
-          (reportFailed || reportedSuccess === true) ? (
-            <Icon
-              icon={reportFailed ? CircleX : CircleCheck}
-              tone={reportFailed ? "danger" : "muted"}
-            />
-          ) : (
-            icon
-          )
-        }
+        icon={outcomeIcon}
         summary={
           compactText(
             structured?.summary ?? reportData?.summary ?? defaultSummary,
@@ -523,9 +541,7 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
           ) ?? "Task report"
         }
         meta={stateLabel}
-        status={
-          reportFailed ? "error" : transport === "running" ? "running" : "idle"
-        }
+        status={outcomeStatus}
         isOpen={isOpen}
         onToggle={() => setOpen(!isOpen)}
         toolCall={toolCall}

@@ -67,6 +67,7 @@ export interface UpdateTaskDocumentRequest {
   slug: string;
   content: string;
   pinned?: boolean;
+  expectedVersion?: number;
 }
 
 export interface DeleteTaskDocumentRequest {
@@ -296,7 +297,7 @@ export const taskDocumentsApi = createApi({
       UpdateTaskDocumentRequest
     >({
       queryFn: async (
-        { taskId, slug, content, pinned },
+        { taskId, slug, content, pinned, expectedVersion },
         api,
         _opts,
         baseQuery,
@@ -310,7 +311,7 @@ export const taskDocumentsApi = createApi({
             )}/documents/${encodeURIComponent(slug)}`,
           ),
           method: "PUT",
-          body: { content, pinned },
+          body: { content, pinned, expected_version: expectedVersion },
         });
         if (result.error) return { error: result.error };
         return { data: result.data as TaskDocumentDetail };

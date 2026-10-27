@@ -270,7 +270,7 @@ function ResponseInstance({
       status={pending ? "running" : "success"}
       isOpen={isOpen}
       onToggle={onToggle}
-      collapsible={!pending}
+      collapsible={compact || !pending}
       toolCall={toolCall}
       {...compactProps}
     >

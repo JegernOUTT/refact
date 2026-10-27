@@ -11,6 +11,7 @@ import {
 } from "../../services/refact/tasks";
 import { KanbanBoard } from "./KanbanBoard";
 import { CardOutcomeBadge } from "./CardOutcomeBadge";
+import { CardEvidencePanel } from "./CardEvidencePanel";
 
 const card: BoardCard = {
   id: "T-1",
@@ -135,5 +136,117 @@ describe("CardOutcomeBadge", () => {
     expect(
       screen.getByRole("status", { name: "Outcome: 1/2 fragments" }),
     ).toBeInTheDocument();
+  });
+
+  it("keeps reported success separate from failed, blocked, not-run and cached verifier evidence", async () => {
+    const evidenceCard: BoardCard = {
+      ...card,
+      column: "done",
+      final_report_structured: { success: true, summary: "Agent says done" },
+      verifier_report: {
+        passed: false,
+        classification: "verification_failed",
+        concerns: ["Missing required coverage"],
+        command_results: [
+          {
+            command: "npm test",
+            passed: false,
+            outcome: "command_failed",
+            exit_code: 1,
+            output_tail: "A failing assertion at the end",
+          },
+          {
+            command: "blocked-command",
+            passed: false,
+            outcome: "policy_denied",
+            exit_code: null,
+          },
+          { command: "not-run-command", passed: false, outcome: "no_commands" },
+          {
+            command: "cached-command",
+            passed: true,
+            outcome: "passed",
+            exit_code: 0,
+            from_cache: true,
+            executed_at: "2026-10-01T12:30:00Z",
+          },
+          { command: "legacy-command", passed: true, exit_code: 0 },
+        ],
+      },
+    };
+    const board = normalizeTaskBoard({
+      ...makeBoard({ "T-1": partialOutcome }),
+      cards: [evidenceCard],
+      owner_chat_id: "actual-owner",
+      card_claims: {
+        "T-1": {
+          claimant_chat_id: "agent-1",
+          claimed_at: "t0",
+          idempotency_key: "never-show-this-secret",
+        },
+      },
+    });
+    if (!board) throw new Error("Invalid evidence fixture");
+    const { user } = render(
+      <CardEvidencePanel card={board.cards[0]} board={board} />,
+    );
+    expect(screen.getByText("Verifier: Failed")).toBeInTheDocument();
+    expect(screen.getByText("Verifier: Blocked — not run")).toBeInTheDocument();
+    expect(screen.getByText("Verifier: Not run")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Cached — replayed, not re-executed/),
+    ).toHaveTextContent("2026-10-01T12:30:00Z");
+    expect(
+      screen.getByText("Verifier: Unknown — legacy or unclassified evidence"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Spec revision \/ verified HEAD: not included/),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByText(
+        "Agent-reported structured report (not independently verified)",
+      ),
+    );
+    expect(screen.getByText("Reported success")).toBeInTheDocument();
+    await user.click(screen.getByText("Full recorded log tail"));
+    expect(
+      screen.getByText("A failing assertion at the end"),
+    ).toBeInTheDocument();
+    await user.click(screen.getByText("Outcome fragments and provenance"));
+    expect(screen.getByText("Source run: agent-1")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Not recorded — not inferred from Done/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("never-show-this-secret"),
+    ).not.toBeInTheDocument();
+    expect(JSON.stringify(board.card_claims)).not.toContain(
+      "never-show-this-secret",
+    );
+  });
+
+  it("treats legacy or malformed optional evidence as unknown, never a pass", async () => {
+    const board = normalizeTaskBoard({
+      ...makeBoard(),
+      cards: [
+        {
+          ...card,
+          final_report_structured: { verification: "invalid" },
+          verifier_report: { command_results: [{ command: 42, passed: true }] },
+        },
+      ],
+    });
+    if (!board) throw new Error("Invalid legacy fixture");
+    const { user } = render(
+      <CardEvidencePanel card={board.cards[0]} board={board} />,
+    );
+    await user.click(
+      screen.getByText("Verifier report (separate from the agent claim)"),
+    );
+    expect(
+      screen.getByText("No verifier report. Verification unknown; not a pass."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Verifier: Passed")).not.toBeInTheDocument();
+    expect(screen.getByText("Unknown — no owner recorded")).toBeInTheDocument();
   });
 });

@@ -35,6 +35,10 @@
   white-space: nowrap;
 }
 
+.recordedStatus :global(.rf-active-pulse) {
+  animation: none;
+}
+
 .livePreview {
   display: block;
   min-width: 0;

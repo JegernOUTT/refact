@@ -1,6 +1,6 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { RootState } from "../../app/store";
-import { buildApiUrlFromState } from "./apiUrl";
+import { buildApiUrlFromState, getEngineEndpointIdentity } from "./apiUrl";
 
 export type TaskMemoryKind =
   | "decision"
@@ -243,25 +243,31 @@ export const taskMemoriesApi = createApi({
         if (result.error) return { error: result.error };
         return { data: result.data as PinTaskMemoryResponse };
       },
-      invalidatesTags: (_result, _error, { taskId }) => [
-        { type: "TaskMemories", id: taskId },
-        { type: "TaskMemories", id: `${taskId}:facets` },
-      ],
       async onQueryStarted(
         { taskId, filename, pinned },
         { dispatch, queryFulfilled, getState },
       ) {
+        const initial = (getState() as RootState).config;
+        const endpoint = getEngineEndpointIdentity(initial);
+        const sameScope = () => {
+          const current = (getState() as RootState).config;
+          return (
+            getEngineEndpointIdentity(current) === endpoint &&
+            current.apiKey === initial.apiKey
+          );
+        };
         const invalidated = taskMemoriesApi.util.selectInvalidatedBy(
           getState() as RootState,
           [{ type: "TaskMemories", id: taskId }],
         );
         const patches = invalidated
           .filter((entry) => entry.endpointName === "listTaskMemories")
-          .map((entry) =>
-            dispatch(
+          .map((entry) => {
+            const args = entry.originalArgs as TaskMemoriesQuery;
+            const patch = dispatch(
               taskMemoriesApi.util.updateQueryData(
                 "listTaskMemories",
-                entry.originalArgs as TaskMemoriesQuery,
+                args,
                 (draft) => {
                   const memory = draft.memories.find(
                     (m) => m.filename === filename,
@@ -269,12 +275,44 @@ export const taskMemoriesApi = createApi({
                   if (memory) memory.pinned = pinned;
                 },
               ),
-            ),
-          );
+            );
+            const optimistic =
+              taskMemoriesApi.endpoints.listTaskMemories.select(args)(
+                getState() as RootState,
+              );
+            return {
+              args,
+              patch,
+              data: optimistic.data,
+              requestId: optimistic.requestId,
+            };
+          });
         try {
           await queryFulfilled;
         } catch {
-          patches.forEach((p) => p.undo());
+          if (sameScope()) {
+            for (const entry of patches) {
+              const current = taskMemoriesApi.endpoints.listTaskMemories.select(
+                entry.args,
+              )(getState() as RootState);
+              if (
+                current.data !== undefined &&
+                current.data === entry.data &&
+                current.requestId === entry.requestId
+              ) {
+                entry.patch.undo();
+              }
+            }
+          }
+        } finally {
+          if (sameScope()) {
+            dispatch(
+              taskMemoriesApi.util.invalidateTags([
+                { type: "TaskMemories", id: taskId },
+                { type: "TaskMemories", id: `${taskId}:facets` },
+              ]),
+            );
+          }
         }
       },
     }),
@@ -297,25 +335,31 @@ export const taskMemoriesApi = createApi({
         if (result.error) return { error: result.error };
         return { data: result.data as ArchiveTaskMemoryResponse };
       },
-      invalidatesTags: (_result, _error, { taskId }) => [
-        { type: "TaskMemories", id: taskId },
-        { type: "TaskMemories", id: `${taskId}:facets` },
-      ],
       async onQueryStarted(
         { taskId, filename },
         { dispatch, queryFulfilled, getState },
       ) {
+        const initial = (getState() as RootState).config;
+        const endpoint = getEngineEndpointIdentity(initial);
+        const sameScope = () => {
+          const current = (getState() as RootState).config;
+          return (
+            getEngineEndpointIdentity(current) === endpoint &&
+            current.apiKey === initial.apiKey
+          );
+        };
         const invalidated = taskMemoriesApi.util.selectInvalidatedBy(
           getState() as RootState,
           [{ type: "TaskMemories", id: taskId }],
         );
         const patches = invalidated
           .filter((entry) => entry.endpointName === "listTaskMemories")
-          .map((entry) =>
-            dispatch(
+          .map((entry) => {
+            const args = entry.originalArgs as TaskMemoriesQuery;
+            const patch = dispatch(
               taskMemoriesApi.util.updateQueryData(
                 "listTaskMemories",
-                entry.originalArgs as TaskMemoriesQuery,
+                args,
                 (draft) => {
                   const idx = draft.memories.findIndex(
                     (m) => m.filename === filename,
@@ -323,12 +367,44 @@ export const taskMemoriesApi = createApi({
                   if (idx !== -1) draft.memories.splice(idx, 1);
                 },
               ),
-            ),
-          );
+            );
+            const optimistic =
+              taskMemoriesApi.endpoints.listTaskMemories.select(args)(
+                getState() as RootState,
+              );
+            return {
+              args,
+              patch,
+              data: optimistic.data,
+              requestId: optimistic.requestId,
+            };
+          });
         try {
           await queryFulfilled;
         } catch {
-          patches.forEach((p) => p.undo());
+          if (sameScope()) {
+            for (const entry of patches) {
+              const current = taskMemoriesApi.endpoints.listTaskMemories.select(
+                entry.args,
+              )(getState() as RootState);
+              if (
+                current.data !== undefined &&
+                current.data === entry.data &&
+                current.requestId === entry.requestId
+              ) {
+                entry.patch.undo();
+              }
+            }
+          }
+        } finally {
+          if (sameScope()) {
+            dispatch(
+              taskMemoriesApi.util.invalidateTags([
+                { type: "TaskMemories", id: taskId },
+                { type: "TaskMemories", id: `${taskId}:facets` },
+              ]),
+            );
+          }
         }
       },
     }),

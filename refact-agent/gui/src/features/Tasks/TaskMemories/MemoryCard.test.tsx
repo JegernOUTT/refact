@@ -101,12 +101,31 @@ describe("MemoryCard", () => {
 
   it("archive icon opens confirm popover and confirm archives", async () => {
     const onArchive = vi.fn();
-    const { user } = renderCard(mockMemory, { onArchive });
+    const { user, rerender } = renderCard(mockMemory, { onArchive });
 
     await user.click(screen.getByRole("button", { name: "Archive" }));
     expect(screen.getByText("Archive this memory?")).toBeInTheDocument();
     expect(onArchive).not.toHaveBeenCalled();
 
+    rerender(
+      <MemoryCard
+        memory={mockMemory}
+        onPin={vi.fn()}
+        onArchive={onArchive}
+        pending
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Pin" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Archive" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Confirm archive" }),
+    ).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Confirm archive" }));
+    expect(onArchive).not.toHaveBeenCalled();
+
+    rerender(
+      <MemoryCard memory={mockMemory} onPin={vi.fn()} onArchive={onArchive} />,
+    );
     await user.click(screen.getByRole("button", { name: "Confirm archive" }));
     expect(onArchive).toHaveBeenCalledWith(mockMemory.filename);
   });

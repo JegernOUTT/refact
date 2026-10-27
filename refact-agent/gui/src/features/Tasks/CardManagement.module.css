@@ -1,0 +1,107 @@
+.toolbar,
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.toolbar {
+  padding: var(--rf-panel-pad);
+  flex-shrink: 0;
+}
+
+.filter {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.sort {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.summary,
+.hint {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+  overflow-wrap: anywhere;
+}
+
+.summary {
+  flex-basis: 100%;
+}
+
+.cardTitleButton {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cardTitleButton:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-space-2xs);
+}
+
+.editorBody,
+.form,
+.dependencies,
+.review {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  min-width: 0;
+}
+
+.editorBody {
+  overflow-wrap: anywhere;
+}
+
+.dependencies {
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  padding: var(--rf-space-3);
+  margin: 0;
+}
+
+.dependencyList {
+  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  max-height: calc(var(--rf-control-h) * 6);
+  overflow-y: auto;
+  min-width: 0;
+}
+
+.review {
+  padding: var(--rf-space-3);
+  border: var(--rf-hairline) solid var(--rf-border-strong);
+  border-radius: var(--rf-radius-ctl);
+}
+
+.currentValues {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--rf-space-1);
+  margin: 0;
+}
+
+.currentValues dt {
+  color: var(--rf-color-muted);
+  font-weight: var(--rf-weight-medium);
+}
+
+.currentValues dd {
+  margin: 0 0 var(--rf-space-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.error {
+  color: var(--rf-color-danger);
+}

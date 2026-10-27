@@ -68,16 +68,14 @@ describe("resolveChatLink", () => {
     });
   });
 
-  it("returns agent via legacy agent-<cardId>-<suffix> heuristic when card exists", () => {
+  it("does not infer card authority from legacy agent ID spelling", () => {
     const planners: PlannerInfo[] = [];
-    // Card has no agent_chat_id, but the legacy pattern still resolves it
     const board = makeBoard([makeCard("T-7", null)]);
 
     const result = resolveChatLink("agent-T-7-legacysuffix", planners, board);
 
     expect(result).toEqual({
-      kind: "agent",
-      cardId: "T-7",
+      kind: "unknown",
       chatId: "agent-T-7-legacysuffix",
     });
   });

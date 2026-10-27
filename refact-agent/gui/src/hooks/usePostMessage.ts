@@ -1,25 +1,28 @@
 declare global {
   interface Window {
     postIntellijMessage?: (message: Record<string, unknown>) => void;
-    acquireVsCodeApi?(): {
+    acquireVsCodeApi?: () => {
       postMessage: (message: Record<string, unknown>) => void;
     };
   }
 }
 
 let postMessage: Window["postMessage"] | undefined;
+let acquireVsCodeApi: Window["acquireVsCodeApi"];
+const webPostMessage = (message: Record<string, unknown>) =>
+  window.postMessage(message, "*");
 
 function setUpPostMessage() {
-  if (postMessage) return postMessage;
   if (window.acquireVsCodeApi) {
-    postMessage = window.acquireVsCodeApi().postMessage;
+    if (acquireVsCodeApi !== window.acquireVsCodeApi || !postMessage) {
+      acquireVsCodeApi = window.acquireVsCodeApi;
+      postMessage = window.acquireVsCodeApi().postMessage;
+    }
+    return postMessage;
   } else if (window.postIntellijMessage) {
-    postMessage = window.postIntellijMessage;
-  } else {
-    postMessage = (message: Record<string, unknown>) =>
-      window.postMessage(message, "*");
+    return window.postIntellijMessage;
   }
-  return postMessage;
+  return webPostMessage;
 }
 
 export const usePostMessage = () => {

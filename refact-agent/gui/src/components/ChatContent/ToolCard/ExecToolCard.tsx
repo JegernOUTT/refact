@@ -1,13 +1,27 @@
 import { Code, Timer, Rows3 } from "lucide-react";
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Box, Flex, Text } from "@radix-ui/themes";
 import { FileText } from "lucide-react";
 import classNames from "classnames";
 
 import { useAppSelector } from "../../../hooks/useAppSelector";
-import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/selectors";
-import { useThreadId } from "../../../features/Chat/Thread";
-import { selectHost } from "../../../features/Config/configSlice";
+import {
+  selectConfig,
+  selectCapabilities,
+} from "../../../features/Config/configSlice";
+import { useToolCallActivity } from "./useToolCallActivity";
+import { useCopyToClipboard } from "../../../hooks/useCopyToClipboard";
+import {
+  getEngineEndpointIdentity,
+  hasUsableEngineEndpoint,
+} from "../../../services/refact/apiUrl";
+import { readExec } from "../../../services/refact/exec";
 import type {
   ExecOutputChunkMetadata,
   ExecProcessMetadata,
@@ -66,7 +80,7 @@ type ProcessArgs = ShellArgs & {
 type DisplayProcess = {
   processId?: string;
   shortDescription: string;
-  status: ExecProcessStatus;
+  status: ExecProcessStatus | "unknown";
   mode?: string;
   command?: string;
   cwd?: string | null;
@@ -103,7 +117,8 @@ function normalizeStatus(
   toolName: ExecToolName,
   hasResult: boolean,
   toolFailed: boolean | undefined,
-): ExecProcessStatus {
+  isRunning: boolean,
+): DisplayProcess["status"] {
   if (metadata && isExecProcessStatus(metadata.status)) {
     if (
       metadata.status === "running" &&
@@ -115,7 +130,7 @@ function normalizeStatus(
     }
     return metadata.status;
   }
-  if (!hasResult) return "running";
+  if (!hasResult) return isRunning ? "running" : "unknown";
   return toolFailed ? "failed" : "exited";
 }
 
@@ -149,7 +164,7 @@ function summarizeTool(toolName: ExecToolName, args: ProcessArgs): string {
 function displayProcessFromMetadata(
   metadata: ExecToolMetadata | null,
   args: ProcessArgs,
-  status: ExecProcessStatus,
+  status: DisplayProcess["status"],
   fallbackSummary: string,
 ): DisplayProcess {
   const startedAtMs = metadata?.started_at_ms ?? metadata?.started_at;
@@ -170,21 +185,30 @@ function displayProcessFromMetadata(
   };
 }
 
-function durationLabel(process: DisplayProcess, nowMs: number): string | null {
+function durationLabel(
+  process: DisplayProcess,
+  nowMs: number,
+  isLive: boolean,
+): string | null {
   if (
     (process.status === "running" ||
       process.status === "running_in_background" ||
       process.status === "starting") &&
     typeof process.startedAtMs === "number"
   ) {
+    if (!isLive) return null;
     const elapsed = Math.max(0, nowMs - process.startedAtMs) / 1000;
     return `${elapsed.toFixed(0)}s running`;
   }
   if (typeof process.durationMs === "number") {
     return `${(process.durationMs / 1000).toFixed(1)}s`;
   }
-  if (typeof process.startedAtMs !== "number") return null;
-  const end = typeof process.endedAtMs === "number" ? process.endedAtMs : nowMs;
+  if (
+    typeof process.startedAtMs !== "number" ||
+    typeof process.endedAtMs !== "number"
+  )
+    return null;
+  const end = process.endedAtMs;
   const elapsed = Math.max(0, end - process.startedAtMs) / 1000;
   return `${elapsed.toFixed(1)}s`;
 }
@@ -232,7 +256,7 @@ function persistedOutputPath(metadata: ExecToolMetadata | null): string | null {
   );
 }
 
-function isBusyStatus(status: ExecProcessStatus): boolean {
+function isBusyStatus(status: DisplayProcess["status"]): boolean {
   return (
     status === "starting" ||
     status === "running" ||
@@ -240,7 +264,7 @@ function isBusyStatus(status: ExecProcessStatus): boolean {
   );
 }
 
-function isTerminalStatus(status: ExecProcessStatus): boolean {
+function isTerminalStatus(status: DisplayProcess["status"]): boolean {
   return !isBusyStatus(status);
 }
 
@@ -314,14 +338,6 @@ function latestChunkPreview(
   return contentPreviewText(content);
 }
 
-async function openLogInWeb(path: string): Promise<void> {
-  const response = await fetch(path);
-  const blob = await response.blob();
-  const url = URL.createObjectURL(blob);
-  window.open(url, "_blank", "noopener,noreferrer");
-  window.setTimeout(() => URL.revokeObjectURL(url), 60000);
-}
-
 function processItemLabel(process: ExecProcessMetadata): string {
   return (
     process.short_description ??
@@ -371,14 +387,18 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
   toolCall,
   toolName,
 }) => {
-  const host = useAppSelector(selectHost);
+  const config = useAppSelector(selectConfig);
+  const capabilities = useAppSelector(selectCapabilities);
+  const host = config.host;
   const postMessage = usePostMessage();
+  const copyToClipboard = useCopyToClipboard();
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey, false);
-  const threadId = useThreadId();
-  const maybeResult = useAppSelector((state) =>
-    selectToolResultByThreadAndId(state, threadId, toolCall.id),
-  );
+  const {
+    result: maybeResult,
+    isRunning,
+    threadId,
+  } = useToolCallActivity(toolCall.id);
   const content =
     maybeResult && typeof maybeResult.content === "string"
       ? maybeResult.content
@@ -398,6 +418,7 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
     toolName,
     Boolean(maybeResult),
     maybeResult?.tool_failed,
+    isRunning,
   );
   const process = displayProcessFromMetadata(
     metadata,
@@ -406,12 +427,62 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
     fallbackSummary,
   );
   const copyableOutput = useMemo(() => copyableOutputText(content), [content]);
-  const isBusy = isBusyStatus(status);
+  const isBusy = isRunning;
   const livePreview = latestChunkPreview(metadata, content, toolCall);
-  const showLivePreview = isBusy && livePreview !== null;
+  const showLivePreview =
+    (isBusy || isBusyStatus(status)) && livePreview !== null;
   const nowMs = useRunningNowMs(isBusy);
-  const duration = durationLabel(process, nowMs);
+  const duration = durationLabel(process, nowMs, isBusy);
   const logPath = persistedOutputPath(metadata);
+  const endpointIdentity = getEngineEndpointIdentity(config);
+  const canReadTranscript = Boolean(
+    process.processId && threadId && hasUsableEngineEndpoint(config),
+  );
+  const canOpenInIde =
+    capabilities.openFileInIde &&
+    ((host === "vscode" && typeof window.acquireVsCodeApi === "function") ||
+      (host === "jetbrains" &&
+        typeof window.postIntellijMessage === "function") ||
+      (host === "ide" &&
+        (typeof window.acquireVsCodeApi === "function" ||
+          typeof window.postIntellijMessage === "function")));
+  const source = useMemo(
+    () => ({
+      endpointIdentity,
+      threadId,
+      toolCallId: toolCall.id,
+      processId: process.processId,
+      logPath,
+      apiKey: config.apiKey,
+      canReadTranscript,
+      canOpenInIde,
+    }),
+    [
+      endpointIdentity,
+      threadId,
+      toolCall.id,
+      process.processId,
+      logPath,
+      config.apiKey,
+      canReadTranscript,
+      canOpenInIde,
+    ],
+  );
+  const sourceRef = useRef<object | null>(source);
+  sourceRef.current = source;
+  const [logState, setLogState] = useState<{
+    source: object;
+    loading?: boolean;
+    content?: string;
+    error?: string;
+  } | null>(null);
+  const currentLogState = logState?.source === source ? logState : null;
+  useEffect(() => {
+    sourceRef.current = source;
+    return () => {
+      sourceRef.current = null;
+    };
+  }, [source]);
   const meta = [
     duration,
     writeStdinMeta(toolName, metadata),
@@ -431,21 +502,55 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
   const handleOpenLog = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       event.stopPropagation();
-      if (!logPath) return;
-      if (host === "web") {
-        void openLogInWeb(logPath).catch(() => undefined);
-        return;
+      if (!logPath || !canOpenInIde) return;
+      try {
+        postMessage(ideOpenFile({ file_path: logPath }));
+      } catch (cause) {
+        setLogState({
+          source,
+          error: cause instanceof Error ? cause.message : String(cause),
+        });
       }
-      postMessage(ideOpenFile({ file_path: logPath }));
     },
-    [host, logPath, postMessage],
+    [canOpenInIde, logPath, postMessage, source],
   );
+  const handleReadTranscript = useCallback(async () => {
+    if (!canReadTranscript || !process.processId || currentLogState?.loading)
+      return;
+    setLogState({ source, loading: true });
+    try {
+      const response = await readExec(
+        process.processId,
+        0,
+        config,
+        threadId,
+        config.apiKey ?? undefined,
+      );
+      if (sourceRef.current !== source) return;
+      const content = response.chunks.map((chunk) => chunk.text).join("");
+      setLogState({ source, content });
+    } catch (cause) {
+      if (sourceRef.current !== source) return;
+      setLogState({
+        source,
+        error: cause instanceof Error ? cause.message : String(cause),
+      });
+    }
+  }, [
+    canReadTranscript,
+    config,
+    currentLogState?.loading,
+    process.processId,
+    source,
+    threadId,
+  ]);
   const handleOpenPath = useCallback(
     (
       event: React.MouseEvent<HTMLButtonElement>,
       reference: ToolEnrichmentReference,
     ) => {
       event.stopPropagation();
+      if (!canOpenInIde) return;
       postMessage(
         ideOpenFile({
           file_path: reference.target,
@@ -453,7 +558,7 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
         }),
       );
     },
-    [postMessage],
+    [canOpenInIde, postMessage],
   );
 
   const icon = toolName === "process_list" ? <Rows3 /> : <Code />;
@@ -469,7 +574,10 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
       <span className={styles.summary}>{summaryText}</span>
       <span className={styles.meta}>
         {meta && <span className={styles.metaText}>{meta}</span>}
-        <ProcessStatusBadge status={status} />
+        {maybeResult && <span>Recorded</span>}
+        <span className={styles.recordedStatus}>
+          <ProcessStatusBadge status={status} />
+        </span>
         {metadata?.tty === true && (
           <Badge
             tone="accent"
@@ -498,7 +606,10 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
           data-testid="exec-live-preview"
           title={livePreview}
         >
-          <span className="rf-text-shimmer">{livePreview}</span>
+          <span className={isBusy ? "rf-text-shimmer" : undefined}>
+            {!isBusy && "Recorded output: "}
+            {livePreview}
+          </span>
         </Text>
       )}
 
@@ -507,7 +618,13 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
         icon={icon}
         summary={summary}
         status={
-          isBusy ? "running" : maybeResult?.tool_failed ? "error" : "success"
+          isBusy
+            ? "running"
+            : maybeResult?.tool_failed
+              ? "error"
+              : maybeResult
+                ? "success"
+                : "idle"
         }
         isOpen={isOpen}
         onToggle={handleToggle}
@@ -542,6 +659,12 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
             processId={process.processId}
           />
 
+          {!maybeResult && !isRunning && (
+            <Text size="1" color="gray">
+              Result not recorded; process outcome unknown.
+            </Text>
+          )}
+
           {pathReferences.length > 0 && (
             <Flex
               gap="1"
@@ -557,9 +680,14 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
                   type="button"
                   size="sm"
                   variant="soft"
+                  disabled={!canOpenInIde}
                   className={styles.pathReference}
                   onClick={(event) => handleOpenPath(event, reference)}
-                  title={pathReferenceLabel(reference)}
+                  title={
+                    canOpenInIde
+                      ? pathReferenceLabel(reference)
+                      : "Opening this path requires a supported IDE bridge"
+                  }
                 >
                   {pathReferenceLabel(reference)}
                 </Button>
@@ -567,18 +695,95 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
             </Flex>
           )}
 
-          {logPath && (
-            <Flex gap="2" wrap="wrap" className={styles.controls}>
-              <Button
-                type="button"
-                size="sm"
-                variant="soft"
-                className={styles.logButton}
-                onClick={handleOpenLog}
-                leftIcon={FileText}
-              >
-                Open log
-              </Button>
+          {(Boolean(logPath) || Boolean(process.processId)) && (
+            <Flex direction="column" gap="2">
+              <Flex gap="2" wrap="wrap" className={styles.controls}>
+                {logPath && canOpenInIde && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="soft"
+                    className={styles.logButton}
+                    onClick={handleOpenLog}
+                    leftIcon={FileText}
+                  >
+                    Open log in IDE
+                  </Button>
+                )}
+                {logPath && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="soft"
+                    onClick={() => copyToClipboard(logPath)}
+                  >
+                    Copy log path
+                  </Button>
+                )}
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="soft"
+                  disabled={!canReadTranscript || currentLogState?.loading}
+                  onClick={() => {
+                    void handleReadTranscript();
+                  }}
+                >
+                  {currentLogState?.loading
+                    ? "Reading transcript…"
+                    : "Read process transcript"}
+                </Button>
+              </Flex>
+              <Text size="1" color="gray">
+                Bounded in-memory transcript (up to 10,000 retained chunks);
+                older output may be missing. Not the full disk log.
+              </Text>
+              {logPath && !canOpenInIde && (
+                <Text size="1" color="gray">
+                  Full disk log unavailable here: opening its path requires a
+                  supported IDE bridge.
+                </Text>
+              )}
+              {!canReadTranscript && (
+                <Text size="1" color="gray">
+                  Transcript unavailable: requires a process ID, owning chat,
+                  and connected engine endpoint.
+                </Text>
+              )}
+              {currentLogState?.error && (
+                <Text size="1" color="red" role="alert">
+                  Transcript/log unavailable: {currentLogState.error}
+                </Text>
+              )}
+              {currentLogState?.content !== undefined && (
+                <>
+                  <Text size="1" weight="medium">
+                    Retained process transcript
+                  </Text>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="soft"
+                    onClick={() =>
+                      copyToClipboard(currentLogState.content ?? "")
+                    }
+                  >
+                    Copy transcript
+                  </Button>
+                  {currentLogState.content.length > 30_000 && (
+                    <Text size="1" color="gray">
+                      Preview capped at 30,000 characters; Copy transcript
+                      retains all returned text.
+                    </Text>
+                  )}
+                  <Box className={styles.outputBody}>
+                    <pre className={styles.outputPre}>
+                      {currentLogState.content.slice(0, 30_000) ||
+                        "No retained output returned."}
+                    </pre>
+                  </Box>
+                </>
+              )}
             </Flex>
           )}
 
@@ -588,7 +793,13 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
           />
 
           {listedProcesses.length > 0 && (
-            <Box className={styles.processList} data-testid="exec-process-list">
+            <Box
+              className={classNames(styles.processList, styles.recordedStatus)}
+              data-testid="exec-process-list"
+            >
+              <Text size="1" color="gray">
+                Recorded process list
+              </Text>
               {listedProcesses.map((item) => (
                 <Flex
                   key={item.process_id}
@@ -618,7 +829,7 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
             </Box>
           )}
 
-          {!metadata && (
+          {!metadata && maybeResult && (
             <Flex align="center" gap="1" mt="2">
               <Timer />
               <Text size="1" color="gray">

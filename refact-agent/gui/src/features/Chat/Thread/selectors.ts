@@ -340,6 +340,19 @@ function shouldKeepBackgroundAgent(
   );
 }
 
+export function reconcileBackgroundAgents(
+  liveAgents: Record<string, BackgroundAgentSummary>,
+  fetchedAgents: BackgroundAgentSummary[] = [],
+): Record<string, BackgroundAgentSummary> {
+  const agents = { ...liveAgents };
+  for (const agent of fetchedAgents) {
+    if (shouldKeepBackgroundAgent(agents[agent.agent_id], agent)) {
+      agents[agent.agent_id] = agent;
+    }
+  }
+  return agents;
+}
+
 export const selectBackgroundAgentPool = createSelector(
   [selectAllThreads],
   (threads): Record<string, BackgroundAgentSummary> => {
@@ -376,10 +389,16 @@ export function flattenBackgroundAgentTree(
 export const selectActiveBackgroundAgents = createSelector(
   [selectBackgroundAgentsTree],
   (tree): BackgroundAgentSummary[] =>
-    flattenBackgroundAgentTree(tree)
-      .filter((agent) => !isTerminalBackgroundAgent(agent))
-      .sort(compareBackgroundAgentActivity),
+    activeBackgroundAgents(flattenBackgroundAgentTree(tree)),
 );
+
+export function activeBackgroundAgents(
+  agents: BackgroundAgentSummary[],
+): BackgroundAgentSummary[] {
+  return agents
+    .filter((agent) => !isTerminalBackgroundAgent(agent))
+    .sort(compareBackgroundAgentActivity);
+}
 
 export type AgentsAggregateUsage = {
   tokensTotal: number;

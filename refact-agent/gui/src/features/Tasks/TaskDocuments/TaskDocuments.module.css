@@ -140,6 +140,13 @@
   min-width: 0;
 }
 
+.conflictNotice {
+  min-width: 0;
+  padding: var(--rf-space-3);
+  border: var(--rf-hairline) solid var(--rf-color-warning);
+  border-radius: var(--rf-radius-ctl);
+}
+
 .editorTextarea {
   min-height: 260px;
   resize: vertical;

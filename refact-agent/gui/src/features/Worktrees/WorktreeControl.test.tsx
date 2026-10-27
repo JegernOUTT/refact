@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test } from "vitest";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { http, HttpResponse } from "msw";
-import { screen, waitFor, render } from "../../utils/test-utils";
+import { fireEvent, screen, waitFor, render } from "../../utils/test-utils";
 import type { Chat } from "../Chat/Thread/types";
 import { ChatThreadProvider } from "../Chat/Thread";
 import type {
@@ -13,6 +13,7 @@ import type {
 } from "../../services/refact";
 import { WorktreeControl } from "./WorktreeControl";
 import { server } from "../../utils/mockServer";
+import { resetChatParamsSyncState } from "../../services/refact/chatCommands";
 
 type JsonObject = Record<string, unknown>;
 type Host = "web" | "ide" | "vscode" | "jetbrains";
@@ -280,6 +281,7 @@ function renderControl(
 }
 
 beforeEach(() => {
+  resetChatParamsSyncState();
   server.use(worktreesList([]), worktreeDiff(), chatModes());
 });
 
@@ -700,5 +702,139 @@ describe("WorktreeControl", () => {
     expect(screen.getByTestId("worktree-control-trigger")).toHaveTextContent(
       "dev",
     );
+  });
+
+  test("merge cleanup warnings remain inspectable after the registry and chat detach", async () => {
+    const record = makeWorktreeRecord("wt-merged", "refact/chat/merged");
+    const mergeCalls: JsonObject[] = [];
+    const commandCalls: JsonObject[] = [];
+    let removed = false;
+    let removedInventoryReads = 0;
+    const { user } = renderControl([record], record.meta);
+    server.use(
+      http.get("*/v1/worktrees", () => {
+        if (removed) removedInventoryReads += 1;
+        return HttpResponse.json(makeWorktreeList(removed ? [] : [record]));
+      }),
+      commandCapture(commandCalls),
+      http.post("*/v1/worktrees/:id/merge", async ({ request }) => {
+        mergeCalls.push((await request.json()) as JsonObject);
+        removed = true;
+        return HttpResponse.json({
+          id: record.meta.id,
+          status: "merged",
+          merged: true,
+          cleanup: {
+            worktree_deleted: true,
+            branch_deleted: false,
+            registry_deleted: true,
+            stale_path: false,
+            warnings: ["Branch deletion failed; branch retained."],
+          },
+          warnings: ["Merge completed with a source warning."],
+        });
+      }),
+    );
+
+    await user.click(screen.getByTestId("worktree-control-trigger"));
+    await user.click(
+      await screen.findByRole("button", { name: "Merge worktree" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("worktree-control-trigger")).toHaveTextContent(
+        "dev",
+      );
+      expect(commandCalls.length).toBeGreaterThan(0);
+      expect(removedInventoryReads).toBeGreaterThan(0);
+    });
+    expect(
+      screen.getByRole("dialog", { name: "Merge worktree" }),
+    ).toHaveTextContent("Merge refact/chat/merged into a target branch.");
+    expect(screen.getByText("Merge completed.")).toBeInTheDocument();
+    expect(
+      screen.getByText("Merge completed with a source warning."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Cleanup: worktree deleted, branch kept, registry deleted",
+      ),
+    ).toBeInTheDocument();
+    const warning = screen.getByText(
+      "Branch deletion failed; branch retained.",
+    );
+    expect(
+      fireEvent.pointerDown(warning, { button: 0, cancelable: true }),
+    ).toBe(true);
+    await user.pointer([
+      { target: warning, offset: 0, keys: "[MouseLeft>]" },
+      { target: warning, offset: warning.textContent?.length },
+      { keys: "[/MouseLeft]" },
+    ]);
+    expect(window.getSelection()?.toString()).toBe(warning.textContent);
+    expect(
+      screen.getByRole("dialog", { name: "Merge worktree" }),
+    ).toBeInTheDocument();
+    const merge = screen.getByRole("button", { name: "Merge" });
+    expect(merge).toBeDisabled();
+    await user.click(merge);
+    expect(mergeCalls).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "Merge worktree" }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  test("nothing-to-merge partial cleanup keeps the retained worktree outcome visible", async () => {
+    const record = makeWorktreeRecord("wt-noop", "refact/chat/noop");
+    const commandCalls: JsonObject[] = [];
+    const { user } = renderControl([record], record.meta);
+    server.use(
+      commandCapture(commandCalls),
+      http.post("*/v1/worktrees/:id/merge", () =>
+        HttpResponse.json({
+          id: record.meta.id,
+          status: "nothing_to_merge",
+          merged: false,
+          cleanup: {
+            worktree_deleted: false,
+            branch_deleted: true,
+            registry_deleted: false,
+            stale_path: false,
+            warnings: ["Worktree cleanup failed; worktree retained."],
+          },
+          warnings: ["No new commits were found."],
+        }),
+      ),
+    );
+
+    await user.click(screen.getByTestId("worktree-control-trigger"));
+    await user.click(
+      await screen.findByRole("button", { name: "Merge worktree" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+
+    expect(await screen.findByText("Nothing to merge.")).toBeInTheDocument();
+    expect(
+      screen.getByText("Cleanup: worktree kept, branch deleted, registry kept"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Worktree cleanup failed; worktree retained."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("No new commits were found.")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Worktree merged and removed."),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Merge" })).toBeEnabled();
+    expect(commandCalls).toHaveLength(0);
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "Merge worktree" }),
+      ).not.toBeInTheDocument();
+    });
   });
 });

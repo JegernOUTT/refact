@@ -1,5 +1,5 @@
 import { act } from "react-dom/test-utils";
-import { describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   cleanup,
   fireEvent,
@@ -16,10 +16,12 @@ import { CollapsibleStoreProvider } from "../useStoredOpen";
 import type { CollapsibleStore } from "../CollapsibleStore";
 import {
   reducer as configReducer,
+  updateConfig,
   type Config,
 } from "../../../features/Config/configSlice";
 import type {
   ExecToolMetadata,
+  ChatMessage,
   ToolCall,
   ToolEnrichment,
   ToolMessage,
@@ -40,11 +42,13 @@ type RenderExecToolOptions = {
   host?: Config["host"];
   subchatLog?: string[];
   collapsibleStore?: CollapsibleStore;
+  busy?: boolean;
+  config?: Partial<Config>;
 };
 
-function makeStore(toolMessage?: ToolMessage, host: Config["host"] = "web") {
+function makeStore(messages: ChatMessage[], options: RenderExecToolOptions) {
   const config: Config = {
-    host,
+    host: options.host ?? "web",
     lspPort: 8001,
     apiKey: null,
     features: {
@@ -57,6 +61,8 @@ function makeStore(toolMessage?: ToolMessage, host: Config["host"] = "web") {
       appearance: "dark",
     },
     shiftEnterToSubmit: false,
+    engineServed: true,
+    ...options.config,
   };
 
   return configureStore({
@@ -68,8 +74,10 @@ function makeStore(toolMessage?: ToolMessage, host: Config["host"] = "web") {
           threads: {
             "chat-1": {
               thread: {
-                messages: toolMessage ? [toolMessage] : [],
+                messages,
               },
+              streaming: options.busy === true,
+              waiting_for_response: false,
             },
           },
         },
@@ -115,26 +123,39 @@ function renderExecTool(options: RenderExecToolOptions = {}) {
               : undefined,
         }
       : undefined;
-  const store = makeStore(message, options.host);
+  const store = makeStore(
+    [
+      { role: "assistant", content: "", tool_calls: [toolCall] },
+      ...(message ? [message] : []),
+    ],
+    options,
+  );
 
   const card = <ExecToolCard toolCall={toolCall} toolName={toolName} />;
 
-  return render(
-    <Provider store={store}>
-      <Theme>
-        {options.collapsibleStore ? (
-          <CollapsibleStoreProvider value={options.collapsibleStore}>
-            {card}
-          </CollapsibleStoreProvider>
-        ) : (
-          card
-        )}
-      </Theme>
-    </Provider>,
-  );
+  return {
+    store,
+    ...render(
+      <Provider store={store}>
+        <Theme>
+          {options.collapsibleStore ? (
+            <CollapsibleStoreProvider value={options.collapsibleStore}>
+              {card}
+            </CollapsibleStoreProvider>
+          ) : (
+            card
+          )}
+        </Theme>
+      </Provider>,
+    ),
+  };
 }
 
 describe("ExecToolCard", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
   test("shell card renders short description, command, cwd, status, and process id", () => {
     renderExecTool({
       content:
@@ -178,9 +199,12 @@ describe("ExecToolCard", () => {
     const postMessageSpy = vi
       .spyOn(window, "postMessage")
       .mockImplementation(() => undefined);
+    vi.stubGlobal("postIntellijMessage", (message: Record<string, unknown>) =>
+      window.postMessage(message, "*"),
+    );
     try {
       renderExecTool({
-        host: "vscode",
+        host: "jetbrains",
         extra: {
           process_id: "exec_paths_1",
           status: "exited",
@@ -322,7 +346,9 @@ describe("ExecToolCard", () => {
     expect(screen.getByText("server ready")).toBeInTheDocument();
   });
 
-  test("persisted_output_path renders Open log button", () => {
+  test("persisted_output_path offers retained transcript and copy path, never a cache URL", () => {
+    const copy = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText: copy } });
     renderExecTool({
       content: "output",
       extra: {
@@ -336,79 +362,137 @@ describe("ExecToolCard", () => {
 
     fireEvent.click(screen.getByText("Read log"));
 
+    expect(screen.queryByRole("button", { name: /open log/i })).toBeNull();
     expect(
-      screen.getByRole("button", { name: /open log/i }),
+      screen.getByRole("button", { name: "Read process transcript" }),
+    ).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Copy log path" }));
+    expect(copy).toHaveBeenCalledWith("/tmp/refact/exec/exec_log_1.log");
+    expect(
+      screen.getByText(/Full disk log unavailable here/u),
     ).toBeInTheDocument();
   });
 
-  test("Open log fetches and opens a blob in web host mode", async () => {
-    const blob = new Blob(["log output"], { type: "text/plain" });
-    const fetchMock = vi.fn().mockResolvedValue({
-      blob: vi.fn().mockResolvedValue(blob),
-    });
-    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
-    const createObjectURL = vi.fn(() => "blob:exec-log");
-    const revokeObjectURL = vi.fn();
-    const previousFetch = globalThis.fetch;
-    const previousCreateObjectURL = URL.createObjectURL.bind(URL);
-    const previousRevokeObjectURL = URL.revokeObjectURL.bind(URL);
-    Object.defineProperty(globalThis, "fetch", {
-      configurable: true,
-      value: fetchMock,
-    });
-    Object.defineProperty(URL, "createObjectURL", {
-      configurable: true,
-      value: createObjectURL,
-    });
-    Object.defineProperty(URL, "revokeObjectURL", {
-      configurable: true,
-      value: revokeObjectURL,
-    });
-
+  test("web transcript reads use exact process, chat, endpoint and authorization without popups", async () => {
+    const copy = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText: copy } });
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          chunks: [{ seq: 3, stream: "stdout", text: "retained log output\n" }],
+          next_seq: 4,
+          status: "exited",
+        }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(null);
     renderExecTool({
-      host: "web",
+      config: {
+        engineServed: false,
+        lspUrl: "https://engine.example/api",
+        apiKey: "log-token",
+      },
       content: "output",
       extra: {
-        process_id: "exec_log_web",
+        process_id: "exec/log web",
         status: "exited",
         short_description: "Read web log",
-        command: "cat big.log",
-        persisted_output_path: "/tmp/refact/exec/exec_log_web.log",
+        persisted_output_path: "/tmp/refact/private.log",
       },
     });
-
     fireEvent.click(screen.getByText("Read web log"));
-    fireEvent.click(screen.getByRole("button", { name: /open log/i }));
-    expect(fetchMock).toHaveBeenCalledWith("/tmp/refact/exec/exec_log_web.log");
-    await waitFor(() => {
-      expect(openSpy).toHaveBeenCalledWith(
-        "blob:exec-log",
-        "_blank",
-        "noopener,noreferrer",
-      );
-    });
-
-    cleanup();
-    openSpy.mockRestore();
-    Object.defineProperty(globalThis, "fetch", {
-      configurable: true,
-      value: previousFetch,
-    });
-    Object.defineProperty(URL, "createObjectURL", {
-      configurable: true,
-      value: previousCreateObjectURL,
-    });
-    Object.defineProperty(URL, "revokeObjectURL", {
-      configurable: true,
-      value: previousRevokeObjectURL,
-    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Read process transcript" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByText("retained log output")).toBeInTheDocument(),
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://engine.example/api/v1/exec/exec%2Flog%20web/read?since_seq=0&limit=10000&chat_id=chat-1",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: "Bearer log-token",
+        }) as unknown,
+      }),
+    );
+    expect(screen.getByText(/Not the full disk log/u)).toBeInTheDocument();
+    expect(openSpy).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Copy transcript" }));
+    expect(copy).toHaveBeenCalledWith("retained log output\n");
   });
 
-  test("Open log dispatches ideOpenFile in IDE host mode", () => {
-    const postMessageSpy = vi
+  test("transcript read errors are visible and late output cannot cross engine endpoints", async () => {
+    let resolveRead: (response: Response) => void = () => {
+      throw new Error("read not started");
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ detail: "Process access denied" }), {
+          status: 403,
+        }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveRead = resolve;
+          }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const { store } = renderExecTool({
+      content: "recorded output",
+      extra: {
+        process_id: "owned-process",
+        status: "exited",
+        short_description: "Scoped log",
+      },
+    });
+    fireEvent.click(screen.getByText("Scoped log"));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Read process transcript" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Process access denied",
+      ),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Read process transcript" }),
+    );
+    act(() => {
+      store.dispatch(
+        updateConfig({
+          engineServed: false,
+          lspUrl: "https://other-engine.example",
+        }),
+      );
+    });
+    await act(() => {
+      resolveRead(
+        new Response(
+          JSON.stringify({
+            chunks: [{ seq: 0, stream: "stdout", text: "foreign late output" }],
+            next_seq: 1,
+            status: "exited",
+          }),
+        ),
+      );
+      return Promise.resolve();
+    });
+    expect(screen.queryByText("foreign late output")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByText("recorded output")).toBeInTheDocument();
+  });
+
+  test("Open log uses only a supported native bridge and never a web fallback", () => {
+    const nativePost = vi.fn();
+    vi.stubGlobal("postIntellijMessage", nativePost);
+    const fallback = vi
       .spyOn(window, "postMessage")
       .mockImplementation(() => undefined);
-
     renderExecTool({
       host: "jetbrains",
       content: "output",
@@ -416,23 +500,43 @@ describe("ExecToolCard", () => {
         process_id: "exec_log_ide",
         status: "exited",
         short_description: "Read IDE log",
-        command: "cat big.log",
         persisted_output_path: "/tmp/refact/exec/exec_log_ide.log",
       },
     });
-
     fireEvent.click(screen.getByText("Read IDE log"));
-    fireEvent.click(screen.getByRole("button", { name: /open log/i }));
-    expect(postMessageSpy).toHaveBeenCalledWith(
-      {
-        type: "ide/openFile",
-        payload: { file_path: "/tmp/refact/exec/exec_log_ide.log" },
-      },
-      "*",
+    fireEvent.click(screen.getByRole("button", { name: "Open log in IDE" }));
+    expect(nativePost).toHaveBeenCalledWith({
+      type: "ide/openFile",
+      payload: { file_path: "/tmp/refact/exec/exec_log_ide.log" },
+    });
+    expect(fallback).not.toHaveBeenCalled();
+    nativePost.mockImplementation(() => {
+      throw new Error("IDE bridge unavailable");
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Open log in IDE" }));
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "IDE bridge unavailable",
     );
-
     cleanup();
-    postMessageSpy.mockRestore();
+    vi.unstubAllGlobals();
+    renderExecTool({
+      host: "jetbrains",
+      content: "output",
+      extra: {
+        process_id: "unsupported",
+        status: "exited",
+        short_description: "Unsupported IDE",
+        persisted_output_path: "/tmp/unsupported.log",
+      },
+    });
+    fireEvent.click(screen.getByText("Unsupported IDE"));
+    expect(
+      screen.queryByRole("button", { name: "Open log in IDE" }),
+    ).toBeNull();
+    expect(
+      screen.getByText(/requires a supported IDE bridge/u),
+    ).toBeInTheDocument();
+    expect(fallback).not.toHaveBeenCalled();
   });
 
   test("process_write_stdin result shows bytes_written and chunks_returned", () => {
@@ -616,7 +720,7 @@ describe("ExecToolCard", () => {
     expect(screen.getByTestId("exec-output-view")).toBeInTheDocument();
     expect(screen.getByText("all tests passed")).toBeInTheDocument();
   });
-  test("running process without output uses the card header instead of a duplicate waiting line", () => {
+  test("recorded process state without output is not presented as live activity", () => {
     renderExecTool({
       toolName: "process_start",
       args: { command: "npm run dev", mode: "background" },
@@ -636,9 +740,8 @@ describe("ExecToolCard", () => {
     });
 
     expect(screen.queryByTestId("exec-live-preview")).not.toBeInTheDocument();
-    expect(document.querySelector(".rf-text-shimmer")).toHaveTextContent(
-      "Start dev server",
-    );
+    expect(document.querySelector(".rf-text-shimmer")).toBeNull();
+    expect(screen.getByText("Recorded")).toBeInTheDocument();
     expect(screen.getByText("Start dev server")).toBeInTheDocument();
     expect(
       screen.getByTestId("exec-status-running_in_background"),
@@ -688,6 +791,7 @@ describe("ExecToolCard", () => {
     renderExecTool({
       toolName: "shell",
       args: { command: "npm test" },
+      busy: true,
       subchatLog: ["stdout:\ncompiling\nstderr:\nwarning: noisy gremlin"],
     });
 

@@ -644,7 +644,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
         status={isPending ? "running" : "success"}
         isOpen={isOpen}
         onToggle={handleToggle}
-        collapsible={!isPending}
+        collapsible={compact || !isPending}
         toolCall={toolCall}
         {...compactProps}
       >
@@ -721,7 +721,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
         status={status}
         isOpen={isOpen}
         onToggle={handleToggle}
-        collapsible={false}
+        collapsible={compact}
         toolCall={toolCall}
         {...compactProps}
       >

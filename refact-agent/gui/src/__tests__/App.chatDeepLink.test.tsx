@@ -1,11 +1,12 @@
 import React from "react";
+import { act } from "react-dom/test-utils";
 import { renderHook, waitFor } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { Provider } from "react-redux";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { setUpStore } from "../app/store";
-import type { Config } from "../features/Config/configSlice";
+import { updateConfig, type Config } from "../features/Config/configSlice";
 import { useChatDeepLink } from "../hooks/useChatDeepLink";
 import { server } from "../utils/mockServer";
 
@@ -37,8 +38,8 @@ function renderDeepLink(config: Config, ready = true) {
   const wrapper = ({ children }: { children: React.ReactNode }) => (
     <Provider store={store}>{children}</Provider>
   );
-  renderHook(() => useChatDeepLink(ready), { wrapper });
-  return { store };
+  const hook = renderHook(() => useChatDeepLink(ready), { wrapper });
+  return { store, ...hook };
 }
 
 describe("useChatDeepLink", () => {
@@ -98,9 +99,10 @@ describe("useChatDeepLink", () => {
     );
     window.history.replaceState(null, "", `/?chat=${CHAT_ID}`);
 
-    const { store } = renderDeepLink(makeConfig());
+    const { store, result } = renderDeepLink(makeConfig());
 
     await waitFor(() => {
+      expect(result.current.error).toContain("not found");
       expect(window.location.search).toBe("");
     });
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -123,5 +125,39 @@ describe("useChatDeepLink", () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(window.location.search).toBe(`?chat=${CHAT_ID}`);
     expect(store.getState().chat.threads[CHAT_ID]).toBeUndefined();
+  });
+  it("discards an authorized read completed after the endpoint changes", async () => {
+    let finish: () => void = () => undefined;
+    const responseReady = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    let requested = false;
+    server.use(
+      http.get(`*/v1/trajectories/${CHAT_ID}`, async () => {
+        requested = true;
+        await responseReady;
+        return HttpResponse.json(trajectory);
+      }),
+    );
+    window.history.replaceState(null, "", `/?chat=${CHAT_ID}`);
+    const { store, result } = renderDeepLink(makeConfig());
+    await waitFor(() => expect(requested).toBe(true));
+    act(() => {
+      store.dispatch(
+        updateConfig({
+          engineServed: false,
+          lspUrl: "http://other-engine:9000",
+        }),
+      );
+    });
+    await act(() => {
+      finish();
+      return Promise.resolve();
+    });
+    await waitFor(() => expect(result.current.pending).toBe(false));
+    expect(store.getState().chat.threads[CHAT_ID]).toBeUndefined();
+    expect(store.getState().pages.some((page) => page.name === "chat")).toBe(
+      false,
+    );
   });
 });

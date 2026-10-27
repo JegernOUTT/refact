@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useAppDispatch } from "./useAppDispatch";
+import {
+  taskSnapshotRevalidationRequested,
+  taskSnapshotRevalidationCancelled,
+} from "../app/middleware";
 import { useConfig } from "./useConfig";
 import { usePostMessage } from "./usePostMessage";
 import {
@@ -1049,6 +1053,9 @@ export function useSidebarSubscription() {
       void prepareInitialHistory(generation);
     }
 
+    let freshWorkspaceSnapshot = false;
+    let pendingTaskRevalidation = false;
+
     const onEvent = (envelope: SidebarDispatchedEventEnvelope) => {
       if (generation !== generationRef.current) return;
 
@@ -1063,6 +1070,24 @@ export function useSidebarSubscription() {
 
       if (envelope.event.type === "section_snapshot") {
         processSectionSnapshot(envelope.event, envelope.subscription_id);
+        if (envelope.event.section === "workspace") {
+          freshWorkspaceSnapshot = envelope.event.status === "ready";
+        } else if (envelope.event.section === "tasks") {
+          pendingTaskRevalidation = envelope.event.status === "ready";
+        }
+        if (freshWorkspaceSnapshot && pendingTaskRevalidation) {
+          pendingTaskRevalidation = false;
+          dispatch(
+            taskSnapshotRevalidationRequested({
+              endpointIdentity,
+              projectRoot: resolveProjectRoot(
+                serverProjectRootRef.current,
+                serverWorkspaceRootsRef.current,
+              ),
+              subscriptionId: envelope.subscription_id,
+            }),
+          );
+        }
       } else if (envelope.event.type === "section_update") {
         processSectionUpdate(envelope.event.section, envelope.event.update);
       } else {
@@ -1072,6 +1097,7 @@ export function useSidebarSubscription() {
 
     const onError = (error: Error) => {
       if (generation !== generationRef.current) return;
+      dispatch(taskSnapshotRevalidationCancelled());
       for (const section of ["workspace", "chats", "tasks", "buddy"] as const) {
         if (sidebarSectionsRef.current[section].status !== "ready") {
           dispatch(
@@ -1090,6 +1116,7 @@ export function useSidebarSubscription() {
 
     const onDisconnected = () => {
       if (generation !== generationRef.current) return;
+      dispatch(taskSnapshotRevalidationCancelled());
       scheduleReconnect();
     };
 
@@ -1122,6 +1149,7 @@ export function useSidebarSubscription() {
     connect();
     return () => {
       generationRef.current += 1;
+      dispatch(taskSnapshotRevalidationCancelled());
       if (disconnectRef.current) {
         disconnectRef.current();
       }
@@ -1132,6 +1160,8 @@ export function useSidebarSubscription() {
         clearTimeout(taskListFlushRef.current);
         taskListFlushRef.current = null;
       }
+      reconnectTimeoutRef.current = null;
+      disconnectRef.current = null;
     };
-  }, [connect]);
+  }, [connect, dispatch]);
 }

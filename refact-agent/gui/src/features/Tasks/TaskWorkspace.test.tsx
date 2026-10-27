@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { delay, http, HttpResponse } from "msw";
+import { act } from "react-dom/test-utils";
 import {
   cleanup,
   render,
@@ -17,10 +18,15 @@ import {
 import type { CardWorktreeTarget } from "./TaskWorkspaceWorktree";
 import type { PlannerInfo } from "./tasksSlice";
 import { openTask, taskSseEventReceived } from "./tasksSlice";
-import { createChatWithId, switchToThread } from "../Chat/Thread";
+import {
+  applyChatEvent,
+  createChatWithId,
+  switchToThread,
+} from "../Chat/Thread";
 import { push } from "../Pages/pagesSlice";
 import {
   loadTaskWorkspaceTab,
+  saveTaskWorkspaceTab,
   setProjectStorageNamespace,
 } from "../../utils/chatUiPersistence";
 import type { ChatThreadRuntime } from "../Chat/Thread/types";
@@ -39,6 +45,7 @@ import type {
 import { taskDocumentsApi } from "../../services/refact/taskDocumentsApi";
 import { taskMemoriesApi } from "../../services/refact/taskMemoriesApi";
 import { server } from "../../utils/mockServer";
+import { updateConfig } from "../Config/configSlice";
 
 const TASK_ID = "task-1";
 const CARD_ID = "T-1";
@@ -337,6 +344,18 @@ function taskWorkspaceHandlers(
     http.get("*/v1/tasks/task-1/trajectories/agents", () =>
       HttpResponse.json([]),
     ),
+    http.get("*/v1/trajectories/:id", ({ params }) =>
+      HttpResponse.json({
+        id: String(params.id),
+        title: "Stored chat",
+        model: "",
+        mode: "AGENT",
+        tool_use: "agent",
+        messages: [],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      }),
+    ),
     http.get("*/v1/worktrees", () =>
       HttpResponse.json(makeWorktreeList(records)),
     ),
@@ -471,6 +490,328 @@ function openedIds(props: MockWorktreePanelProps[]): string[] {
   }
   return ids;
 }
+
+describe("TaskWorkspace owner workflow requests", () => {
+  const ownerId = "actual-board-owner";
+
+  function setupOwnerRequest() {
+    clearWorkspaceStorage();
+    const card = makeCard({ column: "done" });
+    let board: TaskBoard = { ...makeBoard(card), owner_chat_id: ownerId };
+    const commands: { chatId: string; body: Record<string, unknown> }[] = [];
+    const mutations: string[] = [];
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.get("*/v1/tasks/task-1/board", () => HttpResponse.json(board)),
+      http.get("*/v1/tasks/task-1/trajectories/planner", () =>
+        HttpResponse.json([
+          {
+            id: ownerId,
+            title: "Owner",
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+          {
+            id: PLANNER_ID,
+            title: "Selected planner",
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-02T00:00:00Z",
+          },
+        ]),
+      ),
+      http.get("*/v1/trajectories/:id", ({ params }) =>
+        HttpResponse.json({
+          id: String(params.id),
+          title: "Owner",
+          model: "test-provider/test-model",
+          mode: "TASK_PLANNER",
+          tool_use: "agent",
+          messages: [],
+          created_at: "t0",
+          updated_at: "t0",
+        }),
+      ),
+      http.get("*/v1/caps", () =>
+        HttpResponse.json({
+          metadata: null,
+          chat_default_model: "test-provider/test-model",
+          chat_models: { "test-provider/test-model": { enabled: true } },
+        }),
+      ),
+      http.get("*/v1/tools", () =>
+        HttpResponse.json([
+          {
+            name: "tasks",
+            category: "builtin",
+            description: "Task controls",
+            tools: [
+              {
+                enabled: true,
+                spec: {
+                  name: "task_verify_card",
+                  source: { source_type: "builtin", config_path: "" },
+                  input_schema: {
+                    type: "object",
+                    properties: {
+                      task_id: { type: "string" },
+                      card_id: { type: "string" },
+                    },
+                    required: ["card_id"],
+                  },
+                },
+              },
+            ],
+          },
+        ]),
+      ),
+      http.post("*/v1/privacy/inspect", () =>
+        HttpResponse.json({
+          chat_id: ownerId,
+          destination: {
+            id: "test-provider",
+            kind: "provider",
+            display_name: "test-provider/test-model",
+          },
+          sendable: true,
+          records: [],
+          blocked: [],
+          refusal: null,
+        }),
+      ),
+      http.post("*/v1/chats/:id/commands", async ({ params, request }) => {
+        commands.push({
+          chatId: String(params.id),
+          body: (await request.json()) as Record<string, unknown>,
+        });
+        return HttpResponse.json({ queued: true }, { status: 202 });
+      }),
+      http.post("*/v1/tasks/task-1/board", () => {
+        mutations.push("board patch");
+        return HttpResponse.json(board);
+      }),
+      http.post("*/v1/tasks/task-1/planner-chats", () => {
+        mutations.push("create planner");
+        return HttpResponse.json({ chat_id: "must-not-create" });
+      }),
+    );
+    const preloaded = workspacePreloadedState(PLANNER_ID);
+    const ownerRuntime = makeRuntime("idle", ownerId);
+    ownerRuntime.thread.model = "test-provider/test-model";
+    return {
+      card,
+      commands,
+      mutations,
+      preloadedState: {
+        ...preloaded,
+        chat: {
+          ...preloaded.chat,
+          threads: { ...preloaded.chat.threads, [ownerId]: ownerRuntime },
+        },
+      },
+      setBoard: (next: TaskBoard) => {
+        board = next;
+      },
+      getBoard: () => board,
+    };
+  }
+
+  it("sends the exact user-message request to the current owner, not the selected planner; ACK is not execution", async () => {
+    const fixture = setupOwnerRequest();
+    const { user, store } = render(
+      <TaskWorkspace taskId={TASK_ID} cardId={CARD_ID} />,
+      { preloadedState: fixture.preloadedState },
+    );
+    const request = await screen.findByRole("button", {
+      name: "Request verify card from owner planner",
+    });
+    await waitFor(() => expect(request).toBeEnabled());
+    const text = screen.getByLabelText("Request text");
+    await user.clear(text);
+    await user.type(text, "Please verify without merging.");
+    await user.click(request);
+    await screen.findByText(/Request submitted; awaiting planner ACK/);
+    expect(fixture.commands).toHaveLength(1);
+    expect(fixture.commands[0].chatId).toBe(ownerId);
+    expect(fixture.commands[0].body).toMatchObject({
+      type: "user_message",
+      priority: false,
+      client_request_id: expect.any(String) as unknown,
+    });
+    expect(fixture.commands[0].body.content).toContain(
+      'task_verify_card({"task_id":"task-1","card_id":"T-1"})',
+    );
+    expect(fixture.commands[0].body.content).toContain(
+      "observed board revision: 1",
+    );
+    expect(fixture.commands[0].body.content).toContain(
+      "Please verify without merging.",
+    );
+    expect(fixture.mutations).toEqual([]);
+    act(() => {
+      store.dispatch(
+        applyChatEvent({
+          type: "ack",
+          chat_id: ownerId,
+          seq: "1",
+          client_request_id: String(fixture.commands[0].body.client_request_id),
+          accepted: true,
+          result: { queued: true },
+        }),
+      );
+    });
+    expect(await screen.findByText(/Planner ACK accepted/)).toHaveTextContent(
+      "Workflow outcome pending",
+    );
+    expect(
+      screen.getByText("No verifier report. Verification unknown; not a pass."),
+    ).toBeInTheDocument();
+    expect(
+      store.getState().tasksUI.openTasks.find((task) => task.id === TASK_ID)
+        ?.activeChat?.chatId,
+    ).toBe(PLANNER_ID);
+    act(() => {
+      store.dispatch(updateConfig({ apiKey: "synthetic-owner-principal" }));
+    });
+    let releaseDelivery: () => void = () => undefined;
+    const delivery = new Promise<void>((resolve) => {
+      releaseDelivery = resolve;
+    });
+    server.use(
+      http.post("*/v1/chats/:id/commands", async ({ params, request }) => {
+        fixture.commands.push({
+          chatId: String(params.id),
+          body: (await request.json()) as Record<string, unknown>,
+        });
+        await delivery;
+        return HttpResponse.error();
+      }),
+    );
+    const nextRequest = await screen.findByRole("button", {
+      name: "Request verify card from owner planner",
+    });
+    await waitFor(() => expect(nextRequest).toBeEnabled());
+    await user.click(nextRequest);
+    await screen.findByText(/Sending owner request/);
+    await waitFor(() => expect(fixture.commands).toHaveLength(2));
+    const uncertainId = String(fixture.commands[1].body.client_request_id);
+    expect(uncertainId).not.toBe(
+      String(fixture.commands[0].body.client_request_id),
+    );
+    expect(
+      screen.queryByRole("button", {
+        name: "Request verify card from owner planner",
+      }),
+    ).not.toBeInTheDocument();
+    await act(() => {
+      releaseDelivery();
+      return Promise.resolve();
+    });
+    expect(
+      await screen.findByText(/Owner request delivery is unconfirmed/),
+    ).toHaveTextContent(uncertainId);
+    expect(fixture.commands).toHaveLength(2);
+    expect(screen.getByLabelText("Request text")).toBeDisabled();
+    act(() => {
+      store.dispatch(updateConfig({ apiKey: "synthetic-third-principal" }));
+      store.dispatch(
+        applyChatEvent({
+          type: "ack",
+          chat_id: ownerId,
+          seq: "2",
+          client_request_id: uncertainId,
+          accepted: true,
+          result: { queued: true },
+        }),
+      );
+    });
+    expect(screen.queryByText(/Planner ACK accepted/)).not.toBeInTheDocument();
+    expect(await screen.findByLabelText("Request text")).toBeEnabled();
+    expect(fixture.commands).toHaveLength(2);
+  });
+
+  it("blocks missing owners without substituting or creating a planner", async () => {
+    const fixture = setupOwnerRequest();
+    fixture.setBoard({ ...fixture.getBoard(), owner_chat_id: undefined });
+    const { user } = render(
+      <TaskWorkspace taskId={TASK_ID} cardId={CARD_ID} />,
+      { preloadedState: fixture.preloadedState },
+    );
+    const request = await screen.findByRole("button", {
+      name: "Request verify card from owner planner",
+    });
+    expect(request).toBeDisabled();
+    await user.click(request);
+    expect(
+      screen.getByText(/No board owner is recorded. Requests are blocked/),
+    ).toBeInTheDocument();
+    expect(fixture.commands).toEqual([]);
+    expect(fixture.mutations).toEqual([]);
+  });
+
+  it("retains request text when a fresh board changes owner and revision, with no automatic send", async () => {
+    const fixture = setupOwnerRequest();
+    const { user } = render(
+      <TaskWorkspace taskId={TASK_ID} cardId={CARD_ID} />,
+      { preloadedState: fixture.preloadedState },
+    );
+    const request = await screen.findByRole("button", {
+      name: "Request verify card from owner planner",
+    });
+    await waitFor(() => expect(request).toBeEnabled());
+    await user.clear(screen.getByLabelText("Request text"));
+    await user.type(
+      screen.getByLabelText("Request text"),
+      "Keep this request draft",
+    );
+    fixture.setBoard({
+      ...fixture.getBoard(),
+      owner_chat_id: PLANNER_ID,
+      rev: 2,
+    });
+    await user.click(request);
+    expect(
+      await screen.findByText(/Request blocked or not confirmed:/),
+    ).toHaveTextContent("Board owner or revision changed");
+    expect(screen.getByLabelText("Request text")).toHaveValue(
+      "Keep this request draft",
+    );
+    expect(fixture.commands).toEqual([]);
+    expect(fixture.mutations).toEqual([]);
+    expect(
+      screen.getByRole("button", {
+        name: "Use current owner and revision after review",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("blocks denied model permission rather than delivering a workflow request", async () => {
+    const fixture = setupOwnerRequest();
+    server.use(
+      http.post("*/v1/privacy/inspect", () =>
+        HttpResponse.json({
+          chat_id: ownerId,
+          destination: { id: "test-provider" },
+          sendable: false,
+          refusal: "Owner model privacy denied",
+        }),
+      ),
+    );
+    const { user } = render(
+      <TaskWorkspace taskId={TASK_ID} cardId={CARD_ID} />,
+      { preloadedState: fixture.preloadedState },
+    );
+    const request = await screen.findByRole("button", {
+      name: "Request verify card from owner planner",
+    });
+    await waitFor(() => expect(request).toBeEnabled());
+    await user.click(request);
+    expect(
+      await screen.findByText(/Request blocked or not confirmed:/),
+    ).toHaveTextContent("Owner model privacy denied");
+    expect(fixture.commands).toEqual([]);
+    expect(fixture.mutations).toEqual([]);
+  });
+});
 
 beforeEach(() => {
   worktreeDiffPanelProps.length = 0;
@@ -884,7 +1225,9 @@ describe("TaskWorkspace worktree actions", () => {
     expect(dialog).toHaveTextContent("T-7");
     expect(dialog).toHaveTextContent("Instructions");
     expect(dialog).toHaveTextContent("Follow the server card instructions.");
-    expect(dialog).toHaveTextContent("Final Report");
+    expect(dialog).toHaveTextContent(
+      "Agent-reported final report (not verification)",
+    );
     expect(dialog).toHaveTextContent("Final parity report");
     expect(dialog).toHaveTextContent("Updates");
     expect(dialog).toHaveTextContent("Waiting on review");
@@ -1250,6 +1593,74 @@ describe("TaskWorkspace layout and chat surfaces", () => {
         within(boardTab).getByTitle(/waiting for input/),
       ).toHaveTextContent("1"),
     );
+  });
+
+  it("paused_agents_are_not_running_and_regressed_chats_remain_in_rail_and_switcher", async () => {
+    const paused = makeCard({
+      id: "T-paused",
+      title: "Paused work",
+      paused_at: "2026-01-02T00:00:00Z",
+    });
+    const regressed = makeCard({
+      id: "T-regressed",
+      title: "Regressed work",
+      column: "regressed",
+      agent_chat_id: "regressed-chat",
+    });
+    server.use(...taskWorkspaceHandlers(makeCard(), []));
+    server.use(
+      http.get("*/v1/tasks/task-1/board", () =>
+        HttpResponse.json({
+          ...makeBoard(makeCard()),
+          cards: [makeCard(), paused, regressed],
+        }),
+      ),
+    );
+    const { store, user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+    const boardTab = await screen.findByRole("tab", { name: /^Board/ });
+    expect(within(boardTab).getByTitle("1 running agent")).toHaveTextContent(
+      "1",
+    );
+    const rail = screen.getByRole("complementary", {
+      name: "Chats and task agents",
+    });
+    expect(
+      within(rail).getByRole("button", {
+        name: "Open agent chat T-paused Paused work",
+      }),
+    ).toHaveTextContent("Paused");
+    await user.click(
+      within(rail).getByRole("button", {
+        name: "Open agent chat T-regressed Regressed work",
+      }),
+    );
+    await waitFor(() =>
+      expect(store.getState().tasksUI.openTasks[0]?.activeChat).toEqual({
+        type: "agent",
+        cardId: "T-regressed",
+        chatId: "regressed-chat",
+      }),
+    );
+    expect(
+      store.getState().chat.threads["regressed-chat"]?.thread.task_meta,
+    ).toMatchObject({
+      task_id: TASK_ID,
+      role: "agents",
+      card_id: "T-regressed",
+    });
+    await user.click(screen.getByRole("button", { name: "Switch chat" }));
+    expect(
+      await screen.findByRole("button", {
+        name: "Open agent chat T-regressed Regressed work",
+      }),
+    ).toHaveTextContent("Regressed");
+    expect(
+      screen.getByRole("button", {
+        name: "Open agent chat T-paused Paused work",
+      }),
+    ).toHaveTextContent("Paused");
   });
 
   it("board_rail_shows_linked_card_badge_for_agent_spawned_by_chat", async () => {
@@ -2022,7 +2433,234 @@ describe("TaskWorkspace SSE invalidation", () => {
   });
 });
 
+describe("TaskWorkspace revision-checked card management", () => {
+  beforeEach(clearWorkspaceStorage);
+
+  it("posts one flattened create patch and preserves every draft field through a 409 until explicit review", async () => {
+    const dependency = makeCard({
+      id: "T-base",
+      title: "Foundation",
+      column: "planned",
+    });
+    let revision = 7;
+    const requests: unknown[] = [];
+    server.use(...taskWorkspaceHandlers(dependency, []));
+    server.use(
+      http.get(`*/v1/tasks/${TASK_ID}/board`, () =>
+        HttpResponse.json({ ...makeBoard(dependency), rev: revision }),
+      ),
+      http.post(`*/v1/tasks/${TASK_ID}/board`, async ({ request }) => {
+        requests.push(await request.json());
+        revision = 8;
+        if (requests.length === 1)
+          return new HttpResponse("Board rev mismatch: expected 7, actual 8", {
+            status: 409,
+          });
+        return HttpResponse.json({ ...makeBoard(dependency), rev: 9 });
+      }),
+    );
+    const { user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+    await user.click(
+      await screen.findByRole("button", { name: "Create card" }),
+    );
+    const dialog = await screen.findByRole("dialog", { name: "Create card" });
+    await user.type(within(dialog).getByLabelText("Card ID"), "T-new");
+    await user.type(within(dialog).getByLabelText("Title"), "New card draft");
+    const priorityTrigger = within(dialog).getByLabelText("Priority");
+    act(() => priorityTrigger.focus());
+    expect(priorityTrigger).toHaveFocus();
+    await user.keyboard("p0");
+    await waitFor(() => expect(priorityTrigger).toHaveTextContent("P0"));
+    await user.type(
+      within(dialog).getByLabelText("Instructions"),
+      "Keep these instructions.",
+    );
+    await user.type(
+      within(dialog).getByLabelText("Target files"),
+      "src/first.ts\nsrc/second.ts",
+    );
+    await user.click(
+      within(dialog).getByRole("checkbox", { name: "T-base: Foundation" }),
+    );
+    await user.click(
+      within(dialog).getByRole("button", { name: "Create card" }),
+    );
+    const expectedPatch = {
+      action: "create_card",
+      rev: 7,
+      id: "T-new",
+      title: "New card draft",
+      priority: "P0",
+      instructions: "Keep these instructions.",
+      target_files: ["src/first.ts", "src/second.ts"],
+      depends_on: ["T-base"],
+    };
+    await within(dialog).findByText(/Create card failed: Board rev mismatch/);
+    const review = await within(dialog).findByRole("button", {
+      name: "Use revision 8 after review",
+    });
+    await waitFor(() => expect(review).toBeEnabled());
+    expect(requests).toEqual([expectedPatch]);
+    expect(within(dialog).getByLabelText("Card ID")).toHaveValue("T-new");
+    expect(within(dialog).getByLabelText("Title")).toHaveValue(
+      "New card draft",
+    );
+    expect(within(dialog).getByLabelText("Priority")).toHaveTextContent("P0");
+    expect(within(dialog).getByLabelText("Instructions")).toHaveValue(
+      "Keep these instructions.",
+    );
+    expect(within(dialog).getByLabelText("Target files")).toHaveValue(
+      "src/first.ts\nsrc/second.ts",
+    );
+    expect(
+      within(dialog).getByRole("checkbox", { name: "T-base: Foundation" }),
+    ).toBeChecked();
+    expect(
+      within(dialog).getByRole("button", { name: "Create card" }),
+    ).toBeDisabled();
+    await user.click(review);
+    expect(requests).toHaveLength(1);
+    await user.click(
+      within(dialog).getByRole("button", { name: "Create card" }),
+    );
+    await waitFor(() =>
+      expect(requests).toEqual([expectedPatch, { ...expectedPatch, rev: 8 }]),
+    );
+  });
+
+  it("keeps card identity immutable and posts an empty dependency replacement", async () => {
+    const dependency = makeCard({
+      id: "T-base",
+      title: "Foundation",
+      depends_on: [CARD_ID],
+    });
+    const card = makeCard({ depends_on: [dependency.id] });
+    const requests: unknown[] = [];
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.get(`*/v1/tasks/${TASK_ID}/board`, () =>
+        HttpResponse.json({
+          ...makeBoard(card),
+          rev: 12,
+          cards: [card, dependency],
+        }),
+      ),
+      http.post(`*/v1/tasks/${TASK_ID}/board`, async ({ request }) => {
+        requests.push(await request.json());
+        return HttpResponse.json({ ...makeBoard(card), rev: 13 });
+      }),
+    );
+    const { user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+    await user.click(await openCardDetail(card));
+    await user.click(screen.getByRole("button", { name: "Edit card" }));
+    const dialog = await screen.findByRole("dialog", { name: "Edit card" });
+    expect(within(dialog).getByLabelText("Card ID")).toHaveAttribute(
+      "readonly",
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Save card" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "These dependencies would create a cycle.",
+    );
+    expect(requests).toEqual([]);
+    await user.click(
+      within(dialog).getByRole("button", { name: "Clear dependencies" }),
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Save card" }));
+    await waitFor(() =>
+      expect(requests).toEqual([
+        {
+          action: "update_card",
+          rev: 12,
+          id: card.id,
+          title: card.title,
+          priority: card.priority,
+          instructions: card.instructions,
+          target_files: [],
+          depends_on: [],
+        },
+      ]),
+    );
+  });
+
+  it("sends an explicit metadata move and only a confirmed nonforce deletion, preserving server refusals", async () => {
+    const card = makeCard();
+    const requests: unknown[] = [];
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.post(`*/v1/tasks/${TASK_ID}/board`, async ({ request }) => {
+        const body: unknown = await request.json();
+        requests.push(body);
+        return new HttpResponse(
+          requests.length === 1
+            ? "Card move is guarded"
+            : "active agent card: T-1",
+          { status: requests.length === 1 ? 400 : 409 },
+        );
+      }),
+    );
+    const { user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+    await user.click(await openCardDetail(card));
+    await user.click(screen.getByRole("button", { name: "Move card" }));
+    let dialog = await screen.findByRole("dialog", { name: "Move card" });
+    expect(dialog).toHaveTextContent("Done does not mean verified");
+    // Keyboard typeahead on the closed Radix Select trigger (see create test).
+    const columnTrigger = within(dialog).getByLabelText("Move to column");
+    act(() => columnTrigger.focus());
+    expect(columnTrigger).toHaveFocus();
+    await user.keyboard("done");
+    await waitFor(() => expect(columnTrigger).toHaveTextContent("Done"));
+    await user.click(within(dialog).getByRole("button", { name: "Move card" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "Card move is guarded",
+    );
+    expect(requests).toEqual([
+      { action: "move_card", rev: 1, id: CARD_ID, column: "done" },
+    ]);
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await user.click(await openCardDetail(card));
+    await user.click(screen.getByRole("button", { name: "Delete card" }));
+    dialog = await screen.findByRole("dialog", { name: "Delete card" });
+    expect(requests).toHaveLength(1);
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(requests).toHaveLength(1);
+    await user.click(await openCardDetail(card));
+    await user.click(screen.getByRole("button", { name: "Delete card" }));
+    dialog = await screen.findByRole("dialog", { name: "Delete card" });
+    await user.click(
+      within(dialog).getByRole("button", { name: "Delete card" }),
+    );
+    await within(dialog).findByText(/Delete card failed: active agent card/);
+    await waitFor(() =>
+      expect(
+        within(dialog).getByRole("button", {
+          name: "Use revision 1 after review",
+        }),
+      ).toBeEnabled(),
+    );
+    expect(requests).toEqual([
+      { action: "move_card", rev: 1, id: CARD_ID, column: "done" },
+      { action: "delete_card", rev: 1, card_id: CARD_ID, force: false },
+    ]);
+    expect(
+      within(dialog).getByRole("button", { name: "Delete card" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", {
+        name: `Open card ${card.id}: ${card.title}`,
+        hidden: true,
+      }),
+    ).toBeInTheDocument();
+  });
+});
+
 describe("TaskWorkspace planner CRUD", () => {
+  beforeEach(clearWorkspaceStorage);
   function makePlannerTrajectory(): TrajectoryInfo {
     return {
       id: PLANNER_ID,
@@ -2032,67 +2670,241 @@ describe("TaskWorkspace planner CRUD", () => {
     };
   }
 
-  it("delete_planner_failure_restores_local_state", async () => {
+  it("delete_planner_cancel_sends_no_request", async () => {
+    const deleteCalls: string[] = [];
     server.use(...taskWorkspaceHandlers(makeCard(), []));
     server.use(
       http.get("*/v1/tasks/task-1/trajectories/planner", () =>
         HttpResponse.json([makePlannerTrajectory()]),
       ),
-      http.delete(`*/v1/tasks/${TASK_ID}/planner-chats/${PLANNER_ID}`, () =>
-        HttpResponse.json({ error: "Internal error" }, { status: 500 }),
+      http.delete(
+        `*/v1/tasks/${TASK_ID}/planner-chats/${PLANNER_ID}`,
+        ({ request }) => {
+          deleteCalls.push(request.url);
+          return HttpResponse.json({ deleted: true });
+        },
       ),
     );
-
-    const { user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+    const { store, user } = render(<TaskWorkspace taskId={TASK_ID} />, {
       preloadedState: workspacePreloadedState(),
     });
-
     await user.click(await screen.findByRole("tab", { name: /^Board/ }));
-
-    const deleteBtn = await screen.findByRole("button", {
-      name: "Delete chat",
-      hidden: true,
-    });
-    await user.click(deleteBtn);
-
-    await waitFor(() =>
-      expect(screen.getByText(/Delete failed/)).toBeInTheDocument(),
+    await user.click(
+      await screen.findByRole("button", { name: "Delete chat" }),
     );
-    expect(
-      screen.getByRole("button", { name: "Delete chat", hidden: true }),
-    ).toBeInTheDocument();
+    const dialog = await screen.findByRole("dialog", {
+      name: "Delete planner chat",
+    });
+    expect(deleteCalls).toEqual([]);
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Delete planner chat" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(deleteCalls).toEqual([]);
+    expect(store.getState().tasksUI.openTasks[0]?.activeChat).toEqual({
+      type: "planner",
+      chatId: PLANNER_ID,
+    });
   });
 
-  it("delete_planner_409_shows_agent_refs_in_notification", async () => {
+  it("delete_planner_failure_keeps_planner_and_selection", async () => {
+    let finishDelete: () => void = () => undefined;
+    const pendingDelete = new Promise<void>((resolve) => {
+      finishDelete = resolve;
+    });
+    const deleteCalls: string[] = [];
     server.use(...taskWorkspaceHandlers(makeCard(), []));
     server.use(
       http.get("*/v1/tasks/task-1/trajectories/planner", () =>
         HttpResponse.json([makePlannerTrajectory()]),
       ),
-      http.delete(`*/v1/tasks/${TASK_ID}/planner-chats/${PLANNER_ID}`, () =>
-        HttpResponse.json(
-          {
-            error: "Referenced by agents",
-            agent_refs: [{ chat_id: "agent-ref-1" }],
-          },
-          { status: 409 },
-        ),
+      http.delete(
+        `*/v1/tasks/${TASK_ID}/planner-chats/${PLANNER_ID}`,
+        async ({ request }) => {
+          deleteCalls.push(request.url);
+          await pendingDelete;
+          return HttpResponse.json(
+            { error: "Internal error" },
+            { status: 500 },
+          );
+        },
       ),
     );
-
-    const { user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+    const { store, user } = render(<TaskWorkspace taskId={TASK_ID} />, {
       preloadedState: workspacePreloadedState(),
     });
-
     await user.click(await screen.findByRole("tab", { name: /^Board/ }));
-
-    const deleteBtn = await screen.findByRole("button", {
-      name: "Delete chat",
-      hidden: true,
+    await user.click(
+      await screen.findByRole("button", { name: "Delete chat" }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "Delete planner chat",
     });
-    await user.click(deleteBtn);
+    const confirm = within(dialog).getByRole("button", {
+      name: "Delete planner chat",
+    });
+    await user.click(confirm);
+    await waitFor(() => expect(deleteCalls).toHaveLength(1));
+    expect(confirm).toBeDisabled();
+    expect(
+      within(dialog).getByRole("button", { name: "Cancel" }),
+    ).toBeDisabled();
+    expect(store.getState().tasksUI.openTasks[0]).toMatchObject({
+      plannerChats: [expect.objectContaining({ id: PLANNER_ID })],
+      activeChat: { type: "planner", chatId: PLANNER_ID },
+    });
+    await user.click(confirm);
+    expect(deleteCalls).toHaveLength(1);
+    finishDelete();
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "Internal error",
+    );
+    expect(store.getState().tasksUI.openTasks[0]?.activeChat).toEqual({
+      type: "planner",
+      chatId: PLANNER_ID,
+    });
+    expect(store.getState().tasksUI.openTasks[0]?.plannerChats).toHaveLength(1);
+  });
 
-    await screen.findByText(/agent-ref-1/);
+  it("delete_planner_409_is_nonforce_and_keeps_selection_with_safe_references", async () => {
+    const deleteCalls: string[] = [];
+    server.use(...taskWorkspaceHandlers(makeCard(), []));
+    server.use(
+      http.get("*/v1/tasks/task-1/trajectories/planner", () =>
+        HttpResponse.json([makePlannerTrajectory()]),
+      ),
+      http.delete(
+        `*/v1/tasks/${TASK_ID}/planner-chats/${PLANNER_ID}`,
+        ({ request }) => {
+          deleteCalls.push(request.url);
+          return HttpResponse.json(
+            {
+              error: "Referenced by agents",
+              agent_refs: [{ chat_id: "agent-ref-1" }],
+              hint: "Pass ?force=true to delete anyway.",
+            },
+            { status: 409 },
+          );
+        },
+      ),
+    );
+    const { store, user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+    await user.click(
+      await screen.findByRole("button", { name: "Switch chat" }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "Delete chat" }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "Delete planner chat",
+    });
+    await user.click(
+      within(dialog).getByRole("button", { name: "Delete planner chat" }),
+    );
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "agent-ref-1",
+    );
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(
+      "Review the linked agent chats",
+    );
+    expect(dialog).not.toHaveTextContent("force=true");
+    expect(deleteCalls).toHaveLength(1);
+    expect(new URL(deleteCalls[0]).searchParams.has("force")).toBe(false);
+    expect(store.getState().tasksUI.openTasks[0]).toMatchObject({
+      plannerChats: [expect.objectContaining({ id: PLANNER_ID })],
+      activeChat: { type: "planner", chatId: PLANNER_ID },
+    });
+  });
+
+  it("successful_delete_removes_only_the_confirmed_planner_without_stale_resurrection", async () => {
+    let deleted = false;
+    server.use(...taskWorkspaceHandlers(makeCard(), []));
+    server.use(
+      http.get("*/v1/tasks/task-1/trajectories/planner", () =>
+        HttpResponse.json(deleted ? [] : [makePlannerTrajectory()]),
+      ),
+      http.delete(`*/v1/tasks/${TASK_ID}/planner-chats/${PLANNER_ID}`, () => {
+        deleted = true;
+        return HttpResponse.json({ deleted: true });
+      }),
+    );
+    const { store, user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+    await user.click(await screen.findByRole("tab", { name: /^Board/ }));
+    await user.click(
+      await screen.findByRole("button", { name: "Delete chat" }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "Delete planner chat",
+    });
+    await user.click(
+      within(dialog).getByRole("button", { name: "Delete planner chat" }),
+    );
+    await screen.findByText("Planner chat deleted.");
+    await waitFor(() =>
+      expect(store.getState().tasksUI.openTasks[0]).toMatchObject({
+        plannerChats: [],
+        activeChat: null,
+      }),
+    );
+    expect(
+      screen.queryByRole("dialog", { name: "Delete planner chat" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("late_create_completion_does_not_select_a_chat_after_task_navigation", async () => {
+    let finishCreate: () => void = () => undefined;
+    const pendingCreate = new Promise<void>((resolve) => {
+      finishCreate = resolve;
+    });
+    const completed = vi.fn();
+    server.use(...taskWorkspaceHandlers(makeCard(), []));
+    server.use(
+      http.post(`*/v1/tasks/${TASK_ID}/planner-chats`, async () => {
+        await pendingCreate;
+        completed();
+        return HttpResponse.json({ chat_id: "late-planner" });
+      }),
+      http.get("*/v1/tasks/task-2", () =>
+        HttpResponse.json({ meta: { ...makeTask(), id: "task-2" } }),
+      ),
+      http.get("*/v1/tasks/task-2/board", () =>
+        HttpResponse.json({ ...makeBoard(makeCard()), cards: [] }),
+      ),
+      http.get("*/v1/tasks/task-2/trajectories/:role", () =>
+        HttpResponse.json([]),
+      ),
+    );
+    const { store, user, rerender } = render(
+      <TaskWorkspace taskId={TASK_ID} />,
+      {
+        preloadedState: workspacePreloadedState(),
+      },
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "New task planner" }),
+    );
+    await screen.findByText("Creating planner chat...");
+    const pendingRequests = store.dispatch(
+      tasksApi.util.getRunningMutationsThunk(),
+    );
+    rerender(<TaskWorkspace taskId="task-2" />);
+    await screen.findByText("No task agents yet");
+    await act(async () => {
+      finishCreate();
+      await Promise.all(pendingRequests);
+    });
+    expect(completed).toHaveBeenCalledOnce();
+    expect(
+      store.getState().tasksUI.openTasks.find((task) => task.id === "task-2")
+        ?.activeChat,
+    ).toBeNull();
+    expect(store.getState().chat.threads["late-planner"]).toBeUndefined();
   });
 
   it("cached_savedPlanners_does_not_resurrect_deleted_planner", async () => {
@@ -2120,15 +2932,22 @@ describe("TaskWorkspace planner CRUD", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("create_planner_failure_shows_notification", async () => {
+  it("create_planner_pending_blocks_duplicates_and_failure_stays_visible", async () => {
+    let finishCreate: () => void = () => undefined;
+    const pendingCreate = new Promise<void>((resolve) => {
+      finishCreate = resolve;
+    });
+    const createCalls = vi.fn();
     server.use(...taskWorkspaceHandlers(makeCard(), []));
     server.use(
       http.get("*/v1/tasks/task-1/trajectories/planner", () =>
         HttpResponse.json([]),
       ),
-      http.post(`*/v1/tasks/${TASK_ID}/planner-chats`, () =>
-        HttpResponse.json({ error: "Server error" }, { status: 500 }),
-      ),
+      http.post(`*/v1/tasks/${TASK_ID}/planner-chats`, async () => {
+        createCalls();
+        await pendingCreate;
+        return HttpResponse.json({ error: "Server error" }, { status: 500 });
+      }),
     );
 
     const { user } = render(<TaskWorkspace taskId={TASK_ID} />, {
@@ -2139,7 +2958,18 @@ describe("TaskWorkspace planner CRUD", () => {
 
     await user.click(screen.getByRole("button", { name: "New task planner" }));
 
-    await screen.findByText(/Create failed/);
+    await waitFor(() => expect(createCalls).toHaveBeenCalledOnce());
+    const createButton = screen.getByRole("button", {
+      name: "New task planner",
+    });
+    expect(createButton).toBeDisabled();
+    expect(screen.getByRole("button", { name: "New chat" })).toBeDisabled();
+    await user.click(createButton);
+    expect(createCalls).toHaveBeenCalledOnce();
+    finishCreate();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Create failed: Server error",
+    );
   });
 });
 
@@ -2356,6 +3186,61 @@ describe("TaskWorkspace planner restore race", () => {
 });
 
 describe("TaskWorkspace CardDetail dialog", () => {
+  it("opens the exact linked card despite a persisted non-board tab", async () => {
+    clearWorkspaceStorage();
+    setProjectStorageNamespace("ui-n-card-link");
+    saveTaskWorkspaceTab(TASK_ID, "documents");
+    const card = makeCard();
+    server.use(...taskWorkspaceHandlers(card, []));
+    render(<TaskWorkspace taskId={TASK_ID} cardId={CARD_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+    expect(
+      await screen.findByRole("dialog", { name: card.title }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("tab", { name: /^Board/, hidden: true }),
+    ).toHaveAttribute("data-state", "active");
+  });
+
+  it("keeps the card dialog and selection on unsupported and denied internal targets", async () => {
+    clearWorkspaceStorage();
+    const card = makeCard({
+      instructions:
+        "[unsupported](refact://card/T-9) [denied](refact://chat/denied-chat) [card](refact://task/task-1/card/T-1)",
+    });
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.get("*/v1/trajectories/denied-chat", () =>
+        HttpResponse.json({ detail: "Access denied" }, { status: 403 }),
+      ),
+    );
+    const { store, user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+    await user.click(await openCardDetail(card));
+    const dialog = await screen.findByRole("dialog", { name: card.title });
+    const before = store.getState().chat.current_thread_id;
+    await user.click(within(dialog).getByRole("link", { name: "unsupported" }));
+    expect(dialog).toBeVisible();
+    expect(within(dialog).getAllByRole("alert").length).toBeGreaterThan(0);
+    await user.click(within(dialog).getByRole("link", { name: "denied" }));
+    expect(
+      await within(dialog).findByText(/Could not open link: Access denied/),
+    ).toBeVisible();
+    expect(dialog).toBeVisible();
+    expect(store.getState().chat.current_thread_id).toBe(before);
+    expect(store.getState().chat.threads["denied-chat"]).toBeUndefined();
+    await user.click(within(dialog).getByRole("link", { name: "card" }));
+    await waitFor(() =>
+      expect(
+        within(dialog).queryByText(/Could not open link:/),
+      ).not.toBeInTheDocument(),
+    );
+    expect(dialog).toBeVisible();
+    expect(store.getState().chat.current_thread_id).toBe(before);
+  });
+
   it("escape_closes_card_detail_dialog", async () => {
     const card = makeCard();
     server.use(...taskWorkspaceHandlers(card, []));

@@ -1,5 +1,11 @@
 import { CircleCheck, TriangleAlert, Timer } from "lucide-react";
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Flex, Text } from "@radix-ui/themes";
 import { Button } from "../../ui";
 
@@ -8,11 +14,10 @@ import type { ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
 import { useAppSelector } from "../../../hooks/useAppSelector";
 import { useChatActions } from "../../../hooks/useChatActions";
-import {
-  selectMessagesById,
-  selectToolResultByThreadAndId,
-} from "../../../features/Chat/Thread/selectors";
-import { useThreadId } from "../../../features/Chat/Thread";
+import { selectMessagesById } from "../../../features/Chat/Thread/selectors";
+import { useToolCallActivity } from "./useToolCallActivity";
+import { selectConfig } from "../../../features/Config/configSlice";
+import { getEngineEndpointIdentity } from "../../../services/refact/apiUrl";
 import type {
   EventMessage,
   ToolCall,
@@ -215,25 +220,50 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey, false);
   const [nowMs, setNowMs] = useState(() => Date.now());
-  const contextThreadId = useThreadId();
-  const resolvedThreadId = threadId ?? contextThreadId;
+  const {
+    result: resultMessage,
+    isRunning,
+    threadId: resolvedThreadId,
+  } = useToolCallActivity(toolCall.id, threadId);
   const { abort } = useChatActions(resolvedThreadId);
+  const config = useAppSelector(selectConfig);
+  const endpointIdentity = getEngineEndpointIdentity(config);
+  const source = useMemo(
+    () => ({
+      resolvedThreadId,
+      toolCallId: toolCall.id,
+      endpointIdentity,
+      apiKey: config.apiKey,
+      isRunning,
+    }),
+    [resolvedThreadId, toolCall.id, endpointIdentity, config.apiKey, isRunning],
+  );
+  const sourceRef = useRef<object | null>(source);
+  sourceRef.current = source;
+  const [wakeState, setWakeState] = useState<{
+    source: object;
+    pending?: boolean;
+    error?: string;
+  } | null>(null);
+  const currentWakeState = wakeState?.source === source ? wakeState : null;
+  useEffect(() => {
+    sourceRef.current = source;
+    return () => {
+      sourceRef.current = null;
+    };
+  }, [source]);
 
   const sleepArgs = useMemo(() => parseSleepArgs(toolCall), [toolCall]);
   const messages = useAppSelector((state) =>
     selectMessagesById(state, resolvedThreadId),
   );
-  const resultMessage = useAppSelector((state) =>
-    selectToolResultByThreadAndId(state, resolvedThreadId, toolCall.id),
-  );
   const sleepResult = useMemo(
     () => parseSleepResult(resultMessage),
     [resultMessage],
   );
-  const isRunning = !resultMessage;
   const status: ToolStatus = isRunning
     ? "running"
-    : resultMessage.tool_failed
+    : resultMessage?.tool_failed
       ? "error"
       : sleepResult
         ? "success"
@@ -251,8 +281,9 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({
     [messages],
   );
   const startedAtMs = useMemo(
-    () => resolveSleepStartedAtMs(resolvedThreadId, toolCall.id),
-    [resolvedThreadId, toolCall.id],
+    () =>
+      isRunning ? resolveSleepStartedAtMs(resolvedThreadId, toolCall.id) : 0,
+    [isRunning, resolvedThreadId, toolCall.id],
   );
 
   useEffect(() => {
@@ -275,13 +306,15 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({
 
   const stateLabel = isRunning
     ? `${formatSeconds(remainingMs)} remaining`
-    : resultMessage.tool_failed
+    : resultMessage?.tool_failed
       ? "Wait request failed"
       : sleepResult?.interrupted
         ? "Interrupted"
         : sleepResult
           ? "Wait ended"
-          : "Outcome unknown";
+          : resultMessage
+            ? "Outcome unknown"
+            : "Result not recorded";
   const facts = [
     { label: "Requested wait", value: formatSeconds(sleepArgs.durationMs) },
     ...(sleepResult
@@ -298,9 +331,22 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({
   const handleWakeUp = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       event.stopPropagation();
-      void abort(resolvedThreadId);
+      if (!isRunning || currentWakeState?.pending) return;
+      setWakeState({ source, pending: true });
+      void abort(resolvedThreadId).then(
+        () => {
+          if (sourceRef.current === source) setWakeState(null);
+        },
+        (cause: unknown) => {
+          if (sourceRef.current !== source) return;
+          setWakeState({
+            source,
+            error: cause instanceof Error ? cause.message : String(cause),
+          });
+        },
+      );
     },
-    [abort, resolvedThreadId],
+    [abort, currentWakeState?.pending, isRunning, resolvedThreadId, source],
   );
 
   const icon =
@@ -330,10 +376,25 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({
         className={styles.sleepCard}
       >
         {isRunning && (
-          <Button type="button" variant="soft" onClick={handleWakeUp}>
-            <Timer />
-            Wake up
-          </Button>
+          <Flex direction="column" gap="1">
+            <Button
+              type="button"
+              variant="soft"
+              disabled={currentWakeState?.pending}
+              onClick={handleWakeUp}
+            >
+              <Timer />
+              Wake up (abort chat)
+            </Button>
+            <Text size="1" color="gray">
+              Aborts the whole chat turn, not only this wait.
+            </Text>
+            {currentWakeState?.error && (
+              <Text size="1" color="red" role="alert">
+                {currentWakeState.error}
+              </Text>
+            )}
+          </Flex>
         )}
         <CompactToolDetails facts={facts}>
           <Flex direction="column" gap="2" className={styles.countdown}>

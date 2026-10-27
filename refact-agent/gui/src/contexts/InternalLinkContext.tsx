@@ -1,6 +1,15 @@
 import React, { createContext } from "react";
 
-export type InternalLinkHandler = (url: string) => boolean;
+export type InternalLinkOrigin = {
+  chatId?: string;
+  taskId?: string;
+  cardId?: string;
+};
+
+export type InternalLinkHandler = (
+  url: string,
+  origin?: InternalLinkOrigin,
+) => boolean | Promise<boolean>;
 
 export interface InternalLinkContextValue {
   handleInternalLink: InternalLinkHandler;

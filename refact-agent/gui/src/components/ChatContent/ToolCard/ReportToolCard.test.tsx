@@ -268,11 +268,12 @@ describe("ReportToolCard", () => {
   test("TaskDoneTool pending uses compact report language, never completed", () => {
     const chat = createDefaultChatState();
     chat.threads[chat.current_thread_id].streaming = true;
-    render(<TaskDoneTool toolCall={toolCall()} />, {
+    render(<TaskDoneTool toolCall={toolCall()} compact />, {
       preloadedState: { chat },
     });
-    expect(screen.getByRole("button")).toHaveTextContent("Task report");
-    expect(screen.getByRole("button")).toHaveTextContent("Awaiting report");
+    const row = screen.getByRole("button", { expanded: false });
+    expect(row).toHaveTextContent("Task report");
+    expect(row).toHaveTextContent("Awaiting report");
     expect(screen.queryByText(/Task completed/)).not.toBeInTheDocument();
   });
 
@@ -325,11 +326,29 @@ describe("ReportToolCard", () => {
     chat.threads[chat.current_thread_id].thread.messages =
       content === null ? [] : [toolMessage(undefined, content, failed)];
     chat.threads[chat.current_thread_id].streaming = content === null;
-    render(<TaskDoneTool toolCall={toolCall()} />, {
-      preloadedState: { chat },
-    });
-    const toggle = screen.getByRole("button");
+    const { container } = render(
+      <TaskDoneTool toolCall={toolCall()} compact />,
+      {
+        preloadedState: { chat },
+      },
+    );
+    const toggle = screen.getByRole("button", { expanded: false });
     expect(toggle.querySelector(`.lucide-${icon}`)).toBeInTheDocument();
+    expect(container.querySelector("section")).toHaveAttribute(
+      "data-status",
+      icon === "circle-x" ? "error" : content === null ? "running" : "idle",
+    );
+    expect(toggle).toHaveTextContent(
+      failed
+        ? "Request failed"
+        : content === null
+          ? "Awaiting report"
+          : icon === "circle-check"
+            ? "Reported success"
+            : icon === "circle-x"
+              ? "Reported failure"
+              : "Report unverified",
+    );
     if (icon !== "circle-check") {
       expect(toggle.querySelector(".lucide-circle-check")).toBeNull();
     }
@@ -374,32 +393,46 @@ describe("ReportToolCard", () => {
     },
   );
 
-  test("TaskDoneTool delivered report preserves full content, files and reported failure", async () => {
+  test("standalone TaskDoneTool stays expanded and unbounded with full content, files and reported failure", async () => {
     const payload = {
       type: "task_done",
       summary: "Build still needs fixes",
       success: false,
-      report: "# Build report\n\nFull failure evidence",
+      report: `# Build report\n\nFull failure evidence\n\n${"Evidence preserved. ".repeat(
+        80,
+      )}\n\nEND OF REPORT`,
       files_changed: ["src/cache.ts"],
     };
     const chat = createDefaultChatState();
     chat.threads[chat.current_thread_id].thread.messages = [
       toolMessage(undefined, JSON.stringify(payload)),
     ];
-    const { user } = render(<TaskDoneTool toolCall={toolCall()} />, {
+    const { user, container } = render(<TaskDoneTool toolCall={toolCall()} />, {
       preloadedState: { chat },
     });
-    expect(screen.getByRole("button")).toHaveTextContent(
-      "Build still needs fixes",
-    );
+    const row = screen.getByRole("button", { expanded: true });
+    expect(row).toHaveTextContent("Build still needs fixes");
     expect(screen.getByText("Reported failure")).toBeInTheDocument();
-    expect(screen.getByRole("button")).not.toHaveTextContent(/completed/i);
-    await user.click(screen.getByRole("button"));
-    await user.click(screen.getByRole("button", { name: "More details" }));
-    await user.click(screen.getByTitle("Copy report"));
+    expect(row).not.toHaveTextContent(/completed|verified/i);
+    expect(row.querySelector(".lucide-circle-x")).toBeInTheDocument();
+    expect(row.querySelector(".lucide-circle-check")).toBeNull();
+    expect(container.querySelector("section")).toHaveAttribute(
+      "data-status",
+      "error",
+    );
+    expect(container.querySelector('[data-density="compact"]')).toBeNull();
+    expect(screen.queryByRole("button", { name: "More details" })).toBeNull();
+    expect(await screen.findByText(/END OF REPORT/)).toBeInTheDocument();
+    expect(
+      container.querySelector("[class*='contentUnbounded']"),
+    ).not.toBeNull();
+    await user.click(screen.getByRole("button", { name: "Copy report" }));
     expect(copy).toHaveBeenCalledWith(payload.report);
-    await user.click(screen.getByRole("button", { name: "cache.ts" }));
+    await user.click(screen.getByRole("button", { name: "Save as file" }));
+    expect(save).toHaveBeenCalledWith(payload.report);
+    await user.click(screen.getByText("cache.ts"));
     expect(openFile).toHaveBeenCalledWith({ path: "src/cache.ts" });
+    expect(container.querySelector("button button")).toBeNull();
   });
 
   test.each([
@@ -411,7 +444,7 @@ describe("ReportToolCard", () => {
     chat.threads[chat.current_thread_id].thread.messages = [
       toolMessage(undefined, JSON.stringify(payload)),
     ];
-    render(<TaskDoneTool toolCall={toolCall()} />, {
+    render(<TaskDoneTool toolCall={toolCall()} compact />, {
       preloadedState: { chat },
     });
     expect(screen.getByRole("button")).toHaveAttribute(

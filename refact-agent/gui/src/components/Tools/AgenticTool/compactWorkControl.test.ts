@@ -292,7 +292,7 @@ describe("work and roster snapshots", () => {
 describe("inspection and wait evidence", () => {
   it("keeps planner wait mode and permissively parsed missing states unconfirmed", () => {
     const output = present("wait_agents", known("wait_agents"));
-    expect(output.stateLabel).toBe("Paused / approval");
+    expect(output.stateLabel).toBe("Approval needed");
     expect(output.headline).toContain("Check UTF-8");
     expect(facts(output)).toContain("1 card rows shown · coverage unknown");
     expect(facts(output)).toContain(
@@ -314,8 +314,10 @@ describe("inspection and wait evidence", () => {
       "wait_agents",
       "⚠️  Alerts: 2 stuck, 1 failed, 3 needing approval, 0 needing attention\nshowing 0 of 10",
     );
-    expect(alerts.stateLabel).toBe("Failures · Blocked · Paused / approval");
+    expect(alerts.stateLabel).toBe("Failures · Blocked");
     expect(alerts.tone).toBe("danger");
+    expect(facts(alerts)).toContain("1 failed · 2 stuck");
+    expect(facts(alerts)).toContain("Approval count unconfirmed");
   });
 
   it.each(["agent_status", "agent_result", "agent_wait"])(
@@ -412,13 +414,13 @@ describe("inspection and wait evidence", () => {
       };
       for (const result of [receipt, JSON.stringify(receipt)]) {
         const output = present("wait_agents", result);
-        expect(output.stateLabel).toBe("Paused / approval");
+        expect(output.stateLabel).toBe("Approval needed");
         expect(output.tone).toBe("warning");
         expect(output.facts).toEqual([
           { label: "Snapshot", value: "1 card rows shown · coverage unknown" },
           {
             label: "Reported alerts",
-            value: "0 failed · 0 stuck · 1 paused / awaiting approval",
+            value: "0 failed · 0 stuck · 1 awaiting approval",
           },
           {
             label: "Wait",

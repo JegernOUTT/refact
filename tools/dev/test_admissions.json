@@ -1021,6 +1021,171 @@
       "author": "background_agent:bgagent-63087e16-d20a-463e-94c7-f1f68f4b6fa8",
       "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
       "review_evidence": "Independent current source/dependency review: The exact bounded lead is ![allow(dead_code)], the ! in a crate-level inner attribute incorrectly encountered as an item-macro candidate. allow(dead_code) changes warning lint level only; it does not expand items or documentation and cannot remove physical tests from accounting."
+    },
+    {
+      "path": "refact-agent/engine/crates/refact-providers/src/claude_code.rs",
+      "kind": "item_macro",
+      "source_sha256": "07f6f0a5d8717784a98214b86359e9b097b55385c748d9b5d2ee3ee1317c63a1",
+      "lead_sha256": "7db0ff438af8c48e6d4e86d3db79b242d2b0b2180610ac833308272a7542f740",
+      "conclusion": "non_test",
+      "rationale": "This exact invocation declares static ref CLAUDE_CODE_REFRESH_GUARD: AMutex<()> = AMutex::new(()); with no forwarded test or doc attributes. Lock-pinned lazy_static 1.5.0 checksum bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe, src/lib.rs SHA256680e2ac624b3000ba17e9c3d49138332c15c5caf3a0143601b4fc6d9fbd5dd85 lines117-173: lazy_static forwards to __lazy_static_internal, emitting a named struct/static, Deref implementation with initializer/stability functions, and LazyStatic impl. __lazy_static_create in src/inline_lazy.rs SHA256cd8a9babcc3af7d0d39f9874dc575a1da000f0d6048a66296f3ca197c2c00b46 lines44-48 emits a static Lazy value only. Lock entry has no spin dependency; workspace lazy_static dependency enables no spin_no_std feature. No nested test-generating expressions in this input. cfg(test) context, when present, gates a helper static rather than generating a test. Dependency doctests are not expanded into the invocation.",
+      "author": "task:UI-ADMISSION/agent-UI-ADMISSION-bb4f92bf",
+      "reviewer": "bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd",
+      "review_evidence": "Independent read-only Opus discovery review bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd / subchat-20b73436-6d7a-47e2-83e6-2afc5dca6d0a, generation 1, HEAD 76c2a19a1c205664807afe3c3dea60beb1c624c2 tree f9ed2fb78ec8898feb4cb9aeac639be382e52dfb: approved six lazy_static leads and impl_new definition plus eight calls; five task_local leads explicitly blocked pending std source. Classification only; no runtime or test-admission approval. Exact source and lead hashes independently computed by author; reviewer inspected bodies and used supplied hashes."
+    },
+    {
+      "path": "refact-agent/engine/crates/refact-providers/src/claude_code_oauth.rs",
+      "kind": "item_macro",
+      "source_sha256": "af66e9fe3c7a614f7dcf663f77fc49c57b6047b24374aa4c26373719acb119c1",
+      "lead_sha256": "910e9581112539697465e7ae8e7da60fdda89071f2e9cfb407abc0445446ca97",
+      "conclusion": "non_test",
+      "rationale": "This exact invocation declares static ref PENDING_SESSIONS: Arc<AMutex<HashMap<String, PkceSession>>> = with no forwarded test or doc attributes. Lock-pinned lazy_static 1.5.0 checksum bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe, src/lib.rs SHA256680e2ac624b3000ba17e9c3d49138332c15c5caf3a0143601b4fc6d9fbd5dd85 lines117-173: lazy_static forwards to __lazy_static_internal, emitting a named struct/static, Deref implementation with initializer/stability functions, and LazyStatic impl. __lazy_static_create in src/inline_lazy.rs SHA256cd8a9babcc3af7d0d39f9874dc575a1da000f0d6048a66296f3ca197c2c00b46 lines44-48 emits a static Lazy value only. Lock entry has no spin dependency; workspace lazy_static dependency enables no spin_no_std feature. No nested test-generating expressions in this input. cfg(test) context, when present, gates a helper static rather than generating a test. Dependency doctests are not expanded into the invocation.",
+      "author": "task:UI-ADMISSION/agent-UI-ADMISSION-bb4f92bf",
+      "reviewer": "bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd",
+      "review_evidence": "Independent read-only Opus discovery review bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd / subchat-20b73436-6d7a-47e2-83e6-2afc5dca6d0a, generation 1, HEAD 76c2a19a1c205664807afe3c3dea60beb1c624c2 tree f9ed2fb78ec8898feb4cb9aeac639be382e52dfb: approved six lazy_static leads and impl_new definition plus eight calls; five task_local leads explicitly blocked pending std source. Classification only; no runtime or test-admission approval. Exact source and lead hashes independently computed by author; reviewer inspected bodies and used supplied hashes."
+    },
+    {
+      "path": "refact-agent/engine/crates/refact-providers/src/claude_code_oauth.rs",
+      "kind": "item_macro",
+      "source_sha256": "af66e9fe3c7a614f7dcf663f77fc49c57b6047b24374aa4c26373719acb119c1",
+      "lead_sha256": "48633d0f8e02819fe6efa73907afc8d4008d74f9ba959e9f43e3e2e7ae4f47c1",
+      "conclusion": "non_test",
+      "rationale": "This exact invocation declares static ref PENDING_SESSIONS_TEST_LOCK: AMutex<()> = AMutex::new(()); with no forwarded test or doc attributes. Lock-pinned lazy_static 1.5.0 checksum bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe, src/lib.rs SHA256680e2ac624b3000ba17e9c3d49138332c15c5caf3a0143601b4fc6d9fbd5dd85 lines117-173: lazy_static forwards to __lazy_static_internal, emitting a named struct/static, Deref implementation with initializer/stability functions, and LazyStatic impl. __lazy_static_create in src/inline_lazy.rs SHA256cd8a9babcc3af7d0d39f9874dc575a1da000f0d6048a66296f3ca197c2c00b46 lines44-48 emits a static Lazy value only. Lock entry has no spin dependency; workspace lazy_static dependency enables no spin_no_std feature. No nested test-generating expressions in this input. cfg(test) context, when present, gates a helper static rather than generating a test. Dependency doctests are not expanded into the invocation.",
+      "author": "task:UI-ADMISSION/agent-UI-ADMISSION-bb4f92bf",
+      "reviewer": "bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd",
+      "review_evidence": "Independent read-only Opus discovery review bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd / subchat-20b73436-6d7a-47e2-83e6-2afc5dca6d0a, generation 1, HEAD 76c2a19a1c205664807afe3c3dea60beb1c624c2 tree f9ed2fb78ec8898feb4cb9aeac639be382e52dfb: approved six lazy_static leads and impl_new definition plus eight calls; five task_local leads explicitly blocked pending std source. Classification only; no runtime or test-admission approval. Exact source and lead hashes independently computed by author; reviewer inspected bodies and used supplied hashes."
+    },
+    {
+      "path": "refact-agent/engine/src/chat/stream_core.rs",
+      "kind": "item_macro",
+      "source_sha256": "19af3e35092d3c47917c958c04d53e906547007132b212a45484c862cf1faa41",
+      "lead_sha256": "65518f15a8745d606f0b104679252ecca35ac458009e99e49c7de4ae44c1df3b",
+      "conclusion": "non_test",
+      "rationale": "This exact invocation declares static ref OPENAI_CODEX_UNBOUND_WEBSOCKET_SESSIONS: with no forwarded test or doc attributes. Lock-pinned lazy_static 1.5.0 checksum bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe, src/lib.rs SHA256680e2ac624b3000ba17e9c3d49138332c15c5caf3a0143601b4fc6d9fbd5dd85 lines117-173: lazy_static forwards to __lazy_static_internal, emitting a named struct/static, Deref implementation with initializer/stability functions, and LazyStatic impl. __lazy_static_create in src/inline_lazy.rs SHA256cd8a9babcc3af7d0d39f9874dc575a1da000f0d6048a66296f3ca197c2c00b46 lines44-48 emits a static Lazy value only. Lock entry has no spin dependency; workspace lazy_static dependency enables no spin_no_std feature. No nested test-generating expressions in this input. cfg(test) context, when present, gates a helper static rather than generating a test. Dependency doctests are not expanded into the invocation.",
+      "author": "task:UI-ADMISSION/agent-UI-ADMISSION-bb4f92bf",
+      "reviewer": "bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd",
+      "review_evidence": "Independent read-only Opus discovery review bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd / subchat-20b73436-6d7a-47e2-83e6-2afc5dca6d0a, generation 1, HEAD 76c2a19a1c205664807afe3c3dea60beb1c624c2 tree f9ed2fb78ec8898feb4cb9aeac639be382e52dfb: approved six lazy_static leads and impl_new definition plus eight calls; five task_local leads explicitly blocked pending std source. Classification only; no runtime or test-admission approval. Exact source and lead hashes independently computed by author; reviewer inspected bodies and used supplied hashes."
+    },
+    {
+      "path": "refact-agent/engine/src/providers/oauth_refresh.rs",
+      "kind": "item_macro",
+      "source_sha256": "7280394d7906aa60ee3b8e27cb5bb6a04c27abff120b1573165bf972fc5bdac0",
+      "lead_sha256": "80b72a6597039ee2c3e84e448ae8cbeaa2d3fdbe588116a784b3576638dec772",
+      "conclusion": "non_test",
+      "rationale": "This exact invocation declares static ref OAUTH_FAILED_INSTANCES: std::sync::Mutex<HashSet<String>> = with no forwarded test or doc attributes. Lock-pinned lazy_static 1.5.0 checksum bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe, src/lib.rs SHA256680e2ac624b3000ba17e9c3d49138332c15c5caf3a0143601b4fc6d9fbd5dd85 lines117-173: lazy_static forwards to __lazy_static_internal, emitting a named struct/static, Deref implementation with initializer/stability functions, and LazyStatic impl. __lazy_static_create in src/inline_lazy.rs SHA256cd8a9babcc3af7d0d39f9874dc575a1da000f0d6048a66296f3ca197c2c00b46 lines44-48 emits a static Lazy value only. Lock entry has no spin dependency; workspace lazy_static dependency enables no spin_no_std feature. No nested test-generating expressions in this input. cfg(test) context, when present, gates a helper static rather than generating a test. Dependency doctests are not expanded into the invocation.",
+      "author": "task:UI-ADMISSION/agent-UI-ADMISSION-bb4f92bf",
+      "reviewer": "bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd",
+      "review_evidence": "Independent read-only Opus discovery review bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd / subchat-20b73436-6d7a-47e2-83e6-2afc5dca6d0a, generation 1, HEAD 76c2a19a1c205664807afe3c3dea60beb1c624c2 tree f9ed2fb78ec8898feb4cb9aeac639be382e52dfb: approved six lazy_static leads and impl_new definition plus eight calls; five task_local leads explicitly blocked pending std source. Classification only; no runtime or test-admission approval. Exact source and lead hashes independently computed by author; reviewer inspected bodies and used supplied hashes."
+    },
+    {
+      "path": "refact-agent/engine/src/providers/oauth_refresh.rs",
+      "kind": "item_macro",
+      "source_sha256": "7280394d7906aa60ee3b8e27cb5bb6a04c27abff120b1573165bf972fc5bdac0",
+      "lead_sha256": "7c820edc6abef94da95b0fa124948c1e232b68cbc2fca773f8cffb5429f8c4b8",
+      "conclusion": "non_test",
+      "rationale": "This exact invocation declares static ref REFRESH_TRACKING_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()); with no forwarded test or doc attributes. Lock-pinned lazy_static 1.5.0 checksum bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe, src/lib.rs SHA256680e2ac624b3000ba17e9c3d49138332c15c5caf3a0143601b4fc6d9fbd5dd85 lines117-173: lazy_static forwards to __lazy_static_internal, emitting a named struct/static, Deref implementation with initializer/stability functions, and LazyStatic impl. __lazy_static_create in src/inline_lazy.rs SHA256cd8a9babcc3af7d0d39f9874dc575a1da000f0d6048a66296f3ca197c2c00b46 lines44-48 emits a static Lazy value only. Lock entry has no spin dependency; workspace lazy_static dependency enables no spin_no_std feature. No nested test-generating expressions in this input. cfg(test) context, when present, gates a helper static rather than generating a test. Dependency doctests are not expanded into the invocation.",
+      "author": "task:UI-ADMISSION/agent-UI-ADMISSION-bb4f92bf",
+      "reviewer": "bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd",
+      "review_evidence": "Independent read-only Opus discovery review bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd / subchat-20b73436-6d7a-47e2-83e6-2afc5dca6d0a, generation 1, HEAD 76c2a19a1c205664807afe3c3dea60beb1c624c2 tree f9ed2fb78ec8898feb4cb9aeac639be382e52dfb: approved six lazy_static leads and impl_new definition plus eight calls; five task_local leads explicitly blocked pending std source. Classification only; no runtime or test-admission approval. Exact source and lead hashes independently computed by author; reviewer inspected bodies and used supplied hashes."
+    },
+    {
+      "path": "refact-agent/engine/src/tools/tool_task_documents.rs",
+      "kind": "macro_definition",
+      "source_sha256": "eb6dfbace8f98f02cfccc340153b7fbdff4e292b7a4c1972a4574f1d315e3a54",
+      "lead_sha256": "591241c71344a7db715293be6749f62c377afab9fe18b43f5491c0b83fd0045b",
+      "conclusion": "non_test",
+      "rationale": "The entire local impl_new definition at1107-1115 has exactly one ident arm. Its full expansion is impl $tool { pub fn new() -> Self { Self } }. The macro emits one inherent constructor, no attributes, modules, test functions, documentation examples, nested macros, or other token inputs. Definition and all eight invocations1126-1133 were read together; this is not a macro-name allowlist.",
+      "author": "task:UI-ADMISSION/agent-UI-ADMISSION-bb4f92bf",
+      "reviewer": "bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd",
+      "review_evidence": "Independent read-only Opus discovery review bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd / subchat-20b73436-6d7a-47e2-83e6-2afc5dca6d0a, generation 1, HEAD 76c2a19a1c205664807afe3c3dea60beb1c624c2 tree f9ed2fb78ec8898feb4cb9aeac639be382e52dfb: approved six lazy_static leads and impl_new definition plus eight calls; five task_local leads explicitly blocked pending std source. Classification only; no runtime or test-admission approval. Exact source and lead hashes independently computed by author; reviewer inspected bodies and used supplied hashes."
+    },
+    {
+      "path": "refact-agent/engine/src/tools/tool_task_documents.rs",
+      "kind": "item_macro",
+      "source_sha256": "eb6dfbace8f98f02cfccc340153b7fbdff4e292b7a4c1972a4574f1d315e3a54",
+      "lead_sha256": "6c22f282fbc5cb001dcb20996ec22288334cf731be77e5a4d7e651895e79afbe",
+      "conclusion": "non_test",
+      "rationale": "This exact impl_new!(ToolDocList); invocation supplies one unit-struct identifier from1117-1124. Its full expansion is impl $tool { pub fn new() -> Self { Self } }. The macro emits one inherent constructor, no attributes, modules, test functions, documentation examples, nested macros, or other token inputs. Definition and all eight invocations1126-1133 were read together; this is not a macro-name allowlist.",
+      "author": "task:UI-ADMISSION/agent-UI-ADMISSION-bb4f92bf",
+      "reviewer": "bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd",
+      "review_evidence": "Independent read-only Opus discovery review bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd / subchat-20b73436-6d7a-47e2-83e6-2afc5dca6d0a, generation 1, HEAD 76c2a19a1c205664807afe3c3dea60beb1c624c2 tree f9ed2fb78ec8898feb4cb9aeac639be382e52dfb: approved six lazy_static leads and impl_new definition plus eight calls; five task_local leads explicitly blocked pending std source. Classification only; no runtime or test-admission approval. Exact source and lead hashes independently computed by author; reviewer inspected bodies and used supplied hashes."
+    },
+    {
+      "path": "refact-agent/engine/src/tools/tool_task_documents.rs",
+      "kind": "item_macro",
+      "source_sha256": "eb6dfbace8f98f02cfccc340153b7fbdff4e292b7a4c1972a4574f1d315e3a54",
+      "lead_sha256": "c407b70fd94b1c7c3b842689b09551151a43b4f4b0c159b89f9b2062d15a1917",
+      "conclusion": "non_test",
+      "rationale": "This exact impl_new!(ToolDocGet); invocation supplies one unit-struct identifier from1117-1124. Its full expansion is impl $tool { pub fn new() -> Self { Self } }. The macro emits one inherent constructor, no attributes, modules, test functions, documentation examples, nested macros, or other token inputs. Definition and all eight invocations1126-1133 were read together; this is not a macro-name allowlist.",
+      "author": "task:UI-ADMISSION/agent-UI-ADMISSION-bb4f92bf",
+      "reviewer": "bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd",
+      "review_evidence": "Independent read-only Opus discovery review bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd / subchat-20b73436-6d7a-47e2-83e6-2afc5dca6d0a, generation 1, HEAD 76c2a19a1c205664807afe3c3dea60beb1c624c2 tree f9ed2fb78ec8898feb4cb9aeac639be382e52dfb: approved six lazy_static leads and impl_new definition plus eight calls; five task_local leads explicitly blocked pending std source. Classification only; no runtime or test-admission approval. Exact source and lead hashes independently computed by author; reviewer inspected bodies and used supplied hashes."
+    },
+    {
+      "path": "refact-agent/engine/src/tools/tool_task_documents.rs",
+      "kind": "item_macro",
+      "source_sha256": "eb6dfbace8f98f02cfccc340153b7fbdff4e292b7a4c1972a4574f1d315e3a54",
+      "lead_sha256": "12b5d1509ffa0eeeee1459221256bdcf415f1c37ea599026d7ef09f5a729155a",
+      "conclusion": "non_test",
+      "rationale": "This exact impl_new!(ToolDocCreate); invocation supplies one unit-struct identifier from1117-1124. Its full expansion is impl $tool { pub fn new() -> Self { Self } }. The macro emits one inherent constructor, no attributes, modules, test functions, documentation examples, nested macros, or other token inputs. Definition and all eight invocations1126-1133 were read together; this is not a macro-name allowlist.",
+      "author": "task:UI-ADMISSION/agent-UI-ADMISSION-bb4f92bf",
+      "reviewer": "bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd",
+      "review_evidence": "Independent read-only Opus discovery review bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd / subchat-20b73436-6d7a-47e2-83e6-2afc5dca6d0a, generation 1, HEAD 76c2a19a1c205664807afe3c3dea60beb1c624c2 tree f9ed2fb78ec8898feb4cb9aeac639be382e52dfb: approved six lazy_static leads and impl_new definition plus eight calls; five task_local leads explicitly blocked pending std source. Classification only; no runtime or test-admission approval. Exact source and lead hashes independently computed by author; reviewer inspected bodies and used supplied hashes."
+    },
+    {
+      "path": "refact-agent/engine/src/tools/tool_task_documents.rs",
+      "kind": "item_macro",
+      "source_sha256": "eb6dfbace8f98f02cfccc340153b7fbdff4e292b7a4c1972a4574f1d315e3a54",
+      "lead_sha256": "4c771bcd1fee791b82b5e09edcdf4337e7e174f232db551b5a911e67162926d9",
+      "conclusion": "non_test",
+      "rationale": "This exact impl_new!(ToolDocUpdate); invocation supplies one unit-struct identifier from1117-1124. Its full expansion is impl $tool { pub fn new() -> Self { Self } }. The macro emits one inherent constructor, no attributes, modules, test functions, documentation examples, nested macros, or other token inputs. Definition and all eight invocations1126-1133 were read together; this is not a macro-name allowlist.",
+      "author": "task:UI-ADMISSION/agent-UI-ADMISSION-bb4f92bf",
+      "reviewer": "bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd",
+      "review_evidence": "Independent read-only Opus discovery review bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd / subchat-20b73436-6d7a-47e2-83e6-2afc5dca6d0a, generation 1, HEAD 76c2a19a1c205664807afe3c3dea60beb1c624c2 tree f9ed2fb78ec8898feb4cb9aeac639be382e52dfb: approved six lazy_static leads and impl_new definition plus eight calls; five task_local leads explicitly blocked pending std source. Classification only; no runtime or test-admission approval. Exact source and lead hashes independently computed by author; reviewer inspected bodies and used supplied hashes."
+    },
+    {
+      "path": "refact-agent/engine/src/tools/tool_task_documents.rs",
+      "kind": "item_macro",
+      "source_sha256": "eb6dfbace8f98f02cfccc340153b7fbdff4e292b7a4c1972a4574f1d315e3a54",
+      "lead_sha256": "8cdea53e93b64341e33b092f0da232dd9161614b1503a7579e8f6ab088ca64c6",
+      "conclusion": "non_test",
+      "rationale": "This exact impl_new!(ToolDocAppend); invocation supplies one unit-struct identifier from1117-1124. Its full expansion is impl $tool { pub fn new() -> Self { Self } }. The macro emits one inherent constructor, no attributes, modules, test functions, documentation examples, nested macros, or other token inputs. Definition and all eight invocations1126-1133 were read together; this is not a macro-name allowlist.",
+      "author": "task:UI-ADMISSION/agent-UI-ADMISSION-bb4f92bf",
+      "reviewer": "bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd",
+      "review_evidence": "Independent read-only Opus discovery review bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd / subchat-20b73436-6d7a-47e2-83e6-2afc5dca6d0a, generation 1, HEAD 76c2a19a1c205664807afe3c3dea60beb1c624c2 tree f9ed2fb78ec8898feb4cb9aeac639be382e52dfb: approved six lazy_static leads and impl_new definition plus eight calls; five task_local leads explicitly blocked pending std source. Classification only; no runtime or test-admission approval. Exact source and lead hashes independently computed by author; reviewer inspected bodies and used supplied hashes."
+    },
+    {
+      "path": "refact-agent/engine/src/tools/tool_task_documents.rs",
+      "kind": "item_macro",
+      "source_sha256": "eb6dfbace8f98f02cfccc340153b7fbdff4e292b7a4c1972a4574f1d315e3a54",
+      "lead_sha256": "590b7bf02027cb5ce17c240b348e4f44b4aee9b7f78ee82f855a88f9458981af",
+      "conclusion": "non_test",
+      "rationale": "This exact impl_new!(ToolDocDelete); invocation supplies one unit-struct identifier from1117-1124. Its full expansion is impl $tool { pub fn new() -> Self { Self } }. The macro emits one inherent constructor, no attributes, modules, test functions, documentation examples, nested macros, or other token inputs. Definition and all eight invocations1126-1133 were read together; this is not a macro-name allowlist.",
+      "author": "task:UI-ADMISSION/agent-UI-ADMISSION-bb4f92bf",
+      "reviewer": "bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd",
+      "review_evidence": "Independent read-only Opus discovery review bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd / subchat-20b73436-6d7a-47e2-83e6-2afc5dca6d0a, generation 1, HEAD 76c2a19a1c205664807afe3c3dea60beb1c624c2 tree f9ed2fb78ec8898feb4cb9aeac639be382e52dfb: approved six lazy_static leads and impl_new definition plus eight calls; five task_local leads explicitly blocked pending std source. Classification only; no runtime or test-admission approval. Exact source and lead hashes independently computed by author; reviewer inspected bodies and used supplied hashes."
+    },
+    {
+      "path": "refact-agent/engine/src/tools/tool_task_documents.rs",
+      "kind": "item_macro",
+      "source_sha256": "eb6dfbace8f98f02cfccc340153b7fbdff4e292b7a4c1972a4574f1d315e3a54",
+      "lead_sha256": "1f60c2c6846c6959d18856e1b21b281c142f02e186ce73957bff0bdffaecc372",
+      "conclusion": "non_test",
+      "rationale": "This exact impl_new!(ToolDocPin); invocation supplies one unit-struct identifier from1117-1124. Its full expansion is impl $tool { pub fn new() -> Self { Self } }. The macro emits one inherent constructor, no attributes, modules, test functions, documentation examples, nested macros, or other token inputs. Definition and all eight invocations1126-1133 were read together; this is not a macro-name allowlist.",
+      "author": "task:UI-ADMISSION/agent-UI-ADMISSION-bb4f92bf",
+      "reviewer": "bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd",
+      "review_evidence": "Independent read-only Opus discovery review bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd / subchat-20b73436-6d7a-47e2-83e6-2afc5dca6d0a, generation 1, HEAD 76c2a19a1c205664807afe3c3dea60beb1c624c2 tree f9ed2fb78ec8898feb4cb9aeac639be382e52dfb: approved six lazy_static leads and impl_new definition plus eight calls; five task_local leads explicitly blocked pending std source. Classification only; no runtime or test-admission approval. Exact source and lead hashes independently computed by author; reviewer inspected bodies and used supplied hashes."
+    },
+    {
+      "path": "refact-agent/engine/src/tools/tool_task_documents.rs",
+      "kind": "item_macro",
+      "source_sha256": "eb6dfbace8f98f02cfccc340153b7fbdff4e292b7a4c1972a4574f1d315e3a54",
+      "lead_sha256": "89b29bf4c5273a84503594595639965ecaeca994ba3d4a87c2752884eacc9db0",
+      "conclusion": "non_test",
+      "rationale": "This exact impl_new!(ToolDocHistory); invocation supplies one unit-struct identifier from1117-1124. Its full expansion is impl $tool { pub fn new() -> Self { Self } }. The macro emits one inherent constructor, no attributes, modules, test functions, documentation examples, nested macros, or other token inputs. Definition and all eight invocations1126-1133 were read together; this is not a macro-name allowlist.",
+      "author": "task:UI-ADMISSION/agent-UI-ADMISSION-bb4f92bf",
+      "reviewer": "bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd",
+      "review_evidence": "Independent read-only Opus discovery review bgagent-5c5fabd3-19d9-46ed-b646-491dc9edf6bd / subchat-20b73436-6d7a-47e2-83e6-2afc5dca6d0a, generation 1, HEAD 76c2a19a1c205664807afe3c3dea60beb1c624c2 tree f9ed2fb78ec8898feb4cb9aeac639be382e52dfb: approved six lazy_static leads and impl_new definition plus eight calls; five task_local leads explicitly blocked pending std source. Classification only; no runtime or test-admission approval. Exact source and lead hashes independently computed by author; reviewer inspected bodies and used supplied hashes."
     }
   ],
   "impacts": [

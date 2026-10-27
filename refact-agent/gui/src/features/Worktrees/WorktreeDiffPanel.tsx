@@ -7,7 +7,6 @@ import {
   type WorktreeRecordView,
   type WorktreeStatus,
 } from "../../services/refact";
-import { dialogNonInteractiveCloseHandlers } from "../../utils/dialogPointerClose";
 import { worktreeErrorText } from "./worktreeError";
 import styles from "./Worktrees.module.css";
 
@@ -18,7 +17,6 @@ type WorktreeDiffPanelProps = {
   record?: WorktreeRecordView | null;
   sourceWorkspaceRoot?: string;
   onOpenChange: (open: boolean) => void;
-  closeOnNonInteractiveContentClick?: boolean;
 };
 
 function displayWorktreeLabel(
@@ -104,7 +102,6 @@ export const WorktreeDiffPanel: React.FC<WorktreeDiffPanelProps> = ({
   record,
   sourceWorkspaceRoot,
   onOpenChange,
-  closeOnNonInteractiveContentClick = false,
 }) => {
   const queryId = worktreeId ?? record?.meta.id ?? worktree?.id ?? "";
   const resolvedSourceRoot =
@@ -127,11 +124,7 @@ export const WorktreeDiffPanel: React.FC<WorktreeDiffPanelProps> = ({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <Dialog.Content className={styles.diffDialog} maxWidth="900px">
-        <div
-          {...(closeOnNonInteractiveContentClick
-            ? dialogNonInteractiveCloseHandlers(() => onOpenChange(false))
-            : {})}
-        >
+        <div>
           <Dialog.Title>Worktree diff</Dialog.Title>
           <Dialog.Description>Review changes for {label}</Dialog.Description>
 

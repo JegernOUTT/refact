@@ -85,7 +85,6 @@
   min-width: 0;
   padding: var(--rf-row-pad);
   border-radius: var(--rf-radius-ctl);
-  cursor: pointer;
 }
 
 .nodeRow:hover,
@@ -104,10 +103,10 @@
 .metaLine {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--rf-row-gap);
   min-width: 0;
   padding-left: var(--rf-agent-row-indent);
-  overflow: hidden;
 }
 
 .nodeTitle {
@@ -164,7 +163,7 @@
   display: inline-flex;
   align-items: center;
   gap: var(--rf-space-2xs);
-  min-height: var(--rf-control-h-sm);
+  height: var(--rf-control-h-sm);
   padding: 0 var(--rf-space-1);
   color: var(--rf-color-muted);
   background: transparent;
@@ -258,19 +257,25 @@
 
 .nodeDetails p {
   margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.errorSummary {
+  color: var(--rf-color-danger);
 }
 
 .fileList,
 .branchRow {
+  display: flex;
   gap: var(--rf-space-1);
   flex-wrap: wrap;
 }
 
 .fileList > span {
-  max-width: 180px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .branchRow > span {

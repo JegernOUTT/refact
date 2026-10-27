@@ -1,0 +1,49 @@
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.stack h3,
+.stack p {
+  margin: 0;
+}
+
+.stack details {
+  min-width: 0;
+}
+
+.stack summary {
+  cursor: pointer;
+  padding-block: var(--rf-space-2);
+  font-weight: var(--rf-weight-medium);
+}
+
+.text {
+  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: calc(var(--rf-control-h) * 7);
+  overflow-y: auto;
+  margin: 0;
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+}
+
+.metadata {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--rf-space-1);
+  margin: 0;
+}
+
+.metadata dt {
+  color: var(--rf-color-muted);
+}
+
+.metadata dd {
+  margin: 0 0 var(--rf-space-2);
+  overflow-wrap: anywhere;
+}

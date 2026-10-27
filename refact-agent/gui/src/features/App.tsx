@@ -7,12 +7,9 @@ import React, {
 } from "react";
 import { Flex } from "@radix-ui/themes";
 import {
-  createChatWithId,
   selectAllThreads,
-  selectBackgroundAgentsByThread,
   selectChatId,
   selectIsStreaming,
-  selectThread,
   switchToThread,
 } from "./Chat";
 import { WorkspaceView } from "./Workspace/WorkspaceView";
@@ -30,6 +27,7 @@ import {
 } from "../hooks";
 import { useBrowserOnlineStatus } from "../hooks/useBrowserOnlineStatus";
 import { useChatDeepLink } from "../hooks/useChatDeepLink";
+import { useInternalNavigation } from "../hooks/useInternalNavigation";
 import { useBuddyWorkDeepLink } from "../hooks/useBuddyWorkDeepLink";
 import { store } from "../app/store";
 import { Provider } from "react-redux";
@@ -82,7 +80,6 @@ import {
 } from "../utils/chatUiPersistence";
 import { selectFocusedWorkspaceChatId } from "./Workspace";
 import { InternalLinkProvider } from "../contexts/InternalLinkContext";
-import { parseRefactLink } from "../contexts/internalLinkUtils";
 import { ProcessCompletedToasts } from "./Notifications";
 import { CapsProvidersErrorBanner } from "./Errors/CapsProvidersErrorBanner";
 import { getIsAuthError } from "./Errors/errorsSlice";
@@ -128,10 +125,6 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
   const { chatPageChange, setIsChatStreaming, setIsChatReady } =
     useEventsBusForIDE();
   const chatId = useAppSelector(selectChatId);
-  const currentThread = useAppSelector(selectThread);
-  const backgroundAgents = useAppSelector((state) =>
-    selectBackgroundAgentsByThread(state, chatId),
-  );
   const backendStatus = useAppSelector(selectBackendStatus);
   const backendLastOkAt = useAppSelector(selectBackendLastOkAt);
   const isAuthError = useAppSelector(getIsAuthError);
@@ -298,7 +291,8 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
 
   const canAccessApp = providerBootstrap.canAccessApp;
   useBuddyWorkDeepLink(canAccessApp && isLoggedIn);
-  useChatDeepLink(canAccessApp && isLoggedIn);
+  const deepLink = useChatDeepLink(canAccessApp && isLoggedIn);
+  const navigation = useInternalNavigation();
   const hadAppAccessRef = useRef(canAccessApp);
   const [startupResolved, setStartupResolved] = useState(false);
   const [startupDeadlineReached, setStartupDeadlineReached] = useState(false);
@@ -398,29 +392,6 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
   const goBack = useCallback(() => {
     dispatch(pop());
   }, [dispatch]);
-
-  const handleInternalLink = useCallback(
-    (url: string): boolean => {
-      const parsed = parseRefactLink(url);
-      if (!parsed || parsed.type !== "chat" || !parsed.id) return false;
-
-      const agent = Object.values(backgroundAgents).find(
-        (candidate) => candidate.child_chat_id === parsed.id,
-      );
-      dispatch(
-        createChatWithId({
-          id: parsed.id,
-          parentId: currentThread?.id,
-          linkType: agent?.kind ?? currentThread?.link_type ?? "subagent",
-        }),
-      );
-      dispatch(switchToThread({ id: parsed.id }));
-      dispatch(popBackTo({ name: "history" }));
-      dispatch(push({ name: "chat" }));
-      return true;
-    },
-    [backgroundAgents, currentThread?.id, currentThread?.link_type, dispatch],
-  );
 
   const pageWrapperStyle = useMemo<React.CSSProperties | undefined>(() => {
     if (renderedPage.name === "history") {
@@ -602,6 +573,12 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
       ) : (
         <>
           {activeTab && <Toolbar activeTab={activeTab} />}
+          {(navigation.pending || deepLink.pending) && (
+            <div role="status">Opening linked target...</div>
+          )}
+          {(navigation.error ?? deepLink.error) && (
+            <div role="alert">{navigation.error ?? deepLink.error}</div>
+          )}
           <PageWrapper
             host={config.host}
             style={pageWrapperStyle}
@@ -611,7 +588,7 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
             {pageSwitching && <ChatLoading />}
             {!pageSwitching && renderedPage.name === "history" && <Dashboard />}
             {!pageSwitching && renderedPage.name === "chat" && (
-              <InternalLinkProvider onInternalLink={handleInternalLink}>
+              <InternalLinkProvider onInternalLink={navigation.navigate}>
                 <WorkspaceView />
               </InternalLinkProvider>
             )}
@@ -630,6 +607,7 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
               <TaskWorkspace
                 key={renderedPage.taskId}
                 taskId={renderedPage.taskId}
+                cardId={renderedPage.cardId}
               />
             )}
             {!pageSwitching && renderedPage.name === "knowledge graph" && (

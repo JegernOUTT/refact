@@ -3,13 +3,21 @@ import { readFileSync } from "node:fs";
 import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { fireEvent, render, screen, waitFor } from "../../../utils/test-utils";
+import {
+  createDefaultChatState,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
 import { setDockOpen, setDockSection } from "../workspaceSlice";
 import { updateConfig } from "../../Config/configSlice";
 import { Dock } from "./Dock";
 import sheetStyles from "../../../components/ui/Sheet/Sheet.module.css";
 import dockStyles from "./Dock.module.css";
+import type { BackgroundAgentSummary } from "../../../services/refact";
+import { openTab } from "../workspaceSlice";
 
 const originalMatchMedia = window.matchMedia;
 const dockCss = readFileSync(
@@ -63,6 +71,105 @@ function stubFileTree() {
 }
 
 describe("Dock", () => {
+  it("opens a discovered unloaded child through the actual dock handler and keeps denied links in place", async () => {
+    mockNarrow(false);
+    const chat = createDefaultChatState();
+    const parentId = chat.current_thread_id;
+    const childId = "unloaded-dock-child";
+    const deniedId = "denied-dock-child";
+    const summary: BackgroundAgentSummary = {
+      agent_id: "agent-dock",
+      parent_chat_id: parentId,
+      child_chat_id: childId,
+      kind: "subagent",
+      status: "running",
+      title: "Unloaded child",
+      progress: null,
+      step_count: 0,
+      last_activity: null,
+      target_files: [],
+      edited_files: [],
+      diff_summary: null,
+      conflict_summary: null,
+      result_summary: null,
+      error: null,
+      started_at: null,
+      finished_at: null,
+      change_seq: 1,
+    };
+    let reads = 0;
+    const commands = vi.fn();
+    server.use(
+      http.get("*/v1/background-agents", () =>
+        HttpResponse.json([
+          summary,
+          {
+            ...summary,
+            agent_id: "agent-denied",
+            child_chat_id: deniedId,
+            title: "Denied child",
+          },
+        ]),
+      ),
+      http.get(`*/v1/trajectories/${childId}`, ({ request }) => {
+        reads += 1;
+        expect(request.headers.get("authorization")).toBe("Bearer scoped-key");
+        return HttpResponse.json({
+          id: childId,
+          title: "Stored child",
+          model: "",
+          mode: "AGENT",
+          tool_use: "agent",
+          messages: [],
+        });
+      }),
+      http.get(`*/v1/trajectories/${deniedId}`, () =>
+        HttpResponse.json({ detail: "Access denied" }, { status: 403 }),
+      ),
+      http.post("*/v1/chats/:id/commands", () => {
+        commands();
+        return HttpResponse.json({});
+      }),
+    );
+    const view = render(<Dock />, {
+      preloadedState: {
+        chat,
+        config: {
+          host: "web",
+          dev: true,
+          lspPort: 8001,
+          apiKey: "scoped-key",
+          themeProps: {},
+        },
+      },
+    });
+    view.store.dispatch(openTab(`chat:${parentId}`));
+    view.store.dispatch(setDockSection("agents"));
+    await view.user.click(
+      await screen.findByRole("button", { name: "Denied child" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent("Access denied");
+    expect(view.store.getState().chat.current_thread_id).toBe(parentId);
+    expect(view.store.getState().chat.threads[deniedId]).toBeUndefined();
+    await view.user.click(
+      screen.getByRole("button", { name: "Unloaded child" }),
+    );
+    await waitFor(() =>
+      expect(view.store.getState().chat.current_thread_id).toBe(childId),
+    );
+    expect(view.store.getState().chat.threads[childId]).toMatchObject({
+      thread: {
+        title: "Stored child",
+        parent_id: parentId,
+        root_chat_id: parentId,
+        link_type: "subagent",
+      },
+      snapshot_received: false,
+    });
+    expect(reads).toBe(1);
+    expect(commands).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => {
     server.use(
       http.get("*/v1/git/status", () => HttpResponse.json({ roots: [] })),

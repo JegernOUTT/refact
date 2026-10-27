@@ -198,6 +198,17 @@
   min-width: 0;
 }
 
+.goalFeedback,
+.goalError {
+  margin: 0;
+  padding: var(--rf-space-2) var(--rf-space-3);
+  overflow-wrap: anywhere;
+}
+
+.goalError {
+  color: var(--rf-color-danger);
+}
+
 .goalProgressSaturated {
   color: var(--rf-color-danger);
   font-weight: var(--rf-weight-semibold);

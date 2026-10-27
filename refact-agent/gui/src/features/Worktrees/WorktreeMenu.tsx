@@ -17,7 +17,6 @@ import {
 } from "../../services/refact";
 import { sendUserMessage } from "../../services/refact/chatCommands";
 import { useAppDispatch, useAppSelector } from "../../hooks";
-import { dialogNonInteractiveCloseHandlers } from "../../utils/dialogPointerClose";
 import { selectApiKey, selectConfig } from "../Config/configSlice";
 import { setThreadWorktree } from "../Chat/Thread";
 import { WorktreeStatusBadge } from "./WorktreeStatusBadge";
@@ -193,6 +192,11 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
   const handleMerged = useCallback(
     (response: MergeWorktreeResponse) => {
       const cleanup = response.cleanup;
+      setLocalFeedback(
+        `${
+          response.merged === true ? "Worktree merged." : "Nothing to merge."
+        } Review the merge result for cleanup details and warnings.`,
+      );
       if (
         (cleanup?.worktree_deleted ?? false) ||
         (cleanup?.registry_deleted ?? false)
@@ -201,10 +205,6 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
           dispatch(setThreadWorktree({ chatId, worktree: null }));
         }
         onDetach();
-        setMergeOpen(false);
-        setLocalFeedback("Worktree merged and removed.");
-      } else if (response.merged === true) {
-        setLocalFeedback("Worktree merged.");
       }
     },
     [chatId, dispatch, onDetach],
@@ -368,7 +368,6 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
         worktree={currentWorktree}
         record={currentRecord}
         onOpenChange={setDiffOpen}
-        closeOnNonInteractiveContentClick
       />
 
       <MergeWorktreeModal
@@ -380,14 +379,11 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
         onMerged={handleMerged}
         onAskRefact={handleAskRefact}
         onOpenWorktree={onOpenInNewWindow}
-        closeOnNonInteractiveContentClick
       />
 
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <Dialog.Content maxWidth="420px">
-          <div
-            {...dialogNonInteractiveCloseHandlers(() => setDeleteOpen(false))}
-          >
+          <div>
             <Dialog.Title>Delete worktree</Dialog.Title>
             <Dialog.Description>
               Delete or discard the selected worktree from disk.

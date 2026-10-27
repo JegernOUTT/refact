@@ -1,9 +1,18 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import classNames from "classnames";
 import { Pause, Play, Square, Target, type LucideIcon } from "lucide-react";
 
-import { useChatActions } from "../../hooks/useChatActions";
+import { useChatCommandRequest } from "../../hooks/useChatCommandRequest";
+import { selectConfig } from "../../features/Config/configSlice";
+import { getEngineEndpointIdentity } from "../../services/refact/apiUrl";
+import { selectGoalById } from "../../features/Chat/Thread/selectors";
 import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { useAppSelector } from "../../hooks/useAppSelector";
 import {
@@ -216,8 +225,7 @@ const GOAL_STOPPABLE_STATUSES: ReadonlySet<GoalStatus> = new Set<GoalStatus>([
 
 const GOAL_RESUMABLE_STATUSES: ReadonlySet<GoalStatus> = new Set<GoalStatus>([
   "paused",
-  "budget_exhausted",
-  "no_progress",
+  "stopped",
 ]);
 
 function goalControlAvailability(goal: GoalSnapshot): {
@@ -240,14 +248,10 @@ type GoalControlDescriptor = {
   disabled: boolean;
 };
 
-/**
- * Single source of truth for which goal controls exist, in which order, with
- * which label/icon/disabled state. Both the icon-only and the labelled control
- * rows consume this, keeping their own presentation markup.
- */
 function goalControlActions(
   goal: GoalSnapshot,
   onControl: (action: GoalControlAction) => void,
+  pending: boolean,
 ): GoalControlDescriptor[] {
   const { canPause, canResume, canStop } = goalControlAvailability(goal);
   if (!canPause && !canResume && !canStop) return [];
@@ -258,24 +262,24 @@ function goalControlActions(
         label: "Resume",
         icon: Play,
         handler: () => onControl("resume"),
-        disabled: false,
+        disabled: pending,
       }
     : {
         key: "pause",
         label: "Pause",
         icon: Pause,
         handler: () => onControl("pause"),
-        disabled: !canPause,
+        disabled: pending || !canPause,
       };
 
   return [
-    primary,
+    ...(canPause || canResume || goal.status === "verifying" ? [primary] : []),
     {
       key: "stop",
       label: "Stop",
       icon: Square,
       handler: () => onControl("stop"),
-      disabled: !canStop,
+      disabled: pending || !canStop,
     },
   ];
 }
@@ -347,15 +351,17 @@ const GoalIndicator: React.FC<GoalIndicatorProps> = ({ goal }) => (
 type GoalControlIconsProps = {
   goal: GoalSnapshot;
   onControl: (action: GoalControlAction) => void;
+  pending: boolean;
   className?: string;
 };
 
 const GoalControlIcons: React.FC<GoalControlIconsProps> = ({
   goal,
   onControl,
+  pending,
   className,
 }) => {
-  const actions = goalControlActions(goal, onControl);
+  const actions = goalControlActions(goal, onControl, pending);
 
   if (actions.length === 0) return null;
 
@@ -384,10 +390,11 @@ type GoalSectionProps = {
   goal: GoalSnapshot | null;
   expanded: boolean;
   onExpandedChange: (open: boolean) => void;
-  onCreate: (content: string, budget?: GoalBudgetCommand) => void;
-  onUpdateText: (content: string) => void;
-  onApplyBudget: (budget: GoalBudgetCommand) => void;
+  onCreate: (content: string, budget?: GoalBudgetCommand) => Promise<boolean>;
+  onUpdateText: (content: string) => Promise<boolean>;
+  onApplyBudget: (budget: GoalBudgetCommand) => Promise<boolean>;
   onControl: (action: GoalControlAction) => void;
+  pending: boolean;
 };
 
 const GoalSection: React.FC<GoalSectionProps> = ({
@@ -398,29 +405,33 @@ const GoalSection: React.FC<GoalSectionProps> = ({
   onUpdateText,
   onApplyBudget,
   onControl,
+  pending,
 }) => {
+  const [editingGoal, setEditingGoal] = useState(false);
+  const [creatingGoal, setCreatingGoal] = useState(false);
   const [draft, setDraft] = useState(goal?.content ?? "");
+  const [budgetDirty, setBudgetDirty] = useState(false);
   const [budgetDraft, setBudgetDraft] = useState<GoalBudgetDraft>(() =>
     budgetDraftFromGoal(goal),
   );
 
   useEffect(() => {
-    setDraft(goal?.content ?? "");
-  }, [goal?.content]);
+    if (!editingGoal && !creatingGoal) setDraft(goal?.content ?? "");
+  }, [creatingGoal, editingGoal, goal?.content]);
 
   const goalMaxTurns = goal?.budget.max_turns;
   const goalMaxMinutes = goal?.budget.max_minutes;
   const goalMaxTokens = goal?.budget.max_tokens;
 
   useEffect(() => {
+    if (budgetDirty) return;
     setBudgetDraft({
       maxTurns: goalLimitDraftValue(goalMaxTurns),
       maxMinutes: goalLimitDraftValue(goalMaxMinutes),
       maxTokens: goalLimitDraftValue(goalMaxTokens),
     });
-  }, [goalMaxMinutes, goalMaxTokens, goalMaxTurns]);
+  }, [budgetDirty, goalMaxMinutes, goalMaxTokens, goalMaxTurns]);
 
-  const [editingGoal, setEditingGoal] = useState(false);
   const trimmedDraft = draft.trim();
   const hasGoal = goal !== null;
   const canSave =
@@ -430,28 +441,39 @@ const GoalSection: React.FC<GoalSectionProps> = ({
     [budgetDraft],
   );
 
-  const handleSave = useCallback(() => {
-    if (!canSave) return;
-    if (hasGoal) {
-      onUpdateText(trimmedDraft);
-      setEditingGoal(false);
+  const handleSave = useCallback(async () => {
+    if (!canSave || pending) return;
+    if (hasGoal && !creatingGoal) {
+      if (await onUpdateText(trimmedDraft)) setEditingGoal(false);
       return;
     }
-    onCreate(
+    setCreatingGoal(true);
+    const created = await onCreate(
       trimmedDraft,
       hasBudgetCommandLimits(budgetCommand) ? budgetCommand : undefined,
     );
-  }, [budgetCommand, canSave, hasGoal, onCreate, onUpdateText, trimmedDraft]);
+    if (created) setCreatingGoal(false);
+  }, [
+    budgetCommand,
+    canSave,
+    creatingGoal,
+    hasGoal,
+    onCreate,
+    onUpdateText,
+    pending,
+    trimmedDraft,
+  ]);
 
   const handleBudgetChange = useCallback(
     (field: keyof GoalBudgetDraft, value: string) => {
+      setBudgetDirty(true);
       setBudgetDraft((current) => ({ ...current, [field]: value }));
     },
     [],
   );
 
-  const handleApplyBudget = useCallback(() => {
-    onApplyBudget(budgetCommand);
+  const handleApplyBudget = useCallback(async () => {
+    if (await onApplyBudget(budgetCommand)) setBudgetDirty(false);
   }, [budgetCommand, onApplyBudget]);
 
   return (
@@ -486,6 +508,7 @@ const GoalSection: React.FC<GoalSectionProps> = ({
             <GoalControlIcons
               goal={goal}
               onControl={onControl}
+              pending={pending}
               className={styles.goalHeaderRowControls}
             />
           ) : null}
@@ -494,7 +517,7 @@ const GoalSection: React.FC<GoalSectionProps> = ({
         <Collapsible.Content>
           <Flex direction="column" gap="3" className={styles.goalBody}>
             <Flex direction="column" gap="2">
-              {goal && !editingGoal ? (
+              {goal && !editingGoal && !creatingGoal ? (
                 <>
                   <Markdown>{goal.content}</Markdown>
                   {goal.status === "transferred" && goal.transferred_to ? (
@@ -512,6 +535,7 @@ const GoalSection: React.FC<GoalSectionProps> = ({
                     className={styles.goalInput}
                     id="task-goal-input"
                     value={draft}
+                    disabled={pending}
                     onChange={(event) => setDraft(event.currentTarget.value)}
                     placeholder="Set a goal for this thread"
                   />
@@ -520,7 +544,14 @@ const GoalSection: React.FC<GoalSectionProps> = ({
               <GoalBudgetEditor
                 draft={budgetDraft}
                 showApply={hasGoal}
-                onApply={handleApplyBudget}
+                pending={pending}
+                canApply={
+                  JSON.stringify(budgetCommand) !==
+                  JSON.stringify(
+                    budgetCommandFromDraft(budgetDraftFromGoal(goal)),
+                  )
+                }
+                onApply={() => void handleApplyBudget()}
                 onChange={handleBudgetChange}
               />
               <Flex align="center" justify="end" gap="3" wrap="wrap">
@@ -531,10 +562,11 @@ const GoalSection: React.FC<GoalSectionProps> = ({
                     "Save to start tracking a goal"
                   )}
                 </Text>
-                {goal && !editingGoal ? (
+                {goal && !editingGoal && !creatingGoal ? (
                   <Button
                     size="sm"
                     variant="ghost"
+                    disabled={pending}
                     onClick={() => setEditingGoal(true)}
                   >
                     Edit
@@ -545,9 +577,11 @@ const GoalSection: React.FC<GoalSectionProps> = ({
                       <Button
                         size="sm"
                         variant="ghost"
+                        disabled={pending}
                         onClick={() => {
                           setDraft(goal.content);
                           setEditingGoal(false);
+                          setCreatingGoal(false);
                         }}
                       >
                         Cancel
@@ -556,8 +590,8 @@ const GoalSection: React.FC<GoalSectionProps> = ({
                     <Button
                       size="sm"
                       variant="primary"
-                      disabled={!canSave}
-                      onClick={handleSave}
+                      disabled={!canSave || pending}
+                      onClick={() => void handleSave()}
                     >
                       Save
                     </Button>
@@ -569,7 +603,11 @@ const GoalSection: React.FC<GoalSectionProps> = ({
             {goal ? (
               <>
                 {goal.plan ? <GoalPlanSection plan={goal.plan} /> : null}
-                <GoalControls goal={goal} onControl={onControl} />
+                <GoalControls
+                  goal={goal}
+                  onControl={onControl}
+                  pending={pending}
+                />
                 <GoalAttempts attempts={goal.attempts} />
                 <GoalEvents events={goal.events} />
               </>
@@ -616,17 +654,21 @@ export function GoalPlanSection({ plan }: { plan: GoalPlanSnapshot }) {
 type GoalBudgetEditorProps = {
   draft: GoalBudgetDraft;
   showApply: boolean;
+  pending: boolean;
   onApply: () => void;
+  canApply: boolean;
   onChange: (field: keyof GoalBudgetDraft, value: string) => void;
 };
 
 const GoalBudgetEditor: React.FC<GoalBudgetEditorProps> = ({
   draft,
   showApply,
+  pending,
+  canApply,
   onApply,
   onChange,
 }) => (
-  <fieldset className={styles.goalBudgetGroup}>
+  <fieldset className={styles.goalBudgetGroup} disabled={pending}>
     <legend className={styles.goalBudgetLegend}>
       Budget limits (optional — leave blank for unlimited)
     </legend>
@@ -672,7 +714,7 @@ const GoalBudgetEditor: React.FC<GoalBudgetEditorProps> = ({
     </div>
     {showApply ? (
       <Flex justify="end" className={styles.goalBudgetActions}>
-        <Button size="sm" variant="soft" onClick={onApply}>
+        <Button size="sm" variant="soft" onClick={onApply} disabled={!canApply}>
           Apply budget
         </Button>
       </Flex>
@@ -683,10 +725,15 @@ const GoalBudgetEditor: React.FC<GoalBudgetEditorProps> = ({
 type GoalControlsProps = {
   goal: GoalSnapshot;
   onControl: (action: GoalControlAction) => void;
+  pending: boolean;
 };
 
-const GoalControls: React.FC<GoalControlsProps> = ({ goal, onControl }) => {
-  const actions = goalControlActions(goal, onControl);
+const GoalControls: React.FC<GoalControlsProps> = ({
+  goal,
+  onControl,
+  pending,
+}) => {
+  const actions = goalControlActions(goal, onControl, pending);
 
   if (actions.length === 0) return null;
 
@@ -795,6 +842,24 @@ const GoalEvents: React.FC<GoalEventsProps> = ({ events }) => {
 };
 
 export const TaskProgressWidget: React.FC = () => {
+  const chatId = useThreadId();
+  const config = useAppSelector(selectConfig);
+  const principal = useRef({ key: config.apiKey, epoch: 0 });
+  if (principal.current.key !== config.apiKey) {
+    principal.current = {
+      key: config.apiKey,
+      epoch: principal.current.epoch + 1,
+    };
+  }
+  const source = JSON.stringify([
+    getEngineEndpointIdentity(config),
+    chatId,
+    principal.current.epoch,
+  ]);
+  return <TaskProgressWidgetInstance key={source} />;
+};
+
+const TaskProgressWidgetInstance: React.FC = () => {
   const dispatch = useAppDispatch();
   const chatId = useThreadId();
   const hasTasks = useAppSelector((state) => selectHasTasksById(state, chatId));
@@ -822,8 +887,13 @@ export const TaskProgressWidget: React.FC = () => {
   const { done, total, activeTitle } = useAppSelector((state) =>
     selectTaskProgressById(state, chatId),
   );
-  const { setGoal, setGoalBudget, updateGoal, controlGoal } =
-    useChatActions(chatId);
+  const request = useChatCommandRequest(chatId, "goal", (state) => {
+    const current = selectGoalById(state, chatId);
+    return (
+      current?.version === goal?.version &&
+      JSON.stringify(current?.owner) === JSON.stringify(goal?.owner)
+    );
+  });
   const hasGoal = hasGoalWork(goal);
   const goalSupported = isGoalSupported(threadMode, threadToolUse);
   const isFreshGoalOpportunity =
@@ -863,33 +933,58 @@ export const TaskProgressWidget: React.FC = () => {
     [dispatch, chatId],
   );
 
-  const handleGoalCreate = useCallback(
-    (content: string, budget?: GoalBudgetCommand) => {
-      void setGoal(content, budget);
-    },
-    [setGoal],
-  );
+  const sameGoal = (current: GoalSnapshot | null) =>
+    current?.version === goal?.version &&
+    JSON.stringify(current?.owner) === JSON.stringify(goal?.owner);
 
-  const handleGoalTextUpdate = useCallback(
-    (content: string) => {
-      void updateGoal(content);
-    },
-    [updateGoal],
-  );
+  const handleGoalCreate = (content: string, budget?: GoalBudgetCommand) =>
+    request.run(
+      { type: "set_goal", content, ...(budget ? { budget } : {}) },
+      (state) => selectGoalById(state, chatId)?.content === content,
+    );
 
-  const handleGoalBudgetApply = useCallback(
-    (budget: GoalBudgetCommand) => {
-      void setGoalBudget(budget);
-    },
-    [setGoalBudget],
-  );
+  const handleGoalTextUpdate = (content: string) =>
+    request.run({ type: "update_goal", note: content }, (state) => {
+      const updated = selectGoalById(state, chatId);
+      return (
+        !!updated &&
+        sameGoal(updated) &&
+        updated.content !== goal?.content &&
+        updated.content.endsWith(content)
+      );
+    });
 
-  const handleGoalControl = useCallback(
-    (action: GoalControlAction) => {
-      void controlGoal(action);
-    },
-    [controlGoal],
-  );
+  const handleGoalBudgetApply = (budget: GoalBudgetCommand) => {
+    const nextBudget: GoalBudgetCommand = Object.fromEntries(
+      Object.entries(goal?.budget ?? {}).filter(
+        ([key, value]) =>
+          typeof value === "number" &&
+          key !== "max_turns" &&
+          key !== "max_minutes" &&
+          key !== "max_tokens",
+      ),
+    );
+    Object.assign(nextBudget, budget);
+    return request.run(
+      { type: "set_goal_budget", budget: nextBudget },
+      (state) => {
+        const updated = selectGoalById(state, chatId);
+        if (!updated || !sameGoal(updated)) return false;
+        return (["max_turns", "max_minutes", "max_tokens"] as const).every(
+          (key) => (updated.budget[key] ?? 0) === (nextBudget[key] ?? 0),
+        );
+      },
+    );
+  };
+
+  const handleGoalControl = (action: GoalControlAction) => {
+    const expected =
+      action === "pause" ? "paused" : action === "stop" ? "stopped" : "active";
+    void request.run({ type: "goal_control", action }, (state) => {
+      const updated = selectGoalById(state, chatId);
+      return sameGoal(updated) && updated?.status === expected;
+    });
+  };
 
   if (!shouldRender) return null;
 
@@ -965,6 +1060,7 @@ export const TaskProgressWidget: React.FC = () => {
             <GoalControlIcons
               goal={goal}
               onControl={handleGoalControl}
+              pending={request.blocked}
               className={styles.headerRowControls}
             />
           ) : null}
@@ -980,6 +1076,7 @@ export const TaskProgressWidget: React.FC = () => {
               onUpdateText={handleGoalTextUpdate}
               onApplyBudget={handleGoalBudgetApply}
               onControl={handleGoalControl}
+              pending={request.blocked}
             />
 
             {hasTasks ? (
@@ -1004,6 +1101,33 @@ export const TaskProgressWidget: React.FC = () => {
           </Flex>
         </Collapsible.Content>
       </Collapsible.Root>
+      {goal?.status === "budget_exhausted" || goal?.status === "no_progress" ? (
+        <Text as="p" size="1" color="gray" className={styles.goalFeedback}>
+          {goal.status === "budget_exhausted"
+            ? "Budget exhausted. Review usage and explicitly adjust budget limits to continue."
+            : "No progress detected. Provide new direction or review the progress budget before continuing."}
+        </Text>
+      ) : null}
+      {request.status ? (
+        <Text as="p" size="1" role="status" className={styles.goalFeedback}>
+          {request.status}
+        </Text>
+      ) : null}
+      {request.error ? (
+        <Text as="p" size="1" role="alert" className={styles.goalError}>
+          {request.error}
+        </Text>
+      ) : null}
+      {request.uncertain ? (
+        <Button
+          size="sm"
+          variant="soft"
+          disabled={request.pending}
+          onClick={() => void request.checkStatus()}
+        >
+          Check status
+        </Button>
+      ) : null}
     </Box>
   );
 };

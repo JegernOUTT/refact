@@ -320,25 +320,35 @@ export function buildCompactWorkControlPresentation(
       const report = content === null ? null : parseAgentStatusOutput(content);
       if (report !== null) {
         const counts = readCompactRecord(result?.alerts);
+        const header = content?.match(
+          /^⚠️ {2}Alerts: (\d+) stuck, (\d+) failed, (\d+) needing approval, (\d+) needing attention(?:\r?\n|$)/u,
+        );
+        const reportedHeader =
+          header !== null &&
+          header !== undefined &&
+          header
+            .slice(1)
+            .every((value) => Number.isSafeInteger(Number(value))) &&
+          Number(header[1]) === report.alerts.stuck &&
+          Number(header[2]) === report.alerts.failed;
+        const explicitApproval =
+          (counts !== null &&
+            counts.failed === report.alerts.failed &&
+            counts.stuck === report.alerts.stuck &&
+            counts.needing_approval === report.alerts.approval) ||
+          report.rows.some((row) => row.approvalRequired);
         const reported =
           Object.values(report.alerts).every(
             (count) => Number.isSafeInteger(count) && count >= 0,
           ) &&
-          (content?.startsWith(
-            `⚠️  Alerts: ${report.alerts.stuck} stuck, ${report.alerts.failed} failed, ${report.alerts.paused} needing approval,`,
-          ) === true ||
-            (counts !== null &&
-              counts.failed === report.alerts.failed &&
-              counts.stuck === report.alerts.stuck &&
-              (counts.paused ?? counts.needing_approval) ===
-                report.alerts.paused));
+          (reportedHeader || explicitApproval);
         const failures = reported && report.alerts.failed > 0;
         const blocked = reported && report.alerts.stuck > 0;
-        const held = reported && report.alerts.paused > 0;
+        const held = reported && explicitApproval && report.alerts.approval > 0;
         const alerts = [
           failures && "Failures",
           blocked && "Blocked",
-          held && "Paused / approval",
+          held && "Approval needed",
         ]
           .filter(Boolean)
           .join(" · ");
@@ -356,7 +366,13 @@ export function buildCompactWorkControlPresentation(
           {
             label: "Reported alerts",
             value: reported
-              ? `${report.alerts.failed} failed · ${report.alerts.stuck} stuck · ${report.alerts.paused} paused / awaiting approval`
+              ? `${report.alerts.failed} failed · ${
+                  report.alerts.stuck
+                } stuck · ${
+                  explicitApproval
+                    ? `${report.alerts.approval} awaiting approval`
+                    : "Approval count unconfirmed"
+                }`
               : "No recognized alert counts; target state unknown",
           },
           {

@@ -1,12 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "../../utils/test-utils";
 import { Markdown } from "./Markdown";
-import { InternalLinkProvider } from "../../contexts/InternalLinkContext";
 import {
-  applyChatEvent,
-  createChatWithId,
-  switchToThread,
-} from "../../features/Chat";
+  InternalLinkProvider,
+  type InternalLinkOrigin,
+} from "../../contexts/InternalLinkContext";
+import { applyChatEvent } from "../../features/Chat";
+import { ChatThreadProvider } from "../../features/Chat/Thread/ChatThreadContext";
+import { http, HttpResponse } from "msw";
+import { server } from "../../utils/mockServer";
+import { useInternalNavigation } from "../../hooks/useInternalNavigation";
+import { parseRefactLink } from "../../contexts/internalLinkUtils";
 import type { ChatEventEnvelope } from "../../services/refact/chatSubscription";
 
 function snapshotWithLink(chatId: string): ChatEventEnvelope {
@@ -79,7 +83,10 @@ describe("Markdown internal links", () => {
 
     await user.click(link);
 
-    expect(onInternalLink).toHaveBeenCalledWith("refact://chat/child-chat-1");
+    expect(onInternalLink).toHaveBeenCalledWith(
+      "refact://chat/child-chat-1",
+      undefined,
+    );
   });
 
   it("snapshot markdown renders the refact chat link as an internal anchor", () => {
@@ -104,41 +111,90 @@ describe("Markdown internal links", () => {
     expect(link.outerHTML).toContain("refact://chat/child-chat-1");
   });
 
-  it("refact chat link handler dispatches the chat switch chain", async () => {
-    const childChatId = "child-chat-1";
-    const { user, store } = render(
-      <InternalLinkProvider
-        onInternalLink={(url) => {
-          if (url !== `refact://chat/${childChatId}`) return false;
-          store.dispatch(
-            createChatWithId({
-              id: childChatId,
-              parentId: store.getState().chat.current_thread_id,
-              linkType: "subagent",
-            }),
-          );
-          store.dispatch(switchToThread({ id: childChatId }));
-          return true;
-        }}
-      >
+  it("routes once from the explicit originating pane without inventing the global parent", async () => {
+    let reads = 0;
+    server.use(
+      http.get("*/v1/trajectories/child-chat-1", () => {
+        reads += 1;
+        return HttpResponse.json({
+          id: "child-chat-1",
+          title: "Child",
+          mode: "AGENT",
+          model: "",
+          messages: [],
+          tool_use: "agent",
+          parent_id: "origin-pane",
+          link_type: "subagent",
+          root_chat_id: "origin-root",
+        });
+      }),
+    );
+    const origins: (InternalLinkOrigin | undefined)[] = [];
+    function LinkedPane() {
+      const navigation = useInternalNavigation();
+      return (
+        <InternalLinkProvider
+          onInternalLink={(url, origin) => {
+            origins.push(origin);
+            return navigation.navigate(url, origin);
+          }}
+        >
+          <ChatThreadProvider chatId="origin-pane">
+            <Markdown>[view](refact://chat/child-chat-1)</Markdown>
+          </ChatThreadProvider>
+        </InternalLinkProvider>
+      );
+    }
+    const { user, store } = render(<LinkedPane />);
+    const globalParent = store.getState().chat.current_thread_id;
+    await user.click(screen.getByRole("link", { name: "view" }));
+    await waitFor(() =>
+      expect(store.getState().chat.current_thread_id).toBe("child-chat-1"),
+    );
+    expect(globalParent).not.toBe("origin-pane");
+    expect(origins).toEqual([{ chatId: "origin-pane" }]);
+    expect(store.getState().chat.threads["child-chat-1"]?.thread).toMatchObject(
+      {
+        parent_id: "origin-pane",
+        link_type: "subagent",
+        root_chat_id: "origin-root",
+      },
+    );
+    expect(
+      store.getState().chat.threads["child-chat-1"]?.thread.goal,
+    ).toBeUndefined();
+    expect(reads).toBe(1);
+  });
+
+  it("reports false async handling and keeps external HTTPS anchors ordinary", async () => {
+    const handler = vi.fn(() => Promise.resolve(false));
+    const { user } = render(
+      <InternalLinkProvider onInternalLink={handler}>
         <Markdown>
-          Open the child trajectory: [view](refact://chat/child-chat-1)
+          [blocked](refact://card/T-1) [external](https://example.com/docs)
         </Markdown>
       </InternalLinkProvider>,
     );
-
-    const parentId = store.getState().chat.current_thread_id;
-    await user.click(screen.getByRole("link", { name: "view" }));
-
-    await waitFor(() => {
-      expect(store.getState().chat.current_thread_id).toBe(childChatId);
+    await user.click(screen.getByRole("link", { name: "blocked" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "current view has been kept",
+    );
+    expect(handler).toHaveBeenCalledOnce();
+    expect(screen.getByRole("link", { name: "external" })).toHaveAttribute(
+      "href",
+      "https://example.com/docs",
+    );
+    expect(screen.getByRole("link", { name: "external" })).toHaveAttribute(
+      "target",
+      "_blank",
+    );
+    expect(parseRefactLink("refact://task/task-1/card/T-1")).toEqual({
+      type: "task",
+      id: "task-1",
+      cardId: "T-1",
     });
-    expect(store.getState().chat.threads[childChatId]?.thread.parent_id).toBe(
-      parentId,
-    );
-    expect(store.getState().chat.threads[childChatId]?.thread.link_type).toBe(
-      "subagent",
-    );
-    expect(store.getState().chat.open_thread_ids).toContain(childChatId);
+    expect(parseRefactLink("refact://card/T-1")).toBeNull();
+    expect(parseRefactLink("refact://chat/../other")).toBeNull();
+    expect(parseRefactLink("refact://chat/id%2Fother")).toBeNull();
   });
 });

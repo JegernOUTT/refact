@@ -127,12 +127,14 @@ export const MemoryCard: React.FC<MemoryCardProps> = ({
   }, [isExpanded, setExpanded]);
 
   const handlePin = useCallback(() => {
+    if (disabled || pending) return;
     void onPin(memory.filename, !memory.pinned);
-  }, [memory.filename, memory.pinned, onPin]);
+  }, [disabled, pending, memory.filename, memory.pinned, onPin]);
 
   const handleArchive = useCallback(() => {
+    if (disabled || pending) return;
     void onArchive(memory.filename);
-  }, [memory.filename, onArchive]);
+  }, [disabled, pending, memory.filename, onArchive]);
 
   return (
     <Surface
@@ -208,7 +210,7 @@ export const MemoryCard: React.FC<MemoryCardProps> = ({
                   aria-label={memory.pinned ? "Unpin" : "Pin"}
                   icon={Pin}
                   onClick={handlePin}
-                  disabled={disabled}
+                  disabled={disabled || pending}
                   className={classNames(
                     styles.cardIconButton,
                     memory.pinned && styles.iconButtonPinned,
@@ -223,7 +225,7 @@ export const MemoryCard: React.FC<MemoryCardProps> = ({
                       variant="plain"
                       aria-label="Archive"
                       icon={Trash2}
-                      disabled={disabled}
+                      disabled={disabled || pending}
                       className={styles.cardIconButton}
                     />
                   </Popover.Trigger>
@@ -236,6 +238,7 @@ export const MemoryCard: React.FC<MemoryCardProps> = ({
                         <Button
                           size="sm"
                           variant="soft"
+                          disabled={disabled || pending}
                           onClick={handleArchive}
                         >
                           Confirm archive
@@ -252,7 +255,12 @@ export const MemoryCard: React.FC<MemoryCardProps> = ({
               </Popover>
             </Flex>
             {pending && (
-              <Flex align="center" gap="1" className={styles.pendingState}>
+              <Flex
+                align="center"
+                gap="1"
+                className={styles.pendingState}
+                role="status"
+              >
                 <Spinner size="sm" />
                 <Text size="1" className={styles.cardPreviewMuted}>
                   Updating

@@ -2,15 +2,17 @@ import React, { useMemo } from "react";
 import classNames from "classnames";
 import { CheckCircle2, CircleX } from "lucide-react";
 import { Markdown, ShikiCodeBlock } from "../Markdown";
-import { Badge, Icon } from "../ui";
+import { Badge, Icon, ToolCard as DetailsCard } from "../ui";
 import { AnimatedCollapsible } from "./shared/AnimatedCollapsible";
 import styles from "./FinalReportView.module.css";
 
 import { CompactToolDetails } from "../Tools/AgenticTool/CompactToolDetails";
+import { PagedText } from "../Tools/AgenticTool/PagedText";
 import {
   finalReportPresentation,
   parseFinalReport,
   verificationPassed,
+  verificationSummary,
   type VerificationResult,
 } from "./finalReportJson";
 
@@ -18,6 +20,7 @@ type FinalReportViewProps = {
   content: string;
   title?: string;
   compact?: boolean;
+  technicalDetails?: React.ReactNode;
 };
 
 function truncate(text: string): string {
@@ -94,6 +97,7 @@ export const FinalReportView: React.FC<FinalReportViewProps> = ({
   content,
   title = "Final Report",
   compact = false,
+  technicalDetails,
 }) => {
   const report = useMemo(() => parseFinalReport(content), [content]);
   if (compact) {
@@ -102,6 +106,11 @@ export const FinalReportView: React.FC<FinalReportViewProps> = ({
         <div className={styles.fullReport}>
           <FinalReportView content={content} title={title} />
         </div>
+        {technicalDetails ?? (
+          <DetailsCard title="Technical details" defaultOpen={false}>
+            <PagedText label="Full response" body={content} />
+          </DetailsCard>
+        )}
       </CompactToolDetails>
     );
   }
@@ -123,8 +132,9 @@ export const FinalReportView: React.FC<FinalReportViewProps> = ({
             size="sm"
             tone={report.success ? "success" : "danger"}
           />
-          {report.success ? "Success" : "Failed"}
+          {report.success ? "Reported success" : "Reported failure"}
         </Badge>
+        <Badge tone="muted">{verificationSummary(report)}</Badge>
       </header>
       <Section title="Summary">
         <div className={styles.markdown}>
@@ -181,6 +191,14 @@ export const FinalReportView: React.FC<FinalReportViewProps> = ({
                 <p className={styles.followupInstructions}>
                   {truncate(card.instructions)}
                 </p>
+                {card.instructions.length > 220 && (
+                  <DetailsCard defaultOpen={false} title="Full instructions">
+                    <PagedText
+                      label={`Instructions for ${card.title}`}
+                      body={card.instructions}
+                    />
+                  </DetailsCard>
+                )}
               </article>
             ))}
           </div>

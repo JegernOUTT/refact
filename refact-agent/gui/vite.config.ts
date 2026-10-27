@@ -68,6 +68,7 @@ function makeConfig(library: "browser" | "node") {
       },
       plugins: [react()],
       server: {
+        host: process.env.REFACT_OFFLINE_NETNS ? "127.0.0.1" : undefined,
         proxy: {
           "/v1": process.env.REFACT_LSP_URL ?? "http://127.0.0.1:8001",
         },
@@ -85,7 +86,18 @@ function makeConfig(library: "browser" | "node") {
         pool: "forks",
         poolOptions: {
           forks: {
-            execArgv: ["--max-old-space-size=4096"],
+            execArgv: [
+              "--max-old-space-size=4096",
+              ...(process.env.REFACT_OFFLINE_NETNS
+                ? [
+                    "--require",
+                    path.resolve(
+                      __dirname,
+                      "../../tools/dev/offline_network.cjs",
+                    ),
+                  ]
+                : []),
+            ],
             maxForks: 4,
             minForks: 1,
           },

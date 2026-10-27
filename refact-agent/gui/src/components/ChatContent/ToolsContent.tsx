@@ -129,7 +129,7 @@ const FinalReportToolCard: React.FC<FinalReportToolCardProps> = ({
     selectIsWaitingById(state, threadId),
   );
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle] = useStoredOpen(storeKey, true);
+  const [isOpen, handleToggle] = useStoredOpen(storeKey, false);
   const presentation = finalReportPresentation(
     content ?? (hasResult ? "" : null),
     toolFailed,
@@ -151,6 +151,27 @@ const FinalReportToolCard: React.FC<FinalReportToolCardProps> = ({
     ) : (
       <File data-testid="final-report-tool-neutral-icon" />
     );
+  const technicalDetails = (
+    <DetailsCard title="Technical details" defaultOpen={false}>
+      <PagedText label="Raw arguments" body={toolCall.function.arguments} />
+      {rawContent !== undefined && (
+        <PagedText
+          label="Full response"
+          body={
+            typeof rawContent === "string"
+              ? rawContent
+              : JSON.stringify(rawContent, null, 2)
+          }
+        />
+      )}
+      {extra && (
+        <PagedText
+          label="Response metadata"
+          body={JSON.stringify(extra, null, 2)}
+        />
+      )}
+    </DetailsCard>
+  );
 
   return (
     <>
@@ -158,42 +179,23 @@ const FinalReportToolCard: React.FC<FinalReportToolCardProps> = ({
       <ToolCard
         icon={statusIcon}
         summary="Task agent final report"
-        meta={
-          content === null
-            ? presentation.stateLabel
-            : report?.success === false
-              ? "failed"
-              : report?.success === true
-                ? "success"
-                : undefined
-        }
+        meta={presentation.stateLabel}
+        density="compact"
         status={status}
         isOpen={isOpen}
         onToggle={handleToggle}
         toolCall={toolCall}
       >
         {content === null ? (
-          <CompactToolDetails facts={presentation.facts} />
+          <CompactToolDetails facts={presentation.facts}>
+            {technicalDetails}
+          </CompactToolDetails>
         ) : (
-          <FinalReportView content={content} />
-        )}
-        {content === null && rawContent !== undefined && (
-          <DetailsCard title="Technical details" defaultOpen={false}>
-            <PagedText
-              label="Raw arguments"
-              body={toolCall.function.arguments}
-            />
-            <PagedText
-              label="Full response"
-              body={JSON.stringify(rawContent, null, 2)}
-            />
-            {extra && (
-              <PagedText
-                label="Response metadata"
-                body={JSON.stringify(extra, null, 2)}
-              />
-            )}
-          </DetailsCard>
+          <FinalReportView
+            compact
+            content={content}
+            technicalDetails={technicalDetails}
+          />
         )}
       </ToolCard>
     </>
@@ -1019,6 +1021,7 @@ function processToolCalls(
       <LaunchPreviewTool
         key={`launch-preview-${head.id ?? processed.length}`}
         toolCall={normalizedHead}
+        rawContent={result?.content}
         extra={result?.extra}
         hasResult={Boolean(result)}
         failed={result?.tool_failed === true}
@@ -1439,6 +1442,7 @@ function processToolCalls(
       <TaskDoneTool
         key={`task-done-tool-${head.id ?? processed.length}`}
         toolCall={normalizedHead}
+        compact
       />
     );
     return processToolCalls(

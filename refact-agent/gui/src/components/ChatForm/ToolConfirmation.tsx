@@ -1,9 +1,9 @@
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useMemo, useRef } from "react";
 import classNames from "classnames";
 import { AlertTriangle, OctagonX } from "lucide-react";
 import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { useAppSelector } from "../../hooks/useAppSelector";
-import { useChatActions } from "../../hooks/useChatActions";
+import { useChatCommandRequest } from "../../hooks/useChatCommandRequest";
 import { Markdown } from "../Markdown";
 import { Link } from "../Link";
 import styles from "./ToolConfirmation.module.css";
@@ -16,11 +16,12 @@ import {
 } from "../../services/refact";
 import {
   selectMessagesById,
-  setAutoApproveEditingTools,
+  selectThreadById,
+  selectThreadPauseReasonsById,
   useThreadId,
 } from "../../features/Chat/Thread";
 import { PATCH_LIKE_FUNCTIONS } from "./constants";
-import { sendChatCommand } from "../../services/refact/chatCommands";
+import { getEngineEndpointIdentity } from "../../services/refact/apiUrl";
 import { Badge, Button, Icon, Surface } from "../ui";
 
 type ToolConfirmationProps = {
@@ -112,6 +113,19 @@ function isShellConfiguration(reason: ResolvedPauseReason): boolean {
 export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
   pauseReasons,
 }) => {
+  const chatId = useThreadId();
+  const config = useAppSelector(selectConfig);
+  const source = JSON.stringify([
+    getEngineEndpointIdentity(config),
+    chatId,
+    pauseReasons,
+  ]);
+  return <ToolConfirmationInstance key={source} pauseReasons={pauseReasons} />;
+};
+
+const ToolConfirmationInstance: React.FC<ToolConfirmationProps> = ({
+  pauseReasons,
+}) => {
   const dispatch = useAppDispatch();
   const chatId = useThreadId();
   const messages = useAppSelector((state) => selectMessagesById(state, chatId));
@@ -157,46 +171,90 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
     [resolvedReasons],
   );
 
-  const { respondToTools } = useChatActions(chatId);
+  const source = JSON.stringify(pauseReasons);
+  const request = useChatCommandRequest(
+    chatId,
+    source,
+    (state) =>
+      JSON.stringify(selectThreadPauseReasonsById(state, chatId)) === source,
+  );
+  const actionLock = useRef(false);
+  const [settingApplied, setSettingApplied] = React.useState(false);
+  const [settingAttempted, setSettingAttempted] = React.useState(false);
 
-  const confirmToolUsage = useCallback(() => {
-    const decisions = toolCallIds.map((id) => ({
-      tool_call_id: id,
-      accepted: true,
-    }));
-    void respondToTools(decisions);
-  }, [respondToTools, toolCallIds]);
-
-  const rejectToolUsage = useCallback(() => {
-    const decisions = toolCallIds.map((id) => ({
-      tool_call_id: id,
-      accepted: false,
-    }));
-    void respondToTools(decisions);
-  }, [respondToTools, toolCallIds]);
-
-  const [isSettingAutoApprove, setIsSettingAutoApprove] = useState(false);
-  const config = useAppSelector(selectConfig);
-
-  const handleAllowForThisChat = useCallback(async () => {
-    setIsSettingAutoApprove(true);
-    try {
-      if (chatId) {
-        await sendChatCommand(chatId, config, config.apiKey ?? undefined, {
-          type: "set_params",
-          patch: { auto_approve_editing_tools: true },
+  const submitDecision = useCallback(
+    async (accepted: boolean, allowForChat = false) => {
+      if (actionLock.current || request.blocked) return;
+      actionLock.current = true;
+      try {
+        if (allowForChat) {
+          setSettingAttempted(true);
+          const applied = await request.run(
+            { type: "set_params", patch: { auto_approve_editing_tools: true } },
+            (state) =>
+              selectThreadById(state, chatId)?.auto_approve_editing_tools ===
+              true,
+          );
+          if (!request.isCurrent()) return;
+          setSettingApplied(applied);
+          if (!applied) return;
+        }
+        if (!request.isCurrent()) return;
+        const decisions = toolCallIds.map((id) => ({
+          tool_call_id: id,
+          accepted,
+        }));
+        await request.run({ type: "tool_decisions", decisions }, (state) => {
+          const current = selectThreadPauseReasonsById(state, chatId);
+          return !current.some((reason) =>
+            toolCallIds.includes(reason.tool_call_id),
+          );
         });
+      } finally {
+        actionLock.current = false;
       }
-      dispatch(setAutoApproveEditingTools({ chatId, value: true }));
-      confirmToolUsage();
-    } finally {
-      setIsSettingAutoApprove(false);
-    }
-  }, [dispatch, chatId, config, confirmToolUsage]);
+    },
+    [chatId, request, toolCallIds],
+  );
 
-  const handleReject = useCallback(() => {
-    rejectToolUsage();
-  }, [rejectToolUsage]);
+  const confirmToolUsage = () => void submitDecision(true);
+  const handleReject = () => void submitDecision(false);
+  const handleAllowForThisChat = () => void submitDecision(true, true);
+  const feedback = (
+    <>
+      {settingApplied ? (
+        <p role="status" className={styles.ToolConfirmationText}>
+          Chat editing approval is enabled. The current tool decision is
+          separate and still awaits confirmation.
+        </p>
+      ) : settingAttempted && request.error ? (
+        <p className={styles.ToolConfirmationText}>
+          Chat editing approval was not confirmed; no tool decision was sent by
+          this action.
+        </p>
+      ) : null}
+      {request.status ? (
+        <p role="status" className={styles.ToolConfirmationText}>
+          {request.status}
+        </p>
+      ) : null}
+      {request.error ? (
+        <p role="alert" className={styles.ToolConfirmationText}>
+          {request.error}
+        </p>
+      ) : null}
+      {request.uncertain ? (
+        <Button
+          size="sm"
+          variant="soft"
+          disabled={request.pending}
+          onClick={() => void request.checkStatus()}
+        >
+          Check status
+        </Button>
+      ) : null}
+    </>
+  );
 
   if (resolvedReasons.length === 0) return null;
 
@@ -226,6 +284,8 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
         pauseReasons={pauseReasons}
         confirmToolUsage={confirmToolUsage}
         rejectToolUsage={handleReject}
+        disabled={request.blocked}
+        feedback={feedback}
       />
     );
   }
@@ -237,8 +297,9 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
         toolCallsById={toolCallsById}
         handleAllowForThisChat={handleAllowForThisChat}
         rejectToolUsage={handleReject}
+        disabled={request.blocked}
+        feedback={feedback}
         confirmToolUsage={confirmToolUsage}
-        isSettingAutoApprove={isSettingAutoApprove}
       />
     );
   }
@@ -308,12 +369,23 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
             )}
           </div>
         </div>
+        {feedback}
         <div className={styles.ActionRow}>
-          <Button variant="primary" size="sm" onClick={confirmToolUsage}>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={confirmToolUsage}
+            disabled={request.blocked}
+          >
             {allConfirmation ? "Confirm" : "Continue"}
           </Button>
           {allConfirmation && (
-            <Button variant="danger" size="sm" onClick={handleReject}>
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={handleReject}
+              disabled={request.blocked}
+            >
               Stop
             </Button>
           )}
@@ -327,12 +399,16 @@ type CacheGuardConfirmationProps = {
   pauseReasons: ToolConfirmationPauseReason[];
   rejectToolUsage: () => void;
   confirmToolUsage: () => void;
+  disabled: boolean;
+  feedback: React.ReactNode;
 };
 
 const CacheGuardConfirmation: React.FC<CacheGuardConfirmationProps> = ({
   pauseReasons,
   rejectToolUsage,
   confirmToolUsage,
+  disabled,
+  feedback,
 }) => {
   const details = pauseReasons[0].command;
   const diff = extractCacheGuardDiff(details);
@@ -362,11 +438,22 @@ const CacheGuardConfirmation: React.FC<CacheGuardConfirmationProps> = ({
           </div>
         </div>
 
+        {feedback}
         <div className={styles.ActionRow}>
-          <Button variant="primary" size="sm" onClick={confirmToolUsage}>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={confirmToolUsage}
+            disabled={disabled}
+          >
             Force and Continue
           </Button>
-          <Button variant="danger" size="sm" onClick={rejectToolUsage}>
+          <Button
+            variant="danger"
+            size="sm"
+            onClick={rejectToolUsage}
+            disabled={disabled}
+          >
             Stop
           </Button>
         </div>
@@ -378,10 +465,11 @@ const CacheGuardConfirmation: React.FC<CacheGuardConfirmationProps> = ({
 type PatchConfirmationProps = {
   pauseReasons: ToolConfirmationPauseReason[];
   toolCallsById: Map<string, ToolCall>;
-  handleAllowForThisChat: () => Promise<void>;
+  handleAllowForThisChat: () => void;
   rejectToolUsage: () => void;
   confirmToolUsage: () => void;
-  isSettingAutoApprove?: boolean;
+  disabled: boolean;
+  feedback: React.ReactNode;
 };
 
 const PatchConfirmation: React.FC<PatchConfirmationProps> = ({
@@ -390,7 +478,8 @@ const PatchConfirmation: React.FC<PatchConfirmationProps> = ({
   handleAllowForThisChat,
   confirmToolUsage,
   rejectToolUsage,
-  isSettingAutoApprove,
+  disabled,
+  feedback,
 }) => {
   const messageForPatch = useMemo(() => {
     const filenames: string[] = [];
@@ -424,17 +513,23 @@ const PatchConfirmation: React.FC<PatchConfirmationProps> = ({
             <Markdown color="indigo">{messageForPatch.concat("\n\n")}</Markdown>
           </div>
         </div>
+        {feedback}
         <div className={styles.PatchActionRow}>
           <div className={styles.PrimaryActions}>
             <Button
               variant="primary"
               size="sm"
-              onClick={() => void handleAllowForThisChat()}
-              loading={isSettingAutoApprove}
+              onClick={handleAllowForThisChat}
+              disabled={disabled}
             >
-              {isSettingAutoApprove ? "Setting..." : "Allow for This Chat"}
+              Allow for This Chat
             </Button>
-            <Button variant="primary" size="sm" onClick={confirmToolUsage}>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={confirmToolUsage}
+              disabled={disabled}
+            >
               Allow Once
             </Button>
           </div>
@@ -443,6 +538,7 @@ const PatchConfirmation: React.FC<PatchConfirmationProps> = ({
             variant="danger"
             size="sm"
             onClick={rejectToolUsage}
+            disabled={disabled}
           >
             Stop
           </Button>

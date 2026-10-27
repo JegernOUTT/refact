@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { Popover } from "@radix-ui/themes";
 import { setUpStore } from "../../app/store";
-import { render, screen, waitFor } from "../../utils/test-utils";
+import { fireEvent, render, screen, waitFor } from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
 import type { Chat } from "../Chat/Thread/types";
 import type {
@@ -707,6 +707,19 @@ describe("Worktree lifecycle GUI", () => {
     expect(diffButton).toHaveTextContent("Diff");
     await user.click(diffButton);
     expect(await screen.findByText("src/lib.rs")).toBeInTheDocument();
+    const patchLine = screen.getByText("+new line");
+    expect(
+      fireEvent.pointerDown(patchLine, { button: 0, cancelable: true }),
+    ).toBe(true);
+    await user.pointer([
+      { target: patchLine, offset: 0, keys: "[MouseLeft>]" },
+      { target: patchLine, offset: patchLine.textContent?.length },
+      { keys: "[/MouseLeft]" },
+    ]);
+    expect(window.getSelection()?.toString()).toBe("+new line");
+    expect(
+      screen.getByRole("dialog", { name: "Worktree diff" }),
+    ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Close" }));
 
     const mergeButton = screen.getByRole("button", { name: "Merge worktree" });
@@ -772,9 +785,20 @@ describe("Worktree lifecycle GUI", () => {
     expect(
       await screen.findByRole("heading", { name: "Delete worktree" }),
     ).toBeInTheDocument();
+    const sharedWarning = screen.getByText(
+      /This worktree is shared by 2 references/,
+    );
     expect(
-      screen.getAllByText(/shared by 2 references/).length,
-    ).toBeGreaterThan(0);
+      fireEvent.pointerDown(sharedWarning, { button: 0, cancelable: true }),
+    ).toBe(true);
+    await user.click(sharedWarning);
+    expect(
+      screen.getByRole("dialog", { name: "Delete worktree" }),
+    ).toBeInTheDocument();
+    expect(deleteCalls).toHaveLength(0);
+    expect(
+      screen.getByRole("checkbox", { name: "Delete git branch too" }),
+    ).not.toBeChecked();
     await user.click(screen.getByRole("button", { name: "Delete worktree" }));
 
     await waitFor(() => expect(deleteCalls).toEqual(["wt-shared"]));

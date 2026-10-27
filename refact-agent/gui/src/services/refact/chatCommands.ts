@@ -256,6 +256,15 @@ function queueItemUrl(
   );
 }
 
+export class ChatCommandHttpError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 async function sendRawChatCommand(
   chatId: string,
   connection: PortOrConnection,
@@ -263,6 +272,7 @@ async function sendRawChatCommand(
   command: ChatCommandBase,
   priority?: boolean,
   clientRequestId = uuidv4(),
+  signal?: AbortSignal,
 ): Promise<string> {
   const commandWithId: ChatCommand = {
     ...command,
@@ -282,11 +292,13 @@ async function sendRawChatCommand(
     method: "POST",
     headers,
     body: JSON.stringify(commandWithId),
+    ...(signal ? { signal } : {}),
   });
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(
+    throw new ChatCommandHttpError(
+      response.status,
       `Failed to send command: ${response.status} ${response.statusText} - ${text}`,
     );
   }
@@ -344,8 +356,16 @@ export async function sendChatCommand(
   apiKey: string | undefined,
   command: ChatCommandBase,
   priority?: boolean,
+  clientRequestId?: string,
+  signal?: AbortSignal,
 ): Promise<string | undefined> {
-  if (command.type === "set_params") {
+  if (
+    clientRequestId !== undefined &&
+    (!clientRequestId.trim() || clientRequestId.length > 256)
+  ) {
+    throw new Error("Client request ID must contain 1–256 characters");
+  }
+  if (command.type === "set_params" && clientRequestId === undefined) {
     await sendChangedChatParams(
       chatId,
       connection,
@@ -355,7 +375,15 @@ export async function sendChatCommand(
     );
     return;
   }
-  return sendRawChatCommand(chatId, connection, apiKey, command, priority);
+  return sendRawChatCommand(
+    chatId,
+    connection,
+    apiKey,
+    command,
+    priority,
+    clientRequestId,
+    signal,
+  );
 }
 
 export async function sendUserMessage(

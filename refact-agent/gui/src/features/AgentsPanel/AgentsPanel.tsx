@@ -2,18 +2,23 @@ import classNames from "classnames";
 import { Bot } from "lucide-react";
 import { useMemo } from "react";
 
-import { Badge, EmptyState, SegmentedControl } from "../../components/ui";
+import {
+  Badge,
+  Button,
+  EmptyState,
+  ErrorState,
+  LoadingState,
+  SegmentedControl,
+} from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { useIsDocumentVisible } from "../../hooks/useIsDocumentVisible";
+import { useGetBackgroundAgentsQuery } from "../../services/refact";
 import {
-  useGetBackgroundAgentsQuery,
-  type BackgroundAgentSummary,
-} from "../../services/refact";
-import {
+  activeBackgroundAgents,
   aggregateBackgroundAgentUsage,
   buildBackgroundAgentsTree,
   flattenBackgroundAgentTree,
-  selectActiveBackgroundAgents,
+  reconcileBackgroundAgents,
   selectBackgroundAgentPool,
 } from "../Chat/Thread";
 import { selectAgentsPanelTab, tabChanged } from "./agentsPanelSlice";
@@ -49,31 +54,27 @@ function AgentsSectionContents({
   const visible = useIsDocumentVisible();
   const tab = useAppSelector(selectAgentsPanelTab);
   const agentPool = useAppSelector((state) => selectBackgroundAgentPool(state));
-  const activeAgents = useAppSelector((state) =>
-    selectActiveBackgroundAgents(state, chatId),
-  );
-  const { data: fetchedAgents } = useGetBackgroundAgentsQuery(chatId, {
+  const {
+    currentData: fetchedAgents,
+    isFetching,
+    isError,
+    refetch,
+  } = useGetBackgroundAgentsQuery(chatId, {
     pollingInterval: visible ? 30_000 : 0,
     refetchOnFocus: true,
+    refetchOnMountOrArgChange: true,
   });
 
   const combinedAgents = useMemo(
-    () => ({
-      ...agentPool,
-      ...(fetchedAgents ?? []).reduce<Record<string, BackgroundAgentSummary>>(
-        (result, agent) => {
-          result[agent.agent_id] = agent;
-          return result;
-        },
-        {},
-      ),
-    }),
+    () => reconcileBackgroundAgents(agentPool, fetchedAgents),
     [agentPool, fetchedAgents],
   );
   const tree = useMemo(
     () => buildBackgroundAgentsTree(combinedAgents, chatId),
     [combinedAgents, chatId],
   );
+  const roster = useMemo(() => flattenBackgroundAgentTree(tree), [tree]);
+  const activeAgents = useMemo(() => activeBackgroundAgents(roster), [roster]);
   const visibleTree = useMemo(() => {
     if (tab === "all") return tree;
     const activeIds = new Set(activeAgents.map((agent) => agent.agent_id));
@@ -87,9 +88,7 @@ function AgentsSectionContents({
     return filter(tree);
   }, [activeAgents, tab, tree]);
   const visibleCount = flattenBackgroundAgentTree(visibleTree).length;
-  const aggregate = aggregateBackgroundAgentUsage(
-    flattenBackgroundAgentTree(tree),
-  );
+  const aggregate = aggregateBackgroundAgentUsage(roster);
   const cost = formatCost(aggregate.costTotal);
 
   return (
@@ -117,7 +116,7 @@ function AgentsSectionContents({
             { value: "active", label: `Active (${activeAgents.length})` },
             {
               value: "all",
-              label: `All (${flattenBackgroundAgentTree(tree).length})`,
+              label: `All (${roster.length})`,
             },
           ]}
           size="sm"
@@ -129,7 +128,36 @@ function AgentsSectionContents({
         />
       </header>
       <div className={styles.panelBody}>
-        {visibleCount === 0 ? (
+        {isError && (
+          <ErrorState
+            title="Could not refresh agents"
+            description={
+              fetchedAgents !== undefined || roster.length > 0
+                ? "Showing last known agent data, which may be out of date."
+                : "Agent data is unavailable. Retry to load this chat's agents."
+            }
+            retry={
+              <Button
+                size="sm"
+                variant="soft"
+                disabled={isFetching}
+                onClick={() => void refetch()}
+              >
+                Retry
+              </Button>
+            }
+          />
+        )}
+        {isFetching && (
+          <LoadingState
+            label={
+              fetchedAgents !== undefined || roster.length > 0
+                ? "Refreshing agents; showing last known data."
+                : "Loading agents…"
+            }
+          />
+        )}
+        {visibleCount === 0 && !isError && !isFetching ? (
           <EmptyState
             description={
               tab === "active"
@@ -140,7 +168,7 @@ function AgentsSectionContents({
             title="No agents"
             variant="compact"
           />
-        ) : (
+        ) : visibleCount > 0 ? (
           <ul className={classNames(styles.tree, "rf-stagger")}>
             {visibleTree.map((node) => (
               <AgentTreeNode
@@ -151,7 +179,7 @@ function AgentsSectionContents({
               />
             ))}
           </ul>
-        )}
+        ) : null}
       </div>
     </>
   );
@@ -169,7 +197,11 @@ export function AgentsSection({ chatId, onNavigate }: AgentsSectionProps) {
           />
         </div>
       ) : (
-        <AgentsSectionContents chatId={chatId} onNavigate={onNavigate} />
+        <AgentsSectionContents
+          key={chatId}
+          chatId={chatId}
+          onNavigate={onNavigate}
+        />
       )}
     </section>
   );

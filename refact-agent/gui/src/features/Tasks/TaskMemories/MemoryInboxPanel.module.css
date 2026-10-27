@@ -129,6 +129,13 @@
 
 .errorState {
   flex-shrink: 0;
+  overflow-wrap: anywhere;
+}
+
+.actionFeedback {
+  min-width: 0;
+  color: var(--rf-color-muted);
+  overflow-wrap: anywhere;
 }
 
 .list {

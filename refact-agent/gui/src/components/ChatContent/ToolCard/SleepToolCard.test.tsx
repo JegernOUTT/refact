@@ -14,7 +14,10 @@ import type {
   ToolMessage,
 } from "../../../services/refact/types";
 import { createDefaultChatState } from "../../../utils/test-utils";
-import { backUpMessages } from "../../../features/Chat/Thread/actions";
+import {
+  applyChatEvent,
+  backUpMessages,
+} from "../../../features/Chat/Thread/actions";
 import { CollapsibleStoreProvider } from "../useStoredOpen";
 
 const chatId = "sleep-chat";
@@ -77,7 +80,10 @@ function renderSleepCard(
   const chat = createDefaultChatState();
   const runtime = chat.threads[chat.current_thread_id];
   runtime.thread.id = chatId;
-  runtime.thread.messages = messages;
+  runtime.thread.messages = [
+    { role: "assistant", content: "", tool_calls: [toolCall(args)] },
+    ...messages,
+  ];
   runtime.streaming = true;
   runtime.waiting_for_response = false;
   chat.current_thread_id = chatId;
@@ -125,8 +131,16 @@ function renderSleepCardForThread(
     thread: {
       ...activeRuntime.thread,
       id: chatId,
-      messages,
+      messages: [
+        {
+          role: "assistant" as const,
+          content: "",
+          tool_calls: [toolCall(args)],
+        },
+        ...messages,
+      ],
     },
+    streaming: true,
   };
   chat.current_thread_id = activeChatId;
   chat.open_thread_ids = [activeChatId, chatId];
@@ -168,6 +182,7 @@ describe("SleepToolCard", () => {
     (globalThis as ActGlobal).IS_REACT_ACT_ENVIRONMENT = undefined;
     window.localStorage.clear();
     vi.useRealTimers();
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
@@ -194,6 +209,9 @@ describe("SleepToolCard", () => {
     renderSleepCard();
 
     await user.click(screen.getByRole("button", { expanded: false }));
+    expect(
+      screen.getByText("Aborts the whole chat turn, not only this wait."),
+    ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /wake up/i }));
 
     expect(fetchMock).toHaveBeenCalledWith(
@@ -351,6 +369,62 @@ describe("SleepToolCard", () => {
       "Outcome unknown",
     );
     expect(screen.queryByRole("button", { name: /wake up/i })).toBeNull();
+  });
+
+  test("historical missing sleep stays unknown while another turn runs and stops its timer on idle", () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+    const { store } = renderSleepCard([], {}, true);
+    const timerCount = vi.getTimerCount();
+    act(() => {
+      store.dispatch(
+        applyChatEvent({
+          type: "runtime_updated",
+          seq: "1",
+          chat_id: chatId,
+          state: "idle",
+        }),
+      );
+    });
+    expect(screen.getByRole("button", { expanded: true })).toHaveTextContent(
+      "Result not recorded",
+    );
+    expect(screen.queryByRole("button", { name: /wake up/i })).toBeNull();
+    expect(vi.getTimerCount()).toBeLessThan(timerCount);
+    expect(
+      window.localStorage.getItem(
+        `refact.sleep.startedAt:${chatId}:call-sleep`,
+      ),
+    ).toBeNull();
+    act(() => {
+      store.dispatch(
+        backUpMessages({
+          id: chatId,
+          messages: [
+            { role: "assistant", content: "", tool_calls: [toolCall()] },
+            { role: "user", content: "Start a new turn" },
+            {
+              role: "assistant",
+              content: "",
+              tool_calls: [{ ...toolCall(), id: "new-call" }],
+            },
+          ],
+        }),
+      );
+      store.dispatch(
+        applyChatEvent({
+          type: "runtime_updated",
+          seq: "2",
+          chat_id: chatId,
+          state: "generating",
+        }),
+      );
+    });
+    expect(screen.getByRole("button", { expanded: true })).toHaveTextContent(
+      "Result not recorded",
+    );
+    expect(screen.queryByRole("button", { name: /wake up/i })).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
