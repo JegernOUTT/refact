@@ -121,6 +121,9 @@ type Options = {
   logCalls?: URLSearchParams[];
   commitCalls?: string[];
   log?: (params: URLSearchParams) => GitCommitLogEntry[];
+  scanTruncated?: (params: URLSearchParams) => boolean;
+  delayLog?: (params: URLSearchParams) => Promise<void> | undefined;
+  details?: (entry: GitCommitLogEntry) => GitCommitDetails;
   branches?: GitBranchesRoot;
 };
 
@@ -145,9 +148,10 @@ function installHandlers(options: Options = {}) {
     http.get("*/v1/git/branches", () =>
       HttpResponse.json({ roots: [options.branches ?? BRANCHES] }),
     ),
-    http.get("*/v1/git/log", ({ request }) => {
+    http.get("*/v1/git/log", async ({ request }) => {
       const params = new URL(request.url).searchParams;
       options.logCalls?.push(params);
+      await options.delayLog?.(params);
       const commits = options.log ? options.log(params) : HISTORY;
       return HttpResponse.json({
         roots: [
@@ -155,7 +159,7 @@ function installHandlers(options: Options = {}) {
             root: ROOT,
             commits,
             head_oid: HISTORY[0].oid,
-            scan_truncated: false,
+            scan_truncated: options.scanTruncated?.(params) ?? false,
           },
         ],
       });
@@ -165,7 +169,7 @@ function installHandlers(options: Options = {}) {
       options.commitCalls?.push(oid);
       const entry =
         HISTORY.find((item) => item.oid === oid) ?? commit(oid, ["parent0"]);
-      return HttpResponse.json(details(entry));
+      return HttpResponse.json((options.details ?? details)(entry));
     }),
     http.get("*/v1/worktrees", () =>
       HttpResponse.json({
@@ -392,6 +396,84 @@ describe("Git log tool window", () => {
     expect(
       screen.queryByRole("button", { name: "Load more" }),
     ).not.toBeInTheDocument();
+  });
+
+  test("shows Search stopped early when a later page was truncated", async () => {
+    const page = (skip: number) =>
+      Array.from({ length: skip === 0 ? LOG_PAGE_SIZE : 3 }, (_, index) =>
+        commit(`t${String(skip + index).padStart(6, "0")}`, undefined),
+      );
+    installHandlers({
+      log: (params) => page(Number(params.get("skip"))),
+      scanTruncated: (params) => params.get("skip") !== "0",
+    });
+    const { user } = renderPanel();
+
+    await user.click(await screen.findByRole("button", { name: "Load more" }));
+    expect(await screen.findByText(/Search stopped early/)).toBeInTheDocument();
+  });
+
+  test("drops a page that arrives after the log was refreshed", async () => {
+    let releasePage: () => void = () => undefined;
+    let generation = 0;
+    const page = (skip: number) =>
+      Array.from({ length: skip === 0 ? LOG_PAGE_SIZE : 3 }, (_, index) =>
+        commit(
+          `g${generation}x${String(skip + index).padStart(6, "0")}`,
+          undefined,
+        ),
+      );
+    installHandlers({
+      log: (params) => page(Number(params.get("skip"))),
+      delayLog: (params) =>
+        params.get("skip") === "0"
+          ? undefined
+          : new Promise<void>((resolve) => {
+              releasePage = resolve;
+            }),
+    });
+    const { user } = renderPanel();
+
+    await user.click(await screen.findByRole("button", { name: "Load more" }));
+    expect(
+      await screen.findByRole("status", { name: "Loading more commits" }),
+    ).toBeInTheDocument();
+    // An explicit refresh (button / window focus) replaces the first page
+    // meanwhile; tag invalidation would wait, but refetch() does not.
+    generation = 1;
+    fireEvent.click(screen.getByRole("button", { name: "Refresh log" }));
+    await waitFor(() =>
+      expect(
+        within(commitList()).getByRole("option", {
+          name: /g1x000000/,
+        }),
+      ).toBeInTheDocument(),
+    );
+    releasePage();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(within(commitList()).getAllByRole("option")).toHaveLength(
+      LOG_PAGE_SIZE,
+    );
+    expect(screen.getByRole("button", { name: "Load more" })).toBeEnabled();
+  });
+
+  test("marks a truncated containing-branches list", async () => {
+    installHandlers({
+      details: (entry) => ({
+        ...details(entry),
+        branches: ["main", "origin/main"],
+        branches_truncated: true,
+      }),
+    });
+    renderPanel();
+    const region = await screen.findByRole("region", {
+      name: "Commit details",
+    });
+    expect(
+      await within(region).findByText(
+        "In 2+ branches: main, origin/main and more",
+      ),
+    ).toBeInTheDocument();
   });
 
   test("degrades without parents, refs or extended branch fields", async () => {

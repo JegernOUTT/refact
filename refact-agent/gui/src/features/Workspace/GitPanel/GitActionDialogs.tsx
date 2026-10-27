@@ -51,6 +51,9 @@ export function RollbackDialog({
 }: RollbackDialogProps) {
   const [deleteAdded, setDeleteAdded] = useState(false);
   const hasAdded = entries.some((entry) => entry.status === "ADDED");
+  const hasRenamed = entries.some(
+    (entry) => entry.status === "RENAMED" && entry.oldPath !== null,
+  );
   return (
     <Dialog
       open
@@ -65,6 +68,11 @@ export function RollbackDialog({
           the HEAD revision. Local modifications will be lost.
         </Dialog.Description>
         <FileList entries={entries} />
+        {hasRenamed ? (
+          <p className={styles.mutedText} role="note">
+            Renamed files will be moved back to their original paths.
+          </p>
+        ) : null}
         {hasAdded ? (
           <Checkbox
             checked={deleteAdded}

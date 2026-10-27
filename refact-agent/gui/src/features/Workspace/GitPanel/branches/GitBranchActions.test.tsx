@@ -337,9 +337,7 @@ describe("branch popup", () => {
     const current = within(listbox()).getByRole("option", {
       name: "main (current)",
     });
-    await user.click(
-      within(current).getByRole("button", { name: "Actions for main" }),
-    );
+    await user.click(within(current).getByTitle("Actions for main"));
     expect(
       within(listbox()).getByRole("option", { name: "Rename…" }),
     ).toBeInTheDocument();
@@ -409,9 +407,7 @@ describe("branch popup", () => {
     });
     const { user } = renderDock();
     await openPopup(user);
-    await user.click(
-      screen.getByRole("button", { name: "Actions for feature/login" }),
-    );
+    await user.click(within(listbox()).getByTitle("Actions for feature/login"));
     await user.click(
       within(listbox()).getByRole("option", { name: "Delete…" }),
     );
@@ -517,6 +513,45 @@ describe("push dialog", () => {
   });
 });
 
+describe("push upstream mismatch", () => {
+  test("upstream_mismatch reopens Push with an explicit target", async () => {
+    const calls = installHandlers({
+      status: statusRoot({ upstream: "origin/trunk" }),
+      errors: {
+        push: [
+          {
+            status: 409,
+            code: "upstream_mismatch",
+            error: "Branch main tracks origin/trunk, whose name differs",
+          },
+        ],
+      },
+    });
+    const { user } = renderDock();
+    await user.click(await screen.findByRole("button", { name: "Push…" }));
+    let dialog = await screen.findByRole("dialog", { name: "Push Commits" });
+    await user.click(within(dialog).getByRole("button", { name: "Push" }));
+
+    dialog = await screen.findByRole("dialog", { name: "Push Commits" });
+    expect(
+      await within(dialog).findByRole("combobox", { name: "Remote" }),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(
+      "The local branch and its upstream have different names — choose the push target in the Push dialog.",
+    );
+    expect(dialog).toHaveTextContent("main tracks origin/trunk");
+    await user.click(within(dialog).getByRole("button", { name: "Push" }));
+    await waitFor(() =>
+      expect(calls.push?.at(-1)).toEqual({
+        root: ROOT,
+        remote: "origin",
+        branch: "main",
+        set_upstream: true,
+      }),
+    );
+  });
+});
+
 describe("dock toolbar remote actions", () => {
   test("fetch and update report the engine summary", async () => {
     const calls = installHandlers({
@@ -531,11 +566,27 @@ describe("dock toolbar remote actions", () => {
     expect(calls.pull).toEqual([{ root: ROOT }]);
   });
 
+  test("Update Project explains why it is blocked without an upstream", async () => {
+    const calls = installHandlers({ status: statusRoot({ upstream: null }) });
+    const { user } = renderDock();
+    await openPopup(user);
+    const update = within(listbox()).getByRole("option", {
+      name: "Update Project",
+    });
+    expect(update).toHaveAttribute("aria-disabled", "true");
+    expect(update).toHaveTextContent("main has no upstream branch");
+    expect(
+      screen.getByRole("button", { name: "Update Project" }),
+    ).toBeDisabled();
+    expect(calls.pull).toBeUndefined();
+  });
+
   test("auth_failed renders a friendly message with raw output", async () => {
     installHandlers({
       errors: {
         fetch: {
-          status: 401,
+          // The engine now reports auth failures as 502; handling is by code.
+          status: 502,
           code: "auth_failed",
           error: "fatal: Authentication failed for 'https://example.com/repo'",
         },
@@ -556,18 +607,38 @@ describe("commit and push", () => {
   const messageBox = () =>
     screen.getByRole("textbox", { name: "Commit message" });
 
-  test("commits then opens the push dialog", async () => {
-    const calls = installHandlers();
+  test("commits, refreshes status, then opens the push dialog", async () => {
+    const logCalls: URLSearchParams[] = [];
+    const calls = installHandlers({
+      logCalls,
+      status: statusRoot({ ahead: 1 }),
+    });
+    server.use(
+      http.get("*/v1/git/status", () =>
+        HttpResponse.json({
+          roots: [statusRoot({ ahead: calls.commit ? 2 : 1 })],
+        }),
+      ),
+    );
     const { user } = renderDock();
     await screen.findByRole("treeitem", { name: "src/app.ts" });
     await user.type(messageBox(), "Ship it");
     await user.click(screen.getByRole("button", { name: "Commit and Push…" }));
-    expect(
-      await screen.findByRole("dialog", { name: "Push Commits" }),
-    ).toBeInTheDocument();
+    const dialog = await screen.findByRole("dialog", { name: "Push Commits" });
     expect(calls.commit).toEqual([
       { root: ROOT, message: "Ship it", paths: ["src/app.ts"] },
     ]);
+    // The outgoing list uses the post-commit ahead count, not the stale one.
+    const list = await within(dialog).findByRole("list", {
+      name: "Outgoing commits",
+    });
+    expect(within(list).getAllByRole("listitem")).toHaveLength(2);
+    expect(
+      logCalls.some(
+        (params) =>
+          params.get("scope") === "head" && params.get("limit") === "1",
+      ),
+    ).toBe(false);
   });
 
   test("a failed commit does not open the push dialog", async () => {

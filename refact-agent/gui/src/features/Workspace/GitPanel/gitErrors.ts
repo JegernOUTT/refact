@@ -26,6 +26,8 @@ const RAW_OUTPUT_MESSAGES: Record<string, string> = {
     "The current branch can't be deleted. Check out another one first.",
   not_merged: "The branch is not fully merged.",
   no_upstream: "The current branch has no upstream branch.",
+  upstream_mismatch:
+    "The local branch and its upstream have different names — choose the push target in the Push dialog.",
   not_fast_forward:
     "Local and remote branches have diverged — merge or rebase outside the app.",
   rejected: "Push was rejected by the remote. Update the project first.",

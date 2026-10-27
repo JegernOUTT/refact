@@ -40,10 +40,12 @@ function joinPath(root: string, path: string): string {
   return `${root.replace(/[/\\]+$/, "")}/${path}`;
 }
 
-function branchesLabel(branches: string[]): string {
+function branchesLabel(branches: string[], truncated: boolean): string {
   const listed = branches.slice(0, MAX_LISTED_BRANCHES).join(", ");
   const rest = branches.length - MAX_LISTED_BRANCHES;
-  return rest > 0 ? `${listed} and ${rest} more` : listed;
+  const more = truncated ? "+" : "";
+  if (rest > 0) return `${listed} and ${rest}${more} more`;
+  return truncated ? `${listed} and more` : listed;
 }
 
 function FileStats({ file }: { file: GitCommitFile | undefined }) {
@@ -223,9 +225,17 @@ function Details({
         )}
         {details.branches.length > 0 ? (
           <div className={styles.mutedText} title={details.branches.join(", ")}>
-            In {details.branches.length}{" "}
-            {details.branches.length === 1 ? "branch" : "branches"}:{" "}
-            {branchesLabel(details.branches)}
+            In {details.branches.length}
+            {details.branches_truncated === true ? "+" : ""}{" "}
+            {details.branches.length === 1 &&
+            details.branches_truncated !== true
+              ? "branch"
+              : "branches"}
+            :{" "}
+            {branchesLabel(
+              details.branches,
+              details.branches_truncated === true,
+            )}
           </div>
         ) : null}
       </section>

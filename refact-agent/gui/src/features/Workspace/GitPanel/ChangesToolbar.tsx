@@ -76,6 +76,8 @@ export type ChangesToolbarProps = {
   remote: RemoteToolbarProps;
   refreshing: boolean;
   canRollback: boolean;
+  /** Why Rollback is disabled; shown as its tooltip. */
+  rollbackTooltip?: string;
   canShowDiff: boolean;
   groupByDirectory: boolean;
   onRefresh: () => void;
@@ -90,6 +92,7 @@ export function ChangesToolbar({
   remote,
   refreshing,
   canRollback,
+  rollbackTooltip,
   canShowDiff,
   groupByDirectory,
   onRefresh,
@@ -115,6 +118,7 @@ export function ChangesToolbar({
         icon={Undo2}
         label="Rollback…"
         onClick={onRollback}
+        tooltip={canRollback ? undefined : rollbackTooltip}
       />
       <ToolbarAction
         disabled={!canShowDiff}

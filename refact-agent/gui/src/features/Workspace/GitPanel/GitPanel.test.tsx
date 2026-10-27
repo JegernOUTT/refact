@@ -193,11 +193,26 @@ function installHandlers(options?: {
       return HttpResponse.json({ staged: 1, skipped: 0 });
     }),
     http.post("*/v1/git/rollback", async ({ request }) => {
-      options?.rollbackBodies?.push(await request.json());
+      const body = (await request.json()) as {
+        paths: string[];
+        delete_added_files?: boolean;
+        delete_untracked?: boolean;
+      };
+      options?.rollbackBodies?.push(body);
+      // Mirrors the engine: file lists are repo-relative path arrays.
+      const added = new Set(["src/new.ts", "docs/guide.md"]);
+      const untracked = body.paths.filter((path) => path === "notes.txt");
+      const unstaged = body.paths.filter((path) => added.has(path));
+      const restored = body.paths.filter(
+        (path) => !added.has(path) && path !== "notes.txt",
+      );
       return HttpResponse.json({
-        restored: 1,
-        unstaged: 0,
-        deleted: 1,
+        restored,
+        unstaged,
+        deleted: [
+          ...(body.delete_added_files ? unstaged : []),
+          ...(body.delete_untracked ? untracked : []),
+        ],
         skipped: [],
       });
     }),
@@ -535,6 +550,20 @@ describe("GitDock commit tool window", () => {
     ).toBeDisabled();
   });
 
+  test("disables amend with a reason while a merge is in progress", async () => {
+    installHandlers({
+      status: () => [statusRoot("/repo", { repo_state: "merge" })],
+    });
+    renderPanel();
+
+    const amend = await screen.findByRole("checkbox", { name: "Amend" });
+    expect(amend).toBeDisabled();
+    expect(amend.closest("label")).toHaveAttribute(
+      "title",
+      "Merging is in progress — finish or abort it before amending.",
+    );
+  });
+
   test("generates a message from the HEAD diff of included paths", async () => {
     const diffCalls: URLSearchParams[] = [];
     const generateBodies: unknown[] = [];
@@ -587,6 +616,76 @@ describe("GitDock commit tool window", () => {
       paths: ["src/app.ts", "src/new.ts"],
       delete_added_files: true,
     });
+    expect(await screen.findByText("Rolled back 2 files")).toBeInTheDocument();
+  });
+
+  test("rolling back a rename moves it back and keeps the added-files choice", async () => {
+    const rollbackBodies: unknown[] = [];
+    installHandlers({ rollbackBodies, status: () => [RICH_STATUS] });
+    const { user } = renderPanel();
+
+    await openMenu(user, "Changes");
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Rollback…" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Rollback Changes",
+    });
+    expect(dialog).toHaveTextContent(
+      "Renamed files will be moved back to their original paths.",
+    );
+    // Leave "Delete local copies of added files" unchecked.
+    await user.click(within(dialog).getByRole("button", { name: "Rollback" }));
+
+    await waitFor(() => expect(rollbackBodies).toHaveLength(2));
+    expect(rollbackBodies).toEqual([
+      {
+        root: "/repo",
+        paths: ["docs/old-guide.md", "src/app.ts", "src/new.ts"],
+      },
+      {
+        root: "/repo",
+        paths: ["docs/guide.md"],
+        delete_added_files: true,
+      },
+    ]);
+    expect(await screen.findByText("Rolled back 3 files")).toBeInTheDocument();
+  });
+
+  test("toolbar Rollback acts only on the selection and never widens it", async () => {
+    const rollbackBodies: unknown[] = [];
+    installHandlers({ rollbackBodies, status: () => [RICH_STATUS] });
+    const { user } = renderPanel();
+
+    const rollbackButton = await screen.findByRole("button", {
+      name: "Rollback…",
+    });
+    // Nothing selected: the included changes are the scope.
+    expect(rollbackButton).toBeEnabled();
+
+    await user.click(screen.getByRole("treeitem", { name: "notes.txt" }));
+    expect(screen.getByRole("button", { name: "Rollback…" })).toBeDisabled();
+    await user.click(screen.getByRole("treeitem", { name: "lib/conflict.ts" }));
+    expect(screen.getByRole("button", { name: "Rollback…" })).toBeDisabled();
+    await user.click(
+      screen.getByRole("treeitem", { name: "Unversioned Files" }),
+    );
+    expect(screen.getByRole("button", { name: "Rollback…" })).toBeDisabled();
+
+    await user.click(screen.getByRole("treeitem", { name: "src/app.ts" }));
+    await user.click(screen.getByRole("button", { name: "Rollback…" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Rollback Changes",
+    });
+    expect(
+      within(within(dialog).getByRole("list", { name: "Affected files" }))
+        .getAllByRole("listitem")
+        .map((item) => item.textContent),
+    ).toEqual(["src/app.ts"]);
+    await user.click(within(dialog).getByRole("button", { name: "Rollback" }));
+    await waitFor(() =>
+      expect(rollbackBodies).toEqual([
+        { root: "/repo", paths: ["src/app.ts"] },
+      ]),
+    );
     expect(await screen.findByText("Rolled back 1 file")).toBeInTheDocument();
   });
 
@@ -619,6 +718,7 @@ describe("GitDock commit tool window", () => {
         { root: "/repo", paths: ["notes.txt"], delete_untracked: true },
       ]),
     );
+    expect(await screen.findByText("Deleted 1 file")).toBeInTheDocument();
   });
 
   test("Mark as Resolved stages the conflicted path", async () => {

@@ -49,6 +49,7 @@ function appendUnique(
 type ExtraPages = {
   commits: GitCommitLogEntry[];
   lastPageSize: number;
+  scanTruncated: boolean;
 };
 
 function useIncrementalGraph(
@@ -90,9 +91,15 @@ export function useCommitLog(root: string, filters: LogFilters) {
   const headRoot = head.data?.roots[0];
   const { refetch } = head;
 
+  // Bumped whenever the first page or the filters change; a page response
+  // from an older generation is dropped so pages never mix across refreshes.
+  const generation = useRef(0);
+  const loadingMore = useRef(false);
   useEffect(() => {
+    generation.current += 1;
+    loadingMore.current = false;
     setExtra(null);
-  }, [headRoot]);
+  }, [headRoot, firstRequest]);
 
   const commits = useMemo(
     () => appendUnique(headRoot?.commits ?? [], extra?.commits ?? []),
@@ -106,23 +113,30 @@ export function useCommitLog(root: string, filters: LogFilters) {
     headRoot !== undefined &&
     lastPageSize === LOG_PAGE_SIZE;
 
-  const loadingMore = useRef(false);
   const loadMore = useCallback(async () => {
     if (!hasMore || loadingMore.current) return;
     loadingMore.current = true;
+    const requestGeneration = generation.current;
     try {
       const response = await fetchPage(
         logRequest(root, filters, commits.length),
       ).unwrap();
-      const page = response.roots[0]?.commits ?? [];
+      if (requestGeneration !== generation.current) return;
+      const pageRoot = response.roots.at(0);
+      const page = pageRoot?.commits ?? [];
       setExtra((current) => ({
         commits: appendUnique(current?.commits ?? [], page),
         lastPageSize: page.length,
+        scanTruncated:
+          (current?.scanTruncated ?? false) ||
+          pageRoot?.scan_truncated === true,
       }));
     } catch {
       // Surfaced through pageState.error; the next scroll or click retries.
     } finally {
-      loadingMore.current = false;
+      if (requestGeneration === generation.current) {
+        loadingMore.current = false;
+      }
     }
   }, [commits.length, fetchPage, filters, hasMore, root]);
 
@@ -138,7 +152,8 @@ export function useCommitLog(root: string, filters: LogFilters) {
     commits,
     graph,
     headOid: headRoot?.head_oid ?? null,
-    scanTruncated: headRoot?.scan_truncated ?? false,
+    scanTruncated:
+      (headRoot?.scan_truncated ?? false) || (extra?.scanTruncated ?? false),
     isLoading: head.isLoading || (head.isFetching && commits.length === 0),
     isFetching: head.isFetching,
     loadingMore: pageState.isFetching,

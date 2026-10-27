@@ -23,6 +23,7 @@ import {
   useRollbackGitPathsMutation,
   useStageGitPathsMutation,
   type GitRepoState,
+  type GitRollbackResponse,
   type GitSkippedPath,
   type NormalizedGitStatus,
 } from "../../../services/refact/gitRead";
@@ -68,6 +69,13 @@ import {
   type GitRootViewState,
 } from "./gitPanelSlice";
 import { REPO_STATE_LABELS } from "./repoState";
+import {
+  amendBlockedReason,
+  mergeRollbackResponses,
+  planRollbackRequests,
+  ROLLBACK_EMPTY_SELECTION_HINT,
+  rolledBackCount,
+} from "./rollbackPlan";
 import { useGitStatus } from "./useGitStatus";
 import styles from "./GitDock.module.css";
 
@@ -86,8 +94,8 @@ function rootLabel(root: string): string {
   return normalized.split(/[/\\]/).pop() ?? root;
 }
 
-function rollbackPaths(entries: ChangesTreeEntry[]): string[] {
-  return commitPaths(entries);
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
 function AheadBehind({ status }: { status: NormalizedGitStatus }) {
@@ -135,6 +143,7 @@ type CommitToolWindowProps = {
   status: NormalizedGitStatus;
   refreshing: boolean;
   onRefresh: () => void;
+  refreshStatus: () => Promise<unknown>;
   actions: GitActionsController;
   messageRef: RefObject<HTMLTextAreaElement>;
 };
@@ -144,6 +153,7 @@ function CommitToolWindow({
   status,
   refreshing,
   onRefresh,
+  refreshStatus,
   actions,
   messageRef,
 }: CommitToolWindowProps) {
@@ -265,30 +275,40 @@ function CommitToolWindow({
     if (!dialog) return;
     setDialogError(null);
     try {
-      const response = await rollback(
-        dialog.kind === "rollback"
-          ? {
+      const responses: GitRollbackResponse[] = [];
+      if (dialog.kind === "rollback") {
+        for (const plan of planRollbackRequests(
+          dialog.entries,
+          deleteAddedFiles,
+        )) {
+          responses.push(
+            await rollback({
               root,
-              paths: rollbackPaths(dialog.entries),
-              ...(deleteAddedFiles ? { delete_added_files: true } : {}),
-            }
-          : {
-              root,
-              paths: dialog.entries.map((entry) => entry.path),
-              delete_untracked: true,
-            },
-      ).unwrap();
+              paths: plan.paths,
+              ...(plan.deleteAddedFiles ? { delete_added_files: true } : {}),
+            }).unwrap(),
+          );
+        }
+      } else {
+        responses.push(
+          await rollback({
+            root,
+            paths: dialog.entries.map((entry) => entry.path),
+            delete_untracked: true,
+          }).unwrap(),
+        );
+      }
+      const response = mergeRollbackResponses(responses);
       setDialog(null);
       setFeedback({
         tone: "success",
         text:
           dialog.kind === "rollback"
-            ? `Rolled back ${response.restored + response.unstaged} ${
-                response.restored + response.unstaged === 1 ? "file" : "files"
-              }`
-            : `Deleted ${response.deleted} ${
-                response.deleted === 1 ? "file" : "files"
-              }`,
+            ? `Rolled back ${plural(
+                rolledBackCount(dialog.entries, response),
+                "file",
+              )}`
+            : `Deleted ${plural(response.deleted.length, "file")}`,
         skipped: response.skipped,
       });
     } catch (error) {
@@ -307,12 +327,18 @@ function CommitToolWindow({
 
   const changeEntriesOf = (node: ChangesTreeNode | null) =>
     node ? collectEntries(node).filter((entry) => entry.kind === "change") : [];
-  const toolbarRollbackEntries = (() => {
-    const fromSelection = changeEntriesOf(selectedNode);
-    return fromSelection.length > 0
-      ? fromSelection
-      : included.filter((entry) => entry.kind === "change");
-  })();
+  // With a selection, act on exactly its changes (never widen to every
+  // included change); only an empty selection falls back to included changes.
+  const toolbarRollbackEntries = selectedNode
+    ? changeEntriesOf(selectedNode)
+    : included.filter((entry) => entry.kind === "change");
+  const rollbackTooltip =
+    toolbarRollbackEntries.length > 0
+      ? undefined
+      : selectedNode
+        ? ROLLBACK_EMPTY_SELECTION_HINT
+        : "No included changes to roll back";
+  const amendBlocked = amendBlockedReason(status);
 
   const renderContextMenu = (node: ChangesTreeNode) => {
     if (node.type !== "file") {
@@ -415,6 +441,7 @@ function CommitToolWindow({
     <>
       <ChangesToolbar
         canRollback={toolbarRollbackEntries.length > 0}
+        rollbackTooltip={rollbackTooltip}
         canShowDiff={selectedFile !== null && selectedFile.kind !== "conflict"}
         groupByDirectory={view.groupByDirectory}
         onCollapseAll={() => updateView({ collapsed: containerIds(groups) })}
@@ -433,7 +460,7 @@ function CommitToolWindow({
           pulling: actions.pulling,
           pushing: actions.pushing,
           canPush: actions.canPush,
-          updateBlockedReason: actions.blockedReason,
+          updateBlockedReason: actions.updateBlockedReason,
           onFetch: () => void actions.fetch(),
           onPull: () => void actions.pull(),
           onPush: () => actions.openPush(),
@@ -478,13 +505,22 @@ function CommitToolWindow({
         />
       )}
       <CommitPanel
-        amendAvailable={!status.extended || status.headOid !== null}
+        amendAvailable={amendBlocked === null}
+        amendBlockedReason={amendBlocked}
         canPush={actions.canPush}
         includedCount={included.length}
         key={root}
         messageRef={messageRef}
         onCommitted={() => setFeedback(null)}
-        onPushRequested={() => actions.openPush()}
+        onPushRequested={async () => {
+          // The commit changed the outgoing count; open Push on fresh status.
+          try {
+            await refreshStatus();
+          } catch {
+            // A failed refresh still opens the dialog with the last status.
+          }
+          actions.openPush();
+        }}
         paths={paths}
         root={root}
         totalCount={checkableCount(status)}
@@ -592,6 +628,7 @@ export function GitDock() {
           messageRef={messageRef}
           key={activeStatus.root}
           onRefresh={() => void statusQuery.refetch()}
+          refreshStatus={() => statusQuery.refetch()}
           refreshing={statusQuery.isFetching}
           status={activeStatus}
         />

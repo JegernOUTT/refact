@@ -44,9 +44,6 @@ const PAGE_STEP = 20;
 const LOAD_MORE_THRESHOLD_PX = 400;
 const BRANCH_ALL = "__all__";
 const BRANCH_HEAD = "__head__";
-const STATUS_ROW = "status-row";
-
-type ListItem = GitCommitLogEntry | typeof STATUS_ROW;
 
 export type CommitsPaneProps = {
   commits: GitCommitLogEntry[];
@@ -288,6 +285,8 @@ export function CommitsPane({
     if (hasMore && remaining < LOAD_MORE_THRESHOLD_PX) onLoadMore();
   };
 
+  // Kept outside the listbox: a listbox may only own options, so the paging
+  // status (and its button) is a sibling region instead of a fake row.
   const statusRow =
     hasMore || loadingMore || pageError ? (
       <div className={styles.loadingRow}>
@@ -300,12 +299,10 @@ export function CommitsPane({
         )}
       </div>
     ) : scanTruncated ? (
-      <div className={styles.loadingRow}>
+      <div className={styles.loadingRow} role="note">
         Search stopped early; refine the filters to find older commits.
       </div>
     ) : null;
-  const items: ListItem[] =
-    statusRow && commits.length > 0 ? [...commits, STATUS_ROW] : commits;
 
   return (
     <div className={styles.commitsPane}>
@@ -375,32 +372,29 @@ export function CommitsPane({
                 ? "No commits match the filters."
                 : "No commits yet"
             }
-            getItemKey={(item) => (item === STATUS_ROW ? item : item.oid)}
+            getItemKey={(item) => item.oid}
             height="100%"
-            items={items}
+            items={commits}
             listRef={listRef}
             onListScroll={handleScroll}
-            renderItem={(commit, index) =>
-              commit === STATUS_ROW ? (
-                statusRow
-              ) : (
-                <CommitRow
-                  commit={commit}
-                  commitActions={commitActions}
-                  graph={graph}
-                  index={index}
-                  onSelect={(oid) => {
-                    onSelect(oid);
-                    focusRef.current?.focus();
-                  }}
-                  rowId={rowId(commit.oid)}
-                  selected={commit.oid === selectedOid}
-                />
-              )
-            }
+            renderItem={(commit, index) => (
+              <CommitRow
+                commit={commit}
+                commitActions={commitActions}
+                graph={graph}
+                index={index}
+                onSelect={(oid) => {
+                  onSelect(oid);
+                  focusRef.current?.focus();
+                }}
+                rowId={rowId(commit.oid)}
+                selected={commit.oid === selectedOid}
+              />
+            )}
           />
         </div>
       )}
+      {!error && !isLoading && commits.length > 0 ? statusRow : null}
     </div>
   );
 }

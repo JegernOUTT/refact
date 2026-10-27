@@ -57,14 +57,15 @@ function popupActions(
   onCommit: (() => void) | undefined,
 ): PopupAction[] {
   const blocked = controller.blockedReason ?? undefined;
+  const updateBlocked = controller.updateBlockedReason ?? undefined;
   const actions: PopupAction[] = [
     {
       id: "update",
       icon: "update",
       label: "Update Project",
       onSelect: () => void controller.pull(),
-      disabled: blocked !== undefined,
-      hint: blocked,
+      disabled: updateBlocked !== undefined,
+      hint: updateBlocked,
     },
   ];
   if (onCommit) {
@@ -396,22 +397,24 @@ function PopupRowView({
           {hint}
         </span>
       ) : null}
-      <button
-        aria-label={`Actions for ${ref.name}`}
+      {/* An option must not own interactive descendants, so the expander is
+          a pointer-only affordance; assistive tech uses aria-expanded on the
+          option with ArrowRight/ArrowLeft from the search box. */}
+      <span
+        aria-hidden="true"
         className={styles.popupExpand}
         onClick={(event) => {
           event.stopPropagation();
           onToggle();
         }}
-        tabIndex={-1}
-        type="button"
+        title={`Actions for ${ref.name}`}
       >
         <Icon
           icon={expanded ? ChevronDown : ChevronRight}
           size="sm"
           tone="muted"
         />
-      </button>
+      </span>
     </div>
   );
 }

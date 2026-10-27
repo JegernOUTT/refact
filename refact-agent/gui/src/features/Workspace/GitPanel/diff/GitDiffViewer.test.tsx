@@ -4,7 +4,10 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { server } from "../../../../utils/mockServer";
 import { render } from "../../../../utils/test-utils";
-import type { GitFileResponse } from "../../../../services/refact/gitRead";
+import {
+  gitReadApi,
+  type GitFileResponse,
+} from "../../../../services/refact/gitRead";
 import { selectGitDiffViewerPrefs } from "../gitPanelSlice";
 import { GitDiffViewer } from "./GitDiffViewer";
 import type { GitDiffDescriptor } from "./gitDiffDescriptor";
@@ -70,7 +73,37 @@ const modified: GitDiffDescriptor = {
   kind: "working",
 };
 
+let headOid = "head-1";
+let statusCalls = 0;
+
+function serveStatus() {
+  server.use(
+    http.get("*/v1/git/status", ({ request }) => {
+      statusCalls += 1;
+      const root = new URL(request.url).searchParams.get("root") ?? "/repo";
+      return HttpResponse.json({
+        roots: [
+          {
+            root,
+            branch: "main",
+            head_detached: false,
+            ahead: 0,
+            behind: 0,
+            staged: [],
+            unstaged: [],
+            untracked_included: true,
+            head_oid: headOid,
+          },
+        ],
+      });
+    }),
+  );
+}
+
 beforeEach(() => {
+  headOid = "head-1";
+  statusCalls = 0;
+  serveStatus();
   vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(
     () => undefined,
   );
@@ -256,5 +289,35 @@ describe("GitDiffViewer", () => {
     expect(
       screen.getByRole("button", { name: "Jump to Source (F4)" }),
     ).toBeDisabled();
+  });
+
+  test("refetches the HEAD side when HEAD moves outside the app", async () => {
+    const calls = serveFiles({
+      "HEAD@src/app.ts": file("HEAD", "src/app.ts", "old\n"),
+      "WORKTREE@src/app.ts": file("WORKTREE", "src/app.ts", "new\n"),
+    });
+    const { store } = render(<GitDiffViewer descriptor={modified} />);
+    await screen.findByRole("textbox", { name: "HEAD version of src/app.ts" });
+    const headFetches = () =>
+      calls.filter((key) => key === "HEAD@src/app.ts").length;
+    expect(headFetches()).toBe(1);
+
+    // Same HEAD: a status refresh alone must not refetch the HEAD side.
+    const before = statusCalls;
+    store.dispatch(
+      gitReadApi.util.invalidateTags([{ type: "GitStatus", id: "/repo" }]),
+    );
+    await waitFor(() => expect(statusCalls).toBeGreaterThan(before));
+    expect(headFetches()).toBe(1);
+
+    // A commit made in a terminal moves HEAD; the next status read sees it.
+    headOid = "head-2";
+    store.dispatch(
+      gitReadApi.util.invalidateTags([{ type: "GitStatus", id: "/repo" }]),
+    );
+    await waitFor(() => expect(headFetches()).toBe(2));
+    expect(
+      calls.filter((key) => key === "WORKTREE@src/app.ts").length,
+    ).toBeGreaterThanOrEqual(1);
   });
 });

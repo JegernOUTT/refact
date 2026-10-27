@@ -31,6 +31,8 @@ export type PushDialogProps = {
   ahead: number | null;
   remotes: readonly string[];
   setUpstreamMode: boolean;
+  /** Set when the engine refused an implicit push to a differently named upstream. */
+  upstreamMismatch?: boolean;
   busy: boolean;
   error: GitErrorView | null;
   onCancel: () => void;
@@ -91,6 +93,7 @@ export function PushDialog({
   ahead,
   remotes,
   setUpstreamMode,
+  upstreamMismatch = false,
   busy,
   error,
   onCancel,
@@ -155,7 +158,16 @@ export function PushDialog({
               </Badge>
             ) : null}
           </div>
-          {isNew ? (
+          {isNew && upstreamMismatch ? (
+            <p className={styles.mutedText}>
+              {branch} tracks {upstream ?? "an upstream"} under a different
+              name. Pushing to{" "}
+              <code>
+                {remote}/{branch}
+              </code>{" "}
+              sets it as the new upstream.
+            </p>
+          ) : isNew ? (
             <p className={styles.mutedText}>
               The branch has no upstream yet. Pushing creates{" "}
               <code>

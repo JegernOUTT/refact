@@ -35,10 +35,12 @@ export type CommitPanelProps = {
   totalCount: number;
   paths: string[];
   amendAvailable: boolean;
+  /** Why Amend is unavailable; shown as its tooltip. */
+  amendBlockedReason?: string | null;
   canPush: boolean;
   messageRef?: Ref<HTMLTextAreaElement>;
   onCommitted: () => void;
-  onPushRequested: () => void;
+  onPushRequested: () => void | Promise<void>;
 };
 
 type CommitResult = {
@@ -52,6 +54,7 @@ export function CommitPanel({
   totalCount,
   paths,
   amendAvailable,
+  amendBlockedReason,
   canPush,
   messageRef,
   onCommitted,
@@ -71,6 +74,9 @@ export function CommitPanel({
   const busy = commitState.isLoading || generating;
   const canCommit =
     message.trim().length > 0 && (includedCount > 0 || amend) && !busy;
+
+  // Leave amend mode if it becomes unavailable (e.g. a merge started).
+  if (amend && !amendAvailable) setAmend(false);
 
   const toggleAmend = async (checked: boolean) => {
     setAmend(checked);
@@ -129,7 +135,7 @@ export function CommitPanel({
         skipped: response.skipped,
       });
       onCommitted();
-      if (pushAfter) onPushRequested();
+      if (pushAfter) await onPushRequested();
     } catch (commitError) {
       setError(gitErrorText(commitError));
     }
@@ -145,13 +151,23 @@ export function CommitPanel({
   return (
     <section aria-label="Commit" className={styles.commitPanel}>
       <div className={styles.commitOptions}>
-        <Checkbox
-          checked={amend}
-          disabled={!amendAvailable || busy || logState.isFetching}
-          onCheckedChange={(checked) => void toggleAmend(checked === true)}
-        >
-          Amend
-        </Checkbox>
+        {!amendAvailable && amendBlockedReason ? (
+          <Tooltip content={amendBlockedReason}>
+            <span className={styles.disabledTooltipHost}>
+              <Checkbox checked={false} disabled title={amendBlockedReason}>
+                Amend
+              </Checkbox>
+            </span>
+          </Tooltip>
+        ) : (
+          <Checkbox
+            checked={amend}
+            disabled={!amendAvailable || busy || logState.isFetching}
+            onCheckedChange={(checked) => void toggleAmend(checked === true)}
+          >
+            Amend
+          </Checkbox>
+        )}
         <Tooltip content="Generate commit message">
           <IconButton
             aria-label="Generate commit message"

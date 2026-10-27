@@ -206,6 +206,8 @@ export type GitCommitDetails = {
   message: string;
   refs: GitRef[];
   branches: string[];
+  /** Set when the engine stopped listing containing branches early. */
+  branches_truncated?: boolean;
   files: GitCommitFile[];
   files_truncated: boolean;
 };
@@ -283,9 +285,12 @@ export type GitRollbackRequest = {
 };
 
 export type GitRollbackResponse = {
-  restored: number;
-  unstaged: number;
-  deleted: number;
+  /** Repo-relative paths restored to HEAD. */
+  restored: string[];
+  /** Repo-relative added paths removed from the index. */
+  unstaged: string[];
+  /** Repo-relative paths deleted from disk. */
+  deleted: string[];
   skipped: GitSkippedPath[];
 };
 
@@ -299,6 +304,11 @@ export type GitFileRequest = {
   root: string;
   path: string;
   rev: GitFileRevision;
+  /**
+   * Cache key only (never sent): the HEAD oid the HEAD/INDEX sides were read
+   * against, so moving HEAD outside the app refetches them.
+   */
+  headOid?: string | null;
 };
 
 export type GitFileResponse = {
@@ -397,6 +407,7 @@ export type GitApiErrorCode =
   | "current_branch"
   | "not_merged"
   | "no_upstream"
+  | "upstream_mismatch"
   | "not_fast_forward"
   | "rejected"
   | "auth_failed"

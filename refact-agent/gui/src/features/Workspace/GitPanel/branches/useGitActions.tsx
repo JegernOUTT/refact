@@ -41,7 +41,7 @@ type DialogState =
   | { kind: "rename"; name: string }
   | { kind: "delete"; name: string; notMerged: boolean }
   | { kind: "revision" }
-  | { kind: "push"; setUpstream: boolean };
+  | { kind: "push"; setUpstream: boolean; mismatch?: boolean };
 
 export type NewBranchSource = {
   startPoint: string | null;
@@ -82,6 +82,13 @@ export function useGitActions({ root, status }: UseGitActionsOptions) {
 
   const blockedReason = repoBlockedReason(status?.repoState);
   const currentBranch = status?.branch ?? branches?.current ?? null;
+  const updateBlockedReason =
+    blockedReason ??
+    (status?.headDetached
+      ? "HEAD is detached — check out a branch to update the project."
+      : status?.extended && currentBranch && !status.upstream
+        ? `${currentBranch} has no upstream branch — push it with Push… to set one.`
+        : null);
   const localNames = useMemo(
     () => (branches?.branches ?? []).map((branch) => branch.name),
     [branches?.branches],
@@ -200,7 +207,18 @@ export function useGitActions({ root, status }: UseGitActionsOptions) {
   }, [fetchRemote, reportError, root]);
 
   const pull = useCallback(async () => {
-    if (blockedReason) return;
+    if (updateBlockedReason) {
+      setFeedback({
+        tone: "error",
+        error: {
+          code: null,
+          message: updateBlockedReason,
+          output: null,
+          files: [],
+        },
+      });
+      return;
+    }
     setFeedback(null);
     try {
       const response = await pullRemote({ root }).unwrap();
@@ -208,7 +226,7 @@ export function useGitActions({ root, status }: UseGitActionsOptions) {
     } catch (error) {
       reportError(error);
     }
-  }, [blockedReason, pullRemote, reportError, root]);
+  }, [pullRemote, reportError, root, updateBlockedReason]);
 
   const push = async (target: PushTarget) => {
     if (!currentBranch) return;
@@ -230,8 +248,14 @@ export function useGitActions({ root, status }: UseGitActionsOptions) {
           `Pushed ${plural(count, "commit")} to ${target.destination}`,
       });
     } catch (error) {
-      if (gitErrorCode(error) === "no_upstream") {
-        openDialog({ kind: "push", setUpstream: true });
+      const code = gitErrorCode(error);
+      if (code === "no_upstream" || code === "upstream_mismatch") {
+        // Re-open with an explicit target the user picks (remote/branch).
+        openDialog({
+          kind: "push",
+          setUpstream: true,
+          mismatch: code === "upstream_mismatch",
+        });
         setDialogError(gitErrorText(error));
         return;
       }
@@ -442,6 +466,7 @@ export function useGitActions({ root, status }: UseGitActionsOptions) {
         remotes={remotes}
         root={root}
         setUpstreamMode={dialog.setUpstream}
+        upstreamMismatch={dialog.mismatch === true}
         upstream={status?.upstream ?? null}
       />
     );
@@ -454,6 +479,7 @@ export function useGitActions({ root, status }: UseGitActionsOptions) {
     remotes,
     currentBranch,
     blockedReason,
+    updateBlockedReason,
     canPush: Boolean(currentBranch) && !status?.headDetached,
     fetching: fetchState.isLoading,
     pulling: pullState.isLoading,
