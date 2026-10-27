@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -11,12 +11,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::app_state::AppState;
-use crate::git::operations::{list_branches, stage_changes, unstage_changes};
+use crate::git::operations::{
+    changed_files_for_commit_oid, stage_changes, unstage_changes, GitFileChangeStatus,
+    MAX_GIT_HISTORY_FILES_PER_COMMIT,
+};
 use crate::git::{FileChange, FileChangeStatus};
 use crate::global_context::GlobalContext;
 
 const MAX_PATCH_BYTES: usize = 512 * 1024;
 const MAX_LOG_COMMITS: usize = 500;
+const MAX_LOG_SCAN_COMMITS: usize = 50_000;
+const MAX_CONTAINING_BRANCHES: usize = 50;
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<Value>)>;
 
@@ -68,6 +73,16 @@ pub struct LogQuery {
     pub limit: usize,
     #[serde(default)]
     pub skip: usize,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default, rename = "ref")]
+    pub reference: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub author: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -143,6 +158,14 @@ pub struct GitDiffRoot {
 pub struct GitLogRoot {
     pub root: String,
     pub commits: Vec<GitCommitJson>,
+    pub head_oid: Option<String>,
+    pub scan_truncated: bool,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct GitRefLabel {
+    pub name: String,
+    pub kind: String,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -154,6 +177,8 @@ pub struct GitCommitJson {
     pub author_email: String,
     pub message_first_line: String,
     pub message: String,
+    pub parents: Vec<String>,
+    pub refs: Vec<GitRefLabel>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -161,6 +186,11 @@ pub struct GitBranchesRoot {
     pub root: String,
     pub current: Option<String>,
     pub branches: Vec<GitBranchJson>,
+    pub head_detached: bool,
+    pub head_oid: Option<String>,
+    pub remotes: Vec<String>,
+    pub remote_branches: Vec<GitRemoteBranchJson>,
+    pub tags: Vec<GitTagJson>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -168,6 +198,60 @@ pub struct GitBranchJson {
     pub name: String,
     pub is_head: bool,
     pub upstream: Option<String>,
+    pub tip_oid: Option<String>,
+    pub ahead: Option<usize>,
+    pub behind: Option<usize>,
+    pub upstream_gone: bool,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct GitRemoteBranchJson {
+    pub name: String,
+    pub remote: String,
+    pub short_name: String,
+    pub tip_oid: String,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct GitTagJson {
+    pub name: String,
+    pub target_oid: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitCommitDetailsQuery {
+    #[serde(default)]
+    pub root: Option<String>,
+    pub oid: String,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct GitCommitFileJson {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub status: String,
+    pub additions: usize,
+    pub deletions: usize,
+    pub binary: bool,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct GitCommitDetails {
+    pub root: String,
+    pub oid: String,
+    pub short_oid: String,
+    pub parents: Vec<String>,
+    pub author_name: String,
+    pub author_email: String,
+    pub author_time_ms: i64,
+    pub committer_name: String,
+    pub committer_email: String,
+    pub committer_time_ms: i64,
+    pub message: String,
+    pub refs: Vec<GitRefLabel>,
+    pub branches: Vec<String>,
+    pub files: Vec<GitCommitFileJson>,
+    pub files_truncated: bool,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -736,71 +820,555 @@ fn diff_for_repo<'a>(
     })
 }
 
-fn log_for_repo(root: &Path, limit: usize, skip: usize) -> Result<GitLogRoot, String> {
-    let repository =
-        Repository::open(root).map_err(|error| format!("Failed to open repo: {}", error))?;
+type HttpError = (StatusCode, Json<Value>);
+
+#[derive(Debug, Default, Clone)]
+pub(super) struct LogFilters {
+    pub scope_all: bool,
+    pub reference: Option<String>,
+    pub text: Option<String>,
+    pub author: Option<String>,
+    pub path: Option<PathBuf>,
+}
+
+impl LogFilters {
+    fn from_query(query: &LogQuery) -> Result<Self, HttpError> {
+        let scope_all = match query.scope.as_deref().map(str::trim) {
+            None | Some("") | Some("head") => false,
+            Some("all") => true,
+            Some(other) => {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("Unsupported log scope: {}", other),
+                ))
+            }
+        };
+        let non_empty = |value: &Option<String>| {
+            value
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+        };
+        let reference = non_empty(&query.reference);
+        if let Some(reference) = &reference {
+            validate_rev_input(reference)
+                .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))?;
+        }
+        let path = match non_empty(&query.path) {
+            Some(path) => repo_relative_paths(vec![path])
+                .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))?
+                .pop(),
+            None => None,
+        };
+        Ok(Self {
+            scope_all,
+            reference,
+            text: non_empty(&query.text).map(|text| text.to_lowercase()),
+            author: non_empty(&query.author).map(|author| author.to_lowercase()),
+            path,
+        })
+    }
+
+    fn filtering(&self) -> bool {
+        self.text.is_some() || self.author.is_some() || self.path.is_some()
+    }
+}
+
+/// Rejects revision input git could parse as an option or that is not a plausible ref/rev.
+pub(super) fn validate_rev_input(value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err("Revision must not be empty".to_string());
+    }
+    if value.starts_with('-') {
+        return Err("Revision must not start with '-'".to_string());
+    }
+    if value
+        .chars()
+        .any(|ch| ch.is_control() || ch.is_whitespace())
+    {
+        return Err("Revision must not contain whitespace or control characters".to_string());
+    }
+    Ok(())
+}
+
+fn ref_label(name: &str, kind: &str) -> GitRefLabel {
+    GitRefLabel {
+        name: name.to_string(),
+        kind: kind.to_string(),
+    }
+}
+
+fn ref_kind_rank(kind: &str) -> u8 {
+    match kind {
+        "head" => 0,
+        "local" => 1,
+        "remote" => 2,
+        _ => 3,
+    }
+}
+
+/// Builds oid -> labels once per request. Symbolic refs (e.g. origin/HEAD) are skipped.
+pub(super) fn ref_labels_by_oid(
+    repository: &Repository,
+) -> Result<HashMap<git2::Oid, Vec<GitRefLabel>>, String> {
+    let mut labels: HashMap<git2::Oid, Vec<GitRefLabel>> = HashMap::new();
+    let references = repository
+        .references()
+        .map_err(|error| format!("Failed to list references: {}", error))?;
+    for reference in references.flatten() {
+        if reference.kind() != Some(git2::ReferenceType::Direct) {
+            continue;
+        }
+        let Some(full) = reference.name() else {
+            continue;
+        };
+        let (name, kind) = if let Some(name) = full.strip_prefix("refs/heads/") {
+            (name, "local")
+        } else if let Some(name) = full.strip_prefix("refs/remotes/") {
+            (name, "remote")
+        } else if let Some(name) = full.strip_prefix("refs/tags/") {
+            (name, "tag")
+        } else {
+            continue;
+        };
+        let Ok(commit) = reference.peel_to_commit() else {
+            continue;
+        };
+        labels
+            .entry(commit.id())
+            .or_default()
+            .push(ref_label(name, kind));
+    }
+    if let Ok(head) = repository.head().and_then(|head| head.peel_to_commit()) {
+        labels
+            .entry(head.id())
+            .or_default()
+            .push(ref_label("HEAD", "head"));
+    }
+    for entry in labels.values_mut() {
+        entry.sort_by(|a, b| {
+            ref_kind_rank(&a.kind)
+                .cmp(&ref_kind_rank(&b.kind))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+    }
+    Ok(labels)
+}
+
+/// Resolves a user ref: local branch, remote branch, tag, then any revision.
+pub(super) fn resolve_commit_ref<'repo>(
+    repository: &'repo Repository,
+    reference: &str,
+) -> Option<git2::Commit<'repo>> {
+    for prefix in ["refs/heads/", "refs/remotes/", "refs/tags/"] {
+        let full = format!("{}{}", prefix, reference);
+        if !git2::Reference::is_valid_name(&full) {
+            continue;
+        }
+        if let Ok(commit) = repository
+            .find_reference(&full)
+            .and_then(|found| found.peel_to_commit())
+        {
+            return Some(commit);
+        }
+    }
+    repository
+        .revparse_single(reference)
+        .and_then(|object| object.peel_to_commit())
+        .ok()
+}
+
+fn tree_entry_id(tree: &git2::Tree<'_>, path: &Path) -> Option<git2::Oid> {
+    tree.get_path(path).ok().map(|entry| entry.id())
+}
+
+fn commit_touches_path(commit: &git2::Commit<'_>, path: &Path) -> bool {
+    let Ok(tree) = commit.tree() else {
+        return false;
+    };
+    let current = tree_entry_id(&tree, path);
+    let parent = commit
+        .parent(0)
+        .ok()
+        .and_then(|parent| parent.tree().ok())
+        .and_then(|tree| tree_entry_id(&tree, path));
+    current != parent
+}
+
+fn commit_matches(commit: &git2::Commit<'_>, filters: &LogFilters) -> bool {
+    if let Some(author) = &filters.author {
+        let signature = commit.author();
+        let name = signature.name().unwrap_or_default().to_lowercase();
+        let email = signature.email().unwrap_or_default().to_lowercase();
+        if !name.contains(author.as_str()) && !email.contains(author.as_str()) {
+            return false;
+        }
+    }
+    if let Some(text) = &filters.text {
+        let oid_match = text.len() >= 4
+            && text.chars().all(|ch| ch.is_ascii_hexdigit())
+            && commit.id().to_string().starts_with(text.as_str());
+        if !oid_match
+            && !commit
+                .message()
+                .unwrap_or_default()
+                .to_lowercase()
+                .contains(text.as_str())
+        {
+            return false;
+        }
+    }
+    if let Some(path) = &filters.path {
+        if !commit_touches_path(commit, path) {
+            return false;
+        }
+    }
+    true
+}
+
+fn commit_json(
+    commit: &git2::Commit<'_>,
+    labels: &HashMap<git2::Oid, Vec<GitRefLabel>>,
+) -> GitCommitJson {
+    let oid = commit.id().to_string();
+    let message = commit.message().unwrap_or_default().to_string();
+    let author = commit.author();
+    GitCommitJson {
+        short_oid: oid.chars().take(12).collect(),
+        oid,
+        time_ms: commit.time().seconds().saturating_mul(1000),
+        author_name: author.name().unwrap_or_default().to_string(),
+        author_email: author.email().unwrap_or_default().to_string(),
+        message_first_line: message.lines().next().unwrap_or_default().to_string(),
+        message,
+        parents: commit.parent_ids().map(|oid| oid.to_string()).collect(),
+        refs: labels.get(&commit.id()).cloned().unwrap_or_default(),
+    }
+}
+
+pub(super) fn log_for_repo(
+    root: &Path,
+    limit: usize,
+    skip: usize,
+    filters: &LogFilters,
+) -> Result<GitLogRoot, HttpError> {
+    let repository = Repository::open(root)
+        .map_err(|error| internal_error(format!("Failed to open repo: {}", error)))?;
+    let git_error = |context: &'static str| {
+        move |error: git2::Error| internal_error(format!("{}: {}", context, error))
+    };
+    let head = repository
+        .head()
+        .and_then(|head| head.peel_to_commit())
+        .ok()
+        .map(|commit| commit.id());
+    let mut result = GitLogRoot {
+        root: root.to_string_lossy().to_string(),
+        commits: Vec::new(),
+        head_oid: head.map(|oid| oid.to_string()),
+        scan_truncated: false,
+    };
     let mut revwalk = repository
         .revwalk()
-        .map_err(|error| format!("Failed to create revwalk: {}", error))?;
+        .map_err(git_error("Failed to create revwalk"))?;
     revwalk
         .set_sorting(git2::Sort::TIME | git2::Sort::TOPOLOGICAL)
-        .map_err(|error| format!("Failed to configure revwalk: {}", error))?;
-    if let Ok(head) = repository.head().and_then(|head| head.peel_to_commit()) {
+        .map_err(git_error("Failed to configure revwalk"))?;
+    let labels = ref_labels_by_oid(&repository).map_err(internal_error)?;
+    let mut pushed = false;
+    if let Some(reference) = &filters.reference {
+        let commit = resolve_commit_ref(&repository, reference).ok_or_else(|| {
+            api_error(
+                StatusCode::NOT_FOUND,
+                format!("Reference not found: {}", reference),
+            )
+        })?;
         revwalk
-            .push(head.id())
-            .map_err(|error| format!("Failed to walk HEAD: {}", error))?;
+            .push(commit.id())
+            .map_err(git_error("Failed to walk reference"))?;
+        pushed = true;
     } else {
-        return Ok(GitLogRoot {
-            root: root.to_string_lossy().to_string(),
-            commits: Vec::new(),
-        });
+        if let Some(head) = head {
+            revwalk
+                .push(head)
+                .map_err(git_error("Failed to walk HEAD"))?;
+            pushed = true;
+        }
+        if filters.scope_all {
+            for oid in labels.keys() {
+                revwalk
+                    .push(*oid)
+                    .map_err(git_error("Failed to walk references"))?;
+                pushed = true;
+            }
+        }
+    }
+    if !pushed {
+        return Ok(result);
     }
 
-    let mut commits = Vec::new();
-    for oid in revwalk.skip(skip).take(limit.min(MAX_LOG_COMMITS)) {
-        let oid = oid.map_err(|error| format!("Failed to read commit id: {}", error))?;
+    let limit = limit.min(MAX_LOG_COMMITS);
+    let filtering = filters.filtering();
+    let mut matched = 0usize;
+    let mut scanned = 0usize;
+    for oid in revwalk {
+        if result.commits.len() >= limit {
+            break;
+        }
+        if filtering && scanned >= MAX_LOG_SCAN_COMMITS {
+            result.scan_truncated = true;
+            break;
+        }
+        scanned += 1;
+        let oid = oid.map_err(git_error("Failed to read commit id"))?;
         let commit = repository
             .find_commit(oid)
-            .map_err(|error| format!("Failed to read commit: {}", error))?;
-        let oid = oid.to_string();
-        let message = commit.message().unwrap_or_default().to_string();
-        let author = commit.author();
-        commits.push(GitCommitJson {
-            short_oid: oid.chars().take(12).collect(),
-            oid,
-            time_ms: commit.time().seconds().saturating_mul(1000),
-            author_name: author.name().unwrap_or_default().to_string(),
-            author_email: author.email().unwrap_or_default().to_string(),
-            message_first_line: message.lines().next().unwrap_or_default().to_string(),
-            message,
-        });
+            .map_err(git_error("Failed to read commit"))?;
+        if filtering && !commit_matches(&commit, filters) {
+            continue;
+        }
+        matched += 1;
+        if matched <= skip {
+            continue;
+        }
+        result.commits.push(commit_json(&commit, &labels));
     }
+    Ok(result)
+}
 
-    Ok(GitLogRoot {
+fn find_commit_by_user_oid<'repo>(
+    repository: &'repo Repository,
+    oid: &str,
+) -> Result<git2::Commit<'repo>, HttpError> {
+    let oid = oid.trim();
+    if oid.len() < 4 || oid.len() > 40 || !oid.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "Commit oid must be 4-40 hex characters",
+        ));
+    }
+    let found = if oid.len() == 40 {
+        git2::Oid::from_str(oid).and_then(|oid| repository.find_commit(oid))
+    } else {
+        repository.find_commit_by_prefix(oid)
+    };
+    found.map_err(|_| api_error(StatusCode::NOT_FOUND, "Commit not found"))
+}
+
+fn file_status_name(status: GitFileChangeStatus) -> &'static str {
+    match status {
+        GitFileChangeStatus::Added => "ADDED",
+        GitFileChangeStatus::Modified => "MODIFIED",
+        GitFileChangeStatus::Deleted => "DELETED",
+        GitFileChangeStatus::Renamed => "RENAMED",
+        GitFileChangeStatus::TypeChanged => "TYPECHANGE",
+    }
+}
+
+fn branches_containing(repository: &Repository, target: git2::Oid) -> Vec<String> {
+    let mut names = Vec::new();
+    let Ok(branches) = repository.branches(None) else {
+        return names;
+    };
+    for (branch, _) in branches.flatten() {
+        if branch.get().kind() != Some(git2::ReferenceType::Direct) {
+            continue;
+        }
+        let Some(name) = branch.name().ok().flatten().map(ToString::to_string) else {
+            continue;
+        };
+        let Some(tip) = branch.get().peel_to_commit().ok().map(|commit| commit.id()) else {
+            continue;
+        };
+        if tip == target || repository.graph_descendant_of(tip, target).unwrap_or(false) {
+            names.push(name);
+        }
+    }
+    names.sort();
+    names.dedup();
+    names.truncate(MAX_CONTAINING_BRANCHES);
+    names
+}
+
+pub(super) fn commit_details_for_repo(
+    root: &Path,
+    oid: &str,
+) -> Result<GitCommitDetails, HttpError> {
+    let repository = Repository::open(root)
+        .map_err(|error| internal_error(format!("Failed to open repo: {}", error)))?;
+    let commit = find_commit_by_user_oid(&repository, oid)?;
+    let labels = ref_labels_by_oid(&repository).map_err(internal_error)?;
+    let (files, files_truncated) =
+        changed_files_for_commit_oid(&repository, commit.id(), MAX_GIT_HISTORY_FILES_PER_COMMIT)
+            .map_err(internal_error)?;
+    let author = commit.author();
+    let committer = commit.committer();
+    let oid = commit.id().to_string();
+    Ok(GitCommitDetails {
         root: root.to_string_lossy().to_string(),
-        commits,
+        short_oid: oid.chars().take(12).collect(),
+        oid,
+        parents: commit.parent_ids().map(|oid| oid.to_string()).collect(),
+        author_name: author.name().unwrap_or_default().to_string(),
+        author_email: author.email().unwrap_or_default().to_string(),
+        author_time_ms: author.when().seconds().saturating_mul(1000),
+        committer_name: committer.name().unwrap_or_default().to_string(),
+        committer_email: committer.email().unwrap_or_default().to_string(),
+        committer_time_ms: committer.when().seconds().saturating_mul(1000),
+        message: commit.message().unwrap_or_default().to_string(),
+        refs: labels.get(&commit.id()).cloned().unwrap_or_default(),
+        branches: branches_containing(&repository, commit.id()),
+        files: files
+            .into_iter()
+            .map(|file| GitCommitFileJson {
+                status: file_status_name(file.status).to_string(),
+                path: file.path,
+                old_path: file.old_path,
+                additions: file.additions,
+                deletions: file.deletions,
+                binary: file.binary,
+            })
+            .collect(),
+        files_truncated,
     })
 }
 
-fn branches_for_repo(root: &Path) -> Result<GitBranchesRoot, String> {
+fn local_branch_json(repository: &Repository, branch: &git2::Branch<'_>) -> Option<GitBranchJson> {
+    let name = branch.name().ok().flatten()?.to_string();
+    let tip = branch.get().peel_to_commit().ok().map(|commit| commit.id());
+    let configured = repository
+        .branch_upstream_name(&format!("refs/heads/{}", name))
+        .is_ok();
+    let upstream_branch = branch.upstream().ok();
+    let upstream = upstream_branch
+        .as_ref()
+        .and_then(|upstream| upstream.name().ok().flatten().map(ToString::to_string));
+    let upstream_tip = upstream_branch
+        .as_ref()
+        .and_then(|upstream| upstream.get().peel_to_commit().ok())
+        .map(|commit| commit.id());
+    let (ahead, behind) = match (tip, upstream_tip) {
+        (Some(local), Some(remote)) => repository
+            .graph_ahead_behind(local, remote)
+            .map(|(ahead, behind)| (Some(ahead), Some(behind)))
+            .unwrap_or((None, None)),
+        _ => (None, None),
+    };
+    Some(GitBranchJson {
+        name,
+        is_head: branch.is_head(),
+        upstream,
+        tip_oid: tip.map(|oid| oid.to_string()),
+        ahead,
+        behind,
+        upstream_gone: configured && upstream_branch.is_none(),
+    })
+}
+
+pub(super) fn branches_for_repo(root: &Path) -> Result<GitBranchesRoot, String> {
     let repository =
         Repository::open(root).map_err(|error| format!("Failed to open repo: {}", error))?;
-    let branches = list_branches(&repository)?;
+    let mut branches = Vec::new();
+    for entry in repository
+        .branches(Some(git2::BranchType::Local))
+        .map_err(|error| format!("Failed to list branches: {}", error))?
+    {
+        let (branch, _) = entry.map_err(|error| format!("Failed to read branch: {}", error))?;
+        branches.extend(local_branch_json(&repository, &branch));
+    }
+    branches.sort_by(|a, b| a.name.cmp(&b.name));
     let current = branches
         .iter()
         .find(|branch| branch.is_head)
         .map(|branch| branch.name.clone());
+
+    let mut remotes = repository
+        .remotes()
+        .map(|remotes| {
+            remotes
+                .iter()
+                .flatten()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    remotes.sort();
+
+    let mut remote_branches = Vec::new();
+    for entry in repository
+        .branches(Some(git2::BranchType::Remote))
+        .map_err(|error| format!("Failed to list remote branches: {}", error))?
+    {
+        let Ok((branch, _)) = entry else {
+            continue;
+        };
+        let reference = branch.get();
+        if reference.kind() != Some(git2::ReferenceType::Direct) {
+            continue;
+        }
+        let (Some(full), Some(name)) = (
+            reference.name().map(ToString::to_string),
+            branch.name().ok().flatten().map(ToString::to_string),
+        ) else {
+            continue;
+        };
+        let Ok(tip) = reference.peel_to_commit() else {
+            continue;
+        };
+        let remote = repository
+            .branch_remote_name(&full)
+            .ok()
+            .and_then(|buf| buf.as_str().map(ToString::to_string))
+            .or_else(|| name.split('/').next().map(ToString::to_string))
+            .unwrap_or_default();
+        let short_name = name
+            .strip_prefix(&format!("{}/", remote))
+            .unwrap_or(&name)
+            .to_string();
+        remote_branches.push(GitRemoteBranchJson {
+            name,
+            remote,
+            short_name,
+            tip_oid: tip.id().to_string(),
+        });
+    }
+    remote_branches.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let mut tags = Vec::new();
+    if let Ok(references) = repository.references_glob("refs/tags/*") {
+        for reference in references.flatten() {
+            let Some(name) = reference
+                .name()
+                .and_then(|name| name.strip_prefix("refs/tags/"))
+                .map(ToString::to_string)
+            else {
+                continue;
+            };
+            if let Ok(commit) = reference.peel_to_commit() {
+                tags.push(GitTagJson {
+                    name,
+                    target_oid: commit.id().to_string(),
+                });
+            }
+        }
+    }
+    tags.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let head_oid = repository
+        .head()
+        .and_then(|head| head.peel_to_commit())
+        .ok()
+        .map(|commit| commit.id().to_string());
     Ok(GitBranchesRoot {
         root: root.to_string_lossy().to_string(),
         current,
-        branches: branches
-            .into_iter()
-            .map(|branch| GitBranchJson {
-                name: branch.name,
-                is_head: branch.is_head,
-                upstream: branch.upstream,
-            })
-            .collect(),
+        branches,
+        head_detached: repository.head_detached().unwrap_or(false),
+        head_oid,
+        remotes,
+        remote_branches,
+        tags,
     })
 }
 
@@ -877,11 +1445,34 @@ pub async fn handle_v1_git_log(
     State(app): State<AppState>,
     Query(query): Query<LogQuery>,
 ) -> ApiResult<RootsResponse<GitLogRoot>> {
+    let filters = LogFilters::from_query(&query)?;
     let roots = selected_roots(app.gcx.clone(), query.root).await?;
-    collect_roots(roots, move |root| {
-        log_for_repo(root, query.limit, query.skip)
+    let (limit, skip) = (query.limit, query.skip);
+    tokio::task::spawn_blocking(move || {
+        roots
+            .iter()
+            .map(|root| log_for_repo(root, limit, skip, &filters))
+            .collect::<Result<Vec<_>, _>>()
     })
     .await
+    .map_err(|error| internal_error(format!("Git operation task failed: {}", error)))?
+    .map(|roots| Json(RootsResponse { roots }))
+}
+
+pub async fn handle_v1_git_commit_details(
+    State(app): State<AppState>,
+    Query(query): Query<GitCommitDetailsQuery>,
+) -> ApiResult<GitCommitDetails> {
+    let root = selected_roots(app.gcx.clone(), query.root)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "No active git root"))?;
+    let oid = query.oid;
+    tokio::task::spawn_blocking(move || commit_details_for_repo(&root, &oid))
+        .await
+        .map_err(|error| internal_error(format!("Git operation task failed: {}", error)))?
+        .map(Json)
 }
 
 pub async fn handle_v1_git_branches(

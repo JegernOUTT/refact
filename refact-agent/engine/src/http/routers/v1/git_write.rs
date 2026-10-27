@@ -102,7 +102,7 @@ fn git2_error(context: &str) -> impl Fn(git2::Error) -> HttpError + '_ {
     move |error| internal_error(format!("{}: {}", context, error))
 }
 
-fn cli_error(error: GitCliError) -> HttpError {
+pub(super) fn cli_error(error: GitCliError) -> HttpError {
     match error {
         GitCliError::Unavailable(_) => {
             api_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string())
@@ -112,11 +112,11 @@ fn cli_error(error: GitCliError) -> HttpError {
     }
 }
 
-fn open_repo(root: &Path) -> Result<Repository, HttpError> {
+pub(super) fn open_repo(root: &Path) -> Result<Repository, HttpError> {
     Repository::open(root).map_err(git2_error("Failed to open repo"))
 }
 
-async fn resolve_root(app: &AppState, requested: String) -> Result<PathBuf, HttpError> {
+pub(super) async fn resolve_root(app: &AppState, requested: String) -> Result<PathBuf, HttpError> {
     selected_roots(app.gcx.clone(), Some(requested))
         .await?
         .into_iter()
@@ -129,7 +129,7 @@ async fn resolve_root(app: &AppState, requested: String) -> Result<PathBuf, Http
         })
 }
 
-async fn run_blocking<T, F>(operation: F) -> Result<T, HttpError>
+pub(super) async fn run_blocking<T, F>(operation: F) -> Result<T, HttpError>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, HttpError> + Send + 'static,

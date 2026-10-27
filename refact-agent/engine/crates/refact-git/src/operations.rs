@@ -666,24 +666,24 @@ fn commit_summary(
     })
 }
 
-#[allow(dead_code)]
+/// Files changed by a commit versus its first parent (root commits diff against the
+/// empty tree). Returns the capped list and whether the cap truncated it.
 pub fn changed_files_for_commit_oid(
     repository: &Repository,
     oid: Oid,
     max_files: usize,
-) -> Result<Vec<GitCommitFileChange>, String> {
+) -> Result<(Vec<GitCommitFileChange>, bool), String> {
     let commit = repository
         .find_commit(oid)
         .map_err_with_prefix("Failed to find commit:")?;
-    let (changes, _) = changed_files_for_commit(
+    changed_files_for_commit(
         repository,
         &commit,
         &GitHistoryOptions {
             max_files_per_commit: max_files,
             ..GitHistoryOptions::default()
         },
-    )?;
-    Ok(changes)
+    )
 }
 
 fn changed_files_for_commit(

@@ -147,6 +147,8 @@ pub async fn run_git_cli(
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "never")
+        .env("LANGUAGE", "C")
+        .env("LC_MESSAGES", "C")
         .stdin(if options.stdin.is_some() {
             Stdio::piped()
         } else {
@@ -155,6 +157,11 @@ pub async fn run_git_cli(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // Callers map git's English diagnostics to error codes; keep messages untranslated while
+    // preserving the caller's character-set locale (an LC_ALL override would win otherwise).
+    if let Some(all) = std::env::var_os("LC_ALL").filter(|value| !value.is_empty()) {
+        command.env_remove("LC_ALL").env("LANG", all);
+    }
     if options.literal_pathspecs {
         command.env("GIT_LITERAL_PATHSPECS", "1");
     }

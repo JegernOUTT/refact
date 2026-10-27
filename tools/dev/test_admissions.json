@@ -657,6 +657,158 @@
       "author": "bgagent-b2-e1-engine-git (author subagent, wave E1)",
       "reviewer": "bgagent-82a388bc-802b-40c3-9883-6963cf278298",
       "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-d03eb62b-0492-447a-9ec4-c2d5404c70df (REQUEST_CHANGES on rollback default flags, hook redaction/reset witnesses, Windows gate and case accounting for file/diff test; approved commit and status tests) then bgagent-82a388bc-802b-40c3-9883-6963cf278298 re-review VERDICT APPROVE for all five tests after the requested changes, verifying mutant diff hashes, failing lines and restoration by cmp. Witnesses re-executed after a final 3-line production change (all-skipped in-progress commit now 400); every failing line shifted by exactly +3 with identical diagnostics."
+    },
+    {
+      "fingerprint": "03d5c0755fba184afc5e40a2ee1b891c6c757bf916a45d35db59efeddcaa5ffe",
+      "occurrences": 1,
+      "failure_mode": "GET /v1/git/log ignores or mis-applies scope/ref/text/author/path filters (e.g. skip/limit counted over walked rather than matching commits), mislabels refs (HEAD/local/remote/tag, symbolic origin/HEAD leaked, annotated tag not peeled), omits parents/head_oid; GET /v1/git/commit returns wrong files/containing branches or no 404; GET /v1/git/branches misreports remote branches, tags, ahead/behind or upstream_gone.",
+      "importance": "The Git Log panel and branch popup render these fields directly; wrong graph edges, filters or ref labels mislead users into checking out/deleting the wrong ref.",
+      "nearest_retained": {
+        "fingerprint": "13f1fd9daeff766ba0b2af33f459fbe84b6349c81c4fb2931ab688da1b68412d",
+        "why_insufficient": "git_status_reports_changes_untracked_conflicts_and_unchanged_legacy_lists covers only /v1/git/status; no retained test exercises log filters, ref labels, parents, commit details or the branches inventory."
+      },
+      "oracle": "Exact oid lists per query (HEAD scope, scope=all set, ref=feature/v1/origin/main, author, text, oid prefix, path dir/file, author+skip+limit), exact refs arrays and parents, head_oid and scan_truncated, 404 not_found for unknown ref/oid and 400 for option-like ref, exact commit-details files/refs/branches, exact full branches JSON including ahead=1/behind=0 and upstream_gone.",
+      "prerequisites": "Annotated tag asserted distinct from its peeled commit; distinct Bob-authored commit; feature branch with its own commit; origin/main separate ref plus symbolic origin/HEAD; feature branch configured with a missing upstream ref.",
+      "shipping_implementation": "git_read::handle_v1_git_log/log_for_repo/ref_labels_by_oid, handle_v1_git_commit_details/commit_details_for_repo (refact-git changed_files_for_commit_oid), branches_for_repo via registered /v1/git/* routes.",
+      "determinism": "Isolated tempdir repo, explicit per-repo identity and author/committer env, init -b main, hooksPath to empty dir, gpgsign off, local-only fake remote, no network.",
+      "layer": "Engine HTTP route via make_refact_http_server + tower oneshot over a real tempdir git repository",
+      "why_cheapest": "One fixture serves log, details and inventory; splitting would triple fixture cost with no added detection.",
+      "meaningful_cases": 6,
+      "critical": false,
+      "criticality_reason": "Read-only endpoints; no destructive or authority effect. Packing disclosed: at least 6 scenario groups (HEAD log with refs, scope=all, an 11-row filter table, 404/400 refusals, commit details, branch inventory). Executed witness covers only the skip/limit filter row; details and inventory rest on the reviewed counterfactual.",
+      "removed_coverage": "None; no retained test removed or changed.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Executed mutant L1 (skip counted before filter) fails at the author+skip+limit row. For details/inventory: dropping symbolic-ref skipping would add origin/HEAD to remote_branches; not peeling tags would put the tag object oid in tags[].target_oid; computing upstream_gone from upstream() alone would report false; each breaks the exact JSON equality.",
+        "evidence": "L1 exit 101: thread 'http::routers::v1::git_branches::tests::git_log_graph_refs_filters_commit_details_and_branch_inventory' (2693056) panicked at src/http/routers/v1/git_branches.rs:1055:13: assertion `left == right` failed: &author=alice&skip=1&limit=1; diff /tmp/e2_L1_skip_before_filter.diff sha256 b6de11e23a21f56f63c94f7fef009aec5fb4d21af12d626f67abe3633640ce3f."
+      },
+      "author": "bgagent-e2-engine-git (author subagent, wave E2)",
+      "reviewer": "bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-a6ad015b-420c-465a-ae7d-a93b4abb0905 (APPROVE log test; REQUEST_CHANGES: vacuous forced delete in branch-ops test needing an always -d mutant, stale P1 mutant log, case accounting, English-stderr locale risk) then bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2 re-review VERDICT APPROVE for all three after the changes, verifying all 8 mutant diff sha256 against /tmp/e2_mutants_results.json, panic lines vs current source, byte restoration by cmp against /tmp/e2_final_*.rs, and case accounting."
+    },
+    {
+      "fingerprint": "56686003974c20c4dff062be60cba50ba0fe7419e166c9b1a29100df3f3e4e87",
+      "occurrences": 1,
+      "failure_mode": "Branch delete removes the current or an unmerged branch without force (or ignores force), checkout silently discards local changes, remote checkout switches to a same-named local branch tracking something else instead of 409 already_exists, or rename/tracking config is wrong.",
+      "importance": "Destructive ref/worktree operations: losing unmerged commits or uncommitted edits is data loss.",
+      "nearest_retained": {
+        "fingerprint": "4387bbb8eabde346b846b8cca51c7467b3075ed7e79c601a825b32bb6d734cb5",
+        "why_insufficient": "git_rollback_restores_unstages_and_never_deletes_through_symlinked_parent guards file rollback only; no retained test drives branch delete/rename/checkout endpoints."
+      },
+      "oracle": "409 current_branch with main ref intact; 409 not_merged with unmerged tip unchanged; merged delete ref gone; 400 for name \"-D\"; rename moves the ref; 409 checkout_conflict whose error lists f.txt with worktree content, HEAD symbolic ref and oid unchanged; unmerged doomed refused without force then deleted with force; remote checkout response {branch:topic, head_oid, detached:false} plus branch.topic.remote/merge config; 409 already_exists leaving HEAD on topic.",
+      "prerequisites": "unmerged diverges from main on the same file; doomed created at the unmerged commit while HEAD is main and refused first without force; local edit written before checkout; merged recreated without tracking config while origin/merged exists.",
+      "shipping_implementation": "git_branches::handle_v1_git_branch_delete/rename/checkout (plan_checkout, local_cli_failure) via the hardened git CLI runner and /v1/git/branch/* routes.",
+      "determinism": "Isolated tempdir repo, explicit identity, init -b main, hooks/gpg disabled, fake local remote refs via update-ref, no network; git messages pinned to C locale by the runner.",
+      "layer": "Engine HTTP route via make_refact_http_server + tower oneshot over a real tempdir git repository",
+      "why_cheapest": "Guards live in handler planning plus CLI error mapping; only the route over a real repository proves refusal with unchanged refs/worktree.",
+      "meaningful_cases": 8,
+      "critical": true,
+      "criticality_reason": "Destructive ref/worktree operations (critical per policy). Cases: current_branch refusal, not_merged refusal, merged delete, option-like name rejected, rename, checkout_conflict keeps worktree+HEAD, forced delete of unmerged, remote tracking checkout + already_exists. The current_branch pre-check is not claimed separately from git's own refusal mapping.",
+      "removed_coverage": "None; no retained test removed or changed.",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "cargo",
+            "test",
+            "--lib",
+            "http::routers::v1::git_branches::tests::git_branch_ops_refuse_current_unmerged_and_overwriting_checkout",
+            "--",
+            "--exact"
+          ],
+          "exit_code": 101,
+          "evidence": "Mutants applied by /tmp/e2_mutants.py to the final shipping source, focused test FAILED (0 passed; 1 failed) for each: B1_force_ignored: exit 101, src/http/routers/v1/git_branches.rs:1155:9: (delete ignores force=false and uses git branch -D), diff sha256 3457251d6712623b2fbd54f66e9bc0d5d9361d0c92965e7d1015f2cb6c23c525; B4_force_never_applied: exit 101, src/http/routers/v1/git_branches.rs:1230:9: (delete ignores force=true and always uses git branch -d), diff sha256 cff1e8bedf3af2a1d1d1124d47c2d2545301938a9a17371b3eb2af0b64e72069; B2_checkout_discards_changes: exit 101, src/http/routers/v1/git_branches.rs:1198:9: (local checkout passes --discard-changes (overwrites local edits)), diff sha256 e72bdb4b7e2aa23828bb56a139effaab10ce7fe282123fcf288851d25a0bcdc4; B3_remote_checkout_no_tracking_check: exit 101, src/http/routers/v1/git_branches.rs:1262:9: (remote checkout switches to an existing same-named local branch without checking it tracks the remote), diff sha256 2367bae74d02620ff520cc7fc11c8224c2f0cc7379032d5861fd6087f2d4f8f0. Logs /tmp/e2_<NAME>.log."
+        },
+        "passing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "cargo",
+            "test",
+            "--lib",
+            "--",
+            "git_branches::tests",
+            "git_write::tests",
+            "git_read::tests",
+            "routers::v1::router_tests"
+          ],
+          "exit_code": 0,
+          "evidence": "Harness restored each file and asserted byte equality; cmp against /tmp/e2_final_git_branches.rs and /tmp/e2_final_git_read.rs succeeded; focused rerun 13 passed 0 failed (/tmp/e2_passing.log); full cargo test --lib 3670 passed, 2 unrelated tool_task_verify_card failures that pass when rerun alone."
+        },
+        "intended_diagnostic": "B1_force_ignored: delete ignores force=false and uses git branch -D -> thread 'http::routers::v1::git_branches::tests::git_branch_ops_refuse_current_unmerged_and_overwriting_checkout' (2668704) panicked at src/http/routers/v1/git_branches.rs:1155:9: assertion `left == right` failed: {\"deleted\":\"unmerged\"}",
+        "production_target": "src/http/routers/v1/git_branches.rs handle_v1_git_branch_delete force flag, CheckoutPlan::SwitchLocal args, plan_checkout remote tracking check",
+        "before_fix": {
+          "reference": "unified diff mutant /tmp/e2_B1_force_ignored.diff against the final source (other mutants listed in failing.evidence)",
+          "fingerprint": "3457251d6712623b2fbd54f66e9bc0d5d9361d0c92965e7d1015f2cb6c23c525"
+        }
+      },
+      "author": "bgagent-e2-engine-git (author subagent, wave E2)",
+      "reviewer": "bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-a6ad015b-420c-465a-ae7d-a93b4abb0905 (APPROVE log test; REQUEST_CHANGES: vacuous forced delete in branch-ops test needing an always -d mutant, stale P1 mutant log, case accounting, English-stderr locale risk) then bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2 re-review VERDICT APPROVE for all three after the changes, verifying all 8 mutant diff sha256 against /tmp/e2_mutants_results.json, panic lines vs current source, byte restoration by cmp against /tmp/e2_final_*.rs, and case accounting."
+    },
+    {
+      "fingerprint": "790f69de66e8bdcd028f9713ee8a98ee96176f0846ce9c0a65c903fff2dc9de8",
+      "occurrences": 1,
+      "failure_mode": "Push force-overwrites a diverged remote branch (plain --force), pull merges or rewrites instead of --ff-only, push without upstream silently publishes to a guessed remote, or fetch/pull do not update tracking state.",
+      "importance": "Remote ref mutation: a forced push destroys other users' commits on the shared remote; an implicit merge or publish changes shared history without consent.",
+      "nearest_retained": {
+        "fingerprint": "f7f068e882425881ec82652b61ba5165c2d085f29062df567533f92e5f29c628",
+        "why_insufficient": "git_commit_with_hooks_uses_cli_and_failed_hook_leaves_head_and_index_unchanged covers local CLI commit and redaction only; no retained test drives fetch/pull/push."
+      },
+      "oracle": "branches main (ahead,behind) (0,0) before and (0,1) after fetch; pull fast-forwards HEAD to the upstream oid with file content; diverged pull 409 not_fast_forward with HEAD and worktree unchanged; non-ff push 409 rejected with bare main still at upstream_three; no-upstream push 409 no_upstream naming origin with newb absent on bare; set_upstream push creates bare newb at local tip and configures branch.newb.merge.",
+      "prerequisites": "Remote really advanced by a second clone before fetch (asserted 0 behind first); distinct local and upstream commits for the diverged state; newb asserted absent on the bare remote before set_upstream.",
+      "shipping_implementation": "git_branches::handle_v1_git_fetch/pull/push (plan_pull, plan_push, rejection/auth mapping) via run_git_cli with NETWORK_GIT_CLI_TIMEOUT and /v1/git/{fetch,pull,push} routes.",
+      "determinism": "Local bare repository path remote in a tempdir, clones configured with identity/hooks/gpg off, pull.rebase=false, push.default=simple; no network or credentials; C message locale.",
+      "layer": "Engine HTTP route via make_refact_http_server + tower oneshot against real local repositories",
+      "why_cheapest": "Remote-mutation safety depends on the actual git push/pull exit semantics; a local bare remote is the cheapest deterministic real peer.",
+      "meaningful_cases": 6,
+      "critical": true,
+      "criticality_reason": "Remote ref mutation treated as destructive (critical). Cases: fetch updates behind, ff pull, diverged pull refused, non-ff push rejected, no_upstream refusal, set_upstream push. prune and force_with_lease are not claimed.",
+      "removed_coverage": "None; no retained test removed or changed.",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "cargo",
+            "test",
+            "--lib",
+            "http::routers::v1::git_branches::tests::git_fetch_pull_push_against_local_bare_remote",
+            "--",
+            "--exact"
+          ],
+          "exit_code": 101,
+          "evidence": "Mutants applied by /tmp/e2_mutants.py to the final shipping source, focused test FAILED (0 passed; 1 failed) for each: P1_plain_force_push: exit 101, src/http/routers/v1/git_branches.rs:1352:9: (push always uses plain --force), diff sha256 72db9ddb5779a9aa09cada48383fc5bdc69956f1496f2ff48febc3b327a97380; P2_pull_merges: exit 101, src/http/routers/v1/git_branches.rs:1346:9: (pull merges instead of --ff-only), diff sha256 cc31dbe1c80524e7bbb78956372ff7b48974dddeee7ffec53ba80192fc81121d; P3_push_without_upstream_guesses: exit 101, src/http/routers/v1/git_branches.rs:1363:9: (push without upstream silently pushes to the guessed remote), diff sha256 e0c632587530d37d38ea982e4bc4f6632e8bf99c850bf887b87da017290ca7c5. Logs /tmp/e2_<NAME>.log."
+        },
+        "passing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "cargo",
+            "test",
+            "--lib",
+            "--",
+            "git_branches::tests",
+            "git_write::tests",
+            "git_read::tests",
+            "routers::v1::router_tests"
+          ],
+          "exit_code": 0,
+          "evidence": "Harness restored each file and asserted byte equality; cmp against /tmp/e2_final_git_branches.rs and /tmp/e2_final_git_read.rs succeeded; focused rerun 13 passed 0 failed (/tmp/e2_passing.log); full cargo test --lib 3670 passed, 2 unrelated tool_task_verify_card failures that pass when rerun alone."
+        },
+        "intended_diagnostic": "P1_plain_force_push: push always uses plain --force -> thread 'http::routers::v1::git_branches::tests::git_fetch_pull_push_against_local_bare_remote' (2682798) panicked at src/http/routers/v1/git_branches.rs:1352:9: assertion `left == right` failed: {\"ok\":true,\"summary\":\"Pushed main to origin/main\",\"output\":\"To /tmp/.tmphGt7es/remote.git\\n+\\trefs/heads/main:refs/heads/main\\t8bab0fc...f1dd80b (forced update)\\nDone\"}",
+        "production_target": "src/http/routers/v1/git_branches.rs handle_v1_git_push args, handle_v1_git_pull --ff-only, plan_push no_upstream arm",
+        "before_fix": {
+          "reference": "unified diff mutant /tmp/e2_P1_plain_force_push.diff against the final source (other mutants listed in failing.evidence)",
+          "fingerprint": "72db9ddb5779a9aa09cada48383fc5bdc69956f1496f2ff48febc3b327a97380"
+        }
+      },
+      "author": "bgagent-e2-engine-git (author subagent, wave E2)",
+      "reviewer": "bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-a6ad015b-420c-465a-ae7d-a93b4abb0905 (APPROVE log test; REQUEST_CHANGES: vacuous forced delete in branch-ops test needing an always -d mutant, stale P1 mutant log, case accounting, English-stderr locale risk) then bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2 re-review VERDICT APPROVE for all three after the changes, verifying all 8 mutant diff sha256 against /tmp/e2_mutants_results.json, panic lines vs current source, byte restoration by cmp against /tmp/e2_final_*.rs, and case accounting."
     }
   ],
   "classifications": [
@@ -7930,17 +8082,19 @@
     },
     {
       "path": "refact-agent/engine/src/git/cli.rs",
-      "before_sha256": null,
-      "after_sha256": "f58826c3d702ba9320724715e8e2ef273ec92b4756f01e88fe6130ecc7adf5be",
+      "before_sha256": "f58826c3d702ba9320724715e8e2ef273ec92b4756f01e88fe6130ecc7adf5be",
+      "after_sha256": "c5b5accb30408acefd195f2784e6acc78baab44437e02b6c5ff6f93534a219fc",
       "affected_tests": [
+        "56686003974c20c4dff062be60cba50ba0fe7419e166c9b1a29100df3f3e4e87",
+        "790f69de66e8bdcd028f9713ee8a98ee96176f0846ce9c0a65c903fff2dc9de8",
         "f7f068e882425881ec82652b61ba5165c2d085f29062df567533f92e5f29c628",
         "4387bbb8eabde346b846b8cca51c7467b3075ed7e79c601a825b32bb6d734cb5"
       ],
-      "impact": "New hardened async git CLI runner (timeouts, kill_on_drop, prompt-disabling env, BatchMode ssh, literal pathspecs, capped redacted output) and per-root mutation lock. No test helpers; consumed by commit CLI path and rollback restore.",
-      "execution_context": "Default engine library test context (cargo test --lib); unix-gated tests for hooks/symlinks; no features, ignores or shared-fixture rewrites. Focused git_write::tests 5 passed; existing git_read tests pass unchanged.",
-      "author": "bgagent-b2-e1-engine-git (author subagent, wave E1)",
-      "reviewer": "bgagent-82a388bc-802b-40c3-9883-6963cf278298",
-      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-d03eb62b-0492-447a-9ec4-c2d5404c70df (REQUEST_CHANGES on rollback default flags, hook redaction/reset witnesses, Windows gate and case accounting for file/diff test; approved commit and status tests) then bgagent-82a388bc-802b-40c3-9883-6963cf278298 re-review VERDICT APPROVE for all five tests after the requested changes, verifying mutant diff hashes, failing lines and restoration by cmp. Witnesses re-executed after a final 3-line production change (all-skipped in-progress commit now 400); every failing line shifted by exactly +3 with identical diagnostics."
+      "impact": "Runner pins git message locale (LANGUAGE=C, LC_MESSAGES=C; LC_ALL relocated to LANG) so error-code mapping on git diagnostics is deterministic. No test helpers changed; E1 commit/rollback tests still pass.",
+      "execution_context": "Default engine library test context (cargo test --lib); RUST_MIN_STACK=16777216; no features, ignores or shared-fixture rewrites. Focused git_branches/git_write/git_read/router tests 13 passed.",
+      "author": "bgagent-e2-engine-git (author subagent, wave E2)",
+      "reviewer": "bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-a6ad015b-420c-465a-ae7d-a93b4abb0905 (APPROVE log test; REQUEST_CHANGES: vacuous forced delete in branch-ops test needing an always -d mutant, stale P1 mutant log, case accounting, English-stderr locale risk) then bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2 re-review VERDICT APPROVE for all three after the changes, verifying all 8 mutant diff sha256 against /tmp/e2_mutants_results.json, panic lines vs current source, byte restoration by cmp against /tmp/e2_final_*.rs, and case accounting."
     },
     {
       "path": "refact-agent/engine/src/git/mod.rs",
@@ -7957,55 +8111,83 @@
     },
     {
       "path": "refact-agent/engine/src/http/routers/v1.rs",
-      "before_sha256": "6fb841159d2c901a10eb4cf1b2a4489178bfbebd6228e343283fc9919556f150",
-      "after_sha256": "b575beb063f2f0bdf1995a1305cae42cb7c8e431d937800cdba9d79285958b8b",
+      "before_sha256": "b575beb063f2f0bdf1995a1305cae42cb7c8e431d937800cdba9d79285958b8b",
+      "after_sha256": "6e2c60a5f6471643a26cebbfbc4a3484df8308438bfeee87c923cb539a8fd4ee",
       "affected_tests": [
-        "cbd09b87002cf00a073ca1842e3854b79f4dc4f143f97ec73edf40ee209615c0",
-        "4387bbb8eabde346b846b8cca51c7467b3075ed7e79c601a825b32bb6d734cb5",
-        "f7f068e882425881ec82652b61ba5165c2d085f29062df567533f92e5f29c628",
-        "57dcfb6e8dae5159447013c04821b619bca11b168938654fe7d16eb562d2d827",
-        "13f1fd9daeff766ba0b2af33f459fbe84b6349c81c4fb2931ab688da1b68412d"
+        "03d5c0755fba184afc5e40a2ee1b891c6c757bf916a45d35db59efeddcaa5ffe",
+        "56686003974c20c4dff062be60cba50ba0fe7419e166c9b1a29100df3f3e4e87",
+        "790f69de66e8bdcd028f9713ee8a98ee96176f0846ce9c0a65c903fff2dc9de8",
+        "273ec5b020829ac3e044665c19c255d535897b406bccbb9145a91d9e722dbccf"
       ],
-      "impact": "Registers /git/commit, /git/rollback, /git/file routes and git_write module; existing route test body unchanged.",
-      "execution_context": "Default engine library test context (cargo test --lib); unix-gated tests for hooks/symlinks; no features, ignores or shared-fixture rewrites. Focused git_write::tests 5 passed; existing git_read tests pass unchanged.",
-      "author": "bgagent-b2-e1-engine-git (author subagent, wave E1)",
-      "reviewer": "bgagent-82a388bc-802b-40c3-9883-6963cf278298",
-      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-d03eb62b-0492-447a-9ec4-c2d5404c70df (REQUEST_CHANGES on rollback default flags, hook redaction/reset witnesses, Windows gate and case accounting for file/diff test; approved commit and status tests) then bgagent-82a388bc-802b-40c3-9883-6963cf278298 re-review VERDICT APPROVE for all five tests after the requested changes, verifying mutant diff hashes, failing lines and restoration by cmp. Witnesses re-executed after a final 3-line production change (all-skipped in-progress commit now 400); every failing line shifted by exactly +3 with identical diagnostics."
+      "impact": "Registers git_branches module and routes: GET /git/commit (details, alongside POST commit), /git/branch/{checkout,create,rename,delete}, /git/{fetch,pull,push}.",
+      "execution_context": "Default engine library test context (cargo test --lib); RUST_MIN_STACK=16777216; no features, ignores or shared-fixture rewrites. Focused git_branches/git_write/git_read/router tests 13 passed.",
+      "author": "bgagent-e2-engine-git (author subagent, wave E2)",
+      "reviewer": "bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-a6ad015b-420c-465a-ae7d-a93b4abb0905 (APPROVE log test; REQUEST_CHANGES: vacuous forced delete in branch-ops test needing an always -d mutant, stale P1 mutant log, case accounting, English-stderr locale risk) then bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2 re-review VERDICT APPROVE for all three after the changes, verifying all 8 mutant diff sha256 against /tmp/e2_mutants_results.json, panic lines vs current source, byte restoration by cmp against /tmp/e2_final_*.rs, and case accounting."
     },
     {
       "path": "refact-agent/engine/src/http/routers/v1/git_read.rs",
-      "before_sha256": "22694afa5f515d43f83d0d2ff1ea60225725c631d7c7dfd1c576c5957c7860b3",
-      "after_sha256": "80a7ae6c4e7a70aabd43e7b77921484cf33b62ed4238b49823fcebbfa4719160",
+      "before_sha256": "80a7ae6c4e7a70aabd43e7b77921484cf33b62ed4238b49823fcebbfa4719160",
+      "after_sha256": "e2ba1c43b24389d74f65d0ddc698f49a379e1927a74348139cfcb3dc683e70c5",
       "affected_tests": [
-        "13f1fd9daeff766ba0b2af33f459fbe84b6349c81c4fb2931ab688da1b68412d",
-        "57dcfb6e8dae5159447013c04821b619bca11b168938654fe7d16eb562d2d827",
+        "03d5c0755fba184afc5e40a2ee1b891c6c757bf916a45d35db59efeddcaa5ffe",
         "b23767686cb96a6d8f90a31f3b603fe026a3d5f6bd81259f0e7057a7811f138e",
         "39c50d9c5d8171245f1abbb05a3a79064daa613d406e924d7b38958fb608cea4",
         "78432c914e73f5cb4b41664473c078ac57348b0f5a3ad7860ae3fb049fc00951",
         "9cd16bf8f1e563ebb288ae0f40fc109aef357edd2648e6b5059cbff9a6f50cb0"
       ],
-      "impact": "Route-specific single-pass status (update_index false) with new fields; diff gains against=head and repeated literal paths; helpers made pub(super); stage/unstage take the repo mutation lock. Existing test module bytes are identical to base (diff_for_repo keeps a compatible None/bool call shape).",
-      "execution_context": "Default engine library test context (cargo test --lib); unix-gated tests for hooks/symlinks; no features, ignores or shared-fixture rewrites. Focused git_write::tests 5 passed; existing git_read tests pass unchanged.",
-      "author": "bgagent-b2-e1-engine-git (author subagent, wave E1)",
-      "reviewer": "bgagent-82a388bc-802b-40c3-9883-6963cf278298",
-      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-d03eb62b-0492-447a-9ec4-c2d5404c70df (REQUEST_CHANGES on rollback default flags, hook redaction/reset witnesses, Windows gate and case accounting for file/diff test; approved commit and status tests) then bgagent-82a388bc-802b-40c3-9883-6963cf278298 re-review VERDICT APPROVE for all five tests after the requested changes, verifying mutant diff hashes, failing lines and restoration by cmp. Witnesses re-executed after a final 3-line production change (all-skipped in-progress commit now 400); every failing line shifted by exactly +3 with identical diagnostics."
+      "impact": "Log filters/scope/ref/refs/parents/head_oid/scan_truncated, commit details handler, branches extension; existing status/diff/stage code and test module unchanged.",
+      "execution_context": "Default engine library test context (cargo test --lib); RUST_MIN_STACK=16777216; no features, ignores or shared-fixture rewrites. Focused git_branches/git_write/git_read/router tests 13 passed.",
+      "author": "bgagent-e2-engine-git (author subagent, wave E2)",
+      "reviewer": "bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-a6ad015b-420c-465a-ae7d-a93b4abb0905 (APPROVE log test; REQUEST_CHANGES: vacuous forced delete in branch-ops test needing an always -d mutant, stale P1 mutant log, case accounting, English-stderr locale risk) then bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2 re-review VERDICT APPROVE for all three after the changes, verifying all 8 mutant diff sha256 against /tmp/e2_mutants_results.json, panic lines vs current source, byte restoration by cmp against /tmp/e2_final_*.rs, and case accounting."
     },
     {
       "path": "refact-agent/engine/src/http/routers/v1/git_write.rs",
-      "before_sha256": null,
-      "after_sha256": "bfcdf67cfb83e02d65db371cf4c2c42dc8f3bc4274ad0bb76197085c7fe335b7",
+      "before_sha256": "bfcdf67cfb83e02d65db371cf4c2c42dc8f3bc4274ad0bb76197085c7fe335b7",
+      "after_sha256": "711a3191d0a8356a3096b3fe30478b082887c8bcb9c1dd7c19f70968506474c9",
       "affected_tests": [
+        "56686003974c20c4dff062be60cba50ba0fe7419e166c9b1a29100df3f3e4e87",
+        "790f69de66e8bdcd028f9713ee8a98ee96176f0846ce9c0a65c903fff2dc9de8",
         "cbd09b87002cf00a073ca1842e3854b79f4dc4f143f97ec73edf40ee209615c0",
         "4387bbb8eabde346b846b8cca51c7467b3075ed7e79c601a825b32bb6d734cb5",
         "f7f068e882425881ec82652b61ba5165c2d085f29062df567533f92e5f29c628",
         "57dcfb6e8dae5159447013c04821b619bca11b168938654fe7d16eb562d2d827",
         "13f1fd9daeff766ba0b2af33f459fbe84b6349c81c4fb2931ab688da1b68412d"
       ],
-      "impact": "New commit/rollback/file handlers plus the five admitted tests and their private fixture helpers (git, init_repo, commit_all, router_for, send, tree_text, index_text).",
-      "execution_context": "Default engine library test context (cargo test --lib); unix-gated tests for hooks/symlinks; no features, ignores or shared-fixture rewrites. Focused git_write::tests 5 passed; existing git_read tests pass unchanged.",
-      "author": "bgagent-b2-e1-engine-git (author subagent, wave E1)",
-      "reviewer": "bgagent-82a388bc-802b-40c3-9883-6963cf278298",
-      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-d03eb62b-0492-447a-9ec4-c2d5404c70df (REQUEST_CHANGES on rollback default flags, hook redaction/reset witnesses, Windows gate and case accounting for file/diff test; approved commit and status tests) then bgagent-82a388bc-802b-40c3-9883-6963cf278298 re-review VERDICT APPROVE for all five tests after the requested changes, verifying mutant diff hashes, failing lines and restoration by cmp. Witnesses re-executed after a final 3-line production change (all-skipped in-progress commit now 400); every failing line shifted by exactly +3 with identical diagnostics."
+      "impact": "Visibility only: cli_error, open_repo, resolve_root, run_blocking made pub(super) for git_branches; behaviour and tests unchanged.",
+      "execution_context": "Default engine library test context (cargo test --lib); RUST_MIN_STACK=16777216; no features, ignores or shared-fixture rewrites. Focused git_branches/git_write/git_read/router tests 13 passed.",
+      "author": "bgagent-e2-engine-git (author subagent, wave E2)",
+      "reviewer": "bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-a6ad015b-420c-465a-ae7d-a93b4abb0905 (APPROVE log test; REQUEST_CHANGES: vacuous forced delete in branch-ops test needing an always -d mutant, stale P1 mutant log, case accounting, English-stderr locale risk) then bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2 re-review VERDICT APPROVE for all three after the changes, verifying all 8 mutant diff sha256 against /tmp/e2_mutants_results.json, panic lines vs current source, byte restoration by cmp against /tmp/e2_final_*.rs, and case accounting."
+    },
+    {
+      "path": "refact-agent/engine/crates/refact-git/src/operations.rs",
+      "before_sha256": "17d5e91556db8c551b4e5be3d061fff52d96952733462987abdf2544446c2218",
+      "after_sha256": "794a23d695529155793f5a03cdb65535fb2a25b7b1bc6be9b75ed5d9bf4688aa",
+      "affected_tests": [
+        "03d5c0755fba184afc5e40a2ee1b891c6c757bf916a45d35db59efeddcaa5ffe"
+      ],
+      "impact": "changed_files_for_commit_oid made public (no dead_code allow) and returns (files, truncated); consumed by GET /v1/git/commit.",
+      "execution_context": "Default engine library test context (cargo test --lib); RUST_MIN_STACK=16777216; no features, ignores or shared-fixture rewrites. Focused git_branches/git_write/git_read/router tests 13 passed.",
+      "author": "bgagent-e2-engine-git (author subagent, wave E2)",
+      "reviewer": "bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-a6ad015b-420c-465a-ae7d-a93b4abb0905 (APPROVE log test; REQUEST_CHANGES: vacuous forced delete in branch-ops test needing an always -d mutant, stale P1 mutant log, case accounting, English-stderr locale risk) then bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2 re-review VERDICT APPROVE for all three after the changes, verifying all 8 mutant diff sha256 against /tmp/e2_mutants_results.json, panic lines vs current source, byte restoration by cmp against /tmp/e2_final_*.rs, and case accounting."
+    },
+    {
+      "path": "refact-agent/engine/src/http/routers/v1/git_branches.rs",
+      "before_sha256": null,
+      "after_sha256": "95ec7a5223ca99a1acf67308d5ec9cf0ea69abfc8ceb8b11205a3f5f19a33067",
+      "affected_tests": [
+        "03d5c0755fba184afc5e40a2ee1b891c6c757bf916a45d35db59efeddcaa5ffe",
+        "56686003974c20c4dff062be60cba50ba0fe7419e166c9b1a29100df3f3e4e87",
+        "790f69de66e8bdcd028f9713ee8a98ee96176f0846ce9c0a65c903fff2dc9de8"
+      ],
+      "impact": "New module: branch checkout/create/rename/delete and fetch/pull/push handlers plus the three admitted tests and their local fixture helpers.",
+      "execution_context": "Default engine library test context (cargo test --lib); RUST_MIN_STACK=16777216; no features, ignores or shared-fixture rewrites. Focused git_branches/git_write/git_read/router tests 13 passed.",
+      "author": "bgagent-e2-engine-git (author subagent, wave E2)",
+      "reviewer": "bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-a6ad015b-420c-465a-ae7d-a93b4abb0905 (APPROVE log test; REQUEST_CHANGES: vacuous forced delete in branch-ops test needing an always -d mutant, stale P1 mutant log, case accounting, English-stderr locale risk) then bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2 re-review VERDICT APPROVE for all three after the changes, verifying all 8 mutant diff sha256 against /tmp/e2_mutants_results.json, panic lines vs current source, byte restoration by cmp against /tmp/e2_final_*.rs, and case accounting."
     }
   ]
 }

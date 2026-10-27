@@ -34,9 +34,13 @@ use crate::http::routers::v1::chat_based_handlers::{
 use crate::http::routers::v1::git::{
     handle_v1_git_commit, handle_v1_checkpoints_preview, handle_v1_checkpoints_restore,
 };
+use crate::http::routers::v1::git_branches::{
+    handle_v1_git_branch_checkout, handle_v1_git_branch_create, handle_v1_git_branch_delete,
+    handle_v1_git_branch_rename, handle_v1_git_fetch, handle_v1_git_pull, handle_v1_git_push,
+};
 use crate::http::routers::v1::git_read::{
-    handle_v1_git_branches, handle_v1_git_diff, handle_v1_git_log, handle_v1_git_stage,
-    handle_v1_git_status, handle_v1_git_unstage,
+    handle_v1_git_branches, handle_v1_git_commit_details, handle_v1_git_diff, handle_v1_git_log,
+    handle_v1_git_stage, handle_v1_git_status, handle_v1_git_unstage,
 };
 use crate::http::routers::v1::git_write::{
     handle_v1_git_commit_v2, handle_v1_git_file, handle_v1_git_rollback,
@@ -174,6 +178,7 @@ mod ext_marketplace_sources;
 mod file_edit_tools;
 mod files;
 mod git;
+mod git_branches;
 mod git_read;
 mod git_write;
 pub mod graceful_shutdown;
@@ -573,9 +578,19 @@ fn git_routes() -> Router<AppState> {
         .route("/git/branches", get(handle_v1_git_branches))
         .route("/git/stage", post(handle_v1_git_stage))
         .route("/git/unstage", post(handle_v1_git_unstage))
-        .route("/git/commit", post(handle_v1_git_commit_v2))
+        .route(
+            "/git/commit",
+            get(handle_v1_git_commit_details).post(handle_v1_git_commit_v2),
+        )
         .route("/git/rollback", post(handle_v1_git_rollback))
         .route("/git/file", get(handle_v1_git_file))
+        .route("/git/branch/checkout", post(handle_v1_git_branch_checkout))
+        .route("/git/branch/create", post(handle_v1_git_branch_create))
+        .route("/git/branch/rename", post(handle_v1_git_branch_rename))
+        .route("/git/branch/delete", post(handle_v1_git_branch_delete))
+        .route("/git/fetch", post(handle_v1_git_fetch))
+        .route("/git/pull", post(handle_v1_git_pull))
+        .route("/git/push", post(handle_v1_git_push))
         .route("/checkpoints-preview", post(handle_v1_checkpoints_preview))
         .route("/checkpoints-restore", post(handle_v1_checkpoints_restore))
 }
