@@ -5,7 +5,9 @@ import { useAppDispatch, useAppSelector } from "../../../../hooks";
 import { useGetGitBranchesQuery } from "../../../../services/refact/gitRead";
 import { gitErrorText } from "../gitErrors";
 import { selectGitLogLayout, setGitLogLayout } from "../gitPanelSlice";
-import { BranchesPane, type BranchActionsRenderer } from "./BranchesPane";
+import type { GitCommitLogEntry } from "../../../../services/refact/gitRead";
+import type { GitMenuAction } from "../branches/menuActions";
+import { BranchesPane, type BranchActionsProvider } from "./BranchesPane";
 import { allBranchRefs, buildBranchTree } from "./branchesTreeModel";
 import { CommitDetailsPane } from "./CommitDetailsPane";
 import { CommitsPane } from "./CommitsPane";
@@ -21,8 +23,8 @@ const DETAILS_MAX = 720;
 
 export type GitLogProps = {
   root: string;
-  /** Extension point for branch actions (checkout, rename, …). */
-  renderBranchActions?: BranchActionsRenderer;
+  branchActions?: BranchActionsProvider;
+  commitActions?: (commit: GitCommitLogEntry) => GitMenuAction[];
 };
 
 function useRefetchOnFocus(refetch: () => void) {
@@ -35,7 +37,7 @@ function useRefetchOnFocus(refetch: () => void) {
   }, []);
 }
 
-export function GitLog({ root, renderBranchActions }: GitLogProps) {
+export function GitLog({ root, branchActions, commitActions }: GitLogProps) {
   const dispatch = useAppDispatch();
   const layout = useAppSelector(selectGitLogLayout);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -87,7 +89,7 @@ export function GitLog({ root, renderBranchActions }: GitLogProps) {
             data={branchData}
             filter={filters.branch}
             onNavigate={(branch) => updateFilters({ branch })}
-            renderBranchActions={renderBranchActions}
+            branchActions={branchActions}
           />
         )}
       </section>
@@ -105,6 +107,7 @@ export function GitLog({ root, renderBranchActions }: GitLogProps) {
       />
       <section aria-label="Commit log" className={styles.pane} data-grow="true">
         <CommitsPane
+          commitActions={commitActions}
           commits={log.commits}
           error={log.error}
           filters={filters}

@@ -1,5 +1,7 @@
+import { ContextMenu } from "@radix-ui/themes";
 import { RefreshCw } from "lucide-react";
 import {
+  forwardRef,
   useCallback,
   useEffect,
   useId,
@@ -20,6 +22,10 @@ import {
   type VirtualListHandle,
 } from "../../../../components/ui";
 import type { GitCommitLogEntry } from "../../../../services/refact/gitRead";
+import {
+  ContextMenuActions,
+  type GitMenuAction,
+} from "../branches/menuActions";
 import { gitErrorText } from "../gitErrors";
 import type { BranchRef } from "./branchesTreeModel";
 import { CommitGraphCell } from "./CommitGraphCell";
@@ -59,6 +65,7 @@ export type CommitsPaneProps = {
   onFiltersChange: (patch: Partial<LogFilters>) => void;
   onLoadMore: () => void;
   onRefresh: () => void;
+  commitActions?: (commit: GitCommitLogEntry) => GitMenuAction[];
 };
 
 function branchValue(branch: BranchFilter): string {
@@ -135,26 +142,42 @@ type CommitRowProps = {
   rowId: string;
   selected: boolean;
   onSelect: (oid: string) => void;
+  commitActions?: (commit: GitCommitLogEntry) => GitMenuAction[];
 };
 
-function CommitRow({
-  commit,
-  graph,
-  index,
-  rowId,
-  selected,
-  onSelect,
-}: CommitRowProps) {
+function CommitRow({ commitActions, ...props }: CommitRowProps) {
+  if (!commitActions) return <CommitRowContent {...props} />;
+  return (
+    <ContextMenu.Root modal={false}>
+      <ContextMenu.Trigger>
+        <CommitRowContent {...props} />
+      </ContextMenu.Trigger>
+      <ContextMenu.Content size="1">
+        <ContextMenuActions actions={commitActions(props.commit)} />
+      </ContextMenu.Content>
+    </ContextMenu.Root>
+  );
+}
+
+const CommitRowContent = forwardRef<
+  HTMLDivElement,
+  Omit<CommitRowProps, "commitActions">
+>(function CommitRowContent(
+  { commit, graph, index, rowId, selected, onSelect, ...rest },
+  ref,
+) {
   const graphRow = graph?.rows[index];
   const absolute = formatAbsoluteDate(commit.time_ms);
   return (
     <div
+      {...rest}
       aria-selected={selected}
       className={styles.commitRow}
       data-oid={commit.oid}
       data-selected={selected ? "true" : undefined}
       id={rowId}
       onClick={() => onSelect(commit.oid)}
+      ref={ref}
       role="option"
       title={`${commit.short_oid} · ${commit.message_first_line}`}
     >
@@ -174,7 +197,7 @@ function CommitRow({
       <span className={styles.hashCell}>{commit.short_oid}</span>
     </div>
   );
-}
+});
 
 export function CommitsPane({
   commits,
@@ -193,6 +216,7 @@ export function CommitsPane({
   onFiltersChange,
   onLoadMore,
   onRefresh,
+  commitActions,
 }: CommitsPaneProps) {
   const listId = useId();
   const listRef = useRef<VirtualListHandle>(null);
@@ -362,6 +386,7 @@ export function CommitsPane({
               ) : (
                 <CommitRow
                   commit={commit}
+                  commitActions={commitActions}
                   graph={graph}
                   index={index}
                   onSelect={(oid) => {

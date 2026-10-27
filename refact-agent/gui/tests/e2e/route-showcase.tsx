@@ -156,6 +156,14 @@ const showcaseGitStatus = {
     },
   ],
 };
+const showcaseGitActionsStatus = {
+  ...showcaseGitStatus,
+  branch: "main",
+  upstream: "origin/main",
+  ahead: 3,
+  behind: 1,
+  repo_state: "clean",
+};
 const showcaseDiffHead = `import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
 
 import { makeSurfaceKey } from "../surfaceKey";
@@ -538,8 +546,15 @@ const route =
 const terminalDisabledRoute = route === "workspace-chrome-disabled";
 const workspaceGitDiffRoute = route === "workspace-git-diff";
 const workspaceGitLogRoute = route === "workspace-git-log";
+const workspaceGitBranchesRoute = route === "workspace-git-branches";
+const workspaceGitPushRoute = route === "workspace-git-push";
+const workspaceGitActionsRoute =
+  workspaceGitBranchesRoute || workspaceGitPushRoute;
 const workspaceGitRoute =
-  route === "workspace-git" || workspaceGitDiffRoute || workspaceGitLogRoute;
+  route === "workspace-git" ||
+  workspaceGitDiffRoute ||
+  workspaceGitLogRoute ||
+  workspaceGitActionsRoute;
 const workspaceChromeRoute =
   route === "workspace-chrome" || terminalDisabledRoute || workspaceGitRoute;
 const chatRoute =
@@ -2096,7 +2111,48 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     );
   }
   if (path === "/v1/git/status") {
-    return Promise.resolve(jsonResponse({ roots: [showcaseGitStatus] }));
+    return Promise.resolve(
+      jsonResponse({
+        roots: [
+          workspaceGitActionsRoute
+            ? showcaseGitActionsStatus
+            : showcaseGitStatus,
+        ],
+      }),
+    );
+  }
+  if (path === "/v1/git/log" && workspaceGitActionsRoute) {
+    const limit = Number(url.searchParams.get("limit") ?? "1");
+    return Promise.resolve(
+      jsonResponse({
+        roots: [
+          {
+            root: "/workspace/refact",
+            commits: showcaseLogCommits.slice(0, limit),
+            head_oid: showcaseOid("M30"),
+          },
+        ],
+      }),
+    );
+  }
+  if (
+    path.startsWith("/v1/git/branch/") ||
+    /^\/v1\/git\/(fetch|pull|push)$/.test(path)
+  ) {
+    return Promise.resolve(
+      jsonResponse({
+        ok: true,
+        summary: "Already up to date",
+        output: "",
+        branch: "main",
+        head_oid: showcaseOid("M30"),
+        detached: false,
+        name: "main",
+        tip_oid: showcaseOid("M30"),
+        checked_out: true,
+        deleted: true,
+      }),
+    );
   }
   if (path === "/v1/git/log" && workspaceGitLogRoute) {
     const skip = Number(url.searchParams.get("skip") ?? "0");
@@ -2477,6 +2533,26 @@ const preloadedState: Partial<RootState> = {
 };
 
 const store = setUpStore(preloadedState);
+if (workspaceGitActionsRoute) {
+  const selector = workspaceGitPushRoute
+    ? 'button[aria-label="Push…"]:not([disabled])'
+    : 'button[aria-label^="Git branch:"]';
+  const ready = () =>
+    workspaceGitPushRoute ||
+    document.querySelector('[aria-label="Git branch: main"]') !== null;
+  const openWhenReady = () => {
+    const target = document.querySelector<HTMLButtonElement>(selector);
+    if (target && ready()) {
+      target.dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true, button: 0 }),
+      );
+      target.click();
+      return;
+    }
+    window.setTimeout(openWhenReady, 50);
+  };
+  window.setTimeout(openWhenReady, 50);
+}
 if (workspaceGitLogRoute) {
   const gitSurface = makeSurfaceKey("git", "main");
   store.dispatch(openTab(gitSurface));

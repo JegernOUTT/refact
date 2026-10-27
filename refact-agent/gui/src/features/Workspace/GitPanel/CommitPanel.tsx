@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type KeyboardEvent } from "react";
+import { useId, useRef, useState, type KeyboardEvent, type Ref } from "react";
 import { Sparkles } from "lucide-react";
 
 import { Checkbox } from "../../../components/Checkbox";
@@ -35,7 +35,10 @@ export type CommitPanelProps = {
   totalCount: number;
   paths: string[];
   amendAvailable: boolean;
+  canPush: boolean;
+  messageRef?: Ref<HTMLTextAreaElement>;
   onCommitted: () => void;
+  onPushRequested: () => void;
 };
 
 type CommitResult = {
@@ -49,7 +52,10 @@ export function CommitPanel({
   totalCount,
   paths,
   amendAvailable,
+  canPush,
+  messageRef,
   onCommitted,
+  onPushRequested,
 }: CommitPanelProps) {
   const messageId = useId();
   const [message, setMessage] = useState("");
@@ -104,7 +110,7 @@ export function CommitPanel({
     }
   };
 
-  const handleCommit = async () => {
+  const handleCommit = async (pushAfter = false) => {
     if (!canCommit) return;
     setError(null);
     setResult(null);
@@ -123,6 +129,7 @@ export function CommitPanel({
         skipped: response.skipped,
       });
       onCommitted();
+      if (pushAfter) onPushRequested();
     } catch (commitError) {
       setError(gitErrorText(commitError));
     }
@@ -164,6 +171,7 @@ export function CommitPanel({
         className={styles.commitMessage}
         disabled={busy}
         id={messageId}
+        ref={messageRef}
         onChange={setMessage}
         onKeyDown={handleKeyDown}
         placeholder="Commit Message"
@@ -192,15 +200,25 @@ export function CommitPanel({
           {includedCount} of {totalCount} {totalCount === 1 ? "file" : "files"}{" "}
           included
         </span>
-        <Button
-          disabled={!canCommit}
-          loading={commitState.isLoading}
-          onClick={() => void handleCommit()}
-          size="sm"
-          variant="primary"
-        >
-          {amend ? "Amend Commit" : "Commit"}
-        </Button>
+        <span className={styles.commitButtons}>
+          <Button
+            disabled={!canCommit}
+            loading={commitState.isLoading}
+            onClick={() => void handleCommit()}
+            size="sm"
+            variant="primary"
+          >
+            {amend ? "Amend Commit" : "Commit"}
+          </Button>
+          <Button
+            disabled={!canCommit || !canPush}
+            onClick={() => void handleCommit(true)}
+            size="sm"
+            variant="soft"
+          >
+            {amend ? "Amend Commit and Push…" : "Commit and Push…"}
+          </Button>
+        </span>
       </div>
     </section>
   );

@@ -43,11 +43,24 @@
   align-items: center;
   gap: var(--rf-space-1);
   padding: var(--rf-space-2xs) var(--rf-space-xs);
+  border: 0;
   border-radius: var(--rf-radius-chip);
   background: var(--rf-surface-2);
   color: var(--rf-color-muted);
+  cursor: pointer;
   font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line-1)
     var(--rf-font-ui);
+}
+
+.branchChip:hover,
+.branchChip[data-state="open"] {
+  background: var(--rf-surface-3);
+  color: var(--rf-color-fg);
+}
+
+.branchChip:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
 }
 
 .branchChipLabel {
@@ -84,6 +97,14 @@
 .toolbarButton[data-pressed="true"] {
   background: var(--rf-color-accent-soft);
   color: var(--rf-color-accent);
+}
+
+.disabledTooltipHost {
+  display: inline-flex;
+}
+
+.toolbarSpacer {
+  flex: 1 1 auto;
 }
 
 .toolbarSeparator {
@@ -235,6 +256,12 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--rf-space-2);
+}
+
+.commitButtons {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: var(--rf-space-1);
 }
 
 .commitMessage {

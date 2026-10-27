@@ -3,7 +3,12 @@ import { GitBranch } from "lucide-react";
 
 import { FieldSelect, Icon, Tabs } from "../../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../../hooks";
-import { useGetGitStatusQuery } from "../../../services/refact/gitRead";
+import {
+  normalizeGitStatus,
+  useGetGitStatusQuery,
+} from "../../../services/refact/gitRead";
+import { GitFeedback } from "./branches/GitFeedback";
+import { useGitActions } from "./branches/useGitActions";
 import {
   selectActiveGitRoot,
   selectGitDiffTargetForChat,
@@ -76,6 +81,14 @@ export function GitPanel() {
     worktreeSourceRoot,
   );
   const activeIndex = TABS.findIndex((item) => item.value === tab);
+  const normalizedStatus = useMemo(
+    () => (activeStatus ? normalizeGitStatus(activeStatus) : null),
+    [activeStatus],
+  );
+  const actions = useGitActions({
+    root: resolvedRoot,
+    status: normalizedStatus,
+  });
 
   return (
     <div className={styles.panel} data-testid="git-main-panel">
@@ -123,7 +136,18 @@ export function GitPanel() {
         {resolvedRoot ? (
           <>
             <Tabs.Content className={styles.tabContent} value="log">
-              <GitLog key={`log-${resolvedRoot}`} root={resolvedRoot} />
+              <div className={styles.logColumn}>
+                <GitFeedback
+                  feedback={actions.feedback}
+                  onDismiss={actions.clearFeedback}
+                />
+                <GitLog
+                  branchActions={actions.branchActions}
+                  commitActions={actions.commitActions}
+                  key={`log-${resolvedRoot}`}
+                  root={resolvedRoot}
+                />
+              </div>
             </Tabs.Content>
             <Tabs.Content className={styles.tabScroll} value="worktrees">
               <WorktreesSection
@@ -142,6 +166,7 @@ export function GitPanel() {
           </section>
         )}
       </Tabs>
+      {actions.dialogs}
     </div>
   );
 }

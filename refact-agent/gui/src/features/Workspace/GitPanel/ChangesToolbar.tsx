@@ -1,6 +1,9 @@
 import * as ToolbarPrimitive from "@radix-ui/react-toolbar";
 import {
+  ArrowDownToLine,
+  ArrowUpFromLine,
   ChevronsDownUp,
+  CloudDownload,
   ChevronsUpDown,
   FileDiff,
   FolderTree,
@@ -14,6 +17,7 @@ import styles from "./GitDock.module.css";
 
 type ToolbarActionProps = {
   label: string;
+  tooltip?: string;
   icon: LucideIcon;
   onClick: () => void;
   disabled?: boolean;
@@ -23,33 +27,53 @@ type ToolbarActionProps = {
 
 function ToolbarAction({
   label,
+  tooltip,
   icon,
   onClick,
   disabled,
   loading,
   pressed,
 }: ToolbarActionProps) {
+  const button = (
+    <ToolbarPrimitive.Button asChild>
+      <IconButton
+        aria-label={label}
+        aria-pressed={pressed}
+        className={styles.toolbarButton}
+        data-pressed={pressed ? "true" : undefined}
+        disabled={disabled}
+        icon={icon}
+        loading={loading}
+        onClick={onClick}
+        size="sm"
+        variant="ghost"
+      />
+    </ToolbarPrimitive.Button>
+  );
   return (
-    <Tooltip content={label}>
-      <ToolbarPrimitive.Button asChild>
-        <IconButton
-          aria-label={label}
-          aria-pressed={pressed}
-          className={styles.toolbarButton}
-          data-pressed={pressed ? "true" : undefined}
-          disabled={disabled}
-          icon={icon}
-          loading={loading}
-          onClick={onClick}
-          size="sm"
-          variant="ghost"
-        />
-      </ToolbarPrimitive.Button>
+    <Tooltip content={tooltip ?? label}>
+      {disabled && tooltip ? (
+        <span className={styles.disabledTooltipHost}>{button}</span>
+      ) : (
+        button
+      )}
     </Tooltip>
   );
 }
 
+export type RemoteToolbarProps = {
+  fetching: boolean;
+  pulling: boolean;
+  pushing: boolean;
+  canPush: boolean;
+  updateBlockedReason: string | null;
+  onFetch: () => void;
+  onPull: () => void;
+  onPush: () => void;
+};
+
 export type ChangesToolbarProps = {
+  remote: RemoteToolbarProps;
   refreshing: boolean;
   canRollback: boolean;
   canShowDiff: boolean;
@@ -63,6 +87,7 @@ export type ChangesToolbarProps = {
 };
 
 export function ChangesToolbar({
+  remote,
   refreshing,
   canRollback,
   canShowDiff,
@@ -113,6 +138,31 @@ export function ChangesToolbar({
         icon={ChevronsDownUp}
         label="Collapse All"
         onClick={onCollapseAll}
+      />
+      <span className={styles.toolbarSpacer} />
+      <ToolbarAction
+        icon={CloudDownload}
+        label="Fetch"
+        loading={remote.fetching}
+        onClick={remote.onFetch}
+      />
+      <ToolbarAction
+        disabled={remote.updateBlockedReason !== null}
+        icon={ArrowDownToLine}
+        label="Update Project"
+        loading={remote.pulling}
+        onClick={remote.onPull}
+        tooltip={
+          remote.updateBlockedReason ??
+          "Update Project (pull, fast-forward only)"
+        }
+      />
+      <ToolbarAction
+        disabled={!remote.canPush}
+        icon={ArrowUpFromLine}
+        label="Push…"
+        loading={remote.pushing}
+        onClick={remote.onPush}
       />
     </ToolbarPrimitive.Root>
   );

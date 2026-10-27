@@ -312,6 +312,77 @@ export type GitFileResponse = {
   content: string;
 };
 
+export type GitCheckoutKind = "local" | "remote" | "tag" | "revision";
+
+export type GitCheckoutRequest = {
+  root: string;
+  name: string;
+  kind: GitCheckoutKind;
+};
+
+export type GitCheckoutResponse = {
+  branch: string | null;
+  head_oid: string | null;
+  detached: boolean;
+};
+
+export type GitCreateBranchRequest = {
+  root: string;
+  name: string;
+  start_point?: string;
+  checkout?: boolean;
+};
+
+export type GitCreateBranchResponse = {
+  name: string;
+  tip_oid: string | null;
+  checked_out: boolean;
+};
+
+export type GitRenameBranchRequest = {
+  root: string;
+  old_name: string;
+  new_name: string;
+};
+
+export type GitRenameBranchResponse = {
+  name: string;
+};
+
+export type GitDeleteBranchRequest = {
+  root: string;
+  name: string;
+  force?: boolean;
+};
+
+export type GitDeleteBranchResponse = {
+  deleted: string | boolean;
+};
+
+export type GitFetchRequest = {
+  root: string;
+  remote?: string;
+  prune?: boolean;
+};
+
+export type GitPullRequest = {
+  root: string;
+};
+
+export type GitPushRequest = {
+  root: string;
+  remote?: string;
+  branch?: string;
+  set_upstream?: boolean;
+  force_with_lease?: boolean;
+};
+
+export type GitRemoteResponse = {
+  ok: boolean;
+  summary: string;
+  output: string;
+};
+
 export type GitApiErrorCode =
   | "bad_request"
   | "not_found"
@@ -320,7 +391,16 @@ export type GitApiErrorCode =
   | "nothing_to_commit"
   | "hook_failed"
   | "git_unavailable"
-  | "timeout";
+  | "timeout"
+  | "checkout_conflict"
+  | "already_exists"
+  | "current_branch"
+  | "not_merged"
+  | "no_upstream"
+  | "not_fast_forward"
+  | "rejected"
+  | "auth_failed"
+  | "remote_error";
 
 export type GitApiError = {
   code: GitApiErrorCode | (string & Record<never, never>);
@@ -354,6 +434,15 @@ function fileTag(root: string) {
 
 function worktreeTags(root: string) {
   return [rootTag(root), diffTag(root), fileTag(root)];
+}
+
+function repositoryTags(root: string) {
+  return [
+    ...worktreeTags(root),
+    { type: "GitLog" as const, id: root },
+    { type: "GitBranches" as const, id: root },
+    { type: "GitCommit" as const, id: root },
+  ];
 }
 
 export function gitDiffQuery({
@@ -545,12 +634,7 @@ export const gitReadApi = createApi({
         if (result.error) return { error: result.error };
         return { data: result.data as GitCommitResponse };
       },
-      invalidatesTags: (_result, _error, { root }) => [
-        ...worktreeTags(root),
-        { type: "GitLog" as const, id: root },
-        { type: "GitBranches" as const, id: root },
-        { type: "GitCommit" as const, id: root },
-      ],
+      invalidatesTags: (_result, _error, { root }) => repositoryTags(root),
     }),
     rollbackGitPaths: builder.mutation<GitRollbackResponse, GitRollbackRequest>(
       {
@@ -567,6 +651,106 @@ export const gitReadApi = createApi({
         invalidatesTags: (_result, _error, { root }) => worktreeTags(root),
       },
     ),
+    checkoutGitRef: builder.mutation<GitCheckoutResponse, GitCheckoutRequest>({
+      queryFn: async (body, api, _options, baseQuery) => {
+        const state = api.getState() as RootState;
+        const result = await baseQuery({
+          url: gitUrl(state, "/git/branch/checkout"),
+          method: "POST",
+          body,
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as GitCheckoutResponse };
+      },
+      invalidatesTags: (_result, _error, { root }) => repositoryTags(root),
+    }),
+    createGitBranch: builder.mutation<
+      GitCreateBranchResponse,
+      GitCreateBranchRequest
+    >({
+      queryFn: async (body, api, _options, baseQuery) => {
+        const state = api.getState() as RootState;
+        const result = await baseQuery({
+          url: gitUrl(state, "/git/branch/create"),
+          method: "POST",
+          body,
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as GitCreateBranchResponse };
+      },
+      invalidatesTags: (_result, _error, { root }) => repositoryTags(root),
+    }),
+    renameGitBranch: builder.mutation<
+      GitRenameBranchResponse,
+      GitRenameBranchRequest
+    >({
+      queryFn: async (body, api, _options, baseQuery) => {
+        const state = api.getState() as RootState;
+        const result = await baseQuery({
+          url: gitUrl(state, "/git/branch/rename"),
+          method: "POST",
+          body,
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as GitRenameBranchResponse };
+      },
+      invalidatesTags: (_result, _error, { root }) => repositoryTags(root),
+    }),
+    deleteGitBranch: builder.mutation<
+      GitDeleteBranchResponse,
+      GitDeleteBranchRequest
+    >({
+      queryFn: async (body, api, _options, baseQuery) => {
+        const state = api.getState() as RootState;
+        const result = await baseQuery({
+          url: gitUrl(state, "/git/branch/delete"),
+          method: "POST",
+          body,
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as GitDeleteBranchResponse };
+      },
+      invalidatesTags: (_result, _error, { root }) => repositoryTags(root),
+    }),
+    fetchGitRemote: builder.mutation<GitRemoteResponse, GitFetchRequest>({
+      queryFn: async (body, api, _options, baseQuery) => {
+        const state = api.getState() as RootState;
+        const result = await baseQuery({
+          url: gitUrl(state, "/git/fetch"),
+          method: "POST",
+          body,
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as GitRemoteResponse };
+      },
+      invalidatesTags: (_result, _error, { root }) => repositoryTags(root),
+    }),
+    pullGitRemote: builder.mutation<GitRemoteResponse, GitPullRequest>({
+      queryFn: async (body, api, _options, baseQuery) => {
+        const state = api.getState() as RootState;
+        const result = await baseQuery({
+          url: gitUrl(state, "/git/pull"),
+          method: "POST",
+          body,
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as GitRemoteResponse };
+      },
+      invalidatesTags: (_result, _error, { root }) => repositoryTags(root),
+    }),
+    pushGitRemote: builder.mutation<GitRemoteResponse, GitPushRequest>({
+      queryFn: async (body, api, _options, baseQuery) => {
+        const state = api.getState() as RootState;
+        const result = await baseQuery({
+          url: gitUrl(state, "/git/push"),
+          method: "POST",
+          body,
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as GitRemoteResponse };
+      },
+      invalidatesTags: (_result, _error, { root }) => repositoryTags(root),
+    }),
     generateCommitMessage: builder.mutation<
       string,
       GenerateCommitMessageRequest
@@ -600,4 +784,11 @@ export const {
   useCommitGitPathsMutation,
   useRollbackGitPathsMutation,
   useGenerateCommitMessageMutation,
+  useCheckoutGitRefMutation,
+  useCreateGitBranchMutation,
+  useRenameGitBranchMutation,
+  useDeleteGitBranchMutation,
+  useFetchGitRemoteMutation,
+  usePullGitRemoteMutation,
+  usePushGitRemoteMutation,
 } = gitReadApi;

@@ -3,6 +3,7 @@ import {
   ChevronDown,
   ChevronRight,
   Cloud,
+  Ellipsis,
   Folder,
   FolderOpen,
   GitBranch,
@@ -16,11 +17,16 @@ import {
   useMemo,
   useState,
   type KeyboardEvent,
-  type ReactNode,
 } from "react";
 
-import { Icon } from "../../../../components/ui";
+import { Icon, IconButton, Menu } from "../../../../components/ui";
 import type { GitBranchesRoot } from "../../../../services/refact/gitRead";
+import {
+  ContextMenuActions,
+  MenuActions,
+  type GitMenuAction,
+} from "../branches/menuActions";
+import branchStyles from "../branches/Branches.module.css";
 import {
   HEAD_NODE_ID,
   TAGS_GROUP_ID,
@@ -34,14 +40,14 @@ import {
 import type { BranchFilter } from "./logFilters";
 import styles from "./GitLog.module.css";
 
-export type BranchActionsRenderer = (ref: BranchRef) => ReactNode;
+export type BranchActionsProvider = (ref: BranchRef) => GitMenuAction[];
 
 export type BranchesPaneProps = {
   data: GitBranchesRoot | undefined;
   filter: BranchFilter;
   onNavigate: (filter: BranchFilter) => void;
-  /** Context menu items for a ref; omitted means no context menu. */
-  renderBranchActions?: BranchActionsRenderer;
+  /** Actions for a ref (context menu and hover "…" menu); omitted means none. */
+  branchActions?: BranchActionsProvider;
 };
 
 const DEFAULT_COLLAPSED: ReadonlySet<string> = new Set([TAGS_GROUP_ID]);
@@ -94,7 +100,9 @@ type RowProps = {
   active: boolean;
   onActivate: (node: BranchTreeNode) => void;
   onToggle: (id: string) => void;
-  renderBranchActions?: BranchActionsRenderer;
+  branchActions?: BranchActionsProvider;
+  menuOpen: boolean;
+  onMenuOpenChange: (open: boolean) => void;
 };
 
 function BranchRow({
@@ -105,17 +113,26 @@ function BranchRow({
   active,
   onActivate,
   onToggle,
-  renderBranchActions,
+  branchActions,
+  menuOpen,
+  onMenuOpenChange,
 }: RowProps) {
   const { node, depth } = row;
   const isGroup = node.type === "group";
   const hint = node.type === "ref" ? trackingHint(node.ref) : null;
+  const actions =
+    node.type === "ref" && branchActions ? branchActions(node.ref) : null;
   const content = (
     <div
       aria-expanded={isGroup ? expanded : undefined}
+      aria-label={node.type === "ref" ? node.ref.name : undefined}
       aria-level={depth + 1}
       aria-selected={selected}
-      className={styles.treeRow}
+      className={
+        actions
+          ? `${styles.treeRow} ${branchStyles.rowActionsHost}`
+          : styles.treeRow
+      }
       data-active={active ? "true" : undefined}
       data-node-id={node.id}
       data-selected={selected ? "true" : undefined}
@@ -170,15 +187,33 @@ function BranchRow({
         <span className={styles.treeHint}>{node.detail}</span>
       ) : null}
       {hint ? <span className={styles.treeHint}>{hint}</span> : null}
+      {actions && node.type === "ref" ? (
+        <Menu onOpenChange={onMenuOpenChange} open={menuOpen}>
+          <Menu.Trigger asChild>
+            <IconButton
+              aria-label={`Actions for ${node.ref.name}`}
+              className={branchStyles.rowActions}
+              icon={Ellipsis}
+              onClick={(event) => event.stopPropagation()}
+              size="sm"
+              tabIndex={-1}
+              variant="ghost"
+            />
+          </Menu.Trigger>
+          <Menu.Content align="end">
+            <MenuActions actions={actions} />
+          </Menu.Content>
+        </Menu>
+      ) : null}
     </div>
   );
 
-  if (node.type !== "ref" || !renderBranchActions) return content;
+  if (!actions) return content;
   return (
     <ContextMenu.Root modal={false}>
       <ContextMenu.Trigger>{content}</ContextMenu.Trigger>
       <ContextMenu.Content size="1">
-        {renderBranchActions(node.ref)}
+        <ContextMenuActions actions={actions} />
       </ContextMenu.Content>
     </ContextMenu.Root>
   );
@@ -188,10 +223,11 @@ export function BranchesPane({
   data,
   filter,
   onNavigate,
-  renderBranchActions,
+  branchActions,
 }: BranchesPaneProps) {
   const treeId = useId();
   const [search, setSearch] = useState("");
+  const [menuFor, setMenuFor] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState(DEFAULT_COLLAPSED);
   const [cursor, setCursor] = useState<string | null>(null);
   const tree = useMemo(() => (data ? buildBranchTree(data) : []), [data]);
@@ -230,6 +266,16 @@ export function BranchesPane({
     const isGroup = current.type === "group";
     const expanded = isGroup && !collapsed.has(current.id);
     let next = index;
+    if (
+      event.key === "ContextMenu" ||
+      (event.key === "F10" && event.shiftKey)
+    ) {
+      if (current.type === "ref" && branchActions) {
+        event.preventDefault();
+        setMenuFor(current.id);
+      }
+      return;
+    }
     switch (event.key) {
       case "ArrowDown":
         next = Math.min(index + 1, rows.length - 1);
@@ -291,8 +337,10 @@ export function BranchesPane({
             expanded={row.node.type === "group" && !collapsed.has(row.node.id)}
             key={row.node.id}
             onActivate={activate}
+            branchActions={branchActions}
+            menuOpen={menuFor === row.node.id}
+            onMenuOpenChange={(open) => setMenuFor(open ? row.node.id : null)}
             onToggle={toggle}
-            renderBranchActions={renderBranchActions}
             row={row}
             rowId={rowId(row.node.id)}
             active={row.node.id === activeId}

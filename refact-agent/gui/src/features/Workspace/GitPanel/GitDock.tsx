@@ -1,5 +1,12 @@
 import { ContextMenu } from "@radix-ui/themes";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
 
 import {
   Badge,
@@ -21,6 +28,12 @@ import {
 } from "../../../services/refact/gitRead";
 import { selectFocusedWorkspaceChatId } from "../workspaceSlice";
 import { BranchChip } from "./BranchChip";
+import { BranchPopup } from "./branches/BranchPopup";
+import { GitFeedback } from "./branches/GitFeedback";
+import {
+  useGitActions,
+  type GitActionsController,
+} from "./branches/useGitActions";
 import { ChangesToolbar } from "./ChangesToolbar";
 import { ChangesTree } from "./ChangesTree";
 import {
@@ -54,18 +67,9 @@ import {
   updateGitRootView,
   type GitRootViewState,
 } from "./gitPanelSlice";
+import { REPO_STATE_LABELS } from "./repoState";
 import { useGitStatus } from "./useGitStatus";
 import styles from "./GitDock.module.css";
-
-const REPO_STATE_LABELS: Partial<Record<GitRepoState, string>> = {
-  merge: "Merging",
-  rebase: "Rebasing",
-  cherry_pick: "Cherry-picking",
-  revert: "Reverting",
-  bisect: "Bisecting",
-  apply_mailbox: "Applying patches",
-  other: "Operation in progress",
-};
 
 type PendingDialog =
   | { kind: "rollback"; entries: ChangesTreeEntry[] }
@@ -131,6 +135,8 @@ type CommitToolWindowProps = {
   status: NormalizedGitStatus;
   refreshing: boolean;
   onRefresh: () => void;
+  actions: GitActionsController;
+  messageRef: RefObject<HTMLTextAreaElement>;
 };
 
 function CommitToolWindow({
@@ -138,6 +144,8 @@ function CommitToolWindow({
   status,
   refreshing,
   onRefresh,
+  actions,
+  messageRef,
 }: CommitToolWindowProps) {
   const dispatch = useAppDispatch();
   const root = status.root;
@@ -420,6 +428,20 @@ function CommitToolWindow({
           updateView({ groupByDirectory: !view.groupByDirectory })
         }
         refreshing={refreshing}
+        remote={{
+          fetching: actions.fetching,
+          pulling: actions.pulling,
+          pushing: actions.pushing,
+          canPush: actions.canPush,
+          updateBlockedReason: actions.blockedReason,
+          onFetch: () => void actions.fetch(),
+          onPull: () => void actions.pull(),
+          onPush: () => actions.openPush(),
+        }}
+      />
+      <GitFeedback
+        feedback={actions.feedback}
+        onDismiss={actions.clearFeedback}
       />
       {feedback ? (
         <div
@@ -457,9 +479,12 @@ function CommitToolWindow({
       )}
       <CommitPanel
         amendAvailable={!status.extended || status.headOid !== null}
+        canPush={actions.canPush}
         includedCount={included.length}
         key={root}
+        messageRef={messageRef}
         onCommitted={() => setFeedback(null)}
+        onPushRequested={() => actions.openPush()}
         paths={paths}
         root={root}
         totalCount={checkableCount(status)}
@@ -507,6 +532,17 @@ export function GitDock() {
   const activeStatus =
     roots.find((root) => root.root === activeRoot) ?? roots.at(0);
   const noRepositories = statusQuery.data !== undefined && roots.length === 0;
+  const messageRef = useRef<HTMLTextAreaElement>(null);
+  const actions = useGitActions({
+    root: activeStatus?.root ?? "",
+    status: activeStatus ?? null,
+  });
+  const focusCommitMessage = useCallback(() => {
+    // The closing popover restores focus to its trigger on a timer; queue behind it.
+    window.setTimeout(() =>
+      window.setTimeout(() => messageRef.current?.focus()),
+    );
+  }, []);
 
   return (
     <div className={styles.dockPanel} data-testid="git-dock-panel">
@@ -514,10 +550,16 @@ export function GitDock() {
         <h2 className={styles.title}>Commit</h2>
         {activeStatus ? (
           <div className={styles.headerMeta}>
-            <BranchChip
-              branch={activeStatus.branch}
-              headDetached={activeStatus.headDetached}
-              headOid={activeStatus.headOid}
+            <BranchPopup
+              controller={actions}
+              onCommit={focusCommitMessage}
+              trigger={
+                <BranchChip
+                  branch={activeStatus.branch}
+                  headDetached={activeStatus.headDetached}
+                  headOid={activeStatus.headOid}
+                />
+              }
             />
             <AheadBehind status={activeStatus} />
             <RepoStateBadge state={activeStatus.repoState} />
@@ -545,7 +587,9 @@ export function GitDock() {
         </p>
       ) : activeStatus ? (
         <CommitToolWindow
+          actions={actions}
           chatId={chatId}
+          messageRef={messageRef}
           key={activeStatus.root}
           onRefresh={() => void statusQuery.refetch()}
           refreshing={statusQuery.isFetching}
@@ -558,6 +602,7 @@ export function GitDock() {
       ) : (
         <LoadingState label="Loading Git status" />
       )}
+      {actions.dialogs}
     </div>
   );
 }
