@@ -1,6 +1,6 @@
 import { http, HttpResponse } from "msw";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { render, waitFor } from "../utils/test-utils";
+import { render, screen, waitFor } from "../utils/test-utils";
 import { server } from "../utils/mockServer";
 import { useSidebarSubscription } from "../hooks/useSidebarSubscription";
 import { setBuddySnapshot } from "../features/Buddy/buddySlice";
@@ -9,7 +9,13 @@ import {
   subscribeToSidebarEvents,
   type SidebarSubscriptionCallbacks,
 } from "../services/refact/sidebarSubscription";
-import { type TaskBoard, type TaskMeta } from "../services/refact/tasks";
+import {
+  type BoardCard,
+  type TaskBoard,
+  type TaskMeta,
+  useGetBoardQuery,
+} from "../services/refact/tasks";
+import { KanbanBoard } from "../features/Tasks/KanbanBoard";
 
 const CONFIG_STATE = {
   config: {
@@ -915,3 +921,195 @@ function tasksQueryFromStore(
     (query) => query?.endpointName === "listTasks",
   );
 }
+
+function boardCard(index: number, column: string): BoardCard {
+  const id = `T-${index.toString().padStart(3, "0")}`;
+  return {
+    id,
+    title: `Card ${id}`,
+    column,
+    priority: "P1",
+    depends_on: [],
+    instructions: "",
+    assignee: null,
+    agent_chat_id: null,
+    status_updates: [],
+    final_report: null,
+    created_at: "2024-01-01T00:00:00Z",
+    started_at: null,
+    completed_at: null,
+    target_files: [],
+  };
+}
+
+const LARGE_BOARD_COLUMNS = [
+  { id: "planned", title: "Planned" },
+  { id: "doing", title: "Doing" },
+  { id: "done", title: "Done" },
+];
+
+const MOVED_CARD_INDEX = 137;
+
+function largeBoard(rev: number, movedColumn: string): TaskBoard {
+  return {
+    schema_version: 1,
+    rev,
+    columns: LARGE_BOARD_COLUMNS,
+    cards: Array.from({ length: 250 }, (_, index) =>
+      boardCard(
+        index,
+        index === MOVED_CARD_INDEX
+          ? movedColumn
+          : LARGE_BOARD_COLUMNS[index % 2].id,
+      ),
+    ),
+  };
+}
+
+function BoardHarness({ taskId }: { taskId: string }) {
+  useSidebarSubscription();
+  const { data, isFetching } = useGetBoardQuery(taskId);
+  return (
+    <div data-testid="board" data-fetching={isFetching ? "yes" : "no"}>
+      {data ? <KanbanBoard board={data} /> : null}
+    </div>
+  );
+}
+
+function columnTitleOfCard(title: string) {
+  const section = screen.getByText(title).closest("section");
+  return section?.querySelector("h3")?.textContent ?? null;
+}
+
+function controllableSidebar() {
+  const controllers: ReadableStreamDefaultController<Uint8Array>[] = [];
+  const encoder = new TextEncoder();
+  const handler = http.get("*/v1/sidebar/subscribe", () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controllers.push(controller);
+      },
+    });
+    return new HttpResponse(stream, {
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  });
+  const push = (event: unknown) => {
+    controllers[controllers.length - 1].enqueue(
+      encoder.encode(`data: ${JSON.stringify(event)}\n\n`),
+    );
+  };
+  const close = () => {
+    controllers[controllers.length - 1].close();
+  };
+  return { controllers, handler, push, close };
+}
+
+function boardServer(taskId: string) {
+  const state = { board: largeBoard(1, "planned"), requests: 0 };
+  const handler = http.get(`*/v1/tasks/${taskId}/board`, () => {
+    state.requests += 1;
+    return HttpResponse.json(state.board);
+  });
+  return { state, handler };
+}
+
+async function waitForBoardIdle() {
+  await waitFor(() => {
+    expect(screen.getByTestId("board").dataset.fetching).toBe("no");
+  });
+}
+
+describe("task board resync after sidebar tasks snapshot", () => {
+  const movedTitle = `Card T-${MOVED_CARD_INDEX.toString().padStart(3, "0")}`;
+  const largeTask: TaskMeta = { ...taskA, cards_total: 250 };
+
+  it("refetches a stale 250-card board when the tasks section resyncs", async () => {
+    const sidebar = controllableSidebar();
+    const boards = boardServer(largeTask.id);
+    server.use(sidebar.handler, boards.handler);
+
+    const { store } = render(<BoardHarness taskId={largeTask.id} />, {
+      preloadedState: CONFIG_STATE,
+    });
+
+    await waitFor(() => {
+      expect(sidebar.controllers).toHaveLength(1);
+    });
+    sidebar.push(sectionSnapshot(0, "tasks", { tasks: [largeTask] }));
+
+    await waitFor(() => {
+      expect(columnTitleOfCard(movedTitle)).toBe("Planned");
+    });
+    await waitForBoardIdle();
+    expect(screen.getAllByText(/^Card T-\d{3}$/)).toHaveLength(250);
+    const requestsBeforeResync = boards.state.requests;
+
+    boards.state.board = largeBoard(2, "done");
+
+    sidebar.push(envelope(1, { type: "heartbeat" }));
+    sidebar.push(
+      sectionUpdate(2, "tasks", {
+        type: "task_updated",
+        task_id: largeTask.id,
+        meta: { ...largeTask, updated_at: "2024-02-01T00:00:00Z" },
+      }),
+    );
+    await waitFor(() => {
+      expect(tasksFromStore(store.getState())[0]?.updated_at).toBe(
+        "2024-02-01T00:00:00Z",
+      );
+    });
+    await waitForBoardIdle();
+    expect(boards.state.requests).toBe(requestsBeforeResync);
+    expect(columnTitleOfCard(movedTitle)).toBe("Planned");
+
+    sidebar.push(
+      sectionSnapshot(3, "tasks", {
+        tasks: [{ ...largeTask, cards_done: 1 }],
+      }),
+    );
+
+    await waitFor(() => {
+      expect(columnTitleOfCard(movedTitle)).toBe("Done");
+    });
+    expect(boards.state.requests).toBe(requestsBeforeResync + 1);
+    expect(screen.getAllByText(/^Card T-\d{3}$/)).toHaveLength(250);
+  });
+
+  it("refetches a stale 250-card board on reconnect snapshot", async () => {
+    const sidebar = controllableSidebar();
+    const boards = boardServer(largeTask.id);
+    server.use(sidebar.handler, boards.handler);
+
+    render(<BoardHarness taskId={largeTask.id} />, {
+      preloadedState: CONFIG_STATE,
+    });
+
+    await waitFor(() => {
+      expect(sidebar.controllers).toHaveLength(1);
+    });
+    sidebar.push(sectionSnapshot(0, "tasks", { tasks: [largeTask] }));
+    await waitFor(() => {
+      expect(columnTitleOfCard(movedTitle)).toBe("Planned");
+    });
+    await waitForBoardIdle();
+    const requestsBeforeReconnect = boards.state.requests;
+
+    boards.state.board = largeBoard(2, "done");
+    sidebar.close();
+
+    await waitFor(
+      () => {
+        expect(sidebar.controllers).toHaveLength(2);
+      },
+      { timeout: 3000 },
+    );
+    sidebar.push(sectionSnapshot(0, "tasks", { tasks: [largeTask] }));
+
+    await waitFor(() => {
+      expect(columnTitleOfCard(movedTitle)).toBe("Done");
+    });
+    expect(boards.state.requests).toBe(requestsBeforeReconnect + 1);
+  });
+});

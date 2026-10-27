@@ -2439,6 +2439,7 @@ startListening({
         void listenerApi.dispatch(
           tasksApi.util.upsertQueryData("listTasks", undefined, event.tasks),
         );
+        void listenerApi.dispatch(tasksApi.util.invalidateTags(["Board"]));
         break;
       case "task_created": {
         const result = listenerApi.dispatch(
