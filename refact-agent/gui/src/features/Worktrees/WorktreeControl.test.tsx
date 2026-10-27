@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from "vitest";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { http, HttpResponse } from "msw";
@@ -520,6 +520,99 @@ describe("WorktreeControl", () => {
         "refact/chat/new",
       );
     });
+  });
+
+  test("create stays busy through attachment, blocks duplicates, and closes after attach", async () => {
+    const created = makeWorktreeRecord("wt-slow", "refact/chat/slow");
+    const createCalls: JsonObject[] = [];
+    const commandCalls: JsonObject[] = [];
+    let releaseAttach: () => void = () => undefined;
+    const attachGate = new Promise<void>((resolve) => {
+      releaseAttach = resolve;
+    });
+    const onOpenChange = vi.fn();
+    server.use(
+      worktreesList([]),
+      createWorktreeHandler(created, createCalls),
+      http.post("*/v1/chats/:id/commands", async ({ request }) => {
+        commandCalls.push((await request.json()) as JsonObject);
+        await attachGate;
+        return HttpResponse.json({ status: "queued" });
+      }),
+    );
+
+    const { user } = render(<WorktreeControl onOpenChange={onOpenChange} />, {
+      preloadedState: {
+        chat: makeChatState("chat-1"),
+        config: configState(),
+      },
+    });
+
+    try {
+      await user.click(screen.getByTestId("worktree-control-trigger"));
+      await user.click(
+        await screen.findByRole("button", { name: "Create worktree" }),
+      );
+      const branchInput = await screen.findByLabelText(/Branch name/);
+      await user.clear(branchInput);
+      await user.type(branchInput, "refact/chat/slow");
+      await user.click(screen.getByRole("button", { name: /^Create$/ }));
+
+      await waitFor(() => expect(commandCalls).toHaveLength(1));
+      const busyButton = screen.getByRole("button", {
+        name: /^(Create|Creating\.\.\.)$/,
+      });
+      expect(busyButton).toBeDisabled();
+      await user.click(busyButton);
+      expect(createCalls).toHaveLength(1);
+      expect(screen.getByRole("dialog")).toBeInTheDocument();
+      onOpenChange.mockClear();
+    } finally {
+      releaseAttach();
+    }
+
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+    expect(
+      screen.queryByRole("button", { name: "Create worktree" }),
+    ).not.toBeInTheDocument();
+    expect(createCalls).toHaveLength(1);
+    expect(screen.getByTestId("worktree-control-trigger")).toHaveTextContent(
+      "refact/chat/slow",
+    );
+  });
+
+  test("successful select and detach notify parent menu close", async () => {
+    const record = makeWorktreeRecord("wt-notify", "refact/chat/notify");
+    const onOpenChange = vi.fn();
+    server.use(worktreesList([record]), commandCapture([]));
+
+    const { user } = render(<WorktreeControl onOpenChange={onOpenChange} />, {
+      preloadedState: {
+        chat: makeChatState("chat-1"),
+        config: configState(),
+      },
+    });
+
+    await user.click(screen.getByTestId("worktree-control-trigger"));
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Select worktree refact\/chat\/notify/,
+      }),
+    );
+    await waitFor(() => expect(onOpenChange).toHaveBeenLastCalledWith(false));
+
+    onOpenChange.mockClear();
+    await user.click(screen.getByTestId("worktree-control-trigger"));
+    expect(onOpenChange).toHaveBeenLastCalledWith(true);
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Detach worktree and use main workspace",
+      }),
+    );
+    await waitFor(() => expect(onOpenChange).toHaveBeenLastCalledWith(false));
   });
 
   test("create modal requires and sends selected base branch", async () => {

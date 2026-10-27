@@ -109,6 +109,8 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
     [onOpenChange],
   );
   const [createOpen, setCreateOpen] = useState(false);
+  const createInFlightRef = useRef(false);
+  const [isCreatingTransaction, setIsCreatingTransaction] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
   const pendingCreatedWorktreeIdRef = useRef<string | null>(null);
@@ -126,7 +128,7 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
     refetchOnFocus: true,
     refetchOnReconnect: true,
   });
-  const [createWorktree, createState] = useCreateWorktreeMutation();
+  const [createWorktree] = useCreateWorktreeMutation();
   const [deleteWorktree] = useDeleteWorktreeMutation();
   const [openWorktree] = useOpenWorktreeMutation();
 
@@ -253,21 +255,23 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
   const handleSelect = useCallback(
     (record: WorktreeRecordView) => {
       void attachWorktree(record.meta).then((attached) => {
-        if (attached) setMenuOpen(false);
+        if (attached) handleMenuOpenChange(false);
       });
     },
-    [attachWorktree],
+    [attachWorktree, handleMenuOpenChange],
   );
 
   const handleDetach = useCallback(() => {
     void attachWorktree(null).then((detached) => {
-      if (detached) setMenuOpen(false);
+      if (detached) handleMenuOpenChange(false);
     });
-  }, [attachWorktree]);
+  }, [attachWorktree, handleMenuOpenChange]);
 
   const handleCreate = useCallback(
     async ({ branch, baseBranch }: CreateWorktreeValues) => {
-      if (!chatId) return;
+      if (!chatId || createInFlightRef.current) return;
+      createInFlightRef.current = true;
+      setIsCreatingTransaction(true);
       setCreateError(null);
       const request = {
         branch,
@@ -282,7 +286,7 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
         });
         if (attached) {
           setCreateOpen(false);
-          setMenuOpen(false);
+          handleMenuOpenChange(false);
         } else {
           setPendingCreatedWorktreeId(null);
           await deleteWorktree({
@@ -296,6 +300,9 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
       } catch (error) {
         setPendingCreatedWorktreeId(null);
         setCreateError(worktreeErrorText(error));
+      } finally {
+        createInFlightRef.current = false;
+        setIsCreatingTransaction(false);
       }
     },
     [
@@ -303,6 +310,7 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
       chatId,
       createWorktree,
       deleteWorktree,
+      handleMenuOpenChange,
       setPendingCreatedWorktreeId,
     ],
   );
@@ -401,9 +409,12 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
         defaultBranch={branchSuggestion}
         defaultBaseBranch={baseBranch}
         baseBranchOptions={baseBranchOptions}
-        isCreating={createState.isLoading}
+        isCreating={isCreatingTransaction}
         error={createError}
-        onOpenChange={setCreateOpen}
+        onOpenChange={(open) => {
+          if (!open && createInFlightRef.current) return;
+          setCreateOpen(open);
+        }}
         onCreate={handleCreate}
       />
     </>

@@ -78,12 +78,16 @@ function isMerged(response: MergeWorktreeResponse): boolean {
   return response.merged === true && !hasMergeConflict(response);
 }
 
-function didCleanupNoop(response: MergeWorktreeResponse): boolean {
+function isCompletedNoop(
+  response: MergeWorktreeResponse,
+  deleteRequested: boolean,
+): boolean {
   const cleanup = response.cleanup;
   return (
     response.status === "nothing_to_merge" &&
-    cleanup != null &&
-    (cleanup.worktree_deleted ||
+    (!deleteRequested ||
+      cleanup == null ||
+      cleanup.worktree_deleted ||
       cleanup.branch_deleted ||
       cleanup.registry_deleted)
   );
@@ -137,7 +141,7 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
   const result = completedResult?.response ?? null;
   const [error, setError] = useState<string | null>(null);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
-  const wasOpen = useRef(false);
+  const initializedWorktreeId = useRef<string | null>(null);
   const [mergeWorktree, mergeState] = useMergeWorktreeMutation();
   const queryId = worktreeId ?? record?.meta.id ?? worktree?.id ?? "";
   const sourceWorkspaceRoot =
@@ -166,11 +170,16 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
 
   useEffect(() => {
     if (!open) {
-      wasOpen.current = false;
+      initializedWorktreeId.current = null;
       return;
     }
-    if (wasOpen.current) return;
-    wasOpen.current = true;
+    if (
+      initializedWorktreeId.current === queryId ||
+      (!queryId && initializedWorktreeId.current !== null)
+    ) {
+      return;
+    }
+    initializedWorktreeId.current = queryId;
     setStrategy("squash");
     setDeleteAfterMerge(true);
     setIncludeUncommitted(true);
@@ -178,7 +187,7 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
     setCompletedResult(null);
     setError(null);
     setActionFeedback(null);
-  }, [defaultTargetBranch, open, record, worktree]);
+  }, [defaultTargetBranch, open, queryId, record, worktree]);
 
   const invalidateTask = useCallback(() => {
     if (!resolvedTaskId) return;
@@ -210,8 +219,15 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
       }).unwrap();
       setCompletedResult({ response, id: queryId, label });
       invalidateTask();
-      if (isMerged(response) || didCleanupNoop(response)) {
+      const completed =
+        !hasMergeConflict(response) &&
+        response.success !== false &&
+        (isMerged(response) || isCompletedNoop(response, deleteAfterMerge));
+      if (completed) {
         onMerged?.(response);
+      }
+      if (completed && responseWarnings(response).length === 0) {
+        onOpenChange(false);
       }
     } catch (mergeError) {
       setError(worktreeErrorText(mergeError));
@@ -225,6 +241,7 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
     mergeState.isLoading,
     mergeWorktree,
     onMerged,
+    onOpenChange,
     queryId,
     sourceWorkspaceRoot,
     strategy,

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
+import { useState } from "react";
 import { http, HttpResponse } from "msw";
 import { Popover } from "@radix-ui/themes";
 import { setUpStore } from "../../app/store";
@@ -315,6 +316,7 @@ describe("Worktree lifecycle GUI", () => {
   test("merge modal success path invalidates task queries and shows summary", async () => {
     const record = makeRecord();
     const mergeCalls: JsonObject[] = [];
+    const onOpenChange = vi.fn();
     server.use(
       mergeHandler(
         {
@@ -348,7 +350,7 @@ describe("Worktree lifecycle GUI", () => {
         worktreeId={record.meta.id}
         record={record}
         taskId="task-1"
-        onOpenChange={() => undefined}
+        onOpenChange={onOpenChange}
       />,
       { store },
     );
@@ -373,6 +375,7 @@ describe("Worktree lifecycle GUI", () => {
     expect(dispatchSpy).toHaveBeenCalledWith(
       expect.objectContaining({ type: "tasksApi/invalidateTags" }),
     );
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
   });
 
   test("merge modal displays structured backend error text", async () => {
@@ -407,6 +410,84 @@ describe("Worktree lifecycle GUI", () => {
         "Worktree has uncommitted changes; include them or commit first.",
       ),
     ).toBeInTheDocument();
+  });
+
+  test("merge modal closes after success without deleting the worktree", async () => {
+    const record = makeRecord();
+    const onMerged = vi.fn();
+    function MergeDialog() {
+      const [open, setOpen] = useState(true);
+      return (
+        <MergeWorktreeModal
+          open={open}
+          record={record}
+          onOpenChange={setOpen}
+          onMerged={onMerged}
+        />
+      );
+    }
+    server.use(mergeHandler({ status: "merged", merged: true }, []));
+
+    const { user } = render(<MergeDialog />, {
+      preloadedState: { config: configState() },
+    });
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+
+    await waitFor(() => {
+      expect(onMerged).toHaveBeenCalledOnce();
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+  });
+
+  test("merge modal preserves edits and conflicts across background record refreshes", async () => {
+    const record = makeRecord();
+    const onOpenChange = vi.fn();
+    const conflict: MergeWorktreeResponse = {
+      status: "conflict",
+      merged: false,
+      conflict: {
+        files: ["src/conflict.ts"],
+        aborted: true,
+        merge_in_progress: false,
+        instructions: "Resolve conflict markers.",
+      },
+    };
+    server.use(mergeHandler(conflict, []));
+    const dialog = (currentRecord?: WorktreeRecordView) => (
+      <MergeWorktreeModal
+        open
+        worktreeId={record.meta.id}
+        record={currentRecord}
+        onOpenChange={onOpenChange}
+      />
+    );
+    const { user, rerender } = render(dialog(record), {
+      preloadedState: { config: configState() },
+    });
+    const target = screen.getByLabelText("Target branch");
+    await user.clear(target);
+    await user.type(target, "release");
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "Delete worktree after merge or if there is nothing to merge",
+      }),
+    );
+
+    rerender(dialog({ ...record, updated_at: "2026-04-30T00:00:05Z" }));
+    expect(target).toHaveValue("release");
+    expect(
+      screen.getByRole("checkbox", {
+        name: "Delete worktree after merge or if there is nothing to merge",
+      }),
+    ).not.toBeChecked();
+
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+    expect(await screen.findByText("src/conflict.ts")).toBeInTheDocument();
+    rerender(dialog({ ...record, updated_at: "2026-04-30T00:00:10Z" }));
+    expect(screen.getByText("src/conflict.ts")).toBeInTheDocument();
+    rerender(dialog(undefined));
+    expect(screen.getByText("src/conflict.ts")).toBeInTheDocument();
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
   });
 
   test("merge modal allows opting out of uncommitted changes", async () => {
@@ -455,6 +536,7 @@ describe("Worktree lifecycle GUI", () => {
   test("merge modal reports no-op cleanup and invokes completion callback", async () => {
     const record = makeRecord();
     const onMerged = vi.fn();
+    const onOpenChange = vi.fn();
     server.use(
       mergeHandler(
         {
@@ -485,7 +567,7 @@ describe("Worktree lifecycle GUI", () => {
         open
         worktreeId={record.meta.id}
         record={record}
-        onOpenChange={() => undefined}
+        onOpenChange={onOpenChange}
         onMerged={onMerged}
       />,
       { preloadedState: { config: configState() } },
@@ -503,11 +585,63 @@ describe("Worktree lifecycle GUI", () => {
     expect(onMerged).toHaveBeenCalledWith(
       expect.objectContaining({ status: "nothing_to_merge" }),
     );
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  test("merge modal closes a clean no-op when cleanup was not requested", async () => {
+    const record = makeRecord();
+    const onOpenChange = vi.fn();
+    const onMerged = vi.fn();
+    server.use(mergeHandler({ status: "nothing_to_merge", merged: false }, []));
+    const { user } = render(
+      <MergeWorktreeModal
+        open
+        record={record}
+        onOpenChange={onOpenChange}
+        onMerged={onMerged}
+      />,
+      { preloadedState: { config: configState() } },
+    );
+
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "Delete worktree after merge or if there is nothing to merge",
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+    expect(onMerged).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "nothing_to_merge" }),
+    );
+  });
+
+  test("merge modal completes a clean no-op when cleanup metadata is absent", async () => {
+    const onOpenChange = vi.fn();
+    const onMerged = vi.fn();
+    server.use(mergeHandler({ status: "nothing_to_merge", merged: false }, []));
+    const { user } = render(
+      <MergeWorktreeModal
+        open
+        record={makeRecord()}
+        onOpenChange={onOpenChange}
+        onMerged={onMerged}
+      />,
+      { preloadedState: { config: configState() } },
+    );
+
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+    expect(onMerged).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "nothing_to_merge" }),
+    );
   });
 
   test("merge modal does not report no-op cleanup completion when nothing was deleted", async () => {
     const record = makeRecord();
     const onMerged = vi.fn();
+    const onOpenChange = vi.fn();
     server.use(
       mergeHandler(
         {
@@ -538,7 +672,7 @@ describe("Worktree lifecycle GUI", () => {
         open
         worktreeId={record.meta.id}
         record={record}
-        onOpenChange={() => undefined}
+        onOpenChange={onOpenChange}
         onMerged={onMerged}
       />,
       { preloadedState: { config: configState() } },
@@ -548,6 +682,7 @@ describe("Worktree lifecycle GUI", () => {
 
     expect(await screen.findByText("Nothing to merge.")).toBeInTheDocument();
     expect(onMerged).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
   });
 
   test("merge modal clears stale result when a retry fails", async () => {
@@ -727,13 +862,29 @@ describe("Worktree lifecycle GUI", () => {
     await user.click(mergeButton);
     await user.click(await screen.findByRole("button", { name: "Merge" }));
 
-    expect(await screen.findByText("Merge completed.")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(mergeCalls).toHaveLength(1);
+      expect(
+        screen.queryByRole("dialog", { name: "Merge worktree" }),
+      ).not.toBeInTheDocument();
+    });
+    expect(screen.getByText("Worktree merged.")).toBeInTheDocument();
     expect(mergeCalls[0]).toMatchObject({
       strategy: "squash",
       target_branch: "main",
       delete_after_merge: true,
       include_uncommitted: true,
     });
+
+    server.use(mergeHandler({ status: "nothing_to_merge", merged: false }, []));
+    await user.click(screen.getByRole("button", { name: "Merge worktree" }));
+    await user.click(await screen.findByRole("button", { name: "Merge" }));
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "Merge worktree" }),
+      ).not.toBeInTheDocument();
+    });
+    expect(screen.getByText("Nothing to merge.")).toBeInTheDocument();
   });
 
   test("delete confirmation calls endpoint and shows shared-use warning", async () => {

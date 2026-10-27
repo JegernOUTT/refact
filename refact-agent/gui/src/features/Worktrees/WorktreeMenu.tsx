@@ -192,10 +192,15 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
   const handleMerged = useCallback(
     (response: MergeWorktreeResponse) => {
       const cleanup = response.cleanup;
+      const summary =
+        response.merged === true ? "Worktree merged." : "Nothing to merge.";
+      const hasWarnings =
+        (response.warnings?.length ?? 0) > 0 ||
+        (cleanup?.warnings.length ?? 0) > 0;
       setLocalFeedback(
-        `${
-          response.merged === true ? "Worktree merged." : "Nothing to merge."
-        } Review the merge result for cleanup details and warnings.`,
+        hasWarnings
+          ? `${summary} Review the merge result for cleanup details and warnings.`
+          : summary,
       );
       if (
         (cleanup?.worktree_deleted ?? false) ||
