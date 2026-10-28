@@ -107,6 +107,8 @@
 .diffLine {
   display: flex;
   min-width: 0;
+  font-size: var(--rf-code-size, var(--rf-text-1));
+  line-height: var(--rf-line-1);
 }
 
 .lineNumber {
