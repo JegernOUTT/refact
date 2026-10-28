@@ -1,8 +1,21 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { ThemePropsContext } from "../Theme/ThemePropsContext";
-import { MessageFooter } from "./MessageFooter";
+import { MessageFooter, MessageWrapper } from "./MessageFooter";
+import styles from "./MessageFooter.module.css";
+
+const footerCss = readFileSync(
+  join(process.cwd(), "src/components/ChatContent/MessageFooter.module.css"),
+  "utf8",
+);
+
+function rule(selector: string): string {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return footerCss.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`))?.[1] ?? "";
+}
 
 function renderFooter() {
   return render(
@@ -66,5 +79,70 @@ describe("MessageFooter", () => {
     expect(screen.getByText("10.60k")).toBeInTheDocument();
     expect(screen.getByText("Cache creation")).toBeInTheDocument();
     expect(screen.getByText("5.40k")).toBeInTheDocument();
+  });
+
+  it("renders a zero-height overlay lane for tool-only messages", () => {
+    render(
+      <MessageWrapper>
+        <MessageFooter
+          messageId="m1"
+          onCopy={() => undefined}
+          onBranch={() => undefined}
+          onDelete={() => undefined}
+          overlay
+        />
+      </MessageWrapper>,
+    );
+    const lane = screen.getByTestId("message-footer");
+    expect(lane).toHaveClass(styles.footerLaneOverlay);
+    expect(lane).not.toHaveClass(styles.footerLane);
+    expect(lane).toHaveAttribute("data-overlay", "true");
+  });
+
+  it("keeps the in-flow lane by default", () => {
+    render(<MessageFooter onCopy={() => undefined} />);
+    const lane = screen.getByTestId("message-footer");
+    expect(lane).toHaveClass(styles.footerLane);
+    expect(lane).toHaveAttribute("data-overlay", "false");
+  });
+
+  it.each([false, true])(
+    "lets Tab reach hidden footer buttons (overlay %s)",
+    async (overlay) => {
+      const user = userEvent.setup();
+      render(
+        <MessageWrapper>
+          <MessageFooter
+            messageId="m1"
+            onCopy={() => undefined}
+            onBranch={() => undefined}
+            onDelete={() => undefined}
+            overlay={overlay}
+          />
+        </MessageWrapper>,
+      );
+      const copy = screen.getByRole("button", { name: "Copy message" });
+      const branch = screen.getByRole("button", { name: "Branch from here" });
+      const remove = screen.getByRole("button", { name: "Delete message" });
+      await user.tab();
+      expect(copy).toHaveFocus();
+      await user.tab();
+      expect(branch).toHaveFocus();
+      await user.tab();
+      expect(remove).toHaveFocus();
+    },
+  );
+
+  it("hides footer content without visibility so it stays focusable", () => {
+    expect(footerCss).not.toMatch(/visibility\s*:\s*hidden/u);
+    const content = rule(".footerContent");
+    expect(content).toContain("opacity: 0");
+    expect(content).toContain("pointer-events: none");
+    const overlayLane = rule(".footerLaneOverlay");
+    expect(overlayLane).toContain("position: absolute");
+    expect(overlayLane).not.toContain("min-height");
+    expect(footerCss).toMatch(
+      /\.messageWrapper:focus-within \.footerContent,\s*\.messageWrapper:focus-visible \.footerContent\s*\{[^}]*opacity: 1;[^}]*pointer-events: auto;/u,
+    );
   });
 });

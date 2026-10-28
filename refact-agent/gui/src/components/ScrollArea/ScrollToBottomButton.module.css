@@ -1,8 +1,10 @@
 .root {
   position: absolute;
-  right: var(--rf-space-4);
+  right: auto;
   bottom: var(--rf-space-4);
+  left: 50%;
   z-index: 1;
+  transform: translateX(-50%);
   pointer-events: none;
 }
 

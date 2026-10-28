@@ -37,6 +37,7 @@ import { ChatThreadProvider, useThreadId } from "../../features/Chat/Thread";
 import { ScrollArea } from "../ScrollArea";
 import { takeWhile } from "../../utils";
 import { DialogImage } from "../DialogImage";
+import { buildImageDataUrl } from "../../utils/imageDataUrl";
 import { RootState } from "../../app/store";
 import { createChatWithId, switchToThread } from "../../features/Chat/Thread";
 import { selectFeatures } from "../../features/Config/configSlice";
@@ -97,6 +98,7 @@ import { BackgroundAgentCard } from "../BackgroundAgentCard";
 import { AgenticTool, isAgenticToolName } from "../Tools/AgenticTool";
 import { LaunchPreviewTool } from "../Tools/AgenticTool/LaunchPreviewTool";
 import { parseAgenticArgs } from "../Tools/AgenticTool/agenticToolModel";
+import { expandTruncatedAgentTitle } from "../../utils/displayNames";
 import styles from "./ToolsContent.module.css";
 import { PrivacyToolResult } from "../../features/Privacy/PrivacyToolResult";
 import {
@@ -403,6 +405,18 @@ function readBackgroundAgentStatus(
   return isBackgroundAgentStatus(value) ? value : "queued";
 }
 
+function readBackgroundAgentTitle(
+  result: ToolResult,
+  task: unknown,
+  agentId: string,
+): string {
+  const title = readStringField(result, "title");
+  if (title) return expandTruncatedAgentTitle(title, task);
+  return typeof task === "string" && task.trim() !== ""
+    ? task
+    : `Requested background work: ${agentId.slice(-8)}`;
+}
+
 function backgroundAgentPlaceholder(
   result: ToolResult,
   toolName: "subagent" | "delegate",
@@ -418,11 +432,7 @@ function backgroundAgentPlaceholder(
     child_chat_id: readStringField(result, "child_chat_id"),
     kind,
     status: readBackgroundAgentStatus(result),
-    title:
-      readStringField(result, "title") ??
-      (typeof task === "string" && task.trim() !== ""
-        ? task
-        : `Requested background work: ${agentId.slice(-8)}`),
+    title: readBackgroundAgentTitle(result, task, agentId),
     progress: readStringField(result, "progress"),
     step_count: readNumberField(result, "step_count") ?? 0,
     last_activity: readStringField(result, "last_activity"),
@@ -1812,7 +1822,10 @@ const MultiModalToolContent: React.FC<{
   const diffs = useAppSelector(selectDiffs);
 
   const hasImages = toolResults.some((toolResult) =>
-    toolResult.content.some((content) => content.m_type.startsWith("image/")),
+    toolResult.content.some(
+      (content) =>
+        buildImageDataUrl(content.m_type, content.m_content) !== null,
+    ),
   );
 
   const toolNames = toolCalls.reduce<string[]>((acc, toolCall) => {
@@ -1898,13 +1911,13 @@ const MultiModalToolContent: React.FC<{
             );
             if (!toolResult) return null;
 
-            const images = toolResult.content.filter((content) =>
-              content.m_type.startsWith("image/"),
-            );
-            if (images.length === 0) return null;
+            const dataUrls = toolResult.content.flatMap((content) => {
+              const url = buildImageDataUrl(content.m_type, content.m_content);
+              return url ? [url] : [];
+            });
+            if (dataUrls.length === 0) return null;
 
-            return images.map((image, idx) => {
-              const dataUrl = `data:${image.m_type};base64,${image.m_content}`;
+            return dataUrls.map((dataUrl, idx) => {
               const key = `tool-image-${toolResult.tool_call_id}-${index}-${idx}`;
               return (
                 <DialogImage key={key} size="8" src={dataUrl} fallback="" />

@@ -32,6 +32,7 @@ import type { AgentTreeNode as AgentTreeNodeModel } from "../Chat/Thread";
 import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { setError } from "../Errors/errorsSlice";
 import { setInformation } from "../Errors/informationSlice";
+import { stripAgentKindPrefix } from "../../utils/displayNames";
 import styles from "./AgentsPanel.module.css";
 
 export type AgentTreeNodeProps = {
@@ -40,9 +41,6 @@ export type AgentTreeNodeProps = {
   depth?: number;
   onNavigate?: (chatId: string) => void;
 };
-
-const AGENT_TITLE_PREFIX = /^\s*(?:subagent|delegate)\s*:\s*/iu;
-const MARKDOWN_EMPHASIS = /(\*\*|__|`)/gu;
 
 function isTerminal(agent: BackgroundAgentSummary): boolean {
   return ["completed", "failed", "cancelled", "interrupted"].includes(
@@ -60,10 +58,7 @@ function statusFor(agent: BackgroundAgentSummary) {
 
 function displayAgentTitle(agent: BackgroundAgentSummary): string {
   const raw = agent.title || agent.agent_id;
-  const stripped = raw
-    .replace(AGENT_TITLE_PREFIX, "")
-    .replace(MARKDOWN_EMPHASIS, "")
-    .trim();
+  const stripped = stripAgentKindPrefix(raw);
   return stripped || raw;
 }
 

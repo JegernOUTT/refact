@@ -236,6 +236,7 @@ const _AssistantInput: React.FC<ChatInputProps> = ({
         onBranch={onBranch}
         onDelete={onDelete}
         usage={usage}
+        overlay={!message && !combinedReasoning}
       />
     </MessageWrapper>
   );

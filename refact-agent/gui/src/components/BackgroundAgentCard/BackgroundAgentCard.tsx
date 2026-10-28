@@ -4,7 +4,11 @@ import classNames from "classnames";
 import { Bot, MessageCircleQuestion, Telescope } from "lucide-react";
 import { Badge, Button, Icon } from "../ui";
 import { Chevron } from "../Collapsible";
-import { humanizeIdentifier } from "../../utils/displayNames";
+import {
+  expandTruncatedAgentTitle,
+  humanizeIdentifier,
+  stripAgentKindPrefix,
+} from "../../utils/displayNames";
 import { formatTokenCount } from "../../features/StatsDashboard/utils/formatters";
 import styles from "./BackgroundAgentCard.module.css";
 import type {
@@ -25,6 +29,7 @@ import {
 } from "../ChatContent/useChatScrollAnchor";
 import { CompactToolDetails } from "../Tools/AgenticTool/CompactToolDetails";
 import { compactText } from "../Tools/AgenticTool/compactPresentation";
+import { parseAgenticArgs } from "../Tools/AgenticTool/agenticToolModel";
 import { ToolCallTooltip } from "../ChatContent/ToolCard/ToolCallTooltip";
 
 export interface BackgroundAgentCardProps {
@@ -642,10 +647,7 @@ const InlineBackgroundAgent: React.FC<{
         ? statusTone(status)
         : "muted";
   const headline =
-    compactText(
-      agent.title.replace(/^\s*(?:subagent|delegate)\s*(?::\s*|$)/iu, ""),
-      160,
-    ) ?? "Background work";
+    compactText(stripAgentKindPrefix(agent.title)) ?? "Background work";
   const facts = [
     { label: "Error", value: compactText(agent.error) },
     { label: "Reported result", value: compactText(agent.result_summary) },
@@ -754,7 +756,18 @@ const _BackgroundAgentCard: React.FC<BackgroundAgentCardProps> = ({
   const subscribedAgent = useAppSelector((state) =>
     selectBackgroundAgent(state, threadId ?? "", agentId ?? agent.agent_id),
   );
-  const displayedAgent = subscribedAgent ?? agent;
+  const mergedAgent = subscribedAgent ?? agent;
+  const task = toolCall
+    ? parseAgenticArgs(toolCall.function.arguments).args.task
+    : undefined;
+  const expandedTitle = expandTruncatedAgentTitle(mergedAgent.title, task);
+  const displayedAgent = useMemo(
+    () =>
+      expandedTitle === mergedAgent.title
+        ? mergedAgent
+        : { ...mergedAgent, title: expandedTitle },
+    [mergedAgent, expandedTitle],
+  );
   const [expanded, setExpanded] = useState(!compactDefault);
   const [filesOpen, setFilesOpen] = useState(false);
   const filesPanelId = useId();

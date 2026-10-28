@@ -24,6 +24,7 @@ type MessageFooterProps = {
   usage?: Usage | null;
   checkpoints?: Checkpoint[] | null;
   messageIndex?: number;
+  overlay?: boolean;
 };
 
 const TokenDisplay: React.FC<{ label: string; value: number }> = ({
@@ -58,6 +59,7 @@ export const MessageFooter: React.FC<MessageFooterProps> = ({
   usage,
   checkpoints,
   messageIndex,
+  overlay = false,
 }) => {
   const handleBranch = useCallback(() => {
     if (messageId && onBranch) {
@@ -92,7 +94,11 @@ export const MessageFooter: React.FC<MessageFooterProps> = ({
   const hasUsageInfo = Boolean(usage && contextTokens > 0) || hasUsd;
 
   return (
-    <div className={styles.footerLane}>
+    <div
+      className={overlay ? styles.footerLaneOverlay : styles.footerLane}
+      data-testid="message-footer"
+      data-overlay={overlay}
+    >
       <div className={styles.footerContent}>
         {checkpoints &&
           checkpoints.length > 0 &&

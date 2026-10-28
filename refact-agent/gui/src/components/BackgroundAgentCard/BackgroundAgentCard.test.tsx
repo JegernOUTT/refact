@@ -744,6 +744,47 @@ describe("inline background agents", () => {
     expect(preserve).toHaveBeenCalledOnce();
   });
 
+  it("shows the full task instead of an engine-truncated title", () => {
+    const task =
+      "Implement approved Buddy HOME overhaul in active worktree and verify the GUI checks";
+    const call: ToolCall = {
+      id: "truncated-title",
+      index: 0,
+      function: { name: "subagent", arguments: JSON.stringify({ task }) },
+    };
+    render(
+      <BackgroundAgentCard
+        presentation="inline"
+        toolCall={call}
+        agent={makeAgent({
+          title:
+            "Subagent: Implement approved Buddy HOME overhaul in active w…",
+          pending_questions: 0,
+        })}
+      />,
+    );
+    const title = screen.getByTitle(task);
+    expect(title).toHaveTextContent(task);
+    expect(title).not.toHaveTextContent(/subagent|…/i);
+  });
+
+  it("strips a repeated agent kind prefix from the inline headline", () => {
+    render(
+      <BackgroundAgentCard
+        presentation="inline"
+        agent={makeAgent({
+          title: "Subagent: Subagent: Implement X",
+          pending_questions: 0,
+        })}
+      />,
+    );
+    const toggle = screen
+      .getByTestId("background-agent-inline")
+      .querySelector("button");
+    expect(toggle).toHaveTextContent("Implement X");
+    expect(toggle).not.toHaveTextContent(/subagent/i);
+  });
+
   it("bounds and escapes a long hostile title without losing essential status", () => {
     render(
       <BackgroundAgentCard

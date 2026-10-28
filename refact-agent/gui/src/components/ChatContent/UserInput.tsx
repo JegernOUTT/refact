@@ -5,6 +5,7 @@ import type { UserMessage } from "../../services/refact";
 import type { Checkpoint } from "../../features/Checkpoints/types";
 import { RetryForm } from "../ChatForm";
 import { DialogImage } from "../DialogImage";
+import { buildImageDataUrl } from "../../utils/imageDataUrl";
 import { Markdown } from "../Markdown";
 import { Button } from "../ui";
 import styles from "./ChatContent.module.css";
@@ -117,7 +118,8 @@ const _UserInput: React.FC<UserInputProps> = ({
     if (typeof children === "string") return [];
     return children.filter((c) => {
       if ("type" in c && c.type === "image_url") return true;
-      if ("m_type" in c && c.m_type.startsWith("image/")) return true;
+      if ("m_type" in c)
+        return buildImageDataUrl(c.m_type, c.m_content) !== null;
       return false;
     });
   }, [children]);
@@ -219,16 +221,14 @@ const _UserInput: React.FC<UserInputProps> = ({
                           />
                         );
                       }
-                      if (
-                        "m_type" in image &&
-                        image.m_type.startsWith("image/")
-                      ) {
-                        const content = `data:${image.m_type};base64,${image.m_content}`;
-                        return (
-                          <DialogImage key={`img-${index}`} src={content} />
-                        );
-                      }
-                      return null;
+                      if (!("m_type" in image)) return null;
+                      const content = buildImageDataUrl(
+                        image.m_type,
+                        image.m_content,
+                      );
+                      return content ? (
+                        <DialogImage key={`img-${index}`} src={content} />
+                      ) : null;
                     })}
                   </Flex>
                 )}

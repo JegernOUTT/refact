@@ -25,6 +25,7 @@ import type {
 } from "../../../services/refact/browser";
 import { ShikiCodeBlock } from "../../Markdown";
 import { DialogImage } from "../../DialogImage";
+import { buildImageDataUrl } from "../../../utils/imageDataUrl";
 import { Badge, Chip } from "../../ui";
 import { AriaSnapshotView } from "./AriaSnapshotView";
 import { ActionabilityLog } from "./ActionabilityLog";
@@ -590,16 +591,16 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
   }, [maybeResult]);
 
   const { textLog, images } = useMemo(() => {
-    if (!maybeResult) return { textLog: null, images: [] as string[] };
+    if (!maybeResult) return { textLog: null, images: [] as (string | null)[] };
 
     const content = maybeResult.content;
 
     if (typeof content === "string") {
-      return { textLog: content || null, images: [] as string[] };
+      return { textLog: content || null, images: [] as (string | null)[] };
     }
 
     if (!Array.isArray(content)) {
-      return { textLog: null, images: [] as string[] };
+      return { textLog: null, images: [] as (string | null)[] };
     }
 
     const textParts = content
@@ -618,10 +619,9 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
         (item) =>
           isRecord(item) &&
           typeof item.m_type === "string" &&
-          item.m_type.startsWith("image/") &&
-          typeof item.m_content === "string",
+          item.m_type.startsWith("image/"),
       )
-      .map((item) => `data:${item.m_type};base64,${item.m_content}`);
+      .map((item) => buildImageDataUrl(item.m_type, item.m_content));
 
     return { textLog: textParts || null, images: imageParts };
   }, [maybeResult]);
@@ -664,7 +664,7 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
     }
 
     const effectiveScreenshots = maybeResult
-      ? images.length
+      ? images.filter((url) => url !== null).length
       : stats.screenshotCount;
     const urlLabel = stats.url ? (
       <span className={styles.url}>{formatUrl(stats.url)}</span>
@@ -792,7 +792,8 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
       if (attachable) cursor += 1;
       const kind = captureKind(data);
       if (!kind) continue;
-      const src = imageIndex === null ? undefined : images[imageIndex];
+      const src =
+        imageIndex === null ? undefined : images[imageIndex] ?? undefined;
       if (imageIndex !== null && src !== undefined) used.add(imageIndex);
       entries.push({
         stepIndex: step.step_index,
@@ -809,7 +810,11 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
   }, [typedResult, images]);
 
   const looseImages = useMemo(
-    () => images.filter((_, index) => !usedImageIndexes.has(index)),
+    () =>
+      images.filter(
+        (url, index): url is string =>
+          url !== null && !usedImageIndexes.has(index),
+      ),
     [images, usedImageIndexes],
   );
 
@@ -977,7 +982,10 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
   }, [typedResult]);
 
   const reportScreenshot = typedResult?.screenshot
-    ? `data:${typedResult.screenshot.mime};base64,${typedResult.screenshot.data}`
+    ? buildImageDataUrl(
+        typedResult.screenshot.mime,
+        typedResult.screenshot.data,
+      )
     : null;
   const hasImageArtifact = typedArtifacts.some(
     (data) => isRecord(data.artifact) && data.artifact.kind === "image",
@@ -986,8 +994,8 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
     typedArtifacts.length > 0 || (typedResult?.downloads?.length ?? 0) > 0;
 
   const icon =
-    images.length > 0 ||
-    Boolean(typedResult?.screenshot) ||
+    images.some((url) => url !== null) ||
+    reportScreenshot !== null ||
     hasImageArtifact ? (
       <Image />
     ) : hasArtifacts ? (

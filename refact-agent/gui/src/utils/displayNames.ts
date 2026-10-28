@@ -66,3 +66,31 @@ export function humanizeIdentifier(raw: string): string {
   if (words.length === 0) return trimmed;
   return capitalize(words.join(" "));
 }
+
+const AGENT_KIND_PREFIX = /^(?:\s*(?:subagent|delegate)\s*:\s*)+/iu;
+const MARKDOWN_EMPHASIS = /\*\*|__|`/gu;
+
+export function stripAgentKindPrefix(title: string): string {
+  return title
+    .replace(MARKDOWN_EMPHASIS, "")
+    .replace(AGENT_KIND_PREFIX, "")
+    .trim();
+}
+
+const ELLIPSIS = "…";
+
+const collapseWhitespace = (value: string): string =>
+  value.replace(/\s+/gu, " ").trim();
+
+export function expandTruncatedAgentTitle(
+  title: string,
+  task: unknown,
+): string {
+  if (typeof task !== "string") return title;
+  const stripped = stripAgentKindPrefix(title);
+  if (!stripped.endsWith(ELLIPSIS)) return title;
+  const head = collapseWhitespace(stripped.slice(0, -ELLIPSIS.length));
+  const fullTask = collapseWhitespace(task);
+  if (head === "" || !fullTask.startsWith(head)) return title;
+  return fullTask;
+}

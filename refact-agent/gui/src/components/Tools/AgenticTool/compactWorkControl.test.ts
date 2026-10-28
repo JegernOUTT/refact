@@ -334,6 +334,14 @@ describe("inspection and wait evidence", () => {
     },
   );
 
+  it("does not repeat the agent kind prefix in the child status headline", () => {
+    const output = present(
+      "agent_status",
+      "# Subagent: Subagent: Implement X\n- Status: 🟢 running\n- Agent ID: child",
+    );
+    expect(output.headline).toBe("Check child status: Implement X");
+  });
+
   it("does not turn paused into failed", () => {
     const output = present(
       "agent_status",

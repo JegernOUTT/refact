@@ -67,18 +67,34 @@
   gap: var(--rf-space-2);
 }
 
-.table {
-  width: max-content;
+.tableScroll {
+  composes: scrollbarThin from "../shared/scrollbar.module.css";
   max-width: 100%;
   margin: var(--rf-space-2) 0;
+  overflow-x: auto;
+}
+
+.table {
+  width: max-content;
+  min-width: 100%;
   border-collapse: collapse;
+  overflow-wrap: normal;
+  word-break: normal;
   font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
     var(--rf-font-ui);
 }
 
 .table :where(th, td) {
+  min-width: 8ch;
+  max-width: 60ch;
   padding: var(--rf-space-1) var(--rf-space-2);
   border: var(--rf-hairline) solid var(--rf-border);
+  overflow-wrap: break-word;
+  vertical-align: top;
+}
+
+.table :where(td code, td a) {
+  overflow-wrap: anywhere;
 }
 
 .table th {

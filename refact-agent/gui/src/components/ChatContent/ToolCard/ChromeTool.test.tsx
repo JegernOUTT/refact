@@ -1485,4 +1485,55 @@ describe("ChromeTool", () => {
     expect(screen.getByText("3 matched")).toBeInTheDocument();
     expect(screen.getByText("1 routes")).toBeInTheDocument();
   });
+
+  test("skips an omitted report screenshot and keeps the real image part", async () => {
+    const user = userEvent.setup();
+    const toolCall: ToolCall = {
+      id: "tc-omitted-screenshot",
+      index: 0,
+      function: {
+        name: "chrome",
+        arguments: JSON.stringify({
+          request: { steps: [{ action: "navigate", url: "https://a.test" }] },
+        }),
+      },
+    };
+    const store = makeStore({
+      tool_call_id: "tc-omitted-screenshot",
+      content: [
+        {
+          m_type: "text",
+          m_content: JSON.stringify({
+            ok: true,
+            steps: [],
+            screenshot: {
+              mime: "image/png",
+              data: "<omitted>",
+              bytes: 155193,
+            },
+          }),
+        },
+        { m_type: "image/png", m_content: "iVBORw0KGgo=" },
+      ],
+    });
+
+    const view = render(
+      <Provider store={store}>
+        <Theme>
+          <ChromeTool toolCall={toolCall} />
+        </Theme>
+      </Provider>,
+    );
+
+    await user.click(screen.getByText(/Browser action/i));
+
+    const images = Array.from(view.container.querySelectorAll("img"));
+    expect(images).toHaveLength(1);
+    expect(images[0].getAttribute("src")).toBe(
+      "data:image/png;base64,iVBORw0KGgo=",
+    );
+    for (const image of images) {
+      expect(image.getAttribute("src") ?? "").not.toContain("<omitted>");
+    }
+  });
 });

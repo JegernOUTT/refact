@@ -237,10 +237,12 @@ const _Markdown: React.FC<MarkdownProps> = ({
       },
       table({ color: _color, ref: _ref, node: _node, ...props }) {
         return (
-          <table
-            {...props}
-            className={classNames(styles.table, props.className)}
-          />
+          <div className={styles.tableScroll}>
+            <table
+              {...props}
+              className={classNames(styles.table, props.className)}
+            />
+          </div>
         );
       },
       tbody({ color: _color, ref: _ref, node: _node, ...props }) {

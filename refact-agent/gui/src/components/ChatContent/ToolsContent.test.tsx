@@ -1343,6 +1343,33 @@ describe("neutral dedicated outcome regressions", () => {
   });
 });
 
+describe("multimodal tool images", () => {
+  it("renders real image parts and skips omitted placeholders", () => {
+    const id = "mm-omitted";
+    const chat = createDefaultChatState();
+    chat.threads[chat.current_thread_id].thread.messages = [
+      {
+        role: "tool",
+        tool_call_id: id,
+        content: [
+          { m_type: "text", m_content: "captured" },
+          { m_type: "image/png", m_content: "<omitted>" },
+          { m_type: "image/png", m_content: "iVBORw0KGgo=" },
+        ],
+        tool_failed: false,
+      },
+    ];
+    const { container } = render(
+      <ToolContent toolCalls={[makeToolCall("screenshot", id)]} />,
+      { preloadedState: { chat } },
+    );
+    const sources = Array.from(container.querySelectorAll("img")).map(
+      (image) => image.getAttribute("src") ?? "",
+    );
+    expect(sources).toEqual(["data:image/png;base64,iVBORw0KGgo="]);
+  });
+});
+
 describe("typed unavailable review route", () => {
   it("preserves unavailable stage evidence without a successful outer shell", () => {
     const report = {

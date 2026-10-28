@@ -3,7 +3,10 @@ import {
   parseWorkPage,
   type WorkRow,
 } from "../../../services/refact/workTypes";
-import { humanizeIdentifier } from "../../../utils/displayNames";
+import {
+  humanizeIdentifier,
+  stripAgentKindPrefix,
+} from "../../../utils/displayNames";
 import { normalizeToolName } from "../../../utils/toolNameAliases";
 import { parseAgentStatusOutput } from "../../ChatContent/AgentStatusModel";
 import { buildAgenticToolViewModel } from "./agenticToolModel";
@@ -216,6 +219,11 @@ function approvalState(
       { label: "Scope", value: "Historical receipt · single execution only" },
     ],
   };
+}
+
+function agentTitle(title: string | null | undefined): string | null {
+  if (!title) return null;
+  return stripAgentKindPrefix(title) || null;
 }
 
 export function buildCompactWorkControlPresentation(
@@ -617,7 +625,8 @@ export function buildCompactWorkControlPresentation(
       const roster = name === "agents_overview" || name === "agent_list";
       if (roster && model !== null && model.agents.length > 0) {
         state = snapshotState(model.agents.map((row) => row.status));
-        if (model.agents.length === 1) title ??= model.agents[0].title;
+        if (model.agents.length === 1)
+          title ??= agentTitle(model.agents[0].title);
         facts = [
           {
             label: "Snapshot",
@@ -644,7 +653,9 @@ export function buildCompactWorkControlPresentation(
                 stateLabel: `Wait ended · ${observed.stateLabel.toLowerCase()}`,
               }
             : observed;
-          title ??= readCompactText(result, "title") ?? report.title;
+          title ??= agentTitle(
+            readCompactText(result, "title") ?? report.title,
+          );
           facts.push({
             label: "Evidence",
             value: "Historical state snapshot · completion is not verification",
