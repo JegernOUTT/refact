@@ -1,14 +1,16 @@
 import { BookOpen, MessageCircle, Pencil } from "lucide-react";
 import React, { useMemo } from "react";
-import { Box } from "@radix-ui/themes";
-import { ToolCard, ToolStatus } from "./ToolCard";
-import { useStoredOpen } from "../useStoredOpen";
 import { ContextFileList } from "./ContextFileList";
 import { useAppSelector } from "../../../hooks/useAppSelector";
 import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/selectors";
 import { useThreadId } from "../../../features/Chat/Thread";
 import { ChatContextFile, ToolCall } from "../../../services/refact/types";
 import { ShikiCodeBlock } from "../../Markdown";
+import {
+  TranscriptClamp,
+  TranscriptItem,
+  type TranscriptStatus,
+} from "../TranscriptItem";
 import styles from "./KnowledgeTool.module.css";
 
 type KnowledgeToolType =
@@ -19,13 +21,7 @@ type KnowledgeToolType =
 
 interface KnowledgeArgs {
   search_key?: string;
-}
-
-interface CreateKnowledgeArgs {
   content?: string;
-}
-
-interface TrajectoriesArgs {
   query?: string;
 }
 
@@ -46,105 +42,75 @@ function titlePreview(text: string): string {
 export const KnowledgeTool: React.FC<KnowledgeToolProps> = ({
   toolCall,
   toolType,
-  contextFiles,
+  contextFiles = [],
 }) => {
-  const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle] = useStoredOpen(storeKey);
-
   const threadId = useThreadId();
-  const maybeResult = useAppSelector((state) =>
+  const result = useAppSelector((state) =>
     selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
-
-  const args = useMemo(():
-    | KnowledgeArgs
-    | CreateKnowledgeArgs
-    | TrajectoriesArgs => {
+  const args = useMemo((): KnowledgeArgs => {
     try {
-      return JSON.parse(toolCall.function.arguments) as
-        | KnowledgeArgs
-        | CreateKnowledgeArgs
-        | TrajectoriesArgs;
+      return JSON.parse(toolCall.function.arguments) as KnowledgeArgs;
     } catch {
       return {};
     }
   }, [toolCall.function.arguments]);
 
-  const status: ToolStatus = useMemo(() => {
-    if (!maybeResult) return "running";
-    if (
-      typeof maybeResult === "object" &&
-      "tool_failed" in maybeResult &&
-      maybeResult.tool_failed
-    ) {
-      return "error";
-    }
-    return "success";
-  }, [maybeResult]);
+  const failed = result?.tool_failed === true;
+  const status: TranscriptStatus = !result
+    ? "running"
+    : failed
+      ? "failed"
+      : "done";
+  const content = typeof result?.content === "string" ? result.content : null;
 
-  const content =
-    maybeResult && typeof maybeResult.content === "string"
-      ? maybeResult.content
-      : null;
+  const isSave = toolType === "create_knowledge";
+  const target = isSave
+    ? titlePreview(args.content ?? "memory")
+    : toolType === "knowledge"
+      ? args.search_key ?? "knowledge"
+      : args.query ?? "conversations";
+  const meta =
+    contextFiles.length > 0
+      ? `${contextFiles.length} result${contextFiles.length === 1 ? "" : "s"}`
+      : isSave && result && !failed
+        ? "saved"
+        : undefined;
 
-  const summary = useMemo(() => {
-    if (toolType === "knowledge") {
-      const knowledgeArgs = args as KnowledgeArgs;
-      const query = knowledgeArgs.search_key ?? "knowledge";
-      return (
-        <>
-          Recall <span className={styles.query}>&quot;{query}&quot;</span>
-        </>
-      );
-    }
+  const icon = isSave ? (
+    <Pencil />
+  ) : toolType === "knowledge" ? (
+    <BookOpen />
+  ) : (
+    <MessageCircle />
+  );
 
-    if (toolType === "create_knowledge") {
-      const createArgs = args as CreateKnowledgeArgs;
-      const preview = titlePreview(createArgs.content ?? "memory");
-      return (
-        <>
-          Remember <span className={styles.query}>&quot;{preview}&quot;</span>
-        </>
-      );
-    }
-
-    // toolType === "trajectories" || toolType === "search_trajectories"
-    const trajArgs = args as TrajectoriesArgs;
-    const query = trajArgs.query ?? "conversations";
-    return (
-      <>
-        Recall <span className={styles.query}>&quot;{query}&quot;</span>
-      </>
-    );
-  }, [toolType, args]);
-
-  const icon =
-    toolType === "create_knowledge" ? (
-      <Pencil />
-    ) : toolType === "knowledge" ? (
-      <BookOpen />
-    ) : (
-      <MessageCircle />
-    );
+  const hasContent = content !== null && content.length > 0 && !failed;
+  const output =
+    hasContent || contextFiles.length > 0 ? (
+      <div className={styles.output}>
+        {hasContent && (
+          <TranscriptClamp>
+            <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
+          </TranscriptClamp>
+        )}
+        <ContextFileList files={contextFiles} />
+      </div>
+    ) : null;
 
   return (
-    <ToolCard
+    <TranscriptItem
+      data-testid="knowledge-tool"
+      error={failed ? content : null}
       icon={icon}
-      summary={summary}
+      meta={meta}
+      openKey={toolCall.id ? `tc:${toolCall.id}` : undefined}
+      output={output}
+      raw={[{ label: "Arguments", value: toolCall.function.arguments }]}
       status={status}
-      isOpen={isOpen}
-      onToggle={handleToggle}
-      toolCall={toolCall}
-    >
-      {content && (
-        <Box className={styles.resultContent}>
-          <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
-        </Box>
-      )}
-      {contextFiles && contextFiles.length > 0 && (
-        <ContextFileList files={contextFiles} />
-      )}
-    </ToolCard>
+      target={target}
+      verb="Memory"
+    />
   );
 };
 

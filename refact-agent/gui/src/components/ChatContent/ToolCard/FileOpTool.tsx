@@ -1,8 +1,6 @@
-import { MoveRight, Trash2, CirclePlus } from "lucide-react";
-import React, { useMemo, useCallback } from "react";
+import { CirclePlus, ExternalLink, MoveRight, Trash2 } from "lucide-react";
+import React, { useMemo } from "react";
 import { Box } from "@radix-ui/themes";
-import { ToolCard, ToolStatus } from "./ToolCard";
-import { useStoredOpen } from "../useStoredOpen";
 import { useAppSelector } from "../../../hooks/useAppSelector";
 import { useOpenFileInApp } from "../../../hooks/useOpenFileInApp";
 import {
@@ -14,23 +12,24 @@ import {
 import { useThreadId } from "../../../features/Chat/Thread";
 import { ToolCall, DiffChunk } from "../../../services/refact/types";
 import { ShikiCodeBlock } from "../../Markdown";
+import { Button } from "../../ui";
+import {
+  TranscriptClamp,
+  TranscriptItem,
+  type TranscriptFact,
+  type TranscriptStatus,
+} from "../TranscriptItem";
 import { basename } from "./utils";
-import styles from "./FileOpTool.module.css";
+import { DiffBlock } from "./DiffBlock";
+import { getDiffStats } from "./DiffBlockStats";
 
 type FileOpType = "mv" | "rm" | "add_workspace_folder";
 
-interface MvArgs {
+interface FileOpArgs {
   source?: string;
   destination?: string;
-}
-
-interface RmArgs {
   path?: string;
   recursive?: boolean;
-}
-
-interface AddWorkspaceArgs {
-  path?: string;
 }
 
 interface FileOpToolProps {
@@ -40,20 +39,13 @@ interface FileOpToolProps {
   isActiveTool?: boolean;
 }
 
-function countNonEmptyLines(text: string): number {
-  let count = 0;
-  let hasContent = false;
-
-  for (const char of text) {
-    if (char === "\n") {
-      if (hasContent) count++;
-      hasContent = false;
-    } else if (char !== "\r" && char !== " " && char !== "\t") {
-      hasContent = true;
-    }
+function parseArgs(raw: string): FileOpArgs {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === "object" ? (parsed as FileOpArgs) : {};
+  } catch {
+    return {};
   }
-
-  return hasContent ? count + 1 : count;
 }
 
 export const FileOpTool: React.FC<FileOpToolProps> = ({
@@ -62,8 +54,6 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
   diffs = [],
   isActiveTool = true,
 }) => {
-  const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle] = useStoredOpen(storeKey);
   const { canOpen, openFile } = useOpenFileInApp();
   const threadId = useThreadId();
   const isStreaming = useAppSelector((state) =>
@@ -72,11 +62,9 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
   const isWaiting = useAppSelector((state) =>
     selectIsWaitingById(state, threadId),
   );
-
   const maybeResult = useAppSelector((state) =>
     selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
-
   const diffIds = useMemo(
     () => (toolCall.id ? [toolCall.id] : []),
     [toolCall.id],
@@ -90,137 +78,125 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
   const hasResult = maybeResult !== undefined;
   const hasDiffs = diffs.length > 0 || toolDiffs.length > 0;
   const isToolBusy = isActiveTool && !hasResult && (isStreaming || isWaiting);
-  const shouldReadDiffs = hasDiffs && !isToolBusy;
 
   const allDiffs = useMemo((): DiffChunk[] => {
-    if (!shouldReadDiffs) return [];
+    if (!hasDiffs || isToolBusy) return [];
+    return diffs.length > 0 ? diffs : toolDiffs.flatMap((d) => d.content);
+  }, [diffs, hasDiffs, isToolBusy, toolDiffs]);
 
-    const fromProps = diffs;
-    const fromStore = toolDiffs.flatMap((d) => d.content);
-    return fromProps.length > 0 ? fromProps : fromStore;
-  }, [diffs, shouldReadDiffs, toolDiffs]);
-
-  const args = useMemo((): MvArgs | RmArgs | AddWorkspaceArgs => {
-    try {
-      const parsed = JSON.parse(toolCall.function.arguments) as unknown;
-      return parsed && typeof parsed === "object"
-        ? (parsed as MvArgs | RmArgs | AddWorkspaceArgs)
-        : {};
-    } catch {
-      return {};
-    }
-  }, [toolCall.function.arguments]);
-
-  const status: ToolStatus = useMemo(() => {
-    if (maybeResult) {
-      if (
-        typeof maybeResult === "object" &&
-        "tool_failed" in maybeResult &&
-        maybeResult.tool_failed
-      ) {
-        return "error";
-      }
-      return "success";
-    }
-    if (isToolBusy) return "running";
-    // rm tool returns diff message (not tool message) when deleting files with content
-    if (hasDiffs) {
-      return "success";
-    }
-    return "running";
-  }, [hasDiffs, isToolBusy, maybeResult]);
-  const handleFileClick = useCallback(
-    (e: React.MouseEvent, filePath: string) => {
-      e.stopPropagation();
-      openFile({ path: filePath });
-    },
-    [openFile],
+  const args = useMemo(
+    () => parseArgs(toolCall.function.arguments),
+    [toolCall.function.arguments],
   );
+
+  const failed = maybeResult?.tool_failed === true;
+  const status: TranscriptStatus = failed
+    ? "failed"
+    : hasResult || (hasDiffs && !isToolBusy)
+      ? "done"
+      : "running";
 
   const content =
     maybeResult && typeof maybeResult.content === "string"
       ? maybeResult.content
       : null;
 
-  const { icon, summary } = useMemo(() => {
-    if (toolType === "mv") {
-      const mvArgs = args as MvArgs;
-      const src = mvArgs.source ?? "";
-      const dest = mvArgs.destination ?? "";
-      return {
-        icon: <MoveRight />,
-        summary: (
-          <>
-            Move{" "}
-            <span
-              className={canOpen ? styles.filename : styles.filenamePlain}
-              onClick={canOpen ? (e) => handleFileClick(e, src) : undefined}
-            >
-              {basename(src)}
-            </span>
-            {" → "}
-            <span
-              className={canOpen ? styles.filename : styles.filenamePlain}
-              onClick={canOpen ? (e) => handleFileClick(e, dest) : undefined}
-            >
-              {basename(dest)}
-            </span>
-          </>
-        ),
-      };
-    }
+  const path = args.path ?? "";
+  const source = args.source ?? "";
+  const destination = args.destination ?? "";
+  const removed = getDiffStats(allDiffs).removed;
 
-    if (toolType === "add_workspace_folder") {
-      const addArgs = args as AddWorkspaceArgs;
-      const path = addArgs.path ?? "";
-      return {
-        icon: <CirclePlus />,
-        summary: (
-          <>
-            Add workspace{" "}
-            <span className={styles.filename}>{basename(path)}</span>
-          </>
-        ),
-      };
-    }
+  const row =
+    toolType === "mv"
+      ? {
+          icon: <MoveRight />,
+          verb: "Move",
+          target: `${basename(source)} → ${basename(destination)}`,
+          meta: undefined,
+        }
+      : toolType === "add_workspace_folder"
+        ? {
+            icon: <CirclePlus />,
+            verb: "Add workspace",
+            target: basename(path),
+            meta: undefined,
+          }
+        : {
+            icon: <Trash2 />,
+            verb: "Delete",
+            target: basename(path),
+            meta:
+              removed > 0
+                ? `−${removed}`
+                : args.recursive
+                  ? "recursive"
+                  : undefined,
+          };
 
-    // rm
-    const rmArgs = args as RmArgs;
-    const path = rmArgs.path ?? "";
-    const isDir = rmArgs.recursive;
-    const linesRemoved = allDiffs.reduce(
-      (acc, d) => acc + countNonEmptyLines(d.lines_remove),
-      0,
-    );
-    return {
-      icon: <Trash2 />,
-      summary: (
-        <>
-          Delete <span className={styles.filename}>{basename(path)}</span>
-          {isDir && <span className={styles.meta}> (recursive)</span>}
-          {linesRemoved > 0 && (
-            <span className={styles.removed}> −{linesRemoved}</span>
-          )}
-        </>
-      ),
-    };
-  }, [toolType, args, canOpen, handleFileClick, allDiffs]);
+  const summary: TranscriptFact[] =
+    toolType === "mv"
+      ? [
+          { label: "From", value: source, title: source },
+          { label: "To", value: destination, title: destination },
+        ]
+      : path
+        ? [{ label: "Path", value: path, title: path }]
+        : [];
+
+  const openPaths = toolType === "mv" ? [destination].filter(Boolean) : [];
+
+  const output =
+    allDiffs.length > 0 ? (
+      <TranscriptClamp>
+        <Box className="scrollX">
+          {allDiffs.map((diff, i) => (
+            <DiffBlock
+              key={`${diff.file_name}-${i}`}
+              diff={diff}
+              fileName={diff.file_name}
+              uncapped
+            />
+          ))}
+        </Box>
+      </TranscriptClamp>
+    ) : content && !failed ? (
+      <TranscriptClamp>
+        <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
+      </TranscriptClamp>
+    ) : null;
+
+  const actions =
+    canOpen && openPaths.length > 0
+      ? openPaths.map((filePath) => (
+          <Button
+            key={filePath}
+            leftIcon={ExternalLink}
+            size="sm"
+            type="button"
+            variant="soft"
+            onClick={() => openFile({ path: filePath })}
+          >
+            Open {basename(filePath)}
+          </Button>
+        ))
+      : null;
 
   return (
-    <ToolCard
-      icon={icon}
-      summary={summary}
+    <TranscriptItem
+      data-testid="file-op-tool"
+      defaultOpen={allDiffs.length > 0}
+      actions={actions}
+      error={failed ? content : null}
+      icon={row.icon}
+      meta={row.meta}
+      openKey={toolCall.id ? `tc:${toolCall.id}` : undefined}
+      output={output}
+      raw={[{ label: "Arguments", value: toolCall.function.arguments }]}
       status={status}
-      isOpen={isOpen}
-      onToggle={handleToggle}
-      toolCall={toolCall}
-    >
-      {content && (
-        <Box className={styles.resultContent}>
-          <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
-        </Box>
-      )}
-    </ToolCard>
+      summary={summary}
+      target={row.target}
+      verb={row.verb}
+    />
   );
 };
 

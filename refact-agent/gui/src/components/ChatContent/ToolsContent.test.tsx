@@ -707,6 +707,7 @@ describe("ToolsContent routing", () => {
     expect(screen.queryByTestId("generic-tool")).not.toBeInTheDocument();
     expect(screen.getByTestId("exec-tool-exec")).toBeInTheDocument();
     expect(screen.getByText("Dev server")).toBeInTheDocument();
+    openToolCard();
     expect(screen.getByText("exec_service_dev")).toBeInTheDocument();
   });
 

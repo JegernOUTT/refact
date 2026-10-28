@@ -1,3 +1,5 @@
+import type { ChatContextFile } from "../../../services/refact/types";
+
 export interface ReadToolArgs {
   paths?: unknown;
   path?: unknown;
@@ -22,4 +24,14 @@ export function normalizeReadPaths(args: ReadToolArgs): string[] {
   }
 
   return [];
+}
+
+export function contextFileLineCount(file: ChatContextFile): number {
+  return file.file_content ? file.file_content.split("\n").length : 0;
+}
+
+export function filesTarget(paths: string[], fallback: string): string {
+  if (paths.length === 0) return fallback;
+  const first = paths[0].split("/").pop() ?? paths[0];
+  return paths.length > 1 ? `${first} +${paths.length - 1}` : first;
 }

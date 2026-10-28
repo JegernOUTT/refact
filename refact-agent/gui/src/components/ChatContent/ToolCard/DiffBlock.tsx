@@ -4,34 +4,9 @@ import { useAppearance } from "../../../hooks/useAppearance";
 import { useShiki } from "../../../hooks/useShiki";
 import { DiffChunk } from "../../../services/refact/types";
 import { basename } from "./utils";
+import { getDiffStats } from "./DiffBlockStats";
 import { extractCodeLines } from "./editToolHighlight";
 import styles from "./EditTool.module.css";
-
-function countNonEmptyLines(text: string): number {
-  let count = 0;
-  let hasContent = false;
-
-  for (const char of text) {
-    if (char === "\n") {
-      if (hasContent) count++;
-      hasContent = false;
-    } else if (char !== "\r" && char !== " " && char !== "\t") {
-      hasContent = true;
-    }
-  }
-
-  return hasContent ? count + 1 : count;
-}
-
-function getDiffStats(diffs: DiffChunk[]): { added: number; removed: number } {
-  let added = 0;
-  let removed = 0;
-  for (const diff of diffs) {
-    added += countNonEmptyLines(diff.lines_add);
-    removed += countNonEmptyLines(diff.lines_remove);
-  }
-  return { added, removed };
-}
 
 const EXTENSION_LANGUAGE_MAP: Partial<Record<string, string>> = {
   js: "javascript",
@@ -369,11 +344,19 @@ export const DiffBlock: React.FC<{
   displayFileName?: string;
   onOpenFile?: () => void;
   actions?: DiffHeaderAction[];
-}> = ({ diff, fileName, displayFileName, onOpenFile, actions = [] }) => {
-  const [showAll, setShowAll] = useState(false);
+  uncapped?: boolean;
+}> = ({
+  diff,
+  fileName,
+  displayFileName,
+  onOpenFile,
+  actions = [],
+  uncapped = false,
+}) => {
+  const [showAll, setShowAll] = useState(uncapped);
   const hunk = useMemo(() => buildRenderedHunk(diff), [diff]);
   const stats = useMemo(() => getDiffStats([diff]), [diff]);
-  const isLarge = hunk.lines.length > MAX_VISIBLE_DIFF_LINES;
+  const isLarge = !uncapped && hunk.lines.length > MAX_VISIBLE_DIFF_LINES;
   const visibleLines = useMemo(
     () => (showAll ? hunk.lines : hunk.lines.slice(0, MAX_VISIBLE_DIFF_LINES)),
     [hunk.lines, showAll],

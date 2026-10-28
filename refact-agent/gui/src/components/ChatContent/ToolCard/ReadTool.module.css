@@ -1,28 +1,6 @@
-.filename {
-  font-family: var(--rf-font-mono);
-  font-size: inherit;
-  color: var(--rf-color-accent);
-  cursor: pointer;
-  vertical-align: baseline;
-}
-
-.args {
-  color: var(--rf-color-muted);
-  font-family: var(--rf-font-mono);
-  font-size: inherit;
-  vertical-align: baseline;
-}
-
-.filename:hover {
-  text-decoration: underline;
-}
-
-.filenamePlain {
-  font-family: var(--rf-font-mono);
-  font-size: inherit;
-  vertical-align: baseline;
-}
-
-.resultContent {
-  composes: resultPanel from "./ToolCardBody.module.css";
+.artifacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rf-space-1);
+  min-width: 0;
 }

@@ -1,53 +1,32 @@
-.summarySuccess {
-  color: var(--rf-color-success);
-}
-
-.summaryInterrupted {
-  color: var(--rf-color-warning);
-}
-
-.countdown {
-  padding: var(--rf-space-2);
-  border: 1px solid var(--rf-border);
-  border-radius: var(--rf-radius-ctl);
-  background: color-mix(in oklab, var(--rf-surface-glass) 52%, transparent);
-  box-shadow: var(--rf-elev-panel);
-}
-
-.countdownText {
-  font-size: var(--font-size-5);
-  line-height: var(--line-height-5);
-}
-
-.description {
+.note {
   color: var(--rf-color-muted);
 }
 
 .tickStream {
-  min-height: 22px;
-  padding-top: var(--rf-space-1);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-2);
 }
 
 .tickDot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+  width: var(--rf-space-2);
+  height: var(--rf-space-2);
+  border-radius: var(--rf-radius-pill);
   background: var(--rf-color-accent);
-  animation: tickBlip 1.4s ease-in-out infinite;
+  animation: tickBlip var(--rf-motion-spin-duration) var(--rf-ease-standard)
+    infinite;
 }
 
 @keyframes tickBlip {
   0% {
-    opacity: 0;
-    transform: scale(0.6);
+    opacity: var(--rf-motion-opacity-hidden);
   }
   20% {
-    opacity: 1;
-    transform: scale(1.2);
+    opacity: var(--rf-motion-opacity-visible);
   }
   100% {
-    opacity: 0.35;
-    transform: scale(0.85);
+    opacity: var(--rf-motion-opacity-muted);
   }
 }
 
@@ -55,14 +34,4 @@
   .tickDot {
     animation: none;
   }
-}
-
-@media (prefers-reduced-transparency: reduce) {
-  .countdown {
-    background: var(--rf-surface-glass);
-  }
-}
-
-:global(.radix-themes[data-host="jetbrains"]) .countdown {
-  background: var(--rf-surface-glass);
 }

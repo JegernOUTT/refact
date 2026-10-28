@@ -1,4 +1,4 @@
-import { CircleCheck, TriangleAlert, Timer } from "lucide-react";
+import { Timer } from "lucide-react";
 import React, {
   useCallback,
   useEffect,
@@ -6,12 +6,12 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { Flex, Text } from "@radix-ui/themes";
 import { Button } from "../../ui";
-
-import { ToolCard } from "./ToolCard";
-import type { ToolStatus } from "./ToolCard";
-import { useStoredOpen } from "../useStoredOpen";
+import {
+  TranscriptItem,
+  type TranscriptFact,
+  type TranscriptStatus,
+} from "../TranscriptItem";
 import { useAppSelector } from "../../../hooks/useAppSelector";
 import { useChatActions } from "../../../hooks/useChatActions";
 import { selectMessagesById } from "../../../features/Chat/Thread/selectors";
@@ -24,7 +24,6 @@ import type {
   ToolResult,
 } from "../../../services/refact/types";
 import { normalizeEventMessageMetadata } from "../../../services/refact/types";
-import { CompactToolDetails } from "../../Tools/AgenticTool/CompactToolDetails";
 import { compactText } from "../../Tools/AgenticTool/compactPresentation";
 import styles from "./SleepToolCard.module.css";
 
@@ -187,38 +186,42 @@ function resolveSleepStartedAtMs(
   return startedAtMs;
 }
 
-const TickDots = React.memo(function TickDots({
-  ticks,
-}: {
-  ticks: SleepTick[];
-}) {
-  const visibleTicks = ticks.slice(-12);
+const MAX_VISIBLE_TICKS = 12;
+const MAX_REASON_CHARS = 160;
+
+function TickDots({ ticks }: { ticks: SleepTick[] }) {
+  if (ticks.length === 0) return null;
   return (
-    <Flex
-      align="center"
-      gap="2"
-      wrap="wrap"
-      className={styles.tickStream}
-      data-testid="sleep-tick-stream"
-    >
-      {visibleTicks.map((tick, index) => (
+    <div className={styles.tickStream} data-testid="sleep-tick-stream">
+      {ticks.slice(-MAX_VISIBLE_TICKS).map((tick, index) => (
         <span
-          key={tick.id}
           className={styles.tickDot}
           data-testid="sleep-tick-dot"
           data-tick-index={index}
+          key={tick.id}
         />
       ))}
-    </Flex>
+    </div>
   );
-});
+}
+
+function sleepOutcome(
+  isRunning: boolean,
+  result: ToolResult | undefined,
+  sleep: SleepResult | null,
+): { status: TranscriptStatus; label?: string } {
+  if (isRunning) return { status: "running" };
+  if (result?.tool_failed) return { status: "failed" };
+  if (sleep?.interrupted) return { status: "cancelled", label: "Interrupted" };
+  if (sleep) return { status: "done" };
+  if (result) return { status: "unknown", label: "Outcome unknown" };
+  return { status: "unknown", label: "Result not recorded" };
+}
 
 export const SleepToolCard: React.FC<SleepToolCardProps> = ({
   toolCall,
   threadId,
 }) => {
-  const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle] = useStoredOpen(storeKey, false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const {
     result: resultMessage,
@@ -261,13 +264,6 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({
     () => parseSleepResult(resultMessage),
     [resultMessage],
   );
-  const status: ToolStatus = isRunning
-    ? "running"
-    : resultMessage?.tool_failed
-      ? "error"
-      : sleepResult
-        ? "success"
-        : "idle";
   const ticks = useMemo(
     () =>
       messages.flatMap((message, index) => {
@@ -303,128 +299,77 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({
   );
   const remainingMs =
     remainingFromTick(sleepArgs.durationMs, ticks) ?? fallbackRemainingMs;
+  const outcome = sleepOutcome(isRunning, resultMessage, sleepResult);
 
-  const stateLabel = isRunning
+  const meta = isRunning
     ? `${formatSeconds(remainingMs)} remaining`
-    : resultMessage?.tool_failed
-      ? "Wait request failed"
-      : sleepResult?.interrupted
-        ? "Interrupted"
-        : sleepResult
-          ? "Wait ended"
-          : resultMessage
-            ? "Outcome unknown"
-            : "Result not recorded";
-  const facts = [
-    { label: "Requested wait", value: formatSeconds(sleepArgs.durationMs) },
-    ...(sleepResult
-      ? [
-          {
-            label: sleepResult.interrupted ? "Interrupted after" : "Slept",
-            value: formatCompletedSeconds(sleepResult.sleptMs),
-          },
-        ]
-      : []),
-    { label: "Recorded ticks", value: String(ticks.length) },
+    : sleepResult
+      ? formatCompletedSeconds(sleepResult.sleptMs)
+      : formatSeconds(sleepArgs.durationMs);
+
+  const summary: TranscriptFact[] = [
+    { label: "Requested", value: formatSeconds(sleepArgs.durationMs) },
   ];
+  if (sleepResult) {
+    summary.push({
+      label: sleepResult.interrupted ? "Interrupted after" : "Slept",
+      value: formatCompletedSeconds(sleepResult.sleptMs),
+    });
+  }
+  summary.push({ label: "Ticks", value: String(ticks.length) });
 
-  const handleWakeUp = useCallback(
-    (event: React.MouseEvent<HTMLButtonElement>) => {
-      event.stopPropagation();
-      if (!isRunning || currentWakeState?.pending) return;
-      setWakeState({ source, pending: true });
-      void abort(resolvedThreadId).then(
-        () => {
-          if (sourceRef.current === source) setWakeState(null);
-        },
-        (cause: unknown) => {
-          if (sourceRef.current !== source) return;
-          setWakeState({
-            source,
-            error: cause instanceof Error ? cause.message : String(cause),
-          });
-        },
-      );
-    },
-    [abort, currentWakeState?.pending, isRunning, resolvedThreadId, source],
-  );
-
-  const icon =
-    sleepResult?.interrupted === true || resultMessage?.tool_failed === true ? (
-      <span className={styles.summaryInterrupted}>
-        <TriangleAlert />
-      </span>
-    ) : sleepResult ? (
-      <span className={styles.summarySuccess}>
-        <CircleCheck />
-      </span>
-    ) : (
-      <Timer />
+  const handleWakeUp = useCallback(() => {
+    if (!isRunning || currentWakeState?.pending) return;
+    setWakeState({ source, pending: true });
+    void abort(resolvedThreadId).then(
+      () => {
+        if (sourceRef.current === source) setWakeState(null);
+      },
+      (cause: unknown) => {
+        if (sourceRef.current !== source) return;
+        setWakeState({
+          source,
+          error: cause instanceof Error ? cause.message : String(cause),
+        });
+      },
     );
+  }, [abort, currentWakeState?.pending, isRunning, resolvedThreadId, source]);
+
+  const actions = isRunning ? (
+    <>
+      <Button
+        disabled={currentWakeState?.pending}
+        leftIcon={Timer}
+        size="sm"
+        type="button"
+        variant="soft"
+        onClick={handleWakeUp}
+      >
+        Wake up (abort chat)
+      </Button>
+      <span className={styles.note}>
+        Aborts the whole chat turn, not only this wait.
+      </span>
+    </>
+  ) : null;
 
   return (
-    <div data-testid="sleep-tool-card">
-      <ToolCard
-        icon={icon}
-        summary={compactText(sleepArgs.description, 160) ?? "Wait briefly"}
-        meta={stateLabel}
-        density="compact"
-        status={status}
-        isOpen={isOpen}
-        onToggle={handleToggle}
-        toolCall={toolCall}
-        className={styles.sleepCard}
-      >
-        {isRunning && (
-          <Flex direction="column" gap="1">
-            <Button
-              type="button"
-              variant="soft"
-              disabled={currentWakeState?.pending}
-              onClick={handleWakeUp}
-            >
-              <Timer />
-              Wake up (abort chat)
-            </Button>
-            <Text size="1" color="gray">
-              Aborts the whole chat turn, not only this wait.
-            </Text>
-            {currentWakeState?.error && (
-              <Text size="1" color="red" role="alert">
-                {currentWakeState.error}
-              </Text>
-            )}
-          </Flex>
-        )}
-        <CompactToolDetails facts={facts}>
-          <Flex direction="column" gap="2" className={styles.countdown}>
-            <Flex align="center" justify="between" gap="2" wrap="wrap">
-              <Flex direction="column" gap="1">
-                <Text weight="bold" className={styles.countdownText}>
-                  {isRunning
-                    ? `Sleeping… ${formatSeconds(remainingMs)} remaining`
-                    : sleepResult?.interrupted
-                      ? `Interrupted after ${formatCompletedSeconds(
-                          sleepResult.sleptMs,
-                        )}`
-                      : sleepResult
-                        ? `Slept ${formatCompletedSeconds(
-                            sleepResult.sleptMs,
-                          )} · ${ticks.length} ticks`
-                        : stateLabel}
-                </Text>
-                {sleepArgs.description && (
-                  <Text size="1" className={styles.description}>
-                    {sleepArgs.description}
-                  </Text>
-                )}
-              </Flex>
-            </Flex>
-            <TickDots ticks={ticks} />
-          </Flex>
-        </CompactToolDetails>
-      </ToolCard>
-    </div>
+    <TranscriptItem
+      actions={actions}
+      data-density="compact"
+      data-testid="sleep-tool-card"
+      error={currentWakeState?.error}
+      icon={<Timer />}
+      meta={meta}
+      openKey={toolCall.id ? `tc:${toolCall.id}` : undefined}
+      output={<TickDots ticks={ticks} />}
+      raw={[{ label: "Arguments", value: toolCall.function.arguments }]}
+      status={outcome.status}
+      statusLabel={outcome.label}
+      summary={summary}
+      target={compactText(sleepArgs.description, MAX_REASON_CHARS) ?? "briefly"}
+      verb="Wait"
+    />
   );
 };
 

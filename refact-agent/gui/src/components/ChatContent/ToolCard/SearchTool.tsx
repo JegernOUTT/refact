@@ -1,39 +1,33 @@
-import { Search, FolderSearch } from "lucide-react";
+import { FolderSearch, FolderTree, Search } from "lucide-react";
 import React, { useMemo } from "react";
-import { Box } from "@radix-ui/themes";
-import { ToolCard, ToolStatus } from "./ToolCard";
-import { useStoredOpen } from "../useStoredOpen";
 import { ContextFileList } from "./ContextFileList";
 import { useAppSelector } from "../../../hooks/useAppSelector";
 import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/selectors";
 import { useThreadId } from "../../../features/Chat/Thread";
 import { ChatContextFile, ToolCall } from "../../../services/refact/types";
 import { ShikiCodeBlock } from "../../Markdown";
+import {
+  TranscriptClamp,
+  TranscriptItem,
+  type TranscriptStatus,
+} from "../TranscriptItem";
 import styles from "./SearchTool.module.css";
 
-type SearchToolType =
+export type SearchToolType =
   | "search_pattern"
   | "search_semantic"
   | "search_symbol_definition"
-  | "glob";
+  | "glob"
+  | "tree";
 
-interface SearchPatternArgs {
-  pattern?: string;
-  scope?: string;
-}
-
-interface SearchSemanticArgs {
-  queries?: string;
-  scope?: string;
-}
-
-interface SearchSymbolArgs {
-  symbols?: string;
-}
-
-interface GlobArgs {
-  pattern?: string;
-  path?: string;
+interface SearchArgs {
+  pattern?: unknown;
+  queries?: unknown;
+  symbols?: unknown;
+  scope?: unknown;
+  path?: unknown;
+  use_ast?: unknown;
+  max_files?: unknown;
 }
 
 interface SearchToolProps {
@@ -42,180 +36,145 @@ interface SearchToolProps {
   contextFiles?: ChatContextFile[];
 }
 
-function isSimpleWhitespace(char: string): boolean {
-  return char === " " || char === "\t" || char === "\r" || char === "\n";
+type SearchPresentation = {
+  icon: React.ReactNode;
+  verb: string;
+  target: string;
+  scope: string | null;
+  unit: string;
+};
+
+function text(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-function countMatches(content: string): number | null {
-  let count = 0;
-  let hasContent = false;
-
-  for (const char of content) {
-    if (char === "\n") {
-      if (hasContent) count++;
-      hasContent = false;
-    } else if (!isSimpleWhitespace(char)) {
-      hasContent = true;
-    }
+function parseArgs(raw: string): SearchArgs {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === "object" ? (parsed as SearchArgs) : {};
+  } catch {
+    return {};
   }
-
-  if (hasContent) count++;
-  return count > 0 ? count : null;
 }
 
-function getString(value: unknown, fallback: string): string {
-  return typeof value === "string" ? value : fallback;
+function presentation(
+  type: SearchToolType,
+  args: SearchArgs,
+): SearchPresentation {
+  const scope = text(args.scope) ?? text(args.path);
+  const visibleScope = scope && scope !== "workspace" ? scope : null;
+  switch (type) {
+    case "search_pattern":
+      return {
+        icon: <Search />,
+        verb: "Search",
+        target: text(args.pattern) ?? "pattern",
+        scope: visibleScope,
+        unit: "matches",
+      };
+    case "search_semantic":
+      return {
+        icon: <Search />,
+        verb: "Search",
+        target: text(args.queries) ?? "query",
+        scope: visibleScope,
+        unit: "results",
+      };
+    case "search_symbol_definition":
+      return {
+        icon: <Search />,
+        verb: "Find symbol",
+        target: text(args.symbols) ?? "symbol",
+        scope: null,
+        unit: "definitions",
+      };
+    case "glob":
+      return {
+        icon: <FolderSearch />,
+        verb: "Find files",
+        target: text(args.pattern) ?? "pattern",
+        scope: visibleScope,
+        unit: "files",
+      };
+    case "tree":
+      return {
+        icon: <FolderTree />,
+        verb: "Tree",
+        target: scope ?? "project",
+        scope: null,
+        unit: "lines",
+      };
+  }
+}
+
+function countLines(content: string): number {
+  return content.split("\n").filter((line) => line.trim().length > 0).length;
 }
 
 export const SearchTool: React.FC<SearchToolProps> = ({
   toolCall,
   toolType,
-  contextFiles,
+  contextFiles = [],
 }) => {
-  const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle] = useStoredOpen(storeKey);
-
   const threadId = useThreadId();
-  const maybeResult = useAppSelector((state) =>
+  const result = useAppSelector((state) =>
     selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
-
-  const args = useMemo(():
-    | SearchPatternArgs
-    | SearchSemanticArgs
-    | SearchSymbolArgs
-    | GlobArgs => {
-    try {
-      const parsed = JSON.parse(toolCall.function.arguments) as unknown;
-      return parsed && typeof parsed === "object"
-        ? (parsed as
-            | SearchPatternArgs
-            | SearchSemanticArgs
-            | SearchSymbolArgs
-            | GlobArgs)
-        : {};
-    } catch {
-      return {};
-    }
-  }, [toolCall.function.arguments]);
-
-  const status: ToolStatus = useMemo(() => {
-    if (!maybeResult && contextFiles && contextFiles.length > 0) {
-      return "success";
-    }
-    if (!maybeResult) return "running";
-    if (
-      typeof maybeResult === "object" &&
-      "tool_failed" in maybeResult &&
-      maybeResult.tool_failed
-    ) {
-      return "error";
-    }
-    return "success";
-  }, [contextFiles, maybeResult]);
-
-  const content =
-    maybeResult && typeof maybeResult.content === "string"
-      ? maybeResult.content
-      : null;
-
-  // Don't show match count on error - error messages also have content
-  const matchCount = useMemo(
-    () => (content && status !== "error" ? countMatches(content) : null),
-    [content, status],
+  const args = useMemo(
+    () => parseArgs(toolCall.function.arguments),
+    [toolCall.function.arguments],
   );
+  const view = presentation(toolType, args);
 
-  const summary = useMemo(() => {
-    switch (toolType) {
-      case "search_pattern": {
-        const patternArgs = args as SearchPatternArgs;
-        const pattern = getString(patternArgs.pattern, "pattern");
-        return (
-          <>
-            Search <span className={styles.query}>{pattern}</span>
-            {matchCount !== null && (
-              <span className={styles.count}> → {matchCount} matches</span>
-            )}
-          </>
-        );
-      }
-      case "search_semantic": {
-        const semanticArgs = args as SearchSemanticArgs;
-        const query = getString(semanticArgs.queries, "query");
-        return (
-          <>
-            Search <span className={styles.query}>&quot;{query}&quot;</span>
-            {matchCount !== null && (
-              <span className={styles.count}> → {matchCount} results</span>
-            )}
-          </>
-        );
-      }
-      case "search_symbol_definition": {
-        const symbolArgs = args as SearchSymbolArgs;
-        const symbols = getString(symbolArgs.symbols, "symbol");
-        return (
-          <>
-            Find <span className={styles.query}>{symbols}</span>
-            {matchCount !== null && (
-              <span className={styles.count}> → {matchCount} found</span>
-            )}
-          </>
-        );
-      }
-      case "glob": {
-        const globArgs = args as GlobArgs;
-        const pattern = getString(globArgs.pattern, "pattern");
-        return (
-          <>
-            Find files <span className={styles.query}>{pattern}</span>
-            {matchCount !== null && (
-              <span className={styles.count}> → {matchCount} files</span>
-            )}
-          </>
-        );
-      }
-    }
-  }, [toolType, args, matchCount]);
+  const failed = result?.tool_failed === true;
+  const status: TranscriptStatus = failed
+    ? "failed"
+    : result !== undefined || contextFiles.length > 0
+      ? "done"
+      : "running";
+  const content = typeof result?.content === "string" ? result.content : null;
+  const matchCount = content && !failed ? countLines(content) : 0;
+  const fileCount = new Set(contextFiles.map((file) => file.file_name)).size;
 
-  const meta = useMemo(() => {
-    if (toolType === "glob") {
-      const globArgs = args as GlobArgs;
-      const path = getString(globArgs.path, "");
-      if (path && path !== "workspace") {
-        return path;
-      }
-      return null;
-    }
-    if (toolType === "search_pattern" || toolType === "search_semantic") {
-      const scopeArgs = args as SearchPatternArgs | SearchSemanticArgs;
-      const scope = getString(scopeArgs.scope, "");
-      if (scope && scope !== "workspace") {
-        return scope;
-      }
-    }
-    return null;
-  }, [toolType, args]);
+  const meta = [
+    matchCount > 0 ? `${matchCount} ${view.unit}` : null,
+    fileCount > 0 && toolType !== "glob"
+      ? `in ${fileCount} file${fileCount === 1 ? "" : "s"}`
+      : null,
+    toolType === "tree" && args.use_ast === true ? "AST" : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const output =
+    content && !failed ? (
+      <div className={styles.results}>
+        <TranscriptClamp lineCount={matchCount}>
+          <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
+        </TranscriptClamp>
+        <ContextFileList files={contextFiles} />
+      </div>
+    ) : contextFiles.length > 0 ? (
+      <ContextFileList files={contextFiles} />
+    ) : null;
 
   return (
-    <ToolCard
-      icon={toolType === "glob" ? <FolderSearch /> : <Search />}
-      summary={summary}
+    <TranscriptItem
+      data-testid="search-tool"
+      error={failed ? content : null}
+      icon={view.icon}
+      input={
+        view.scope ? <code className={styles.scope}>{view.scope}</code> : null
+      }
       meta={meta}
+      openKey={toolCall.id ? `tc:${toolCall.id}` : undefined}
+      output={output}
+      raw={[{ label: "Arguments", value: toolCall.function.arguments }]}
+      sectionLabels={{ input: "Scope" }}
       status={status}
-      isOpen={isOpen}
-      onToggle={handleToggle}
-      toolCall={toolCall}
-    >
-      {content && (
-        <Box className={styles.resultContent}>
-          <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
-        </Box>
-      )}
-      {contextFiles && contextFiles.length > 0 && (
-        <ContextFileList files={contextFiles} />
-      )}
-    </ToolCard>
+      target={view.target}
+      verb={view.verb}
+    />
   );
 };
 

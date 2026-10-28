@@ -85,9 +85,11 @@ describe("WebTool", () => {
       </Provider>,
     );
 
-    await user.click(screen.getByText(/Search web/i));
+    await user.click(screen.getByRole("button", { expanded: false }));
 
-    expect(screen.getByText(/Results \(2\)/i)).toBeInTheDocument();
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
+      "2 results",
+    );
     expect(screen.getByText("Async Programming in Rust")).toBeInTheDocument();
     expect(
       screen.getByText("https://rust-lang.github.io/async-book/"),
@@ -123,9 +125,11 @@ describe("WebTool", () => {
       </Provider>,
     );
 
-    await user.click(screen.getByText(/Search web/i));
+    await user.click(screen.getByRole("button", { expanded: false }));
 
-    expect(screen.getByText(/Results \(2\)/i)).toBeInTheDocument();
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
+      "2 results",
+    );
     expect(screen.getByText("Example")).toBeInTheDocument();
     expect(screen.getByText("https://example.com")).toBeInTheDocument();
     expect(screen.getByText("Example snippet")).toBeInTheDocument();

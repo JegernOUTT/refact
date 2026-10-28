@@ -1,6 +1,13 @@
-import { CircleCheck, LoaderCircle, RotateCcw } from "lucide-react";
+import {
+  CircleCheck,
+  FilePen,
+  FilePlus,
+  FileX,
+  LoaderCircle,
+  RotateCcw,
+} from "lucide-react";
 import React, { useMemo, useCallback } from "react";
-import { Flex, Box } from "@radix-ui/themes";
+import { Box } from "@radix-ui/themes";
 import { Icon } from "../../ui";
 import { useAppSelector } from "../../../hooks/useAppSelector";
 import { useEventsBusForIDE } from "../../../hooks/useEventBusForIDE";
@@ -23,8 +30,17 @@ import {
   isUpdateTextDocToolCall,
   isUpdateTextDocByLinesToolCall,
 } from "../../Tools/types";
-
+import {
+  TranscriptClamp,
+  TranscriptItem,
+  type TranscriptStatus,
+} from "../TranscriptItem";
 import { DiffBlock, type DiffHeaderAction } from "./DiffBlock";
+import {
+  diffStatsMeta,
+  editToolFilePaths,
+  fileListTarget,
+} from "./DiffBlockStats";
 import styles from "./EditTool.module.css";
 
 interface EditToolProps {
@@ -33,46 +49,28 @@ interface EditToolProps {
   isActiveTool?: boolean;
 }
 
-function getFilePath(toolCall: ToolCall): string | null {
-  try {
-    const args = JSON.parse(toolCall.function.arguments) as Record<
-      string,
-      unknown
-    >;
-    return typeof args.path === "string" ? args.path : null;
-  } catch {
-    return null;
+type EditVerb = "Edit" | "Create" | "Delete";
+
+const CREATE_ACTIONS = new Set(["new", "add", "create"]);
+const DELETE_ACTIONS = new Set(["remove", "delete"]);
+
+function editVerb(toolName: string | undefined, diffs: DiffChunk[]): EditVerb {
+  if (diffs.length > 0) {
+    if (diffs.every((diff) => CREATE_ACTIONS.has(diff.file_action))) {
+      return "Create";
+    }
+    if (diffs.every((diff) => DELETE_ACTIONS.has(diff.file_action))) {
+      return "Delete";
+    }
+    return "Edit";
   }
+  return toolName === "create_textdoc" ? "Create" : "Edit";
 }
 
-interface FileEditItemProps {
-  fileName: string;
-  diffs: DiffChunk[];
-  onOpenFile?: (fileName: string) => void;
-  actions?: DiffHeaderAction[];
-}
-
-const FileEditItem: React.FC<FileEditItemProps> = ({
-  fileName,
-  diffs,
-  onOpenFile,
-  actions = [],
-}) => {
-  return (
-    <div className={styles.fileItem}>
-      <Box className="scrollX">
-        {diffs.map((diff, i) => (
-          <DiffBlock
-            key={i}
-            diff={diff}
-            fileName={fileName}
-            onOpenFile={onOpenFile ? () => onOpenFile(fileName) : undefined}
-            actions={actions}
-          />
-        ))}
-      </Box>
-    </div>
-  );
+const VERB_ICONS: Record<EditVerb, React.ReactNode> = {
+  Edit: <FilePen />,
+  Create: <FilePlus />,
+  Delete: <FileX />,
 };
 
 export const EditTool: React.FC<EditToolProps> = ({
@@ -93,10 +91,8 @@ export const EditTool: React.FC<EditToolProps> = ({
   );
   const canPaste = useAppSelector(selectCanPaste);
   const selectedSnippet = useAppSelector(selectSelectedSnippet);
-
-  const hasResult = useAppSelector(
-    (state) =>
-      selectToolResultByThreadAndId(state, chatId, toolCall.id) !== undefined,
+  const result = useAppSelector((state) =>
+    selectToolResultByThreadAndId(state, chatId, toolCall.id),
   );
 
   const diffIds = useMemo(
@@ -110,16 +106,15 @@ export const EditTool: React.FC<EditToolProps> = ({
   const toolDiffs = useAppSelector(selectDiffs);
 
   const hasDiffs = diffs.length > 0 || toolDiffs.length > 0;
-  const isToolBusy = isActiveTool && !hasResult && (isStreaming || isWaiting);
+  const isToolBusy =
+    isActiveTool && result === undefined && (isStreaming || isWaiting);
   const shouldRenderDiffs = hasDiffs && !isToolBusy;
   const hasSelection = selectedSnippet.code.trim().length > 0;
 
   const allDiffs = useMemo(() => {
     if (!shouldRenderDiffs) return [];
-
-    const fromProps = diffs;
     const fromStore = toolDiffs.flatMap((d) => d.content);
-    return fromProps.length > 0 ? fromProps : fromStore;
+    return diffs.length > 0 ? diffs : fromStore;
   }, [diffs, shouldRenderDiffs, toolDiffs]);
 
   const parsedToolCall = useMemo(() => {
@@ -152,9 +147,7 @@ export const EditTool: React.FC<EditToolProps> = ({
           sendToolCallToIde(parsedToolCall, results.data, chatId);
         }
       })
-      .catch(() => {
-        /* ignore */
-      });
+      .catch(() => undefined);
   }, [chatId, parsedToolCall, requestDryRun, sendToolCallToIde]);
 
   const handleReplace = useCallback(() => {
@@ -163,25 +156,16 @@ export const EditTool: React.FC<EditToolProps> = ({
     }
   }, [chatId, diffPasteBack, replaceContent, toolCall.id]);
 
-  const filePath = useMemo(() => {
-    const fromArgs = getFilePath(toolCall);
-    if (fromArgs) return fromArgs;
-    if (allDiffs.length > 0) return allDiffs[0].file_name;
-    return null;
-  }, [toolCall, allDiffs]);
-
-  const filesByName = useMemo(() => {
-    const grouped: Partial<Record<string, DiffChunk[]>> = {};
-    for (const diff of allDiffs) {
-      const fileDiffs = grouped[diff.file_name] ?? [];
-      grouped[diff.file_name] = fileDiffs.concat(diff);
-    }
-    return grouped;
-  }, [allDiffs]);
-
-  const fileNames = Object.keys(filesByName).filter(
-    (fileName): fileName is string => filesByName[fileName] !== undefined,
+  const argsPaths = useMemo(
+    () => editToolFilePaths(toolCall.function.arguments),
+    [toolCall],
   );
+  const argsPath = argsPaths.length === 1 ? argsPaths[0] : null;
+
+  const fileNames = useMemo(() => {
+    const names = Array.from(new Set(allDiffs.map((diff) => diff.file_name)));
+    return names.length > 0 ? names : argsPaths;
+  }, [allDiffs, argsPaths]);
   const isSingleFile = fileNames.length <= 1;
 
   const diffActions = useMemo(() => {
@@ -221,36 +205,56 @@ export const EditTool: React.FC<EditToolProps> = ({
     replaceContent,
   ]);
 
-  if (!shouldRenderDiffs) return null;
+  const verb = editVerb(toolCall.function.name, allDiffs);
+  const failed = result?.tool_failed === true;
+  const status: TranscriptStatus = isToolBusy
+    ? "running"
+    : failed
+      ? "failed"
+      : "done";
+  const errorText =
+    failed && typeof result.content === "string" ? result.content : null;
 
-  return isSingleFile ? (
-    <Box className="scrollX">
-      {allDiffs.map((diff, i) => (
-        <DiffBlock
-          key={i}
-          diff={diff}
-          fileName={filePath ?? diff.file_name}
-          onOpenFile={
-            canOpen
-              ? () => openFile({ path: filePath ?? diff.file_name })
-              : undefined
-          }
-          actions={diffActions}
-        />
-      ))}
-    </Box>
-  ) : (
-    <Flex direction="column" gap="1" className={styles.fileList}>
-      {fileNames.map((fileName) => (
-        <FileEditItem
-          key={fileName}
-          fileName={fileName}
-          diffs={filesByName[fileName] ?? []}
-          onOpenFile={canOpen ? (path) => openFile({ path }) : undefined}
-          actions={diffActions}
-        />
-      ))}
-    </Flex>
+  if (!shouldRenderDiffs && !isToolBusy && !errorText) return null;
+
+  const output =
+    allDiffs.length > 0 ? (
+      <TranscriptClamp>
+        <Box className={`${styles.fileList} scrollX`}>
+          {allDiffs.map((diff, i) => {
+            const fileName =
+              isSingleFile && argsPath ? argsPath : diff.file_name;
+            return (
+              <DiffBlock
+                key={`${diff.file_name}-${i}`}
+                diff={diff}
+                fileName={fileName}
+                onOpenFile={
+                  canOpen ? () => openFile({ path: fileName }) : undefined
+                }
+                actions={diffActions}
+                uncapped
+              />
+            );
+          })}
+        </Box>
+      </TranscriptClamp>
+    ) : null;
+
+  return (
+    <TranscriptItem
+      data-testid="edit-tool"
+      defaultOpen
+      error={errorText}
+      icon={VERB_ICONS[verb]}
+      meta={diffStatsMeta(allDiffs)}
+      openKey={toolCall.id ? `tc:${toolCall.id}` : undefined}
+      output={output}
+      raw={[{ label: "Arguments", value: toolCall.function.arguments }]}
+      status={status}
+      target={fileListTarget(fileNames)}
+      verb={verb}
+    />
   );
 };
 

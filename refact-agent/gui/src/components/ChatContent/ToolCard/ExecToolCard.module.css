@@ -1,65 +1,10 @@
-.card {
-  overflow: visible;
+.code {
+  font-family: var(--rf-font-mono);
 }
 
-.execTitle {
-  display: flex;
-  flex: 1 1 auto;
-  min-width: 0;
-  align-items: center;
-  gap: var(--rf-space-2);
-}
-
-.summary {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.meta {
-  display: inline-flex;
-  flex: 0 1 auto;
-  min-width: 0;
-  align-items: center;
-  justify-content: flex-end;
-  gap: var(--rf-space-2);
-}
-
-.metaText {
-  min-width: 0;
-  overflow: hidden;
+.note {
+  margin: 0;
   color: var(--rf-color-muted);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.recordedStatus :global(.rf-active-pulse) {
-  animation: none;
-}
-
-.livePreview {
-  display: block;
-  min-width: 0;
-  padding-bottom: var(--rf-space-1);
-  overflow: hidden;
-  font-family: var(--rf-font-mono);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.processChip {
-  max-width: 180px;
-  overflow: hidden;
-  font-family: var(--rf-font-mono);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ptyChip {
-  color: var(--rf-color-accent);
-  background: var(--rf-color-accent-soft);
 }
 
 .statusBadge {
@@ -97,44 +42,10 @@
   color: var(--rf-color-danger);
 }
 
-.content {
-  display: grid;
-  gap: var(--rf-space-2);
-  min-width: 0;
-}
-
-.detailsGrid {
-  display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
-  gap: var(--rf-space-1) var(--rf-space-3);
-  min-width: 0;
-  padding: var(--rf-space-2);
-  background: color-mix(in oklab, var(--rf-surface-glass) 52%, transparent);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  box-shadow: var(--rf-elev-panel);
-}
-
-.detailLabel {
-  color: var(--rf-color-muted);
-}
-
-.detailValue {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.codeValue {
-  font-family: var(--rf-font-mono);
-}
-
-.controls {
-  margin-bottom: 0;
-}
-
 .pathReferences {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rf-space-1);
   min-width: 0;
 }
 
@@ -146,75 +57,52 @@
   white-space: nowrap;
 }
 
-.logButton,
-.copyButton {
-  cursor: pointer;
-}
-
 .outputView {
-  display: flex;
-  flex-direction: column;
+  display: grid;
   gap: var(--rf-space-2);
+  min-width: 0;
 }
 
 .outputSection {
-  overflow: hidden;
-  background: color-mix(in oklab, var(--rf-surface-glass) 52%, transparent);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  box-shadow: var(--rf-elev-panel);
+  display: grid;
+  gap: var(--rf-space-2xs);
+  min-width: 0;
 }
 
-.outputHeader {
-  padding: var(--rf-space-1) var(--rf-space-2);
-  background: transparent;
-  border-bottom: var(--rf-hairline) solid var(--rf-border);
-}
-
-.outputBody {
-  composes: scrollbarThin from "../../shared/scrollbar.module.css";
-  max-height: 360px;
-  padding: var(--rf-space-2);
-  overflow-x: hidden;
-  overflow-y: auto;
+.streamLabel {
+  color: var(--rf-color-muted);
 }
 
 .outputPre {
   margin: 0;
   font-family: var(--rf-font-mono);
-  font-size: var(--rf-text-1);
-  line-height: var(--rf-line-1);
-  min-width: max-content;
+  font-size: var(--rf-transcript-mono-size);
+  line-height: var(--rf-transcript-mono-line);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
-.outputEmpty {
-  padding: var(--rf-space-2);
-  color: var(--rf-color-muted);
-}
-
-.truncationNotice {
-  padding: var(--rf-space-2);
-  background: transparent;
-  background: color-mix(in srgb, var(--rf-color-warning) 12%, transparent);
-  border: var(--rf-hairline) solid var(--rf-color-warning);
-  border-radius: var(--rf-radius-card);
-}
-
 .processList {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-2);
+  display: grid;
+  gap: var(--rf-space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .processListItem {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
   min-width: 0;
-  padding: var(--rf-space-2);
-  background: color-mix(in oklab, var(--rf-surface-glass) 48%, transparent);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  box-shadow: var(--rf-elev-panel);
+}
+
+.processLabel {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .stdinInputRow {
@@ -237,17 +125,11 @@
 }
 
 @media (prefers-reduced-transparency: reduce) {
-  .detailsGrid,
-  .outputSection,
-  .processListItem,
   .stdinInputRow {
     background: var(--rf-surface-glass);
   }
 }
 
-:global(.radix-themes[data-host="jetbrains"]) .detailsGrid,
-:global(.radix-themes[data-host="jetbrains"]) .outputSection,
-:global(.radix-themes[data-host="jetbrains"]) .processListItem,
 :global(.radix-themes[data-host="jetbrains"]) .stdinInputRow {
   background: var(--rf-surface-glass);
 }

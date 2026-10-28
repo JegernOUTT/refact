@@ -1,27 +1,39 @@
 .list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-1);
-  margin-top: 0;
-  padding-top: var(--rf-space-2);
-  border-top: 1px solid var(--rf-border);
+  display: grid;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .item {
-  overflow: hidden;
+  display: grid;
+  gap: var(--rf-space-1);
+  min-width: 0;
 }
 
-.icon {
-  flex-shrink: 0;
-  width: 12px;
-  height: 12px;
-  color: var(--rf-color-faint);
+.header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.filename,
+.filenamePlain {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .filename {
+  all: unset;
+  overflow: hidden;
   color: var(--rf-color-accent);
-  font-family: var(--rf-font-mono);
-  font-size: var(--rf-text-1);
+  text-overflow: ellipsis;
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -29,14 +41,11 @@
   text-decoration: underline;
 }
 
-.filenamePlain {
-  font-family: var(--rf-font-mono);
-  font-size: var(--rf-text-1);
+.filename:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
 }
 
-.content {
-  composes: scrollbarThin from "../../shared/scrollbar.module.css";
-  max-height: 200px;
-  padding: var(--rf-space-1) 0;
-  overflow-y: auto;
+.lines {
+  flex-shrink: 0;
+  color: var(--rf-color-muted);
 }

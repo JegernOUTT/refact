@@ -10,7 +10,6 @@ export { ExecToolCard } from "./ExecToolCard";
 export { ProcessStatusBadge } from "./ProcessStatusBadge";
 export { ProcessOutputView } from "./ProcessOutputView";
 export { ProcessStdinInput } from "./ProcessStdinInput";
-export { ProcessControls } from "./ProcessControls";
 export { ShellTool } from "./ShellTool";
 export { SubagentTool } from "./SubagentTool";
 export { EngineAnalysisTool } from "./EngineAnalysisTool";

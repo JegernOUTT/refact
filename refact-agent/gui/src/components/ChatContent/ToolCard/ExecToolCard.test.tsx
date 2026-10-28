@@ -181,13 +181,19 @@ describe("ExecToolCard", () => {
       "data-exec-process-id",
       "exec_shell_1",
     );
-    expect(screen.getByText("Run tests")).toBeInTheDocument();
-    expect(screen.getByText("exec_shell_1")).toBeInTheDocument();
-    expect(screen.getByTestId("exec-status-exited")).toHaveTextContent(
-      "exited",
+    expect(screen.getByTestId("transcript-verb")).toHaveTextContent("Run");
+    expect(screen.getByTestId("transcript-target")).toHaveTextContent(
+      "Run tests",
     );
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
+      "exit 0 · 0.2s",
+    );
+    expect(screen.queryByTestId("exec-status-exited")).toBeNull();
+    expect(screen.queryByText("exec_shell_1")).toBeNull();
 
     fireEvent.click(screen.getByText("Run tests"));
+
+    expect(screen.getByText("exec_shell_1")).toBeInTheDocument();
 
     expect(screen.getByText("npm test")).toBeInTheDocument();
     expect(screen.getByText("/workspace")).toBeInTheDocument();
@@ -338,10 +344,11 @@ describe("ExecToolCard", () => {
     expect(screen.getByText("Start dev server")).toBeInTheDocument();
     expect(
       screen.getByTestId("exec-status-running_in_background"),
-    ).toHaveTextContent("background");
-    expect(screen.getByText("exec_bg_1")).toBeInTheDocument();
+    ).toHaveTextContent("Background");
 
     fireEvent.click(screen.getByText("Start dev server"));
+
+    expect(screen.getByText("exec_bg_1")).toBeInTheDocument();
 
     expect(screen.getByText("server ready")).toBeInTheDocument();
   });
@@ -369,8 +376,11 @@ describe("ExecToolCard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Copy log path" }));
     expect(copy).toHaveBeenCalledWith("/tmp/refact/exec/exec_log_1.log");
     expect(
-      screen.getByText(/Full disk log unavailable here/u),
-    ).toBeInTheDocument();
+      screen.getByRole("button", { name: "Copy log path" }),
+    ).toHaveAttribute(
+      "title",
+      expect.stringMatching(/Full disk log unavailable here/u) as unknown,
+    );
   });
 
   test("web transcript reads use exact process, chat, endpoint and authorization without popups", async () => {
@@ -534,8 +544,11 @@ describe("ExecToolCard", () => {
       screen.queryByRole("button", { name: "Open log in IDE" }),
     ).toBeNull();
     expect(
-      screen.getByText(/requires a supported IDE bridge/u),
-    ).toBeInTheDocument();
+      screen.getByRole("button", { name: "Copy log path" }),
+    ).toHaveAttribute(
+      "title",
+      expect.stringMatching(/requires a supported IDE bridge/u) as unknown,
+    );
     expect(fallback).not.toHaveBeenCalled();
   });
 
@@ -555,11 +568,9 @@ describe("ExecToolCard", () => {
       },
     });
 
-    fireEvent.click(screen.getByText("Interactive shell"));
-
-    expect(
-      screen.getByText("Wrote 8 bytes, got 2 new chunks"),
-    ).toBeInTheDocument();
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
+      "Wrote 8 bytes, got 2 new chunks",
+    );
   });
 
   test("tty true shows PTY chip", () => {
@@ -575,6 +586,7 @@ describe("ExecToolCard", () => {
       },
     });
 
+    fireEvent.click(screen.getByText("Interactive shell"));
     expect(screen.getByTestId("exec-pty-chip")).toHaveTextContent("PTY");
   });
 
@@ -619,9 +631,9 @@ describe("ExecToolCard", () => {
   });
 
   test.each([
-    ["failed", "failed"],
-    ["killed", "killed"],
-    ["timed_out", "timed out"],
+    ["failed", "Failed"],
+    ["killed", "Killed"],
+    ["timed_out", "Timed out"],
   ] as const)("renders %s status distinctly", (status, label) => {
     renderExecTool({
       content: "output",
@@ -662,7 +674,9 @@ describe("ExecToolCard", () => {
     expect(screen.getByTestId("exec-output-view")).toBeInTheDocument();
     expect(screen.getByText(/output capped in UI/u)).toBeInTheDocument();
     expect(screen.getByTestId("exec-truncation-notice")).toBeInTheDocument();
-    expect(screen.queryByRole("heading")).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("exec-output-view").querySelector("h1, h2, h3, h4"),
+    ).toBeNull();
   });
 
   test("process_list metadata routes with an empty process array", () => {
@@ -679,7 +693,15 @@ describe("ExecToolCard", () => {
     });
 
     expect(screen.getByTestId("exec-tool-process_list")).toBeInTheDocument();
-    expect(screen.getByText("0 processes · all · all")).toBeInTheDocument();
+    expect(screen.getByTestId("transcript-verb")).toHaveTextContent(
+      "Processes",
+    );
+    expect(screen.getByTestId("transcript-target")).toHaveTextContent(
+      "all · all",
+    );
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
+      "0 processes",
+    );
     expect(
       screen.queryByText(/structured process metadata was not available/u),
     ).not.toBeInTheDocument();
@@ -688,8 +710,10 @@ describe("ExecToolCard", () => {
   test("plain text exec result without metadata degrades gracefully", () => {
     renderExecTool({ content: "legacy plain output" });
 
-    expect(screen.getByText("Run npm test")).toBeInTheDocument();
-    fireEvent.click(screen.getByText("Run npm test"));
+    expect(screen.getByTestId("transcript-target")).toHaveTextContent(
+      "npm test",
+    );
+    fireEvent.click(screen.getByText("npm test"));
     expect(screen.getByText("legacy plain output")).toBeInTheDocument();
     expect(
       screen.getByText(/structured process metadata was not available/u),
@@ -739,13 +763,16 @@ describe("ExecToolCard", () => {
       },
     });
 
-    expect(screen.queryByTestId("exec-live-preview")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("exec-live-preview")).toBeNull();
     expect(document.querySelector(".rf-text-shimmer")).toBeNull();
-    expect(screen.getByText("Recorded")).toBeInTheDocument();
+    expect(screen.queryByText("Recorded")).toBeNull();
     expect(screen.getByText("Start dev server")).toBeInTheDocument();
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
+      "background",
+    );
     expect(
       screen.getByTestId("exec-status-running_in_background"),
-    ).toHaveTextContent("background");
+    ).toHaveTextContent("Background");
   });
 
   test("running process shows latest output chunk preview", () => {
@@ -782,8 +809,8 @@ describe("ExecToolCard", () => {
       },
     });
 
-    expect(screen.getByTestId("exec-live-preview")).toHaveTextContent(
-      "stderr: server ready",
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
+      "background · server ready",
     );
   });
 
@@ -795,8 +822,8 @@ describe("ExecToolCard", () => {
       subchatLog: ["stdout:\ncompiling\nstderr:\nwarning: noisy gremlin"],
     });
 
-    expect(screen.getByTestId("exec-live-preview")).toHaveTextContent(
-      "warning: noisy gremlin",
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
+      "running · warning: noisy gremlin",
     );
   });
 

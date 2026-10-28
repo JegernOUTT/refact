@@ -694,10 +694,15 @@ describe("chat rendering regressions", () => {
       expect(container.textContent).toContain("completed.ts");
       expect(container.textContent).toContain("+3");
       expect(container.textContent).toContain("−3");
-      expect(container.textContent).not.toContain("active.ts");
       expect(container.textContent).not.toContain("+2000");
       expect(container.textContent).not.toContain("−2000");
+      expect(container.textContent).not.toContain("active new");
     });
+
+    const activeRow = container.querySelector(
+      '[data-testid="edit-tool"][data-status="running"]',
+    );
+    expect(activeRow?.textContent).toContain("active.ts");
   });
 
   it("keeps appended context files grouped with the preceding read tool", async () => {
@@ -752,7 +757,9 @@ describe("chat rendering regressions", () => {
     );
 
     await waitFor(() => {
-      expect(container.textContent).toContain("Read README.md");
+      expect(
+        container.querySelector('[data-testid="read-tool"]')?.textContent,
+      ).toContain("README.md");
     });
 
     expect(container.textContent).not.toContain("Memories (1)");
@@ -816,7 +823,9 @@ describe("chat rendering regressions", () => {
     );
 
     await waitFor(() => {
-      expect(container.textContent).toContain("Read README.md");
+      expect(
+        container.querySelector('[data-testid="read-tool"]')?.textContent,
+      ).toContain("README.md");
     });
 
     expect(container.textContent).not.toContain("Memories (1)");

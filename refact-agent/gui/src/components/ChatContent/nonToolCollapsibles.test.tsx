@@ -92,15 +92,11 @@ describe("non-tool chat collapsibles", () => {
     expect(trigger).toHaveAttribute("aria-expanded", "true");
   });
 
-  it("renders ContextFileList item header as an aria-expanded button", () => {
+  it("renders ContextFileList as a flat list with visible previews", () => {
     renderWithTheme(<ContextFileList files={[file]} />);
 
-    const trigger = screen.getByRole("button", { name: /example\.ts:1-3/i });
-    expect(trigger).toHaveAttribute("aria-expanded", "false");
-
-    fireEvent.click(trigger);
-
-    expect(trigger).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByText("export const value = 1;")).toBeInTheDocument();
+    expect(screen.getByText(/example\.ts:1-3/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { expanded: false })).toBeNull();
+    expect(screen.getByTestId("transcript-clamp")).toBeInTheDocument();
   });
 });

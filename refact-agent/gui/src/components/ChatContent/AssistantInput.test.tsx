@@ -276,9 +276,11 @@ describe("AssistantInput", () => {
 
     render(<AssistantInput message="" serverExecutedTools={aliasCalls} />);
 
-    expect(screen.getByText(/Read/i)).toBeInTheDocument();
+    expect(
+      screen.getAllByTestId("transcript-verb").map((node) => node.textContent),
+    ).toEqual(["Read", "Search", "Web"]);
     expect(screen.getByText("TODO")).toBeInTheDocument();
-    expect(screen.getByText(/Search web/i)).toBeInTheDocument();
+    expect(screen.getByText("refact")).toBeInTheDocument();
   });
 
   test("passes diffsByToolId through to serverExecutedTools so diff blocks are not repeated outside the tool card", () => {
@@ -308,7 +310,10 @@ describe("AssistantInput", () => {
       />,
     );
 
-    expect(screen.getAllByText(/debug_codex_models\.py/i)).toHaveLength(1);
+    const card = screen.getByTestId("edit-tool");
+    const mentions = screen.getAllByText(/debug_codex_models\.py/i);
+    expect(mentions.length).toBeGreaterThan(0);
+    for (const node of mentions) expect(card).toContainElement(node);
     expect(screen.queryByText(/Tasks 0\/3/i)).not.toBeInTheDocument();
   });
 

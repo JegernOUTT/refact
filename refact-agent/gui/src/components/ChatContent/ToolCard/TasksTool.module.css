@@ -1,45 +1,31 @@
-.stats {
-  color: var(--rf-color-muted);
-  font-family: var(--rf-font-mono);
-}
-
-/* While running, let the title shimmer own the color so the whole line
-   animates uniformly. */
-[data-status="running"] .stats {
-  color: inherit;
-}
-
 .taskList {
-  composes: scrollbarThin from "../../shared/scrollbar.module.css";
-  display: flex;
-  max-height: 300px;
+  display: grid;
+  gap: var(--rf-space-1);
   min-width: 0;
-  flex-direction: column;
-  gap: var(--rf-space-2);
-  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .taskItem {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
   min-width: 0;
-  padding: var(--rf-space-2);
-  color: var(--rf-color-muted);
-  background: color-mix(in oklab, var(--rf-surface-glass) 48%, transparent);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  box-shadow: var(--rf-elev-panel);
 }
 
 .taskItem svg {
-  width: 14px;
-  height: 14px;
   flex-shrink: 0;
+  width: var(--rf-icon-sm);
+  height: var(--rf-icon-sm);
 }
 
 .pending {
   color: var(--rf-color-muted);
 }
 
-.inProgress {
+.inProgress,
+.in_progress {
   color: var(--rf-color-accent);
 }
 
@@ -49,14 +35,4 @@
 
 .failed {
   color: var(--rf-color-danger);
-}
-
-@media (prefers-reduced-transparency: reduce) {
-  .taskItem {
-    background: var(--rf-surface-glass);
-  }
-}
-
-:global(.radix-themes[data-host="jetbrains"]) .taskItem {
-  background: var(--rf-surface-glass);
 }

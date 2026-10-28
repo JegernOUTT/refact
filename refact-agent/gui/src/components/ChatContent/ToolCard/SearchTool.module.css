@@ -1,16 +1,9 @@
-.query {
+.results {
+  display: grid;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.scope {
   font-family: var(--rf-font-mono);
-  font-size: var(--rf-text-2);
-  color: var(--rf-color-accent);
-  vertical-align: baseline;
-}
-
-.count {
-  color: var(--rf-color-muted);
-  vertical-align: baseline;
-  white-space: nowrap;
-}
-
-.resultContent {
-  composes: resultPanel from "./ToolCardBody.module.css";
 }

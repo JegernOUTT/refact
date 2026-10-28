@@ -1,9 +1,6 @@
 import { Globe, Search } from "lucide-react";
 import React, { useMemo } from "react";
-import { Box, Flex, Text } from "@radix-ui/themes";
 
-import { ToolCard, ToolStatus } from "./ToolCard";
-import { useStoredOpen } from "../useStoredOpen";
 import { ContextFileList } from "./ContextFileList";
 import { useAppSelector } from "../../../hooks/useAppSelector";
 import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/selectors";
@@ -11,18 +8,23 @@ import { useThreadId } from "../../../features/Chat/Thread";
 import { ChatContextFile, ToolCall } from "../../../services/refact/types";
 import { Link } from "../../Link";
 import { Markdown, ShikiCodeBlock } from "../../Markdown";
+import {
+  TranscriptClamp,
+  TranscriptItem,
+  type TranscriptStatus,
+} from "../TranscriptItem";
 import styles from "./WebTool.module.css";
 
 type WebToolType = "web" | "web_search";
 
 interface WebArgs {
   url?: string;
-}
-
-interface WebSearchArgs {
   query?: string;
   num_results?: number | string;
 }
+
+const MAX_RESULTS = 50;
+const MAX_MARKDOWN_CHARS = 50_000;
 
 type SearchResult = {
   title: string;
@@ -132,171 +134,124 @@ function extractStructuredSearchResults(
   const raw = extra?.search_results;
   if (!Array.isArray(raw)) return [];
 
-  return raw.filter(isSearchResult).slice(0, 50);
+  return raw.filter(isSearchResult).slice(0, MAX_RESULTS);
 }
 
 export const WebTool: React.FC<WebToolProps> = ({
   toolCall,
   toolType,
-  contextFiles,
+  contextFiles = [],
 }) => {
-  const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle] = useStoredOpen(storeKey);
-
   const threadId = useThreadId();
-  const maybeResult = useAppSelector((state) =>
+  const result = useAppSelector((state) =>
     selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
 
-  const args = useMemo((): WebArgs | WebSearchArgs => {
+  const args = useMemo((): WebArgs => {
     try {
-      return JSON.parse(toolCall.function.arguments) as WebArgs | WebSearchArgs;
+      return JSON.parse(toolCall.function.arguments) as WebArgs;
     } catch {
       return {};
     }
   }, [toolCall.function.arguments]);
 
-  const status: ToolStatus = useMemo(() => {
-    if (!maybeResult) return "running";
-    if (
-      typeof maybeResult === "object" &&
-      "tool_failed" in maybeResult &&
-      maybeResult.tool_failed
-    ) {
-      return "error";
-    }
-    return "success";
-  }, [maybeResult]);
-
-  const content =
-    maybeResult && typeof maybeResult.content === "string"
-      ? maybeResult.content
-      : null;
+  const failed = result?.tool_failed === true;
+  const status: TranscriptStatus = !result
+    ? "running"
+    : failed
+      ? "failed"
+      : "done";
+  const content = typeof result?.content === "string" ? result.content : null;
 
   const searchResults = useMemo(() => {
-    if (toolType !== "web_search") return [] as SearchResult[];
-
-    const structured = extractStructuredSearchResults(maybeResult?.extra);
+    if (toolType !== "web_search") return [];
+    const structured = extractStructuredSearchResults(result?.extra);
     if (structured.length > 0) return structured;
-    if (!content) return [] as SearchResult[];
-    return parseSearchResultsFromText(content).slice(0, 50);
-  }, [toolType, content, maybeResult?.extra]);
+    if (!content) return [];
+    return parseSearchResultsFromText(content).slice(0, MAX_RESULTS);
+  }, [toolType, content, result?.extra]);
 
-  const summary = useMemo(() => {
-    if (toolType === "web") {
-      const webArgs = args as WebArgs;
-      const url = webArgs.url ?? "page";
-      return (
-        <>
-          Fetch <span className={styles.url}>{extractDomain(url)}</span>
-        </>
-      );
-    }
+  const isSearch = toolType === "web_search";
+  const target = isSearch
+    ? args.query ?? "query"
+    : extractDomain(args.url ?? "page");
 
-    const searchArgs = args as WebSearchArgs;
-    const query = searchArgs.query ?? "query";
-    return (
-      <>
-        Search web <span className={styles.query}>&quot;{query}&quot;</span>
-      </>
-    );
-  }, [toolType, args]);
-
-  const meta = useMemo(() => {
-    if (toolType !== "web_search") return undefined;
-
-    if (searchResults.length > 0) {
-      return `${searchResults.length} result${
-        searchResults.length === 1 ? "" : "s"
-      }`;
-    }
-
-    const requested = (args as WebSearchArgs).num_results;
-    if (typeof requested === "number") return `up to ${requested}`;
-    if (typeof requested === "string" && requested.trim()) {
-      return `up to ${requested.trim()}`;
-    }
-
-    return undefined;
-  }, [toolType, searchResults.length, args]);
+  const requested =
+    typeof args.num_results === "number"
+      ? String(args.num_results)
+      : args.num_results?.trim();
+  const meta = !isSearch
+    ? undefined
+    : searchResults.length > 0
+      ? `${searchResults.length} result${searchResults.length === 1 ? "" : "s"}`
+      : requested
+        ? `up to ${requested}`
+        : undefined;
 
   const shouldRenderMarkdown =
-    !!content && content.length <= 50_000 && looksLikeMarkdown(content);
+    !!content &&
+    content.length <= MAX_MARKDOWN_CHARS &&
+    looksLikeMarkdown(content);
+
+  const results =
+    searchResults.length > 0 ? (
+      <ul className={styles.resultList}>
+        {searchResults.map((item, idx) => {
+          const safeUrl = isSafeHttpUrl(item.url) ? item.url : "";
+          return (
+            <li className={styles.resultItem} key={`${item.url}-${idx}`}>
+              {safeUrl ? (
+                <Link href={safeUrl} rel="noopener noreferrer" target="_blank">
+                  {item.title}
+                </Link>
+              ) : (
+                <span>{item.title}</span>
+              )}
+              {safeUrl && <span className={styles.inlineCode}>{safeUrl}</span>}
+              {item.snippet && (
+                <span className={styles.snippet}>{item.snippet}</span>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    ) : content && !failed ? (
+      shouldRenderMarkdown ? (
+        <div className={styles.markdownContent}>
+          <Markdown>{content}</Markdown>
+        </div>
+      ) : (
+        <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
+      )
+    ) : null;
+
+  const output =
+    results !== null || contextFiles.length > 0 ? (
+      <div className={styles.output}>
+        {results && <TranscriptClamp>{results}</TranscriptClamp>}
+        <ContextFileList files={contextFiles} />
+      </div>
+    ) : null;
 
   return (
-    <ToolCard
-      icon={toolType === "web_search" ? <Search /> : <Globe />}
-      summary={summary}
+    <TranscriptItem
+      data-testid="web-tool"
+      error={failed ? content : null}
+      icon={isSearch ? <Search /> : <Globe />}
+      input={
+        !isSearch && args.url ? (
+          <code className={styles.inlineCode}>{args.url}</code>
+        ) : null
+      }
       meta={meta}
+      openKey={toolCall.id ? `tc:${toolCall.id}` : undefined}
+      output={output}
+      raw={[{ label: "Arguments", value: toolCall.function.arguments }]}
+      sectionLabels={{ input: "URL" }}
       status={status}
-      isOpen={isOpen}
-      onToggle={handleToggle}
-      toolCall={toolCall}
-    >
-      {toolType === "web_search" && searchResults.length > 0 && (
-        <Box>
-          <Text size="1" color="gray">
-            Results ({searchResults.length})
-          </Text>
-          <Box className={`${styles.resultList} rf-stagger`}>
-            {searchResults.map((result, idx) => {
-              const safeUrl = isSafeHttpUrl(result.url) ? result.url : "";
-              return (
-                <Box
-                  key={`${result.url}-${idx}`}
-                  className={`${styles.resultItem} rf-enter-rise rf-pressable`}
-                >
-                  <Flex direction="column" gap="1">
-                    {safeUrl ? (
-                      <Link
-                        href={safeUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        size="2"
-                      >
-                        {result.title}
-                      </Link>
-                    ) : (
-                      <Text size="2" weight="medium">
-                        {result.title}
-                      </Text>
-                    )}
-
-                    {safeUrl && (
-                      <Text size="1" color="gray" className={styles.inlineCode}>
-                        {safeUrl}
-                      </Text>
-                    )}
-
-                    {result.snippet && (
-                      <Text size="1" color="gray">
-                        {result.snippet}
-                      </Text>
-                    )}
-                  </Flex>
-                </Box>
-              );
-            })}
-          </Box>
-        </Box>
-      )}
-
-      {content && !(toolType === "web_search" && searchResults.length > 0) && (
-        <Box className={styles.resultContent}>
-          {shouldRenderMarkdown ? (
-            <Box className={styles.markdownContent}>
-              <Markdown>{content}</Markdown>
-            </Box>
-          ) : (
-            <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
-          )}
-        </Box>
-      )}
-
-      {contextFiles && contextFiles.length > 0 && (
-        <ContextFileList files={contextFiles} />
-      )}
-    </ToolCard>
+      target={target}
+      verb="Web"
+    />
   );
 };
 

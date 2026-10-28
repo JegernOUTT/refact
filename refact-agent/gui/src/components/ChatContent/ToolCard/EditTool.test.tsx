@@ -3,6 +3,7 @@ import { http, HttpResponse } from "msw";
 import { render, screen } from "../../../utils/test-utils";
 import type { DiffChunk, ToolCall } from "../../../services/refact/types";
 import { EditTool } from "./EditTool";
+import { editToolFilePaths } from "./DiffBlockStats";
 import { server } from "../../../utils/mockServer";
 
 function makeToolCall(id: string): ToolCall {
@@ -192,7 +193,7 @@ describe("EditTool", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("caps very large edit hunks behind a show-more control", async () => {
+  it("renders a large hunk in full inside the transcript clamp", () => {
     const diff: DiffChunk = {
       file_name: "src/large.ts",
       file_action: "edit",
@@ -204,7 +205,7 @@ describe("EditTool", () => {
       ),
     };
 
-    const { user } = render(
+    render(
       <EditTool
         toolCall={makeToolCall("edit-2")}
         diffs={[diff]}
@@ -212,14 +213,82 @@ describe("EditTool", () => {
       />,
     );
 
-    expect(screen.getByText("new-240")).toBeInTheDocument();
-    expect(screen.queryByText("new-245")).not.toBeInTheDocument();
+    expect(screen.getByText("new-245")).toBeInTheDocument();
+    expect(screen.getByTestId("transcript-clamp")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /more diff lines/i }),
+    ).toBeNull();
+  });
 
-    await user.click(
-      screen.getByRole("button", { name: "Show 5 more diff lines" }),
+  it("shows an open unified row with verb, file target and diff stats", () => {
+    const diff: DiffChunk = {
+      file_name: "src/demo.ts",
+      file_action: "edit",
+      line1: 1,
+      line2: 1,
+      lines_remove: "a\nb\n",
+      lines_add: "c\n",
+    };
+
+    render(
+      <EditTool
+        toolCall={makeToolCall("edit-row")}
+        diffs={[diff]}
+        isActiveTool={false}
+      />,
     );
 
-    expect(screen.getByText("new-245")).toBeInTheDocument();
+    expect(screen.getByTestId("transcript-verb")).toHaveTextContent("Edit");
+    expect(screen.getByTestId("transcript-target")).toHaveTextContent(
+      "demo.ts",
+    );
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent("+1 −2");
+    expect(screen.getByTestId("transcript-toggle")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+  });
+
+  it("names apply_patch targets from the patch headers", () => {
+    const patch = [
+      "*** Begin Patch",
+      "*** Update File: src/a.ts",
+      "*** Add File: src/b.ts",
+      "+++ b/src/c.ts",
+      "+++ /dev/null",
+      "*** End Patch",
+    ].join("\n");
+
+    expect(editToolFilePaths(JSON.stringify({ patch }))).toEqual([
+      "src/a.ts",
+      "src/b.ts",
+      "src/c.ts",
+    ]);
+    expect(editToolFilePaths(JSON.stringify({ path: "src/x.ts" }))).toEqual([
+      "src/x.ts",
+    ]);
+    expect(editToolFilePaths("not json")).toEqual([]);
+  });
+
+  it("labels created files with the Create verb", () => {
+    const diff: DiffChunk = {
+      file_name: "src/fresh.ts",
+      file_action: "new",
+      line1: 1,
+      line2: 1,
+      lines_remove: "",
+      lines_add: "hello\n",
+    };
+
+    render(
+      <EditTool
+        toolCall={makeToolCall("edit-create")}
+        diffs={[diff]}
+        isActiveTool={false}
+      />,
+    );
+
+    expect(screen.getByTestId("transcript-verb")).toHaveTextContent("Create");
   });
 
   it("does not show a large-diff cap at the visible-line boundary", () => {

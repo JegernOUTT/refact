@@ -196,10 +196,8 @@
 }
 
 .fileList {
+  display: grid;
   gap: var(--rf-space-1);
-}
-
-.fileItem {
   min-width: 0;
 }
 

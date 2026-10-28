@@ -1,10 +1,14 @@
-import { CircleCheck, Circle, CircleX, RefreshCw } from "lucide-react";
+import {
+  Circle,
+  CircleCheck,
+  CircleX,
+  ListChecks,
+  LoaderCircle,
+} from "lucide-react";
 import React, { useMemo } from "react";
-import { Flex, Text, Box } from "@radix-ui/themes";
-import { ToolCard, ToolStatus } from "./ToolCard";
-import { useStoredOpen } from "../useStoredOpen";
 import { useToolCallActivity } from "./useToolCallActivity";
 import { ToolCall } from "../../../services/refact/types";
+import { TranscriptItem, type TranscriptStatus } from "../TranscriptItem";
 import styles from "./TasksTool.module.css";
 
 interface Task {
@@ -21,35 +25,15 @@ interface TasksToolProps {
   toolCall: ToolCall;
 }
 
-const TaskStatusIcon: React.FC<{ status: Task["status"] }> = ({ status }) => {
-  switch (status) {
-    case "completed":
-      return <CircleCheck className={styles.completed} />;
-    case "failed":
-      return <CircleX className={styles.failed} />;
-    case "in_progress":
-      return <RefreshCw className={`${styles.inProgress} rf-spin`} />;
-    default:
-      return <Circle className={styles.pending} />;
-  }
-};
-
-const TaskItem: React.FC<{ task: Task }> = ({ task }) => {
-  return (
-    <Flex align="center" gap="2" className={`${styles.taskItem} rf-enter-rise`}>
-      <TaskStatusIcon status={task.status} />
-      <Text size="1" className={styles[task.status]}>
-        {task.content}
-      </Text>
-    </Flex>
-  );
+const STATUS_ICONS: Record<Task["status"], React.ReactNode> = {
+  completed: <CircleCheck className={styles.completed} />,
+  failed: <CircleX className={styles.failed} />,
+  in_progress: <LoaderCircle className={`${styles.inProgress} rf-spin`} />,
+  pending: <Circle className={styles.pending} />,
 };
 
 export const TasksTool: React.FC<TasksToolProps> = ({ toolCall }) => {
-  const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle] = useStoredOpen(storeKey);
-
-  const { result: maybeResult, isRunning } = useToolCallActivity(toolCall.id);
+  const { result, isRunning } = useToolCallActivity(toolCall.id);
 
   const tasks = useMemo((): Task[] => {
     try {
@@ -60,54 +44,53 @@ export const TasksTool: React.FC<TasksToolProps> = ({ toolCall }) => {
     }
   }, [toolCall.function.arguments]);
 
-  const status: ToolStatus = useMemo(() => {
-    if (!maybeResult) return isRunning ? "running" : "idle";
-    if (
-      typeof maybeResult === "object" &&
-      "tool_failed" in maybeResult &&
-      maybeResult.tool_failed
-    ) {
-      return "error";
-    }
-    return "success";
-  }, [maybeResult, isRunning]);
+  const failed = result?.tool_failed === true;
+  const status: TranscriptStatus = isRunning
+    ? "running"
+    : failed
+      ? "failed"
+      : result
+        ? "done"
+        : "unknown";
+  const completed = tasks.filter((t) => t.status === "completed").length;
+  const current =
+    tasks.find((t) => t.status === "in_progress") ??
+    tasks.find((t) => t.status === "pending");
 
-  const stats = useMemo(() => {
-    const completed = tasks.filter((t) => t.status === "completed").length;
-    const total = tasks.length;
-    return { completed, total };
-  }, [tasks]);
-
-  const summary = useMemo(() => {
-    if (tasks.length === 0) return "Update tasks";
-    return (
-      <>
-        Tasks{" "}
-        <span className={styles.stats}>
-          {stats.completed}/{stats.total}
-        </span>
-      </>
-    );
-  }, [tasks.length, stats]);
+  const output =
+    tasks.length > 0 ? (
+      <ul className={styles.taskList}>
+        {tasks.map((task) => (
+          <li
+            className={styles.taskItem}
+            data-status={task.status}
+            key={task.id}
+          >
+            {STATUS_ICONS[task.status]}
+            <span className={styles[task.status]}>{task.content}</span>
+          </li>
+        ))}
+      </ul>
+    ) : null;
 
   return (
-    <ToolCard
-      icon={maybeResult ? <CircleCheck /> : <Circle />}
-      summary={summary}
-      meta={!maybeResult && !isRunning ? "Result not recorded" : undefined}
+    <TranscriptItem
+      data-testid="tasks-tool"
+      error={
+        failed && typeof result.content === "string" ? result.content : null
+      }
+      icon={<ListChecks />}
+      meta={current?.content}
+      openKey={toolCall.id ? `tc:${toolCall.id}` : undefined}
+      output={output}
+      raw={[{ label: "Arguments", value: toolCall.function.arguments }]}
       status={status}
-      isOpen={isOpen}
-      onToggle={handleToggle}
-      toolCall={toolCall}
-    >
-      {tasks.length > 0 && (
-        <Box className={`${styles.taskList} rf-stagger`}>
-          {tasks.map((task) => (
-            <TaskItem key={task.id} task={task} />
-          ))}
-        </Box>
-      )}
-    </ToolCard>
+      statusLabel={!result && !isRunning ? "Result not recorded" : undefined}
+      target={
+        tasks.length > 0 ? `${completed} / ${tasks.length} done` : "update"
+      }
+      verb="Tasks"
+    />
   );
 };
 

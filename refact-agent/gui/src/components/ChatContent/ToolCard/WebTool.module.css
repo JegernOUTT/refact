@@ -1,9 +1,3 @@
-.url {
-  font-family: var(--rf-font-mono);
-  font-size: var(--rf-text-2);
-  color: var(--rf-color-accent);
-}
-
 .inlineCode {
   min-width: 0;
   overflow-wrap: anywhere;
@@ -11,26 +5,34 @@
   color: var(--rf-color-muted);
 }
 
-.query {
-  color: var(--rf-color-accent);
+.output {
+  display: grid;
+  gap: var(--rf-space-2);
+  min-width: 0;
 }
 
 .resultList {
-  composes: resultList from "./ToolCardBody.module.css";
+  display: grid;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .resultItem {
-  composes: resultItem from "./ToolCardBody.module.css";
+  display: grid;
+  gap: var(--rf-space-2xs);
+  min-width: 0;
 }
 
-.resultContent {
-  composes: resultPanel from "./ToolCardBody.module.css";
+.snippet {
+  color: var(--rf-color-muted);
 }
 
 .markdownContent {
   width: 100%;
   min-width: 0;
-  line-height: var(--rf-line);
 }
 
 .markdownContent :global(p) {

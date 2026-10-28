@@ -275,17 +275,13 @@ describe("SleepToolCard", () => {
     ]);
 
     expect(screen.queryByTestId("sleep-tick-dot")).toBeNull();
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
+      "15s remaining",
+    );
     fireEvent.click(screen.getByRole("button", { expanded: false }));
-    expect(
-      screen.getByTestId("sleep-tick-stream").closest("[inert]"),
-    ).not.toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "More details" }));
     const dots = screen.getAllByTestId("sleep-tick-dot");
     expect(dots).toHaveLength(3);
     expect(dots[0]?.className).toMatch(/tickDot/u);
-    expect(
-      screen.getAllByText(/Sleeping… 15s remaining/u).length,
-    ).toBeGreaterThan(0);
   });
 
   test("completion shows summary", () => {
@@ -298,12 +294,15 @@ describe("SleepToolCard", () => {
       toolResult({ sleptMs: 30_000 }),
     ]);
 
-    expect(screen.getByRole("button", { expanded: false })).toHaveTextContent(
-      "Wait ended",
+    expect(screen.getByTestId("transcript-verb")).toHaveTextContent("Wait");
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent("30s");
+    expect(screen.getByTestId("sleep-tool-card")).toHaveAttribute(
+      "data-status",
+      "done",
     );
     fireEvent.click(screen.getByRole("button", { expanded: false }));
-    fireEvent.click(screen.getByRole("button", { name: "More details" }));
-    expect(screen.getByText("Slept 30s · 5 ticks")).toBeInTheDocument();
+    expect(screen.getByText("Slept")).toBeInTheDocument();
+    expect(screen.getByText("5")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /wake up/i })).toBeNull();
   });
 
@@ -314,27 +313,28 @@ describe("SleepToolCard", () => {
       toolResult({ sleptMs: 12_000, interrupted: true }),
     ]);
 
-    const row = screen.getByRole("button", { expanded: false });
-    expect(row).toHaveTextContent("Interrupted");
-    expect(row.closest("[data-status]")).toHaveAttribute(
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "Interrupted",
+    );
+    expect(screen.getByTestId("sleep-tool-card")).toHaveAttribute(
       "data-status",
-      "success",
+      "cancelled",
     );
     expect(screen.queryByRole("button", { name: /wake up/i })).toBeNull();
-    fireEvent.click(row);
-    fireEvent.click(screen.getByRole("button", { name: "More details" }));
-    expect(screen.getByText("Interrupted after 12s")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { expanded: false }));
+    expect(screen.getByText("Interrupted after")).toBeInTheDocument();
+    expect(screen.getAllByText("12s").length).toBeGreaterThan(0);
   });
 
   test("does not declare completion from a local countdown timeout or reopen on result", () => {
-    const { store, container } = renderSleepCard();
+    const { store } = renderSleepCard();
     const row = screen.getByRole("button", { expanded: false });
-    expect(container.querySelector('[data-density="compact"]')).not.toBeNull();
+    const card = screen.getByTestId("sleep-tool-card");
     act(() => {
       vi.advanceTimersByTime(30_000);
     });
     expect(row).toHaveTextContent("0s remaining");
-    expect(row).not.toHaveTextContent("Wait ended");
+    expect(card).toHaveAttribute("data-status", "running");
     act(() => {
       store.dispatch(
         backUpMessages({
@@ -343,7 +343,8 @@ describe("SleepToolCard", () => {
         }),
       );
     });
-    expect(row).toHaveTextContent("Wait ended");
+    expect(card).toHaveAttribute("data-status", "done");
+    expect(row).toHaveTextContent("30s");
     expect(row).toHaveAttribute("aria-expanded", "false");
   });
 
@@ -354,9 +355,10 @@ describe("SleepToolCard", () => {
     expect(
       screen.getByRole("button", { name: /wake up/i }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "More details" }),
-    ).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByTestId("transcript-raw")).toHaveAttribute(
+      "data-open",
+      "false",
+    );
     unmount();
     expect(vi.getTimerCount()).toBeLessThan(timerCount);
   });
@@ -365,7 +367,7 @@ describe("SleepToolCard", () => {
     renderSleepCard([
       { role: "tool", tool_call_id: "call-sleep", content: "{}" },
     ]);
-    expect(screen.getByRole("button", { expanded: false })).toHaveTextContent(
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
       "Outcome unknown",
     );
     expect(screen.queryByRole("button", { name: /wake up/i })).toBeNull();
@@ -386,7 +388,7 @@ describe("SleepToolCard", () => {
         }),
       );
     });
-    expect(screen.getByRole("button", { expanded: true })).toHaveTextContent(
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
       "Result not recorded",
     );
     expect(screen.queryByRole("button", { name: /wake up/i })).toBeNull();
@@ -420,7 +422,7 @@ describe("SleepToolCard", () => {
         }),
       );
     });
-    expect(screen.getByRole("button", { expanded: true })).toHaveTextContent(
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
       "Result not recorded",
     );
     expect(screen.queryByRole("button", { name: /wake up/i })).toBeNull();
