@@ -22,5 +22,6 @@ export type {
   TranscriptRawProps,
 } from "./TranscriptParts";
 export * from "./statusVocabulary";
+export * from "./unrecordedResult";
 export { useTranscriptCollapse } from "./useTranscriptCollapse";
 export { useTranscriptAnchoredToggle } from "./useTranscriptAnchoredToggle";
