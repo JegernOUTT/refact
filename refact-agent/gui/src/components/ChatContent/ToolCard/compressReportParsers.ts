@@ -1,4 +1,8 @@
-import type { ReportData } from "./ReportToolCard";
+export interface CompressReportData {
+  summary: string;
+  meta: string;
+  markdown: string;
+}
 
 function formatNumber(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
@@ -50,7 +54,7 @@ function numberOrZero(value: unknown): number {
 const PROBE_TYPES: readonly string[] = ["ctx_probe", "compress_chat_probe"];
 const APPLY_TYPES: readonly string[] = ["ctx_apply", "compress_chat_apply"];
 
-export function extractProbeReport(content: string): ReportData | null {
+export function extractProbeReport(content: string): CompressReportData | null {
   try {
     const raw = JSON.parse(content) as unknown;
     if (!isRecord(raw)) return null;
@@ -125,6 +129,7 @@ export function extractProbeReport(content: string): ReportData | null {
       summary: `Chat analysis: ${data.messages_count} messages, ~${formatNumber(
         data.total_tokens,
       )} tokens`,
+      meta: `~${formatNumber(totalGains)} tokens reclaimable`,
       markdown: lines.filter((l): l is string => l !== null).join("\n"),
     };
   } catch {
@@ -132,7 +137,7 @@ export function extractProbeReport(content: string): ReportData | null {
   }
 }
 
-export function extractApplyReport(content: string): ReportData | null {
+export function extractApplyReport(content: string): CompressReportData | null {
   try {
     const raw = JSON.parse(content) as unknown;
     if (!isRecord(raw)) return null;
@@ -196,6 +201,9 @@ export function extractApplyReport(content: string): ReportData | null {
       summary: `Compressed: ${formatNumber(
         data.before_tokens,
       )} → ${formatNumber(data.after_tokens)} tokens`,
+      meta: `${data.before_message_count} → ${
+        data.after_message_count
+      } messages · saved ~${formatNumber(saved)} tokens`,
       markdown: lines.filter((l): l is string => l !== null).join("\n"),
     };
   } catch {

@@ -89,7 +89,9 @@ function snapshot(chatId: string, pendingQuestions: PendingQuestionSet[]) {
 }
 
 function header(): HTMLElement | null {
-  return document.querySelector("section > div > button[aria-expanded]");
+  return document.querySelector<HTMLElement>(
+    '[data-testid="transcript-toggle"]',
+  );
 }
 
 function headerState(open: boolean): HTMLElement {
@@ -362,7 +364,7 @@ describe("AskQuestionsTool", () => {
       preloadedState: { chat },
     });
     expect(screen.queryByRole("button", { name: "Submit Answers" })).toBeNull();
-    expect(screen.getByText("Questions answered")).toBeInTheDocument();
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent("answered");
 
     runtime.thread.pending_questions[0].status = "cancelled";
     rerender(<AskQuestionsTool toolCall={toolCall()} />);
@@ -396,21 +398,20 @@ describe("AskQuestionsTool", () => {
     const card = container.querySelector("section");
     expect(card).toHaveAttribute("data-open", "true");
     expect(card).toHaveTextContent("Choose scope");
-    expect(card).toHaveTextContent("Needs answer");
-    expect(container.querySelector('[data-density="compact"]')).not.toBeNull();
-    expect(header()).toBeNull();
+    expect(card).toHaveTextContent("Needs you");
+    headerState(true);
     const submit = screen.getByRole("button", { name: "Submit Answers" });
     expect(submit).toBeDisabled();
     await user.click(screen.getByRole("radio", { name: "GUI" }));
     expect(fetchMock).not.toHaveBeenCalled();
     await user.click(submit);
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-    expect(card).toHaveTextContent("Needs answer");
+    expect(card).toHaveTextContent("Awaiting confirmation");
     expect(
       screen.getByText("Answers sent, awaiting confirmation."),
     ).toBeInTheDocument();
     expect(card).toHaveAttribute("data-open", "true");
-    expect(header()).toBeNull();
+    headerState(true);
     act(() => {
       store.dispatch(
         snapshot(chat.current_thread_id, [
@@ -423,7 +424,7 @@ describe("AskQuestionsTool", () => {
       );
     });
     const row = await waitFor(() => headerState(false));
-    expect(row).toHaveTextContent("Answered");
+    expect(row).toHaveTextContent("answered");
     await user.click(row);
     expect(row).toHaveAttribute("aria-expanded", "true");
   });
@@ -449,7 +450,7 @@ describe("AskQuestionsTool", () => {
       "data-open",
       "true",
     );
-    expect(header()).toBeNull();
+    headerState(true);
     expect(
       screen.getByRole("button", { name: "Submit Answers" }),
     ).toBeInTheDocument();
@@ -480,7 +481,7 @@ describe("AskQuestionsTool", () => {
       { store },
     );
     const row = headerState(false);
-    expect(row).toHaveTextContent("Questions answered");
+    expect(row).toHaveTextContent("answered");
     await view.user.click(row);
     expect(row).toHaveAttribute("aria-expanded", "true");
     view.unmount();
@@ -490,7 +491,7 @@ describe("AskQuestionsTool", () => {
       </CollapsibleStoreProvider>,
       { store },
     );
-    expect(headerState(true)).toHaveTextContent("Questions answered");
+    expect(headerState(true)).toHaveTextContent("answered");
   });
 
   test("legacy form questions stay expanded until a form answer arrives, then collapse and reopen", async () => {
@@ -508,7 +509,7 @@ describe("AskQuestionsTool", () => {
       "data-open",
       "true",
     );
-    expect(header()).toBeNull();
+    headerState(true);
     act(() => {
       store.dispatch(
         backUpMessages({
@@ -525,10 +526,10 @@ describe("AskQuestionsTool", () => {
       );
     });
     const row = await waitFor(() => headerState(false));
-    expect(row).toHaveTextContent("Questions answered");
+    expect(row).toHaveTextContent("answered");
     await user.click(row);
     expect(row).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByText("→ One larger card")).toBeInTheDocument();
+    expect(screen.getByText("One larger card")).toBeInTheDocument();
   });
 
   test.each(["answered", "cancelled"] as const)(
@@ -562,25 +563,13 @@ describe("AskQuestionsTool", () => {
       );
       const card = container.querySelector("section");
       expect(card).toHaveTextContent(
-        status === "answered" ? "Answered" : "Withdrawn",
+        status === "answered" ? "answered" : "Withdrawn",
       );
-      if (status === "answered") {
-        await user.click(headerState(false));
-        expect(
-          screen.getByRole("button", { name: "More details" }),
-        ).toHaveAttribute("aria-expanded", "false");
-        expect(screen.getByText("Engine").closest("[inert]")).not.toBeNull();
-        await user.click(screen.getByRole("button", { name: "More details" }));
-      } else {
-        expect(card).toHaveAttribute("data-open", "true");
-        expect(
-          screen.queryByRole("button", { name: "More details" }),
-        ).toBeNull();
-      }
-      expect(screen.getByText("Engine").closest("[inert]")).toBeNull();
+      await user.click(headerState(false));
+      expect(screen.getByText("Engine")).toBeInTheDocument();
       expect(
-        screen.getByText(status === "answered" ? /→ GUI/ : /no answer/),
-      ).toBeInTheDocument();
+        screen.getAllByText(status === "answered" ? "GUI" : /no answer/).length,
+      ).toBeGreaterThan(0);
       expect(
         screen.queryByRole("button", { name: "Submit Answers" }),
       ).toBeNull();
@@ -598,9 +587,9 @@ describe("AskQuestionsTool", () => {
       { store },
     );
     const card = container.querySelector("section");
-    expect(card).toHaveTextContent("Needs answer");
+    expect(card).toHaveTextContent("Needs you");
     expect(card).toHaveAttribute("data-open", "true");
-    expect(header()).toBeNull();
+    headerState(true);
     expect(
       screen.getByRole("radiogroup", { name: "Choose the rollout path" }),
     ).toBeInTheDocument();
@@ -629,12 +618,11 @@ describe("AskQuestionsTool", () => {
       );
     });
     await waitFor(() => expect(card).toHaveTextContent("State unknown"));
-    expect(card).toHaveAttribute("data-open", "true");
-    expect(header()).toBeNull();
+    headerState(false);
     expect(screen.queryByRole("button", { name: "Submit Answers" })).toBeNull();
   });
 
-  test("compact unknown history stays expanded, ignores stored state and does not manufacture expired state", () => {
+  test("compact unknown history stays collapsed and does not manufacture expired state", () => {
     const chat = createDefaultChatState();
     chat.threads[chat.current_thread_id].thread.pending_questions = [
       {
@@ -657,7 +645,7 @@ describe("AskQuestionsTool", () => {
       { preloadedState: { chat } },
     );
     const card = container.querySelector("section");
-    expect(card).toHaveAttribute("data-open", "true");
+    headerState(false);
     expect(card).toHaveTextContent("State unknown");
     expect(card).not.toHaveTextContent("Expired");
     expect(screen.queryByRole("button", { name: "More details" })).toBeNull();
@@ -665,19 +653,18 @@ describe("AskQuestionsTool", () => {
     expect(container.querySelector("script")).toBeNull();
   });
 
-  test("compact syncing history keeps the complete questions recoverable without offering stale controls", () => {
+  test("compact syncing history keeps the complete questions recoverable without offering stale controls", async () => {
     const chat = createDefaultChatState();
     const runtime = chat.threads[chat.current_thread_id];
     runtime.thread.messages = [toolMessage()];
     runtime.thread.pending_questions = [];
-    const { container } = render(
+    const { container, user } = render(
       <AskQuestionsTool toolCall={toolCall()} compact />,
       { preloadedState: { chat } },
     );
     const card = container.querySelector("section");
-    expect(card).toHaveTextContent("Syncing state");
-    expect(card).toHaveAttribute("data-open", "true");
-    expect(header()).toBeNull();
+    expect(card).toHaveTextContent("Syncing");
+    await user.click(headerState(false));
     expect(screen.queryByRole("button", { name: "More details" })).toBeNull();
     expect(
       screen.getByText(
@@ -705,12 +692,13 @@ describe("AskQuestionsTool", () => {
         preloadedState: { chat },
       });
 
-      expect(screen.getByText("Questions syncing")).toBeInTheDocument();
-      expect(container.querySelector("section")).toHaveAttribute(
-        "data-open",
-        "true",
+      expect(container.querySelector("section")).toHaveTextContent(
+        "State unknown",
       );
-      expect(header()).toBeNull();
+      expect(container.querySelector("section")).not.toHaveTextContent(
+        "answered",
+      );
+      headerState(false);
       expect(
         screen.queryByRole("button", { name: "Submit Answers" }),
       ).toBeNull();
@@ -728,7 +716,9 @@ describe("AskQuestionsTool", () => {
         store,
       });
 
-      expect(screen.getByText("Questions syncing")).toBeInTheDocument();
+      expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+        "Syncing",
+      );
       expect(store.getState().chat.sse_refresh_requested).toBe(threadId);
 
       store.dispatch(clearSseRefreshRequest());

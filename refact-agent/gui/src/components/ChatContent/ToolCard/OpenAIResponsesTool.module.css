@@ -1,5 +1,7 @@
 .content {
-  composes: bodyStack from "./ToolCardBody.module.css";
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
 }
 
 .inlineCode {
@@ -9,22 +11,29 @@
   color: var(--rf-color-muted);
 }
 
+.muted {
+  color: var(--rf-color-muted);
+}
+
 .resultList {
-  composes: resultList from "./ToolCardBody.module.css";
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .resultItem {
-  composes: resultItem from "./ToolCardBody.module.css";
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+  overflow-wrap: anywhere;
 }
 
-.codeBox {
-  composes: resultPanel from "./ToolCardBody.module.css";
-}
-
-.rawJson {
-  composes: resultPanel from "./ToolCardBody.module.css";
-}
-
-.sectionLabel {
-  composes: sectionLabel from "./ToolCardBody.module.css";
+.imageGrid {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
 }

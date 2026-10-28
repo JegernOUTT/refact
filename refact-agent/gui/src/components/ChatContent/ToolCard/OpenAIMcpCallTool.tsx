@@ -1,12 +1,9 @@
 import { Box } from "lucide-react";
-import React, { useMemo } from "react";
-import { Box as RadixBox, Text } from "@radix-ui/themes";
-
-import { ToolCard } from "./ToolCard";
+import React from "react";
 import type { ToolCall } from "../../../services/refact/types";
-import { ShikiCodeBlock } from "../../Markdown";
-import styles from "./OpenAIResponsesTool.module.css";
 import { useOpenAiResponsesToolCardState } from "./openaiResponsesToolCardState";
+import { OpenAIServerTool } from "./OpenAIServerTool";
+import { humanizeToolName, parseToolArgs } from "./genericToolTitle";
 
 type Props = {
   toolCall: ToolCall;
@@ -14,37 +11,16 @@ type Props = {
 
 export const OpenAIMcpCallTool: React.FC<Props> = ({ toolCall }) => {
   const state = useOpenAiResponsesToolCardState(toolCall);
-  const args = state.parsedArgs as Record<string, unknown> | null;
-
-  const summary = useMemo(() => {
-    if (!args) return "MCP Call";
-    const server = typeof args.server === "string" ? args.server : undefined;
-    const tool = typeof args.tool === "string" ? args.tool : undefined;
-    const label = [server, tool].filter(Boolean).join(" ");
-    return label ? (
-      <>
-        MCP Call: <span className={styles.inlineCode}>{label}</span>
-      </>
-    ) : (
-      "MCP Call"
-    );
-  }, [args]);
-
+  const args = parseToolArgs(state.parsedArgs);
+  const server = typeof args.server === "string" ? args.server : undefined;
+  const tool = typeof args.tool === "string" ? args.tool : undefined;
   return (
-    <ToolCard
+    <OpenAIServerTool
       icon={<Box />}
-      summary={summary}
-      status={state.status}
-      isOpen={state.isOpen}
-      onToggle={state.toggleOpen}
+      meta={server}
+      target={tool ? humanizeToolName(tool) : undefined}
       toolCall={toolCall}
-    >
-      <Text size="1" color="gray">
-        Raw JSON
-      </Text>
-      <RadixBox className={styles.rawJson}>
-        <ShikiCodeBlock showLineNumbers={false}>{state.rawJson}</ShikiCodeBlock>
-      </RadixBox>
-    </ToolCard>
+      verb="MCP"
+    />
   );
 };

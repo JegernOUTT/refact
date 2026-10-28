@@ -5,6 +5,7 @@ import {
   waitFor,
   createDefaultChatState,
 } from "../../../utils/test-utils";
+import userEvent from "@testing-library/user-event";
 import { AskQuestionsTool } from "./AskQuestionsTool";
 import type { PendingQuestionSet } from "../../../services/refact/types";
 import { act } from "react-dom/test-utils";
@@ -55,7 +56,9 @@ function setup(extra: Partial<PendingQuestionSet> = {}, compact = false) {
 }
 
 function header(): HTMLElement | null {
-  return document.querySelector("section > div > button[aria-expanded]");
+  return document.querySelector<HTMLElement>(
+    '[data-testid="transcript-toggle"]',
+  );
 }
 
 function headerState(open: boolean): HTMLElement {
@@ -272,22 +275,21 @@ describe("compact protocol-v2 question responses", () => {
     vi.restoreAllMocks();
   });
 
-  test("pending compact questions start expanded without a collapse control and stay expanded awaiting confirmation", async () => {
+  test("pending compact questions start expanded and stay expanded awaiting confirmation", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal("fetch", fetchMock);
     const { user, container } = setup({}, true);
     const card = container.querySelector("section");
     expect(card).toHaveAttribute("data-open", "true");
-    expect(card).toHaveTextContent("Choose a direction (+2 questions)");
-    expect(card).toHaveTextContent("Needs answer");
-    expect(container.querySelectorAll('[data-density="compact"]')).toHaveLength(
-      1,
-    );
-    expect(header()).toBeNull();
+    expect(card).toHaveTextContent("Choose a direction");
+    expect(card).toHaveTextContent("Needs you");
+    headerState(true);
     expect(screen.queryByRole("button", { name: "More details" })).toBeNull();
     expect(
       screen.getByRole("button", { name: "Submit response" }),
     ).toBeDisabled();
+    await user.tab();
+    expect(headerState(true)).toHaveFocus();
     await user.tab();
     expect(screen.getAllByRole("button", { name: "Skip" })[0]).toHaveFocus();
     await user.click(
@@ -333,9 +335,9 @@ describe("compact protocol-v2 question responses", () => {
         overall_comments: "Extra context",
       },
     });
-    expect(card).toHaveTextContent("Needs answer · Awaiting confirmation");
+    expect(card).toHaveTextContent("Awaiting confirmation");
     expect(card).toHaveAttribute("data-open", "true");
-    expect(header()).toBeNull();
+    headerState(true);
   });
 
   test.each(["answered", "cancelled"] as const)(
@@ -364,31 +366,13 @@ describe("compact protocol-v2 question responses", () => {
       );
       const card = container.querySelector("section");
       expect(card).toHaveTextContent(
-        status === "answered" ? "Answered" : "Withdrawn",
+        status === "answered" ? "answered" : "Withdrawn",
       );
       expect(card).toHaveAttribute(
         "data-status",
         status === "answered" ? "success" : "idle",
       );
-      if (status === "answered") {
-        await user.click(headerState(false));
-        const details = screen.getByRole("button", { name: "More details" });
-        expect(details).toHaveAttribute("aria-expanded", "false");
-        expect(
-          screen
-            .getAllByRole("term")
-            .filter((term) => !term.closest("[inert]")),
-        ).toHaveLength(1);
-        expect(screen.getByText("B").closest("[inert]")).not.toBeNull();
-        await user.click(details);
-      } else {
-        expect(card).toHaveAttribute("data-open", "true");
-        expect(header()).toBeNull();
-        expect(
-          screen.queryByRole("button", { name: "More details" }),
-        ).toBeNull();
-      }
-      expect(screen.getByText("B").closest("[inert]")).toBeNull();
+      await user.click(headerState(false));
       expect(screen.getByText("B")).toBeInTheDocument();
       expect(screen.getByText("A reason")).toBeInTheDocument();
       expect(screen.getByText("Overall history")).toBeInTheDocument();
@@ -420,7 +404,7 @@ describe("compact protocol-v2 question responses", () => {
       );
     });
     expect(card).toHaveAttribute("data-open", "true");
-    expect(card).toHaveTextContent("Needs answer");
+    expect(card).toHaveTextContent("Needs you");
     updateQuestion(store, {
       status: "answered",
       response: {
@@ -431,12 +415,10 @@ describe("compact protocol-v2 question responses", () => {
       },
     });
     const row = headerState(false);
-    expect(row).toHaveTextContent("Answered");
+    expect(row).toHaveTextContent("answered");
     await user.click(row);
     expect(row).toHaveAttribute("aria-expanded", "true");
-    expect(
-      screen.getByRole("button", { name: "More details" }),
-    ).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("Custom answer: Manual response")).toBeVisible();
   });
 
   test("persisted closed state cannot hide a pending question; drafts and reopened answered state survive remount", async () => {
@@ -457,7 +439,7 @@ describe("compact protocol-v2 question responses", () => {
       "data-open",
       "true",
     );
-    expect(header()).toBeNull();
+    headerState(true);
     await mounted.user.click(
       screen.getAllByRole("button", { name: "Write my own answer" })[0],
     );
@@ -487,7 +469,7 @@ describe("compact protocol-v2 question responses", () => {
       </CollapsibleStoreProvider>,
       { store: view.store },
     );
-    expect(headerState(true)).toHaveTextContent("Answered");
+    expect(headerState(true)).toHaveTextContent("answered");
   });
 
   test("send failures and retry controls remain directly accessible and request identity stays stable", async () => {
@@ -504,10 +486,10 @@ describe("compact protocol-v2 question responses", () => {
     await user.click(screen.getByRole("radio", { name: "No" }));
     await user.click(screen.getByRole("button", { name: "Submit response" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("offline");
-    expect(card).toHaveTextContent("Send failed");
+    expect(card).toHaveTextContent("send failed");
     expect(card).toHaveAttribute("data-status", "error");
     expect(card).toHaveAttribute("data-open", "true");
-    expect(header()).toBeNull();
+    headerState(true);
     await user.click(screen.getByRole("button", { name: "Submit response" }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     expect(screen.getByRole("radio", { name: "No" })).toBeDisabled();
@@ -677,7 +659,7 @@ describe("compact protocol-v2 question responses", () => {
     ).toBeInTheDocument();
   });
 
-  test("unrecognized historical state stays expanded, neutral, escaped and never offers live controls", () => {
+  test("unrecognized historical state stays neutral, escaped and never offers live controls", async () => {
     const values = new Map<string, boolean>([[`tc:${call.id}`, false]]);
     const view = setup(
       {
@@ -703,8 +685,7 @@ describe("compact protocol-v2 question responses", () => {
     const card = container.querySelector("section");
     expect(card).toHaveTextContent("State unknown");
     expect(card).toHaveAttribute("data-status", "idle");
-    expect(card).toHaveAttribute("data-open", "true");
-    expect(header()).toBeNull();
+    await userEvent.setup().click(headerState(false));
     expect(container.querySelector("script")).toBeNull();
     expect(screen.queryByRole("button", { name: "More details" })).toBeNull();
     expect(screen.getByText("No answer")).toBeInTheDocument();

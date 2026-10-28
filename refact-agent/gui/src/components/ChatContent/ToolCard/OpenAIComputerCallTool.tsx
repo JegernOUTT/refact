@@ -1,12 +1,9 @@
 import { Monitor } from "lucide-react";
-import React, { useMemo } from "react";
-import { Box, Text } from "@radix-ui/themes";
-
-import { ToolCard } from "./ToolCard";
+import React from "react";
 import type { ToolCall } from "../../../services/refact/types";
-import { ShikiCodeBlock } from "../../Markdown";
-import styles from "./OpenAIResponsesTool.module.css";
 import { useOpenAiResponsesToolCardState } from "./openaiResponsesToolCardState";
+import { OpenAIServerTool } from "./OpenAIServerTool";
+import { humanizeToolName, parseToolArgs } from "./genericToolTitle";
 
 type Props = {
   toolCall: ToolCall;
@@ -14,35 +11,14 @@ type Props = {
 
 export const OpenAIComputerCallTool: React.FC<Props> = ({ toolCall }) => {
   const state = useOpenAiResponsesToolCardState(toolCall);
-  const args = state.parsedArgs as Record<string, unknown> | null;
-
-  const summary = useMemo(() => {
-    const action =
-      args && typeof args.action === "string" ? args.action : undefined;
-    return action ? (
-      <>
-        Computer Call: <span className={styles.inlineCode}>{action}</span>
-      </>
-    ) : (
-      state.label
-    );
-  }, [args, state.label]);
-
+  const args = parseToolArgs(state.parsedArgs);
+  const action = typeof args.action === "string" ? args.action : undefined;
   return (
-    <ToolCard
+    <OpenAIServerTool
       icon={<Monitor />}
-      summary={summary}
-      status={state.status}
-      isOpen={state.isOpen}
-      onToggle={state.toggleOpen}
+      target={action ? humanizeToolName(action) : undefined}
       toolCall={toolCall}
-    >
-      <Text size="1" color="gray">
-        Raw JSON
-      </Text>
-      <Box className={styles.rawJson}>
-        <ShikiCodeBlock showLineNumbers={false}>{state.rawJson}</ShikiCodeBlock>
-      </Box>
-    </ToolCard>
+      verb="Computer"
+    />
   );
 };

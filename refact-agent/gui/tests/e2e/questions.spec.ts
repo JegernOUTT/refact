@@ -117,23 +117,16 @@ test("compact native protocol keeps decisions draft-only after explicit opening 
     });
   });
   await page.goto("/tests/e2e/questions-showcase.html?native=pending");
-  const row = page.getByRole("button", {
-    name: /Choose the next direction.*Needs answer/,
-  });
-  await expect(row).toHaveAttribute("aria-expanded", "false");
+  const row = page.getByTestId("transcript-toggle").first();
+  await expect(row).toContainText("Question");
+  await expect(row).toContainText("Choose the next direction");
+  await expect(page.getByTestId("transcript-status-pill").first()).toHaveText(
+    "Needs you",
+  );
+  await expect(row).toHaveAttribute("aria-expanded", "true");
   await page.getByRole("button", { name: "Before question" }).focus();
   await page.keyboard.press("Tab");
   await expect(row).toBeFocused();
-  await page.keyboard.press("Tab");
-  await expect(
-    page.getByRole("button", { name: "After question" }),
-  ).toBeFocused();
-  await row.focus();
-  await page.keyboard.press("Enter");
-  await expect(row).toHaveAttribute("aria-expanded", "true");
-  await expect(page.getByRole("button", { name: "More details" })).toHaveCount(
-    0,
-  );
   await expect(
     page.getByRole("button", { name: "Submit response" }),
   ).toBeDisabled();
@@ -165,10 +158,8 @@ test("compact native protocol keeps decisions draft-only after explicit opening 
     .fill("Keep the full history");
   expect(commands).toEqual([]);
   await page.getByRole("button", { name: "Submit response" }).click();
-  await expect(page.getByRole("alert")).toBeVisible();
-  await row.click();
-  await expect(row).toContainText("Send failed");
-  await row.click();
+  await expect(page.getByRole("alert").first()).toBeVisible();
+  await expect(row).toContainText("send failed");
   await page.getByRole("button", { name: "Submit response" }).click();
   await expect(
     page.getByText("Response sent, awaiting confirmation."),
@@ -197,8 +188,9 @@ test("compact native protocol keeps decisions draft-only after explicit opening 
   await expect(
     page.getByRole("button", { name: "Check status / retry" }),
   ).toBeVisible();
-  await row.click();
-  await expect(row).toContainText("Needs answer · Awaiting confirmation");
+  await expect(page.getByTestId("transcript-status-pill").first()).toHaveText(
+    "Awaiting confirmation",
+  );
 });
 
 for (const status of ["answered", "cancelled"] as const) {
@@ -206,28 +198,14 @@ for (const status of ["answered", "cancelled"] as const) {
     page,
   }) => {
     await page.goto(`/tests/e2e/questions-showcase.html?native=${status}`);
-    const row = page.getByRole("button", { expanded: false });
-    await expect(row).toContainText(
-      status === "answered" ? "Answered" : "Withdrawn",
-    );
+    const row = page.getByTestId("transcript-toggle").first();
+    await expect(row).toHaveAttribute("aria-expanded", "false");
+    if (status === "answered") await expect(row).toContainText("answered");
+    else
+      await expect(
+        page.getByTestId("transcript-status-pill").first(),
+      ).toHaveText("Withdrawn");
     await row.click();
-    const details = page.getByRole("button", { name: "More details" });
-    await expect(details).toHaveAttribute("aria-expanded", "false");
-    const body = page.locator(
-      `[id="${await details.getAttribute("aria-controls")}"]`,
-    );
-    await expect(body).toHaveAttribute("inert", "");
-    await expect
-      .poll(() =>
-        body.evaluate((element) => element.getBoundingClientRect().height),
-      )
-      .toBe(0);
-    await details.focus();
-    await page.keyboard.press("Tab");
-    await expect(
-      page.getByRole("button", { name: "After question" }),
-    ).toBeFocused();
-    await details.click();
     await expect(page.getByText("Roomy", { exact: true })).toBeVisible();
     if (status === "answered") {
       await expect(page.getByText("Custom answer: Combine both")).toBeVisible();
@@ -258,7 +236,6 @@ test("compact native permission dismissal remains an explicit skipped response, 
     });
   });
   await page.goto("/tests/e2e/questions-showcase.html?native=approval");
-  await page.getByRole("button", { expanded: false }).click();
   await expect(
     page.getByText(/Only an explicit Approve grants permission/),
   ).toBeVisible();

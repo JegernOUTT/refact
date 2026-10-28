@@ -1,13 +1,9 @@
 import { Image } from "lucide-react";
-import React, { useMemo } from "react";
-import { Box, Flex, Text } from "@radix-ui/themes";
-
-import { ToolCard } from "./ToolCard";
+import React from "react";
 import type { ToolCall } from "../../../services/refact/types";
-import { ShikiCodeBlock } from "../../Markdown";
-import { DialogImage } from "../../DialogImage";
-import styles from "./OpenAIResponsesTool.module.css";
 import { useOpenAiResponsesToolCardState } from "./openaiResponsesToolCardState";
+import { OpenAIServerTool } from "./OpenAIServerTool";
+import { parseToolArgs } from "./genericToolTitle";
 
 type Props = {
   toolCall: ToolCall;
@@ -17,48 +13,20 @@ export const OpenAIImageGenerationCallTool: React.FC<Props> = ({
   toolCall,
 }) => {
   const state = useOpenAiResponsesToolCardState(toolCall);
-  const args = state.parsedArgs as Record<string, unknown> | null;
-
-  const imageUrls = useMemo(() => {
-    if (!args) return [] as string[];
-
-    // Sometimes: { image_url: "..." } or { output: { image_url: "..." } }
-    const direct = typeof args.image_url === "string" ? args.image_url : null;
-    const output =
-      typeof args.output === "object" && args.output !== null
-        ? (args.output as Record<string, unknown>)
-        : null;
-    const nested =
-      output && typeof output.image_url === "string" ? output.image_url : null;
-
-    return [direct, nested].filter(
-      (u): u is string => typeof u === "string" && u.length > 0,
-    );
-  }, [args]);
-
+  const args = parseToolArgs(state.parsedArgs);
+  const output = parseToolArgs(args.output);
+  const images = [args.image_url, output.image_url].filter(
+    (url): url is string => typeof url === "string" && url.length > 0,
+  );
+  const prompt =
+    typeof args.revised_prompt === "string" ? args.revised_prompt : undefined;
   return (
-    <ToolCard
+    <OpenAIServerTool
       icon={<Image />}
-      summary={"Image Generation"}
-      status={state.status}
-      isOpen={state.isOpen}
-      onToggle={state.toggleOpen}
+      images={images}
+      target={prompt}
       toolCall={toolCall}
-    >
-      {imageUrls.length > 0 && (
-        <Flex py="2" gap="2" wrap="wrap">
-          {imageUrls.map((url, idx) => (
-            <DialogImage key={idx} src={url} fallback="" size="8" />
-          ))}
-        </Flex>
-      )}
-
-      <Text size="1" color="gray">
-        Raw JSON
-      </Text>
-      <Box className={styles.rawJson}>
-        <ShikiCodeBlock showLineNumbers={false}>{state.rawJson}</ShikiCodeBlock>
-      </Box>
-    </ToolCard>
+      verb="Image generation"
+    />
   );
 };

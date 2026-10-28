@@ -1,6 +1,4 @@
 import { useMemo } from "react";
-import { useStoredOpen } from "../useStoredOpen";
-
 import { useAppSelector } from "../../../hooks/useAppSelector";
 import {
   selectIsStreamingById,
@@ -23,14 +21,13 @@ export function toolNameLabel(name: string): string {
   const stripped = name.startsWith("openai_")
     ? name.slice("openai_".length)
     : name;
-  return stripped.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  const words = stripped.replace(/_/g, " ").trim();
+  return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
 export type OpenAiResponsesToolCardState = {
   toolName: string;
   label: string;
-  isOpen: boolean;
-  toggleOpen: () => void;
   status: ToolStatus;
   parsedArgs: unknown;
   rawJson: string;
@@ -41,8 +38,6 @@ export type OpenAiResponsesToolCardState = {
 export function useOpenAiResponsesToolCardState(
   toolCall: ToolCall,
 ): OpenAiResponsesToolCardState {
-  const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, toggleOpen] = useStoredOpen(storeKey, false);
   const threadId = useThreadId();
 
   const isStreaming = useAppSelector((state) =>
@@ -94,8 +89,6 @@ export function useOpenAiResponsesToolCardState(
   return {
     toolName,
     label,
-    isOpen,
-    toggleOpen,
     status,
     parsedArgs,
     rawJson,

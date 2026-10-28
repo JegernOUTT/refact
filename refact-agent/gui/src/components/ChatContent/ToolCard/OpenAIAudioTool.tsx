@@ -1,12 +1,9 @@
 import { Volume2 } from "lucide-react";
-import React, { useMemo } from "react";
-import { Box, Text } from "@radix-ui/themes";
-
-import { ToolCard } from "./ToolCard";
+import React from "react";
 import type { ToolCall } from "../../../services/refact/types";
-import { ShikiCodeBlock } from "../../Markdown";
-import styles from "./OpenAIResponsesTool.module.css";
 import { useOpenAiResponsesToolCardState } from "./openaiResponsesToolCardState";
+import { OpenAIServerTool, ServerToolText } from "./OpenAIServerTool";
+import { parseToolArgs } from "./genericToolTitle";
 
 type Props = {
   toolCall: ToolCall;
@@ -14,48 +11,20 @@ type Props = {
 
 export const OpenAIAudioTool: React.FC<Props> = ({ toolCall }) => {
   const state = useOpenAiResponsesToolCardState(toolCall);
-  const args = state.parsedArgs as Record<string, unknown> | null;
-
-  const transcript = useMemo(() => {
-    if (!args) return null;
-    if (typeof args.transcript === "string") return args.transcript;
-    if (typeof args.text === "string") return args.text;
-    return null;
-  }, [args]);
-
-  const summary = transcript ? (
-    <>
-      Audio:{" "}
-      <span className={styles.inlineCode}>
-        {transcript.slice(0, 40)}
-        {transcript.length > 40 ? "…" : ""}
-      </span>
-    </>
-  ) : (
-    "Audio"
-  );
-
+  const args = parseToolArgs(state.parsedArgs);
+  const transcript =
+    typeof args.transcript === "string"
+      ? args.transcript
+      : typeof args.text === "string"
+        ? args.text
+        : undefined;
   return (
-    <ToolCard
+    <OpenAIServerTool
       icon={<Volume2 />}
-      summary={summary}
-      status={state.status}
-      isOpen={state.isOpen}
-      onToggle={state.toggleOpen}
+      output={transcript ? <ServerToolText text={transcript} /> : null}
+      target={transcript}
       toolCall={toolCall}
-    >
-      {transcript && (
-        <Box className={styles.codeBox}>
-          <ShikiCodeBlock showLineNumbers={false}>{transcript}</ShikiCodeBlock>
-        </Box>
-      )}
-
-      <Text size="1" color="gray">
-        Raw JSON
-      </Text>
-      <Box className={styles.rawJson}>
-        <ShikiCodeBlock showLineNumbers={false}>{state.rawJson}</ShikiCodeBlock>
-      </Box>
-    </ToolCard>
+      verb="Audio"
+    />
   );
 };

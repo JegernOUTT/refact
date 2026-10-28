@@ -1,11 +1,12 @@
-.section {
-  composes: section from "./ToolCardBody.module.css";
-}
-
 .panel,
 .group,
 .rowContent {
   min-width: 0;
+}
+
+.panel {
+  display: grid;
+  gap: var(--rf-space-3);
 }
 
 .group {
@@ -87,7 +88,6 @@
 .url {
   overflow: hidden;
   color: var(--rf-color-accent);
-  font-size: var(--rf-text-1);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -95,7 +95,6 @@
 .path {
   color: var(--rf-color-muted);
   font-family: var(--rf-font-mono);
-  font-size: var(--rf-text-1);
 }
 
 .primaryLink:hover,

@@ -1,42 +1,76 @@
-.url {
-  font-family: var(--rf-font-mono);
-  font-size: var(--rf-text-2);
-  color: var(--rf-color-accent);
+.sectionStack {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-3);
 }
 
-.meta {
+.block {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+}
+
+.blockLabel,
+.muted {
   color: var(--rf-color-muted);
 }
 
-.logContent {
-  composes: resultPanel from "./ToolCardBody.module.css";
+.mono {
+  min-width: 0;
+  font-family: var(--rf-font-mono);
+  overflow-wrap: anywhere;
 }
 
-.section {
-  composes: section from "./ToolCardBody.module.css";
-}
-
-.sectionLabel {
-  composes: sectionLabel from "./ToolCardBody.module.css";
-}
-
-.handlerList {
-  composes: resultPanel from "./ToolCardBody.module.css";
+.stepList {
   display: grid;
+  min-width: 0;
   gap: var(--rf-space-1);
-  font-size: var(--rf-text-1);
+  margin: 0;
+  padding-inline-start: var(--rf-space-5);
 }
 
-.actionabilityList {
-  display: grid;
+.stepItem {
   min-width: 0;
-  gap: var(--rf-space-2);
+  overflow-wrap: anywhere;
 }
 
-.assertionList {
+.stepItem[data-status="error"] {
+  color: var(--rf-color-danger);
+}
+
+.stepSummary {
+  display: block;
+  min-width: 0;
+}
+
+.chipRow {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: var(--rf-space-1);
+}
+
+.locatorEcho {
+  display: block;
+  min-width: 0;
+  padding-inline-start: var(--rf-space-2);
+  color: var(--rf-color-accent);
+  font-family: var(--rf-font-mono);
+  border-inline-start: var(--rf-hairline) solid var(--rf-border);
+  overflow-wrap: anywhere;
+}
+
+.warnings {
   display: grid;
   min-width: 0;
-  gap: var(--rf-space-2);
+  gap: var(--rf-space-1);
+  color: var(--rf-color-warning);
+  overflow-wrap: anywhere;
+}
+
+.warningText {
+  color: var(--rf-color-warning);
+  overflow-wrap: anywhere;
 }
 
 .assertion {
@@ -51,23 +85,20 @@
   border-inline-start-color: var(--rf-color-danger);
 }
 
+.assertionHead {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--rf-space-2);
+}
+
 .assertionStatus {
   color: var(--rf-color-success);
 }
 
 .assertion[data-status="error"] .assertionStatus {
   color: var(--rf-color-danger);
-}
-
-.assertionName {
-  color: var(--rf-color-fg);
-  font-family: var(--rf-font-mono);
-}
-
-.assertionMeta,
-.assertionValueLabel {
-  color: var(--rf-color-muted);
-  font-size: var(--rf-text-1);
 }
 
 .assertionValues {
@@ -83,112 +114,28 @@
   }
 }
 
-.handlerRow {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.handlerRow[data-status="error"] {
-  padding-inline-start: var(--rf-space-2);
-  border-inline-start: var(--rf-hairline) solid var(--rf-color-danger);
-}
-
-.handlerStatus {
-  color: var(--rf-color-success);
-}
-
-.handlerRow[data-status="error"] .handlerStatus {
-  color: var(--rf-color-danger);
-}
-
-.handlerName {
-  color: var(--rf-color-fg);
-  font-family: var(--rf-font-mono);
-}
-
-.handlerDetail {
-  color: var(--rf-color-muted);
-}
-.stepList {
-  composes: resultList from "./ToolCardBody.module.css";
-}
-
-.stepRow {
+.screenshotGrid {
   display: grid;
   min-width: 0;
-  gap: var(--rf-space-1);
-}
-
-.stepSummary {
-  min-width: 0;
-  color: var(--rf-color-muted);
-  font-size: var(--rf-text-1);
-  overflow-wrap: anywhere;
-}
-
-.locatorEcho {
-  min-width: 0;
-  padding-inline-start: var(--rf-space-2);
-  color: var(--rf-color-accent);
-  font-family: var(--rf-font-mono);
-  font-size: var(--rf-text-1);
-  border-inline-start: var(--rf-hairline) solid var(--rf-border);
-  overflow-wrap: anywhere;
-}
-
-.captureList {
-  display: grid;
-  min-width: 0;
+  grid-template-columns: repeat(
+    auto-fill,
+    minmax(min(100%, var(--rf-overlay-popover-min)), 1fr)
+  );
   gap: var(--rf-space-2);
 }
 
 .capture {
   display: grid;
   min-width: 0;
-  gap: var(--rf-space-1);
   justify-items: start;
+  gap: var(--rf-space-1);
 }
 
-.captureLabel {
-  color: var(--rf-color-fg);
-  font-size: var(--rf-text-1);
-}
-
-.captureDetail {
-  color: var(--rf-color-muted);
-  font-size: var(--rf-text-1);
-}
-
-.frameChip {
-  padding: 0 var(--rf-space-2);
-  color: var(--rf-color-muted);
-  font-family: var(--rf-font-mono);
-  font-size: var(--rf-text-1);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-pill);
-  white-space: nowrap;
-}
-
-.captureWarning {
-  color: var(--rf-color-warning);
-  font-size: var(--rf-text-1);
-  overflow-wrap: anywhere;
-}
-
-.warningBanner {
+.errorList {
   display: grid;
   min-width: 0;
   gap: var(--rf-space-1);
-  padding: var(--rf-space-2);
-  color: var(--rf-color-warning);
-  background: color-mix(in oklab, var(--rf-color-warning) 12%, transparent);
-  border: var(--rf-hairline) solid
-    color-mix(in oklab, var(--rf-color-warning) 40%, transparent);
-  border-radius: var(--rf-radius-card);
-}
-
-.warningLine {
-  min-width: 0;
-  font-size: var(--rf-text-1);
+  margin: 0;
+  padding-inline-start: var(--rf-space-4);
   overflow-wrap: anywhere;
 }

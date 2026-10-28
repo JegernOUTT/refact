@@ -16,26 +16,29 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import React, { useMemo } from "react";
-import { Box } from "@radix-ui/themes";
-import { ToolCard, type ToolStatus } from "./ToolCard";
-import { useStoredOpen } from "../useStoredOpen";
 import { useAppSelector } from "../../../hooks/useAppSelector";
-import {
-  selectToolResultByThreadAndId,
-  selectIsStreamingById,
-  selectIsWaitingById,
-} from "../../../features/Chat/Thread/selectors";
+import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/selectors";
 import { useThreadId } from "../../../features/Chat/Thread";
 import type { ToolCall } from "../../../services/refact/types";
 import { Markdown, ShikiCodeBlock } from "../../Markdown";
-import { Icon } from "../../ui";
-import { formatToolDisplayName } from "../../../utils/toolNameAliases";
+import {
+  TranscriptClamp,
+  TranscriptItem,
+  type TranscriptFact,
+  type TranscriptStatus,
+} from "../TranscriptItem";
+import { ToolCallTooltip } from "./ToolCallTooltip";
 import { AnalysisReportView } from "./AnalysisReport";
 import { ArtifactsPanel } from "./ArtifactsPanel";
 import {
   buildAnalysisReport,
   parseEngineAnalysisJson,
 } from "./engineAnalysisJson";
+import {
+  humanizeToolName,
+  parseToolArgs,
+  primaryArgument,
+} from "./genericToolTitle";
 import styles from "./GenericTool.module.css";
 
 interface EngineAnalysisToolProps {
@@ -60,48 +63,59 @@ const ENGINE_ANALYSIS_ICONS: Partial<Record<string, LucideIcon>> = {
   visual_diff: Copy,
 };
 
-function formatArgs(argsStr: string): string {
-  try {
-    const parsed: unknown = JSON.parse(argsStr);
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
-      return argsStr;
-    const entries = Object.entries(parsed);
-    if (entries.length === 0) return "";
-    return entries
-      .map(([key, value]) =>
-        [key, typeof value === "string" ? value : JSON.stringify(value)].join(
-          "=",
-        ),
-      )
-      .join(", ");
-  } catch {
-    return argsStr;
-  }
-}
+const ENGINE_ANALYSIS_NAMES: Partial<Record<string, string>> = {
+  code_duplication: "Code duplication",
+  code_health: "Code health",
+  code_map: "Code map",
+  code_why: "Code why",
+  codegraph_overview: "Codegraph overview",
+  contrast_audit: "Contrast audit",
+  dead_code: "Dead code",
+  design_system: "Design system",
+  git_risk: "Git risk",
+  image_region: "Image region",
+  mark_elements: "Mark elements",
+  pr_blast: "PR blast radius",
+  security_scan: "Security scan",
+  ui_probe: "UI probe",
+  visual_diff: "Visual diff",
+};
 
-function formatRawArgs(argsStr: string): string {
-  try {
-    return JSON.stringify(JSON.parse(argsStr) as unknown, null, 2);
-  } catch {
-    return argsStr;
-  }
-}
-
-function truncatePreview(text: string, maxLength = 120): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  return normalized.length <= maxLength
-    ? normalized
-    : normalized.slice(0, maxLength - 1).concat("…");
-}
+const SCOPE_KEYS = [
+  "file_path",
+  "path",
+  "query",
+  "image_path",
+  "baseline",
+  "task",
+] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function scopeOf(args: Record<string, unknown>): string | undefined {
+  for (const key of SCOPE_KEYS) {
+    const value = args[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  const changed = args.changed_files;
+  if (Array.isArray(changed) && changed.length > 0) {
+    const first = typeof changed[0] === "string" ? changed[0] : "";
+    return changed.length > 1 ? `${first} +${changed.length - 1}` : first;
+  }
+  return primaryArgument(args);
+}
+
+function count(value: unknown, noun: string): string | undefined {
+  if (typeof value !== "number") return undefined;
+  return `${value} ${noun}${value === 1 ? "" : "s"}`;
+}
+
 function resultMeta(toolName: string, value: unknown): string | undefined {
   if (!isRecord(value)) return undefined;
-  if (toolName === "security_scan" && typeof value.finding_count === "number")
-    return `${value.finding_count} findings`;
+  if (toolName === "security_scan")
+    return count(value.finding_count, "finding");
   if (
     toolName === "pr_blast" &&
     typeof value.impacted_file_count === "number" &&
@@ -116,6 +130,25 @@ function resultMeta(toolName: string, value: unknown): string | undefined {
     typeof value.total_candidates === "number"
   )
     return `${value.shown}/${value.total_candidates} candidates`;
+  if (toolName === "code_health" && isRecord(value.aggregate)) {
+    const grade = value.aggregate.grade;
+    return typeof grade === "string" ? `grade ${grade}` : undefined;
+  }
+  if (toolName === "code_duplication" && isRecord(value.aggregate)) {
+    const pct = value.aggregate.duplication_pct;
+    return typeof pct === "number"
+      ? `${pct.toFixed(1)}% duplicated`
+      : undefined;
+  }
+  if (toolName === "git_risk" && Array.isArray(value.hotspots))
+    return count(value.hotspots.length, "hotspot");
+  if (toolName === "code_why" && Array.isArray(value.decisions))
+    return count(value.decisions.length, "decision");
+  if (toolName === "code_map") return count(value.files_count, "file");
+  if (toolName === "codegraph_overview" && isRecord(value.counts))
+    return count(value.counts.nodes, "node");
+  if (Array.isArray(value.findings))
+    return count(value.findings.length, "finding");
   return undefined;
 }
 
@@ -127,52 +160,26 @@ function codeMapMarkdown(toolName: string, value: unknown): string | null {
 export const EngineAnalysisTool: React.FC<EngineAnalysisToolProps> = ({
   toolCall,
 }) => {
-  const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle] = useStoredOpen(storeKey);
   const threadId = useThreadId();
-  const isStreaming = useAppSelector((state) =>
-    selectIsStreamingById(state, threadId),
-  );
-  const isWaiting = useAppSelector((state) =>
-    selectIsWaitingById(state, threadId),
-  );
   const maybeResult = useAppSelector((state) =>
     selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
 
-  const status: ToolStatus = useMemo(() => {
-    if (!maybeResult && (isStreaming || isWaiting)) return "running";
-    if (!maybeResult) return "running";
-    if (
-      typeof maybeResult === "object" &&
-      "tool_failed" in maybeResult &&
-      maybeResult.tool_failed
-    )
-      return "error";
-    return "success";
-  }, [maybeResult, isStreaming, isWaiting]);
+  const failed = Boolean(maybeResult?.tool_failed);
+  const status: TranscriptStatus = !maybeResult
+    ? "running"
+    : failed
+      ? "failed"
+      : "done";
+  const tone = !maybeResult ? "running" : failed ? "error" : "success";
 
   const content =
     maybeResult && typeof maybeResult.content === "string"
       ? maybeResult.content
       : null;
   const toolName = toolCall.function.name ?? "tool";
-  const argsPreview = truncatePreview(formatArgs(toolCall.function.arguments));
-  const rawArgs = useMemo(
-    () => formatRawArgs(toolCall.function.arguments),
-    [toolCall.function.arguments],
-  );
-  const summary = useMemo(() => {
-    const displayName = formatToolDisplayName(toolName);
-    return argsPreview ? (
-      <>
-        {displayName} <span className={styles.args}>{argsPreview}</span>
-      </>
-    ) : (
-      displayName
-    );
-  }, [toolName, argsPreview]);
-
+  const rawArguments = toolCall.function.arguments;
+  const args = useMemo(() => parseToolArgs(rawArguments), [rawArguments]);
   const parsed = useMemo(
     () => (content ? parseEngineAnalysisJson(content) : null),
     [content],
@@ -182,56 +189,56 @@ export const EngineAnalysisTool: React.FC<EngineAnalysisToolProps> = ({
     [parsed, toolName],
   );
   const markdown = codeMapMarkdown(toolName, parsed);
-  const meta = resultMeta(toolName, parsed);
   const artifacts = parsed?.artifact ? [parsed] : [];
   const AnalysisIcon = ENGINE_ANALYSIS_ICONS[toolName] ?? Network;
+  const scope = scopeOf(args);
+  const showAsError = failed && !report;
+
+  const summary: TranscriptFact[] = report
+    ? report.facts.map((fact) => ({ label: fact.key, value: fact.value }))
+    : [];
+  const body = report ? (
+    <>
+      <AnalysisReportView report={{ ...report, facts: [] }} />
+      {markdown ? (
+        <div className={styles.markdownContent}>
+          <Markdown>{markdown}</Markdown>
+        </div>
+      ) : null}
+    </>
+  ) : content ? (
+    <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
+  ) : null;
 
   return (
-    <>
-      <span data-testid="engine-analysis-tool" hidden />
-      <ToolCard
-        icon={
-          <Icon
-            icon={AnalysisIcon}
-            size="md"
-            tone={status === "error" ? "danger" : "accent"}
-          />
+    <ToolCallTooltip toolCall={toolCall}>
+      <TranscriptItem
+        artifacts={
+          artifacts.length > 0 ? <ArtifactsPanel artifacts={artifacts} /> : null
         }
-        summary={summary}
-        meta={meta}
+        className="rf-enter"
+        data-status={tone}
+        data-testid="engine-analysis-tool"
+        error={showAsError ? content : null}
+        icon={<AnalysisIcon />}
+        meta={resultMeta(toolName, parsed)}
+        openKey={toolCall.id ? `tc:${toolCall.id}` : undefined}
+        output={
+          body && !showAsError ? (
+            <TranscriptClamp>{body}</TranscriptClamp>
+          ) : null
+        }
+        raw={[
+          { label: "Arguments", value: rawArguments },
+          ...(content !== null ? [{ label: "JSON", value: content }] : []),
+        ]}
+        rowTooltip={scope}
         status={status}
-        isOpen={isOpen}
-        onToggle={handleToggle}
-        toolCall={toolCall}
-      >
-        <Box className={styles.section}>
-          <Box className={styles.sectionLabel}>Arguments</Box>
-          <Box className={styles.resultContent}>
-            <ShikiCodeBlock showLineNumbers={false}>{rawArgs}</ShikiCodeBlock>
-          </Box>
-        </Box>
-        {(report !== null || content !== null) && (
-          <Box className={styles.section}>
-            <Box className={styles.sectionLabel}>Result</Box>
-            {report ? (
-              <AnalysisReportView report={report} />
-            ) : content ? (
-              <Box className={styles.resultContent}>
-                <ShikiCodeBlock showLineNumbers={false}>
-                  {content}
-                </ShikiCodeBlock>
-              </Box>
-            ) : null}
-            {report && markdown && (
-              <Box className={styles.markdownContent}>
-                <Markdown>{markdown}</Markdown>
-              </Box>
-            )}
-            {artifacts.length > 0 && <ArtifactsPanel artifacts={artifacts} />}
-          </Box>
-        )}
-      </ToolCard>
-    </>
+        summary={summary}
+        target={scope}
+        verb={ENGINE_ANALYSIS_NAMES[toolName] ?? humanizeToolName(toolName)}
+      />
+    </ToolCallTooltip>
   );
 };
 

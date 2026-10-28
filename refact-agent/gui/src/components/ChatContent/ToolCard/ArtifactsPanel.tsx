@@ -1,5 +1,5 @@
-import { Box, Flex, Text } from "@radix-ui/themes";
-import { Download, FileJson, FileText, Images } from "lucide-react";
+import { Box, Flex } from "@radix-ui/themes";
+import { Download, FileJson, FileText } from "lucide-react";
 
 import type {
   BrowserDownloadInfo,
@@ -10,7 +10,7 @@ import type {
 } from "../../../services/refact/browser";
 import { DialogImage } from "../../DialogImage";
 import { Badge, Icon } from "../../ui";
-import { AnimatedCollapsible } from "../shared/AnimatedCollapsible";
+import { buildImageDataUrl } from "../../../utils/imageDataUrl";
 import styles from "./ArtifactsPanel.module.css";
 
 type DisplayDownload = Omit<BrowserDownloadInfo, "state"> & {
@@ -194,10 +194,6 @@ function fileUrl(path: string): string {
     : `file:///${normalized}`;
 }
 
-function countLabel(count: number, singular: string): string {
-  return `${count} ${singular}${count === 1 ? "" : "s"}`;
-}
-
 function stateLabel(state: DisplayDownload["state"]): string {
   if (state === "in_progress") return "In progress";
   return state.charAt(0).toUpperCase() + state.slice(1);
@@ -238,244 +234,209 @@ export function ArtifactsPanel({ artifacts, downloads }: ArtifactsPanelProps) {
 
   if (count === 0) return null;
 
-  const counts = [
-    screenshots.length > 0
-      ? countLabel(screenshots.length, "screenshot")
-      : null,
-    pdfs.length > 0 ? countLabel(pdfs.length, "PDF") : null,
-    hars.length > 0 ? countLabel(hars.length, "HAR") : null,
-    coverage.length > 0 ? countLabel(coverage.length, "coverage report") : null,
-    parsedDownloads.length > 0
-      ? countLabel(parsedDownloads.length, "download")
-      : null,
-  ].filter((value): value is string => value !== null);
-  const hasFailedDownload = parsedDownloads.some(
-    (download) => download.state === "canceled" || download.state === "failed",
-  );
-
   return (
-    <Box className={styles.section}>
-      <AnimatedCollapsible
-        className={styles.panel}
-        data-testid="artifacts-panel"
-        header={`Artifacts — ${counts.join(", ")}`}
-        icon={<Icon icon={Images} />}
-        status={hasFailedDownload ? "error" : "success"}
-        variant="compact"
-      >
-        {screenshots.length > 0 ? (
-          <Box className={styles.group}>
-            <Text className={styles.groupTitle} size="1" weight="bold">
-              Screenshots ({screenshots.length})
-            </Text>
-            <Box className={styles.screenshotGrid}>
-              {screenshots.map((screenshot, index) => (
-                <Box className={styles.screenshot} key={`screenshot-${index}`}>
-                  <DialogImage
-                    alt={`Screenshot ${index + 1}`}
-                    fallback=""
-                    size="9"
-                    src={`data:${screenshot.mime};base64,${screenshot.data}`}
-                  />
-                  <Text className={styles.meta} size="1">
-                    {screenshot.width}×{screenshot.height} ·{" "}
-                    {formatSize(screenshot.bytes)}
-                  </Text>
-                </Box>
-              ))}
-            </Box>
+    <div className={styles.panel} data-testid="artifacts-panel">
+      {screenshots.length > 0 ? (
+        <Box className={styles.group}>
+          <span className={styles.groupTitle}>
+            Screenshots ({screenshots.length})
+          </span>
+          <Box className={styles.screenshotGrid}>
+            {screenshots.map((screenshot, index) => (
+              <Box className={styles.screenshot} key={`screenshot-${index}`}>
+                <DialogImage
+                  alt={`Screenshot ${index + 1}`}
+                  fallback=""
+                  size="9"
+                  src={
+                    buildImageDataUrl(screenshot.mime, screenshot.data) ?? ""
+                  }
+                />
+                <span className={styles.meta}>
+                  {screenshot.width}×{screenshot.height} ·{" "}
+                  {formatSize(screenshot.bytes)}
+                </span>
+              </Box>
+            ))}
           </Box>
-        ) : null}
+        </Box>
+      ) : null}
 
-        {pdfs.length > 0 ? (
-          <Box className={styles.group}>
-            <Text className={styles.groupTitle} size="1" weight="bold">
-              PDFs ({pdfs.length})
-            </Text>
-            <Box className={styles.rows}>
-              {pdfs.map((pdf, index) => {
-                const name = fileName(pdf.path);
-                const openHref = pdf.data
-                  ? `data:${pdf.mime};base64,${pdf.data}`
-                  : fileUrl(pdf.path);
-                return (
-                  <Box className={styles.row} key={`${pdf.path}-${index}`}>
-                    <Icon icon={FileText} />
-                    <Box className={styles.rowContent}>
-                      <a
-                        aria-label={`Open PDF ${name}`}
-                        className={styles.primaryLink}
-                        href={openHref}
-                        rel="noreferrer"
-                        target="_blank"
-                      >
-                        {name}
-                      </a>
-                      <Flex className={styles.meta} gap="2" wrap="wrap">
-                        <span>{formatSize(pdf.bytes)}</span>
-                        {pdf.pageCount ? (
-                          <span>
-                            {pdf.pageCount} page{pdf.pageCount === 1 ? "" : "s"}
-                          </span>
-                        ) : null}
-                      </Flex>
-                      <a
-                        aria-label={`Open local path ${pdf.path}`}
-                        className={styles.path}
-                        href={fileUrl(pdf.path)}
-                        rel="noreferrer"
-                        target="_blank"
-                      >
-                        {pdf.path}
-                      </a>
-                    </Box>
-                  </Box>
-                );
-              })}
-            </Box>
-          </Box>
-        ) : null}
-
-        {hars.length > 0 ? (
-          <Box className={styles.group}>
-            <Text className={styles.groupTitle} size="1" weight="bold">
-              HARs ({hars.length})
-            </Text>
-            <Box className={styles.rows}>
-              {hars.map((har, index) => (
-                <Box className={styles.row} key={`${har.path}-${index}`}>
-                  <Icon icon={FileJson} />
+      {pdfs.length > 0 ? (
+        <Box className={styles.group}>
+          <span className={styles.groupTitle}>PDFs ({pdfs.length})</span>
+          <Box className={styles.rows}>
+            {pdfs.map((pdf, index) => {
+              const name = fileName(pdf.path);
+              const openHref = pdf.data
+                ? `data:${pdf.mime};base64,${pdf.data}`
+                : fileUrl(pdf.path);
+              return (
+                <Box className={styles.row} key={`${pdf.path}-${index}`}>
+                  <Icon icon={FileText} />
                   <Box className={styles.rowContent}>
                     <a
-                      aria-label={`Open HAR ${fileName(har.path)}`}
+                      aria-label={`Open PDF ${name}`}
                       className={styles.primaryLink}
-                      href={fileUrl(har.path)}
+                      href={openHref}
                       rel="noreferrer"
                       target="_blank"
                     >
-                      {fileName(har.path)}
+                      {name}
                     </a>
-                    <Text className={styles.meta} size="1">
-                      {har.entry_count} entries · {formatSize(har.bytes)}
-                    </Text>
+                    <Flex className={styles.meta} gap="2" wrap="wrap">
+                      <span>{formatSize(pdf.bytes)}</span>
+                      {pdf.pageCount ? (
+                        <span>
+                          {pdf.pageCount} page{pdf.pageCount === 1 ? "" : "s"}
+                        </span>
+                      ) : null}
+                    </Flex>
                     <a
-                      aria-label={`Open local path ${har.path}`}
+                      aria-label={`Open local path ${pdf.path}`}
                       className={styles.path}
-                      href={fileUrl(har.path)}
+                      href={fileUrl(pdf.path)}
                       rel="noreferrer"
                       target="_blank"
                     >
-                      {har.path}
+                      {pdf.path}
                     </a>
                   </Box>
                 </Box>
-              ))}
-            </Box>
+              );
+            })}
           </Box>
-        ) : null}
+        </Box>
+      ) : null}
 
-        {coverage.length > 0 ? (
-          <Box className={styles.group}>
-            <Text className={styles.groupTitle} size="1" weight="bold">
-              Coverage reports ({coverage.length})
-            </Text>
-            <Box className={styles.rows}>
-              {coverage.map((report, index) => (
-                <Box className={styles.row} key={`${report.path}-${index}`}>
-                  <Icon icon={FileJson} />
-                  <Box className={styles.rowContent}>
-                    <a
-                      aria-label={`Open coverage report ${fileName(
-                        report.path,
-                      )}`}
-                      className={styles.primaryLink}
-                      href={fileUrl(report.path)}
-                      rel="noreferrer"
-                      target="_blank"
-                    >
-                      {fileName(report.path)}
-                    </a>
-                    <Text className={styles.meta} size="1">
-                      {report.resource_count} resources ·{" "}
-                      {formatSize(report.bytes)}
-                    </Text>
-                    <a
-                      aria-label={`Open local path ${report.path}`}
-                      className={styles.path}
-                      href={fileUrl(report.path)}
-                      rel="noreferrer"
-                      target="_blank"
-                    >
-                      {report.path}
-                    </a>
-                  </Box>
-                </Box>
-              ))}
-            </Box>
-          </Box>
-        ) : null}
-
-        {parsedDownloads.length > 0 ? (
-          <Box className={styles.group}>
-            <Text className={styles.groupTitle} size="1" weight="bold">
-              Downloads ({parsedDownloads.length})
-            </Text>
-            <Box className={styles.rows}>
-              {parsedDownloads.map((download, index) => {
-                const failed =
-                  download.state === "canceled" || download.state === "failed";
-                const size = download.received_bytes || download.total_bytes;
-                return (
-                  <Box
-                    className={styles.row}
-                    data-status={failed ? "error" : download.state}
-                    data-testid={`download-${index}`}
-                    key={`${download.guid}-${index}`}
+      {hars.length > 0 ? (
+        <Box className={styles.group}>
+          <span className={styles.groupTitle}>HARs ({hars.length})</span>
+          <Box className={styles.rows}>
+            {hars.map((har, index) => (
+              <Box className={styles.row} key={`${har.path}-${index}`}>
+                <Icon icon={FileJson} />
+                <Box className={styles.rowContent}>
+                  <a
+                    aria-label={`Open HAR ${fileName(har.path)}`}
+                    className={styles.primaryLink}
+                    href={fileUrl(har.path)}
+                    rel="noreferrer"
+                    target="_blank"
                   >
-                    <Icon icon={Download} />
-                    <Box className={styles.rowContent}>
-                      <Flex
-                        align="center"
-                        gap="2"
-                        justify="between"
-                        wrap="wrap"
-                      >
-                        <a
-                          aria-label={`Open download ${download.suggested_filename}`}
-                          className={styles.primaryLink}
-                          href={fileUrl(download.local_path)}
-                          rel="noreferrer"
-                          target="_blank"
-                        >
-                          {download.suggested_filename}
-                        </a>
-                        <Badge size="xs" tone={stateTone(download.state)}>
-                          {stateLabel(download.state)}
-                        </Badge>
-                      </Flex>
-                      <Text className={styles.meta} size="1">
-                        {formatSize(size)}
-                      </Text>
-                      <span className={styles.url} title={download.url}>
-                        {download.url}
-                      </span>
+                    {fileName(har.path)}
+                  </a>
+                  <span className={styles.meta}>
+                    {har.entry_count} entries · {formatSize(har.bytes)}
+                  </span>
+                  <a
+                    aria-label={`Open local path ${har.path}`}
+                    className={styles.path}
+                    href={fileUrl(har.path)}
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    {har.path}
+                  </a>
+                </Box>
+              </Box>
+            ))}
+          </Box>
+        </Box>
+      ) : null}
+
+      {coverage.length > 0 ? (
+        <Box className={styles.group}>
+          <span className={styles.groupTitle}>
+            Coverage reports ({coverage.length})
+          </span>
+          <Box className={styles.rows}>
+            {coverage.map((report, index) => (
+              <Box className={styles.row} key={`${report.path}-${index}`}>
+                <Icon icon={FileJson} />
+                <Box className={styles.rowContent}>
+                  <a
+                    aria-label={`Open coverage report ${fileName(report.path)}`}
+                    className={styles.primaryLink}
+                    href={fileUrl(report.path)}
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    {fileName(report.path)}
+                  </a>
+                  <span className={styles.meta}>
+                    {report.resource_count} resources ·{" "}
+                    {formatSize(report.bytes)}
+                  </span>
+                  <a
+                    aria-label={`Open local path ${report.path}`}
+                    className={styles.path}
+                    href={fileUrl(report.path)}
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    {report.path}
+                  </a>
+                </Box>
+              </Box>
+            ))}
+          </Box>
+        </Box>
+      ) : null}
+
+      {parsedDownloads.length > 0 ? (
+        <Box className={styles.group}>
+          <span className={styles.groupTitle}>
+            Downloads ({parsedDownloads.length})
+          </span>
+          <Box className={styles.rows}>
+            {parsedDownloads.map((download, index) => {
+              const failed =
+                download.state === "canceled" || download.state === "failed";
+              const size = download.received_bytes || download.total_bytes;
+              return (
+                <Box
+                  className={styles.row}
+                  data-status={failed ? "error" : download.state}
+                  data-testid={`download-${index}`}
+                  key={`${download.guid}-${index}`}
+                >
+                  <Icon icon={Download} />
+                  <Box className={styles.rowContent}>
+                    <Flex align="center" gap="2" justify="between" wrap="wrap">
                       <a
-                        aria-label={`Open local path ${download.local_path}`}
-                        className={styles.path}
+                        aria-label={`Open download ${download.suggested_filename}`}
+                        className={styles.primaryLink}
                         href={fileUrl(download.local_path)}
                         rel="noreferrer"
                         target="_blank"
                       >
-                        {download.local_path}
+                        {download.suggested_filename}
                       </a>
-                    </Box>
+                      <Badge size="xs" tone={stateTone(download.state)}>
+                        {stateLabel(download.state)}
+                      </Badge>
+                    </Flex>
+                    <span className={styles.meta}>{formatSize(size)}</span>
+                    <span className={styles.url} title={download.url}>
+                      {download.url}
+                    </span>
+                    <a
+                      aria-label={`Open local path ${download.local_path}`}
+                      className={styles.path}
+                      href={fileUrl(download.local_path)}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      {download.local_path}
+                    </a>
                   </Box>
-                );
-              })}
-            </Box>
+                </Box>
+              );
+            })}
           </Box>
-        ) : null}
-      </AnimatedCollapsible>
-    </Box>
+        </Box>
+      ) : null}
+    </div>
   );
 }

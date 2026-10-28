@@ -83,14 +83,7 @@ describe("ArtifactsPanel", () => {
     const user = userEvent.setup();
     renderPanel(artifacts, downloads);
 
-    const trigger = screen.getByRole("button", {
-      name: "Artifacts — 1 screenshot, 1 PDF, 1 HAR, 1 coverage report, 2 downloads",
-    });
-    expect(trigger).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByText("report.pdf")).not.toBeInTheDocument();
-
-    await user.click(trigger);
-
+    expect(screen.getByTestId("artifacts-panel")).toBeInTheDocument();
     expect(screen.getByText("Screenshots (1)")).toBeInTheDocument();
     expect(screen.getByText("1280×720 · 2.0 KB")).toBeInTheDocument();
     expect(screen.getByText("PDFs (1)")).toBeInTheDocument();
@@ -159,17 +152,11 @@ describe("ArtifactsPanel", () => {
     expect(screen.queryByTestId("artifacts-panel")).not.toBeInTheDocument();
   });
 
-  test("ignores malformed entries while rendering valid partial results", async () => {
-    const user = userEvent.setup();
+  test("ignores malformed entries while rendering valid partial results", () => {
     renderPanel(
       [artifacts[0], { artifact: { kind: "pdf", path: null } }],
       [{ state: "failed" }],
     );
-
-    const trigger = screen.getByRole("button", {
-      name: "Artifacts — 1 screenshot",
-    });
-    await user.click(trigger);
 
     expect(screen.getByText("1280×720 · 2.0 KB")).toBeInTheDocument();
     expect(screen.queryByText(/PDFs/)).not.toBeInTheDocument();

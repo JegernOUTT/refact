@@ -1,13 +1,9 @@
-import { Monitor, Image } from "lucide-react";
-import React, { useMemo } from "react";
-import { Box, Flex, Text } from "@radix-ui/themes";
-
-import { ToolCard } from "./ToolCard";
+import { Image, Monitor } from "lucide-react";
+import React from "react";
 import type { ToolCall } from "../../../services/refact/types";
-import { ShikiCodeBlock } from "../../Markdown";
-import { DialogImage } from "../../DialogImage";
-import styles from "./OpenAIResponsesTool.module.css";
 import { useOpenAiResponsesToolCardState } from "./openaiResponsesToolCardState";
+import { OpenAIServerTool } from "./OpenAIServerTool";
+import { parseToolArgs } from "./genericToolTitle";
 
 type Props = {
   toolCall: ToolCall;
@@ -15,46 +11,16 @@ type Props = {
 
 export const OpenAIComputerCallOutputTool: React.FC<Props> = ({ toolCall }) => {
   const state = useOpenAiResponsesToolCardState(toolCall);
-  const args = state.parsedArgs as Record<string, unknown> | null;
-
-  const imageUrls = useMemo(() => {
-    if (!args) return [] as string[];
-
-    // Typical shape: { output: { image_url: "..." } }
-    const output =
-      typeof args.output === "object" && args.output !== null
-        ? (args.output as Record<string, unknown>)
-        : null;
-    const url =
-      output && typeof output.image_url === "string" ? output.image_url : null;
-
-    if (url) return [url];
-    return [];
-  }, [args]);
-
+  const output = parseToolArgs(parseToolArgs(state.parsedArgs).output);
+  const images = typeof output.image_url === "string" ? [output.image_url] : [];
   return (
-    <ToolCard
-      icon={imageUrls.length > 0 ? <Image /> : <Monitor />}
-      summary={"Computer Output"}
-      status={state.status}
-      isOpen={state.isOpen}
-      onToggle={state.toggleOpen}
+    <OpenAIServerTool
+      icon={images.length > 0 ? <Image /> : <Monitor />}
+      images={images}
+      meta={images.length > 0 ? "screenshot" : undefined}
+      target="Output"
       toolCall={toolCall}
-    >
-      {imageUrls.length > 0 && (
-        <Flex py="2" gap="2" wrap="wrap">
-          {imageUrls.map((url, idx) => (
-            <DialogImage key={idx} src={url} fallback="" size="8" />
-          ))}
-        </Flex>
-      )}
-
-      <Text size="1" color="gray">
-        Raw JSON
-      </Text>
-      <Box className={styles.rawJson}>
-        <ShikiCodeBlock showLineNumbers={false}>{state.rawJson}</ShikiCodeBlock>
-      </Box>
-    </ToolCard>
+      verb="Computer"
+    />
   );
 };

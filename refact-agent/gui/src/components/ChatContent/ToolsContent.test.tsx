@@ -877,16 +877,18 @@ describe("compact dedicated transcript composition", () => {
             },
           );
           expect(screen.queryByTestId("generic-tool"), alias).toBeNull();
+          if (name === "ask_questions" || name === "ask") {
+            expect(
+              screen.getByTestId("ask-questions-tool"),
+              alias,
+            ).toBeInTheDocument();
+            unmount();
+            continue;
+          }
           const row = container.querySelector(
             'section[data-density="compact"]',
           );
           expect(row, alias).not.toBeNull();
-          if (name === "ask_questions" || name === "ask") {
-            expect(row).toHaveAttribute("data-open", "true");
-            expect(row?.querySelector("button[aria-expanded]")).toBeNull();
-            unmount();
-            continue;
-          }
           expect(row).toHaveAttribute("data-open", "false");
           expect(row?.querySelector("button")).not.toHaveTextContent(
             "RAW_TECHNICAL_SENTINEL",
@@ -1115,16 +1117,8 @@ describe("compact dedicated transcript composition", () => {
         ],
       });
       const card = container.querySelector("section");
-      expect(card).toHaveTextContent("Needs answer");
+      expect(card).toHaveTextContent("Needs you");
       expect(card).toHaveAttribute("data-open", "true");
-      expect(
-        card?.querySelector(":scope > div > button[aria-expanded]"),
-      ).toBeNull();
-      expect(container.querySelector("section")).toHaveAttribute(
-        "data-density",
-        "compact",
-      );
-      expect(screen.queryByRole("button", { name: "More details" })).toBeNull();
       await user.click(screen.getByRole("radio", { name: "No" }));
       expect(fetchMock).not.toHaveBeenCalled();
       expect(container.querySelector("button button")).toBeNull();

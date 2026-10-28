@@ -1,14 +1,5 @@
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { v4 as uuidv4 } from "uuid";
-import { CircleCheck, CircleHelp, CircleMinus } from "lucide-react";
-import { ToolCard } from "./ToolCard";
-import { Markdown } from "../../Markdown";
 import { Button } from "../../ui";
 import { QuestionResponseForm } from "./QuestionResponseForm";
 import type {
@@ -39,42 +30,22 @@ import {
   type QuestionDraft,
 } from "../../../utils/questionResponses";
 import styles from "./AskQuestionsTool.module.css";
-import { QuestionArtifactContext } from "../../Markdown/questionArtifactContext";
-import { CompactToolDetails } from "../../Tools/AgenticTool/CompactToolDetails";
-import { compactText } from "../../Tools/AgenticTool/compactPresentation";
-
-function ResponseHistory({
-  compact,
-  count,
-  children,
-}: {
-  compact: boolean;
-  count: number;
-  children: ReactNode;
-}) {
-  return compact ? (
-    <CompactToolDetails facts={[{ label: "Questions", value: String(count) }]}>
-      {children}
-    </CompactToolDetails>
-  ) : (
-    <>{children}</>
-  );
-}
+import {
+  AnswerList,
+  QuestionList,
+  QuestionTranscript,
+  type AnswerEntry,
+  type QuestionState,
+} from "./QuestionTranscript";
 
 export function NativeQuestionResponse({
   set,
   threadId,
   toolCall,
-  isOpen,
-  onToggle,
-  compact = false,
 }: {
   set: PendingQuestionSet;
   threadId: string;
   toolCall: ToolCall;
-  isOpen: boolean;
-  onToggle: () => void;
-  compact?: boolean;
 }) {
   const config = useAppSelector(selectConfig);
   const identity = getEngineEndpointIdentity(config);
@@ -87,7 +58,7 @@ export function NativeQuestionResponse({
   return (
     <ResponseInstance
       key={instance}
-      {...{ set, threadId, toolCall, isOpen, onToggle, instance, compact }}
+      {...{ set, threadId, toolCall, instance }}
     />
   );
 }
@@ -96,18 +67,12 @@ function ResponseInstance({
   set,
   threadId,
   toolCall,
-  isOpen,
-  onToggle,
   instance,
-  compact,
 }: {
   set: PendingQuestionSet;
   threadId: string;
   toolCall: ToolCall;
-  isOpen: boolean;
-  onToggle: () => void;
   instance: string;
-  compact: boolean;
 }) {
   const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
@@ -215,150 +180,95 @@ function ResponseInstance({
       ...answer,
       disposition: "answered" as const,
     }));
-  const questionText = compactText(set.questions[0]?.text, 120);
-  const stateLabel = pending
+  const state: QuestionState = pending
     ? error
-      ? "Needs answer · Send failed"
+      ? "send_failed"
       : sent
-        ? "Needs answer · Awaiting confirmation"
-        : "Needs answer"
+        ? "sent"
+        : "pending"
     : set.status === "answered"
-      ? "Answered"
+      ? "answered"
       : set.status === "cancelled"
-        ? "Withdrawn"
-        : "State unknown";
-  const compactProps = compact
-    ? {
-        density: "compact" as const,
-        summary: questionText
-          ? `${questionText}${
-              set.questions.length > 1
-                ? ` (+${set.questions.length - 1} questions)`
-                : ""
-            }`
-          : "Question history",
-        meta: stateLabel,
-        status: error
-          ? ("error" as const)
-          : pending
-            ? ("running" as const)
-            : set.status === "answered"
-              ? ("success" as const)
-              : ("idle" as const),
-      }
-    : {};
+        ? "cancelled"
+        : "unknown";
+  const answers: AnswerEntry[] = set.questions.map((q) => {
+    const answer = submitted?.find((a) => a.id === q.id);
+    return {
+      id: q.id,
+      question: q.text,
+      answer:
+        set.status === "cancelled"
+          ? "No response submitted"
+          : answer
+            ? `${
+                answer.disposition === "custom" ? "Custom answer: " : ""
+              }${responseLabel(answer)}`
+            : "No answer",
+      explanation:
+        answer &&
+        "explanation" in answer &&
+        typeof answer.explanation === "string"
+          ? answer.explanation
+          : undefined,
+    };
+  });
+  const status = (
+    <>
+      {sending && <p role="status">Submitting response…</p>}
+      {sent && pending && (
+        <div role="status" className={styles.sentStatus}>
+          <p>Response sent, awaiting confirmation.</p>
+          <Button
+            size="sm"
+            onClick={() => {
+              lock.current = false;
+              setSent(false);
+              dispatch(requestSseRefresh({ chatId: threadId }));
+            }}
+          >
+            Check status / retry
+          </Button>
+        </div>
+      )}
+    </>
+  );
   return (
-    <ToolCard
-      icon={
+    <QuestionTranscript
+      actions={
         pending ? (
-          <CircleHelp />
-        ) : set.status === "cancelled" ? (
-          <CircleMinus />
-        ) : compact && set.status !== "answered" ? (
-          <CircleHelp />
-        ) : (
-          <CircleCheck />
+          <div className={styles.responseForm}>
+            <QuestionResponseForm
+              questions={set.questions}
+              instance={instance}
+              drafts={drafts}
+              comments={comments}
+              onDrafts={setDrafts}
+              onComments={setComments}
+              disabled={sending || sent}
+              approval={set.tool_call_id.startsWith("agent-approval:")}
+              onSubmit={(r) => void submit(r)}
+            />
+            {status}
+          </div>
+        ) : null
+      }
+      error={error}
+      input={
+        pending ? null : (
+          <QuestionList questions={set.questions} instance={instance} />
         )
       }
-      summary={
-        pending
-          ? "Questions for you"
-          : set.status === "cancelled"
-            ? "Questions cancelled"
-            : "Response submitted"
-      }
-      status={pending ? "running" : "success"}
-      isOpen={isOpen || set.status !== "answered"}
-      onToggle={onToggle}
-      collapsible={set.status === "answered"}
-      toolCall={toolCall}
-      {...compactProps}
-    >
-      <div className={styles.responseForm}>
-        {pending ? (
-          <QuestionResponseForm
-            questions={set.questions}
-            instance={instance}
-            drafts={drafts}
-            comments={comments}
-            onDrafts={setDrafts}
-            onComments={setComments}
-            disabled={sending || sent}
-            approval={set.tool_call_id.startsWith("agent-approval:")}
-            onSubmit={(r) => void submit(r)}
+      output={
+        pending ? null : (
+          <AnswerList
+            answers={answers}
+            comments={set.response?.overall_comments}
           />
-        ) : (
-          <ResponseHistory
-            compact={compact && set.status === "answered"}
-            count={set.questions.length}
-          >
-            {set.questions.map((q) => {
-              const answer = submitted?.find((a) => a.id === q.id);
-              return (
-                <section key={q.id} className={styles.responseQuestion}>
-                  <QuestionArtifactContext.Provider
-                    value={{
-                      instance: `${instance}:${q.id}`,
-                      enabled: false,
-                      onAnswer: () => undefined,
-                    }}
-                  >
-                    <Markdown>{q.text}</Markdown>
-                  </QuestionArtifactContext.Provider>
-                  {compact && q.options?.length ? (
-                    <ul>
-                      {q.options.map((option) => (
-                        <li key={option}>{option}</li>
-                      ))}
-                    </ul>
-                  ) : null}
-                  <p className={styles.answerText}>
-                    {set.status === "cancelled"
-                      ? "No response submitted"
-                      : answer
-                        ? `${
-                            answer.disposition === "custom"
-                              ? "Custom answer: "
-                              : ""
-                          }${responseLabel(answer)}`
-                        : "No answer"}
-                  </p>
-                  {answer &&
-                    "explanation" in answer &&
-                    typeof answer.explanation === "string" && (
-                      <p className={styles.answerText}>{answer.explanation}</p>
-                    )}
-                </section>
-              );
-            })}
-            {set.response?.overall_comments && (
-              <div>
-                <strong>Overall comments</strong>
-                <p className={styles.answerText}>
-                  {set.response.overall_comments}
-                </p>
-              </div>
-            )}
-          </ResponseHistory>
-        )}
-        {error && <p role="alert">{error}</p>}
-        {sending && <p role="status">Submitting response…</p>}
-        {sent && pending && (
-          <div role="status">
-            <p>Response sent, awaiting confirmation.</p>
-            <Button
-              size="sm"
-              onClick={() => {
-                lock.current = false;
-                setSent(false);
-                dispatch(requestSseRefresh({ chatId: threadId }));
-              }}
-            >
-              Check status / retry
-            </Button>
-          </div>
-        )}
-      </div>
-    </ToolCard>
+        )
+      }
+      questions={set.questions}
+      state={state}
+      toolCall={toolCall}
+    />
   );
 }

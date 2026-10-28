@@ -1,12 +1,9 @@
 import { TriangleAlert } from "lucide-react";
-import React, { useMemo } from "react";
-import { Box, Text } from "@radix-ui/themes";
-
-import { ToolCard } from "./ToolCard";
+import React from "react";
 import type { ToolCall } from "../../../services/refact/types";
-import { ShikiCodeBlock } from "../../Markdown";
-import styles from "./OpenAIResponsesTool.module.css";
 import { useOpenAiResponsesToolCardState } from "./openaiResponsesToolCardState";
+import { OpenAIServerTool, ServerToolText } from "./OpenAIServerTool";
+import { parseToolArgs } from "./genericToolTitle";
 
 type Props = {
   toolCall: ToolCall;
@@ -14,36 +11,20 @@ type Props = {
 
 export const OpenAIRefusalTool: React.FC<Props> = ({ toolCall }) => {
   const state = useOpenAiResponsesToolCardState(toolCall);
-  const args = state.parsedArgs as Record<string, unknown> | null;
-
-  const refusal = useMemo(() => {
-    if (!args) return null;
-    if (typeof args.refusal === "string") return args.refusal;
-    if (typeof args.text === "string") return args.text;
-    return null;
-  }, [args]);
-
+  const args = parseToolArgs(state.parsedArgs);
+  const refusal =
+    typeof args.refusal === "string"
+      ? args.refusal
+      : typeof args.text === "string"
+        ? args.text
+        : undefined;
   return (
-    <ToolCard
+    <OpenAIServerTool
       icon={<TriangleAlert />}
-      summary={"Refusal"}
-      status={state.status}
-      isOpen={state.isOpen}
-      onToggle={state.toggleOpen}
+      output={refusal ? <ServerToolText text={refusal} /> : null}
+      target={refusal}
       toolCall={toolCall}
-    >
-      {refusal && (
-        <Box className={styles.codeBox}>
-          <ShikiCodeBlock showLineNumbers={false}>{refusal}</ShikiCodeBlock>
-        </Box>
-      )}
-
-      <Text size="1" color="gray">
-        Raw JSON
-      </Text>
-      <Box className={styles.rawJson}>
-        <ShikiCodeBlock showLineNumbers={false}>{state.rawJson}</ShikiCodeBlock>
-      </Box>
-    </ToolCard>
+      verb="Refusal"
+    />
   );
 };
