@@ -45,6 +45,7 @@ import {
   setTemperature,
   setMaxTokens,
   setAutoCompressionCap,
+  setContextTokensCap,
   updateChatRuntimeFromSessionState,
   openBuddyChat,
   newBuddyChatAction,
@@ -2275,9 +2276,6 @@ startListening({
     const patch: Record<string, unknown> = {
       model: action.payload.model,
     };
-    if (action.payload.modelMaxContextTokens !== undefined) {
-      patch.context_tokens_cap = runtime.thread.context_tokens_cap ?? null;
-    }
 
     try {
       const { sendChatCommand } = await import(
@@ -2294,22 +2292,14 @@ startListening({
 });
 
 startListening({
-  actionCreator: setMaxNewTokens,
+  actionCreator: setContextTokensCap,
   effect: async (action, listenerApi) => {
     const state = listenerApi.getState();
     const apiKey = state.config.apiKey;
-    const chatId =
-      typeof action.payload === "number"
-        ? state.chat.current_thread_id
-        : action.payload.chatId ?? state.chat.current_thread_id;
+    const chatId = action.payload.chatId;
     const runtime = chatId ? state.chat.threads[chatId] : undefined;
 
     if (!hasConfiguredEngineEndpoint(state) || !chatId || !runtime) return;
-
-    const previousCap =
-      listenerApi.getOriginalState().chat.threads[chatId]?.thread
-        .context_tokens_cap;
-    if (previousCap === runtime.thread.context_tokens_cap) return;
 
     try {
       const { sendChatCommand } = await import(
@@ -2318,7 +2308,7 @@ startListening({
       await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
         type: "set_params",
         patch: {
-          context_tokens_cap: runtime.thread.context_tokens_cap ?? null,
+          context_tokens_cap: action.payload.value,
         },
       });
     } catch {

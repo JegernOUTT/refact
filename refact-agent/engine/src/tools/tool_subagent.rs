@@ -50,6 +50,7 @@ struct SubagentArgs {
     tools: Option<Vec<String>>,
     model_type: Option<String>,
     model_name: Option<String>,
+    context_tokens_cap: Option<usize>,
     goal: Option<SpawnGoal>,
     plan: Option<String>,
     worktree_mode: SpawnWorktreeMode,
@@ -153,6 +154,7 @@ impl Tool for ToolSubagent {
                     "tools": {"type": "string", "description": "Optional comma-separated tool allowlist that narrows inherited authority. Omit or leave empty to inherit all parent-chat tools. Task wording such as 'read-only' does not restrict tools. For read-only research, explicitly list only required read tools (e.g. cat, tree, glob, search_pattern) and request supported sandbox=read_only for shell confinement. Exclude subagent and review when nested delegation is not intended. Coordination tools may still be added within parent authority."},
                     "model_type": {"type": "string", "enum": MODEL_TYPES, "description": "Configured model slot. Ignored when model_name is supplied."},
                     "model_name": {"type": "string", "description": "Concrete chat model id. Takes precedence over model_type."},
+                    "context_tokens_cap": {"type": "integer", "minimum": 1, "description": "Optional child context limit in tokens, at most the selected model's window. Omit to use the full model window; the parent's own limit is never inherited."},
                     "goal": goal_schema,
                     "worktree": {"type": "string", "enum": ["inherit", "isolated"], "default": "inherit", "description": "Use the parent worktree or create an isolated worktree."},
                     "push": PushMode::schema(),
@@ -451,6 +453,7 @@ impl Tool for ToolSubagent {
             max_steps,
             model: model.clone(),
             model_type: model_type.clone(),
+            context_tokens_cap: args.context_tokens_cap,
             goal: goal.clone(),
             plan: args.plan.clone(),
             deliverable,
@@ -688,6 +691,16 @@ fn parse_subagent_args_with_limits(
         }
     }
     let model_name = parse_optional_string(args, "model_name")?;
+    let context_tokens_cap = match args.get("context_tokens_cap") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .filter(|cap| *cap > 0)
+                .and_then(|cap| usize::try_from(cap).ok())
+                .ok_or("argument `context_tokens_cap` must be a positive integer")?,
+        ),
+    };
     let goal = parse_goal(args)?;
     if args.contains_key("plan") {
         return Err("subagent.plan was removed; use goal.plan.content".into());
@@ -743,6 +756,7 @@ fn parse_subagent_args_with_limits(
         tools,
         model_type,
         model_name,
+        context_tokens_cap,
         goal,
         plan,
         worktree_mode,
@@ -1201,6 +1215,11 @@ fn build_launch_preview_tool_result(
             preview_value(args.model_type.as_deref().unwrap_or("(not specified)"))
         ),
         format!(
+            "- context_tokens_cap: {}",
+            args.context_tokens_cap
+                .map_or("(not specified)".to_string(), |cap| cap.to_string())
+        ),
+        format!(
             "- worktree_mode: {}",
             match &args.worktree_mode {
                 SpawnWorktreeMode::Inherit => "inherit".to_string(),
@@ -1236,6 +1255,13 @@ fn build_launch_preview_tool_result(
             lines.extend([
                 "## Applied Launch (prepared; not dispatched)".to_string(),
                 format!("- model: {}", preview_value(&effective.model)),
+                format!(
+                    "- context_tokens_cap: {}",
+                    effective
+                        .context_tokens_cap
+                        .map_or("none (model window)".to_string(), |cap| cap.to_string())
+                ),
+                format!("- n_ctx: {}", effective.n_ctx),
                 format!("- mode: {}", preview_value(&effective.mode)),
                 format!("- tools: {tools}"),
                 format!(

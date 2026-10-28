@@ -1252,6 +1252,7 @@ mod tests {
             max_steps: 2,
             model: "test-model".into(),
             model_type: None,
+            context_tokens_cap: None,
             goal: Some(goal),
             plan: None,
             worktree_mode: SpawnWorktreeMode::Inherit,

@@ -1751,6 +1751,7 @@ mod tests {
             model: "test/model".to_string(),
             mode: "agent".to_string(),
             n_ctx: 4096,
+            implicit_context_window: false,
             max_new_tokens: 512,
             temperature: None,
             reasoning_effort: None,

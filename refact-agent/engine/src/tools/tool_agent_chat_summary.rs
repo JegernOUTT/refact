@@ -386,6 +386,7 @@ async fn run_summary_subchat(
         model: current_model,
         mode: "NO_TOOLS".to_string(),
         n_ctx: SUMMARY_N_CTX,
+        implicit_context_window: false,
         max_new_tokens: SUMMARY_MAX_NEW_TOKENS,
         temperature: Some(0.0),
         reasoning_effort: None,

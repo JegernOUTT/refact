@@ -161,6 +161,7 @@ pub(crate) fn spawn_request(parent_chat_id: &str, kind: BgAgentKind) -> SpawnReq
         max_steps: 10,
         model: "openai/gpt-4o".to_string(),
         model_type: None,
+        context_tokens_cap: None,
         goal: None,
         plan: None,
         deliverable: None,

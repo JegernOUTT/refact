@@ -523,6 +523,11 @@ export const setAutoCompressionCap = createAction<{
   value: number | null;
 }>("chatThread/setAutoCompressionCap");
 
+export const setContextTokensCap = createAction<{
+  chatId: string;
+  value: number | null;
+}>("chatThread/setContextTokensCap");
+
 export const setParallelToolCalls = createAction<{
   chatId: string;
   value: boolean | null;

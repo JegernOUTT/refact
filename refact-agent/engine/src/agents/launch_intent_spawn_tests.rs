@@ -119,6 +119,7 @@ fn request(parent_id: &str) -> SpawnRequest {
         max_steps: 2,
         model: "model".into(),
         model_type: None,
+        context_tokens_cap: None,
         goal: None,
         plan: None,
         deliverable: None,

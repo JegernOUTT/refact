@@ -2113,6 +2113,7 @@ async fn run_verifier_review(
         model,
         mode: "agent".to_string(),
         n_ctx: 32_000,
+        implicit_context_window: false,
         max_new_tokens: 1024,
         temperature: Some(0.0),
         reasoning_effort: None,

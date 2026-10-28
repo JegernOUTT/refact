@@ -53,6 +53,7 @@ import {
   setFrequencyPenalty,
   setMaxTokens,
   setAutoCompressionCap,
+  setContextTokensCap,
   setParallelToolCalls,
   closeThread,
   switchToThread,
@@ -134,22 +135,9 @@ const createChatThread = (
 function syncThreadContextLimitToModelMax(
   thread: Draft<ChatThread>,
   modelMaxContextTokens: number,
-  previousModelMaxContextTokens = thread.modelMaximumContextTokens,
 ): void {
-  const previousStoredModelMaxContextTokens = thread.modelMaximumContextTokens;
-  const currentCap = thread.context_tokens_cap;
-
   thread.modelMaximumContextTokens = modelMaxContextTokens;
   thread.currentMaximumContextTokens = modelMaxContextTokens;
-
-  if (
-    currentCap === undefined ||
-    currentCap > modelMaxContextTokens ||
-    currentCap === previousModelMaxContextTokens ||
-    currentCap === previousStoredModelMaxContextTokens
-  ) {
-    thread.context_tokens_cap = modelMaxContextTokens;
-  }
 }
 
 const createThreadRuntime = (
@@ -711,7 +699,6 @@ export const chatReducer = createReducer(initialState, (builder) => {
       syncThreadContextLimitToModelMax(
         rt.thread,
         action.payload.modelMaxContextTokens,
-        action.payload.previousModelMaxContextTokens,
       );
     }
   });
@@ -953,6 +940,11 @@ export const chatReducer = createReducer(initialState, (builder) => {
   builder.addCase(setAutoCompressionCap, (state, action) => {
     const rt = getRuntime(state, action.payload.chatId);
     if (rt) rt.thread.auto_compression_cap = action.payload.value;
+  });
+
+  builder.addCase(setContextTokensCap, (state, action) => {
+    const rt = getRuntime(state, action.payload.chatId);
+    if (rt) rt.thread.context_tokens_cap = action.payload.value ?? undefined;
   });
 
   builder.addCase(setParallelToolCalls, (state, action) => {
@@ -1533,8 +1525,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
               : "agent",
           mode: normalizeLegacyMode(backendMode || existing?.mode),
           boost_reasoning: event.thread.boost_reasoning,
-          context_tokens_cap:
-            event.thread.context_tokens_cap ?? existing?.context_tokens_cap,
+          context_tokens_cap: event.thread.context_tokens_cap ?? undefined,
           include_project_info: event.thread.include_project_info,
           checkpoints_enabled: event.thread.checkpoints_enabled,
           isTitleGenerated:

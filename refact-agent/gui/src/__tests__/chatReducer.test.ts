@@ -12,6 +12,7 @@ import {
   setTemperature,
   setMaxTokens,
   setAutoCompressionCap,
+  setContextTokensCap,
   setChatModel,
   setMaxNewTokens,
 } from "../features/Chat/Thread/actions";
@@ -561,7 +562,7 @@ describe("Chat Thread Reducer - Core Functionality", () => {
       );
     });
 
-    test("caps_fulfilled_updates_auto_context_cap_after_model_switch", () => {
+    test("caps_fulfilled_keeps_request_context_uncapped_after_model_switch", () => {
       const capsPayload = {
         chat_default_model: "old-model",
         chat_models: {
@@ -581,7 +582,9 @@ describe("Chat Thread Reducer - Core Functionality", () => {
       };
 
       const initialized = chatReducer(initialState, capsAction);
-      expect(initialized.threads[chatId]?.thread.context_tokens_cap).toBe(8192);
+      expect(
+        initialized.threads[chatId]?.thread.context_tokens_cap,
+      ).toBeUndefined();
 
       const switchedModel = chatReducer(
         initialized,
@@ -592,7 +595,9 @@ describe("Chat Thread Reducer - Core Functionality", () => {
       expect(
         afterCaps.threads[chatId]?.thread.currentMaximumContextTokens,
       ).toBe(128000);
-      expect(afterCaps.threads[chatId]?.thread.context_tokens_cap).toBe(128000);
+      expect(
+        afterCaps.threads[chatId]?.thread.context_tokens_cap,
+      ).toBeUndefined();
     });
 
     test("caps_fulfilled_preserves_lower_explicit_context_cap_after_model_switch", () => {
@@ -710,7 +715,7 @@ describe("Chat Thread Reducer - Core Functionality", () => {
       expect(afterCaps.threads[chatId]?.thread.context_tokens_cap).toBe(4096);
     });
 
-    test("set_max_new_tokens_updates_auto_context_cap_after_model_switch", () => {
+    test("set_max_new_tokens_does_not_create_a_request_context_cap", () => {
       const withOldModelLimit = chatReducer(
         initialState,
         setMaxNewTokens(8192),
@@ -727,12 +732,12 @@ describe("Chat Thread Reducer - Core Functionality", () => {
       expect(
         afterLimitUpdate.threads[chatId]?.thread.currentMaximumContextTokens,
       ).toBe(128000);
-      expect(afterLimitUpdate.threads[chatId]?.thread.context_tokens_cap).toBe(
-        128000,
-      );
+      expect(
+        afterLimitUpdate.threads[chatId]?.thread.context_tokens_cap,
+      ).toBeUndefined();
     });
 
-    test("snapshot_preserves_model_context_limit_before_model_switch", () => {
+    test("snapshot_clears_saved_request_cap_and_preserves_model_capacity", () => {
       const capsPayload = {
         chat_default_model: "old-model",
         chat_models: {
@@ -778,7 +783,10 @@ describe("Chat Thread Reducer - Core Functionality", () => {
         messages: [],
       };
 
-      const initialized = chatReducer(initialState, capsAction);
+      const initialized = chatReducer(
+        chatReducer(initialState, capsAction),
+        setContextTokensCap({ chatId, value: 8192 }),
+      );
       const afterSnapshot = chatReducer(
         initialized,
         applyChatEvent(snapshotEvent),
@@ -792,49 +800,57 @@ describe("Chat Thread Reducer - Core Functionality", () => {
       expect(
         afterSnapshot.threads[chatId]?.thread.modelMaximumContextTokens,
       ).toBe(8192);
+      expect(
+        afterSnapshot.threads[chatId]?.thread.context_tokens_cap,
+      ).toBeUndefined();
       expect(afterCaps.threads[chatId]?.thread.modelMaximumContextTokens).toBe(
         128000,
       );
-      expect(afterCaps.threads[chatId]?.thread.context_tokens_cap).toBe(128000);
+      expect(
+        afterCaps.threads[chatId]?.thread.context_tokens_cap,
+      ).toBeUndefined();
     });
 
-    test("model_switch_updates_auto_context_cap_without_existing_model_limit", () => {
-      const existingRuntime = requireThread(initialState, chatId);
-      const restoredState: Chat = {
-        ...initialState,
-        threads: {
-          ...initialState.threads,
-          [chatId]: {
-            ...existingRuntime,
-            thread: {
-              ...existingRuntime.thread,
-              model: "old-model",
-              context_tokens_cap: 8192,
-              currentMaximumContextTokens: undefined,
-              modelMaximumContextTokens: undefined,
+    test.each([4096, 8192, 200000])(
+      "model_switch_preserves_explicit_request_cap_%s",
+      (cap) => {
+        const existingRuntime = requireThread(initialState, chatId);
+        const restoredState: Chat = {
+          ...initialState,
+          threads: {
+            ...initialState.threads,
+            [chatId]: {
+              ...existingRuntime,
+              thread: {
+                ...existingRuntime.thread,
+                model: "old-model",
+                context_tokens_cap: cap,
+                currentMaximumContextTokens: undefined,
+                modelMaximumContextTokens: undefined,
+              },
             },
           },
-        },
-      };
+        };
 
-      const switchedModel = chatReducer(
-        restoredState,
-        setChatModel({
-          model: "new-model",
-          modelMaxContextTokens: 128000,
-          previousModelMaxContextTokens: 8192,
-        }),
-      );
+        const switchedModel = chatReducer(
+          restoredState,
+          setChatModel({
+            model: "new-model",
+            modelMaxContextTokens: 128000,
+            previousModelMaxContextTokens: 8192,
+          }),
+        );
 
-      expect(
-        switchedModel.threads[chatId]?.thread.modelMaximumContextTokens,
-      ).toBe(128000);
-      expect(switchedModel.threads[chatId]?.thread.context_tokens_cap).toBe(
-        128000,
-      );
-    });
+        expect(
+          switchedModel.threads[chatId]?.thread.modelMaximumContextTokens,
+        ).toBe(128000);
+        expect(switchedModel.threads[chatId]?.thread.context_tokens_cap).toBe(
+          cap,
+        );
+      },
+    );
 
-    test("model_switch_updates_auto_context_cap_with_stale_previous_limit", () => {
+    test("model_switch_does_not_create_a_request_cap_with_stale_previous_limit", () => {
       const withOldModelLimit = chatReducer(
         initialState,
         setMaxNewTokens(8192),
@@ -856,12 +872,12 @@ describe("Chat Thread Reducer - Core Functionality", () => {
         }),
       );
 
-      expect(firstSwitch.threads[chatId]?.thread.context_tokens_cap).toBe(
-        128000,
-      );
-      expect(secondSwitch.threads[chatId]?.thread.context_tokens_cap).toBe(
-        200000,
-      );
+      expect(
+        firstSwitch.threads[chatId]?.thread.context_tokens_cap,
+      ).toBeUndefined();
+      expect(
+        secondSwitch.threads[chatId]?.thread.context_tokens_cap,
+      ).toBeUndefined();
     });
   });
 

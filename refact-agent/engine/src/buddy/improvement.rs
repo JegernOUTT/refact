@@ -524,6 +524,7 @@ pub fn spawn_request(
         max_steps: 32,
         model,
         model_type: None,
+        context_tokens_cap: None,
         goal: None,
         plan: None,
         worktree_mode: crate::agents::spawn::SpawnWorktreeMode::Isolated { auto_merge: false },

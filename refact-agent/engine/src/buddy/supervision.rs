@@ -601,6 +601,7 @@ pub(crate) async fn spawn_worker(
         max_steps: native_budget(&record)?.max_turns.unwrap_or(1) as usize,
         model: record.mandate.model_constraints[0].clone(),
         model_type: None,
+        context_tokens_cap: None,
         goal: Some(spawn_goal),
         plan: None,
         worktree_mode: SpawnWorktreeMode::Isolated { auto_merge: false },

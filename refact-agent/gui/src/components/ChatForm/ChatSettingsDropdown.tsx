@@ -31,6 +31,7 @@ import {
   setTemperature,
   setMaxTokens,
   setAutoCompressionCap,
+  setContextTokensCap,
   useThreadId,
 } from "../../features/Chat/Thread";
 import type { ReasoningEffort } from "../../features/Chat/Thread/types";
@@ -51,6 +52,7 @@ import styles from "./ChatSettingsDropdown.module.css";
 
 const MIN_OUTPUT_TOKENS = 1024;
 const MIN_COMPRESSION_TOKENS = 1024;
+const MIN_REQUEST_CONTEXT_TOKENS = 1024;
 
 function formatTokens(tokens: number): string {
   if (tokens >= 1000000) {
@@ -279,6 +281,9 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
     null,
   );
   const [localMaxTokens, setLocalMaxTokens] = useState<number | null>(null);
+  const [localContextTokensCap, setLocalContextTokensCap] = useState<
+    number | null
+  >(null);
   const [localAutoCompressionCap, setLocalAutoCompressionCap] = useState<
     number | null
   >(null);
@@ -296,21 +301,30 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
   );
   const modelContextTokens =
     selectedModelDetail?.nCtx ?? MIN_COMPRESSION_TOKENS;
+  const displayContextTokensCap = localContextTokensCap ?? contextTokensCap;
+  const clampedContextTokensCap = Math.min(
+    Math.max(
+      displayContextTokensCap ?? modelContextTokens,
+      MIN_REQUEST_CONTEXT_TOKENS,
+    ),
+    modelContextTokens,
+  );
   const effectiveContextTokens =
     contextTokensCap != null && contextTokensCap > 0
       ? Math.min(modelContextTokens, contextTokensCap)
       : modelContextTokens;
   const defaultCompressionCap = Math.floor(0.9 * effectiveContextTokens);
-  const maxCompressionTokens = Math.max(
-    effectiveContextTokens,
+  const maxCompressionTokens = effectiveContextTokens;
+  const minCompressionTokens = Math.min(
     MIN_COMPRESSION_TOKENS,
+    maxCompressionTokens,
   );
   const displayAutoCompressionCap =
     localAutoCompressionCap ?? threadAutoCompressionCap;
   const clampedAutoCompressionCap = Math.min(
     Math.max(
       displayAutoCompressionCap ?? maxCompressionTokens,
-      MIN_COMPRESSION_TOKENS,
+      minCompressionTokens,
     ),
     maxCompressionTokens,
   );
@@ -320,6 +334,7 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
   useEffect(() => {
     setLocalThinkingBudget(null);
     setLocalMaxTokens(null);
+    setLocalContextTokensCap(null);
     setLocalAutoCompressionCap(null);
   }, [chatId]);
 
@@ -327,6 +342,7 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
     if (!isOpen) {
       setLocalThinkingBudget(null);
       setLocalMaxTokens(null);
+      setLocalContextTokensCap(null);
       setLocalAutoCompressionCap(null);
     }
   }, [isOpen]);
@@ -595,13 +611,106 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
                     <div className={styles.tokenLimitsBody}>
                       <div className={styles.section}>
                         <div className={styles.settingsRow}>
+                          <Text size="1" color="gray">
+                            Model capacity
+                          </Text>
+                          <Text size="1" weight="medium">
+                            {formatTokens(modelContextTokens)}
+                          </Text>
+                        </div>
+                        <div className={styles.settingsRow}>
                           <Text
                             size="1"
                             color="gray"
                             weight="medium"
                             className={styles.sectionHeader}
                           >
-                            Max tokens
+                            Request context limit
+                          </Text>
+                          <Text size="1" weight="medium">
+                            {displayContextTokensCap != null &&
+                            displayContextTokensCap > 0
+                              ? displayContextTokensCap
+                              : `${formatTokens(
+                                  modelContextTokens,
+                                )} (model maximum)`}
+                          </Text>
+                        </div>
+                        <Text
+                          size="1"
+                          color="gray"
+                          className={styles.helperText}
+                        >
+                          Optional request limit, bounded by model capacity.
+                          Reset uses the selected model maximum without changing
+                          auto-compression.
+                        </Text>
+                        <div
+                          className={classNames(
+                            styles.sliderContainer,
+                            styles.sliderTrack,
+                            contextTokensCap != null &&
+                              styles.sliderTrackWithReset,
+                          )}
+                        >
+                          <Text size="1" color="gray">
+                            1K
+                          </Text>
+                          <Slider
+                            min={Math.min(
+                              MIN_REQUEST_CONTEXT_TOKENS,
+                              modelContextTokens,
+                            )}
+                            max={modelContextTokens}
+                            step={1}
+                            value={[clampedContextTokensCap]}
+                            onValueChange={(values) =>
+                              setLocalContextTokensCap(values[0])
+                            }
+                            onValueCommit={(values) => {
+                              dispatch(
+                                setContextTokensCap({
+                                  chatId,
+                                  value: values[0],
+                                }),
+                              );
+                              setLocalContextTokensCap(null);
+                            }}
+                            disabled={isStreamingDisabled}
+                            className={styles.slider}
+                            aria-label="Request context limit"
+                          />
+                          <Text size="1" color="gray">
+                            {formatTokens(modelContextTokens)}
+                          </Text>
+                          {contextTokensCap != null && (
+                            <button
+                              type="button"
+                              className={styles.resetButton}
+                              onClick={() => {
+                                dispatch(
+                                  setContextTokensCap({ chatId, value: null }),
+                                );
+                                setLocalContextTokensCap(null);
+                              }}
+                              disabled={isStreamingDisabled}
+                              aria-label="Reset request context limit"
+                            >
+                              <Icon icon={X} size="md" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      <Separator size="4" />
+                      <div className={styles.section}>
+                        <div className={styles.settingsRow}>
+                          <Text
+                            size="1"
+                            color="gray"
+                            weight="medium"
+                            className={styles.sectionHeader}
+                          >
+                            Max output tokens
                           </Text>
                           <Text size="1" weight="medium">
                             {displayMaxTokens ??
@@ -635,6 +744,7 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
                             }}
                             disabled={isInteractionDisabled}
                             className={styles.slider}
+                            aria-label="Max output tokens"
                           />
                           <Text size="1" color="gray">
                             {formatTokens(maxOutputTokens)}
@@ -688,10 +798,12 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
                           )}
                         >
                           <Text size="1" color="gray">
-                            1K
+                            {minCompressionTokens < 1000
+                              ? minCompressionTokens
+                              : "1K"}
                           </Text>
                           <Slider
-                            min={MIN_COMPRESSION_TOKENS}
+                            min={minCompressionTokens}
                             max={maxCompressionTokens}
                             step={MIN_COMPRESSION_TOKENS}
                             value={[clampedAutoCompressionCap]}

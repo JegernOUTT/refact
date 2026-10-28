@@ -590,6 +590,8 @@ pub struct SubchatConfig {
     pub model: String,
     pub mode: String,
     pub n_ctx: usize,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub implicit_context_window: bool,
     pub max_new_tokens: usize,
     pub temperature: Option<f32>,
     pub reasoning_effort: Option<ReasoningEffort>,
@@ -608,6 +610,12 @@ pub struct SubchatConfig {
     #[serde(skip)]
     pub step_progress: Option<Arc<dyn Fn(SubchatProgress) + Send + Sync>>,
     pub trace_parent: TraceParent,
+}
+
+impl SubchatConfig {
+    pub fn context_tokens_cap(&self) -> Option<usize> {
+        (!self.implicit_context_window).then_some(self.n_ctx)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -890,6 +898,42 @@ fn apply_subchat_report_policy(
         &mut messages[report_index],
         records.into_iter().map(|(_, record)| record),
     );
+    Ok(())
+}
+
+pub fn apply_launch_context_window(
+    config: &mut SubchatConfig,
+    model_n_ctx: usize,
+    explicit_cap: Option<usize>,
+    implicit: bool,
+) -> Result<(), String> {
+    match explicit_cap {
+        Some(0) => return Err("context_tokens_cap must be > 0".into()),
+        Some(cap) if model_n_ctx > 0 && cap > model_n_ctx => {
+            return Err(format!(
+                "context_tokens_cap ({cap}) exceeds model '{}' n_ctx ({model_n_ctx})",
+                config.model
+            ))
+        }
+        Some(cap) => {
+            config.n_ctx = cap;
+            config.implicit_context_window = false;
+        }
+        None if implicit => {
+            if model_n_ctx == 0 {
+                return Err(format!(
+                    "model '{}' has no known context window",
+                    config.model
+                ));
+            }
+            config.n_ctx = model_n_ctx;
+            config.implicit_context_window = true;
+        }
+        None => return Ok(()),
+    }
+    if config.n_ctx > 1 {
+        config.max_new_tokens = config.max_new_tokens.min(config.n_ctx - 1);
+    }
     Ok(())
 }
 
@@ -1411,6 +1455,7 @@ pub async fn resolve_subchat_config_with_parent(
         model,
         mode,
         n_ctx: params.subchat_n_ctx,
+        implicit_context_window: false,
         max_new_tokens: params.subchat_max_new_tokens,
         temperature: params.subchat_temperature,
         reasoning_effort: params.subchat_reasoning_effort,
@@ -1541,6 +1586,7 @@ pub async fn resolve_subchat_config_with_explicit_params(
         model: model_rec.base.id.clone(),
         mode,
         n_ctx: params.subchat_n_ctx,
+        implicit_context_window: false,
         max_new_tokens: params.subchat_max_new_tokens,
         temperature: params.subchat_temperature,
         reasoning_effort: params.subchat_reasoning_effort,
@@ -1640,7 +1686,7 @@ fn stateful_thread_from_config(chat_id: &str, config: &SubchatConfig) -> ThreadP
         auto_approve_editing_tools: config.auto_approve_editing_tools,
         auto_approve_dangerous_commands: config.auto_approve_dangerous_commands,
         buddy_meta: config.buddy_meta.clone(),
-        context_tokens_cap: Some(config.n_ctx),
+        context_tokens_cap: config.context_tokens_cap(),
         ..Default::default()
     };
     // SubchatConfig carries the already model-normalized request window.
@@ -1720,6 +1766,99 @@ fn record_subchat_progress(progress: &SubchatProgressMessages, messages: &[ChatM
     *slot = messages.to_vec();
 }
 
+async fn runner_owned_session(
+    app: &AppState,
+    config: &SubchatConfig,
+    chat_id: &str,
+) -> Option<Arc<AMutex<crate::chat::types::ChatSession>>> {
+    if !config.stateful {
+        return None;
+    }
+    let session = app.chat.sessions.read().await.get(chat_id).cloned()?;
+    let owned = {
+        let session = session.lock().await;
+        !session.closed && session.is_runner_owned_subagent_view()
+    };
+    owned.then_some(session)
+}
+
+async fn save_through_runner_session(
+    app: &AppState,
+    config: &SubchatConfig,
+    thread: &ThreadParams,
+    messages: &[ChatMessage],
+    intent: TrajectoryCommitIntent,
+) -> Option<Result<(), String>> {
+    let session = runner_owned_session(app, config, &thread.id).await?;
+    {
+        let mut session = session.lock().await;
+        if thread.worktree.is_some() {
+            session.thread.worktree = thread.worktree.clone();
+        }
+        session.mirror_runner_messages(messages.to_vec());
+        session.increment_version();
+    }
+    Some(
+        crate::chat::trajectories::try_save_trajectory_with_intent(app.clone(), session, intent)
+            .await
+            .and_then(|saved| {
+                if saved || !intent.requires_durability() {
+                    Ok(())
+                } else {
+                    Err("child trajectory changed before its save completed".into())
+                }
+            }),
+    )
+}
+
+async fn save_subchat_trajectory(
+    app: &AppState,
+    config: &SubchatConfig,
+    thread: &ThreadParams,
+    messages: &[ChatMessage],
+    intent: TrajectoryCommitIntent,
+) -> Result<(), String> {
+    match save_through_runner_session(app, config, thread, messages, intent).await {
+        Some(result) => result,
+        None => {
+            crate::chat::trajectories::save_trajectory_as_with_intent_checked(
+                app.gcx.clone(),
+                thread,
+                messages,
+                intent,
+            )
+            .await
+        }
+    }
+}
+
+async fn refresh_live_context_window(ccx: &Arc<AMutex<AtCommandsContext>>, config: &SubchatConfig) {
+    if matches!(config.tools, ToolsPolicy::Supervised { .. }) {
+        return;
+    }
+    let (app, chat_id) = {
+        let context = ccx.lock().await;
+        (context.app.clone(), context.chat_id.clone())
+    };
+    let Some(session) = runner_owned_session(&app, config, &chat_id).await else {
+        return;
+    };
+    let live_cap = session.lock().await.thread.context_tokens_cap;
+    let model_n_ctx = match try_load_caps_quickly_if_not_present(app.gcx.clone(), 0).await {
+        Ok(caps) => resolve_chat_model(caps, &config.model)
+            .map(|model| model.base.n_ctx)
+            .unwrap_or(0),
+        Err(_) => 0,
+    };
+    let window = match (live_cap.filter(|cap| *cap > 0), model_n_ctx) {
+        (Some(cap), 0) => cap,
+        (Some(cap), model) => cap.min(model),
+        (None, 0) => return,
+        (None, model) => model,
+    };
+    ccx.lock().await.n_ctx = window;
+}
+
 async fn persist_subchat_progress(
     ccx: &Arc<AMutex<AtCommandsContext>>,
     config: &SubchatConfig,
@@ -1761,14 +1900,7 @@ async fn persist_subchat_progress(
     } else {
         TrajectoryCommitIntent::Required
     };
-    match crate::chat::trajectories::save_trajectory_as_with_intent_checked(
-        gcx.clone(),
-        &thread,
-        messages,
-        intent,
-    )
-    .await
-    {
+    match save_subchat_trajectory(&app, config, &thread, messages, intent).await {
         Ok(()) => {
             if let Some(agent_id) = config.background_agent_id.as_deref() {
                 for id in acknowledgements {
@@ -1843,15 +1975,19 @@ async fn save_failed_subchat_trajectory(
     if config.stateful {
         register_stateful_subchat_worktree(gcx.clone(), chat_id, &mut thread).await;
     }
-    save_trajectory_as_with_intent(
-        gcx.clone(),
+    let app = AppState::from_gcx(gcx).await;
+    if let Err(error) = save_subchat_trajectory(
+        &app,
+        config,
         &thread,
         &messages,
         subchat_trajectory_commit_intent(SubchatTrajectoryCommitPhase::Failed),
     )
-    .await;
+    .await
+    {
+        warn!("Failed to save trajectory: {}", error);
+    }
     if config.stateful {
-        let app = AppState::from_gcx(gcx).await;
         mirror_subchat_messages_into_session(&app, chat_id, &messages).await;
     }
 }
@@ -1919,6 +2055,7 @@ pub(crate) mod test_support {
             model: "test/model".into(),
             mode: "agent".into(),
             n_ctx: 4096,
+            implicit_context_window: false,
             max_new_tokens: 512,
             temperature: None,
             reasoning_effort: None,
@@ -2114,13 +2251,17 @@ pub async fn run_subchat(
     if config.stateful {
         let mut thread = stateful_thread_from_config(&chat_id, &config);
         register_stateful_subchat_worktree(gcx.clone(), &chat_id, &mut thread).await;
-        save_trajectory_as_with_intent(
-            gcx.clone(),
+        if let Err(error) = save_subchat_trajectory(
+            &app,
+            &config,
             &thread,
             &current_messages,
             subchat_trajectory_commit_intent(SubchatTrajectoryCommitPhase::Final),
         )
-        .await;
+        .await
+        {
+            warn!("Failed to save trajectory: {}", error);
+        }
         mirror_subchat_messages_into_session(&app, &chat_id, &current_messages).await;
     } else if should_persist_subchat_trajectory(&config) {
         let thread = trace_thread_from_config(&chat_id, &config);
@@ -2461,6 +2602,7 @@ async fn runner_model_turn(
         if hold_native_pause(&ccx, config).await {
             return Err("Aborted".to_string());
         }
+        refresh_live_context_window(&ccx, config).await;
         let execution = app.agent_executions.get(&chat_id);
         let _operation = if let Some(execution) = &execution {
             Some(
@@ -4636,6 +4778,7 @@ mod subchat_tests {
             model: "model".to_string(),
             mode: "agent".to_string(),
             n_ctx: 4096,
+            implicit_context_window: false,
             max_new_tokens: 512,
             temperature: None,
             reasoning_effort: None,
@@ -5521,6 +5664,122 @@ mod subchat_tests {
         assert!(log_error.contains("[REDACTED"));
     }
 
+    #[tokio::test]
+    async fn general_subagent_context_cap_is_explicit_only_and_follows_live_session() {
+        let gcx = make_test_gcx().await;
+        let mut caps = CodeAssistantCaps::default();
+        caps.chat_models.insert(
+            "test/1m".into(),
+            chat_model_record("test/1m", 1_000_000, "https://example.com/v1"),
+        );
+        caps.chat_models.insert(
+            "test/200k".into(),
+            chat_model_record("test/200k", 200_000, "https://example.com/v1"),
+        );
+        install_caps(gcx.clone(), caps).await;
+        let app = crate::app_state::AppState::from_gcx(gcx).await;
+        let launched = |cap| {
+            let mut config = super::test_support::minimal_config("child", "parent");
+            config.model = "test/1m".into();
+            config.n_ctx = 200_000;
+            config.max_new_tokens = 16_000;
+            super::apply_launch_context_window(&mut config, 1_000_000, cap, true).map(|_| config)
+        };
+
+        let implicit = launched(None).unwrap();
+        let thread = stateful_thread_from_config("child", &implicit);
+        assert_eq!(implicit.n_ctx, 1_000_000);
+        assert_eq!(thread.context_tokens_cap, None);
+        assert_eq!(thread.auto_compression_cap, Some(900_000));
+        let saved: SubchatConfig =
+            serde_json::from_value(serde_json::to_value(&implicit).unwrap()).unwrap();
+        assert_eq!(saved.context_tokens_cap(), None);
+
+        let explicit = launched(Some(300_000)).unwrap();
+        let thread = stateful_thread_from_config("child", &explicit);
+        assert_eq!(thread.context_tokens_cap, Some(300_000));
+        assert_eq!(thread.auto_compression_cap, Some(270_000));
+        let mut legacy = serde_json::to_value(&explicit).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("implicit_context_window");
+        let legacy: SubchatConfig = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.context_tokens_cap(), Some(300_000));
+
+        assert!(launched(Some(1_000_001)).err().unwrap().contains("exceeds"));
+        assert!(launched(Some(0)).is_err());
+
+        let workspace = tempfile::tempdir().unwrap();
+        *app.gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        let messages = vec![ChatMessage::new("user".into(), "task".into())];
+        super::install_stateful_subchat_session(&app, "child", &explicit, &messages, None)
+            .await
+            .unwrap();
+        let session = app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get("child")
+            .cloned()
+            .unwrap();
+        session
+            .lock()
+            .await
+            .set_runtime_state(crate::chat::types::SessionState::Generating, None);
+        let ccx = Arc::new(tokio::sync::Mutex::new(
+            crate::at_commands::at_commands::AtCommandsContext::new_from_app(
+                app.clone(),
+                200_000,
+                1,
+                false,
+                vec![],
+                "child".into(),
+                None,
+                "test/1m".into(),
+                None,
+                None,
+            )
+            .await,
+        ));
+        super::refresh_live_context_window(&ccx, &explicit).await;
+        assert_eq!(ccx.lock().await.n_ctx, 300_000);
+        session.lock().await.thread.context_tokens_cap = Some(2_000_000);
+        super::refresh_live_context_window(&ccx, &explicit).await;
+        assert_eq!(ccx.lock().await.n_ctx, 1_000_000);
+        session.lock().await.thread.context_tokens_cap = None;
+        ccx.lock().await.n_ctx = 200_000;
+        let mut supervised = explicit.clone();
+        supervised.tools = ToolsPolicy::Supervised {
+            tools: vec![],
+            budget: Default::default(),
+        };
+        super::refresh_live_context_window(&ccx, &supervised).await;
+        assert_eq!(ccx.lock().await.n_ctx, 200_000);
+        super::refresh_live_context_window(&ccx, &explicit).await;
+        assert_eq!(ccx.lock().await.n_ctx, 1_000_000);
+
+        let progress = Arc::new(StdMutex::new(messages.clone()));
+        super::save_failed_subchat_trajectory(
+            app.gcx.clone(),
+            "child",
+            &explicit,
+            &progress,
+            "provider failed",
+        )
+        .await;
+        let saved = crate::chat::trajectories::load_trajectory_for_chat(app.gcx.clone(), "child")
+            .await
+            .unwrap();
+        assert_eq!(saved.thread.context_tokens_cap, None);
+        assert!(saved.messages.iter().any(|message| message
+            .content
+            .content_text_only()
+            .contains("provider failed")));
+    }
+
     #[test]
     fn subchat_worktree_stateful_thread_from_config_carries_scope() {
         let (_temp, worktree) = sample_worktree();
@@ -5552,6 +5811,7 @@ mod subchat_tests {
             model: "model".to_string(),
             mode: "agent".to_string(),
             n_ctx: 4096,
+            implicit_context_window: false,
             max_new_tokens: 512,
             temperature: None,
             reasoning_effort: Some(ReasoningEffort::Low),
@@ -5626,6 +5886,7 @@ mod subchat_tests {
             model: "model".to_string(),
             mode: "agent".to_string(),
             n_ctx: 4096,
+            implicit_context_window: false,
             max_new_tokens: 512,
             temperature: None,
             reasoning_effort: None,
@@ -5884,6 +6145,7 @@ mod subchat_tests {
             model: "model".to_string(),
             mode: "agent".to_string(),
             n_ctx: 4096,
+            implicit_context_window: false,
             max_new_tokens: 512,
             temperature: None,
             reasoning_effort: None,

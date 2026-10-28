@@ -14,6 +14,7 @@ import {
   setChatModel,
   setMaxNewTokens,
   setAutoCompressionCap,
+  setContextTokensCap,
   switchToThread,
 } from "../features/Chat/Thread";
 import { setCurrentProjectInfo } from "../features/Chat/currentProject";
@@ -1532,41 +1533,62 @@ describe("context limit middleware", () => {
     expect(body.patch).toEqual({ auto_compression_cap: expected });
   });
 
-  it("syncs the selected model context cap to backend", async () => {
-    const THREAD_ID = "context-cap-chat";
-    const fetchMock = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(new Response(null, { status: 200 }));
-    vi.stubGlobal("fetch", fetchMock);
+  it.each([1000000, null])(
+    "syncs an explicit request context cap %s to backend",
+    async (value) => {
+      const THREAD_ID = "context-cap-chat";
+      const fetchMock = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(new Response(null, { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const thread = makeThread(THREAD_ID);
+      thread.thread.context_tokens_cap = 200000;
+      thread.thread.auto_compression_cap = 180000;
 
-    const store = setUpStore({
-      config: { host: "vscode", lspPort: 8001, themeProps: {} },
-      chat: {
-        current_thread_id: THREAD_ID,
-        open_thread_ids: [THREAD_ID],
-        threads: { [THREAD_ID]: makeThread(THREAD_ID) },
-        system_prompt: {},
-        tool_use: "explore" as const,
-        sse_refresh_requested: null,
-        stream_version: 0,
-      },
-    });
+      const store = setUpStore({
+        config: { host: "vscode", lspPort: 8001, themeProps: {} },
+        chat: {
+          current_thread_id: "other-chat",
+          open_thread_ids: [THREAD_ID, "other-chat"],
+          threads: {
+            [THREAD_ID]: thread,
+            "other-chat": makeThread("other-chat"),
+          },
+          system_prompt: {},
+          tool_use: "explore" as const,
+          sse_refresh_requested: null,
+          stream_version: 0,
+        },
+      });
 
-    store.dispatch(setMaxNewTokens(128000));
+      store.dispatch(setContextTokensCap({ chatId: THREAD_ID, value }));
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-    const [, init] = fetchMock.mock.calls[0] ?? [];
-    expect(init).toBeDefined();
-    const body = JSON.parse(String(init?.body)) as {
-      type?: string;
-      patch?: Record<string, unknown>;
-    };
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+      const [, init] = fetchMock.mock.calls[0] ?? [];
+      expect(init).toBeDefined();
+      const body = JSON.parse(String(init?.body)) as {
+        type?: string;
+        patch?: Record<string, unknown>;
+      };
 
-    expect(body.type).toBe("set_params");
-    expect(body.patch).toEqual({ context_tokens_cap: 128000 });
-  });
+      expect(body.type).toBe("set_params");
+      expect(body.patch).toEqual({ context_tokens_cap: value });
+      expect(fetchMock.mock.calls[0]?.[0]).toContain(
+        `/chats/${THREAD_ID}/commands`,
+      );
+      expect(
+        store.getState().chat.threads[THREAD_ID]?.thread.context_tokens_cap,
+      ).toBe(value ?? undefined);
+      expect(
+        store.getState().chat.threads[THREAD_ID]?.thread.auto_compression_cap,
+      ).toBe(180000);
+      expect(
+        store.getState().chat.threads["other-chat"]?.thread.context_tokens_cap,
+      ).toBeUndefined();
+    },
+  );
 
-  it("syncs selected model and auto context cap together", async () => {
+  it("syncs selected model without rewriting the explicit request context cap", async () => {
     const THREAD_ID = "context-cap-model-chat";
     const fetchMock = vi
       .fn<typeof fetch>()
@@ -1610,11 +1632,13 @@ describe("context limit middleware", () => {
     expect(body.type).toBe("set_params");
     expect(body.patch).toEqual({
       model: "new-model",
-      context_tokens_cap: 128000,
     });
+    expect(
+      store.getState().chat.threads[THREAD_ID]?.thread.context_tokens_cap,
+    ).toBe(8192);
   });
 
-  it("does not sync unchanged model context cap", async () => {
+  it("does not save an implicit request cap when model capacity changes", async () => {
     const THREAD_ID = "unchanged-context-cap-chat";
     const fetchMock = vi
       .fn<typeof fetch>()
@@ -1622,7 +1646,6 @@ describe("context limit middleware", () => {
     const thread = makeThread(THREAD_ID);
     thread.thread.modelMaximumContextTokens = 128000;
     thread.thread.currentMaximumContextTokens = 128000;
-    thread.thread.context_tokens_cap = 128000;
     vi.stubGlobal("fetch", fetchMock);
 
     const store = setUpStore({
@@ -1638,10 +1661,13 @@ describe("context limit middleware", () => {
       },
     });
 
-    store.dispatch(setMaxNewTokens(128000));
+    store.dispatch(setMaxNewTokens(1000000));
 
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(fetchMock).not.toHaveBeenCalled();
+    expect(
+      store.getState().chat.threads[THREAD_ID]?.thread.context_tokens_cap,
+    ).toBeUndefined();
   });
 });
 

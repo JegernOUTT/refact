@@ -122,6 +122,7 @@ async fn validate_command_inner(
             model,
             mode: "agent".to_string(),
             n_ctx: 8192,
+            implicit_context_window: false,
             max_new_tokens: 128,
             temperature: Some(0.0),
             reasoning_effort: None,

@@ -756,6 +756,7 @@ pub(crate) mod tests {
                 model: "test/model".into(),
                 mode: "agent".into(),
                 n_ctx: 4096,
+                implicit_context_window: false,
                 max_new_tokens: 512,
                 temperature: None,
                 reasoning_effort: None,

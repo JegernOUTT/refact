@@ -2019,6 +2019,7 @@ async fn run_task_briefing_subchat(
                     model,
                     mode: "NO_TOOLS".to_string(),
                     n_ctx: model_n_ctx,
+                    implicit_context_window: false,
                     max_new_tokens: 1536,
                     temperature: Some(0.0),
                     reasoning_effort: None,

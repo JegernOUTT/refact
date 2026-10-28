@@ -84,9 +84,11 @@
 
 .settingsFooter {
   display: grid;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   gap: var(--rf-space-2);
+  min-height: 0;
   min-width: 0;
+  overflow-y: auto;
 }
 
 .tokenLimits {

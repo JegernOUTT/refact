@@ -7,6 +7,7 @@ import { server, goodCaps } from "../../utils/mockServer";
 import { createDefaultChatState } from "../../utils/test-utils";
 import { ChatSettingsDropdown } from "./ChatSettingsDropdown";
 import { ChatThreadProvider } from "../../features/Chat/Thread";
+import { STUB_CAPS_RESPONSE } from "../../__fixtures__/caps";
 
 function chatStateWithReasoning(enabled: boolean) {
   const chat = createDefaultChatState();
@@ -268,6 +269,7 @@ describe("ChatSettingsDropdown", () => {
   );
 
   test.each([
+    [512, 460],
     [100001, 90000],
     [300000, 180000],
     [0, 180000],
@@ -287,6 +289,12 @@ describe("ChatSettingsDropdown", () => {
       );
       await user.click(screen.getByRole("button", { name: /Token limits/ }));
       expect(screen.getByText("7777")).toBeInTheDocument();
+      expect(
+        screen.getByRole("slider", { name: "Auto-compression cap" }),
+      ).toHaveAttribute(
+        "aria-valuemax",
+        String(requestCap > 0 ? Math.min(requestCap, 200000) : 200000),
+      );
       expect(
         store.getState().chat.threads[chat.current_thread_id]?.thread
           .auto_compression_cap,
@@ -317,5 +325,103 @@ describe("ChatSettingsDropdown", () => {
     ).toBe(190000);
     await user.click(screen.getByRole("button", { name: /Token limits/ }));
     expect(screen.getByText("190000")).toBeInTheDocument();
+  });
+
+  test.each(["clear", "raise"])(
+    "can %s a saved 200K request limit on a 1M model without changing compression",
+    async (operation) => {
+      server.use(
+        http.get("*/v1/caps", () =>
+          HttpResponse.json({
+            ...STUB_CAPS_RESPONSE,
+            chat_models: {
+              ...STUB_CAPS_RESPONSE.chat_models,
+              "openai/o1": {
+                ...STUB_CAPS_RESPONSE.chat_models["openai/o1"],
+                n_ctx: 1000000,
+              },
+            },
+          }),
+        ),
+      );
+      const chat = chatStateWithReasoning(false);
+      const threadId = chat.current_thread_id;
+      chat.threads[threadId].thread.context_tokens_cap = 200000;
+      chat.threads[threadId].thread.auto_compression_cap = 180000;
+      const { user, store } = render(<ChatSettingsDropdown />, {
+        preloadedState: { chat, config },
+      });
+      await user.click(
+        await screen.findByRole("button", { name: /openai\/o1/ }),
+      );
+      await user.click(screen.getByRole("button", { name: /Token limits/ }));
+      expect(
+        screen.getByRole("slider", { name: "Request context limit" }),
+      ).toHaveAttribute("aria-valuemax", "1000000");
+      expect(
+        screen.getByRole("slider", { name: "Auto-compression cap" }),
+      ).toHaveAttribute("aria-valuemax", "200000");
+
+      if (operation === "clear") {
+        await user.click(
+          screen.getByRole("button", { name: "Reset request context limit" }),
+        );
+      } else {
+        fireEvent.keyDown(
+          screen.getByRole("slider", { name: "Request context limit" }),
+          { key: "End" },
+        );
+      }
+
+      expect(
+        store.getState().chat.threads[threadId]?.thread.context_tokens_cap,
+      ).toBe(operation === "clear" ? undefined : 1000000);
+      expect(
+        store.getState().chat.threads[threadId]?.thread.auto_compression_cap,
+      ).toBe(180000);
+      expect(
+        screen.getByRole("slider", { name: "Auto-compression cap" }),
+      ).toHaveAttribute("aria-valuemax", "1000000");
+      await user.click(
+        screen.getByRole("button", { name: "Reset auto-compression cap" }),
+      );
+      expect(
+        store.getState().chat.threads[threadId]?.thread.auto_compression_cap,
+      ).toBe(900000);
+    },
+  );
+
+  test("server request-limit clear updates the open controls", async () => {
+    const chat = chatStateWithReasoning(false);
+    const threadId = chat.current_thread_id;
+    chat.threads[threadId].thread.context_tokens_cap = 100000;
+    chat.threads[threadId].thread.auto_compression_cap = 7777;
+    const { user, store } = render(<ChatSettingsDropdown />, {
+      preloadedState: { chat, config },
+    });
+    await user.click(await screen.findByRole("button", { name: /openai\/o1/ }));
+    await user.click(screen.getByRole("button", { name: /Token limits/ }));
+    expect(
+      screen.getByRole("slider", { name: "Auto-compression cap" }),
+    ).toHaveAttribute("aria-valuemax", "100000");
+    store.dispatch(
+      applyChatEvent({
+        chat_id: threadId,
+        seq: "1",
+        type: "thread_updated",
+        context_tokens_cap: null,
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("slider", { name: "Auto-compression cap" }),
+      ).toHaveAttribute("aria-valuemax", "200000"),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Reset request context limit" }),
+    ).not.toBeInTheDocument();
+    expect(
+      store.getState().chat.threads[threadId]?.thread.auto_compression_cap,
+    ).toBe(7777);
   });
 });

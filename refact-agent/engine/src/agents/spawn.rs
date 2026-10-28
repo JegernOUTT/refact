@@ -181,6 +181,7 @@ pub struct SpawnRequest {
     pub max_steps: usize,
     pub model: String,
     pub model_type: Option<String>,
+    pub context_tokens_cap: Option<usize>,
     pub goal: Option<SpawnGoal>,
     pub plan: Option<String>,
     pub deliverable: Option<refact_chat_api::DeliverableContract>,
@@ -359,6 +360,7 @@ pub(crate) async fn recover_run_config(
         || config.root_chat_id != seed.config.root_chat_id
         || config.root_chat_id != record.parent_root_chat_id
         || config.mode != seed.config.mode
+        || config.context_tokens_cap() != seed.config.context_tokens_cap()
         || config.subchat_depth != seed.config.subchat_depth
         || !config.stateful
         || !seed.config.stateful
@@ -573,6 +575,8 @@ pub struct LaunchEffective {
     pub schema_version: u32,
     pub revision: u64,
     pub model: String,
+    pub context_tokens_cap: Option<usize>,
+    pub n_ctx: usize,
     pub mode: String,
     pub tools: crate::subchat::ToolsPolicy,
     pub max_steps: usize,
@@ -677,6 +681,8 @@ pub async fn preview_launch(app: &AppState, req: &SpawnRequest) -> Result<Launch
     Ok(LaunchEffective {
         schema_version: prepared.schema_version,
         revision: prepared.revision,
+        context_tokens_cap: config.context_tokens_cap(),
+        n_ctx: config.n_ctx,
         model: config.model,
         mode: config.mode,
         tools: config.tools,
@@ -1321,6 +1327,7 @@ async fn prepare_launch(
             model: req.model.clone(),
             mode: "agent".into(),
             n_ctx: 4096,
+            implicit_context_window: false,
             max_new_tokens: 512,
             temperature: None,
             reasoning_effort: None,
@@ -1348,6 +1355,21 @@ async fn prepare_launch(
     let mut config = config_result?;
     config.model = req.model.clone();
     config.history_source_model = req.history_source_model.clone();
+    let implicit_window = req.config_name == "subagent" && req.native_supervision_guard.is_none();
+    if implicit_window || req.context_tokens_cap.is_some() {
+        let caps = crate::global_context::try_load_caps_quickly_if_not_present(app.gcx.clone(), 0)
+            .await
+            .map_err(|_| "launch model unavailable")?;
+        let model_n_ctx = crate::caps::resolve_chat_model(caps, &config.model)?
+            .base
+            .n_ctx;
+        crate::subchat::apply_launch_context_window(
+            &mut config,
+            model_n_ctx,
+            req.context_tokens_cap,
+            implicit_window,
+        )?;
+    }
     let configured_consent = crate::yaml_configs::customization_registry::get_subagent_config(
         app.gcx.clone(),
         &req.config_name,

@@ -33,6 +33,7 @@ fn spawn_request(parent_chat_id: &str, title: &str, subchat_depth: usize) -> Spa
         max_steps: 10,
         model: "openai/gpt-4o".to_string(),
         model_type: None,
+        context_tokens_cap: None,
         goal: None,
         plan: None,
         deliverable: None,
