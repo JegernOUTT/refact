@@ -10,4 +10,9 @@
 
 .button {
   pointer-events: auto;
+  border: var(--rf-hairline) solid var(--rf-border-strong);
+  border-radius: var(--rf-radius-pill);
+  background: var(--rf-surface-overlay);
+  box-shadow: var(--rf-elev-overlay);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }

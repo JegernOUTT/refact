@@ -18,6 +18,7 @@ export const ScrollToBottomButton = ({
         aria-label="Follow stream"
         icon={ArrowDown}
         variant="soft"
+        size="lg"
       />
     </div>
   );
