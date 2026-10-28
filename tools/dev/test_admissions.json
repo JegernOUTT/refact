@@ -1809,6 +1809,118 @@
           "fingerprint": "3c837f24604f50cbd51771753e42d3b89d699dd7387d07072034e6eeaca0bdda"
         }
       }
+    },
+    {
+      "fingerprint": "396c9cf5c9192fe40ab5168319457a298a446ef0763daca31c4f3ccf359660b1",
+      "occurrences": 1,
+      "failure_mode": "The new /v1/worktrees list response cache keeps serving a deleted worktree (missing generation bump on delete/save), so GUI and agents attach to a removed checkout.",
+      "importance": "A stale list after a destructive worktree operation lets callers bind chats to deleted paths. The cache is new and sits on the read path of every list call.",
+      "nearest_retained": {
+        "fingerprint": "fd92c77a590115143a925684fcf46cf658ea7c7355ae3589beb0a4b7525cc512",
+        "why_insufficient": "list_worktrees_prunes_missing_record_even_with_stale_references deletes the directory out of band and lists only once after that, so the cache is never filled before the mutation. It cannot see stale cached responses after a service-level delete."
+      },
+      "oracle": "After create, list_worktrees_with_branches(false) returns exactly [id] with empty source_branches. After delete_worktree(id, delete_branch=true), list_worktrees() returns no worktrees, its source_branches include main, and they exclude the deleted branch.",
+      "prerequisites": "A temp git repo with one created worktree; the first list fills the cache within the 2 s TTL, before the delete.",
+      "shipping_implementation": "WorktreeService::list_worktrees_with_branches, the list cache, invalidate_list_cache, delete_worktree and save_registry_unlocked in crates/refact-worktrees/src/service.rs.",
+      "determinism": "Isolated tempdir repo. The second list runs right after the delete, well inside the TTL, so the result depends on invalidation and not on TTL expiry. No timing assertions.",
+      "layer": "Crate service tokio test",
+      "why_cheapest": "A single service-level test with real git2/git and no HTTP or GUI layer.",
+      "meaningful_cases": 1,
+      "critical": true,
+      "criticality_reason": "Destructive worktree operations and cache coherence of the worktree registry.",
+      "removed_coverage": "none",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "refact-worktrees",
+            "--lib",
+            "--",
+            "list_worktrees_cache_drops_deleted_worktree"
+          ],
+          "exit_code": 101,
+          "evidence": "Mutant: invalidate_list_cache made a no-op. Panicked at service.rs:2947 assert!(listed.worktrees.is_empty()); test result FAILED 0 passed 1 failed."
+        },
+        "passing": {
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "refact-worktrees",
+            "--lib",
+            "--",
+            "list_worktrees_cache_drops_deleted_worktree"
+          ],
+          "exit_code": 0,
+          "evidence": "Restored: 1 passed; full cargo test -p refact-worktrees 61 passed."
+        },
+        "intended_diagnostic": "assert!(listed.worktrees.is_empty()) fails with the deleted record still in the cached response",
+        "production_target": "service.rs invalidate_list_cache / CachedList::is_fresh",
+        "before_fix": {
+          "reference": ".refact/evidence/w3/mutant_cache.patch (applied, then restored)",
+          "fingerprint": "1049c6198a62145594f1efeb5d3472e4360cec2fcfde36f78bc6a6d9aa893c5f"
+        }
+      },
+      "author": "background_agent:bgagent-w3-worktrees-list",
+      "reviewer": "background_agent:parent-w3-review-pending",
+      "review_evidence": "Self-checked by author; executed mutant witnesses stored under .refact/evidence/w3 (gitignored, local). Independent semantic review still required by repository protections; the review tool could not run (snapshot exceeded configured limits)."
+    },
+    {
+      "fingerprint": "4efe54beff9213acf1a338bfde43a6b8984d41d749c667ff721ae693e33e27bd",
+      "occurrences": 1,
+      "failure_mode": "The agent status heading prints the kind prefix twice ('Subagent: Subagent: task') when the title already carries it, case-insensitively.",
+      "importance": "Model-facing and user-facing status blocks show a duplicated, confusing heading for every subagent.",
+      "nearest_retained": {
+        "fingerprint": "7b3ccb9c7ff1972ee97d6c7dd26bf32745d57d5368cc738c8217110657220f18",
+        "why_insufficient": "agent_wait_completion_returns_result uses an unprefixed title and never formats a title that already has the kind prefix."
+      },
+      "oracle": "format_agent_status_block for a Subagent titled 'subagent: Fix it' starts with exactly '# subagent: Fix it\\n'. The existing assertion '# Delegate: Slow agent' still guards unprefixed titles.",
+      "prerequisites": "A record whose kind is Subagent and whose title has a lowercase 'subagent:' prefix.",
+      "shipping_implementation": "tool_background_agents.rs format_agent_status_block / agent_heading",
+      "determinism": "Pure string formatting on a cloned record.",
+      "layer": "Engine lib unit assertion added to an existing test",
+      "why_cheapest": "Extends an existing scenario instead of adding a new test.",
+      "meaningful_cases": 1,
+      "critical": false,
+      "criticality_reason": "Cosmetic heading formatting with no authority or data effect.",
+      "removed_coverage": "none",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "cargo",
+            "test",
+            "--lib",
+            "--",
+            "tool_background_agents"
+          ],
+          "exit_code": 101,
+          "evidence": "Before-fix call site (old format string): panicked at tool_background_agents.rs:1963 assertion failed: format_agent_status_block(&prefixed).starts_with(\"# subagent: Fix it\\n\"); 21 passed 1 failed."
+        },
+        "passing": {
+          "command": [
+            "cargo",
+            "test",
+            "--lib",
+            "--",
+            "tool_background_agents"
+          ],
+          "exit_code": 0,
+          "evidence": "22 passed after restoring agent_heading."
+        },
+        "intended_diagnostic": "starts_with('# subagent: Fix it') fails because the heading is '# Subagent: subagent: Fix it'",
+        "production_target": "format_agent_status_block heading",
+        "before_fix": {
+          "reference": ".refact/evidence/w3/mutant_heading.patch",
+          "fingerprint": "86bf473805ac60aadf686d4f91e0df3629f3fb1d98dd6b9e402652ca9c8183d2"
+        }
+      },
+      "author": "background_agent:bgagent-w3-worktrees-list",
+      "reviewer": "background_agent:parent-w3-review-pending",
+      "review_evidence": "Self-checked by author; executed mutant witnesses stored under .refact/evidence/w3 (gitignored, local). Independent semantic review still required by repository protections; the review tool could not run (snapshot exceeded configured limits)."
     }
   ],
   "classifications": [
@@ -5376,15 +5488,29 @@
     },
     {
       "path": "refact-agent/engine/crates/refact-worktrees/src/git.rs",
-      "before_sha256": "6dc1553051153ebc36efd54e25b027c989d509f5d6623f4312641b435d352b37",
-      "after_sha256": "0cce402d8a6d76043d12eedff8e210947c966977ed2e1ccb59b06e7c35abb2f9",
-      "affected_tests": [],
-      "impact": "refact-agent/engine/crates/refact-worktrees/src/git.rs: canonical non-test residue changes remove 57 tokens and add 0 tokens. Cleanup evidence identifies run. 12787\u21926186 global lexical definitions includes intentional coverage loss from case deletions; this support record does not claim strict duplication.",
-      "execution_context": "Same physical Rust path; no retained fingerprint/context relocation relative pinned main. Test-only ownership: inline cfg(test) modules or explicitly cfg(test) helper items; tests/ and *_tests.rs are test harness/module support. Removed dead helper/import/module scaffolding has no surviving intended executing consumer; conservative affected mapping lists surviving same-file tests for dependency review, not a claim all call deleted helpers. See exact residue token hunks and cleanup evidence references.",
-      "author": "support-impact-author-bgagent-1fd43f09",
-      "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
-      "review_evidence": "Independent source/hash review: refact-agent/engine/crates/refact-worktrees/src/git.rs: reviewed removal of run, tests within explicit cfg(test) items/modules. No current same-path physical case remains. Removed all-CUT import/helper/module declarations have no retained executing consumer; preserved production APIs are not being declared unused.",
-      "no_tests_reason": "No current Rust test definitions remain at this path; actual diff removes all-CUT test-only scaffolding/dead helpers or imports, not a retained executable fixture. No production deletion is authorized by this record."
+      "before_sha256": "0cce402d8a6d76043d12eedff8e210947c966977ed2e1ccb59b06e7c35abb2f9",
+      "after_sha256": "8c2de6eb3af2cb1b704f29f80414eefd36aa25bdf7df4a16bc96afa18abb3000",
+      "affected_tests": [
+        "396c9cf5c9192fe40ab5168319457a298a446ef0763daca31c4f3ccf359660b1",
+        "3dedb1ee6a18b9e009156347f9a8062f322d8d947d5f7a514b3191575c7478e4"
+      ],
+      "impact": "Extracts status_for_repo, canonical_common_dir and ensure_repo_on_branch (git2) from existing helpers. status_for_path and ensure_checkout_on_branch keep their behavior; the detached-HEAD message now uses the git2 head commit instead of a rev-parse subprocess.",
+      "execution_context": "cargo test -p refact-worktrees (61 passed) and cargo test --lib with RUST_MIN_STACK=16777216 in the W3 worktree.",
+      "author": "background_agent:bgagent-w3-worktrees-list",
+      "reviewer": "background_agent:parent-w3-review-pending",
+      "review_evidence": "Self-checked by author; executed mutant witnesses stored under .refact/evidence/w3 (gitignored, local). Independent semantic review still required by repository protections; the review tool could not run (snapshot exceeded configured limits).",
+      "prior_review": {
+        "path": "refact-agent/engine/crates/refact-worktrees/src/git.rs",
+        "before_sha256": "6dc1553051153ebc36efd54e25b027c989d509f5d6623f4312641b435d352b37",
+        "after_sha256": "0cce402d8a6d76043d12eedff8e210947c966977ed2e1ccb59b06e7c35abb2f9",
+        "affected_tests": [],
+        "impact": "refact-agent/engine/crates/refact-worktrees/src/git.rs: canonical non-test residue changes remove 57 tokens and add 0 tokens. Cleanup evidence identifies run. 12787\u21926186 global lexical definitions includes intentional coverage loss from case deletions; this support record does not claim strict duplication.",
+        "execution_context": "Same physical Rust path; no retained fingerprint/context relocation relative pinned main. Test-only ownership: inline cfg(test) modules or explicitly cfg(test) helper items; tests/ and *_tests.rs are test harness/module support. Removed dead helper/import/module scaffolding has no surviving intended executing consumer; conservative affected mapping lists surviving same-file tests for dependency review, not a claim all call deleted helpers. See exact residue token hunks and cleanup evidence references.",
+        "author": "support-impact-author-bgagent-1fd43f09",
+        "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
+        "review_evidence": "Independent source/hash review: refact-agent/engine/crates/refact-worktrees/src/git.rs: reviewed removal of run, tests within explicit cfg(test) items/modules. No current same-path physical case remains. Removed all-CUT import/helper/module declarations have no retained executing consumer; preserved production APIs are not being declared unused.",
+        "no_tests_reason": "No current Rust test definitions remain at this path; actual diff removes all-CUT test-only scaffolding/dead helpers or imports, not a retained executable fixture. No production deletion is authorized by this record."
+      }
     },
     {
       "path": "refact-agent/engine/crates/refact-worktrees/src/types.rs",
@@ -7518,15 +7644,27 @@
     },
     {
       "path": "refact-agent/engine/src/http/routers/v1/worktrees.rs",
-      "before_sha256": "be560d7172d344c30b319b2a0e044d586b4c73e17c05bbfbf86137f6be84d69d",
-      "after_sha256": "2e359c607ce88ab96cc69fcdce7984c4108fa7f53183ae0d946a65c553af75fa",
+      "before_sha256": "2e359c607ce88ab96cc69fcdce7984c4108fa7f53183ae0d946a65c553af75fa",
+      "after_sha256": "9d1474d40ec7ebdc287c4f983d359eda2d086a7854ca43f1e40f208252698b75",
       "affected_tests": [],
-      "impact": "refact-agent/engine/src/http/routers/v1/worktrees.rs: canonical non-test residue changes remove 16 tokens and add 0 tokens. Cleanup evidence identifies unused import: `super::*`; tests (empty cfg(test) module). 12787\u21926186 global lexical definitions includes intentional coverage loss from case deletions; this support record does not claim strict duplication.",
-      "execution_context": "Same physical Rust path; no retained fingerprint/context relocation relative pinned main. Test-only ownership: inline cfg(test) modules or explicitly cfg(test) helper items; tests/ and *_tests.rs are test harness/module support. Removed dead helper/import/module scaffolding has no surviving intended executing consumer; conservative affected mapping lists surviving same-file tests for dependency review, not a claim all call deleted helpers. See exact residue token hunks and cleanup evidence references.",
-      "author": "support-impact-author-bgagent-1fd43f09",
-      "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
-      "review_evidence": "Independent source/hash review: refact-agent/engine/src/http/routers/v1/worktrees.rs: reviewed removal of {'names': ['unused import: `super::*`'], 'diagnostic_indices': [279], 'before_byte_span': [12809, 12822], 'removed_text': 'use super::*;', 'evidence': 'rustc unused_imports MachineApplicable deletion; import in cfg(test) scope or test-only file'}, {'names': ['tests (empty cfg(test) module)'], 'before_cleanup_char_span': [12780, 12811], 'removed_text': '#[cfg(test)]\\nmod tests {\\n    \\n}', 'evidence': 'After compiler-evidenced import deletion, lexer proves empty braces: no tests/shared helper items; no qualified module references in engine Rust sources.'} within explicit cfg(test) items/modules. No current same-path physical case remains. Removed all-CUT import/helper/module declarations have no retained executing consumer; preserved production APIs are not being declared unused.",
-      "no_tests_reason": "No current Rust test definitions remain at this path; actual diff removes all-CUT test-only scaffolding/dead helpers or imports, not a retained executable fixture. No production deletion is authorized by this record."
+      "impact": "Adds an include_branches query param to GET /v1/worktrees (defaults to true) and calls list_worktrees_with_branches.",
+      "execution_context": "cargo test -p refact-worktrees (61 passed) and cargo test --lib with RUST_MIN_STACK=16777216 in the W3 worktree.",
+      "author": "background_agent:bgagent-w3-worktrees-list",
+      "reviewer": "background_agent:parent-w3-review-pending",
+      "review_evidence": "Self-checked by author; executed mutant witnesses stored under .refact/evidence/w3 (gitignored, local). Independent semantic review still required by repository protections; the review tool could not run (snapshot exceeded configured limits).",
+      "no_tests_reason": "Thin query deserialization wiring; the service behavior is covered by refact-worktrees tests.",
+      "prior_review": {
+        "path": "refact-agent/engine/src/http/routers/v1/worktrees.rs",
+        "before_sha256": "be560d7172d344c30b319b2a0e044d586b4c73e17c05bbfbf86137f6be84d69d",
+        "after_sha256": "2e359c607ce88ab96cc69fcdce7984c4108fa7f53183ae0d946a65c553af75fa",
+        "affected_tests": [],
+        "impact": "refact-agent/engine/src/http/routers/v1/worktrees.rs: canonical non-test residue changes remove 16 tokens and add 0 tokens. Cleanup evidence identifies unused import: `super::*`; tests (empty cfg(test) module). 12787\u21926186 global lexical definitions includes intentional coverage loss from case deletions; this support record does not claim strict duplication.",
+        "execution_context": "Same physical Rust path; no retained fingerprint/context relocation relative pinned main. Test-only ownership: inline cfg(test) modules or explicitly cfg(test) helper items; tests/ and *_tests.rs are test harness/module support. Removed dead helper/import/module scaffolding has no surviving intended executing consumer; conservative affected mapping lists surviving same-file tests for dependency review, not a claim all call deleted helpers. See exact residue token hunks and cleanup evidence references.",
+        "author": "support-impact-author-bgagent-1fd43f09",
+        "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
+        "review_evidence": "Independent source/hash review: refact-agent/engine/src/http/routers/v1/worktrees.rs: reviewed removal of {'names': ['unused import: `super::*`'], 'diagnostic_indices': [279], 'before_byte_span': [12809, 12822], 'removed_text': 'use super::*;', 'evidence': 'rustc unused_imports MachineApplicable deletion; import in cfg(test) scope or test-only file'}, {'names': ['tests (empty cfg(test) module)'], 'before_cleanup_char_span': [12780, 12811], 'removed_text': '#[cfg(test)]\\nmod tests {\\n    \\n}', 'evidence': 'After compiler-evidenced import deletion, lexer proves empty braces: no tests/shared helper items; no qualified module references in engine Rust sources.'} within explicit cfg(test) items/modules. No current same-path physical case remains. Removed all-CUT import/helper/module declarations have no retained executing consumer; preserved production APIs are not being declared unused.",
+        "no_tests_reason": "No current Rust test definitions remain at this path; actual diff removes all-CUT test-only scaffolding/dead helpers or imports, not a retained executable fixture. No production deletion is authorized by this record."
+      }
     },
     {
       "path": "refact-agent/engine/src/http/utils.rs",
@@ -10237,6 +10375,34 @@
       "author": "parent: worktree_create root-chat tool feature",
       "reviewer": "background_agent: final ledger-refresh reviewer subagent of parent (independent of production author; own id not self-visible)",
       "review_evidence": "Independent final read of exact diffs vs base 87e9902492eef2dad02005e069ca0b4131bff54e: authority preflight is a pure extraction of the unchanged resolver clauses (resolver still calls it first); busy/recheck guards now fire only when shared changes_attachment(thread,patch) is true (same predicate as the authority check), evaluated under transition_lock + session lock, so same-ID echo with other params skips the guard and real rebinds of running chats still 409 after the authority 400 preflight. Unchanged retained seal_refusal_tests.rs:443-508 asserts both running-child rebind/unbind 400 and same-worktree temperature 200. Hashes from current files."
+    },
+    {
+      "path": "refact-agent/engine/crates/refact-worktrees/src/service.rs",
+      "before_sha256": "8ce7a9d7690ac9a97f2e9e9d03d8ae0624e419fe2f1f9cf788459aa1b8e1fb02",
+      "after_sha256": "55a3c7b21b348345ce16f13e87669f90f216c37bc9af8df2364bc41779274f3b",
+      "affected_tests": [
+        "396c9cf5c9192fe40ab5168319457a298a446ef0763daca31c4f3ccf359660b1",
+        "3dedb1ee6a18b9e009156347f9a8062f322d8d947d5f7a514b3191575c7478e4",
+        "fd92c77a590115143a925684fcf46cf658ea7c7355ae3589beb0a4b7525cc512"
+      ],
+      "impact": "List path: git2 repository validation replaces 3 rev-parse subprocesses per record. Pruning is rate-limited (60 s, forced when a record path is missing) and takes the write lock only when it removes records. Per-record work runs with bounded parallelism (8). A per-registry single-flight cache (2 s TTL plus a generation bumped on save/create/delete/merge/cleanup) and list_worktrees_with_branches are added. Security semantics are unchanged; executed common-dir comparison mutant: .refact/evidence/w3/mutant_commondir.patch d39fe638... failed both unrelated-repo tests (EXIT 101), restored passes.",
+      "execution_context": "cargo test -p refact-worktrees (61 passed) and cargo test --lib with RUST_MIN_STACK=16777216 in the W3 worktree.",
+      "author": "background_agent:bgagent-w3-worktrees-list",
+      "reviewer": "background_agent:parent-w3-review-pending",
+      "review_evidence": "Self-checked by author; executed mutant witnesses stored under .refact/evidence/w3 (gitignored, local). Independent semantic review still required by repository protections; the review tool could not run (snapshot exceeded configured limits)."
+    },
+    {
+      "path": "refact-agent/engine/src/tools/tool_background_agents.rs",
+      "before_sha256": "07d35938d1afbe8ae2ad0f09378c70520b82d39257ae947d720deed27819509e",
+      "after_sha256": "86c618ae74ee9d39797287fc09f3300a7ff1ceb93e43396e062e8eb35084bf54",
+      "affected_tests": [
+        "4efe54beff9213acf1a338bfde43a6b8984d41d749c667ff721ae693e33e27bd"
+      ],
+      "impact": "The heading skips the kind prefix when the title already has it.",
+      "execution_context": "cargo test -p refact-worktrees (61 passed) and cargo test --lib with RUST_MIN_STACK=16777216 in the W3 worktree.",
+      "author": "background_agent:bgagent-w3-worktrees-list",
+      "reviewer": "background_agent:parent-w3-review-pending",
+      "review_evidence": "Self-checked by author; executed mutant witnesses stored under .refact/evidence/w3 (gitignored, local). Independent semantic review still required by repository protections; the review tool could not run (snapshot exceeded configured limits)."
     }
   ]
 }

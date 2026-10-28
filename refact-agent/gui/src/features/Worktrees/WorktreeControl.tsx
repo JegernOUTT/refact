@@ -38,6 +38,7 @@ import { worktreeErrorText } from "./worktreeError";
 import styles from "./Worktrees.module.css";
 
 const EMPTY_WORKTREE_RECORDS: WorktreeRecordView[] = [];
+const WORKTREE_BRANCH_ARGS = { include_branches: true };
 
 type AttachWorktreeOptions = {
   optimistic?: boolean;
@@ -101,12 +102,21 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
   const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey) ?? undefined;
   const [menuOpen, setMenuOpen] = useState(false);
+  const {
+    data,
+    isLoading,
+    refetch: refetchList,
+  } = useListWorktreesQuery(undefined, {
+    refetchOnFocus: true,
+    refetchOnReconnect: true,
+  });
   const handleMenuOpenChange = useCallback(
     (open: boolean) => {
       setMenuOpen(open);
+      if (open) void refetchList();
       onOpenChange?.(open);
     },
-    [onOpenChange],
+    [onOpenChange, refetchList],
   );
   const [createOpen, setCreateOpen] = useState(false);
   const createInFlightRef = useRef(false);
@@ -123,11 +133,9 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
   }, []);
   const copyToClipboard = useCopyToClipboard();
   const { openFolderInNewWindow } = useEventsBusForIDE();
-  const { data, isLoading } = useListWorktreesQuery(undefined, {
-    pollingInterval: 5000,
-    refetchOnFocus: true,
-    refetchOnReconnect: true,
-  });
+  const { data: branchData } = useListWorktreesQuery(
+    createOpen ? WORKTREE_BRANCH_ARGS : skipToken,
+  );
   const [createWorktree] = useCreateWorktreeMutation();
   const [deleteWorktree] = useDeleteWorktreeMutation();
   const [openWorktree] = useOpenWorktreeMutation();
@@ -176,7 +184,7 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
   );
   const baseBranch = sourceBranch ?? "";
   const baseBranchOptions = useMemo(() => {
-    const sourceBranches = data?.source_branches ?? [];
+    const sourceBranches = branchData?.source_branches ?? [];
     const branches = [
       sourceBranch,
       ...sourceBranches,
@@ -186,7 +194,7 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
       ]),
     ];
     return branches.filter((branch): branch is string => Boolean(branch));
-  }, [data?.source_branches, records, sourceBranch]);
+  }, [branchData?.source_branches, records, sourceBranch]);
 
   const attachWorktree = useCallback(
     async (

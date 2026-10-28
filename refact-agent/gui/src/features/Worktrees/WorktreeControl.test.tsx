@@ -78,12 +78,18 @@ function worktreesList(
   records: WorktreeRecordView[],
   sourceCurrentBranch: string | null = "dev",
   sourceBranches?: string[],
+  requests?: string[],
 ) {
-  return http.get("*/v1/worktrees", () =>
-    HttpResponse.json(
-      makeWorktreeList(records, sourceCurrentBranch, sourceBranches),
-    ),
-  );
+  return http.get("*/v1/worktrees", ({ request }) => {
+    const includeBranches = new URL(request.url).searchParams.get(
+      "include_branches",
+    );
+    requests?.push(includeBranches ?? "default");
+    const list = makeWorktreeList(records, sourceCurrentBranch, sourceBranches);
+    return HttpResponse.json(
+      includeBranches === "false" ? { ...list, source_branches: [] } : list,
+    );
+  });
 }
 
 function worktreeDiff() {
@@ -286,6 +292,30 @@ beforeEach(() => {
 });
 
 describe("WorktreeControl", () => {
+  test("fetches the list once without branches and loads branches only for create", async () => {
+    const requests: string[] = [];
+    server.use(worktreesList([], "dev", ["dev", "feature/base"], requests));
+    const { user, rerender } = render(<WorktreeControl />, {
+      preloadedState: {
+        chat: makeChatState("chat-1", null),
+        config: configState("web"),
+      },
+    });
+
+    await waitFor(() => expect(requests).toEqual(["false"]));
+    rerender(<WorktreeControl />);
+    await user.click(screen.getByTestId("worktree-control-trigger"));
+    await waitFor(() => expect(requests).toEqual(["false", "false"]));
+    await user.click(
+      await screen.findByRole("button", { name: "Create worktree" }),
+    );
+    await waitFor(() => expect(requests).toEqual(["false", "false", "true"]));
+    await user.click(screen.getByLabelText("Base branch"));
+    expect(
+      await screen.findByRole("button", { name: "feature/base" }),
+    ).toBeInTheDocument();
+  });
+
   test("label shows worktree branch", async () => {
     const record = makeWorktreeRecord("wt-branch", "refact/chat/branch");
 

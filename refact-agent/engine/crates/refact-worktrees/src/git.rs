@@ -313,45 +313,7 @@ pub fn status_for_path(path: &Path) -> WorktreeStatus {
     }
 
     match discover_repo(path) {
-        Ok(repo) => {
-            let mut status = WorktreeStatus {
-                path_exists: true,
-                is_git_worktree: true,
-                dirty: false,
-                conflicted: false,
-                staged_count: 0,
-                unstaged_count: 0,
-                untracked_count: 0,
-                branch: current_branch(&repo),
-                head_commit: head_commit(&repo).ok(),
-                error: None,
-            };
-            match repo.statuses(Some(&mut status_options(StatusShow::IndexAndWorkdir))) {
-                Ok(statuses) => {
-                    for entry in statuses.iter() {
-                        let entry_status = entry.status();
-                        if is_index_changed(entry_status) {
-                            status.staged_count += 1;
-                        }
-                        if entry_status.is_conflicted() {
-                            status.conflicted = true;
-                        }
-                        if entry_status.is_wt_new() && !is_index_changed(entry_status) {
-                            status.untracked_count += 1;
-                        } else if is_workdir_changed(entry_status) {
-                            status.unstaged_count += 1;
-                        }
-                    }
-                    status.dirty = status.staged_count > 0
-                        || status.unstaged_count > 0
-                        || status.untracked_count > 0;
-                }
-                Err(e) => {
-                    status.error = Some(format!("Failed to read git status: {}", e));
-                }
-            }
-            status
-        }
+        Ok(repo) => status_for_repo(&repo),
         Err(e) => WorktreeStatus {
             path_exists: true,
             is_git_worktree: false,
@@ -365,6 +327,55 @@ pub fn status_for_path(path: &Path) -> WorktreeStatus {
             error: Some(e),
         },
     }
+}
+
+pub fn status_for_repo(repo: &Repository) -> WorktreeStatus {
+    let mut status = WorktreeStatus {
+        path_exists: true,
+        is_git_worktree: true,
+        dirty: false,
+        conflicted: false,
+        staged_count: 0,
+        unstaged_count: 0,
+        untracked_count: 0,
+        branch: current_branch(repo),
+        head_commit: head_commit(repo).ok(),
+        error: None,
+    };
+    match repo.statuses(Some(&mut status_options(StatusShow::IndexAndWorkdir))) {
+        Ok(statuses) => {
+            for entry in statuses.iter() {
+                let entry_status = entry.status();
+                if is_index_changed(entry_status) {
+                    status.staged_count += 1;
+                }
+                if entry_status.is_conflicted() {
+                    status.conflicted = true;
+                }
+                if entry_status.is_wt_new() && !is_index_changed(entry_status) {
+                    status.untracked_count += 1;
+                } else if is_workdir_changed(entry_status) {
+                    status.unstaged_count += 1;
+                }
+            }
+            status.dirty =
+                status.staged_count > 0 || status.unstaged_count > 0 || status.untracked_count > 0;
+        }
+        Err(e) => {
+            status.error = Some(format!("Failed to read git status: {}", e));
+        }
+    }
+    status
+}
+
+pub fn canonical_common_dir(repo: &Repository) -> Result<PathBuf, String> {
+    repo.commondir().canonicalize().map_err(|e| {
+        format!(
+            "Failed to canonicalize git common dir '{}': {}",
+            repo.commondir().display(),
+            e
+        )
+    })
 }
 
 pub fn run_git(path: &Path, args: &[&str]) -> Result<String, String> {
@@ -909,7 +920,15 @@ pub fn ensure_checkout_on_branch(
     expected_branch: &str,
 ) -> Result<(), String> {
     let repo = discover_repo(root)?;
-    match current_branch(&repo).as_deref() {
+    ensure_repo_on_branch(&repo, label, expected_branch)
+}
+
+pub fn ensure_repo_on_branch(
+    repo: &Repository,
+    label: &str,
+    expected_branch: &str,
+) -> Result<(), String> {
+    match current_branch(repo).as_deref() {
         Some(current_branch) if current_branch == expected_branch => Ok(()),
         Some(current_branch) => Err(format!(
             "{} is checked out on a different branch '{}'; expected branch '{}'",
@@ -918,7 +937,7 @@ pub fn ensure_checkout_on_branch(
         None => Err(format!(
             "{} is checked out on detached HEAD {}; expected branch '{}'",
             label,
-            head_rev(root)?,
+            head_commit(repo)?,
             expected_branch
         )),
     }

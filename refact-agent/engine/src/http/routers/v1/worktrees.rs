@@ -28,6 +28,14 @@ pub struct WorktreeQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct WorktreeListQuery {
+    #[serde(default)]
+    pub source_workspace_root: Option<String>,
+    #[serde(default)]
+    pub include_branches: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct WorktreeDiffQuery {
     #[serde(default)]
     pub source_workspace_root: Option<String>,
@@ -174,12 +182,12 @@ async fn service_for_request(
 
 pub async fn handle_v1_worktrees_list(
     State(app): State<AppState>,
-    Query(query): Query<WorktreeQuery>,
+    Query(query): Query<WorktreeListQuery>,
 ) -> ApiResult<WorktreeListResponse> {
     let gcx = app.gcx.clone();
     let service = service_for_request(gcx, query.source_workspace_root).await?;
     service
-        .list_worktrees()
+        .list_worktrees_with_branches(query.include_branches.unwrap_or(true))
         .await
         .map(Json)
         .map_err(map_service_error)

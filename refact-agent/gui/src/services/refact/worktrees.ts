@@ -74,6 +74,11 @@ export type WorktreeListResponse = {
   worktrees: WorktreeRecordView[];
 };
 
+export type ListWorktreesRequest = {
+  source_workspace_root?: string;
+  include_branches?: boolean;
+};
+
 export type CreateWorktreeRequest = {
   source_workspace_root?: string;
   branch?: string;
@@ -357,18 +362,24 @@ export const worktreesApi = createApi({
   endpoints: (builder) => ({
     listWorktrees: builder.query<
       WorktreeListResponse,
-      { source_workspace_root?: string } | undefined
+      ListWorktreesRequest | undefined
     >({
       queryFn: async (args, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
           url: buildWorktreeUrl(state, "/worktrees", {
             source_workspace_root: args?.source_workspace_root,
+            include_branches: args?.include_branches === true,
           }),
         });
         if (result.error) return { error: result.error };
         return { data: result.data as WorktreeListResponse };
       },
+      serializeQueryArgs: ({ endpointName, queryArgs }) =>
+        `${endpointName}:${JSON.stringify({
+          source_workspace_root: queryArgs?.source_workspace_root ?? null,
+          include_branches: queryArgs?.include_branches === true,
+        })}`,
       providesTags: (result) =>
         result
           ? [

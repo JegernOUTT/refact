@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use sha2::{Digest, Sha256};
@@ -29,6 +31,61 @@ static MERGE_LOCKS: OnceLock<Mutex<HashMap<String, Arc<AMutex<()>>>>> = OnceLock
 
 fn registry_write_lock() -> &'static AMutex<()> {
     REGISTRY_WRITE_LOCK.get_or_init(|| AMutex::new(()))
+}
+
+const LIST_PARALLELISM: usize = 8;
+const LIST_CACHE_TTL: Duration = Duration::from_secs(2);
+const PRUNE_INTERVAL: Duration = Duration::from_secs(60);
+
+static LIST_CACHE_GENERATION: AtomicU64 = AtomicU64::new(0);
+static LIST_CACHE: OnceLock<Mutex<HashMap<PathBuf, ListCacheSlot>>> = OnceLock::new();
+static PRUNE_TIMES: OnceLock<Mutex<HashMap<PathBuf, Instant>>> = OnceLock::new();
+
+type ListCacheSlot = Arc<AMutex<Option<CachedList>>>;
+
+struct CachedList {
+    response: WorktreeListResponse,
+    generation: u64,
+    computed_at: Instant,
+}
+
+impl CachedList {
+    fn is_fresh(&self) -> bool {
+        self.generation == list_cache_generation() && self.computed_at.elapsed() < LIST_CACHE_TTL
+    }
+}
+
+fn list_cache_generation() -> u64 {
+    LIST_CACHE_GENERATION.load(Ordering::SeqCst)
+}
+
+fn invalidate_list_cache() {
+    LIST_CACHE_GENERATION.fetch_add(1, Ordering::SeqCst);
+}
+
+fn list_cache_slot(registry_path: &Path) -> ListCacheSlot {
+    LIST_CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(registry_path.to_path_buf())
+        .or_insert_with(|| Arc::new(AMutex::new(None)))
+        .clone()
+}
+
+fn prune_due(source_root: &Path, force: bool) -> bool {
+    let now = Instant::now();
+    let mut times = PRUNE_TIMES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match times.get(source_root) {
+        Some(last) if !force && now.duration_since(*last) < PRUNE_INTERVAL => false,
+        _ => {
+            times.insert(source_root.to_path_buf(), now);
+            true
+        }
+    }
 }
 
 /// One merge at a time per target checkout. Two merges into the same checkout
@@ -143,9 +200,20 @@ impl WorktreeService {
         self.save_registry_unlocked(registry).await
     }
 
-    async fn load_registry_pruning_missing_records(&self) -> Result<WorktreeRegistry, String> {
-        let _guard = registry_write_lock().lock().await;
-        let mut registry = self.load_registry_unlocked().await?;
+    async fn load_registry_for_listing(&self) -> Result<WorktreeRegistry, String> {
+        let registry = self.load_registry_unlocked().await?;
+        let mut missing = HashSet::new();
+        for record in &registry.records {
+            if !tokio::fs::try_exists(&record.meta.root)
+                .await
+                .unwrap_or(true)
+            {
+                missing.insert(record.meta.id.clone());
+            }
+        }
+        if !prune_due(&self.source_workspace_root, !missing.is_empty()) {
+            return Ok(registry);
+        }
         let source_root = self.source_workspace_root.clone();
         let git_roots = tokio::task::spawn_blocking(move || {
             git::prune_worktrees(&source_root)?;
@@ -158,8 +226,19 @@ impl WorktreeService {
         })
         .await
         .map_err(|error| format!("Git worktree reconciliation task failed: {error}"))??;
+        let is_stale = |record: &WorktreeRegistryRecord| {
+            missing.contains(&record.meta.id)
+                && !normalized_path_key(&record.meta.root)
+                    .map(|root| git_roots.contains(&root))
+                    .unwrap_or(true)
+        };
+        if !registry.records.iter().any(is_stale) {
+            return Ok(registry);
+        }
+        let _guard = registry_write_lock().lock().await;
+        let mut registry = self.load_registry_unlocked().await?;
         let before = registry.records.len();
-        let mut retained = Vec::with_capacity(registry.records.len());
+        let mut retained = Vec::with_capacity(before);
         for record in registry.records.drain(..) {
             let exists = tokio::fs::try_exists(&record.meta.root)
                 .await
@@ -179,19 +258,99 @@ impl WorktreeService {
     }
 
     pub async fn list_worktrees(&self) -> Result<WorktreeListResponse, String> {
-        let registry = self.load_registry_pruning_missing_records().await?;
-        let mut worktrees = Vec::with_capacity(registry.records.len());
-        for record in &registry.records {
-            self.validate_registered_record_checkout_record(record)
-                .await?;
-            worktrees.push(self.record_view(record).await?);
+        self.list_worktrees_with_branches(true).await
+    }
+
+    pub async fn list_worktrees_with_branches(
+        &self,
+        include_branches: bool,
+    ) -> Result<WorktreeListResponse, String> {
+        let slot = list_cache_slot(&self.registry_path());
+        let mut response = {
+            let mut cached = slot.lock().await;
+            match cached.as_ref() {
+                Some(entry) if entry.is_fresh() => entry.response.clone(),
+                _ => {
+                    let generation = list_cache_generation();
+                    let response = self.compute_worktree_list().await?;
+                    *cached = Some(CachedList {
+                        response: response.clone(),
+                        generation,
+                        computed_at: Instant::now(),
+                    });
+                    response
+                }
+            }
+        };
+        if include_branches {
+            let source_root = self.source_workspace_root.clone();
+            response.source_branches =
+                tokio::task::spawn_blocking(move || match git::discover_repo(&source_root) {
+                    Ok(repo) => git::local_branches(&repo),
+                    Err(_) => Vec::new(),
+                })
+                .await
+                .map_err(|e| format!("Worktree branch listing task failed: {}", e))?;
+        }
+        Ok(response)
+    }
+
+    async fn compute_worktree_list(&self) -> Result<WorktreeListResponse, String> {
+        let registry = self.load_registry_for_listing().await?;
+        let records = Arc::new(registry.records);
+        let mut source_common_dirs: HashMap<PathBuf, PathBuf> = HashMap::new();
+        for record in records.iter() {
+            let source = record.meta.source_workspace_root.clone();
+            if !source_common_dirs.contains_key(&source) {
+                let lookup = source.clone();
+                let common_dir = tokio::task::spawn_blocking(move || source_common_dir(&lookup))
+                    .await
+                    .map_err(|e| format!("Worktree source inspection task failed: {}", e))??;
+                source_common_dirs.insert(source, common_dir);
+            }
+        }
+        let source_common_dirs = Arc::new(source_common_dirs);
+        let permits = Arc::new(tokio::sync::Semaphore::new(LIST_PARALLELISM));
+        let mut tasks = tokio::task::JoinSet::new();
+        for index in 0..records.len() {
+            let records = records.clone();
+            let source_common_dirs = source_common_dirs.clone();
+            let permits = permits.clone();
+            tasks.spawn(async move {
+                let _permit = permits
+                    .acquire_owned()
+                    .await
+                    .map_err(|e| format!("Worktree listing semaphore closed: {}", e))?;
+                let status = tokio::task::spawn_blocking(move || {
+                    let meta = &records[index].meta;
+                    let common_dir = source_common_dirs
+                        .get(&meta.source_workspace_root)
+                        .ok_or_else(|| "Worktree source common dir missing".to_string())?;
+                    inspect_listed_record(meta, common_dir)
+                })
+                .await
+                .map_err(|e| format!("Worktree validation task failed: {}", e))?;
+                Ok::<_, String>((index, status))
+            });
+        }
+        let mut statuses: Vec<Option<Result<WorktreeStatus, String>>> =
+            (0..records.len()).map(|_| None).collect();
+        while let Some(joined) = tasks.join_next().await {
+            let (index, status) =
+                joined.map_err(|e| format!("Worktree listing task failed: {}", e))??;
+            statuses[index] = Some(status);
+        }
+        let mut worktrees = Vec::with_capacity(records.len());
+        for (record, status) in records.iter().zip(statuses) {
+            let status = status.ok_or_else(|| "Worktree listing task missing".to_string())??;
+            worktrees.push(self.record_view_with_status(record, status).await?);
         }
         worktrees.sort_by(|a, b| a.created_at.cmp(&b.created_at));
         let source_root = self.source_workspace_root.clone();
-        let (source_current_branch, source_branches) =
+        let source_current_branch =
             tokio::task::spawn_blocking(move || match git::discover_repo(&source_root) {
-                Ok(repo) => (git::current_branch(&repo), git::local_branches(&repo)),
-                Err(_) => (None, Vec::new()),
+                Ok(repo) => git::current_branch(&repo),
+                Err(_) => None,
             })
             .await
             .map_err(|e| format!("Worktree source inspection task failed: {}", e))?;
@@ -199,7 +358,7 @@ impl WorktreeService {
             project_hash: self.project_hash.clone(),
             source_workspace_root: self.source_workspace_root.clone(),
             source_current_branch,
-            source_branches,
+            source_branches: Vec::new(),
             worktrees,
         })
     }
@@ -656,7 +815,7 @@ impl WorktreeService {
             }
             let blocking_service = service.clone();
             let blocking_id = id.clone();
-            let (response, updated_registry) = tokio::task::spawn_blocking(move || {
+            let merged = tokio::task::spawn_blocking(move || {
                 let mut registry = registry;
                 let mut registry_changed = false;
                 let response = blocking_service.merge_worktree_inner_blocking(
@@ -667,8 +826,10 @@ impl WorktreeService {
                 )?;
                 Ok::<_, String>((response, registry_changed.then_some(registry)))
             })
-            .await
-            .map_err(|e| format!("Worktree merge blocking task failed: {}", e))??;
+            .await;
+            invalidate_list_cache();
+            let (response, updated_registry) =
+                merged.map_err(|e| format!("Worktree merge blocking task failed: {}", e))??;
             if let Some(registry) = updated_registry {
                 service.save_registry_unlocked(&registry).await?;
             }
@@ -1110,30 +1271,23 @@ impl WorktreeService {
         let removal_id = record.meta.id.clone();
         let removal_root = record.meta.root.clone();
         let removal_branch = record.meta.branch.clone();
-        let (stale_path, mut warnings, branch_result, still_present) =
-            match tokio::task::spawn_blocking(move || {
-                let stale_path = !removal_root.exists();
-                let warnings = git::remove_worktree(&removal_source, &removal_id, &removal_root);
-                let branch_result = if delete_branch {
-                    removal_branch
-                        .as_deref()
-                        .map(|branch| git::delete_branch(&removal_source, branch))
-                } else {
-                    None
-                };
-                let still_present = removal_root.exists();
-                (stale_path, warnings, branch_result, still_present)
-            })
-            .await
-            {
-                Ok(triple) => triple,
-                Err(e) => {
-                    return Err(format!(
-                        "Worktree '{}' removal task failed: {}",
-                        record.meta.id, e
-                    ));
-                }
+        let removed = tokio::task::spawn_blocking(move || {
+            let stale_path = !removal_root.exists();
+            let warnings = git::remove_worktree(&removal_source, &removal_id, &removal_root);
+            let branch_result = if delete_branch {
+                removal_branch
+                    .as_deref()
+                    .map(|branch| git::delete_branch(&removal_source, branch))
+            } else {
+                None
             };
+            let still_present = removal_root.exists();
+            (stale_path, warnings, branch_result, still_present)
+        })
+        .await;
+        invalidate_list_cache();
+        let (stale_path, mut warnings, branch_result, still_present) = removed
+            .map_err(|e| format!("Worktree '{}' removal task failed: {}", record.meta.id, e))?;
         if still_present {
             return Err(format!(
                 "Failed to remove worktree directory '{}': {}",
@@ -1215,7 +1369,7 @@ impl WorktreeService {
             let _guard = registry_write_lock().lock().await;
             let registry = service.load_registry_unlocked().await?;
             let blocking_service = service.clone();
-            let (result, updated_registry) = tokio::task::spawn_blocking(move || {
+            let cleaned = tokio::task::spawn_blocking(move || {
                 let mut registry = registry;
                 let mut registry_changed = false;
                 let result = blocking_service.cleanup_worktrees_inner_blocking(
@@ -1225,8 +1379,10 @@ impl WorktreeService {
                 )?;
                 Ok::<_, String>((result, registry_changed.then_some(registry)))
             })
-            .await
-            .map_err(|e| format!("Worktree cleanup blocking task failed: {}", e))??;
+            .await;
+            invalidate_list_cache();
+            let (result, updated_registry) =
+                cleaned.map_err(|e| format!("Worktree cleanup blocking task failed: {}", e))??;
             if let Some(registry) = updated_registry {
                 service.save_registry_unlocked(&registry).await?;
             }
@@ -1861,9 +2017,11 @@ impl WorktreeService {
                 .await
                 .map_err(|e| format!("Failed to remove existing worktree registry: {}", e))?;
         }
-        tokio::fs::rename(&tmp_path, &path)
+        let replaced = tokio::fs::rename(&tmp_path, &path)
             .await
-            .map_err(|e| format!("Failed to replace worktree registry: {}", e))
+            .map_err(|e| format!("Failed to replace worktree registry: {}", e));
+        invalidate_list_cache();
+        replaced
     }
 
     async fn validate_registry(&self, registry: &WorktreeRegistry) -> Result<(), String> {
@@ -2147,17 +2305,6 @@ fn reference_key(reference: &WorktreeReference) -> String {
     )
 }
 
-fn canonical_git_path(root: &Path, git_path: &str) -> Result<PathBuf, String> {
-    let path = Path::new(git_path.trim());
-    let path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        root.join(path)
-    };
-    path.canonicalize()
-        .map_err(|e| format!("Failed to canonicalize git path: {}", e))
-}
-
 fn validate_registered_record_checkout(record: &WorktreeRegistryRecord) -> Result<(), String> {
     validate_worktree_meta_checkout(&record.meta)
 }
@@ -2167,15 +2314,32 @@ fn validate_registered_record_diff(record: &WorktreeRegistryRecord) -> Result<()
 }
 
 fn validate_worktree_meta_checkout(meta: &WorktreeMeta) -> Result<(), String> {
-    let registered_root = validate_worktree_meta_repository(meta)?;
-    let source_branch = meta
-        .branch
-        .clone()
-        .ok_or_else(|| format!("Worktree '{}' has no source branch", meta.id))?;
-    git::ensure_checkout_on_branch(&registered_root, "Source worktree", &source_branch)
+    let source_common_dir = source_common_dir(&meta.source_workspace_root)?;
+    let (_, repo) = open_registered_repository(meta, &source_common_dir)?;
+    ensure_registered_branch(meta, &repo)
 }
 
 fn validate_worktree_meta_repository(meta: &WorktreeMeta) -> Result<PathBuf, String> {
+    let source_common_dir = source_common_dir(&meta.source_workspace_root)?;
+    open_registered_repository(meta, &source_common_dir).map(|(root, _)| root)
+}
+
+fn source_common_dir(source_root: &Path) -> Result<PathBuf, String> {
+    git::canonical_common_dir(&git::discover_repo(source_root)?)
+}
+
+fn ensure_registered_branch(meta: &WorktreeMeta, repo: &git2::Repository) -> Result<(), String> {
+    let source_branch = meta
+        .branch
+        .as_deref()
+        .ok_or_else(|| format!("Worktree '{}' has no source branch", meta.id))?;
+    git::ensure_repo_on_branch(repo, "Source worktree", source_branch)
+}
+
+fn open_registered_repository(
+    meta: &WorktreeMeta,
+    source_common_dir: &Path,
+) -> Result<(PathBuf, git2::Repository), String> {
     if !meta.root.exists() {
         return Err(format!(
             "Worktree '{}' path '{}' does not exist",
@@ -2187,8 +2351,10 @@ fn validate_worktree_meta_repository(meta: &WorktreeMeta) -> Result<PathBuf, Str
         .root
         .canonicalize()
         .map_err(|e| format!("Failed to canonicalize worktree root: {}", e))?;
-    let top_level = git::run_git(&registered_root, &["rev-parse", "--show-toplevel"])?;
-    let top_level = canonical_git_path(&registered_root, &top_level)?;
+    let repo = git::discover_repo(&registered_root)?;
+    let top_level = git::repo_root(&repo)?
+        .canonicalize()
+        .map_err(|e| format!("Failed to canonicalize worktree top level: {}", e))?;
     if top_level != registered_root {
         return Err(format!(
             "Worktree '{}' path '{}' is not the git worktree root",
@@ -2196,21 +2362,23 @@ fn validate_worktree_meta_repository(meta: &WorktreeMeta) -> Result<PathBuf, Str
             meta.root.display()
         ));
     }
-    let source_common_dir = git::run_git(
-        &meta.source_workspace_root,
-        &["rev-parse", "--git-common-dir"],
-    )?;
-    let registered_common_dir = git::run_git(&registered_root, &["rev-parse", "--git-common-dir"])?;
-    if canonical_git_path(&meta.source_workspace_root, &source_common_dir)?
-        != canonical_git_path(&registered_root, &registered_common_dir)?
-    {
+    if git::canonical_common_dir(&repo)? != source_common_dir {
         return Err(format!(
             "Worktree '{}' path '{}' belongs to a different repository",
             meta.id,
             meta.root.display()
         ));
     }
-    Ok(registered_root)
+    Ok((registered_root, repo))
+}
+
+fn inspect_listed_record(
+    meta: &WorktreeMeta,
+    source_common_dir: &Path,
+) -> Result<WorktreeStatus, String> {
+    let (_, repo) = open_registered_repository(meta, source_common_dir)?;
+    ensure_registered_branch(meta, &repo)?;
+    Ok(git::status_for_repo(&repo))
 }
 
 fn fallback_merge_message(record: &WorktreeRegistryRecord, branch: &str) -> String {
@@ -2737,6 +2905,44 @@ mod worktree_registry_tests {
 
         let registry = service.load_registry().await.unwrap();
         assert!(registry.records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_worktrees_cache_drops_deleted_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/cached-list".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let id = created.worktree.meta.id.clone();
+        let listed = service.list_worktrees_with_branches(false).await.unwrap();
+        assert_eq!(
+            listed
+                .worktrees
+                .iter()
+                .map(|view| view.meta.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![id.as_str()]
+        );
+        assert!(listed.source_branches.is_empty());
+
+        service.delete_worktree(&id, true, false).await.unwrap();
+
+        let listed = service.list_worktrees().await.unwrap();
+        assert!(listed.worktrees.is_empty(), "{:?}", listed.worktrees);
+        assert!(listed.source_branches.contains(&"main".to_string()));
+        assert!(!listed
+            .source_branches
+            .contains(&"refact/chat/cached-list".to_string()));
     }
 
     #[tokio::test]

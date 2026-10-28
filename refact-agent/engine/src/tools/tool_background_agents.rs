@@ -603,6 +603,20 @@ fn kind_title(kind: BgAgentKind) -> &'static str {
     }
 }
 
+fn agent_heading(record: &BackgroundAgent) -> String {
+    let kind = kind_title(record.kind);
+    let prefixed = record
+        .title
+        .get(..kind.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(kind))
+        && record.title[kind.len()..].starts_with(':');
+    if prefixed {
+        record.title.clone()
+    } else {
+        format!("{kind}: {}", record.title)
+    }
+}
+
 fn format_status_chip(status: BgAgentStatus) -> &'static str {
     match status {
         BgAgentStatus::Queued => "⏳ queued",
@@ -749,7 +763,7 @@ fn format_list_line(result: &mut String, label: &str, values: &[String]) {
 
 fn format_agent_status_block(record: &BackgroundAgent) -> String {
     let now = Utc::now();
-    let mut result = format!("# {}: {}\n", kind_title(record.kind), record.title);
+    let mut result = format!("# {}\n", agent_heading(record));
     result.push_str(&format!("- Status: {}\n", format_agent_status_chip(record)));
     result.push_str(&format!("- Agent ID: {}\n", record.agent_id));
     result.push_str(&format!("- Kind: {}\n", kind_label(record.kind)));
@@ -1943,6 +1957,10 @@ mod tests {
 
         assert!(output.starts_with("⏰ Timed out after 1000ms"));
         assert!(output.contains("# Delegate: Slow agent"));
+        let mut prefixed = record.clone();
+        prefixed.kind = BgAgentKind::Subagent;
+        prefixed.title = "subagent: Fix it".to_string();
+        assert!(format_agent_status_block(&prefixed).starts_with("# subagent: Fix it\n"));
         assert!(output.contains("- Status: 🟢 running"));
     }
 
