@@ -61,6 +61,7 @@ import { BuddyHome } from "./Buddy/BuddyHome";
 import { BuddyErrorBoundary } from "./Buddy/BuddyErrorBoundary";
 
 import { ChatLoading } from "../components/ChatContent/ChatLoading";
+import { Button, ErrorState, LoadingState } from "../components/ui";
 import { SplashScreen } from "./Splash";
 import { selectBackendLastOkAt, selectBackendStatus } from "./Connection";
 import {
@@ -504,6 +505,10 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
   useEffect(() => {
     if (restoredActiveTabRef.current) return;
     if (!canAccessApp || !isLoggedIn) return;
+    if (deepLink.targetId) {
+      restoredActiveTabRef.current = true;
+      return;
+    }
     if (!isProjectStorageNamespaceTrusted()) return;
 
     const persistedActiveTab =
@@ -553,11 +558,14 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
   }, [
     allThreads,
     canAccessApp,
+    deepLink.targetId,
     dispatch,
     focusedWorkspaceChatId,
     isLoggedIn,
     openTasks,
   ]);
+
+  const pageHidden = pageSwitching || deepLink.resolving;
 
   const showWorkspaceShell =
     canAccessApp && isLoggedIn && renderedPage.name !== "login page";
@@ -583,12 +591,6 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
       ) : (
         <>
           {activeTab && <Toolbar activeTab={activeTab} />}
-          {(navigation.pending || deepLink.pending) && (
-            <div role="status">Opening linked target...</div>
-          )}
-          {(navigation.error ?? deepLink.error) && (
-            <div role="alert">{navigation.error ?? deepLink.error}</div>
-          )}
           <MaybeWorkspaceShell enabled={showWorkspaceShell}>
             <PageWrapper
               host={config.host}
@@ -596,16 +598,37 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
               flush={renderedPage.name === "chat"}
             >
               {renderedPage.name === "login page" && <LoginPage />}
-              {pageSwitching && <ChatLoading />}
-              {!pageSwitching && renderedPage.name === "history" && (
-                <Dashboard />
+              {navigation.pending && (
+                <LoadingState label="Opening linked target…" />
               )}
-              {!pageSwitching && renderedPage.name === "chat" && (
+              {navigation.error && (
+                <ErrorState
+                  title="Could not open link"
+                  description={navigation.error}
+                />
+              )}
+              {deepLink.error && (
+                <ErrorState
+                  title="Could not open linked chat"
+                  description={deepLink.error}
+                  retry={
+                    <Button size="sm" onClick={deepLink.dismissError}>
+                      Dismiss
+                    </Button>
+                  }
+                />
+              )}
+              {deepLink.resolving && (
+                <LoadingState label="Opening chat…" variant="full" />
+              )}
+              {!deepLink.resolving && pageSwitching && <ChatLoading />}
+              {!pageHidden && renderedPage.name === "history" && <Dashboard />}
+              {!pageHidden && renderedPage.name === "chat" && (
                 <InternalLinkProvider onInternalLink={navigation.navigate}>
                   <WorkspaceView />
                 </InternalLinkProvider>
               )}
-              {!pageSwitching && isSettingsPage(renderedPage) && (
+              {!pageHidden && isSettingsPage(renderedPage) && (
                 <SettingsHub
                   page={renderedPage}
                   onBack={goBack}
@@ -613,28 +636,28 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
                   tabbed={config.tabbed}
                 />
               )}
-              {!pageSwitching && renderedPage.name === "tasks list" && (
+              {!pageHidden && renderedPage.name === "tasks list" && (
                 <TaskList backFromTasks={goBack} />
               )}
-              {!pageSwitching && renderedPage.name === "task workspace" && (
+              {!pageHidden && renderedPage.name === "task workspace" && (
                 <TaskWorkspace
                   key={renderedPage.taskId}
                   taskId={renderedPage.taskId}
                   cardId={renderedPage.cardId}
                 />
               )}
-              {!pageSwitching && renderedPage.name === "knowledge graph" && (
+              {!pageHidden && renderedPage.name === "knowledge graph" && (
                 <KnowledgeWorkspace />
               )}
 
-              {!pageSwitching && renderedPage.name === "code intel" && (
+              {!pageHidden && renderedPage.name === "code intel" && (
                 <CodeIntelWorkspace
                   backFromCodeIntel={goBack}
                   host={config.host}
                 />
               )}
 
-              {!pageSwitching && renderedPage.name === "stats dashboard" && (
+              {!pageHidden && renderedPage.name === "stats dashboard" && (
                 <StatsDashboard
                   backFromDashboard={goBack}
                   tabbed={config.tabbed}
@@ -642,19 +665,19 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
                 />
               )}
 
-              {!pageSwitching && renderedPage.name === "performance" && (
+              {!pageHidden && renderedPage.name === "performance" && (
                 <PerformancePage onBack={goBack} />
               )}
 
-              {!pageSwitching && renderedPage.name === "refact daemon" && (
+              {!pageHidden && renderedPage.name === "refact daemon" && (
                 <RefactDaemonPage backFromDaemon={goBack} />
               )}
 
-              {!pageSwitching && renderedPage.name === "bug report" && (
+              {!pageHidden && renderedPage.name === "bug report" && (
                 <BugReportPage onBack={goBack} />
               )}
 
-              {!pageSwitching && renderedPage.name === "buddy" && <BuddyHome />}
+              {!pageHidden && renderedPage.name === "buddy" && <BuddyHome />}
             </PageWrapper>
           </MaybeWorkspaceShell>
           {renderedPage.name !== "login page" && (
