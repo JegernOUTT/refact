@@ -2648,6 +2648,62 @@
       "author": "background_agent:bgagent-61493284-67af-418b-908a-aa34fc854759 (ledger preparation)",
       "reviewer": "background_agent:bgagent-adaeddf1-8f7e-43c2-8222-00c7b5c1beba (source review only)",
       "review_evidence": "Source review subchat-b5ed3883-90be-441b-a9ee-4a950c547ebb accepted unchanged-default mechanical edits and production/test relevance contingent on actual critical red/green witness. This is not witness evidence or final ledger approval; parent independent ledger review remains pending."
+    },
+    {
+      "fingerprint": "5b3d68c66da4f72d73a3f74d28fdb1c2e449111660dcd0c7fe89c85e6f799a2a",
+      "occurrences": 1,
+      "failure_mode": "A subagent's cleared LIVE session context cap (thread.context_tokens_cap None, implicit full-window launch) is overwritten at persistence time by the frozen launch config (Some(n_ctx)), e.g. when the detached frozen-config save path runs instead of the runner-owned live session, so the durable trajectory permanently carries an artificial cap; related regressions are an explicit cap lost on reload or an implicit window recorded as an explicit cap.",
+      "importance": "Durable persistence of the optional context cap decides the child's context window and auto-compression threshold after resume: a spurious persisted cap permanently shrinks an implicit-window subagent, and a dropped explicit cap lets it exceed the user's limit.",
+      "nearest_retained": {
+        "fingerprint": "a83201f2650c4e47293c616ce2299d2b02bb4a2f510ce206f5247d9ed0ce6075",
+        "why_insufficient": "stateful_thread_from_config_preserves_disabled_approval_flags is unchanged in base and current and checks approval flags only; it never launches with a cap, never exercises implicit-versus-explicit window discrimination, legacy config deserialization, live-session window refresh, or the persisted failed-run trajectory cap."
+      },
+      "oracle": "Implicit launch: n_ctx=1,000,000, thread cap None, auto_compression 900,000, serde round-trip config cap None. Explicit 300,000: thread cap Some(300000), auto_compression 270,000, legacy config without the discriminator keeps Some(300000). Caps above the model window (1,000,001) and zero are rejected. Live refresh: runner session cap 300,000 sets ccx.n_ctx 300,000; 2,000,000 clamps to model 1,000,000; cleared cap restores 1,000,000 for Unsupervised and a Supervised policy leaves n_ctx untouched. Failed-run save through the real save path reloads from disk with thread.context_tokens_cap == None and contains the provider-failed event message.",
+      "prerequisites": "make_test_gcx isolated cache with injected caps for test/1m and test/200k chat models, AppState from the gcx, temporary workspace folder, a real stateful runner-owned session installed by install_stateful_subchat_session and put in Generating state; progress messages seeded with one user message.",
+      "shipping_implementation": "Calls production apply_launch_context_window, stateful_thread_from_config, SubchatConfig serde/context_tokens_cap, install_stateful_subchat_session, refresh_live_context_window and save_failed_subchat_trajectory, which runs production save_subchat_trajectory (save_through_runner_session, else frozen-config save_trajectory_as_with_intent_checked) and loads the saved file with load_trajectory_for_chat; no test-local reimplementation of the cap logic.",
+      "determinism": "Temporary directories and isolated make_test_gcx cache; in-process only, no network, credentials, sleeps or timing races; runs in about 0.1s; exact equality assertions on integers.",
+      "layer": "Engine library async test over real production subchat/session/trajectory code and real filesystem persistence.",
+      "why_cheapest": "One shared gcx/caps/session/persistence fixture with 1 physical test and 11 meaningful scenarios: implicit model window with 90% compression, implicit serde round-trip, explicit cap with 90% compression, legacy config deserialization, over-cap rejection, zero-cap rejection, live 300K refresh, clamp to model window, live-cap cleared, supervised policy, and failure-persist reload. Several are pure functions, but the live-refresh and persistence scenarios need the real session and filesystem, so they are kept together rather than duplicating that fixture.",
+      "meaningful_cases": 11,
+      "critical": true,
+      "criticality_reason": "Durable persistence of the context cap controls whether a restored subagent keeps the user's explicit limit or silently inherits/loses a window; executed binary-mutant red and restored green evidence exists. The witness claims ONLY the saved.thread.context_tokens_cap == None assertion at subchat.rs:5776, not that every other assertion was mutated.",
+      "removed_coverage": "None; no existing test or assertion removed or weakened.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "refact-agent/engine/src/subchat.rs::save_through_runner_session (compiled closure refact_lsp::subchat::save_through_runner_session::{{closure}}, VA 0x970b730, file offset 0x970a730), exercised via save_subchat_trajectory / save_failed_subchat_trajectory",
+        "before_fix": {
+          "reference": "Executed binary-only production mutant, NOT a literal pre-fix source revision and not a source patch: a COPY of the shipping test binary refact-agent/engine/target/ci-test/deps/refact_lsp-954b86a4ea746623 (sha256 0d296e91df94f9e58dda29d4a66de6635f334793656fea302aaceae354174155; source at main 42f1a3f9d6344eed64c3ab5ea07cfa3cebd43ef2, subchat.rs sha256 72dd9904322be824a1d4d1e9fbbd350163520e9f785a76c35765d8f1cde6f533) with 21 bytes at file offset 0x970a730 replaced: original 4989e34981eb00b000004881ec0010000048c70424 (stack-probe prologue) -> 48b80100000000000080488907c64652014889f8c3 as recorded in .refact/verification/context-cap-main/mutant-metadata.json (disassembly: movabs rax,0x8000000000000001; mov [rdi],rax; mov byte [rsi+0x52],1; mov rax,rdi; ret). This forces the async closure to return Poll::Ready(None) so save_subchat_trajectory executes the real detached frozen-config fallback instead of the runner-session path. Original binary and all source unchanged.",
+          "fingerprint": "1477f7fec16aec1ce317cb390ed95a03427f18bc0d9e7a097c129b03ec1a1432"
+        },
+        "intended_diagnostic": "With the closure forced to None, the failed-run save goes through the frozen-config fallback and persists context_tokens_cap Some(300000) (the explicit config's n_ctx) for the session whose live cap is None; the test panics at src/subchat.rs:5776:9 assertion left == right, left Some(300000), right None. The unmutated shipping binary persists None through the live runner session and passes.",
+        "failing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            ".refact/verification/context-cap-main/frozen-cap-mutant-bin",
+            "subchat::subchat_tests::general_subagent_context_cap_is_explicit_only_and_follows_live_session",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/verification/context-cap-main/mutant.log (sha256 50c8d6bc2257825c4ba0549f773c18297f8d9338abb00d13e4400389f0810bef) and mutant.exit=101: panic at src/subchat.rs:5776:9, left Some(300000), right None, 0 passed 1 failed; mutant binary sha256 1477f7fec16aec1ce317cb390ed95a03427f18bc0d9e7a097c129b03ec1a1432; mutation metadata .refact/verification/context-cap-main/mutant-metadata.json."
+        },
+        "passing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "refact-agent/engine/target/ci-test/deps/refact_lsp-954b86a4ea746623",
+            "subchat::subchat_tests::general_subagent_context_cap_is_explicit_only_and_follows_live_session",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/verification/context-cap-main/restored.log (sha256 9146f7bc53ad9a6d34923d722ca9ca45d4347a692794dc2501ab3943e080f743) and restored.exit=0: 1 passed 0 failed on the original unmodified binary; parent focused cargo exec 84d44210 exit 0 and parent full engine lib suite exec_5b7f9bc1 exit 0 on main 42f1a3f9d6344eed64c3ab5ea07cfa3cebd43ef2."
+        }
+      },
+      "author": "parent planner chat (context-cap fix and test author, mutant/restored evidence runner)",
+      "reviewer": "background_agent:bgagent-225c2d36-ce33-43f6-b90b-cb667ed02f98 (independent evidence and ledger review)",
+      "review_evidence": "Reviewer read the test body (subchat.rs 5667-5780) and production save_through_runner_session/save_subchat_trajectory/save_failed_subchat_trajectory; confirmed line 5776 is assert_eq!(saved.thread.context_tokens_cap, None); sha256-verified source binary, mutant binary and both logs; cmp shows only 17 differing bytes inside the 21-byte patch at offset 0x970a730, original bytes in the source binary match metadata, nm places the closure at 0x970b730, disassembly of replacement confirmed. Source reviewer subchat-b5ed3883-90be-441b-a9ee-4a950c547ebb approved test relevance contingent on this red/green. Limits: the mutation is a binary-level approximation of the no-live-session path, the witness covers only the persisted-None assertion, and the other ten scenarios are admitted as meaningful workload by semantic inspection, not individually mutated."
     }
   ],
   "classifications": [
