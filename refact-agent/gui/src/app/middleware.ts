@@ -924,13 +924,16 @@ startListening({
   effect: (action, listenerApi) => {
     const state = listenerApi.getState();
     const chatId = state.chat.current_thread_id || undefined;
-    void reportBuddyFrontendError({
-      source: "ui_error_state",
-      error: action.payload,
-      sourceFile: "frontend/ui_error_state",
-      toolName: "ui_error_state",
-      chatId,
-    });
+    void reportBuddyFrontendError(
+      {
+        source: "ui_error_state",
+        error: action.payload,
+        sourceFile: "frontend/ui_error_state",
+        toolName: "ui_error_state",
+        chatId,
+      },
+      { getState: () => listenerApi.getState() },
+    );
   },
 });
 

@@ -90,6 +90,7 @@ import { extensionsMarketplaceApi } from "../services/refact/extensionsMarketpla
 import { memoryEnrichmentApi } from "../services/refact/memoryEnrichment";
 import { gitReadApi } from "../services/refact/gitRead";
 import { buddySlice } from "../features/Buddy/buddySlice";
+import { configureBuddyFrontendErrorReporter } from "../features/Buddy/reportBuddyFrontendError";
 import { sidebarReducer } from "../features/Sidebar/sidebarSlice";
 import { buddyApi } from "../services/refact/buddy";
 import { notificationsSlice } from "../features/Notifications";
@@ -374,6 +375,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
 pruneStaleDraftMessages();
 
 export const store = setUpStore();
+configureBuddyFrontendErrorReporter(() => store.getState());
 export type Store = typeof store;
 
 export const persistor = persistStore(store);

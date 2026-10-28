@@ -1,4 +1,3 @@
-import { store } from "../../app/store";
 import { hasUsableEngineEndpoint } from "../../services/refact/apiUrl";
 import { postBuddyErrorRequest } from "../../services/refact/buddy";
 import type { EngineApiConnection } from "../../services/refact/chatCommands";
@@ -556,7 +555,7 @@ function shouldReport(key: string, now: number): boolean {
 
 type BuddyFrontendReporterState = {
   config: EngineApiConnection & {
-    apiKey: string | null;
+    apiKey?: string | null;
     lspPort: number;
   };
 };
@@ -567,8 +566,16 @@ type BuddyFrontendErrorDeps = {
   now: () => number;
 };
 
-const defaultDeps: BuddyFrontendErrorDeps = {
-  getState: () => store.getState() as BuddyFrontendReporterState,
+let getReporterState: (() => BuddyFrontendReporterState) | undefined;
+
+export function configureBuddyFrontendErrorReporter(
+  getState: () => BuddyFrontendReporterState,
+): void {
+  getReporterState = getState;
+}
+
+const defaultDeps = {
+  getState: () => getReporterState?.(),
   post: postBuddyErrorRequest,
   now: () => Date.now(),
 };
@@ -604,10 +611,11 @@ export async function reportBuddyFrontendError(
     toolName?: string;
     chatId?: string;
   },
-  deps: BuddyFrontendErrorDeps = defaultDeps,
+  deps: Partial<BuddyFrontendErrorDeps> = {},
 ): Promise<void> {
-  const state = deps.getState();
-  if (!hasUsableEngineEndpoint(state.config)) return;
+  const { getState, post, now } = { ...defaultDeps, ...deps };
+  const state = getState();
+  if (!state || !hasUsableEngineEndpoint(state.config)) return;
 
   const apiKey = state.config.apiKey ?? undefined;
   const rawText = errorToText(args.error).trim();
@@ -631,10 +639,10 @@ export async function reportBuddyFrontendError(
     },
     normalized,
   );
-  if (!shouldReport(key, deps.now())) return;
+  if (!shouldReport(key, now())) return;
 
   try {
-    await deps.post(state.config, apiKey, {
+    await post(state.config, apiKey, {
       error: `[frontend:${args.source}] ${normalized}`,
       source_file: sourceFile,
       tool_name: toolName,
