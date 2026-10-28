@@ -20,8 +20,10 @@ export const skillsStatusApi = createApi({
       return headers;
     },
   }),
+  tagTypes: ["SkillsStatus"],
   endpoints: (builder) => ({
     getSkillsStatus: builder.query<SkillsStatusResponse, string>({
+      providesTags: ["SkillsStatus"],
       queryFn: async (chatId, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({

@@ -77,6 +77,54 @@ import type {
 } from "../../services/refact/chatSubscription";
 
 const COMPRESSION_MIN_VISIBLE_MS = 500;
+const ESTIMATED_LINE_HEIGHT_PX = 22;
+const ESTIMATED_CHARS_PER_LINE = 90;
+const ESTIMATED_TEXT_CHROME_PX = 40;
+const ESTIMATED_TOOL_ROW_PX = 70;
+const ESTIMATED_USER_MESSAGE_PX = 100;
+const ESTIMATED_COMPACT_ROW_PX = 48;
+const MAX_ESTIMATED_ITEM_HEIGHT_PX = 1200;
+
+function estimateTextHeight(text: string): number {
+  const lines = text
+    .split("\n")
+    .reduce(
+      (total, line) =>
+        total + Math.max(1, Math.ceil(line.length / ESTIMATED_CHARS_PER_LINE)),
+      0,
+    );
+  return Math.min(
+    MAX_ESTIMATED_ITEM_HEIGHT_PX,
+    ESTIMATED_TEXT_CHROME_PX + lines * ESTIMATED_LINE_HEIGHT_PX,
+  );
+}
+
+function estimateDisplayItemHeight(item: DisplayItem): number {
+  switch (item.type) {
+    case "assistant": {
+      const text =
+        typeof item.message.content === "string" ? item.message.content : "";
+      const toolRows =
+        (item.message.tool_calls?.length ?? 0) * ESTIMATED_TOOL_ROW_PX;
+      if (!text.trim()) return Math.max(toolRows, ESTIMATED_TOOL_ROW_PX);
+      return Math.min(
+        MAX_ESTIMATED_ITEM_HEIGHT_PX,
+        estimateTextHeight(text) + toolRows,
+      );
+    }
+    case "user":
+      return typeof item.message.content === "string"
+        ? Math.max(
+            ESTIMATED_USER_MESSAGE_PX,
+            estimateTextHeight(item.message.content),
+          )
+        : ESTIMATED_USER_MESSAGE_PX;
+    case "plain_text":
+      return estimateTextHeight(item.content);
+    default:
+      return ESTIMATED_COMPACT_ROW_PX;
+  }
+}
 
 function compressionProgressText(
   phase: CompressionPhase | undefined,
@@ -578,6 +626,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
               key={renderChatId}
               items={displayItems}
               renderItem={renderDisplayItem}
+              estimateItemHeight={estimateDisplayItemHeight}
               initialScrollIndex={initialScrollIndex}
               footer={virtuosoFooter}
               header={

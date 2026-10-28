@@ -11,6 +11,9 @@ const matchMediaMock = new MatchMediaMock();
 type VirtuosoMockProps = {
   data?: unknown[];
   itemContent: (index: number, item: unknown) => React.ReactNode;
+  itemsRendered?: (
+    items: { index: number; data: unknown; offset: number; size: number }[],
+  ) => void;
   components?: {
     Header?: React.ComponentType;
     Scroller?: React.ComponentType<React.HTMLAttributes<HTMLDivElement>>;
@@ -27,12 +30,25 @@ vi.mock("react-virtuoso", async () => {
 
   return {
     Virtuoso: ReactModule.forwardRef<HTMLDivElement, VirtuosoMockProps>(
-      ({ data, itemContent, components, ...props }, _ref) => {
+      ({ data, itemContent, components, itemsRendered, ...props }, _ref) => {
+        ReactModule.useEffect(() => {
+          if (!itemsRendered || !data || data.length === 0) return;
+          if ((globalThis as Record<string, unknown>).__VIRTUOSO_DEFER_PAINT__)
+            return;
+          itemsRendered(
+            data.map((item, index) => ({
+              index,
+              data: item,
+              offset: 0,
+              size: 0,
+            })),
+          );
+        }, [data, itemsRendered]);
         const calls =
           ((globalThis as Record<string, unknown>).__VIRTUOSO_CALLS__ as
             | unknown[]
             | undefined) ?? [];
-        calls.push(props);
+        calls.push({ ...props, itemsRendered });
         (globalThis as Record<string, unknown>).__VIRTUOSO_CALLS__ = calls;
         const header = components?.Header
           ? ReactModule.createElement(components.Header)

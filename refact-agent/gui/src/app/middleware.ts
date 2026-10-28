@@ -75,6 +75,9 @@ import { toolsApi } from "../services/refact/tools";
 import { commandsApi, isDetailMessage } from "../services/refact/commands";
 import { pathApi } from "../services/refact/path";
 import { pingApi } from "../services/refact/ping";
+import { skillsStatusApi } from "../services/refact/skillsStatus";
+import { skillsSettingsApi } from "../services/refact/skillsSettings";
+import { extensionsMarketplaceApi } from "../services/refact/extensionsMarketplace";
 import {
   clearCapsProvidersError,
   clearError,
@@ -93,7 +96,10 @@ import {
   resolveProjectRoot,
   setCurrentProjectInfo,
 } from "../features/Chat/currentProject";
-import { resetSidebarState } from "../features/Sidebar/sidebarSlice";
+import {
+  resetSidebarState,
+  sidebarSubscriptionStarted,
+} from "../features/Sidebar/sidebarSlice";
 import { nextTip } from "../features/TipOfTheDay";
 import { tasksApi } from "../services/refact/tasks";
 import {
@@ -1031,9 +1037,12 @@ startListening({
   // TODO: figure out why this breaks the tests when it's not a function :/
   matcher: isAnyOf(isRejected),
   effect: (action, listenerApi) => {
+    const backendConfirmed =
+      listenerApi.getState().connection.backendStatus !== "unknown";
     if (
       capsApi.endpoints.getCaps.matchRejected(action) &&
-      !action.meta.condition
+      !action.meta.condition &&
+      backendConfirmed
     ) {
       const errorStatus = action.payload?.status;
       const isAuthError = errorStatus === 401;
@@ -1158,8 +1167,11 @@ startListening({
 
     if (
       (providersApi.endpoints.updateProvider.matchRejected(action) ||
-        providersApi.endpoints.getProvider.matchRejected(action) ||
-        providersApi.endpoints.getConfiguredProviders.matchRejected(action)) &&
+        (backendConfirmed &&
+          (providersApi.endpoints.getProvider.matchRejected(action) ||
+            providersApi.endpoints.getConfiguredProviders.matchRejected(
+              action,
+            )))) &&
       typeof action.meta === "object" &&
       "condition" in action.meta &&
       !action.meta.condition
@@ -1244,6 +1256,19 @@ startListening({
       if (previousStatus === "online") return;
       listenerApi.dispatch(clearError());
       listenerApi.dispatch(clearCapsProvidersError());
+      if (previousStatus === "unknown") {
+        const state = listenerApi.getState();
+        if (capsApi.endpoints.getCaps.select(undefined)(state).isError) {
+          listenerApi.dispatch(capsApi.util.resetApiState());
+        }
+        if (
+          providersApi.endpoints.getConfiguredProviders.select(undefined)(state)
+            .isError
+        ) {
+          listenerApi.dispatch(providersApi.util.resetApiState());
+        }
+        return;
+      }
       listenerApi.dispatch(capsApi.util.resetApiState());
       listenerApi.dispatch(modelsApi.util.resetApiState());
       listenerApi.dispatch(providersApi.util.resetApiState());
@@ -1253,6 +1278,28 @@ startListening({
     listenerApi.dispatch(capsApi.util.resetApiState());
     listenerApi.dispatch(modelsApi.util.resetApiState());
     listenerApi.dispatch(providersApi.util.resetApiState());
+  },
+});
+
+startListening({
+  matcher: isAnyOf(
+    skillsSettingsApi.endpoints.saveSkillsSettings.matchFulfilled,
+    extensionsMarketplaceApi.endpoints.installMarketplaceSkill.matchFulfilled,
+  ),
+  effect: (_action, listenerApi) => {
+    listenerApi.dispatch(skillsStatusApi.util.invalidateTags(["SkillsStatus"]));
+  },
+});
+
+startListening({
+  matcher: isAnyOf(
+    capsApi.endpoints.getCaps.matchFulfilled,
+    providersApi.endpoints.getConfiguredProviders.matchFulfilled,
+    sidebarSubscriptionStarted,
+  ),
+  effect: (_action, listenerApi) => {
+    if (listenerApi.getState().connection.backendStatus !== "unknown") return;
+    listenerApi.dispatch(setBackendStatus({ status: "online" }));
   },
 });
 

@@ -467,6 +467,29 @@ export const selectMessagesById = (state: RootState, chatId: string) =>
 export const selectMessages = (state: RootState) =>
   selectMessagesById(state, state.chat.current_thread_id);
 
+export const selectSkillsStatusRevisionById = createSelector(
+  [
+    selectMessagesById,
+    (state: RootState, chatId: string) =>
+      state.chat.threads[chatId]?.thread.mode,
+  ],
+  (messages, mode) => {
+    let skillEvents = 0;
+    for (const message of messages) {
+      if (message.role === "cd_instruction") skillEvents++;
+      if (
+        isAssistantMessage(message) &&
+        message.tool_calls?.some((call) =>
+          isToolName(call.function.name, "activate_skill"),
+        )
+      ) {
+        skillEvents++;
+      }
+    }
+    return `${mode ?? ""}:${skillEvents}`;
+  },
+);
+
 /**
  * Unified context rebuild selectors.
  *

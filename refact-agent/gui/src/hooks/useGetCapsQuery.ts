@@ -22,7 +22,7 @@ export const useGetCapsQuery = (_args?: undefined) => {
   );
   useGetPing();
   const canFetchCaps = hasUsableEngineEndpoint(config);
-  const skip = !!isAuthError || !canFetchCaps || backendStatus !== "online";
+  const skip = !!isAuthError || !canFetchCaps || backendStatus === "offline";
   const isCapsUninitialized = cachedCapsStatus === QueryStatus.uninitialized;
   const hasLoadedEmptyModelList =
     !!cachedCaps && Object.keys(cachedCaps.chat_models).length === 0;

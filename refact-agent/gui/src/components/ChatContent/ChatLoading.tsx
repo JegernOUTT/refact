@@ -4,9 +4,20 @@ import styles from "./ChatLoading.module.css";
 
 const skeletonWidths = ["85%", "70%", "90%", "60%"];
 
-export const ChatLoading: React.FC = () => {
+export type ChatLoadingProps = {
+  overlay?: boolean;
+};
+
+export const ChatLoading: React.FC<ChatLoadingProps> = ({
+  overlay = false,
+}) => {
   return (
-    <Container>
+    <Container
+      className={overlay ? styles.overlay : undefined}
+      aria-busy="true"
+      aria-label="Loading chat"
+      data-testid="chat-loading"
+    >
       <Flex
         direction="column"
         align="center"

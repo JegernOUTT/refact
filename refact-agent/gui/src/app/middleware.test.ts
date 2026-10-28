@@ -46,6 +46,7 @@ import {
   sessionAdded,
   setTerminalWorkbenchOpen,
 } from "../features/Workspace/TerminalPanel";
+import { setBackendStatus } from "../features/Connection";
 
 function makeThread(id: string): ChatThreadRuntime {
   const mode = id.startsWith("chat-") ? "agent" : undefined;
@@ -1652,9 +1653,11 @@ describe("providers rejection middleware", () => {
         .fn<typeof fetch>()
         .mockResolvedValue(new Response(null, { status: 200 })),
     );
-    return setUpStore({
+    const store = setUpStore({
       config: { host: "vscode", lspPort: 8001, themeProps: {} },
     });
+    store.dispatch(setBackendStatus({ status: "online" }));
+    return store;
   }
 
   function rejection(

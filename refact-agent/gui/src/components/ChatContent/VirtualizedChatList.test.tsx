@@ -18,6 +18,8 @@ type VirtuosoCall = {
   defaultItemHeight?: number;
   minOverscanItemCount?: { top: number; bottom: number };
   overscan?: { main: number; reverse: number };
+  heightEstimates?: number[];
+  itemsRendered?: (items: unknown[]) => void;
   skipAnimationFrameInResizeObserver?: boolean;
 };
 
@@ -77,7 +79,7 @@ describe("VirtualizedChatList", () => {
     );
 
     const firstCall = getVirtuosoCalls().at(-1);
-    expect(firstCall?.increaseViewportBy).toEqual({ top: 800, bottom: 1200 });
+    expect(firstCall?.increaseViewportBy).toEqual({ top: 400, bottom: 800 });
 
     rerender(
       <div style={{ height: 400 }}>
@@ -90,7 +92,7 @@ describe("VirtualizedChatList", () => {
     );
 
     const secondCall = getVirtuosoCalls().at(-1);
-    expect(secondCall?.increaseViewportBy).toEqual({ top: 800, bottom: 1000 });
+    expect(secondCall?.increaseViewportBy).toEqual({ top: 400, bottom: 600 });
   });
 
   test("uses synchronous ResizeObserver measurements to reduce dynamic-height jitter", () => {
@@ -120,9 +122,113 @@ describe("VirtualizedChatList", () => {
     );
 
     const call = getVirtuosoCalls().at(-1);
-    expect(call?.defaultItemHeight).toBe(240);
-    expect(call?.minOverscanItemCount).toEqual({ top: 20, bottom: 20 });
-    expect(call?.overscan).toEqual({ main: 400, reverse: 400 });
+    expect(call?.defaultItemHeight).toBe(96);
+    expect(call?.minOverscanItemCount).toEqual({ top: 4, bottom: 6 });
+    expect(call?.overscan).toBeUndefined();
+  });
+
+  test("passes per-item height estimates cached by item key", () => {
+    const estimate = vi.fn((item: Item) => 40 + item.text.length);
+    const { rerender } = render(
+      <div style={{ height: 400 }}>
+        <VirtualizedChatList
+          items={items}
+          renderItem={(item) => <div>{item.text}</div>}
+          estimateItemHeight={estimate}
+        />
+      </div>,
+    );
+
+    expect(getVirtuosoCalls().at(-1)?.heightEstimates).toEqual(
+      items.map((item) => 40 + item.text.length),
+    );
+    expect(estimate).toHaveBeenCalledTimes(items.length);
+
+    const appended = [...items, { key: "k-new", text: "fresh" }];
+    rerender(
+      <div style={{ height: 400 }}>
+        <VirtualizedChatList
+          items={appended}
+          renderItem={(item) => <div>{item.text}</div>}
+          estimateItemHeight={estimate}
+        />
+      </div>,
+    );
+
+    expect(getVirtuosoCalls().at(-1)?.heightEstimates).toEqual(
+      appended.map((item) => 40 + item.text.length),
+    );
+    expect(estimate).toHaveBeenCalledTimes(items.length + 1);
+  });
+
+  test("covers the list with a loading overlay until items are rendered", async () => {
+    render(
+      <div style={{ height: 400 }}>
+        <VirtualizedChatList
+          items={items}
+          renderItem={(item) => <div>{item.text}</div>}
+        />
+      </div>,
+    );
+
+    await waitFor(() =>
+      expect(screen.queryByTestId("chat-loading")).not.toBeInTheDocument(),
+    );
+  });
+
+  test("keeps the loading overlay until Virtuoso paints, with a timeout fallback", () => {
+    vi.useFakeTimers();
+    (globalThis as Record<string, unknown>).__VIRTUOSO_DEFER_PAINT__ = true;
+    try {
+      render(
+        <div style={{ height: 400 }}>
+          <VirtualizedChatList
+            items={items}
+            renderItem={(item) => <div>{item.text}</div>}
+          />
+        </div>,
+      );
+
+      expect(screen.getByTestId("chat-loading")).toHaveAttribute(
+        "aria-busy",
+        "true",
+      );
+      act(() => {
+        vi.advanceTimersByTime(2999);
+      });
+      expect(screen.getByTestId("chat-loading")).toBeInTheDocument();
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(screen.queryByTestId("chat-loading")).not.toBeInTheDocument();
+    } finally {
+      delete (globalThis as Record<string, unknown>).__VIRTUOSO_DEFER_PAINT__;
+      vi.useRealTimers();
+    }
+  });
+
+  test("hides the loading overlay as soon as Virtuoso reports rendered items", () => {
+    (globalThis as Record<string, unknown>).__VIRTUOSO_DEFER_PAINT__ = true;
+    try {
+      render(
+        <div style={{ height: 400 }}>
+          <VirtualizedChatList
+            items={items}
+            renderItem={(item) => <div>{item.text}</div>}
+          />
+        </div>,
+      );
+      expect(screen.getByTestId("chat-loading")).toBeInTheDocument();
+
+      act(() => {
+        getVirtuosoCalls()
+          .at(-1)
+          ?.itemsRendered?.([{ index: 0 }]);
+      });
+      expect(screen.queryByTestId("chat-loading")).not.toBeInTheDocument();
+    } finally {
+      delete (globalThis as Record<string, unknown>).__VIRTUOSO_DEFER_PAINT__;
+    }
   });
 
   test("waits for a non-zero wrapper height before mounting Virtuoso", () => {

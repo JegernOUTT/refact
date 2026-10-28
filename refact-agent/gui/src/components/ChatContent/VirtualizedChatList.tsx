@@ -6,11 +6,12 @@ import React, {
   useMemo,
   useLayoutEffect,
 } from "react";
-import { Virtuoso, VirtuosoHandle } from "react-virtuoso";
+import { Virtuoso, VirtuosoHandle, type ListItem } from "react-virtuoso";
 import { Flex, Container, Box } from "@radix-ui/themes";
 import classNames from "classnames";
 import { ScrollToBottomButton } from "../ScrollArea/ScrollToBottomButton";
 import styles from "./ChatContent.module.css";
+import { ChatLoading } from "./ChatLoading";
 import {
   captureScrollAnchor,
   ChatScrollAnchorContext,
@@ -23,9 +24,11 @@ const SCROLL_INTENT_MS = 500;
 const PASSIVE_SCROLL_GRACE_MS = 250;
 const ANCHOR_PREPARE_MAX_AGE_MS = 500;
 const MIN_MEASURED_LIST_HEIGHT = 1;
-const DEFAULT_ITEM_HEIGHT = 240;
-const VIRTUOSO_MIN_OVERSCAN_ITEM_COUNT = { top: 20, bottom: 20 };
-const VIRTUOSO_OVERSCAN = { main: 400, reverse: 400 };
+const DEFAULT_ITEM_HEIGHT = 96;
+const VIRTUOSO_MIN_OVERSCAN_ITEM_COUNT = { top: 4, bottom: 6 };
+const IDLE_VIEWPORT_PADDING = { top: 400, bottom: 600 };
+const STREAMING_VIEWPORT_PADDING = { top: 400, bottom: 800 };
+const FIRST_PAINT_TIMEOUT_MS = 3000;
 const FOLLOW_BUTTON_DISTANCE_THRESHOLD_PX = 200;
 const PIN_TO_BOTTOM_TOLERANCE_PX = 20;
 
@@ -66,6 +69,7 @@ function isWheelHandledByNestedScroller(
 export type VirtualizedChatListProps<T extends { key: string }> = {
   items: T[];
   renderItem: (item: T) => React.ReactNode;
+  estimateItemHeight?: (item: T) => number;
   initialScrollIndex?: number;
   footer?: React.ReactNode;
   header?: React.ReactNode;
@@ -75,6 +79,7 @@ export type VirtualizedChatListProps<T extends { key: string }> = {
 export function VirtualizedChatList<T extends { key: string }>({
   items,
   renderItem,
+  estimateItemHeight,
   initialScrollIndex,
   footer,
   header,
@@ -99,6 +104,8 @@ export function VirtualizedChatList<T extends { key: string }>({
   } | null>(null);
   const cancelAnchorRestoreRef = useRef<(() => void) | null>(null);
   const [hasMeasuredHeight, setHasMeasuredHeight] = useState(false);
+  const [firstPaintDone, setFirstPaintDone] = useState(items.length === 0);
+  const heightEstimateCacheRef = useRef(new Map<string, number>());
   // Timestamp of the last active user input that should scroll downward.
   // Used to distinguish real user scroll-down from Virtuoso measurement
   // adjustments that passively change scrollTop.
@@ -516,11 +523,42 @@ export function VirtualizedChatList<T extends { key: string }>({
     [Header, Scroller, List, Footer],
   );
 
-  const viewportPadding = useMemo(
-    () =>
-      isStreaming ? { top: 800, bottom: 1200 } : { top: 800, bottom: 1000 },
-    [isStreaming],
+  const viewportPadding = isStreaming
+    ? STREAMING_VIEWPORT_PADDING
+    : IDLE_VIEWPORT_PADDING;
+
+  const heightEstimates = useMemo(() => {
+    if (!estimateItemHeight) return undefined;
+    const cache = heightEstimateCacheRef.current;
+    return items.map((item) => {
+      const cached = cache.get(item.key);
+      if (cached !== undefined) return cached;
+      const estimate = estimateItemHeight(item);
+      cache.set(item.key, estimate);
+      return estimate;
+    });
+  }, [items, estimateItemHeight]);
+
+  const markFirstPaint = useCallback(() => {
+    setFirstPaintDone(true);
+  }, []);
+
+  const handleItemsRendered = useCallback(
+    (rendered: ListItem<T>[]) => {
+      if (rendered.length > 0) markFirstPaint();
+    },
+    [markFirstPaint],
   );
+
+  useLayoutEffect(() => {
+    if (firstPaintDone) return;
+    if (items.length === 0) {
+      markFirstPaint();
+      return;
+    }
+    const timeoutId = window.setTimeout(markFirstPaint, FIRST_PAINT_TIMEOUT_MS);
+    return () => window.clearTimeout(timeoutId);
+  }, [firstPaintDone, items.length, markFirstPaint]);
 
   const scrollAnchorValue = useMemo(
     () => ({ preserveScrollAnchor, prepareScrollAnchor }),
@@ -552,6 +590,8 @@ export function VirtualizedChatList<T extends { key: string }>({
             computeItemKey={computeItemKey}
             itemContent={itemContent}
             components={components}
+            itemsRendered={firstPaintDone ? undefined : handleItemsRendered}
+            heightEstimates={heightEstimates}
             atBottomStateChange={handleAtBottomChange}
             totalListHeightChanged={handleTotalListHeightChanged}
             followOutput={followOutput}
@@ -564,10 +604,10 @@ export function VirtualizedChatList<T extends { key: string }>({
             increaseViewportBy={viewportPadding}
             defaultItemHeight={DEFAULT_ITEM_HEIGHT}
             minOverscanItemCount={VIRTUOSO_MIN_OVERSCAN_ITEM_COUNT}
-            overscan={VIRTUOSO_OVERSCAN}
             skipAnimationFrameInResizeObserver={true}
           />
         )}
+        {!firstPaintDone && <ChatLoading overlay />}
         {showFollowButton && (
           <ScrollToBottomButton onClick={handleFollowClick} />
         )}

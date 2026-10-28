@@ -24,7 +24,7 @@ export function useGetConfiguredProvidersQuery() {
   const backendStatus = useAppSelector(selectBackendStatus);
   const config = useAppSelector(selectConfig);
   return providersApi.useGetConfiguredProvidersQuery(undefined, {
-    skip: backendStatus !== "online" || !hasUsableEngineEndpoint(config),
+    skip: backendStatus === "offline" || !hasUsableEngineEndpoint(config),
     refetchOnMountOrArgChange: true,
     refetchOnFocus: true,
     refetchOnReconnect: true,
