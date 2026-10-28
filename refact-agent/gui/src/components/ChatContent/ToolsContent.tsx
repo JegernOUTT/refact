@@ -1442,7 +1442,6 @@ function processToolCalls(
       <TaskDoneTool
         key={`task-done-tool-${head.id ?? processed.length}`}
         toolCall={normalizedHead}
-        compact
       />
     );
     return processToolCalls(

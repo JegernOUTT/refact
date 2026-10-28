@@ -313,15 +313,47 @@ describe("ToolsContent routing", () => {
 
     expect(screen.getByTestId(testId)).toBeInTheDocument();
     if (name === "task_done") {
-      expect(container.querySelector("section")).toHaveAttribute(
-        "data-density",
-        "compact",
-      );
-      expect(screen.getByRole("button", { expanded: false })).toHaveTextContent(
+      expect(container.querySelector('[data-density="compact"]')).toBeNull();
+      expect(screen.getByRole("button", { expanded: true })).toHaveTextContent(
         "Report unverified",
       );
     }
   });
+
+  it.each(["structured", "legacy"])(
+    "renders the full %s task_done report inline without opening a spoiler",
+    async (format) => {
+      const report = `# Full task report\n\n${"Evidence preserved. ".repeat(
+        80,
+      )}\n\nEND OF REPORT`;
+      const content =
+        format === "structured"
+          ? JSON.stringify({
+              type: "task_done",
+              summary: "Task report received",
+              report,
+              files_changed: ["src/file.ts"],
+            })
+          : report;
+      const { container } = renderToolContent("task_done", content);
+
+      const heading = await screen.findByRole("heading", {
+        name: "Full task report",
+      });
+      expect(heading).toBeVisible();
+      expect(heading.closest("[inert], [aria-hidden='true']")).toBeNull();
+      expect(screen.getByText("END OF REPORT")).toBeVisible();
+      expect(screen.queryByText("More details")).not.toBeInTheDocument();
+      expect(container.querySelector('[data-density="compact"]')).toBeNull();
+      expect(
+        container.querySelector("[class*='contentUnbounded']"),
+      ).not.toBeNull();
+      expect(screen.getByRole("button", { name: "Copy report" })).toBeVisible();
+      if (format === "structured") {
+        expect(screen.getByText("file.ts")).toBeVisible();
+      }
+    },
+  );
 
   it("keeps agent diff specialized when native Git metadata is present", () => {
     renderToolContent("agent_diff", AGENT_DIFF_OUTPUT, {
@@ -815,7 +847,7 @@ describe("ToolsContent routing", () => {
 });
 
 const DEDICATED_COMPACT_NAMES = [
-  ...DEDICATED_TOOL_CARD_NAMES,
+  ...DEDICATED_TOOL_CARD_NAMES.filter((name) => name !== "task_done"),
   "code_review",
   "review",
   "ask_questions",
@@ -1228,12 +1260,11 @@ describe("neutral dedicated outcome regressions", () => {
         expect(container.querySelector(".lucide-loader-circle")).toBeNull();
         if (name === "task_done") {
           expect(
-            screen.getByRole("button", { expanded: false }),
+            screen.getByRole("button", { expanded: true }),
           ).toHaveTextContent(missing ? "State unknown" : "Report unverified");
-          expect(container.querySelector("section")).toHaveAttribute(
-            "data-density",
-            "compact",
-          );
+          expect(
+            container.querySelector('[data-density="compact"]'),
+          ).toBeNull();
         }
         unmount();
       }
@@ -1263,7 +1294,7 @@ describe("neutral dedicated outcome regressions", () => {
       expect(screen.queryByTestId("generic-tool")).toBeNull();
       expect(container.querySelector("button")).toHaveAttribute(
         "aria-expanded",
-        "false",
+        name === "task_done" ? "true" : "false",
       );
       if (name === "agent_finish") {
         expect(screen.getByRole("button")).toHaveTextContent("Awaiting report");
