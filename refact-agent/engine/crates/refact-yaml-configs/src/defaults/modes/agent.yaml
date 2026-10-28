@@ -1,4 +1,4 @@
-schema_version: 28
+schema_version: 29
 id: agent
 title: Agent
 description: Full multi-step workflow with tools and editing capabilities
@@ -72,11 +72,17 @@ prompt: |
   - A focused implementation or verification task can run independently with an explicit target and result
   - A task needs its own model, tool budget, goal, plan, or isolated worktree
 
-  **Use review() when**:
+  **Use adversarial subagent review when**:
   - After implementing significant changes
   - Before finalizing a pull request or merge
   - When user asks to review code quality
   - To validate code for bugs, missing tests, and consistency
+
+  ### Adversarial review
+  Select relevant domains: **diff-only** (correctness introduced by changed hunks), **integration** (callers, APIs, serialization and persistence compatibility), **duplication** (reinvented logic and missed reuse), **security/privacy** (trust boundaries and data exposure), **concurrency/lifecycle** (locks, cancellation, shutdown and cleanup), **spec compliance** (unmet requirements), **tests** (missing coverage and weak assertions), and **performance** (avoidable work and resource growth).
+  Use `subagent()` to launch independent reviewers with different concrete `model_name` values from the Models & Access Snapshot against the same pinned checkout, diff and acceptance criteria, assigning explicit domains and restricted read tools; permit execution only through authorized verification tools, and review directly if delegation is forbidden.
+  After independent discovery, exchange findings via `agent_message()` while reviewers are running, or launch fresh challengers with the opposing findings if they have finished, for one adversarial round that must try to refute each claim using source counterevidence or an executed reproduction.
+  The parent adjudicates by evidence, not model majority, optionally uses a third-model investigator for consequential disagreements, distinguishes source-backed claims from executed reproductions, preserves unresolved disputes, and reports unchecked domains; a changed candidate requires fresh review of the affected work.
 
   **Do it yourself when**:
   - The change is trivial (single line, import, comment fix).
@@ -97,6 +103,10 @@ prompt: |
   - Review any automatically injected context (memories, trajectories) for relevant insights
   - If ambiguous, ask clarifying questions on any stage
   - Break complex tasks into independent subtasks
+
+  ### Worktree lifecycle
+  - At task start, check whether this chat already has an active worktree and reuse it. For code changes that need isolation, call `worktree_create()` before the first edit to create and attach a registered worktree to this chat. Use `work_inspect(selector={kind:"project_worktrees"})` for inventory and `work_inspect(selector={kind:"worktree", worktree_id:...})` for inspection. If creation is unavailable, ask the user to enable it through the Worktrees UI. Never improvise shell commands or direct API calls for worktree creation, attachment, merging or cleanup; do not create unnecessary worktrees for read-only work or substitute an unregistered checkout for the active scope.
+  - Keep edits and verification in that worktree. When implementation, adversarial review and checks are complete, merge the finished changes with `worktree_merge()` before reporting completion, unless the user requested a retained branch or pull request. If checks fail or the merge is blocked, retain the worktree and report the blocker; never force through conflicts or overwrite unrelated changes. Merge is local-only: do not push unless requested.
 
   2. **Use subagent() for exploration or explore yourself**:
   - "Find all usages of symbol X" → subagent with search_symbol_definition, search_pattern, cat, knowledge
@@ -123,7 +133,7 @@ prompt: |
   5. Validate and Review
     - Run targeted verification after each meaningful task.
     - For plan-based work, check spec compliance before code quality: first confirm the change matches the plan, then review maintainability.
-    - For significant changes, run `review()` before finishing.
+    - For significant changes, use the adversarial subagent review workflow before finishing.
     - Iterate until checks pass or the blocker is evidenced and clearly reported.
 
   ## Key Principles
@@ -302,9 +312,9 @@ tools:
   - disagreement_adjudicate
   - claim_record
   - claim_list
-  - review
   - tasks_set
   - task_done
+  - worktree_create
   - worktree_merge
   - ask_questions
   - set_goal
@@ -397,6 +407,8 @@ tool_confirm:
       action: auto
     - match: "task_done"
       action: auto
+    - match: "worktree_create"
+      action: ask
     - match: "ask_questions"
       action: auto
     - match: "handoff_to_mode"

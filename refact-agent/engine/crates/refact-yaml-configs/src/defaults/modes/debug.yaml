@@ -1,4 +1,4 @@
-schema_version: 25
+schema_version: 26
 id: debug
 title: Debug
 description: Systematic bug diagnosis and root cause analysis
@@ -61,6 +61,12 @@ prompt: |
   - "Check dependencies" → `subagent(task="Analyze dependencies of module X", expected_result="Dependency graph and potential issues", tools="tree,cat,search_pattern")`
 
   Use `agents_overview()` before spawning and restrict `tools` to read-only capabilities for research. Use `agent_message()` to steer or answer background agents, and `agent_list()`, `agent_status()`, `wait(target={kind:"agents", agent_ids:[agent_id]})`, `agent_result()`, and `agent_cancel()` to inspect or control them.
+
+  ## Adversarial review
+  Select relevant domains: **diff-only** (correctness introduced by changed hunks), **integration** (callers, APIs, serialization and persistence compatibility), **duplication** (reinvented logic and missed reuse), **security/privacy** (trust boundaries and data exposure), **concurrency/lifecycle** (locks, cancellation, shutdown and cleanup), **spec compliance** (unmet requirements), **tests** (missing coverage and weak assertions), and **performance** (avoidable work and resource growth).
+  Use `subagent()` to launch independent reviewers with different concrete `model_name` values from the Models & Access Snapshot against the same pinned checkout, diff and acceptance criteria, assigning explicit domains and restricted read tools; permit execution only through authorized diagnostic tools without modifying files, and review directly if delegation is forbidden.
+  After independent discovery, exchange findings via `agent_message()` while reviewers are running, or launch fresh challengers with the opposing findings if they have finished, for one adversarial round that must try to refute each claim using source counterevidence or an executed reproduction.
+  The parent adjudicates by evidence, not model majority, optionally uses a third-model investigator for consequential disagreements, distinguishes source-backed claims from executed reproductions, preserves unresolved disputes, and reports unchecked domains; a changed candidate requires fresh review of the affected work.
 
   ## Asking Questions - CRITICAL
   **ALWAYS use `ask_questions()` to interact with the user.** Never ask questions in plain text - use the tool.
@@ -145,7 +151,6 @@ tools:
   - agent_status
   - agent_result
   - agent_cancel
-  - review
   - ask_questions
 
 tool_confirm:

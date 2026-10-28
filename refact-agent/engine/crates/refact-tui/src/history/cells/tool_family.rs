@@ -32,6 +32,7 @@ const TUI_TOOL_FAMILY_REGISTRY: &[(&str, ToolFamily)] = &[
     ("agent_lifecycle", ToolFamily::Server),
     ("agent_resume", ToolFamily::Server),
     ("add_workspace_folder", ToolFamily::Process),
+    ("worktree_create", ToolFamily::Process),
     ("worktree_merge", ToolFamily::Process),
     ("create_textdoc", ToolFamily::Diff),
     ("update_textdoc", ToolFamily::Diff),
@@ -62,7 +63,6 @@ const TUI_TOOL_FAMILY_REGISTRY: &[(&str, ToolFamily)] = &[
     ("security_scan", ToolFamily::CodeIntel),
     ("pr_blast", ToolFamily::CodeIntel),
     ("code_map", ToolFamily::CodeIntel),
-    ("review", ToolFamily::CodeSearch),
     ("cat", ToolFamily::FileSearch),
     ("glob", ToolFamily::FileSearch),
     ("refact_engine_search", ToolFamily::CodeSearch),
@@ -325,7 +325,6 @@ mod tests {
         "contrast_audit",
         "image_region",
         "visual_diff",
-        "review",
         "subagent",
         "tasks_set",
         "activate_skill",
@@ -445,6 +444,7 @@ mod tests {
         "agents_overview",
         "agent_message",
         "progress_report",
+        "worktree_create",
         "worktree_merge",
     ];
 

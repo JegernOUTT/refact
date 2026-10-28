@@ -125,12 +125,6 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
     names: ["codegraph_dead_code_max_results", "codegraph_exec_flow_max_nodes"],
   },
   {
-    title: "Code review",
-    description:
-      "How much diff the review pipeline reads. Raising these lets review see larger changes in full and increases token spend per review.",
-    names: ["review_diff_char_cap", "review_max_diff_patch_bytes"],
-  },
-  {
     title: OPTIMIZATIONS_GROUP_TITLE,
     description:
       "These optimizations are enabled by default. Disabling one reduces performance; restart-required changes take effect after the next engine restart.",

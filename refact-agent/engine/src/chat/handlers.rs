@@ -719,6 +719,36 @@ pub async fn handle_v1_chat_command(
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string);
+        let scope_patch = super::worktree_lifecycle::is_worktree_patch(patch);
+        drop(session);
+        let _scope_transition = if scope_patch {
+            Some(super::worktree_lifecycle::transition_lock(&session_arc).await)
+        } else {
+            None
+        };
+        let thread_before = session_arc.lock().await.thread.clone();
+        if let Err(error) =
+            super::queue::check_worktree_setparams_authority(&app, &chat_id, &thread_before, patch)
+                .await
+        {
+            let mut session = session_arc.lock().await;
+            session.emit(ChatEvent::Ack {
+                client_request_id: request.client_request_id,
+                accepted: false,
+                result: Some(serde_json::json!({"error": error.clone()})),
+            });
+            return Ok(command_error_response(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                error,
+            ));
+        }
+        let session = session_arc.lock().await;
+        if super::worktree_lifecycle::changes_attachment(&session.thread, patch) {
+            if let Err(error) = super::worktree_lifecycle::check_idle_attachment(&session) {
+                return Ok(command_error_response(StatusCode::CONFLICT, "busy", error));
+            }
+        }
         let thread_before = session.thread.clone();
         drop(session);
         let worktree_update =
@@ -741,6 +771,19 @@ pub async fn handle_v1_chat_command(
                 }
             };
         let mut session = session_arc.lock().await;
+        if super::worktree_lifecycle::changes_attachment(&session.thread, patch) {
+            if let Err(error) =
+                super::worktree_lifecycle::check_idle_attachment(&session).and_then(|_| {
+                    super::worktree_lifecycle::check_unchanged_attachment(&session, &thread_before)
+                })
+            {
+                return Ok(command_error_response(
+                    StatusCode::CONFLICT,
+                    "scope_changed",
+                    error,
+                ));
+            }
+        }
         let old_model = session.thread.model.clone();
         let old_mode = session.thread.mode.clone();
         let (mut changed, sanitized_patch) =

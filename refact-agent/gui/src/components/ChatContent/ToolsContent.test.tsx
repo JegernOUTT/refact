@@ -848,8 +848,6 @@ describe("ToolsContent routing", () => {
 
 const DEDICATED_COMPACT_NAMES = [
   ...DEDICATED_TOOL_CARD_NAMES.filter((name) => name !== "task_done"),
-  "code_review",
-  "review",
   "ask_questions",
   "ask",
   "sleep",
@@ -1252,7 +1250,7 @@ describe("compact dedicated transcript composition", () => {
 });
 
 describe("neutral dedicated outcome regressions", () => {
-  it.each(["code_review", "review", "task_done"])(
+  it.each(["task_done"])(
     "%s unknown results and idle missing results never imply success",
     (name) => {
       for (const missing of [false, true]) {
@@ -1281,7 +1279,6 @@ describe("neutral dedicated outcome regressions", () => {
   );
 
   it.each([
-    ["code_review", true, "running"],
     ["task_done", true, "running"],
     ["agent_finish", true, "running"],
     ["agent_finish", false, "idle"],
@@ -1370,61 +1367,17 @@ describe("multimodal tool images", () => {
   });
 });
 
-describe("typed unavailable review route", () => {
-  it("preserves unavailable stage evidence without a successful outer shell", () => {
-    const report = {
-      depth: "deep",
-      outcome: "inconclusive",
-      scope: {
-        mode: "strict",
-        requested_files: 2,
-        reviewed_files: 0,
-        files: [],
-        dropped_files: ["src/a.ts"],
-        focus: null,
-        expansion: null,
-        out_of_scope_findings: 0,
-      },
-      diff: { base: "abc", head: "HEAD", changed_files: 2, hunks: 1 },
-      stages: [
-        {
-          name: "diff",
-          model: null,
-          status: "timed_out",
-          reason: "stage budget exceeded",
-          duration_ms: 1,
-          findings: 0,
-          summary: null,
-          coverage: {
-            files_read: [],
-            commands_run: [],
-            tools_unavailable: [],
-            stopped_early: null,
-          },
+describe("removed review tool history", () => {
+  it.each(["code_review", "review", "t_review"])(
+    "%s historical messages fall back to the generic renderer",
+    (name) => {
+      const { container } = renderToolContent(name, "Original review receipt", {
+        resultExtra: {
+          review_report: { outcome: "inconclusive", findings: [] },
         },
-      ],
-      findings: [],
-      duration_ms: 1,
-      duplicates_merged: 0,
-      scratch_dir: ".refact/review/route",
-    };
-    const { container } = renderToolContent(
-      "review",
-      "Original review receipt",
-      { resultExtra: { review_report: report } },
-    );
-    expect(container.querySelector("section")).toHaveAttribute(
-      "data-status",
-      "idle",
-    );
-    expect(screen.getByText("Review unavailable")).toBeInTheDocument();
-    expect(screen.getByRole("button")).toHaveTextContent("2 files in scope");
-    openToolCard();
-    fireEvent.click(screen.getByRole("button", { name: "More details" }));
-    expect(
-      screen.getAllByText(/stage budget exceeded/u).length,
-    ).toBeGreaterThan(0);
-    fireEvent.click(screen.getByRole("button", { name: "Technical details" }));
-    expect(container.textContent).toContain("Original review receipt");
-  });
+      });
+      expect(screen.getByTestId("generic-tool")).toBeInTheDocument();
+      expect(container.textContent).not.toContain("Review unavailable");
+    },
+  );
 });

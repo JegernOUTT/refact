@@ -165,7 +165,6 @@ pub const CC_TOOL_RENAMES: &[(&str, &str)] = &[
     ("search_semantic", "semantic_search"),
     ("search_pattern", "regex_search"),
     // Orchestration
-    ("review", "review"),
     ("subagent", "subagent"),
     // General task management
     ("tasks_set", "set_tasks"),
@@ -268,7 +267,6 @@ const CC_SYSTEM_REPLACEMENTS: &[(&str, &str)] = &[
     ("create_textdoc",           "write"),
     ("undo_textdoc",             "undo"),
     // Orchestration
-    ("review",                   "review"),
     ("subagent",                 "subagent"),
     // Task management
     ("tasks_set",                "set_tasks"),

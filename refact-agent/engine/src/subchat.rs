@@ -624,10 +624,6 @@ pub enum SubchatProgress {
     },
 }
 
-fn should_stream_thinking_progress(tool_name: &str) -> bool {
-    tool_name == "review_agents" || tool_name.starts_with("review_")
-}
-
 struct SubchatProgressCollector {
     sender: Option<mpsc::UnboundedSender<Value>>,
     tool_call_id: Option<String>,
@@ -2491,11 +2487,7 @@ async fn runner_model_turn(
                 config.reasoning_effort.clone(),
                 config.cache_control,
                 prepend_system_prompt,
-                if should_stream_thinking_progress(&config.tool_name) {
-                    config.parent_tool_call_id.as_deref()
-                } else {
-                    None
-                },
+                None,
                 subchat_retries_allowed(config),
             );
             tokio::pin!(generation);
@@ -5926,42 +5918,6 @@ mod subchat_tests {
             .references
             .iter()
             .any(|reference| reference.chat_id.as_deref() == Some("child-ref-chat")));
-    }
-
-    #[tokio::test]
-    async fn test_resolve_subchat_params_normalizes_review_agents_for_smaller_model() {
-        let gcx = make_test_gcx().await;
-        let config_dir = gcx.config_dir.clone();
-        global_configs_try_create_all(&config_dir).await.unwrap();
-
-        let thinking_model_id = "claude_code/claude-opus-4-6".to_string();
-        let mut caps = CodeAssistantCaps::default();
-        caps.chat_models.insert(
-            thinking_model_id.clone(),
-            chat_model_record(
-                &thinking_model_id,
-                200_000,
-                "https://api.anthropic.com/v1/messages",
-            ),
-        );
-        caps.defaults.chat_default_model = thinking_model_id.clone();
-        caps.defaults.chat_light_model = thinking_model_id.clone();
-        caps.defaults.chat_thinking_model = thinking_model_id;
-
-        install_caps(gcx.clone(), caps).await;
-
-        let params = resolve_subchat_params(gcx.clone(), "review_agents")
-            .await
-            .unwrap();
-        let extra_budget = (params.subchat_n_ctx as f32 * 0.06) as usize;
-
-        assert_eq!(params.subchat_n_ctx, 200_000);
-        assert_eq!(params.subchat_cache_control, CacheControl::Off);
-        assert!(
-            params.subchat_max_new_tokens + params.subchat_tokens_for_rag + extra_budget
-                < params.subchat_n_ctx,
-            "normalized review_agents budget must fit the clamped model context window"
-        );
     }
 
     #[test]

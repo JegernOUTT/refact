@@ -216,18 +216,6 @@ const NEW_LIMIT_FIELDS: {
     value: 900,
     label: "Codegraph exec flow max nodes",
   },
-  {
-    name: "review_diff_char_cap",
-    group: "Code review",
-    value: 120000,
-    label: "Review diff char cap",
-  },
-  {
-    name: "review_max_diff_patch_bytes",
-    group: "Code review",
-    value: 262144,
-    label: "Review max diff patch bytes",
-  },
 ];
 
 function settingsResponseWithNewLimits(): TrajectorySettingsResponse {
@@ -412,7 +400,6 @@ describe("TrajectorySettingsPanel", () => {
       "Search and history",
       "Git intelligence",
       "Code graph",
-      "Code review",
     ]) {
       expect(screen.getByText(groupTitle)).toBeInTheDocument();
     }

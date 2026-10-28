@@ -67,7 +67,7 @@ pub const AGENT_EXECUTION_INSTRUCTIONS: &str = r#"3. Plan or Execute a Plan
 5. Validate and Review
   - Run targeted verification after each meaningful task.
   - For plan-based work, check spec compliance before code quality: first confirm the change matches the plan, then review maintainability.
-  - For significant changes, run `review()` before finishing.
+  - For significant changes, run independent adversarial reviews with `subagent()` using different concrete models on the same pinned diff and explicit domains; challenge findings once, adjudicate by evidence rather than majority, and report unchecked areas.
   - Iterate until checks pass or the blocker is evidenced and clearly reported."#;
 
 pub const AGENT_EXECUTION_INSTRUCTIONS_NO_TOOLS: &str = r#"  - Propose the changes to the user

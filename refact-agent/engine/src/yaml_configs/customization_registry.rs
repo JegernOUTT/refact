@@ -661,7 +661,6 @@ mod tests {
     fn runtime_required_subagent_ids() -> Vec<&'static str> {
         vec![
             "subagent",
-            "review_agents",
             "commit_message",
             "title_generation",
             "kg_enrich",

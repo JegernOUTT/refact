@@ -507,24 +507,16 @@ fn trajectory_settings_fields() -> Vec<TrajectorySettingField> {
         live_usize("hist_search_preview_chars", 100, 100_000),
         live_usize("agent_diff_max_output_bytes", 4_096, 268_435_456),
         live_usize("process_subscribe_preview_bytes", 50, 100_000),
-        live_usize("review_diff_char_cap", 4_096, 8_388_608),
-        live_usize("review_max_diff_patch_bytes", 4_096, 268_435_456),
         live_usize("plan_checkpoint_delta_threshold", 1, 10_000),
         live_usize("plan_projection_max_chars", 1_024, 1_048_576),
         live_usize("verification_evidence_timeout_secs", 10, 86_400),
         live_usize("verification_evidence_output_cap_bytes", 256, 8_388_608),
-        live_bool("goal_review_enabled"),
-        live_usize("goal_review_max_repair_attempts", 0, 20),
-        live_usize("goal_review_spot_check_percent", 0, 100),
         live_usize("goal_sub_goal_max_depth", 1, 32),
         live_usize("goal_sub_goal_max_fan_out", 1, 256),
         live_usize("goal_auto_sub_goal_lane_cap", 1, 4_096),
         live_usize("verification_evidence_cache_max_entries", 1, 100_000),
         live_usize("verification_evidence_cache_max_bytes", 1_024, 268_435_456),
         live_usize("verification_evidence_cache_ttl_secs", 60, 604_800),
-        live_usize("goal_review_reuse_max_entries", 1, 100_000),
-        live_usize("goal_review_reuse_max_bytes", 1_024, 268_435_456),
-        live_usize("goal_review_reuse_ttl_secs", 60, 604_800),
     ];
     fields.extend(coordination_settings_fields(true));
     fields
@@ -992,7 +984,7 @@ mod tests {
         let app = AppState::from_gcx(gcx).await;
         let mut original = crate::runtime_settings::TrajectoryRuntimeSettings::default();
         original.max_queue_size = 777;
-        original.review_diff_char_cap = 12_345;
+        original.hist_search_preview_chars = 12_345;
         original.coordination.max_pending = 321;
         let path = crate::runtime_settings::settings_path(&app.paths.config_dir);
         tokio::fs::create_dir_all(path.parent().unwrap())
@@ -1023,7 +1015,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(loaded.max_queue_size, original.max_queue_size);
-        assert_eq!(loaded.review_diff_char_cap, original.review_diff_char_cap);
+        assert_eq!(
+            loaded.hist_search_preview_chars,
+            original.hist_search_preview_chars
+        );
         assert_eq!(loaded.coordination, coordination);
         assert_eq!(
             crate::runtime_settings::current().coordination,

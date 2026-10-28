@@ -1394,21 +1394,13 @@ async fn add_thread_worktree_reference(
     }
 }
 
-pub async fn resolve_worktree_setparams_update(
-    app: AppState,
+pub(crate) async fn check_worktree_setparams_authority(
+    app: &AppState,
     chat_id: &str,
     thread: &ThreadParams,
     patch: &serde_json::Value,
-) -> Result<Option<WorktreeSetParamsUpdate>, String> {
-    let rebinds_worktree = patch.get("worktree_id").is_some_and(|id| {
-        id.as_str()
-            != thread
-                .worktree
-                .as_ref()
-                .map(|worktree| worktree.id.as_str())
-    }) || patch.get("worktree").is_some_and(|worktree| {
-        worktree.is_null() || Some(worktree) != serde_json::to_value(&thread.worktree).ok().as_ref()
-    });
+) -> Result<(), String> {
+    let rebinds_worktree = super::worktree_lifecycle::changes_attachment(thread, patch);
     if rebinds_worktree {
         if let Some(reason) = crate::agents::seal::seal_reason(&app, chat_id).await {
             return Err(reason.message());
@@ -1422,6 +1414,16 @@ pub async fn resolve_worktree_setparams_update(
             return Err("Background agent child chats cannot change their worktree".to_string());
         }
     }
+    Ok(())
+}
+
+pub async fn resolve_worktree_setparams_update(
+    app: AppState,
+    chat_id: &str,
+    thread: &ThreadParams,
+    patch: &serde_json::Value,
+) -> Result<Option<WorktreeSetParamsUpdate>, String> {
+    check_worktree_setparams_authority(&app, chat_id, thread, patch).await?;
     if let Some(worktree_id) = patch.get("worktree_id") {
         let worktree_id = worktree_id
             .as_str()

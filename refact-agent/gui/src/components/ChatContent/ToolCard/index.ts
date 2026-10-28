@@ -13,7 +13,6 @@ export { ProcessStdinInput } from "./ProcessStdinInput";
 export { ProcessControls } from "./ProcessControls";
 export { ShellTool } from "./ShellTool";
 export { SubagentTool } from "./SubagentTool";
-export { CodeReviewTool } from "./CodeReviewTool";
 export { EngineAnalysisTool } from "./EngineAnalysisTool";
 export { ShellServiceTool } from "./ShellServiceTool";
 export { EditTool } from "./EditTool";

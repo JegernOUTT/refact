@@ -20,7 +20,6 @@ describe("toolNameAliases", () => {
     ["t_ask", "ask_questions"],
     ["t_set_tasks", "tasks_set"],
     ["t_finish", "task_done"],
-    ["t_review", "code_review"],
     ["t_save_knowledge", "create_knowledge"],
     ["tool_search", "mcp_tool_search"],
     ["github_create_issue", "mcp_github_create_issue"],

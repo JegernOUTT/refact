@@ -92,16 +92,10 @@ fn enrich_tool_messages(messages: &mut [ChatMessage]) {
         if references.is_empty() {
             continue;
         }
-        let truncated = message
-            .extra
-            .get("review_refs_truncated")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
         attach_tool_enrichment(
             message,
             ToolEnrichment {
                 references,
-                truncated,
                 ..Default::default()
             },
         );
@@ -366,7 +360,6 @@ fn native_references(message: &ChatMessage) -> Vec<ToolEnrichmentReference> {
     }
     references.extend(diff_references(message));
     references.extend(git_references(message));
-    references.extend(review_references(message));
     references
 }
 
@@ -441,51 +434,6 @@ fn git_references(message: &ChatMessage) -> Vec<ToolEnrichmentReference> {
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     vec![reference]
-}
-
-fn review_references(message: &ChatMessage) -> Vec<ToolEnrichmentReference> {
-    let Some(references) = message
-        .extra
-        .get("review_refs")
-        .and_then(serde_json::Value::as_array)
-    else {
-        return Vec::new();
-    };
-    references
-        .iter()
-        .filter_map(|value| {
-            let path = value.get("path")?.as_str()?;
-            let mut reference = reference(ToolEnrichmentKind::Review, path);
-            reference.label = value
-                .get("id")
-                .and_then(serde_json::Value::as_str)
-                .map(ToString::to_string);
-            reference.status = value
-                .get("severity")
-                .and_then(serde_json::Value::as_str)
-                .map(ToString::to_string);
-            reference.details = Some(ToolEnrichmentReferenceDetails {
-                action: value
-                    .get("evidence_kind")
-                    .and_then(serde_json::Value::as_str)
-                    .map(ToString::to_string),
-                scope: value
-                    .get("scope")
-                    .and_then(serde_json::Value::as_str)
-                    .map(ToString::to_string),
-                ..Default::default()
-            });
-            reference.line1 = value
-                .get("line1")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|line| usize::try_from(line).ok());
-            reference.line2 = value
-                .get("line2")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|line| usize::try_from(line).ok());
-            Some(reference)
-        })
-        .collect()
 }
 
 fn reference(kind: ToolEnrichmentKind, target: &str) -> ToolEnrichmentReference {
@@ -661,7 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn native_enrichment_keeps_diff_git_review_and_agent_metadata_thin() {
+    fn native_enrichment_keeps_diff_git_and_agent_metadata_thin() {
         let mut diff = ChatMessage::new(
             "diff".to_string(),
             serde_json::json!([
@@ -721,19 +669,6 @@ mod tests {
             }),
         );
         metadata.extra.insert(
-            "review_refs".to_string(),
-            serde_json::json!([{
-                "id": "finding-1",
-                "severity": "high",
-                "path": "src/lib.rs",
-                "line1": 3,
-                "line2": 4,
-                "evidence_kind": "excerpt",
-                "scope": "abc1234",
-                "content": "must not be copied"
-            }]),
-        );
-        metadata.extra.insert(
             "background_agent_id".to_string(),
             serde_json::json!("bgagent-1"),
         );
@@ -769,12 +704,11 @@ mod tests {
         enrich_tool_messages(std::slice::from_mut(&mut metadata));
 
         let enrichment = refact_chat_api::tool_enrichment_from_extra(&metadata.extra).unwrap();
-        assert_eq!(enrichment.references.len(), 5);
+        assert_eq!(enrichment.references.len(), 4);
         assert_eq!(enrichment.references[0].kind, ToolEnrichmentKind::Agent);
         assert_eq!(enrichment.references[1].status.as_deref(), Some("target"));
         assert_eq!(enrichment.references[2].status.as_deref(), Some("edited"));
         assert_eq!(enrichment.references[3].kind, ToolEnrichmentKind::Git);
-        assert_eq!(enrichment.references[4].kind, ToolEnrichmentKind::Review);
         assert_eq!(
             enrichment.references[0]
                 .details
@@ -805,29 +739,5 @@ mod tests {
         assert!(!serde_json::to_string(&enrichment)
             .unwrap()
             .contains("must not be copied"));
-    }
-
-    #[test]
-    fn native_enrichment_marks_bounded_review_references_as_truncated() {
-        let mut message = ChatMessage::new("tool".to_string(), "raw result".to_string());
-        message.extra.insert(
-            "review_refs".to_string(),
-            serde_json::json!([{
-                "id": "finding-1",
-                "severity": "high",
-                "path": "src/lib.rs",
-                "line1": 3,
-                "line2": 4,
-                "evidence_kind": "excerpt"
-            }]),
-        );
-        message
-            .extra
-            .insert("review_refs_truncated".to_string(), serde_json::json!(true));
-
-        enrich_tool_messages(std::slice::from_mut(&mut message));
-
-        let enrichment = refact_chat_api::tool_enrichment_from_extra(&message.extra).unwrap();
-        assert!(enrichment.truncated);
     }
 }

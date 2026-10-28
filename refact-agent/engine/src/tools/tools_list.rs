@@ -581,9 +581,6 @@ async fn get_builtin_tools(
     let system_tools = builtin_system_tools(config_path.clone());
 
     let deep_analysis_tools: Vec<Box<dyn Tool + Send>> = vec![
-        Box::new(crate::tools::tool_review::ToolCodeReview {
-            config_path: config_path.clone(),
-        }),
         Box::new(crate::tools::tool_subagent::ToolSubagent {
             config_path: config_path.clone(),
         }),
@@ -861,9 +858,10 @@ async fn get_builtin_tools(
         }),
     ];
 
-    let worktree_tools: Vec<Box<dyn Tool + Send>> = vec![Box::new(
-        crate::tools::tool_worktree_merge::ToolWorktreeMerge::new(),
-    )];
+    let worktree_tools: Vec<Box<dyn Tool + Send>> = vec![
+        Box::new(crate::tools::tool_worktree_create::ToolWorktreeCreate),
+        Box::new(crate::tools::tool_worktree_merge::ToolWorktreeMerge::new()),
+    ];
 
     let mut tool_groups = vec![
         ToolGroup {

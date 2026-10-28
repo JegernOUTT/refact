@@ -391,13 +391,11 @@ fn is_editing_tool(tool_name: &str) -> bool {
     EDITING_TOOLS.contains(&tool_name)
 }
 
-// Tools whose results are expensive, non-reproducible reports (code reviews,
-// subagent/delegate outcomes). Their outputs bypass the shared per-round
+// Tools whose results are expensive, non-reproducible subagent outcomes bypass the shared per-round
 // ToolBudget so running many of them at once does not chop each report to a
 // fair-share fragment; overall context pressure is handled later by chat
 // compression instead.
-const TOOL_RESULT_TRUNCATION_EXEMPT_TOOLS: &[&str] =
-    &["review", "code_review", "subagent", "wait", "agent_result"];
+const TOOL_RESULT_TRUNCATION_EXEMPT_TOOLS: &[&str] = &["subagent", "wait", "agent_result"];
 
 fn is_tool_result_truncation_exempt(tool_name: &str) -> bool {
     TOOL_RESULT_TRUNCATION_EXEMPT_TOOLS.contains(&tool_name)
@@ -1487,7 +1485,6 @@ mod tests {
 
     #[test]
     fn test_tool_result_truncation_exempt_tools() {
-        assert!(is_tool_result_truncation_exempt("code_review"));
         assert!(is_tool_result_truncation_exempt("subagent"));
         assert!(is_tool_result_truncation_exempt("wait"));
         assert!(is_tool_result_truncation_exempt("agent_result"));

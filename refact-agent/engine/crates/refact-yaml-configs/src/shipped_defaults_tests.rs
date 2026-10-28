@@ -5,13 +5,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use tokio::fs;
 
-const BOOTSTRAP_KINDS: [&str; 5] = [
-    "modes",
-    "subagents",
-    "toolbox_commands",
-    "code_lens",
-    "review_stages",
-];
+const BOOTSTRAP_KINDS: [&str; 4] = ["modes", "subagents", "toolbox_commands", "code_lens"];
 
 type ShippedDefaults = HashMap<String, Vec<(u32, String)>>;
 

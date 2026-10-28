@@ -42,9 +42,6 @@ pub(crate) mod evidence_revision;
 #[cfg(test)]
 mod goal_checkpoint_snapshot_tests;
 pub mod goal_monitor;
-pub mod goal_review;
-#[cfg(test)]
-mod goal_review_wiring_tests;
 pub mod goal_role;
 pub mod goal_verifier;
 pub mod goal_wait;
@@ -69,10 +66,10 @@ pub mod prompt_snippets;
 pub mod prompts;
 #[cfg(test)]
 pub(crate) mod questions_closure_tests;
-mod queue;
+pub(crate) mod queue;
 pub(crate) mod retry_policy;
-pub mod review_reuse;
 mod session;
+pub(crate) mod worktree_lifecycle;
 pub(crate) use session::goal_snapshot_from_messages;
 pub mod session_runtime;
 pub mod stream_core;

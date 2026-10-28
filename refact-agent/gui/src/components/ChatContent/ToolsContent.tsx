@@ -60,7 +60,6 @@ import {
   ShellTool as NewShellTool,
   ExecToolCard,
   SubagentTool as NewSubagentTool,
-  CodeReviewTool as NewCodeReviewTool,
   EngineAnalysisTool,
   ShellServiceTool as NewShellServiceTool,
   EditTool,
@@ -1058,26 +1057,6 @@ function processToolCalls(
       toolResults,
       features,
       [...processed, decoratedElem],
-      contextFilesByToolId,
-      diffsByToolId,
-      activeToolCallId,
-      onOpenTrajectory,
-      threadId,
-    );
-  }
-
-  if (headName === "code_review") {
-    const elem = (
-      <NewCodeReviewTool
-        key={`code-review-tool-${head.id ?? processed.length}`}
-        toolCall={normalizedHead}
-      />
-    );
-    return processToolCalls(
-      tail,
-      toolResults,
-      features,
-      [...processed, elem],
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,

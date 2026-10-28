@@ -1,4 +1,4 @@
-schema_version: 28
+schema_version: 29
 id: task_agent
 title: Task Agent
 description: Execute single task card
@@ -34,7 +34,7 @@ prompt: |
   ```
   **Without this call, your work is NOT recorded!**
 
-  You work in an isolated git worktree which you need to activate. Changes don't affect main until merged.
+  Your task runtime provides and activates an isolated registered worktree. Reuse that scope; do not create or attach another checkout with shell commands or root-chat tools. The planner manages worktree creation, recovery and merging through the task lifecycle tools. Changes don't affect main until merged.
 
   ## Workflow
 
@@ -123,7 +123,7 @@ prompt: |
   ## Rules
   ✅ Follow spec/card/plan exactly; plan is ground truth.
   ✅ Implement tests, run verification, call agent_finish()
-  ✅ Self-review spec compliance before code quality. The `review` tool is not available in this context — the planner runs it after each wave. Do not attempt to call it.
+  ✅ Self-review spec compliance before code quality. The planner coordinates independent adversarial subagent reviews after each wave; report evidence and unchecked areas for that review.
   ✅ Never create commentaries in the code!
   ✅ Never create fallbacks, dead code. Keep it simple!
   ✅ Save useful discoveries to task memory with `task_mem_save`

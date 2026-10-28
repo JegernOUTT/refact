@@ -483,8 +483,20 @@ async fn handle_set_params(
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_string);
+    let scope_patch = crate::chat::worktree_lifecycle::is_worktree_patch(&patch);
+    let _scope_transition = if scope_patch {
+        Some(crate::chat::worktree_lifecycle::transition_lock(&session_arc).await)
+    } else {
+        None
+    };
     let (chat_id, thread_before) = {
-        let session = session_arc.lock().await;
+        let mut session = session_arc.lock().await;
+        if crate::chat::worktree_lifecycle::changes_attachment(&session.thread, &patch) {
+            if let Err(error) = crate::chat::worktree_lifecycle::check_idle_attachment(&session) {
+                reject_guard(&mut session, &context.request_id, error);
+                return QueueCommandOutcome::Continue;
+            }
+        }
         (session.chat_id.clone(), session.thread.clone())
     };
     let worktree_update = match resolve_worktree_setparams_update(
@@ -515,6 +527,19 @@ async fn handle_set_params(
         }
     };
     let mut session = session_arc.lock().await;
+    if crate::chat::worktree_lifecycle::changes_attachment(&session.thread, &patch) {
+        if let Err(error) = crate::chat::worktree_lifecycle::check_idle_attachment(&session)
+            .and_then(|_| {
+                crate::chat::worktree_lifecycle::check_unchanged_attachment(
+                    &session,
+                    &thread_before,
+                )
+            })
+        {
+            reject_guard(&mut session, &context.request_id, error);
+            return QueueCommandOutcome::Continue;
+        }
+    }
     let old_model = session.thread.model.clone();
     let old_mode = session.thread.mode.clone();
     let (mut changed, sanitized_patch) = apply_setparams_patch(&mut session.thread, &patch);

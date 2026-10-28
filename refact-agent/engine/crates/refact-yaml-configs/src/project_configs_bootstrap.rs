@@ -8,18 +8,29 @@ use tokio::fs;
 use tracing::{info, warn};
 
 const CHECKSUM_FILE: &str = "default-checksums.yaml";
-const BOOTSTRAP_KINDS: [&str; 5] = [
-    "modes",
-    "subagents",
-    "toolbox_commands",
-    "code_lens",
-    "review_stages",
+const BOOTSTRAP_KINDS: [&str; 4] = ["modes", "subagents", "toolbox_commands", "code_lens"];
+const RETIRED_REVIEW_DEFAULTS: [&str; 13] = [
+    "subagents/review_agents.yaml",
+    "review_stages/adversarial.yaml",
+    "review_stages/browser.yaml",
+    "review_stages/concurrency.yaml",
+    "review_stages/dependencies.yaml",
+    "review_stages/diff.yaml",
+    "review_stages/execution.yaml",
+    "review_stages/impact.yaml",
+    "review_stages/mechanical.yaml",
+    "review_stages/security.yaml",
+    "review_stages/simplicity.yaml",
+    "review_stages/spec.yaml",
+    "review_stages/tests.yaml",
 ];
 
 fn is_bootstrap_owned_key(key: &str) -> bool {
-    key.split_once('/')
-        .map(|(kind, _)| BOOTSTRAP_KINDS.contains(&kind))
-        .unwrap_or(false)
+    RETIRED_REVIEW_DEFAULTS.contains(&key)
+        || key
+            .split_once('/')
+            .map(|(kind, _)| BOOTSTRAP_KINDS.contains(&kind))
+            .unwrap_or(false)
 }
 
 #[derive(RustEmbed)]
@@ -56,7 +67,6 @@ pub async fn global_configs_try_create_all(config_dir: &Path) -> Result<(), Stri
         "subagents",
         "toolbox_commands",
         "code_lens",
-        "review_stages",
         "knowledge",
         "trajectories",
         "tasks",
@@ -129,6 +139,16 @@ pub async fn global_configs_try_create_all(config_dir: &Path) -> Result<(), Stri
     )
     .await;
 
+    for key in RETIRED_REVIEW_DEFAULTS {
+        remove_retired_default(
+            &config_dir.join(key),
+            key,
+            &existing_checksums,
+            &mut new_checksums,
+        )
+        .await;
+    }
+
     for (key, value) in &existing_checksums {
         if !is_bootstrap_owned_key(key) {
             new_checksums
@@ -155,7 +175,6 @@ pub async fn project_configs_ensure_dirs(project_root: &Path) -> Result<(), Stri
         "subagents",
         "toolbox_commands",
         "code_lens",
-        "review_stages",
         "knowledge",
         "trajectories",
         "tasks",

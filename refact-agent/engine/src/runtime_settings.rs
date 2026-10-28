@@ -44,19 +44,12 @@ const PLANNER_QNA_ANSWER_LIMIT_DEFAULT: usize = 8_000;
 const HIST_SEARCH_PREVIEW_CHARS_DEFAULT: usize = 2_000;
 const AGENT_DIFF_MAX_OUTPUT_BYTES_DEFAULT: usize = 4_194_304;
 const PROCESS_SUBSCRIBE_PREVIEW_BYTES_DEFAULT: usize = 2_000;
-const REVIEW_DIFF_CHAR_CAP_DEFAULT: usize = 400_000;
-const REVIEW_MAX_DIFF_PATCH_BYTES_DEFAULT: usize = 4_194_304;
 const PLAN_CHECKPOINT_DELTA_THRESHOLD_DEFAULT: usize =
     refact_chat_api::role_projection::DEFAULT_CHECKPOINT_DELTA_THRESHOLD;
 const PLAN_PROJECTION_MAX_CHARS_DEFAULT: usize =
     refact_chat_api::role_projection::DEFAULT_PROJECTION_MAX_CHARS;
 const VERIFICATION_EVIDENCE_TIMEOUT_SECS_DEFAULT: u64 = 600;
 const VERIFICATION_EVIDENCE_OUTPUT_CAP_BYTES_DEFAULT: usize = 4_000;
-const GOAL_REVIEW_MAX_REPAIR_ATTEMPTS_DEFAULT: usize = 2;
-const GOAL_REVIEW_SPOT_CHECK_PERCENT_DEFAULT: usize = 0;
-const GOAL_REVIEW_REUSE_MAX_ENTRIES_DEFAULT: usize = 64;
-const GOAL_REVIEW_REUSE_MAX_BYTES_DEFAULT: usize = 8_388_608;
-const GOAL_REVIEW_REUSE_TTL_SECS_DEFAULT: u64 = 3_600;
 const GOAL_SUB_GOAL_MAX_DEPTH_DEFAULT: usize = refact_chat_api::DEFAULT_SUB_GOAL_MAX_DEPTH;
 const GOAL_SUB_GOAL_MAX_FAN_OUT_DEFAULT: usize = refact_chat_api::DEFAULT_SUB_GOAL_MAX_FAN_OUT;
 const GOAL_AUTO_SUB_GOAL_LANE_CAP_DEFAULT: usize = refact_chat_api::DEFAULT_SUB_GOAL_MAX_FAN_OUT;
@@ -348,8 +341,6 @@ pub struct TrajectoryRuntimeSettings {
     pub hist_search_preview_chars: usize,
     pub agent_diff_max_output_bytes: usize,
     pub process_subscribe_preview_bytes: usize,
-    pub review_diff_char_cap: usize,
-    pub review_max_diff_patch_bytes: usize,
     /// Deltas kept verbatim in a hidden plan/goal projection before older ones
     /// fold into an approved-base checkpoint. Never touches what is on disk.
     pub plan_checkpoint_delta_threshold: usize,
@@ -358,15 +349,6 @@ pub struct TrajectoryRuntimeSettings {
     pub plan_projection_max_chars: usize,
     pub verification_evidence_timeout_secs: u64,
     pub verification_evidence_output_cap_bytes: usize,
-    /// Agentic review on the goal path costs real model calls, so it is off
-    /// unless an operator turns it on.
-    pub goal_review_enabled: bool,
-    /// How many repair rounds a goal may take on reviewer findings before the
-    /// outcome becomes an explicit escalation.
-    pub goal_review_max_repair_attempts: usize,
-    /// Share of children whose claimed-complete work a parent samples for
-    /// review. Zero disables sampling.
-    pub goal_review_spot_check_percent: usize,
     /// How deep a sub-goal lane may sit below the top-level goal.
     pub goal_sub_goal_max_depth: usize,
     /// How many child lanes one sub-goal may own.
@@ -380,11 +362,6 @@ pub struct TrajectoryRuntimeSettings {
     pub verification_evidence_cache_max_entries: usize,
     pub verification_evidence_cache_max_bytes: usize,
     pub verification_evidence_cache_ttl_secs: u64,
-    /// The window within which a review of an unchanged diff is reused instead of
-    /// re-run, and the bounds on how much reusable review is kept.
-    pub goal_review_reuse_max_entries: usize,
-    pub goal_review_reuse_max_bytes: usize,
-    pub goal_review_reuse_ttl_secs: u64,
     pub coordination: CoordinationSettings,
 }
 
@@ -439,15 +416,10 @@ impl Default for TrajectoryRuntimeSettings {
             hist_search_preview_chars: HIST_SEARCH_PREVIEW_CHARS_DEFAULT,
             agent_diff_max_output_bytes: AGENT_DIFF_MAX_OUTPUT_BYTES_DEFAULT,
             process_subscribe_preview_bytes: PROCESS_SUBSCRIBE_PREVIEW_BYTES_DEFAULT,
-            review_diff_char_cap: REVIEW_DIFF_CHAR_CAP_DEFAULT,
-            review_max_diff_patch_bytes: REVIEW_MAX_DIFF_PATCH_BYTES_DEFAULT,
             plan_checkpoint_delta_threshold: PLAN_CHECKPOINT_DELTA_THRESHOLD_DEFAULT,
             plan_projection_max_chars: PLAN_PROJECTION_MAX_CHARS_DEFAULT,
             verification_evidence_timeout_secs: VERIFICATION_EVIDENCE_TIMEOUT_SECS_DEFAULT,
             verification_evidence_output_cap_bytes: VERIFICATION_EVIDENCE_OUTPUT_CAP_BYTES_DEFAULT,
-            goal_review_enabled: false,
-            goal_review_max_repair_attempts: GOAL_REVIEW_MAX_REPAIR_ATTEMPTS_DEFAULT,
-            goal_review_spot_check_percent: GOAL_REVIEW_SPOT_CHECK_PERCENT_DEFAULT,
             goal_sub_goal_max_depth: GOAL_SUB_GOAL_MAX_DEPTH_DEFAULT,
             goal_sub_goal_max_fan_out: GOAL_SUB_GOAL_MAX_FAN_OUT_DEFAULT,
             goal_auto_sub_goal_lane_cap: GOAL_AUTO_SUB_GOAL_LANE_CAP_DEFAULT,
@@ -455,9 +427,6 @@ impl Default for TrajectoryRuntimeSettings {
                 VERIFICATION_EVIDENCE_CACHE_MAX_ENTRIES_DEFAULT,
             verification_evidence_cache_max_bytes: VERIFICATION_EVIDENCE_CACHE_MAX_BYTES_DEFAULT,
             verification_evidence_cache_ttl_secs: VERIFICATION_EVIDENCE_CACHE_TTL_SECS_DEFAULT,
-            goal_review_reuse_max_entries: GOAL_REVIEW_REUSE_MAX_ENTRIES_DEFAULT,
-            goal_review_reuse_max_bytes: GOAL_REVIEW_REUSE_MAX_BYTES_DEFAULT,
-            goal_review_reuse_ttl_secs: GOAL_REVIEW_REUSE_TTL_SECS_DEFAULT,
             coordination: CoordinationSettings::default(),
         }
     }
@@ -859,18 +828,6 @@ pub fn validate(settings: &TrajectoryRuntimeSettings) -> Result<(), String> {
         100_000,
     )?;
     validate_usize(
-        "review_diff_char_cap",
-        settings.review_diff_char_cap,
-        4_096,
-        8_388_608,
-    )?;
-    validate_usize(
-        "review_max_diff_patch_bytes",
-        settings.review_max_diff_patch_bytes,
-        4_096,
-        268_435_456,
-    )?;
-    validate_usize(
         "plan_checkpoint_delta_threshold",
         settings.plan_checkpoint_delta_threshold,
         1,
@@ -893,18 +850,6 @@ pub fn validate(settings: &TrajectoryRuntimeSettings) -> Result<(), String> {
         settings.verification_evidence_output_cap_bytes,
         256,
         8_388_608,
-    )?;
-    validate_usize(
-        "goal_review_max_repair_attempts",
-        settings.goal_review_max_repair_attempts,
-        0,
-        20,
-    )?;
-    validate_usize(
-        "goal_review_spot_check_percent",
-        settings.goal_review_spot_check_percent,
-        0,
-        100,
     )?;
     validate_usize(
         "goal_sub_goal_max_depth",
@@ -939,24 +884,6 @@ pub fn validate(settings: &TrajectoryRuntimeSettings) -> Result<(), String> {
     validate_u64(
         "verification_evidence_cache_ttl_secs",
         settings.verification_evidence_cache_ttl_secs,
-        60,
-        604_800,
-    )?;
-    validate_usize(
-        "goal_review_reuse_max_entries",
-        settings.goal_review_reuse_max_entries,
-        1,
-        100_000,
-    )?;
-    validate_usize(
-        "goal_review_reuse_max_bytes",
-        settings.goal_review_reuse_max_bytes,
-        1_024,
-        268_435_456,
-    )?;
-    validate_u64(
-        "goal_review_reuse_ttl_secs",
-        settings.goal_review_reuse_ttl_secs,
         60,
         604_800,
     )?;
@@ -1412,7 +1339,6 @@ trajectory_writer_enabled: false
             loaded.vecdb_trajectory_split_bytes,
             defaults.vecdb_trajectory_split_bytes
         );
-        assert_eq!(loaded.review_diff_char_cap, defaults.review_diff_char_cap);
         assert_eq!(loaded.cat_max_input_paths, defaults.cat_max_input_paths);
         assert!(validate(&loaded).is_ok());
     }
