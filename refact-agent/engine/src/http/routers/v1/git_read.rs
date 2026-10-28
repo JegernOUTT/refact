@@ -22,6 +22,7 @@ const MAX_PATCH_BYTES: usize = 512 * 1024;
 const MAX_LOG_COMMITS: usize = 500;
 const MAX_LOG_SCAN_COMMITS: usize = 50_000;
 const MAX_CONTAINING_BRANCHES: usize = 50;
+const MAX_CONTAINING_BRANCHES_EXAMINED: usize = 500;
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<Value>)>;
 
@@ -250,6 +251,7 @@ pub struct GitCommitDetails {
     pub message: String,
     pub refs: Vec<GitRefLabel>,
     pub branches: Vec<String>,
+    pub branches_truncated: bool,
     pub files: Vec<GitCommitFileJson>,
     pub files_truncated: bool,
 }
@@ -585,9 +587,8 @@ pub(super) fn read_status_snapshot(repository: &Repository) -> Result<StatusSnap
             });
             continue;
         }
-        if status.is_index_new() && status.is_wt_deleted() {
-            continue;
-        }
+        // A staged add that was later deleted from disk (INDEX_NEW|WT_DELETED) is still a
+        // pending change: it surfaces as ADDED, staged and unstaged, so it can be rolled back.
         let (relative, old_path, combined) = if let Some(old) = old_path {
             if status.is_wt_deleted() {
                 (old, None, "DELETED")
@@ -855,7 +856,12 @@ impl LogFilters {
             validate_rev_input(reference)
                 .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))?;
         }
-        let path = match non_empty(&query.path) {
+        // Tree lookups need '/' separators; on Windows accept the native separator too.
+        #[cfg(windows)]
+        let query_path = non_empty(&query.path).map(|path| path.replace('\\', "/"));
+        #[cfg(not(windows))]
+        let query_path = non_empty(&query.path);
+        let path = match query_path {
             Some(path) => repo_relative_paths(vec![path])
                 .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))?
                 .pop(),
@@ -1110,13 +1116,14 @@ pub(super) fn log_for_repo(
 
     let limit = limit.min(MAX_LOG_COMMITS);
     let filtering = filters.filtering();
+    // The scan cap also bounds unfiltered walks, so a huge `skip` cannot force an unbounded walk.
     let mut matched = 0usize;
     let mut scanned = 0usize;
     for oid in revwalk {
         if result.commits.len() >= limit {
             break;
         }
-        if filtering && scanned >= MAX_LOG_SCAN_COMMITS {
+        if scanned >= MAX_LOG_SCAN_COMMITS {
             result.scan_truncated = true;
             break;
         }
@@ -1153,7 +1160,13 @@ fn find_commit_by_user_oid<'repo>(
     } else {
         repository.find_commit_by_prefix(oid)
     };
-    found.map_err(|_| api_error(StatusCode::NOT_FOUND, "Commit not found"))
+    found.map_err(|error| match error.code() {
+        git2::ErrorCode::Ambiguous => api_error(
+            StatusCode::BAD_REQUEST,
+            "Commit oid prefix is ambiguous; use more characters",
+        ),
+        _ => api_error(StatusCode::NOT_FOUND, "Commit not found"),
+    })
 }
 
 fn file_status_name(status: GitFileChangeStatus) -> &'static str {
@@ -1166,29 +1179,45 @@ fn file_status_name(status: GitFileChangeStatus) -> &'static str {
     }
 }
 
-fn branches_containing(repository: &Repository, target: git2::Oid) -> Vec<String> {
+/// Branches whose tip contains `target`: local branches first, then remote ones. Each check is
+/// a graph walk, so the work is bounded by both a match cap and an examined-branch cap; either
+/// cap being hit reports `truncated`.
+fn branches_containing(repository: &Repository, target: git2::Oid) -> (Vec<String>, bool) {
     let mut names = Vec::new();
-    let Ok(branches) = repository.branches(None) else {
-        return names;
-    };
-    for (branch, _) in branches.flatten() {
-        if branch.get().kind() != Some(git2::ReferenceType::Direct) {
-            continue;
-        }
-        let Some(name) = branch.name().ok().flatten().map(ToString::to_string) else {
+    let mut examined = 0usize;
+    let mut truncated = false;
+    'kinds: for kind in [git2::BranchType::Local, git2::BranchType::Remote] {
+        let Ok(branches) = repository.branches(Some(kind)) else {
             continue;
         };
-        let Some(tip) = branch.get().peel_to_commit().ok().map(|commit| commit.id()) else {
-            continue;
-        };
-        if tip == target || repository.graph_descendant_of(tip, target).unwrap_or(false) {
-            names.push(name);
+        for (branch, _) in branches.flatten() {
+            if branch.get().kind() != Some(git2::ReferenceType::Direct) {
+                continue;
+            }
+            if names.len() > MAX_CONTAINING_BRANCHES || examined >= MAX_CONTAINING_BRANCHES_EXAMINED
+            {
+                truncated = true;
+                break 'kinds;
+            }
+            examined += 1;
+            let Some(name) = branch.name().ok().flatten().map(ToString::to_string) else {
+                continue;
+            };
+            let Some(tip) = branch.get().peel_to_commit().ok().map(|commit| commit.id()) else {
+                continue;
+            };
+            if tip == target || repository.graph_descendant_of(tip, target).unwrap_or(false) {
+                names.push(name);
+            }
         }
+    }
+    if names.len() > MAX_CONTAINING_BRANCHES {
+        truncated = true;
+        names.truncate(MAX_CONTAINING_BRANCHES);
     }
     names.sort();
     names.dedup();
-    names.truncate(MAX_CONTAINING_BRANCHES);
-    names
+    (names, truncated)
 }
 
 pub(super) fn commit_details_for_repo(
@@ -1205,6 +1234,7 @@ pub(super) fn commit_details_for_repo(
     let author = commit.author();
     let committer = commit.committer();
     let oid = commit.id().to_string();
+    let (branches, branches_truncated) = branches_containing(&repository, commit.id());
     Ok(GitCommitDetails {
         root: root.to_string_lossy().to_string(),
         short_oid: oid.chars().take(12).collect(),
@@ -1218,7 +1248,8 @@ pub(super) fn commit_details_for_repo(
         committer_time_ms: committer.when().seconds().saturating_mul(1000),
         message: commit.message().unwrap_or_default().to_string(),
         refs: labels.get(&commit.id()).cloned().unwrap_or_default(),
-        branches: branches_containing(&repository, commit.id()),
+        branches,
+        branches_truncated,
         files: files
             .into_iter()
             .map(|file| GitCommitFileJson {

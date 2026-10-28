@@ -427,64 +427,6 @@
       "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-d03eb62b-0492-447a-9ec4-c2d5404c70df (REQUEST_CHANGES on rollback default flags, hook redaction/reset witnesses, Windows gate and case accounting for file/diff test; approved commit and status tests) then bgagent-82a388bc-802b-40c3-9883-6963cf278298 re-review VERDICT APPROVE for all five tests after the requested changes, verifying mutant diff hashes, failing lines and restoration by cmp. Witnesses re-executed after a final 3-line production change (all-skipped in-progress commit now 400); every failing line shifted by exactly +3 with identical diagnostics."
     },
     {
-      "fingerprint": "4387bbb8eabde346b846b8cca51c7467b3075ed7e79c601a825b32bb6d734cb5",
-      "occurrences": 1,
-      "failure_mode": "POST /v1/git/rollback deletes a file outside the repository through a symlinked parent directory, deletes directories, accepts traversal, mis-classifies paths (restore vs unstage vs untracked), or leaves the index/worktree un-restored.",
-      "importance": "Destructive filesystem operation: an escaped delete removes user data outside the workspace; wrong classification destroys or keeps the wrong changes.",
-      "nearest_retained": {
-        "fingerprint": "39c50d9c5d8171245f1abbb05a3a79064daa613d406e924d7b38958fb608cea4",
-        "why_insufficient": "Retained auth_matrix_git_stage_rejects_non_relative_paths checks only lexical ../ and absolute rejection on /v1/git/stage; it cannot detect symlink-parent escape, directory deletion, or rollback classification/restore effects."
-      },
-      "oracle": "Default-flags request (no delete flags): unstaged [added.txt], deleted [], skipped exactly [untracked.txt=untracked], both files still on disk. Full-flags request: exact restored/unstaged/deleted arrays and exact sorted skipped list (dir=directory, dir/inner.txt=unchanged, link/victim.txt=symlink_parent); outside victim file content unchanged and link still present; tracked.txt index+worktree equal HEAD; added.txt removed from index and disk; untracked.txt deleted; ../escape.txt returns 400.",
-      "prerequisites": "Victim file exists outside the root before the call; link is a real symlink to the outside dir; tracked.txt has distinct staged and worktree edits; added.txt staged and not in HEAD; untracked.txt exists; dir/inner.txt unchanged and tracked.",
-      "shipping_implementation": "crate::http::routers::v1::git_write::handle_v1_git_rollback with contained_leaf/safe_remove_file and the hardened git CLI runner (git restore) via /v1/git/rollback.",
-      "determinism": "Isolated tempdirs, unix-only symlink fixture (#[cfg(unix)]), local git CLI with prompts disabled, no network.",
-      "layer": "Engine HTTP route via make_refact_http_server + tower oneshot over a real tempdir git2 repository",
-      "why_cheapest": "Containment depends on real filesystem symlinks and the route-level classification; one scenario covers all branches without separate unit cases.",
-      "meaningful_cases": 3,
-      "critical": true,
-      "criticality_reason": "Destructive filesystem operation with a path-containment boundary (critical class per policy). Cases: lexical traversal refusal, default (non-destructive) flags, full delete flags with symlink-parent/directory/unchanged refusals.",
-      "removed_coverage": "None; no retained test removed or changed.",
-      "witness": {
-        "kind": "executed",
-        "failing": {
-          "command": [
-            "env",
-            "RUST_MIN_STACK=16777216",
-            "cargo",
-            "test",
-            "--lib",
-            "http::routers::v1::git_write::tests::git_rollback_restores_unstages_and_never_deletes_through_symlinked_parent",
-            "--",
-            "--exact"
-          ],
-          "exit_code": 101,
-          "evidence": "Mutant 2 applied to the final shipping source by /tmp/e1_mutants.py, focused test FAILED (0 passed; 1 failed). mutant follows symlinks (fs::metadata) and drops canonical containment: deleted assertion (final-source git_write.rs:1271; log reports 1269 because the mutant removes two lines above) left [added.txt, link/victim.txt, untracked.txt] right [added.txt, untracked.txt] (outside file deleted). Log /tmp/e1_mut2.log in author worktree. Second executed mutant 2b (/tmp/e1_mut2b.diff sha256 7dcae8b3ee408e69e2cdfa9490c46661b9e95387ab2ca803140e07091130512c): ignore delete_untracked=false; focused test exit 101 at git_write.rs:1243 deleted left [untracked.txt] right [] (default flags delete an untracked file)."
-        },
-        "passing": {
-          "command": [
-            "env",
-            "RUST_MIN_STACK=16777216",
-            "cargo",
-            "test",
-            "--lib",
-            "git_write::tests"
-          ],
-          "exit_code": 0,
-          "evidence": "All mutants reverted by the harness (cmp of git_write.rs, git_read.rs and cli.rs against saved final copies succeeded); git_write::tests 5 passed 0 failed on the final source (archived /tmp/e1_passing.log)."
-        },
-        "intended_diagnostic": "mutant follows symlinks (fs::metadata) and drops canonical containment: deleted assertion (final-source git_write.rs:1271; log reports 1269 because the mutant removes two lines above) left [added.txt, link/victim.txt, untracked.txt] right [added.txt, untracked.txt] (outside file deleted)",
-        "production_target": "src/http/routers/v1/git_write.rs contained_leaf (symlink parent + canonical containment guard)",
-        "before_fix": {
-          "reference": "unified diff mutant /tmp/e1_mut2.diff against the final source",
-          "fingerprint": "bb3f6e19d58b51497787738f48bee22e315d1f61ba6faa5e8d45bf2e440c96c0"
-        }
-      },
-      "author": "bgagent-b2-e1-engine-git (author subagent, wave E1)",
-      "reviewer": "bgagent-82a388bc-802b-40c3-9883-6963cf278298",
-      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-d03eb62b-0492-447a-9ec4-c2d5404c70df (REQUEST_CHANGES on rollback default flags, hook redaction/reset witnesses, Windows gate and case accounting for file/diff test; approved commit and status tests) then bgagent-82a388bc-802b-40c3-9883-6963cf278298 re-review VERDICT APPROVE for all five tests after the requested changes, verifying mutant diff hashes, failing lines and restoration by cmp. Witnesses re-executed after a final 3-line production change (all-skipped in-progress commit now 400); every failing line shifted by exactly +3 with identical diagnostics."
-    },
-    {
       "fingerprint": "f7f068e882425881ec82652b61ba5165c2d085f29062df567533f92e5f29c628",
       "occurrences": 1,
       "failure_mode": "(Note: when hooks exist any CLI commit failure is reported as hook_failed per the endpoint contract.) With an executable pre-commit hook, the commit bypasses hooks via git2, or a rejected hook still moves HEAD, leaves the pre-added untracked path staged, loses unrelated staged entries, or leaks credentials from hook output; a passing hook path commits unrelated staged entries.",
@@ -601,70 +543,12 @@
       "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-d03eb62b-0492-447a-9ec4-c2d5404c70df (REQUEST_CHANGES on rollback default flags, hook redaction/reset witnesses, Windows gate and case accounting for file/diff test; approved commit and status tests) then bgagent-82a388bc-802b-40c3-9883-6963cf278298 re-review VERDICT APPROVE for all five tests after the requested changes, verifying mutant diff hashes, failing lines and restoration by cmp. Witnesses re-executed after a final 3-line production change (all-skipped in-progress commit now 400); every failing line shifted by exactly +3 with identical diagnostics."
     },
     {
-      "fingerprint": "13f1fd9daeff766ba0b2af33f459fbe84b6349c81c4fb2931ab688da1b68412d",
-      "occurrences": 1,
-      "failure_mode": "The extended /v1/git/status changes legacy staged/unstaged semantics (renames collapsed instead of DELETED+ADDED, conflicted paths leaking, untracked missing as ADDED) or produces wrong new fields (combined status/staged/unstaged flags, RENAMED old_path, untracked list, conflict ours/theirs/ancestor, repo_state, head_oid).",
-      "importance": "DaemonDashboard GitTab and ActivityRail consume the legacy lists; the new Commit tool window relies on the new fields to decide what to commit or roll back.",
-      "nearest_retained": {
-        "fingerprint": "d7bf0a828644cac5f4c956c094592916fd48b2713d2cd40cbdd26f39c42b7548",
-        "why_insufficient": "Retained untracked_external_symlink_status_keeps_absolute_path_in_repo exercises shared get_diff_statuses, which the route no longer uses; it cannot detect regressions in the route-specific single-pass status, rename splitting, conflicts or new fields."
-      },
-      "oracle": "Exact ordered legacy staged/unstaged (path,status) pairs with absolute paths, exact sorted changes array objects, exact untracked and conflicted arrays, repo_state merge, truncated false, head_oid equals HEAD.",
-      "prerequisites": "Real git merge leaves conflict.txt with all three stages (merge asserted to fail); staged rename via git mv; index-new+worktree-modified both.txt; worktree-deleted gone.txt; untracked u/x.txt inside an untracked dir.",
-      "shipping_implementation": "crate::http::routers::v1::git_read::handle_v1_git_status -> status_for_repo -> read_status_snapshot via /v1/git/status.",
-      "determinism": "Isolated tempdir, local git CLI for merge/mv with fixed branch flow, no network.",
-      "layer": "Engine HTTP route via make_refact_http_server + tower oneshot over a real tempdir git2 repository",
-      "why_cheapest": "Conflicts and renames need a real repository state; one scenario covers all categories at the consumed boundary.",
-      "meaningful_cases": 1,
-      "critical": false,
-      "criticality_reason": "Read-only status projection; not destructive, privacy or durable-write. Ordinary, with an executed witness anyway.",
-      "removed_coverage": "None; no retained test removed or changed.",
-      "witness": {
-        "kind": "executed",
-        "failing": {
-          "command": [
-            "env",
-            "RUST_MIN_STACK=16777216",
-            "cargo",
-            "test",
-            "--lib",
-            "http::routers::v1::git_write::tests::git_status_reports_changes_untracked_conflicts_and_unchanged_legacy_lists",
-            "--",
-            "--exact"
-          ],
-          "exit_code": 101,
-          "evidence": "Mutant 5 applied to the final shipping source by /tmp/e1_mutants.py, focused test FAILED (0 passed; 1 failed). mutant disables rename splitting: panicked at git_write.rs:1508 legacy staged left [(both.txt,ADDED),(renamed.txt,MODIFIED),(staged.txt,MODIFIED)] right [... (old.txt,DELETED),(renamed.txt,ADDED) ...]. Log /tmp/e1_mut5.log in author worktree. "
-        },
-        "passing": {
-          "command": [
-            "env",
-            "RUST_MIN_STACK=16777216",
-            "cargo",
-            "test",
-            "--lib",
-            "git_write::tests"
-          ],
-          "exit_code": 0,
-          "evidence": "All mutants reverted by the harness (cmp of git_write.rs, git_read.rs and cli.rs against saved final copies succeeded); git_write::tests 5 passed 0 failed on the final source (archived /tmp/e1_passing.log)."
-        },
-        "intended_diagnostic": "mutant disables rename splitting: panicked at git_write.rs:1508 legacy staged left [(both.txt,ADDED),(renamed.txt,MODIFIED),(staged.txt,MODIFIED)] right [... (old.txt,DELETED),(renamed.txt,ADDED) ...]",
-        "production_target": "src/http/routers/v1/git_read.rs read_status_snapshot legacy rename split",
-        "before_fix": {
-          "reference": "unified diff mutant /tmp/e1_mut5.diff against the final source",
-          "fingerprint": "8cb29caf87693a4e79e353b0d30a0de28f8d92fe16aa86c6e9287d068db9fafd"
-        }
-      },
-      "author": "bgagent-b2-e1-engine-git (author subagent, wave E1)",
-      "reviewer": "bgagent-82a388bc-802b-40c3-9883-6963cf278298",
-      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-d03eb62b-0492-447a-9ec4-c2d5404c70df (REQUEST_CHANGES on rollback default flags, hook redaction/reset witnesses, Windows gate and case accounting for file/diff test; approved commit and status tests) then bgagent-82a388bc-802b-40c3-9883-6963cf278298 re-review VERDICT APPROVE for all five tests after the requested changes, verifying mutant diff hashes, failing lines and restoration by cmp. Witnesses re-executed after a final 3-line production change (all-skipped in-progress commit now 400); every failing line shifted by exactly +3 with identical diagnostics."
-    },
-    {
       "fingerprint": "03d5c0755fba184afc5e40a2ee1b891c6c757bf916a45d35db59efeddcaa5ffe",
       "occurrences": 1,
       "failure_mode": "GET /v1/git/log ignores or mis-applies scope/ref/text/author/path filters (e.g. skip/limit counted over walked rather than matching commits), mislabels refs (HEAD/local/remote/tag, symbolic origin/HEAD leaked, annotated tag not peeled), omits parents/head_oid; GET /v1/git/commit returns wrong files/containing branches or no 404; GET /v1/git/branches misreports remote branches, tags, ahead/behind or upstream_gone.",
       "importance": "The Git Log panel and branch popup render these fields directly; wrong graph edges, filters or ref labels mislead users into checking out/deleting the wrong ref.",
       "nearest_retained": {
-        "fingerprint": "13f1fd9daeff766ba0b2af33f459fbe84b6349c81c4fb2931ab688da1b68412d",
+        "fingerprint": "9c0845e45541b840155cc3ffb09e010f08e656d6c25c0fb461d39625aa278e25",
         "why_insufficient": "git_status_reports_changes_untracked_conflicts_and_unchanged_legacy_lists covers only /v1/git/status; no retained test exercises log filters, ref labels, parents, commit details or the branches inventory."
       },
       "oracle": "Exact oid lists per query (HEAD scope, scope=all set, ref=feature/v1/origin/main, author, text, oid prefix, path dir/file, author+skip+limit), exact refs arrays and parents, head_oid and scan_truncated, 404 not_found for unknown ref/oid and 400 for option-like ref, exact commit-details files/refs/branches, exact full branches JSON including ahead=1/behind=0 and upstream_gone.",
@@ -692,7 +576,7 @@
       "failure_mode": "Branch delete removes the current or an unmerged branch without force (or ignores force), checkout silently discards local changes, remote checkout switches to a same-named local branch tracking something else instead of 409 already_exists, or rename/tracking config is wrong.",
       "importance": "Destructive ref/worktree operations: losing unmerged commits or uncommitted edits is data loss.",
       "nearest_retained": {
-        "fingerprint": "4387bbb8eabde346b846b8cca51c7467b3075ed7e79c601a825b32bb6d734cb5",
+        "fingerprint": "1014c473da32f74fb0fd311c658662dafc1534351a6bae922985c6094353a6bb",
         "why_insufficient": "git_rollback_restores_unstages_and_never_deletes_through_symlinked_parent guards file rollback only; no retained test drives branch delete/rename/checkout endpoints."
       },
       "oracle": "409 current_branch with main ref intact; 409 not_merged with unmerged tip unchanged; merged delete ref gone; 400 for name \"-D\"; rename moves the ref; 409 checkout_conflict whose error lists f.txt with worktree content, HEAD symbolic ref and oid unchanged; unmerged doomed refused without force then deleted with force; remote checkout response {branch:topic, head_oid, detached:false} plus branch.topic.remote/merge config; 409 already_exists leaving HEAD on topic.",
@@ -1173,6 +1057,122 @@
       "author": "chat:490caf4d-da9e-4d52-bc18-6f194a7da06c",
       "reviewer": "background_agent:bgagent-c33999e7-e460-4fb0-b263-0674a217858e",
       "review_evidence": "Independent final review subchat-4c715d09-85e2-49a5-9acd-3415f9ddc04a approved seven records / 27 meaningful cases after reading final bodies, six-file matching manifests, actual seven red/green logs and final module/full-library results. Earlier source and mutant semantic review subchat-7a144338-a6d2-423d-9639-0d25a3668a67. Approval is narrow as stated in witness diagnostics; no isolated tail-erasure or full provider reconstruction claim."
+    },
+    {
+      "fingerprint": "1014c473da32f74fb0fd311c658662dafc1534351a6bae922985c6094353a6bb",
+      "occurrences": 1,
+      "failure_mode": "POST /v1/git/rollback deletes a file outside the repository through a symlinked parent directory, deletes directories, accepts traversal, mis-classifies paths (restore vs unstage vs untracked), or leaves the index/worktree un-restored. Wave F-E: a path that is a file in HEAD but now a directory in the worktree is routed to git restore (checkout-force semantics), which replaces the directory and deletes everything inside it, including ignored/untracked user files.",
+      "importance": "Destructive filesystem operation: an escaped delete removes user data outside the workspace; wrong classification destroys or keeps the wrong changes.",
+      "nearest_retained": {
+        "fingerprint": "39c50d9c5d8171245f1abbb05a3a79064daa613d406e924d7b38958fb608cea4",
+        "why_insufficient": "Retained auth_matrix_git_stage_rejects_non_relative_paths checks only lexical ../ and absolute rejection on /v1/git/stage; it cannot detect symlink-parent escape, directory deletion, or rollback classification/restore effects."
+      },
+      "oracle": "Default-flags request (no delete flags): unstaged [added.txt], deleted [], skipped exactly [untracked.txt=untracked], both files still on disk. Full-flags request: exact restored/unstaged/deleted arrays and exact sorted skipped list (dir=directory, dir/inner.txt=unchanged, link/victim.txt=symlink_parent, swap=directory); outside victim file content unchanged and link still present; tracked.txt index+worktree equal HEAD; added.txt removed from index and disk; untracked.txt deleted; ../escape.txt returns 400. Wave F-E: right after the full-flags call, swap/precious.secret (an ignored file inside the directory that replaced the HEAD file swap) still reads 'ignored work' (asserted before any other response check).",
+      "prerequisites": "Victim file exists outside the root before the call; link is a real symlink to the outside dir; tracked.txt has distinct staged and worktree edits; added.txt staged and not in HEAD; untracked.txt exists; dir/inner.txt unchanged and tracked. Wave F-E: swap is committed in HEAD, then gets a staged edit (so status reports a change), then is replaced on disk by a directory holding only an ignored file (exclude *.secret; status_should_ignore asserted true) — a directory holding only ignored files is reported as a deleted file, which the old classifier routes to git restore.",
+      "shipping_implementation": "crate::http::routers::v1::git_write::handle_v1_git_rollback with contained_leaf/safe_remove_file and the hardened git CLI runner (git restore) via /v1/git/rollback.",
+      "determinism": "Isolated tempdirs, unix-only symlink fixture (#[cfg(unix)]), local git CLI with prompts disabled, no network.",
+      "layer": "Engine HTTP route via make_refact_http_server + tower oneshot over a real tempdir git2 repository",
+      "why_cheapest": "Containment depends on real filesystem symlinks and the route-level classification; one scenario covers all branches without separate unit cases.",
+      "meaningful_cases": 4,
+      "critical": true,
+      "criticality_reason": "Destructive filesystem operation with a path-containment boundary (critical class per policy). Cases: lexical traversal refusal, default (non-destructive) flags, full delete flags with symlink-parent/directory/unchanged refusals; wave F-E adds a 4th case: HEAD file replaced by a directory is skipped as directory and its contents survive.",
+      "removed_coverage": "None; existing assertions are kept unchanged and only the swap fixture/expectations were added.",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "cargo",
+            "test",
+            "--lib",
+            "http::routers::v1::git_write::tests::git_rollback_restores_unstages_and_never_deletes_through_symlinked_parent",
+            "--",
+            "--exact"
+          ],
+          "exit_code": 101,
+          "evidence": "Fault-injection counterfactual (not a literal pre-fix revision: with the guard alone removed, git2 status_file errors on the directory and the old fallback happened to skip it as 'unchanged'). Mutant A2 (/tmp/fe/mutA2.diff sha256 b65e14783e2f4a66fcfbd036d523ae8e29f7ff02576ea09b2fd614f197a0bc89): removes the new `leaf == Containment::Directory => Err(\"directory\")` guard in classify_rollback and makes an unreadable status count as modified. Focused test exit 101 (0 passed; 1 failed) panicked at git_write.rs:1365 'HEAD file replaced by a directory must never reach git restore' left None right Some(\"ignored work\\n\"): git restore deleted the ignored file inside swap/. Log /tmp/fe/mutA2.log. Guard-only mutant A (/tmp/fe/mutA.diff sha256 c46cbde74e54c3bd769bf2aba114b9f5f8d84250f0e8f5491a00deaca79bfa63) also exits 101 at git_write.rs:1375, skipped swap reason 'unchanged' instead of 'directory' (/tmp/fe/mutA.log). Manual git probe: `git restore --source=HEAD --staged --worktree` on a HEAD file replaced by a directory holding only ignored files exits 0 and removes the directory and its contents. Earlier executed E1 witnesses (mutants 2 and 2b) still apply to unchanged assertions."
+        },
+        "passing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "cargo",
+            "test",
+            "--lib",
+            "git_write::tests"
+          ],
+          "exit_code": 0,
+          "evidence": "Mutants restored by copying saved final sources (cmp of git_write.rs and git_read.rs against /tmp/fe/final_*.rs succeeded); git_write::tests 5 passed 0 failed on the final source (/tmp/fe/pass.log). Full focused run git_branches::tests git_write::tests git_read::tests routers::v1: 195 passed 0 failed."
+        },
+        "intended_diagnostic": "panicked at git_write.rs:1365: HEAD file replaced by a directory must never reach git restore; left None right Some(\"ignored work\\n\")",
+        "production_target": "src/http/routers/v1/git_write.rs classify_rollback directory guard before routing to git restore (plus contained_leaf symlink/containment guard from E1)",
+        "before_fix": {
+          "reference": "unified diff fault-injection mutant /tmp/fe/mutA2.diff against the final git_write.rs",
+          "fingerprint": "b65e14783e2f4a66fcfbd036d523ae8e29f7ff02576ea09b2fd614f197a0bc89"
+        }
+      },
+      "author": "bgagent-fe-engine-git (author subagent, wave F-E)",
+      "reviewer": "bgagent-fd720f32-3ebc-4060-b064-50e88a69a1f9",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 review bgagent-fd720f32-3ebc-4060-b064-50e88a69a1f9 (subchat-d7393a5b-d03a-46c9-9818-ea1b368f08ca): VERDICT APPROVE for both changed tests (rollback directory-replacement case, status INDEX_NEW|WT_DELETED case). Verified the mutA/mutA2/mutH diff sha256 values, the exit-101 logs and the restored final sources by cmp, reproduced in a scratch repo that git restore deletes a directory replacing a HEAD file (ignored contents included), and accepted case accounting 3->4 / 1. Requested wording changes (mutA2 described as fault injection, not pre-fix; mutH line-number provenance) are applied in these rows."
+    },
+    {
+      "fingerprint": "9c0845e45541b840155cc3ffb09e010f08e656d6c25c0fb461d39625aa278e25",
+      "occurrences": 1,
+      "failure_mode": "The extended /v1/git/status changes legacy staged/unstaged semantics (renames collapsed instead of DELETED+ADDED, conflicted paths leaking, untracked missing as ADDED) or produces wrong new fields (combined status/staged/unstaged flags, RENAMED old_path, untracked list, conflict ours/theirs/ancestor, repo_state, head_oid). Wave F-E: a staged add that was deleted from disk (INDEX_NEW|WT_DELETED) is dropped from `changes`, so the user can neither see nor roll it back.",
+      "importance": "DaemonDashboard GitTab and ActivityRail consume the legacy lists; the new Commit tool window relies on the new fields to decide what to commit or roll back.",
+      "nearest_retained": {
+        "fingerprint": "d7bf0a828644cac5f4c956c094592916fd48b2713d2cd40cbdd26f39c42b7548",
+        "why_insufficient": "Retained untracked_external_symlink_status_keeps_absolute_path_in_repo exercises shared get_diff_statuses, which the route no longer uses; it cannot detect regressions in the route-specific single-pass status, rename splitting, conflicts or new fields."
+      },
+      "oracle": "Exact ordered legacy staged/unstaged (path,status) pairs with absolute paths, exact sorted changes array objects, exact untracked and conflicted arrays, repo_state merge, truncated false, head_oid equals HEAD. Wave F-E: ghost.txt appears in legacy staged as ADDED, legacy unstaged as DELETED, and in changes as {status: ADDED, staged: true, unstaged: true}.",
+      "prerequisites": "Real git merge leaves conflict.txt with all three stages (merge asserted to fail); staged rename via git mv; index-new+worktree-modified both.txt; worktree-deleted gone.txt; untracked u/x.txt inside an untracked dir. Wave F-E: ghost.txt is written, staged with git add, then removed from disk.",
+      "shipping_implementation": "crate::http::routers::v1::git_read::handle_v1_git_status -> status_for_repo -> read_status_snapshot via /v1/git/status.",
+      "determinism": "Isolated tempdir, local git CLI for merge/mv with fixed branch flow, no network.",
+      "layer": "Engine HTTP route via make_refact_http_server + tower oneshot over a real tempdir git2 repository",
+      "why_cheapest": "Conflicts and renames need a real repository state; one scenario covers all categories at the consumed boundary.",
+      "meaningful_cases": 1,
+      "critical": false,
+      "criticality_reason": "Read-only status projection; not destructive, privacy or durable-write. Ordinary, with an executed witness anyway.",
+      "removed_coverage": "None; existing expectations kept, ghost.txt rows added.",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "cargo",
+            "test",
+            "--lib",
+            "http::routers::v1::git_write::tests::git_status_reports_changes_untracked_conflicts_and_unchanged_legacy_lists",
+            "--",
+            "--exact"
+          ],
+          "exit_code": 101,
+          "evidence": "Mutant H (/tmp/fe/mutH.diff sha256 072929825a180c9b736c7ec1350608347b0228ab71bf1ef31ceb26a49d0924fe) puts back the old `if status.is_index_new() && status.is_wt_deleted() { continue; }` skip in read_status_snapshot. Focused test exit 101 (0 passed; 1 failed), panicked at the `Value::Array(changes)` equality assertion (reported git_write.rs:1650; the run used a git_write.rs a few lines shorter before the ignored-file swap fixture edit, now ~1654; git_read.rs was byte-identical to the final source, and the status test exercises only git_read.rs); left changes are missing ghost.txt, right expects {ghost.txt, ADDED, staged true, unstaged true}. Log /tmp/fe/mutH.log. E1 mutant 5 (rename split) still applies to unchanged assertions."
+        },
+        "passing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "cargo",
+            "test",
+            "--lib",
+            "git_write::tests"
+          ],
+          "exit_code": 0,
+          "evidence": "Mutants restored by copying saved final sources (cmp of git_write.rs and git_read.rs against /tmp/fe/final_*.rs succeeded); git_write::tests 5 passed 0 failed on the final source (/tmp/fe/pass.log). Full focused run git_branches::tests git_write::tests git_read::tests routers::v1: 195 passed 0 failed."
+        },
+        "intended_diagnostic": "Value::Array(changes) equality assertion fails: ghost.txt {ADDED, staged true, unstaged true} missing",
+        "production_target": "src/http/routers/v1/git_read.rs read_status_snapshot INDEX_NEW|WT_DELETED projection",
+        "before_fix": {
+          "reference": "unified diff mutant /tmp/fe/mutH.diff against the final git_read.rs",
+          "fingerprint": "072929825a180c9b736c7ec1350608347b0228ab71bf1ef31ceb26a49d0924fe"
+        }
+      },
+      "author": "bgagent-fe-engine-git (author subagent, wave F-E)",
+      "reviewer": "bgagent-fd720f32-3ebc-4060-b064-50e88a69a1f9",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 review bgagent-fd720f32-3ebc-4060-b064-50e88a69a1f9 (subchat-d7393a5b-d03a-46c9-9818-ea1b368f08ca): VERDICT APPROVE for both changed tests (rollback directory-replacement case, status INDEX_NEW|WT_DELETED case). Verified the mutA/mutA2/mutH diff sha256 values, the exit-101 logs and the restored final sources by cmp, reproduced in a scratch repo that git restore deletes a directory replacing a HEAD file (ignored contents included), and accepted case accounting 3->4 / 1. Requested wording changes (mutA2 described as fault injection, not pre-fix; mutH line-number provenance) are applied in these rows."
     }
   ],
   "classifications": [
@@ -8446,19 +8446,20 @@
     },
     {
       "path": "refact-agent/engine/src/git/cli.rs",
-      "before_sha256": "f58826c3d702ba9320724715e8e2ef273ec92b4756f01e88fe6130ecc7adf5be",
-      "after_sha256": "c5b5accb30408acefd195f2784e6acc78baab44437e02b6c5ff6f93534a219fc",
+      "before_sha256": "c5b5accb30408acefd195f2784e6acc78baab44437e02b6c5ff6f93534a219fc",
+      "after_sha256": "3587125a5736b755135adef5bbaa08d5571dc8451302ae9a9f8786874ef3448a",
       "affected_tests": [
         "56686003974c20c4dff062be60cba50ba0fe7419e166c9b1a29100df3f3e4e87",
         "790f69de66e8bdcd028f9713ee8a98ee96176f0846ce9c0a65c903fff2dc9de8",
         "f7f068e882425881ec82652b61ba5165c2d085f29062df567533f92e5f29c628",
-        "4387bbb8eabde346b846b8cca51c7467b3075ed7e79c601a825b32bb6d734cb5"
+        "1014c473da32f74fb0fd311c658662dafc1534351a6bae922985c6094353a6bb",
+        "9c0845e45541b840155cc3ffb09e010f08e656d6c25c0fb461d39625aa278e25"
       ],
-      "impact": "Runner pins git message locale (LANGUAGE=C, LC_MESSAGES=C; LC_ALL relocated to LANG) so error-code mapping on git diagnostics is deterministic. No test helpers changed; E1 commit/rollback tests still pass.",
-      "execution_context": "Default engine library test context (cargo test --lib); RUST_MIN_STACK=16777216; no features, ignores or shared-fixture rewrites. Focused git_branches/git_write/git_read/router tests 13 passed.",
-      "author": "bgagent-e2-engine-git (author subagent, wave E2)",
-      "reviewer": "bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2",
-      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-a6ad015b-420c-465a-ae7d-a93b4abb0905 (APPROVE log test; REQUEST_CHANGES: vacuous forced delete in branch-ops test needing an always -d mutant, stale P1 mutant log, case accounting, English-stderr locale risk) then bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2 re-review VERDICT APPROVE for all three after the changes, verifying all 8 mutant diff sha256 against /tmp/e2_mutants_results.json, panic lines vs current source, byte restoration by cmp against /tmp/e2_final_*.rs, and case accounting."
+      "impact": "Runner env_remove's inherited repository-selecting variables (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_COMMON_DIR, GIT_NAMESPACE, GIT_PREFIX, GIT_QUARANTINE_PATH) so `-C root` alone selects the repository. No test helpers changed.",
+      "execution_context": "Default engine library test context (cargo test --lib); RUST_MIN_STACK=16777216; no features, ignores or shared-fixture rewrites. Focused git_branches::tests git_write::tests git_read::tests routers::v1: 195 passed 0 failed.",
+      "author": "bgagent-fe-engine-git (author subagent, wave F-E)",
+      "reviewer": "bgagent-fd720f32-3ebc-4060-b064-50e88a69a1f9",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 review bgagent-fd720f32-3ebc-4060-b064-50e88a69a1f9 (subchat-d7393a5b-d03a-46c9-9818-ea1b368f08ca): VERDICT APPROVE for both changed tests (rollback directory-replacement case, status INDEX_NEW|WT_DELETED case). Verified the mutA/mutA2/mutH diff sha256 values, the exit-101 logs and the restored final sources by cmp, reproduced in a scratch repo that git restore deletes a directory replacing a HEAD file (ignored contents included), and accepted case accounting 3->4 / 1. Requested wording changes (mutA2 described as fault injection, not pre-fix; mutH line-number provenance) are applied in these rows."
     },
     {
       "path": "refact-agent/engine/src/git/mod.rs",
@@ -8491,67 +8492,75 @@
     },
     {
       "path": "refact-agent/engine/src/http/routers/v1/git_read.rs",
-      "before_sha256": "80a7ae6c4e7a70aabd43e7b77921484cf33b62ed4238b49823fcebbfa4719160",
-      "after_sha256": "e2ba1c43b24389d74f65d0ddc698f49a379e1927a74348139cfcb3dc683e70c5",
+      "before_sha256": "e2ba1c43b24389d74f65d0ddc698f49a379e1927a74348139cfcb3dc683e70c5",
+      "after_sha256": "3df31962e6a4b1bf60def62caa4f6d5261df68b94377c3d8f773624dfd03c8d0",
       "affected_tests": [
         "03d5c0755fba184afc5e40a2ee1b891c6c757bf916a45d35db59efeddcaa5ffe",
         "b23767686cb96a6d8f90a31f3b603fe026a3d5f6bd81259f0e7057a7811f138e",
         "39c50d9c5d8171245f1abbb05a3a79064daa613d406e924d7b38958fb608cea4",
         "78432c914e73f5cb4b41664473c078ac57348b0f5a3ad7860ae3fb049fc00951",
-        "9cd16bf8f1e563ebb288ae0f40fc109aef357edd2648e6b5059cbff9a6f50cb0"
+        "9cd16bf8f1e563ebb288ae0f40fc109aef357edd2648e6b5059cbff9a6f50cb0",
+        "1014c473da32f74fb0fd311c658662dafc1534351a6bae922985c6094353a6bb",
+        "9c0845e45541b840155cc3ffb09e010f08e656d6c25c0fb461d39625aa278e25"
       ],
-      "impact": "Log filters/scope/ref/refs/parents/head_oid/scan_truncated, commit details handler, branches extension; existing status/diff/stage code and test module unchanged.",
-      "execution_context": "Default engine library test context (cargo test --lib); RUST_MIN_STACK=16777216; no features, ignores or shared-fixture rewrites. Focused git_branches/git_write/git_read/router tests 13 passed.",
-      "author": "bgagent-e2-engine-git (author subagent, wave E2)",
-      "reviewer": "bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2",
-      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-a6ad015b-420c-465a-ae7d-a93b4abb0905 (APPROVE log test; REQUEST_CHANGES: vacuous forced delete in branch-ops test needing an always -d mutant, stale P1 mutant log, case accounting, English-stderr locale risk) then bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2 re-review VERDICT APPROVE for all three after the changes, verifying all 8 mutant diff sha256 against /tmp/e2_mutants_results.json, panic lines vs current source, byte restoration by cmp against /tmp/e2_final_*.rs, and case accounting."
+      "impact": "Production: status emits INDEX_NEW|WT_DELETED as ADDED staged+unstaged; branches_containing bounded (local first, match cap+1, 500 examined, branches_truncated); log scan cap applies to unfiltered walks; ambiguous oid prefix => 400; Windows log path separator normalisation. Test module unchanged.",
+      "execution_context": "Default engine library test context (cargo test --lib); RUST_MIN_STACK=16777216; no features, ignores or shared-fixture rewrites. Focused git_branches::tests git_write::tests git_read::tests routers::v1: 195 passed 0 failed.",
+      "author": "bgagent-fe-engine-git (author subagent, wave F-E)",
+      "reviewer": "bgagent-fd720f32-3ebc-4060-b064-50e88a69a1f9",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 review bgagent-fd720f32-3ebc-4060-b064-50e88a69a1f9 (subchat-d7393a5b-d03a-46c9-9818-ea1b368f08ca): VERDICT APPROVE for both changed tests (rollback directory-replacement case, status INDEX_NEW|WT_DELETED case). Verified the mutA/mutA2/mutH diff sha256 values, the exit-101 logs and the restored final sources by cmp, reproduced in a scratch repo that git restore deletes a directory replacing a HEAD file (ignored contents included), and accepted case accounting 3->4 / 1. Requested wording changes (mutA2 described as fault injection, not pre-fix; mutH line-number provenance) are applied in these rows."
     },
     {
       "path": "refact-agent/engine/src/http/routers/v1/git_write.rs",
-      "before_sha256": "bfcdf67cfb83e02d65db371cf4c2c42dc8f3bc4274ad0bb76197085c7fe335b7",
-      "after_sha256": "711a3191d0a8356a3096b3fe30478b082887c8bcb9c1dd7c19f70968506474c9",
+      "before_sha256": "711a3191d0a8356a3096b3fe30478b082887c8bcb9c1dd7c19f70968506474c9",
+      "after_sha256": "abfa2faabb5b15a1f072c7130d9016ae0d6e272e716d715961fb6e134d55276c",
       "affected_tests": [
         "56686003974c20c4dff062be60cba50ba0fe7419e166c9b1a29100df3f3e4e87",
         "790f69de66e8bdcd028f9713ee8a98ee96176f0846ce9c0a65c903fff2dc9de8",
         "cbd09b87002cf00a073ca1842e3854b79f4dc4f143f97ec73edf40ee209615c0",
-        "4387bbb8eabde346b846b8cca51c7467b3075ed7e79c601a825b32bb6d734cb5",
+        "1014c473da32f74fb0fd311c658662dafc1534351a6bae922985c6094353a6bb",
         "f7f068e882425881ec82652b61ba5165c2d085f29062df567533f92e5f29c628",
         "57dcfb6e8dae5159447013c04821b619bca11b168938654fe7d16eb562d2d827",
-        "13f1fd9daeff766ba0b2af33f459fbe84b6349c81c4fb2931ab688da1b68412d"
+        "9c0845e45541b840155cc3ffb09e010f08e656d6c25c0fb461d39625aa278e25"
       ],
-      "impact": "Visibility only: cli_error, open_repo, resolve_root, run_blocking made pub(super) for git_branches; behaviour and tests unchanged.",
-      "execution_context": "Default engine library test context (cargo test --lib); RUST_MIN_STACK=16777216; no features, ignores or shared-fixture rewrites. Focused git_branches/git_write/git_read/router tests 13 passed.",
-      "author": "bgagent-e2-engine-git (author subagent, wave E2)",
-      "reviewer": "bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2",
-      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-a6ad015b-420c-465a-ae7d-a93b4abb0905 (APPROVE log test; REQUEST_CHANGES: vacuous forced delete in branch-ops test needing an always -d mutant, stale P1 mutant log, case accounting, English-stderr locale risk) then bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2 re-review VERDICT APPROVE for all three after the changes, verifying all 8 mutant diff sha256 against /tmp/e2_mutants_results.json, panic lines vs current source, byte restoration by cmp against /tmp/e2_final_*.rs, and case accounting."
+      "impact": "Production: classify_rollback skips HEAD files now replaced by directories; slash_path rewrites '\\\\' only on Windows; CLI commit failure cleanup restores the original index state (rm --cached for staged deletions); bisect keeps --only commits; WORKTREE file reads refuse non-regular files (O_NONBLOCK|O_NOFOLLOW). Tests: rollback and status tests extended (re-admitted with new fingerprints); no shared helper changes.",
+      "execution_context": "Default engine library test context (cargo test --lib); RUST_MIN_STACK=16777216; no features, ignores or shared-fixture rewrites. Focused git_branches::tests git_write::tests git_read::tests routers::v1: 195 passed 0 failed.",
+      "author": "bgagent-fe-engine-git (author subagent, wave F-E)",
+      "reviewer": "bgagent-fd720f32-3ebc-4060-b064-50e88a69a1f9",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 review bgagent-fd720f32-3ebc-4060-b064-50e88a69a1f9 (subchat-d7393a5b-d03a-46c9-9818-ea1b368f08ca): VERDICT APPROVE for both changed tests (rollback directory-replacement case, status INDEX_NEW|WT_DELETED case). Verified the mutA/mutA2/mutH diff sha256 values, the exit-101 logs and the restored final sources by cmp, reproduced in a scratch repo that git restore deletes a directory replacing a HEAD file (ignored contents included), and accepted case accounting 3->4 / 1. Requested wording changes (mutA2 described as fault injection, not pre-fix; mutH line-number provenance) are applied in these rows."
     },
     {
       "path": "refact-agent/engine/crates/refact-git/src/operations.rs",
-      "before_sha256": "17d5e91556db8c551b4e5be3d061fff52d96952733462987abdf2544446c2218",
-      "after_sha256": "794a23d695529155793f5a03cdb65535fb2a25b7b1bc6be9b75ed5d9bf4688aa",
+      "before_sha256": "794a23d695529155793f5a03cdb65535fb2a25b7b1bc6be9b75ed5d9bf4688aa",
+      "after_sha256": "d9908b018653dc43c9b4ea78972572cc61796d168e1a2b1e169164c6ace2cabe",
       "affected_tests": [
-        "03d5c0755fba184afc5e40a2ee1b891c6c757bf916a45d35db59efeddcaa5ffe"
+        "03d5c0755fba184afc5e40a2ee1b891c6c757bf916a45d35db59efeddcaa5ffe",
+        "0b84eaba34b984ca1a091fdf339654c89ae8494d3fe329dd3faf870a305bec0a",
+        "0f011437cebfc1b5082da916d0bbf63d40e74b712327e7b559c1f6041de07d80",
+        "b4ee3c36a04273c4892374739ec14fefe25d21d19fc29ae183b317c7058812c7",
+        "d0d36383a079be8e7296b1b2d0d77e2075e65209a2c64e66cc34670592b6afec",
+        "d7bf0a828644cac5f4c956c094592916fd48b2713d2cd40cbdd26f39c42b7548",
+        "8783d8c9cd70ad7e6c69152c0a3a4319b933df2bd24fa4eb1538e7a230e6c8f5"
       ],
-      "impact": "changed_files_for_commit_oid made public (no dead_code allow) and returns (files, truncated); consumed by GET /v1/git/commit.",
-      "execution_context": "Default engine library test context (cargo test --lib); RUST_MIN_STACK=16777216; no features, ignores or shared-fixture rewrites. Focused git_branches/git_write/git_read/router tests 13 passed.",
-      "author": "bgagent-e2-engine-git (author subagent, wave E2)",
-      "reviewer": "bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2",
-      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-a6ad015b-420c-465a-ae7d-a93b4abb0905 (APPROVE log test; REQUEST_CHANGES: vacuous forced delete in branch-ops test needing an always -d mutant, stale P1 mutant log, case accounting, English-stderr locale risk) then bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2 re-review VERDICT APPROVE for all three after the changes, verifying all 8 mutant diff sha256 against /tmp/e2_mutants_results.json, panic lines vs current source, byte restoration by cmp against /tmp/e2_final_*.rs, and case accounting."
+      "impact": "changed_files_for_commit counts lines (git2 Patch::line_stats) only for deltas kept after the max_files cap, instead of building the whole diff's patch text first. Same additions/deletions values; consumed by GET /v1/git/commit.",
+      "execution_context": "Default engine library test context (cargo test --lib); RUST_MIN_STACK=16777216; no features, ignores or shared-fixture rewrites. Focused git_branches::tests git_write::tests git_read::tests routers::v1: 195 passed 0 failed.",
+      "author": "bgagent-fe-engine-git (author subagent, wave F-E)",
+      "reviewer": "bgagent-fd720f32-3ebc-4060-b064-50e88a69a1f9",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 review bgagent-fd720f32-3ebc-4060-b064-50e88a69a1f9 (subchat-d7393a5b-d03a-46c9-9818-ea1b368f08ca): VERDICT APPROVE for both changed tests (rollback directory-replacement case, status INDEX_NEW|WT_DELETED case). Verified the mutA/mutA2/mutH diff sha256 values, the exit-101 logs and the restored final sources by cmp, reproduced in a scratch repo that git restore deletes a directory replacing a HEAD file (ignored contents included), and accepted case accounting 3->4 / 1. Requested wording changes (mutA2 described as fault injection, not pre-fix; mutH line-number provenance) are applied in these rows."
     },
     {
       "path": "refact-agent/engine/src/http/routers/v1/git_branches.rs",
-      "before_sha256": null,
-      "after_sha256": "95ec7a5223ca99a1acf67308d5ec9cf0ea69abfc8ceb8b11205a3f5f19a33067",
+      "before_sha256": "95ec7a5223ca99a1acf67308d5ec9cf0ea69abfc8ceb8b11205a3f5f19a33067",
+      "after_sha256": "e623788b493f7f70802e92a45028618199755922c67996b40cad8ce63abf6956",
       "affected_tests": [
         "03d5c0755fba184afc5e40a2ee1b891c6c757bf916a45d35db59efeddcaa5ffe",
         "56686003974c20c4dff062be60cba50ba0fe7419e166c9b1a29100df3f3e4e87",
         "790f69de66e8bdcd028f9713ee8a98ee96176f0846ce9c0a65c903fff2dc9de8"
       ],
-      "impact": "New module: branch checkout/create/rename/delete and fetch/pull/push handlers plus the three admitted tests and their local fixture helpers.",
-      "execution_context": "Default engine library test context (cargo test --lib); RUST_MIN_STACK=16777216; no features, ignores or shared-fixture rewrites. Focused git_branches/git_write/git_read/router tests 13 passed.",
-      "author": "bgagent-e2-engine-git (author subagent, wave E2)",
-      "reviewer": "bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2",
-      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-a6ad015b-420c-465a-ae7d-a93b4abb0905 (APPROVE log test; REQUEST_CHANGES: vacuous forced delete in branch-ops test needing an always -d mutant, stale P1 mutant log, case accounting, English-stderr locale risk) then bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2 re-review VERDICT APPROVE for all three after the changes, verifying all 8 mutant diff sha256 against /tmp/e2_mutants_results.json, panic lines vs current source, byte restoration by cmp against /tmp/e2_final_*.rs, and case accounting."
+      "impact": "Production: upstream remote validated (\".\"/invalid => 409 no_upstream); push.default=simple upstream_mismatch 409; missing remote ref => no_upstream, [remote rejected] => rejected, auth_failed now 502; checkout/create-with-checkout refuse non-clean repo state; rename via `git branch -m` (updates linked worktree HEADs). Test module unchanged; the three existing tests pass.",
+      "execution_context": "Default engine library test context (cargo test --lib); RUST_MIN_STACK=16777216; no features, ignores or shared-fixture rewrites. Focused git_branches::tests git_write::tests git_read::tests routers::v1: 195 passed 0 failed.",
+      "author": "bgagent-fe-engine-git (author subagent, wave F-E)",
+      "reviewer": "bgagent-fd720f32-3ebc-4060-b064-50e88a69a1f9",
+      "review_evidence": "Independent claude_code/claude-sonnet-5-5 review bgagent-fd720f32-3ebc-4060-b064-50e88a69a1f9 (subchat-d7393a5b-d03a-46c9-9818-ea1b368f08ca): VERDICT APPROVE for both changed tests (rollback directory-replacement case, status INDEX_NEW|WT_DELETED case). Verified the mutA/mutA2/mutH diff sha256 values, the exit-101 logs and the restored final sources by cmp, reproduced in a scratch repo that git restore deletes a directory replacing a HEAD file (ignored contents included), and accepted case accounting 3->4 / 1. Requested wording changes (mutA2 described as fault injection, not pre-fix; mutH line-number provenance) are applied in these rows."
     },
     {
       "path": "refact-agent/engine/src/chat/context_rebuild.rs",

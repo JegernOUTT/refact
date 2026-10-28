@@ -11,6 +11,17 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 pub const DEFAULT_GIT_CLI_TIMEOUT: Duration = Duration::from_secs(60);
 pub const NETWORK_GIT_CLI_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+const REPOSITORY_SELECTING_ENV: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "GIT_PREFIX",
+    "GIT_QUARANTINE_PATH",
+];
 
 #[derive(Debug, Clone)]
 pub struct GitCliOptions {
@@ -157,6 +168,11 @@ pub async fn run_git_cli(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // `-C root` must select the repository: inherited repository-selecting variables (e.g. when
+    // the engine itself runs inside a git hook) would otherwise redirect commands elsewhere.
+    for name in REPOSITORY_SELECTING_ENV {
+        command.env_remove(name);
+    }
     // Callers map git's English diagnostics to error codes; keep messages untranslated while
     // preserving the caller's character-set locale (an LC_ALL override would win otherwise).
     if let Some(all) = std::env::var_os("LC_ALL").filter(|value| !value.is_empty()) {

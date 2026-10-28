@@ -255,11 +255,27 @@ fn is_auth_failure(text: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
+fn is_missing_upstream_ref(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("couldn't find remote ref") || lower.contains("no such ref was fetched")
+}
+
 fn remote_cli_failure(output: &GitCliOutput, action: &str) -> HttpError {
     let tail = output_tail(output);
+    if is_missing_upstream_ref(&tail) {
+        return conflict(
+            "no_upstream",
+            format!(
+                "{} failed: the upstream branch no longer exists on the remote: {}",
+                action, tail
+            ),
+        );
+    }
     if is_auth_failure(&tail) {
+        // 502, not 401: this is the remote's credential failure, which must never be confused
+        // with the engine/daemon session auth by proxies or clients.
         return api_error_code(
-            StatusCode::UNAUTHORIZED,
+            StatusCode::BAD_GATEWAY,
             "auth_failed",
             format!(
                 "{} failed: authentication required or rejected: {}",
@@ -288,6 +304,19 @@ async fn run_network(root: &Path, args: Vec<OsString>) -> Result<GitCliOutput, H
     run_git_cli(root, &args, options).await.map_err(cli_error)
 }
 
+fn require_clean_state(repository: &Repository, action: &str) -> Result<(), HttpError> {
+    if repository.state() != RepositoryState::Clean {
+        return Err(conflict(
+            "conflict",
+            format!(
+                "Finish or abort the in-progress operation before {}",
+                action
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn read_head(root: &Path) -> Result<GitCheckoutResponse, HttpError> {
     Ok(head_state(&open_repo(root)?))
 }
@@ -300,6 +329,7 @@ enum CheckoutPlan {
 
 fn plan_checkout(root: &Path, name: &str, kind: &str) -> Result<CheckoutPlan, HttpError> {
     let repository = open_repo(root)?;
+    require_clean_state(&repository, "checking out")?;
     match kind {
         "local" => {
             validate_local_branch_name(name)?;
@@ -425,6 +455,9 @@ pub async fn handle_v1_git_branch_create(
     let plan_name = name.clone();
     let tip = run_blocking(move || {
         let repository = open_repo(&plan_root)?;
+        if checkout {
+            require_clean_state(&repository, "checking out")?;
+        }
         if local_branch_exists(&repository, &plan_name) {
             return Err(conflict(
                 "already_exists",
@@ -487,28 +520,52 @@ pub async fn handle_v1_git_branch_rename(
     let lock = repo_mutation_lock(&root);
     let _guard = lock.lock().await;
     let (old_name, new_name) = (request.old_name, request.new_name);
+    let check_root = root.clone();
+    let (check_old, check_new) = (old_name.clone(), new_name.clone());
     run_blocking(move || {
-        let repository = open_repo(&root)?;
-        let mut branch = repository
-            .find_branch(&old_name, git2::BranchType::Local)
-            .map_err(|_| {
-                api_error(
-                    StatusCode::NOT_FOUND,
-                    format!("Local branch not found: {}", old_name),
-                )
-            })?;
-        if old_name != new_name && local_branch_exists(&repository, &new_name) {
-            return Err(conflict(
-                "already_exists",
-                format!("Branch {} already exists", new_name),
+        let repository = open_repo(&check_root)?;
+        if !local_branch_exists(&repository, &check_old) {
+            return Err(api_error(
+                StatusCode::NOT_FOUND,
+                format!("Local branch not found: {}", check_old),
             ));
         }
-        branch
-            .rename(&new_name, false)
-            .map_err(|error| git2_failure("Failed to rename branch", error))?;
-        Ok(Json(GitBranchRenameResponse { name: new_name }))
+        if check_old != check_new && local_branch_exists(&repository, &check_new) {
+            return Err(conflict(
+                "already_exists",
+                format!("Branch {} already exists", check_new),
+            ));
+        }
+        Ok(())
     })
-    .await
+    .await?;
+    if old_name == new_name {
+        return Ok(Json(GitBranchRenameResponse { name: new_name }));
+    }
+    // `git branch -m` (unlike git2's rename) also rewrites HEAD of every linked worktree that
+    // has the branch checked out, so no worktree is left on a dangling branch.
+    let output = run_local(
+        &root,
+        git_args([
+            OsString::from("branch"),
+            "-m".into(),
+            "--".into(),
+            old_name.into(),
+            new_name.clone().into(),
+        ]),
+    )
+    .await?;
+    if !output.success {
+        let tail = output_tail(&output);
+        if tail.contains("already exists") {
+            return Err(conflict(
+                "already_exists",
+                format!("Branch {} already exists: {}", new_name, tail),
+            ));
+        }
+        return Err(internal_error(format!("git branch -m failed: {}", tail)));
+    }
+    Ok(Json(GitBranchRenameResponse { name: new_name }))
 }
 
 pub async fn handle_v1_git_branch_delete(
@@ -619,12 +676,7 @@ struct PullPlan {
 
 fn plan_pull(root: &Path) -> Result<PullPlan, HttpError> {
     let repository = open_repo(root)?;
-    if repository.state() != RepositoryState::Clean {
-        return Err(conflict(
-            "conflict",
-            "Finish or abort the in-progress operation before pulling",
-        ));
-    }
+    require_clean_state(&repository, "pulling")?;
     let branch = current_branch(&repository)
         .filter(|_| !repository.head_detached().unwrap_or(false))
         .ok_or_else(|| {
@@ -717,7 +769,9 @@ fn plan_push(
     set_upstream: bool,
 ) -> Result<PushPlan, HttpError> {
     let repository = open_repo(root)?;
-    let branch = match branch.filter(|branch| !branch.trim().is_empty()) {
+    let branch = branch.filter(|branch| !branch.trim().is_empty());
+    let explicit_branch = branch.is_some();
+    let branch = match branch {
         Some(branch) => branch,
         None => current_branch(&repository)
             .filter(|_| !repository.head_detached().unwrap_or(false))
@@ -742,6 +796,22 @@ fn plan_push(
         .branch_upstream_merge(&local_ref)
         .ok()
         .and_then(|buf| buf.as_str().map(ToString::to_string));
+    // The configured upstream remote reaches the CLI as an argument: validate it exactly like an
+    // explicit remote. "." (a local upstream) or an unknown/invalid name has no remote to push to.
+    let upstream_remote = match upstream_remote {
+        Some(name) if validate_remote_name(&repository, &name).is_ok() => Some(name),
+        Some(name) if !set_upstream && remote.as_ref().is_none_or(|remote| remote == &name) => {
+            return Err(conflict(
+                "no_upstream",
+                format!(
+                    "Branch {} tracks {:?}, which is not a pushable remote; push with set_upstream",
+                    branch, name
+                ),
+            ))
+        }
+        _ => None,
+    };
+    let explicit_target = remote.is_some();
     let remotes = remote_names(&repository);
     let (remote, destination) = match (remote, upstream_remote, upstream_merge) {
         (None, Some(upstream_remote), Some(merge)) if !set_upstream => (upstream_remote, merge),
@@ -798,6 +868,17 @@ fn plan_push(
         )));
     }
     let destination_short = destination.trim_start_matches("refs/heads/").to_string();
+    // push.default=simple: an implicit push to the upstream only proceeds when the upstream
+    // branch has the same name as the local one.
+    if !set_upstream && !explicit_target && !explicit_branch && destination_short != branch {
+        return Err(conflict(
+            "upstream_mismatch",
+            format!(
+                "Branch {} tracks {}/{}, whose name differs; specify the branch or push with set_upstream",
+                branch, remote, destination_short
+            ),
+        ));
+    }
     Ok(PushPlan {
         summary: format!("Pushed {} to {}/{}", branch, remote, destination_short),
         refspec: format!("{}:{}", local_ref, destination),
@@ -828,6 +909,7 @@ pub async fn handle_v1_git_push(
     if !output.success {
         let tail = output_tail(&output);
         if tail.contains("[rejected]")
+            || tail.contains("[remote rejected]")
             || tail.contains("non-fast-forward")
             || tail.contains("fetch first")
             || tail.contains("stale info")

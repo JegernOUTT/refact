@@ -140,7 +140,16 @@ where
 }
 
 fn slash_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    // Only Windows uses '\\' as a separator; elsewhere it is a legal file-name character and
+    // rewriting it would address a different file.
+    #[cfg(windows)]
+    {
+        path.to_string_lossy().replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_string_lossy().to_string()
+    }
 }
 
 fn skipped(path: &Path, reason: &str) -> SkippedPath {
@@ -346,7 +355,10 @@ fn commit_response(
 
 struct CommitPlan {
     paths: Vec<PathBuf>,
+    /// Paths absent from the index that the CLI route must `git add` first.
     untracked: Vec<PathBuf>,
+    /// Subset of `untracked` present in HEAD (a staged deletion such as `git rm --cached`).
+    untracked_in_head: Vec<PathBuf>,
     skipped: Vec<SkippedPath>,
 }
 
@@ -365,6 +377,7 @@ fn plan_commit_paths(
     let mut plan = CommitPlan {
         paths: Vec::new(),
         untracked: Vec::new(),
+        untracked_in_head: Vec::new(),
         skipped: Vec::new(),
     };
     for path in paths {
@@ -389,6 +402,9 @@ fn plan_commit_paths(
             Ok(Containment::File | Containment::Symlink) => {
                 if !in_index {
                     plan.untracked.push(path.clone());
+                    if in_head {
+                        plan.untracked_in_head.push(path.clone());
+                    }
                 }
                 plan.paths.push(path);
             }
@@ -562,8 +578,25 @@ async fn commit_with_cli(
         Err(error) => Some(cli_error(error)),
     };
     if let Some(failure) = failure {
-        if !untracked.is_empty() {
-            let _ = run_with_paths(root, &["reset", "-q"], &untracked).await;
+        // Restore each pre-added path's original index state exactly: all of them were absent
+        // from the index. `git reset` would re-add HEAD's entry for a staged deletion, so paths
+        // present in HEAD are removed from the index instead.
+        let in_head = paths_as_strings(&plan.untracked_in_head);
+        let not_in_head = untracked
+            .iter()
+            .filter(|path| !in_head.contains(path))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !in_head.is_empty() {
+            let _ = run_with_paths(
+                root,
+                &["rm", "--cached", "-q", "-f", "--ignore-unmatch"],
+                &in_head,
+            )
+            .await;
+        }
+        if !not_in_head.is_empty() {
+            let _ = run_with_paths(root, &["reset", "-q"], &not_in_head).await;
         }
         return Err(failure);
     }
@@ -598,6 +631,23 @@ async fn commit_in_progress_state(
     run_blocking(move || commit_response(&open_repo(&root)?, true, hooks, plan.skipped)).await
 }
 
+/// Merge/revert/cherry-pick/rebase must record the whole index (git refuses partial commits
+/// there). Bisect and other states keep `--only` semantics.
+fn operation_requires_full_commit(state: RepositoryState) -> bool {
+    matches!(
+        state,
+        RepositoryState::Merge
+            | RepositoryState::Revert
+            | RepositoryState::RevertSequence
+            | RepositoryState::CherryPick
+            | RepositoryState::CherryPickSequence
+            | RepositoryState::Rebase
+            | RepositoryState::RebaseInteractive
+            | RepositoryState::RebaseMerge
+            | RepositoryState::ApplyMailboxOrRebase
+    )
+}
+
 enum CommitRoute {
     Done(GitCommitV2Response),
     Cli { plan: CommitPlan, hooks: bool },
@@ -630,7 +680,7 @@ pub async fn handle_v1_git_commit_v2(
         let root = blocking_root;
         let repository = open_repo(&root)?;
         let hooks = commit_hooks_present(&repository, &root);
-        if repository.state() != RepositoryState::Clean {
+        if operation_requires_full_commit(repository.state()) {
             let index = repository
                 .index()
                 .map_err(git2_error("Failed to read index"))?;
@@ -708,6 +758,11 @@ fn classify_rollback(
     });
     let in_index = index.get_path(path, 0).is_some();
     if in_head {
+        // `git restore` uses checkout-force semantics: a HEAD file now replaced by a directory
+        // would have the whole subtree (untracked files included) removed. Never route it there.
+        if leaf == Containment::Directory {
+            return Err("directory");
+        }
         let status = repository
             .status_file(path)
             .unwrap_or(git2::Status::CURRENT);
@@ -868,6 +923,24 @@ fn tree_blob(
     }
 }
 
+/// A payload `file_payload` reports as binary with no content.
+fn unsupported_file_payload() -> (u64, Vec<u8>) {
+    (0, vec![0])
+}
+
+/// Opens without following a final symlink and without blocking on a FIFO swapped in after the
+/// type check; regular files ignore `O_NONBLOCK`.
+fn open_regular_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
+    options.open(path)
+}
+
 fn read_revision_file(
     root: &Path,
     path: &Path,
@@ -885,9 +958,22 @@ fn read_revision_file(
                 Ok(Some((bytes.len() as u64, bytes)))
             }
             Containment::File => {
-                let file = std::fs::File::open(root.join(path))
+                let absolute = root.join(path);
+                let metadata = std::fs::symlink_metadata(&absolute)
+                    .map_err(|error| internal_error(format!("Failed to stat file: {}", error)))?;
+                if !metadata.file_type().is_file() {
+                    // FIFOs, sockets and devices could block or stream forever: never open them.
+                    return Ok(Some(unsupported_file_payload()));
+                }
+                let file = open_regular_file(&absolute)
                     .map_err(|error| internal_error(format!("Failed to open file: {}", error)))?;
-                let size = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+                let metadata = file
+                    .metadata()
+                    .map_err(|error| internal_error(format!("Failed to stat file: {}", error)))?;
+                if !metadata.is_file() {
+                    return Ok(Some(unsupported_file_payload()));
+                }
+                let size = metadata.len();
                 let mut bytes = Vec::new();
                 file.take(MAX_FILE_BYTES as u64 + 1)
                     .read_to_end(&mut bytes)
@@ -1206,7 +1292,11 @@ mod tests {
         let repository = init_repo(dir.path());
         commit_all(
             &repository,
-            &[("tracked.txt", "head\n"), ("dir/inner.txt", "inner\n")],
+            &[
+                ("tracked.txt", "head\n"),
+                ("dir/inner.txt", "inner\n"),
+                ("swap", "head file\n"),
+            ],
             "base",
         );
         fs::write(dir.path().join("tracked.txt"), "staged edit\n").unwrap();
@@ -1251,7 +1341,16 @@ mod tests {
         let mut index = repository.index().unwrap();
         index.read(true).unwrap();
         index.add_path(Path::new("added.txt")).unwrap();
+        fs::write(dir.path().join("swap"), "staged swap\n").unwrap();
+        index.add_path(Path::new("swap")).unwrap();
         index.write().unwrap();
+        fs::remove_file(dir.path().join("swap")).unwrap();
+        fs::create_dir(dir.path().join("swap")).unwrap();
+        fs::write(dir.path().join(".git/info/exclude"), "*.secret\n").unwrap();
+        fs::write(dir.path().join("swap/precious.secret"), "ignored work\n").unwrap();
+        assert!(repository
+            .status_should_ignore(Path::new("swap/precious.secret"))
+            .unwrap());
 
         let (status, body) = send(
             &router,
@@ -1259,13 +1358,18 @@ mod tests {
             "/v1/git/rollback",
             Some(json!({
                 "root": root,
-                "paths": ["tracked.txt", "added.txt", "untracked.txt", "link/victim.txt", "dir", "dir/inner.txt"],
+                "paths": ["tracked.txt", "added.txt", "untracked.txt", "link/victim.txt", "dir", "dir/inner.txt", "swap"],
                 "delete_added_files": true,
                 "delete_untracked": true,
             })),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("swap/precious.secret")).ok(),
+            Some("ignored work\n".to_string()),
+            "HEAD file replaced by a directory must never reach git restore"
+        );
         assert_eq!(body["restored"], json!(["tracked.txt"]));
         assert_eq!(body["unstaged"], json!(["added.txt"]));
         assert_eq!(body["deleted"], json!(["added.txt", "untracked.txt"]));
@@ -1277,6 +1381,7 @@ mod tests {
                 {"path": "dir", "reason": "directory"},
                 {"path": "dir/inner.txt", "reason": "unchanged"},
                 {"path": "link/victim.txt", "reason": "symlink_parent"},
+                {"path": "swap", "reason": "directory"},
             ])
         );
         assert_eq!(fs::read_to_string(&victim).unwrap(), "outside\n");
@@ -1465,6 +1570,9 @@ mod tests {
         fs::write(root.join("both.txt"), "b1\n").unwrap();
         git(root, &["add", "both.txt"]);
         fs::write(root.join("both.txt"), "b2\n").unwrap();
+        fs::write(root.join("ghost.txt"), "staged then deleted\n").unwrap();
+        git(root, &["add", "ghost.txt"]);
+        fs::remove_file(root.join("ghost.txt")).unwrap();
         fs::create_dir_all(root.join("u")).unwrap();
         fs::write(root.join("u/x.txt"), "x\n").unwrap();
 
@@ -1509,6 +1617,7 @@ mod tests {
             legacy("staged"),
             pairs(&[
                 ("both.txt", "ADDED"),
+                ("ghost.txt", "ADDED"),
                 ("old.txt", "DELETED"),
                 ("renamed.txt", "ADDED"),
                 ("staged.txt", "MODIFIED"),
@@ -1518,6 +1627,7 @@ mod tests {
             legacy("unstaged"),
             pairs(&[
                 ("both.txt", "MODIFIED"),
+                ("ghost.txt", "DELETED"),
                 ("gone.txt", "DELETED"),
                 ("u/x.txt", "ADDED")
             ])
@@ -1545,6 +1655,7 @@ mod tests {
             Value::Array(changes),
             json!([
                 change("both.txt", None, "ADDED", true, true),
+                change("ghost.txt", None, "ADDED", true, true),
                 change("gone.txt", None, "DELETED", false, true),
                 change("renamed.txt", Some("old.txt"), "RENAMED", true, false),
                 change("staged.txt", None, "MODIFIED", true, false),

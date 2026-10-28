@@ -720,12 +720,14 @@ fn changed_files_for_commit(
     let max_files = options
         .max_files_per_commit
         .min(MAX_GIT_HISTORY_FILES_PER_COMMIT);
-    let line_counts = diff_line_counts(&diff);
+    // Line counting generates the patch text; do it only for the deltas that survive the cap
+    // so a commit touching many thousands of files stays bounded.
     let mut changes = diff
         .deltas()
-        .filter_map(|delta| diff_delta_to_change(delta, &line_counts))
+        .enumerate()
+        .filter_map(|(index, delta)| diff_delta_to_change(delta).map(|change| (index, change)))
         .collect::<Vec<_>>();
-    changes.sort_by(|a, b| {
+    changes.sort_by(|(_, a), (_, b)| {
         a.path
             .cmp(&b.path)
             .then_with(|| a.old_path.cmp(&b.old_path))
@@ -733,45 +735,29 @@ fn changed_files_for_commit(
     });
     let file_cap_hit = changes.len() > max_files;
     changes.truncate(max_files);
+    let changes = changes
+        .into_iter()
+        .map(|(index, mut change)| {
+            let counted = git2::Patch::from_diff(&diff, index)
+                .ok()
+                .flatten()
+                .and_then(|patch| patch.line_stats().ok())
+                .map(|(_, additions, deletions)| (additions, deletions))
+                .filter(|(additions, deletions)| *additions > 0 || *deletions > 0);
+            let (additions, deletions) = counted.unwrap_or_else(|| {
+                diff.get_delta(index)
+                    .map(|delta| delta_line_counts(&delta))
+                    .unwrap_or((0, 0))
+            });
+            change.additions = additions;
+            change.deletions = deletions;
+            change
+        })
+        .collect::<Vec<_>>();
     Ok((changes, file_cap_hit))
 }
 
-fn diff_line_counts(diff: &git2::Diff) -> BTreeMap<String, (usize, usize)> {
-    let mut counts = BTreeMap::<String, (usize, usize)>::new();
-    let mut line_cb = |delta: git2::DiffDelta<'_>,
-                       _hunk: Option<git2::DiffHunk<'_>>,
-                       line: git2::DiffLine<'_>| {
-        let Some(path) = diff_delta_path_for_counts(delta) else {
-            return true;
-        };
-        let entry = counts.entry(path).or_insert((0, 0));
-        match line.origin() {
-            '+' => entry.0 = entry.0.saturating_add(1),
-            '-' => entry.1 = entry.1.saturating_add(1),
-            _ => {}
-        }
-        true
-    };
-    if diff
-        .foreach(&mut |_, _| true, None, None, Some(&mut line_cb))
-        .is_err()
-    {
-        return BTreeMap::new();
-    }
-    counts
-}
-
-fn diff_delta_path_for_counts(delta: git2::DiffDelta<'_>) -> Option<String> {
-    match delta.status() {
-        git2::Delta::Deleted => diff_path(delta.old_file().path()),
-        _ => diff_path(delta.new_file().path()).or_else(|| diff_path(delta.old_file().path())),
-    }
-}
-
-fn diff_delta_to_change(
-    delta: git2::DiffDelta<'_>,
-    line_counts: &BTreeMap<String, (usize, usize)>,
-) -> Option<GitCommitFileChange> {
+fn diff_delta_to_change(delta: git2::DiffDelta<'_>) -> Option<GitCommitFileChange> {
     let status = match delta.status() {
         git2::Delta::Added | git2::Delta::Copied => GitFileChangeStatus::Added,
         git2::Delta::Deleted => GitFileChangeStatus::Deleted,
@@ -789,17 +775,12 @@ fn diff_delta_to_change(
     } else {
         None
     };
-    let (additions, deletions) = line_counts
-        .get(&path)
-        .copied()
-        .filter(|(additions, deletions)| *additions > 0 || *deletions > 0)
-        .unwrap_or_else(|| delta_line_counts(&delta));
     Some(GitCommitFileChange {
         path,
         old_path,
         status,
-        additions,
-        deletions,
+        additions: 0,
+        deletions: 0,
         binary: delta.old_file().is_binary() || delta.new_file().is_binary(),
     })
 }
