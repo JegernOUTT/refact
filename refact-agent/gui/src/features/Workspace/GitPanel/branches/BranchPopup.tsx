@@ -12,6 +12,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import {
+  useCallback,
   useEffect,
   useId,
   useMemo,
@@ -21,6 +22,8 @@ import {
 } from "react";
 
 import { Icon, Popover } from "../../../../components/ui";
+import { useAppDispatch } from "../../../../hooks";
+import { openGitLog } from "../gitPanelSlice";
 import type { BranchRef } from "../log/branchesTreeModel";
 import {
   buildPopupRows,
@@ -29,6 +32,7 @@ import {
   type PopupActionIcon,
   type PopupRow,
 } from "./branchPopupModel";
+import type { GitMenuAction } from "./menuActions";
 import type { GitActionsController } from "./useGitActions";
 import styles from "./Branches.module.css";
 
@@ -156,11 +160,27 @@ type BodyProps = {
 };
 
 function BranchPopupBody({ controller, onClose, onCommit }: BodyProps) {
+  const dispatch = useAppDispatch();
   const listId = useId();
   const [query, setQuery] = useState("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
-  const { branchActions, branches, remotes } = controller;
+  const { branches, remotes, root } = controller;
+  const controllerBranchActions = controller.branchActions;
+  const branchActions = useCallback(
+    (ref: BranchRef): GitMenuAction[] => [
+      ...controllerBranchActions(ref),
+      {
+        id: "show-log",
+        label: "Show Log",
+        separatorBefore: true,
+        onSelect: () => {
+          void dispatch(openGitLog({ root, ref: ref.name }));
+        },
+      },
+    ],
+    [controllerBranchActions, dispatch, root],
+  );
   const actions = useMemo(
     () => popupActions(controller, onCommit),
     [controller, onCommit],

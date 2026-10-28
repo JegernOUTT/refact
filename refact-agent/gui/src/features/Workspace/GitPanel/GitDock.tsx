@@ -62,6 +62,7 @@ import {
 import { gitErrorText } from "./gitErrors";
 import {
   openGitDiff,
+  openGitLog,
   selectActiveGitRoot,
   selectGitRootView,
   setActiveGitRoot,
@@ -251,6 +252,9 @@ function CommitToolWindow({
   const jumpToSource = (entry: ChangesTreeEntry) =>
     openFile({ path: entry.absolutePath, resolved: true });
 
+  const showHistory = (path?: string) =>
+    dispatch(openGitLog(path ? { root, path } : { root }));
+
   const runStage = async (entries: ChangesTreeEntry[], verb: string) => {
     setFeedback(null);
     try {
@@ -376,6 +380,14 @@ function CommitToolWindow({
           <ContextMenu.Item onSelect={() => setExpanded(node.id, !expanded)}>
             {expanded ? "Collapse" : "Expand"}
           </ContextMenu.Item>
+          {node.type === "dir" ? (
+            <>
+              <ContextMenu.Separator />
+              <ContextMenu.Item onSelect={() => showHistory(node.path)}>
+                Show History
+              </ContextMenu.Item>
+            </>
+          ) : null}
         </>
       );
     }
@@ -394,6 +406,11 @@ function CommitToolWindow({
         >
           Jump to Source
         </ContextMenu.Item>
+        {entry.kind === "change" || entry.kind === "untracked" ? (
+          <ContextMenu.Item onSelect={() => showHistory(entry.path)}>
+            Show History
+          </ContextMenu.Item>
+        ) : null}
         <ContextMenu.Separator />
         {entry.kind === "change" ? (
           <ContextMenu.Item onSelect={() => openDialog("rollback", [entry])}>
@@ -451,6 +468,7 @@ function CommitToolWindow({
         onShowDiff={() => {
           if (selectedFile) showDiff(selectedFile);
         }}
+        onShowLog={() => showHistory()}
         onToggleGroupByDirectory={() =>
           updateView({ groupByDirectory: !view.groupByDirectory })
         }

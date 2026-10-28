@@ -148,6 +148,10 @@ export function CommitPanel({
     }
   };
 
+  const summary = `${includedCount} of ${totalCount} ${
+    totalCount === 1 ? "file" : "files"
+  } included`;
+
   return (
     <section aria-label="Commit" className={styles.commitPanel}>
       <div className={styles.commitOptions}>
@@ -212,9 +216,11 @@ export function CommitPanel({
         </div>
       ) : null}
       <div className={styles.commitFooter}>
-        <span className={styles.mutedText}>
-          {includedCount} of {totalCount} {totalCount === 1 ? "file" : "files"}{" "}
-          included
+        <span
+          className={`${styles.mutedText} ${styles.commitSummary}`}
+          title={summary}
+        >
+          {summary}
         </span>
         <span className={styles.commitButtons}>
           <Button

@@ -10,9 +10,11 @@ import {
 import { GitFeedback } from "./branches/GitFeedback";
 import { useGitActions } from "./branches/useGitActions";
 import {
+  consumeGitLogRequest,
   selectActiveGitRoot,
   selectGitDiffTargetForChat,
   selectGitLogLayout,
+  selectGitLogRequest,
   setActiveGitRoot,
   setGitLogLayout,
   type GitWindowTab,
@@ -63,6 +65,9 @@ export function GitPanel() {
     selectGitDiffTargetForChat(state, chatId),
   );
   const { tab } = useAppSelector(selectGitLogLayout);
+  const logRequest = useAppSelector((state) =>
+    selectGitLogRequest(state, chatId),
+  );
   const statusQuery = useGetGitStatusQuery(contextRoots);
   const roots = useMemo(
     () => statusQuery.data?.roots ?? [],
@@ -145,6 +150,10 @@ export function GitPanel() {
                   branchActions={actions.branchActions}
                   commitActions={actions.commitActions}
                   key={`log-${resolvedRoot}`}
+                  onRequestApplied={(nonce) =>
+                    dispatch(consumeGitLogRequest({ chatId, nonce }))
+                  }
+                  request={logRequest}
                   root={resolvedRoot}
                 />
               </div>

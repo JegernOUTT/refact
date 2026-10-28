@@ -1,6 +1,7 @@
 import classNames from "classnames";
 import {
   FileDiff,
+  GitBranch,
   FileText,
   Layers,
   Menu as MenuIcon,
@@ -883,6 +884,8 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
                       <Icon icon={FileText} size="sm" tone="muted" />
                     ) : tab.kind === "gitdiff" ? (
                       <Icon icon={FileDiff} size="sm" tone="muted" />
+                    ) : tab.kind === "git" ? (
+                      <Icon icon={GitBranch} size="sm" tone="muted" />
                     ) : tab.kind === "design" ? (
                       <Icon icon={Palette} size="sm" tone="muted" />
                     ) : (

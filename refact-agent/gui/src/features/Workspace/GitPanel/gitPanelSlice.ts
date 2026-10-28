@@ -1,6 +1,6 @@
 import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
 
-import { makeGitDiffSurfaceKey } from "../surfaceKey";
+import { makeGitDiffSurfaceKey, type SurfaceKey } from "../surfaceKey";
 import {
   bindSurfaceToChat,
   openTab,
@@ -50,9 +50,24 @@ export type GitPanelContextState = {
   activeRoot: string;
   selectedFile: GitDiffTarget | null;
   roots?: Record<string, GitRootViewState | undefined>;
+  /** One-shot Git Log filter request; GitLog applies it once per nonce. */
+  logRequest?: GitLogRequestState | null;
 };
 
 export type GitWindowTab = "log" | "worktrees";
+
+export type GitLogRequestState = {
+  root?: string;
+  path?: string;
+  ref?: string;
+  nonce: number;
+};
+
+export type OpenGitLogOptions = {
+  root?: string;
+  path?: string;
+  ref?: string;
+};
 
 export type GitLogLayout = {
   tab: GitWindowTab;
@@ -65,6 +80,8 @@ export type GitPanelState = {
   /** Optional so older persisted/preloaded states stay valid. */
   diffViewer?: GitDiffViewerPrefs;
   logLayout?: GitLogLayout;
+  /** Monotonic counter for log filter request nonces. */
+  logRequestSeq?: number;
 };
 
 export const DEFAULT_GIT_LOG_LAYOUT: GitLogLayout = {
@@ -115,6 +132,10 @@ type RootViewPayload = {
   patch: Partial<GitRootViewState>;
 };
 
+type GitLogRequestPayload = OpenGitLogOptions & { chatId: string | null };
+
+type ConsumeGitLogRequestPayload = { chatId: string | null; nonce: number };
+
 const ensureContext = (
   state: GitPanelState,
   chatId: string | null,
@@ -143,6 +164,7 @@ export const gitPanelSlice = createSlice({
         activeRoot: action.payload.root,
         selectedFile: null,
         roots: context?.roots,
+        logRequest: context?.logRequest,
       };
     },
     selectGitDiffTarget: (
@@ -156,6 +178,7 @@ export const gitPanelSlice = createSlice({
         activeRoot: action.payload.selection?.root ?? context?.activeRoot ?? "",
         selectedFile: action.payload.selection,
         roots: context?.roots,
+        logRequest: context?.logRequest,
       };
     },
     updateGitRootView: (state, action: PayloadAction<RootViewPayload>) => {
@@ -185,10 +208,35 @@ export const gitPanelSlice = createSlice({
         ...action.payload,
       };
     },
+    requestGitLogFilter: (
+      state,
+      action: PayloadAction<GitLogRequestPayload>,
+    ) => {
+      const { chatId, root, path, ref } = action.payload;
+      const context = ensureContext(state, chatId);
+      const nonce = (state.logRequestSeq ?? 0) + 1;
+      state.logRequestSeq = nonce;
+      context.logRequest = {
+        ...(root ? { root } : {}),
+        ...(path ? { path } : {}),
+        ...(ref ? { ref } : {}),
+        nonce,
+      };
+    },
+    consumeGitLogRequest: (
+      state,
+      action: PayloadAction<ConsumeGitLogRequestPayload>,
+    ) => {
+      const context = state.contexts[gitPanelContextKey(action.payload.chatId)];
+      if (context?.logRequest?.nonce !== action.payload.nonce) return;
+      context.logRequest = null;
+    },
   },
 });
 
 export const {
+  consumeGitLogRequest,
+  requestGitLogFilter,
   selectGitDiffTarget,
   setActiveGitRoot,
   setGitDiffViewerPrefs,
@@ -201,7 +249,10 @@ type GitPanelDispatch = (
     | ReturnType<typeof openTab>
     | ReturnType<typeof bindSurfaceToChat>
     | ReturnType<typeof selectGitDiffTarget>
-    | ReturnType<typeof setDockOpen>,
+    | ReturnType<typeof setDockOpen>
+    | ReturnType<typeof setActiveGitRoot>
+    | ReturnType<typeof setGitLogLayout>
+    | ReturnType<typeof requestGitLogFilter>,
 ) => void;
 
 type GitPanelThunkState = {
@@ -252,12 +303,11 @@ export function commitDiffDescriptor(
   };
 }
 
-function openDiffSurface(
-  descriptor: GitDiffDescriptor,
+function openGitSurface(
+  surfaceKey: SurfaceKey,
   dispatch: GitPanelDispatch,
   chatId: string | null,
 ) {
-  const surfaceKey = makeGitDiffSurfaceKey(descriptor);
   dispatch(openTab(surfaceKey));
   if (chatId) dispatch(bindSurfaceToChat({ surfaceKey, chatId }));
   if (
@@ -268,6 +318,34 @@ function openDiffSurface(
   }
   return surfaceKey;
 }
+
+function openDiffSurface(
+  descriptor: GitDiffDescriptor,
+  dispatch: GitPanelDispatch,
+  chatId: string | null,
+) {
+  return openGitSurface(makeGitDiffSurfaceKey(descriptor), dispatch, chatId);
+}
+
+export const GIT_LOG_SURFACE_KEY: SurfaceKey = "git:main";
+
+/**
+ * Opens the Git tool window on its Log tab. A `path` or `ref` becomes a
+ * one-shot filter request the mounted GitLog applies (once per nonce).
+ */
+export const openGitLog =
+  (options: OpenGitLogOptions = {}) =>
+  (dispatch: GitPanelDispatch, getState: () => GitPanelThunkState) => {
+    const chatId = selectFocusedWorkspaceChatId(getState());
+    if (options.root) {
+      dispatch(setActiveGitRoot({ chatId, root: options.root }));
+    }
+    dispatch(setGitLogLayout({ tab: "log" }));
+    if (Boolean(options.path) || Boolean(options.ref)) {
+      dispatch(requestGitLogFilter({ chatId, ...options }));
+    }
+    return openGitSurface(GIT_LOG_SURFACE_KEY, dispatch, chatId);
+  };
 
 export const openGitDiff =
   (target: GitDiffTarget) =>
@@ -311,6 +389,12 @@ export const selectGitRootView = (
   root: string,
 ): GitRootViewState =>
   selectGitPanelContext(state, chatId).roots?.[root] ?? DEFAULT_GIT_ROOT_VIEW;
+
+export const selectGitLogRequest = (
+  state: GitPanelRootState,
+  chatId: string | null,
+): GitLogRequestState | null =>
+  selectGitPanelContext(state, chatId).logRequest ?? null;
 
 export const selectGitDiffViewerPrefs = (
   state: GitPanelRootState,

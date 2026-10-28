@@ -4,14 +4,22 @@ import type { CSSProperties } from "react";
 import { useAppDispatch, useAppSelector } from "../../../../hooks";
 import { useGetGitBranchesQuery } from "../../../../services/refact/gitRead";
 import { gitErrorText } from "../gitErrors";
-import { selectGitLogLayout, setGitLogLayout } from "../gitPanelSlice";
+import {
+  selectGitLogLayout,
+  setGitLogLayout,
+  type GitLogRequestState,
+} from "../gitPanelSlice";
 import type { GitCommitLogEntry } from "../../../../services/refact/gitRead";
 import type { GitMenuAction } from "../branches/menuActions";
 import { BranchesPane, type BranchActionsProvider } from "./BranchesPane";
 import { allBranchRefs, buildBranchTree } from "./branchesTreeModel";
 import { CommitDetailsPane } from "./CommitDetailsPane";
 import { CommitsPane } from "./CommitsPane";
-import { DEFAULT_LOG_FILTERS, type LogFilters } from "./logFilters";
+import {
+  DEFAULT_LOG_FILTERS,
+  filtersForRequest,
+  type LogFilters,
+} from "./logFilters";
 import { PaneSplitter } from "./PaneSplitter";
 import { useCommitLog } from "./useCommitLog";
 import styles from "./GitLog.module.css";
@@ -25,6 +33,9 @@ export type GitLogProps = {
   root: string;
   branchActions?: BranchActionsProvider;
   commitActions?: (commit: GitCommitLogEntry) => GitMenuAction[];
+  /** One-shot filter request (Show History / Show Log); applied once per nonce. */
+  request?: GitLogRequestState | null;
+  onRequestApplied?: (nonce: number) => void;
 };
 
 function useRefetchOnFocus(refetch: () => void) {
@@ -37,11 +48,34 @@ function useRefetchOnFocus(refetch: () => void) {
   }, []);
 }
 
-export function GitLog({ root, branchActions, commitActions }: GitLogProps) {
+export function GitLog({
+  root,
+  branchActions,
+  commitActions,
+  request,
+  onRequestApplied,
+}: GitLogProps) {
   const dispatch = useAppDispatch();
   const layout = useAppSelector(selectGitLogLayout);
   const containerRef = useRef<HTMLDivElement>(null);
-  const [filters, setFilters] = useState<LogFilters>(DEFAULT_LOG_FILTERS);
+  const pendingRequest =
+    request && (!request.root || request.root === root) ? request : null;
+  const appliedNonce = useRef<number | null>(pendingRequest?.nonce ?? null);
+  const [filters, setFilters] = useState<LogFilters>(() =>
+    pendingRequest ? filtersForRequest(pendingRequest) : DEFAULT_LOG_FILTERS,
+  );
+  const appliedRef = useRef(onRequestApplied);
+  appliedRef.current = onRequestApplied;
+
+  useEffect(() => {
+    if (!pendingRequest) return;
+    if (appliedNonce.current !== pendingRequest.nonce) {
+      appliedNonce.current = pendingRequest.nonce;
+      setFilters(filtersForRequest(pendingRequest));
+    }
+    appliedRef.current?.(pendingRequest.nonce);
+  }, [pendingRequest]);
+
   const [selectedOid, setSelectedOid] = useState<string | null>(null);
   const branches = useGetGitBranchesQuery(root);
   const log = useCommitLog(root, filters);

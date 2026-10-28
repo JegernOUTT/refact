@@ -2,6 +2,7 @@ import { useEffect } from "react";
 
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { selectCapabilities, selectHost } from "../Config/configSlice";
+import { openGitLog } from "./GitPanel/gitPanelSlice";
 import {
   setTerminalWorkbenchOpen,
   toggleTerminalWorkbench,
@@ -64,6 +65,15 @@ export function useWorkspaceShortcuts() {
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (
+        isGitLogShortcut(event) &&
+        gitAvailable &&
+        !ownsWorkspaceShortcut(event.target)
+      ) {
+        event.preventDefault();
+        void dispatch(openGitLog());
+        return;
+      }
+      if (
         event.defaultPrevented ||
         event.repeat ||
         event.isComposing ||
@@ -114,4 +124,18 @@ export function useWorkspaceShortcuts() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [capabilities, dispatch, dock.open, focusedChatId, host, panelsForced]);
+}
+
+/** Alt+9 (JetBrains "Git" tool window). Uses `code` so macOS Option works. */
+function isGitLogShortcut(event: KeyboardEvent): boolean {
+  return (
+    !event.defaultPrevented &&
+    !event.repeat &&
+    !event.isComposing &&
+    event.altKey &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    !event.shiftKey &&
+    (event.code === "Digit9" || event.key === "9")
+  );
 }

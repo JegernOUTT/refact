@@ -83,12 +83,19 @@
   padding: var(--rf-space-2) var(--rf-space-3) 0;
 }
 
+.toolbarHost {
+  flex: 0 0 auto;
+  min-width: 0;
+  container-type: inline-size;
+}
+
 .toolbar {
   display: flex;
   flex: 0 0 auto;
   min-width: 0;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow: hidden;
   gap: var(--rf-space-2xs);
   padding: var(--rf-space-1) var(--rf-space-2);
   border-bottom: var(--rf-hairline) solid var(--rf-border);
@@ -105,6 +112,37 @@
 
 .toolbarSpacer {
   flex: 1 1 auto;
+}
+
+.toolbarViewActions,
+.toolbarNavActions {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: var(--rf-space-2xs);
+}
+
+.toolbarOverflow {
+  display: none;
+  flex: 0 0 auto;
+}
+
+/* Narrow docks: view actions move into the "More actions" menu so the
+   remote actions stay on the same row. */
+@container (max-width: 359px) {
+  .toolbarViewActions {
+    display: none;
+  }
+
+  .toolbarOverflow {
+    display: inline-flex;
+  }
+}
+
+@container (max-width: 289px) {
+  .toolbarNavActions {
+    display: none;
+  }
 }
 
 .toolbarSeparator {
@@ -249,8 +287,7 @@
   border-top: var(--rf-hairline) solid var(--rf-border);
 }
 
-.commitOptions,
-.commitFooter {
+.commitOptions {
   display: flex;
   min-width: 0;
   align-items: center;
@@ -258,10 +295,31 @@
   gap: var(--rf-space-2);
 }
 
-.commitButtons {
-  display: inline-flex;
-  flex: 0 0 auto;
+.commitFooter {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: stretch;
   gap: var(--rf-space-1);
+}
+
+.commitSummary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.commitButtons {
+  display: flex;
+  min-width: 0;
+  justify-content: flex-end;
+  gap: var(--rf-space-1);
+}
+
+.commitButtons > * {
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .commitMessage {
