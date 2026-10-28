@@ -1,86 +1,24 @@
 .root {
-  width: 100%;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.fullReport {
-  composes: scrollbarThin from "../shared/scrollbar.module.css";
-  min-width: 0;
-  max-height: var(--rf-overlay-popover-max);
-  overflow-y: auto;
-}
-
-.header,
-.verificationItem,
-.followupCard {
-  padding: var(--rf-space-2) 0;
-  border-bottom: var(--rf-hairline) solid var(--rf-border);
-}
-
-.header,
-.followupHeader {
-  display: flex;
-  align-items: center;
-  gap: var(--rf-space-2);
+  display: grid;
+  gap: var(--rf-space-3);
   min-width: 0;
 }
 
-.verificationHeader {
-  display: flex;
-  align-items: center;
-  gap: var(--rf-space-2);
+.markdown {
   min-width: 0;
-}
-
-.header,
-.followupHeader {
-  flex-wrap: wrap;
-}
-
-.header {
-  justify-content: space-between;
-}
-
-.title,
-.verificationHeader code {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.title {
   color: var(--rf-color-fg);
-  font-size: var(--rf-text-3);
-  font-weight: var(--rf-weight-semibold);
+  overflow-wrap: anywhere;
 }
 
-.section,
-.details {
-  margin-top: var(--rf-space-3);
-}
-
-.sectionTitle,
-.collapsibleTitle {
-  color: var(--rf-color-muted);
-  font-size: var(--rf-text-2);
-  font-weight: var(--rf-weight-semibold);
+.section {
+  display: grid;
+  gap: var(--rf-space-1);
+  min-width: 0;
 }
 
 .sectionTitle {
-  margin-bottom: var(--rf-space-1);
-}
-
-.markdown,
-.legacy {
-  padding: var(--rf-space-2) 0;
-  color: var(--rf-color-fg);
-}
-
-.none {
+  margin: 0;
   color: var(--rf-color-muted);
-  font-size: var(--rf-text-2);
 }
 
 .list {
@@ -89,27 +27,38 @@
   color: var(--rf-color-fg);
 }
 
+.verificationItem,
+.followupCard {
+  display: grid;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+
 .verificationHeader {
-  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
 }
 
 .verificationHeader code {
-  font-family: var(--rf-font-mono);
-  font-size: var(--rf-text-2);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .exitCode,
 .followupInstructions {
   color: var(--rf-color-muted);
-  font-size: var(--rf-text-2);
 }
 
 .followupTitle {
   color: var(--rf-color-fg);
-  font-size: var(--rf-text-2);
-  font-weight: var(--rf-weight-semibold);
 }
 
 .followupInstructions {
-  margin: var(--rf-space-2) 0 0;
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }

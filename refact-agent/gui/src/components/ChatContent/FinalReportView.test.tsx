@@ -1,14 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { within } from "@testing-library/react";
 import {
   createDefaultChatState,
   fireEvent,
   render,
   screen,
 } from "../../utils/test-utils";
-import { FinalReportView } from "./FinalReportView";
+import { FinalReportTool, FinalReportView } from "./FinalReportView";
 import { finalReportPresentation } from "./finalReportJson";
-import { ToolContent } from "./ToolsContent";
 import type {
   ChatMessages,
   ToolCall,
@@ -87,97 +85,78 @@ function renderFinalReportTool(content: string) {
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
   if (!runtime) throw new Error("missing test thread");
   runtime.thread.messages = [makeToolMessage(content)] as ChatMessages;
-  return render(<ToolContent toolCalls={[makeToolCall()]} />, {
-    preloadedState: { chat },
-  });
+  return render(
+    <FinalReportTool
+      content={content}
+      hasResult
+      rawContent={content}
+      toolCall={makeToolCall()}
+    />,
+    { preloadedState: { chat } },
+  );
 }
 
 describe("FinalReportView", () => {
-  it("renders structured payload sections", () => {
-    render(<FinalReportView content={structuredPayload} title="Card T-1" />);
-    expect(screen.getByText("Card T-1")).toBeInTheDocument();
-    expect(screen.getByText("Reported success")).toBeInTheDocument();
-    expect(screen.getByText("structured")).toBeInTheDocument();
-    expect(
-      screen.getByText("src/components/ChatContent/FinalReportView.tsx"),
-    ).toBeInTheDocument();
+  it("renders the structured payload as sections", () => {
+    render(<FinalReportView content={structuredPayload} />);
+    expect(screen.getByTestId("final-report-view")).toBeInTheDocument();
+    expect(screen.getByText("structured").tagName).toBe("STRONG");
     expect(screen.getByText("FinalReportView.test.tsx")).toBeInTheDocument();
     expect(screen.getByText("Followup cards")).toBeInTheDocument();
-    expect(screen.getByText("Add create-card actions")).toBeInTheDocument();
+    expect(
+      screen.getByText("Add create-card actions", { exact: false }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Renderer only handles the current structured schema."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Legacy markdown remains available."),
+    ).toBeInTheDocument();
   });
 
   it("does not render raw scripts or inline image handlers from summary markdown", () => {
     const { container } = render(
       <FinalReportView content={unsafeStructuredPayload} />,
     );
-
     expect(container.querySelector("script")).not.toBeInTheDocument();
     expect(container.querySelector("img[onerror]")).not.toBeInTheDocument();
   });
 
-  it("shows verification pass and fail states", () => {
+  it("shows verification commands with their output tails", () => {
     render(<FinalReportView content={structuredPayload} />);
-    expect(screen.getByText("Reported success")).toBeInTheDocument();
-    expect(screen.getByText("1/2 checks reported passed")).toBeInTheDocument();
     expect(
       screen.getByText("npm run test -- FinalReportView --run"),
     ).toBeInTheDocument();
     expect(screen.getByText("npm run lint")).toBeInTheDocument();
+    expect(screen.getByText("lint failed")).toBeInTheDocument();
   });
 
-  it("renders legacy string payload without error", () => {
-    render(<FinalReportView content="Legacy report\n\nStill readable." />);
-    expect(screen.getByText(/Legacy report/)).toBeInTheDocument();
+  it("renders a legacy string payload as markdown", () => {
+    render(<FinalReportView content={"# Legacy report\n\nStill readable."} />);
+    expect(
+      screen.getByRole("heading", { name: "Legacy report" }),
+    ).toBeInTheDocument();
     expect(screen.getByText(/Still readable/)).toBeInTheDocument();
   });
 
-  it("renders minimal structured payload", () => {
-    render(
-      <FinalReportView
-        content={JSON.stringify({ summary: "Minimal report", success: true })}
-      />,
-    );
-
-    expect(screen.getByText("Minimal report")).toBeInTheDocument();
-    expect(screen.getByText("Reported success")).toBeInTheDocument();
-    expect(screen.getByText("No verification evidence")).toBeInTheDocument();
-    expect(screen.getByText("Files changed")).toBeInTheDocument();
-    expect(screen.getByText("Tests added or updated")).toBeInTheDocument();
-    expect(screen.getByText("Verification")).toBeInTheDocument();
-    expect(screen.getByText("Followup cards")).toBeInTheDocument();
-    expect(screen.getByText("Risks")).toBeInTheDocument();
-    expect(screen.getByText("Assumptions")).toBeInTheDocument();
-    expect(screen.getAllByText("None")).toHaveLength(6);
-  });
-
-  it("renders null optional fields as empty sections", () => {
+  it("omits empty optional sections", () => {
     render(
       <FinalReportView
         content={JSON.stringify({
           summary: "Null optional fields report",
           success: false,
           files_changed: null,
-          tests_added_or_updated: null,
           verification: null,
-          followup_cards: null,
           risks: null,
-          assumptions: null,
         })}
       />,
     );
-
     expect(screen.getByText("Null optional fields report")).toBeInTheDocument();
-    expect(screen.getByText("Reported failure")).toBeInTheDocument();
-    expect(screen.getByText("Files changed")).toBeInTheDocument();
-    expect(screen.getByText("Tests added or updated")).toBeInTheDocument();
-    expect(screen.getByText("Verification")).toBeInTheDocument();
-    expect(screen.getByText("Followup cards")).toBeInTheDocument();
-    expect(screen.getByText("Risks")).toBeInTheDocument();
-    expect(screen.getByText("Assumptions")).toBeInTheDocument();
-    expect(screen.getAllByText("None")).toHaveLength(6);
+    expect(screen.queryByText("Verification")).toBeNull();
+    expect(screen.queryByText("Risks")).toBeNull();
   });
 
-  it("renders followup cards read-only", () => {
+  it("renders full followup instructions inside the clamp", () => {
     const instructions = `Keep every instruction ${"x".repeat(
       9000,
     )}FOLLOWUP_TAIL`;
@@ -192,132 +171,103 @@ describe("FinalReportView", () => {
         })}
       />,
     );
-    expect(screen.getByText("Add create-card actions")).toBeInTheDocument();
-    expect(screen.getByText("P2")).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: /create/i }),
-    ).not.toBeInTheDocument();
-    expect(screen.queryByText("+")).not.toBeInTheDocument();
-    expect(container.textContent).not.toContain("FOLLOWUP_TAIL");
-    fireEvent.click(screen.getByRole("button", { name: "Full instructions" }));
-    const content = screen.getByLabelText(
-      "Instructions for Add create-card actions content",
+    expect(screen.getByTestId("transcript-clamp")).toBeInTheDocument();
+    expect(container.textContent).toContain("FOLLOWUP_TAIL");
+    expect(screen.queryByRole("button", { name: /create/i })).toBeNull();
+  });
+});
+
+describe("FinalReportTool", () => {
+  it("renders agent_finish as one Report item with summary target and verification meta", () => {
+    const { container } = renderFinalReportTool(structuredPayload);
+    expect(screen.getByTestId("final-report-tool")).toHaveAttribute(
+      "data-transcript-item",
+      "true",
     );
-    const next = within(
-      screen.getByLabelText("Instructions for Add create-card actions pages"),
-    ).getByRole("button", { name: "Next section" });
-    fireEvent.click(next);
-    fireEvent.click(next);
-    expect(content).toHaveTextContent("FOLLOWUP_TAIL");
-    expect(next).toBeDisabled();
-  });
-
-  it("keeps verification output tails expandable", () => {
-    const { container } = render(
-      <FinalReportView content={structuredPayload} />,
+    expect(screen.getByTestId("transcript-verb")).toHaveTextContent("Report");
+    expect(screen.getByTestId("transcript-target")).toHaveTextContent(
+      "Implemented **structured** final report rendering.",
     );
-    const toggle = screen.getByRole("button", {
-      name: /npm run test -- FinalReportView --run/u,
-    });
-
-    expect(container.querySelector("details")).not.toBeInTheDocument();
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByText("test passed")).not.toBeInTheDocument();
-
-    fireEvent.click(toggle);
-    expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByText("test passed")).toBeInTheDocument();
-
-    fireEvent.click(toggle);
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
-  });
-
-  it("renders risks and assumptions as animated disclosure buttons", () => {
-    render(<FinalReportView content={structuredPayload} />);
-
-    const risks = screen.getByRole("button", { name: /Risks \(1\)/u });
-    const assumptions = screen.getByRole("button", {
-      name: /Assumptions \(1\)/u,
-    });
-
-    expect(risks).toHaveAttribute("aria-expanded", "false");
-    expect(assumptions).toHaveAttribute("aria-expanded", "false");
-
-    fireEvent.click(risks);
-    expect(risks).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
+      "1/2 checks reported passed",
+    );
     expect(
-      screen.getByText("Renderer only handles the current structured schema."),
-    ).toBeInTheDocument();
+      container.querySelectorAll('[data-transcript-item="true"]'),
+    ).toHaveLength(1);
+    expect(container.textContent).not.toContain("Technical details");
   });
 
-  it("renders agent_finish reports inside a ToolCard wrapper", async () => {
-    const { user } = renderFinalReportTool(structuredPayload);
-
-    expect(screen.getByTestId("final-report-tool")).toBeInTheDocument();
-    const toggle = screen.getByRole("button", { expanded: false });
+  it("starts collapsed unless it is the latest report", async () => {
+    const { user, unmount } = renderFinalReportTool(structuredPayload);
+    const toggle = screen.getByTestId("transcript-toggle");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
     await user.click(toggle);
-    await user.click(screen.getByRole("button", { name: "More details" }));
     expect(screen.getByTestId("final-report-view")).toBeInTheDocument();
-    expect(screen.getByText("Final Report")).toBeInTheDocument();
-  });
-
-  it("compact view shows three facts and preserves full sections behind deeper disclosure", async () => {
-    const payload = `${structuredPayload.slice(0, -1)},"extra":"${"x".repeat(
-      9000,
-    )}REPORT_TAIL"}`;
-    const { container, user } = render(
-      <FinalReportView compact content={payload} />,
-    );
-    expect(container.querySelectorAll("dt")).toHaveLength(3);
     expect(screen.getByText("Success (self-reported)")).toBeInTheDocument();
     expect(
-      screen.getAllByText("1/2 checks reported passed")[0],
+      screen.getByRole("button", { name: "Copy report" }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByTestId("final-report-view").closest("[inert]"),
-    ).not.toBeNull();
-    const toggle = screen.getByRole("button", { name: "More details" });
-    toggle.focus();
-    await user.keyboard("{Enter}");
-    expect(
-      screen.getByTestId("final-report-view").closest("[inert]"),
-    ).toBeNull();
-    expect(screen.getByText("Add create-card actions")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /npm run lint/ }));
-    expect(screen.getByText("lint failed")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Technical details" }));
-    expect(container.textContent).toContain('"success":true');
-    expect(container.textContent).toContain('"output_tail":"lint failed"');
-    const raw = screen.getByLabelText("Full response content");
-    expect(raw.closest("[inert]")).toBeNull();
-    expect(raw).not.toHaveTextContent("REPORT_TAIL");
-    const next = within(screen.getByLabelText("Full response pages")).getByRole(
-      "button",
-      { name: "Next section" },
+    unmount();
+    render(
+      <FinalReportTool
+        content={structuredPayload}
+        hasResult
+        latest
+        toolCall={makeToolCall()}
+      />,
     );
-    await user.click(next);
-    await user.click(next);
-    expect(raw).toHaveTextContent("REPORT_TAIL");
-    expect(next).toBeDisabled();
-    expect(container.querySelector("button button")).toBeNull();
+    expect(screen.getByTestId("transcript-toggle")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
   });
 
-  it("compact legacy markdown stays recoverable without outcome inference", () => {
-    render(<FinalReportView compact content="PASS! verified by prose only" />);
+  it("opens the most recent final report in the thread by default", () => {
+    const chat = createDefaultChatState();
+    const runtime = chat.threads[chat.current_thread_id];
+    runtime.thread.messages = [
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [makeToolCall()],
+      },
+      makeToolMessage(structuredPayload),
+    ] as ChatMessages;
+    render(
+      <FinalReportTool
+        content={structuredPayload}
+        hasResult
+        toolCall={makeToolCall()}
+      />,
+      { preloadedState: { chat } },
+    );
+    expect(screen.getByTestId("transcript-toggle")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+  });
+
+  it("legacy markdown stays recoverable without outcome inference", () => {
+    renderFinalReportTool("PASS! verified by prose only");
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "Outcome unconfirmed",
+    );
+    fireEvent.click(screen.getByTestId("transcript-toggle"));
     expect(
       screen.getByText("No structured outcome or verification evidence"),
     ).toBeInTheDocument();
     expect(
-      screen
-        .getByText("PASS! verified by prose only", { selector: "p" })
-        .closest("[inert]"),
-    ).not.toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "More details" }));
-    expect(
-      screen
-        .getByText("PASS! verified by prose only", { selector: "p" })
-        .closest("[inert]"),
-    ).toBeNull();
+      screen.getByText("PASS! verified by prose only", { selector: "p" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps raw arguments and response", () => {
+    renderFinalReportTool(structuredPayload);
+    fireEvent.click(screen.getByTestId("transcript-toggle"));
+    fireEvent.click(screen.getByRole("button", { name: /^Raw/ }));
+    expect(screen.getByTestId("transcript-raw")).toHaveTextContent(
+      '"output_tail": "lint failed"',
+    );
   });
 
   it.each([

@@ -81,424 +81,337 @@ function renderReportTool(
   );
 }
 
+function renderTaskDone(
+  content: string | null,
+  {
+    failed = false,
+    streaming = false,
+    latest,
+  }: { failed?: boolean; streaming?: boolean; latest?: boolean } = {},
+) {
+  const chat = createDefaultChatState();
+  const runtime = chat.threads[chat.current_thread_id];
+  runtime.thread.messages =
+    content === null ? [] : [toolMessage(undefined, content, failed)];
+  runtime.streaming = streaming;
+  return render(<TaskDoneTool toolCall={toolCall()} latest={latest} />, {
+    preloadedState: { chat },
+  });
+}
+
 describe("ReportToolCard", () => {
   beforeEach(() => vi.clearAllMocks());
-  test("routes its body through the shared animated collapsible wrapper", async () => {
+
+  test("renders a single collapsed transcript item with the report as markdown", async () => {
     const { container, user } = renderReportTool(toolMessage());
-    const card = container.querySelector("section");
-    const toggle = screen.getByRole("button", { name: /run subagent/i });
-
-    expect(card).toHaveAttribute("data-open", "true");
-    expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(container.querySelector(".rf-expand-grid")).toBeInTheDocument();
-    expect(screen.getByText("Animation fixed.")).toBeInTheDocument();
-
-    await user.click(toggle);
-
-    expect(card).toHaveAttribute("data-open", "false");
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
-  });
-
-  test("applies the running text shimmer and spinner while report tools are pending", () => {
-    const { container } = renderReportTool();
-    const toggle = screen.getByRole("button", { name: /run subagent/i });
-
-    expect(container.querySelector("section")).toHaveAttribute(
-      "data-status",
-      "running",
-    );
-    expect(toggle).not.toHaveClass("rf-active-pulse");
-    expect(toggle.querySelector(".rf-text-shimmer")).toHaveTextContent(
+    expect(
+      container.querySelectorAll('[data-transcript-item="true"]'),
+    ).toHaveLength(1);
+    expect(screen.getByTestId("transcript-verb")).toHaveTextContent("Report");
+    expect(screen.getByTestId("transcript-target")).toHaveTextContent(
       "Run subagent",
     );
-    expect(toggle.querySelector(".rf-spin")).toBeInTheDocument();
-    expect(screen.getByText(/collecting context/)).toBeInTheDocument();
+    const toggle = screen.getByTestId("transcript-toggle");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await user.click(toggle);
+    expect(
+      screen.getByRole("heading", { name: "Report", level: 1 }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Animation fixed.")).toBeInTheDocument();
+    expect(container.querySelector("details")).toBeNull();
+    expect(container.textContent).not.toContain("Technical details");
+    expect(container.textContent).not.toContain("More details");
   });
 
-  test("compact opt-in starts closed and keeps progress behind both disclosures", async () => {
-    const { container, user } = renderReportTool(undefined, {
-      compact: true,
-      meta: "model: private-model",
-    });
-    const toggle = screen.getByRole("button");
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
-    expect(container.querySelector("section")).toHaveAttribute(
-      "data-density",
-      "compact",
+  test("shows streaming progress as output while the report is pending", () => {
+    const chat = createDefaultChatState();
+    chat.threads[chat.current_thread_id].streaming = true;
+    render(
+      <ReportToolCard
+        defaultOpen
+        defaultSummary="Run subagent"
+        icon={<FileText />}
+        toolCall={toolCall()}
+      />,
+      { preloadedState: { chat } },
     );
-    expect(toggle).toHaveTextContent("Awaiting report");
-    expect(toggle).not.toHaveTextContent(/completed|success/i);
-    expect(screen.queryByText(/collecting context/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/private-model/)).not.toBeInTheDocument();
-    toggle.focus();
-    await user.keyboard("{Enter}");
-    expect(container.querySelectorAll("dt")).toHaveLength(2);
-    const progress = screen.getByText(/collecting context/);
-    expect(progress.closest("[inert]")).not.toBeNull();
-    const more = screen.getByRole("button", { name: "More details" });
-    more.focus();
-    await user.keyboard("{Enter}");
-    expect(progress.closest("[inert]")).toBeNull();
-    expect(screen.getByText(/private-model/)).toBeInTheDocument();
+    expect(screen.getByTestId("transcript-icon")).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Progress" })).toHaveTextContent(
+      "collecting context",
+    );
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "Running",
+    );
   });
 
   test.each([
-    [false, false, "Reported failure"],
-    [true, false, "Reported success"],
-    [true, true, "Request failed"],
+    [false, false, "Failure (self-reported)", "Reported failure"],
+    [true, false, "Success (self-reported)", null],
+    [true, true, "Success (self-reported)", "Request failed"],
   ] as const)(
     "keeps reported success=%s separate from transport failed=%s",
-    (success, failed, label) => {
-      const content = JSON.stringify({ summary: "Attempted build", success });
-      const { container } = renderReportTool(
-        toolMessage(undefined, content, failed),
-        { compact: true },
+    async (success, failed, outcome, pill) => {
+      const { user } = renderReportTool(
+        toolMessage(
+          undefined,
+          JSON.stringify({ summary: "Build", success }),
+          failed,
+        ),
       );
-      expect(screen.getByText(label)).toBeInTheDocument();
-      expect(screen.getByRole("button")).not.toHaveTextContent(
-        /completed|verified/i,
-      );
-      expect(container.querySelector("section")).toHaveAttribute(
-        "data-status",
-        failed || !success ? "error" : "idle",
-      );
-      fireEvent.click(screen.getByRole("button"));
-      expect(screen.getByText("No verification evidence")).toBeInTheDocument();
+      if (pill) {
+        expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+          pill,
+        );
+      } else {
+        expect(screen.queryByTestId("transcript-status-pill")).toBeNull();
+      }
+      await user.click(screen.getByTestId("transcript-toggle"));
+      expect(screen.getByText(outcome)).toBeInTheDocument();
     },
   );
 
-  test("preserves full report copy/save, keyboard file links and bounded content after deeper open", async () => {
-    const markdown = `# Full report\n\n${"Evidence preserved. ".repeat(
-      80,
-    )}\n\nEND OF REPORT`;
-    const { container, user } = renderReportTool(
-      toolMessage(undefined, "transport"),
-      {
-        compact: true,
-        unboundedContent: true,
-        extractReport: () => ({
-          summary: "Review the evidence",
-          markdown,
-          filesChanged: ["src/nested/cache.ts"],
-          knowledgePath: ".refact/knowledge/report.md",
+  test("exposes copy/save actions, file chips and knowledge after opening", async () => {
+    const report = `# Report\n\n${"Line. ".repeat(200)}\n\nEND OF REPORT`;
+    const { user } = renderReportTool(
+      toolMessage(
+        undefined,
+        JSON.stringify({
+          type: "task_done",
+          summary: "Cache fix",
+          report,
+          files_changed: ["src/cache.ts"],
+          knowledge_path: "knowledge/cache.md",
         }),
+      ),
+      {
+        extractReport: (content) => {
+          const data = JSON.parse(content) as {
+            summary: string;
+            report: string;
+            files_changed: string[];
+            knowledge_path: string;
+          };
+          return {
+            summary: data.summary,
+            markdown: data.report,
+            filesChanged: data.files_changed,
+            knowledgePath: data.knowledge_path,
+          };
+        },
       },
     );
-    expect(screen.queryByTitle("Copy report")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button"));
-    const copyButton = screen.getByTitle("Copy report");
-    expect(copyButton.closest("[inert]")).not.toBeNull();
-    const more = screen.getByRole("button", { name: "More details" });
-    more.focus();
-    await user.keyboard("{Enter}");
-    expect(copyButton.closest("[inert]")).toBeNull();
-    copyButton.focus();
-    await user.keyboard("{Enter}");
-    expect(copy).toHaveBeenCalledWith(markdown);
-    await user.click(screen.getByTitle("Save as file"));
-    expect(save).toHaveBeenCalledWith(markdown);
-    const file = screen.getByRole("button", { name: "cache.ts" });
-    file.focus();
-    await user.keyboard("{Enter}");
-    expect(openFile).toHaveBeenCalledWith({ path: "src/nested/cache.ts" });
+    expect(screen.queryByRole("button", { name: "Copy report" })).toBeNull();
+    await user.click(screen.getByTestId("transcript-toggle"));
+    await user.click(screen.getByRole("button", { name: "Copy report" }));
+    expect(copy).toHaveBeenCalledWith(report);
+    await user.click(screen.getByRole("button", { name: "Save as file" }));
+    expect(save).toHaveBeenCalledWith(report);
+    await user.click(screen.getByRole("button", { name: "cache.ts" }));
+    expect(openFile).toHaveBeenCalledWith({ path: "src/cache.ts" });
     expect(screen.getByText("Saved to knowledge")).toBeInTheDocument();
+    expect(screen.getByTestId("transcript-clamp")).toBeInTheDocument();
     expect(screen.getByText(/END OF REPORT/)).toBeInTheDocument();
-    expect(container.querySelector("[class*='contentUnbounded']")).toBeNull();
-    expect(container.querySelector("button button")).toBeNull();
   });
 
   test("failed transport still preserves copyable evidence", async () => {
     const { user } = renderReportTool(
-      toolMessage(undefined, "Failure evidence", true),
-      { compact: true },
+      toolMessage(undefined, "Exact failure payload", true),
     );
-    await user.click(screen.getByRole("button"));
-    await user.click(screen.getByRole("button", { name: "More details" }));
-    await user.click(screen.getByTitle("Copy report"));
-    expect(copy).toHaveBeenCalledWith("Failure evidence");
+    await user.click(screen.getByTestId("transcript-toggle"));
+    await user.click(screen.getByRole("button", { name: "Copy report" }));
+    expect(copy).toHaveBeenCalledWith("Exact failure payload");
   });
 
-  test("stored open choices override defaults and progress updates never reopen", () => {
-    const values = new Map([["tc:report-card-1", true]]);
+  test("stored open choices override defaults and never reopen on progress", () => {
+    const values = new Map<string, boolean>([["tc:report-card-1", false]]);
     const store = {
       get: (key: string) => values.get(key),
-      set: (key: string, open: boolean) => values.set(key, open),
+      set: (key: string, value: boolean) => values.set(key, value),
     };
-    const view = (log: string[]) => (
+    const chat = createDefaultChatState();
+    render(
       <CollapsibleStoreProvider value={store}>
         <ReportToolCard
-          compact
-          toolCall={{ ...toolCall(), subchat_log: log }}
-          icon={<FileText />}
+          defaultOpen
           defaultSummary="Collect build evidence"
+          icon={<FileText />}
+          toolCall={toolCall()}
         />
-      </CollapsibleStoreProvider>
+      </CollapsibleStoreProvider>,
+      { preloadedState: { chat } },
     );
-    const { rerender, unmount } = render(view(["first progress"]));
-    const toggle = screen.getByRole("button", {
-      name: /Collect build evidence/,
-    });
-    expect(toggle).toHaveAttribute("aria-expanded", "true");
-    fireEvent.click(toggle);
-    rerender(view(["later progress"]));
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
-    unmount();
-    render(view(["remounted progress"]));
-    expect(
-      screen.getByRole("button", { name: /Collect build evidence/ }),
-    ).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByTestId("transcript-toggle")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
   });
 
-  test("explicit defaultOpen remains supported in compact mode", () => {
-    renderReportTool(toolMessage(), { compact: true, defaultOpen: true });
-    expect(
-      screen.getByRole("button", { name: /Run subagent/ }),
-    ).toHaveAttribute("aria-expanded", "true");
+  test("raw block keeps the request arguments and response", async () => {
+    const content = "# Report\n\n**Original** markdown";
+    const { user } = renderReportTool(toolMessage(undefined, content));
+    await user.click(screen.getByTestId("transcript-toggle"));
+    await user.click(screen.getByRole("button", { name: /^Raw/ }));
+    const raw = screen.getByTestId("transcript-raw");
+    expect(raw).toHaveTextContent("Investigate animation");
+    expect(raw).toHaveTextContent("**Original** markdown");
   });
+});
 
-  test("legacy report prose cannot mint success or verification", () => {
-    renderReportTool(toolMessage(undefined, "PASS! All tests verified!"), {
-      compact: true,
-    });
-    expect(screen.getByText("Report unverified")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button"));
-    expect(screen.getByText("No verification evidence")).toBeInTheDocument();
-  });
+describe("TaskDoneTool", () => {
+  beforeEach(() => vi.clearAllMocks());
 
-  test("TaskDoneTool pending uses compact report language, never completed", () => {
-    const chat = createDefaultChatState();
-    chat.threads[chat.current_thread_id].streaming = true;
-    render(<TaskDoneTool toolCall={toolCall()} compact />, {
-      preloadedState: { chat },
-    });
-    const row = screen.getByRole("button", { expanded: false });
-    expect(row).toHaveTextContent("Task report");
-    expect(row).toHaveTextContent("Awaiting report");
-    expect(screen.queryByText(/Task completed/)).not.toBeInTheDocument();
+  test("keeps the task-done test id on the transcript root", () => {
+    renderTaskDone(null, { streaming: true });
+    const root = screen.getByTestId("task-done-tool");
+    expect(root).toHaveAttribute("data-transcript-item", "true");
+    expect(screen.getByTestId("transcript-target")).toHaveTextContent(
+      "Task report",
+    );
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "Running",
+    );
+    expect(root).not.toHaveTextContent(/Task completed/);
   });
 
   test.each([
-    { state: "pending", content: null, failed: false, icon: "loader-circle" },
     {
       state: "transport failed despite reported success",
       content: JSON.stringify({ type: "task_done", success: true }),
       failed: true,
-      icon: "circle-x",
+      status: "failed",
+      pill: "Request failed",
     },
     {
       state: "reported false",
       content: JSON.stringify({ type: "task_done", success: false }),
       failed: false,
-      icon: "circle-x",
+      status: "failed",
+      pill: "Reported failure",
     },
     {
       state: "reported true",
       content: JSON.stringify({ type: "task_done", success: true }),
       failed: false,
-      icon: "circle-check",
+      status: "done",
+      pill: null,
     },
     {
       state: "missing outcome",
       content: '{"type":"task_done"}',
       failed: false,
-      icon: "file-text",
-    },
-    {
-      state: "mistyped outcome",
-      content: '{"type":"task_done","success":"true"}',
-      failed: false,
-      icon: "file-text",
-    },
-    {
-      state: "malformed",
-      content: "{broken",
-      failed: false,
-      icon: "file-text",
+      status: "done",
+      pill: null,
     },
     {
       state: "legacy success prose",
       content: "# Success!\n\nAll checks passed!",
       failed: false,
-      icon: "file-text",
+      status: "done",
+      pill: null,
     },
-  ])("TaskDoneTool uses truthful $state icon", ({ content, failed, icon }) => {
-    const chat = createDefaultChatState();
-    chat.threads[chat.current_thread_id].thread.messages =
-      content === null ? [] : [toolMessage(undefined, content, failed)];
-    chat.threads[chat.current_thread_id].streaming = content === null;
-    const { container } = render(
-      <TaskDoneTool toolCall={toolCall()} compact />,
-      {
-        preloadedState: { chat },
-      },
-    );
-    const toggle = screen.getByRole("button", { expanded: false });
-    expect(toggle.querySelector(`.lucide-${icon}`)).toBeInTheDocument();
-    expect(container.querySelector("section")).toHaveAttribute(
+  ])("maps $state truthfully", ({ content, failed, status, pill }) => {
+    renderTaskDone(content, { failed });
+    expect(screen.getByTestId("task-done-tool")).toHaveAttribute(
       "data-status",
-      icon === "circle-x" ? "error" : content === null ? "running" : "idle",
+      status,
     );
-    expect(toggle).toHaveTextContent(
-      failed
-        ? "Request failed"
-        : content === null
-          ? "Awaiting report"
-          : icon === "circle-check"
-            ? "Reported success"
-            : icon === "circle-x"
-              ? "Reported failure"
-              : "Report unverified",
-    );
-    if (icon !== "circle-check") {
-      expect(toggle.querySelector(".lucide-circle-check")).toBeNull();
+    if (pill) {
+      expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+        pill,
+      );
+    } else {
+      expect(screen.queryByTestId("transcript-status-pill")).toBeNull();
     }
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
+      "No verification evidence",
+    );
   });
 
-  test.each([
-    { state: "pending", content: null, failed: false },
-    {
-      state: "failed",
-      content: "# Failure\n\nExact failure payload",
-      failed: true,
-    },
-    {
-      state: "markdown",
-      content: "# Report\n\n**Original** markdown",
-      failed: false,
-    },
-    { state: "malformed", content: "```json\n{broken}\n```", failed: false },
-  ])(
-    "compact report preserves raw request and result in $state state",
-    ({ content, failed }) => {
-      const { container } = renderReportTool(
-        content === null ? undefined : toolMessage(undefined, content, failed),
-        { compact: true },
-      );
-      fireEvent.click(screen.getByRole("button"));
-      fireEvent.click(screen.getByRole("button", { name: "More details" }));
-      const technical = screen.getByRole("button", {
-        name: "Technical details",
-      });
-      expect(technical).toHaveAttribute("aria-expanded", "false");
-      fireEvent.click(technical);
-      const codes = Array.from(container.querySelectorAll("code"));
-      expect(
-        codes.some(
-          (node) => node.textContent === toolCall().function.arguments,
-        ),
-      ).toBe(true);
-      if (content !== null) {
-        expect(codes.some((node) => node.textContent === content)).toBe(true);
-      }
-    },
-  );
+  test("absent result without activity is unknown, never success", () => {
+    renderTaskDone(null);
+    expect(screen.getByTestId("task-done-tool")).toHaveAttribute(
+      "data-status",
+      "unknown",
+    );
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "State unknown",
+    );
+  });
 
-  test("standalone TaskDoneTool stays expanded and unbounded with full content, files and reported failure", async () => {
+  test("the latest report starts open with the full markdown, earlier ones collapsed", async () => {
     const payload = {
       type: "task_done",
       summary: "Build still needs fixes",
       success: false,
-      report: `# Build report\n\nFull failure evidence\n\n${"Evidence preserved. ".repeat(
-        80,
-      )}\n\nEND OF REPORT`,
+      report: "# Build report\n\n- Full failure evidence\n\nEND OF REPORT",
       files_changed: ["src/cache.ts"],
     };
-    const chat = createDefaultChatState();
-    chat.threads[chat.current_thread_id].thread.messages = [
-      toolMessage(undefined, JSON.stringify(payload)),
-    ];
-    const { user, container } = render(<TaskDoneTool toolCall={toolCall()} />, {
-      preloadedState: { chat },
-    });
-    const row = screen.getByRole("button", { expanded: true });
-    expect(row).toHaveTextContent("Build still needs fixes");
-    expect(screen.getByText("Reported failure")).toBeInTheDocument();
-    expect(row).not.toHaveTextContent(/completed|verified/i);
-    expect(row.querySelector(".lucide-circle-x")).toBeInTheDocument();
-    expect(row.querySelector(".lucide-circle-check")).toBeNull();
-    expect(container.querySelector("section")).toHaveAttribute(
-      "data-status",
-      "error",
+    const view = renderTaskDone(JSON.stringify(payload), { latest: true });
+    expect(screen.getByTestId("transcript-toggle")).toHaveAttribute(
+      "aria-expanded",
+      "true",
     );
-    expect(container.querySelector('[data-density="compact"]')).toBeNull();
-    expect(screen.queryByRole("button", { name: "More details" })).toBeNull();
-    expect(await screen.findByText(/END OF REPORT/)).toBeInTheDocument();
     expect(
-      container.querySelector("[class*='contentUnbounded']"),
-    ).not.toBeNull();
-    await user.click(screen.getByRole("button", { name: "Copy report" }));
+      screen.getByRole("heading", { name: "Build report" }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText(/END OF REPORT/)).toBeInTheDocument();
+    expect(screen.getByText("cache.ts")).toBeInTheDocument();
+    await view.user.click(screen.getByRole("button", { name: "Copy report" }));
     expect(copy).toHaveBeenCalledWith(payload.report);
-    await user.click(screen.getByRole("button", { name: "Save as file" }));
-    expect(save).toHaveBeenCalledWith(payload.report);
-    await user.click(screen.getByText("cache.ts"));
-    expect(openFile).toHaveBeenCalledWith({ path: "src/cache.ts" });
-    expect(container.querySelector("button button")).toBeNull();
+    view.unmount();
+    renderTaskDone(JSON.stringify(payload), { latest: false });
+    expect(screen.getByTestId("transcript-toggle")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
   });
 
   test.each([
     null,
     [],
     { type: "task_done", summary: 42, report: false, files_changed: [1] },
-  ])("TaskDoneTool malformed legacy fields are safe: %j", (payload) => {
-    const chat = createDefaultChatState();
-    chat.threads[chat.current_thread_id].thread.messages = [
-      toolMessage(undefined, JSON.stringify(payload)),
-    ];
-    render(<TaskDoneTool toolCall={toolCall()} compact />, {
-      preloadedState: { chat },
-    });
-    expect(screen.getByRole("button")).toHaveAttribute(
+  ])("malformed legacy fields are safe: %j", (payload) => {
+    renderTaskDone(JSON.stringify(payload));
+    expect(screen.getByTestId("transcript-toggle")).toHaveAttribute(
       "aria-expanded",
       "false",
     );
-    expect(screen.getByText("Report unverified")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button"));
-    fireEvent.click(screen.getByRole("button", { name: "More details" }));
+    fireEvent.click(screen.getByTestId("transcript-toggle"));
     expect(screen.getByTitle("Copy report")).toBeInTheDocument();
   });
 });
 
-describe("explicit compact report transport", () => {
-  test.each(["pending", "unknown", "running"] as const)(
+describe("explicit report transport", () => {
+  test.each([
+    ["pending", "waiting", "Awaiting report"],
+    ["unknown", "waiting", "Awaiting report"],
+    ["running", "running", "Running"],
+  ] as const)(
     "uses %s transport without inventing a result",
-    (compactTransportState) => {
+    (compactTransportState, status, pill) => {
       const { container } = renderReportTool(undefined, {
-        compact: true,
         compactTransportState,
       });
       expect(container.querySelector("section")).toHaveAttribute(
         "data-status",
-        compactTransportState === "running" ? "running" : "idle",
+        status,
       );
-      expect(screen.getByRole("button")).toHaveAttribute(
-        "aria-expanded",
-        "false",
+      expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+        pill,
       );
-      expect(screen.getByRole("button")).toHaveTextContent("Awaiting report");
     },
   );
 
-  test("explicit failed transport dominates typed reported success only in compact mode", () => {
-    const message = toolMessage(
-      undefined,
-      JSON.stringify({ summary: "Attempted build", success: true }),
+  test("explicit failed transport dominates typed reported success", () => {
+    renderReportTool(
+      toolMessage(
+        undefined,
+        JSON.stringify({ summary: "Attempted build", success: true }),
+      ),
+      { compactTransportState: "failed" },
     );
-    const first = renderReportTool(message, {
-      compact: true,
-      compactTransportState: "failed",
-    });
-    expect(screen.getByText("Request failed")).toBeInTheDocument();
-    expect(first.container.querySelector("section")).toHaveAttribute(
-      "data-status",
-      "error",
-    );
-    first.unmount();
-    const panel = renderReportTool(message, {
-      compactTransportState: "failed",
-    });
-    expect(panel.container.querySelector("section")).toHaveAttribute(
-      "data-status",
-      "success",
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "Request failed",
     );
   });
 });

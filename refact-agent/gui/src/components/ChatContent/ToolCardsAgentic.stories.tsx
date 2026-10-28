@@ -57,11 +57,10 @@ export const Expanded: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await userEvent.click(
-      within(canvas.getByTestId("background-agent-inline")).getAllByRole(
-        "button",
-      )[0],
+      within(canvas.getByTestId("background-agent-inline")).getByTestId(
+        "transcript-toggle",
+      ),
     );
-    await userEvent.click(canvas.getByRole("button", { name: "More details" }));
   },
 };
 

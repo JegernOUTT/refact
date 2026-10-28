@@ -59,9 +59,7 @@ describe("BackgroundAgentCard handoff", () => {
         })}
       />,
     );
-    fireEvent.click(
-      screen.getByRole("button", { name: "Expand background agent details" }),
-    );
+    fireEvent.click(screen.getByTestId("transcript-toggle"));
 
     const handoff = screen.getByRole("region", { name: "Handoff" });
     expect(
@@ -101,9 +99,7 @@ describe("BackgroundAgentCard handoff", () => {
           })}
         />,
       );
-      fireEvent.click(
-        screen.getByRole("button", { name: "Expand background agent details" }),
-      );
+      fireEvent.click(screen.getByTestId("transcript-toggle"));
       expect(screen.getByRole("region", { name: "Handoff" })).toHaveTextContent(
         "Nothing declared",
       );
@@ -126,9 +122,7 @@ describe("BackgroundAgentCard handoff", () => {
         })}
       />,
     );
-    fireEvent.click(
-      screen.getByRole("button", { name: "Expand background agent details" }),
-    );
+    fireEvent.click(screen.getByTestId("transcript-toggle"));
     expect(
       screen.queryByRole("region", { name: "Handoff" }),
     ).not.toBeInTheDocument();
@@ -196,9 +190,7 @@ describe("BackgroundAgentCard handoff", () => {
     expect(normalized.handoff?.gaps).toHaveLength(2);
     expect(normalized.handoff?.notes).toEqual([]);
     render(<BackgroundAgentCard agent={normalized} />);
-    fireEvent.click(
-      screen.getByRole("button", { name: "Expand background agent details" }),
-    );
+    fireEvent.click(screen.getByTestId("transcript-toggle"));
 
     const handoff = screen.getByRole("region", { name: "Handoff" });
     expect(
@@ -259,9 +251,7 @@ describe("BackgroundAgentCard handoff", () => {
         })}
       />,
     );
-    fireEvent.click(
-      screen.getByRole("button", { name: "Expand background agent details" }),
-    );
+    fireEvent.click(screen.getByTestId("transcript-toggle"));
 
     const handoff = screen.getByRole("region", { name: "Handoff" });
     expect(within(handoff).getAllByRole("listitem")).toHaveLength(10);

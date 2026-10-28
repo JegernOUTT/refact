@@ -1,236 +1,42 @@
-.variantTaskDone {
-  color: var(--rf-color-fg);
-}
-
-.variantPlan {
-  color: var(--rf-color-fg);
-}
-
-.variantReport {
-  color: var(--rf-color-fg);
-}
-
-.stack {
-  /* Root-level indent: aligns with header text (trigger pad + icon + gap). */
-  --rf-toolcard-indent: calc(
-    var(--rf-space-2) + var(--rf-icon) + var(--rf-space-2)
-  );
-
-  display: grid;
-  gap: var(--rf-space-2);
+.markdown {
   min-width: 0;
+  overflow-wrap: anywhere;
 }
 
-.card {
-  /* Inside the collapsible body, which already pads by one trigger pad. */
-  --rf-toolcard-indent: calc(var(--rf-icon) + var(--rf-space-2));
-
-  overflow: visible;
-}
-
-.titleRow {
+.files {
   display: flex;
-  flex: 1 1 auto;
+  flex-wrap: wrap;
+  gap: var(--rf-space-1);
   min-width: 0;
-  align-items: center;
-  gap: var(--rf-space-2);
 }
 
-.icon {
-  display: flex;
-  flex: 0 0 auto;
-  width: var(--rf-icon);
-  min-width: var(--rf-icon);
-  align-items: center;
-  justify-content: center;
-  color: var(--rf-color-muted);
-}
-
-.icon svg {
-  width: var(--rf-icon-sm);
-  height: var(--rf-icon-sm);
-}
-
-.summary {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
+.fileButton {
+  padding: 0;
   color: inherit;
-  font-size: var(--rf-text-3);
-  font-weight: var(--rf-weight-bold);
-  line-height: var(--rf-line-3);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.summaryTaskDone {
-  color: var(--rf-color-success);
-}
-
-.meta {
-  flex: 0 10 auto;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--rf-color-muted);
-  text-align: right;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.running .titleRow,
-.running .summary {
-  color: var(--rf-color-muted);
-}
-
-.withoutBody > :global(.rf-expand-grid) {
-  display: none;
-}
-
-.error {
-  color: var(--rf-color-danger);
-}
-
-.errorBadge {
-  flex: 0 0 auto;
-  color: var(--rf-color-danger);
-  font-size: var(--rf-text-1);
-}
-
-.actionButton {
-  all: unset;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: var(--rf-control-h-icon-sm);
-  height: var(--rf-control-h-icon-sm);
-  color: var(--rf-color-muted);
-  background: transparent;
-  border-radius: var(--rf-radius-chip);
   cursor: pointer;
-  transition:
-    background-color 0.1s,
-    color 0.1s;
+  background: transparent;
+  border: 0;
+  border-radius: var(--rf-radius-chip);
 }
 
-.actionButton:hover {
-  color: var(--rf-color-fg);
-  background: color-mix(in oklab, var(--rf-surface-glass) 44%, transparent);
-}
-
-.actionButton:focus-visible {
+.fileButton:focus-visible {
   outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
-  outline-offset: var(--rf-hairline);
 }
 
-.actionButton svg {
+.knowledge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+}
+
+.knowledge svg {
   width: var(--rf-icon-sm);
   height: var(--rf-icon-sm);
 }
 
-.copiedButton {
-  color: var(--rf-color-success);
-}
-
-.entertainmentContent {
-  composes: scrollbarThin from "../../shared/scrollbar.module.css";
-  max-height: 260px;
-  min-width: 0;
-  padding: var(--rf-space-1) 0 var(--rf-space-1) var(--rf-toolcard-indent);
-  overflow-y: auto;
-}
-
-.entertainmentText {
-  display: block;
+.progress {
+  margin: 0;
   color: var(--rf-color-muted);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-}
-
-.content {
-  --rf-code-block-bg: transparent;
-  --rf-code-block-border-width: 0;
-  --rf-code-block-margin: 0;
-  --rf-code-block-padding: 0;
-  --rf-code-block-radius: 0;
-
-  composes: scrollbarThin from "../../shared/scrollbar.module.css";
-  min-width: 0;
-  max-height: 400px;
-  margin-left: var(--rf-toolcard-indent);
-  padding: var(--rf-space-2);
-  overflow-y: auto;
-  color: var(--rf-color-muted);
-  background: color-mix(in oklab, var(--rf-surface-glass) 52%, transparent);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  box-shadow: var(--rf-elev-panel);
-}
-
-.contentUnbounded {
-  max-height: none;
-  overflow: visible;
-}
-
-.fileFooter {
-  min-width: 0;
-  padding: 0 var(--rf-space-1) 0 var(--rf-toolcard-indent);
-}
-
-.fileLink {
-  color: var(--rf-color-accent);
-  cursor: pointer;
-  text-decoration: underline;
-}
-
-.compactFileLink {
-  padding: 0;
-  font-size: var(--rf-text-1);
-  line-height: var(--rf-line-1);
-  overflow-wrap: anywhere;
-  background: transparent;
-  border: 0;
-}
-
-.compactFileLink:focus-visible {
-  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
-}
-
-.compactBody {
-  display: grid;
-  min-width: 0;
-  gap: var(--rf-space-2);
-}
-
-.compactContent {
-  max-height: var(--rf-overlay-popover-max);
-  margin-left: 0;
-  padding: 0;
-  background: transparent;
-  border: 0;
-  border-radius: 0;
-  box-shadow: none;
-}
-
-.fileLink:hover {
-  color: var(--rf-color-accent);
-}
-
-.fileLinkPlain {
-  color: var(--rf-color-muted);
-}
-
-.knowledgePath {
-  padding: 0 var(--rf-space-1) 0 var(--rf-toolcard-indent);
-}
-
-@media (prefers-reduced-transparency: reduce) {
-  .actionButton:hover,
-  .content {
-    background: var(--rf-surface-glass);
-  }
-}
-
-:global(.radix-themes[data-host="jetbrains"]) .actionButton:hover,
-:global(.radix-themes[data-host="jetbrains"]) .content {
-  background: var(--rf-surface-glass);
 }

@@ -3,11 +3,11 @@ import React from "react";
 import { ToolCall } from "../../../services/refact/types";
 import { ReportToolCard, type ReportData } from "./ReportToolCard";
 import { readCompactRecord } from "../../Tools/AgenticTool/compactPresentation";
-import { Icon } from "../../ui";
+import { useIsLatestFinalReport } from "../finalReportLatest";
 
 interface TaskDoneToolProps {
   toolCall: ToolCall;
-  compact?: boolean;
+  latest?: boolean;
 }
 
 function extractTaskDoneReport(content: string): ReportData | null {
@@ -30,22 +30,19 @@ function extractTaskDoneReport(content: string): ReportData | null {
 
 export const TaskDoneTool: React.FC<TaskDoneToolProps> = ({
   toolCall,
-  compact = false,
+  latest,
 }) => {
+  const isLatestInThread = useIsLatestFinalReport(toolCall.id);
   return (
-    <>
-      <span data-testid="task-done-tool" hidden />
-      <ReportToolCard
-        toolCall={toolCall}
-        icon={<Icon icon={FileText} tone="muted" />}
-        defaultSummary="Task report"
-        variant="taskDone"
-        extractReport={extractTaskDoneReport}
-        compact={compact}
-        defaultOpen={!compact}
-        unboundedContent
-      />
-    </>
+    <ReportToolCard
+      defaultOpen={latest ?? isLatestInThread}
+      defaultSummary="Task report"
+      extractReport={extractTaskDoneReport}
+      icon={<FileText />}
+      testId="task-done-tool"
+      toolCall={toolCall}
+      variant="taskDone"
+    />
   );
 };
 

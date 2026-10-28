@@ -1,23 +1,5 @@
-import {
-  Copy,
-  Check,
-  FileText,
-  BookOpen,
-  LoaderCircle,
-  CircleCheck,
-  CircleX,
-} from "lucide-react";
-import React, {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
-import { Flex, Text, Box } from "@radix-ui/themes";
-import { Icon, ToolCard as DetailsCard } from "../../ui";
-import classNames from "classnames";
-import { useStoredOpen } from "../useStoredOpen";
+import { BookOpen, Check, Copy, FileText } from "lucide-react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useAppSelector } from "../../../hooks/useAppSelector";
 import {
   selectIsStreamingById,
@@ -27,12 +9,7 @@ import {
 import { useThreadId } from "../../../features/Chat/Thread";
 import { ToolCall } from "../../../services/refact/types";
 import { Markdown, ShikiCodeBlock } from "../../Markdown";
-import { ToolCallTooltip } from "./ToolCallTooltip";
-import { AnimatedCollapsible } from "../shared/AnimatedCollapsible";
-import {
-  useChatScrollAnchor,
-  usePrepareChatScrollAnchor,
-} from "../useChatScrollAnchor";
+import { Button, Chip } from "../../ui";
 import { useCopyToClipboard } from "../../../hooks/useCopyToClipboard";
 import { useEventsBusForIDE } from "../../../hooks/useEventBusForIDE";
 import { useOpenFileInApp } from "../../../hooks/useOpenFileInApp";
@@ -43,32 +20,109 @@ import {
   addBuddyCrashBreadcrumb,
   setBuddyCrashHotSlot,
 } from "../../../features/Buddy/reportBuddyFrontendError";
-import { ToolCard } from "./ToolCard";
-import { CompactToolDetails } from "../../Tools/AgenticTool/CompactToolDetails";
+import type { CompactTransportState } from "../../Tools/AgenticTool/compactPresentation";
 import {
-  compactText,
-  type CompactTransportState,
-} from "../../Tools/AgenticTool/compactPresentation";
-import { finalReportPresentation, parseFinalReport } from "../finalReportJson";
+  TranscriptClamp,
+  TranscriptItem,
+  type TranscriptFact,
+  type TranscriptRawBlock,
+  type TranscriptStatus,
+} from "../TranscriptItem";
+import { parseFinalReport, verificationSummary } from "../finalReportJson";
 import styles from "./ReportToolCard.module.css";
 
 const MAX_MD_RENDER_CHARS = 50_000;
 const MAX_STREAMING_PROGRESS_CHARS = 500;
+const COPIED_RESET_MS = 2000;
 
-function looksLikeMarkdown(text: string): boolean {
-  if (text.includes("```")) return true;
-  if (/\[[^\]]+\]\([^)]+\)/.test(text)) return true;
-  if (/^#{1,6}\s+\S/m.test(text)) return true;
-  if (/^\s*([-*+])\s+\S/m.test(text)) return true;
-  if (/^\s*\d+\.\s+\S/m.test(text)) return true;
-  const hasTableHeader = /^\s*\|.+\|\s*$/m.test(text);
-  const hasTableSep = /^\s*\|[\s:|-]+\|\s*$/m.test(text);
-  if (hasTableHeader && hasTableSep) return true;
-  return false;
-}
+export const ReportMarkdown: React.FC<{
+  markdown: string;
+  streaming?: boolean;
+}> = ({ markdown, streaming = false }) => (
+  <TranscriptClamp>
+    <div className={styles.markdown}>
+      {markdown.length <= MAX_MD_RENDER_CHARS ? (
+        <Markdown isStreaming={streaming}>{markdown}</Markdown>
+      ) : (
+        <ShikiCodeBlock showLineNumbers={false}>{markdown}</ShikiCodeBlock>
+      )}
+    </div>
+  </TranscriptClamp>
+);
+
+export const ReportActions: React.FC<{ markdown: string }> = ({ markdown }) => {
+  const copyToClipboard = useCopyToClipboard();
+  const { newFile } = useEventsBusForIDE();
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!copied) return;
+    const id = setTimeout(() => setCopied(false), COPIED_RESET_MS);
+    return () => clearTimeout(id);
+  }, [copied]);
+
+  const handleCopy = useCallback(() => {
+    copyToClipboard(markdown);
+    setCopied(true);
+  }, [copyToClipboard, markdown]);
+
+  return (
+    <>
+      <Button
+        aria-label="Copy report"
+        size="sm"
+        title="Copy report"
+        variant="soft"
+        onClick={handleCopy}
+      >
+        {copied ? <Check /> : <Copy />}
+        {copied ? "Copied" : "Copy"}
+      </Button>
+      {isIdeHost() && (
+        <Button
+          aria-label="Save as file"
+          size="sm"
+          title="Save as file"
+          variant="soft"
+          onClick={() => newFile(markdown)}
+        >
+          <FileText />
+          Save as file
+        </Button>
+      )}
+    </>
+  );
+};
+
+export const FileChips: React.FC<{ files: readonly string[] }> = ({
+  files,
+}) => {
+  const { canOpen, openFile } = useOpenFileInApp();
+  if (files.length === 0) return null;
+  return (
+    <div className={styles.files}>
+      {files.map((file) =>
+        canOpen ? (
+          <button
+            className={styles.fileButton}
+            key={file}
+            title={file}
+            type="button"
+            onClick={() => openFile({ path: file })}
+          >
+            <Chip radius="chip">{basename(file)}</Chip>
+          </button>
+        ) : (
+          <Chip key={file} radius="chip" title={file}>
+            {basename(file)}
+          </Chip>
+        ),
+      )}
+    </div>
+  );
+};
 
 export type ReportVariant = "taskDone" | "plan" | "report";
-type ToolStatus = "idle" | "running" | "success" | "error";
 
 export interface ReportData {
   summary?: string;
@@ -78,16 +132,11 @@ export interface ReportData {
   success?: boolean;
 }
 
-const REPORT_VARIANT_CLASSES = {
-  taskDone: styles.variantTaskDone,
-  plan: styles.variantPlan,
-  report: styles.variantReport,
-} satisfies Record<ReportVariant, string>;
-
 interface ReportToolCardProps {
   toolCall: ToolCall;
   icon: React.ReactNode;
   defaultSummary: React.ReactNode;
+  verb?: React.ReactNode;
   variant?: ReportVariant;
   meta?: string | null;
   extractReport?: (content: string) => ReportData | null;
@@ -95,30 +144,38 @@ interface ReportToolCardProps {
   unboundedContent?: boolean;
   compact?: boolean;
   compactTransportState?: CompactTransportState;
+  testId?: string;
+  input?: React.ReactNode;
+  facts?: readonly TranscriptFact[];
+}
+
+function transportOf(
+  hasResult: boolean,
+  failed: boolean,
+  active: boolean,
+): CompactTransportState {
+  if (hasResult) return failed ? "failed" : "succeeded";
+  return active ? "running" : "pending";
 }
 
 export const ReportToolCard: React.FC<ReportToolCardProps> = ({
   toolCall,
   icon,
   defaultSummary,
+  verb = "Report",
   variant = "report",
   meta,
   extractReport,
-  compact = false,
   compactTransportState,
-  defaultOpen = !compact,
-  unboundedContent = false,
+  defaultOpen = false,
+  testId,
+  input,
+  facts = [],
 }) => {
-  const copyToClipboard = useCopyToClipboard();
-  const { newFile } = useEventsBusForIDE();
-  const { canOpen, openFile } = useOpenFileInApp();
-  const [copied, setCopied] = useState(false);
-
   const threadId = useThreadId();
   const maybeResult = useAppSelector((state) =>
     selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
-
   const streaming = useAppSelector((state) =>
     selectIsStreamingById(state, threadId),
   );
@@ -127,14 +184,11 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
   );
   const transport =
     compactTransportState ??
-    (maybeResult
-      ? maybeResult.tool_failed
-        ? "failed"
-        : "succeeded"
-      : streaming || waiting
-        ? "running"
-        : "pending");
-
+    transportOf(
+      Boolean(maybeResult),
+      Boolean(maybeResult?.tool_failed),
+      streaming || waiting,
+    );
   const content =
     maybeResult && typeof maybeResult.content === "string"
       ? maybeResult.content
@@ -142,470 +196,154 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
 
   const reportData = useMemo((): ReportData | null => {
     if (!content) return null;
-    if (extractReport) {
-      const parsed = extractReport(content);
-      if (parsed) return parsed;
-    }
-    return { markdown: content };
+    return extractReport?.(content) ?? { markdown: content };
   }, [content, extractReport]);
+  const structured = useMemo(
+    () => (content ? parseFinalReport(content) : null),
+    [content],
+  );
 
-  const structured =
-    (compact || variant === "taskDone") && content
-      ? parseFinalReport(content)
-      : null;
+  const requestFailed =
+    transport === "failed" || Boolean(maybeResult?.tool_failed);
   const reportedSuccess = structured?.success ?? reportData?.success;
-  const reportFailed =
-    transport === "failed" ||
-    Boolean(maybeResult?.tool_failed) ||
-    reportedSuccess === false;
-  const stateLabel =
-    transport === "failed" || maybeResult?.tool_failed
-      ? "Request failed"
-      : !maybeResult
-        ? variant === "taskDone" && transport !== "running"
-          ? "State unknown"
-          : "Awaiting report"
-        : reportedSuccess === false
-          ? "Reported failure"
-          : reportedSuccess === true
-            ? "Reported success"
-            : "Report unverified";
-  const outcomeStatus = reportFailed
-    ? "error"
-    : transport === "running"
-      ? "running"
-      : "idle";
-  const status: ToolStatus =
-    variant === "taskDone"
-      ? outcomeStatus
-      : !maybeResult
+  const running = transport === "running";
+  const status: TranscriptStatus = requestFailed
+    ? "failed"
+    : reportedSuccess === false
+      ? "failed"
+      : running
         ? "running"
-        : maybeResult.tool_failed
-          ? "error"
-          : "success";
-  const outcomeIcon =
-    variant === "taskDone" && (reportFailed || reportedSuccess === true) ? (
-      <Icon
-        icon={reportFailed ? CircleX : CircleCheck}
-        tone={reportFailed ? "danger" : "muted"}
-      />
-    ) : (
-      icon
-    );
+        : !maybeResult
+          ? variant === "taskDone"
+            ? "unknown"
+            : "waiting"
+          : "done";
+  const statusLabel = requestFailed
+    ? "Request failed"
+    : reportedSuccess === false
+      ? "Reported failure"
+      : !maybeResult && variant === "taskDone" && !running
+        ? "State unknown"
+        : !maybeResult && !running
+          ? "Awaiting report"
+          : undefined;
 
-  const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, , setOpen] = useStoredOpen(storeKey, defaultOpen);
-  const preserveScrollAnchor = useChatScrollAnchor();
-  const prepareScrollAnchor = usePrepareChatScrollAnchor();
-  const [animateContent, setAnimateContent] = useState(false);
-  const [bodyReady, setBodyReady] = useState(variant !== "taskDone");
+  const verification = structured
+    ? verificationSummary(structured)
+    : maybeResult
+      ? "No verification evidence"
+      : null;
+  const outcome =
+    reportedSuccess === true
+      ? "Success (self-reported)"
+      : reportedSuccess === false
+        ? "Failure (self-reported)"
+        : null;
+  const files = structured?.files_changed ?? reportData?.filesChanged ?? [];
 
-  const handleOpenChange = useCallback(
-    (open: boolean) => {
-      setAnimateContent(true);
-      preserveScrollAnchor(() => setOpen(open));
-    },
-    [preserveScrollAnchor, setOpen],
-  );
-
-  const summary = reportData?.summary ?? defaultSummary;
-
-  const handleCopy = useCallback(
-    (e: React.MouseEvent) => {
-      e.stopPropagation();
-      if (reportData?.markdown) {
-        copyToClipboard(reportData.markdown);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-      }
-    },
-    [reportData?.markdown, copyToClipboard],
-  );
-
-  const handleSave = useCallback(
-    (e: React.MouseEvent) => {
-      e.stopPropagation();
-      if (reportData?.markdown) {
-        newFile(reportData.markdown);
-      }
-    },
-    [reportData?.markdown, newFile],
-  );
-
-  const handleFileClick = useCallback(
-    (e: React.MouseEvent, filePath: string) => {
-      e.stopPropagation();
-      openFile({ path: filePath });
-    },
-    [openFile],
-  );
-
-  const entertainmentText = useMemo(() => {
-    if (status !== "running") return null;
+  const progressText = useMemo(() => {
+    if (!running) return null;
     const log = toolCall.subchat_log;
     if (!log || log.length === 0) return null;
     return log[log.length - 1].slice(-MAX_STREAMING_PROGRESS_CHARS);
-  }, [status, toolCall.subchat_log]);
-  const deferredEntertainmentText = useStreamingMarkdown(
-    entertainmentText,
-    status === "running",
-  );
-  const deferredReportMarkdown = useStreamingMarkdown(
+  }, [running, toolCall.subchat_log]);
+  const deferredProgress = useStreamingMarkdown(progressText, running);
+  const deferredMarkdown = useStreamingMarkdown(
     reportData?.markdown ?? null,
-    status === "running",
+    running,
   );
 
   useEffect(() => {
-    if (variant !== "taskDone") {
-      setBodyReady(true);
-      return;
-    }
-    if (bodyReady) return;
-    if (!reportData?.markdown) return;
-    let cancelled = false;
-
-    const arm = () => {
-      if (!cancelled) {
-        setBodyReady(true);
-      }
-    };
-
-    let timeoutId: ReturnType<typeof setTimeout> | null = null;
-    let frameId: number | null = null;
-    if (typeof globalThis.requestAnimationFrame === "function") {
-      frameId = globalThis.requestAnimationFrame(arm);
-    } else {
-      timeoutId = setTimeout(arm, 16);
-    }
-
-    return () => {
-      cancelled = true;
-      if (
-        frameId != null &&
-        typeof globalThis.cancelAnimationFrame === "function"
-      ) {
-        globalThis.cancelAnimationFrame(frameId);
-      }
-      if (timeoutId != null) {
-        clearTimeout(timeoutId);
-      }
-    };
-  }, [bodyReady, reportData?.markdown, variant]);
-
-  const entertainmentRef = useRef<HTMLDivElement | null>(null);
-  const userScrolledRef = useRef(false);
-
-  const handleEntertainmentScroll = useCallback(() => {
-    const el = entertainmentRef.current;
-    if (!el) return;
-    const isAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 20;
-    userScrolledRef.current = !isAtBottom;
-  }, []);
-
-  useEffect(() => {
-    if (status !== "running") return;
-    const el = entertainmentRef.current;
-    if (!el) return;
-    if (userScrolledRef.current) return;
-    if (el.scrollTop + el.clientHeight + 20 < el.scrollHeight) {
-      el.scrollTop = el.scrollHeight;
-    }
-  }, [status, deferredEntertainmentText]);
-
-  useEffect(() => {
-    if (status === "running") {
-      if (deferredEntertainmentText) {
-        addBuddyCrashBreadcrumb("report_progress", deferredEntertainmentText);
+    if (running) {
+      if (deferredProgress) {
+        addBuddyCrashBreadcrumb("report_progress", deferredProgress);
       }
       return;
     }
-
     if (variant === "taskDone") {
       setBuddyCrashHotSlot(
         "report",
-        deferredReportMarkdown ??
-          reportData?.summary ??
-          defaultSummary?.toString() ??
-          null,
+        deferredMarkdown ?? reportData?.summary ?? null,
       );
-      if (deferredReportMarkdown) {
-        addBuddyCrashBreadcrumb("task_done", deferredReportMarkdown);
-      }
+      if (deferredMarkdown)
+        addBuddyCrashBreadcrumb("task_done", deferredMarkdown);
       return;
     }
-
     setBuddyCrashHotSlot("report", null);
   }, [
-    defaultSummary,
-    deferredEntertainmentText,
-    deferredReportMarkdown,
+    deferredMarkdown,
+    deferredProgress,
     reportData?.summary,
-    status,
+    running,
     variant,
   ]);
 
-  const showActions =
-    (compact || variant === "taskDone" || status === "success") &&
-    isOpen &&
-    !!deferredReportMarkdown;
-  const showSaveButton = isIdeHost();
-  const variantClass = REPORT_VARIANT_CLASSES[variant];
-  const hasReportBody = !!deferredReportMarkdown && bodyReady;
+  const target = structured?.summary ?? reportData?.summary ?? defaultSummary;
+  const metaText =
+    variant === "taskDone" ? verification ?? undefined : meta ?? undefined;
 
-  const actions = showActions ? (
-    <>
-      <button
-        className={classNames(
-          styles.actionButton,
-          copied && styles.copiedButton,
-        )}
-        onClick={handleCopy}
-        title="Copy report"
-        type="button"
-      >
-        {copied ? <Check /> : <Copy />}
-      </button>
-      {showSaveButton && (
-        <button
-          className={styles.actionButton}
-          onClick={handleSave}
-          title="Save as file"
-          type="button"
-        >
-          <FileText />
-        </button>
-      )}
-    </>
-  ) : null;
-
-  const header = (
-    <span className={styles.titleRow}>
-      <span className={styles.icon}>
-        {status === "running" ? (
-          <Icon
-            className="rf-spin"
-            icon={LoaderCircle}
-            size="sm"
-            tone="accent"
-          />
-        ) : (
-          outcomeIcon
-        )}
-      </span>
-      <span
-        className={classNames(
-          styles.summary,
-          status === "error" && styles.error,
-          variant === "taskDone" &&
-            reportedSuccess === true &&
-            !reportFailed &&
-            styles.summaryTaskDone,
-        )}
-      >
-        {status === "running" ? (
-          <span className="rf-text-shimmer">{summary}</span>
-        ) : (
-          summary
-        )}
-      </span>
-      {variant === "taskDone" && (
-        <span className={styles.meta}>{stateLabel}</span>
-      )}
-      {meta && <span className={styles.meta}>{meta}</span>}
-      {status === "error" && <span className={styles.errorBadge}>failed</span>}
-    </span>
-  );
-
-  const reportBody = (
-    <>
-      {hasReportBody && reportData ? (
-        <>
-          <Box
-            className={classNames(
-              styles.content,
-              !compact && unboundedContent && styles.contentUnbounded,
-              compact && styles.compactContent,
-            )}
-          >
-            {deferredReportMarkdown.length <= MAX_MD_RENDER_CHARS &&
-            looksLikeMarkdown(deferredReportMarkdown) ? (
-              <Text size="2">
-                <Markdown isStreaming={status === "running"}>
-                  {deferredReportMarkdown}
-                </Markdown>
-              </Text>
-            ) : (
-              <ShikiCodeBlock showLineNumbers={false}>
-                {deferredReportMarkdown}
-              </ShikiCodeBlock>
-            )}
-          </Box>
-
-          {reportData.filesChanged && reportData.filesChanged.length > 0 && (
-            <Flex
-              className={styles.fileFooter}
-              gap="2"
-              wrap="wrap"
-              align="center"
-            >
-              <Text size="1" color="gray">
-                Files:
-              </Text>
-              {reportData.filesChanged.map((f) =>
-                compact && canOpen ? (
-                  <button
-                    key={f}
-                    type="button"
-                    className={classNames(
-                      styles.fileLink,
-                      styles.compactFileLink,
-                    )}
-                    onClick={(e) => handleFileClick(e, f)}
-                  >
-                    {basename(f)}
-                  </button>
-                ) : (
-                  <Text
-                    key={f}
-                    size="1"
-                    className={canOpen ? styles.fileLink : styles.fileLinkPlain}
-                    onClick={canOpen ? (e) => handleFileClick(e, f) : undefined}
-                  >
-                    {basename(f)}
-                  </Text>
-                ),
-              )}
-            </Flex>
-          )}
-
-          {reportData.knowledgePath && (
-            <Text size="1" color="gray" as="p" className={styles.knowledgePath}>
-              <Flex as="span" align="center" gap="1">
-                <BookOpen />
-                Saved to knowledge
-              </Flex>
-            </Text>
-          )}
-        </>
-      ) : null}
-    </>
-  );
-
-  const entertainment = deferredEntertainmentText ? (
-    <div
-      className={styles.entertainmentContent}
-      ref={entertainmentRef}
-      onScroll={handleEntertainmentScroll}
-    >
-      <Text size="1" color="gray" className={styles.entertainmentText}>
-        {deferredEntertainmentText}
-      </Text>
-    </div>
-  ) : null;
-
-  if (compact) {
-    const presentation = finalReportPresentation(
-      content,
-      !!maybeResult?.tool_failed,
-    );
-    const facts = structured
-      ? presentation.facts
-      : [
+  const summary: TranscriptFact[] = [
+    ...facts,
+    ...(outcome ? [{ label: "Outcome", value: outcome }] : []),
+    ...(verification && variant !== "taskDone"
+      ? [{ label: "Verification", value: verification }]
+      : []),
+    ...(files.length > 0
+      ? [{ label: "Files changed", value: String(files.length) }]
+      : []),
+    ...(reportData?.knowledgePath
+      ? [
           {
-            label: "Outcome",
-            value:
-              reportedSuccess === false
-                ? "Failure (self-reported)"
-                : reportedSuccess === true
-                  ? "Success (self-reported)"
-                  : "No structured outcome evidence",
+            label: "Knowledge",
+            value: (
+              <span className={styles.knowledge}>
+                <BookOpen aria-hidden />
+                Saved to knowledge
+              </span>
+            ),
+            title: reportData.knowledgePath,
           },
-          { label: "Verification", value: "No verification evidence" },
-          ...(reportData?.filesChanged
-            ? [
-                {
-                  label: "Changes",
-                  value: `${reportData.filesChanged.length} files reported`,
-                },
-              ]
-            : []),
-        ];
-    return (
-      <ToolCard
-        density="compact"
-        icon={outcomeIcon}
-        summary={
-          compactText(
-            structured?.summary ?? reportData?.summary ?? defaultSummary,
-            160,
-          ) ?? "Task report"
-        }
-        meta={stateLabel}
-        status={outcomeStatus}
-        isOpen={isOpen}
-        onToggle={() => setOpen(!isOpen)}
-        toolCall={toolCall}
-      >
-        <CompactToolDetails facts={facts}>
-          <div className={styles.compactBody}>
-            {actions && (
-              <Flex gap="1" aria-label="Report actions">
-                {actions}
-              </Flex>
-            )}
-            {meta && (
-              <Text size="1" color="gray">
-                {meta}
-              </Text>
-            )}
-            {reportBody}
-            {entertainment}
-            <DetailsCard title="Technical details" defaultOpen={false}>
-              {content !== null && (
-                <ShikiCodeBlock showLineNumbers={false}>
-                  {content}
-                </ShikiCodeBlock>
-              )}
-              <ShikiCodeBlock showLineNumbers={false}>
-                {toolCall.function.arguments}
-              </ShikiCodeBlock>
-            </DetailsCard>
-          </div>
-        </CompactToolDetails>
-      </ToolCard>
-    );
-  }
+        ]
+      : []),
+  ];
 
-  const card = (
-    <AnimatedCollapsible
-      animate={animateContent}
-      actions={actions}
-      className={classNames(
-        "rf-enter",
-        styles.card,
-        variantClass,
-        status === "running" && styles.running,
-        !hasReportBody && styles.withoutBody,
-      )}
-      data-status={status}
-      header={header}
-      onKeyDownCapture={prepareScrollAnchor}
-      onMouseDownCapture={prepareScrollAnchor}
-      onOpenChange={handleOpenChange}
-      onPointerDownCapture={prepareScrollAnchor}
-      open={isOpen}
-      status={status}
-      variant="compact"
-    >
-      {reportBody}
-    </AnimatedCollapsible>
-  );
+  const raw: TranscriptRawBlock[] = [
+    { label: "Arguments", value: toolCall.function.arguments },
+    ...(maybeResult ? [{ label: "Response", value: maybeResult.content }] : []),
+  ];
 
   return (
-    <div className={styles.stack}>
-      <ToolCallTooltip toolCall={toolCall}>{card}</ToolCallTooltip>
-      {entertainment}
-    </div>
+    <TranscriptItem
+      data-testid={testId}
+      actions={
+        deferredMarkdown ? <ReportActions markdown={deferredMarkdown} /> : null
+      }
+      artifacts={files.length > 0 ? <FileChips files={files} /> : null}
+      defaultOpen={defaultOpen}
+      icon={icon}
+      input={input}
+      meta={metaText}
+      openKey={toolCall.id ? `tc:${toolCall.id}` : undefined}
+      output={
+        deferredMarkdown ? (
+          <ReportMarkdown markdown={deferredMarkdown} streaming={running} />
+        ) : deferredProgress ? (
+          <TranscriptClamp>
+            <pre className={styles.progress}>{deferredProgress}</pre>
+          </TranscriptClamp>
+        ) : null
+      }
+      raw={raw}
+      sectionLabels={{
+        input: "Task",
+        output: deferredMarkdown ? "Report" : "Progress",
+      }}
+      status={status}
+      statusLabel={statusLabel}
+      summary={summary}
+      target={target}
+      verb={verb}
+    />
   );
 };
 

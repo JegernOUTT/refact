@@ -661,11 +661,12 @@ describe("background agents", () => {
   test("BackgroundAgentCard renders status badge, title, target_files, and edited_files", () => {
     render(<BackgroundAgentCard agent={makeAgent()} />);
 
-    expect(screen.getByTestId("background-agent-status-dot")).toHaveAttribute(
-      "aria-label",
-      "Background agent status: Running",
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "Running",
     );
-    expect(screen.getByText("Inspect the frogs")).toBeInTheDocument();
+    expect(screen.getByTestId("transcript-target")).toHaveTextContent(
+      "Inspect the frogs",
+    );
     expect(
       screen.queryByRole("button", { name: "1 target files" }),
     ).not.toBeInTheDocument();
@@ -678,11 +679,12 @@ describe("background agents", () => {
       />,
     );
 
-    expect(screen.getByTestId("background-agent-status-dot")).toHaveAttribute(
-      "aria-label",
-      "Background agent status: Failed",
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "Failed",
     );
     expect(screen.queryByText("boom")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("transcript-toggle"));
+    expect(screen.getByRole("alert")).toHaveTextContent("boom");
   });
 
   test("BackgroundAgentCard renders conflict badge when conflict_summary is set", () => {
@@ -710,12 +712,9 @@ describe("background agents", () => {
     ]);
 
     expect(screen.getByTestId("background-agent-inline")).toBeInTheDocument();
-    expect(
-      screen.getByTestId("background-agent-inline-status"),
-    ).toHaveTextContent("Running");
-    expect(
-      screen.queryByRole("button", { name: "Copy agent id" }),
-    ).toHaveAttribute("tabindex", "-1");
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "Running",
+    );
   });
 
   test("ToolContent keeps rendering BackgroundAgentCard from nested extra fallback", () => {
@@ -784,14 +783,17 @@ describe("background agents", () => {
     );
 
     const row = screen.getByTestId("background-agent-inline");
-    expect(screen.getByLabelText("2 pending questions")).toHaveTextContent("2");
-    fireEvent.click(within(row).getAllByRole("button")[0]);
-    fireEvent.click(screen.getByRole("button", { name: "More details" }));
-    expect(within(row).getByText("Delegate")).toBeVisible();
-    expect(within(row).getByText("thinking")).toBeInTheDocument();
+    expect(row).toHaveAttribute("data-open", "true");
+    expect(within(row).getByTestId("transcript-status-pill")).toHaveTextContent(
+      "2 questions",
+    );
+    expect(within(row).getByTestId("transcript-verb")).toHaveTextContent(
+      "Delegate",
+    );
     expect(within(row).getByText("openai/gpt-5.6-terra")).toBeInTheDocument();
-    expect(within(row).getByText("now: shell: cargo test")).toBeInTheDocument();
-    expect(within(row).getByText("Local merge: Pending")).toBeInTheDocument();
+    expect(within(row).getByText("shell: cargo test")).toBeInTheDocument();
+    expect(within(row).getByText("Merge pending")).toBeInTheDocument();
+    expect(within(row).getByText("refact/task/frogs")).toBeInTheDocument();
   });
 
   test("BackgroundAgentUpdated state overrides the flattened placeholder card", () => {
@@ -816,14 +818,10 @@ describe("background agents", () => {
     );
 
     expect(screen.getByTestId("background-agent-inline")).toBeInTheDocument();
-    expect(
-      within(screen.getByTestId("background-agent-inline")).getAllByRole(
-        "button",
-      )[0],
-    ).toHaveTextContent("Updated frog report");
-    expect(
-      screen.getByTestId("background-agent-inline-status"),
-    ).toHaveTextContent("Completed");
+    expect(screen.getByTestId("transcript-target")).toHaveTextContent(
+      "Updated frog report",
+    );
+    expect(screen.queryByTestId("transcript-status-pill")).toBeNull();
   });
 
   test("flattened message_added event keeps background agent fields on selected tool result", () => {
@@ -867,9 +865,7 @@ describe("background agents", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", { name: "Expand background agent details" }),
-    );
+    await user.click(screen.getByTestId("transcript-toggle"));
     await user.click(screen.getByRole("button", { name: "Open trajectory" }));
 
     expect(onOpenTrajectory).toHaveBeenCalledWith("child-chat");

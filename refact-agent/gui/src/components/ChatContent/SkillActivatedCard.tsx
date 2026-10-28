@@ -1,10 +1,7 @@
-import React, { useMemo } from "react";
+import React from "react";
 import { Zap } from "lucide-react";
-import { ToolCard } from "./ToolCard/ToolCard";
-import { useStoredOpen } from "./useStoredOpen";
 import { Markdown } from "../Markdown";
-import { Icon } from "../ui";
-import styles from "./SkillActivatedCard.module.css";
+import { TranscriptClamp, TranscriptItem } from "./TranscriptItem";
 
 interface SkillActivatedCardProps {
   name: string;
@@ -19,36 +16,30 @@ export const SkillActivatedCard: React.FC<SkillActivatedCardProps> = ({
   allowedTools,
   modelOverride,
 }) => {
-  const storeKey = `skill:${name}`;
-  const [isOpen, handleToggle] = useStoredOpen(storeKey, false);
-
-  const meta = useMemo(() => {
-    const parts: string[] = [];
-    if (modelOverride) parts.push(modelOverride);
-    if (allowedTools.length > 0)
-      parts.push(`tools: ${allowedTools.join(", ")}`);
-    return parts.length > 0 ? parts.join(" · ") : undefined;
-  }, [allowedTools, modelOverride]);
-
+  const summary = [
+    ...(modelOverride ? [{ label: "Model", value: modelOverride }] : []),
+    ...(allowedTools.length > 0
+      ? [{ label: "Tools", value: allowedTools.join(", ") }]
+      : []),
+  ];
   return (
-    <ToolCard
-      icon={<Icon icon={Zap} size="sm" tone="accent" />}
-      summary={
-        <span className={styles.skillText}>
-          Skill active: <span className={styles.skillName}>{name}</span>
-        </span>
+    <TranscriptItem
+      data-testid="skill-activated-card"
+      icon={<Zap />}
+      input={
+        body ? (
+          <TranscriptClamp>
+            <Markdown>{body}</Markdown>
+          </TranscriptClamp>
+        ) : null
       }
-      meta={meta}
-      status="success"
-      isOpen={isOpen}
-      onToggle={handleToggle}
-      className={styles.skillCard}
-    >
-      {body && (
-        <div className={styles.body}>
-          <Markdown>{body}</Markdown>
-        </div>
-      )}
-    </ToolCard>
+      meta="activated"
+      openKey={`skill:${name}`}
+      sectionLabels={{ input: "Instructions" }}
+      status="done"
+      summary={summary}
+      target={name}
+      verb="Skill"
+    />
   );
 };

@@ -1,214 +1,211 @@
 import React, { useMemo } from "react";
-import classNames from "classnames";
-import { CheckCircle2, CircleX } from "lucide-react";
+import { CheckCircle2, CircleX, FileText } from "lucide-react";
 import { Markdown, ShikiCodeBlock } from "../Markdown";
-import { Badge, Icon, ToolCard as DetailsCard } from "../ui";
-import { AnimatedCollapsible } from "./shared/AnimatedCollapsible";
+import { Icon } from "../ui";
+import { useAppSelector } from "../../hooks/useAppSelector";
+import { useThreadId } from "../../features/Chat/Thread";
+import {
+  selectIsStreamingById,
+  selectIsWaitingById,
+} from "../../features/Chat/Thread/selectors";
+import type { ToolCall, ToolResult } from "../../services/refact/types";
+import {
+  TranscriptClamp,
+  TranscriptFacts,
+  TranscriptItem,
+  type TranscriptRawBlock,
+  type TranscriptStatus,
+} from "./TranscriptItem";
+import {
+  FileChips,
+  ReportActions,
+  ReportMarkdown,
+} from "./ToolCard/ReportToolCard";
+import { useIsLatestFinalReport } from "./finalReportLatest";
 import styles from "./FinalReportView.module.css";
-
-import { CompactToolDetails } from "../Tools/AgenticTool/CompactToolDetails";
-import { PagedText } from "../Tools/AgenticTool/PagedText";
 import {
   finalReportPresentation,
   parseFinalReport,
   verificationPassed,
   verificationSummary,
-  type VerificationResult,
+  type FinalReport,
 } from "./finalReportJson";
 
-type FinalReportViewProps = {
-  content: string;
-  title?: string;
-  compact?: boolean;
-  technicalDetails?: React.ReactNode;
-};
-
-function truncate(text: string): string {
-  return text.length > 220 ? `${text.slice(0, 219)}…` : text;
-}
-
-const Section: React.FC<{ title: string; children: React.ReactNode }> = ({
-  title,
-  children,
-}) => (
-  <section className={styles.section}>
-    <div className={styles.sectionTitle}>{title}</div>
-    {children}
-  </section>
-);
-
-const TextDetails: React.FC<{ title: string; items: string[] }> = ({
+const List: React.FC<{ title: string; items: readonly string[] }> = ({
   title,
   items,
 }) =>
-  items.length > 0 ? (
-    <AnimatedCollapsible
-      className={styles.details}
-      defaultOpen={false}
-      header={
-        <span className={styles.collapsibleTitle}>
-          {title} ({items.length})
-        </span>
-      }
-      variant="compact"
-    >
+  items.length === 0 ? null : (
+    <section className={styles.section}>
+      <h5 className={styles.sectionTitle}>{title}</h5>
       <ul className={styles.list}>
         {items.map((item) => (
           <li key={item}>{item}</li>
         ))}
       </ul>
-    </AnimatedCollapsible>
-  ) : (
-    <Section title={title}>
-      <span className={styles.none}>None</span>
-    </Section>
+    </section>
   );
 
-const VerificationDetails: React.FC<{ item: VerificationResult }> = ({
-  item,
-}) => (
-  <AnimatedCollapsible
-    className={styles.verificationItem}
-    defaultOpen={false}
-    header={
-      <span className={styles.verificationHeader}>
-        <Icon
-          icon={verificationPassed(item) ? CheckCircle2 : CircleX}
-          size="sm"
-          tone={verificationPassed(item) ? "success" : "danger"}
-        />
-        <code>{item.command}</code>
-        {item.exit_code !== undefined && item.exit_code !== null && (
-          <span className={styles.exitCode}>({item.exit_code})</span>
-        )}
-      </span>
-    }
-    variant="compact"
-  >
-    {item.output_tail && (
-      <ShikiCodeBlock showLineNumbers={false}>
-        {item.output_tail}
-      </ShikiCodeBlock>
+const StructuredBody: React.FC<{ report: FinalReport }> = ({ report }) => (
+  <div className={styles.root} data-testid="final-report-view">
+    <div className={styles.markdown}>
+      <Markdown>{report.summary}</Markdown>
+    </div>
+    <List
+      title="Tests added or updated"
+      items={report.tests_added_or_updated}
+    />
+    {report.verification.length > 0 && (
+      <section className={styles.section}>
+        <h5 className={styles.sectionTitle}>Verification</h5>
+        {report.verification.map((item) => (
+          <div
+            className={styles.verificationItem}
+            key={`${item.command}:${item.exit_code ?? ""}`}
+          >
+            <span className={styles.verificationHeader}>
+              <Icon
+                icon={verificationPassed(item) ? CheckCircle2 : CircleX}
+                size="sm"
+                tone={verificationPassed(item) ? "success" : "danger"}
+              />
+              <code>{item.command}</code>
+              {item.exit_code !== undefined && item.exit_code !== null && (
+                <span className={styles.exitCode}>({item.exit_code})</span>
+              )}
+            </span>
+            {item.output_tail && (
+              <ShikiCodeBlock showLineNumbers={false}>
+                {item.output_tail}
+              </ShikiCodeBlock>
+            )}
+          </div>
+        ))}
+      </section>
     )}
-  </AnimatedCollapsible>
+    {report.followup_cards.length > 0 && (
+      <section className={styles.section}>
+        <h5 className={styles.sectionTitle}>Followup cards</h5>
+        {report.followup_cards.map((card) => (
+          <article className={styles.followupCard} key={card.title}>
+            <span className={styles.followupTitle}>
+              {card.title} · {card.priority}
+            </span>
+            <p className={styles.followupInstructions}>{card.instructions}</p>
+          </article>
+        ))}
+      </section>
+    )}
+    <List title="Risks" items={report.risks} />
+    <List title="Assumptions" items={report.assumptions} />
+  </div>
 );
+
+export type FinalReportViewProps = {
+  content: string;
+  compact?: boolean;
+  technicalDetails?: React.ReactNode;
+};
+
+const FinalReportBody: React.FC<{ content: string }> = ({ content }) => {
+  const report = useMemo(() => parseFinalReport(content), [content]);
+  if (!report) return <ReportMarkdown markdown={content} />;
+  return (
+    <TranscriptClamp>
+      <StructuredBody report={report} />
+    </TranscriptClamp>
+  );
+};
 
 export const FinalReportView: React.FC<FinalReportViewProps> = ({
   content,
-  title = "Final Report",
   compact = false,
   technicalDetails,
+}) =>
+  compact ? (
+    <div className={styles.root}>
+      <TranscriptFacts facts={finalReportPresentation(content).facts} />
+      <FinalReportBody content={content} />
+      {technicalDetails}
+    </div>
+  ) : (
+    <FinalReportBody content={content} />
+  );
+
+export type FinalReportToolProps = {
+  toolCall: ToolCall;
+  content: string | null;
+  hasResult: boolean;
+  rawContent?: ToolResult["content"];
+  toolFailed?: boolean;
+  extra?: Record<string, unknown>;
+  latest?: boolean;
+};
+
+export const FinalReportTool: React.FC<FinalReportToolProps> = ({
+  toolCall,
+  content,
+  hasResult,
+  rawContent,
+  toolFailed = false,
+  extra,
+  latest,
 }) => {
-  const report = useMemo(() => parseFinalReport(content), [content]);
-  if (compact) {
-    return (
-      <CompactToolDetails facts={finalReportPresentation(content).facts}>
-        <div className={styles.fullReport}>
-          <FinalReportView content={content} title={title} />
-        </div>
-        {technicalDetails ?? (
-          <DetailsCard title="Technical details" defaultOpen={false}>
-            <PagedText label="Full response" body={content} />
-          </DetailsCard>
-        )}
-      </CompactToolDetails>
-    );
-  }
-  if (!report) {
-    return (
-      <div className={styles.legacy}>
-        <Markdown>{content}</Markdown>
-      </div>
-    );
-  }
+  const threadId = useThreadId();
+  const active = useAppSelector(
+    (state) =>
+      selectIsStreamingById(state, threadId) ||
+      selectIsWaitingById(state, threadId),
+  );
+  const isLatestInThread = useIsLatestFinalReport(toolCall.id);
+  const presentation = finalReportPresentation(
+    content ?? (hasResult ? "" : null),
+    toolFailed,
+  );
+  const report = useMemo(
+    () => (content ? parseFinalReport(content) : null),
+    [content],
+  );
+  const status: TranscriptStatus =
+    toolFailed || report?.success === false
+      ? "failed"
+      : !hasResult
+        ? active
+          ? "running"
+          : "waiting"
+        : report
+          ? "done"
+          : "unknown";
+  const raw: TranscriptRawBlock[] = [
+    { label: "Arguments", value: toolCall.function.arguments },
+    ...(rawContent !== undefined
+      ? [{ label: "Response", value: rawContent }]
+      : []),
+    ...(extra ? [{ label: "Metadata", value: extra }] : []),
+  ];
 
   return (
-    <div className={styles.root} data-testid="final-report-view">
-      <header className={classNames(styles.header, "rf-enter")}>
-        <span className={styles.title}>{title}</span>
-        <Badge tone={report.success ? "success" : "danger"}>
-          <Icon
-            icon={report.success ? CheckCircle2 : CircleX}
-            size="sm"
-            tone={report.success ? "success" : "danger"}
-          />
-          {report.success ? "Reported success" : "Reported failure"}
-        </Badge>
-        <Badge tone="muted">{verificationSummary(report)}</Badge>
-      </header>
-      <Section title="Summary">
-        <div className={styles.markdown}>
-          <Markdown>{report.summary}</Markdown>
-        </div>
-      </Section>
-      <Section title="Files changed">
-        {report.files_changed.length > 0 ? (
-          <div className={styles.followupHeader}>
-            {report.files_changed.map((file) => (
-              <Badge key={file} tone="muted">
-                {file}
-              </Badge>
-            ))}
-          </div>
-        ) : (
-          <span className={styles.none}>None</span>
-        )}
-      </Section>
-      <Section title="Tests added or updated">
-        {report.tests_added_or_updated.length > 0 ? (
-          <ul className={styles.list}>
-            {report.tests_added_or_updated.map((test) => (
-              <li key={test}>{test}</li>
-            ))}
-          </ul>
-        ) : (
-          <span className={styles.none}>None</span>
-        )}
-      </Section>
-      <Section title="Verification">
-        {report.verification.length > 0 ? (
-          <div>
-            {report.verification.map((item) => (
-              <VerificationDetails
-                key={`${item.command}:${item.exit_code ?? ""}`}
-                item={item}
-              />
-            ))}
-          </div>
-        ) : (
-          <span className={styles.none}>None</span>
-        )}
-      </Section>
-      <Section title="Followup cards">
-        {report.followup_cards.length > 0 ? (
-          <div>
-            {report.followup_cards.map((card) => (
-              <article key={card.title} className={styles.followupCard}>
-                <div className={styles.followupHeader}>
-                  <span className={styles.followupTitle}>{card.title}</span>
-                  <Badge tone="muted">{card.priority}</Badge>
-                </div>
-                <p className={styles.followupInstructions}>
-                  {truncate(card.instructions)}
-                </p>
-                {card.instructions.length > 220 && (
-                  <DetailsCard defaultOpen={false} title="Full instructions">
-                    <PagedText
-                      label={`Instructions for ${card.title}`}
-                      body={card.instructions}
-                    />
-                  </DetailsCard>
-                )}
-              </article>
-            ))}
-          </div>
-        ) : (
-          <span className={styles.none}>None</span>
-        )}
-      </Section>
-      <TextDetails title="Risks" items={report.risks} />
-      <TextDetails title="Assumptions" items={report.assumptions} />
-    </div>
+    <TranscriptItem
+      data-testid="final-report-tool"
+      actions={content ? <ReportActions markdown={content} /> : null}
+      artifacts={
+        report && report.files_changed.length > 0 ? (
+          <FileChips files={report.files_changed} />
+        ) : null
+      }
+      defaultOpen={latest ?? isLatestInThread}
+      icon={<FileText />}
+      meta={report ? verificationSummary(report) : presentation.stateLabel}
+      openKey={toolCall.id ? `tc:${toolCall.id}` : undefined}
+      output={content ? <FinalReportBody content={content} /> : null}
+      raw={raw}
+      sectionLabels={{ output: "Report" }}
+      status={status}
+      statusLabel={status === "done" ? undefined : presentation.stateLabel}
+      summary={presentation.facts}
+      target={presentation.headline}
+      verb="Report"
+    />
   );
 };
 

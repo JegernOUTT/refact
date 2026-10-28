@@ -314,8 +314,9 @@ describe("ToolsContent routing", () => {
     expect(screen.getByTestId(testId)).toBeInTheDocument();
     if (name === "task_done") {
       expect(container.querySelector('[data-density="compact"]')).toBeNull();
-      expect(screen.getByRole("button", { expanded: true })).toHaveTextContent(
-        "Report unverified",
+      expect(screen.getByTestId("task-done-tool")).toHaveAttribute(
+        "data-transcript-item",
+        "true",
       );
     }
   });
@@ -336,6 +337,7 @@ describe("ToolsContent routing", () => {
             })
           : report;
       const { container } = renderToolContent("task_done", content);
+      fireEvent.click(screen.getByTestId("transcript-toggle"));
 
       const heading = await screen.findByRole("heading", {
         name: "Full task report",
@@ -345,9 +347,7 @@ describe("ToolsContent routing", () => {
       expect(screen.getByText("END OF REPORT")).toBeVisible();
       expect(screen.queryByText("More details")).not.toBeInTheDocument();
       expect(container.querySelector('[data-density="compact"]')).toBeNull();
-      expect(
-        container.querySelector("[class*='contentUnbounded']"),
-      ).not.toBeNull();
+      expect(screen.getByTestId("transcript-clamp")).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Copy report" })).toBeVisible();
       if (format === "structured") {
         expect(screen.getByText("file.ts")).toBeVisible();
@@ -681,7 +681,6 @@ describe("ToolsContent routing", () => {
     expect(screen.queryByTestId("final-report-view")).not.toBeInTheDocument();
     expect(screen.getByTestId("final-report-tool")).toBeInTheDocument();
     openToolCard();
-    fireEvent.click(screen.getByRole("button", { name: "More details" }));
     expect(
       screen.getByText("Plain legacy report", { selector: "p" }),
     ).toBeInTheDocument();
@@ -801,7 +800,6 @@ describe("ToolsContent routing", () => {
     );
 
     openToolCard();
-    fireEvent.click(screen.getByRole("button", { name: "More details" }));
     expect(
       screen.getByText("Right thread report", { selector: "p" }),
     ).toBeInTheDocument();
@@ -892,7 +890,7 @@ describe("compact dedicated transcript composition", () => {
           expect(row?.querySelector("button")).not.toHaveTextContent(
             "RAW_TECHNICAL_SENTINEL",
           );
-          expect(row?.querySelector("button")).toHaveAttribute(
+          expect(row?.querySelector("button[aria-expanded]")).toHaveAttribute(
             "aria-expanded",
             "false",
           );
@@ -906,7 +904,7 @@ describe("compact dedicated transcript composition", () => {
     ["doc_get", "unknown"],
     ["doc_list", "unknown"],
     ["agent_finish", "idle"],
-    ["subagent", "idle"],
+    ["subagent", "waiting"],
   ])(
     "%s missing historical output is %s, not success or running",
     (name, status) => {
@@ -934,8 +932,10 @@ describe("compact dedicated transcript composition", () => {
       "data-status",
       "running",
     );
-    expect(screen.getByRole("button")).toHaveTextContent("Awaiting report");
-    expect(screen.getByRole("button")).not.toHaveTextContent(
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "Running",
+    );
+    expect(screen.getByTestId("transcript-row")).not.toHaveTextContent(
       /queued|completed|verified/iu,
     );
   });
@@ -964,27 +964,40 @@ describe("compact dedicated transcript composition", () => {
         },
       );
       const row = screen.getByTestId("background-agent-inline");
-      const outer = within(row).getAllByRole("button")[0];
-      expect(outer).toHaveAttribute("aria-expanded", "false");
-      expect(outer).toHaveTextContent("Inspect scoped files");
-      expect(outer).toHaveTextContent(
+      const outer = within(row).getByTestId("transcript-toggle");
+      expect(outer).toHaveAttribute(
+        "aria-expanded",
+        status === "waiting_for_approval" ? "true" : "false",
+      );
+      expect(within(row).getByTestId("transcript-target")).toHaveTextContent(
+        "Inspect scoped files",
+      );
+      const expected =
         !status || status === "future_state"
           ? "Status unknown"
           : status === "waiting_for_approval"
             ? "Approval needed"
-            : status[0].toUpperCase() + status.slice(1),
+            : status === "completed"
+              ? null
+              : status[0].toUpperCase() + status.slice(1);
+      if (expected) {
+        expect(
+          within(row).getByTestId("transcript-status-pill"),
+        ).toHaveTextContent(expected);
+      } else {
+        expect(within(row).queryByTestId("transcript-status-pill")).toBeNull();
+      }
+      expect(within(row).getByTestId("transcript-row")).not.toHaveTextContent(
+        "RAW_LAUNCH_ONLY_ONCE",
       );
-      expect(outer).not.toHaveTextContent("RAW_LAUNCH_ONLY_ONCE");
       expect(
-        container.querySelectorAll('section[data-density="compact"]'),
+        container.querySelectorAll('[data-transcript-item="true"]'),
       ).toHaveLength(1);
-      const raw = screen.getByLabelText("Full response content");
-      expect(raw.closest("[inert]")).not.toBeNull();
-      fireEvent.click(outer);
-      expect(raw.closest("[inert]")).not.toBeNull();
-      fireEvent.click(screen.getByRole("button", { name: "More details" }));
-      expect(raw.closest("[inert]")).toBeNull();
-      expect(screen.getAllByText("RAW_LAUNCH_ONLY_ONCE")).toHaveLength(1);
+      if (status !== "waiting_for_approval") fireEvent.click(outer);
+      fireEvent.click(within(row).getByRole("button", { name: /^Raw/ }));
+      expect(within(row).getByTestId("transcript-raw")).toHaveTextContent(
+        "RAW_LAUNCH_ONLY_ONCE",
+      );
       expect(container.querySelector("button button")).toBeNull();
     },
   );
@@ -1026,15 +1039,13 @@ describe("compact dedicated transcript composition", () => {
         },
       );
       const row = screen.getByTestId("background-agent-inline");
-      expect(row).toHaveAttribute("data-status", "error");
-      expect(screen.getByRole("alert")).toHaveTextContent("Request failed");
-      expect(within(row).getAllByRole("button")[0]).not.toHaveTextContent(
-        "Failed child",
-      );
-      fireEvent.click(within(row).getAllByRole("button")[0]);
-      fireEvent.click(screen.getByRole("button", { name: "More details" }));
-      expect(screen.getByText("Running")).toBeInTheDocument();
-      expect(screen.getByLabelText("Full response content")).toHaveTextContent(
+      expect(row).toHaveAttribute("data-status", "failed");
+      expect(
+        within(row).getByTestId("transcript-status-pill"),
+      ).toHaveTextContent("Request failed");
+      fireEvent.click(within(row).getByTestId("transcript-toggle"));
+      fireEvent.click(within(row).getByRole("button", { name: /^Raw/ }));
+      expect(within(row).getByTestId("transcript-raw")).toHaveTextContent(
         "Request transport failed",
       );
       fireEvent.click(screen.getByRole("button", { name: "Open trajectory" }));
@@ -1171,12 +1182,7 @@ describe("compact dedicated transcript composition", () => {
     expect(screen.queryByLabelText("Full response content")).toBeNull();
     fireEvent.click(outer);
     expect(container.querySelectorAll("dt")).toHaveLength(3);
-    const more = screen.getByRole("button", { name: "More details" });
-    expect(more).toHaveAttribute("aria-expanded", "false");
     const raw = screen.getByLabelText("Full response content");
-    expect(raw.closest("[inert]")).not.toBeNull();
-    fireEvent.click(more);
-    expect(raw.closest("[inert]")).not.toBeNull();
     expect(screen.getByTestId("final-report-view")).toHaveTextContent(
       "npm run test -- ToolsContent --run",
     );
@@ -1253,14 +1259,21 @@ describe("neutral dedicated outcome regressions", () => {
         );
         expect(container.querySelector("section")).toHaveAttribute(
           "data-status",
-          "idle",
+          missing ? "unknown" : "done",
         );
         expect(container.querySelector(".lucide-circle-check")).toBeNull();
         expect(container.querySelector(".lucide-loader-circle")).toBeNull();
         if (name === "task_done") {
-          expect(
-            screen.getByRole("button", { expanded: true }),
-          ).toHaveTextContent(missing ? "State unknown" : "Report unverified");
+          if (!missing) {
+            expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
+              "No verification evidence",
+            );
+          }
+          if (missing) {
+            expect(
+              screen.getByTestId("transcript-status-pill"),
+            ).toHaveTextContent("State unknown");
+          }
           expect(
             container.querySelector('[data-density="compact"]'),
           ).toBeNull();
@@ -1292,7 +1305,7 @@ describe("neutral dedicated outcome regressions", () => {
       expect(screen.queryByTestId("generic-tool")).toBeNull();
       expect(container.querySelector("button")).toHaveAttribute(
         "aria-expanded",
-        name === "task_done" ? "true" : "false",
+        "false",
       );
       if (name === "agent_finish") {
         expect(screen.getByRole("button")).toHaveTextContent("Awaiting report");

@@ -1,7 +1,8 @@
-import { User } from "lucide-react";
+import { Telescope } from "lucide-react";
 import React, { useMemo } from "react";
 import { ToolCall } from "../../../services/refact/types";
-import { ReportToolCard, type ReportData } from "./ReportToolCard";
+import { ReportToolCard } from "./ReportToolCard";
+import { extractSubagentReport } from "./subagentReport";
 import { useThreadId } from "../../../features/Chat/Thread";
 import { useAppSelector } from "../../../hooks/useAppSelector";
 import {
@@ -13,93 +14,79 @@ import {
   readCompactRecord,
   readCompactText,
 } from "../../Tools/AgenticTool/compactPresentation";
+import { Markdown } from "../../Markdown";
+import { TranscriptClamp, type TranscriptFact } from "../TranscriptItem";
 
 interface SubagentToolProps {
   toolCall: ToolCall;
   presentation?: "panel" | "inline";
 }
 
-function extractSubagentReport(content: string): ReportData | null {
-  const responseMarker = "## Response";
-  const responseIndex = content.indexOf(responseMarker);
-  if (!content.startsWith("# Subagent Result") || responseIndex === -1) {
-    return null;
-  }
-
-  const taskMatch = content.match(/\*\*Task:\*\*\s*([^\n]+)/);
-  const responseStart = responseIndex + responseMarker.length;
-  const response = content.slice(responseStart).trim();
-
-  return {
-    summary:
-      readCompactText({ task: taskMatch?.[1] }, "task") ??
-      "Background work report",
-    markdown: response || content,
-  };
-}
-
-export const SubagentTool: React.FC<SubagentToolProps> = ({
-  toolCall,
-  presentation = "panel",
-}) => {
+export const SubagentTool: React.FC<SubagentToolProps> = ({ toolCall }) => {
   const threadId = useThreadId();
   const result = useAppSelector((state) =>
     selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
-  const streaming = useAppSelector((state) =>
-    selectIsStreamingById(state, threadId),
-  );
-  const waiting = useAppSelector((state) =>
-    selectIsWaitingById(state, threadId),
+  const active = useAppSelector(
+    (state) =>
+      selectIsStreamingById(state, threadId) ||
+      selectIsWaitingById(state, threadId),
   );
   const args = useMemo(
     () => readCompactRecord(toolCall.function.arguments),
     [toolCall.function.arguments],
   );
-  const task = readCompactText(args, "task");
-  const tools = readCompactText(args, "tools");
+  const task = typeof args?.task === "string" ? args.task.trim() : "";
+  const model =
+    readCompactText(args, "model_name") ?? readCompactText(args, "model_type");
   const maxSteps = readCompactText(args, "max_steps");
-  const modelType = readCompactText(args, "model_type");
-  const modelName = readCompactText(args, "model_name");
+  const targetFiles = Array.isArray(args?.target_files)
+    ? args.target_files.length
+    : 0;
 
-  const summary =
-    presentation === "inline"
-      ? task ?? "Background work"
-      : `Analyze "${task ?? "task"}"`;
-
-  const meta =
-    [
-      tools && `tools: ${tools}`,
-      maxSteps && `max: ${maxSteps}`,
-      modelType && `model type: ${modelType}`,
-      modelName && `model: ${modelName}`,
-      args?.worktree && "worktree",
-      args?.auto_merge === true && "auto merge",
-      Array.isArray(args?.target_files) &&
-        args.target_files.length > 0 &&
-        `files: ${args.target_files.length}`,
-    ]
-      .filter(Boolean)
-      .join(" · ") || null;
+  const facts: TranscriptFact[] = [
+    ...(model ? [{ label: "Model", value: model }] : []),
+    ...(args?.worktree
+      ? [
+          {
+            label: "Worktree",
+            value:
+              args.auto_merge === true ? "isolated · auto merge" : "isolated",
+          },
+        ]
+      : []),
+    ...(maxSteps ? [{ label: "Max steps", value: maxSteps }] : []),
+    ...(targetFiles > 0
+      ? [{ label: "Target files", value: String(targetFiles) }]
+      : []),
+  ];
+  const tools = readCompactText(args, "tools");
 
   return (
     <ReportToolCard
-      toolCall={toolCall}
-      icon={<User />}
-      defaultSummary={summary}
-      meta={meta}
-      extractReport={extractSubagentReport}
-      compact={presentation === "inline"}
       compactTransportState={
         result
           ? result.tool_failed
             ? "failed"
             : "succeeded"
-          : streaming || waiting
+          : active
             ? "running"
             : "pending"
       }
-      unboundedContent
+      defaultSummary={task || "Background work"}
+      extractReport={extractSubagentReport}
+      facts={facts}
+      icon={<Telescope />}
+      input={
+        task ? (
+          <TranscriptClamp>
+            <Markdown>{task}</Markdown>
+          </TranscriptClamp>
+        ) : null
+      }
+      meta={tools ? `tools: ${tools}` : null}
+      toolCall={toolCall}
+      verb="Subagent"
     />
   );
 };
