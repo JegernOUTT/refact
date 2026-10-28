@@ -27,6 +27,7 @@ export type ReadFileRequest = {
   lineStart?: number;
   lineEnd?: number;
   revision?: string;
+  manual?: boolean;
 };
 
 export type ReadFileResponse = {
@@ -40,6 +41,9 @@ export type ReadFileResponse = {
   mtime_ms: number;
   binary?: boolean;
   digest?: string;
+  can_edit?: boolean;
+  image_mime?: string | null;
+  image_data?: string | null;
 };
 
 export type WriteFileRequest = {
@@ -53,6 +57,29 @@ export type WriteFileResponse = {
   path: string;
   size: number;
   mtime_ms: number;
+};
+
+export const PREVIEW_IMAGE_MIME_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+]);
+
+export const MAX_PREVIEW_IMAGE_BYTES = 10 * 1024 * 1024;
+
+const BASE64_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/u;
+
+export const imageDataUrl = (
+  mime: string | null | undefined,
+  data: string | null | undefined,
+): string | null => {
+  if (!mime || !data) return null;
+  const normalizedMime = mime.trim().toLowerCase();
+  if (!PREVIEW_IMAGE_MIME_TYPES.has(normalizedMime)) return null;
+  if (data.length % 4 !== 0 || !BASE64_PATTERN.test(data)) return null;
+  if ((data.length / 4) * 3 > MAX_PREVIEW_IMAGE_BYTES + 2) return null;
+  return `data:${normalizedMime};base64,${data}`;
 };
 
 export const filesApi = createApi({
@@ -107,15 +134,25 @@ export const filesApi = createApi({
     readFile: builder.query<ReadFileResponse, ReadFileRequest>({
       queryFn: async (request, api, _extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const result = await baseQuery({
-          url: buildApiUrlFromState(state, "/v1/files/read", {
-            path: request.path,
-            line_start: request.lineStart,
-            line_end: request.lineEnd,
-          }),
-          credentials: "same-origin",
-          redirect: "follow",
-        });
+        const result = await baseQuery(
+          request.manual
+            ? {
+                url: buildApiUrlFromState(state, "/v1/files/open"),
+                method: "POST",
+                body: { path: request.path },
+                credentials: "same-origin",
+                redirect: "follow",
+              }
+            : {
+                url: buildApiUrlFromState(state, "/v1/files/read", {
+                  path: request.path,
+                  line_start: request.lineStart,
+                  line_end: request.lineEnd,
+                }),
+                credentials: "same-origin",
+                redirect: "follow",
+              },
+        );
         if (result.error) return { error: result.error };
         return { data: result.data as ReadFileResponse };
       },

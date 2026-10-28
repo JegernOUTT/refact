@@ -99,6 +99,7 @@ import { schedulerApi } from "../services/refact/schedulerApi";
 import {
   normalizeWorkspaceDock,
   reconcileWorkspaceState,
+  selectWorkspaceContextChatIds,
   workspaceSlice,
 } from "../features/Workspace/workspaceSlice";
 import { terminalSlice } from "../features/Workspace/TerminalPanel/terminalSlice";
@@ -251,6 +252,7 @@ const workspaceInvariantReducer = (state: ReturnType<typeof rootReducer>) => {
     state.workspace,
     state.chat.open_thread_ids,
     capabilities,
+    selectWorkspaceContextChatIds(state),
   );
 
   if (nextWorkspace === state.workspace) {

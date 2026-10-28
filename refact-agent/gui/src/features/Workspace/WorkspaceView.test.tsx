@@ -24,6 +24,7 @@ import { makeSurfaceKey, type SurfaceKey } from "./surfaceKey";
 import { updateConfig } from "../Config/configSlice";
 import { WORKSPACE_NARROW_QUERY } from "./workspaceBreakpoints";
 import { WorkspaceView } from "./WorkspaceView";
+import { WorkspaceShell } from "./WorkspaceShell";
 
 const groupSplitViewCss = readFileSync(
   "src/features/Workspace/GroupSplitView.module.css",
@@ -99,7 +100,12 @@ function createEmptySplitWorkspaceStore(): AppStore {
 }
 
 function renderWorkspaceView(store: AppStore) {
-  return render(<WorkspaceView />, { store });
+  return render(
+    <WorkspaceShell>
+      <WorkspaceView />
+    </WorkspaceShell>,
+    { store },
+  );
 }
 
 function setWorkspaceAvailability(
@@ -384,6 +390,25 @@ describe("WorkspaceView", () => {
     expect(
       screen.queryByRole("button", { name: "Split active tab" }),
     ).toBeNull();
+  });
+
+  it("leaves the rail and dock to the shared workspace shell", () => {
+    render(<WorkspaceView />, { store: createWorkspaceStore() });
+
+    expectSurface(chat("chat-a"));
+    expect(
+      screen.queryByRole("navigation", { name: "Workspace sections" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Workspace dock")).not.toBeInTheDocument();
+  });
+
+  it("renders a single rail inside the shared workspace shell", () => {
+    renderWorkspaceView(createWorkspaceStore());
+
+    expect(
+      screen.getAllByRole("navigation", { name: "Workspace sections" }),
+    ).toHaveLength(1);
+    expect(screen.getAllByLabelText("Workspace dock")).toHaveLength(1);
   });
 
   it("keeps the Files tree mounted in the dock while a chat is active", async () => {

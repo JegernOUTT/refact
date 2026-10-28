@@ -174,6 +174,8 @@ import {
   clearWorkspaceChatState,
   selectFocusedChatWorkspaceRoot,
   selectFocusedWorkspaceChatId,
+  selectWorkspaceContextChatIds,
+  selectWorkspaceFocusedChatId,
   selectLiveEditsForChat,
   setLiveEditsForChat,
   setActiveTab as setWorkspaceActiveTab,
@@ -370,12 +372,14 @@ function hydratePersistedChatUi(listenerApi: {
         ...trustedWorkspace,
         workspaceCapabilities,
         openThreadIds: listenerApi.getState().chat.open_thread_ids,
+        contextChatIds: selectWorkspaceContextChatIds(listenerApi.getState()),
       }),
     );
     listenerApi.dispatch(
       reconcileWorkspace({
         openThreadIds: listenerApi.getState().chat.open_thread_ids,
         workspaceCapabilities,
+        contextChatIds: selectWorkspaceContextChatIds(listenerApi.getState()),
       }),
     );
     switchToFocusedWorkspaceChat(listenerApi);
@@ -397,7 +401,7 @@ function switchToFocusedWorkspaceChat(listenerApi: {
   getState: () => RootState;
 }): void {
   const state = listenerApi.getState();
-  const chatId = selectFocusedWorkspaceChatId(state);
+  const chatId = selectWorkspaceFocusedChatId(state);
   if (!isWorkspaceRoutableChat(state, chatId)) return;
   if (state.chat.current_thread_id === chatId) return;
   listenerApi.dispatch(switchToThread({ id: chatId, openTab: false }));
@@ -914,6 +918,7 @@ startListening({
     listenerApi.dispatch(
       reconcileWorkspace({
         openThreadIds: listenerApi.getState().chat.open_thread_ids,
+        contextChatIds: selectWorkspaceContextChatIds(listenerApi.getState()),
       }),
     );
   },

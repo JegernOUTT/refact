@@ -10,6 +10,7 @@ import {
   clearLiveFileUpdatesForChat,
   markLiveFileUpdateAuthoritative,
   openFileInFilesPanel,
+  validateAbsoluteFilePath,
 } from "./filesPanelSlice";
 
 describe("openFileInFilesPanel", () => {
@@ -254,5 +255,52 @@ describe("live file updates", () => {
     expect(
       store.getState().filesPanel.liveUpdatesByChat["chat-a"],
     ).toBeUndefined();
+  });
+});
+
+describe("manual absolute path targets", () => {
+  it("validates absolute file paths", () => {
+    expect(validateAbsoluteFilePath("  /tmp/a.txt ")).toEqual({
+      ok: true,
+      path: "/tmp/a.txt",
+    });
+    expect(validateAbsoluteFilePath("C:\\Users\\a.txt")).toMatchObject({
+      ok: true,
+    });
+    expect(validateAbsoluteFilePath("\\\\server\\share\\a.txt")).toMatchObject({
+      ok: true,
+    });
+    expect(validateAbsoluteFilePath("")).toMatchObject({ ok: false });
+    expect(validateAbsoluteFilePath("src/a.ts")).toMatchObject({ ok: false });
+    expect(validateAbsoluteFilePath("~/a.ts")).toMatchObject({ ok: false });
+    expect(validateAbsoluteFilePath("/tmp/dir/")).toMatchObject({ ok: false });
+    expect(validateAbsoluteFilePath("/tmp/a\nb")).toMatchObject({ ok: false });
+    expect(validateAbsoluteFilePath(`/${"a".repeat(5000)}`)).toMatchObject({
+      ok: false,
+    });
+  });
+
+  it("dedups the manual tab and keeps the manual flag on reopen", () => {
+    const store = setUpStore({
+      current_project: { name: "workspace", workspaceRoots: ["/workspace"] },
+    });
+
+    store.dispatch(openFileInFilesPanel({ path: "/etc/hosts", manual: true }));
+    store.dispatch(openFileInFilesPanel({ path: "/etc/hosts", line: 3 }));
+
+    expect(
+      store
+        .getState()
+        .workspace.tabs.filter((tab) => tab === "file:/etc/hosts"),
+    ).toHaveLength(1);
+    expect(store.getState().filesPanel.viewerTargets["/etc/hosts"]).toEqual({
+      path: "/etc/hosts",
+      line: 3,
+      manual: true,
+    });
+    expect(store.getState().filesPanel.expandedDirectories).toEqual([]);
+    expect(store.getState().current_project.workspaceRoots).toEqual([
+      "/workspace",
+    ]);
   });
 });

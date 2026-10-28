@@ -24,6 +24,9 @@ import {
   selectFocusedChatWorkspaceRoot,
   selectFocusedWorkspaceChatId,
   selectGroupForTab,
+  selectSurfaceChatId,
+  selectWorkspaceContextChatIds,
+  selectWorkspaceFocusedChatId,
   selectIsTabSplit,
   selectLiveEditsForChat,
   selectTabs,
@@ -1157,5 +1160,86 @@ describe("workspaceSlice", () => {
     state = reducer(state, splitTab({ tabId, dir: "row" }));
 
     expect(collectLeafIds(groupFor(state, tabId).root)).toEqual(leafIdsBefore);
+  });
+});
+
+describe("task-aware workspace context", () => {
+  const fileKey = makeSurfaceKey("file", "/repo/a.ts");
+  const workspace = (): WorkspaceState => {
+    let state = reducer(undefined, openTab(makeSurfaceKey("chat", "chat-a")));
+    state = reducer(state, openTab(fileKey));
+    return reducer(
+      state,
+      bindSurfaceToChat({ surfaceKey: fileKey, chatId: "agent-1" }),
+    );
+  };
+  const tasksUI = {
+    openTasks: [
+      {
+        id: "task-1",
+        activeChat: { chatId: "planner-1" },
+        plannerChats: [{ id: "planner-1" }],
+      },
+    ],
+  };
+
+  test("uses the active task chat only on task pages", () => {
+    const base = { workspace: workspace(), tasksUI };
+    expect(
+      selectFocusedWorkspaceChatId({ ...base, pages: [{ name: "chat" }] }),
+    ).toBe("agent-1");
+    expect(
+      selectFocusedWorkspaceChatId({
+        ...base,
+        pages: [{ name: "task workspace", taskId: "task-1" }],
+      }),
+    ).toBe("planner-1");
+    expect(
+      selectWorkspaceFocusedChatId({
+        ...base,
+        pages: [{ name: "task workspace", taskId: "task-1" }],
+      }),
+    ).toBe("agent-1");
+    expect(
+      selectFocusedWorkspaceChatId({
+        ...base,
+        pages: [{ name: "task workspace", taskId: "missing" }],
+      }),
+    ).toBeNull();
+  });
+
+  test("collects open task chats including card agents from thread metadata", () => {
+    expect(
+      selectWorkspaceContextChatIds({
+        workspace: workspace(),
+        tasksUI,
+        chat: {
+          threads: {
+            "agent-1": { thread: { task_meta: { task_id: "task-1" } } },
+            "other-agent": { thread: { task_meta: { task_id: "task-2" } } },
+            "chat-a": { thread: {} },
+          },
+        },
+      }).sort(),
+    ).toEqual(["agent-1", "planner-1"]);
+  });
+
+  test("reconcile keeps surfaces owned by task context chats", () => {
+    const state = workspace();
+    const dropped = reducer(
+      state,
+      reconcileWorkspace({ openThreadIds: ["chat-a"] }),
+    );
+    expect(dropped.tabs).not.toContain(fileKey);
+
+    const kept = reducer(
+      state,
+      reconcileWorkspace({
+        openThreadIds: ["chat-a"],
+        contextChatIds: ["agent-1"],
+      }),
+    );
+    expect(kept.tabs).toContain(fileKey);
+    expect(selectSurfaceChatId({ workspace: kept }, fileKey)).toBe("agent-1");
   });
 });

@@ -315,3 +315,53 @@
   font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
     var(--rf-font-ui);
 }
+
+.readOnlyBanner {
+  flex: 0 0 auto;
+  padding: var(--rf-space-1) var(--rf-space-3);
+  color: var(--rf-color-muted);
+  background: var(--rf-surface-2);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
+}
+
+.openPathForm {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  min-width: 0;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+}
+
+.openPathRow {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: var(--rf-space-1);
+}
+
+.openPathInput {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
+}
+
+.openPathError {
+  margin: 0;
+  color: var(--rf-color-danger);
+  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
+  overflow-wrap: anywhere;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}

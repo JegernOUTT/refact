@@ -19,6 +19,7 @@ import {
 export type FileViewerTarget = {
   path: string;
   line?: number;
+  manual?: boolean;
 };
 
 export type LiveFileUpdate = {
@@ -158,10 +159,17 @@ export const filesPanelSlice = createSlice({
       state,
       action: PayloadAction<FileViewerTarget | null>,
     ) => {
-      state.viewerTarget = action.payload;
-      state.selectedPath = action.payload?.path ?? state.selectedPath;
-      if (action.payload) {
-        state.viewerTargets[action.payload.path] = action.payload;
+      const previous = action.payload
+        ? state.viewerTargets[action.payload.path]
+        : undefined;
+      const target =
+        action.payload && previous?.manual && action.payload.manual !== false
+          ? { ...action.payload, manual: true }
+          : action.payload;
+      state.viewerTarget = target;
+      state.selectedPath = target?.path ?? state.selectedPath;
+      if (target) {
+        state.viewerTargets[target.path] = target;
       }
     },
     applyLiveFileUpdate: (
@@ -348,6 +356,37 @@ export const isPathWithinWorkspaceRoots = (
   });
 };
 
+export const MAX_MANUAL_PATH_LENGTH = 4096;
+
+export const validateAbsoluteFilePath = (
+  input: string,
+): { ok: true; path: string } | { ok: false; error: string } => {
+  const path = input.trim();
+  if (path.length === 0) {
+    return { ok: false, error: "Enter an absolute file path." };
+  }
+  if (path.length > MAX_MANUAL_PATH_LENGTH) {
+    return { ok: false, error: "This path is too long." };
+  }
+  if ([...path].some((char) => char.charCodeAt(0) < 0x20)) {
+    return { ok: false, error: "The path contains control characters." };
+  }
+  const absolute =
+    path.startsWith("/") ||
+    /^[A-Za-z]:[\\/]/u.test(path) ||
+    /^\\\\[^\\]+\\[^\\]+/u.test(path);
+  if (!absolute) {
+    return {
+      ok: false,
+      error: "Use an absolute path, such as /home/user/file.txt.",
+    };
+  }
+  if (/[\\/]$/u.test(path)) {
+    return { ok: false, error: "Enter a file path, not a directory." };
+  }
+  return { ok: true, path };
+};
+
 const parentDirectories = (path: string): string[] => {
   const normalized = normalizePath(path);
   const lastSeparator = normalized.lastIndexOf("/");
@@ -397,6 +436,7 @@ export const openFileInFilesPanel =
       ? [worktreeRoot]
       : state.current_project.workspaceRoots ?? [];
     const surfaceKey = makeSurfaceKey("file", target.path);
+    dispatch(setViewerTarget(target));
     dispatch(openTab(surfaceKey));
     if (chatId) dispatch(bindSurfaceToChat({ surfaceKey, chatId }));
     for (const directory of parentDirectories(target.path)) {
@@ -404,7 +444,6 @@ export const openFileInFilesPanel =
         dispatch(expandDirectory(directory));
       }
     }
-    dispatch(setViewerTarget(target));
     if (
       typeof window !== "undefined" &&
       window.matchMedia("(max-width: 767px)").matches

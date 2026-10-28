@@ -23,6 +23,7 @@ pub const PRIVACY_BLOCKED_PREFIX: &str = "Blocked by privacy rules:";
 const DEFAULT_MAX_ENTRIES: usize = 2_000;
 const MAX_ENTRIES: usize = 5_000;
 const MAX_CONTENT_BYTES: usize = 1024 * 1024;
+const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 const BINARY_PROBE_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Deserialize)]
@@ -78,6 +79,11 @@ pub struct ReadQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct OpenRequest {
+    path: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct WriteRequest {
     path: String,
     content: String,
@@ -107,6 +113,9 @@ pub struct ReadResponse {
     digest: String,
     #[serde(skip_serializing_if = "is_false")]
     binary: bool,
+    can_edit: bool,
+    image_mime: Option<String>,
+    image_data: Option<String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -370,21 +379,6 @@ fn validate_line_range(
     Ok(())
 }
 
-fn slice_lines(text: &str, line_start: Option<usize>, line_end: Option<usize>) -> String {
-    if line_start.is_none() && line_end.is_none() {
-        return text.to_string();
-    }
-    let start = line_start.unwrap_or(1);
-    let end = line_end.unwrap_or(usize::MAX);
-    text.split_inclusive('\n')
-        .enumerate()
-        .filter_map(|(index, line)| {
-            let line_number = index + 1;
-            (line_number >= start && line_number <= end).then_some(line)
-        })
-        .collect()
-}
-
 fn truncate_content(mut content: String) -> (String, bool) {
     if content.len() <= MAX_CONTENT_BYTES {
         return (content, false);
@@ -446,47 +440,240 @@ fn mtime_ms(metadata: &std::fs::Metadata) -> u64 {
         .unwrap_or(0)
 }
 
+fn browser_safe_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    let (format, mime) = match image::guess_format(bytes).ok()? {
+        image::ImageFormat::Png => (image::ImageFormat::Png, "image/png"),
+        image::ImageFormat::Jpeg => (image::ImageFormat::Jpeg, "image/jpeg"),
+        image::ImageFormat::Gif => (image::ImageFormat::Gif, "image/gif"),
+        image::ImageFormat::WebP => (image::ImageFormat::WebP, "image/webp"),
+        _ => return None,
+    };
+    image::ImageReader::with_format(std::io::Cursor::new(bytes), format)
+        .into_dimensions()
+        .ok()
+        .filter(|(width, height)| *width > 0 && *height > 0)
+        .map(|_| mime)
+}
+
+fn may_be_preview_image(prefix: &[u8]) -> bool {
+    matches!(
+        image::guess_format(prefix),
+        Ok(image::ImageFormat::Png
+            | image::ImageFormat::Jpeg
+            | image::ImageFormat::Gif
+            | image::ImageFormat::WebP)
+    )
+}
+
+struct LineSelector {
+    start: usize,
+    end: usize,
+    line: usize,
+    selected: Vec<u8>,
+    overflow: bool,
+}
+
+impl LineSelector {
+    fn new(line_start: Option<usize>, line_end: Option<usize>) -> Self {
+        Self {
+            start: line_start.unwrap_or(1),
+            end: line_end.unwrap_or(usize::MAX),
+            line: 1,
+            selected: Vec::new(),
+            overflow: false,
+        }
+    }
+
+    fn push(&mut self, mut data: &[u8]) {
+        let cap = MAX_CONTENT_BYTES + 4;
+        while !data.is_empty() && self.line <= self.end {
+            let (segment, rest, newline) = match data.iter().position(|byte| *byte == b'\n') {
+                Some(index) => (&data[..=index], &data[index + 1..], true),
+                None => (data, &data[data.len()..], false),
+            };
+            if self.line >= self.start {
+                let keep = segment.len().min(cap - self.selected.len());
+                self.selected.extend_from_slice(&segment[..keep]);
+                self.overflow |= keep < segment.len();
+            }
+            if newline {
+                self.line += 1;
+            }
+            data = rest;
+        }
+    }
+}
+
+struct Utf8Stream {
+    carry: Vec<u8>,
+    valid: bool,
+}
+
+impl Utf8Stream {
+    fn push(&mut self, data: &[u8]) {
+        if !self.valid {
+            return;
+        }
+        self.carry.extend_from_slice(data);
+        match std::str::from_utf8(&self.carry) {
+            Ok(_) => self.carry.clear(),
+            Err(error) if error.error_len().is_none() => {
+                self.carry.drain(..error.valid_up_to());
+            }
+            Err(_) => self.valid = false,
+        }
+    }
+
+    fn finish(&self) -> bool {
+        self.valid && self.carry.is_empty()
+    }
+}
+
+struct StreamedFile {
+    metadata: std::fs::Metadata,
+    head: Vec<u8>,
+    complete_head: bool,
+    selected: Vec<u8>,
+    selected_overflow: bool,
+    utf8: bool,
+    digest: String,
+}
+
+fn not_regular_file() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file")
+}
+
+fn stream_regular_file(
+    path: &Path,
+    line_start: Option<usize>,
+    line_end: Option<usize>,
+) -> std::io::Result<StreamedFile> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    if !std::fs::symlink_metadata(path)?.is_file() {
+        return Err(not_regular_file());
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(not_regular_file());
+    }
+    let mut file = file.take(metadata.len());
+    let mut hasher = Sha256::new();
+    let mut head_cap = BINARY_PROBE_BYTES;
+    let mut head = Vec::with_capacity(head_cap);
+    let mut total = 0usize;
+    let mut lines = LineSelector::new(line_start, line_end);
+    let mut utf8 = Utf8Stream {
+        carry: Vec::new(),
+        valid: true,
+    };
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        let read = match file.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        let data = &chunk[..read];
+        if total == 0 && may_be_preview_image(data) {
+            head_cap = MAX_IMAGE_BYTES;
+        }
+        hasher.update(data);
+        let keep = read.min(head_cap.saturating_sub(head.len()));
+        head.extend_from_slice(&data[..keep]);
+        utf8.push(data);
+        lines.push(data);
+        total = total.saturating_add(read);
+    }
+    let out = hasher.finalize();
+    Ok(StreamedFile {
+        metadata,
+        complete_head: total == head.len(),
+        head,
+        selected: lines.selected,
+        selected_overflow: lines.overflow,
+        utf8: utf8.finish(),
+        digest: hex::encode(&out[..16]),
+    })
+}
+
 async fn read_file_core(
     path: &Path,
     line_start: Option<usize>,
     line_end: Option<usize>,
+    can_edit: bool,
 ) -> Result<ReadResponse, ScratchError> {
+    use base64::Engine;
+
     validate_line_range(line_start, line_end)?;
-    let metadata = tokio::fs::metadata(path)
-        .await
-        .map_err(|error| io_error(StatusCode::NOT_FOUND, "inspect file", path, error))?;
-    if !metadata.is_file() {
-        return Err(ScratchError::new(
-            StatusCode::BAD_REQUEST,
-            format!("Path '{}' is not a file", path.display()),
-        ));
-    }
-    let bytes = tokio::fs::read(path)
-        .await
-        .map_err(|error| io_error(StatusCode::INTERNAL_SERVER_ERROR, "read file", path, error))?;
-    let binary = bytes[..bytes.len().min(BINARY_PROBE_BYTES)].contains(&0);
-    let text = if binary {
-        None
-    } else {
-        std::str::from_utf8(&bytes).ok()
-    };
+    let owned = path.to_path_buf();
+    let streamed =
+        tokio::task::spawn_blocking(move || stream_regular_file(&owned, line_start, line_end))
+            .await
+            .map_err(|error| {
+                ScratchError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to read '{}': {error}", path.display()),
+                )
+            })?
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::InvalidInput => ScratchError::new(
+                    StatusCode::BAD_REQUEST,
+                    format!("Path '{}' is not a file", path.display()),
+                ),
+                std::io::ErrorKind::NotFound => {
+                    io_error(StatusCode::NOT_FOUND, "read file", path, error)
+                }
+                _ => io_error(StatusCode::INTERNAL_SERVER_ERROR, "read file", path, error),
+            })?;
+    let StreamedFile {
+        metadata,
+        head,
+        complete_head,
+        selected,
+        selected_overflow,
+        utf8,
+        digest,
+    } = streamed;
     let language = language_for_path(path);
     let path = path.to_string_lossy().to_string();
-    if let Some(text) = text {
-        let (content, truncated) = truncate_content(slice_lines(text, line_start, line_end));
+    let image_mime = complete_head
+        .then(|| browser_safe_image_mime(&head))
+        .flatten();
+    let binary = image_mime.is_some() || head[..head.len().min(BINARY_PROBE_BYTES)].contains(&0);
+    if !binary && utf8 {
+        let text = match std::str::from_utf8(&selected) {
+            Ok(text) => text,
+            Err(error) => std::str::from_utf8(&selected[..error.valid_up_to()]).unwrap_or_default(),
+        };
+        let (content, truncated) = truncate_content(text.to_string());
         return Ok(ReadResponse {
             path,
             content,
             language,
             size: metadata.len(),
-            truncated,
+            truncated: truncated || selected_overflow,
             line_start,
             line_end,
             mtime_ms: mtime_ms(&metadata),
-            digest: crate::file_activity::digest_bytes(&bytes),
+            digest,
             binary: false,
+            can_edit,
+            image_mime: None,
+            image_data: None,
         });
     }
+    let image_data = image_mime.map(|_| base64::engine::general_purpose::STANDARD.encode(&head));
     Ok(ReadResponse {
         path,
         content: String::new(),
@@ -496,8 +683,11 @@ async fn read_file_core(
         line_start,
         line_end,
         mtime_ms: mtime_ms(&metadata),
-        digest: crate::file_activity::digest_bytes(&bytes),
+        digest,
         binary: true,
+        can_edit,
+        image_mime: image_mime.map(str::to_string),
+        image_data,
     })
 }
 
@@ -545,7 +735,127 @@ pub async fn handle_v1_files_read(
     privacy_checked_path(app.gcx.clone(), &requested).await?;
     privacy_checked_path(app.gcx, &path).await?;
     Ok(Json(
-        read_file_core(&path, query.line_start, query.line_end).await?,
+        read_file_core(&path, query.line_start, query.line_end, true).await?,
+    ))
+}
+
+fn trusted_open_origin(headers: &axum::http::HeaderMap) -> bool {
+    use std::net::IpAddr;
+    use url::Host;
+
+    let Some(origin) = headers.get(axum::http::header::ORIGIN) else {
+        return true;
+    };
+    let Some(origin) = origin
+        .to_str()
+        .ok()
+        .and_then(|origin| url::Url::parse(origin).ok())
+    else {
+        return false;
+    };
+    if origin.scheme() == "vscode-webview" {
+        return origin.host().is_some() && matches!(origin.path(), "" | "/");
+    }
+    if origin.path() != "/"
+        || origin.query().is_some()
+        || origin.fragment().is_some()
+        || !origin.username().is_empty()
+        || origin.password().is_some()
+    {
+        return false;
+    }
+    if !matches!(origin.scheme(), "http" | "https") {
+        return false;
+    }
+    let local_host = match origin.host() {
+        Some(Host::Domain(domain)) if domain == "localhost" => return true,
+        Some(Host::Domain(domain)) if domain == "refactai" => {
+            return origin.scheme() == "http" && origin.port().is_none();
+        }
+        Some(Host::Ipv4(ip)) if ip.is_loopback() => return true,
+        Some(Host::Ipv6(ip)) if ip.is_loopback() => return true,
+        Some(Host::Domain(domain)) => domain
+            .strip_suffix(".local")
+            .is_some_and(|label| !label.is_empty() && !label.ends_with('.')),
+        Some(Host::Ipv4(_) | Host::Ipv6(_)) => true,
+        None => false,
+    };
+    let Some(port) = origin.port_or_known_default() else {
+        return false;
+    };
+    let Some(request_host) = headers
+        .get(axum::http::header::HOST)
+        .and_then(|host| host.to_str().ok())
+        .and_then(|host| host.parse::<axum::http::uri::Authority>().ok())
+    else {
+        return false;
+    };
+    let request_port = request_host
+        .port_u16()
+        .unwrap_or(port_default(origin.scheme()));
+    let request_name = request_host
+        .host()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
+    let same_host = match origin.host() {
+        Some(Host::Domain(domain)) => request_name == domain,
+        Some(Host::Ipv4(ip)) => request_name.parse::<IpAddr>().ok() == Some(IpAddr::V4(ip)),
+        Some(Host::Ipv6(ip)) => request_name.parse::<IpAddr>().ok() == Some(IpAddr::V6(ip)),
+        None => false,
+    };
+    local_host && same_host && request_port == port
+}
+
+fn port_default(scheme: &str) -> u16 {
+    if scheme == "https" {
+        443
+    } else {
+        80
+    }
+}
+
+pub async fn handle_v1_files_open(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<OpenRequest>,
+) -> Result<Json<ReadResponse>, ScratchError> {
+    if !trusted_open_origin(&headers) {
+        return Err(ScratchError::new(
+            StatusCode::FORBIDDEN,
+            "Opening files is not allowed from this origin".to_string(),
+        ));
+    }
+    let requested = PathBuf::from(&request.path);
+    if !requested.is_absolute() {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "Path must be absolute".to_string(),
+        ));
+    }
+    let canonical = tokio::fs::canonicalize(&requested)
+        .await
+        .map(|path| dunce::simplified(&path).to_path_buf())
+        .map_err(|error| io_error(StatusCode::NOT_FOUND, "resolve path", &requested, error))?;
+    let privacy = crate::privacy::load_privacy_if_needed(app.gcx.clone()).await;
+    crate::privacy::check_file_privacy(
+        privacy,
+        &requested,
+        &crate::privacy::FilePrivacyLevel::AllowToSendAnywhere,
+    )
+    .map_err(|error| {
+        ScratchError::new(
+            StatusCode::FORBIDDEN,
+            format!("{PRIVACY_BLOCKED_PREFIX} {error}"),
+        )
+    })?;
+    privacy_checked_path(app.gcx.clone(), &requested).await?;
+    privacy_checked_path(app.gcx.clone(), &canonical).await?;
+    let can_edit = validated_existing_path(app.gcx.clone(), &requested)
+        .await
+        .is_ok_and(|validated| validated == canonical);
+    Ok(Json(
+        read_file_core(&canonical, None, None, can_edit).await?,
     ))
 }
 
@@ -1215,12 +1525,12 @@ mod tests {
     async fn big_file_is_truncated_on_utf8_boundary() {
         let workspace = tempfile::tempdir().unwrap();
         let path = workspace.path().join("big.txt");
-        let content = format!("{}é-tail", "a".repeat(MAX_CONTENT_BYTES - 1));
+        let content = format!("{}é-tail\nlast\n", "a".repeat(MAX_CONTENT_BYTES - 1));
         tokio::fs::write(&path, content.as_bytes()).await.unwrap();
         let (_gcx, router) = test_router(&[workspace.path()]).await;
 
         let (status, response) = get_json(
-            router,
+            router.clone(),
             query_uri(
                 "/v1/files/read",
                 &[("path", path.to_string_lossy().to_string())],
@@ -1235,5 +1545,220 @@ mod tests {
             MAX_CONTENT_BYTES - 1
         );
         assert_eq!(response["language"], "plaintext");
+        assert_eq!(
+            response["digest"],
+            crate::file_activity::digest_bytes(content.as_bytes())
+        );
+
+        let (status, late) = get_json(
+            router,
+            query_uri(
+                "/v1/files/read",
+                &[
+                    ("path", path.to_string_lossy().to_string()),
+                    ("line_start", "2".to_string()),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(late["content"], "last\n");
+        assert_eq!(late["truncated"], false);
+    }
+
+    #[tokio::test]
+    async fn open_reads_external_text_read_only_without_widening_scope() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let inside = workspace.path().join("main.rs");
+        let external = outside.path().join("notes.txt");
+        tokio::fs::write(&inside, "fn main() {}\n").await.unwrap();
+        tokio::fs::write(&external, "external\n").await.unwrap();
+        let (_gcx, router) = test_router(&[workspace.path()]).await;
+
+        let (status, opened) = post_json(
+            router.clone(),
+            "/v1/files/open",
+            serde_json::json!({ "path": external }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{opened:?}");
+        assert_eq!(opened["content"], "external\n");
+        assert_eq!(opened["can_edit"], false);
+        assert_eq!(opened["image_mime"], Value::Null);
+        assert_eq!(
+            opened["digest"],
+            crate::file_activity::digest_of("external\n")
+        );
+
+        let (status, inside_opened) = post_json(
+            router.clone(),
+            "/v1/files/open",
+            serde_json::json!({ "path": inside }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(inside_opened["can_edit"], true);
+
+        for (origin, expected) in [
+            ("https://evil.example", StatusCode::FORBIDDEN),
+            ("null", StatusCode::FORBIDDEN),
+            ("http://localhost.evil.example:5173", StatusCode::FORBIDDEN),
+            ("http://localhost:5173", StatusCode::OK),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/files/open")
+                        .header("content-type", "application/json")
+                        .header("origin", origin)
+                        .body(Body::from(
+                            serde_json::to_vec(&serde_json::json!({ "path": external })).unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{origin}");
+            let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&body).contains("external"),
+                expected == StatusCode::OK,
+                "{origin}"
+            );
+        }
+
+        let (status, _) = get_json(
+            router.clone(),
+            query_uri(
+                "/v1/files/read",
+                &[("path", external.to_string_lossy().to_string())],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = post_json(
+            router,
+            "/v1/files/write",
+            serde_json::json!({ "path": external, "content": "clobbered\n" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            tokio::fs::read_to_string(&external).await.unwrap(),
+            "external\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_previews_only_bounded_recognized_raster_regular_files() {
+        use base64::Engine;
+
+        let outside = tempfile::tempdir().unwrap();
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(2, 1, image::Rgba([255, 0, 0, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let png_path = outside.path().join("pixel.dat");
+        tokio::fs::write(&png_path, &png).await.unwrap();
+        let mut oversized = png.clone();
+        oversized.resize(super::MAX_IMAGE_BYTES + 1, 0);
+        let oversized_path = outside.path().join("huge.png");
+        tokio::fs::write(&oversized_path, &oversized).await.unwrap();
+        let svg_path = outside.path().join("icon.svg");
+        let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\"><script>x</script></svg>";
+        tokio::fs::write(&svg_path, svg).await.unwrap();
+        let (_gcx, router) = test_router(&[]).await;
+        let open = |path: PathBuf| {
+            post_json(
+                router.clone(),
+                "/v1/files/open",
+                serde_json::json!({ "path": path }),
+            )
+        };
+
+        let (status, image) = open(png_path).await;
+        assert_eq!(status, StatusCode::OK, "{image:?}");
+        assert_eq!(image["image_mime"], "image/png");
+        assert_eq!(image["size"], png.len() as u64);
+        assert_eq!(image["binary"], true);
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(image["image_data"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(decoded, png);
+
+        let (status, huge) = open(oversized_path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(huge["image_mime"], Value::Null);
+        assert_eq!(huge["image_data"], Value::Null);
+        assert_eq!(huge["size"], oversized.len() as u64);
+
+        let (status, svg_response) = open(svg_path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(svg_response["image_mime"], Value::Null);
+        assert_eq!(svg_response["content"], svg);
+
+        #[cfg(unix)]
+        {
+            let fifo = outside.path().join("pipe");
+            let c_path = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+            let (status, _) = tokio::time::timeout(std::time::Duration::from_secs(10), open(fifo))
+                .await
+                .expect("opening a FIFO must not block");
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn open_checks_privacy_and_edit_scope_on_canonical_alias() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("token.secret");
+        let plain = outside.path().join("plain.txt");
+        tokio::fs::write(&secret, "TOKEN\n").await.unwrap();
+        tokio::fs::write(&plain, "plain\n").await.unwrap();
+        let secret_alias = outside.path().join("alias.txt");
+        symlink(&secret, &secret_alias).unwrap();
+        let requested_secret_alias = outside.path().join("plain.secret");
+        symlink(&plain, &requested_secret_alias).unwrap();
+        let workspace_alias = workspace.path().join("linked.txt");
+        symlink(&plain, &workspace_alias).unwrap();
+        let (gcx, router) = test_router(&[workspace.path()]).await;
+        set_privacy(gcx, vec!["*.secret".to_string()]);
+
+        let (status, blocked) = post_json(
+            router.clone(),
+            "/v1/files/open",
+            serde_json::json!({ "path": secret_alias }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(blocked["detail"].as_str().unwrap().contains("privacy"));
+        assert!(!blocked.to_string().contains("TOKEN"));
+
+        let (status, blocked) = post_json(
+            router.clone(),
+            "/v1/files/open",
+            serde_json::json!({ "path": requested_secret_alias }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(blocked["detail"].as_str().unwrap().contains("privacy"));
+
+        let (status, aliased) = post_json(
+            router,
+            "/v1/files/open",
+            serde_json::json!({ "path": workspace_alias }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{aliased:?}");
+        assert_eq!(aliased["content"], "plain\n");
+        assert_eq!(aliased["can_edit"], false);
     }
 }

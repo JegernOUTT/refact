@@ -1149,15 +1149,17 @@ export const reconcileWorkspaceState = (
   state: WorkspaceState,
   openThreadIds: string[],
   workspaceCapabilities: WorkspaceCapabilities = DEFAULT_WORKSPACE_CAPABILITIES,
+  contextChatIds: readonly string[] = [],
 ): WorkspaceState => {
   const effectiveCapabilities = effectiveWorkspaceCapabilities(
     state,
     workspaceCapabilities,
   );
   const openThreads = new Set(openThreadIds);
+  const contextOwners = new Set([...openThreadIds, ...contextChatIds]);
   const contextOwnerIsOpen = (tabId: SurfaceKey): boolean => {
     const chatId = state.contextChatByTab?.[tabId]?.trim();
-    return !chatId || openThreads.has(chatId);
+    return !chatId || contextOwners.has(chatId);
   };
   const nextState: WorkspaceState = {
     tabs: unique(state.tabs)
@@ -1207,7 +1209,7 @@ export const reconcileWorkspaceState = (
   ) {
     nextState.activeTabId = nextState.tabs[0] ?? null;
   }
-  pruneContextChatByTab(nextState, openThreads);
+  pruneContextChatByTab(nextState, contextOwners);
 
   const sanitizedState = sanitizeWorkspaceSurfaceUniqueness(
     nextState,
@@ -1687,12 +1689,14 @@ export const workspaceSlice = createSlice({
       action: PayloadAction<{
         openThreadIds: string[];
         workspaceCapabilities?: WorkspaceCapabilities;
+        contextChatIds?: string[];
       }>,
     ) =>
       reconcileWorkspaceState(
         state,
         action.payload.openThreadIds,
         action.payload.workspaceCapabilities,
+        action.payload.contextChatIds,
       ),
     hydrateWorkspace: (
       _state,
@@ -1700,6 +1704,7 @@ export const workspaceSlice = createSlice({
         WorkspaceHydrationState & {
           workspaceCapabilities?: WorkspaceCapabilities;
           openThreadIds?: string[];
+          contextChatIds?: string[];
         }
       >,
     ) => {
@@ -1783,6 +1788,7 @@ export const workspaceSlice = createSlice({
               : hydratedState,
             action.payload.openThreadIds,
             workspaceCapabilities,
+            action.payload.contextChatIds,
           )
         : hydratedState;
     },
@@ -1817,8 +1823,22 @@ export const {
   hydrateWorkspace,
 } = workspaceSlice.actions;
 
+type WorkspacePageState = {
+  name: string;
+  taskId?: string;
+  chatId?: string;
+};
+
+type WorkspaceTaskState = {
+  id: string;
+  activeChat: { chatId: string } | null;
+  plannerChats?: readonly { id: string }[];
+};
+
 type WorkspaceRootState = {
   workspace: WorkspaceState;
+  pages?: readonly WorkspacePageState[];
+  tasksUI?: { openTasks: readonly WorkspaceTaskState[] };
 };
 
 type FocusedChatWorkspaceRootState = WorkspaceRootState & {
@@ -1913,9 +1933,56 @@ export const selectFocusedWorkspaceSurfaceKey = (
   return group ? focusedSurfaceKey(group) : activeTabId;
 };
 
-export const selectFocusedWorkspaceChatId = (
+export const selectWorkspaceFocusedChatId = (
   state: WorkspaceRootState,
 ): string | null => focusedWorkspaceChatId(state.workspace);
+
+export const selectTaskPageChatId = (
+  state: WorkspaceRootState,
+): string | null | undefined => {
+  const page = state.pages?.[state.pages.length - 1];
+  if (page?.name === "task agent") return page.chatId ?? null;
+  if (page?.name !== "task workspace") return undefined;
+  const task = state.tasksUI?.openTasks.find(({ id }) => id === page.taskId);
+  return task?.activeChat?.chatId ?? null;
+};
+
+export const selectFocusedWorkspaceChatId = (
+  state: WorkspaceRootState,
+): string | null => {
+  const taskChatId = selectTaskPageChatId(state);
+  return taskChatId === undefined
+    ? selectWorkspaceFocusedChatId(state)
+    : taskChatId;
+};
+
+type WorkspaceContextRootState = WorkspaceRootState & {
+  chat?: {
+    threads: Record<
+      string,
+      { thread: { task_meta?: { task_id: string } | null } } | undefined
+    >;
+  };
+};
+
+export const selectWorkspaceContextChatIds = (
+  state: WorkspaceContextRootState,
+): string[] => {
+  const chatIds = new Set<string>();
+  const openTaskIds = new Set<string>();
+  for (const task of state.tasksUI?.openTasks ?? []) {
+    openTaskIds.add(task.id);
+    if (task.activeChat?.chatId) chatIds.add(task.activeChat.chatId);
+    for (const planner of task.plannerChats ?? []) chatIds.add(planner.id);
+  }
+  for (const [chatId, runtime] of Object.entries(state.chat?.threads ?? {})) {
+    const taskId = runtime?.thread.task_meta?.task_id;
+    if (taskId && openTaskIds.has(taskId)) chatIds.add(chatId);
+  }
+  const taskChatId = selectTaskPageChatId(state);
+  if (taskChatId) chatIds.add(taskChatId);
+  return [...chatIds];
+};
 
 export const selectSurfaceChatId = (
   state: WorkspaceRootState,

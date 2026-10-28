@@ -1,0 +1,99 @@
+.preview {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  background: var(--rf-bg);
+}
+
+.toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  min-width: 0;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-1) var(--rf-space-3);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+}
+
+.zoomLevel {
+  min-width: calc(var(--rf-space-3) * 4);
+  color: var(--rf-color-muted);
+  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.dimensions {
+  margin-inline-start: auto;
+  color: var(--rf-color-faint);
+  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
+  font-variant-numeric: tabular-nums;
+}
+
+.viewport {
+  composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
+  display: flex;
+  flex: 0 0 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: auto;
+  background: var(--rf-surface-2);
+  outline: none;
+}
+
+.viewport:focus-visible {
+  box-shadow: inset 0 0 0 var(--rf-focus-ring-w) var(--rf-focus-ring);
+}
+
+.stage {
+  position: relative;
+  flex: 0 0 auto;
+  margin: auto;
+  overflow: hidden;
+}
+
+.image {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  max-width: none;
+  transform: translate(-50%, -50%);
+  user-select: none;
+}
+
+.image[data-rotation="90"] {
+  transform: translate(-50%, -50%) rotate(90deg);
+}
+
+.image[data-rotation="180"] {
+  transform: translate(-50%, -50%) rotate(180deg);
+}
+
+.image[data-rotation="270"] {
+  transform: translate(-50%, -50%) rotate(270deg);
+}
+
+.resizeHandle {
+  flex: 0 0 auto;
+  height: var(--rf-space-2);
+  border-top: var(--rf-hairline) solid var(--rf-border);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+  background: var(--rf-surface-glass);
+  cursor: row-resize;
+  touch-action: none;
+  outline: none;
+}
+
+.resizeHandle:hover {
+  background: var(--rf-surface-2);
+}
+
+.resizeHandle:focus-visible {
+  box-shadow: inset 0 0 0 var(--rf-focus-ring-w) var(--rf-focus-ring);
+}

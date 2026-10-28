@@ -17,6 +17,8 @@ import {
 } from "../../../hooks";
 import type { DiffChunk } from "../../../services/refact";
 import {
+  MAX_PREVIEW_IMAGE_BYTES,
+  imageDataUrl,
   useReadFileQuery,
   useWriteFileMutation,
 } from "../../../services/refact/files";
@@ -44,6 +46,7 @@ import {
   isPrivacyBlocked,
 } from "./filesPanelErrors";
 import { changedLineNumbers } from "./liveFileModel";
+import { ImageFilePreview } from "./ImageFilePreview";
 import { MarkdownFilePreview } from "./MarkdownFilePreview";
 import styles from "./FilesPanel.module.css";
 
@@ -57,6 +60,7 @@ type DiscardIntent = "cancel" | "reload" | null;
 const EMPTY_ROOTS: string[] = [];
 const EMPTY_CHUNKS: DiffChunk[] = [];
 const MARKDOWN_LANGUAGES = new Set(["markdown", "md", "mdx"]);
+const IMAGE_PATH_PATTERN = /\.(png|jpe?g|gif|webp)$/iu;
 
 const normalizeBreadcrumbPath = (path: string): string => {
   const normalized = path.replace(/\\/g, "/");
@@ -135,18 +139,30 @@ export function FileViewer({ path }: { path: string }) {
   const viewRef = useRef<EditorView | null>(null);
   const [writeFile, writeState] = useWriteFileMutation();
   const target = storedTarget ?? { path };
-  const { data, error, isFetching, refetch } = useReadFileQuery({
-    path,
-    chatId: chatId ?? undefined,
-    revision:
-      liveUpdate?.operation === "write" ? liveUpdate.revision : undefined,
-  });
+  const manual = storedTarget?.manual === true;
+  const { data, error, isFetching, refetch } = useReadFileQuery(
+    manual
+      ? { path, manual: true }
+      : {
+          path,
+          chatId: chatId ?? undefined,
+          revision:
+            liveUpdate?.operation === "write" ? liveUpdate.revision : undefined,
+        },
+  );
   const breadcrumbs = useMemo(
     () => breadcrumbsForPath(path, workspaceRoots),
     [path, workspaceRoots],
   );
   const unavailable =
-    liveUpdate?.operation === "remove" || liveUpdate?.operation === "rename";
+    !manual &&
+    (liveUpdate?.operation === "remove" || liveUpdate?.operation === "rename");
+  const imageSrc = useMemo(
+    () => imageDataUrl(data?.image_mime, data?.image_data),
+    [data?.image_mime, data?.image_data],
+  );
+  const unsupportedImage = !!data?.image_mime && imageSrc === null;
+  const canEdit = manual ? data?.can_edit === true : data?.can_edit !== false;
   const displayedContent = unavailable ? null : data?.content ?? null;
   const displayedByteLength = useMemo(
     () =>
@@ -170,7 +186,9 @@ export function FileViewer({ path }: { path: string }) {
       : undefined;
   const editable =
     !!data &&
+    canEdit &&
     !data.binary &&
+    !data.image_mime &&
     !data.truncated &&
     data.line_start === null &&
     data.line_end === null &&
@@ -303,10 +321,12 @@ export function FileViewer({ path }: { path: string }) {
   const blocked = isPrivacyBlocked(error);
   const unreadableDescription = blocked
     ? "This file is blocked by privacy rules."
-    : isAccessDenied(error)
-      ? errorDetail(error) ??
-        "This file is outside the directories the workspace worker may read."
-      : "The workspace worker could not read this file.";
+    : manual
+      ? errorDetail(error) ?? "This file could not be opened."
+      : isAccessDenied(error)
+        ? errorDetail(error) ??
+          "This file is outside the directories the workspace worker may read."
+        : "The workspace worker could not read this file.";
   const lineStart = data?.line_start ?? 1;
 
   return (
@@ -383,9 +403,11 @@ export function FileViewer({ path }: { path: string }) {
               content={
                 isPlaying
                   ? "Editing is locked while edits are playing"
-                  : editable
-                    ? "Edit this file"
-                    : "This file cannot be edited here"
+                  : data && !canEdit
+                    ? "This file is read-only"
+                    : editable
+                      ? "Edit this file"
+                      : "This file cannot be edited here"
               }
             >
               <IconButton
@@ -439,11 +461,36 @@ export function FileViewer({ path }: { path: string }) {
           title={blocked ? "File blocked" : "File unavailable"}
           variant="full"
         />
-      ) : data?.binary ? (
+      ) : imageSrc !== null && data ? (
+        <>
+          <div className={styles.fileMeta}>
+            <span>{data.image_mime}</span>
+            <span>{data.size.toLocaleString()} bytes</span>
+          </div>
+          {!canEdit ? (
+            <div className={styles.readOnlyBanner} role="status">
+              Read-only
+            </div>
+          ) : null}
+          <ImageFilePreview alt={basename} key={path} src={imageSrc} />
+        </>
+      ) : data && (unsupportedImage || data.binary) ? (
         <EmptyState
           icon={FileQuestion}
-          title="Binary file"
-          description={`${basename} is binary and cannot be previewed (${data.size.toLocaleString()} bytes).`}
+          title={
+            IMAGE_PATH_PATTERN.test(basename) &&
+            data.size > MAX_PREVIEW_IMAGE_BYTES
+              ? "Image too large"
+              : "Binary file"
+          }
+          description={
+            IMAGE_PATH_PATTERN.test(basename) &&
+            data.size > MAX_PREVIEW_IMAGE_BYTES
+              ? `${basename} is too large to preview (${data.size.toLocaleString()} bytes). Image previews are limited to 10 MiB.`
+              : unsupportedImage
+                ? `${basename} uses an image format that cannot be previewed safely (${data.size.toLocaleString()} bytes).`
+                : `${basename} is binary and cannot be previewed (${data.size.toLocaleString()} bytes).`
+          }
           variant="full"
         />
       ) : displayedContent !== null ? (
@@ -452,6 +499,11 @@ export function FileViewer({ path }: { path: string }) {
             <span>{data?.language ?? "Plain text"}</span>
             <span>{displayedByteLength.toLocaleString()} bytes</span>
           </div>
+          {data && !canEdit ? (
+            <div className={styles.readOnlyBanner} role="status">
+              Read-only
+            </div>
+          ) : null}
           {data?.truncated ? (
             <div className={styles.truncatedBanner} role="status">
               File truncated at 1 MiB

@@ -1173,6 +1173,240 @@
       "author": "bgagent-fe-engine-git (author subagent, wave F-E)",
       "reviewer": "bgagent-fd720f32-3ebc-4060-b064-50e88a69a1f9",
       "review_evidence": "Independent claude_code/claude-sonnet-5-5 review bgagent-fd720f32-3ebc-4060-b064-50e88a69a1f9 (subchat-d7393a5b-d03a-46c9-9818-ea1b368f08ca): VERDICT APPROVE for both changed tests (rollback directory-replacement case, status INDEX_NEW|WT_DELETED case). Verified the mutA/mutA2/mutH diff sha256 values, the exit-101 logs and the restored final sources by cmp, reproduced in a scratch repo that git restore deletes a directory replacing a HEAD file (ignored contents included), and accepted case accounting 3->4 / 1. Requested wording changes (mutA2 described as fault injection, not pre-fix; mutH line-number provenance) are applied in these rows."
+    },
+    {
+      "fingerprint": "2692c2eac8cba8b6043b2298227358aa9fb906ca0043374e3b114b2ce59c6167",
+      "occurrences": 1,
+      "failure_mode": "POST /v1/files/open becomes an ambient cross-origin exfiltration endpoint (hostile/null/lookalike Origin accepted) or opening an external file widens scope: can_edit true for external, or /read and /write start accepting the same external path, or external content gets modified.",
+      "importance": "Engine runs with permissive CORS on a local port; any website could read arbitrary absolute files. External viewing must not grant edit/tool scope.",
+      "nearest_retained": {
+        "fingerprint": "4a0e92fcd5952671156fb24af62700024d6f5188a1334431e47cc6c09afcf835",
+        "why_insufficient": "write_rejects_path_outside_workspace exercises only /write scope; it cannot observe the new /open route, its Origin gate, or can_edit."
+      },
+      "oracle": "External open: 200 exact content, can_edit=false, image_mime null, digest == digest_of(content). Inside open: can_edit=true. Origins evil.example, null, localhost.evil.example:5173 -> 403 and body lacks file content; localhost:5173 -> 200 with content. /read and /write on external -> 403 and file unchanged.",
+      "prerequisites": "Real tempdir workspace registered as workspace folder plus separate tempdir outside it; external file has known content.",
+      "shipping_implementation": "files::handle_v1_files_open -> trusted_open_origin, privacy_checked_path, validated_existing_path, read_file_core via make_refact_http_server router.",
+      "determinism": "Tempdirs, in-process tower oneshot, no network.",
+      "layer": "Engine HTTP route via make_refact_http_server",
+      "why_cheapest": "Origin gate, scope and can_edit are route-level contracts; one scenario with a shared fixture covers the exfiltration and scope boundaries.",
+      "meaningful_cases": 8,
+      "critical": true,
+      "criticality_reason": "Security/privacy: arbitrary local file read by hostile web origin; scope widening.",
+      "removed_coverage": "none",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "cargo",
+            "test",
+            "--lib",
+            "--",
+            "http::routers::v1::files::tests::open_reads_external_text_read_only_without_widening_scope",
+            "--exact"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/evidence/files-open/mutant-open_reads_external_text_read_only_without_widening_scope.log"
+        },
+        "passing": {
+          "command": [
+            "cargo",
+            "test",
+            "--lib",
+            "--",
+            "http::routers::v1::files::tests"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/evidence/files-open/restored-pass.log (18 passed, EXIT=0, files.rs a5f89c54...)"
+        },
+        "intended_diagnostic": "files.rs:1626 assertion failed: https://evil.example left 200 right 403 (origin gate mutated to always-allow)",
+        "production_target": "files.rs trusted_open_origin",
+        "before_fix": {
+          "reference": ".refact/evidence/files-open/combined-mutant.patch (applied to final a5f89c54...; restored)",
+          "fingerprint": "ce39a52965572e5b2ccb8f3715d2256e65d74dee7e670d37ff1dff599ffc970e"
+        },
+        "env": "REFACT_SKIP_GUI_BUILD=1 RUST_MIN_STACK=16777216 RUSTC_WRAPPER=sccache, own worktree target"
+      },
+      "author": "background_agent:bgagent-67af796a-7c9a-4bfc-be7f-22e917e92a11",
+      "reviewer": "background_agent:bgagent-b56c0599-11eb-447c-98c3-30724ea18d7c",
+      "review_evidence": "Independent semantic approval subchat-4c507335-a609-4d1a-98c1-9082ef0796bf: verified current/baseline body fingerprints, nearest retained references, real nonvacuous router fixtures, cheapest layer, 8/4/3/3 current scenarios, all four compiled semantic mutant EXIT101 assertion failures and restored 18/18 EXIT0; verified final-files/current hashes and combined-mutant.patch ce39a52965572e5b2ccb8f3715d2256e65d74dee7e670d37ff1dff599ffc970e. Real requested-alias before-fix failure separately verified. Witness claims limited to reached assertions, not independent SVG/FIFO/can_edit/late-range mutations. Parent final cargo check exited0; full lib3677 pass2 unchanged verifier failures11ignored, failed tests rerun isolated pass. Router shared-layers test passed in full lib run."
+    },
+    {
+      "fingerprint": "81315c6bd2911146b84cf6a18aac672438e56cd42dd9adbe3bd400bc243c9208",
+      "occurrences": 1,
+      "failure_mode": "Preview returns wrong MIME/bytes for real PNG, emits image data for files over 10 MiB cap, treats SVG (scriptable) as image data URL, or blocks/hangs on FIFO instead of refusing non-regular files.",
+      "importance": "GUI renders image_data as data URL; SVG would be active content; oversize defeats memory bound; FIFO open blocks a blocking-pool worker indefinitely.",
+      "nearest_retained": {
+        "fingerprint": "06fcad04ee53453beda4311781c30bbbadd3c76233ccb683faf12aeabd88f979",
+        "why_insufficient": "read_rejects_privacy_blocked_path (unchanged) reads a text file through /read; it has no image bytes, size cap, SVG, or non-regular (FIFO) file and never observes image_mime/image_data."
+      },
+      "oracle": "Real 2x1 PNG encoded by image crate under .dat extension: image_mime image/png, size exact, binary true, base64-decoded image_data byte-equal. PNG prefix padded to MAX_IMAGE_BYTES+1: image_mime/image_data null, size exact. SVG: image_mime null and content returned as text. FIFO: 400 within 10s timeout.",
+      "prerequisites": "Tempdir outside any workspace (no workspace roots); mkfifo succeeds (asserted).",
+      "shipping_implementation": "read_file_core -> stream_regular_file (symlink_metadata/O_NONBLOCK|O_NOFOLLOW/regular check, bounded head) -> browser_safe_image_mime via /v1/files/open.",
+      "determinism": "Generated bytes, local FS, bounded timeout only as hang guard.",
+      "layer": "Engine HTTP route",
+      "why_cheapest": "Byte-sniffing, cap and regular-file guards are in shared read core reached by the route; one fixture dir covers all four classes.",
+      "meaningful_cases": 4,
+      "critical": true,
+      "criticality_reason": "Security (active SVG content, unbounded memory, blocking DoS).",
+      "removed_coverage": "none",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "cargo",
+            "test",
+            "--lib",
+            "--",
+            "http::routers::v1::files::tests::open_previews_only_bounded_recognized_raster_regular_files",
+            "--exact"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/evidence/files-open/mutant-open_previews_only_bounded_recognized_raster_regular_files.log"
+        },
+        "passing": {
+          "command": [
+            "cargo",
+            "test",
+            "--lib",
+            "--",
+            "http::routers::v1::files::tests"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/evidence/files-open/restored-pass.log (18 passed, EXIT=0, files.rs a5f89c54...)"
+        },
+        "intended_diagnostic": "files.rs:1696 huge image_mime left \"image/png\" right null (image head cap mutated to usize::MAX)",
+        "production_target": "files.rs read_file_core image cap",
+        "before_fix": {
+          "reference": ".refact/evidence/files-open/combined-mutant.patch (applied to final a5f89c54...; restored)",
+          "fingerprint": "ce39a52965572e5b2ccb8f3715d2256e65d74dee7e670d37ff1dff599ffc970e"
+        },
+        "env": "REFACT_SKIP_GUI_BUILD=1 RUST_MIN_STACK=16777216 RUSTC_WRAPPER=sccache, own worktree target",
+        "note": "Combined mutant reached the oversize-cap assertion; SVG and FIFO branches not separately mutation-executed (FIFO mutant would block a blocking-pool worker). Covered by passing assertions and source review."
+      },
+      "author": "background_agent:bgagent-67af796a-7c9a-4bfc-be7f-22e917e92a11",
+      "reviewer": "background_agent:bgagent-b56c0599-11eb-447c-98c3-30724ea18d7c",
+      "review_evidence": "Independent semantic approval subchat-4c507335-a609-4d1a-98c1-9082ef0796bf: verified current/baseline body fingerprints, nearest retained references, real nonvacuous router fixtures, cheapest layer, 8/4/3/3 current scenarios, all four compiled semantic mutant EXIT101 assertion failures and restored 18/18 EXIT0; verified final-files/current hashes and combined-mutant.patch ce39a52965572e5b2ccb8f3715d2256e65d74dee7e670d37ff1dff599ffc970e. Real requested-alias before-fix failure separately verified. Witness claims limited to reached assertions, not independent SVG/FIFO/can_edit/late-range mutations. Parent final cargo check exited0; full lib3677 pass2 unchanged verifier failures11ignored, failed tests rerun isolated pass. Router shared-layers test passed in full lib run."
+    },
+    {
+      "fingerprint": "b4089cb682155d2f458f95a242e0571912de0372238ebe4f2aeec89b49cd112a",
+      "occurrences": 1,
+      "failure_mode": "Privacy enforced only on one of requested/canonical path, so a symlink alias reads a blocked file (or a blocked-named alias reads around policy); or can_edit true for a workspace symlink resolving outside the workspace.",
+      "importance": "Privacy-blocked secrets must never be returned via aliases; editing through workspace symlink to external target must not be offered.",
+      "nearest_retained": {
+        "fingerprint": "06fcad04ee53453beda4311781c30bbbadd3c76233ccb683faf12aeabd88f979",
+        "why_insufficient": "read_rejects_privacy_blocked_path covers direct /read on a workspace path; it does not reach /open alias handling or can_edit."
+      },
+      "oracle": "alias.txt -> token.secret: 403, detail contains privacy, body lacks TOKEN. plain.secret -> plain.txt: 403 privacy. workspace/linked.txt -> external plain.txt: 200 content, can_edit false.",
+      "prerequisites": "Blocked glob *.secret; symlinks created (unix only).",
+      "shipping_implementation": "handle_v1_files_open privacy_checked_path(requested), privacy_checked_path(canonical), validated_existing_path canonical equality.",
+      "determinism": "Tempdirs and symlinks, no network.",
+      "layer": "Engine HTTP route",
+      "why_cheapest": "Alias semantics require canonicalization through the real route.",
+      "meaningful_cases": 3,
+      "critical": true,
+      "criticality_reason": "Privacy.",
+      "removed_coverage": "none",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "cargo",
+            "test",
+            "--lib",
+            "--",
+            "http::routers::v1::files::tests::open_checks_privacy_and_edit_scope_on_canonical_alias",
+            "--exact"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/evidence/files-open/mutant-open_checks_privacy_and_edit_scope_on_canonical_alias.log"
+        },
+        "passing": {
+          "command": [
+            "cargo",
+            "test",
+            "--lib",
+            "--",
+            "http::routers::v1::files::tests"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/evidence/files-open/restored-pass.log (18 passed, EXIT=0, files.rs a5f89c54...)"
+        },
+        "intended_diagnostic": "files.rs:1743 alias.txt->token.secret left 200 right 403 (canonical/requested privacy checks removed)",
+        "production_target": "files.rs handle_v1_files_open privacy checks",
+        "before_fix": {
+          "reference": ".refact/evidence/files-open/combined-mutant.patch (applied to final a5f89c54...; restored)",
+          "fingerprint": "ce39a52965572e5b2ccb8f3715d2256e65d74dee7e670d37ff1dff599ffc970e"
+        },
+        "env": "REFACT_SKIP_GUI_BUILD=1 RUST_MIN_STACK=16777216 RUSTC_WRAPPER=sccache, own worktree target",
+        "additional_real_before_fix": {
+          "failing": {
+            "exit_code": 101,
+            "evidence": ".refact/evidence/files-open/focused-pass.log: requested-blocked alias plain.secret->plain.txt returned 200 vs 403 at files.rs:1739 on source d3822f9d..."
+          },
+          "fix": ".refact/evidence/files-open/privacy-fix.diff",
+          "before_fix_source_sha256": "d3822f9d406a36cb5c241955dd3e4986ea531b4b6a82f40a2a5d28f501506dd9",
+          "note": "combined mutant fails first at canonical-blocked alias assertion; requested-blocked branch witnessed by this real pre-fix failure"
+        }
+      },
+      "author": "background_agent:bgagent-67af796a-7c9a-4bfc-be7f-22e917e92a11",
+      "reviewer": "background_agent:bgagent-b56c0599-11eb-447c-98c3-30724ea18d7c",
+      "review_evidence": "Independent semantic approval subchat-4c507335-a609-4d1a-98c1-9082ef0796bf: verified current/baseline body fingerprints, nearest retained references, real nonvacuous router fixtures, cheapest layer, 8/4/3/3 current scenarios, all four compiled semantic mutant EXIT101 assertion failures and restored 18/18 EXIT0; verified final-files/current hashes and combined-mutant.patch ce39a52965572e5b2ccb8f3715d2256e65d74dee7e670d37ff1dff599ffc970e. Real requested-alias before-fix failure separately verified. Witness claims limited to reached assertions, not independent SVG/FIFO/can_edit/late-range mutations. Parent final cargo check exited0; full lib3677 pass2 unchanged verifier failures11ignored, failed tests rerun isolated pass. Router shared-layers test passed in full lib run."
+    },
+    {
+      "fingerprint": "48e0fd4c552dd15ad4fd124e0be9d4d6cefd63e953a38ab1ece07f617693da2c",
+      "occurrences": 1,
+      "failure_mode": "Streaming read core changes text digest contract (must equal digest_bytes of full file, used by write expected_digest) or loses line ranges located beyond the truncation cap.",
+      "importance": "Write precondition uses digest; GUI line-range reads of large files would silently return empty.",
+      "nearest_retained": {
+        "fingerprint": "2a1ab390621f6dfb128619779e2db95c7ea4b95ca87279f19946362324d3cf06",
+        "why_insufficient": "write_rechecks_preconditions_after_waiting_for_cooperative_writer uses digest_of on a small file passed by the client; it never checks that /read's returned digest over a file larger than the retained head equals digest_bytes(full), nor late line ranges past the cap."
+      },
+      "oracle": "Existing truncation asserts plus digest == digest_bytes(full content) and line_start=2 returns exactly 'last\\n' with truncated false.",
+      "prerequisites": "File > 1 MiB with line 2 after the cap.",
+      "shipping_implementation": "read_file_core/stream_regular_file LineSelector via /v1/files/read",
+      "determinism": "Deterministic content.",
+      "layer": "Engine HTTP route",
+      "why_cheapest": "Reuses existing large fixture.",
+      "meaningful_cases": 3,
+      "critical": true,
+      "criticality_reason": "Durable-write integrity: /read digest feeds /write expected_digest precondition; a head-only digest would make every large-file save conflict or (if matched against a prefix hash) weaken change detection.",
+      "removed_coverage": "none",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "cargo",
+            "test",
+            "--lib",
+            "--",
+            "http::routers::v1::files::tests::big_file_is_truncated_on_utf8_boundary",
+            "--exact"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/evidence/files-open/mutant-big_file_is_truncated_on_utf8_boundary.log"
+        },
+        "passing": {
+          "command": [
+            "cargo",
+            "test",
+            "--lib",
+            "--",
+            "http::routers::v1::files::tests"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/evidence/files-open/restored-pass.log (18 passed, EXIT=0, files.rs a5f89c54...)"
+        },
+        "intended_diagnostic": "files.rs:1550 digest left dd4e6730... right ddb34b08... (digest computed over retained head, not full stream)",
+        "production_target": "files.rs stream_regular_file digest",
+        "before_fix": {
+          "reference": ".refact/evidence/files-open/combined-mutant.patch (applied to final a5f89c54...; restored)",
+          "fingerprint": "ce39a52965572e5b2ccb8f3715d2256e65d74dee7e670d37ff1dff599ffc970e"
+        },
+        "env": "REFACT_SKIP_GUI_BUILD=1 RUST_MIN_STACK=16777216 RUSTC_WRAPPER=sccache, own worktree target"
+      },
+      "author": "background_agent:bgagent-67af796a-7c9a-4bfc-be7f-22e917e92a11",
+      "reviewer": "background_agent:bgagent-b56c0599-11eb-447c-98c3-30724ea18d7c",
+      "review_evidence": "Independent semantic approval subchat-4c507335-a609-4d1a-98c1-9082ef0796bf: verified current/baseline body fingerprints, nearest retained references, real nonvacuous router fixtures, cheapest layer, 8/4/3/3 current scenarios, all four compiled semantic mutant EXIT101 assertion failures and restored 18/18 EXIT0; verified final-files/current hashes and combined-mutant.patch ce39a52965572e5b2ccb8f3715d2256e65d74dee7e670d37ff1dff599ffc970e. Real requested-alias before-fix failure separately verified. Witness claims limited to reached assertions, not independent SVG/FIFO/can_edit/late-range mutations. Parent final cargo check exited0; full lib3677 pass2 unchanged verifier failures11ignored, failed tests rerun isolated pass. Router shared-layers test passed in full lib run."
     }
   ],
   "classifications": [
@@ -8475,22 +8709,6 @@
       "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-d03eb62b-0492-447a-9ec4-c2d5404c70df (REQUEST_CHANGES on rollback default flags, hook redaction/reset witnesses, Windows gate and case accounting for file/diff test; approved commit and status tests) then bgagent-82a388bc-802b-40c3-9883-6963cf278298 re-review VERDICT APPROVE for all five tests after the requested changes, verifying mutant diff hashes, failing lines and restoration by cmp. Witnesses re-executed after a final 3-line production change (all-skipped in-progress commit now 400); every failing line shifted by exactly +3 with identical diagnostics."
     },
     {
-      "path": "refact-agent/engine/src/http/routers/v1.rs",
-      "before_sha256": "b575beb063f2f0bdf1995a1305cae42cb7c8e431d937800cdba9d79285958b8b",
-      "after_sha256": "6e2c60a5f6471643a26cebbfbc4a3484df8308438bfeee87c923cb539a8fd4ee",
-      "affected_tests": [
-        "03d5c0755fba184afc5e40a2ee1b891c6c757bf916a45d35db59efeddcaa5ffe",
-        "56686003974c20c4dff062be60cba50ba0fe7419e166c9b1a29100df3f3e4e87",
-        "790f69de66e8bdcd028f9713ee8a98ee96176f0846ce9c0a65c903fff2dc9de8",
-        "273ec5b020829ac3e044665c19c255d535897b406bccbb9145a91d9e722dbccf"
-      ],
-      "impact": "Registers git_branches module and routes: GET /git/commit (details, alongside POST commit), /git/branch/{checkout,create,rename,delete}, /git/{fetch,pull,push}.",
-      "execution_context": "Default engine library test context (cargo test --lib); RUST_MIN_STACK=16777216; no features, ignores or shared-fixture rewrites. Focused git_branches/git_write/git_read/router tests 13 passed.",
-      "author": "bgagent-e2-engine-git (author subagent, wave E2)",
-      "reviewer": "bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2",
-      "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-a6ad015b-420c-465a-ae7d-a93b4abb0905 (APPROVE log test; REQUEST_CHANGES: vacuous forced delete in branch-ops test needing an always -d mutant, stale P1 mutant log, case accounting, English-stderr locale risk) then bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2 re-review VERDICT APPROVE for all three after the changes, verifying all 8 mutant diff sha256 against /tmp/e2_mutants_results.json, panic lines vs current source, byte restoration by cmp against /tmp/e2_final_*.rs, and case accounting."
-    },
-    {
       "path": "refact-agent/engine/src/http/routers/v1/git_read.rs",
       "before_sha256": "e2ba1c43b24389d74f65d0ddc698f49a379e1927a74348139cfcb3dc683e70c5",
       "after_sha256": "3df31962e6a4b1bf60def62caa4f6d5261df68b94377c3d8f773624dfd03c8d0",
@@ -8651,6 +8869,65 @@
       "author": "chat:490caf4d-da9e-4d52-bc18-6f194a7da06c",
       "reviewer": "background_agent:bgagent-c33999e7-e460-4fb0-b263-0674a217858e",
       "review_evidence": "Independent final review subchat-4c715d09-85e2-49a5-9acd-3415f9ddc04a approved all six support mappings after source/body/evidence inspection and checking matching source manifests and recorded after hashes. Earlier source review subchat-7a144338-a6d2-423d-9639-0d25a3668a67. Stable-ID pause anchoring remains source-reviewed, not a new e2e resume guarantee."
+    },
+    {
+      "path": "refact-agent/engine/src/http/routers/v1/files.rs",
+      "before_sha256": "4e0e895be8bf5aff3fd6dde4f18be176fb11764b42d470e4876b6ff1fc0019b6",
+      "after_sha256": "a5f89c54f95472e245c1bb6df133096870dfc6e0ece62d6765ea1bf48920db3e",
+      "affected_tests": [
+        "06fcad04ee53453beda4311781c30bbbadd3c76233ccb683faf12aeabd88f979",
+        "2692c2eac8cba8b6043b2298227358aa9fb906ca0043374e3b114b2ce59c6167",
+        "2a1ab390621f6dfb128619779e2db95c7ea4b95ca87279f19946362324d3cf06",
+        "2f838a0ba58815671cd0f92d238436baa0d8b6b412152fd040c952f016e2fedd",
+        "403ab90f5cb5704e5f1790d009286bc2e772bf0e811ab514dffc5e69ec184d37",
+        "48e0fd4c552dd15ad4fd124e0be9d4d6cefd63e953a38ab1ece07f617693da2c",
+        "4a0e92fcd5952671156fb24af62700024d6f5188a1334431e47cc6c09afcf835",
+        "4dea238f3966c30b7bc135b30b2f415816d59745f3ee085765afee8ed0167198",
+        "62a61c91ab485c0b2eea8dac1ee9de0425fd4ea883b14f17272223b3383b47c1",
+        "6bc9a4ce5244d08e66439fe866eb567988c92e2793e1c15577a14c17afa2e3ef",
+        "81315c6bd2911146b84cf6a18aac672438e56cd42dd9adbe3bd400bc243c9208",
+        "9a2da9e778f056cc70fce5db29d3e0ed80a85fa7ebdd5fdc3d01c25bd2648ea6",
+        "9e3e50a01d14ac666d03a9d1a4cbf9a0b43b55f01077fc9c51becbd2a27db78d",
+        "a57005a1c4f3628bc019739111db149d1ce84617ad52020969efd49d1a24de1b",
+        "a658f1062d67e6fb29028b2b215cac729dadc3024f8f14026fe7d168cee077d3",
+        "b4089cb682155d2f458f95a242e0571912de0372238ebe4f2aeec89b49cd112a",
+        "c80e30c2fac4d66be12be0e8b43c9bcc2234fb5ee0b78cf7113e96dd818d336e",
+        "d450e5befc8d91616ec16be14a24bb9e20a0624a7bd4a9d7edd71ecb32e07c48"
+      ],
+      "impact": "read_file_core rewritten as bounded streaming reader used by /read and /open; /read sets can_edit true; slice_lines removed; new /open handler + origin gate.",
+      "execution_context": ".refact/evidence/files-open/restored-pass.log: 18/18 files::tests EXIT=0 on a5f89c54..., REFACT_SKIP_GUI_BUILD=1 RUST_MIN_STACK=16777216 dev profile own worktree target.",
+      "author": "background_agent:bgagent-67af796a-7c9a-4bfc-be7f-22e917e92a11",
+      "reviewer": "background_agent:bgagent-b56c0599-11eb-447c-98c3-30724ea18d7c",
+      "review_evidence": "Independent semantic approval subchat-4c507335-a609-4d1a-98c1-9082ef0796bf: verified current/baseline body fingerprints, nearest retained references, real nonvacuous router fixtures, cheapest layer, 8/4/3/3 current scenarios, all four compiled semantic mutant EXIT101 assertion failures and restored 18/18 EXIT0; verified final-files/current hashes and combined-mutant.patch ce39a52965572e5b2ccb8f3715d2256e65d74dee7e670d37ff1dff599ffc970e. Real requested-alias before-fix failure separately verified. Witness claims limited to reached assertions, not independent SVG/FIFO/can_edit/late-range mutations. Parent final cargo check exited0; full lib3677 pass2 unchanged verifier failures11ignored, failed tests rerun isolated pass. Router shared-layers test passed in full lib run."
+    },
+    {
+      "path": "refact-agent/engine/src/http/routers/v1.rs",
+      "before_sha256": "6e2c60a5f6471643a26cebbfbc4a3484df8308438bfeee87c923cb539a8fd4ee",
+      "after_sha256": "74669424e39d66544d88db1966a2b59b1b516093cf5f1afa675ad2f7bb6b4172",
+      "affected_tests": [
+        "273ec5b020829ac3e044665c19c255d535897b406bccbb9145a91d9e722dbccf"
+      ],
+      "impact": "Registers POST /files/open.",
+      "execution_context": "Default engine library test context. Parent full cargo test --locked --lib with RUST_MIN_STACK=16777216 executed retained router shared-layers test successfully; total 3677 passed, 2 unchanged task-verifier failures, 11 ignored. The two failed verifier tests passed on isolated module rerun. New route focused tests restored 18/18 pass.",
+      "author": "background_agent:bgagent-67af796a-7c9a-4bfc-be7f-22e917e92a11",
+      "reviewer": "background_agent:bgagent-b56c0599-11eb-447c-98c3-30724ea18d7c",
+      "review_evidence": "Independent semantic approval subchat-4c507335-a609-4d1a-98c1-9082ef0796bf: verified current/baseline body fingerprints, nearest retained references, real nonvacuous router fixtures, cheapest layer, 8/4/3/3 current scenarios, all four compiled semantic mutant EXIT101 assertion failures and restored 18/18 EXIT0; verified final-files/current hashes and combined-mutant.patch ce39a52965572e5b2ccb8f3715d2256e65d74dee7e670d37ff1dff599ffc970e. Real requested-alias before-fix failure separately verified. Witness claims limited to reached assertions, not independent SVG/FIFO/can_edit/late-range mutations. Parent final cargo check exited0; full lib3677 pass2 unchanged verifier failures11ignored, failed tests rerun isolated pass. Router shared-layers test passed in full lib run.",
+      "prior_review": {
+        "path": "refact-agent/engine/src/http/routers/v1.rs",
+        "before_sha256": "b575beb063f2f0bdf1995a1305cae42cb7c8e431d937800cdba9d79285958b8b",
+        "after_sha256": "6e2c60a5f6471643a26cebbfbc4a3484df8308438bfeee87c923cb539a8fd4ee",
+        "affected_tests": [
+          "03d5c0755fba184afc5e40a2ee1b891c6c757bf916a45d35db59efeddcaa5ffe",
+          "56686003974c20c4dff062be60cba50ba0fe7419e166c9b1a29100df3f3e4e87",
+          "790f69de66e8bdcd028f9713ee8a98ee96176f0846ce9c0a65c903fff2dc9de8",
+          "273ec5b020829ac3e044665c19c255d535897b406bccbb9145a91d9e722dbccf"
+        ],
+        "impact": "Registers git_branches module and routes: GET /git/commit (details, alongside POST commit), /git/branch/{checkout,create,rename,delete}, /git/{fetch,pull,push}.",
+        "execution_context": "Default engine library test context (cargo test --lib); RUST_MIN_STACK=16777216; no features, ignores or shared-fixture rewrites. Focused git_branches/git_write/git_read/router tests 13 passed.",
+        "author": "bgagent-e2-engine-git (author subagent, wave E2)",
+        "reviewer": "bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2",
+        "review_evidence": "Independent claude_code/claude-sonnet-5-5 reviews: bgagent-a6ad015b-420c-465a-ae7d-a93b4abb0905 (APPROVE log test; REQUEST_CHANGES: vacuous forced delete in branch-ops test needing an always -d mutant, stale P1 mutant log, case accounting, English-stderr locale risk) then bgagent-87d27132-4607-4a5d-86db-c09b53fa2ce2 re-review VERDICT APPROVE for all three after the changes, verifying all 8 mutant diff sha256 against /tmp/e2_mutants_results.json, panic lines vs current source, byte restoration by cmp against /tmp/e2_final_*.rs, and case accounting."
+      }
     }
   ]
 }

@@ -1,7 +1,9 @@
-import { useCallback, useEffect } from "react";
+import { FolderOpen } from "lucide-react";
+import { type FormEvent, useCallback, useEffect, useId, useState } from "react";
 
-import { Switch, Tooltip } from "../../../components/ui";
+import { Button, FieldText, Switch, Tooltip } from "../../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../../hooks";
+import { filesApi } from "../../../services/refact/files";
 import {
   selectFocusedWorkspaceChatId,
   selectLiveEditsForChat,
@@ -11,8 +13,10 @@ import { FileTree } from "./FileTree";
 import {
   hydrateShowIgnored,
   loadPersistedShowIgnored,
+  openFileInFilesPanel,
   selectShowIgnored,
   updateShowIgnored,
+  validateAbsoluteFilePath,
 } from "./filesPanelSlice";
 import styles from "./FilesPanel.module.css";
 
@@ -37,6 +41,28 @@ export function FilesPanel() {
       dispatch(setLiveEditsForChat({ chatId: focusedChatId, enabled }));
     },
     [dispatch, focusedChatId],
+  );
+
+  const inputId = useId();
+  const errorId = useId();
+  const [manualPath, setManualPath] = useState("");
+  const [manualPathError, setManualPathError] = useState<string | null>(null);
+
+  const onOpenPath = useCallback(
+    (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      const result = validateAbsoluteFilePath(manualPath);
+      if (!result.ok) {
+        setManualPathError(result.error);
+        return;
+      }
+      setManualPathError(null);
+      dispatch(openFileInFilesPanel({ path: result.path, manual: true }));
+      dispatch(
+        filesApi.util.invalidateTags([{ type: "File", id: result.path }]),
+      );
+    },
+    [dispatch, manualPath],
   );
 
   return (
@@ -71,6 +97,40 @@ export function FilesPanel() {
             />
           </div>
         </div>
+        <form
+          aria-label="Open file by absolute path"
+          className={styles.openPathForm}
+          noValidate
+          onSubmit={onOpenPath}
+        >
+          <label className={styles.srOnly} htmlFor={inputId}>
+            Absolute file path
+          </label>
+          <div className={styles.openPathRow}>
+            <FieldText
+              aria-describedby={manualPathError ? errorId : undefined}
+              aria-invalid={manualPathError ? true : undefined}
+              autoComplete="off"
+              className={styles.openPathInput}
+              id={inputId}
+              onChange={(value) => {
+                setManualPath(value);
+                if (manualPathError) setManualPathError(null);
+              }}
+              placeholder="Open absolute path…"
+              spellCheck={false}
+              value={manualPath}
+            />
+            <Button leftIcon={FolderOpen} size="sm" type="submit">
+              Open
+            </Button>
+          </div>
+          {manualPathError ? (
+            <p className={styles.openPathError} id={errorId} role="alert">
+              {manualPathError}
+            </p>
+          ) : null}
+        </form>
         <FileTree />
       </aside>
     </div>

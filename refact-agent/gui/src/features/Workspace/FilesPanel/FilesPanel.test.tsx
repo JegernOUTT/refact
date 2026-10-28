@@ -12,6 +12,7 @@ import {
   within,
 } from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
+import { useAppSelector } from "../../../hooks";
 import { setProjectStorageNamespace } from "../../../utils/chatUiPersistence";
 import { filesApi, type FilesTreeEntry } from "../../../services/refact/files";
 import type { PrivacyPolicyResponse } from "../../../services/refact/privacy";
@@ -126,6 +127,17 @@ const setEditorContent = (editor: HTMLElement, content: string) => {
     changes: { from: 0, to: editorView.state.doc.length, insert: content },
   });
 };
+
+function ActiveFileViewer() {
+  const activeTabId = useAppSelector((state) => state.workspace.activeTabId);
+  if (!activeTabId?.startsWith("file:")) return null;
+  return <FileViewer path={activeTabId.slice("file:".length)} />;
+}
+
+const expectEditorText = (text: string) =>
+  waitFor(() =>
+    expect(document.querySelector(".cm-content")).toHaveTextContent(text),
+  );
 
 describe("FilesPanel", () => {
   beforeEach(() => {
@@ -1211,5 +1223,276 @@ describe("FilesPanel", () => {
     });
     expect(selectedRow.id).not.toBe("");
     expect(tree).toHaveAttribute("aria-activedescendant", selectedRow.id);
+  });
+
+  it("validates the absolute path input with an accessible error", async () => {
+    server.use(rootHandler());
+    const { user, store } = render(<FilesPanel />);
+    const input = screen.getByLabelText("Absolute file path");
+
+    await user.click(screen.getByRole("button", { name: "Open" }));
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Enter an absolute file path.",
+    );
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(input).toHaveAttribute(
+      "aria-describedby",
+      screen.getByRole("alert").id,
+    );
+
+    await user.type(input, "relative/file.txt{Enter}");
+    expect(screen.getByRole("alert")).toHaveTextContent("Use an absolute path");
+    expect(store.getState().workspace.tabs).toEqual([]);
+
+    await user.clear(input);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(input).not.toHaveAttribute("aria-invalid");
+  });
+
+  it("opens an external absolute path read-only through POST /open without adding a root", async () => {
+    const externalPath = "/etc/hosts";
+    let openBody: unknown = null;
+    let readCalls = 0;
+    server.use(
+      rootHandler(),
+      http.get("*/v1/files/read", () => {
+        readCalls += 1;
+        return HttpResponse.json(readResponse());
+      }),
+      http.post("*/v1/files/open", async ({ request }) => {
+        openBody = await request.json();
+        return HttpResponse.json(
+          readResponse({
+            path: externalPath,
+            content: "127.0.0.1 localhost\n",
+            language: null,
+            can_edit: false,
+            image_mime: null,
+            image_data: null,
+          }),
+        );
+      }),
+    );
+    const { user, store } = render(
+      <>
+        <FilesPanel />
+        <ActiveFileViewer />
+      </>,
+      {
+        preloadedState: {
+          current_project: { name: "workspace", workspaceRoots: [rootPath] },
+        },
+      },
+    );
+
+    await user.type(
+      screen.getByLabelText("Absolute file path"),
+      `  ${externalPath}  {Enter}`,
+    );
+
+    await expectEditorText("127.0.0.1 localhost");
+    expect(openBody).toEqual({ path: externalPath });
+    expect(readCalls).toBe(0);
+    expect(store.getState().workspace.activeTabId).toBe(`file:${externalPath}`);
+    expect(store.getState().current_project.workspaceRoots).toEqual([rootPath]);
+    expect(store.getState().filesPanel.viewerTargets[externalPath]).toEqual({
+      path: externalPath,
+      manual: true,
+    });
+    expect(screen.getByText("Read-only")).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Edit this file" }),
+    ).toBeDisabled();
+  });
+
+  it("never treats a manual path as editable without can_edit true", async () => {
+    server.use(
+      http.post("*/v1/files/open", () =>
+        HttpResponse.json(readResponse({ path: "/tmp/x.ts" })),
+      ),
+    );
+    const view = render(<FileViewer path="/tmp/x.ts" />);
+    view.store.dispatch(
+      openFileInFilesPanel({ path: "/tmp/x.ts", manual: true }),
+    );
+
+    await expectEditorText("const first = 1;");
+    expect(
+      screen.getByRole("button", { name: "Edit this file" }),
+    ).toBeDisabled();
+  });
+
+  it("allows editing a manual path only when the backend grants can_edit", async () => {
+    server.use(
+      http.post("*/v1/files/open", () =>
+        HttpResponse.json(readResponse({ can_edit: true })),
+      ),
+    );
+    const view = render(<FileViewer path={filePath} />);
+    view.store.dispatch(openFileInFilesPanel({ path: filePath, manual: true }));
+
+    await expectEditorText("const first = 1;");
+    expect(
+      screen.getByRole("button", { name: "Edit this file" }),
+    ).toBeEnabled();
+    expect(screen.queryByText("Read-only")).toBeNull();
+  });
+
+  it("disables editing for a workspace read that reports can_edit false", async () => {
+    server.use(
+      http.get("*/v1/files/read", () =>
+        HttpResponse.json(readResponse({ can_edit: false })),
+      ),
+    );
+    const view = render(<FileViewer path={filePath} />);
+    view.store.dispatch(openFileInFilesPanel({ path: filePath }));
+
+    await expectEditorText("const first = 1;");
+    expect(
+      screen.getByRole("button", { name: "Edit this file" }),
+    ).toBeDisabled();
+  });
+
+  it("renders a safe raster image with preview controls", async () => {
+    server.use(
+      http.post("*/v1/files/open", () =>
+        HttpResponse.json(
+          readResponse({
+            path: "/tmp/pic.png",
+            content: "",
+            language: null,
+            size: 8,
+            binary: true,
+            can_edit: false,
+            image_mime: "image/png",
+            image_data: "iVBORw0KGgo=",
+          }),
+        ),
+      ),
+    );
+    const view = render(<FileViewer path="/tmp/pic.png" />);
+    view.store.dispatch(
+      openFileInFilesPanel({ path: "/tmp/pic.png", manual: true }),
+    );
+
+    const image = await screen.findByRole("img", { name: "pic.png" });
+    expect(image).toHaveAttribute("src", "data:image/png;base64,iVBORw0KGgo=");
+    expect(
+      screen.getByRole("toolbar", { name: "Image controls" }),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Fit to view" })).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Edit this file" }),
+    ).toBeDisabled();
+  });
+
+  it("refuses to render SVG or unknown image MIME types as data URLs", async () => {
+    server.use(
+      http.get("*/v1/files/read", () =>
+        HttpResponse.json(
+          readResponse({
+            path: `${rootPath}/logo.svg`,
+            content: "",
+            binary: true,
+            image_mime: "image/svg+xml",
+            image_data: "PHN2Zz48L3N2Zz4=",
+          }),
+        ),
+      ),
+    );
+    const svgPath = `${rootPath}/logo.svg`;
+    const view = render(<FileViewer path={svgPath} />);
+    view.store.dispatch(openFileInFilesPanel({ path: svgPath }));
+
+    expect(await screen.findByText("Binary file")).toBeVisible();
+    expect(screen.queryByRole("img")).toBeNull();
+  });
+
+  it("surfaces manual open errors from the backend", async () => {
+    server.use(
+      http.post("*/v1/files/open", () =>
+        HttpResponse.json(
+          { detail: "Unsupported binary file" },
+          { status: 415 },
+        ),
+      ),
+    );
+    const view = render(<FileViewer path="/tmp/blob.bin" />);
+    view.store.dispatch(
+      openFileInFilesPanel({ path: "/tmp/blob.bin", manual: true }),
+    );
+
+    expect(await screen.findByText("File unavailable")).toBeVisible();
+    expect(screen.getByText("Unsupported binary file")).toBeVisible();
+  });
+
+  it("shows the privacy-blocked state for a manual path", async () => {
+    server.use(
+      http.post("*/v1/files/open", () =>
+        HttpResponse.json(
+          { detail: "Blocked by privacy rules: privacy level Blocked" },
+          { status: 403 },
+        ),
+      ),
+    );
+    const view = render(<FileViewer path="/tmp/secret.env" />);
+    view.store.dispatch(
+      openFileInFilesPanel({ path: "/tmp/secret.env", manual: true }),
+    );
+
+    expect(await screen.findByText("File blocked")).toBeVisible();
+  });
+
+  it("explains the image size limit for oversized images", async () => {
+    const bigPath = `${rootPath}/huge.png`;
+    server.use(
+      http.get("*/v1/files/read", () =>
+        HttpResponse.json(
+          readResponse({
+            path: bigPath,
+            content: "",
+            binary: true,
+            size: 11 * 1024 * 1024,
+            image_mime: null,
+            image_data: null,
+          }),
+        ),
+      ),
+    );
+    const view = render(<FileViewer path={bigPath} />);
+    view.store.dispatch(openFileInFilesPanel({ path: bigPath }));
+
+    expect(await screen.findByText("Image too large")).toBeVisible();
+    expect(screen.getByText(/limited to 10 MiB/)).toBeVisible();
+  });
+
+  it("refetches a manual path when it is opened again", async () => {
+    const externalPath = "/tmp/notes.txt";
+    let openCalls = 0;
+    server.use(
+      http.post("*/v1/files/open", () => {
+        openCalls += 1;
+        return HttpResponse.json(
+          readResponse({
+            path: externalPath,
+            content: `version ${String(openCalls)}\n`,
+            can_edit: false,
+          }),
+        );
+      }),
+    );
+    const { user } = render(
+      <>
+        <FilesPanel />
+        <ActiveFileViewer />
+      </>,
+    );
+    const input = screen.getByLabelText("Absolute file path");
+
+    await user.type(input, `${externalPath}{Enter}`);
+    await expectEditorText("version 1");
+    await user.click(screen.getByRole("button", { name: "Open" }));
+    await expectEditorText("version 2");
+    expect(openCalls).toBe(2);
   });
 });

@@ -16,7 +16,7 @@ import { popBackTo, push, selectPages } from "../../features/Pages/pagesSlice";
 import { openTask, selectOpenTasksFromRoot } from "../../features/Tasks";
 import { selectCapabilities } from "../../features/Config/configSlice";
 import {
-  selectFocusedWorkspaceChatId,
+  selectWorkspaceFocusedChatId,
   selectPanelsForced,
   selectTabs,
 } from "../../features/Workspace";
@@ -90,7 +90,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const { host } = useConfig();
   const allThreads = useAppSelector(selectAllThreads);
   const currentChatId = useAppSelector(selectChatId);
-  const focusedWorkspaceChatId = useAppSelector(selectFocusedWorkspaceChatId);
+  const focusedWorkspaceChatId = useAppSelector(selectWorkspaceFocusedChatId);
   const workspaceTabs = useAppSelector(selectTabs);
   const openTasks = useAppSelector(selectOpenTasksFromRoot);
   const pages = useAppSelector(selectPages);

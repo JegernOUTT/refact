@@ -13,6 +13,7 @@ import {
   switchToThread,
 } from "./Chat";
 import { WorkspaceView } from "./Workspace/WorkspaceView";
+import { WorkspaceShell } from "./Workspace/WorkspaceShell";
 
 import {
   useAppSelector,
@@ -78,7 +79,7 @@ import {
   loadPersistedActiveTab,
   savePersistedActiveTab,
 } from "../utils/chatUiPersistence";
-import { selectFocusedWorkspaceChatId } from "./Workspace";
+import { selectWorkspaceFocusedChatId } from "./Workspace";
 import { InternalLinkProvider } from "../contexts/InternalLinkContext";
 import { ProcessCompletedToasts } from "./Notifications";
 import { CapsProvidersErrorBanner } from "./Errors/CapsProvidersErrorBanner";
@@ -97,6 +98,12 @@ export interface AppProps {
   style?: React.CSSProperties;
 }
 
+const MaybeWorkspaceShell: React.FC<{
+  enabled: boolean;
+  children: React.ReactNode;
+}> = ({ enabled, children }) =>
+  enabled ? <WorkspaceShell>{children}</WorkspaceShell> : <>{children}</>;
+
 const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
   const dispatch = useAppDispatch();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -113,7 +120,7 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
   const isStreaming = useAppSelector(selectIsStreaming);
   const allThreads = useAppSelector(selectAllThreads);
   const openTasks = useAppSelector(selectOpenTasksFromRoot);
-  const focusedWorkspaceChatId = useAppSelector(selectFocusedWorkspaceChatId);
+  const focusedWorkspaceChatId = useAppSelector(selectWorkspaceFocusedChatId);
 
   const isPageInHistory = useCallback(
     (pageName: string) => {
@@ -552,6 +559,9 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
     openTasks,
   ]);
 
+  const showWorkspaceShell =
+    canAccessApp && isLoggedIn && renderedPage.name !== "login page";
+
   const startupSplashMessage =
     providerBootstrap.status === "backend_installing"
       ? "Downloading Refact engine…"
@@ -579,70 +589,74 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
           {(navigation.error ?? deepLink.error) && (
             <div role="alert">{navigation.error ?? deepLink.error}</div>
           )}
-          <PageWrapper
-            host={config.host}
-            style={pageWrapperStyle}
-            flush={renderedPage.name === "chat"}
-          >
-            {renderedPage.name === "login page" && <LoginPage />}
-            {pageSwitching && <ChatLoading />}
-            {!pageSwitching && renderedPage.name === "history" && <Dashboard />}
-            {!pageSwitching && renderedPage.name === "chat" && (
-              <InternalLinkProvider onInternalLink={navigation.navigate}>
-                <WorkspaceView />
-              </InternalLinkProvider>
-            )}
-            {!pageSwitching && isSettingsPage(renderedPage) && (
-              <SettingsHub
-                page={renderedPage}
-                onBack={goBack}
-                host={config.host}
-                tabbed={config.tabbed}
-              />
-            )}
-            {!pageSwitching && renderedPage.name === "tasks list" && (
-              <TaskList backFromTasks={goBack} />
-            )}
-            {!pageSwitching && renderedPage.name === "task workspace" && (
-              <TaskWorkspace
-                key={renderedPage.taskId}
-                taskId={renderedPage.taskId}
-                cardId={renderedPage.cardId}
-              />
-            )}
-            {!pageSwitching && renderedPage.name === "knowledge graph" && (
-              <KnowledgeWorkspace />
-            )}
+          <MaybeWorkspaceShell enabled={showWorkspaceShell}>
+            <PageWrapper
+              host={config.host}
+              style={pageWrapperStyle}
+              flush={renderedPage.name === "chat"}
+            >
+              {renderedPage.name === "login page" && <LoginPage />}
+              {pageSwitching && <ChatLoading />}
+              {!pageSwitching && renderedPage.name === "history" && (
+                <Dashboard />
+              )}
+              {!pageSwitching && renderedPage.name === "chat" && (
+                <InternalLinkProvider onInternalLink={navigation.navigate}>
+                  <WorkspaceView />
+                </InternalLinkProvider>
+              )}
+              {!pageSwitching && isSettingsPage(renderedPage) && (
+                <SettingsHub
+                  page={renderedPage}
+                  onBack={goBack}
+                  host={config.host}
+                  tabbed={config.tabbed}
+                />
+              )}
+              {!pageSwitching && renderedPage.name === "tasks list" && (
+                <TaskList backFromTasks={goBack} />
+              )}
+              {!pageSwitching && renderedPage.name === "task workspace" && (
+                <TaskWorkspace
+                  key={renderedPage.taskId}
+                  taskId={renderedPage.taskId}
+                  cardId={renderedPage.cardId}
+                />
+              )}
+              {!pageSwitching && renderedPage.name === "knowledge graph" && (
+                <KnowledgeWorkspace />
+              )}
 
-            {!pageSwitching && renderedPage.name === "code intel" && (
-              <CodeIntelWorkspace
-                backFromCodeIntel={goBack}
-                host={config.host}
-              />
-            )}
+              {!pageSwitching && renderedPage.name === "code intel" && (
+                <CodeIntelWorkspace
+                  backFromCodeIntel={goBack}
+                  host={config.host}
+                />
+              )}
 
-            {!pageSwitching && renderedPage.name === "stats dashboard" && (
-              <StatsDashboard
-                backFromDashboard={goBack}
-                tabbed={config.tabbed}
-                host={config.host}
-              />
-            )}
+              {!pageSwitching && renderedPage.name === "stats dashboard" && (
+                <StatsDashboard
+                  backFromDashboard={goBack}
+                  tabbed={config.tabbed}
+                  host={config.host}
+                />
+              )}
 
-            {!pageSwitching && renderedPage.name === "performance" && (
-              <PerformancePage onBack={goBack} />
-            )}
+              {!pageSwitching && renderedPage.name === "performance" && (
+                <PerformancePage onBack={goBack} />
+              )}
 
-            {!pageSwitching && renderedPage.name === "refact daemon" && (
-              <RefactDaemonPage backFromDaemon={goBack} />
-            )}
+              {!pageSwitching && renderedPage.name === "refact daemon" && (
+                <RefactDaemonPage backFromDaemon={goBack} />
+              )}
 
-            {!pageSwitching && renderedPage.name === "bug report" && (
-              <BugReportPage onBack={goBack} />
-            )}
+              {!pageSwitching && renderedPage.name === "bug report" && (
+                <BugReportPage onBack={goBack} />
+              )}
 
-            {!pageSwitching && renderedPage.name === "buddy" && <BuddyHome />}
-          </PageWrapper>
+              {!pageSwitching && renderedPage.name === "buddy" && <BuddyHome />}
+            </PageWrapper>
+          </MaybeWorkspaceShell>
           {renderedPage.name !== "login page" && (
             <CapsProvidersErrorBanner
               onRetry={providerBootstrap.retry}

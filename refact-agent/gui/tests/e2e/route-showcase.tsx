@@ -11,6 +11,7 @@ import { Dashboard } from "../../src/features/Dashboard";
 import { Toolbar } from "../../src/components/Toolbar/Toolbar";
 import { TabBar } from "../../src/features/Workspace/TabBar";
 import { WorkspaceView } from "../../src/features/Workspace/WorkspaceView";
+import { WorkspaceShell } from "../../src/features/Workspace/WorkspaceShell";
 import { WorkPanel } from "../../src/features/Workspace/WorkPanel/WorkPanel";
 import { ToolContent } from "../../src/components/ChatContent/ToolsContent";
 import { resumeReceipt } from "../../src/components/Tools/AgenticTool/resumeFixtures";
@@ -3285,7 +3286,9 @@ const ShowcaseSurface = () => {
           <TabBar />
         )}
         <Flex style={{ flex: "1 1 auto", minWidth: 0, minHeight: 0 }}>
-          <WorkspaceView />
+          <WorkspaceShell>
+            <WorkspaceView />
+          </WorkspaceShell>
         </Flex>
       </Flex>
     );
@@ -3309,7 +3312,9 @@ const ShowcaseSurface = () => {
           </UiButton>
         </Flex>
         <Flex style={{ flex: "1 1 auto", minHeight: 0 }}>
-          <WorkspaceView />
+          <WorkspaceShell>
+            <WorkspaceView />
+          </WorkspaceShell>
         </Flex>
       </Flex>
     );
@@ -3319,7 +3324,9 @@ const ShowcaseSurface = () => {
     return (
       <>
         {queueRoute && <QueueDemoControls />}
-        <WorkspaceView />
+        <WorkspaceShell>
+          <WorkspaceView />
+        </WorkspaceShell>
       </>
     );
   }
