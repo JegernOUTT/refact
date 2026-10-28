@@ -183,14 +183,14 @@ function renderToolContent(
   );
   if (options.resultExtra) message.extra = options.resultExtra;
   message.tool_failed = options.failed === true;
-  runtime.thread.messages = options.missing ? [] : [message];
+  const call = makeToolCall(name, id, options.args);
+  runtime.thread.messages = options.missing
+    ? [{ role: "assistant", content: "", tool_calls: [call] }]
+    : [message];
 
-  return render(
-    <ToolContent toolCalls={[makeToolCall(name, id, options.args)]} />,
-    {
-      preloadedState: { chat },
-    },
-  );
+  return render(<ToolContent toolCalls={[call]} />, {
+    preloadedState: { chat },
+  });
 }
 
 function openToolCard() {
@@ -228,7 +228,7 @@ describe("ToolsContent routing", () => {
     expect(container.querySelectorAll('[data-status="running"]')).toHaveLength(
       3,
     );
-    expect(screen.queryByText("Result not recorded")).toBeNull();
+    expect(screen.queryByText("No result")).toBeNull();
     act(() => {
       store.dispatch(
         applyChatEvent({
@@ -259,7 +259,7 @@ describe("ToolsContent routing", () => {
     expect(container.querySelectorAll('[data-status="running"]')).toHaveLength(
       0,
     );
-    expect(screen.getByText("Result not recorded")).toBeInTheDocument();
+    expect(screen.getAllByText("No result").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByTestId("exec-status-unknown")).toBeInTheDocument();
     act(() => {
       store.dispatch(
@@ -291,7 +291,7 @@ describe("ToolsContent routing", () => {
     expect(container.querySelectorAll('[data-status="running"]')).toHaveLength(
       0,
     );
-    expect(screen.getAllByText("Result not recorded")).toHaveLength(2);
+    expect(screen.getAllByText("No result").length).toBeGreaterThanOrEqual(2);
   });
 
   it.each([
@@ -806,42 +806,57 @@ describe("ToolsContent routing", () => {
     expect(screen.queryByText("Wrong current report")).not.toBeInTheDocument();
   });
 
-  it("final_report_tool_card_uses_hidden_marker_not_display_contents", () => {
+  it("agent_finish renders one TranscriptItem row with Report verb and summary target", () => {
     const { container } = renderToolContent(
       "agent_finish",
       STRUCTURED_FINAL_REPORT,
     );
-
-    expect(screen.getByTestId("final-report-tool")).toHaveAttribute("hidden");
-    expect(
-      Array.from(container.querySelectorAll<HTMLElement>("[style]")).some(
-        (element) => element.style.display === "contents",
-      ),
-    ).toBe(false);
+    const items = container.querySelectorAll("[data-transcript-item]");
+    expect(items).toHaveLength(1);
+    expect(items[0]).toHaveAttribute("data-testid", "final-report-tool");
+    expect(screen.getByTestId("transcript-verb")).toHaveTextContent("Report");
+    expect(screen.getByTestId("transcript-target")).toHaveTextContent(
+      "Added routing tests.",
+    );
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
+      "1/1 checks reported passed",
+    );
+    expect(screen.queryByTestId("transcript-status-pill")).toBeNull();
+    expect(container.textContent).not.toContain("Technical details");
+    expect(container.querySelector("[data-density]")).toBeNull();
   });
 
-  it("final_report_tool_card_shows_error_when_success_false", () => {
-    renderToolContent("agent_finish", structuredFinalReport(false));
-
-    expect(
-      screen.getByTestId("final-report-tool-error-icon"),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByTestId("final-report-tool-success-icon"),
-    ).not.toBeInTheDocument();
-    expect(screen.getAllByText("Reported failure")).not.toHaveLength(0);
+  it("agent_finish reported failure shows a failed pill", () => {
+    const { container } = renderToolContent(
+      "agent_finish",
+      structuredFinalReport(false),
+    );
+    expect(container.querySelector("section")).toHaveAttribute(
+      "data-status",
+      "failed",
+    );
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "Reported failure",
+    );
   });
 
-  it("final_report_tool_card_shows_success_when_success_true", () => {
-    renderToolContent("agent_finish", structuredFinalReport(true));
-
-    expect(
-      screen.getByTestId("final-report-tool-success-icon"),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByTestId("final-report-tool-error-icon"),
-    ).not.toBeInTheDocument();
-    expect(screen.getByText("Reported success")).toBeInTheDocument();
+  it("agent_finish expanded panel keeps fixed section order with raw last", () => {
+    const { container } = renderToolContent(
+      "agent_finish",
+      STRUCTURED_FINAL_REPORT,
+      { resultExtra: { source: "engine" } },
+    );
+    openToolCard();
+    const sections = Array.from(
+      container.querySelectorAll("[data-section]"),
+    ).map((node) => node.getAttribute("data-section"));
+    expect(sections).toEqual([
+      "summary",
+      "output",
+      "artifacts",
+      "actions",
+      "raw",
+    ]);
   });
 });
 
@@ -903,8 +918,8 @@ describe("compact dedicated transcript composition", () => {
   it.each([
     ["doc_get", "unknown"],
     ["doc_list", "unknown"],
-    ["agent_finish", "idle"],
-    ["subagent", "waiting"],
+    ["agent_finish", "unknown"],
+    ["subagent", "unknown"],
   ])(
     "%s missing historical output is %s, not success or running",
     (name, status) => {
@@ -1152,19 +1167,18 @@ describe("compact dedicated transcript composition", () => {
     "unknown final report %s stays neutral",
     (content) => {
       const { container } = renderToolContent("agent_finish", content);
-      expect(
-        screen.getByTestId("final-report-tool-neutral-icon"),
-      ).toBeInTheDocument();
-      expect(screen.queryByTestId("final-report-tool-success-icon")).toBeNull();
+      expect(container.querySelector(".lucide-circle-check")).toBeNull();
       expect(container.querySelector("section")).toHaveAttribute(
         "data-status",
-        "idle",
+        "unknown",
       );
-      expect(screen.getByText("Outcome unconfirmed")).toBeInTheDocument();
+      expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+        "Outcome unconfirmed",
+      );
     },
   );
 
-  it("final report disclosure keeps three facts, original request, metadata and complete report", () => {
+  it("final report disclosure keeps three facts and complete raw arguments, response and metadata", () => {
     const report = `${STRUCTURED_FINAL_REPORT.slice(
       0,
       -1,
@@ -1178,41 +1192,18 @@ describe("compact dedicated transcript composition", () => {
         diagnostic: `Receipt metadata ${"x".repeat(9000)}METADATA_TAIL`,
       },
     });
-    const outer = screen.getByRole("button", { expanded: false });
-    expect(screen.queryByLabelText("Full response content")).toBeNull();
-    fireEvent.click(outer);
-    expect(container.querySelectorAll("dt")).toHaveLength(3);
-    const raw = screen.getByLabelText("Full response content");
+    openToolCard();
+    const summary = container.querySelector('[data-section="summary"]');
+    expect(summary?.querySelectorAll("dt")).toHaveLength(3);
     expect(screen.getByTestId("final-report-view")).toHaveTextContent(
       "npm run test -- ToolsContent --run",
     );
-    const technical = screen.getAllByRole("button", {
-      name: "Technical details",
-    });
-    fireEvent.click(technical[technical.length - 1]);
-    expect(screen.getByLabelText("Raw arguments content")).toHaveTextContent(
-      "Original report argument",
-    );
-    expect(
-      screen.getByLabelText("Response metadata content"),
-    ).toHaveTextContent("Receipt metadata");
-    expect(raw.closest("[inert]")).toBeNull();
-    for (const [label, marker] of [
-      ["Raw arguments", "ARGUMENT_TAIL"],
-      ["Full response", "REPORT_TAIL"],
-      ["Response metadata", "METADATA_TAIL"],
-    ]) {
-      const content = screen.getByLabelText(`${label} content`);
-      expect(content).not.toHaveTextContent(marker);
-      const next = within(screen.getByLabelText(`${label} pages`)).getByRole(
-        "button",
-        { name: "Next section" },
-      );
-      fireEvent.click(next);
-      fireEvent.click(next);
-      expect(content).toHaveTextContent(marker);
-      expect(next).toBeDisabled();
-    }
+    fireEvent.click(screen.getByRole("button", { name: /^Raw/ }));
+    const raw = screen.getByTestId("transcript-raw");
+    expect(raw).toHaveTextContent("ARGUMENT_TAIL");
+    expect(raw).toHaveTextContent("REPORT_TAIL");
+    expect(raw).toHaveTextContent("METADATA_TAIL");
+    expect(container.textContent).not.toContain("Technical details");
     expect(container.querySelector("button button")).toBeNull();
   });
 
@@ -1242,7 +1233,7 @@ describe("compact dedicated transcript composition", () => {
     expect(outer).toHaveAttribute("aria-expanded", "false");
     expect(container.querySelector("section")).toHaveAttribute(
       "data-status",
-      "error",
+      "failed",
     );
   });
 });
@@ -1272,7 +1263,7 @@ describe("neutral dedicated outcome regressions", () => {
           if (missing) {
             expect(
               screen.getByTestId("transcript-status-pill"),
-            ).toHaveTextContent("State unknown");
+            ).toHaveTextContent("No result");
           }
           expect(
             container.querySelector('[data-density="compact"]'),
@@ -1286,7 +1277,7 @@ describe("neutral dedicated outcome regressions", () => {
   it.each([
     ["task_done", true, "running"],
     ["agent_finish", true, "running"],
-    ["agent_finish", false, "idle"],
+    ["agent_finish", false, "unknown"],
   ] as const)(
     "%s absent result with busy=%s stays %s without promoting an outcome",
     (name, busy, status) => {
@@ -1308,7 +1299,9 @@ describe("neutral dedicated outcome regressions", () => {
         "false",
       );
       if (name === "agent_finish") {
-        expect(screen.getByRole("button")).toHaveTextContent("Awaiting report");
+        expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+          busy ? "Running" : "No result",
+        );
         expect(screen.getByRole("button")).not.toHaveTextContent(
           /queued|completed|verified|success/iu,
         );
@@ -1316,7 +1309,7 @@ describe("neutral dedicated outcome regressions", () => {
     },
   );
 
-  it("agent_finish retains non-string multimodal history under technical details, never generic", () => {
+  it("agent_finish retains non-string multimodal history in raw, never generic", () => {
     const content = [
       { m_type: "text", m_content: "Original multimodal report" },
       { m_type: "image/png", m_content: "abc123" },
@@ -1330,18 +1323,15 @@ describe("neutral dedicated outcome regressions", () => {
       preloadedState: { chat },
     });
     expect(screen.queryByTestId("generic-tool")).toBeNull();
-    expect(
-      screen.getByTestId("final-report-tool-neutral-icon"),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Outcome unconfirmed")).toBeInTheDocument();
+    expect(screen.getByTestId("final-report-tool")).toBeInTheDocument();
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "Outcome unconfirmed",
+    );
     openToolCard();
-    fireEvent.click(screen.getByRole("button", { name: "More details" }));
-    fireEvent.click(screen.getByRole("button", { name: "Technical details" }));
-    expect(
-      JSON.parse(
-        screen.getByLabelText("Full response content").textContent ?? "",
-      ),
-    ).toEqual(content);
+    fireEvent.click(screen.getByRole("button", { name: /^Raw/ }));
+    expect(screen.getByTestId("transcript-raw")).toHaveTextContent(
+      "Original multimodal report",
+    );
   });
 });
 

@@ -3,13 +3,6 @@ import React, { useMemo } from "react";
 import { ToolCall } from "../../../services/refact/types";
 import { ReportToolCard } from "./ReportToolCard";
 import { extractSubagentReport } from "./subagentReport";
-import { useThreadId } from "../../../features/Chat/Thread";
-import { useAppSelector } from "../../../hooks/useAppSelector";
-import {
-  selectIsStreamingById,
-  selectIsWaitingById,
-  selectToolResultByThreadAndId,
-} from "../../../features/Chat/Thread/selectors";
 import {
   readCompactRecord,
   readCompactText,
@@ -23,15 +16,6 @@ interface SubagentToolProps {
 }
 
 export const SubagentTool: React.FC<SubagentToolProps> = ({ toolCall }) => {
-  const threadId = useThreadId();
-  const result = useAppSelector((state) =>
-    selectToolResultByThreadAndId(state, threadId, toolCall.id),
-  );
-  const active = useAppSelector(
-    (state) =>
-      selectIsStreamingById(state, threadId) ||
-      selectIsWaitingById(state, threadId),
-  );
   const args = useMemo(
     () => readCompactRecord(toolCall.function.arguments),
     [toolCall.function.arguments],
@@ -64,15 +48,6 @@ export const SubagentTool: React.FC<SubagentToolProps> = ({ toolCall }) => {
 
   return (
     <ReportToolCard
-      compactTransportState={
-        result
-          ? result.tool_failed
-            ? "failed"
-            : "succeeded"
-          : active
-            ? "running"
-            : "pending"
-      }
       defaultSummary={task || "Background work"}
       extractReport={extractSubagentReport}
       facts={facts}

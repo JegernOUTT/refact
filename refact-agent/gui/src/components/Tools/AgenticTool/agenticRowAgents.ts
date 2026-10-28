@@ -194,11 +194,7 @@ export function inspectRow(
   const status =
     name === "agent_wait" && (timedOut || interrupted) ? "done" : mapped.status;
   const statusLabel =
-    name === "agent_wait" && timedOut
-      ? "Timed out"
-      : name === "agent_wait" && interrupted
-        ? "Interrupted"
-        : mapped.label;
+    name === "agent_wait" && (timedOut || interrupted) ? null : mapped.label;
   const error = detailValue(text, "Error");
   return {
     ...emptyRow(verb),

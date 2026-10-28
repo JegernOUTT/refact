@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import React, { useMemo } from "react";
 import { useToolCallActivity } from "./useToolCallActivity";
+import { useUnrecordedResultState } from "../TranscriptItem/useUnrecordedResultState";
 import { ToolCall } from "../../../services/refact/types";
 import { TranscriptItem, type TranscriptStatus } from "../TranscriptItem";
 import styles from "./TasksTool.module.css";
@@ -33,7 +34,8 @@ const STATUS_ICONS: Record<Task["status"], React.ReactNode> = {
 };
 
 export const TasksTool: React.FC<TasksToolProps> = ({ toolCall }) => {
-  const { result, isRunning } = useToolCallActivity(toolCall.id);
+  const { result } = useToolCallActivity(toolCall.id);
+  const unrecorded = useUnrecordedResultState(toolCall.id);
 
   const tasks = useMemo((): Task[] => {
     try {
@@ -45,13 +47,11 @@ export const TasksTool: React.FC<TasksToolProps> = ({ toolCall }) => {
   }, [toolCall.function.arguments]);
 
   const failed = result?.tool_failed === true;
-  const status: TranscriptStatus = isRunning
-    ? "running"
+  const status: TranscriptStatus = !result
+    ? unrecorded.status
     : failed
       ? "failed"
-      : result
-        ? "done"
-        : "unknown";
+      : "done";
   const completed = tasks.filter((t) => t.status === "completed").length;
   const current =
     tasks.find((t) => t.status === "in_progress") ??
@@ -85,7 +85,7 @@ export const TasksTool: React.FC<TasksToolProps> = ({ toolCall }) => {
       output={output}
       raw={[{ label: "Arguments", value: toolCall.function.arguments }]}
       status={status}
-      statusLabel={!result && !isRunning ? "Result not recorded" : undefined}
+      statusLabel={result ? undefined : unrecorded.statusLabel}
       target={
         tasks.length > 0 ? `${completed} / ${tasks.length} done` : "update"
       }

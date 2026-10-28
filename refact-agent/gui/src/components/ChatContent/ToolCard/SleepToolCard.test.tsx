@@ -389,7 +389,7 @@ describe("SleepToolCard", () => {
       );
     });
     expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
-      "Result not recorded",
+      "No result",
     );
     expect(screen.queryByRole("button", { name: /wake up/i })).toBeNull();
     expect(vi.getTimerCount()).toBeLessThan(timerCount);
@@ -423,7 +423,7 @@ describe("SleepToolCard", () => {
       );
     });
     expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
-      "Result not recorded",
+      "No result",
     );
     expect(screen.queryByRole("button", { name: /wake up/i })).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();

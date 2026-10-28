@@ -3,11 +3,7 @@ import classNames from "classnames";
 import { CircleAlert, FileText, Github } from "lucide-react";
 import groupBy from "lodash.groupby";
 import { useAppSelector } from "../../hooks/useAppSelector";
-import {
-  selectIsStreamingById,
-  selectIsWaitingById,
-  selectToolResultByThreadAndId,
-} from "../../features/Chat/Thread/selectors";
+import { selectToolResultByThreadAndId } from "../../features/Chat/Thread/selectors";
 import { useThreadId } from "../../features/Chat/Thread";
 import type { DiffChunk, ToolCall } from "../../services/refact/types";
 import { ShikiCodeBlock } from "../Markdown";
@@ -16,6 +12,7 @@ import {
   compactText,
 } from "../Tools/AgenticTool/compactPresentation";
 import { Button, Icon } from "../ui";
+import { useUnrecordedResultState } from "./TranscriptItem/useUnrecordedResultState";
 import { TranscriptItem, type TranscriptStatus } from "./TranscriptItem";
 import { DiffBlock } from "./ToolCard/DiffBlock";
 import editToolStyles from "./ToolCard/EditTool.module.css";
@@ -187,12 +184,7 @@ export const AgentDiffContent: React.FC<AgentDiffContentProps> = ({
 
 export const AgentDiffView: React.FC<AgentDiffViewProps> = ({ toolCall }) => {
   const threadId = useThreadId();
-  const isStreaming = useAppSelector((state) =>
-    selectIsStreamingById(state, threadId),
-  );
-  const isWaiting = useAppSelector((state) =>
-    selectIsWaitingById(state, threadId),
-  );
+  const unrecorded = useUnrecordedResultState(toolCall.id);
 
   const maybeResult = useAppSelector((state) =>
     selectToolResultByThreadAndId(state, threadId, toolCall.id),
@@ -207,12 +199,10 @@ export const AgentDiffView: React.FC<AgentDiffViewProps> = ({ toolCall }) => {
   );
 
   const failed = maybeResult?.tool_failed === true;
-  const status: TranscriptStatus = failed
-    ? "failed"
-    : !maybeResult
-      ? isStreaming || isWaiting
-        ? "running"
-        : "unknown"
+  const status: TranscriptStatus = !maybeResult
+    ? unrecorded.status
+    : failed
+      ? "failed"
       : "done";
   const title =
     report && report.cardTitle !== report.cardId
@@ -222,9 +212,14 @@ export const AgentDiffView: React.FC<AgentDiffViewProps> = ({ toolCall }) => {
   const meta =
     report === null
       ? undefined
-      : files > 0
-        ? `${files} ${files === 1 ? "file" : "files"}`
-        : "no changes";
+      : [
+          files > 0
+            ? `${files} ${files === 1 ? "file" : "files"}`
+            : "no changes",
+          report.truncated ? "partial" : null,
+        ]
+          .filter(Boolean)
+          .join(" · ");
 
   return (
     <TranscriptItem
@@ -234,8 +229,7 @@ export const AgentDiffView: React.FC<AgentDiffViewProps> = ({ toolCall }) => {
       target={title ?? undefined}
       meta={meta}
       status={status}
-      statusLabel={report?.truncated ? "Partial" : undefined}
-      statusDetail={report?.truncated ?? undefined}
+      statusLabel={!maybeResult ? unrecorded.statusLabel : undefined}
       output={report ? <AgentDiffContent report={report} /> : undefined}
       error={failed ? content : undefined}
       raw={[

@@ -47,7 +47,9 @@ function renderStatus(
   const chat = createDefaultChatState();
   const threadId = chat.current_thread_id;
   chat.threads[threadId].thread.messages =
-    content === null ? [] : [statusMessage(content, toolFailed)];
+    content === null
+      ? [{ role: "assistant", content: "", tool_calls: [toolCall] }]
+      : [statusMessage(content, toolFailed)];
   chat.threads[threadId].waiting_for_response = waiting;
   return {
     ...render(<AgentStatusView toolCall={toolCall} />, {
@@ -534,7 +536,7 @@ T-AB: ⚠ needs attention: summary attention sentinel (since 2026-05-21T23:30:00
   });
 
   it.each([
-    [null, false, false, null, "unknown", "Unknown"],
+    [null, false, false, null, "unknown", "No result"],
     [null, false, true, null, "running", "Running"],
     ["not a report", false, false, null, "done", null],
     ['cancel_agent(card_id="T-1")', true, false, null, "failed", "Failed"],

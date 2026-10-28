@@ -8,6 +8,7 @@ import { useThreadId } from "../../../features/Chat/Thread";
 import { ChatContextFile, ToolCall } from "../../../services/refact/types";
 import { ShikiCodeBlock } from "../../Markdown";
 import { Button } from "../../ui";
+import { useUnrecordedResultState } from "../TranscriptItem/useUnrecordedResultState";
 import {
   TranscriptClamp,
   TranscriptItem,
@@ -53,11 +54,13 @@ export const ReadTool: React.FC<ReadToolProps> = ({
     }
   }, [toolCall.function.arguments]);
 
+  const unrecorded = useUnrecordedResultState(toolCall.id);
   const failed = result?.tool_failed === true;
+  const unrecordedRow = !result && contextFiles.length === 0;
   const status: TranscriptStatus = !result
     ? contextFiles.length > 0
       ? "done"
-      : "running"
+      : unrecorded.status
     : failed
       ? "failed"
       : "done";
@@ -120,6 +123,7 @@ export const ReadTool: React.FC<ReadToolProps> = ({
       raw={[{ label: "Arguments", value: toolCall.function.arguments }]}
       sectionLabels={{ artifacts: "Open in IDE" }}
       status={status}
+      statusLabel={unrecordedRow ? unrecorded.statusLabel : undefined}
       target={filesTarget(paths, "file")}
       verb="Read"
     />

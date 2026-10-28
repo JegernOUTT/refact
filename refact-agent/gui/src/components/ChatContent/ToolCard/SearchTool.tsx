@@ -6,6 +6,7 @@ import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/sel
 import { useThreadId } from "../../../features/Chat/Thread";
 import { ChatContextFile, ToolCall } from "../../../services/refact/types";
 import { ShikiCodeBlock } from "../../Markdown";
+import { useUnrecordedResultState } from "../TranscriptItem/useUnrecordedResultState";
 import {
   TranscriptClamp,
   TranscriptItem,
@@ -126,12 +127,14 @@ export const SearchTool: React.FC<SearchToolProps> = ({
   );
   const view = presentation(toolType, args);
 
+  const unrecorded = useUnrecordedResultState(toolCall.id);
   const failed = result?.tool_failed === true;
+  const unrecordedRow = result === undefined && contextFiles.length === 0;
   const status: TranscriptStatus = failed
     ? "failed"
-    : result !== undefined || contextFiles.length > 0
-      ? "done"
-      : "running";
+    : unrecordedRow
+      ? unrecorded.status
+      : "done";
   const content = typeof result?.content === "string" ? result.content : null;
   const matchCount = content && !failed ? countLines(content) : 0;
   const fileCount = new Set(contextFiles.map((file) => file.file_name)).size;
@@ -172,6 +175,7 @@ export const SearchTool: React.FC<SearchToolProps> = ({
       raw={[{ label: "Arguments", value: toolCall.function.arguments }]}
       sectionLabels={{ input: "Scope" }}
       status={status}
+      statusLabel={unrecordedRow ? unrecorded.statusLabel : undefined}
       target={view.target}
       verb={view.verb}
     />

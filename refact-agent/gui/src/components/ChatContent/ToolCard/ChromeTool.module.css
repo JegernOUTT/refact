@@ -47,7 +47,18 @@
   display: flex;
   min-width: 0;
   flex-wrap: wrap;
-  gap: var(--rf-space-1);
+  gap: 0 var(--rf-space-2);
+  color: var(--rf-color-muted);
+}
+
+.factItem + .factItem::before {
+  content: "·";
+  margin-inline-end: var(--rf-space-2);
+  color: var(--rf-color-muted);
+}
+
+.factItem[data-tone="warning"] {
+  color: var(--rf-color-warning);
 }
 
 .locatorEcho {

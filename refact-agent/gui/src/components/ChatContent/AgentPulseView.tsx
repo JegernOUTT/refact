@@ -11,11 +11,7 @@ import {
   Timer,
 } from "lucide-react";
 import { useAppSelector } from "../../hooks/useAppSelector";
-import {
-  selectIsStreamingById,
-  selectIsWaitingById,
-  selectToolResultByThreadAndId,
-} from "../../features/Chat/Thread/selectors";
+import { selectToolResultByThreadAndId } from "../../features/Chat/Thread/selectors";
 import { useThreadId } from "../../features/Chat/Thread";
 import { selectApiKey, selectConfig } from "../../features/Config/configSlice";
 import { sendChatCommand } from "../../services/refact/chatCommands";
@@ -25,6 +21,7 @@ import {
   compactText,
 } from "../Tools/AgenticTool/compactPresentation";
 import { Badge, Button, Dialog, FieldTextarea, Icon, StatusDot } from "../ui";
+import { useUnrecordedResultState } from "./TranscriptItem/useUnrecordedResultState";
 import { TranscriptItem, type TranscriptStatus } from "./TranscriptItem";
 import {
   DEFAULT_CANCEL_REASON,
@@ -368,12 +365,7 @@ export const AgentPulseContent: React.FC<AgentPulseContentProps> = ({
 
 export const AgentPulseView: React.FC<AgentPulseViewProps> = ({ toolCall }) => {
   const chatId = useThreadId();
-  const isStreaming = useAppSelector((state) =>
-    selectIsStreamingById(state, chatId),
-  );
-  const isWaiting = useAppSelector((state) =>
-    selectIsWaitingById(state, chatId),
-  );
+  const unrecorded = useUnrecordedResultState(toolCall.id);
   const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
 
@@ -390,12 +382,10 @@ export const AgentPulseView: React.FC<AgentPulseViewProps> = ({ toolCall }) => {
   );
 
   const failed = maybeResult?.tool_failed === true;
-  const status: TranscriptStatus = failed
-    ? "failed"
-    : !maybeResult
-      ? isStreaming || isWaiting
-        ? "running"
-        : "unknown"
+  const status: TranscriptStatus = !maybeResult
+    ? unrecorded.status
+    : failed
+      ? "failed"
       : report
         ? PULSE_STATUS[report.stateKind]
         : "unknown";
@@ -431,7 +421,13 @@ export const AgentPulseView: React.FC<AgentPulseViewProps> = ({ toolCall }) => {
       verb="Pulse"
       target={title ?? undefined}
       status={status}
-      statusLabel={report?.stateKind === "paused" ? "Paused" : undefined}
+      statusLabel={
+        !maybeResult
+          ? unrecorded.statusLabel
+          : report?.stateKind === "paused"
+            ? "Paused"
+            : undefined
+      }
       summary={facts}
       output={
         report ? (

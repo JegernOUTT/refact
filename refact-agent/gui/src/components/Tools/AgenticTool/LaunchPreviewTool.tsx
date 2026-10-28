@@ -7,6 +7,7 @@ import {
   type TranscriptRawBlock,
   type TranscriptStatus,
 } from "../../ChatContent/TranscriptItem";
+import { useUnrecordedResultState } from "../../ChatContent/TranscriptItem/useUnrecordedResultState";
 import type { ToolCall, ToolResult } from "../../../services/refact/types";
 import { humanizeIdentifier } from "../../../utils/displayNames";
 import { compactText, readCompactRecord } from "./compactPresentation";
@@ -380,6 +381,7 @@ export function LaunchPreviewTool({
   hasResult: boolean;
   failed: boolean;
 }) {
+  const unrecorded = useUnrecordedResultState(toolCall.id);
   const preview = parse(extra);
   const args = readCompactRecord(toolCall.function.arguments);
   const task =
@@ -394,7 +396,7 @@ export function LaunchPreviewTool({
           }`
         : null);
   const status: TranscriptStatus = !hasResult
-    ? "running"
+    ? unrecorded.status
     : !available
       ? "failed"
       : blockedReason !== null
@@ -415,7 +417,13 @@ export function LaunchPreviewTool({
       target={task ?? undefined}
       meta="preview"
       status={status}
-      statusLabel={blockedReason !== null ? "Blocked" : undefined}
+      statusLabel={
+        !hasResult
+          ? unrecorded.statusLabel
+          : blockedReason !== null
+            ? "Blocked"
+            : undefined
+      }
       summary={
         available
           ? [

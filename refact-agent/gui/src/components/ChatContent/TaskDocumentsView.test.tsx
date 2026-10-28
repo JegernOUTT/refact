@@ -62,10 +62,13 @@ function makeToolCall(
   };
 }
 
-function documentToolState(messages: ToolMessage[] = []) {
+function documentToolState(messages: ToolMessage[] = [], ownerCall?: ToolCall) {
   const chat = createDefaultChatState();
   const threadId = chat.current_thread_id;
-  chat.threads[threadId].thread.messages = messages;
+  chat.threads[threadId].thread.messages =
+    messages.length === 0 && ownerCall
+      ? [{ role: "assistant", content: "", tool_calls: [ownerCall] }]
+      : messages;
   return { chat, threadId };
 }
 
@@ -96,6 +99,7 @@ function renderDocumentTool(
             tool_failed: failed,
           },
         ],
+    toolCall,
   );
   chat.threads[threadId].streaming = streaming;
   chat.threads[threadId].waiting_for_response = waiting;
@@ -405,8 +409,8 @@ describe("TaskDocumentsView transcript route", () => {
   );
 
   it.each([
-    ["doc_get", false, false, "unknown", "Unknown"],
-    ["doc_list", false, false, "unknown", "Unknown"],
+    ["doc_get", false, false, "unknown", "No result"],
+    ["doc_list", false, false, "unknown", "No result"],
     ["doc_get", true, false, "running", "Running"],
     ["doc_list", false, true, "running", "Running"],
   ] as const)(

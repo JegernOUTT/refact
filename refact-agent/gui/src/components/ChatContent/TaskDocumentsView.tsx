@@ -1,11 +1,7 @@
 import React, { useMemo } from "react";
 import { FileText } from "lucide-react";
 import { useAppSelector } from "../../hooks/useAppSelector";
-import {
-  selectIsStreamingById,
-  selectIsWaitingById,
-  selectToolResultByThreadAndId,
-} from "../../features/Chat/Thread/selectors";
+import { selectToolResultByThreadAndId } from "../../features/Chat/Thread/selectors";
 import { useThreadId } from "../../features/Chat/Thread";
 import type { ToolCall } from "../../services/refact/types";
 import { Markdown } from "../Markdown";
@@ -16,6 +12,7 @@ import {
   readCompactRecord,
 } from "../Tools/AgenticTool/compactPresentation";
 import { Badge } from "../ui";
+import { useUnrecordedResultState } from "./TranscriptItem/useUnrecordedResultState";
 import {
   TranscriptClamp,
   TranscriptItem,
@@ -240,12 +237,7 @@ export const TaskDocumentsView: React.FC<TaskDocumentsToolProps> = ({
   toolType,
 }) => {
   const threadId = useThreadId();
-  const isStreaming = useAppSelector((state) =>
-    selectIsStreamingById(state, threadId),
-  );
-  const isWaiting = useAppSelector((state) =>
-    selectIsWaitingById(state, threadId),
-  );
+  const unrecorded = useUnrecordedResultState(toolCall.id);
   const maybeResult = useAppSelector((state) =>
     selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
@@ -287,12 +279,10 @@ export const TaskDocumentsView: React.FC<TaskDocumentsToolProps> = ({
                 : null,
           },
         ]);
-  const status: TranscriptStatus = failed
-    ? "failed"
-    : !maybeResult
-      ? isStreaming || isWaiting
-        ? "running"
-        : "unknown"
+  const status: TranscriptStatus = !maybeResult
+    ? unrecorded.status
+    : failed
+      ? "failed"
       : "done";
   const target =
     toolType === "doc_list"
@@ -313,6 +303,7 @@ export const TaskDocumentsView: React.FC<TaskDocumentsToolProps> = ({
       target={target}
       meta={meta}
       status={status}
+      statusLabel={!maybeResult ? unrecorded.statusLabel : undefined}
       summary={facts}
       output={
         content !== null && !failed ? (

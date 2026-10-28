@@ -16,6 +16,8 @@ import { useAppSelector } from "../../../hooks/useAppSelector";
 import { useChatActions } from "../../../hooks/useChatActions";
 import { selectMessagesById } from "../../../features/Chat/Thread/selectors";
 import { useToolCallActivity } from "./useToolCallActivity";
+import { useUnrecordedResultState } from "../TranscriptItem/useUnrecordedResultState";
+import type { UnrecordedResultState } from "../TranscriptItem";
 import { selectConfig } from "../../../features/Config/configSlice";
 import { getEngineEndpointIdentity } from "../../../services/refact/apiUrl";
 import type {
@@ -206,16 +208,16 @@ function TickDots({ ticks }: { ticks: SleepTick[] }) {
 }
 
 function sleepOutcome(
-  isRunning: boolean,
+  unrecorded: UnrecordedResultState,
   result: ToolResult | undefined,
   sleep: SleepResult | null,
 ): { status: TranscriptStatus; label?: string } {
-  if (isRunning) return { status: "running" };
-  if (result?.tool_failed) return { status: "failed" };
+  if (!result)
+    return { status: unrecorded.status, label: unrecorded.statusLabel };
+  if (result.tool_failed) return { status: "failed" };
   if (sleep?.interrupted) return { status: "cancelled", label: "Interrupted" };
   if (sleep) return { status: "done" };
-  if (result) return { status: "unknown", label: "Outcome unknown" };
-  return { status: "unknown", label: "Result not recorded" };
+  return { status: "unknown", label: "Outcome unknown" };
 }
 
 export const SleepToolCard: React.FC<SleepToolCardProps> = ({
@@ -228,6 +230,7 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({
     isRunning,
     threadId: resolvedThreadId,
   } = useToolCallActivity(toolCall.id, threadId);
+  const unrecorded = useUnrecordedResultState(toolCall.id, threadId);
   const { abort } = useChatActions(resolvedThreadId);
   const config = useAppSelector(selectConfig);
   const endpointIdentity = getEngineEndpointIdentity(config);
@@ -299,7 +302,7 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({
   );
   const remainingMs =
     remainingFromTick(sleepArgs.durationMs, ticks) ?? fallbackRemainingMs;
-  const outcome = sleepOutcome(isRunning, resultMessage, sleepResult);
+  const outcome = sleepOutcome(unrecorded, resultMessage, sleepResult);
 
   const meta = isRunning
     ? `${formatSeconds(remainingMs)} remaining`

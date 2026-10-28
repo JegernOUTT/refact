@@ -22,7 +22,6 @@ export {
   isAgenticToolName,
   lookupAgenticFamily,
 } from "./agenticFamilies";
-export { PagedText, PAGE_CHARS } from "./PagedText";
 export { parseFamilyReport, reportIsStructured } from "./familyReport";
 export type { FamilyReport } from "./familyReport";
 export { FamilyReportView } from "./FamilyReportView";

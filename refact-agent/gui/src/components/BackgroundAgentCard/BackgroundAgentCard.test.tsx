@@ -669,7 +669,7 @@ describe("legacy SubagentTool", () => {
   });
 
   it.each([
-    [undefined, false, "Awaiting report"],
+    [undefined, false, "No result"],
     ["Launch failed", true, "Request failed"],
   ] as const)("does not infer lifecycle from %s", (content, failed, label) => {
     renderLegacy(content, failed);

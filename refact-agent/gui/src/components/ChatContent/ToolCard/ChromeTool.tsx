@@ -6,6 +6,7 @@ import { useThreadId } from "../../../features/Chat/Thread";
 import type { ToolCall } from "../../../services/refact/types";
 import type { BrowserActionResponse } from "../../../services/refact/browser";
 import { buildImageDataUrl } from "../../../utils/imageDataUrl";
+import { useUnrecordedResultState } from "../TranscriptItem/useUnrecordedResultState";
 import {
   TranscriptClamp,
   TranscriptItem,
@@ -150,6 +151,7 @@ function isErrorLevel(level: string): boolean {
 
 export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
   const threadId = useThreadId();
+  const unrecorded = useUnrecordedResultState(toolCall.id);
   const result = useAppSelector((state) =>
     selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
@@ -206,7 +208,7 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
   const consoleWarnings = pageContext?.console.warnings ?? 0;
 
   const status: TranscriptStatus = !result
-    ? "running"
+    ? unrecorded.status
     : failedSteps.length > 0 || (result.tool_failed && !report)
       ? "failed"
       : "done";
@@ -215,7 +217,9 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
       ? "running"
       : status === "failed"
         ? "error"
-        : "success";
+        : !result
+          ? "idle"
+          : "success";
 
   const target = args.request
     ? describeStepsTarget(requestSteps)
@@ -415,6 +419,7 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
         output={output}
         raw={raw}
         status={status}
+        statusLabel={!result ? unrecorded.statusLabel : undefined}
         summary={summary}
         target={target}
         verb="Browser"

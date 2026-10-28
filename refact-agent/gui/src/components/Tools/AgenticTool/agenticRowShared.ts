@@ -3,8 +3,10 @@ import {
   stripAgentKindPrefix,
 } from "../../../utils/displayNames";
 import {
+  NO_RESULT_LABEL,
   fromAgentStatus,
   type TranscriptStatus,
+  type UnrecordedResultState,
 } from "../../ChatContent/TranscriptItem";
 import { shortenAgentId } from "./agenticToolModel";
 import { compactText, type CompactTransportState } from "./compactPresentation";
@@ -50,6 +52,7 @@ export type AgenticRowInput = {
   extra: RecordValue | undefined;
   transport: CompactTransportState;
   lookup: AgentLookup;
+  unrecorded?: UnrecordedResultState;
 };
 
 export const TARGET_CHARS = 80;
@@ -181,9 +184,23 @@ export function applyTransport(
   row: AgenticRow,
   transport: CompactTransportState,
   content: string | null,
+  unrecorded?: UnrecordedResultState,
 ): AgenticRow {
-  if (transport === "running") return { ...row, status: "running" };
-  if (transport === "pending") return { ...row, status: "unknown" };
+  if (
+    transport === "running" ||
+    transport === "pending" ||
+    transport === "unknown"
+  ) {
+    const state: UnrecordedResultState = unrecorded ?? {
+      status: transport === "running" ? "running" : "unknown",
+      statusLabel: transport === "running" ? undefined : NO_RESULT_LABEL,
+    };
+    return {
+      ...row,
+      status: state.status,
+      statusLabel: state.statusLabel ?? null,
+    };
+  }
   if (transport === "failed")
     return {
       ...row,

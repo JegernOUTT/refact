@@ -1,13 +1,11 @@
 import { useMemo } from "react";
 import { useAppSelector } from "../../../hooks/useAppSelector";
-import {
-  selectIsStreamingById,
-  selectIsWaitingById,
-  selectToolResultByThreadAndId,
-} from "../../../features/Chat/Thread/selectors";
+import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/selectors";
 import { useThreadId } from "../../../features/Chat/Thread";
 import type { ToolCall, ToolResult } from "../../../services/refact/types";
 import type { ToolStatus } from "./ToolCard";
+import { fromToolTone, type TranscriptStatus } from "../TranscriptItem";
+import { useUnrecordedResultState } from "../TranscriptItem/useUnrecordedResultState";
 
 function parseJsonOrNull(text: string): unknown {
   try {
@@ -29,6 +27,8 @@ export type OpenAiResponsesToolCardState = {
   toolName: string;
   label: string;
   status: ToolStatus;
+  transcriptStatus: TranscriptStatus;
+  statusLabel?: string;
   parsedArgs: unknown;
   rawJson: string;
   maybeResult: ToolResult | undefined;
@@ -40,12 +40,7 @@ export function useOpenAiResponsesToolCardState(
 ): OpenAiResponsesToolCardState {
   const threadId = useThreadId();
 
-  const isStreaming = useAppSelector((state) =>
-    selectIsStreamingById(state, threadId),
-  );
-  const isWaiting = useAppSelector((state) =>
-    selectIsWaitingById(state, threadId),
-  );
+  const unrecorded = useUnrecordedResultState(toolCall.id);
 
   const maybeResult = useAppSelector((state) =>
     selectToolResultByThreadAndId(state, threadId, toolCall.id),
@@ -55,8 +50,8 @@ export function useOpenAiResponsesToolCardState(
   const label = useMemo(() => toolNameLabel(toolName), [toolName]);
 
   const status: ToolStatus = useMemo(() => {
-    if (!maybeResult && (isStreaming || isWaiting)) return "running";
-    if (!maybeResult) return "running";
+    if (!maybeResult)
+      return unrecorded.status === "running" ? "running" : "idle";
     if (
       typeof maybeResult === "object" &&
       "tool_failed" in maybeResult &&
@@ -65,7 +60,11 @@ export function useOpenAiResponsesToolCardState(
       return "error";
     }
     return "success";
-  }, [maybeResult, isStreaming, isWaiting]);
+  }, [maybeResult, unrecorded.status]);
+  const transcriptStatus: TranscriptStatus = maybeResult
+    ? fromToolTone(status)
+    : unrecorded.status;
+  const statusLabel = maybeResult ? undefined : unrecorded.statusLabel;
 
   const parsedArgs = useMemo(
     () => parseJsonOrNull(toolCall.function.arguments),
@@ -90,6 +89,8 @@ export function useOpenAiResponsesToolCardState(
     toolName,
     label,
     status,
+    transcriptStatus,
+    statusLabel,
     parsedArgs,
     rawJson,
     maybeResult,

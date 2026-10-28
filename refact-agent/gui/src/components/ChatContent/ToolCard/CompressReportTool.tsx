@@ -5,6 +5,7 @@ import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/sel
 import { useThreadId } from "../../../features/Chat/Thread";
 import type { ToolCall } from "../../../services/refact/types";
 import { Markdown } from "../../Markdown";
+import { useUnrecordedResultState } from "../TranscriptItem/useUnrecordedResultState";
 import {
   TranscriptClamp,
   TranscriptItem,
@@ -35,6 +36,7 @@ export const CompressReportTool: React.FC<CompressReportToolProps> = ({
     maybeResult && typeof maybeResult.content === "string"
       ? maybeResult.content
       : null;
+  const unrecorded = useUnrecordedResultState(toolCall.id);
   const failed = Boolean(maybeResult?.tool_failed);
   const report = useMemo(() => {
     if (!content) return null;
@@ -42,7 +44,7 @@ export const CompressReportTool: React.FC<CompressReportToolProps> = ({
   }, [content, isProbe]);
 
   const status: TranscriptStatus = !maybeResult
-    ? "running"
+    ? unrecorded.status
     : failed
       ? "failed"
       : "done";
@@ -68,6 +70,7 @@ export const CompressReportTool: React.FC<CompressReportToolProps> = ({
         }
         raw={[{ label: "Arguments", value: toolCall.function.arguments }]}
         status={status}
+        statusLabel={!maybeResult ? unrecorded.statusLabel : undefined}
         target={report?.summary ?? (isProbe ? "Analyze chat" : "Compress chat")}
         verb="Compress"
       />

@@ -5,7 +5,6 @@ import { Markdown, ShikiCodeBlock } from "../../Markdown";
 import {
   TranscriptClamp,
   TranscriptItem,
-  fromToolTone,
   type TranscriptFact,
 } from "../TranscriptItem";
 import { ToolCallTooltip } from "./ToolCallTooltip";
@@ -81,7 +80,8 @@ export function OpenAIServerTool({
             ? [{ label: "Response", value: state.contentText }]
             : []),
         ]}
-        status={fromToolTone(state.status)}
+        status={state.transcriptStatus}
+        statusLabel={state.statusLabel}
         summary={summary}
         target={target}
         verb={verb}

@@ -1,11 +1,7 @@
 import { BookOpen, Check, Copy, FileText } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useAppSelector } from "../../../hooks/useAppSelector";
-import {
-  selectIsStreamingById,
-  selectIsWaitingById,
-  selectToolResultByThreadAndId,
-} from "../../../features/Chat/Thread/selectors";
+import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/selectors";
 import { useThreadId } from "../../../features/Chat/Thread";
 import { ToolCall } from "../../../services/refact/types";
 import { Markdown, ShikiCodeBlock } from "../../Markdown";
@@ -20,7 +16,7 @@ import {
   addBuddyCrashBreadcrumb,
   setBuddyCrashHotSlot,
 } from "../../../features/Buddy/reportBuddyFrontendError";
-import type { CompactTransportState } from "../../Tools/AgenticTool/compactPresentation";
+import { useUnrecordedResultState } from "../TranscriptItem/useUnrecordedResultState";
 import {
   TranscriptClamp,
   TranscriptItem,
@@ -143,19 +139,9 @@ interface ReportToolCardProps {
   defaultOpen?: boolean;
   unboundedContent?: boolean;
   compact?: boolean;
-  compactTransportState?: CompactTransportState;
   testId?: string;
   input?: React.ReactNode;
   facts?: readonly TranscriptFact[];
-}
-
-function transportOf(
-  hasResult: boolean,
-  failed: boolean,
-  active: boolean,
-): CompactTransportState {
-  if (hasResult) return failed ? "failed" : "succeeded";
-  return active ? "running" : "pending";
 }
 
 export const ReportToolCard: React.FC<ReportToolCardProps> = ({
@@ -166,7 +152,6 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
   variant = "report",
   meta,
   extractReport,
-  compactTransportState,
   defaultOpen = false,
   testId,
   input,
@@ -176,19 +161,7 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
   const maybeResult = useAppSelector((state) =>
     selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
-  const streaming = useAppSelector((state) =>
-    selectIsStreamingById(state, threadId),
-  );
-  const waiting = useAppSelector((state) =>
-    selectIsWaitingById(state, threadId),
-  );
-  const transport =
-    compactTransportState ??
-    transportOf(
-      Boolean(maybeResult),
-      Boolean(maybeResult?.tool_failed),
-      streaming || waiting,
-    );
+  const unrecorded = useUnrecordedResultState(toolCall.id);
   const content =
     maybeResult && typeof maybeResult.content === "string"
       ? maybeResult.content
@@ -203,30 +176,21 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
     [content],
   );
 
-  const requestFailed =
-    transport === "failed" || Boolean(maybeResult?.tool_failed);
+  const requestFailed = Boolean(maybeResult?.tool_failed);
   const reportedSuccess = structured?.success ?? reportData?.success;
-  const running = transport === "running";
-  const status: TranscriptStatus = requestFailed
-    ? "failed"
-    : reportedSuccess === false
+  const running = !maybeResult && unrecorded.status === "running";
+  const status: TranscriptStatus = !maybeResult
+    ? unrecorded.status
+    : requestFailed || reportedSuccess === false
       ? "failed"
-      : running
-        ? "running"
-        : !maybeResult
-          ? variant === "taskDone"
-            ? "unknown"
-            : "waiting"
-          : "done";
-  const statusLabel = requestFailed
-    ? "Request failed"
-    : reportedSuccess === false
-      ? "Reported failure"
-      : !maybeResult && variant === "taskDone" && !running
-        ? "State unknown"
-        : !maybeResult && !running
-          ? "Awaiting report"
-          : undefined;
+      : "done";
+  const statusLabel = !maybeResult
+    ? unrecorded.statusLabel
+    : requestFailed
+      ? "Request failed"
+      : reportedSuccess === false
+        ? "Reported failure"
+        : undefined;
 
   const verification = structured
     ? verificationSummary(structured)
@@ -319,7 +283,7 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
         deferredMarkdown ? <ReportActions markdown={deferredMarkdown} /> : null
       }
       artifacts={files.length > 0 ? <FileChips files={files} /> : null}
-      defaultOpen={defaultOpen}
+      defaultOpen={defaultOpen && Boolean(maybeResult)}
       icon={icon}
       input={input}
       meta={metaText}

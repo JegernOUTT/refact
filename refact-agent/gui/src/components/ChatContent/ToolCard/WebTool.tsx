@@ -8,6 +8,7 @@ import { useThreadId } from "../../../features/Chat/Thread";
 import { ChatContextFile, ToolCall } from "../../../services/refact/types";
 import { Link } from "../../Link";
 import { Markdown, ShikiCodeBlock } from "../../Markdown";
+import { useUnrecordedResultState } from "../TranscriptItem/useUnrecordedResultState";
 import {
   TranscriptClamp,
   TranscriptItem,
@@ -155,9 +156,10 @@ export const WebTool: React.FC<WebToolProps> = ({
     }
   }, [toolCall.function.arguments]);
 
+  const unrecorded = useUnrecordedResultState(toolCall.id);
   const failed = result?.tool_failed === true;
   const status: TranscriptStatus = !result
-    ? "running"
+    ? unrecorded.status
     : failed
       ? "failed"
       : "done";
@@ -249,6 +251,7 @@ export const WebTool: React.FC<WebToolProps> = ({
       raw={[{ label: "Arguments", value: toolCall.function.arguments }]}
       sectionLabels={{ input: "URL" }}
       status={status}
+      statusLabel={!result ? unrecorded.statusLabel : undefined}
       target={target}
       verb="Web"
     />

@@ -15,8 +15,6 @@ import { useOpenFileInApp } from "../../../hooks/useOpenFileInApp";
 import { selectCapabilities } from "../../../features/Config/configSlice";
 import {
   selectManyDiffMessageByThreadAndIds,
-  selectIsStreamingById,
-  selectIsWaitingById,
   selectToolResultByThreadAndId,
 } from "../../../features/Chat/Thread/selectors";
 import { useThreadId } from "../../../features/Chat/Thread";
@@ -30,6 +28,7 @@ import {
   isUpdateTextDocToolCall,
   isUpdateTextDocByLinesToolCall,
 } from "../../Tools/types";
+import { useUnrecordedResultState } from "../TranscriptItem/useUnrecordedResultState";
 import {
   TranscriptClamp,
   TranscriptItem,
@@ -83,12 +82,7 @@ export const EditTool: React.FC<EditToolProps> = ({
   const capabilities = useAppSelector(selectCapabilities);
   const [requestDryRun, dryRunResult] = toolsApi.useDryRunForEditToolMutation();
   const chatId = useThreadId();
-  const isStreaming = useAppSelector((state) =>
-    selectIsStreamingById(state, chatId),
-  );
-  const isWaiting = useAppSelector((state) =>
-    selectIsWaitingById(state, chatId),
-  );
+  const unrecorded = useUnrecordedResultState(toolCall.id);
   const canPaste = useAppSelector(selectCanPaste);
   const selectedSnippet = useAppSelector(selectSelectedSnippet);
   const result = useAppSelector((state) =>
@@ -107,7 +101,7 @@ export const EditTool: React.FC<EditToolProps> = ({
 
   const hasDiffs = diffs.length > 0 || toolDiffs.length > 0;
   const isToolBusy =
-    isActiveTool && result === undefined && (isStreaming || isWaiting);
+    isActiveTool && result === undefined && unrecorded.status === "running";
   const shouldRenderDiffs = hasDiffs && !isToolBusy;
   const hasSelection = selectedSnippet.code.trim().length > 0;
 
@@ -207,15 +201,16 @@ export const EditTool: React.FC<EditToolProps> = ({
 
   const verb = editVerb(toolCall.function.name, allDiffs);
   const failed = result?.tool_failed === true;
-  const status: TranscriptStatus = isToolBusy
-    ? "running"
+  const unrecordedRow = result === undefined && !shouldRenderDiffs;
+  const status: TranscriptStatus = unrecordedRow
+    ? unrecorded.status
     : failed
       ? "failed"
       : "done";
   const errorText =
     failed && typeof result.content === "string" ? result.content : null;
 
-  if (!shouldRenderDiffs && !isToolBusy && !errorText) return null;
+  if (!shouldRenderDiffs && !unrecordedRow && !errorText) return null;
 
   const output =
     allDiffs.length > 0 ? (
@@ -252,6 +247,7 @@ export const EditTool: React.FC<EditToolProps> = ({
       output={output}
       raw={[{ label: "Arguments", value: toolCall.function.arguments }]}
       status={status}
+      statusLabel={unrecordedRow ? unrecorded.statusLabel : undefined}
       target={fileListTarget(fileNames)}
       verb={verb}
     />

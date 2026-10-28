@@ -5,7 +5,6 @@ import type {
 } from "../../../services/refact/browser";
 import { ShikiCodeBlock } from "../../Markdown";
 import { DialogImage } from "../../DialogImage";
-import { Badge } from "../../ui";
 import {
   type FillDiagnosticChip,
   type StepCaptureEntry,
@@ -51,9 +50,13 @@ export function StepResults({ rows }: { rows: readonly StepRow[] }) {
               data-testid="browser-fill-diagnostics"
             >
               {row.diagnostics.map((chip) => (
-                <Badge key={chip.label} size="xs" tone={chip.tone}>
+                <span
+                  className={styles.factItem}
+                  data-tone={chip.tone}
+                  key={chip.label}
+                >
                   {chip.label}
-                </Badge>
+                </span>
               ))}
             </span>
           ) : null}
@@ -182,16 +185,15 @@ export function ScreenshotGrid({
             />
           ) : null}
           {capture.frames.length > 0 ? (
-            <span className={styles.chipRow}>
+            <span className={styles.chipRow} data-testid="capture-frames">
               {capture.frames.map((frame) => (
-                <Badge
+                <span
+                  className={styles.factItem}
                   key={frame.index}
-                  size="xs"
                   title={frame.artifactPath ?? undefined}
-                  tone="muted"
                 >
                   {formatFrameChip(frame)}
-                </Badge>
+                </span>
               ))}
             </span>
           ) : null}

@@ -244,10 +244,10 @@ describe("AgenticTool other agentic rows", () => {
     ).toBeInTheDocument();
   });
 
-  test("unrecorded calls show an unknown pill without a panel claim", () => {
+  test("unrecorded calls show the shared No result pill without a panel claim", () => {
     renderTools([], [toolCall("agent_status", { agent_id: CHILD_ID })]);
     expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
-      "Unknown",
+      "No result",
     );
     expect(screen.getByTestId("transcript-target")).toHaveTextContent(
       "Migrate the exec family",

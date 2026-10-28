@@ -21,6 +21,7 @@ import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/sel
 import { useThreadId } from "../../../features/Chat/Thread";
 import type { ToolCall } from "../../../services/refact/types";
 import { Markdown, ShikiCodeBlock } from "../../Markdown";
+import { useUnrecordedResultState } from "../TranscriptItem/useUnrecordedResultState";
 import {
   TranscriptClamp,
   TranscriptItem,
@@ -165,13 +166,20 @@ export const EngineAnalysisTool: React.FC<EngineAnalysisToolProps> = ({
     selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
 
+  const unrecorded = useUnrecordedResultState(toolCall.id);
   const failed = Boolean(maybeResult?.tool_failed);
   const status: TranscriptStatus = !maybeResult
-    ? "running"
+    ? unrecorded.status
     : failed
       ? "failed"
       : "done";
-  const tone = !maybeResult ? "running" : failed ? "error" : "success";
+  const tone = !maybeResult
+    ? unrecorded.status === "running"
+      ? "running"
+      : "idle"
+    : failed
+      ? "error"
+      : "success";
 
   const content =
     maybeResult && typeof maybeResult.content === "string"
@@ -234,6 +242,7 @@ export const EngineAnalysisTool: React.FC<EngineAnalysisToolProps> = ({
         ]}
         rowTooltip={scope}
         status={status}
+        statusLabel={!maybeResult ? unrecorded.statusLabel : undefined}
         summary={summary}
         target={scope}
         verb={ENGINE_ANALYSIS_NAMES[toolName] ?? humanizeToolName(toolName)}

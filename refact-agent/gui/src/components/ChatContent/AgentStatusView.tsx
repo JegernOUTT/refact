@@ -12,11 +12,7 @@ import {
   Settings,
 } from "lucide-react";
 import { useAppSelector } from "../../hooks/useAppSelector";
-import {
-  selectIsStreamingById,
-  selectIsWaitingById,
-  selectToolResultByThreadAndId,
-} from "../../features/Chat/Thread/selectors";
+import { selectToolResultByThreadAndId } from "../../features/Chat/Thread/selectors";
 import { useThreadId } from "../../features/Chat/Thread";
 import { selectApiKey, selectConfig } from "../../features/Config/configSlice";
 import { sendChatCommand } from "../../services/refact/chatCommands";
@@ -32,6 +28,7 @@ import {
   Select,
   StatusDot,
 } from "../ui";
+import { useUnrecordedResultState } from "./TranscriptItem/useUnrecordedResultState";
 import { TranscriptItem, type TranscriptStatus } from "./TranscriptItem";
 import {
   COLLAPSE_ANIMATION_MS,
@@ -665,12 +662,7 @@ export const AgentStatusView: React.FC<AgentStatusViewProps> = ({
   toolCall,
 }) => {
   const chatId = useThreadId();
-  const isStreaming = useAppSelector((state) =>
-    selectIsStreamingById(state, chatId),
-  );
-  const isWaiting = useAppSelector((state) =>
-    selectIsWaitingById(state, chatId),
-  );
+  const unrecorded = useUnrecordedResultState(toolCall.id);
   const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
 
@@ -691,21 +683,19 @@ export const AgentStatusView: React.FC<AgentStatusViewProps> = ({
     : EMPTY_ALERTS;
   const parsed = report !== null && report.roster !== "unparsed";
   const rowCount = parsed ? report.rows.length : null;
-  const isRequestRunning = !maybeResult && (isStreaming || isWaiting);
   const failed = maybeResult?.tool_failed === true;
-  const status: TranscriptStatus = failed
-    ? "failed"
-    : isRequestRunning
-      ? "running"
-      : !maybeResult
-        ? "unknown"
-        : alerts.failed > 0
-          ? "failed"
-          : alerts.approval > 0 || alerts.stuck > 0
-            ? "needs_you"
-            : "done";
-  const statusLabel =
-    !failed && alerts.failed > 0
+  const status: TranscriptStatus = !maybeResult
+    ? unrecorded.status
+    : failed
+      ? "failed"
+      : alerts.failed > 0
+        ? "failed"
+        : alerts.approval > 0 || alerts.stuck > 0
+          ? "needs_you"
+          : "done";
+  const statusLabel = !maybeResult
+    ? unrecorded.statusLabel
+    : !failed && alerts.failed > 0
       ? `${alerts.failed} failed`
       : alerts.approval > 0
         ? `${alerts.approval} need approval`

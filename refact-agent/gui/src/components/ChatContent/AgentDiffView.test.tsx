@@ -39,7 +39,9 @@ function renderDiff(
   const chat = createDefaultChatState();
   const threadId = chat.current_thread_id;
   chat.threads[threadId].thread.messages =
-    content === null ? [] : [diffMessage(content, toolFailed)];
+    content === null
+      ? [{ role: "assistant", content: "", tool_calls: [TOOL_CALL] }]
+      : [diffMessage(content, toolFailed)];
   chat.threads[threadId].waiting_for_response = waiting;
   return {
     ...render(<AgentDiffView toolCall={TOOL_CALL} />, {
@@ -229,12 +231,10 @@ describe("AgentDiffView transcript route", () => {
       "check-agents redesign",
     );
     expect(within(outer).getByTestId("transcript-meta")).toHaveTextContent(
-      "2 files",
+      "2 files · partial",
     );
     expect(outer).not.toHaveTextContent("T-29");
-    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
-      "Partial",
-    );
+    expect(screen.queryByTestId("transcript-status-pill")).toBeNull();
     const files = screen.getByRole("button", { name: "All files" });
     expect(files.closest("[inert]")).toBeNull();
     expect(screen.getByText("refact/task/T-29-agent")).toBeInTheDocument();
@@ -262,7 +262,7 @@ describe("AgentDiffView transcript route", () => {
   });
 
   it.each([
-    [null, false, false, "unknown", null, "Unknown"],
+    [null, false, false, "unknown", null, "No result"],
     [null, false, true, "running", null, "Running"],
     ["not a diff", false, false, "done", null, null],
     ['agent_diff(card_id="T-29")', true, false, "failed", null, "Failed"],

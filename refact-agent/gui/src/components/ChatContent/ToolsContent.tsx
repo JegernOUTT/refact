@@ -1,56 +1,23 @@
-import {
-  CircleCheck,
-  CircleX,
-  File,
-  LoaderCircle,
-  Settings,
-  Rows3,
-} from "lucide-react";
-import React, { forwardRef, useCallback, useEffect, useMemo } from "react";
-import * as Collapsible from "@radix-ui/react-collapsible";
-import classNames from "classnames";
-import { Container, Flex, Text, Box } from "@radix-ui/themes";
-import { Icon } from "../ui";
+import React, { useCallback, useMemo } from "react";
 import {
   ChatContextFile,
   DiffChunk,
   BackgroundAgentSummary,
   isMultiModalToolResult,
   extractExecMetadata,
-  MultiModalToolResult,
   ToolCall,
   ToolResult,
-  ToolUsage,
 } from "../../services/refact";
-import { CommandMarkdown } from "../Command";
-import { Chevron } from "../Collapsible";
 import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { useAppSelector } from "../../hooks/useAppSelector";
-import {
-  selectIsStreamingById,
-  selectIsWaitingById,
-  selectManyDiffMessageByThreadAndIds,
-  selectManyToolResultsByThreadAndIds,
-  selectToolResultByThreadAndId,
-} from "../../features/Chat/Thread/selectors";
+import { selectManyToolResultsByThreadAndIds } from "../../features/Chat/Thread/selectors";
 import { ChatThreadProvider, useThreadId } from "../../features/Chat/Thread";
-import { ScrollArea } from "../ScrollArea";
-import { takeWhile } from "../../utils";
-import { DialogImage } from "../DialogImage";
-import { buildImageDataUrl } from "../../utils/imageDataUrl";
 import { RootState } from "../../app/store";
 import { createChatWithId, switchToThread } from "../../features/Chat/Thread";
 import { selectFeatures } from "../../features/Config/configSlice";
 import { push } from "../../features/Pages/pagesSlice";
 import { isRawTextDocToolCall } from "../Tools/types";
-import {
-  normalizeToolCall,
-  normalizeToolName,
-  formatToolDisplayName,
-} from "../../utils/toolNameAliases";
-import { useCollapsibleStore, useStoredOpen } from "./useStoredOpen";
-import { AnimatedText } from "../Text";
-import { toolCallArgsToString } from "./toolCallArgs";
+import { normalizeToolCall } from "../../utils/toolNameAliases";
 import {
   ReadTool,
   ListTool,
@@ -82,133 +49,23 @@ import {
   OpenAIMcpCallTool,
   OpenAIMcpListToolsTool,
   CompressReportTool,
-  ToolCard,
 } from "./ToolCard";
+import { MultiModalTool } from "./ToolCard/MultiModalTool";
 import { AgentStatusView } from "./AgentStatusView";
 import { AgentPulseView } from "./AgentPulseView";
 import { AgentDiffView } from "./AgentDiffView";
 import { TaskDocumentsView } from "./TaskDocumentsView";
-import { FinalReportView } from "./FinalReportView";
-import { finalReportPresentation, parseFinalReport } from "./finalReportJson";
-import { CompactToolDetails } from "../Tools/AgenticTool/CompactToolDetails";
-import { PagedText } from "../Tools/AgenticTool/PagedText";
-import { ToolCard as DetailsCard } from "../ui";
+import { FinalReportTool } from "./FinalReportView";
 import { BackgroundAgentCard } from "../BackgroundAgentCard";
 import { AgenticTool, isAgenticToolName } from "../Tools/AgenticTool";
 import { LaunchPreviewTool } from "../Tools/AgenticTool/LaunchPreviewTool";
 import { parseAgenticArgs } from "../Tools/AgenticTool/agenticToolModel";
 import { expandTruncatedAgentTitle } from "../../utils/displayNames";
-import styles from "./ToolsContent.module.css";
 import { PrivacyToolResult } from "../../features/Privacy/PrivacyToolResult";
 import {
   extractPrivacyShellMetadata,
   isPrivacyRefusalContent,
 } from "../../services/refact/privacy";
-
-type FinalReportToolCardProps = {
-  toolCall: ToolCall;
-  content: string | null;
-  hasResult: boolean;
-  rawContent?: ToolResult["content"];
-  toolFailed?: boolean;
-  extra?: Record<string, unknown>;
-};
-
-const FinalReportToolCard: React.FC<FinalReportToolCardProps> = ({
-  toolCall,
-  content,
-  hasResult,
-  rawContent,
-  toolFailed,
-  extra,
-}) => {
-  const threadId = useThreadId();
-  const isStreaming = useAppSelector((state) =>
-    selectIsStreamingById(state, threadId),
-  );
-  const isWaiting = useAppSelector((state) =>
-    selectIsWaitingById(state, threadId),
-  );
-  const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle] = useStoredOpen(storeKey, false);
-  const presentation = finalReportPresentation(
-    content ?? (hasResult ? "" : null),
-    toolFailed,
-  );
-  const report = content ? parseFinalReport(content) : null;
-  const status =
-    presentation.tone === "danger"
-      ? "error"
-      : !hasResult && (isStreaming || isWaiting)
-        ? "running"
-        : report?.success === true
-          ? "success"
-          : "idle";
-  const statusIcon =
-    status === "error" ? (
-      <CircleX data-testid="final-report-tool-error-icon" />
-    ) : report?.success === true ? (
-      <CircleCheck data-testid="final-report-tool-success-icon" />
-    ) : (
-      <File data-testid="final-report-tool-neutral-icon" />
-    );
-  const technicalDetails = (
-    <DetailsCard title="Technical details" defaultOpen={false}>
-      <PagedText label="Raw arguments" body={toolCall.function.arguments} />
-      {rawContent !== undefined && (
-        <PagedText
-          label="Full response"
-          body={
-            typeof rawContent === "string"
-              ? rawContent
-              : JSON.stringify(rawContent, null, 2)
-          }
-        />
-      )}
-      {extra && (
-        <PagedText
-          label="Response metadata"
-          body={JSON.stringify(extra, null, 2)}
-        />
-      )}
-    </DetailsCard>
-  );
-
-  return (
-    <>
-      <span data-testid="final-report-tool" hidden />
-      <ToolCard
-        icon={statusIcon}
-        summary="Task agent final report"
-        meta={presentation.stateLabel}
-        density="compact"
-        status={status}
-        isOpen={isOpen}
-        onToggle={handleToggle}
-        toolCall={toolCall}
-      >
-        {content === null ? (
-          <CompactToolDetails facts={presentation.facts}>
-            {technicalDetails}
-          </CompactToolDetails>
-        ) : (
-          <FinalReportView
-            compact
-            content={content}
-            technicalDetails={technicalDetails}
-          />
-        )}
-      </ToolCard>
-    </>
-  );
-};
-
-function parseProgressEntry(entry: string): { step?: string; text: string } {
-  const m = entry.match(/^(\d+\/\d+):\s*([\s\S]+)$/);
-  if (!m) return { text: entry };
-  const [, step, text] = m;
-  return { step, text };
-}
 
 const EXEC_TOOL_NAMES = new Set([
   "process_start",
@@ -489,224 +346,9 @@ function decorateBackgroundAgentTool(
           readStringField(result, "status"),
       )}
       onOpenAgentTrajectory={onOpenTrajectory}
-    >
-      <PagedText label="Raw arguments" body={toolCall.function.arguments} />
-      <PagedText
-        label="Full response"
-        body={
-          typeof result.content === "string"
-            ? result.content
-            : JSON.stringify(result.content, null, 2)
-        }
-      />
-      {result.extra && (
-        <PagedText
-          label="Response metadata"
-          body={JSON.stringify(result.extra, null, 2)}
-        />
-      )}
-    </BackgroundAgentCard>
+    />
   );
 }
-
-// TODO: Sort of duplicated
-const ToolMessage: React.FC<{
-  toolCall: ToolCall;
-  threadId: string;
-}> = ({ toolCall, threadId }) => {
-  const name = normalizeToolName(toolCall.function.name) ?? "";
-  const maybeResult = useAppSelector((state) =>
-    selectToolResultByThreadAndId(state, threadId, toolCall.id),
-  );
-
-  const argsString = React.useMemo(() => {
-    return toolCallArgsToString(toolCall.function.arguments);
-  }, [toolCall.function.arguments]);
-
-  if (maybeResult && isMultiModalToolResult(maybeResult)) {
-    // TODO: handle this
-    return null;
-  }
-
-  const functionCalled = "```python\n" + name + "(" + argsString + ")\n```";
-
-  return (
-    <Flex direction="column">
-      <ScrollArea scrollbars="horizontal" style={{ width: "100%" }}>
-        <Box>
-          <CommandMarkdown isInsideScrollArea>{functionCalled}</CommandMarkdown>
-        </Box>
-      </ScrollArea>
-    </Flex>
-  );
-};
-
-const ToolUsageDisplay: React.FC<{
-  functionName: string;
-  amountOfCalls: number;
-}> = ({ functionName, amountOfCalls }) => {
-  return (
-    <>
-      {formatToolDisplayName(functionName)}
-      {amountOfCalls > 1 ? ` (${amountOfCalls})` : ""}
-    </>
-  );
-};
-
-const AnimatedCollapsibleContent: React.FC<{
-  open: boolean;
-  children: React.ReactNode;
-}> = ({ open, children }) => {
-  return (
-    <Collapsible.Content forceMount asChild>
-      <div
-        className={classNames("rf-expand-grid", styles.toolGroupGrid)}
-        data-open={open}
-        hidden={false}
-      >
-        <div className={styles.toolGroupBody}>{children}</div>
-      </div>
-    </Collapsible.Content>
-  );
-};
-
-// Use this for a single tool results
-export const SingleModelToolContent: React.FC<{
-  toolCalls: ToolCall[];
-  threadId?: string;
-}> = ({ toolCalls, threadId }) => {
-  const contextThreadId = useThreadId();
-  const resolvedThreadId = threadId ?? contextThreadId;
-  const isStreaming = useAppSelector((state) =>
-    selectIsStreamingById(state, resolvedThreadId),
-  );
-  const isWaiting = useAppSelector((state) =>
-    selectIsWaitingById(state, resolvedThreadId),
-  );
-  const store = useCollapsibleStore();
-
-  const toolCallsId = useMemo(() => {
-    const out: string[] = [];
-    for (const toolCall of toolCalls) {
-      if (typeof toolCall.id === "string") {
-        out.push(toolCall.id);
-      }
-    }
-    return out;
-  }, [toolCalls]);
-
-  const toolCallsIdKey = toolCallsId.join("|");
-  const storeKey = toolCallsId[0] ? `tg:${toolCallsId[0]}` : undefined;
-  const [open, setOpen] = React.useState(() => {
-    if (storeKey && store) {
-      const stored = store.get(storeKey);
-      if (stored !== undefined) return stored;
-    }
-    return false;
-  });
-
-  useEffect(() => {
-    if (storeKey && store) store.set(storeKey, open);
-  }, [storeKey, store, open]);
-  const selectResults = useMemo(
-    () => selectManyToolResultsByThreadAndIds(resolvedThreadId, toolCallsId),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [resolvedThreadId, toolCallsIdKey],
-  );
-  const selectDiffs = useMemo(
-    () => selectManyDiffMessageByThreadAndIds(resolvedThreadId, toolCallsId),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [resolvedThreadId, toolCallsIdKey],
-  );
-  const results = useAppSelector(selectResults);
-  const diffs = useAppSelector(selectDiffs);
-  const allResolved = useMemo(() => {
-    const resolvedToolIds = new Set<string>();
-    for (const result of results) {
-      resolvedToolIds.add(result.tool_call_id);
-    }
-    for (const diff of diffs) {
-      resolvedToolIds.add(diff.tool_call_id);
-    }
-    return toolCallsId.every((id) => resolvedToolIds.has(id));
-  }, [diffs, results, toolCallsId]);
-
-  const busy = useMemo(() => {
-    if (allResolved) return false;
-    return isStreaming || isWaiting;
-  }, [allResolved, isStreaming, isWaiting]);
-
-  if (toolCalls.length === 0) return null;
-
-  const toolNames = toolCalls.reduce<string[]>((acc, toolCall) => {
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-    if (toolCall === null) {
-      // eslint-disable-next-line no-console
-      console.error("toolCall is null");
-      return acc;
-    }
-    const normalizedName = normalizeToolName(toolCall.function.name);
-    if (!normalizedName) return acc;
-    if (acc.includes(normalizedName)) return acc;
-    return [...acc, normalizedName];
-  }, []);
-
-  /*
-    Calculates the usage amount of each tool by mapping over the unique tool names
-    and counting how many times each tool has been called in the toolCalls array.
-  */
-  const toolUsageAmount = toolNames.map<ToolUsage>((toolName) => {
-    return {
-      functionName: toolName,
-      amountOfCalls: toolCalls.filter(
-        (toolCall) => normalizeToolName(toolCall.function.name) === toolName,
-      ).length,
-    };
-  });
-
-  const subchatLog: string[] = toolCalls.flatMap((tc) => tc.subchat_log ?? []);
-  const attachedFiles = toolCalls
-    .flatMap((tc) => tc.attached_files ?? [])
-    .filter((f, i, arr) => arr.indexOf(f) === i);
-  const shownAttachedFiles = attachedFiles.slice(-6);
-  const hiddenFiles = Math.max(0, attachedFiles.length - 6);
-
-  // Use this for single tool result
-  return (
-    <Container>
-      <Collapsible.Root open={open} onOpenChange={setOpen}>
-        <Collapsible.Trigger asChild>
-          <ToolUsageSummary
-            toolUsageAmount={toolUsageAmount}
-            hiddenFiles={hiddenFiles}
-            shownAttachedFiles={shownAttachedFiles}
-            subchatLog={subchatLog}
-            open={open}
-            onClick={() => setOpen((prev) => !prev)}
-            waiting={busy}
-          />
-        </Collapsible.Trigger>
-        <AnimatedCollapsibleContent open={open}>
-          {toolCalls.map((toolCall) => {
-            // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-            if (toolCall === null) {
-              // eslint-disable-next-line no-console
-              console.error("toolCall is null");
-              return;
-            }
-            if (toolCall.id === undefined) return;
-            const key = `${toolCall.id}-${toolCall.index}`;
-            return (
-              <Box key={key} py="2">
-                <ToolMessage toolCall={toolCall} threadId={resolvedThreadId} />
-              </Box>
-            );
-          })}
-        </AnimatedCollapsibleContent>
-      </Collapsible.Root>
-    </Container>
-  );
-};
 
 export type ToolContentProps = {
   toolCalls: ToolCall[];
@@ -1403,7 +1045,7 @@ function processToolCalls(
 
   if (headName === "agent_finish") {
     const elem = (
-      <FinalReportToolCard
+      <FinalReportTool
         key={`final-report-tool-${head.id ?? processed.length}`}
         toolCall={normalizedHead}
         content={typeof result?.content === "string" ? result.content : null}
@@ -1683,33 +1325,15 @@ function processToolCalls(
   }
 
   if (result && isMultiModalToolResult(result)) {
-    const restInTail = takeWhile(tail, (toolCall) => {
-      const nextResult = toolResults.find(
-        (res) => res.tool_call_id === toolCall.id,
-      );
-      return nextResult !== undefined && isMultiModalToolResult(nextResult);
-    });
-
-    const nextTail = tail.slice(restInTail.length);
-    const multiModalToolCalls = [
-      normalizedHead,
-      ...restInTail.map(normalizeToolCall),
-    ];
-    const ids = multiModalToolCalls.map((d) => d.id);
-    const multiModalToolResults: MultiModalToolResult[] = toolResults
-      .filter(isMultiModalToolResult)
-      .filter((toolResult) => ids.includes(toolResult.tool_call_id));
-
     const elem = (
-      <MultiModalToolContent
-        key={`multi-model-tool-content-${processed.length}`}
-        toolCalls={multiModalToolCalls}
-        toolResults={multiModalToolResults}
-        threadId={threadId ?? ""}
+      <MultiModalTool
+        key={`multimodal-tool-${head.id ?? processed.length}`}
+        toolCall={normalizedHead}
+        result={result}
       />
     );
     return processToolCalls(
-      nextTail,
+      tail,
       toolResults,
       features,
       [...processed, elem],
@@ -1759,274 +1383,3 @@ function processToolCalls(
     threadId,
   );
 }
-
-const MultiModalToolContent: React.FC<{
-  toolCalls: ToolCall[];
-  toolResults: MultiModalToolResult[];
-  threadId: string;
-}> = ({ toolCalls, toolResults, threadId }) => {
-  const isStreaming = useAppSelector((state) =>
-    selectIsStreamingById(state, threadId),
-  );
-  const isWaiting = useAppSelector((state) =>
-    selectIsWaitingById(state, threadId),
-  );
-  const store = useCollapsibleStore();
-
-  const ids = useMemo(() => {
-    return toolCalls
-      .map((tc) => tc.id)
-      .filter((id): id is string => typeof id === "string");
-  }, [toolCalls]);
-
-  const idsKey = ids.join("|");
-  const mmStoreKey = ids[0] ? `mm:${ids[0]}` : undefined;
-  const [open, setOpen] = React.useState(() => {
-    if (mmStoreKey && store) {
-      const stored = store.get(mmStoreKey);
-      if (stored !== undefined) return stored;
-    }
-    return false;
-  });
-
-  useEffect(() => {
-    if (mmStoreKey && store) store.set(mmStoreKey, open);
-  }, [mmStoreKey, store, open]);
-
-  const selectDiffs = useMemo(
-    () => selectManyDiffMessageByThreadAndIds(threadId, ids),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [threadId, idsKey],
-  );
-  const diffs = useAppSelector(selectDiffs);
-
-  const hasImages = toolResults.some((toolResult) =>
-    toolResult.content.some(
-      (content) =>
-        buildImageDataUrl(content.m_type, content.m_content) !== null,
-    ),
-  );
-
-  const toolNames = toolCalls.reduce<string[]>((acc, toolCall) => {
-    const normalizedName = normalizeToolName(toolCall.function.name);
-    if (!normalizedName) return acc;
-    if (acc.includes(normalizedName)) return acc;
-    return [...acc, normalizedName];
-  }, []);
-
-  const toolUsageAmount = toolNames.map<ToolUsage>((toolName) => {
-    return {
-      functionName: toolName,
-      amountOfCalls: toolCalls.filter(
-        (toolCall) => normalizeToolName(toolCall.function.name) === toolName,
-      ).length,
-    };
-  });
-
-  const hasResults = useMemo(() => {
-    const diffIds = diffs.map((diff) => diff.tool_call_id);
-    const toolIds = toolResults.map((d) => d.tool_call_id);
-    const resultIds = [...diffIds, ...toolIds];
-    return toolCalls.every(
-      (toolCall) => toolCall.id && resultIds.includes(toolCall.id),
-    );
-  }, [toolCalls, toolResults, diffs]);
-
-  const busy = useMemo(() => {
-    if (hasResults) return false;
-    return isStreaming || isWaiting;
-  }, [hasResults, isStreaming, isWaiting]);
-
-  return (
-    <Container>
-      <Collapsible.Root open={open} onOpenChange={setOpen}>
-        <Collapsible.Trigger asChild>
-          <ToolUsageSummary
-            toolUsageAmount={toolUsageAmount}
-            open={open}
-            onClick={() => setOpen((prev) => !prev)}
-            waiting={busy}
-          />
-        </Collapsible.Trigger>
-        <AnimatedCollapsibleContent open={open}>
-          <Box py="2">
-            {toolCalls.map((toolCall, i) => {
-              const result = toolResults.find(
-                (toolResult) => toolResult.tool_call_id === toolCall.id,
-              );
-              if (!result) return null;
-
-              const name = normalizeToolName(toolCall.function.name) ?? "";
-              const argsString = toolCallArgsToString(
-                toolCall.function.arguments,
-              );
-              const functionCalled =
-                "```python\n" + name + "(" + argsString + ")\n```";
-
-              return (
-                <Flex
-                  direction="column"
-                  key={`tool-call-command-${toolCall.id}-${i}`}
-                  py="2"
-                >
-                  <ScrollArea scrollbars="horizontal" style={{ width: "100%" }}>
-                    <Box>
-                      <CommandMarkdown isInsideScrollArea>
-                        {functionCalled}
-                      </CommandMarkdown>
-                    </Box>
-                  </ScrollArea>
-                </Flex>
-              );
-            })}
-          </Box>
-        </AnimatedCollapsibleContent>
-      </Collapsible.Root>
-      {hasImages && (
-        <Flex py="2" gap="2" wrap="wrap">
-          {toolCalls.map((toolCall, index) => {
-            const toolResult = toolResults.find(
-              (toolResult) => toolResult.tool_call_id === toolCall.id,
-            );
-            if (!toolResult) return null;
-
-            const dataUrls = toolResult.content.flatMap((content) => {
-              const url = buildImageDataUrl(content.m_type, content.m_content);
-              return url ? [url] : [];
-            });
-            if (dataUrls.length === 0) return null;
-
-            return dataUrls.map((dataUrl, idx) => {
-              const key = `tool-image-${toolResult.tool_call_id}-${index}-${idx}`;
-              return (
-                <DialogImage key={key} size="8" src={dataUrl} fallback="" />
-              );
-            });
-          })}
-        </Flex>
-      )}
-    </Container>
-  );
-};
-
-type ToolUsageSummaryProps = {
-  toolUsageAmount: ToolUsage[];
-  hiddenFiles?: number;
-  shownAttachedFiles?: string[];
-  subchatLog?: string[];
-  open: boolean;
-  onClick?: () => void;
-  waiting: boolean;
-};
-
-function getFile(path: string): React.ReactNode {
-  if (path.endsWith("/") || !path.includes(".")) return <Rows3 />;
-  return <File />;
-}
-
-function truncatePath(path: string, maxLen = 50): string {
-  if (path.length <= maxLen) return path;
-  const parts = path.split("/");
-  if (parts.length <= 2) return "…" + path.slice(-maxLen + 1);
-  const filename = parts[parts.length - 1];
-  const dir = parts[parts.length - 2];
-  const short = `…/${dir}/${filename}`;
-  if (short.length <= maxLen) return short;
-  return "…" + path.slice(-maxLen + 1);
-}
-
-const ToolUsageSummary = forwardRef<HTMLDivElement, ToolUsageSummaryProps>(
-  (
-    {
-      toolUsageAmount,
-      hiddenFiles,
-      shownAttachedFiles,
-      subchatLog,
-      open,
-      onClick,
-      waiting,
-    },
-    ref,
-  ) => {
-    const currentStep = (subchatLog ?? []).slice(-1)[0];
-
-    return (
-      <AnimatedText
-        as="div"
-        weight="light"
-        size="1"
-        animating={waiting}
-        className={styles.toolUsageSummary}
-      >
-        <Flex gap="2" align="end" onClick={onClick} ref={ref} my="2">
-          <Flex
-            gap="1"
-            align="start"
-            direction="column"
-            className={styles.toolUsageSummaryBody}
-          >
-            <Flex gap="2" align="center" justify="center">
-              {waiting ? (
-                <Icon icon={LoaderCircle} size="sm" tone="accent" />
-              ) : (
-                <Settings />
-              )}
-              {toolUsageAmount.map(({ functionName, amountOfCalls }, index) => (
-                <span key={functionName}>
-                  <ToolUsageDisplay
-                    functionName={functionName}
-                    amountOfCalls={amountOfCalls}
-                  />
-                  {index === toolUsageAmount.length - 1 ? "" : ", "}
-                </span>
-              ))}
-            </Flex>
-
-            {hiddenFiles !== undefined && hiddenFiles > 0 && (
-              <Text weight="light" size="1" ml="4">
-                {`<+${hiddenFiles} more files>`}
-              </Text>
-            )}
-            {shownAttachedFiles?.map((file, index) => (
-              <Text weight="light" size="1" key={index} ml="4" as="div">
-                {getFile(file)} {truncatePath(file)}
-              </Text>
-            ))}
-            {currentStep &&
-              (() => {
-                const parsed = parseProgressEntry(currentStep);
-                return (
-                  <Flex direction="column" gap="1" ml="4" mt="1">
-                    {parsed.step && (
-                      <Flex align="center" gap="1">
-                        {waiting && (
-                          <Icon icon={LoaderCircle} size="sm" tone="accent" />
-                        )}
-                        <Text weight="light" size="1">
-                          {parsed.step}:
-                        </Text>
-                      </Flex>
-                    )}
-                    <Text
-                      size="1"
-                      color="gray"
-                      as="div"
-                      ml={parsed.step ? "4" : "0"}
-                      style={{
-                        whiteSpace: "pre-wrap",
-                        wordBreak: "break-word",
-                      }}
-                    >
-                      {parsed.text}
-                    </Text>
-                  </Flex>
-                );
-              })()}
-          </Flex>
-          <Chevron open={open} />
-        </Flex>
-      </AnimatedText>
-    );
-  },
-);
-ToolUsageSummary.displayName = "ToolUsageSummary";

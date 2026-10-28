@@ -87,5 +87,10 @@ function rowFor(input: AgenticRowInput, name: string): AgenticRow {
 
 export function buildAgenticRow(input: AgenticRowInput): AgenticRow {
   const name = normalizeToolName(input.toolName) ?? input.toolName;
-  return applyTransport(rowFor(input, name), input.transport, input.content);
+  return applyTransport(
+    rowFor(input, name),
+    input.transport,
+    input.content,
+    input.unrecorded,
+  );
 }

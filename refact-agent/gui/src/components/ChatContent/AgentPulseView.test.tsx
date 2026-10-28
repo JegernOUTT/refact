@@ -49,7 +49,9 @@ function renderPulse(
   const chat = createDefaultChatState();
   const threadId = chat.current_thread_id;
   chat.threads[threadId].thread.messages =
-    content === null ? [] : [pulseMessage(content, toolFailed)];
+    content === null
+      ? [{ role: "assistant", content: "", tool_calls: [TOOL_CALL] }]
+      : [pulseMessage(content, toolFailed)];
   chat.threads[threadId].waiting_for_response = waiting;
   return {
     ...render(<AgentPulseView toolCall={TOOL_CALL} />, {
@@ -279,7 +281,7 @@ describe("AgentPulseView transcript route", () => {
   );
 
   it.each([
-    [null, false, false, "unknown", "Unknown"],
+    [null, false, false, "unknown", "No result"],
     [null, false, true, "running", "Running"],
     ["not a report", false, false, "unknown", "Unknown"],
     ['cancel_agent(card_id="T-29")', true, false, "failed", "Failed"],

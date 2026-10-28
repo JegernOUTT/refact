@@ -3,6 +3,7 @@ import React, { useMemo } from "react";
 import type { ToolStatus } from "./ToolCard";
 import { ToolCallTooltip } from "./ToolCallTooltip";
 import { useToolCallActivity } from "./useToolCallActivity";
+import { useUnrecordedResultState } from "../TranscriptItem/useUnrecordedResultState";
 import {
   getToolEnrichment,
   type ToolCall,
@@ -77,7 +78,7 @@ function factValue(value: unknown): string {
     : text;
 }
 
-function ArgumentsView({ args }: { args: Record<string, unknown> }) {
+export function ArgumentsView({ args }: { args: Record<string, unknown> }) {
   const entries = Object.entries(args);
   const codeEntries = entries.filter(([key, value]) =>
     isCodeArgument(key, value),
@@ -103,7 +104,7 @@ function ArgumentsView({ args }: { args: Record<string, unknown> }) {
   );
 }
 
-function ResultView({ content }: { content: string }) {
+export function ResultView({ content }: { content: string }) {
   const rendered = useMemo(() => capToolResult(content), [content]);
   const asMarkdown =
     content.length <= MARKDOWN_MAX_CHARS && looksLikeMarkdown(content);
@@ -138,7 +139,8 @@ function toolIcon(name: string) {
 }
 
 export const GenericTool: React.FC<GenericToolProps> = ({ toolCall }) => {
-  const { result, isRunning } = useToolCallActivity(toolCall.id);
+  const { result } = useToolCallActivity(toolCall.id);
+  const unrecorded = useUnrecordedResultState(toolCall.id);
   const toolName = toolCall.function.name ?? "tool";
   const rawArguments = toolCall.function.arguments;
   const args = useMemo(() => parseToolArgs(rawArguments), [rawArguments]);
@@ -148,13 +150,13 @@ export const GenericTool: React.FC<GenericToolProps> = ({ toolCall }) => {
   );
 
   const tone: ToolStatus = !result
-    ? isRunning
+    ? unrecorded.status === "running"
       ? "running"
       : "idle"
     : result.tool_failed
       ? "error"
       : "success";
-  const status = !result && !isRunning ? "unknown" : fromToolTone(tone);
+  const status = result ? fromToolTone(tone) : unrecorded.status;
   const content =
     result && typeof result.content === "string" ? result.content : null;
   const enrichment = getToolEnrichment(result?.extra);
@@ -182,7 +184,6 @@ export const GenericTool: React.FC<GenericToolProps> = ({ toolCall }) => {
     { label: "Arguments", value: rawArguments },
     ...(result ? [{ label: "Response", value: result.content }] : []),
   ];
-  const meta = !result && !isRunning ? "Result not recorded" : title.meta;
 
   return (
     <ToolCallTooltip toolCall={toolCall}>
@@ -194,11 +195,12 @@ export const GenericTool: React.FC<GenericToolProps> = ({ toolCall }) => {
         input={
           Object.keys(args).length > 0 ? <ArgumentsView args={args} /> : null
         }
-        meta={meta}
+        meta={title.meta}
         openKey={toolCall.id ? `tc:${toolCall.id}` : undefined}
         output={content ? <ResultView content={content} /> : null}
         raw={raw}
         status={status}
+        statusLabel={result ? undefined : unrecorded.statusLabel}
         summary={summary}
         target={title.target}
         verb={title.verb}

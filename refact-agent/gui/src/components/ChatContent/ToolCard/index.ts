@@ -5,7 +5,6 @@ export { SearchTool } from "./SearchTool";
 export { WebTool } from "./WebTool";
 export { KnowledgeTool } from "./KnowledgeTool";
 export { ContextFileList } from "./ContextFileList";
-export { StreamingToolCard } from "./StreamingToolCard";
 export { ExecToolCard } from "./ExecToolCard";
 export { ProcessStatusBadge } from "./ProcessStatusBadge";
 export { ProcessOutputView } from "./ProcessOutputView";

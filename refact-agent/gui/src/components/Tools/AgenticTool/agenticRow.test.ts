@@ -133,7 +133,7 @@ describe("buildAgenticRow agent inspection", () => {
     expect(result.error).toBe("compile error");
   });
 
-  test("agent_wait reports a timeout as a label, not a failure", () => {
+  test("agent_wait reports a timeout in meta, not as a failure pill", () => {
     const result = row({
       toolName: "agent_wait",
       args: { agent_ids: [AGENT_ID], timeout_ms: 30000 },
@@ -147,7 +147,7 @@ describe("buildAgenticRow agent inspection", () => {
     expect(result.target).toBe("Migrate the report family");
     expect(result.meta).toBe("timed out after 30s");
     expect(result.status).toBe("done");
-    expect(result.statusLabel).toBe("Timed out");
+    expect(result.statusLabel).toBeNull();
   });
 });
 

@@ -47,6 +47,7 @@ import {
   type AnswerEntry,
   type QuestionState,
 } from "./QuestionTranscript";
+import { useUnrecordedResultState } from "../TranscriptItem/useUnrecordedResultState";
 import styles from "./AskQuestionsTool.module.css";
 import { NativeQuestionResponse } from "./NativeQuestionResponse";
 
@@ -276,6 +277,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
   );
   const [submitError, setSubmitError] = useState<string | null>(null);
 
+  const unrecorded = useUnrecordedResultState(toolCall.id);
   const maybeResult = useAppSelector((state) =>
     selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
@@ -663,6 +665,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
     );
   }
 
+  const fallbackUnrecorded = maybeResult ? undefined : unrecorded;
   const fallbackState: QuestionState = maybeResult?.tool_failed
     ? "failed"
     : hasNativeQuestionCapability && data && !hasNextMessage
@@ -685,6 +688,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
       questions={questions}
       state={fallbackState}
       toolCall={toolCall}
+      unrecorded={fallbackUnrecorded}
     />
   );
 };

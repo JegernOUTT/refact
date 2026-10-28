@@ -2,20 +2,14 @@ import React, { useMemo } from "react";
 import { CheckCircle2, CircleX, FileText } from "lucide-react";
 import { Markdown, ShikiCodeBlock } from "../Markdown";
 import { Icon } from "../ui";
-import { useAppSelector } from "../../hooks/useAppSelector";
-import { useThreadId } from "../../features/Chat/Thread";
-import {
-  selectIsStreamingById,
-  selectIsWaitingById,
-} from "../../features/Chat/Thread/selectors";
 import type { ToolCall, ToolResult } from "../../services/refact/types";
 import {
   TranscriptClamp,
-  TranscriptFacts,
   TranscriptItem,
   type TranscriptRawBlock,
   type TranscriptStatus,
 } from "./TranscriptItem";
+import { useUnrecordedResultState } from "./TranscriptItem/useUnrecordedResultState";
 import {
   FileChips,
   ReportActions,
@@ -103,8 +97,6 @@ const StructuredBody: React.FC<{ report: FinalReport }> = ({ report }) => (
 
 export type FinalReportViewProps = {
   content: string;
-  compact?: boolean;
-  technicalDetails?: React.ReactNode;
 };
 
 const FinalReportBody: React.FC<{ content: string }> = ({ content }) => {
@@ -119,18 +111,7 @@ const FinalReportBody: React.FC<{ content: string }> = ({ content }) => {
 
 export const FinalReportView: React.FC<FinalReportViewProps> = ({
   content,
-  compact = false,
-  technicalDetails,
-}) =>
-  compact ? (
-    <div className={styles.root}>
-      <TranscriptFacts facts={finalReportPresentation(content).facts} />
-      <FinalReportBody content={content} />
-      {technicalDetails}
-    </div>
-  ) : (
-    <FinalReportBody content={content} />
-  );
+}) => <FinalReportBody content={content} />;
 
 export type FinalReportToolProps = {
   toolCall: ToolCall;
@@ -151,12 +132,7 @@ export const FinalReportTool: React.FC<FinalReportToolProps> = ({
   extra,
   latest,
 }) => {
-  const threadId = useThreadId();
-  const active = useAppSelector(
-    (state) =>
-      selectIsStreamingById(state, threadId) ||
-      selectIsWaitingById(state, threadId),
-  );
+  const unrecorded = useUnrecordedResultState(toolCall.id);
   const isLatestInThread = useIsLatestFinalReport(toolCall.id);
   const presentation = finalReportPresentation(
     content ?? (hasResult ? "" : null),
@@ -166,16 +142,18 @@ export const FinalReportTool: React.FC<FinalReportToolProps> = ({
     () => (content ? parseFinalReport(content) : null),
     [content],
   );
-  const status: TranscriptStatus =
-    toolFailed || report?.success === false
+  const status: TranscriptStatus = !hasResult
+    ? unrecorded.status
+    : toolFailed || report?.success === false
       ? "failed"
-      : !hasResult
-        ? active
-          ? "running"
-          : "waiting"
-        : report
-          ? "done"
-          : "unknown";
+      : report
+        ? "done"
+        : "unknown";
+  const statusLabel = !hasResult
+    ? unrecorded.statusLabel
+    : status === "done"
+      ? undefined
+      : presentation.stateLabel;
   const raw: TranscriptRawBlock[] = [
     { label: "Arguments", value: toolCall.function.arguments },
     ...(rawContent !== undefined
@@ -193,15 +171,15 @@ export const FinalReportTool: React.FC<FinalReportToolProps> = ({
           <FileChips files={report.files_changed} />
         ) : null
       }
-      defaultOpen={latest ?? isLatestInThread}
+      defaultOpen={latest ?? (hasResult && isLatestInThread)}
       icon={<FileText />}
-      meta={report ? verificationSummary(report) : presentation.stateLabel}
+      meta={report ? verificationSummary(report) : undefined}
       openKey={toolCall.id ? `tc:${toolCall.id}` : undefined}
       output={content ? <FinalReportBody content={content} /> : null}
       raw={raw}
       sectionLabels={{ output: "Report" }}
       status={status}
-      statusLabel={status === "done" ? undefined : presentation.stateLabel}
+      statusLabel={statusLabel}
       summary={presentation.facts}
       target={presentation.headline}
       verb="Report"

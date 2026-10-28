@@ -3,8 +3,6 @@ import { useAppDispatch } from "../../../hooks/useAppDispatch";
 import { useAppSelector } from "../../../hooks/useAppSelector";
 import {
   selectBackgroundAgentPool,
-  selectIsStreamingById,
-  selectIsWaitingById,
   selectToolResultByThreadAndId,
 } from "../../../features/Chat/Thread/selectors";
 import {
@@ -22,6 +20,7 @@ import {
   TranscriptItem,
   type TranscriptRawBlock,
 } from "../../ChatContent/TranscriptItem";
+import { useUnrecordedResultState } from "../../ChatContent/TranscriptItem/useUnrecordedResultState";
 import {
   buildAgenticToolViewModel,
   parseAgenticArgs,
@@ -85,12 +84,8 @@ export const AgenticTool: React.FC<AgenticToolProps> = ({
   const contextThreadId = useThreadId();
   const resolvedThreadId = threadId ?? contextThreadId;
   const dispatch = useAppDispatch();
-  const isStreaming = useAppSelector((state) =>
-    selectIsStreamingById(state, resolvedThreadId),
-  );
-  const isWaiting = useAppSelector((state) =>
-    selectIsWaitingById(state, resolvedThreadId),
-  );
+  const unrecorded = useUnrecordedResultState(toolCall.id, resolvedThreadId);
+  const isBusy = unrecorded.status === "running";
   const maybeResult = useAppSelector((state) =>
     selectToolResultByThreadAndId(state, resolvedThreadId, toolCall.id),
   );
@@ -106,7 +101,7 @@ export const AgenticTool: React.FC<AgenticToolProps> = ({
     ? maybeResult.tool_failed
       ? "failed"
       : "succeeded"
-    : isStreaming || isWaiting
+    : isBusy
       ? "running"
       : "pending";
 
@@ -133,8 +128,17 @@ export const AgenticTool: React.FC<AgenticToolProps> = ({
         extra: maybeResult?.extra,
         transport,
         lookup,
+        unrecorded,
       }),
-    [argumentsRaw, content, lookup, maybeResult?.extra, toolName, transport],
+    [
+      argumentsRaw,
+      content,
+      lookup,
+      maybeResult?.extra,
+      toolName,
+      transport,
+      unrecorded,
+    ],
   );
 
   const model = useMemo(
@@ -146,18 +150,10 @@ export const AgenticTool: React.FC<AgenticToolProps> = ({
             content,
             toolFailed: maybeResult?.tool_failed,
             hasResult: Boolean(maybeResult),
-            isBusy: isStreaming || isWaiting,
+            isBusy,
           })
         : null,
-    [
-      argumentsRaw,
-      content,
-      isStreaming,
-      isWaiting,
-      maybeResult,
-      row.useFamilyView,
-      toolName,
-    ],
+    [argumentsRaw, content, isBusy, maybeResult, row.useFamilyView, toolName],
   );
 
   const openChild = useCallback(

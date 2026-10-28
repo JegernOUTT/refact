@@ -6,8 +6,6 @@ import { useOpenFileInApp } from "../../../hooks/useOpenFileInApp";
 import {
   selectToolResultByThreadAndId,
   selectManyDiffMessageByThreadAndIds,
-  selectIsStreamingById,
-  selectIsWaitingById,
 } from "../../../features/Chat/Thread/selectors";
 import { useThreadId } from "../../../features/Chat/Thread";
 import { ToolCall, DiffChunk } from "../../../services/refact/types";
@@ -19,6 +17,7 @@ import {
   type TranscriptFact,
   type TranscriptStatus,
 } from "../TranscriptItem";
+import { useUnrecordedResultState } from "../TranscriptItem/useUnrecordedResultState";
 import { basename } from "./utils";
 import { DiffBlock } from "./DiffBlock";
 import { getDiffStats } from "./DiffBlockStats";
@@ -56,12 +55,7 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
 }) => {
   const { canOpen, openFile } = useOpenFileInApp();
   const threadId = useThreadId();
-  const isStreaming = useAppSelector((state) =>
-    selectIsStreamingById(state, threadId),
-  );
-  const isWaiting = useAppSelector((state) =>
-    selectIsWaitingById(state, threadId),
-  );
+  const unrecorded = useUnrecordedResultState(toolCall.id);
   const maybeResult = useAppSelector((state) =>
     selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
@@ -77,7 +71,8 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
 
   const hasResult = maybeResult !== undefined;
   const hasDiffs = diffs.length > 0 || toolDiffs.length > 0;
-  const isToolBusy = isActiveTool && !hasResult && (isStreaming || isWaiting);
+  const isToolBusy =
+    isActiveTool && !hasResult && unrecorded.status === "running";
 
   const allDiffs = useMemo((): DiffChunk[] => {
     if (!hasDiffs || isToolBusy) return [];
@@ -90,11 +85,12 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
   );
 
   const failed = maybeResult?.tool_failed === true;
+  const unrecordedRow = !hasResult && !(hasDiffs && !isToolBusy);
   const status: TranscriptStatus = failed
     ? "failed"
-    : hasResult || (hasDiffs && !isToolBusy)
-      ? "done"
-      : "running";
+    : unrecordedRow
+      ? unrecorded.status
+      : "done";
 
   const content =
     maybeResult && typeof maybeResult.content === "string"
@@ -193,6 +189,9 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
       output={output}
       raw={[{ label: "Arguments", value: toolCall.function.arguments }]}
       status={status}
+      statusLabel={
+        unrecordedRow && !failed ? unrecorded.statusLabel : undefined
+      }
       summary={summary}
       target={row.target}
       verb={row.verb}

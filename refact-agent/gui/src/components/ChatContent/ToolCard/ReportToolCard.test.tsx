@@ -92,7 +92,9 @@ function renderTaskDone(
   const chat = createDefaultChatState();
   const runtime = chat.threads[chat.current_thread_id];
   runtime.thread.messages =
-    content === null ? [] : [toolMessage(undefined, content, failed)];
+    content === null
+      ? [{ role: "assistant", content: "", tool_calls: [toolCall()] }]
+      : [toolMessage(undefined, content, failed)];
   runtime.streaming = streaming;
   return render(<TaskDoneTool toolCall={toolCall()} latest={latest} />, {
     preloadedState: { chat },
@@ -125,7 +127,11 @@ describe("ReportToolCard", () => {
 
   test("shows streaming progress as output while the report is pending", () => {
     const chat = createDefaultChatState();
-    chat.threads[chat.current_thread_id].streaming = true;
+    const runtime = chat.threads[chat.current_thread_id];
+    runtime.streaming = true;
+    runtime.thread.messages = [
+      { role: "assistant", content: "", tool_calls: [toolCall()] },
+    ];
     render(
       <ReportToolCard
         defaultOpen
@@ -136,6 +142,7 @@ describe("ReportToolCard", () => {
       { preloadedState: { chat } },
     );
     expect(screen.getByTestId("transcript-icon")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("transcript-toggle"));
     expect(screen.getByRole("group", { name: "Progress" })).toHaveTextContent(
       "collecting context",
     );
@@ -334,7 +341,7 @@ describe("TaskDoneTool", () => {
       "unknown",
     );
     expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
-      "State unknown",
+      "No result",
     );
   });
 
@@ -381,37 +388,50 @@ describe("TaskDoneTool", () => {
   });
 });
 
-describe("explicit report transport", () => {
-  test.each([
-    ["pending", "waiting", "Awaiting report"],
-    ["unknown", "waiting", "Awaiting report"],
-    ["running", "running", "Running"],
-  ] as const)(
-    "uses %s transport without inventing a result",
-    (compactTransportState, status, pill) => {
-      const { container } = renderReportTool(undefined, {
-        compactTransportState,
-      });
-      expect(container.querySelector("section")).toHaveAttribute(
-        "data-status",
-        status,
-      );
-      expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
-        pill,
-      );
-    },
-  );
+describe("report without a recorded result", () => {
+  function renderUnrecorded(options: { busy?: boolean; paused?: boolean }) {
+    const chat = createDefaultChatState();
+    const runtime = chat.threads[chat.current_thread_id];
+    const call = toolCall("report-unrecorded");
+    runtime.streaming = options.busy === true;
+    runtime.thread.messages = [
+      { role: "assistant", content: "", tool_calls: [call] },
+    ];
+    if (options.paused) {
+      runtime.confirmation.pause = true;
+      runtime.confirmation.pause_reasons = [
+        {
+          type: "confirmation",
+          tool_name: "subagent",
+          command: "subagent",
+          rule: "ask",
+          tool_call_id: "report-unrecorded",
+          integr_config_path: null,
+        },
+      ];
+    }
+    return render(
+      <ReportToolCard
+        defaultSummary="Report"
+        icon={<span />}
+        toolCall={call}
+      />,
+      { preloadedState: { chat } },
+    );
+  }
 
-  test("explicit failed transport dominates typed reported success", () => {
-    renderReportTool(
-      toolMessage(
-        undefined,
-        JSON.stringify({ summary: "Attempted build", success: true }),
-      ),
-      { compactTransportState: "failed" },
+  test.each([
+    [{}, "unknown", "No result"],
+    [{ busy: true }, "running", "Running"],
+    [{ busy: true, paused: true }, "needs_you", "Needs approval"],
+  ] as const)("%o shows %s", (options, status, pill) => {
+    const { container } = renderUnrecorded(options);
+    expect(container.querySelector("section")).toHaveAttribute(
+      "data-status",
+      status,
     );
     expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
-      "Request failed",
+      pill,
     );
   });
 });

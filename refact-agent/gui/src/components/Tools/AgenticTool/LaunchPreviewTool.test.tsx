@@ -1,6 +1,10 @@
 import { describe, expect, test } from "vitest";
 import { fireEvent, within } from "@testing-library/react";
-import { render, screen } from "../../../utils/test-utils";
+import {
+  createDefaultChatState,
+  render,
+  screen,
+} from "../../../utils/test-utils";
 import { LaunchPreviewTool } from "./LaunchPreviewTool";
 import { launchPreviewCall, launchPreviewReceipt } from "./launchFixtures";
 
@@ -149,20 +153,33 @@ describe("LaunchPreviewTool", () => {
     ).toHaveLength(1);
   });
 
-  test("pending shows running without claiming a preview", () => {
-    render(
-      <LaunchPreviewTool
-        toolCall={launchPreviewCall}
-        extra={undefined}
-        hasResult={false}
-        failed={false}
-      />,
-    );
-    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
-      "Running",
-    );
-    expect(screen.queryByTestId("launch-blocked")).toBeNull();
-  });
+  test.each([
+    [false, "No result"],
+    [true, "Running"],
+  ] as const)(
+    "missing result while busy=%s shows %s without claiming a preview",
+    (busy, pill) => {
+      const chat = createDefaultChatState();
+      const runtime = chat.threads[chat.current_thread_id];
+      runtime.streaming = busy;
+      runtime.thread.messages = [
+        { role: "assistant", content: "", tool_calls: [launchPreviewCall] },
+      ];
+      render(
+        <LaunchPreviewTool
+          toolCall={launchPreviewCall}
+          extra={undefined}
+          hasResult={false}
+          failed={false}
+        />,
+        { preloadedState: { chat } },
+      );
+      expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+        pill,
+      );
+      expect(screen.queryByTestId("launch-blocked")).toBeNull();
+    },
+  );
 
   test("bounds task and source text and keeps markup inert", () => {
     const { container } = render(

@@ -12,7 +12,7 @@ import type { ToolCall } from "../../../services/refact/types";
 
 type ToolContent = string | { m_type: string; m_content: string }[];
 
-function makeStore(id: string, content: ToolContent) {
+function makeStore(id: string, content: ToolContent, streaming = false) {
   return configureStore({
     reducer: {
       browser: browserSlice.reducer,
@@ -22,8 +22,16 @@ function makeStore(id: string, content: ToolContent) {
           current_thread_id: "chat-1",
           threads: {
             "chat-1": {
+              streaming,
               thread: {
-                messages: [{ role: "tool", tool_call_id: id, content }],
+                messages: [
+                  {
+                    role: "assistant",
+                    content: "",
+                    tool_calls: [{ id: "tc-chrome", index: 0, function: {} }],
+                  },
+                  { role: "tool", tool_call_id: id, content },
+                ],
               },
             },
           },
@@ -33,7 +41,12 @@ function makeStore(id: string, content: ToolContent) {
   });
 }
 
-function renderChrome(args: unknown, content: ToolContent, resultId?: string) {
+function renderChrome(
+  args: unknown,
+  content: ToolContent,
+  resultId?: string,
+  streaming = false,
+) {
   const id = "tc-chrome";
   const toolCall: ToolCall = {
     id,
@@ -41,7 +54,7 @@ function renderChrome(args: unknown, content: ToolContent, resultId?: string) {
     function: { name: "chrome", arguments: JSON.stringify(args) },
   };
   return render(
-    <Provider store={makeStore(resultId ?? id, content)}>
+    <Provider store={makeStore(resultId ?? id, content, streaming)}>
       <Theme>
         <ChromeTool toolCall={toolCall} />
       </Theme>
@@ -293,6 +306,9 @@ describe("ChromeTool", () => {
     expect(within(artifacts).getByTestId("capture-artifact")).toHaveTextContent(
       "/artifacts/burst.jpg",
     );
+    const frames = within(artifacts).getByTestId("capture-frames");
+    expect(frames.querySelector(".rt-Badge, [data-accent-color]")).toBeNull();
+    expect(frames.children).toHaveLength(2);
   });
 
   test("falls back to legacy commands and text log", async () => {
@@ -355,10 +371,21 @@ describe("ChromeTool", () => {
   });
 
   test("shows the running state until a result arrives", () => {
-    renderChrome(PAGE_ARGS, "", "other-call");
+    renderChrome(PAGE_ARGS, "", "other-call", true);
     expect(screen.getByTestId("chrome-tool")).toHaveAttribute(
       "data-transcript-status",
       "running",
+    );
+  });
+
+  test("a call without a recorded result in an idle thread shows No result", () => {
+    renderChrome(PAGE_ARGS, "", "other-call");
+    expect(screen.getByTestId("chrome-tool")).toHaveAttribute(
+      "data-transcript-status",
+      "unknown",
+    );
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "No result",
     );
   });
 });

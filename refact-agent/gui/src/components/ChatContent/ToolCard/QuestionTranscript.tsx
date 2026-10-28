@@ -9,6 +9,7 @@ import {
   TranscriptItem,
   type TranscriptFact,
   type TranscriptStatus,
+  type UnrecordedResultState,
 } from "../TranscriptItem";
 import styles from "./AskQuestionsTool.module.css";
 
@@ -145,6 +146,7 @@ export interface QuestionTranscriptProps {
   output?: React.ReactNode;
   error?: React.ReactNode;
   actions?: React.ReactNode;
+  unrecorded?: UnrecordedResultState;
 }
 
 export function QuestionTranscript({
@@ -155,6 +157,7 @@ export function QuestionTranscript({
   output,
   error,
   actions,
+  unrecorded,
 }: QuestionTranscriptProps) {
   const [liveOpen, setLiveOpen] = useState(true);
   const view = stateView(state, questions.length);
@@ -183,8 +186,8 @@ export function QuestionTranscript({
       meta={view.meta}
       output={output}
       raw={[{ label: "Questions", value: questions }]}
-      status={view.status}
-      statusLabel={view.statusLabel}
+      status={unrecorded?.status ?? view.status}
+      statusLabel={unrecorded ? unrecorded.statusLabel : view.statusLabel}
       target={compactText(questions[0]?.text, TARGET_CHARS) ?? "Question"}
       verb="Question"
       {...openProps}
