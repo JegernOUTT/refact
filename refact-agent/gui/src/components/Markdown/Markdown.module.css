@@ -8,8 +8,8 @@
   min-width: 0;
   color: var(--rf-color-fg);
   font-family: var(--rf-font-ui);
-  font-size: var(--rf-text-3);
-  line-height: var(--rf-line-3);
+  font-size: var(--rf-markdown-size, var(--rf-text-3));
+  line-height: var(--rf-markdown-line, var(--rf-line-3));
   white-space: normal;
   overflow-wrap: anywhere;
 }
@@ -27,15 +27,15 @@
 }
 
 .markdown h1 {
-  font-size: var(--rf-text-5);
+  font-size: var(--rf-markdown-h1-size, var(--rf-text-5));
 }
 
 .markdown h2 {
-  font-size: var(--rf-text-4);
+  font-size: var(--rf-markdown-h2-size, var(--rf-text-4));
 }
 
 .markdown :where(h3, h4, h5, h6) {
-  font-size: var(--rf-text-3);
+  font-size: var(--rf-markdown-h3-size, var(--rf-text-3));
 }
 
 .markdown blockquote {
@@ -115,8 +115,8 @@
   --rf-code-block-padding: 0;
   --rf-code-block-radius: 0;
 
-  font-size: var(--rf-text-2);
-  line-height: var(--rf-line-2);
+  font-size: var(--rf-markdown-size, var(--rf-text-2));
+  line-height: var(--rf-markdown-line, var(--rf-line-2));
 }
 
 .variant_terminal {
@@ -159,7 +159,7 @@
   padding: calc(var(--rf-space-1) / 2) var(--rf-space-1);
   border: 1px solid var(--rf-border);
   border-radius: var(--rf-radius-chip);
-  font-size: var(--rf-text-2);
+  font-size: var(--rf-code-size, var(--rf-text-2));
 }
 
 .code_block {

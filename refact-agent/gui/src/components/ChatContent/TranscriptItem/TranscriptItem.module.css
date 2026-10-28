@@ -245,7 +245,7 @@
   min-width: 0;
 }
 
-.sectionLabel {
+.section > .sectionLabel {
   margin: 0;
   color: var(--rf-color-muted);
   font-size: var(--rf-transcript-label-size);
@@ -256,6 +256,13 @@
 }
 
 .sectionBody {
+  --rf-markdown-size: var(--rf-transcript-body-size);
+  --rf-markdown-line: var(--rf-transcript-body-line);
+  --rf-markdown-h1-size: var(--rf-text-3);
+  --rf-markdown-h2-size: var(--rf-text-3);
+  --rf-markdown-h3-size: var(--rf-transcript-body-size);
+  --rf-code-size: var(--rf-transcript-mono-size);
+
   min-width: 0;
   font-size: var(--rf-transcript-body-size);
   line-height: var(--rf-transcript-body-line);

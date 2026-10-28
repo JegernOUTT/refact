@@ -58,7 +58,7 @@
 
 .radix-themes :where(code, kbd, samp, pre) {
   font-family: var(--rf-font-mono);
-  font-size: var(--rf-text-2);
+  font-size: var(--rf-code-size, var(--rf-text-2));
 }
 
 .radix-themes :where(button, input, select, textarea) {
