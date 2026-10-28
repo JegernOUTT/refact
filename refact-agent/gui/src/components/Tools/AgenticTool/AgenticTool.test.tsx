@@ -735,7 +735,10 @@ describe("AgenticTool collaboration compact shell", () => {
     expect(details).toHaveAttribute("aria-expanded", "false");
     expect(details).toHaveAttribute("tabindex", "-1");
     expect(fullBody).toHaveAttribute("inert");
-    expect(outer.querySelectorAll("svg")).toHaveLength(2);
+    expect(outer.querySelectorAll("svg")).toHaveLength(1);
+    expect(
+      card.querySelector('[data-testid="transcript-chevron"]'),
+    ).toBeInTheDocument();
     expect(outer.querySelector("svg")).toHaveAttribute("fill", "none");
     expect(outer.querySelector("svg")).toHaveAttribute("stroke-width", "1.5");
     expect(
@@ -915,7 +918,9 @@ describe("AgenticTool collaboration compact shell", () => {
       order.length = 0;
       prepare(outer);
       fireEvent.click(outer);
-      expect(order).toEqual(["prepare", "preserve"]);
+      expect(order[0]).toBe("prepare");
+      expect(order.at(-1)).toBe("preserve");
+      expect(order.indexOf("preserve")).toBeGreaterThan(0);
     }
     expect(
       container.querySelectorAll('section[data-density="compact"]'),

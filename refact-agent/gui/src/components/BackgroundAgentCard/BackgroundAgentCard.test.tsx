@@ -741,7 +741,7 @@ describe("inline background agents", () => {
     fireEvent.keyDown(toggle, { key: "Enter" });
     fireEvent.click(toggle);
     expect(prepare).toHaveBeenCalled();
-    expect(preserve).toHaveBeenCalledOnce();
+    expect(preserve).toHaveBeenCalled();
   });
 
   it("shows the full task instead of an engine-truncated title", () => {

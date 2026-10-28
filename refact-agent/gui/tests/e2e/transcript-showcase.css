@@ -1,0 +1,25 @@
+.transcript-showcase {
+  display: grid;
+  gap: var(--rf-space-1);
+  max-width: 960px;
+  margin: 0 auto;
+  padding: var(--rf-space-5) var(--rf-space-4);
+}
+
+.transcript-showcase h1 {
+  margin: 0 0 var(--rf-space-3);
+  font-size: var(--rf-text-4);
+}
+
+.transcript-showcase pre {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.transcript-showcase .diff-add {
+  color: var(--rf-color-success);
+}
+
+.transcript-showcase .diff-del {
+  color: var(--rf-color-danger);
+}

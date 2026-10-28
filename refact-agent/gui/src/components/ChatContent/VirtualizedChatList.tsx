@@ -16,6 +16,7 @@ import {
   captureScrollAnchor,
   ChatScrollAnchorContext,
   scheduleScrollAnchorRestore,
+  type PrepareScrollAnchor,
   type PreserveScrollAnchor,
   type ScrollAnchorSnapshot,
 } from "./useChatScrollAnchor";
@@ -103,6 +104,8 @@ export function VirtualizedChatList<T extends { key: string }>({
     capturedAt: number;
   } | null>(null);
   const cancelAnchorRestoreRef = useRef<(() => void) | null>(null);
+  const userToggleActiveRef = useRef(false);
+  const preserveDepthRef = useRef(0);
   const [hasMeasuredHeight, setHasMeasuredHeight] = useState(false);
   const [firstPaintDone, setFirstPaintDone] = useState(items.length === 0);
   const heightEstimateCacheRef = useRef(new Map<string, number>());
@@ -174,6 +177,7 @@ export function VirtualizedChatList<T extends { key: string }>({
   }, []);
 
   const pinToBottomIfFollowing = useCallback(() => {
+    if (userToggleActiveRef.current) return;
     if (!autoFollowRef.current || userScrolledUpRef.current) return;
     const scroller = scrollerRef.current;
     if (!scroller) return;
@@ -216,6 +220,7 @@ export function VirtualizedChatList<T extends { key: string }>({
 
   const followOutput = useCallback(
     (isAtBottom: boolean) => {
+      if (userToggleActiveRef.current) return false;
       if (userScrolledUpRef.current) return false;
       if (
         !isStreaming &&
@@ -249,44 +254,71 @@ export function VirtualizedChatList<T extends { key: string }>({
     [renderItem],
   );
 
-  const prepareScrollAnchor = useCallback(() => {
+  const prepareScrollAnchor = useCallback<PrepareScrollAnchor>((trigger) => {
     const scroller = scrollerRef.current;
     pendingAnchorSnapshotRef.current = {
-      snapshot: scroller ? captureScrollAnchor(scroller) : null,
+      snapshot: scroller ? captureScrollAnchor(scroller, trigger) : null,
       capturedAt: performance.now(),
     };
   }, []);
 
-  const preserveScrollAnchor = useCallback<PreserveScrollAnchor>((mutate) => {
-    const scroller = scrollerRef.current;
-    const pendingAnchor = pendingAnchorSnapshotRef.current;
-    const snapshot =
-      pendingAnchor &&
-      performance.now() - pendingAnchor.capturedAt <= ANCHOR_PREPARE_MAX_AGE_MS
-        ? pendingAnchor.snapshot
-        : scroller
-          ? captureScrollAnchor(scroller)
+  const preserveScrollAnchor = useCallback<PreserveScrollAnchor>(
+    (mutate, options) => {
+      if (preserveDepthRef.current > 0) {
+        mutate();
+        return;
+      }
+      const scroller = scrollerRef.current;
+      const pendingAnchor = pendingAnchorSnapshotRef.current;
+      const pendingSnapshot =
+        pendingAnchor &&
+        performance.now() - pendingAnchor.capturedAt <=
+          ANCHOR_PREPARE_MAX_AGE_MS
+          ? pendingAnchor.snapshot
           : null;
+      const snapshot =
+        options?.trigger && scroller
+          ? captureScrollAnchor(scroller, options.trigger) ?? pendingSnapshot
+          : pendingSnapshot ??
+            (scroller ? captureScrollAnchor(scroller) : null);
 
-    pendingAnchorSnapshotRef.current = null;
-    cancelAnchorRestoreRef.current?.();
-    cancelAnchorRestoreRef.current = null;
-    mutate();
+      pendingAnchorSnapshotRef.current = null;
+      cancelAnchorRestoreRef.current?.();
+      cancelAnchorRestoreRef.current = null;
+      preserveDepthRef.current += 1;
+      try {
+        mutate();
+      } finally {
+        preserveDepthRef.current -= 1;
+      }
 
-    if (!scroller || !snapshot) return;
+      if (!scroller || !snapshot) {
+        userToggleActiveRef.current = false;
+        return;
+      }
 
-    suppressPassiveScrollUntilRef.current =
-      performance.now() + PASSIVE_SCROLL_GRACE_MS;
-    cancelAnchorRestoreRef.current = scheduleScrollAnchorRestore(
-      scroller,
-      snapshot,
-      () => {
-        lastScrollTopRef.current = scroller.scrollTop;
-        suppressPassiveScrollUntilRef.current =
-          performance.now() + PASSIVE_SCROLL_GRACE_MS;
-      },
-    );
-  }, []);
+      const isUserToggle = Boolean(options?.trigger);
+      userToggleActiveRef.current = isUserToggle;
+      suppressPassiveScrollUntilRef.current =
+        performance.now() + PASSIVE_SCROLL_GRACE_MS;
+      cancelAnchorRestoreRef.current = scheduleScrollAnchorRestore(
+        scroller,
+        snapshot,
+        () => {
+          lastScrollTopRef.current = scroller.scrollTop;
+          suppressPassiveScrollUntilRef.current =
+            performance.now() + PASSIVE_SCROLL_GRACE_MS;
+        },
+        {
+          settleElement: options?.settleElement,
+          onDone: () => {
+            if (isUserToggle) userToggleActiveRef.current = false;
+          },
+        },
+      );
+    },
+    [],
+  );
 
   const Scroller = useMemo(() => {
     const ScrollerComponent = React.forwardRef<

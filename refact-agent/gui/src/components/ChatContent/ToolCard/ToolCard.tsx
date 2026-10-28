@@ -1,17 +1,11 @@
 import React from "react";
 import classNames from "classnames";
-import { LoaderCircle } from "lucide-react";
-import { ToolCard as KitToolCard } from "../../ui";
-import { Icon } from "../../ui/Icon";
-import {
-  COLLAPSE_ANIMATION_MS,
-  useDelayedUnmount,
-} from "../../shared/useDelayedUnmount";
 import { ToolCallTooltip } from "./ToolCallTooltip";
+import { TranscriptItem } from "../TranscriptItem/TranscriptItem";
 import {
-  useChatScrollAnchor,
-  usePrepareChatScrollAnchor,
-} from "../useChatScrollAnchor";
+  fromToolTone,
+  type TranscriptStatus,
+} from "../TranscriptItem/statusVocabulary";
 import { ToolCall } from "../../../services/refact/types";
 import styles from "./ToolCard.module.css";
 
@@ -20,10 +14,13 @@ export type ToolStatus = "idle" | "running" | "success" | "error";
 export interface ToolCardProps {
   icon: React.ReactNode;
   summary: React.ReactNode;
+  verb?: React.ReactNode;
   meta?: React.ReactNode;
   density?: "default" | "compact";
   actions?: React.ReactNode;
   status: ToolStatus;
+  transcriptStatus?: TranscriptStatus;
+  statusLabel?: React.ReactNode;
   isOpen: boolean;
   onToggle: () => void;
   collapsible?: boolean;
@@ -33,13 +30,18 @@ export interface ToolCardProps {
   toolCall?: ToolCall;
 }
 
+const HIDDEN_OUTPUT_LABEL = { output: "" };
+
 const ToolCardInner: React.FC<ToolCardProps> = ({
   icon,
   summary,
+  verb,
   meta,
   density = "default",
   actions,
   status,
+  transcriptStatus,
+  statusLabel,
   isOpen,
   onToggle,
   collapsible = true,
@@ -48,65 +50,29 @@ const ToolCardInner: React.FC<ToolCardProps> = ({
   animate = true,
   toolCall,
 }) => {
-  const preserveScrollAnchor = useChatScrollAnchor();
-  const prepareScrollAnchor = usePrepareChatScrollAnchor();
-  const { shouldRender } = useDelayedUnmount(
-    isOpen,
-    COLLAPSE_ANIMATION_MS,
-    animate,
-  );
-  const shouldRenderBody = !collapsible || isOpen || shouldRender;
-  const handleToggle = React.useCallback(() => {
-    preserveScrollAnchor(onToggle);
-  }, [onToggle, preserveScrollAnchor]);
-
-  const summaryContent =
-    status === "running" &&
-    (typeof summary === "string" || typeof summary === "number") ? (
-      <span className="rf-text-shimmer">{summary}</span>
-    ) : (
-      summary
-    );
-
-  const title = (
-    <span className={styles.titleRow}>
-      <span className={styles.iconWrapper}>
-        {status === "running" ? (
-          <Icon className="rf-spin" icon={LoaderCircle} />
-        ) : (
-          icon
-        )}
-      </span>
-      <span className={styles.summary}>{summaryContent}</span>
-      {meta && <span className={styles.meta}>{meta}</span>}
-    </span>
-  );
+  const hasBody =
+    children !== null && children !== undefined && children !== false;
+  const handleOpenChange = React.useCallback(() => onToggle(), [onToggle]);
 
   const card = (
-    <KitToolCard
-      actions={actions}
-      className={classNames(
-        "rf-enter",
-        styles.card,
-        status === "running" && styles.running,
-        status === "success" && styles.completed,
-        status === "error" && styles.error,
-        className,
-      )}
-      density={density}
-      open={isOpen}
-      collapsible={collapsible}
-      onPointerDownCapture={prepareScrollAnchor}
-      onMouseDownCapture={prepareScrollAnchor}
-      onKeyDownCapture={prepareScrollAnchor}
-      onOpenChange={handleToggle}
-      status={status}
-      title={title}
-    >
-      {shouldRenderBody ? (
-        <div className={styles.content}>{children}</div>
-      ) : null}
-    </KitToolCard>
+    <TranscriptItem
+      animate={animate}
+      className={classNames("rf-enter", styles.card, className)}
+      data-density={density}
+      data-status={status}
+      expandable={collapsible}
+      icon={icon}
+      meta={meta}
+      open={collapsible ? isOpen : true}
+      output={hasBody ? <div className={styles.content}>{children}</div> : null}
+      quickAction={actions}
+      sectionLabels={HIDDEN_OUTPUT_LABEL}
+      status={transcriptStatus ?? fromToolTone(status)}
+      statusLabel={statusLabel}
+      target={summary}
+      verb={verb}
+      onOpenChange={handleOpenChange}
+    />
   );
 
   return toolCall ? (

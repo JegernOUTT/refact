@@ -5,7 +5,6 @@ import userEvent from "@testing-library/user-event";
 import { Terminal } from "lucide-react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import styles from "./ToolCard.module.css";
 import { ToolCard } from "./ToolCard";
 
 const originalMatchMedia = window.matchMedia;
@@ -56,7 +55,7 @@ describe("ToolCard", () => {
     const { container, user } = renderToolCard();
     const card = container.querySelector("section");
     const toggle = screen.getByRole("button", { name: /run command/i });
-    const chevron = container.querySelector("svg:last-child");
+    const chevron = screen.getByTestId("transcript-chevron");
 
     expect(card).toHaveAttribute("data-open", "false");
     expect(toggle).toHaveAttribute("aria-expanded", "false");
@@ -66,7 +65,7 @@ describe("ToolCard", () => {
 
     expect(card).toHaveAttribute("data-open", "true");
     expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(chevron).toHaveClass(styles.chevron);
+    expect(card).toContainElement(chevron);
   });
 
   it("toggles from the keyboard", async () => {

@@ -6,11 +6,9 @@ import { Terminal } from "lucide-react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ToolCard as KitToolCard } from "../../ui/ToolCard";
-import kitStyles from "../../ui/ToolCard/ToolCard.module.css";
 import { ChatScrollAnchorContext } from "../useChatScrollAnchor";
 import { CollapsibleStoreProvider, useStoredOpen } from "../useStoredOpen";
 import { ToolCard, type ToolCardProps } from "./ToolCard";
-import styles from "./ToolCard.module.css";
 
 const originalMatchMedia = window.matchMedia;
 
@@ -143,7 +141,6 @@ describe("ChatContent ToolCard", () => {
 
     for (const card of container.querySelectorAll("section")) {
       expect(card).toHaveAttribute("data-density", "default");
-      expect(card).not.toHaveClass(kitStyles.compact);
     }
     expect(screen.getByRole("button", { name: "Run command" })).toHaveAttribute(
       "aria-expanded",
@@ -173,7 +170,6 @@ describe("ChatContent ToolCard", () => {
     const toggle = screen.getByRole("button", { name: "Inspect work" });
 
     expect(card).toHaveAttribute("data-density", "compact");
-    expect(card).toHaveClass(kitStyles.compact);
     expect(toggle).toHaveAttribute("aria-expanded", "true");
 
     await user.click(toggle);
@@ -217,11 +213,10 @@ describe("ChatContent ToolCard", () => {
       );
       expect(toggle).toHaveAttribute("aria-expanded", "false");
       expect(state).toBeVisible();
-      expect(state).toHaveClass(styles.meta);
-      expect(state.parentElement).toHaveClass(styles.titleRow);
-      expect(toggle.querySelector(`.${styles.summary}`)).not.toContainElement(
-        state,
-      );
+      expect(state).toHaveAttribute("data-testid", "transcript-meta");
+      expect(
+        toggle.querySelector('[data-testid="transcript-title"]'),
+      ).not.toContainElement(state);
       expect(screen.queryByText("Full result")).toBeNull();
     },
   );
@@ -293,7 +288,7 @@ describe("ChatContent ToolCard", () => {
     const action = screen.getByRole("button", { name: "Open trajectory" });
 
     expect(toggle).not.toContainElement(action);
-    expect(toggle.parentElement).toContainElement(action);
+    expect(screen.getByTestId("transcript-row")).toContainElement(action);
 
     await user.tab();
     expect(toggle).toHaveFocus();
