@@ -14,6 +14,9 @@ import {
   selectBackgroundAgent,
   selectToolResultByThreadAndId,
 } from "../../features/Chat/Thread/selectors";
+import { useThreadId } from "../../features/Chat/Thread";
+import { selectFoldedAgentEvent } from "../ChatContent/foldedEventSelectors";
+import { agentFromFinishedEvent } from "./foldedAgentEvent";
 import { parseAgenticArgs } from "../Tools/AgenticTool/agenticToolModel";
 import { Markdown } from "../Markdown";
 import {
@@ -82,7 +85,19 @@ const _BackgroundAgentCard: React.FC<BackgroundAgentCardProps> = ({
       ? selectToolResultByThreadAndId(state, threadId ?? "", resolvedToolCallId)
       : undefined,
   );
-  const merged = subscribedAgent ?? agent;
+  const contextThreadId = useThreadId();
+  const foldedEvent = useAppSelector((state) =>
+    selectFoldedAgentEvent(
+      state,
+      threadId ?? contextThreadId,
+      resolvedToolCallId,
+    ),
+  );
+  const fallbackAgent = useMemo(
+    () => (foldedEvent ? agentFromFinishedEvent(agent, foldedEvent) : agent),
+    [agent, foldedEvent],
+  );
+  const merged = subscribedAgent ?? fallbackAgent;
   const task = readTask(toolCall);
   const title = expandTruncatedAgentTitle(merged.title, task);
   const displayed = useMemo(
@@ -90,7 +105,9 @@ const _BackgroundAgentCard: React.FC<BackgroundAgentCardProps> = ({
     [merged, title],
   );
   const inline = presentation === "inline";
-  const known = inline ? Boolean(subscribedAgent) || statusKnown : true;
+  const known = inline
+    ? Boolean(subscribedAgent) || Boolean(foldedEvent) || statusKnown
+    : true;
   const { status, label } = agentTranscriptStatus(
     displayed,
     known,
@@ -144,6 +161,9 @@ const _BackgroundAgentCard: React.FC<BackgroundAgentCardProps> = ({
       : []),
     ...(toolResult?.extra
       ? [{ label: "Response metadata", value: toolResult.extra }]
+      : []),
+    ...(foldedEvent && !subscribedAgent
+      ? [{ label: "Finished event", value: foldedEvent.content }]
       : []),
     ...(displayed.handoff
       ? [{ label: "Handoff", value: displayed.handoff }]

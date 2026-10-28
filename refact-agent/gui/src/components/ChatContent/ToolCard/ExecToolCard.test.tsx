@@ -20,6 +20,7 @@ import {
   type Config,
 } from "../../../features/Config/configSlice";
 import type {
+  EventMessage,
   ExecToolMetadata,
   ChatMessage,
   ToolCall,
@@ -30,6 +31,7 @@ import {
   extractExecMetadata,
   isExecToolMetadata,
 } from "../../../services/refact/types";
+import type { ToolConfirmationPauseReason } from "../../../services/refact/tools";
 import { INCIDENTAL_EXTRA_EXEC } from "../../../__fixtures__";
 
 type RenderExecToolOptions = {
@@ -44,6 +46,8 @@ type RenderExecToolOptions = {
   collapsibleStore?: CollapsibleStore;
   busy?: boolean;
   config?: Partial<Config>;
+  pauseReasons?: ToolConfirmationPauseReason[];
+  extraMessages?: ChatMessage[];
 };
 
 function makeStore(messages: ChatMessage[], options: RenderExecToolOptions) {
@@ -78,6 +82,7 @@ function makeStore(messages: ChatMessage[], options: RenderExecToolOptions) {
               },
               streaming: options.busy === true,
               waiting_for_response: false,
+              confirmation: { pause_reasons: options.pauseReasons ?? [] },
             },
           },
         },
@@ -127,6 +132,7 @@ function renderExecTool(options: RenderExecToolOptions = {}) {
     [
       { role: "assistant", content: "", tool_calls: [toolCall] },
       ...(message ? [message] : []),
+      ...(options.extraMessages ?? []),
     ],
     options,
   );
@@ -854,6 +860,206 @@ describe("ExecToolCard", () => {
     expect(screen.getByText("boom")).toBeInTheDocument();
   });
 });
+function processCompletedEvent(
+  processId: string,
+  payload: Record<string, unknown> = {},
+): EventMessage {
+  const eventPayload = {
+    process_id: processId,
+    status: "exited",
+    exit_code: 0,
+    duration_ms: 12_000,
+    short_description: "Start dev server",
+    mode: "background",
+    ...payload,
+  };
+  return {
+    role: "event",
+    content: `Background process '${processId}' exited (exit 0)`,
+    message_id: `event-${processId}`,
+    subkind: "process_completed",
+    source: "exec.registry",
+    payload: eventPayload,
+    extra: {
+      event: {
+        subkind: "process_completed",
+        source: "exec.registry",
+        payload: eventPayload,
+      },
+    },
+  };
+}
+
+const RUNNING_START: ExecToolMetadata = {
+  process_id: "exec_folded",
+  status: "running",
+  short_description: "Start dev server",
+  command: "npm run dev",
+  mode: "background",
+};
+
+describe("ExecToolCard folded completion and missing results", () => {
+  afterEach(cleanup);
+
+  test("a folded process_completed event shows the final outcome on the start row", () => {
+    renderExecTool({
+      toolName: "process_start",
+      args: { command: "npm run dev", mode: "background" },
+      content: "Process started",
+      extra: RUNNING_START,
+      extraMessages: [processCompletedEvent("exec_folded")],
+    });
+
+    expect(screen.getByTestId("exec-tool-card")).toHaveAttribute(
+      "data-exec-status",
+      "exited",
+    );
+    expect(screen.queryByTestId("transcript-status-pill")).toBeNull();
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
+      "exit 0 · 12.0s",
+    );
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+
+    fireEvent.click(screen.getByText("Start dev server"));
+    expect(screen.getByText("Exit")).toBeInTheDocument();
+    expect(screen.getByText("Duration")).toBeInTheDocument();
+  });
+
+  test("a folded failure maps through the process status vocabulary", () => {
+    renderExecTool({
+      toolName: "process_start",
+      args: { command: "npm run dev", mode: "background" },
+      content: "Process started",
+      extra: RUNNING_START,
+      extraMessages: [
+        processCompletedEvent("exec_folded", {
+          status: "failed",
+          exit_code: 2,
+        }),
+      ],
+    });
+
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "Failed",
+    );
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent("exit 2");
+  });
+
+  test("a folded non-zero exit reads as failed, like the event row it replaces", () => {
+    renderExecTool({
+      toolName: "process_start",
+      args: { command: "npm test", mode: "background" },
+      content: "Process started",
+      extra: RUNNING_START,
+      extraMessages: [
+        processCompletedEvent("exec_folded", {
+          status: "exited",
+          exit_code: 1,
+        }),
+      ],
+    });
+
+    expect(screen.getByTestId("exec-tool-card")).toHaveAttribute(
+      "data-status",
+      "failed",
+    );
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent("exit 1");
+  });
+
+  test("a completion event for another process does not change the row", () => {
+    renderExecTool({
+      toolName: "process_start",
+      args: { command: "npm run dev", mode: "background" },
+      content: "Process started",
+      extra: RUNNING_START,
+      extraMessages: [processCompletedEvent("exec_other")],
+    });
+
+    expect(
+      screen.getByTestId("exec-status-running_in_background"),
+    ).toBeInTheDocument();
+  });
+
+  test("reads never absorb the completion event", () => {
+    renderExecTool({
+      toolName: "process_read",
+      args: { process_id: "exec_folded" },
+      content: "stdout:\nready\n",
+      extra: { ...RUNNING_START, status: "running" },
+      extraMessages: [processCompletedEvent("exec_folded")],
+    });
+
+    expect(screen.getByTestId("exec-tool-card")).toHaveAttribute(
+      "data-exec-status",
+      "running_in_background",
+    );
+  });
+
+  test("an idle thread without a recorded result shows No result", () => {
+    renderExecTool({ toolName: "shell" });
+
+    const pill = screen.getByTestId("transcript-status-pill");
+    expect(pill).toHaveTextContent("No result");
+    expect(pill).not.toHaveTextContent("Unknown");
+    expect(screen.queryByTestId("transcript-meta")).toBeNull();
+  });
+
+  test("a busy thread without a result shows the call as running", () => {
+    const { container } = renderExecTool({ toolName: "shell", busy: true });
+
+    expect(
+      container.querySelector('[data-testid="exec-tool-card"]'),
+    ).toHaveAttribute("data-status", "running");
+    expect(screen.queryByText("No result")).toBeNull();
+  });
+
+  test("an older unresolved call shows No result while a newer turn streams", () => {
+    renderExecTool({
+      toolName: "shell",
+      busy: true,
+      extraMessages: [
+        { role: "user", content: "next step" },
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            {
+              id: "tc-newer",
+              index: 0,
+              type: "function",
+              function: { name: "shell", arguments: "{}" },
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "No result",
+    );
+  });
+
+  test("a call paused for confirmation shows Needs approval", () => {
+    renderExecTool({
+      toolName: "shell",
+      pauseReasons: [
+        {
+          type: "confirmation",
+          tool_name: "shell",
+          command: "npm test",
+          rule: "*",
+          tool_call_id: "tc-exec",
+          integr_config_path: null,
+        },
+      ],
+    });
+
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "Needs approval",
+    );
+  });
+});
+
 describe("isExecToolMetadata", () => {
   test("isExecToolMetadata_accepts_single_process_shape", () => {
     expect(

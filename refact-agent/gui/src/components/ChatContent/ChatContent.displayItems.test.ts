@@ -11,6 +11,13 @@ import {
   buildDisplayItems,
   tryIncrementalDisplayItemsUpdate,
 } from "./ChatContentDisplayItems";
+import {
+  agentFinished,
+  agentResult,
+  execResult,
+  processCompleted,
+  toolCallMessage,
+} from "../../__fixtures__/foldedEvents";
 
 function assistantMessage(
   overrides: Partial<AssistantMessage> = {},
@@ -1161,6 +1168,202 @@ describe("ChatContent display items", () => {
       const items = buildDisplayItems(messages, false);
 
       expect(items.some((item) => item.type === "user")).toBe(false);
+    });
+  });
+
+  describe("finished events folded into their start rows", () => {
+    function eventIds(messages: ChatMessages): (string | undefined)[] {
+      return buildDisplayItems(messages, false).flatMap((item) =>
+        item.type === "event" ? [item.event.message_id] : [],
+      );
+    }
+
+    it("drops a process_completed event when the thread has the start row", () => {
+      const messages: ChatMessages = [
+        toolCallMessage("call-start", "process_start"),
+        execResult("call-start", "proc-1"),
+        processCompleted("proc-1"),
+      ];
+
+      expect(eventIds(messages)).toEqual([]);
+    });
+
+    it("keeps a process_completed event without a start row in the thread", () => {
+      const messages: ChatMessages = [
+        toolCallMessage("call-start", "process_start"),
+        execResult("call-start", "proc-other"),
+        processCompleted("proc-1"),
+      ];
+
+      expect(eventIds(messages)).toEqual(["event-proc-1"]);
+    });
+
+    it("keeps the event when only reads refer to the process", () => {
+      const messages: ChatMessages = [
+        toolCallMessage("call-read", "process_read", { process_id: "proc-1" }),
+        execResult("call-read", "proc-1"),
+        toolCallMessage("call-wait", "process_wait", { process_id: "proc-1" }),
+        execResult("call-wait", "proc-1", "exited"),
+        processCompleted("proc-1"),
+      ];
+
+      expect(eventIds(messages)).toEqual(["event-proc-1"]);
+    });
+
+    it("drops a subagent finished event only for launches in the same thread", () => {
+      const messages: ChatMessages = [
+        toolCallMessage("call-agent", "subagent", { task: "Investigate" }),
+        agentResult("call-agent", "agent-1"),
+        agentFinished("agent-1"),
+        agentFinished("agent-elsewhere"),
+      ];
+
+      expect(eventIds(messages)).toEqual(["event-agent-elsewhere"]);
+    });
+
+    it("matches full rebuild when a completion event is appended after the start row", () => {
+      const previousMessages: ChatMessages = [
+        toolCallMessage("call-start", "process_start"),
+        execResult("call-start", "proc-1"),
+        userMessage({ message_id: "user-between" }),
+      ];
+      const nextMessages: ChatMessages = [
+        ...previousMessages,
+        processCompleted("proc-1"),
+      ];
+      const previousItems = buildDisplayItems(previousMessages, false);
+
+      const incremental = tryIncrementalDisplayItemsUpdate(
+        previousMessages,
+        nextMessages,
+        previousItems,
+        false,
+      );
+
+      expect(incremental).toEqual(buildDisplayItems(nextMessages, false));
+      expect((incremental ?? []).some((item) => item.type === "event")).toBe(
+        false,
+      );
+    });
+
+    it("removes an already rendered event when its start result arrives later", () => {
+      const previousMessages: ChatMessages = [
+        processCompleted("proc-1", "early-event"),
+        toolCallMessage("call-start", "process_start"),
+      ];
+      const nextMessages: ChatMessages = [
+        ...previousMessages,
+        execResult("call-start", "proc-1"),
+      ];
+      const previousItems = buildDisplayItems(previousMessages, false);
+      expect(previousItems[0]?.type).toBe("event");
+
+      const incremental = tryIncrementalDisplayItemsUpdate(
+        previousMessages,
+        nextMessages,
+        previousItems,
+        false,
+      );
+
+      expect(incremental).toEqual(buildDisplayItems(nextMessages, false));
+      expect((incremental ?? []).some((item) => item.type === "event")).toBe(
+        false,
+      );
+    });
+  });
+
+  describe("no empty rows", () => {
+    it("skips non-skill cd_instruction messages", () => {
+      expect(
+        buildDisplayItems([cdInstructionMessage("plain instruction")], false),
+      ).toEqual([]);
+    });
+
+    it("skips context file messages with no files", () => {
+      const messages: ChatMessages = [
+        { role: "context_file", content: [], message_id: "ctx-empty" },
+        {
+          role: "context_file",
+          content: [],
+          tool_call_id: "buddy_project_memory_pulse",
+          message_id: "pulse-empty",
+        },
+      ];
+
+      expect(buildDisplayItems(messages, false)).toEqual([]);
+    });
+
+    it("skips context files trailing an assistant when they hold no files", () => {
+      const messages: ChatMessages = [
+        assistantMessage({ message_id: "assistant-ctx" }),
+        { role: "context_file", content: [], message_id: "ctx-after" },
+      ];
+
+      expect(
+        buildDisplayItems(messages, false).map((item) => item.type),
+      ).toEqual(["assistant"]);
+    });
+
+    it("skips assistant messages without content, reasoning or tool calls", () => {
+      const messages: ChatMessages = [
+        assistantMessage({ message_id: "empty", content: "  " }),
+        assistantMessage({
+          message_id: "empty-arrays",
+          content: null,
+          tool_calls: [],
+          thinking_blocks: [{ thinking: "  " }],
+        }),
+        assistantMessage({
+          message_id: "reasoning",
+          content: "",
+          reasoning_content: "thinking",
+        }),
+      ];
+
+      expect(
+        buildDisplayItems(messages, false).map((item) => item.key),
+      ).toEqual(["reasoning"]);
+    });
+
+    it("matches full rebuild when a streamed assistant gains content", () => {
+      expectIncrementalSameIndexMatchesFull(
+        [assistantMessage({ content: "" })],
+        [assistantMessage({ content: "now visible" })],
+      );
+    });
+
+    it("skips blank system, plain text, user and diff messages", () => {
+      const messages: ChatMessages = [
+        { role: "system", content: " ", message_id: "system-blank" },
+        { role: "plain_text", content: "", message_id: "plain-blank" },
+        userMessage({ message_id: "user-blank", content: "  " }),
+        {
+          role: "diff",
+          content: [],
+          tool_call_id: "call-x",
+          message_id: "diff-empty",
+        },
+      ];
+
+      expect(buildDisplayItems(messages, false)).toEqual([]);
+    });
+
+    it("skips events with neither content nor payload", () => {
+      const messages: ChatMessages = [
+        eventMessage({ message_id: "event-blank", content: " " }),
+        eventMessage({
+          message_id: "event-payload",
+          content: "",
+          subkind: "tick",
+          extra: {
+            event: { subkind: "tick", source: "", payload: { elapsed_ms: 1 } },
+          },
+        }),
+      ];
+
+      expect(
+        buildDisplayItems(messages, false).map((item) => item.key),
+      ).toEqual(["event-payload"]);
     });
   });
 });

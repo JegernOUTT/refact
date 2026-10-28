@@ -17,6 +17,11 @@ import { ChatThreadProvider } from "../../features/Chat/Thread";
 import { CollapsibleStoreProvider } from "../ChatContent/useStoredOpen";
 import { ChatScrollAnchorContext } from "../ChatContent/useChatScrollAnchor";
 import { SubagentTool } from "../ChatContent/ToolCard/SubagentTool";
+import {
+  agentFinished,
+  agentResult,
+  toolCallMessage,
+} from "../../__fixtures__/foldedEvents";
 
 const AGENT_ID = "bgagent-1f0c9a7b-3d21-4a55-9f0e-11223344abcd";
 const ISO_TIMESTAMP = "2026-02-11T09:14:22.123456789Z";
@@ -704,6 +709,67 @@ describe("inline request failure presentation", () => {
     rerender(<BackgroundAgentCard launchFailed agent={agent} />);
     expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
       "Running",
+    );
+  });
+});
+
+describe("BackgroundAgentCard folded finished event", () => {
+  function renderFolded(withLiveAgent: boolean) {
+    const chat = createDefaultChatState();
+    const threadId = chat.current_thread_id;
+    const launch = toolCallMessage("call-agent", "subagent", {
+      task: "Investigate flaky test",
+    });
+    const call = launch.tool_calls?.[0];
+    if (!call) throw new Error("Missing launch call");
+    chat.threads[threadId].thread.messages = [
+      launch,
+      agentResult("call-agent", AGENT_ID),
+      agentFinished(AGENT_ID),
+    ];
+    if (withLiveAgent) {
+      chat.threads[threadId].background_agents = {
+        [AGENT_ID]: makeAgent({
+          status: "running",
+          pending_questions: 0,
+          questions: [],
+        }),
+      };
+    }
+    return render(
+      <BackgroundAgentCard
+        presentation="inline"
+        threadId={threadId}
+        toolCall={call}
+        statusKnown={false}
+        agent={makeAgent({
+          status: "queued",
+          pending_questions: 0,
+          questions: [],
+          result_summary: null,
+          finished_at: null,
+        })}
+      />,
+      { preloadedState: { chat } },
+    );
+  }
+
+  it("falls back to the folded event when the live agent summary is missing", async () => {
+    const { user } = renderFolded(false);
+    const row = screen.getByTestId("background-agent-inline");
+
+    expect(row).toHaveAttribute("data-status", "done");
+    expect(screen.queryByText("Status unknown")).toBeNull();
+    await user.click(toggleOf(row));
+    expect(screen.getByText("All good, fixed it.")).toBeInTheDocument();
+  });
+
+  it("prefers the live agent summary over the folded event", () => {
+    renderFolded(true);
+
+    expect(screen.getByTestId("background-agent-inline")).toHaveAttribute(
+      "data-status",
+      "running",
     );
   });
 });

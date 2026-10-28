@@ -63,6 +63,34 @@ describe("EventRow", () => {
     );
   });
 
+  it("separates unmatched subagent finished events from spawn briefs", () => {
+    const { unmount } = render(
+      <EventRow
+        event={event(
+          "system_notice",
+          { agent_id: "agent-1", status: "completed" },
+          { source: "agents.spawn", content: "[background subagent finished]" },
+        )}
+      />,
+    );
+    expect(screen.getByTestId("transcript-verb").textContent).toBe(
+      "Subagent finished",
+    );
+    unmount();
+    render(
+      <EventRow
+        event={event(
+          "system_notice",
+          { config_name: "default" },
+          { source: "agents.spawn", content: "Do the task" },
+        )}
+      />,
+    );
+    expect(screen.getByTestId("transcript-verb").textContent).toBe(
+      "Subagent brief",
+    );
+  });
+
   it("labels subagent questions and unknown notices", () => {
     const { unmount } = render(
       <EventRow

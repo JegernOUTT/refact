@@ -65,8 +65,16 @@ const QUESTION_PREFIX = "[subagent question]";
 const LEADING_TAG = /^\s*\[[^\]\n]{1,60}\]\s*/;
 const CLOCK_LENGTH = 5;
 
+function isSubagentBrief(event: EventMessage): boolean {
+  return (
+    event.source === "agents.spawn" &&
+    payloadString(eventPayloadRecord(event), "status") === null
+  );
+}
+
 function eventVerb(event: EventMessage): string {
   if (event.content.trimStart().startsWith(QUESTION_PREFIX)) return "Question";
+  if (isSubagentBrief(event)) return "Subagent brief";
   return SOURCE_VERBS[event.source] ?? SUBKIND_VERBS[event.subkind] ?? "Notice";
 }
 

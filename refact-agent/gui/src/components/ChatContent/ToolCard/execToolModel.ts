@@ -1,4 +1,5 @@
 import type {
+  EventMessage,
   ExecOutputChunkMetadata,
   ExecProcessMetadata,
   ExecProcessStatus,
@@ -299,4 +300,63 @@ export function persistedOutputPath(
     metadata?.transcript?.persisted_output_path ??
     null
   );
+}
+
+export type FoldedProcessOutcome = {
+  status: ExecDisplayStatus;
+  exitCode: number | null;
+  durationMs: number | null;
+};
+
+function payloadRecord(event: EventMessage): Record<string, unknown> | null {
+  const payload = event.payload;
+  return typeof payload === "object" &&
+    payload !== null &&
+    !Array.isArray(payload)
+    ? (payload as Record<string, unknown>)
+    : null;
+}
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+export function foldedProcessOutcome(
+  event: EventMessage | undefined,
+): FoldedProcessOutcome | null {
+  if (!event) return null;
+  const payload = payloadRecord(event);
+  const rawStatus = payload?.status;
+  const exitCode = finiteNumber(payload?.exit_code);
+  const nonZeroExit = exitCode !== null && exitCode !== 0;
+  const status: ExecDisplayStatus =
+    rawStatus === "exited" && nonZeroExit
+      ? "failed"
+      : isExecProcessStatus(rawStatus)
+        ? rawStatus
+        : typeof rawStatus === "string" && rawStatus.includes("failed")
+          ? "failed"
+          : exitCode === null
+            ? "unknown"
+            : nonZeroExit
+              ? "failed"
+              : "exited";
+  return {
+    status,
+    exitCode,
+    durationMs: finiteNumber(payload?.duration_ms),
+  };
+}
+
+export function withFoldedOutcome(
+  process: DisplayProcess,
+  outcome: FoldedProcessOutcome | null,
+): DisplayProcess {
+  if (!outcome) return process;
+  return {
+    ...process,
+    status: outcome.status,
+    exitCode: outcome.exitCode ?? process.exitCode,
+    durationMs: outcome.durationMs ?? process.durationMs,
+  };
 }

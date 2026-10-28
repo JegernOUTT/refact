@@ -19,6 +19,7 @@ import {
   isToolMessage,
   isSummarizationMessage,
   isVisibleCompressionFailureEvent,
+  isBuddyPulsePayload,
   normalizeEventMessageMetadata,
   SummarizationMessage,
   syntheticCompressionReportMessage,
@@ -27,6 +28,9 @@ import {
 } from "../../services/refact";
 import { normalizeToolName, isToolName } from "../../utils/toolNameAliases";
 import { isSkillReportContent, parseSkillReport } from "./skillReportUtils";
+import { foldedEventIndexFor } from "./foldedEventIndex";
+
+const BUDDY_PULSE_TOOL_CALL_ID = "buddy_project_memory_pulse";
 
 function getMessageKey(message: ChatMessages[number], index: number): string {
   if (message.message_id) return message.message_id;
@@ -318,10 +322,40 @@ function isMatchingLlmSegmentCompressionReport(
 type AssistantDisplayClass =
   | "compressed"
   | "hidden_activate_skill_only"
+  | "empty"
   | "normal";
 
 function assistantHasVisibleContent(message: AssistantMessage): boolean {
   return Boolean(message.content && String(message.content).trim());
+}
+
+function hasItems(value: readonly unknown[] | null | undefined): boolean {
+  return Array.isArray(value) && value.length > 0;
+}
+
+function hasThinkingText(message: AssistantMessage): boolean {
+  return (message.thinking_blocks ?? []).some(
+    (block) =>
+      Boolean(block.thinking?.trim()) ||
+      (block.summary ?? []).some(
+        (entry) =>
+          entry?.type === "summary_text" &&
+          typeof entry.text === "string" &&
+          entry.text.trim().length > 0,
+      ),
+  );
+}
+
+function isEmptyAssistant(message: AssistantMessage): boolean {
+  return (
+    !assistantHasVisibleContent(message) &&
+    !message.reasoning_content?.trim() &&
+    !hasThinkingText(message) &&
+    !hasItems(message.tool_calls) &&
+    !hasItems(message.server_executed_tools) &&
+    !hasItems(message.server_content_blocks) &&
+    !hasItems(message.citations)
+  );
 }
 
 function isHiddenActivateSkillOnlyAssistant(
@@ -343,11 +377,54 @@ function assistantDisplayClass(
   if (isHiddenActivateSkillOnlyAssistant(message)) {
     return "hidden_activate_skill_only";
   }
+  if (isEmptyAssistant(message)) return "empty";
   return "normal";
 }
 
 function isHiddenDisplayMessage(message: ChatMessages[number]): boolean {
   return message.role === "plan";
+}
+
+function isBlankText(value: unknown): boolean {
+  return typeof value !== "string" || value.trim().length === 0;
+}
+
+function hasEventPayload(event: EventMessage): boolean {
+  const payload = event.payload;
+  if (payload === undefined || payload === null) return false;
+  if (typeof payload === "string") return payload.trim().length > 0;
+  if (Array.isArray(payload)) return payload.length > 0;
+  if (typeof payload === "object") return Object.keys(payload).length > 0;
+  return true;
+}
+
+function isEmptyEvent(event: EventMessage): boolean {
+  return isBlankText(event.content) && !hasEventPayload(event);
+}
+
+function contextFilesRenderNothing(
+  files: ChatContextFile[],
+  toolCallId: string | undefined,
+  rawExtra: unknown,
+): boolean {
+  if (toolCallId === BUDDY_PULSE_TOOL_CALL_ID) {
+    const extra =
+      typeof rawExtra === "object" && rawExtra !== null
+        ? (rawExtra as Record<string, unknown>)
+        : null;
+    return !isBuddyPulsePayload(extra?.buddy_pulse_payload);
+  }
+  return !Array.isArray(files) || files.length === 0;
+}
+
+function hasDiffChunks(diffs: DiffMessage[]): boolean {
+  return diffs.some((diff) => hasItems(diff.content));
+}
+
+function isEmptyUserMessage(message: UserMessage): boolean {
+  if (hasItems(message.checkpoints)) return false;
+  if (typeof message.content === "string") return isBlankText(message.content);
+  return !hasItems(message.content);
 }
 
 export type DisplayItem =
@@ -473,8 +550,11 @@ function rebuildDisplayItemsFromStart(
     hidden,
     rebuildStart,
   );
+  const folded = foldedEventIndexFor(nextMessages).foldedMessageIndices;
   const prefixItems = previousItems.filter(
-    (item) => item.messageIndex < rebuildStart,
+    (item) =>
+      item.messageIndex < rebuildStart &&
+      !(item.type === "event" && folded.has(item.messageIndex)),
   );
 
   return withEventRunPositions(
@@ -504,6 +584,7 @@ function buildDisplayItemsFromIndex(
 ): DisplayItem[] {
   const items: DisplayItem[] = [];
   if (startIndex >= messages.length) return items;
+  const foldedEvents = foldedEventIndexFor(messages).foldedMessageIndices;
 
   let lastUserIdx = -1;
   let lastAssistantIdx = -1;
@@ -538,11 +619,14 @@ function buildDisplayItemsFromIndex(
     if (isHiddenDisplayMessage(head)) continue;
 
     if (isEventMessage(head)) {
+      if (foldedEvents.has(i)) continue;
+      const event = normalizeEventMessageMetadata(head);
+      if (isEmptyEvent(event)) continue;
       items.push({
         type: "event",
         key: getMessageKey(head, i),
         messageIndex: i,
-        event: normalizeEventMessageMetadata(head),
+        event,
         run: "single",
       });
       continue;
@@ -584,6 +668,7 @@ function buildDisplayItemsFromIndex(
           continue;
         }
       }
+      if (isBlankText(head.content)) continue;
       items.push({
         type: "plain_text",
         key: getMessageKey(head, i),
@@ -595,7 +680,11 @@ function buildDisplayItemsFromIndex(
 
     if (head.role === "assistant") {
       const toolCalls = "tool_calls" in head ? head.tool_calls ?? [] : [];
-      if (assistantDisplayClass(head) === "hidden_activate_skill_only") {
+      const displayClass = assistantDisplayClass(head);
+      if (
+        displayClass === "hidden_activate_skill_only" ||
+        displayClass === "empty"
+      ) {
         continue;
       }
 
@@ -666,7 +755,13 @@ function buildDisplayItemsFromIndex(
           if (targetToolId) {
             const prev = contextFilesByToolId[targetToolId] ?? [];
             contextFilesByToolId[targetToolId] = [...prev, ...nextMsg.content];
-          } else {
+          } else if (
+            !contextFilesRenderNothing(
+              nextMsg.content,
+              nextMsg.tool_call_id,
+              (nextMsg as { extra?: unknown }).extra,
+            )
+          ) {
             contextFilesAfter.push({
               type: "context_files",
               key: getMessageKey(nextMsg, j),
@@ -716,7 +811,7 @@ function buildDisplayItemsFromIndex(
         items.push(ctxItem);
       }
 
-      if (diffMessagesAfter.length > 0) {
+      if (hasDiffChunks(diffMessagesAfter)) {
         items.push({
           type: "diff_group",
           key: `diffs-${key}`,
@@ -730,7 +825,7 @@ function buildDisplayItemsFromIndex(
     }
 
     if (head.role === "user") {
-      if (hiddenQaIndices.has(i)) {
+      if (hiddenQaIndices.has(i) || isEmptyUserMessage(head)) {
         continue;
       }
 
@@ -769,18 +864,25 @@ function buildDisplayItemsFromIndex(
     }
 
     if (isChatContextFileMessage(head)) {
+      const rawExtra = (head as { extra?: unknown }).extra;
+      if (
+        contextFilesRenderNothing(head.content, head.tool_call_id, rawExtra)
+      ) {
+        continue;
+      }
       items.push({
         type: "context_files",
         key: getMessageKey(head, i),
         messageIndex: i,
         files: head.content,
         toolCallId: head.tool_call_id,
-        rawExtra: (head as { extra?: unknown }).extra,
+        rawExtra,
       });
       continue;
     }
 
     if (isSystemMessage(head)) {
+      if (isBlankText(head.content)) continue;
       items.push({
         type: "system",
         key: getMessageKey(head, i),
@@ -808,6 +910,10 @@ function buildDisplayItemsFromIndex(
         break;
       }
 
+      if (!hasDiffChunks(diffs)) {
+        i = j - 1;
+        continue;
+      }
       items.push({
         type: "diff_group",
         key: `diffs-${key}`,

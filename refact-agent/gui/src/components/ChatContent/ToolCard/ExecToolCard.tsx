@@ -3,6 +3,7 @@ import React, { useEffect, useMemo, useState } from "react";
 
 import { useToolCallActivity } from "./useToolCallActivity";
 import { useCopyToClipboard } from "../../../hooks/useCopyToClipboard";
+import { useAppSelector } from "../../../hooks/useAppSelector";
 import type { ToolCall } from "../../../services/refact/types";
 import {
   extractExecMetadata,
@@ -14,6 +15,8 @@ import {
   TranscriptItem,
   type TranscriptFact,
 } from "../TranscriptItem";
+import { useUnrecordedResultState } from "../TranscriptItem/useUnrecordedResultState";
+import { selectFoldedProcessEvent } from "../foldedEventSelectors";
 import { ProcessStatusBadge } from "./ProcessStatusBadge";
 import { ProcessOutputView } from "./ProcessOutputView";
 import { ProcessStdinInput } from "./ProcessStdinInput";
@@ -26,12 +29,14 @@ import {
   execTarget,
   execTranscriptStatus,
   execVerb,
+  foldedProcessOutcome,
   isBusyStatus,
   latestOutputLine,
   normalizeExecStatus,
   parseProcessArgs,
   persistedOutputPath,
   processListItemStatus,
+  withFoldedOutcome,
   type ExecToolName,
 } from "./execToolModel";
 import styles from "./ExecToolCard.module.css";
@@ -68,14 +73,28 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
     [toolCall.function.arguments],
   );
   const toolFailed = result?.tool_failed === true;
-  const status = normalizeExecStatus(
-    metadata,
-    toolName,
-    Boolean(result),
-    toolFailed,
-    isRunning,
+  const foldedEvent = useAppSelector((state) =>
+    selectFoldedProcessEvent(state, threadId, toolCall.id),
   );
-  const process = displayProcess(metadata, args, status);
+  const outcome = useMemo(
+    () => foldedProcessOutcome(foldedEvent),
+    [foldedEvent],
+  );
+  const unrecorded = useUnrecordedResultState(toolCall.id, threadId);
+  const status =
+    outcome?.status ??
+    normalizeExecStatus(
+      metadata,
+      toolName,
+      Boolean(result),
+      toolFailed,
+      isRunning,
+    );
+  const process = withFoldedOutcome(
+    displayProcess(metadata, args, status),
+    outcome,
+  );
+  const hasRecordedOutcome = Boolean(result) || outcome !== null;
   const nowMs = useRunningNowMs(isRunning);
   const duration = durationText(process, nowMs, isRunning);
   const logPath = persistedOutputPath(metadata);
@@ -85,7 +104,12 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
     toolCall.id,
     logPath,
   );
-  const transcriptStatus = execTranscriptStatus(status, isRunning, toolFailed);
+  const transcriptStatus = hasRecordedOutcome
+    ? execTranscriptStatus(status, isRunning, toolFailed)
+    : unrecorded.status;
+  const statusText = hasRecordedOutcome
+    ? execStatusLabel(status)
+    : unrecorded.statusLabel ?? execStatusLabel(status);
   const liveHint =
     isRunning || isBusyStatus(status)
       ? latestOutputLine(metadata, isRunning ? content : null, toolCall)
@@ -153,7 +177,7 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
           />
         </TranscriptClamp>
       )}
-      {!result && !isRunning && (
+      {!hasRecordedOutcome && transcriptStatus === "unknown" && (
         <p className={styles.note}>Result not recorded; outcome unknown.</p>
       )}
       {!metadata && result && (
@@ -336,13 +360,16 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
       openKey={toolCall.id ? `tc:${toolCall.id}` : undefined}
       output={output}
       quickAction={stopButton}
-      raw={[{ label: "Arguments", value: toolCall.function.arguments }]}
+      raw={[
+        { label: "Arguments", value: toolCall.function.arguments },
+        ...(foldedEvent?.payload
+          ? [{ label: "Completion event", value: foldedEvent.payload }]
+          : []),
+      ]}
       status={transcriptStatus}
       statusLabel={
         transcriptStatus === "done" ? undefined : (
-          <span data-testid={`exec-status-${status}`}>
-            {execStatusLabel(status)}
-          </span>
+          <span data-testid={`exec-status-${status}`}>{statusText}</span>
         )
       }
       summary={summary}
