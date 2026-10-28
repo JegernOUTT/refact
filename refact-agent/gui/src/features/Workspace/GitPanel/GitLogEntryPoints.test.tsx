@@ -246,4 +246,30 @@ describe("Git Log entry points", () => {
     expect(store.getState().workspace.activeTabId).toBe("git:main");
     expect(selectGitLogLayout(store.getState()).tab).toBe("log");
   });
+
+  test("Alt+9 is ignored while typing in text fields", () => {
+    const store = setUpStore();
+    store.dispatch(updateConfig({ host: "web" }));
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <Provider store={store}>{children}</Provider>
+    );
+    renderHook(() => useWorkspaceShortcuts(), { wrapper });
+    const before = store.getState().workspace.activeTabId;
+
+    for (const tag of ["input", "textarea"] as const) {
+      const field = document.createElement(tag);
+      document.body.appendChild(field);
+      field.focus();
+      const notPrevented = fireEvent.keyDown(field, {
+        key: "9",
+        code: "Digit9",
+        altKey: true,
+      });
+      expect(notPrevented).toBe(true);
+      field.remove();
+    }
+
+    expect(store.getState().workspace.activeTabId).toBe(before);
+    expect(store.getState().workspace.activeTabId).not.toBe("git:main");
+  });
 });
