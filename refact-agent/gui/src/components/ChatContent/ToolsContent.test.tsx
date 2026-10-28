@@ -857,7 +857,7 @@ const DEDICATED_COMPACT_NAMES = [
 
 describe("compact dedicated transcript composition", () => {
   it.each(DEDICATED_COMPACT_NAMES)(
-    "%s and aliases never fall through to generic and always begin closed",
+    "%s and aliases never fall through to generic and begin open only for unanswered questions",
     (name) => {
       const pascal = name
         .split("_")
@@ -883,6 +883,12 @@ describe("compact dedicated transcript composition", () => {
             'section[data-density="compact"]',
           );
           expect(row, alias).not.toBeNull();
+          if (name === "ask_questions" || name === "ask") {
+            expect(row).toHaveAttribute("data-open", "true");
+            expect(row?.querySelector("button[aria-expanded]")).toBeNull();
+            unmount();
+            continue;
+          }
           expect(row).toHaveAttribute("data-open", "false");
           expect(row?.querySelector("button")).not.toHaveTextContent(
             "RAW_TECHNICAL_SENTINEL",
@@ -1091,7 +1097,7 @@ describe("compact dedicated transcript composition", () => {
     ).toBeNull();
   });
 
-  it("protocol-v2 decisions are exposed after one expansion, preserving endpoint, instance and explicit submit", async () => {
+  it("protocol-v2 decisions stay expanded, preserving endpoint, instance and explicit submit", async () => {
     localStorage.clear();
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal("fetch", fetchMock);
@@ -1110,13 +1116,16 @@ describe("compact dedicated transcript composition", () => {
           },
         ],
       });
-      const outer = screen.getByRole("button", { expanded: false });
-      expect(outer).toHaveTextContent("Needs answer");
+      const card = container.querySelector("section");
+      expect(card).toHaveTextContent("Needs answer");
+      expect(card).toHaveAttribute("data-open", "true");
+      expect(
+        card?.querySelector(":scope > div > button[aria-expanded]"),
+      ).toBeNull();
       expect(container.querySelector("section")).toHaveAttribute(
         "data-density",
         "compact",
       );
-      await user.click(outer);
       expect(screen.queryByRole("button", { name: "More details" })).toBeNull();
       await user.click(screen.getByRole("radio", { name: "No" }));
       expect(fetchMock).not.toHaveBeenCalled();

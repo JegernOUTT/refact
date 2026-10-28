@@ -268,9 +268,9 @@ function ResponseInstance({
             : "Response submitted"
       }
       status={pending ? "running" : "success"}
-      isOpen={isOpen}
+      isOpen={isOpen || set.status !== "answered"}
       onToggle={onToggle}
-      collapsible={compact || !pending}
+      collapsible={set.status === "answered"}
       toolCall={toolCall}
       {...compactProps}
     >
@@ -288,7 +288,10 @@ function ResponseInstance({
             onSubmit={(r) => void submit(r)}
           />
         ) : (
-          <ResponseHistory compact={compact} count={set.questions.length}>
+          <ResponseHistory
+            compact={compact && set.status === "answered"}
+            count={set.questions.length}
+          >
             {set.questions.map((q) => {
               const answer = submitted?.find((a) => a.id === q.id);
               return (

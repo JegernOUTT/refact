@@ -54,6 +54,17 @@ function setup(extra: Partial<PendingQuestionSet> = {}, compact = false) {
   });
 }
 
+function header(): HTMLElement | null {
+  return document.querySelector("section > div > button[aria-expanded]");
+}
+
+function headerState(open: boolean): HTMLElement {
+  const element = header();
+  expect(element).toHaveAttribute("aria-expanded", String(open));
+  if (!element) throw new Error("Question card header not found");
+  return element;
+}
+
 describe("flexible question responses", () => {
   beforeEach(() => localStorage.clear());
   afterEach(() => {
@@ -178,8 +189,8 @@ describe("flexible question responses", () => {
     expect(screen.getByRole("radio", { name: "No" })).toBeDisabled();
   });
 
-  test("resolved responses render human-readable values, custom text, comments and skips", () => {
-    setup({
+  test("resolved responses collapse by default and reopen to human-readable values, custom text, comments and skips", async () => {
+    const { user } = setup({
       status: "answered",
       response: {
         answers: [
@@ -190,6 +201,7 @@ describe("flexible question responses", () => {
         overall_comments: "Global context",
       },
     });
+    await user.click(headerState(false));
     expect(screen.getByText("Custom answer: Neither")).toBeInTheDocument();
     expect(screen.getByText("Skipped")).toBeInTheDocument();
     expect(screen.getByText("No")).toBeInTheDocument();
@@ -260,22 +272,18 @@ describe("compact protocol-v2 question responses", () => {
     vi.restoreAllMocks();
   });
 
-  test("starts closed and keyboard expansion exposes the production controls without technical details", async () => {
+  test("pending compact questions start expanded without a collapse control and stay expanded awaiting confirmation", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal("fetch", fetchMock);
     const { user, container } = setup({}, true);
-    const row = screen.getByRole("button", { expanded: false });
-    expect(row).toHaveTextContent("Choose a direction (+2 questions)");
-    expect(row).toHaveTextContent("Needs answer");
+    const card = container.querySelector("section");
+    expect(card).toHaveAttribute("data-open", "true");
+    expect(card).toHaveTextContent("Choose a direction (+2 questions)");
+    expect(card).toHaveTextContent("Needs answer");
     expect(container.querySelectorAll('[data-density="compact"]')).toHaveLength(
       1,
     );
-    expect(
-      screen.queryByRole("button", { name: "Submit response" }),
-    ).toBeNull();
-    await user.tab();
-    expect(row).toHaveFocus();
-    await user.keyboard("{Enter}");
+    expect(header()).toBeNull();
     expect(screen.queryByRole("button", { name: "More details" })).toBeNull();
     expect(
       screen.getByRole("button", { name: "Submit response" }),
@@ -325,9 +333,9 @@ describe("compact protocol-v2 question responses", () => {
         overall_comments: "Extra context",
       },
     });
-    await user.click(row);
-    expect(row).toHaveTextContent("Needs answer · Awaiting confirmation");
-    expect(row).toHaveAttribute("aria-expanded", "false");
+    expect(card).toHaveTextContent("Needs answer · Awaiting confirmation");
+    expect(card).toHaveAttribute("data-open", "true");
+    expect(header()).toBeNull();
   });
 
   test.each(["answered", "cancelled"] as const)(
@@ -335,7 +343,7 @@ describe("compact protocol-v2 question responses", () => {
     async (status) => {
       const fetchMock = vi.fn();
       vi.stubGlobal("fetch", fetchMock);
-      const { user } = setup(
+      const { user, container } = setup(
         {
           status,
           response: {
@@ -354,22 +362,33 @@ describe("compact protocol-v2 question responses", () => {
         },
         true,
       );
-      const row = screen.getByRole("button", { expanded: false });
-      expect(row).toHaveTextContent(
+      const card = container.querySelector("section");
+      expect(card).toHaveTextContent(
         status === "answered" ? "Answered" : "Withdrawn",
       );
-      expect(row.closest("[data-status]")).toHaveAttribute(
+      expect(card).toHaveAttribute(
         "data-status",
         status === "answered" ? "success" : "idle",
       );
-      await user.click(row);
-      const details = screen.getByRole("button", { name: "More details" });
-      expect(details).toHaveAttribute("aria-expanded", "false");
-      expect(
-        screen.getAllByRole("term").filter((term) => !term.closest("[inert]")),
-      ).toHaveLength(1);
-      expect(screen.getByText("B").closest("[inert]")).not.toBeNull();
-      await user.click(details);
+      if (status === "answered") {
+        await user.click(headerState(false));
+        const details = screen.getByRole("button", { name: "More details" });
+        expect(details).toHaveAttribute("aria-expanded", "false");
+        expect(
+          screen
+            .getAllByRole("term")
+            .filter((term) => !term.closest("[inert]")),
+        ).toHaveLength(1);
+        expect(screen.getByText("B").closest("[inert]")).not.toBeNull();
+        await user.click(details);
+      } else {
+        expect(card).toHaveAttribute("data-open", "true");
+        expect(header()).toBeNull();
+        expect(
+          screen.queryByRole("button", { name: "More details" }),
+        ).toBeNull();
+      }
+      expect(screen.getByText("B").closest("[inert]")).toBeNull();
       expect(screen.getByText("B")).toBeInTheDocument();
       expect(screen.getByText("A reason")).toBeInTheDocument();
       expect(screen.getByText("Overall history")).toBeInTheDocument();
@@ -387,9 +406,9 @@ describe("compact protocol-v2 question responses", () => {
     },
   );
 
-  test("keeps closed choice through streaming and authoritative resolution without inferring an answer", async () => {
-    const { store, user } = setup({}, true);
-    const row = screen.getByRole("button", { expanded: false });
+  test("stays expanded through streaming and collapses only on authoritative answered state", async () => {
+    const { store, user, container } = setup({}, true);
+    const card = container.querySelector("section");
     act(() => {
       store.dispatch(
         applyChatEvent({
@@ -400,8 +419,8 @@ describe("compact protocol-v2 question responses", () => {
         }),
       );
     });
-    expect(row).toHaveAttribute("aria-expanded", "false");
-    expect(row).toHaveTextContent("Needs answer");
+    expect(card).toHaveAttribute("data-open", "true");
+    expect(card).toHaveTextContent("Needs answer");
     updateQuestion(store, {
       status: "answered",
       response: {
@@ -411,17 +430,18 @@ describe("compact protocol-v2 question responses", () => {
         overall_comments: "",
       },
     });
+    const row = headerState(false);
     expect(row).toHaveTextContent("Answered");
-    expect(row).toHaveAttribute("aria-expanded", "false");
     await user.click(row);
+    expect(row).toHaveAttribute("aria-expanded", "true");
     expect(
       screen.getByRole("button", { name: "More details" }),
     ).toHaveAttribute("aria-expanded", "false");
   });
 
-  test("honors thread tc storage on remount and preserves draft values across collapse", async () => {
+  test("persisted closed state cannot hide a pending question; drafts and reopened answered state survive remount", async () => {
     const view = setup({}, true);
-    const values = new Map<string, boolean>([[`tc:${call.id}`, true]]);
+    const values = new Map<string, boolean>([[`tc:${call.id}`, false]]);
     const storage = {
       get: (key: string) => values.get(key),
       set: (key: string, open: boolean) => values.set(key, open),
@@ -433,10 +453,11 @@ describe("compact protocol-v2 question responses", () => {
       </CollapsibleStoreProvider>,
       { store: view.store },
     );
-    const row = screen.getByRole("button", {
-      name: /Choose a direction/,
-      expanded: true,
-    });
+    expect(mounted.container.querySelector("section")).toHaveAttribute(
+      "data-open",
+      "true",
+    );
+    expect(header()).toBeNull();
     await mounted.user.click(
       screen.getAllByRole("button", { name: "Write my own answer" })[0],
     );
@@ -444,7 +465,7 @@ describe("compact protocol-v2 question responses", () => {
       screen.getByRole("textbox", { name: "Your answer to question 1" }),
       "A kept draft",
     );
-    await mounted.user.click(row);
+    expect(values.get(`tc:${call.id}`)).toBe(false);
     mounted.unmount();
     const restored = render(
       <CollapsibleStoreProvider value={storage}>
@@ -452,33 +473,21 @@ describe("compact protocol-v2 question responses", () => {
       </CollapsibleStoreProvider>,
       { store: view.store },
     );
-    expect(screen.getByRole("button", { expanded: false })).toHaveTextContent(
-      "Needs answer",
+    expect(
+      screen.getByRole("textbox", { name: "Your answer to question 1" }),
+    ).toHaveValue("A kept draft");
+    updateQuestion(view.store, { status: "answered" });
+    const row = headerState(false);
+    await restored.user.click(row);
+    expect(row).toHaveAttribute("aria-expanded", "true");
+    restored.unmount();
+    render(
+      <CollapsibleStoreProvider value={storage}>
+        <AskQuestionsTool toolCall={call} compact />
+      </CollapsibleStoreProvider>,
+      { store: view.store },
     );
-    await restored.user.click(screen.getByRole("button", { expanded: false }));
-    expect(
-      screen.getByRole("textbox", { name: "Your answer to question 1" }),
-    ).toHaveValue("A kept draft");
-    updateQuestion(view.store, {
-      questions: [
-        {
-          id: "one",
-          type: "single_select",
-          text: "Choose an updated direction",
-          options: ["A", "B"],
-        },
-      ],
-    });
-    const restoredRow = screen.getByRole("button", {
-      name: /Choose an updated direction/,
-      expanded: true,
-    });
-    expect(
-      screen.getByRole("textbox", { name: "Your answer to question 1" }),
-    ).toHaveValue("A kept draft");
-    await restored.user.click(restoredRow);
-    updateQuestion(view.store, {});
-    expect(restoredRow).toHaveAttribute("aria-expanded", "false");
+    expect(headerState(true)).toHaveTextContent("Answered");
   });
 
   test("send failures and retry controls remain directly accessible and request identity stays stable", async () => {
@@ -487,26 +496,23 @@ describe("compact protocol-v2 question responses", () => {
       .mockRejectedValueOnce(new Error("offline"))
       .mockResolvedValue({ ok: true });
     vi.stubGlobal("fetch", fetchMock);
-    const { user } = setup(
+    const { user, container } = setup(
       { questions: [{ id: "yes", type: "yes_no", text: "Continue?" }] },
       true,
     );
-    const row = screen.getByRole("button", { expanded: false });
-    await user.click(row);
+    const card = container.querySelector("section");
     await user.click(screen.getByRole("radio", { name: "No" }));
     await user.click(screen.getByRole("button", { name: "Submit response" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("offline");
-    await user.click(row);
-    expect(row).toHaveTextContent("Send failed");
-    expect(row.closest("[data-status]")).toHaveAttribute(
-      "data-status",
-      "error",
-    );
-    await user.click(row);
+    expect(card).toHaveTextContent("Send failed");
+    expect(card).toHaveAttribute("data-status", "error");
+    expect(card).toHaveAttribute("data-open", "true");
+    expect(header()).toBeNull();
     await user.click(screen.getByRole("button", { name: "Submit response" }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     expect(screen.getByRole("radio", { name: "No" })).toBeDisabled();
     expect(screen.getByRole("radio", { name: "Yes" })).toBeDisabled();
+    expect(card).toHaveAttribute("data-open", "true");
     await user.click(
       screen.getByRole("button", { name: "Check status / retry" }),
     );
@@ -528,7 +534,6 @@ describe("compact protocol-v2 question responses", () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal("fetch", fetchMock);
     const { user, store } = setup({}, true);
-    await user.click(screen.getByRole("button", { expanded: false }));
     await user.click(screen.getByRole("button", { name: "Skip remaining" }));
     await user.click(screen.getByRole("button", { name: "Submit response" }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
@@ -672,8 +677,9 @@ describe("compact protocol-v2 question responses", () => {
     ).toBeInTheDocument();
   });
 
-  test("unrecognized historical state is neutral, escaped and never offers live controls", async () => {
-    const { user, container } = setup(
+  test("unrecognized historical state stays expanded, neutral, escaped and never offers live controls", () => {
+    const values = new Map<string, boolean>([[`tc:${call.id}`, false]]);
+    const view = setup(
       {
         status: "expired" as PendingQuestionSet["status"],
         questions: [
@@ -682,12 +688,26 @@ describe("compact protocol-v2 question responses", () => {
       },
       true,
     );
-    const row = screen.getByRole("button", { expanded: false });
-    expect(row).toHaveTextContent("State unknown");
-    expect(row.closest("[data-status]")).toHaveAttribute("data-status", "idle");
+    view.unmount();
+    const { container } = render(
+      <CollapsibleStoreProvider
+        value={{
+          get: (key: string) => values.get(key),
+          set: (key: string, open: boolean) => values.set(key, open),
+        }}
+      >
+        <AskQuestionsTool toolCall={call} compact />
+      </CollapsibleStoreProvider>,
+      { store: view.store },
+    );
+    const card = container.querySelector("section");
+    expect(card).toHaveTextContent("State unknown");
+    expect(card).toHaveAttribute("data-status", "idle");
+    expect(card).toHaveAttribute("data-open", "true");
+    expect(header()).toBeNull();
     expect(container.querySelector("script")).toBeNull();
-    await user.click(row);
-    await user.click(screen.getByRole("button", { name: "More details" }));
+    expect(screen.queryByRole("button", { name: "More details" })).toBeNull();
+    expect(screen.getByText("No answer")).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Submit response" }),
     ).toBeNull();

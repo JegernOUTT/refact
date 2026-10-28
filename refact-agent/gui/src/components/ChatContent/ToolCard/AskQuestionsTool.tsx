@@ -76,31 +76,42 @@ function compactQuestionState(status: string): string {
 
 function QuestionHistory({
   compact,
+  answered,
   questions,
   children,
 }: {
   compact: boolean;
+  answered: boolean;
   questions: QuestionItem[];
   children: React.ReactNode;
 }) {
   if (!compact) return <>{children}</>;
+  const options = questions.map((question) =>
+    question.options?.length ? (
+      <Box key={question.id}>
+        <Text size="2">{question.text}</Text>
+        <ul>
+          {question.options.map((option) => (
+            <li key={option}>{option}</li>
+          ))}
+        </ul>
+      </Box>
+    ) : null,
+  );
+  if (!answered) {
+    return (
+      <>
+        {children}
+        {options}
+      </>
+    );
+  }
   return (
     <CompactToolDetails
       facts={[{ label: "Questions", value: String(questions.length) }]}
     >
       {children}
-      {questions.map((question) =>
-        question.options?.length ? (
-          <Box key={question.id}>
-            <Text size="2">{question.text}</Text>
-            <ul>
-              {question.options.map((option) => (
-                <li key={option}>{option}</li>
-              ))}
-            </ul>
-          </Box>
-        ) : null,
-      )}
+      {options}
     </CompactToolDetails>
   );
 }
@@ -302,14 +313,13 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
   compact = false,
 }) => {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle, setIsOpen] = useStoredOpen(storeKey, !compact);
+  const [storedOpen, handleToggle, setIsOpen] = useStoredOpen(storeKey, false);
   const [answers, setAnswers] = useState<
     Record<string, AskQuestionsDraftValue>
   >(() => loadAskQuestionsDraft(toolCall.id)?.answers ?? {});
   const [additionalText, setAdditionalText] = useState(
     () => loadAskQuestionsDraft(toolCall.id)?.additionalText ?? "",
   );
-  const hasCollapsedManualRef = useRef(false);
   const threadId = useThreadId();
   const { submit } = useChatActions(threadId);
   const dispatch = useAppDispatch();
@@ -426,13 +436,14 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
     return "success";
   }, [maybeResult, nextUserMessage]);
 
+  const isAnswered = nativeQuestionSet
+    ? nativeQuestionSet.status === "answered"
+    : !hasNativeQuestionCapability && answeredViaForm && !!parsedAnswers;
+  const isOpen = !isAnswered || storedOpen;
+
   useEffect(() => {
-    if (compact) return;
-    if (nextUserMessage && !answeredViaForm && !hasCollapsedManualRef.current) {
-      hasCollapsedManualRef.current = true;
-      setIsOpen(false);
-    }
-  }, [compact, nextUserMessage, answeredViaForm, setIsOpen]);
+    if (!isAnswered && storedOpen) setIsOpen(false);
+  }, [isAnswered, storedOpen, setIsOpen]);
 
   const hasNextMessage = !!nextUserMessage;
 
@@ -592,7 +603,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
       ? "Questions unavailable"
       : !hasNativeQuestionCapability && !hasNextMessage && data
         ? "Needs answer"
-        : answeredViaForm && parsedAnswers
+        : isAnswered
           ? "Answered"
           : hasNativeQuestionCapability && data && !hasNextMessage
             ? "Syncing state"
@@ -644,11 +655,15 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
         status={isPending ? "running" : "success"}
         isOpen={isOpen}
         onToggle={handleToggle}
-        collapsible={compact || !isPending}
+        collapsible={isAnswered}
         toolCall={toolCall}
         {...compactProps}
       >
-        <QuestionHistory compact={compact && !isPending} questions={questions}>
+        <QuestionHistory
+          compact={compact && !isPending}
+          answered={isAnswered}
+          questions={questions}
+        >
           <Box className={`${styles.content} rf-enter-rise`}>
             <Flex direction="column" gap="2">
               {nativeQuestionSet.questions.map((question) => {
@@ -721,7 +736,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
         status={status}
         isOpen={isOpen}
         onToggle={handleToggle}
-        collapsible={compact}
+        collapsible={isAnswered}
         toolCall={toolCall}
         {...compactProps}
       >
@@ -764,10 +779,15 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
         status="running"
         isOpen={isOpen}
         onToggle={handleToggle}
+        collapsible={isAnswered}
         toolCall={toolCall}
         {...compactProps}
       >
-        <QuestionHistory compact={compact} questions={questions}>
+        <QuestionHistory
+          compact={compact}
+          answered={isAnswered}
+          questions={questions}
+        >
           <Box className={`${styles.content} rf-enter-rise`}>
             <Text color="gray" size="2">
               Waiting for the current question state.
@@ -782,7 +802,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
     );
   }
 
-  if (answeredViaForm && data && parsedAnswers) {
+  if (isAnswered && data && parsedAnswers) {
     return (
       <ToolCard
         icon={<CircleCheck />}
@@ -790,10 +810,15 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
         status="success"
         isOpen={isOpen}
         onToggle={handleToggle}
+        collapsible={isAnswered}
         toolCall={toolCall}
         {...compactProps}
       >
-        <QuestionHistory compact={compact} questions={questions}>
+        <QuestionHistory
+          compact={compact}
+          answered={isAnswered}
+          questions={questions}
+        >
           <Box className={`${styles.content} rf-enter-rise`}>
             <Flex direction="column" gap="2">
               {data.questions.map((q) => (
@@ -825,14 +850,19 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
   return (
     <ToolCard
       icon={<CircleHelp />}
-      summary="Questions (answered manually)"
-      status="success"
+      summary="Question state unavailable"
+      status="idle"
       isOpen={isOpen}
       onToggle={handleToggle}
+      collapsible={isAnswered}
       toolCall={toolCall}
       {...compactProps}
     >
-      <QuestionHistory compact={compact} questions={questions}>
+      <QuestionHistory
+        compact={compact}
+        answered={isAnswered}
+        questions={questions}
+      >
         {data && (
           <Box className={`${styles.content} rf-enter-rise`}>
             <Flex direction="column" gap="1">
