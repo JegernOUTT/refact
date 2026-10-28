@@ -216,12 +216,17 @@ describe("Git log tool window", () => {
     expect(options).toHaveLength(HISTORY.length);
     await waitFor(() =>
       expect(
-        within(options[0]).getByLabelText("origin & main (current branch)"),
+        within(options[0]).getByText("origin & main").closest("[data-kind]"),
       ).toHaveAttribute("data-current", "true"),
     );
-    expect(
-      within(options[0]).getByLabelText("origin & main (current branch)"),
-    ).toHaveAttribute("title", "main, origin/main (current branch)");
+    const currentPill = within(options[0])
+      .getByText("origin & main")
+      .closest("[data-kind]");
+    expect(currentPill).toHaveAttribute(
+      "title",
+      "main, origin/main (current branch)",
+    );
+    expect(currentPill).toHaveTextContent("origin & main (current branch)");
     expect(within(options[0]).queryByText("HEAD")).not.toBeInTheDocument();
     expect(within(options[1]).getByText("feature/log")).toBeInTheDocument();
     expect(

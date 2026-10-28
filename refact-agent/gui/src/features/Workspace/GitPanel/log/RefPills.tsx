@@ -13,7 +13,6 @@ export function RefPill({ label }: { label: RefLabel }) {
   const names = label.names.join(", ");
   return (
     <span
-      aria-label={label.current ? `${label.text} (current branch)` : undefined}
       className={styles.refPill}
       data-current={label.current ? "true" : undefined}
       data-kind={label.kind}
@@ -23,6 +22,9 @@ export function RefPill({ label }: { label: RefLabel }) {
         <Target aria-hidden="true" className={styles.refPillIcon} />
       ) : null}
       <span className={styles.refPillText}>{label.text}</span>
+      {label.current ? (
+        <span className={styles.srOnly}> (current branch)</span>
+      ) : null}
     </span>
   );
 }
