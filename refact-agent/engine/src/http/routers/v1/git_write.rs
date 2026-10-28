@@ -1538,6 +1538,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn git_routes_accept_only_registered_linked_worktrees_of_active_roots() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let other_dir = tempfile::tempdir().unwrap();
+        let source = dunce::canonicalize(source_dir.path()).unwrap();
+        let other = dunce::canonicalize(other_dir.path()).unwrap();
+        let source_repo = init_repo(&source);
+        let source_head = commit_all(&source_repo, &[("a.txt", "base\n")], "base");
+        let other_repo = init_repo(&other);
+        commit_all(&other_repo, &[("o.txt", "other\n")], "other");
+
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_vcs_roots.lock().unwrap() = vec![source.clone()];
+        let worktrees = gcx.cache_dir.join("worktrees");
+        let register = |repo: &Path, ids: &[(&str, &Path)]| {
+            let hash = refact_worktrees::service::project_hash_for_path(repo);
+            let mut records = Vec::new();
+            for (id, checkout_of) in ids.iter().copied() {
+                let root = worktrees.join(&hash).join(id);
+                fs::create_dir_all(root.parent().unwrap()).unwrap();
+                let root_text = root.to_string_lossy().to_string();
+                git(
+                    checkout_of,
+                    &["worktree", "add", "-q", "-b", id, root_text.as_str()],
+                );
+                records.push(json!({
+                    "meta": {
+                        "id": id,
+                        "kind": "chat",
+                        "root": root_text,
+                        "source_workspace_root": repo,
+                        "repo_root": repo,
+                    },
+                    "created_at": "2024-01-01T00:00:00Z",
+                    "updated_at": "2024-01-01T00:00:00Z",
+                }));
+            }
+            let registry = json!({
+                "source_workspace_root": repo,
+                "project_hash": hash,
+                "records": records,
+            });
+            fs::write(
+                worktrees.join(&hash).join("index.json"),
+                registry.to_string(),
+            )
+            .unwrap();
+            hash
+        };
+        let source_hash = register(
+            &source,
+            &[("good", source.as_path()), ("forged", other.as_path())],
+        );
+        let other_hash = register(&other, &[("other", other.as_path())]);
+        let worktree = dunce::canonicalize(worktrees.join(&source_hash).join("good")).unwrap();
+        let worktree_repo = Repository::open(&worktree).unwrap();
+        fs::write(worktree.join("a.txt"), "changed\n").unwrap();
+
+        let app = crate::app_state::AppState::from_gcx(gcx).await;
+        let router = crate::http::routers::make_refact_http_server(app);
+        let status_uri = |root: &Path| {
+            format!(
+                "/v1/git/status?root={}",
+                url::form_urlencoded::byte_serialize(root.to_string_lossy().as_bytes())
+                    .collect::<String>()
+            )
+        };
+
+        let (status, body) = send(&router, "GET", &status_uri(&worktree), None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let root = worktree.to_string_lossy().to_string();
+        assert_eq!(body["roots"][0]["root"], root.as_str());
+        let (status, body) = send(
+            &router,
+            "POST",
+            "/v1/git/stage",
+            Some(json!({"root": root, "paths": ["a.txt"]})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            index_text(&worktree_repo, "a.txt").as_deref(),
+            Some("changed\n")
+        );
+        let (status, body) = send(
+            &router,
+            "POST",
+            "/v1/git/commit",
+            Some(json!({"root": root, "message": "in worktree", "paths": ["a.txt"]})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let committed = head_commit(&worktree_repo).unwrap().unwrap();
+        assert_eq!(body["oid"], committed.id().to_string());
+        assert_eq!(
+            committed.parent_ids().collect::<Vec<_>>(),
+            vec![source_head]
+        );
+        assert_eq!(
+            tree_text(&worktree_repo, &committed, "a.txt").as_deref(),
+            Some("changed\n")
+        );
+        assert_eq!(
+            head_commit(&source_repo).unwrap().unwrap().id(),
+            source_head
+        );
+        assert_eq!(fs::read_to_string(source.join("a.txt")).unwrap(), "base\n");
+
+        for rejected in [
+            worktrees.join(&source_hash).join("forged"),
+            worktrees.join(&other_hash).join("other"),
+        ] {
+            assert!(Repository::open(&rejected).unwrap().is_worktree());
+            let (status, body) = send(&router, "GET", &status_uri(&rejected), None).await;
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "{} {body}",
+                rejected.display()
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn git_status_reports_changes_untracked_conflicts_and_unchanged_legacy_lists() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();

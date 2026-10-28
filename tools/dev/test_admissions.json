@@ -2,6 +2,72 @@
   "version": 1,
   "tests": [
     {
+      "fingerprint": "04bd825060410cbf9b66832b11659116f4e902a93aadf02fdb299641a71361cb",
+      "occurrences": 1,
+      "failure_mode": "Git routes reject a registered current-project linked worktree; an overbroad fix can instead authorize another cached project's worktree or a checkout whose actual repository differs from its registry source.",
+      "importance": "Restore worktree Commit panel status, staging and committing without changing the source checkout or crossing project repository boundaries.",
+      "nearest_retained": {
+        "fingerprint": "78432c914e73f5cb4b41664473c078ac57348b0f5a3ad7860ae3fb049fc00951",
+        "why_insufficient": "selected_roots_maps_subdir_and_symlink_to_enclosing_root covers ordinary active roots, aliases and outside rejection, but constructs no registered linked checkout and cannot detect worktree admission, actual common-directory mismatch, inactive-source admission or commit/source isolation. Existing listed-path commit coverage uses an ordinary repository."
+      },
+      "oracle": "Real HTTP status selects the exact linked checkout; stage places changed bytes in its index; commit returns that checkout HEAD OID with the original source HEAD as parent and the exact changed blob. Source HEAD/file stay unchanged. Genuine forged-identity and inactive-project linked checkouts each return 404.",
+      "prerequisites": "Two initialized temporary repositories with commits, three genuine git worktree add checkouts, valid source-hash registries in an isolated cache, only source in active roots, and a modified tracked file in the good checkout. Negative cases assert is_worktree before requesting rejection.",
+      "shipping_implementation": "make_refact_http_server dispatches actual git_read status/stage and git_write commit handlers through production selected_roots and linked_checkout_matches; mocks do not implement authorization or commit logic.",
+      "determinism": "Unique temporary repositories and make_test_gcx cache; local Git configuration and synchronous worktree creation, no credentials, network, timing sleeps or ambient repository inputs.",
+      "layer": "Engine library HTTP-router regression using real local Git linked checkouts",
+      "why_cheapest": "A coherent shared two-repository/registry/router fixture proves the resolver-to-stage/commit boundary and source isolation that a copied predicate or UI mock cannot; no live server or browser is needed. One physical test explicitly charges all three meaningful cases.",
+      "meaningful_cases": 3,
+      "critical": true,
+      "criticality_reason": "Git repository authorization and source/worktree data integrity are critical; executed old-guard failure, two removed-security-guard failures and restored pass are recorded.",
+      "removed_coverage": "None; retained test bodies and shared test helpers are unchanged.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "refact-agent/engine/src/http/routers/v1/git_read.rs::selected_roots",
+        "before_fix": {
+          "reference": "d716ca751f27d07127dbff745fba4d1c79b10d5c:refact-agent/engine/src/http/routers/v1/git_read.rs",
+          "fingerprint": "3df31962e6a4b1bf60def62caa4f6d5261df68b94377c3d8f773624dfd03c8d0"
+        },
+        "intended_diagnostic": "Before-fix fails at good status with Git root is not an active workspace root (404 versus 200). Removing linked_checkout_matches fails on forged (200 versus 404); removing active-source membership fails on other (200 versus 404). Restored production guards pass.",
+        "failing": {
+          "command": [
+            "env",
+            "REFACT_SKIP_GUI_BUILD=1",
+            "RUST_MIN_STACK=16777216",
+            "cargo",
+            "test",
+            "--locked",
+            "--lib",
+            "http::routers::v1::git_write::tests::git_routes_accept_only_registered_linked_worktrees_of_active_roots",
+            "--",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/worktree-git-verification/before-fix.log:2300-2312; witnesses.json records file SHA256 and exit. identity-mutant.log:2306-2318 (SHA256 680088124cebd7734404616ee64357079d2add41564375d67b19d4f18f3b60b5) and source-scope-mutant.log:2306-2318 (SHA256 fd1bdad5fc20ed12609af47b306c6989de74409abce64233ed6a414163ae1a35) each exit 101 at intended negative oracle."
+        },
+        "passing": {
+          "command": [
+            "env",
+            "REFACT_SKIP_GUI_BUILD=1",
+            "RUST_MIN_STACK=16777216",
+            "cargo",
+            "test",
+            "--locked",
+            "--lib",
+            "http::routers::v1::git_write::tests::git_routes_accept_only_registered_linked_worktrees_of_active_roots",
+            "--",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/worktree-git-verification/restored.log:2299-2301: 1 passed, 0 failed. witnesses.json restored SHA256 e373bf929611e3034b20f8a74fdbaff68f0a97f3e2f6915a4268eb1e735188a0; all temporary mutations restored by finally block."
+        }
+      },
+      "author": "background_agent:bgagent-89df24c0-7f3f-42be-ba44-430ed1f2a00e",
+      "reviewer": "background_agent:bgagent-6490bb22-2cb2-4087-8c64-ac82fb2f2a77",
+      "review_evidence": "Independent semantic review bgagent-888a3504-8e68-4f5b-ad5c-e7bf11b9508a approved spec/security and 1 physical/3 meaningful cases. Independent evidence reviewer bgagent-6490bb22 read actual before-fix, identity/source mutants and restored logs, current production/test bodies and inventory fingerprint; approved critical admission with full-suite caveat. See subchat-629f9d04-8a6a-4544-bba8-c3cb3591c60d."
+    },
+    {
       "fingerprint": "2d52a1caafc2d57799080cd4d52b272d219eb1ef7f66dbcec88630801ef7efff",
       "occurrences": 1,
       "failure_mode": "Existing source architecture oracle silently omits valid registered descriptors using .into(), qualified Tool impls, assigned names or helper arguments; stale retired names/process count make valid current architecture fail.",
@@ -8710,22 +8776,38 @@
     },
     {
       "path": "refact-agent/engine/src/http/routers/v1/git_read.rs",
-      "before_sha256": "e2ba1c43b24389d74f65d0ddc698f49a379e1927a74348139cfcb3dc683e70c5",
-      "after_sha256": "3df31962e6a4b1bf60def62caa4f6d5261df68b94377c3d8f773624dfd03c8d0",
+      "before_sha256": "3df31962e6a4b1bf60def62caa4f6d5261df68b94377c3d8f773624dfd03c8d0",
+      "after_sha256": "e373bf929611e3034b20f8a74fdbaff68f0a97f3e2f6915a4268eb1e735188a0",
       "affected_tests": [
-        "03d5c0755fba184afc5e40a2ee1b891c6c757bf916a45d35db59efeddcaa5ffe",
-        "b23767686cb96a6d8f90a31f3b603fe026a3d5f6bd81259f0e7057a7811f138e",
-        "39c50d9c5d8171245f1abbb05a3a79064daa613d406e924d7b38958fb608cea4",
+        "04bd825060410cbf9b66832b11659116f4e902a93aadf02fdb299641a71361cb",
         "78432c914e73f5cb4b41664473c078ac57348b0f5a3ad7860ae3fb049fc00951",
-        "9cd16bf8f1e563ebb288ae0f40fc109aef357edd2648e6b5059cbff9a6f50cb0",
-        "1014c473da32f74fb0fd311c658662dafc1534351a6bae922985c6094353a6bb",
-        "9c0845e45541b840155cc3ffb09e010f08e656d6c25c0fb461d39625aa278e25"
+        "39c50d9c5d8171245f1abbb05a3a79064daa613d406e924d7b38958fb608cea4",
+        "cbd09b87002cf00a073ca1842e3854b79f4dc4f143f97ec73edf40ee209615c0"
       ],
-      "impact": "Production: status emits INDEX_NEW|WT_DELETED as ADDED staged+unstaged; branches_containing bounded (local first, match cap+1, 500 examined, branches_truncated); log scan cap applies to unfiltered walks; ambiguous oid prefix => 400; Windows log path separator normalisation. Test module unchanged.",
-      "execution_context": "Default engine library test context (cargo test --lib); RUST_MIN_STACK=16777216; no features, ignores or shared-fixture rewrites. Focused git_branches::tests git_write::tests git_read::tests routers::v1: 195 passed 0 failed.",
-      "author": "bgagent-fe-engine-git (author subagent, wave F-E)",
-      "reviewer": "bgagent-fd720f32-3ebc-4060-b064-50e88a69a1f9",
-      "review_evidence": "Independent claude_code/claude-sonnet-5-5 review bgagent-fd720f32-3ebc-4060-b064-50e88a69a1f9 (subchat-d7393a5b-d03a-46c9-9818-ea1b368f08ca): VERDICT APPROVE for both changed tests (rollback directory-replacement case, status INDEX_NEW|WT_DELETED case). Verified the mutA/mutA2/mutH diff sha256 values, the exit-101 logs and the restored final sources by cmp, reproduced in a scratch repo that git restore deletes a directory replacing a HEAD file (ignored contents included), and accepted case accounting 3->4 / 1. Requested wording changes (mutA2 described as fault injection, not pre-fix; mutH line-number provenance) are applied in these rows."
+      "impact": "Production root resolver adds a registered linked-worktree fallback only when an explicit canonical request has no enclosing ordinary active Git root. Existing ordinary/subdir/symlink resolution, rootless listing and relative-path guards are unchanged. New test drives the new accepted/rejected cases; retained root-selection, stage authorization and listed-path commit tests exercise preserved paths. No shared test helper or fixture changed.",
+      "execution_context": "Same engine library/router harness and features; blocking registry and Git identity checks run in spawn_blocking. No cfg/module/test reachability or environment changes. The new test uses isolated local source and linked checkouts. Critical witnesses execute the real resolver and are followed by restored passing execution.",
+      "author": "background_agent:bgagent-89df24c0-7f3f-42be-ba44-430ed1f2a00e",
+      "reviewer": "background_agent:bgagent-6490bb22-2cb2-4087-8c64-ac82fb2f2a77",
+      "review_evidence": "Independent semantic reviewer bgagent-888a3504 approved rootless/ordinary behavior preservation and canonical/common-directory/source-scope checks. Independent evidence reviewer bgagent-6490bb22 read current resolver, retained-path impact and actual three failing/restored passing witness logs; no behavior change to retained ordinary-root scenarios found. Full initial library execution ran all tests, with failures in unrelated crash/cross-process modules reported separately rather than hidden. Final restored cargo test --locked --lib rerun: 3677 passed, 0 failed, 11 ignored (.refact/worktree-git-verification/lib-restored.log).",
+      "prior_review": {
+        "path": "refact-agent/engine/src/http/routers/v1/git_read.rs",
+        "before_sha256": "e2ba1c43b24389d74f65d0ddc698f49a379e1927a74348139cfcb3dc683e70c5",
+        "after_sha256": "3df31962e6a4b1bf60def62caa4f6d5261df68b94377c3d8f773624dfd03c8d0",
+        "affected_tests": [
+          "03d5c0755fba184afc5e40a2ee1b891c6c757bf916a45d35db59efeddcaa5ffe",
+          "b23767686cb96a6d8f90a31f3b603fe026a3d5f6bd81259f0e7057a7811f138e",
+          "39c50d9c5d8171245f1abbb05a3a79064daa613d406e924d7b38958fb608cea4",
+          "78432c914e73f5cb4b41664473c078ac57348b0f5a3ad7860ae3fb049fc00951",
+          "9cd16bf8f1e563ebb288ae0f40fc109aef357edd2648e6b5059cbff9a6f50cb0",
+          "1014c473da32f74fb0fd311c658662dafc1534351a6bae922985c6094353a6bb",
+          "9c0845e45541b840155cc3ffb09e010f08e656d6c25c0fb461d39625aa278e25"
+        ],
+        "impact": "Production: status emits INDEX_NEW|WT_DELETED as ADDED staged+unstaged; branches_containing bounded (local first, match cap+1, 500 examined, branches_truncated); log scan cap applies to unfiltered walks; ambiguous oid prefix => 400; Windows log path separator normalisation. Test module unchanged.",
+        "execution_context": "Default engine library test context (cargo test --lib); RUST_MIN_STACK=16777216; no features, ignores or shared-fixture rewrites. Focused git_branches::tests git_write::tests git_read::tests routers::v1: 195 passed 0 failed.",
+        "author": "bgagent-fe-engine-git (author subagent, wave F-E)",
+        "reviewer": "bgagent-fd720f32-3ebc-4060-b064-50e88a69a1f9",
+        "review_evidence": "Independent claude_code/claude-sonnet-5-5 review bgagent-fd720f32-3ebc-4060-b064-50e88a69a1f9 (subchat-d7393a5b-d03a-46c9-9818-ea1b368f08ca): VERDICT APPROVE for both changed tests (rollback directory-replacement case, status INDEX_NEW|WT_DELETED case). Verified the mutA/mutA2/mutH diff sha256 values, the exit-101 logs and the restored final sources by cmp, reproduced in a scratch repo that git restore deletes a directory replacing a HEAD file (ignored contents included), and accepted case accounting 3->4 / 1. Requested wording changes (mutA2 described as fault injection, not pre-fix; mutH line-number provenance) are applied in these rows."
+      }
     },
     {
       "path": "refact-agent/engine/src/http/routers/v1/git_write.rs",

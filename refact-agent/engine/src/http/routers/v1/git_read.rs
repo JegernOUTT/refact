@@ -361,10 +361,48 @@ async fn effective_git_roots(
         .map_err(|error| internal_error(format!("Git root discovery task failed: {}", error)))
 }
 
+fn registered_worktree_root(
+    cache_dir: &Path,
+    roots: &[PathBuf],
+    requested: &Path,
+) -> Option<PathBuf> {
+    let worktrees_dir = dunce::canonicalize(cache_dir.join("worktrees")).ok()?;
+    crate::files_correction::registered_worktree_path_mappings(cache_dir)
+        .iter()
+        .filter_map(|mapping| {
+            let root = dunce::canonicalize(&mapping.root).ok()?;
+            let source = dunce::canonicalize(&mapping.source_root).ok()?;
+            let in_scope = root.starts_with(&worktrees_dir)
+                && root != worktrees_dir
+                && requested.starts_with(&root)
+                && resolve_enclosing_root(roots, &source).is_some();
+            (in_scope && linked_checkout_matches(&root, &source)).then_some(root)
+        })
+        .max_by_key(|root| root.components().count())
+}
+
+fn linked_checkout_matches(root: &Path, source: &Path) -> bool {
+    let (Ok(worktree), Ok(source_repository)) =
+        (Repository::open(root), Repository::discover(source))
+    else {
+        return false;
+    };
+    let workdir = worktree
+        .workdir()
+        .and_then(|workdir| dunce::canonicalize(workdir).ok());
+    let common_dir = |repository: &Repository| dunce::canonicalize(repository.commondir()).ok();
+    let worktree_common_dir = common_dir(&worktree);
+    worktree.is_worktree()
+        && workdir.as_deref() == Some(root)
+        && worktree_common_dir.is_some()
+        && worktree_common_dir == common_dir(&source_repository)
+}
+
 pub(super) async fn selected_roots(
     gcx: Arc<GlobalContext>,
     requested: Option<String>,
 ) -> Result<Vec<PathBuf>, (StatusCode, Json<Value>)> {
+    let cache_dir = gcx.cache_dir.clone();
     let roots = effective_git_roots(gcx).await?;
 
     let Some(requested) = requested else {
@@ -374,14 +412,20 @@ pub(super) async fn selected_roots(
         .await
         .map(|path| dunce::simplified(&path).to_path_buf())
         .map_err(|_| api_error(StatusCode::NOT_FOUND, "Git root not found"))?;
-    resolve_enclosing_root(&roots, &requested)
-        .map(|root| vec![root])
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::NOT_FOUND,
-                "Git root is not an active workspace root",
-            )
+    let selected = match resolve_enclosing_root(&roots, &requested) {
+        Some(root) => Some(root),
+        None => tokio::task::spawn_blocking(move || {
+            registered_worktree_root(&cache_dir, &roots, &requested)
         })
+        .await
+        .map_err(|error| internal_error(format!("Git root discovery task failed: {}", error)))?,
+    };
+    selected.map(|root| vec![root]).ok_or_else(|| {
+        api_error(
+            StatusCode::NOT_FOUND,
+            "Git root is not an active workspace root",
+        )
+    })
 }
 
 pub(super) async fn resolve_requested_root(
