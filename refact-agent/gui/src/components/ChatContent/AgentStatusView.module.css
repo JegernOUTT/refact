@@ -4,12 +4,6 @@
   overflow: hidden;
 }
 
-.receiptDetails {
-  display: grid;
-  gap: var(--rf-space-3);
-  min-width: 0;
-}
-
 .stickyAlerts {
   position: sticky;
   top: 0;

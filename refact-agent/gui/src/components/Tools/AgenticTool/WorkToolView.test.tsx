@@ -3,29 +3,22 @@ import { render, screen } from "../../../utils/test-utils";
 import { WorkToolView } from "./WorkToolView";
 import { workFixture } from "../../../services/refact/workFixtures";
 
-describe("Work tool card", () => {
+describe("Work tool view", () => {
   it("renders structured states rather than raw JSON", () => {
-    render(
-      <WorkToolView
-        content={JSON.stringify(workFixture)}
-        pending={false}
-        failed={false}
-      />,
-    );
+    render(<WorkToolView content={JSON.stringify(workFixture)} />);
     expect(screen.getByText("Board work")).toBeInTheDocument();
     expect(screen.getByText("Queued")).toBeInTheDocument();
     expect(screen.queryByText(/snapshot_id/)).not.toBeInTheDocument();
   });
-  it("supports streaming and unavailable legacy/error results", () => {
-    const view = render(<WorkToolView content={null} pending failed={false} />);
-    expect(screen.getByRole("status")).toHaveTextContent("Waiting");
-    view.rerender(
-      <WorkToolView content="legacy response" pending={false} failed={false} />,
-    );
-    expect(screen.getByRole("alert")).toHaveTextContent("legacy");
+
+  it("renders nothing for legacy or empty responses", () => {
+    const view = render(<WorkToolView content={null} />);
+    expect(screen.queryByLabelText("Work snapshot")).toBeNull();
+    view.rerender(<WorkToolView content="legacy response" />);
+    expect(screen.queryByLabelText("Work snapshot")).toBeNull();
   });
 
-  it("shows the inspected item independently of its children page", () => {
+  it("does not claim emptiness for an inspected item with no children", () => {
     render(
       <WorkToolView
         content={JSON.stringify({
@@ -35,12 +28,7 @@ describe("Work tool card", () => {
           total: 0,
           returned: 0,
         })}
-        pending={false}
-        failed={false}
       />,
-    );
-    expect(screen.getByLabelText("Selected work")).toHaveTextContent(
-      "Board work",
     );
     expect(screen.queryByText(/No work observed/)).not.toBeInTheDocument();
   });
@@ -64,95 +52,31 @@ function inspection(extra: Record<string, unknown>) {
   });
 }
 
-describe("Work tool card file overlap", () => {
-  it("renders nothing when the inspection reports no overlapping work", () => {
+describe("Work tool view file overlap", () => {
+  it("renders no overlap section when nothing overlaps", () => {
     render(
       <WorkToolView
         content={inspection({ rows: [], total: 0, returned: 0 })}
-        pending={false}
-        failed={false}
       />,
     );
     expect(screen.queryByLabelText("File overlap")).not.toBeInTheDocument();
-    expect(screen.queryByText(/same physical file/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/separate checkout/i)).not.toBeInTheDocument();
   });
 
-  it("separates a physical file conflict from an advisory cross-checkout overlap", () => {
+  it("separates a physical file conflict from an advisory overlap", () => {
     render(
       <WorkToolView
         content={inspection({ integration_overlaps: ["trajectory:peer"] })}
-        pending={false}
-        failed={false}
       />,
     );
-    expect(screen.getByLabelText("File overlap")).toBeInTheDocument();
-    expect(screen.getByLabelText("Paths checked (1)")).toBeInTheDocument();
-
-    const physical = screen.getByLabelText("Same file conflicts (1) content");
-    const advisory = screen.getByLabelText(
-      "Cross-checkout overlaps (1) content",
+    expect(screen.getByLabelText("File overlap")).toHaveTextContent(
+      "src/lib.rs",
     );
+    const physical = screen.getByLabelText("Same file conflicts (1)");
+    const advisory = screen.getByLabelText("Cross-checkout overlaps (1)");
     expect(physical).toHaveTextContent("Board work");
     expect(physical).not.toHaveTextContent("Peer work");
     expect(advisory).toHaveTextContent("Peer work");
     expect(advisory).not.toHaveTextContent("Board work");
-
-    expect(
-      screen.getByText(/touch the same physical file/i),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/same repository-relative path in a separate checkout/i),
-    ).toBeInTheDocument();
-  });
-
-  it("describes an advisory overlap without claiming a conflict or a lock", () => {
-    render(
-      <WorkToolView
-        content={inspection({
-          rows: [peerRow],
-          total: 1,
-          returned: 1,
-          integration_overlaps: ["trajectory:peer"],
-        })}
-        pending={false}
-        failed={false}
-      />,
-    );
-    expect(
-      screen.queryByLabelText("Same file conflicts (1)"),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByText(
-        "These work items touch the same repository-relative path in a separate checkout. That is an integration warning, not a file conflict and not a lock.",
-      ),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByText(/can overwrite their changes/i),
-    ).not.toBeInTheDocument();
-  });
-
-  it("bounds a large overlap set behind the shared pager", () => {
-    const many = Array.from({ length: 120 }, (_, index) => ({
-      ...workFixture.rows[0],
-      key: { runtime: "trajectory", id: `peer-${index}` },
-      title: `Overlapping work item number ${index}`,
-    }));
-    render(
-      <WorkToolView
-        content={inspection({ rows: many, total: 120, returned: 120 })}
-        pending={false}
-        failed={false}
-      />,
-    );
-    const body = screen.getByLabelText("Same file conflicts (120) content");
-    expect(body.textContent?.length).toBeLessThanOrEqual(4096);
-    expect(
-      screen.getByRole("navigation", {
-        name: "Same file conflicts (120) pages",
-      }),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Next section" })).toBeEnabled();
   });
 
   it("labels a withheld row and never invents a withheld count", () => {
@@ -163,12 +87,10 @@ describe("Work tool card file overlap", () => {
           total: 1,
           returned: 1,
         })}
-        pending={false}
-        failed={false}
       />,
     );
     expect(
-      screen.getAllByLabelText("Withheld by privacy policy").length,
+      screen.getAllByText(/Withheld by privacy policy/).length,
     ).toBeGreaterThan(0);
     expect(
       screen.queryByLabelText("Withheld work count"),
@@ -180,8 +102,6 @@ describe("Work tool card file overlap", () => {
     render(
       <WorkToolView
         content={JSON.stringify({ ...workFixture, withheld_rows: 1 })}
-        pending={false}
-        failed={false}
       />,
     );
     expect(screen.getByLabelText("Withheld work count")).toHaveTextContent(

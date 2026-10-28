@@ -6,6 +6,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "../../utils/test-utils";
 import * as chatCommands from "../../services/refact/chatCommands";
 import type { ToolCall, ToolMessage } from "../../services/refact/types";
@@ -124,12 +125,8 @@ describe("AgentPulseContent", () => {
       .spyOn(chatCommands, "sendChatCommand")
       .mockResolvedValue(undefined);
     renderPulse(PULSE_OUTPUT);
-    const outer = screen.getByRole("button", {
-      name: "Inspect check-agents redesign Agent running",
-    });
+    const outer = screen.getByTestId("transcript-toggle");
     fireEvent.click(outer);
-    const details = screen.getByRole("button", { name: "More details" });
-    fireEvent.click(details);
     expect(onSubmitCommand).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByText("Pause"));
@@ -209,84 +206,125 @@ describe("AgentPulseContent", () => {
       );
     });
     expect(outer).toHaveAttribute("aria-expanded", "true");
-    expect(details).toHaveAttribute("aria-expanded", "true");
   });
 });
 
-describe("AgentPulseView compact route", () => {
-  it("starts closed with a title and explicit agent state, with hidden controls outside the tab order", async () => {
-    const { user, container } = renderPulse(PULSE_OUTPUT);
-    const outer = screen.getByRole("button", {
-      name: "Inspect check-agents redesign Agent running",
-    });
+function itemOf(toggle: HTMLElement): HTMLElement {
+  const section = toggle.closest("section");
+  if (!section) throw new Error("expected transcript section");
+  return section;
+}
+
+describe("AgentPulseView transcript route", () => {
+  it("starts closed with the card title and reported state, revealing controls when opened", async () => {
+    const { user } = renderPulse(PULSE_OUTPUT);
+    const outer = screen.getByTestId("transcript-toggle");
     expect(outer).toHaveAttribute("aria-expanded", "false");
-    expect(outer.closest("section")).toHaveAttribute("data-density", "compact");
-    expect(outer.closest("section")).toHaveAttribute("data-status", "idle");
+    expect(itemOf(outer)).toHaveAttribute("data-status", "running");
+    expect(within(outer).getByTestId("transcript-verb")).toHaveTextContent(
+      "Pulse",
+    );
+    expect(within(outer).getByTestId("transcript-target")).toHaveTextContent(
+      "check-agents redesign",
+    );
     expect(outer).not.toHaveTextContent("T-29");
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "Running",
+    );
     expect(
       screen.queryByRole("button", { name: "Pause" }),
     ).not.toBeInTheDocument();
     await user.click(outer);
-    expect(container.querySelectorAll("dt")).toHaveLength(3);
-    const details = screen.getByRole("button", { name: "More details" });
+    const facts = screen.getByTestId("transcript-facts");
+    expect(facts.querySelectorAll("dt")).toHaveLength(3);
+    expect(
+      within(facts).getByText("🔄 generating response"),
+    ).toBeInTheDocument();
+    expect(within(facts).getByText("3m ago")).toBeInTheDocument();
     const pause = screen.getByRole("button", { name: "Pause" });
-    expect(pause.closest("[inert]")).not.toBeNull();
-    details.focus();
-    await user.tab();
-    expect(pause).not.toHaveFocus();
-    await user.click(details);
     expect(pause.closest("[inert]")).toBeNull();
     expect(
       screen.getByText("Adding sticky alerts logic..."),
     ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Raw" }));
+    const raw = screen.getByTestId("transcript-raw");
+    const blocks = Array.from(raw.querySelectorAll("pre")).map(
+      (pre) => pre.textContent,
+    );
+    expect(blocks).toEqual([
+      JSON.stringify({ card_id: "T-29" }, null, 2),
+      PULSE_OUTPUT,
+    ]);
   });
 
   it.each([
-    ["💤 idle", "Agent idle"],
-    ["⏸️ paused", "Agent paused"],
-    ["⏳ waiting for user input", "Agent waiting"],
-    ["✅ completed", "Done · unverified"],
-    ["❌ error", "Agent failed"],
-    ["❓ last known: done", "State unknown"],
-    ["not completed; failed?", "State unknown"],
-    ["unknown", "State unknown"],
+    ["💤 idle", "done", null],
+    ["⏸️ paused", "waiting", "Paused"],
+    ["⏳ waiting for user input", "waiting", "Waiting"],
+    ["✅ completed", "done", null],
+    ["❌ error", "failed", "Failed"],
+    ["unknown", "unknown", "Unknown"],
   ])(
-    "uses only explicit reported state %s, never activity as progress",
-    (state, label) => {
+    "maps only the explicit reported state %s, never activity as progress",
+    (state, status, pillText) => {
       renderPulse(PULSE_OUTPUT.replace("🔄 generating response", state));
-      const outer = screen.getByRole("button", {
-        name: `Inspect check-agents redesign ${label}`,
-      });
+      const outer = screen.getByTestId("transcript-toggle");
       expect(outer).toHaveAttribute("aria-expanded", "false");
-      expect(outer.closest("section")).toHaveAttribute("data-status", "idle");
+      expect(itemOf(outer)).toHaveAttribute("data-status", status);
+      const pill = screen.queryByTestId("transcript-status-pill");
+      if (pillText === null) expect(pill).not.toBeInTheDocument();
+      else expect(pill).toHaveTextContent(pillText);
       expect(outer).not.toHaveTextContent(/progress|verified success/iu);
     },
   );
 
   it.each([
-    [null, false, false, "State unknown", "idle"],
-    [null, false, true, "Checking pulse", "running"],
-    ["not a report", false, false, "State unknown", "idle"],
-    ['cancel_agent(card_id="T-29")', true, false, "Request failed", "error"],
-    ["# Agent Pulse: T-29", false, false, "State unknown", "idle"],
+    [null, false, false, "unknown", "Unknown"],
+    [null, false, true, "running", "Running"],
+    ["not a report", false, false, "unknown", "Unknown"],
+    ['cancel_agent(card_id="T-29")', true, false, "failed", "Failed"],
   ])(
     "keeps absent/malformed/failed transport honest: %s",
-    (content, failed, waiting, label, status) => {
+    (content, failed, waiting, status, pillText) => {
       const send = vi
         .spyOn(chatCommands, "sendChatCommand")
         .mockResolvedValue(undefined);
       renderPulse(content, failed, waiting);
-      const outer = screen.getByRole("button", {
-        name: `Inspect agent activity ${label}`,
-      });
+      const outer = screen.getByTestId("transcript-toggle");
       expect(outer).toHaveAttribute("aria-expanded", "false");
-      expect(outer.closest("section")).toHaveAttribute("data-status", status);
+      expect(itemOf(outer)).toHaveAttribute("data-status", status);
+      expect(
+        within(outer).queryByTestId("transcript-target"),
+      ).not.toBeInTheDocument();
+      expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+        pillText,
+      );
       expect(send).not.toHaveBeenCalled();
     },
   );
 
+  it("falls back to the card id when the pulse has no title", () => {
+    renderPulse("# Agent Pulse: T-29");
+    const outer = screen.getByTestId("transcript-toggle");
+    expect(within(outer).getByTestId("transcript-target")).toHaveTextContent(
+      "T-29",
+    );
+    expect(itemOf(outer)).toHaveAttribute("data-status", "unknown");
+  });
+
+  it("shows a failed request in the Error section without pulse controls", async () => {
+    const { user } = renderPulse("pulse failed sentinel", true);
+    await user.click(screen.getByTestId("transcript-toggle"));
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "pulse failed sentinel",
+    );
+    expect(
+      screen.queryByRole("button", { name: "Pause" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("keeps stored disclosure choices independent across status changes and remounts", () => {
-    const preferences = new Map([["tc:pulse-call", true]]);
+    const preferences = new Map([["agent_pulse:pulse-call", true]]);
     const collapseStore = {
       get: (key: string) => preferences.get(key),
       set: (key: string, value: boolean) => {
@@ -303,14 +341,8 @@ describe("AgentPulseView compact route", () => {
       </CollapsibleStoreProvider>
     );
     const { store, unmount } = render(view(), { preloadedState: { chat } });
-    const outer = screen.getByRole("button", {
-      name: "Inspect check-agents redesign Agent running",
-    });
-    const sibling = screen.getByRole("button", {
-      name: "Inspect agent activity State unknown",
-    });
-    const details = screen.getByRole("button", { name: "More details" });
-    fireEvent.click(details);
+    const [outer, sibling] = screen.getAllByTestId("transcript-toggle");
+    expect(outer).toHaveAttribute("aria-expanded", "true");
     act(() => {
       store.dispatch(
         applyChatEvent({
@@ -325,8 +357,9 @@ describe("AgentPulseView compact route", () => {
       );
     });
     expect(outer).toHaveAttribute("aria-expanded", "true");
-    expect(outer).toHaveTextContent("Agent paused");
-    expect(details).toHaveAttribute("aria-expanded", "true");
+    expect(
+      within(itemOf(outer)).getByTestId("transcript-status-pill"),
+    ).toHaveTextContent("Paused");
     expect(sibling).toHaveAttribute("aria-expanded", "false");
     fireEvent.click(outer);
     act(() => {
@@ -343,11 +376,11 @@ describe("AgentPulseView compact route", () => {
     expect(outer).toHaveAttribute("aria-expanded", "false");
     unmount();
     render(view(), { store });
-    expect(
-      screen.getByRole("button", {
-        name: "Inspect agent activity Request failed",
-      }),
-    ).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getAllByTestId("transcript-toggle")[0]).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(preferences.get("agent_pulse:pulse-call")).toBe(false);
   });
 
   it("preserves disabled controls", () => {

@@ -21,8 +21,6 @@ import { useThreadId } from "../../features/Chat/Thread";
 import { selectApiKey, selectConfig } from "../../features/Config/configSlice";
 import { sendChatCommand } from "../../services/refact/chatCommands";
 import type { ToolCall } from "../../services/refact/types";
-import { CompactToolDetails } from "../Tools/AgenticTool/CompactToolDetails";
-import { PagedText } from "../Tools/AgenticTool/PagedText";
 import {
   Badge,
   Button,
@@ -34,8 +32,7 @@ import {
   Select,
   StatusDot,
 } from "../ui";
-import { ToolCard, type ToolStatus } from "./ToolCard";
-import { useStoredOpen } from "./useStoredOpen";
+import { TranscriptItem, type TranscriptStatus } from "./TranscriptItem";
 import {
   COLLAPSE_ANIMATION_MS,
   useDelayedUnmount,
@@ -667,8 +664,6 @@ export const AgentStatusContent: React.FC<AgentStatusContentProps> = ({
 export const AgentStatusView: React.FC<AgentStatusViewProps> = ({
   toolCall,
 }) => {
-  const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle] = useStoredOpen(storeKey, false);
   const chatId = useThreadId();
   const isStreaming = useAppSelector((state) =>
     selectIsStreamingById(state, chatId),
@@ -694,53 +689,41 @@ export const AgentStatusView: React.FC<AgentStatusViewProps> = ({
   const alerts = report
     ? mergeAgentAlerts(report.alerts, countAgentAlerts(report.rows))
     : EMPTY_ALERTS;
-  const hasSnapshot = report !== null;
-  const rowCount =
-    report && report.roster !== "unparsed" ? report.rows.length : null;
+  const parsed = report !== null && report.roster !== "unparsed";
+  const rowCount = parsed ? report.rows.length : null;
   const isRequestRunning = !maybeResult && (isStreaming || isWaiting);
-  const status: ToolStatus = maybeResult?.tool_failed
-    ? "error"
+  const failed = maybeResult?.tool_failed === true;
+  const status: TranscriptStatus = failed
+    ? "failed"
     : isRequestRunning
       ? "running"
-      : "idle";
-  const summary =
-    rowCount !== null ? `${rowCount} agent rows shown` : "Check agent status";
-  const meta = maybeResult?.tool_failed
-    ? "Request failed"
-    : isRequestRunning
-      ? "Checking"
-      : !hasSnapshot
-        ? "Status unknown"
-        : alerts.failed > 0 && alerts.approval > 0
-          ? "Failed / approval"
-          : alerts.failed > 0
-            ? "Agents failed"
-            : alerts.approval > 0
-              ? "Approval needed"
-              : alerts.stuck > 0
-                ? "Agents stuck"
-                : report.roster === "unparsed"
-                  ? "Roster not parsed"
-                  : "Snapshot received";
-  const facts = hasSnapshot
+      : !maybeResult
+        ? "unknown"
+        : alerts.failed > 0
+          ? "failed"
+          : alerts.approval > 0 || alerts.stuck > 0
+            ? "needs_you"
+            : "done";
+  const statusLabel =
+    !failed && alerts.failed > 0
+      ? `${alerts.failed} failed`
+      : alerts.approval > 0
+        ? `${alerts.approval} need approval`
+        : alerts.stuck > 0
+          ? `${alerts.stuck} stuck`
+          : undefined;
+  const facts = parsed
     ? [
+        { label: "Agents", value: String(rowCount) },
+        ...(report.coverage
+          ? [{ label: "Coverage", value: report.coverage }]
+          : []),
         {
-          label: "Observed",
-          value:
-            rowCount === null
-              ? "Agent count unknown"
-              : `${rowCount} agent rows in this response`,
-        },
-        {
-          label: "Coverage",
-          value: report.coverage ?? "Returned rows only; total unknown",
-        },
-        {
-          label: "Observed alerts",
-          value: `${alerts.stuck} stuck, ${alerts.failed} failed, ${alerts.approval} needing approval`,
+          label: "Alerts",
+          value: `${alerts.stuck} stuck · ${alerts.failed} failed · ${alerts.approval} approval`,
         },
       ]
-    : [{ label: "Result", value: "Agent status unavailable" }];
+    : [];
 
   const handleSubmitCommand = useCallback(
     async (command: string) => {
@@ -756,39 +739,31 @@ export const AgentStatusView: React.FC<AgentStatusViewProps> = ({
   );
 
   return (
-    <>
-      <span data-testid="agent-status-view" hidden />
-      <ToolCard
-        density="compact"
-        icon={<Icon icon={Settings} size="sm" />}
-        summary={summary}
-        meta={meta}
-        status={status}
-        isOpen={isOpen}
-        onToggle={handleToggle}
-        toolCall={toolCall}
-      >
-        <CompactToolDetails facts={facts}>
-          <div className={styles.receiptDetails}>
-            {report && report.roster !== "unparsed" ? (
-              <AgentStatusContent
-                report={report}
-                onSubmitCommand={handleSubmitCommand}
-                actionsDisabled={!chatId || maybeResult?.tool_failed === true}
-              />
-            ) : content ? (
-              <div className={styles.emptyState}>
-                Roster not parsed. Inspect the full response below.
-              </div>
-            ) : null}
-            {content !== null && (
-              <PagedText label="Full response" body={content} />
-            )}
-            <PagedText label="Arguments" body={toolCall.function.arguments} />
-          </div>
-        </CompactToolDetails>
-      </ToolCard>
-    </>
+    <TranscriptItem
+      data-testid="agent-status-view"
+      icon={<Settings aria-hidden />}
+      verb="Agents"
+      target={rowCount !== null ? `${rowCount} cards` : undefined}
+      status={status}
+      statusLabel={statusLabel}
+      summary={facts}
+      output={
+        parsed ? (
+          <AgentStatusContent
+            report={report}
+            onSubmitCommand={handleSubmitCommand}
+            actionsDisabled={!chatId || failed}
+          />
+        ) : undefined
+      }
+      error={failed ? content : undefined}
+      raw={[
+        { label: "Arguments", value: toolCall.function.arguments },
+        ...(content !== null ? [{ label: "Response", value: content }] : []),
+      ]}
+      openKey={toolCall.id ? `agent_status:${toolCall.id}` : undefined}
+      defaultOpen={status === "needs_you"}
+    />
   );
 };
 

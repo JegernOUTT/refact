@@ -1,13 +1,15 @@
 import { useState } from "react";
-import { Badge, Button, Icon, ToolCard as DetailsCard } from "../../ui";
+import { Button } from "../../ui";
 import { agenticIcon } from "./agenticIcons";
-import { ToolCard } from "../../ChatContent/ToolCard";
-import { useStoredOpen } from "../../ChatContent/useStoredOpen";
+import {
+  TranscriptFacts,
+  TranscriptItem,
+  type TranscriptRawBlock,
+  type TranscriptStatus,
+} from "../../ChatContent/TranscriptItem";
 import type { ToolCall, ToolResult } from "../../../services/refact/types";
 import { humanizeIdentifier } from "../../../utils/displayNames";
-import { CompactToolDetails } from "./CompactToolDetails";
 import { compactText, readCompactRecord } from "./compactPresentation";
-import { PagedText } from "./PagedText";
 import styles from "./AgenticTool.module.css";
 
 type Source = {
@@ -195,6 +197,176 @@ function bounded(value: string | number): string {
   return text.length > 240 ? `${text.slice(0, 240)}…` : text;
 }
 
+type Fact = { label: string; value: string | number | undefined };
+
+function Facts({ label, facts }: { label: string; facts: Fact[] }) {
+  return (
+    <section aria-label={label} className={styles.section}>
+      <TranscriptFacts
+        facts={facts.flatMap((fact) =>
+          fact.value === undefined
+            ? []
+            : [{ label: fact.label, value: bounded(fact.value) }],
+        )}
+      />
+    </section>
+  );
+}
+
+function launchFacts(launch: EffectiveLaunch): Fact[] {
+  return [
+    {
+      label: "Revision",
+      value: `${launch.revision} (schema ${launch.schema_version})`,
+    },
+    { label: "Mode", value: launch.mode },
+    { label: "Tool authority", value: toolsLabel(launch.tools) },
+    { label: "Step budget", value: launch.max_steps },
+    { label: "Nesting depth", value: launch.subchat_depth },
+    { label: "Checkout", value: launch.worktree_mode },
+    {
+      label: "Approval",
+      value: launch.autonomous_no_confirm
+        ? "autonomous"
+        : [
+            launch.auto_approve_editing_tools
+              ? "edits auto-approved"
+              : "edits confirmed",
+            launch.auto_approve_dangerous_commands
+              ? "commands auto-approved"
+              : "commands confirmed",
+          ].join(", "),
+    },
+    {
+      label: "Accepted payload",
+      value: `${launch.accepted_bytes} of ${launch.accepted_byte_limit} bytes, ${launch.messages} messages`,
+    },
+  ];
+}
+
+function sourceFacts(current: Source): Fact[] {
+  return [
+    { label: "Source kind", value: humanizeIdentifier(current.type) },
+    { label: "Source path", value: current.path },
+    { label: "Source message", value: current.message_id },
+    { label: "Source principal", value: current.principal },
+    { label: "Content digest", value: current.digest },
+    { label: "Document", value: current.slug },
+    { label: "Task", value: current.task_id },
+    { label: "Label", value: current.label ?? undefined },
+    { label: "First line", value: current.line1 },
+    { label: "Last line", value: current.line2 },
+    { label: "Observed at (Unix ms)", value: current.observed_at_ms },
+  ];
+}
+
+function Pager({
+  label,
+  index,
+  total,
+  noun,
+  onChange,
+}: {
+  label: string;
+  index: number;
+  total: number;
+  noun: string;
+  onChange: (index: number) => void;
+}) {
+  if (total < 2) return null;
+  return (
+    <nav aria-label={label} className={styles.actions}>
+      <Button
+        size="sm"
+        disabled={index === 0}
+        onClick={() => onChange(index - 1)}
+      >
+        Previous {noun}
+      </Button>
+      <span role="status">
+        {index + 1} of {total}
+      </span>
+      <Button
+        size="sm"
+        disabled={index + 1 === total}
+        onClick={() => onChange(index + 1)}
+      >
+        Next {noun}
+      </Button>
+    </nav>
+  );
+}
+
+function PreviewInput({ preview }: { preview: Preview }) {
+  const [page, setPage] = useState(0);
+  const [toolPage, setToolPage] = useState(0);
+  const tools = preview.effective_tools;
+  const toolIndex = Math.min(toolPage, Math.max(0, (tools?.length ?? 0) - 1));
+  const index = Math.min(page, Math.max(0, preview.context_sources.length - 1));
+  const current = preview.context_sources.at(index);
+  const contract = preview.deliverable;
+  return (
+    <section aria-label="Child launch preview" className={styles.section}>
+      <section aria-label="Preview tool authority" className={styles.section}>
+        {tools === undefined ? (
+          <p>Tool authority not recorded.</p>
+        ) : tools.length === 0 ? (
+          <p>No tools permitted.</p>
+        ) : (
+          <>
+            <p>{bounded(tools[toolIndex])}</p>
+            <Pager
+              label="Preview tools"
+              index={toolIndex}
+              total={tools.length}
+              noun="tool"
+              onChange={setToolPage}
+            />
+          </>
+        )}
+      </section>
+      {contract ? (
+        <Facts
+          label="Preview deliverable contract"
+          facts={[
+            {
+              label: "Required sections",
+              value:
+                contract.required_sections.length === 0
+                  ? "none"
+                  : contract.required_sections.join(", "),
+            },
+            {
+              label: "Output schema",
+              value: contract.output_schema ? "declared" : "not declared",
+            },
+            {
+              label: "Evidence",
+              value: contract.evidence_required ? "required" : "not required",
+            },
+          ]}
+        />
+      ) : null}
+      {preview.launch_blocked === undefined && preview.effective_launch && (
+        <Facts
+          label="Effective launch settings"
+          facts={launchFacts(preview.effective_launch)}
+        />
+      )}
+      {current && (
+        <Facts label="Launch context source" facts={sourceFacts(current)} />
+      )}
+      <Pager
+        label="Launch context sources"
+        index={index}
+        total={preview.context_sources.length}
+        noun="source"
+        onChange={setPage}
+      />
+    </section>
+  );
+}
+
 export function LaunchPreviewTool({
   toolCall,
   rawContent,
@@ -208,348 +380,74 @@ export function LaunchPreviewTool({
   hasResult: boolean;
   failed: boolean;
 }) {
-  const [open, toggle] = useStoredOpen(
-    toolCall.id ? `tc:${toolCall.id}` : undefined,
-    false,
-  );
-  const [page, setPage] = useState(0);
-  const [toolPage, setToolPage] = useState(0);
   const preview = parse(extra);
   const args = readCompactRecord(toolCall.function.arguments);
   const task =
     typeof args?.task === "string" ? compactText(args.task, 160) : null;
   const available = hasResult && !failed && preview !== null;
-  const blocked =
-    available &&
-    (preview.launch_blocked !== undefined || preview.skipped_count > 0);
-  const stateLabel = !hasResult
-    ? "Preparing preview"
+  const blockedReason = !available
+    ? null
+    : preview.launch_blocked ??
+      (preview.skipped_count > 0
+        ? `${preview.skipped_count} unresolved context ${
+            preview.skipped_count === 1 ? "entry" : "entries"
+          }`
+        : null);
+  const status: TranscriptStatus = !hasResult
+    ? "running"
     : !available
-      ? "Preview unavailable"
-      : blocked
-        ? "Launch blocked"
-        : "Preview only";
-  const facts = available
-    ? [
-        { label: "Launch", value: "No child started" },
-        { label: "Model", value: preview.effective_model },
-        {
-          label: blocked ? "Blocked" : "Context",
-          value:
-            preview.launch_blocked ??
-            (preview.skipped_count > 0
-              ? `${preview.skipped_count} unresolved context entries`
-              : `${preview.estimated_tokens} estimated tokens`),
-        },
-      ]
-    : [
-        {
-          label: "Preview",
-          value: !hasResult
-            ? "Preparing preview; no acceptance receipt yet"
-            : "Details unavailable; this response does not confirm a launch",
-        },
-      ];
-  const toolIndex = Math.min(
-    toolPage,
-    Math.max(0, (preview?.effective_tools?.length ?? 0) - 1),
-  );
-  const index = Math.min(
-    page,
-    Math.max(0, (preview?.context_sources.length ?? 0) - 1),
-  );
-  const current = preview?.context_sources.at(index);
-  const rows: [string, string | number | undefined][] = current
-    ? [
-        ["Source kind", humanizeIdentifier(current.type)],
-        ["Source path", current.path],
-        ["Source message", current.message_id],
-        ["Source principal", current.principal],
-        ["Content digest", current.digest],
-        ["Document", current.slug],
-        ["Task", current.task_id],
-        ["Label", current.label ?? undefined],
-        ["First line", current.line1],
-        ["Last line", current.line2],
-        ["Observed at (Unix ms)", current.observed_at_ms],
-      ]
-    : [];
+      ? "failed"
+      : blockedReason !== null
+        ? "needs_you"
+        : "done";
+  const raw: TranscriptRawBlock[] = [
+    { label: "Arguments", value: toolCall.function.arguments },
+  ];
+  if (rawContent !== undefined)
+    raw.push({ label: "Response", value: rawContent });
+  if (extra !== undefined) raw.push({ label: "Metadata", value: extra });
+  const Icon = agenticIcon("spawn");
   return (
-    <ToolCard
-      icon={<Icon icon={agenticIcon("spawn")} size="sm" />}
-      summary={task ?? "Inspect child launch request"}
-      meta={stateLabel}
-      density="compact"
-      status={!hasResult ? "running" : failed || !preview ? "error" : "success"}
-      isOpen={open}
-      onToggle={toggle}
-      toolCall={toolCall}
-    >
-      <CompactToolDetails facts={facts}>
-        <section aria-label="Child launch preview" className={styles.section}>
-          {!hasResult ? (
-            <p role="status">
-              Preparing launch preview. No acceptance receipt yet.
-            </p>
-          ) : failed || !preview ? (
-            <p role="alert">
-              Preview details unavailable. This error or legacy response does
-              not confirm a launch.
-            </p>
-          ) : (
-            <>
-              <div className={styles.metaRow}>
-                <Badge tone="muted">Preview only</Badge>
-                <Badge tone={preview.skipped_count ? "warning" : "muted"}>
-                  {preview.skipped_count
-                    ? "Unresolved context"
-                    : "Context resolved"}
-                </Badge>
-              </div>
-              <p className={styles.note}>
-                No child spawned. This historical preview is not approval or
-                acceptance; run requests revalidate context and authority.
-              </p>
-              <dl className={styles.detailGrid}>
-                {(
-                  [
-                    ["Effective model", preview.effective_model],
-                    ["Estimated context tokens", preview.estimated_tokens],
-                    ["Serialized context bytes", preview.serialized_bytes],
-                    ["Unresolved entries", preview.skipped_count],
-                  ] satisfies [string, string | number][]
-                ).map(([label, value]) => (
-                  <div key={label} className={styles.detailItem}>
-                    <dt className={styles.detailLabel}>{label}</dt>
-                    <dd className={styles.detailValue}>{bounded(value)}</dd>
-                  </div>
-                ))}
-              </dl>
-              <section
-                aria-label="Preview tool authority"
-                className={styles.section}
-              >
-                {preview.effective_tools === undefined ? (
-                  <p>
-                    Effective tool authority was not recorded in this preview.
-                  </p>
-                ) : preview.effective_tools.length === 0 ? (
-                  <p>No tools permitted by this preview.</p>
-                ) : (
-                  <>
-                    <p className={styles.detailValue}>
-                      {bounded(preview.effective_tools[toolIndex])}
-                    </p>
-                    {preview.effective_tools.length > 1 && (
-                      <nav
-                        aria-label="Preview tools"
-                        className={styles.actions}
-                      >
-                        <Button
-                          size="sm"
-                          disabled={toolIndex === 0}
-                          onClick={() => setToolPage(toolIndex - 1)}
-                        >
-                          Previous tool
-                        </Button>
-                        <span role="status">
-                          {toolIndex + 1} of {preview.effective_tools.length}
-                        </span>
-                        <Button
-                          size="sm"
-                          disabled={
-                            toolIndex + 1 === preview.effective_tools.length
-                          }
-                          onClick={() => setToolPage(toolIndex + 1)}
-                        >
-                          Next tool
-                        </Button>
-                      </nav>
-                    )}
-                  </>
-                )}
-                <p className={styles.note}>
-                  Concrete tool permissions may narrow before dispatch. They do
-                  not grant shell sandbox, file access, or MCP destination
-                  permission.
-                </p>
-              </section>
-              <section
-                aria-label="Preview deliverable contract"
-                className={styles.section}
-              >
-                {preview.deliverable ? (
-                  <dl className={styles.detailGrid}>
-                    <div className={styles.detailItem}>
-                      <dt className={styles.detailLabel}>Required sections</dt>
-                      <dd className={styles.detailValue}>
-                        {preview.deliverable.required_sections.length === 0
-                          ? "none"
-                          : bounded(
-                              preview.deliverable.required_sections.join(", "),
-                            )}
-                      </dd>
-                    </div>
-                    <div className={styles.detailItem}>
-                      <dt className={styles.detailLabel}>Output schema</dt>
-                      <dd className={styles.detailValue}>
-                        {preview.deliverable.output_schema
-                          ? "declared (structural subset enforced)"
-                          : "not declared"}
-                      </dd>
-                    </div>
-                    <div className={styles.detailItem}>
-                      <dt className={styles.detailLabel}>Evidence</dt>
-                      <dd className={styles.detailValue}>
-                        {preview.deliverable.evidence_required
-                          ? "required section; unbacked claims stay unverified"
-                          : "not required"}
-                      </dd>
-                    </div>
-                  </dl>
-                ) : (
-                  <p>No deliverable contract declared for this preview.</p>
-                )}
-              </section>
-              <section
-                aria-label="Effective launch settings"
-                className={styles.section}
-              >
-                {preview.launch_blocked !== undefined ? (
-                  <p role="status" data-testid="launch-blocked">
-                    Launch blocked: {bounded(preview.launch_blocked)}
-                  </p>
-                ) : preview.effective_launch ? (
-                  <dl className={styles.detailGrid}>
-                    {(
-                      [
-                        [
-                          "Revision",
-                          `${preview.effective_launch.revision} (schema ${preview.effective_launch.schema_version})`,
-                        ],
-                        ["Mode", preview.effective_launch.mode],
-                        [
-                          "Tool authority",
-                          toolsLabel(preview.effective_launch.tools),
-                        ],
-                        ["Step budget", preview.effective_launch.max_steps],
-                        [
-                          "Nesting depth",
-                          preview.effective_launch.subchat_depth,
-                        ],
-                        ["Checkout", preview.effective_launch.worktree_mode],
-                        [
-                          "Approval",
-                          preview.effective_launch.autonomous_no_confirm
-                            ? "autonomous"
-                            : [
-                                preview.effective_launch
-                                  .auto_approve_editing_tools
-                                  ? "edits auto-approved"
-                                  : "edits confirmed",
-                                preview.effective_launch
-                                  .auto_approve_dangerous_commands
-                                  ? "commands auto-approved"
-                                  : "commands confirmed",
-                              ].join(", "),
-                        ],
-                        [
-                          "Accepted payload",
-                          `${preview.effective_launch.accepted_bytes} of ${preview.effective_launch.accepted_byte_limit} bytes, ${preview.effective_launch.messages} messages`,
-                        ],
-                      ] as const
-                    ).map(([label, value]) => (
-                      <div className={styles.detailItem} key={label}>
-                        <dt className={styles.detailLabel}>{label}</dt>
-                        <dd className={styles.detailValue}>{bounded(value)}</dd>
-                      </div>
-                    ))}
-                  </dl>
-                ) : (
-                  <p>Effective launch settings were not reported.</p>
-                )}
-              </section>
-              {preview.skipped_count > 0 && (
-                <p role="status">
-                  Unresolved requested context prevents launch; revise the
-                  request before running.
-                </p>
-              )}
-              {current ? (
-                <section
-                  aria-label="Launch context source"
-                  className={styles.section}
-                >
-                  <dl className={styles.detailGrid}>
-                    {rows.flatMap(([label, value]) =>
-                      value === undefined
-                        ? []
-                        : [
-                            <div key={label} className={styles.detailItem}>
-                              <dt className={styles.detailLabel}>{label}</dt>
-                              <dd className={styles.detailValue}>
-                                {bounded(value)}
-                              </dd>
-                            </div>,
-                          ],
-                    )}
-                  </dl>
-                  <p className={styles.note}>
-                    Source provenance is not permission to read or execute.
-                    Historical goals and plans do not activate child control
-                    state.
-                  </p>
-                </section>
-              ) : (
-                <p>No explicit context sources in this preview.</p>
-              )}
-              {preview.context_sources.length > 1 && (
-                <nav
-                  aria-label="Launch context sources"
-                  className={styles.actions}
-                >
-                  <Button
-                    size="sm"
-                    disabled={index === 0}
-                    onClick={() => setPage(index - 1)}
-                  >
-                    Previous source
-                  </Button>
-                  <span role="status">
-                    {index + 1} of {preview.context_sources.length}
-                  </span>
-                  <Button
-                    size="sm"
-                    disabled={index + 1 === preview.context_sources.length}
-                    onClick={() => setPage(index + 1)}
-                  >
-                    Next source
-                  </Button>
-                </nav>
-              )}
-            </>
-          )}
-        </section>
-        <DetailsCard title="Technical details" defaultOpen={false}>
-          <PagedText label="Raw arguments" body={toolCall.function.arguments} />
-          {rawContent !== undefined && (
-            <PagedText
-              label="Full response"
-              body={
-                typeof rawContent === "string"
-                  ? rawContent
-                  : JSON.stringify(rawContent, null, 2)
-              }
-            />
-          )}
-          {extra !== undefined && (
-            <PagedText
-              label="Response metadata"
-              body={JSON.stringify(extra, null, 2)}
-            />
-          )}
-        </DetailsCard>
-      </CompactToolDetails>
-    </ToolCard>
+    <TranscriptItem
+      data-testid="launch-preview"
+      icon={<Icon aria-hidden />}
+      verb="Launch"
+      target={task ?? undefined}
+      meta="preview"
+      status={status}
+      statusLabel={blockedReason !== null ? "Blocked" : undefined}
+      summary={
+        available
+          ? [
+              { label: "Model", value: bounded(preview.effective_model) },
+              {
+                label: "Context",
+                value: `${preview.estimated_tokens} tokens · ${preview.serialized_bytes} bytes`,
+              },
+              ...(preview.skipped_count > 0
+                ? [
+                    {
+                      label: "Unresolved",
+                      value: String(preview.skipped_count),
+                    },
+                  ]
+                : []),
+            ]
+          : []
+      }
+      input={available ? <PreviewInput preview={preview} /> : undefined}
+      error={
+        blockedReason !== null ? (
+          <span data-testid="launch-blocked">
+            Launch blocked: {bounded(blockedReason)}
+          </span>
+        ) : hasResult && !available ? (
+          "Preview unavailable; this response does not confirm a launch."
+        ) : undefined
+      }
+      raw={raw}
+      openKey={toolCall.id ? `launch_preview:${toolCall.id}` : undefined}
+      defaultOpen={status === "needs_you"}
+    />
   );
 }

@@ -1,100 +1,49 @@
 import { describe, expect, test } from "vitest";
 import { fireEvent, within } from "@testing-library/react";
-import { render as renderComponent, screen } from "../../../utils/test-utils";
-import { CollapsibleStoreProvider } from "../../ChatContent/useStoredOpen";
+import { render, screen } from "../../../utils/test-utils";
 import { LaunchPreviewTool } from "./LaunchPreviewTool";
 import { launchPreviewCall, launchPreviewReceipt } from "./launchFixtures";
 
-function render(...args: Parameters<typeof renderComponent>) {
-  const view = renderComponent(...args);
-  fireEvent.click(screen.getByRole("button", { expanded: false }));
-  fireEvent.click(screen.getByRole("button", { name: "More details" }));
+const resolved = { ...launchPreviewReceipt().extra, skipped_count: 0 };
+
+function renderOpen(extra: unknown, rawContent?: string) {
+  const view = render(
+    <LaunchPreviewTool
+      toolCall={launchPreviewCall}
+      rawContent={rawContent}
+      extra={extra}
+      hasResult
+      failed={false}
+    />,
+  );
+  const toggle = screen.getByTestId("transcript-toggle");
+  if (toggle.getAttribute("aria-expanded") === "false") fireEvent.click(toggle);
   return view;
 }
 
 describe("LaunchPreviewTool", () => {
-  test("starts closed with requested task and explicit preview or blocked state", () => {
-    const props = {
-      toolCall: launchPreviewCall,
-      hasResult: true,
-      failed: false,
-    };
-    const { container, rerender } = renderComponent(
+  test("row reads Launch · task · preview and stays quiet when resolved", () => {
+    render(
       <LaunchPreviewTool
-        {...props}
-        extra={{ ...launchPreviewReceipt().extra, skipped_count: 0 }}
+        toolCall={launchPreviewCall}
+        extra={resolved}
+        hasResult
+        failed={false}
       />,
     );
-    const row = screen.getByRole("button", { expanded: false });
-    expect(row).toHaveTextContent("Inspect accepted context");
-    expect(row).toHaveTextContent("Preview only");
-    expect(container.querySelector('[data-density="compact"]')).not.toBeNull();
-    expect(screen.queryByText("src/accepted-context.rs")).toBeNull();
-    fireEvent.click(row);
-    expect(screen.getByText("No child started")).toBeInTheDocument();
-    expect(
-      screen.getAllByRole("term").filter((term) => !term.closest("[inert]")),
-    ).toHaveLength(3);
-    expect(
-      screen.getByRole("button", { name: "More details" }),
-    ).toHaveAttribute("aria-expanded", "false");
-    fireEvent.click(row);
-    rerender(
-      <LaunchPreviewTool {...props} extra={launchPreviewReceipt().extra} />,
+    expect(screen.getByTestId("transcript-verb")).toHaveTextContent("Launch");
+    expect(screen.getByTestId("transcript-target")).toHaveTextContent(
+      "Inspect accepted context",
     );
-    expect(row).toHaveAttribute("aria-expanded", "false");
-    expect(row).toHaveTextContent("Launch blocked");
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent("preview");
+    expect(screen.queryByTestId("transcript-status-pill")).toBeNull();
+    expect(screen.getByTestId("transcript-toggle")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
   });
 
-  test("keeps malformed and failed states visible while closed", () => {
-    const props = { toolCall: launchPreviewCall, extra: {}, hasResult: true };
-    const { rerender } = renderComponent(
-      <LaunchPreviewTool {...props} failed={false} />,
-    );
-    const row = screen.getByRole("button", { expanded: false });
-    expect(row).toHaveTextContent("Preview unavailable");
-    rerender(<LaunchPreviewTool {...props} failed />);
-    expect(row).toHaveTextContent("Preview unavailable");
-    expect(row).toHaveAttribute("aria-expanded", "false");
-  });
-
-  test("preserves stored open choice and escapes requested task text", () => {
-    const values = new Map([[`tc:${launchPreviewCall.id}`, true]]);
-    const { container } = renderComponent(
-      <CollapsibleStoreProvider
-        value={{
-          get: (key) => values.get(key),
-          set: (key, open) => values.set(key, open),
-        }}
-      >
-        <LaunchPreviewTool
-          toolCall={{
-            ...launchPreviewCall,
-            function: {
-              ...launchPreviewCall.function,
-              arguments: JSON.stringify({
-                task: "<script>unsafe</script>" + "x".repeat(10000),
-              }),
-            },
-          }}
-          extra={launchPreviewReceipt().extra}
-          hasResult
-          failed={false}
-        />
-      </CollapsibleStoreProvider>,
-    );
-    const row = screen.getByRole("button", { expanded: true });
-    expect(
-      within(row).getByText(/<script>unsafe/).textContent?.length,
-    ).toBeLessThanOrEqual(160);
-    expect(container.querySelector("script")).toBeNull();
-    expect(screen.getByText("No child started")).toBeInTheDocument();
-    expect(
-      screen.getByText("src/accepted-context.rs").closest("[inert]"),
-    ).not.toBeNull();
-  });
-
-  test("pages concrete authority independently of context sources", () => {
+  test("unresolved context opens the item with a Blocked pill", () => {
     render(
       <LaunchPreviewTool
         toolCall={launchPreviewCall}
@@ -103,163 +52,52 @@ describe("LaunchPreviewTool", () => {
         failed={false}
       />,
     );
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "Blocked",
+    );
+    expect(screen.getByTestId("launch-blocked")).toHaveTextContent(
+      "1 unresolved context entry",
+    );
+  });
+
+  test("pages tool authority and context sources independently", () => {
+    renderOpen(resolved);
     expect(screen.getByText("cat")).toBeInTheDocument();
-    expect(screen.queryByText("mcp_fixture_read")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Next tool" }));
     expect(screen.getByText("mcp_fixture_read")).toBeInTheDocument();
-    expect(screen.getByText("src/accepted-context.rs")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Next tool" })).toBeDisabled();
-  });
-
-  test.each([
-    [undefined, "Effective tool authority was not recorded"],
-    [[], "No tools permitted"],
-  ])("distinguishes absent authority from deny-all", (effectiveTools, text) => {
-    render(
-      <LaunchPreviewTool
-        toolCall={launchPreviewCall}
-        extra={{
-          ...launchPreviewReceipt().extra,
-          effective_tools: effectiveTools,
-        }}
-        hasResult
-        failed={false}
-      />,
-    );
-    expect(screen.getByLabelText("Preview tool authority")).toHaveTextContent(
-      String(text),
-    );
-  });
-
-  test("shows one source at a time without claiming acceptance", () => {
-    render(
-      <LaunchPreviewTool
-        toolCall={launchPreviewCall}
-        extra={launchPreviewReceipt().extra}
-        hasResult
-        failed={false}
-      />,
-    );
-    expect(screen.getByLabelText("Child launch preview")).toHaveTextContent(
-      "No child spawned",
-    );
     expect(screen.getByText("src/accepted-context.rs")).toBeInTheDocument();
-    expect(screen.queryByText("completed-parent-message")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Next source" }));
     expect(screen.getByText("completed-parent-message")).toBeInTheDocument();
     expect(screen.queryByText("src/accepted-context.rs")).toBeNull();
-    expect(screen.getByRole("button", { name: "Next source" })).toBeDisabled();
-    expect(
-      screen.getByText(/Unresolved requested context prevents launch/u),
-    ).toBeInTheDocument();
   });
 
   test.each([
-    null,
-    {},
-    { ...launchPreviewReceipt().extra, preview: false },
-    { ...launchPreviewReceipt().extra, estimated_tokens: -1 },
-    { ...launchPreviewReceipt().extra, effective_tools: "all" },
-    { ...launchPreviewReceipt().extra, effective_tools: [42] },
-    { ...launchPreviewReceipt().extra, deliverable: "sections" },
-    {
-      ...launchPreviewReceipt().extra,
-      deliverable: { required_sections: [1], evidence_required: true },
-    },
-    {
-      ...launchPreviewReceipt().extra,
-      context_sources: [{ type: "arbitrary", observed_at_ms: 0 }],
-    },
-  ])(
-    "rejects malformed and legacy metadata without a success claim",
-    (extra) => {
-      const diagnostic = `Original preview diagnostic ${"x".repeat(
-        9000,
-      )}ERROR_TAIL`;
-      const { container } = renderComponent(
-        <LaunchPreviewTool
-          toolCall={launchPreviewCall}
-          rawContent={diagnostic}
-          extra={extra}
-          hasResult
-          failed={false}
-        />,
-      );
-      const outer = screen.getByRole("button", { expanded: false });
-      expect(outer).toHaveTextContent("Preview unavailable");
-      fireEvent.click(outer);
-      const raw = screen.getByLabelText("Full response content");
-      expect(raw.closest("[inert]")).not.toBeNull();
-      fireEvent.click(screen.getByRole("button", { name: "More details" }));
-      expect(screen.getByRole("alert")).toHaveTextContent(
-        "does not confirm a launch",
-      );
-      expect(screen.queryByText("Context resolved")).toBeNull();
-      expect(raw.closest("[inert]")).not.toBeNull();
-      fireEvent.click(
-        screen.getByRole("button", { name: "Technical details" }),
-      );
-      expect(raw.closest("[inert]")).toBeNull();
-      expect(raw).toHaveTextContent("Original preview diagnostic");
-      const next = within(
-        screen.getByLabelText("Full response pages"),
-      ).getByRole("button", { name: "Next section" });
-      fireEvent.click(next);
-      fireEvent.click(next);
-      expect(raw).toHaveTextContent("ERROR_TAIL");
-      expect(next).toBeDisabled();
-      expect(screen.getByLabelText("Raw arguments content").textContent).toBe(
-        launchPreviewCall.function.arguments,
-      );
-      expect(
-        JSON.parse(
-          screen.getByLabelText("Response metadata content").textContent ?? "",
-        ),
-      ).toEqual(extra);
-      expect(container.querySelector("button button")).toBeNull();
-    },
-  );
-
-  test("renders the declared deliverable contract without a verdict", () => {
-    render(
-      <LaunchPreviewTool
-        toolCall={launchPreviewCall}
-        extra={launchPreviewReceipt().extra}
-        hasResult
-        failed={false}
-      />,
+    [undefined, "Tool authority not recorded"],
+    [[], "No tools permitted"],
+  ])("distinguishes absent authority from deny-all", (tools, text) => {
+    renderOpen({ ...resolved, effective_tools: tools });
+    expect(screen.getByLabelText("Preview tool authority")).toHaveTextContent(
+      text,
     );
+  });
+
+  test("renders the declared deliverable contract", () => {
+    renderOpen(resolved);
     const contract = screen.getByLabelText("Preview deliverable contract");
     expect(contract).toHaveTextContent("Findings, Evidence");
-    expect(contract).toHaveTextContent("structural subset enforced");
-    expect(contract).toHaveTextContent("unbacked claims stay unverified");
+    expect(contract).toHaveTextContent("declared");
   });
 
-  test("reports an undeclared contract without inventing one", () => {
-    const rest = { ...launchPreviewReceipt().extra };
-    delete rest.deliverable;
-    render(
-      <LaunchPreviewTool
-        toolCall={launchPreviewCall}
-        extra={rest}
-        hasResult
-        failed={false}
-      />,
-    );
-    expect(
-      screen.getByLabelText("Preview deliverable contract"),
-    ).toHaveTextContent("No deliverable contract declared");
-  });
-
-  test("renders effective launch settings from the real preparation path", () => {
-    const extra = {
-      ...launchPreviewReceipt().extra,
+  test("renders effective launch settings", () => {
+    renderOpen({
+      ...resolved,
       effective_launch: {
         schema_version: 1,
         revision: 1,
         model: "local/qualified-model",
         mode: "agent",
-        tools: { Only: ["cat", "mcp_fixture_read"] },
+        tools: { Only: ["cat", "fixture_read"] },
         max_steps: 256,
         subchat_depth: 1,
         stateful: true,
@@ -273,106 +111,92 @@ describe("LaunchPreviewTool", () => {
         accepted_bytes: 3360,
         accepted_byte_limit: 16777216,
       },
-    };
-    render(
-      <LaunchPreviewTool
-        toolCall={launchPreviewCall}
-        extra={extra}
-        hasResult
-        failed={false}
-      />,
-    );
+    });
     const settings = screen.getByLabelText("Effective launch settings");
     expect(settings).toHaveTextContent("1 (schema 1)");
     expect(settings).toHaveTextContent("2 concrete");
-    expect(settings).toHaveTextContent("256");
-    expect(settings).toHaveTextContent("isolated(auto_merge=true)");
     expect(settings).toHaveTextContent(
       "edits auto-approved, commands confirmed",
     );
     expect(settings).toHaveTextContent("3360 of 16777216 bytes, 4 messages");
+  });
+
+  test.each([
+    null,
+    {},
+    { ...resolved, preview: false },
+    { ...resolved, estimated_tokens: -1 },
+    { ...resolved, effective_tools: [42] },
+    { ...resolved, effective_launch: { revision: "one" } },
+    {
+      ...resolved,
+      context_sources: [{ type: "arbitrary", observed_at_ms: 0 }],
+    },
+  ])("rejects malformed metadata with one raw copy", (extra) => {
+    const { container } = renderOpen(extra, "Original diagnostic ERROR_TAIL");
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "Failed",
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "does not confirm a launch",
+    );
+    expect(screen.queryByLabelText("Effective launch settings")).toBeNull();
+    const raw = screen.getByTestId("transcript-raw");
+    fireEvent.click(within(raw).getByRole("button", { name: "Raw" }));
+    expect(raw).toHaveTextContent("ERROR_TAIL");
+    expect(
+      container.querySelectorAll("[data-testid=transcript-raw]"),
+    ).toHaveLength(1);
+  });
+
+  test("pending shows running without claiming a preview", () => {
+    render(
+      <LaunchPreviewTool
+        toolCall={launchPreviewCall}
+        extra={undefined}
+        hasResult={false}
+        failed={false}
+      />,
+    );
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "Running",
+    );
     expect(screen.queryByTestId("launch-blocked")).toBeNull();
   });
 
-  test("reports a blocked launch and rejects malformed effective settings", () => {
-    const blocked = render(
-      <LaunchPreviewTool
-        toolCall={launchPreviewCall}
-        extra={{
-          ...launchPreviewReceipt().extra,
-          launch_blocked: "subchat depth limit (5) exceeded",
-        }}
-        hasResult
-        failed={false}
-      />,
-    );
-    expect(screen.getByTestId("launch-blocked")).toHaveTextContent(
-      "subchat depth limit (5) exceeded",
-    );
-    blocked.unmount();
+  test("bounds task and source text and keeps markup inert", () => {
     const { container } = render(
       <LaunchPreviewTool
-        toolCall={launchPreviewCall}
+        toolCall={{
+          ...launchPreviewCall,
+          function: {
+            ...launchPreviewCall.function,
+            arguments: JSON.stringify({
+              task: "<script>unsafe</script>" + "x".repeat(10000),
+            }),
+          },
+        }}
         extra={{
-          ...launchPreviewReceipt().extra,
-          effective_launch: { revision: "one" },
+          ...resolved,
+          context_sources: [
+            {
+              type: "raw_text",
+              label: "<script>label</script>" + "y".repeat(10000),
+              observed_at_ms: 1,
+            },
+          ],
         }}
         hasResult
         failed={false}
       />,
     );
-    expect(container).toHaveTextContent(/unavailable|malformed|could not/i);
     expect(
-      screen.queryByLabelText("Effective launch settings"),
-    ).not.toBeInTheDocument();
-  });
-
-  test("keeps pending and failed distinct from a resolved preview", () => {
-    const props = {
-      toolCall: launchPreviewCall,
-      extra: launchPreviewReceipt().extra,
-      rawContent: "Original request failure: missing required source id",
-    };
-    const { rerender } = render(
-      <LaunchPreviewTool {...props} hasResult={false} failed={false} />,
-    );
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "No acceptance receipt yet",
-    );
-    rerender(<LaunchPreviewTool {...props} hasResult failed />);
-    expect(screen.getByRole("alert")).toBeInTheDocument();
-    const raw = screen.getByLabelText("Full response content");
-    expect(raw.closest("[inert]")).not.toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Technical details" }));
-    expect(raw.closest("[inert]")).toBeNull();
-    expect(raw).toHaveTextContent(
-      "Original request failure: missing required source id",
-    );
-    expect(screen.queryByLabelText("Effective launch settings")).toBeNull();
-  });
-
-  test("bounds source text and renders markup as text", () => {
-    const extra = {
-      ...launchPreviewReceipt().extra,
-      context_sources: [
-        {
-          type: "raw_text",
-          label: "<script>unsafe</script>" + "x".repeat(10000),
-          observed_at_ms: 1,
-        },
-      ],
-    };
-    const { container } = render(
-      <LaunchPreviewTool
-        toolCall={launchPreviewCall}
-        extra={extra}
-        hasResult
-        failed={false}
-      />,
-    );
+      screen.getByTestId("transcript-target").textContent?.length,
+    ).toBeLessThanOrEqual(160);
+    fireEvent.click(screen.getByTestId("transcript-toggle"));
     const label = within(
       screen.getByLabelText("Launch context source"),
-    ).getByText(/<script>unsafe/u);
+    ).getByText(/<script>label/u);
     expect(label.textContent?.length).toBeLessThanOrEqual(241);
     expect(container.querySelector("script")).toBeNull();
   });

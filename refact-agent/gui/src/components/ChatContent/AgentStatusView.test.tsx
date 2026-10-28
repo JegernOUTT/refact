@@ -11,7 +11,6 @@ import {
 import * as chatCommands from "../../services/refact/chatCommands";
 import type { ToolCall, ToolMessage } from "../../services/refact/types";
 import { applyChatEvent } from "../../features/Chat/Thread";
-import { PAGE_CHARS } from "../Tools/AgenticTool/PagedText";
 import { CollapsibleStoreProvider } from "./useStoredOpen";
 import {
   filterAgentStatusRows,
@@ -168,11 +167,8 @@ describe("AgentStatusContent", () => {
       .spyOn(chatCommands, "sendChatCommand")
       .mockResolvedValue(undefined);
     renderStatus(COMPACT_OUTPUT);
-    const outer = screen.getByRole("button", {
-      name: "5 agent rows shown Failed / approval",
-    });
+    const outer = screen.getByTestId("transcript-toggle");
     fireEvent.click(outer);
-    fireEvent.click(screen.getByRole("button", { name: "More details" }));
     expect(onSubmitCommand).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByLabelText("View pulse T-1"));
@@ -255,7 +251,20 @@ describe("AgentStatusContent", () => {
   });
 });
 
-describe("AgentStatusView compact route", () => {
+function itemOf(toggle: HTMLElement): HTMLElement {
+  const section = toggle.closest("section");
+  if (!section) throw new Error("expected transcript section");
+  return section;
+}
+
+function rawTexts(): string[] {
+  const raw = screen.getByTestId("transcript-raw");
+  return Array.from(raw.querySelectorAll("pre")).map(
+    (pre) => pre.textContent ?? "",
+  );
+}
+
+describe("AgentStatusView transcript route", () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -274,15 +283,24 @@ P1 ⏸️  T-PAUSE manual-pause | paused by planner-test since 2026-05-21T23:55:
 showing 3 of 8; pass offset=3 for next page
 `;
     const { user } = renderStatus(output);
-    await user.click(
-      screen.getByRole("button", {
-        name: "3 agent rows shown Snapshot received",
-      }),
+    const outer = screen.getByTestId("transcript-toggle");
+    expect(within(outer).getByTestId("transcript-verb")).toHaveTextContent(
+      "Agents",
+    );
+    expect(within(outer).getByTestId("transcript-target")).toHaveTextContent(
+      "3 cards",
     );
     expect(
-      screen.getByText("0 stuck, 0 failed, 0 needing approval"),
+      screen.queryByTestId("transcript-status-pill"),
+    ).not.toBeInTheDocument();
+    await user.click(outer);
+    const facts = screen.getByTestId("transcript-facts");
+    expect(
+      within(facts).getByText("0 stuck · 0 failed · 0 approval"),
     ).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "More details" }));
+    expect(
+      within(facts).getByText("showing 3 of 8; pass offset=3 for next page"),
+    ).toBeInTheDocument();
     const table = screen.getByRole("table");
     const variantA = within(table).getByText("T-AB/a").closest("article");
     const variantB = within(table).getByText("T-AB/b").closest("article");
@@ -303,9 +321,8 @@ showing 3 of 8; pass offset=3 for next page
         /Variant steering and cancellation are unavailable; inspection targets T-AB\/b only\./u,
       ),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("Full response content").textContent).toBe(
-      output,
-    );
+    await user.click(screen.getByRole("button", { name: "Raw" }));
+    expect(rawTexts()).toEqual(["{}", output]);
     expect(send).not.toHaveBeenCalled();
     await user.click(screen.getByLabelText("View pulse T-AB/a"));
     await waitFor(() =>
@@ -352,17 +369,21 @@ showing 3 of 8; pass offset=3 for next page
       omitted: "JSON omission sentinel",
     });
     const { user } = renderStatus(output);
-    await user.click(
-      screen.getByRole("button", {
-        name: "4 agent rows shown Approval needed",
-      }),
+    const outer = screen.getByTestId("transcript-toggle");
+    expect(within(outer).getByTestId("transcript-target")).toHaveTextContent(
+      "4 cards",
     );
+    expect(itemOf(outer)).toHaveAttribute("data-status", "needs_you");
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "1 need approval",
+    );
+    expect(outer).toHaveAttribute("aria-expanded", "true");
     expect(
-      screen.getByText("0 stuck, 0 failed, 1 needing approval", {
-        selector: "dd",
-      }),
+      within(screen.getByTestId("transcript-facts")).getByText(
+        "0 stuck · 0 failed · 1 approval",
+        { selector: "dd" },
+      ),
     ).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "More details" }));
     expect(screen.getByRole("tab", { name: "Unknown 1" })).toBeInTheDocument();
     expect(
       screen.getByRole("tab", { name: "Cancelled 1" }),
@@ -375,12 +396,11 @@ showing 3 of 8; pass offset=3 for next page
     expect(within(unknown).getByText("future_state")).toBeInTheDocument();
     expect(within(unknown).getByText("Unknown")).toBeInTheDocument();
     expect(within(unknown).queryByText("Running")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Full response content").textContent).toBe(
-      output,
-    );
+    await user.click(screen.getByRole("button", { name: "Raw" }));
+    expect(rawTexts()[1]).toContain("JSON omission sentinel");
   });
 
-  it("recovers the complete detail body and arguments with bounded paging after both disclosures", async () => {
+  it("recovers the complete detail body and arguments from Raw when the roster is not parsed", async () => {
     const args = '{"format":"detail","card_ids":["T-AB/a"],"offset":2}';
     const output = `⚠️  Alerts: 0 stuck, 0 failed, 0 needing approval, 1 needing attention
 
@@ -394,7 +414,7 @@ Showing 1 of 4 agents.
 **A/B variant:** A
 **Last tool:** \`cat\`
 
-**Last Update:** ${"x".repeat(PAGE_CHARS)}
+**Last Update:** ${"x".repeat(5_000)}
 DETAIL_SENTINEL
 
 ---
@@ -405,36 +425,26 @@ showing 1 of 4; pass offset=3 for next page
       ...TOOL_CALL,
       function: { name: "check_agents", arguments: args },
     });
+    const outer = screen.getByTestId("transcript-toggle");
     expect(
-      screen.queryByLabelText("Full response content"),
+      within(outer).queryByTestId("transcript-target"),
     ).not.toBeInTheDocument();
-    await user.click(
-      screen.getByRole("button", {
-        name: "Check agent status Roster not parsed",
-      }),
-    );
-    const details = screen.getByRole("button", { name: "More details" });
-    expect(details).toHaveAttribute("aria-expanded", "false");
-    await user.click(details);
+    expect(
+      screen.queryByTestId("transcript-status-pill"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByTestId("transcript-raw")).not.toBeInTheDocument();
+    await user.click(outer);
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("transcript-facts")).not.toBeInTheDocument();
     expect(
       screen.queryByText("No agents match the selected filters."),
     ).not.toBeInTheDocument();
-    expect(
-      screen.getByText("Roster not parsed. Inspect the full response below."),
-    ).toBeInTheDocument();
-    const raw = screen.getByLabelText("Full response content");
-    expect(raw.textContent).toBe(output.slice(0, PAGE_CHARS));
-    expect(raw).not.toHaveTextContent("DETAIL_SENTINEL");
-    await user.click(
-      within(
-        screen.getByRole("navigation", { name: "Full response pages" }),
-      ).getByRole("button", { name: "Next section" }),
-    );
-    expect(raw.textContent).toBe(output.slice(PAGE_CHARS));
-    expect(raw).toHaveTextContent("DETAIL_SENTINEL");
-    expect(raw).toHaveTextContent("pass offset=3 for next page");
-    expect(screen.getByLabelText("Arguments content").textContent).toBe(args);
+    expect(screen.queryByText(/DETAIL_SENTINEL/u)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Raw" }));
+    const [rawArgs, rawResponse] = rawTexts();
+    expect(JSON.parse(rawArgs)).toEqual(JSON.parse(args));
+    expect(rawResponse).toBe(output);
+    expect(screen.getAllByText(/DETAIL_SENTINEL/u)).toHaveLength(1);
   });
 
   it("keeps the current summary and attention text instead of substituting an empty roster", async () => {
@@ -446,137 +456,130 @@ T-PAUSE: paused by planner-test since 2026-05-21T23:55:00Z
 T-AB: ⚠ needs attention: summary attention sentinel (since 2026-05-21T23:30:00Z, ×3)
 `;
     const { user } = renderStatus(output);
-    await user.click(
-      screen.getByRole("button", {
-        name: "Check agent status Roster not parsed",
-      }),
-    );
-    await user.click(screen.getByRole("button", { name: "More details" }));
+    await user.click(screen.getByTestId("transcript-toggle"));
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Full response content").textContent).toBe(
-      output,
-    );
-    expect(
-      screen.getByText("0 stuck, 0 failed, 0 needing approval"),
-    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Raw" }));
+    expect(rawTexts()[1]).toBe(output);
   });
 
   it("makes malformed bodies inspectable and distinguishes them from a legitimate empty roster", async () => {
     const { user, unmount } = renderStatus(
       '{"agents":[{}],"note":"malformed sentinel"}',
     );
-    await user.click(
-      screen.getByRole("button", { name: "Check agent status Status unknown" }),
-    );
-    await user.click(screen.getByRole("button", { name: "More details" }));
-    expect(screen.getByLabelText("Full response content")).toHaveTextContent(
-      "malformed sentinel",
-    );
+    await user.click(screen.getByTestId("transcript-toggle"));
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Raw" }));
+    expect(rawTexts()[1]).toContain("malformed sentinel");
     unmount();
     renderStatus('{"agents":[]}');
-    await user.click(
-      screen.getByRole("button", {
-        name: "0 agent rows shown Snapshot received",
-      }),
+    const outer = screen.getByTestId("transcript-toggle");
+    expect(within(outer).getByTestId("transcript-target")).toHaveTextContent(
+      "0 cards",
     );
-    await user.click(screen.getByRole("button", { name: "More details" }));
+    await user.click(outer);
     expect(
       screen.getByText("No agent rows returned in this response."),
     ).toBeInTheDocument();
-    expect(
-      screen.queryByText("Roster not parsed. Inspect the full response below."),
-    ).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Full response content").textContent).toBe(
-      '{"agents":[]}',
-    );
+    await user.click(screen.getByRole("button", { name: "Raw" }));
+    expect(rawTexts()[1]).toBe(JSON.stringify({ agents: [] }, null, 2));
   });
 
-  it("starts closed with observed counts and visible alert state, with inert secondary controls", async () => {
-    const { container, user } = renderStatus(
+  it("starts closed with observed counts and visible alert state", async () => {
+    const { user } = renderStatus(
       COMPACT_OUTPUT.replace(
         "showing 5 of 5; no more pages",
         "showing 5 of 50; pass offset=5 for next page",
       ),
     );
-    const outer = screen.getByRole("button", {
-      name: "5 agent rows shown Failed / approval",
-    });
+    const outer = screen.getByTestId("transcript-toggle");
     expect(outer).toHaveAttribute("aria-expanded", "false");
-    expect(outer.closest("section")).toHaveAttribute("data-density", "compact");
+    expect(itemOf(outer)).toHaveAttribute("data-status", "failed");
+    expect(within(outer).getByTestId("transcript-target")).toHaveTextContent(
+      "5 cards",
+    );
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "1 failed",
+    );
     expect(screen.queryByLabelText("View pulse T-1")).not.toBeInTheDocument();
     await user.click(outer);
-    expect(container.querySelectorAll("dt")).toHaveLength(3);
+    const facts = screen.getByTestId("transcript-facts");
+    expect(facts.querySelectorAll("dt")).toHaveLength(3);
     expect(
-      screen.getByText("showing 5 of 50; pass offset=5 for next page"),
+      within(facts).getByText("showing 5 of 50; pass offset=5 for next page"),
     ).toBeInTheDocument();
-    const details = screen.getByRole("button", { name: "More details" });
     const pulse = screen.getByLabelText("View pulse T-1");
-    expect(details).toHaveAttribute("aria-expanded", "false");
-    expect(pulse.closest("[inert]")).not.toBeNull();
-    details.focus();
-    await user.tab();
-    expect(pulse).not.toHaveFocus();
-    await user.click(details);
     expect(pulse.closest("[inert]")).toBeNull();
     expect(pulse).not.toHaveAttribute("tabindex", "-1");
   });
 
   it.each([
-    [null, false, false, "Check agent status Status unknown", "idle"],
-    [null, false, true, "Check agent status Checking", "running"],
-    ["not a report", false, false, "Check agent status Status unknown", "idle"],
     [
-      'cancel_agent(card_id="T-1")',
-      true,
-      false,
-      "Check agent status Request failed",
-      "error",
+      "1 need approval",
+      "P1 ⏸️  T-5   paused-card            | paused     | 10m ago | approval",
     ],
     [
-      '{"agents":[]}',
-      false,
-      false,
-      "0 agent rows shown Snapshot received",
-      "idle",
+      "1 stuck",
+      "P1 🔴  T-2   fix-tests              | STUCK 18m   | needs attention",
     ],
-    [
-      '{"agents":[{}]}',
-      false,
-      false,
-      "Check agent status Status unknown",
-      "idle",
-    ],
-    [
-      '{"agents":[{"card_id":"T-1"}]}',
-      false,
-      false,
-      "1 agent rows shown Snapshot received",
-      "idle",
-    ],
+  ])("labels attention alerts as %s and opens by default", (label, row) => {
+    renderStatus(
+      `P0 🔄  T-1   implement-render       | generating |  3m ago | last: cat\n${row}\n`,
+    );
+    const outer = screen.getByTestId("transcript-toggle");
+    expect(itemOf(outer)).toHaveAttribute("data-status", "needs_you");
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      label,
+    );
+    expect(outer).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it.each([
+    [null, false, false, null, "unknown", "Unknown"],
+    [null, false, true, null, "running", "Running"],
+    ["not a report", false, false, null, "done", null],
+    ['cancel_agent(card_id="T-1")', true, false, null, "failed", "Failed"],
+    ['{"agents":[]}', false, false, "0 cards", "done", null],
+    ['{"agents":[{}]}', false, false, null, "done", null],
+    ['{"agents":[{"card_id":"T-1"}]}', false, false, "1 cards", "done", null],
     [
       "⚠️ Alerts: 0 stuck, 0 failed, 0 needing approval",
       false,
       false,
-      "Check agent status Roster not parsed",
-      "idle",
+      null,
+      "done",
+      null,
     ],
   ])(
     "keeps empty, missing and malformed results distinct: %s",
-    (content, failed, waiting, name, status) => {
+    (content, failed, waiting, target, status, pillText) => {
       const send = vi
         .spyOn(chatCommands, "sendChatCommand")
         .mockResolvedValue(undefined);
       renderStatus(content, failed, waiting);
-      const outer = screen.getByRole("button", { name });
+      const outer = screen.getByTestId("transcript-toggle");
       expect(outer).toHaveAttribute("aria-expanded", "false");
-      expect(outer.closest("section")).toHaveAttribute("data-status", status);
+      expect(itemOf(outer)).toHaveAttribute("data-status", status);
+      const targetNode = within(outer).queryByTestId("transcript-target");
+      if (target === null) expect(targetNode).not.toBeInTheDocument();
+      else expect(targetNode).toHaveTextContent(target);
+      const pill = screen.queryByTestId("transcript-status-pill");
+      if (pillText === null) expect(pill).not.toBeInTheDocument();
+      else expect(pill).toHaveTextContent(pillText);
       expect(send).not.toHaveBeenCalled();
     },
   );
 
+  it("shows a failed request in the Error section", async () => {
+    const { user } = renderStatus("request failed sentinel", true);
+    await user.click(screen.getByTestId("transcript-toggle"));
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "request failed sentinel",
+    );
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  });
+
   it("honors stored choices and independent rows after attention updates and remount", () => {
-    const preferences = new Map([["tc:status-call", true]]);
+    const preferences = new Map([["agent_status:status-call", true]]);
     const collapseStore = {
       get: (key: string) => preferences.get(key),
       set: (key: string, value: boolean) => {
@@ -595,14 +598,8 @@ T-AB: ⚠ needs attention: summary attention sentinel (since 2026-05-21T23:30:00
       </CollapsibleStoreProvider>
     );
     const { store, unmount } = render(view(), { preloadedState: { chat } });
-    const outer = screen.getByRole("button", {
-      name: "5 agent rows shown Failed / approval",
-    });
-    const sibling = screen.getByRole("button", {
-      name: "Check agent status Status unknown",
-    });
+    const [outer, sibling] = screen.getAllByTestId("transcript-toggle");
     expect(outer).toHaveAttribute("aria-expanded", "true");
-    fireEvent.click(screen.getByRole("button", { name: "More details" }));
     fireEvent.click(screen.getByLabelText("Toggle details T-1"));
     act(() => {
       store.dispatch(
@@ -619,8 +616,11 @@ T-AB: ⚠ needs attention: summary attention sentinel (since 2026-05-21T23:30:00
     });
     expect(outer).toHaveAttribute("aria-expanded", "true");
     expect(
-      screen.getAllByText("1 stuck, 2 failed, 1 needing approval"),
-    ).toHaveLength(2);
+      screen.getByText("1 stuck, 2 failed, 1 needing approval"),
+    ).toBeInTheDocument();
+    expect(
+      within(itemOf(outer)).getByTestId("transcript-status-pill"),
+    ).toHaveTextContent("2 failed");
     expect(screen.getByLabelText("Toggle details T-1")).toHaveAttribute(
       "aria-expanded",
       "true",
@@ -641,10 +641,11 @@ T-AB: ⚠ needs attention: summary attention sentinel (since 2026-05-21T23:30:00
     expect(outer).toHaveAttribute("aria-expanded", "false");
     unmount();
     render(view(), { store });
-    expect(
-      screen.getByRole("button", { name: "Check agent status Request failed" }),
-    ).toHaveAttribute("aria-expanded", "false");
-    expect(preferences.get("tc:status-call")).toBe(false);
+    expect(screen.getAllByTestId("transcript-toggle")[0]).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(preferences.get("agent_status:status-call")).toBe(false);
   });
 
   it("preserves disabled content actions", () => {

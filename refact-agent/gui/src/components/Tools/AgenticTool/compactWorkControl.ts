@@ -772,12 +772,6 @@ export function buildCompactWorkControlPresentation(
       facts.unshift({ label: "Request error", value: result.error });
     }
   }
-  if (facts.length === 0)
-    facts.push({
-      label: "Evidence",
-      value:
-        "No recognized outcome confirmed · full response remains in details",
-    });
   return {
     headline:
       compactText(

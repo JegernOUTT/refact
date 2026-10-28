@@ -886,9 +886,7 @@ describe("compact dedicated transcript composition", () => {
             unmount();
             continue;
           }
-          const row = container.querySelector(
-            'section[data-density="compact"]',
-          );
+          const row = container.querySelector("section[data-transcript-item]");
           expect(row, alias).not.toBeNull();
           expect(row).toHaveAttribute("data-open", "false");
           expect(row?.querySelector("button")).not.toHaveTextContent(
@@ -904,13 +902,18 @@ describe("compact dedicated transcript composition", () => {
     },
   );
 
-  it.each(["doc_get", "doc_list", "agent_finish", "subagent"])(
-    "%s missing historical output is idle, not success or running",
-    (name) => {
+  it.each([
+    ["doc_get", "unknown"],
+    ["doc_list", "unknown"],
+    ["agent_finish", "idle"],
+    ["subagent", "idle"],
+  ])(
+    "%s missing historical output is %s, not success or running",
+    (name, status) => {
       const { container } = renderToolContent(name, "", { missing: true });
       expect(container.querySelector("section")).toHaveAttribute(
         "data-status",
-        "idle",
+        status,
       );
       expect(screen.queryByTestId("generic-tool")).toBeNull();
       expect(container.querySelector(".lucide-loader-circle")).toBeNull();
@@ -1062,34 +1065,28 @@ describe("compact dedicated transcript composition", () => {
     const { container } = render(<ToolContent toolCalls={[call]} />, {
       preloadedState: { chat },
     });
-    expect(screen.getByText("Launch blocked")).toBeInTheDocument();
+    const item = screen.getByTestId("launch-preview");
+    expect(
+      container.querySelectorAll("section[data-transcript-item]"),
+    ).toHaveLength(1);
     expect(screen.queryByTestId("background-agent-inline")).toBeNull();
-    expect(screen.queryByLabelText("Full response content")).toBeNull();
-    openToolCard();
-    expect(screen.getByText("No child started")).toBeInTheDocument();
-    const raw = screen.getByLabelText("Full response content");
-    expect(raw.closest("[inert]")).not.toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "More details" }));
-    expect(raw.closest("[inert]")).not.toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Technical details" }));
-    expect(raw.closest("[inert]")).toBeNull();
-    for (const [label, marker] of [
-      ["Raw arguments", "ARGUMENT_TAIL"],
-      ["Full response", "RESPONSE_TAIL"],
-      ["Response metadata", "METADATA_TAIL"],
-    ]) {
-      const content = screen.getByLabelText(`${label} content`);
-      expect(content).not.toHaveTextContent(marker);
-      const next = within(screen.getByLabelText(`${label} pages`)).getByRole(
-        "button",
-        { name: "Next section" },
-      );
-      fireEvent.click(next);
-      fireEvent.click(next);
-      expect(content).toHaveTextContent(marker);
-      expect(next).toBeDisabled();
+    expect(item).toHaveAttribute("data-open", "true");
+    expect(
+      within(item).getByTestId("transcript-status-pill"),
+    ).toHaveTextContent("Blocked");
+    expect(within(item).getByTestId("launch-blocked")).toHaveTextContent(
+      "Launch blocked: 1 unresolved context entry",
+    );
+    expect(within(item).getByTestId("transcript-title")).not.toHaveTextContent(
+      "ARGUMENT_TAIL",
+    );
+    expect(item).not.toHaveTextContent("RESPONSE_TAIL");
+    expect(item).not.toHaveTextContent("METADATA_TAIL");
+    fireEvent.click(within(item).getByRole("button", { name: "Raw" }));
+    const raw = within(item).getByTestId("transcript-raw");
+    for (const marker of ["ARGUMENT_TAIL", "RESPONSE_TAIL", "METADATA_TAIL"]) {
+      expect(raw).toHaveTextContent(marker);
     }
-    expect(screen.getByText("Launch blocked")).toBeInTheDocument();
     expect(container.querySelector("button button")).toBeNull();
     expect(
       screen.queryByRole("button", {

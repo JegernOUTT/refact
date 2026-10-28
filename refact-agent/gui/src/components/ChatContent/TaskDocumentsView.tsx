@@ -9,17 +9,18 @@ import {
 import { useThreadId } from "../../features/Chat/Thread";
 import type { ToolCall } from "../../services/refact/types";
 import { Markdown } from "../Markdown";
-import { CompactToolDetails } from "../Tools/AgenticTool/CompactToolDetails";
 import {
   COMPACT_HEADLINE_CHARS,
   compactFacts,
   compactText,
-  compactTransportPresentation,
   readCompactRecord,
 } from "../Tools/AgenticTool/compactPresentation";
-import { Badge, Icon } from "../ui";
-import { ToolCard, type ToolStatus } from "./ToolCard";
-import { useStoredOpen } from "./useStoredOpen";
+import { Badge } from "../ui";
+import {
+  TranscriptClamp,
+  TranscriptItem,
+  type TranscriptStatus,
+} from "./TranscriptItem";
 import styles from "./TaskDocumentsView.module.css";
 
 type ToolType = "doc_list" | "doc_get";
@@ -175,17 +176,9 @@ function hasParsedDocumentContent(document: ParsedDocument): boolean {
   return Object.values(document.meta).some((value) => value.trim().length > 0);
 }
 
-const RawMarkdownFallback: React.FC<{ content: string; notice: string }> = ({
-  content,
-  notice,
-}) => (
-  <div className={styles.root}>
-    <div className={styles.header}>
-      <span className={styles.headerMeta}>{notice}</span>
-    </div>
-    <div className={styles.markdown}>
-      <Markdown>{content}</Markdown>
-    </div>
+const RawMarkdown: React.FC<{ content: string }> = ({ content }) => (
+  <div className={styles.markdown}>
+    <Markdown>{content}</Markdown>
   </div>
 );
 
@@ -209,51 +202,15 @@ export const TaskDocumentsContent: React.FC<Props> = ({
   const document = useMemo(() => parseDocument(content), [content]);
 
   if (toolType === "doc_get") {
-    const { body, meta } = document;
-    if (!hasParsedDocumentContent(document)) {
-      return (
-        <RawMarkdownFallback
-          content={content}
-          notice="Parser produced no document details; raw output below"
-        />
-      );
-    }
-
-    return (
-      <div className={styles.root}>
-        <div className={styles.header}>
-          <span className={styles.headerTitle}>
-            {meta.name ?? meta.slug ?? "Task document"}
-          </span>
-          {meta.version && <Badge tone="muted">v{meta.version}</Badge>}
-        </div>
-        <div className={styles.badges}>
-          {meta.slug && <Badge tone="muted">{meta.slug}</Badge>}
-          {meta.kind && <Badge tone={kindTone(meta.kind)}>{meta.kind}</Badge>}
-          {meta.pinned && <PinStar pinned={parsePinned(meta.pinned)} />}
-        </div>
-        <div className={styles.markdown}>
-          <Markdown>{body || content}</Markdown>
-        </div>
-      </div>
-    );
+    if (!hasParsedDocumentContent(document))
+      return <RawMarkdown content={content} />;
+    return <RawMarkdown content={document.body || content} />;
   }
 
-  if (rows.length === 0) {
-    return (
-      <RawMarkdownFallback
-        content={content}
-        notice="Parser produced no rows; raw output below"
-      />
-    );
-  }
+  if (rows.length === 0) return <RawMarkdown content={content} />;
 
   return (
     <div className={styles.root}>
-      <div className={styles.header}>
-        <span className={styles.headerTitle}>Task documents</span>
-        <span className={styles.headerMeta}>{rows.length} documents</span>
-      </div>
       <div className={styles.rows}>
         {rows.map((row) => (
           <article key={row.slug} className={styles.row}>
@@ -282,8 +239,6 @@ export const TaskDocumentsView: React.FC<TaskDocumentsToolProps> = ({
   toolCall,
   toolType,
 }) => {
-  const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle] = useStoredOpen(storeKey);
   const threadId = useThreadId();
   const isStreaming = useAppSelector((state) =>
     selectIsStreamingById(state, threadId),
@@ -315,78 +270,64 @@ export const TaskDocumentsView: React.FC<TaskDocumentsToolProps> = ({
   const requestedSlug =
     typeof args?.slug === "string" ? compactText(args.slug) : null;
   const name =
-    compactText(document?.meta.name) ?? compactText(document?.meta.slug);
+    compactText(document?.meta.name, COMPACT_HEADLINE_CHARS) ??
+    compactText(document?.meta.slug);
   const facts =
     toolType === "doc_list"
-      ? compactFacts(
-          rows.length > 0
-            ? [
-                { label: "Documents shown", value: rows.length },
-                { label: "Coverage", value: "Parsed rows in this response" },
-              ]
-            : [],
-        )
+      ? []
       : compactFacts([
-          name
-            ? { label: "Name", value: name }
-            : { label: "Requested document", value: requestedSlug },
+          { label: "Slug", value: document?.meta.slug ?? requestedSlug },
           { label: "Version", value: document?.meta.version },
           { label: "Kind", value: document?.meta.kind },
+          {
+            label: "Pinned",
+            value:
+              document?.meta.pinned && parsePinned(document.meta.pinned)
+                ? "Yes"
+                : null,
+          },
         ]);
-  const hasParsedDetails =
-    rows.length > 0 ||
-    Object.values(document?.meta ?? {}).some(
-      (value) => value.trim().length > 0,
-    );
-  const { stateLabel } = compactTransportPresentation(
-    failed
-      ? "failed"
-      : !maybeResult
-        ? isStreaming || isWaiting
-          ? "running"
-          : "pending"
-        : hasParsedDetails
-          ? "succeeded"
-          : "unknown",
-  );
-  const headline =
+  const status: TranscriptStatus = failed
+    ? "failed"
+    : !maybeResult
+      ? isStreaming || isWaiting
+        ? "running"
+        : "unknown"
+      : "done";
+  const target =
     toolType === "doc_list"
       ? rows.length > 0
-        ? `${rows.length} document${rows.length === 1 ? "" : "s"} shown`
-        : "List task documents"
-      : `Read ${name ?? requestedSlug ?? "document"}`;
-  const status: ToolStatus = useMemo(() => {
-    if (!maybeResult && (isStreaming || isWaiting)) return "running";
-    return maybeResult?.tool_failed ? "error" : "idle";
-  }, [isStreaming, isWaiting, maybeResult]);
+        ? `${rows.length} document${rows.length === 1 ? "" : "s"}`
+        : undefined
+      : name ?? requestedSlug ?? undefined;
+  const meta =
+    toolType === "doc_get" && document?.meta.version
+      ? `v${document.meta.version}`
+      : undefined;
 
   return (
-    <>
-      <span data-testid="task-documents-view" hidden />
-      <ToolCard
-        icon={<Icon icon={FileText} size="sm" />}
-        density="compact"
-        summary={compactText(headline, COMPACT_HEADLINE_CHARS)}
-        meta={stateLabel}
-        status={status}
-        isOpen={isOpen}
-        onToggle={handleToggle}
-        toolCall={toolCall}
-      >
-        <CompactToolDetails facts={facts}>
-          {content !== null ? (
-            failed ? (
-              <RawMarkdownFallback
-                content={content}
-                notice="Request failed; raw output below"
-              />
-            ) : (
-              <TaskDocumentsContent toolType={toolType} content={content} />
-            )
-          ) : null}
-        </CompactToolDetails>
-      </ToolCard>
-    </>
+    <TranscriptItem
+      data-testid="task-documents-view"
+      icon={<FileText aria-hidden />}
+      verb={toolType === "doc_list" ? "Documents" : "Document"}
+      target={target}
+      meta={meta}
+      status={status}
+      summary={facts}
+      output={
+        content !== null && !failed ? (
+          <TranscriptClamp>
+            <TaskDocumentsContent toolType={toolType} content={content} />
+          </TranscriptClamp>
+        ) : undefined
+      }
+      error={failed ? content : undefined}
+      raw={[
+        { label: "Arguments", value: toolCall.function.arguments },
+        ...(content !== null ? [{ label: "Response", value: content }] : []),
+      ]}
+      openKey={toolCall.id ? `${toolType}:${toolCall.id}` : undefined}
+    />
   );
 };
 

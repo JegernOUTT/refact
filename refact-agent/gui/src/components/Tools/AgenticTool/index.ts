@@ -25,11 +25,5 @@ export {
 export { PagedText, PAGE_CHARS } from "./PagedText";
 export { parseFamilyReport, reportIsStructured } from "./familyReport";
 export type { FamilyReport } from "./familyReport";
-export { SpawnToolView } from "./SpawnToolView";
-export { OverviewToolView } from "./OverviewToolView";
-export { InspectToolView } from "./InspectToolView";
-export { ControlToolView } from "./ControlToolView";
-export { BoardToolView } from "./BoardToolView";
-export { DocToolView } from "./DocToolView";
-export { MemoryToolView } from "./MemoryToolView";
+export { FamilyReportView } from "./FamilyReportView";
 export type { AgenticFamily, AgenticIconKey } from "./agenticFamilies";

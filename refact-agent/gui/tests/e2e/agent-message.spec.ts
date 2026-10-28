@@ -1,78 +1,44 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
+
+async function openItem(page: Page, route: string, theme: string) {
+  await page.goto(
+    `/tests/e2e/route-showcase.html?route=${route}&theme=${theme}`,
+  );
+  await page.waitForLoadState("networkidle");
+  const toggle = page.getByTestId("transcript-toggle").first();
+  await expect(toggle).toBeVisible();
+  if ((await toggle.getAttribute("aria-expanded")) === "false")
+    await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByText("More details")).toHaveCount(0);
+  await expect(page.getByTestId("transcript-raw")).toHaveCount(1);
+  return page.locator("[data-transcript-item]").first();
+}
+
+async function expectNoOverflow(page: Page) {
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+}
 
 for (const width of [360, 1280]) {
   for (const theme of ["light", "dark"]) {
-    test(`Message receipts stay bounded and keyboard accessible at ${width}px in ${theme}`, async ({
+    test(`Message row names the recipient and renders the text once at ${width}px in ${theme}`, async ({
       page,
     }) => {
       await page.setViewportSize({ width, height: 900 });
-      await page.goto(
-        `/tests/e2e/route-showcase.html?route=agent-message&theme=${theme}`,
-      );
-      await page
-        .locator('[data-density="compact"] button[aria-expanded]')
-        .first()
-        .click();
-      await page
-        .getByRole("button", { name: "More details", exact: true })
-        .click();
-      const receipt = page.getByLabel("Agent message receipt", { exact: true });
-      await expect(receipt).toBeVisible();
-      await expect(receipt).toContainText("Message queued");
-      const body = receipt.getByLabel("Requested message content", {
-        exact: true,
-      });
-      expect((await body.textContent())?.length).toBe(4096);
-      const next = receipt.getByRole("button", { name: "Next section" });
-      await next.focus();
-      await expect(next).toBeFocused();
-      await page.keyboard.press("Enter");
+      const item = await openItem(page, "agent-message", theme);
+      await expect(item.getByTestId("transcript-verb")).toHaveText("Message");
+      await expect(item.getByTestId("transcript-target")).toHaveText("child");
+      await expect(item.getByTestId("transcript-status-pill")).toHaveCount(0);
+      await expect(item.getByTestId("transcript-facts")).toContainText("Sent");
+      const body = item.getByTestId("agentic-tool-message");
       await expect(body).toContainText("Second message section");
       await expect(body.locator("script")).toHaveCount(0);
-      await expect(next).toBeDisabled();
-      await expect(receipt).toContainText("not proof of consumption");
-      expect(
-        await page.evaluate(
-          () => document.documentElement.scrollWidth <= innerWidth,
-        ),
-      ).toBe(true);
-    });
-
-    test(`Board broadcast receipts page per card and stay inert at ${width}px in ${theme}`, async ({
-      page,
-    }) => {
-      await page.setViewportSize({ width, height: 900 });
-      await page.goto(
-        `/tests/e2e/route-showcase.html?route=agent-broadcast&theme=${theme}`,
-      );
-      await page
-        .locator('[data-density="compact"] button[aria-expanded]')
-        .first()
-        .click();
-      await page
-        .getByRole("button", { name: "More details", exact: true })
-        .click();
-      const receipt = page.getByLabel("Agent message receipt", { exact: true });
-      await expect(receipt).toBeVisible();
-      await expect(receipt).toContainText("4 of 7 board agents reached");
-      const cards = receipt.getByLabel("Board delivery receipts", {
-        exact: true,
-      });
-      await expect(cards).toContainText("Card 0 <script>inert</script>");
-      await expect(cards).toContainText("Not delivered: no live agent session");
-      await expect(cards.locator("script")).toHaveCount(0);
-      await expect(cards).not.toContainText("Card 5");
-      const next = cards.getByRole("button", { name: "Next cards" });
-      await next.focus();
-      await expect(next).toBeFocused();
-      await page.keyboard.press("Enter");
-      await expect(cards).toContainText("Card 5");
-      await expect(next).toBeDisabled();
-      expect(
-        await page.evaluate(
-          () => document.documentElement.scrollWidth <= innerWidth,
-        ),
-      ).toBe(true);
+      await expect(item.getByTestId("transcript-clamp")).toHaveCount(1);
+      await expectNoOverflow(page);
     });
   }
 }

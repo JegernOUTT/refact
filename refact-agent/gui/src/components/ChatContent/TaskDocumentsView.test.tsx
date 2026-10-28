@@ -115,7 +115,8 @@ describe("TaskDocumentsContent", () => {
     expect(screen.getByText("Main Plan")).toBeInTheDocument();
     expect(screen.getByText("API Spec")).toBeInTheDocument();
     expect(screen.getByText("Deploy Runbook")).toBeInTheDocument();
-    expect(screen.getByText("3 documents")).toBeInTheDocument();
+    expect(screen.queryByText("Task documents")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("article")).toHaveLength(3);
   });
 
   it("parses doc_list alias column names and skips rows without slugs", () => {
@@ -133,7 +134,7 @@ describe("TaskDocumentsContent", () => {
 
     expect(screen.getByText("Aliased Plan")).toBeInTheDocument();
     expect(screen.getByText("2026-05-22T13:00:00Z")).toBeInTheDocument();
-    expect(screen.getByText("1 documents")).toBeInTheDocument();
+    expect(screen.getAllByRole("article")).toHaveLength(1);
     expect(screen.queryByText("Missing Slug")).not.toBeInTheDocument();
   });
 
@@ -153,35 +154,36 @@ describe("TaskDocumentsContent", () => {
     expect(screen.getByText("2026-05-22T15:00:00Z")).toBeInTheDocument();
   });
 
-  it("renders raw doc_list markdown when no rows parse", () => {
-    render(
+  it("renders raw doc_list markdown without a notice when no rows parse", () => {
+    const { container } = render(
       <TaskDocumentsContent toolType="doc_list" content="No documents found" />,
     );
 
     expect(screen.getByText("No documents found")).toBeInTheDocument();
-    expect(
-      screen.getByText("Parser produced no rows; raw output below"),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("0 documents")).not.toBeInTheDocument();
+    expect(container.textContent).toBe("No documents found");
+    expect(container.querySelector("article")).toBeNull();
   });
 
-  it("does not render the raw fallback when doc_list rows parse", () => {
-    render(<TaskDocumentsContent toolType="doc_list" content={DOC_LIST} />);
-
-    expect(
-      screen.queryByText("Parser produced no rows; raw output below"),
-    ).not.toBeInTheDocument();
-  });
-
-  it("renders doc_get body markdown", () => {
-    render(<TaskDocumentsContent toolType="doc_get" content={DOC_GET} />);
+  it("renders only the doc_get body markdown", () => {
+    const { container } = render(
+      <TaskDocumentsContent toolType="doc_get" content={DOC_GET} />,
+    );
 
     expect(
       screen.getByRole("heading", { name: "Main Plan" }),
     ).toBeInTheDocument();
     expect(screen.getByText("Ship document renderer")).toBeInTheDocument();
-    expect(screen.getByText("main-plan")).toBeInTheDocument();
-    expect(screen.getByText("v3")).toBeInTheDocument();
+    expect(screen.queryByText("main-plan")).not.toBeInTheDocument();
+    expect(screen.queryByText("v3")).not.toBeInTheDocument();
+    expect(container.textContent).not.toContain("slug:");
+  });
+
+  it("renders unparsed doc_get output as raw markdown without a notice", () => {
+    const { container } = render(
+      <TaskDocumentsContent toolType="doc_get" content="Legacy body" />,
+    );
+
+    expect(container.textContent).toBe("Legacy body");
   });
 
   it("does not render raw scripts or inline image handlers from doc_get markdown", () => {
@@ -201,78 +203,91 @@ describe("TaskDocumentsContent", () => {
   });
 });
 
-describe("TaskDocumentsView compact dedicated route", () => {
-  it("starts doc_get closed with the parsed document name and full metadata behind a second disclosure", async () => {
-    const { container, user } = renderDocumentTool("doc_get", DOC_GET);
-    const toggle = screen.getByRole("button", {
-      name: "Read Main Plan Response received",
-    });
+function itemOf(toggle: HTMLElement): HTMLElement {
+  const section = toggle.closest("section");
+  if (!section) throw new Error("expected transcript section");
+  return section;
+}
 
-    expect(screen.getByTestId("task-documents-view")).toBeInTheDocument();
+function rowParts(toggle: HTMLElement) {
+  return {
+    verb: within(toggle).queryByTestId("transcript-verb")?.textContent ?? null,
+    target:
+      within(toggle).queryByTestId("transcript-target")?.textContent ?? null,
+    meta: within(toggle).queryByTestId("transcript-meta")?.textContent ?? null,
+  };
+}
+
+function factMap(): Record<string, string> {
+  const facts = screen.queryByTestId("transcript-facts");
+  if (!facts) return {};
+  return Object.fromEntries(
+    Array.from(facts.querySelectorAll("dt")).map((dt) => [
+      dt.textContent ?? "",
+      dt.nextElementSibling?.textContent ?? "",
+    ]),
+  );
+}
+
+function rawTexts(): string[] {
+  return Array.from(
+    screen.getByTestId("transcript-raw").querySelectorAll("pre"),
+  ).map((pre) => pre.textContent ?? "");
+}
+
+describe("TaskDocumentsView transcript route", () => {
+  it("starts doc_get closed with the document name and version, revealing facts and body when opened", async () => {
+    const { user } = renderDocumentTool("doc_get", DOC_GET);
+    const toggle = screen.getByTestId("transcript-toggle");
+
+    expect(screen.getByTestId("task-documents-view")).toBe(itemOf(toggle));
     expect(toggle).toHaveAttribute("aria-expanded", "false");
-    expect(container.querySelector("section")).toHaveAttribute(
-      "data-density",
-      "compact",
-    );
+    expect(rowParts(toggle)).toEqual({
+      verb: "Document",
+      target: "Main Plan",
+      meta: "v3",
+    });
+    expect(
+      screen.queryByTestId("transcript-status-pill"),
+    ).not.toBeInTheDocument();
     expect(
       screen.queryByText("Ship document renderer"),
     ).not.toBeInTheDocument();
-    expect(screen.queryByText("Task document")).not.toBeInTheDocument();
 
     toggle.focus();
     await user.keyboard("{Enter}");
 
     expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(container.querySelectorAll("dt")).toHaveLength(3);
-    expect(container.querySelectorAll("dd")).toHaveLength(3);
-    expect(screen.getByText("Name")).toBeInTheDocument();
-    expect(screen.getByText("Version")).toBeInTheDocument();
-    expect(screen.getByText("3")).toBeInTheDocument();
-    expect(screen.getByText("Kind")).toBeInTheDocument();
-    const details = screen.getByRole("button", { name: "More details" });
-    expect(details).toHaveAttribute("aria-expanded", "false");
-    expect(
-      screen.getByText("Ship document renderer").closest("[inert]"),
-    ).not.toBeNull();
-
-    details.focus();
-    await user.keyboard("{Enter}");
-
-    expect(
-      screen.getByText("Ship document renderer").closest("[inert]"),
-    ).toBeNull();
+    expect(factMap()).toEqual({
+      Slug: "main-plan",
+      Version: "3",
+      Kind: "plan",
+    });
     expect(screen.getByRole("heading", { name: "Main Plan" })).toBeVisible();
-    expect(screen.getByText("main-plan")).toBeVisible();
-    expect(screen.getByText("v3")).toBeVisible();
-    expect(screen.getByLabelText("Pinned")).toHaveTextContent("★");
+    expect(screen.getByText("Ship document renderer")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Raw" }));
+    expect(rawTexts()).toEqual([
+      JSON.stringify({ slug: "requested-plan" }, null, 2),
+      DOC_GET,
+    ]);
   });
 
-  it("starts doc_list closed with an observed count and explicit response coverage, retaining all rows on demand", async () => {
+  it("starts doc_list closed with an observed count, retaining all rows on demand", async () => {
     const { container, user } = renderDocumentTool("doc_list", DOC_LIST);
-    const toggle = screen.getByRole("button", {
-      name: "3 documents shown Response received",
-    });
+    const toggle = screen.getByTestId("transcript-toggle");
 
     expect(toggle).toHaveAttribute("aria-expanded", "false");
-    expect(container.querySelector("section")).toHaveAttribute(
-      "data-density",
-      "compact",
-    );
+    expect(rowParts(toggle)).toEqual({
+      verb: "Documents",
+      target: "3 documents",
+      meta: null,
+    });
     expect(screen.queryByText("API Spec")).not.toBeInTheDocument();
     await user.click(toggle);
 
-    expect(container.querySelectorAll("dt")).toHaveLength(2);
-    expect(screen.getByText("Documents shown")).toBeInTheDocument();
-    expect(screen.getByText("3")).toBeInTheDocument();
-    expect(screen.getByText("Coverage")).toBeInTheDocument();
-    expect(
-      screen.getByText("Parsed rows in this response"),
-    ).toBeInTheDocument();
-    expect(screen.getByText("API Spec").closest("[inert]")).not.toBeNull();
-    await user.click(screen.getByRole("button", { name: "More details" }));
-
+    expect(screen.queryByTestId("transcript-facts")).not.toBeInTheDocument();
+    expect(screen.queryByText("Task documents")).not.toBeInTheDocument();
     expect(container.querySelectorAll("article")).toHaveLength(3);
-    expect(screen.getByText("Main Plan").closest("[inert]")).toBeNull();
     expect(screen.getByText("API Spec")).toBeVisible();
     expect(screen.getByText("Deploy Runbook")).toBeVisible();
     expect(screen.getByLabelText("Pinned main-plan")).toHaveTextContent("★");
@@ -289,34 +304,23 @@ describe("TaskDocumentsView compact dedicated route", () => {
         "| | Missing Slug | brief | true | 1 | today |",
       ].join("\n"),
     );
-    await user.click(
-      screen.getByRole("button", {
-        name: "1 document shown Response received",
-      }),
-    );
-    expect(screen.getByText("1")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "More details" }));
+    const toggle = screen.getByTestId("transcript-toggle");
+    expect(rowParts(toggle).target).toBe("1 document");
+    await user.click(toggle);
     expect(screen.getByText("Aliased Plan")).toBeInTheDocument();
     expect(screen.queryByText("Missing Slug")).not.toBeInTheDocument();
   });
 
   it.each([
-    ["slug: payload-slug", "Read payload-slug Response received"],
-    ["name: \nslug: payload-slug", "Read payload-slug Response received"],
-    ["version: 7", "Read requested-plan Response received"],
+    ["slug: payload-slug", "payload-slug", null],
+    ["name: \nslug: payload-slug", "payload-slug", null],
+    ["version: 7", "requested-plan", "v7"],
   ])(
     "uses parsed metadata without inventing a name: %s",
-    async (metadata, header) => {
-      const { user } = renderDocumentTool(
-        "doc_get",
-        `---\n${metadata}\n---\nBody`,
-      );
-      await user.click(screen.getByRole("button", { name: header }));
-      expect(
-        screen.getByRole("button", { name: "More details" }),
-      ).toHaveAttribute("aria-expanded", "false");
-      if (metadata === "version: 7")
-        expect(screen.getByText("7")).toBeInTheDocument();
+    (metadata, target, meta) => {
+      renderDocumentTool("doc_get", `---\n${metadata}\n---\nBody`);
+      const toggle = screen.getByTestId("transcript-toggle");
+      expect(rowParts(toggle)).toEqual({ verb: "Document", target, meta });
     },
   );
 
@@ -328,28 +332,23 @@ describe("TaskDocumentsView compact dedicated route", () => {
   ])(
     "keeps unknown doc_get output neutral and recoverable: %s",
     async (content) => {
-      const { container, user } = renderDocumentTool("doc_get", content);
-      const toggle = screen.getByRole("button", {
-        name: "Read requested-plan Outcome unknown",
-      });
+      const { user } = renderDocumentTool("doc_get", content);
+      const toggle = screen.getByTestId("transcript-toggle");
       expect(toggle).toHaveAttribute("aria-expanded", "false");
+      expect(rowParts(toggle)).toEqual({
+        verb: "Document",
+        target: "requested-plan",
+        meta: null,
+      });
       await user.click(toggle);
-      expect(container.querySelectorAll("dt")).toHaveLength(1);
-      expect(screen.getByText("Requested document")).toBeInTheDocument();
-      const details = screen.getByRole("button", { name: "More details" });
-      expect(details).toHaveAttribute("aria-expanded", "false");
-      await user.click(details);
-      if (content === "") {
-        expect(
-          screen.getByText(
-            "Parser produced no document details; raw output below",
-          ),
-        ).toBeInTheDocument();
-      } else {
-        expect(container.textContent).toContain(
+      expect(factMap()).toEqual({ Slug: "requested-plan" });
+      const output = screen.getByRole("group", { name: "Output" });
+      if (content !== "")
+        expect(output.textContent).toContain(
           content.includes("Legacy body") ? "Legacy body" : content,
         );
-      }
+      await user.click(screen.getByRole("button", { name: "Raw" }));
+      expect(rawTexts()[1]).toBe(content);
     },
   );
 
@@ -363,75 +362,72 @@ describe("TaskDocumentsView compact dedicated route", () => {
     "never turns malformed or uncounted list output into a confirmed count: %s",
     async (content) => {
       const { container, user } = renderDocumentTool("doc_list", content);
-      const toggle = screen.getByRole("button", {
-        name: "List task documents Outcome unknown",
-      });
+      const toggle = screen.getByTestId("transcript-toggle");
       expect(toggle).toHaveAttribute("aria-expanded", "false");
-      expect(
-        screen.queryByText(/\d+ documents? shown/),
-      ).not.toBeInTheDocument();
+      expect(rowParts(toggle)).toEqual({
+        verb: "Documents",
+        target: null,
+        meta: null,
+      });
       await user.click(toggle);
-      expect(container.querySelector("dl")).toBeNull();
-      await user.click(screen.getByRole("button", { name: "More details" }));
-      expect(
-        screen.getByText("Parser produced no rows; raw output below"),
-      ).toBeInTheDocument();
+      expect(screen.queryByTestId("transcript-facts")).not.toBeInTheDocument();
       expect(container.querySelector("article")).toBeNull();
     },
   );
 
   it.each(["doc_get", "doc_list"] as const)(
-    "shows failed %s while closed without confirming payload metadata",
+    "shows failed %s without confirming payload metadata",
     async (toolType) => {
       const content = toolType === "doc_get" ? DOC_GET : DOC_LIST;
-      const { container, user } = renderDocumentTool(toolType, content, {
+      const { user } = renderDocumentTool(toolType, content, {
         failed: true,
       });
-      const summary =
-        toolType === "doc_get" ? "Read requested-plan" : "List task documents";
-      const toggle = screen.getByRole("button", {
-        name: `${summary} Request failed`,
-      });
+      const toggle = screen.getByTestId("transcript-toggle");
       expect(toggle).toHaveAttribute("aria-expanded", "false");
-      expect(container.querySelector("section")).toHaveAttribute(
-        "data-status",
-        "error",
+      expect(itemOf(toggle)).toHaveAttribute("data-status", "failed");
+      expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+        "Failed",
       );
-      expect(screen.queryByText("Main Plan")).not.toBeInTheDocument();
-      expect(
-        screen.queryByText(/\d+ documents? shown/),
-      ).not.toBeInTheDocument();
+      expect(rowParts(toggle)).toEqual({
+        verb: toolType === "doc_get" ? "Document" : "Documents",
+        target: toolType === "doc_get" ? "requested-plan" : null,
+        meta: null,
+      });
       await user.click(toggle);
-      expect(screen.queryByText("Name")).not.toBeInTheDocument();
-      expect(screen.queryByText("Documents shown")).not.toBeInTheDocument();
-      expect(screen.queryByText("Version")).not.toBeInTheDocument();
-      await user.click(screen.getByRole("button", { name: "More details" }));
+      expect(factMap()).toEqual(
+        toolType === "doc_get" ? { Slug: "requested-plan" } : {},
+      );
       expect(
-        screen.getByText("Request failed; raw output below"),
-      ).toBeInTheDocument();
-      expect(container.textContent).toContain("Main Plan");
+        screen.queryByRole("group", { name: "Output" }),
+      ).not.toBeInTheDocument();
+      expect(screen.getByRole("alert")).toHaveTextContent("Main Plan");
     },
   );
 
   it.each([
-    ["doc_get", false, false, "Read requested-plan Awaiting result"],
-    ["doc_list", false, false, "List task documents Awaiting result"],
-    ["doc_get", true, false, "Read requested-plan Running"],
-    ["doc_list", false, true, "List task documents Running"],
+    ["doc_get", false, false, "unknown", "Unknown"],
+    ["doc_list", false, false, "unknown", "Unknown"],
+    ["doc_get", true, false, "running", "Running"],
+    ["doc_list", false, true, "running", "Running"],
   ] as const)(
-    "keeps pending %s closed without a premature result disclosure",
-    async (toolType, streaming, waiting, header) => {
+    "keeps pending %s closed without a premature result",
+    async (toolType, streaming, waiting, status, pillText) => {
       const { user } = renderDocumentTool(toolType, undefined, {
         streaming,
         waiting,
       });
-      const toggle = screen.getByRole("button", { name: header });
+      const toggle = screen.getByTestId("transcript-toggle");
       expect(toggle).toHaveAttribute("aria-expanded", "false");
+      expect(itemOf(toggle)).toHaveAttribute("data-status", status);
+      expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+        pillText,
+      );
       await user.click(toggle);
       expect(
-        screen.queryByRole("button", { name: "More details" }),
+        screen.queryByRole("group", { name: "Output" }),
       ).not.toBeInTheDocument();
-      expect(screen.queryByText("Documents shown")).not.toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Raw" }));
+      expect(rawTexts()).toHaveLength(1);
     },
   );
 
@@ -445,25 +441,28 @@ describe("TaskDocumentsView compact dedicated route", () => {
     "handles invalid arguments without fabricating a document identity: %s",
     (args) => {
       renderDocumentTool("doc_get", "Legacy document body", { args });
-      expect(
-        screen.getByRole("button", { name: "Read document Outcome unknown" }),
-      ).toHaveAttribute("aria-expanded", "false");
+      const toggle = screen.getByTestId("transcript-toggle");
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      expect(rowParts(toggle)).toEqual({
+        verb: "Document",
+        target: null,
+        meta: null,
+      });
     },
   );
 
-  it("keeps non-string results unknown instead of claiming a parsed document", async () => {
+  it("keeps non-string results out of the parsed output", async () => {
     const { user } = renderDocumentTool("doc_get", [
       { m_type: "text", m_content: "name: Fake title" },
     ]);
-    await user.click(
-      screen.getByRole("button", {
-        name: "Read requested-plan Outcome unknown",
-      }),
-    );
-    expect(screen.queryByText("Name")).not.toBeInTheDocument();
+    const toggle = screen.getByTestId("transcript-toggle");
+    expect(rowParts(toggle).target).toBe("requested-plan");
+    await user.click(toggle);
+    expect(factMap()).toEqual({ Slug: "requested-plan" });
     expect(
-      screen.queryByRole("button", { name: "More details" }),
+      screen.queryByRole("group", { name: "Output" }),
     ).not.toBeInTheDocument();
+    expect(screen.queryByText(/Fake title/u)).not.toBeInTheDocument();
   });
 
   it("bounds and escapes hostile metadata while retaining the full large Markdown and safe navigation", async () => {
@@ -485,35 +484,26 @@ describe("TaskDocumentsView compact dedicated route", () => {
       "\n## End of full document",
     ].join("\n\n");
     const { container, user } = renderDocumentTool("doc_get", content);
-    const toggle = screen.getByRole("button");
-    const summary = within(toggle).getByText(/^Read /);
-    expect(Array.from(summary.textContent ?? "")).toHaveLength(
+    const toggle = screen.getByTestId("transcript-toggle");
+    const target = within(toggle).getByTestId("transcript-target");
+    expect(Array.from(target.textContent ?? "")).toHaveLength(
       COMPACT_HEADLINE_CHARS,
     );
-    expect(summary.textContent).toContain("…");
+    expect(target.textContent).toContain("…");
+    expect(target.textContent).toContain(hostile);
     expect(container.querySelector("script, img[onerror]")).toBeNull();
     expect(
       screen.queryByRole("heading", { name: "End of full document" }),
     ).not.toBeInTheDocument();
     await user.click(toggle);
-    expect(container.querySelectorAll("dt")).toHaveLength(3);
-    expect(container.querySelector("dd")?.textContent).toContain(hostile);
+    expect(factMap()).toEqual({
+      Slug: "hostile-document",
+      Version: "9",
+      Kind: "plan",
+    });
     expect(
-      screen
-        .getByRole("heading", { name: "End of full document" })
-        .closest("[inert]"),
-    ).not.toBeNull();
-    expect(
-      screen.getByRole("link", { name: "Read reference" }).closest("[inert]"),
-    ).not.toBeNull();
-    await user.click(screen.getByRole("button", { name: "More details" }));
-
-    expect(
-      screen
-        .getByRole("heading", { name: "End of full document" })
-        .closest("[inert]"),
-    ).toBeNull();
-    expect(screen.getByText(longName)).toBeInTheDocument();
+      screen.getByRole("heading", { name: "End of full document" }),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: "Read reference" }),
     ).toHaveAttribute("href", "https://example.com/reference");
@@ -534,7 +524,9 @@ describe("TaskDocumentsView compact dedicated route", () => {
     async (storedOpen) => {
       const getCall = makeToolCall("doc_get");
       const listCall = makeToolCall("doc_list");
-      const preferences = new Map([[`tc:${getCall.id ?? ""}`, storedOpen]]);
+      const preferences = new Map([
+        [`doc_get:${getCall.id ?? ""}`, storedOpen],
+      ]);
       const store = {
         get: (key: string) => preferences.get(key),
         set: (key: string, open: boolean) => {
@@ -552,12 +544,7 @@ describe("TaskDocumentsView compact dedicated route", () => {
         </CollapsibleStoreProvider>
       );
       const { unmount, user } = render(rows, { preloadedState: { chat } });
-      const read = screen.getByRole("button", {
-        name: "Read Main Plan Response received",
-      });
-      const list = screen.getByRole("button", {
-        name: "3 documents shown Response received",
-      });
+      const [read, list] = screen.getAllByTestId("transcript-toggle");
       expect(read).toHaveAttribute("aria-expanded", String(storedOpen));
       expect(list).toHaveAttribute("aria-expanded", "false");
       await user.click(list);
@@ -566,28 +553,21 @@ describe("TaskDocumentsView compact dedicated route", () => {
       expect(list).toHaveAttribute("aria-expanded", "true");
       unmount();
       render(rows, { preloadedState: { chat } });
-      expect(
-        screen.getByRole("button", {
-          name: "Read Main Plan Response received",
-        }),
-      ).toHaveAttribute("aria-expanded", String(!storedOpen));
-      expect(
-        screen.getByRole("button", {
-          name: "3 documents shown Response received",
-        }),
-      ).toHaveAttribute("aria-expanded", "true");
+      const [readAgain, listAgain] = screen.getAllByTestId("transcript-toggle");
+      expect(readAgain).toHaveAttribute("aria-expanded", String(!storedOpen));
+      expect(listAgain).toHaveAttribute("aria-expanded", "true");
+      expect(preferences.get(`doc_list:${listCall.id ?? ""}`)).toBe(true);
     },
   );
 
-  it("does not force expansion on result/status updates or reset a chosen secondary disclosure", async () => {
-    const { container, store, threadId, toolCall, user } = renderDocumentTool(
+  it("does not force expansion on result/status updates", async () => {
+    const { store, threadId, toolCall, user } = renderDocumentTool(
       "doc_get",
       undefined,
       { streaming: true },
     );
-    const toggle = screen.getByRole("button", {
-      name: "Read requested-plan Running",
-    });
+    const toggle = screen.getByTestId("transcript-toggle");
+    expect(itemOf(toggle)).toHaveAttribute("data-status", "running");
     const message: ToolMessage = {
       role: "tool",
       message_id: "document-result",
@@ -606,12 +586,14 @@ describe("TaskDocumentsView compact dedicated route", () => {
         }),
       );
     });
-    expect(toggle).toHaveAccessibleName("Read Main Plan Response received");
+    expect(rowParts(toggle)).toEqual({
+      verb: "Document",
+      target: "Main Plan",
+      meta: "v3",
+    });
+    expect(itemOf(toggle)).toHaveAttribute("data-status", "done");
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     await user.click(toggle);
-    const details = screen.getByRole("button", { name: "More details" });
-    expect(details).toHaveAttribute("aria-expanded", "false");
-    await user.click(details);
     act(() => {
       store.dispatch(
         applyChatEvent({
@@ -627,9 +609,7 @@ describe("TaskDocumentsView compact dedicated route", () => {
       );
     });
     expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(details).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByText("v4")).toBeInTheDocument();
-    await user.click(details);
+    expect(rowParts(toggle).meta).toBe("v4");
     act(() => {
       store.dispatch(
         applyChatEvent({
@@ -641,11 +621,10 @@ describe("TaskDocumentsView compact dedicated route", () => {
         }),
       );
     });
-    expect(toggle).toHaveAccessibleName("Read requested-plan Request failed");
+    expect(itemOf(toggle)).toHaveAttribute("data-status", "failed");
+    expect(rowParts(toggle).target).toBe("requested-plan");
     expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(details).toHaveAttribute("aria-expanded", "false");
-    expect(container.querySelector("dl")?.textContent).not.toContain(
-      "Main Plan",
-    );
+    expect(factMap()).toEqual({ Slug: "requested-plan" });
+    expect(screen.getByRole("alert")).toHaveTextContent("Main Plan");
   });
 });

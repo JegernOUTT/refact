@@ -1,33 +1,19 @@
-import { describe, expect, test, vi } from "vitest";
-import { render, screen, fireEvent } from "../../../utils/test-utils";
+import { describe, expect, test } from "vitest";
+import { render, screen } from "../../../utils/test-utils";
 import { ResumeToolView } from "./ResumeToolView";
 import { resumeReceipt } from "./resumeFixtures";
 
 describe("ResumeToolView", () => {
-  test("shows typed cap and revision without executing a resume", () => {
-    const open = vi.fn();
-    render(
-      <ResumeToolView
-        content={JSON.stringify(resumeReceipt())}
-        pending={false}
-        failed={false}
-        onOpenChildTrajectory={open}
-      />,
-    );
+  test("shows the typed cap and eligibility without executing a resume", () => {
+    render(<ResumeToolView content={JSON.stringify(resumeReceipt())} />);
     expect(screen.getByLabelText("Execution cap")).toHaveTextContent("20 / 20");
-    expect(screen.getByText(/Inspection only/)).toBeInTheDocument();
     expect(
-      screen.getByText("Record revision").nextElementSibling,
-    ).toHaveTextContent("14");
-    expect(
-      screen.getByText(/Unknown tool outcomes are never replayed/),
-    ).toBeInTheDocument();
-    fireEvent.click(
-      screen.getByRole("button", { name: "Open child trajectory" }),
-    );
-    expect(open).toHaveBeenCalledExactlyOnceWith("child-trajectory");
+      screen.getByText("Eligibility").nextElementSibling,
+    ).toHaveTextContent("Can raise the step cap");
+    expect(screen.queryByRole("button")).toBeNull();
   });
-  test("distinguishes a queued resume receipt from execution success", () => {
+
+  test("shows a queued lifecycle receipt without a cap", () => {
     render(
       <ResumeToolView
         lifecycle
@@ -39,16 +25,14 @@ describe("ResumeToolView", () => {
             can_raise_and_resume: false,
           }),
         )}
-        pending={false}
-        failed={false}
-        onOpenChildTrajectory={vi.fn()}
       />,
     );
-    expect(
-      screen.getByText(/Queued is not running or completed/),
-    ).toBeInTheDocument();
+    expect(screen.getByText("State").nextElementSibling).toHaveTextContent(
+      "Queued",
+    );
     expect(screen.queryByLabelText("Execution cap")).toBeNull();
   });
+
   test("reports unavailable saved scope and configuration explicitly", () => {
     render(
       <ResumeToolView
@@ -62,9 +46,6 @@ describe("ResumeToolView", () => {
             can_raise_and_resume: false,
           }),
         )}
-        pending={false}
-        failed={false}
-        onOpenChildTrajectory={vi.fn()}
       />,
     );
     expect(
@@ -73,11 +54,8 @@ describe("ResumeToolView", () => {
     expect(
       screen.getByText(/Original execution scope unavailable/),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText("Settings step ceiling").nextElementSibling,
-    ).toHaveTextContent("Unavailable");
-    expect(screen.queryByRole("button")).toBeNull();
   });
+
   test.each([
     "legacy",
     "{}",
@@ -86,36 +64,8 @@ describe("ResumeToolView", () => {
     JSON.stringify(resumeReceipt({ can_resume: "true" })),
     JSON.stringify(resumeReceipt({ action: ["inspect"] })),
     JSON.stringify(resumeReceipt({ run_generation: 4 })),
-  ])("fails closed for malformed or legacy receipts %s", (content) => {
-    render(
-      <ResumeToolView
-        content={content}
-        pending={false}
-        failed={false}
-        onOpenChildTrajectory={vi.fn()}
-      />,
-    );
-    expect(screen.getByRole("alert")).toHaveTextContent("does not confirm");
-    expect(screen.queryByRole("button")).toBeNull();
-  });
-  test("keeps pending and failed results distinct", () => {
-    const { rerender } = render(
-      <ResumeToolView
-        content={null}
-        pending
-        failed={false}
-        onOpenChildTrajectory={vi.fn()}
-      />,
-    );
-    expect(screen.getByRole("status")).toHaveTextContent("Waiting");
-    rerender(
-      <ResumeToolView
-        content={JSON.stringify(resumeReceipt())}
-        pending={false}
-        failed
-        onOpenChildTrajectory={vi.fn()}
-      />,
-    );
-    expect(screen.getByRole("alert")).toBeInTheDocument();
+  ])("renders nothing for malformed or legacy receipts %s", (content) => {
+    render(<ResumeToolView content={content} />);
+    expect(screen.queryByLabelText("Child resume")).toBeNull();
   });
 });

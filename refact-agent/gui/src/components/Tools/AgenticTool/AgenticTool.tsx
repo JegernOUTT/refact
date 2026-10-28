@@ -2,6 +2,7 @@ import React, { useCallback, useMemo } from "react";
 import { useAppDispatch } from "../../../hooks/useAppDispatch";
 import { useAppSelector } from "../../../hooks/useAppSelector";
 import {
+  selectBackgroundAgentPool,
   selectIsStreamingById,
   selectIsWaitingById,
   selectToolResultByThreadAndId,
@@ -14,149 +15,67 @@ import {
 import { push } from "../../../features/Pages/pagesSlice";
 import type { ToolCall } from "../../../services/refact/types";
 import { normalizeToolName } from "../../../utils/toolNameAliases";
-import { Badge, ToolCard as CompactCard } from "../../ui";
-import { ToolCallTooltip } from "../../ChatContent/ToolCard/ToolCallTooltip";
-import { useStoredOpen } from "../../ChatContent/useStoredOpen";
+import { Button } from "../../ui";
+import { Markdown } from "../../Markdown";
 import {
-  useChatScrollAnchor,
-  usePrepareChatScrollAnchor,
-} from "../../ChatContent/useChatScrollAnchor";
+  TranscriptClamp,
+  TranscriptItem,
+  type TranscriptRawBlock,
+} from "../../ChatContent/TranscriptItem";
 import {
-  buildCompactAgenticPresentation,
   buildAgenticToolViewModel,
-  type AgenticToolViewModel,
+  parseAgenticArgs,
 } from "./agenticToolModel";
 import { agenticIcon } from "./agenticIcons";
-import { WorkToolView } from "./WorkToolView";
-import { ApprovalToolView } from "./ApprovalToolView";
-import { ResumeToolView } from "./ResumeToolView";
-import { PlanToolView } from "./PlanToolView";
-import { GoalToolView } from "./GoalToolView";
-import { MessageToolView } from "./MessageToolView";
-import { SpawnToolView } from "./SpawnToolView";
-import { OverviewToolView } from "./OverviewToolView";
-import { InspectToolView } from "./InspectToolView";
-import { ControlToolView } from "./ControlToolView";
-import { BoardToolView } from "./BoardToolView";
-import { DocToolView } from "./DocToolView";
-import { MemoryToolView } from "./MemoryToolView";
-import { ExecutionToolView } from "./ExecutionToolView";
-import { FamilyChildLink } from "./FamilyToolCard";
-import { CompactToolDetails } from "./CompactToolDetails";
-import { PagedText } from "./PagedText";
-import {
-  LOCAL_COLLABORATION_TOOL_NAMES,
-  lookupAgenticFamily,
-} from "./agenticFamilies";
+import { lookupAgenticFamily } from "./agenticFamilies";
+import { buildAgenticRow } from "./agenticRow";
+import type { AgentLookup, OverviewAgentRow } from "./agenticRowShared";
+import { AgenticFamilyView } from "./AgenticFamilyView";
+import type { CompactTransportState } from "./compactPresentation";
+import styles from "./AgenticTool.module.css";
 
 export type AgenticToolProps = {
   toolCall: ToolCall;
   threadId?: string;
 };
 
-function familyBody({
-  model,
-  content,
-  extra,
-  argumentsRaw,
-  onOpenChildTrajectory,
+function AgentList({
+  agents,
+  onOpen,
 }: {
-  model: AgenticToolViewModel;
-  content: string | null;
-  extra: Record<string, unknown> | undefined;
-  argumentsRaw: string | undefined;
-  onOpenChildTrajectory: (childChatId: string) => void;
-}): React.ReactNode {
-  const name = normalizeToolName(model.toolName) ?? model.toolName;
-  const pending = model.status === "pending";
-  const failed = model.status === "failed";
-  if (name === "work_overview" || name === "work_inspect")
-    return <WorkToolView content={content} pending={pending} failed={failed} />;
-  if (name === "agent_approval")
-    return (
-      <ApprovalToolView content={content} pending={pending} failed={failed} />
-    );
-  if (["wait", "schedule", "pause", "resume"].includes(name))
-    return <ExecutionToolView model={model} content={content} />;
-  if (name === "agent_resume" || name === "agent_lifecycle")
-    return (
-      <ResumeToolView
-        lifecycle={name === "agent_lifecycle"}
-        content={content}
-        pending={pending}
-        failed={failed}
-        onOpenChildTrajectory={onOpenChildTrajectory}
-      />
-    );
-  if (name === "pause_goal" || name === "snooze_goal")
-    return (
-      <GoalToolView
-        toolName={name}
-        content={content}
-        extra={extra}
-        pending={pending}
-        failed={failed}
-      />
-    );
-  switch (model.family) {
-    case "goal":
-      return (
-        <GoalToolView
-          toolName={name}
-          content={content}
-          extra={extra}
-          pending={pending}
-          failed={failed}
-        />
-      );
-    case "plan":
-      return (
-        <PlanToolView
-          toolName={name}
-          content={content}
-          pending={pending}
-          failed={failed}
-        />
-      );
-    case "message":
-    case "progress":
-      return (
-        <MessageToolView
-          toolName={name}
-          argumentsRaw={argumentsRaw}
-          content={content}
-          extra={extra}
-          pending={pending}
-          failed={failed}
-        />
-      );
-    case "spawn":
-      return (
-        <SpawnToolView
-          model={model}
-          content={content}
-          onOpenChildTrajectory={onOpenChildTrajectory}
-        />
-      );
-    case "overview":
-      return <OverviewToolView model={model} content={content} />;
-    case "inspect":
-      return (
-        <InspectToolView
-          model={model}
-          content={content}
-          onOpenChildTrajectory={onOpenChildTrajectory}
-        />
-      );
-    case "control":
-      return <ControlToolView model={model} content={content} />;
-    case "task":
-      return <BoardToolView model={model} content={content} />;
-    case "doc":
-      return <DocToolView model={model} content={content} />;
-    case "memory":
-      return <MemoryToolView model={model} content={content} />;
-  }
+  agents: OverviewAgentRow[];
+  onOpen: (chatId: string, title: string) => void;
+}) {
+  return (
+    <ul className={styles.agentList} data-testid="agentic-tool-agents">
+      {agents.map((agent) => (
+        <li
+          className={styles.agentRow}
+          key={agent.agentId}
+          title={agent.agentId}
+        >
+          <span className={styles.agentState} data-status={agent.status}>
+            {agent.state}
+          </span>
+          <span className={styles.agentTitle}>{agent.title}</span>
+          {agent.step !== null && (
+            <span className={styles.agentDetail}>step {agent.step}</span>
+          )}
+          {agent.childChatId !== null && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                if (agent.childChatId) onOpen(agent.childChatId, agent.title);
+              }}
+            >
+              Open
+            </Button>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 export const AgenticTool: React.FC<AgenticToolProps> = ({
@@ -165,13 +84,7 @@ export const AgenticTool: React.FC<AgenticToolProps> = ({
 }) => {
   const contextThreadId = useThreadId();
   const resolvedThreadId = threadId ?? contextThreadId;
-  const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const isCollaboration = LOCAL_COLLABORATION_TOOL_NAMES.includes(
-    normalizeToolName(toolCall.function.name) ?? "",
-  );
-  const [isOpen, handleToggle] = useStoredOpen(storeKey, false);
   const dispatch = useAppDispatch();
-
   const isStreaming = useAppSelector((state) =>
     selectIsStreamingById(state, resolvedThreadId),
   );
@@ -181,66 +94,78 @@ export const AgenticTool: React.FC<AgenticToolProps> = ({
   const maybeResult = useAppSelector((state) =>
     selectToolResultByThreadAndId(state, resolvedThreadId, toolCall.id),
   );
+  const agentPool = useAppSelector(selectBackgroundAgentPool);
 
+  const toolName = toolCall.function.name ?? "";
+  const argumentsRaw = toolCall.function.arguments;
   const content =
     maybeResult && typeof maybeResult.content === "string"
       ? maybeResult.content
       : null;
+  const transport: CompactTransportState = maybeResult
+    ? maybeResult.tool_failed
+      ? "failed"
+      : "succeeded"
+    : isStreaming || isWaiting
+      ? "running"
+      : "pending";
 
-  const presentation = useMemo(
+  const lookup = useCallback<AgentLookup>(
+    (agentId) => {
+      const agent = Object.values(agentPool).find(
+        (candidate) =>
+          candidate.agent_id.startsWith(agentId) ||
+          candidate.child_chat_id === agentId,
+      );
+      return agent
+        ? { title: agent.title, childChatId: agent.child_chat_id }
+        : null;
+    },
+    [agentPool],
+  );
+
+  const row = useMemo(
     () =>
-      buildCompactAgenticPresentation({
-        toolName: toolCall.function.name ?? "",
-        arguments: toolCall.function.arguments,
-        result: maybeResult?.content,
+      buildAgenticRow({
+        toolName,
+        args: parseAgenticArgs(argumentsRaw).args,
+        content,
         extra: maybeResult?.extra,
-        transportState: maybeResult
-          ? maybeResult.tool_failed
-            ? "failed"
-            : "succeeded"
-          : isStreaming || isWaiting
-            ? "running"
-            : "pending",
+        transport,
+        lookup,
       }),
-    [
-      isStreaming,
-      isWaiting,
-      maybeResult,
-      toolCall.function.arguments,
-      toolCall.function.name,
-    ],
+    [argumentsRaw, content, lookup, maybeResult?.extra, toolName, transport],
   );
 
   const model = useMemo(
     () =>
-      isCollaboration
-        ? null
-        : buildAgenticToolViewModel({
-            toolName: toolCall.function.name,
-            argumentsRaw: toolCall.function.arguments,
+      row.useFamilyView
+        ? buildAgenticToolViewModel({
+            toolName,
+            argumentsRaw,
             content,
             toolFailed: maybeResult?.tool_failed,
             hasResult: Boolean(maybeResult),
             isBusy: isStreaming || isWaiting,
-            historical: Boolean(maybeResult) && !isStreaming && !isWaiting,
-          }),
+          })
+        : null,
     [
-      isCollaboration,
+      argumentsRaw,
       content,
       isStreaming,
       isWaiting,
       maybeResult,
-      toolCall.function.arguments,
-      toolCall.function.name,
+      row.useFamilyView,
+      toolName,
     ],
   );
 
-  const handleOpenChild = useCallback(
-    (childChatId: string) => {
+  const openChild = useCallback(
+    (childChatId: string, title: string) => {
       dispatch(
         createChatWithId({
           id: childChatId,
-          title: presentation?.headline ?? "Agent trajectory",
+          title,
           parentId: resolvedThreadId,
           linkType: "subagent",
         }),
@@ -248,96 +173,81 @@ export const AgenticTool: React.FC<AgenticToolProps> = ({
       dispatch(switchToThread({ id: childChatId }));
       dispatch(push({ name: "chat" }));
     },
-    [dispatch, presentation?.headline, resolvedThreadId],
+    [dispatch, resolvedThreadId],
   );
 
-  const preserveScrollAnchor = useChatScrollAnchor();
-  const prepareScrollAnchor = usePrepareChatScrollAnchor();
-  const handleCompactToggle = useCallback(() => {
-    preserveScrollAnchor(handleToggle);
-  }, [handleToggle, preserveScrollAnchor]);
-  const family = lookupAgenticFamily(toolCall.function.name);
+  const family = lookupAgenticFamily(toolName);
+  if (!family) return null;
+  const name = normalizeToolName(toolName) ?? toolName;
+  const childChatId = row.childChatId ?? model?.childChatId ?? null;
+  const title = row.target ?? row.verb;
 
-  if (presentation && family)
-    return (
-      <>
-        <span data-testid="agentic-tool" hidden />
-        <ToolCallTooltip toolCall={toolCall}>
-          <CompactCard
-            aria-label={
-              isCollaboration ? "Collaboration receipt" : "Agentic tool"
-            }
-            density="compact"
-            icon={agenticIcon(family.icon)}
-            title={presentation.headline}
-            status={
-              presentation.tone === "danger"
-                ? "error"
-                : !maybeResult && (isStreaming || isWaiting)
-                  ? "running"
-                  : "idle"
-            }
-            open={isOpen}
-            onPointerDownCapture={prepareScrollAnchor}
-            onMouseDownCapture={prepareScrollAnchor}
-            onKeyDownCapture={prepareScrollAnchor}
-            onOpenChange={handleCompactToggle}
-            actions={
-              <Badge
-                role={presentation.tone === "danger" ? "alert" : "status"}
-                tone={
-                  presentation.tone === "danger" ||
-                  presentation.tone === "warning"
-                    ? presentation.tone
-                    : "muted"
-                }
-              >
-                {presentation.stateLabel}
-              </Badge>
-            }
+  const output = model ? (
+    <AgenticFamilyView
+      model={model}
+      toolName={name}
+      content={content}
+      extra={maybeResult?.extra}
+      argumentsRaw={argumentsRaw}
+    />
+  ) : row.markdown !== null || row.agents !== null || row.criteria !== null ? (
+    <TranscriptClamp>
+      {row.agents && <AgentList agents={row.agents} onOpen={openChild} />}
+      {row.markdown !== null && (
+        <div data-testid="agentic-tool-message">
+          <Markdown canHaveInteractiveElements={false}>{row.markdown}</Markdown>
+        </div>
+      )}
+      {row.criteria && (
+        <ol aria-label="Criteria" className={styles.criteria}>
+          {row.criteria.map((criterion, index) => (
+            <li key={index}>{criterion}</li>
+          ))}
+        </ol>
+      )}
+    </TranscriptClamp>
+  ) : null;
+
+  const raw: TranscriptRawBlock[] = [
+    { label: "Arguments", value: argumentsRaw },
+  ];
+  if (maybeResult)
+    raw.push({ label: "Response", value: content ?? maybeResult.content });
+  if (maybeResult?.extra)
+    raw.push({ label: "Metadata", value: maybeResult.extra });
+
+  const Icon = agenticIcon(family.icon);
+  return (
+    <TranscriptItem
+      data-testid="agentic-tool"
+      data-tool={name}
+      icon={<Icon aria-hidden />}
+      verb={row.verb}
+      target={row.target}
+      separator={row.separator}
+      meta={row.meta}
+      status={row.status}
+      statusLabel={row.statusLabel}
+      summary={row.facts}
+      output={output}
+      error={row.error}
+      actions={
+        childChatId ? (
+          <Button
+            size="sm"
+            variant="soft"
+            data-testid="agentic-tool-open-child"
+            onClick={() => openChild(childChatId, title)}
           >
-            <CompactToolDetails
-              facts={presentation.facts}
-              navigation={
-                model?.childChatId ? (
-                  <FamilyChildLink
-                    childChatId={model.childChatId}
-                    onOpen={handleOpenChild}
-                  />
-                ) : undefined
-              }
-            >
-              {model &&
-                familyBody({
-                  model,
-                  content,
-                  extra: maybeResult?.extra,
-                  argumentsRaw: toolCall.function.arguments,
-                  onOpenChildTrajectory: handleOpenChild,
-                })}
-              <PagedText
-                label="Raw arguments"
-                body={toolCall.function.arguments}
-              />
-              {maybeResult && (
-                <PagedText
-                  label="Full response"
-                  body={content ?? JSON.stringify(maybeResult.content, null, 2)}
-                />
-              )}
-              {maybeResult?.extra && (
-                <PagedText
-                  label="Response metadata"
-                  body={JSON.stringify(maybeResult.extra, null, 2)}
-                />
-              )}
-            </CompactToolDetails>
-          </CompactCard>
-        </ToolCallTooltip>
-      </>
-    );
-
-  return null;
+            Open child trajectory
+          </Button>
+        ) : null
+      }
+      raw={raw}
+      openKey={toolCall.id ? `agentic:${toolCall.id}` : undefined}
+      defaultOpen={row.status === "needs_you"}
+    />
+  );
 };
 
 export default AgenticTool;

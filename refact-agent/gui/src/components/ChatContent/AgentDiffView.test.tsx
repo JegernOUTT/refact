@@ -5,6 +5,7 @@ import {
   fireEvent,
   render,
   screen,
+  within,
 } from "../../utils/test-utils";
 import type { ToolCall, ToolMessage } from "../../services/refact/types";
 import { applyChatEvent } from "../../features/Chat/Thread";
@@ -180,12 +181,8 @@ describe("AgentDiffContent", () => {
 
   it("filters rendered unified diff by selected file", () => {
     renderDiff(DIFF_OUTPUT);
-    const outer = screen.getByRole("button", {
-      name: "2 changed files shown · check-agents redesign Partial diff",
-    });
-    fireEvent.click(outer);
-    const details = screen.getByRole("button", { name: "More details" });
-    fireEvent.click(details);
+    const outer = screen.getByTestId("transcript-toggle");
+    expect(outer).toHaveAttribute("aria-expanded", "true");
 
     fireEvent.click(
       screen.getAllByText("src/components/ChatContent/AgentPulseView.tsx")[0],
@@ -196,7 +193,6 @@ describe("AgentDiffContent", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText("new line")).not.toBeInTheDocument();
     expect(outer).toHaveAttribute("aria-expanded", "true");
-    expect(details).toHaveAttribute("aria-expanded", "true");
   });
 
   it("renders a selected file with no hunks without throwing and shows empty diff message", () => {
@@ -214,70 +210,106 @@ describe("AgentDiffContent", () => {
   });
 });
 
-describe("AgentDiffView compact route", () => {
-  it("starts closed with observed changed files and partial coverage, preserving hidden file controls", async () => {
-    const { container, user } = renderDiff(DIFF_OUTPUT);
-    const outer = screen.getByRole("button", {
-      name: "2 changed files shown · check-agents redesign Partial diff",
-    });
-    expect(outer).toHaveAttribute("aria-expanded", "false");
-    expect(outer.closest("section")).toHaveAttribute("data-density", "compact");
+function itemOf(toggle: HTMLElement): HTMLElement {
+  const section = toggle.closest("section");
+  if (!section) throw new Error("expected transcript section");
+  return section;
+}
+
+describe("AgentDiffView transcript route", () => {
+  it("opens by default with the file count, card title and partial coverage", async () => {
+    const { user } = renderDiff(DIFF_OUTPUT);
+    const outer = screen.getByTestId("transcript-toggle");
+    expect(outer).toHaveAttribute("aria-expanded", "true");
+    expect(itemOf(outer)).toHaveAttribute("data-status", "done");
+    expect(within(outer).getByTestId("transcript-verb")).toHaveTextContent(
+      "Diff",
+    );
+    expect(within(outer).getByTestId("transcript-target")).toHaveTextContent(
+      "check-agents redesign",
+    );
+    expect(within(outer).getByTestId("transcript-meta")).toHaveTextContent(
+      "2 files",
+    );
     expect(outer).not.toHaveTextContent("T-29");
-    expect(screen.queryByText("All files")).not.toBeInTheDocument();
-    await user.click(outer);
-    expect(container.querySelectorAll("dt")).toHaveLength(3);
-    expect(container.querySelector("dd")?.textContent).toBe("2");
-    const details = screen.getByRole("button", { name: "More details" });
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "Partial",
+    );
     const files = screen.getByRole("button", { name: "All files" });
-    expect(details).toHaveAttribute("aria-expanded", "false");
-    expect(files.closest("[inert]")).not.toBeNull();
-    await user.click(details);
     expect(files.closest("[inert]")).toBeNull();
     expect(screen.getByText("refact/task/T-29-agent")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Raw" }));
+    const blocks = Array.from(
+      screen.getByTestId("transcript-raw").querySelectorAll("pre"),
+    ).map((pre) => pre.textContent);
+    expect(blocks).toEqual([
+      JSON.stringify({ card_id: "T-29" }, null, 2),
+      DIFF_OUTPUT,
+    ]);
     await user.click(outer);
-    expect(files.closest("[inert]")).not.toBeNull();
-    outer.focus();
-    await user.tab();
-    expect(files).not.toHaveFocus();
+    expect(outer).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("omits the pill for a complete diff", () => {
+    renderDiff(RENAME_ONLY_DIFF_OUTPUT);
+    const outer = screen.getByTestId("transcript-toggle");
+    expect(within(outer).getByTestId("transcript-meta")).toHaveTextContent(
+      "2 files",
+    );
+    expect(
+      screen.queryByTestId("transcript-status-pill"),
+    ).not.toBeInTheDocument();
   });
 
   it.each([
-    [null, false, false, "Inspect changed files Diff unknown", "idle"],
-    [null, false, true, "Inspect changed files Reading diff", "running"],
-    ["not a diff", false, false, "Inspect changed files Diff unknown", "idle"],
-    [
-      'agent_diff(card_id="T-29")',
-      true,
-      false,
-      "Inspect changed files Request failed",
-      "error",
-    ],
+    [null, false, false, "unknown", null, "Unknown"],
+    [null, false, true, "running", null, "Running"],
+    ["not a diff", false, false, "done", null, null],
+    ['agent_diff(card_id="T-29")', true, false, "failed", null, "Failed"],
     [
       `# Agent Diff for T-29\n${FENCE}diff\n${FENCE}`,
       false,
       false,
-      "Inspect changed files Diff unknown",
-      "idle",
+      "done",
+      "no changes",
+      null,
     ],
     [
       `# Agent Diff for T-29\n${FENCE}\n(no changes detected)\n${FENCE}`,
       false,
       false,
-      "0 changed files shown Diff received",
-      "idle",
+      "done",
+      "no changes",
+      null,
     ],
   ])(
     "does not invent changes or request success: %s",
-    (content, failed, waiting, name, status) => {
+    (content, failed, waiting, status, meta, pillText) => {
       renderDiff(content, failed, waiting);
-      const outer = screen.getByRole("button", { name });
+      const outer = screen.getByTestId("transcript-toggle");
       expect(outer).toHaveAttribute("aria-expanded", "false");
-      expect(outer.closest("section")).toHaveAttribute("data-status", status);
+      expect(itemOf(outer)).toHaveAttribute("data-status", status);
+      const metaNode = within(outer).queryByTestId("transcript-meta");
+      if (meta === null) expect(metaNode).not.toBeInTheDocument();
+      else expect(metaNode).toHaveTextContent(meta);
+      const pill = screen.queryByTestId("transcript-status-pill");
+      if (pillText === null) expect(pill).not.toBeInTheDocument();
+      else expect(pill).toHaveTextContent(pillText);
     },
   );
 
+  it("shows a failed request in the Error section", async () => {
+    const { user } = renderDiff("diff failed sentinel", true);
+    await user.click(screen.getByTestId("transcript-toggle"));
+    expect(screen.getByRole("alert")).toHaveTextContent("diff failed sentinel");
+    expect(screen.queryByText("All files")).not.toBeInTheDocument();
+  });
+
   it("honors stored open and closed choices across state changes and remounts", () => {
-    const preferences = new Map([["tc:diff-call", true]]);
+    const preferences = new Map([
+      ["agent_diff:diff-call", true],
+      ["agent_diff:second-diff-call", false],
+    ]);
     const collapseStore = {
       get: (key: string) => preferences.get(key),
       set: (key: string, value: boolean) => {
@@ -294,14 +326,8 @@ describe("AgentDiffView compact route", () => {
       </CollapsibleStoreProvider>
     );
     const { store, unmount } = render(view(), { preloadedState: { chat } });
-    const outer = screen.getByRole("button", {
-      name: "2 changed files shown · check-agents redesign Partial diff",
-    });
-    const sibling = screen.getByRole("button", {
-      name: "Inspect changed files Diff unknown",
-    });
-    const details = screen.getByRole("button", { name: "More details" });
-    fireEvent.click(details);
+    const [outer, sibling] = screen.getAllByTestId("transcript-toggle");
+    expect(outer).toHaveAttribute("aria-expanded", "true");
     fireEvent.click(
       screen.getByRole("button", {
         name: "src/components/ChatContent/AgentPulseView.tsx",
@@ -320,7 +346,6 @@ describe("AgentDiffView compact route", () => {
       );
     });
     expect(outer).toHaveAttribute("aria-expanded", "true");
-    expect(details).toHaveAttribute("aria-expanded", "true");
     expect(screen.queryByText("changed line")).not.toBeInTheDocument();
     fireEvent.click(outer);
     act(() => {
@@ -338,10 +363,10 @@ describe("AgentDiffView compact route", () => {
     expect(sibling).toHaveAttribute("aria-expanded", "false");
     unmount();
     render(view(), { store });
-    expect(
-      screen.getByRole("button", {
-        name: "Inspect changed files Request failed",
-      }),
-    ).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getAllByTestId("transcript-toggle")[0]).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(preferences.get("agent_diff:diff-call")).toBe(false);
   });
 });

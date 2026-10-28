@@ -11,16 +11,14 @@ import {
 import { useThreadId } from "../../features/Chat/Thread";
 import type { DiffChunk, ToolCall } from "../../services/refact/types";
 import { ShikiCodeBlock } from "../Markdown";
-import { CompactToolDetails } from "../Tools/AgenticTool/CompactToolDetails";
 import {
   COMPACT_HEADLINE_CHARS,
   compactText,
 } from "../Tools/AgenticTool/compactPresentation";
 import { Button, Icon } from "../ui";
-import { ToolCard, type ToolStatus } from "./ToolCard";
+import { TranscriptItem, type TranscriptStatus } from "./TranscriptItem";
 import { DiffBlock } from "./ToolCard/DiffBlock";
 import editToolStyles from "./ToolCard/EditTool.module.css";
-import { useStoredOpen } from "./useStoredOpen";
 import { parseAgentDiffOutput, type AgentDiffReport } from "./AgentDiffModel";
 import styles from "./AgentDiffView.module.css";
 
@@ -188,8 +186,6 @@ export const AgentDiffContent: React.FC<AgentDiffContentProps> = ({
 };
 
 export const AgentDiffView: React.FC<AgentDiffViewProps> = ({ toolCall }) => {
-  const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle] = useStoredOpen(storeKey, false);
   const threadId = useThreadId();
   const isStreaming = useAppSelector((state) =>
     selectIsStreamingById(state, threadId),
@@ -210,69 +206,45 @@ export const AgentDiffView: React.FC<AgentDiffViewProps> = ({ toolCall }) => {
     [content],
   );
 
-  const isRequestRunning = !maybeResult && (isStreaming || isWaiting);
-  const status: ToolStatus = maybeResult?.tool_failed
-    ? "error"
-    : isRequestRunning
-      ? "running"
-      : "idle";
-  const hasFileCount =
-    report !== null &&
-    (report.stats.files > 0 ||
-      report.body.trim() === "(no changes detected)" ||
-      report.body.trim() === "(no changes)");
-  const meta = maybeResult?.tool_failed
-    ? "Request failed"
-    : isRequestRunning
-      ? "Reading diff"
-      : hasFileCount
-        ? report.truncated
-          ? "Partial diff"
-          : "Diff received"
-        : "Diff unknown";
+  const failed = maybeResult?.tool_failed === true;
+  const status: TranscriptStatus = failed
+    ? "failed"
+    : !maybeResult
+      ? isStreaming || isWaiting
+        ? "running"
+        : "unknown"
+      : "done";
   const title =
     report && report.cardTitle !== report.cardId
       ? compactText(report.cardTitle, COMPACT_HEADLINE_CHARS)
-      : null;
-  const summary = hasFileCount
-    ? `${report.stats.files} changed files shown${title ? ` · ${title}` : ""}`
-    : "Inspect changed files";
-  const facts = report
-    ? [
-        {
-          label: "Changed files shown",
-          value: hasFileCount ? String(report.stats.files) : "Unknown",
-        },
-        { label: "Files", value: report.files.slice(0, 3).join(", ") },
-        {
-          label: "Coverage",
-          value: report.truncated ?? "Returned diff snapshot; not verification",
-        },
-      ]
-    : [{ label: "Result", value: "Diff unavailable" }];
+      : report?.cardId ?? null;
+  const files = report?.stats.files ?? 0;
+  const meta =
+    report === null
+      ? undefined
+      : files > 0
+        ? `${files} ${files === 1 ? "file" : "files"}`
+        : "no changes";
 
   return (
-    <>
-      <span data-testid="agent-diff-view" hidden />
-      <ToolCard
-        density="compact"
-        icon={<Icon icon={Github} size="sm" />}
-        summary={summary}
-        meta={meta}
-        status={status}
-        isOpen={isOpen}
-        onToggle={handleToggle}
-        toolCall={toolCall}
-      >
-        <CompactToolDetails facts={facts}>
-          {report ? (
-            <AgentDiffContent report={report} />
-          ) : content ? (
-            <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
-          ) : null}
-        </CompactToolDetails>
-      </ToolCard>
-    </>
+    <TranscriptItem
+      data-testid="agent-diff-view"
+      icon={<Github aria-hidden />}
+      verb="Diff"
+      target={title ?? undefined}
+      meta={meta}
+      status={status}
+      statusLabel={report?.truncated ? "Partial" : undefined}
+      statusDetail={report?.truncated ?? undefined}
+      output={report ? <AgentDiffContent report={report} /> : undefined}
+      error={failed ? content : undefined}
+      raw={[
+        { label: "Arguments", value: toolCall.function.arguments },
+        ...(content !== null ? [{ label: "Response", value: content }] : []),
+      ]}
+      openKey={toolCall.id ? `agent_diff:${toolCall.id}` : undefined}
+      defaultOpen={files > 0}
+    />
   );
 };
 
