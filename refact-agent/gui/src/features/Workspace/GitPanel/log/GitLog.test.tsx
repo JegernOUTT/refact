@@ -214,18 +214,19 @@ describe("Git log tool window", () => {
     const list = await screen.findByRole("listbox", { name: "Commits" });
     const options = await within(list).findAllByRole("option");
     expect(options).toHaveLength(HISTORY.length);
-    expect(within(options[0]).getByText("HEAD")).toHaveAttribute(
-      "data-kind",
-      "head",
+    await waitFor(() =>
+      expect(
+        within(options[0]).getByLabelText("origin & main (current branch)"),
+      ).toHaveAttribute("data-current", "true"),
     );
-    expect(within(options[0]).getByText("origin/main")).toHaveAttribute(
-      "data-kind",
-      "remote",
-    );
-    expect(within(options[2]).getByText("v1.0")).toHaveAttribute(
-      "data-kind",
-      "tag",
-    );
+    expect(
+      within(options[0]).getByLabelText("origin & main (current branch)"),
+    ).toHaveAttribute("title", "main, origin/main (current branch)");
+    expect(within(options[0]).queryByText("HEAD")).not.toBeInTheDocument();
+    expect(within(options[1]).getByText("feature/log")).toBeInTheDocument();
+    expect(
+      within(options[2]).getByText("v1.0").closest("[data-kind]"),
+    ).toHaveAttribute("data-kind", "tag");
     expect(list).toHaveAttribute("data-graph", "true");
     expect(options[0].querySelector("svg")).not.toBeNull();
     expect(logCalls[0]?.get("scope")).toBe("all");

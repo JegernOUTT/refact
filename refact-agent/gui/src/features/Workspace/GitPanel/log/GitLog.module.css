@@ -334,9 +334,12 @@
 .refPill {
   --git-ref-color: var(--rf-color-muted);
 
+  display: inline-flex;
   flex: 0 1 auto;
+  align-items: center;
   min-width: 0;
   max-width: 12rem;
+  gap: var(--rf-space-2xs);
   padding: 0 var(--rf-space-xs);
   overflow: hidden;
   color: var(--git-ref-color);
@@ -346,8 +349,20 @@
   border-radius: var(--rf-radius-chip);
   font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
     var(--rf-font-ui);
+  white-space: nowrap;
+}
+
+.refPillText {
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.refPillIcon {
+  flex: 0 0 auto;
+  width: 1em;
+  height: 1em;
 }
 
 .refPill[data-kind="head"] {
@@ -364,6 +379,10 @@
 
 .refPill[data-kind="tag"] {
   --git-ref-color: var(--rf-git-ref-tag);
+}
+
+.refPill[data-current="true"] {
+  --git-ref-color: var(--rf-git-ref-head);
 }
 
 .loadingRow,

@@ -1,38 +1,53 @@
+import { Target } from "lucide-react";
+
 import type { GitRef } from "../../../../services/refact/gitRead";
-import { sortRefs } from "./sortRefs";
+import {
+  EMPTY_REF_LABEL_CONTEXT,
+  groupRefLabels,
+  type RefLabel,
+  type RefLabelContext,
+} from "./refLabels";
 import styles from "./GitLog.module.css";
 
-const MAX_VISIBLE = 3;
-
-export function RefPill({ gitRef }: { gitRef: GitRef }) {
+export function RefPill({ label }: { label: RefLabel }) {
+  const names = label.names.join(", ");
   return (
     <span
+      aria-label={label.current ? `${label.text} (current branch)` : undefined}
       className={styles.refPill}
-      data-kind={gitRef.kind}
-      title={gitRef.name}
+      data-current={label.current ? "true" : undefined}
+      data-kind={label.kind}
+      title={label.current ? `${names} (current branch)` : names}
     >
-      {gitRef.name}
+      {label.current ? (
+        <Target aria-hidden="true" className={styles.refPillIcon} />
+      ) : null}
+      <span className={styles.refPillText}>{label.text}</span>
     </span>
   );
 }
 
-export function RefPills({ refs }: { refs: readonly GitRef[] | undefined }) {
+export function RefPills({
+  refs,
+  context = EMPTY_REF_LABEL_CONTEXT,
+}: {
+  refs: readonly GitRef[] | undefined;
+  context?: RefLabelContext;
+}) {
   if (!refs || refs.length === 0) return null;
-  const sorted = sortRefs(refs);
-  const visible = sorted.slice(0, MAX_VISIBLE);
-  const hidden = sorted.slice(MAX_VISIBLE);
+  const { visible, hidden } = groupRefLabels(refs, context);
   return (
     <span className={styles.refPills}>
-      {visible.map((ref) => (
-        <RefPill gitRef={ref} key={`${ref.kind}:${ref.name}`} />
+      {visible.map((label) => (
+        <RefPill key={label.key} label={label} />
       ))}
       {hidden.length > 0 ? (
         <span
           className={styles.refPill}
           data-kind="more"
-          title={hidden.map((ref) => ref.name).join(", ")}
+          title={hidden.flatMap((label) => label.names).join(", ")}
         >
-          +{hidden.length}
+          <span className={styles.refPillText}>+{hidden.length}</span>
         </span>
       ) : null}
     </span>

@@ -19,6 +19,7 @@ import {
 import { gitErrorText } from "../gitErrors";
 import { openGitCommitDiff } from "../gitPanelSlice";
 import { formatAbsoluteDate, splitMessage } from "./commitFormat";
+import type { RefLabelContext } from "./refLabels";
 import { RefPills } from "./RefPills";
 import styles from "./GitLog.module.css";
 
@@ -34,6 +35,7 @@ export type CommitDetailsPaneProps = {
   oid: string | null;
   isLoaded: (oid: string) => boolean;
   onSelectCommit: (oid: string) => void;
+  refContext?: RefLabelContext;
 };
 
 function joinPath(root: string, path: string): string {
@@ -139,10 +141,12 @@ function Details({
   details,
   isLoaded,
   onSelectCommit,
+  refContext,
 }: {
   details: GitCommitDetails;
   isLoaded: (oid: string) => boolean;
   onSelectCommit: (oid: string) => void;
+  refContext?: RefLabelContext;
 }) {
   const copy = useCopyToClipboard();
   const { subject, body } = splitMessage(details.message);
@@ -178,7 +182,7 @@ function Details({
               variant="ghost"
             />
           </Tooltip>
-          <RefPills refs={details.refs} />
+          <RefPills context={refContext} refs={details.refs} />
         </div>
         <div className={styles.metaRow}>
           <span>
@@ -270,6 +274,7 @@ export function CommitDetailsPane({
   oid,
   isLoaded,
   onSelectCommit,
+  refContext,
 }: CommitDetailsPaneProps) {
   const query = useGetGitCommitDetailsQuery(
     { root, oid: oid ?? "" },
@@ -302,6 +307,7 @@ export function CommitDetailsPane({
       details={query.data}
       isLoaded={isLoaded}
       onSelectCommit={onSelectCommit}
+      refContext={refContext}
     />
   );
 }

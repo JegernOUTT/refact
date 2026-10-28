@@ -36,6 +36,7 @@ import {
   type BranchFilter,
   type LogFilters,
 } from "./logFilters";
+import type { RefLabelContext } from "./refLabels";
 import { RefPills } from "./RefPills";
 import { useDebouncedInput } from "./useDebouncedValue";
 import styles from "./GitLog.module.css";
@@ -50,6 +51,7 @@ export type CommitsPaneProps = {
   graph: GraphLayout | null;
   filters: LogFilters;
   refs: BranchRef[];
+  refContext?: RefLabelContext;
   selectedOid: string | null;
   isLoading: boolean;
   isFetching: boolean;
@@ -139,6 +141,7 @@ type CommitRowProps = {
   rowId: string;
   selected: boolean;
   onSelect: (oid: string) => void;
+  refContext?: RefLabelContext;
   commitActions?: (commit: GitCommitLogEntry) => GitMenuAction[];
 };
 
@@ -160,7 +163,7 @@ const CommitRowContent = forwardRef<
   HTMLDivElement,
   Omit<CommitRowProps, "commitActions">
 >(function CommitRowContent(
-  { commit, graph, index, rowId, selected, onSelect, ...rest },
+  { commit, graph, index, rowId, selected, onSelect, refContext, ...rest },
   ref,
 ) {
   const graphRow = graph?.rows[index];
@@ -182,7 +185,7 @@ const CommitRowContent = forwardRef<
         {graphRow ? (
           <CommitGraphCell row={graphRow} width={graphRow.width} />
         ) : null}
-        <RefPills refs={commit.refs} />
+        <RefPills context={refContext} refs={commit.refs} />
         <span className={styles.subjectText}>{commit.message_first_line}</span>
       </span>
       <span className={styles.authorCell} title={commit.author_email}>
@@ -201,6 +204,7 @@ export function CommitsPane({
   graph,
   filters,
   refs,
+  refContext,
   selectedOid,
   isLoading,
   isFetching,
@@ -387,6 +391,7 @@ export function CommitsPane({
                   onSelect(oid);
                   focusRef.current?.focus();
                 }}
+                refContext={refContext}
                 rowId={rowId(commit.oid)}
                 selected={commit.oid === selectedOid}
               />

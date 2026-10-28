@@ -21,6 +21,7 @@ import {
   type LogFilters,
 } from "./logFilters";
 import { PaneSplitter } from "./PaneSplitter";
+import { refLabelContext } from "./refLabels";
 import { useCommitLog } from "./useCommitLog";
 import styles from "./GitLog.module.css";
 
@@ -84,6 +85,7 @@ export function GitLog({
     () => (branchData ? allBranchRefs(buildBranchTree(branchData)) : []),
     [branchData],
   );
+  const refContext = useMemo(() => refLabelContext(branchData), [branchData]);
   const loaded = useMemo(
     () => new Set(log.commits.map((commit) => commit.oid)),
     [log.commits],
@@ -155,6 +157,7 @@ export function GitLog({
           onRefresh={refresh}
           onSelect={setSelectedOid}
           pageError={log.pageError}
+          refContext={refContext}
           refs={refs}
           scanTruncated={log.scanTruncated}
           selectedOid={selectedOid}
@@ -175,6 +178,7 @@ export function GitLog({
           isLoaded={(oid) => loaded.has(oid)}
           oid={selectedOid}
           onSelectCommit={setSelectedOid}
+          refContext={refContext}
           root={root}
         />
       </section>
