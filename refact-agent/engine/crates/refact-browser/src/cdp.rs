@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tungstenite::stream::MaybeTlsStream;
-use tungstenite::{Message, WebSocket, connect};
+use tungstenite::protocol::WebSocketConfig;
+use tungstenite::{Message, WebSocket};
 
 pub const CDP_INLINE_RESULT_LIMIT_BYTES: usize = 8 * 1024;
 pub const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -158,6 +159,18 @@ pub fn bounded_cdp_text(message: &str) -> String {
 
 type CdpSocket = WebSocket<MaybeTlsStream<TcpStream>>;
 
+pub const RAW_CDP_MAX_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
+pub const RAW_CDP_MAX_FRAME_BYTES: usize = 256 * 1024 * 1024;
+
+/// Opens a raw CDP websocket whose limits match what Chrome may legitimately send (response
+/// bodies, screenshots, large console payloads) instead of tungstenite's 64/16 MiB defaults.
+pub fn connect_raw_cdp(ws_url: &str) -> Result<CdpSocket, tungstenite::Error> {
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(RAW_CDP_MAX_MESSAGE_BYTES))
+        .max_frame_size(Some(RAW_CDP_MAX_FRAME_BYTES));
+    tungstenite::client::connect_with_config(ws_url, Some(config), 3).map(|(socket, _)| socket)
+}
+
 pub struct CdpSession {
     socket: Mutex<CdpSocket>,
     next_command_id: Mutex<u64>,
@@ -166,7 +179,7 @@ pub struct CdpSession {
 
 impl CdpSession {
     pub fn connect(ws_url: &str) -> Result<Self, String> {
-        let (socket, _) = connect(ws_url).map_err(|error| {
+        let socket = connect_raw_cdp(ws_url).map_err(|error| {
             format!(
                 "Failed to open raw CDP session: {}",
                 bounded_cdp_text(&error.to_string())

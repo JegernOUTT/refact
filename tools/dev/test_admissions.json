@@ -1921,6 +1921,399 @@
       "author": "background_agent:bgagent-w3-worktrees-list",
       "reviewer": "background_agent:parent-w3-review-pending",
       "review_evidence": "Self-checked by author; executed mutant witnesses stored under .refact/evidence/w3 (gitignored, local). Independent semantic review still required by repository protections; the review tool could not run (snapshot exceeded configured limits)."
+    },
+    {
+      "fingerprint": "6db36ae7e8af1793bbc19a1dc8a1d5e5efa5f7accb2b5558514c2a9828a2bb33",
+      "occurrences": 1,
+      "author": "background_agent:bgagent-w4-chrome-stream (W4 subagent)",
+      "reviewer": "parent planner chat (W4 brief author); pending independent review via review tool",
+      "review_evidence": "Parent reviewed W4 status report and diffs; review tool run on W4 branch (see W4 final report). Mutant patches and logs under .refact/evidence/w4/.",
+      "removed_coverage": "none",
+      "failure_mode": "A SingletonLock written by Chrome on another host (shared/NFS profile dir) is treated as a local dead pid and deleted, letting two browsers corrupt one profile; or a dead local lock is not cleared and every launch fails.",
+      "importance": "Destructive filesystem operation on a user browser profile; wrong deletion corrupts cookies/storage, missing deletion blocks the chrome tool.",
+      "nearest_retained": {
+        "fingerprint": "d15b904c750d86fffbdeebf622aa25a98d585526e78abadb1c4947716a69ada9",
+        "why_insufficient": "profile_lock_is_not_live_for_an_unparseable_lock only checks a garbage target yields no live pid; it never clears a lock nor presents a foreign host."
+      },
+      "oracle": "Local-host dead lock: Ok and SingletonLock+SingletonCookie removed. Foreign host lock: Err naming host and pid, and the SingletonLock symlink still exists.",
+      "prerequisites": "Real symlinks in a tempdir; dead pid 4294000003 asserted dead elsewhere; foreign host built as not-<local hostname> so it always differs.",
+      "shipping_implementation": "clear_stale_profile_lock -> profile_lock_state -> parse_profile_lock/local_hostname",
+      "determinism": "Tempdir, no processes, no timing.",
+      "layer": "Engine unit test of the shipping lock function",
+      "why_cheapest": "Pure filesystem fixture; extends the existing scenario instead of adding a new test.",
+      "meaningful_cases": 2,
+      "critical": true,
+      "criticality_reason": "Destructive filesystem operation on profile lock artifacts.",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "cargo",
+            "test",
+            "--lib",
+            "--",
+            "integrations::browser_runtime::tests::dead_singleton_locks_are_cleared_before_launch",
+            "integrations::browser_runtime::tests::profile_lock_is_not_live_when_the_pid_is_not_the_profile_owner",
+            "integrations::browser_runtime::tests::a_launch_is_retried_once_only_for_a_startup_death_on_a_free_profile"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/evidence/w4/runtime-mutant.log (3 FAILED, EXIT=101)"
+        },
+        "passing": {
+          "command": [
+            "cargo",
+            "test",
+            "--lib",
+            "--",
+            "integrations::browser_runtime::tests"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/evidence/w4/runtime-restored.log (20 passed, EXIT=0)"
+        },
+        "intended_diagnostic": "browser_runtime.rs:1622 expect_err 'a lock written on another host must never be cleared from here' (mutant cleared it)",
+        "production_target": "clear_stale_profile_lock host check",
+        "before_fix": {
+          "reference": ".refact/evidence/w4/runtime-mutant.patch (host check disabled, substring ownership restored, attempt cap removed; applied to final browser_runtime.rs then restored)",
+          "fingerprint": "adea45844c7517abfe580c470c2909bdb722a32790532d269861ef30216b4bb9"
+        },
+        "env": "Env: REFACT_SKIP_GUI_BUILD=1 RUST_MIN_STACK=16777216 RUSTC_WRAPPER=sccache, W4 worktree target."
+      }
+    },
+    {
+      "fingerprint": "76f7ae3f42e9f9a61707306f75bc9de0b52dda3cc80c38417d891de454da8121",
+      "occurrences": 1,
+      "author": "background_agent:bgagent-w4-chrome-stream (W4 subagent)",
+      "reviewer": "parent planner chat (W4 brief author); pending independent review via review tool",
+      "review_evidence": "Parent reviewed W4 status report and diffs; review tool run on W4 branch (see W4 final report). Mutant patches and logs under .refact/evidence/w4/.",
+      "removed_coverage": "none",
+      "failure_mode": "Ownership substring match makes a live process using sibling profile \u2026/abc-sub count as the owner of \u2026/abc, so a stale lock is reported live (launch refused, profile never cleaned) or the wrong process is treated as the profile's Chrome.",
+      "importance": "Profile ownership drives lock clearing, shutdown targeting and profile deletion.",
+      "nearest_retained": {
+        "fingerprint": "04a65e4214cbbac4a6b9f09eee849c7ff85706aaf18abb8a5bda50987dcd7efa",
+        "why_insufficient": "stale_cleanup_cannot_kill_replacement tests shutdown_target decisions on given pids, never how ownership is derived from a process command line."
+      },
+      "oracle": "Live child with --user-data-dir=<profile>-sub: profile_lock_is_live == None; child with exact --user-data-dir=<profile>: == Some(child pid).",
+      "prerequisites": "Linux /proc; real live sh child whose argv carries the flag; lock symlink uses the local hostname so host check passes; own-pid case still asserts None.",
+      "shipping_implementation": "profile_lock_is_live -> profile_lock_state -> process_owns_profile/process_args/user_data_dir_arg",
+      "determinism": "Child spawned and killed+waited in-test; liveness is read while the child sleeps 30s.",
+      "layer": "Engine unit test with a real child process",
+      "why_cheapest": "A real /proc cmdline is the only way to exercise argv parsing; extends the existing test.",
+      "meaningful_cases": 3,
+      "critical": true,
+      "criticality_reason": "Process ownership feeding destructive lock/profile operations.",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "cargo",
+            "test",
+            "--lib",
+            "--",
+            "integrations::browser_runtime::tests::dead_singleton_locks_are_cleared_before_launch",
+            "integrations::browser_runtime::tests::profile_lock_is_not_live_when_the_pid_is_not_the_profile_owner",
+            "integrations::browser_runtime::tests::a_launch_is_retried_once_only_for_a_startup_death_on_a_free_profile"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/evidence/w4/runtime-mutant.log (left Some(76622) right None for --user-data-dir=\u2026/abc-sub)"
+        },
+        "passing": {
+          "command": [
+            "cargo",
+            "test",
+            "--lib",
+            "--",
+            "integrations::browser_runtime::tests"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/evidence/w4/runtime-restored.log (20 passed, EXIT=0)"
+        },
+        "intended_diagnostic": "browser_runtime.rs:1836 assertion left==right failed: --user-data-dir=/tmp/.tmpuwCpnS/abc-sub left Some(76622) right None",
+        "production_target": "process_owns_profile exact argv match",
+        "before_fix": {
+          "reference": ".refact/evidence/w4/runtime-mutant.patch (host check disabled, substring ownership restored, attempt cap removed; applied to final browser_runtime.rs then restored)",
+          "fingerprint": "adea45844c7517abfe580c470c2909bdb722a32790532d269861ef30216b4bb9"
+        },
+        "env": "Env: REFACT_SKIP_GUI_BUILD=1 RUST_MIN_STACK=16777216 RUSTC_WRAPPER=sccache, W4 worktree target."
+      }
+    },
+    {
+      "fingerprint": "162fae6250c397c4f7504926ca613277540a5027e657d736e56fa8b651b9beb5",
+      "occurrences": 1,
+      "author": "background_agent:bgagent-w4-chrome-stream (W4 subagent)",
+      "reviewer": "parent planner chat (W4 brief author); pending independent review via review tool",
+      "review_evidence": "Parent reviewed W4 status report and diffs; review tool run on W4 branch (see W4 final report). Mutant patches and logs under .refact/evidence/w4/.",
+      "removed_coverage": "none",
+      "failure_mode": "Launch retry loops forever, retries ordinary errors, or retries while a live/foreign process holds the profile (racing a second Chrome onto it).",
+      "importance": "Unbounded relaunch spawns Chrome repeatedly; retrying under a live lock causes the instant-exit handoff seen in production.",
+      "nearest_retained": {
+        "fingerprint": "ba185f584394e2dc865eacf9bc5e9246182bbd85a3309f1e9041ebb4624c5c30",
+        "why_insufficient": "concurrent_relaunches_for_one_chat_share_a_single_guard covers serialization of relaunches, not whether a failed launch is retried."
+      },
+      "oracle": "Retry true only for attempt 1 with a dead-transport or no-port error and Absent/Stale lock; false for attempt 2, Live, Foreign, and a non-startup error.",
+      "prerequisites": "Real headless_chrome error strings for connection-closed and NoAvailablePorts.",
+      "shipping_implementation": "should_retry_launch used by launch_with_lock_recovery",
+      "determinism": "Pure function.",
+      "layer": "Unit",
+      "why_cheapest": "Pure decision function; launching Chrome is unnecessary.",
+      "meaningful_cases": 4,
+      "critical": true,
+      "criticality_reason": "Process ownership/relaunch contract on a shared profile.",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "cargo",
+            "test",
+            "--lib",
+            "--",
+            "integrations::browser_runtime::tests::dead_singleton_locks_are_cleared_before_launch",
+            "integrations::browser_runtime::tests::profile_lock_is_not_live_when_the_pid_is_not_the_profile_owner",
+            "integrations::browser_runtime::tests::a_launch_is_retried_once_only_for_a_startup_death_on_a_free_profile"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/evidence/w4/runtime-mutant.log (FAILED, EXIT=101)"
+        },
+        "passing": {
+          "command": [
+            "cargo",
+            "test",
+            "--lib",
+            "--",
+            "integrations::browser_runtime::tests"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/evidence/w4/runtime-restored.log (20 passed, EXIT=0)"
+        },
+        "intended_diagnostic": "browser_runtime.rs:1860 assert !should_retry_launch(error, 2, &stale) failed (attempt cap removed)",
+        "production_target": "should_retry_launch attempt cap",
+        "before_fix": {
+          "reference": ".refact/evidence/w4/runtime-mutant.patch (host check disabled, substring ownership restored, attempt cap removed; applied to final browser_runtime.rs then restored)",
+          "fingerprint": "adea45844c7517abfe580c470c2909bdb722a32790532d269861ef30216b4bb9"
+        },
+        "env": "Env: REFACT_SKIP_GUI_BUILD=1 RUST_MIN_STACK=16777216 RUSTC_WRAPPER=sccache, W4 worktree target."
+      }
+    },
+    {
+      "fingerprint": "4940ad6b299f7574b06d1640603ba74dc12e281f18b1525365c7025d558a21de",
+      "occurrences": 1,
+      "author": "background_agent:bgagent-w4-chrome-stream (W4 subagent)",
+      "reviewer": "parent planner chat (W4 brief author); pending independent review via review tool",
+      "review_evidence": "Parent reviewed W4 status report and diffs; review tool run on W4 branch (see W4 final report). Mutant patches and logs under .refact/evidence/w4/.",
+      "removed_coverage": "none",
+      "failure_mode": "Lock target <host>-<pid> split at the first dash: a hostname containing '-' (e.g. svakhreev-work) becomes unparseable or a wrong host, so stale locks are never cleared or are misread as foreign.",
+      "importance": "This host's name contains a dash; every stale lock here would block launches.",
+      "nearest_retained": {
+        "fingerprint": "d15b904c750d86fffbdeebf622aa25a98d585526e78abadb1c4947716a69ada9",
+        "why_insufficient": "Unparseable-lock test uses 'garbage' with no dash structure; it cannot detect a wrong split point."
+      },
+      "oracle": "profile_lock_state == Stale(ProfileLock{host: local hostname, pid}) exactly, and profile_lock_is_live == None.",
+      "prerequisites": "Lock uses the real local hostname; witness host svakhreev-work contains a dash (the oracle is only discriminating on dashed hostnames).",
+      "shipping_implementation": "parse_profile_lock / profile_lock_state",
+      "determinism": "Tempdir symlink only.",
+      "layer": "Unit",
+      "why_cheapest": "Extends the existing test with an exact-state oracle.",
+      "meaningful_cases": 1,
+      "critical": true,
+      "criticality_reason": "Gates destructive lock clearing.",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "cargo",
+            "test",
+            "--lib",
+            "--",
+            "integrations::browser_runtime::tests::profile_lock_is_not_live_for_a_dead_pid"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/evidence/w4/split-mutant.log (EXIT=101)"
+        },
+        "passing": {
+          "command": [
+            "cargo",
+            "test",
+            "--lib",
+            "--",
+            "integrations::browser_runtime::tests"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/evidence/w4/runtime-restored.log (20 passed, EXIT=0)"
+        },
+        "intended_diagnostic": "browser_runtime.rs:1783 left Unparseable(\"svakhreev-work-4294000001\") right Stale(ProfileLock{host:\"svakhreev-work\",pid:4294000001})",
+        "production_target": "parse_profile_lock rsplit_once",
+        "before_fix": {
+          "reference": ".refact/evidence/w4/split-mutant.patch (rsplit_once->split_once; restored)",
+          "fingerprint": "2401078f2e6d02a3db0094489d9147d0159cbae5eb8e2e9feb7ccec41a179ad9"
+        },
+        "env": "Env: REFACT_SKIP_GUI_BUILD=1 RUST_MIN_STACK=16777216 RUSTC_WRAPPER=sccache, W4 worktree target."
+      }
+    },
+    {
+      "fingerprint": "bae9023788a6c9b7910187a0ebbaceea74e8f9fe653c448e3e11c5172c88222c",
+      "occurrences": 1,
+      "author": "background_agent:bgagent-w4-chrome-stream (W4 subagent)",
+      "reviewer": "parent planner chat (W4 brief author); pending independent review via review tool",
+      "review_evidence": "Parent reviewed W4 status report and diffs; review tool run on W4 branch (see W4 final report). Mutant patches and logs under .refact/evidence/w4/.",
+      "removed_coverage": "none",
+      "failure_mode": "Chrome launched with --verbose --log-level=0 logs at max verbosity to a stderr pipe whose reader headless_chrome closes, and keeps NetworkServiceInProcess; quieting args are dropped by a refactor.",
+      "importance": "Mitigation for the large-stream session deaths; verbose logging into a closed pipe is wasted work on every network event.",
+      "nearest_retained": {
+        "fingerprint": "b5f28a2474a3f184323645578297aa66f8030452ae86898ec30cd3c1ffdabcd5",
+        "why_insufficient": "defaults_preserve_todays_launch_behaviour compares args with MANDATORY_CHROME_ARGS itself, so it moves with the constant and never checks ignored defaults or the effective log level."
+      },
+      "oracle": "The built LaunchOptions ignore --verbose, --log-level=0 and the NetworkServiceInProcess feature arg, and the last --log-level= in args is 2 (overrides the launcher's hardcoded 0).",
+      "prerequisites": "Real chrome_launch_options output for 3 idle_timeout variants.",
+      "shipping_implementation": "BrowserLaunchOptions::chrome_args/ignored_default_args -> chrome_launch_options",
+      "determinism": "Pure.",
+      "layer": "Unit (launch options)",
+      "why_cheapest": "Extends the existing launch-options test as requested by the brief.",
+      "meaningful_cases": 3,
+      "critical": false,
+      "criticality_reason": "Launch-argument hygiene; no data or authority contract.",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "refact-browser",
+            "--lib",
+            "--",
+            "tests::transport_read_timeout_is_not_wired_to_the_idle_eviction_knob",
+            "tests::huge_console_text_is_capped_on_a_char_boundary"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/evidence/w4/browser-mutant.log ('--verbose is not ignored', EXIT=101)"
+        },
+        "passing": {
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "refact-browser"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/evidence/w4/browser-restored.log (205 passed, EXIT=0)"
+        },
+        "intended_diagnostic": "lib.rs:2178 panicked: --verbose is not ignored",
+        "production_target": "launch.rs IGNORED_CHROME_DEFAULT_ARGS/MANDATORY_CHROME_ARGS",
+        "before_fix": {
+          "reference": ".refact/evidence/w4/browser-mutant.patch (pre-fix launch.rs args restored, console cap bypassed; restored after)",
+          "fingerprint": "1f77738364c728d0f465c22647b3d8aff113900ebf8c40ff4b087878c26dc922"
+        },
+        "env": "Env: REFACT_SKIP_GUI_BUILD=1 RUST_MIN_STACK=16777216 RUSTC_WRAPPER=sccache, W4 worktree target."
+      }
+    },
+    {
+      "fingerprint": "4acb356cd3189aa16f1a90e94b5afa5e1bfcfa01aee7f3aa351472625e04623c",
+      "occurrences": 1,
+      "author": "background_agent:bgagent-w4-chrome-stream (W4 subagent)",
+      "reviewer": "parent planner chat (W4 brief author); pending independent review via review tool",
+      "review_evidence": "Parent reviewed W4 status report and diffs; review tool run on W4 branch (see W4 final report). Mutant patches and logs under .refact/evidence/w4/.",
+      "removed_coverage": "none",
+      "failure_mode": "A page logging megabyte strings has each copied uncapped into console buffers and tool reports, or the cap slices inside a UTF-8 char and panics in the CDP event listener.",
+      "importance": "Listener panics kill event handling; uncapped text bloats reports/context with MBs per log.",
+      "nearest_retained": {
+        "fingerprint": "f3d822101fc46d8e2ea45ea28cbc4d2e7c1bdd7fba472f765b1fd9f798ce8906",
+        "why_insufficient": "Nearest console/transport unit test only classifies error strings; no retained test bounds console text size."
+      },
+      "oracle": "<=cap text unchanged; >cap text keeps the exact head, drops the straddling '\u00e9' whole, and ends with the exact kept/total byte counts.",
+      "prerequisites": "Input built so a 2-byte char straddles the cap boundary.",
+      "shipping_implementation": "cap_console_text used by setup_console_capture",
+      "determinism": "Pure.",
+      "layer": "Unit",
+      "why_cheapest": "Pure helper; the live test covers wiring.",
+      "meaningful_cases": 2,
+      "critical": false,
+      "criticality_reason": "Report size/robustness, no authority or data integrity.",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "refact-browser",
+            "--lib",
+            "--",
+            "tests::transport_read_timeout_is_not_wired_to_the_idle_eviction_knob",
+            "tests::huge_console_text_is_capped_on_a_char_boundary"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/evidence/w4/browser-mutant.log (EXIT=101)"
+        },
+        "passing": {
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "refact-browser"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/evidence/w4/browser-restored.log (205 passed, EXIT=0)"
+        },
+        "intended_diagnostic": "lib.rs:2098 assertion capped.len() < cap+128 failed (cap bypassed)",
+        "production_target": "cap_console_text",
+        "before_fix": {
+          "reference": ".refact/evidence/w4/browser-mutant.patch (pre-fix launch.rs args restored, console cap bypassed; restored after)",
+          "fingerprint": "1f77738364c728d0f465c22647b3d8aff113900ebf8c40ff4b087878c26dc922"
+        },
+        "env": "Env: REFACT_SKIP_GUI_BUILD=1 RUST_MIN_STACK=16777216 RUSTC_WRAPPER=sccache, W4 worktree target."
+      }
+    },
+    {
+      "fingerprint": "983925055af4a7d34a649ea3f449db04f0591e8670956807a69d8e6a30d97e6e",
+      "occurrences": 1,
+      "author": "background_agent:bgagent-w4-chrome-stream (W4 subagent)",
+      "reviewer": "parent planner chat (W4 brief author); pending independent review via review tool",
+      "review_evidence": "Parent reviewed W4 status report and diffs; review tool run on W4 branch (see W4 final report). Mutant patches and logs under .refact/evidence/w4/.",
+      "removed_coverage": "none",
+      "failure_mode": "A page fetch-streaming ~12 MB of SSE (1 MB events) while logging each chunk kills the Chrome process or the CDP transport, or megabyte console.log text reaches the report uncapped.",
+      "importance": "Reproduces the reported chrome tool session death on large chat pages; guards the console cap wiring end to end.",
+      "nearest_retained": {
+        "fingerprint": "f6262cbb33ad3252f164d1fbdba72e06a1aaa78001137bb8fe446cfd2cacead5",
+        "why_insufficient": "transactional_report_settles_fetch_and_returns_console_once uses a tiny JSON fetch and short console lines; no large streaming body or oversized console payload."
+      },
+      "oracle": "Batch ok; page read exactly 12*(1 MiB+8) bytes with no error; transport connected and Chrome pid alive afterwards; every chunk console entry shorter than cap+128.",
+      "prerequisites": "Live Chrome via REFACT_BROWSER_E2E=1; /sse-large fixture route streams 12 MiB; non-empty chunk console entries asserted before the cap check.",
+      "shipping_implementation": "BrowserRuntime::launch + setup_recording_for_tab (console/network capture with new limits) + execute_request_with_runtime",
+      "determinism": "Local fixture server; WaitForFunction readiness on window.streamResult; no sleeps.",
+      "layer": "Gated live-browser integration (tests/it browser_e2e lane, #[ignore] + REFACT_BROWSER_E2E)",
+      "why_cheapest": "Process/transport survival and listener wiring cannot be observed without a real Chrome.",
+      "meaningful_cases": 1,
+      "critical": false,
+      "criticality_reason": "Robustness regression; the crash itself was not reproduced locally so it guards the scenario, not a proven root cause.",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "target/debug/deps/it-fbee9f136cbf7967",
+            "--ignored",
+            "--exact",
+            "browser_e2e::a_page_streaming_twelve_megabytes_of_sse_keeps_the_browser_alive"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/evidence/w4/live-mutant.log ('a megabyte console.log must be capped before it reaches the report', EXIT=101)"
+        },
+        "passing": {
+          "command": [
+            "target/debug/deps/it-fbee9f136cbf7967",
+            "--ignored",
+            "--exact",
+            "browser_e2e::a_page_streaming_twelve_megabytes_of_sse_keeps_the_browser_alive"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/evidence/w4/live-pass.log (1 passed, EXIT=0)"
+        },
+        "intended_diagnostic": "browser_e2e.rs:6793 'a megabyte console.log must be capped before it reaches the report'",
+        "production_target": "setup_console_capture cap wiring",
+        "before_fix": {
+          "reference": ".refact/evidence/w4/live-mutant.patch (cap bypass; restored)",
+          "fingerprint": "90c6dda5a6da97281573aa01186ee0ec6aa7043e49eda6360008223ff40660ea"
+        },
+        "env": "Env: REFACT_SKIP_GUI_BUILD=1 RUST_MIN_STACK=16777216 RUSTC_WRAPPER=sccache, W4 worktree target."
+      }
     }
   ],
   "classifications": [
@@ -2706,17 +3099,6 @@
       "review_evidence": "Independent current source/dependency review: shadow!(build) imports shadow_rs::shadow and expands to pub mod build { include!(concat!(env!(\"OUT_DIR\"), \"/shadow.rs\")); }. The full local build.rs calls default ShadowBuilder without a custom hook. Inspected locked1.6.0 generator templates emit metadata constants plus BuildInfoDisplay/default/all/fmt and print_build_in, not test functions. Full cached shadow.rs confirms those shapes and prose-only doc attrs; it is corroborating output, not a claim a fresh build ran. No external test body or Rustdoc code example is generated."
     },
     {
-      "path": "refact-agent/engine/tests/it/browser_common/mod.rs",
-      "kind": "item_macro",
-      "source_sha256": "30dc5176aa5578f0bece12b68b487c1152d44b3399cb22819c1bda448c266a92",
-      "lead_sha256": "93bb3ca5c15c0a364714f47c48c6de3a5dc510431be5aabe4e9b6b5288b2479b",
-      "conclusion": "non_test",
-      "rationale": "The exact bounded lead is ![allow(dead_code)], the ! in a crate-level inner attribute incorrectly encountered as an item-macro candidate. allow(dead_code) changes warning lint level only; it does not expand items or documentation and cannot remove physical tests from accounting.",
-      "author": "background_agent:bgagent-63087e16-d20a-463e-94c7-f1f68f4b6fa8",
-      "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
-      "review_evidence": "Independent current source/dependency review: The exact bounded lead is ![allow(dead_code)], the ! in a crate-level inner attribute incorrectly encountered as an item-macro candidate. allow(dead_code) changes warning lint level only; it does not expand items or documentation and cannot remove physical tests from accounting."
-    },
-    {
       "path": "refact-agent/engine/crates/refact-providers/src/claude_code.rs",
       "kind": "item_macro",
       "source_sha256": "07f6f0a5d8717784a98214b86359e9b097b55385c748d9b5d2ee3ee1317c63a1",
@@ -2968,6 +3350,28 @@
       "author": "parent: removal-only truncation exemption cleanup",
       "reviewer": "background_agent:bgagent-1778ca3e-1f91-44bf-bc0b-a960823b9017",
       "review_evidence": "Independent current exact attribute/struct read after formatting; bounded source+lead certificate only."
+    },
+    {
+      "path": "refact-agent/engine/tests/it/browser_common/mod.rs",
+      "kind": "item_macro",
+      "source_sha256": "a67d47e9edbd60ffe348e24b216533b2abb551e654fb2551ca9bff91ed06025b",
+      "lead_sha256": "93bb3ca5c15c0a364714f47c48c6de3a5dc510431be5aabe4e9b6b5288b2479b",
+      "conclusion": "non_test",
+      "rationale": "The exact bounded lead is ![allow(dead_code)], the ! in a crate-level inner attribute incorrectly encountered as an item-macro candidate. allow(dead_code) changes warning lint level only; it does not expand items or documentation and cannot remove physical tests from accounting.",
+      "author": "background_agent:bgagent-63087e16-d20a-463e-94c7-f1f68f4b6fa8",
+      "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
+      "review_evidence": "Independent current source/dependency review: The exact bounded lead is ![allow(dead_code)], the ! in a crate-level inner attribute incorrectly encountered as an item-macro candidate. allow(dead_code) changes warning lint level only; it does not expand items or documentation and cannot remove physical tests from accounting. W4: source rehashed after additive /sse-large route; the bounded lead (#![allow(dead_code)] at line 1) is byte-identical."
+    },
+    {
+      "path": "refact-agent/engine/tests/it/browser_common/mod.rs",
+      "kind": "item_macro",
+      "source_sha256": "a67d47e9edbd60ffe348e24b216533b2abb551e654fb2551ca9bff91ed06025b",
+      "lead_sha256": "93bb3ca5c15c0a364714f47c48c6de3a5dc510431be5aabe4e9b6b5288b2479b",
+      "conclusion": "non_test",
+      "rationale": "The exact bounded lead is ![allow(dead_code)], the ! in a crate-level inner attribute incorrectly encountered as an item-macro candidate. allow(dead_code) changes warning lint level only; it does not expand items or documentation and cannot remove physical tests from accounting.",
+      "author": "background_agent:bgagent-w4-chrome-stream (W4 subagent)",
+      "reviewer": "parent planner chat (W4 brief author); pending independent review via review tool",
+      "review_evidence": "Re-certified for W4's additive /sse-large route: the bounded lead is still line 1 `#![allow(dead_code)]` (lead_sha256 unchanged 93bb3ca5\u2026); the only change to the file adds an axum handler and one .route() call, neither defining tests or macros."
     }
   ],
   "impacts": [
@@ -3124,25 +3528,6 @@
       "no_tests_reason": "No current Rust test definitions remain at this path; actual diff removes all-CUT test-only scaffolding/dead helpers or imports, not a retained executable fixture. No production deletion is authorized by this record."
     },
     {
-      "path": "refact-agent/engine/crates/refact-browser/src/cdp.rs",
-      "before_sha256": "f3a235150343c714876dcf6742c884cbb5d6aa95b8e600447afa6874f5ebb1a4",
-      "after_sha256": "46f6ed38f7197fe2e0e22c11b3ddc64b67ff76f092c71095f08179c07125bf1d",
-      "affected_tests": [
-        "19555ac5b3dfa26d3b22ef14835811b118e6856e0375a2bb9334a6c17bb82037",
-        "2ec11d26a3f1e9e88be0d306c540bb450c9f1435895dc1183547ccc0c6346945",
-        "4c83dd3343c7a848c73722365e984dbd70a3ae0ee144f6c2fd49691e37e02eed",
-        "6313a036a88d405ccab07e1f911693db290bdfb9b9823c4d798ba9298659c70b",
-        "8959eeab48fec75f2661908d5ed39adb4f16235a1df73946f0a10f79e27d53a7",
-        "c8217d43dbf9b4a4cca3c1e4c18d672858e56740c969f7b642c4741cab211cce",
-        "caad69316650205b23edf415c455d7352dc92358dedbd671ccee61e3b67c548f"
-      ],
-      "impact": "refact-agent/engine/crates/refact-browser/src/cdp.rs: canonical non-test residue changes remove 54 tokens and add 0 tokens. Cleanup evidence identifies warnings. 12787\u21926186 global lexical definitions includes intentional coverage loss from case deletions; this support record does not claim strict duplication.",
-      "execution_context": "Same physical Rust path; no retained fingerprint/context relocation relative pinned main. Test-only ownership: inline cfg(test) modules or explicitly cfg(test) helper items; tests/ and *_tests.rs are test harness/module support. Removed dead helper/import/module scaffolding has no surviving intended executing consumer; conservative affected mapping lists surviving same-file tests for dependency review, not a claim all call deleted helpers. See exact residue token hunks and cleanup evidence references.",
-      "author": "support-impact-author-bgagent-1fd43f09",
-      "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
-      "review_evidence": "Independent source/hash review: refact-agent/engine/crates/refact-browser/src/cdp.rs: reviewed removal of warnings within explicit cfg(test) items/modules. 7 actual same-path retained cases keep complete attributed canonical body and enclosing-context hash against pinned MAIN. Conservative affected map contains exactly those current fingerprints."
-    },
-    {
       "path": "refact-agent/engine/crates/refact-browser/src/clock.rs",
       "before_sha256": "973c6a399cf9554e7f10692a337b9fc08d2335133df5413e9aa0d70771ef8ea4",
       "after_sha256": "09c599db251cc0507947de66d240f745cf56adadeebde97c374d641b0dd75505",
@@ -3217,26 +3602,6 @@
       "author": "support-impact-author-bgagent-1fd43f09",
       "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
       "review_evidence": "Independent source/hash review: refact-agent/engine/crates/refact-browser/src/hit_target.rs: reviewed removal of take_immediate_result, handle within explicit cfg(test) items/modules. 2 actual same-path retained cases keep complete attributed canonical body and enclosing-context hash against pinned MAIN. Conservative affected map contains exactly those current fingerprints."
-    },
-    {
-      "path": "refact-agent/engine/crates/refact-browser/src/lib.rs",
-      "before_sha256": "bd728a1f015a6130e304384720823dbc6c7a601b69de62f86a14752515a9a2b0",
-      "after_sha256": "19b1b3f7c19a6ef09619e58647cb7ba3ec1b6c97536e45c12bdd178695ded8e0",
-      "affected_tests": [
-        "054c65b8f5814a9e46249d1784e13f10b836f87a558a2895ed51c2b6e57fa53c",
-        "092f4cba7966f6546925822a6fd81834ac03a4a6784d10fea297550022d9764a",
-        "1e76dcf442f0fc26e5ff6bdb85abf44a29d4b058ca390068dbf94e317e0a0651",
-        "36c5c2e7fd29ed87d2058b437136bcaa06240da64a4b946885bbe651b140e2c1",
-        "e44ce2b13062632a6c0cac7dca603390fb8b912d43847ab6ad1837d69e07711c",
-        "edeae89f3b4ce406a312231e724d465c262e9f7538e667a30691d0c4ac4fb6a2",
-        "f3d822101fc46d8e2ea45ea28cbc4d2e7c1bdd7fba472f765b1fd9f798ce8906",
-        "fe4fa7f5130900ac18ca7d08da8889e09f6fb0d28b858b20e68e813c5b331692"
-      ],
-      "impact": "refact-agent/engine/crates/refact-browser/src/lib.rs: canonical non-test residue changes remove 68 tokens and add 0 tokens. Cleanup evidence identifies tab_info. 12787\u21926186 global lexical definitions includes intentional coverage loss from case deletions; this support record does not claim strict duplication.",
-      "execution_context": "Same physical Rust path; no retained fingerprint/context relocation relative pinned main. Test-only ownership: inline cfg(test) modules or explicitly cfg(test) helper items; tests/ and *_tests.rs are test harness/module support. Removed dead helper/import/module scaffolding has no surviving intended executing consumer; conservative affected mapping lists surviving same-file tests for dependency review, not a claim all call deleted helpers. See exact residue token hunks and cleanup evidence references.",
-      "author": "support-impact-author-bgagent-1fd43f09",
-      "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
-      "review_evidence": "Independent source/hash review: refact-agent/engine/crates/refact-browser/src/lib.rs: reviewed removal of tab_info within explicit cfg(test) items/modules. 8 actual same-path retained cases keep complete attributed canonical body and enclosing-context hash against pinned MAIN. Conservative affected map contains exactly those current fingerprints."
     },
     {
       "path": "refact-agent/engine/crates/refact-browser/src/locator_gen.rs",
@@ -7679,53 +8044,6 @@
       "no_tests_reason": "No current Rust test definitions remain at this path; actual diff removes all-CUT test-only scaffolding/dead helpers or imports, not a retained executable fixture. No production deletion is authorized by this record."
     },
     {
-      "path": "refact-agent/engine/src/integrations/browser_controller.rs",
-      "before_sha256": "5e19e745906887131c101a132f5773a6392a2eac48575b1e6bafa1f1c4e4409e",
-      "after_sha256": "b52ba8a0dfaec4fcf6b014c2b2c14fc2547361a133b02a621f7021cccdb0e3cb",
-      "affected_tests": [
-        "1179f52d1cf89e6da87eb7750039d82f0811a815147377cd8006f005f788a5f0",
-        "14ba66d5a6a798a51836c1178adf5938fa71b701da899f94e65730e906b01b18",
-        "1c8b5b372889bd6cb9f5515d0b19db6512a7abb960195b0971cc02c225054c42",
-        "289558815dd6483c1a3a6142faf44d9dc9308a5b785b13a835c26126f132faeb",
-        "30311ff543fe35016428d686c148588b0179d6a7e36f2db848b74b5474eda690",
-        "361c545d401d9b210bbb7ee33980a7cd4878d6ef0c0513a83675620706ba3cf4",
-        "4a7d92f994e27c3896e798bf2d8bf96be67a4bbfa2042ccaa551c2a5c0b200ce",
-        "4e1ddf2e778022b0d022c73d8ee7b22205e89c3cd422d0a0a70d36b245358523",
-        "61ef7f5094d3a4abb57a6e441ef4f953efe9d8f3cf34673e1ac3c57f2c19c7ae",
-        "626238aa9f8ecadd8e6ecac5209e53dadcacea6595a09e048858a51d199bc5c6",
-        "66108e2ca1e8f3d22631daa6f9ae64b75ba43e84a219c1f5c9152a5e356bc885",
-        "67bda0e2d85aaf2994c1ce1cc61f759f3741535bf236f6c025e075da206acbbc",
-        "6858d10ae631b0748f19f4884396662e0ca4572b53f8927394050ca2e94854b2",
-        "6dda9dad6b089c6939b78fc0de4eb2314ac6b3b9d74c0f2304fa9c4c2c3d5c4e",
-        "704e38e8f465b0db1a441eeab02c3e0fb52634b24f4c9e084509581ebeb92ab1",
-        "75c84c20636de25910ab2f2458b3eff72974ed7839263b5628811d9faae79111",
-        "76ab89f8c4d1dddd8d53553d6484bc6eba4fa7cb8bd05e305d783ca605a41991",
-        "7a11ed148efaec24c4f639d38695620360996ddfd0ca29cb272888edf8bc10e4",
-        "7abf68d6a5dec0be62b3397a9536cb8e45b54d28b09d8713d9df42592df395be",
-        "7c9728d55b288cdfa88033d879aeba3817a828f83ccdd9da047c917784d36871",
-        "7ea91573780b3add750c737fadae339cb10ebe453520b48928a7c70229664eb9",
-        "87259cfb4ce037e240aa654b81bc2583c09407b1028e2973da5c00d6418770b1",
-        "87e4336b48da6370057d25fe9eb6e2986d82dad44b02e12059903876c48767d5",
-        "94bd6e9a85982b6b1ea036eeeff5e067c9bc997cfede24511c9ae074d25d247b",
-        "9f6d0d82bd0fe8901371f5250629fc32c1d95a8295deaf13461a3ff39c238604",
-        "a0377de389577efe2c935e85c6746e0dde96a5cb71447c58843da509b849b75d",
-        "a17f4d475f13645e0856e1d615ccf4c1b6bc1b16cd3a29cd003672bc79d698b6",
-        "aba4011b2c60de17cfdb2fe27651f91eeb179a7eed239063c0c561125ce86efa",
-        "bbcfb47fc238e7df56c52367c704d7418f13d1a24a9bd8c420810eb8d1c85a50",
-        "caa82a9f93ca6c440aca102d2e87992df5357eed4ae60ee963dfb919011b59fb",
-        "deb74b0c53a3806ab97738118d480593d21d2d50109ef14381bb1fc416f7c5cf",
-        "dfe622320c55a2d003257d3adf72063db922d032195724f2a6fd8372556b3d82",
-        "e657ba54bef2b96afa9e6949776695c6b643140a618c1ebad2f7c4c494fc00d2",
-        "fb831a64c6e33cdf9f50715a48594a1d6d2c248789c2c7d88e5c419a3abd6950",
-        "ff7dc5702dc5410b86a906a8a160ead903d18794e148eb01d90b1d62fd64b95c"
-      ],
-      "impact": "refact-agent/engine/src/integrations/browser_controller.rs: canonical non-test residue changes remove 819 tokens and add 0 tokens. Cleanup evidence identifies section; nested_tab_management_report; actionable_state; locator_handles; scripted_expectation; element_info; filmstrip_artifact; filmstrip_result. 12787\u21926186 global lexical definitions includes intentional coverage loss from case deletions; this support record does not claim strict duplication.",
-      "execution_context": "Same physical Rust path; no retained fingerprint/context relocation relative pinned main. Test-only ownership: inline cfg(test) modules or explicitly cfg(test) helper items; tests/ and *_tests.rs are test harness/module support. Removed dead helper/import/module scaffolding has no surviving intended executing consumer; conservative affected mapping lists surviving same-file tests for dependency review, not a claim all call deleted helpers. See exact residue token hunks and cleanup evidence references.",
-      "author": "support-impact-author-bgagent-1fd43f09",
-      "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
-      "review_evidence": "Independent source/hash review: refact-agent/engine/src/integrations/browser_controller.rs: reviewed removal of section, nested_tab_management_report, actionable_state, locator_handles, scripted_expectation, element_info, filmstrip_artifact, filmstrip_result within explicit cfg(test) items/modules. 35 actual same-path retained cases keep complete attributed canonical body and enclosing-context hash against pinned MAIN. Conservative affected map contains exactly those current fingerprints."
-    },
-    {
       "path": "refact-agent/engine/src/integrations/browser_models.rs",
       "before_sha256": "e611e8a1a2bf9b91e5527dc0c2dd2cdf752088698f3a134268039bd2526f9295",
       "after_sha256": "440149c3e0d02e5163321e9b9f424f8bdc4b337154a93d603c9e27246a9c7a16",
@@ -8576,27 +8894,6 @@
       "author": "support-impact-author-bgagent-1fd43f09",
       "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
       "review_evidence": "Independent source/hash review: refact-agent/engine/src/tools/tool_causal_trace_tests.rs: reviewed removal of {'names': ['unused import: `ToolSourceType`'], 'diagnostic_indices': [184], 'before_byte_span': [480, 481], 'removed_text': '{', 'evidence': 'rustc unused_imports MachineApplicable deletion; import in cfg(test) scope or test-only file'}, {'names': ['unused import: `ToolSourceType`', 'unused import: `ToolSourceType`'], 'diagnostic_indices': [184, 184], 'before_byte_span': [485, 502], 'removed_text': ', ToolSourceType}', 'evidence': 'rustc unused_imports MachineApplicable deletion; import in cfg(test) scope or test-only file'}, {'names': ['unused imports: `get_available_tools` and `get_tools_for_mode`'], 'diagnostic_indices': [185], 'before_byte_span': [504, 577], 'removed_text': 'use crate::tools::tools_list::{get_available_tools, get_tools_for_mode};\\n', 'evidence': 'rustc unused_imports MachineApplicable deletion; import in cfg(test) scope or test-only file'} within test harness/module support. 2 actual same-path retained cases keep complete attributed canonical body and enclosing-context hash against pinned MAIN. Conservative affected map contains exactly those current fingerprints."
-    },
-    {
-      "path": "refact-agent/engine/src/tools/tool_chrome.rs",
-      "before_sha256": "c9fab4f6754775ace09e5206393a0701e79ff23f92048ad207a8b8bb78afbe30",
-      "after_sha256": "760d64db88f40a7bf7875548ac0da499930434936bcedaaeaa70f5e8331febcf",
-      "affected_tests": [
-        "003aba373791926502a192c422ef095a83cfc1a8337ae1c201daa0a8b99c99a1",
-        "074e771d2bd1f40a6388aee53ae1f0a7384eed758ce4917bd5a01082c2815b70",
-        "0b3bb1ca1f3a9132f1993b9f5aa3c5503bab158d24dc90d3a3110c031fb1cf0e",
-        "1e8cfb625880019423727b8d970496c73d57456e0941e908014a72b7727071b8",
-        "585639a9797ccb393c0ec5307a5df89f90e07ad78d2a2c6a8a3acda08569a620",
-        "9452b8fe8b3841923282f468e270af589f171382991b349b45e07ea9f2e47033",
-        "9bf2f74eafbb7ff2b5d27219d9b8a6c0f419c2d5dd942fe1b88d01e0dc8a1279",
-        "b10323903b8052d81fca938b05401f132a54cdd4f4c7e6077b09dc6f1c0e56df",
-        "c46941d73c10a40907e2e998dab3f8b0f231a64e3a8d97e7a537b0722c127c26"
-      ],
-      "impact": "refact-agent/engine/src/tools/tool_chrome.rs: canonical non-test residue changes remove 241 tokens and add 0 tokens. Cleanup evidence identifies base_with_gpu; merged_gpu; schema_action_names; report_with_step_outcomes. 12787\u21926186 global lexical definitions includes intentional coverage loss from case deletions; this support record does not claim strict duplication.",
-      "execution_context": "Same physical Rust path; no retained fingerprint/context relocation relative pinned main. Test-only ownership: inline cfg(test) modules or explicitly cfg(test) helper items; tests/ and *_tests.rs are test harness/module support. Removed dead helper/import/module scaffolding has no surviving intended executing consumer; conservative affected mapping lists surviving same-file tests for dependency review, not a claim all call deleted helpers. See exact residue token hunks and cleanup evidence references.",
-      "author": "support-impact-author-bgagent-1fd43f09",
-      "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
-      "review_evidence": "Independent source/hash review: refact-agent/engine/src/tools/tool_chrome.rs: reviewed removal of base_with_gpu, merged_gpu, schema_action_names, report_with_step_outcomes within explicit cfg(test) items/modules. 9 actual same-path retained cases keep complete attributed canonical body and enclosing-context hash against pinned MAIN. Conservative affected map contains exactly those current fingerprints."
     },
     {
       "path": "refact-agent/engine/src/tools/tool_cmdline.rs",
@@ -10403,6 +10700,140 @@
       "author": "background_agent:bgagent-w3-worktrees-list",
       "reviewer": "background_agent:parent-w3-review-pending",
       "review_evidence": "Self-checked by author; executed mutant witnesses stored under .refact/evidence/w3 (gitignored, local). Independent semantic review still required by repository protections; the review tool could not run (snapshot exceeded configured limits)."
+    },
+    {
+      "path": "refact-agent/engine/crates/refact-browser/src/cdp.rs",
+      "before_sha256": "46f6ed38f7197fe2e0e22c11b3ddc64b67ff76f092c71095f08179c07125bf1d",
+      "after_sha256": "54fb301c5715a255cf90feb01d7308c4d906ce5d8beddc90bcc3931df66b9c9f",
+      "affected_tests": [
+        "983925055af4a7d34a649ea3f449db04f0591e8670956807a69d8e6a30d97e6e"
+      ],
+      "impact": "Raw CDP socket opened via connect_with_config with 256 MiB message/frame limits (connect_raw_cdp).",
+      "execution_context": "Engine lib/refact-browser unit tests (cargo test -p refact-browser 205 pass; cargo test --lib browser_runtime 20 pass) and the gated live lane (REFACT_BROWSER_E2E=1, tests/it browser_e2e 109/110 pass, the one failure expect_retries_matchers_report_received is timing-flaky and passes on rerun).",
+      "author": "background_agent:bgagent-w4-chrome-stream (W4 subagent)",
+      "reviewer": "parent planner chat (W4 brief author); pending independent review via review tool",
+      "review_evidence": "Parent reviewed W4 status report and diffs; review tool run on W4 branch (see W4 final report). Mutant patches and logs under .refact/evidence/w4/."
+    },
+    {
+      "path": "refact-agent/engine/crates/refact-browser/src/files.rs",
+      "before_sha256": "b26cdd82b5e38c122b39dd4f5681d40aa63dded5aac6bb3af43b62657a432253",
+      "after_sha256": "ec830143adf467d0de48014fc84d06ae2d43144f27764586b1ea8d23a14adc17",
+      "affected_tests": [
+        "983925055af4a7d34a649ea3f449db04f0591e8670956807a69d8e6a30d97e6e"
+      ],
+      "impact": "DownloadMonitor uses connect_raw_cdp instead of default-limit connect; launched by every BrowserRuntime::launch.",
+      "execution_context": "Engine lib/refact-browser unit tests (cargo test -p refact-browser 205 pass; cargo test --lib browser_runtime 20 pass) and the gated live lane (REFACT_BROWSER_E2E=1, tests/it browser_e2e 109/110 pass, the one failure expect_retries_matchers_report_received is timing-flaky and passes on rerun).",
+      "author": "background_agent:bgagent-w4-chrome-stream (W4 subagent)",
+      "reviewer": "parent planner chat (W4 brief author); pending independent review via review tool",
+      "review_evidence": "Parent reviewed W4 status report and diffs; review tool run on W4 branch (see W4 final report). Mutant patches and logs under .refact/evidence/w4/."
+    },
+    {
+      "path": "refact-agent/engine/crates/refact-browser/src/launch.rs",
+      "before_sha256": "abbe5ec0912b52e3e5bd467e93e38f2e675ee06a4320cd36c0194745d1cb1860",
+      "after_sha256": "6f0c04a0ae2fe818820ce905bd8da4a54099c1cecad559392c76c56f69059f8a",
+      "affected_tests": [
+        "bae9023788a6c9b7910187a0ebbaceea74e8f9fe653c448e3e11c5172c88222c",
+        "983925055af4a7d34a649ea3f449db04f0591e8670956807a69d8e6a30d97e6e"
+      ],
+      "impact": "Adds --log-level=2 to mandatory args and ignores --verbose/--log-level=0/NetworkServiceInProcess defaults.",
+      "execution_context": "Engine lib/refact-browser unit tests (cargo test -p refact-browser 205 pass; cargo test --lib browser_runtime 20 pass) and the gated live lane (REFACT_BROWSER_E2E=1, tests/it browser_e2e 109/110 pass, the one failure expect_retries_matchers_report_received is timing-flaky and passes on rerun).",
+      "author": "background_agent:bgagent-w4-chrome-stream (W4 subagent)",
+      "reviewer": "parent planner chat (W4 brief author); pending independent review via review tool",
+      "review_evidence": "Parent reviewed W4 status report and diffs; review tool run on W4 branch (see W4 final report). Mutant patches and logs under .refact/evidence/w4/."
+    },
+    {
+      "path": "refact-agent/engine/crates/refact-browser/src/lib.rs",
+      "before_sha256": "19b1b3f7c19a6ef09619e58647cb7ba3ec1b6c97536e45c12bdd178695ded8e0",
+      "after_sha256": "651d1867806654aad6446593115bc44cbb7582d8f1db320dfe3fabe0aca97bbb",
+      "affected_tests": [
+        "bae9023788a6c9b7910187a0ebbaceea74e8f9fe653c448e3e11c5172c88222c",
+        "4acb356cd3189aa16f1a90e94b5afa5e1bfcfa01aee7f3aa351472625e04623c",
+        "983925055af4a7d34a649ea3f449db04f0591e8670956807a69d8e6a30d97e6e"
+      ],
+      "impact": "Console text cap, Network.enable buffer limits, transport_dead_marker; test edits.",
+      "execution_context": "Engine lib/refact-browser unit tests (cargo test -p refact-browser 205 pass; cargo test --lib browser_runtime 20 pass) and the gated live lane (REFACT_BROWSER_E2E=1, tests/it browser_e2e 109/110 pass, the one failure expect_retries_matchers_report_received is timing-flaky and passes on rerun).",
+      "author": "background_agent:bgagent-w4-chrome-stream (W4 subagent)",
+      "reviewer": "parent planner chat (W4 brief author); pending independent review via review tool",
+      "review_evidence": "Parent reviewed W4 status report and diffs; review tool run on W4 branch (see W4 final report). Mutant patches and logs under .refact/evidence/w4/."
+    },
+    {
+      "path": "refact-agent/engine/src/http/routers/v1/v1_browser.rs",
+      "before_sha256": "f7c0e00ba6f24b08e1acf7dcc5a762ac77a44f4aaf38211a6e5d4215a72283cc",
+      "after_sha256": "c97ae2e255e80bbcbbedb973b437c3a696d10d49b5a9e17aac593d5f2000bc27",
+      "affected_tests": [],
+      "impact": "POST /v1/browser/start launches through launch_with_lock_recovery under the per-chat launch lock.",
+      "execution_context": "Engine lib/refact-browser unit tests (cargo test -p refact-browser 205 pass; cargo test --lib browser_runtime 20 pass) and the gated live lane (REFACT_BROWSER_E2E=1, tests/it browser_e2e 109/110 pass, the one failure expect_retries_matchers_report_received is timing-flaky and passes on rerun).",
+      "author": "background_agent:bgagent-w4-chrome-stream (W4 subagent)",
+      "reviewer": "parent planner chat (W4 brief author); pending independent review via review tool",
+      "review_evidence": "Parent reviewed W4 status report and diffs; review tool run on W4 branch (see W4 final report). Mutant patches and logs under .refact/evidence/w4/.",
+      "no_tests_reason": "HTTP/tool launch wiring only; no Rust test drives this handler. The shared helper it calls is covered by browser_runtime unit tests."
+    },
+    {
+      "path": "refact-agent/engine/src/integrations/browser_controller.rs",
+      "before_sha256": "b52ba8a0dfaec4fcf6b014c2b2c14fc2547361a133b02a621f7021cccdb0e3cb",
+      "after_sha256": "c7cf98e1ec2ddc81bb0daf70d830f2ef547e86ba67db56b8b7300c879a0ab17b",
+      "affected_tests": [
+        "983925055af4a7d34a649ea3f449db04f0591e8670956807a69d8e6a30d97e6e"
+      ],
+      "impact": "Dead-transport relaunch path records pid/error and appends transport_death_note to report warnings; resume logic moved into resume_after_relaunch unchanged.",
+      "execution_context": "Engine lib/refact-browser unit tests (cargo test -p refact-browser 205 pass; cargo test --lib browser_runtime 20 pass) and the gated live lane (REFACT_BROWSER_E2E=1, tests/it browser_e2e 109/110 pass, the one failure expect_retries_matchers_report_received is timing-flaky and passes on rerun).",
+      "author": "background_agent:bgagent-w4-chrome-stream (W4 subagent)",
+      "reviewer": "parent planner chat (W4 brief author); pending independent review via review tool",
+      "review_evidence": "Parent reviewed W4 status report and diffs; review tool run on W4 branch (see W4 final report). Mutant patches and logs under .refact/evidence/w4/."
+    },
+    {
+      "path": "refact-agent/engine/src/integrations/browser_runtime.rs",
+      "before_sha256": "0eeeb943f7b3889f8aec55d5cbc7a048aede84651cb0c7d04e868416696cbea3",
+      "after_sha256": "5ee97082e4a6f728073a9a977e0e64cbe8e0f7256c4445b54bddda810896b9e2",
+      "affected_tests": [
+        "6db36ae7e8af1793bbc19a1dc8a1d5e5efa5f7accb2b5558514c2a9828a2bb33",
+        "76f7ae3f42e9f9a61707306f75bc9de0b52dda3cc80c38417d891de454da8121",
+        "162fae6250c397c4f7504926ca613277540a5027e657d736e56fa8b651b9beb5",
+        "4940ad6b299f7574b06d1640603ba74dc12e281f18b1525365c7025d558a21de"
+      ],
+      "impact": "Host-aware ProfileLockState, exact --user-data-dir ownership, launch_with_lock_recovery, wait_for_profile_release, should_retry_launch, transport_death_note; tests.",
+      "execution_context": "Engine lib/refact-browser unit tests (cargo test -p refact-browser 205 pass; cargo test --lib browser_runtime 20 pass) and the gated live lane (REFACT_BROWSER_E2E=1, tests/it browser_e2e 109/110 pass, the one failure expect_retries_matchers_report_received is timing-flaky and passes on rerun).",
+      "author": "background_agent:bgagent-w4-chrome-stream (W4 subagent)",
+      "reviewer": "parent planner chat (W4 brief author); pending independent review via review tool",
+      "review_evidence": "Parent reviewed W4 status report and diffs; review tool run on W4 branch (see W4 final report). Mutant patches and logs under .refact/evidence/w4/."
+    },
+    {
+      "path": "refact-agent/engine/src/tools/tool_chrome.rs",
+      "before_sha256": "760d64db88f40a7bf7875548ac0da499930434936bcedaaeaa70f5e8331febcf",
+      "after_sha256": "ee8adefa1f419c9e97aeb91aede544013c61a51c43c52e7cb6928e6fde6ec733",
+      "affected_tests": [],
+      "impact": "setup_chrome_session launches via launch_with_lock_recovery passing the dead runtime pid; setup log carries transport_death_note.",
+      "execution_context": "Engine lib/refact-browser unit tests (cargo test -p refact-browser 205 pass; cargo test --lib browser_runtime 20 pass) and the gated live lane (REFACT_BROWSER_E2E=1, tests/it browser_e2e 109/110 pass, the one failure expect_retries_matchers_report_received is timing-flaky and passes on rerun).",
+      "author": "background_agent:bgagent-w4-chrome-stream (W4 subagent)",
+      "reviewer": "parent planner chat (W4 brief author); pending independent review via review tool",
+      "review_evidence": "Parent reviewed W4 status report and diffs; review tool run on W4 branch (see W4 final report). Mutant patches and logs under .refact/evidence/w4/.",
+      "no_tests_reason": "HTTP/tool launch wiring only; no Rust test drives this handler. The shared helper it calls is covered by browser_runtime unit tests."
+    },
+    {
+      "path": "refact-agent/engine/tests/browser_fixtures/large-fetch-stream.html",
+      "before_sha256": null,
+      "after_sha256": "fe5be2c227171502f7cd9c05061d3f0c0d624779b495b0e5d72273d4947595f4",
+      "affected_tests": [
+        "983925055af4a7d34a649ea3f449db04f0591e8670956807a69d8e6a30d97e6e"
+      ],
+      "impact": "New fixture page reading /sse-large via fetch().body.getReader() with optional console/DOM modes.",
+      "execution_context": "Engine lib/refact-browser unit tests (cargo test -p refact-browser 205 pass; cargo test --lib browser_runtime 20 pass) and the gated live lane (REFACT_BROWSER_E2E=1, tests/it browser_e2e 109/110 pass, the one failure expect_retries_matchers_report_received is timing-flaky and passes on rerun).",
+      "author": "background_agent:bgagent-w4-chrome-stream (W4 subagent)",
+      "reviewer": "parent planner chat (W4 brief author); pending independent review via review tool",
+      "review_evidence": "Parent reviewed W4 status report and diffs; review tool run on W4 branch (see W4 final report). Mutant patches and logs under .refact/evidence/w4/."
+    },
+    {
+      "path": "refact-agent/engine/tests/it/browser_common/mod.rs",
+      "before_sha256": "30dc5176aa5578f0bece12b68b487c1152d44b3399cb22819c1bda448c266a92",
+      "after_sha256": "a67d47e9edbd60ffe348e24b216533b2abb551e654fb2551ca9bff91ed06025b",
+      "affected_tests": [
+        "983925055af4a7d34a649ea3f449db04f0591e8670956807a69d8e6a30d97e6e"
+      ],
+      "impact": "Adds /sse-large streaming route to FixtureServer.",
+      "execution_context": "Engine lib/refact-browser unit tests (cargo test -p refact-browser 205 pass; cargo test --lib browser_runtime 20 pass) and the gated live lane (REFACT_BROWSER_E2E=1, tests/it browser_e2e 109/110 pass, the one failure expect_retries_matchers_report_received is timing-flaky and passes on rerun).",
+      "author": "background_agent:bgagent-w4-chrome-stream (W4 subagent)",
+      "reviewer": "parent planner chat (W4 brief author); pending independent review via review tool",
+      "review_evidence": "Parent reviewed W4 status report and diffs; review tool run on W4 branch (see W4 final report). Mutant patches and logs under .refact/evidence/w4/."
     }
   ]
 }

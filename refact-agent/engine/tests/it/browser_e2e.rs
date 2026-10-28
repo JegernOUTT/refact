@@ -6732,3 +6732,75 @@ async fn contrast_audit_composites_real_computed_styles() {
         "a control with no border and no fill has no non-text boundary"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn a_page_streaming_twelve_megabytes_of_sse_keeps_the_browser_alive() {
+    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
+        return;
+    };
+    case.setup_world();
+    let pid = case.runtime.browser.get_process_id();
+    let target = case.server.url("large-fetch-stream.html?log=text");
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+    let report = execute_request_with_runtime(
+        runtime.clone(),
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: None,
+            page_context: Some(PageContextMode::None),
+            network: NetworkReportMode::default(),
+            steps: vec![
+                BrowserStep::Navigate {
+                    url: target,
+                    timeout_ms: None,
+                },
+                BrowserStep::WaitForFunction {
+                    expression: "() => window.streamResult.done || window.streamResult.error"
+                        .to_string(),
+                    locator: None,
+                    timeout_ms: Some(30_000),
+                    polling_ms: Some(100),
+                },
+                BrowserStep::Eval {
+                    expression: "JSON.stringify(window.streamResult)".to_string(),
+                    timeout_ms: None,
+                },
+            ],
+            block_service_workers: None,
+            continue_on_error: false,
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await;
+    let mut rt = runtime.lock().await;
+    let connected = tokio::task::block_in_place(|| rt.check_connection());
+    let pid_alive = pid.is_some_and(refact_lsp::integrations::browser_runtime::pid_is_alive);
+    let report = report.expect("the streaming batch must not lose the browser");
+    assert!(report.ok, "streaming batch failed: {report:?}");
+    let result: serde_json::Value = serde_json::from_str(returned_eval_string(&report)).unwrap();
+    assert_eq!(result["error"], serde_json::Value::Null, "{result}");
+    assert_eq!(result["bytes"], json!(12 * ((1 << 20) + 8)), "{result}");
+    assert!(
+        connected,
+        "the CDP transport closed (pid alive: {pid_alive})"
+    );
+    assert!(pid_alive, "Chrome {pid:?} exited while the page streamed");
+    let streamed: Vec<_> = report
+        .console
+        .iter()
+        .filter(|entry| entry.text.starts_with("data: xxx"))
+        .collect();
+    assert!(
+        !streamed.is_empty(),
+        "the page logged no chunk text: {:?}",
+        report.console
+    );
+    assert!(
+        streamed.iter().all(
+            |entry| entry.text.len() < refact_lsp::refact_browser::MAX_CONSOLE_TEXT_BYTES + 128
+        ),
+        "a megabyte console.log must be capped before it reaches the report"
+    );
+}

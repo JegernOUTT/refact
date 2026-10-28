@@ -9,7 +9,7 @@ use headless_chrome::protocol::cdp::DOM;
 use refact_integrations::browser_models::{DownloadInfo, DownloadState, UploadInfo};
 use serde_json::{Value, json};
 use tungstenite::stream::MaybeTlsStream;
-use tungstenite::{Message, WebSocket, connect};
+use tungstenite::{Message, WebSocket};
 
 use crate::{ElementHandle, WorldManager};
 
@@ -408,7 +408,7 @@ impl DownloadMonitor {
     pub fn connect(ws_url: &str, directory: PathBuf) -> Result<Self, String> {
         std::fs::create_dir_all(&directory)
             .map_err(|error| format!("Failed to create downloads directory: {error}"))?;
-        let (socket, _) = connect(ws_url)
+        let socket = crate::cdp::connect_raw_cdp(ws_url)
             .map_err(|error| format!("Failed to connect download CDP session: {error}"))?;
         Ok(Self {
             socket: Mutex::new(socket),

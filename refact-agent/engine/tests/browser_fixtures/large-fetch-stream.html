@@ -1,0 +1,44 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>large fetch stream</title>
+</head>
+<body>
+  <h1>large fetch stream</h1>
+  <p id="status">pending</p>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const source = params.get("src") || "/sse-large?chunks=12&size=1048576";
+    const logMode = params.get("log") || "size";
+    const decoder = new TextDecoder();
+    window.streamResult = { done: false, bytes: 0, chunks: 0, error: null };
+    (async () => {
+      try {
+        const response = await fetch(source);
+        const reader = response.body.getReader();
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          window.streamResult.bytes += value.length;
+          window.streamResult.chunks += 1;
+          if (logMode === "size") console.log("chunk", window.streamResult.chunks, value.length);
+          if (logMode === "text") console.log(decoder.decode(value, { stream: true }));
+          if (logMode === "whole") window.streamText = (window.streamText || "") + decoder.decode(value, { stream: true });
+          if (params.get("render") === "1") {
+            const pre = document.createElement("pre");
+            pre.textContent = decoder.decode(value, { stream: true });
+            document.body.appendChild(pre);
+          }
+        }
+        if (logMode === "whole") console.log(window.streamText);
+        window.streamResult.done = true;
+        document.getElementById("status").textContent = "done " + window.streamResult.bytes;
+      } catch (error) {
+        window.streamResult.error = String(error);
+        document.getElementById("status").textContent = "error " + error;
+      }
+    })();
+  </script>
+</body>
+</html>

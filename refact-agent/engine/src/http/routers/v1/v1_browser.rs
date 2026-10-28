@@ -13,10 +13,11 @@ use crate::global_context::GlobalContext;
 use crate::chat::types::{BrowserTabInfo, ChatEvent, TimelineEntry};
 use crate::custom_error::ScratchError;
 use crate::integrations::browser_runtime::{
-    BrowserLaunchOptions, BrowserProxyOptions, BrowserRuntime, PICKER_PAGE_TIMEOUT_MS,
-    compute_frame_hash, ensure_frame_emitter, ensure_injection_into_all_tabs,
-    get_browser_profile_dir, register_browser_runtime, relaunch_runtime_for_chat,
-    remove_browser_runtime, find_runtime_by_chat_id, setup_recording_for_runtime,
+    BrowserLaunchOptions, BrowserProxyOptions, PICKER_PAGE_TIMEOUT_MS, compute_frame_hash,
+    ensure_frame_emitter, ensure_injection_into_all_tabs, get_browser_profile_dir,
+    register_browser_runtime, relaunch_runtime_for_chat, remove_browser_runtime,
+    find_runtime_by_chat_id, setup_recording_for_runtime, launch_with_lock_recovery,
+    relaunch_lock_for_chat,
 };
 use crate::integrations::browser_types::{RecorderEvent, ConsoleEntry, NetworkEntry};
 use crate::integrations::browser_models::BrowserActionRequest;
@@ -304,16 +305,33 @@ pub async fn handle_browser_start(
     let launch_options = post.launch_options(BrowserLaunchOptions::default());
     let headless = launch_options.headless;
 
-    let runtime = BrowserRuntime::launch(profile_dir, launch_options).map_err(|e| {
-        ScratchError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to launch browser: {}", e),
-        )
-    })?;
+    let launch_lock = relaunch_lock_for_chat(&post.chat_id);
+    let launch_guard = launch_lock.lock().await;
+    if let Some((rid, _)) = find_runtime_by_chat_id(app.clone(), &post.chat_id).await {
+        drop(launch_guard);
+        ensure_frame_emitter(app.clone(), &post.chat_id, &rid).await;
+        return Ok(json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "runtime_id": rid,
+                "status": "already_running",
+                "headless": headless
+            }),
+        ));
+    }
+    let runtime = launch_with_lock_recovery(profile_dir, launch_options, None)
+        .await
+        .map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to launch browser: {e}"),
+            )
+        })?;
 
     let mut rt = runtime;
     rt.reattach(&post.chat_id);
     let runtime_id = register_browser_runtime(app.clone(), rt).await;
+    drop(launch_guard);
 
     let browser_runtimes = gcx.browser_runtimes.clone();
     let runtime_arc = {

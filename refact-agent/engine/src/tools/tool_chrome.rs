@@ -23,7 +23,7 @@ use crate::integrations::browser_controller;
 use crate::integrations::browser_models::{ExecutionReport, parse_browser_action_request};
 use crate::integrations::browser_runtime::{
     BrowserGpuMode, BrowserLaunchOptions, BrowserProxyOptions, BrowserRuntime,
-    clear_stale_profile_lock, describe_launch_failure, find_runtime_by_chat_id,
+    find_runtime_by_chat_id, launch_with_lock_recovery, runtime_owner_record, transport_death_note,
     register_browser_runtime, get_browser_profile_dir, relaunch_lock_for_chat,
     remove_browser_runtime, setup_recording_for_runtime, setup_recording_for_tab,
 };
@@ -909,6 +909,7 @@ async fn setup_chrome_session(
     let launch_lock = relaunch_lock_for_chat(chat_id);
     let _launch_guard = launch_lock.lock().await;
 
+    let mut dead_pid = None;
     let session_entry = {
         let integration_sessions = gcx.integration_sessions.clone();
         let integration_sessions = integration_sessions.lock().await;
@@ -942,10 +943,11 @@ async fn setup_chrome_session(
         if runtime_healthy {
             return Ok(setup_log);
         } else {
-            setup_log.push(
-                "Browser session was dead; relaunching (open tabs lost, cookies/localStorage kept)."
-                    .to_string(),
-            );
+            dead_pid = runtime_owner_record(&runtime_id).and_then(|owner| owner.process_id());
+            setup_log.push(format!(
+                "{}; relaunching (open tabs lost, cookies/localStorage kept).",
+                transport_death_note(dead_pid, None)
+            ));
             remove_browser_runtime(
                 crate::app_state::AppState::from_gcx(gcx.clone()).await,
                 &runtime_id,
@@ -1021,21 +1023,12 @@ async fn setup_chrome_session(
     } else {
         let cache_dir = gcx.cache_dir.clone();
         let profile_dir = get_browser_profile_dir(&cache_dir, chat_id);
-        clear_stale_profile_lock(&profile_dir).map_err(|error| {
-            format!("Cannot start chrome: {error}; the previous browser never exited")
-        })?;
-
-        setup_log.push(format!(
-            "Started new chrome process ({}).",
-            launch_options.mode_label()
-        ));
         let mode = launch_options.mode_label();
-        BrowserRuntime::launch(profile_dir.clone(), launch_options).map_err(|error| {
-            format!(
-                "Failed to start chrome in {mode} mode: {}",
-                describe_launch_failure(&error, &profile_dir)
-            )
-        })?
+        let runtime = launch_with_lock_recovery(profile_dir, launch_options, dead_pid)
+            .await
+            .map_err(|error| format!("Failed to start chrome in {mode} mode: {error}"))?;
+        setup_log.push(format!("Started new chrome process ({mode})."));
+        runtime
     };
 
     let runtime_id = {

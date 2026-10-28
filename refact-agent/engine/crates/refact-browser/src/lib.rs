@@ -132,6 +132,9 @@ const FRAME_HASH_THRESHOLD: u64 = 50;
 
 const MAX_RAW_EVENT_QUEUE: usize = 2000;
 const MAX_RAW_EVENT_BYTES: usize = 64 * 1024;
+pub const MAX_CONSOLE_TEXT_BYTES: usize = 8 * 1024;
+pub const NETWORK_MAX_TOTAL_BUFFER_BYTES: u32 = 32 * 1024 * 1024;
+pub const NETWORK_MAX_RESOURCE_BUFFER_BYTES: u32 = 8 * 1024 * 1024;
 
 const RECORDER_SCRIPT_TEMPLATE: &str = include_str!("browser_recorder.js");
 const TOOLBAR_SCRIPT: &str = include_str!("browser_toolbar.js");
@@ -1208,10 +1211,34 @@ pub const TRANSPORT_DEAD_MARKERS: [&str; 4] = [
 ];
 
 pub fn is_transport_dead_error(error: &str) -> bool {
+    transport_dead_marker(error).is_some()
+}
+
+/// Which dead-transport marker an error carries, so a relaunch can name the failure variant.
+pub fn transport_dead_marker(error: &str) -> Option<&'static str> {
     let error = error.to_ascii_lowercase();
     TRANSPORT_DEAD_MARKERS
         .iter()
-        .any(|marker| error.contains(marker))
+        .copied()
+        .find(|marker| error.contains(marker))
+}
+
+/// Console text longer than the cap keeps its head and says how much was dropped; one huge
+/// `console.log` must not be copied into every buffer and report.
+pub fn cap_console_text(text: String) -> String {
+    if text.len() <= MAX_CONSOLE_TEXT_BYTES {
+        return text;
+    }
+    let mut end = MAX_CONSOLE_TEXT_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}… [console text truncated: {} of {} bytes kept]",
+        &text[..end],
+        end,
+        text.len()
+    )
 }
 
 /// CDP errors raised when a frame id, its execution context, or a handle inside it belongs to a
@@ -1588,7 +1615,7 @@ pub fn setup_console_capture(
             let entry = ConsoleEntry {
                 timestamp: normalize_timestamp_ms(e.params.timestamp),
                 level: console_level_label(&format!("{:?}", e.params.Type)),
-                text,
+                text: cap_console_text(text),
             };
             if let Ok(mut buf) = console_buffer.lock() {
                 buf.push(entry);
@@ -1602,7 +1629,7 @@ pub fn setup_console_capture(
             let entry = ConsoleEntry {
                 timestamp: normalize_timestamp_ms(e.params.entry.timestamp),
                 level: console_level_label(&format!("{:?}", e.params.entry.level)),
-                text: e.params.entry.text.clone(),
+                text: cap_console_text(e.params.entry.text.clone()),
             };
             if let Ok(mut buf) = console_buffer.lock() {
                 buf.push(entry);
@@ -1623,7 +1650,7 @@ pub fn setup_console_capture(
                 buf.push(ConsoleEntry {
                     timestamp: normalize_timestamp_ms(e.params.timestamp),
                     level: "page_error".to_string(),
-                    text: error,
+                    text: cap_console_text(error),
                 });
                 if buf.len() > MAX_BUFFER_SIZE {
                     let excess = buf.len() - MAX_BUFFER_SIZE;
@@ -1646,8 +1673,8 @@ pub fn setup_network_capture(
     har_recorder: Arc<har::HarRecorder>,
 ) -> Result<(), String> {
     tab.call_method(Network::Enable {
-        max_total_buffer_size: None,
-        max_resource_buffer_size: None,
+        max_total_buffer_size: Some(NETWORK_MAX_TOTAL_BUFFER_BYTES),
+        max_resource_buffer_size: Some(NETWORK_MAX_RESOURCE_BUFFER_BYTES),
         max_post_data_size: None,
         report_direct_socket_traffic: None,
         enable_durable_messages: None,
@@ -2062,6 +2089,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn huge_console_text_is_capped_on_a_char_boundary() {
+        let short = "x".repeat(MAX_CONSOLE_TEXT_BYTES);
+        assert_eq!(cap_console_text(short.clone()), short);
+
+        let huge = format!(
+            "{}é{}",
+            "a".repeat(MAX_CONSOLE_TEXT_BYTES - 1),
+            "b".repeat(1 << 20)
+        );
+        let capped = cap_console_text(huge.clone());
+        assert!(
+            capped.len() < MAX_CONSOLE_TEXT_BYTES + 128,
+            "{}",
+            capped.len()
+        );
+        assert!(capped.starts_with(&"a".repeat(MAX_CONSOLE_TEXT_BYTES - 1)));
+        assert!(
+            !capped.contains('é'),
+            "a split multibyte char must be dropped whole"
+        );
+        assert!(capped.ends_with(&format!(
+            "[console text truncated: {} of {} bytes kept]",
+            MAX_CONSOLE_TEXT_BYTES - 1,
+            huge.len()
+        )));
+    }
+
+    #[test]
     fn transport_dead_errors_are_recognised_and_ordinary_failures_are_not() {
         for dead in [
             "Unable to make method calls because underlying connection is closed",
@@ -2124,6 +2179,28 @@ mod tests {
             );
             assert_eq!(launch.user_data_dir.as_deref(), Some(profile_dir));
             assert!(launch.headless);
+
+            let ignored: Vec<_> = launch.ignore_default_args.iter().collect();
+            for noisy in [
+                "--verbose",
+                "--log-level=0",
+                "--enable-features=NetworkService,NetworkServiceInProcess",
+            ] {
+                assert!(
+                    ignored.contains(&&std::ffi::OsStr::new(noisy)),
+                    "{noisy} is not ignored"
+                );
+            }
+            let last_log_level = launch
+                .args
+                .iter()
+                .filter_map(|arg| arg.to_str()?.strip_prefix("--log-level="))
+                .next_back();
+            assert_eq!(
+                last_log_level,
+                Some("2"),
+                "the launcher's hardcoded --log-level=0 must be overridden by a later flag"
+            );
         }
     }
 

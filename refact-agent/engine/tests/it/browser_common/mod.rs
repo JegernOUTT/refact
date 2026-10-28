@@ -156,6 +156,26 @@ pub async fn route_redirect() -> Response<Body> {
         .unwrap()
 }
 
+#[derive(Deserialize)]
+pub struct SseLargeQuery {
+    chunks: Option<usize>,
+    size: Option<usize>,
+}
+
+pub async fn sse_large(Query(query): Query<SseLargeQuery>) -> Response<Body> {
+    let chunks = query.chunks.unwrap_or(12).min(64);
+    let size = query.size.unwrap_or(1 << 20).min(4 << 20);
+    let event = Bytes::from(format!("data: {}\n\n", "x".repeat(size)));
+    let stream =
+        futures::stream::iter((0..chunks).map(move |_| Ok::<_, std::io::Error>(event.clone())));
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::wrap_stream(stream))
+        .unwrap()
+}
+
 pub fn content_type(path: &FsPath) -> &'static str {
     match path.extension().and_then(|extension| extension.to_str()) {
         Some("html") => "text/html; charset=utf-8",
@@ -210,6 +230,7 @@ impl FixtureServer {
             .route("/slow-echo", get(slow_echo))
             .route("/api/data", get(route_data))
             .route("/api/redirect", get(route_redirect))
+            .route("/sse-large", get(sse_large))
             .route("/login", get(session_login))
             .route("/api/session", get(session_probe))
             .route("/download", get(download))

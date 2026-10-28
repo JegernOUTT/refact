@@ -10,7 +10,10 @@ pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub const TRANSPORT_READ_TIMEOUT: Duration = Duration::from_secs(86_400);
 
-pub const MANDATORY_CHROME_ARGS: [&str; 7] = [
+/// headless_chrome 1.0.20 hardcodes `--verbose --log-level=0` ahead of every launch, so the
+/// `--log-level=2` here (later on the command line, so it wins) is what actually quiets logging;
+/// the matching ignored defaults only take effect if the launcher moves them into DEFAULT_ARGS.
+pub const MANDATORY_CHROME_ARGS: [&str; 8] = [
     "--no-restore-last-session",
     "--no-first-run",
     "--no-startup-window",
@@ -18,9 +21,15 @@ pub const MANDATORY_CHROME_ARGS: [&str; 7] = [
     "--no-default-browser-check",
     "--disable-search-engine-choice-screen",
     "--disable-back-forward-cache",
+    "--log-level=2",
 ];
 
-pub const IGNORED_CHROME_DEFAULT_ARGS: [&str; 1] = ["--enable-automation"];
+pub const IGNORED_CHROME_DEFAULT_ARGS: [&str; 4] = [
+    "--enable-automation",
+    "--enable-features=NetworkService,NetworkServiceInProcess",
+    "--verbose",
+    "--log-level=0",
+];
 
 pub const SOFTWARE_GPU_CHROME_ARGS: [&str; 3] = [
     "--use-gl=angle",

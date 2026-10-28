@@ -2665,6 +2665,7 @@ pub async fn execute_request_with_runtime_validated(
     };
 
     let mut resume = None;
+    let mut dead_error = None;
     let dead_runtime = runtime_arc.clone();
     if transport_alive {
         let outcome =
@@ -2672,14 +2673,66 @@ pub async fn execute_request_with_runtime_validated(
         if !report_hit_dead_transport(&outcome) {
             return outcome;
         }
+        dead_error = dead_transport_error(&outcome);
         if let Ok(attempt) = &outcome {
             resume = Some(plan_resume(attempt, total_steps));
         }
     }
     let last_known_url = last_committed_url(&dead_runtime).await;
+    let dead_pid = runtime_process_id(&dead_runtime).await;
     drop(dead_runtime);
+    let death_note =
+        crate::integrations::browser_runtime::transport_death_note(dead_pid, dead_error.as_deref());
+    tracing::warn!("chat {chat_id}: {death_note}; relaunching");
 
     let runtime_arc = relaunch_and_resolve(app, &chat_id, profile_dir, launch_options).await?;
+    let outcome = resume_after_relaunch(
+        runtime_arc,
+        request,
+        image_policy,
+        resume,
+        last_known_url,
+        total_steps,
+    )
+    .await;
+    outcome.map(|mut report| {
+        report.warnings.push(death_note);
+        report
+    })
+}
+
+async fn runtime_process_id(runtime_arc: &Arc<AMutex<BrowserRuntime>>) -> Option<u32> {
+    let rt = tokio::time::timeout(
+        crate::integrations::browser_runtime::RUNTIME_LOCK_GRACE,
+        runtime_arc.lock(),
+    )
+    .await
+    .ok()?;
+    let runtime_id = rt.runtime_id.clone();
+    drop(rt);
+    crate::integrations::browser_runtime::runtime_owner_record(&runtime_id)
+        .and_then(|owner| owner.process_id())
+}
+
+fn dead_transport_error(outcome: &Result<ExecutionReport, String>) -> Option<String> {
+    match outcome {
+        Err(error) => Some(error.clone()),
+        Ok(report) => report
+            .steps
+            .iter()
+            .filter_map(|step| step.error.clone())
+            .find(|error| refact_browser::is_transport_dead_error(error)),
+    }
+}
+
+async fn resume_after_relaunch(
+    runtime_arc: Arc<AMutex<BrowserRuntime>>,
+    request: BrowserActionRequest,
+    image_policy: &ImagePolicy,
+    resume: Option<ResumePlan>,
+    last_known_url: Option<String>,
+    total_steps: usize,
+) -> Result<ExecutionReport, String> {
     let Some(resume) = resume else {
         let restore = last_known_url
             .filter(|_| !request.steps.iter().any(restores_document_after_relaunch))

@@ -211,15 +211,15 @@ fn terminate_process(pid: u32) {
     }
 }
 
-fn process_cmdline(pid: u32) -> Option<String> {
+fn process_args(pid: u32) -> Option<Vec<String>> {
     #[cfg(target_os = "linux")]
     {
         let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
         Some(
             raw.split(|byte| *byte == 0)
-                .map(String::from_utf8_lossy)
-                .collect::<Vec<_>>()
-                .join(" "),
+                .filter(|arg| !arg.is_empty())
+                .map(|arg| String::from_utf8_lossy(arg).into_owned())
+                .collect(),
         )
     }
     #[cfg(not(target_os = "linux"))]
@@ -229,11 +229,19 @@ fn process_cmdline(pid: u32) -> Option<String> {
     }
 }
 
+fn user_data_dir_arg(arg: &str) -> Option<&Path> {
+    arg.strip_prefix("--user-data-dir=").map(Path::new)
+}
+
+/// A process owns a profile only when one of its arguments is exactly `--user-data-dir=<profile>`;
+/// a sibling profile whose path merely starts with this one (`…/abc-sub`) is someone else's.
 fn process_owns_profile(pid: u32, profile_dir: &Path) -> bool {
-    let Some(cmdline) = process_cmdline(pid) else {
+    let Some(args) = process_args(pid) else {
         return false;
     };
-    cmdline.contains(&*profile_dir.to_string_lossy())
+    args.iter()
+        .filter_map(|arg| user_data_dir_arg(arg))
+        .any(|dir| dir == profile_dir)
 }
 
 /// Which process a removed runtime is allowed to terminate. Only the generation being removed
@@ -258,18 +266,97 @@ pub fn shutdown_target(own_pid: Option<u32>, lock_owner: Option<u32>) -> Shutdow
 
 const PROFILE_SINGLETON_FILES: [&str; 3] = ["SingletonLock", "SingletonSocket", "SingletonCookie"];
 
-/// Removes singleton artifacts left by a Chrome that is no longer running. Never touches a
-/// profile whose lock is held by a live process.
-pub fn clear_stale_profile_lock(profile_dir: &Path) -> Result<(), String> {
-    let Some(pid) = profile_lock_pid(profile_dir) else {
-        return Ok(());
-    };
-    if let Some(live) = profile_lock_is_live(profile_dir) {
-        return Err(format!(
-            "profile {} is locked by live Chrome process {live}",
-            profile_dir.display()
-        ));
+/// The `SingletonLock` symlink target Chrome writes: `<hostname>-<pid>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileLock {
+    pub host: String,
+    pub pid: u32,
+}
+
+pub fn parse_profile_lock(target: &str) -> Option<ProfileLock> {
+    let (host, pid) = target.rsplit_once('-')?;
+    let pid = pid.parse::<u32>().ok().filter(|pid| *pid > 0)?;
+    Some(ProfileLock {
+        host: host.to_string(),
+        pid,
+    })
+}
+
+fn read_profile_lock(profile_dir: &Path) -> Option<Result<ProfileLock, String>> {
+    let target = std::fs::read_link(profile_dir.join("SingletonLock")).ok()?;
+    let target = target.to_string_lossy().into_owned();
+    Some(parse_profile_lock(&target).ok_or(target))
+}
+
+pub fn local_hostname() -> String {
+    hostname::get()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProfileLockState {
+    Absent,
+    Unparseable(String),
+    Stale(ProfileLock),
+    Live(ProfileLock),
+    Foreign(ProfileLock),
+}
+
+impl ProfileLockState {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Absent => "no profile lock".to_string(),
+            Self::Unparseable(target) => format!("unparseable profile lock -> {target}"),
+            Self::Stale(lock) => format!("stale lock of dead pid {} on {}", lock.pid, lock.host),
+            Self::Live(lock) => format!("locked by live Chrome pid {} on {}", lock.pid, lock.host),
+            Self::Foreign(lock) => format!(
+                "locked by pid {} on another host {}; it cannot be checked or cleared from here",
+                lock.pid, lock.host
+            ),
+        }
     }
+}
+
+pub fn profile_lock_state(profile_dir: &Path) -> ProfileLockState {
+    match read_profile_lock(profile_dir) {
+        None => ProfileLockState::Absent,
+        Some(Err(target)) => ProfileLockState::Unparseable(target),
+        Some(Ok(lock)) if lock.host != local_hostname() => ProfileLockState::Foreign(lock),
+        Some(Ok(lock)) if pid_is_alive(lock.pid) && process_owns_profile(lock.pid, profile_dir) => {
+            ProfileLockState::Live(lock)
+        }
+        Some(Ok(lock)) => ProfileLockState::Stale(lock),
+    }
+}
+
+/// Removes singleton artifacts left by a dead Chrome on this host. Never touches a profile
+/// whose lock is held by a live process here or by any process on another host.
+pub fn clear_stale_profile_lock(profile_dir: &Path) -> Result<(), String> {
+    let lock = match profile_lock_state(profile_dir) {
+        ProfileLockState::Absent | ProfileLockState::Unparseable(_) => return Ok(()),
+        ProfileLockState::Stale(lock) => lock,
+        ProfileLockState::Live(lock) => {
+            return Err(format!(
+                "profile {} is locked by live Chrome process {} on {}",
+                profile_dir.display(),
+                lock.pid,
+                lock.host
+            ))
+        }
+        ProfileLockState::Foreign(lock) => {
+            return Err(format!(
+                "profile {} is locked by process {} on another host `{}` (this host is `{}`); \
+                 close that browser or remove {}/SingletonLock by hand if that host is gone",
+                profile_dir.display(),
+                lock.pid,
+                lock.host,
+                local_hostname(),
+                profile_dir.display()
+            ))
+        }
+    };
+    let pid = lock.pid;
     for name in PROFILE_SINGLETON_FILES {
         let path = profile_dir.join(name);
         if std::fs::symlink_metadata(&path).is_err() {
@@ -308,10 +395,15 @@ fn shutdown_runtime_process(pid: Option<u32>, profile_dir: &Path, delete_profile
     if !delete_profile {
         return;
     }
-    if profile_lock_is_live(profile_dir).is_some() {
+    let lock_state = profile_lock_state(profile_dir);
+    if matches!(
+        lock_state,
+        ProfileLockState::Live(_) | ProfileLockState::Foreign(_)
+    ) {
         warn!(
-            "Not deleting browser profile {}: it is still locked by a live process",
-            profile_dir.display()
+            "Not deleting browser profile {}: {}",
+            profile_dir.display(),
+            lock_state.describe()
         );
         return;
     }
@@ -428,19 +520,11 @@ async fn release_runtime_and_wait(removed: Option<Arc<AMutex<BrowserRuntime>>>, 
     release_runtime_off_thread(removed, runtime_id);
 }
 
-fn profile_lock_pid(profile_dir: &Path) -> Option<u32> {
-    let target = std::fs::read_link(profile_dir.join("SingletonLock")).ok()?;
-    let target = target.to_string_lossy();
-    let (_, pid) = target.rsplit_once('-')?;
-    pid.parse::<u32>().ok()
-}
-
 pub fn profile_lock_is_live(profile_dir: &Path) -> Option<u32> {
-    let pid = profile_lock_pid(profile_dir)?;
-    if pid == 0 || !pid_is_alive(pid) {
-        return None;
+    match profile_lock_state(profile_dir) {
+        ProfileLockState::Live(lock) => Some(lock.pid),
+        _ => None,
     }
-    process_owns_profile(pid, profile_dir).then_some(pid)
 }
 
 pub const STALE_PROFILE_MIN_AGE: Duration = Duration::from_secs(600);
@@ -470,14 +554,14 @@ fn live_chrome_profile_dirs() -> Option<Vec<String>> {
             else {
                 continue;
             };
-            let Some(cmdline) = process_cmdline(pid) else {
+            let Some(args) = process_args(pid) else {
                 continue;
             };
-            for arg in cmdline.split_whitespace() {
-                if let Some(dir) = arg.strip_prefix("--user-data-dir=") {
-                    dirs.push(dir.to_string());
-                }
-            }
+            dirs.extend(
+                args.iter()
+                    .filter_map(|arg| user_data_dir_arg(arg))
+                    .map(|dir| dir.to_string_lossy().into_owned()),
+            );
         }
         Some(dirs)
     }
@@ -522,7 +606,10 @@ pub fn sweep_stale_browser_profiles_excluding(
         if live_dirs.iter().any(|dir| dir == &path_str) {
             continue;
         }
-        if profile_lock_is_live(&path).is_some() {
+        if matches!(
+            profile_lock_state(&path),
+            ProfileLockState::Live(_) | ProfileLockState::Foreign(_)
+        ) {
             continue;
         }
         let min_age = profile_min_age(&name);
@@ -578,6 +665,124 @@ pub fn describe_launch_failure(error: &str, profile_dir: &Path) -> String {
         ),
         None => format!("{error} (profile {})", profile_dir.display()),
     }
+}
+
+pub const PROFILE_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
+pub const LAUNCH_MAX_ATTEMPTS: u32 = 2;
+
+/// Chrome launch failures that mean the new process died or handed off before it reported a
+/// debugging URL, which a stale profile lock or a still-exiting predecessor explains.
+pub const STARTUP_DEATH_MARKERS: [&str; 3] = [
+    "no available ports",
+    "didn't give us a websocket url",
+    "debugging port is already in use",
+];
+
+/// Whether a failed launch attempt is retried: only once, only when the new Chrome died during
+/// startup or its transport closed, and never while a live or foreign process holds the profile.
+pub fn should_retry_launch(error: &str, attempt: u32, lock: &ProfileLockState) -> bool {
+    let lowered = error.to_ascii_lowercase();
+    let startup_death = is_transport_dead_error(error)
+        || STARTUP_DEATH_MARKERS
+            .iter()
+            .any(|marker| lowered.contains(marker));
+    attempt < LAUNCH_MAX_ATTEMPTS
+        && startup_death
+        && !matches!(
+            lock,
+            ProfileLockState::Live(_) | ProfileLockState::Foreign(_)
+        )
+}
+
+/// Waits until `previous_pid` (if any) has exited and no live process on this host holds the
+/// profile lock, bounded by `timeout`. Returns the lock state seen last.
+pub async fn wait_for_profile_release(
+    profile_dir: &Path,
+    previous_pid: Option<u32>,
+    timeout: Duration,
+) -> ProfileLockState {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let state = profile_lock_state(profile_dir);
+        let previous_alive = previous_pid.is_some_and(pid_is_alive);
+        if (!previous_alive && !matches!(state, ProfileLockState::Live(_)))
+            || Instant::now() >= deadline
+        {
+            if previous_alive {
+                warn!(
+                    "Previous Chrome {previous_pid:?} for {} is still alive after {timeout:?}",
+                    profile_dir.display()
+                );
+            }
+            return state;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// The one launch path for an owned Chrome: waits for the previous process to release the
+/// profile, clears a stale lock, launches, and on a startup death re-checks the lock and retries
+/// exactly once after the settle delay.
+pub async fn launch_with_lock_recovery(
+    profile_dir: PathBuf,
+    options: BrowserLaunchOptions,
+    previous_pid: Option<u32>,
+) -> Result<BrowserRuntime, String> {
+    wait_for_profile_release(&profile_dir, previous_pid, PROFILE_RELEASE_TIMEOUT).await;
+    clear_stale_profile_lock(&profile_dir)
+        .map_err(|error| format!("{error}; the previous browser never exited"))?;
+    let mut attempt = 1;
+    loop {
+        let launch_dir = profile_dir.clone();
+        let launch_options = options.clone();
+        let outcome =
+            tokio::task::spawn_blocking(move || BrowserRuntime::launch(launch_dir, launch_options))
+                .await
+                .map_err(|error| format!("browser launch task failed: {error}"))
+                .and_then(|outcome| outcome);
+        let error = match outcome {
+            Ok(runtime) => return Ok(runtime),
+            Err(error) => error,
+        };
+        let lock = profile_lock_state(&profile_dir);
+        if !should_retry_launch(&error, attempt, &lock) {
+            return Err(format!(
+                "{} after {attempt} attempt(s); {}",
+                describe_launch_failure(&error, &profile_dir),
+                lock.describe()
+            ));
+        }
+        warn!(
+            "Chrome died while starting on {} ({error}; {}); retrying once",
+            profile_dir.display(),
+            lock.describe()
+        );
+        if let ProfileLockState::Stale(_) = lock {
+            clear_stale_profile_lock(&profile_dir)?;
+        }
+        tokio::time::sleep(browser_settings::current().relaunch_settle()).await;
+        attempt += 1;
+    }
+}
+
+/// Says whether a dead runtime's Chrome actually exited or only its CDP socket closed, with the
+/// transport error variant, so a relaunch warning is diagnosable.
+pub fn transport_death_note(pid: Option<u32>, error: Option<&str>) -> String {
+    let process = match pid {
+        Some(pid) if pid_is_alive(pid) => {
+            format!("Chrome process {pid} is still alive, so only the CDP socket closed")
+        }
+        Some(pid) => format!("Chrome process {pid} had exited (crash or external kill)"),
+        None => "the Chrome process id is unknown".to_string(),
+    };
+    let variant = match error {
+        Some(error) => match transport_dead_marker(error) {
+            Some(marker) => format!("transport error `{marker}`"),
+            None => format!("error `{}`", bounded_cdp_text(error)),
+        },
+        None => "the connection probe failed before the batch ran".to_string(),
+    };
+    format!("browser session died: {process}; {variant}")
 }
 
 #[derive(Debug, Clone, Default)]
@@ -829,6 +1034,7 @@ pub async fn relaunch_runtime_for_chat(
     let relaunch_lock = relaunch_lock_for_chat(chat_id);
     let _relaunch_guard = relaunch_lock.lock().await;
 
+    let mut previous_pid = None;
     let previous_emitter_active = match find_runtime_by_chat_id(app.clone(), chat_id).await {
         Some((runtime_id, runtime_arc)) => {
             let (emitter_active, usable) =
@@ -856,6 +1062,7 @@ pub async fn relaunch_runtime_for_chat(
                 return Ok(runtime_id);
             }
             drop(runtime_arc);
+            previous_pid = runtime_owner_record(&runtime_id).and_then(|owner| owner.process_id());
             let removed = take_browser_runtime(&app, &runtime_id, false).await;
             release_runtime_and_wait(removed, &runtime_id).await;
             tokio::time::sleep(browser_settings::current().relaunch_settle()).await;
@@ -865,18 +1072,9 @@ pub async fn relaunch_runtime_for_chat(
     };
 
     let mode = options.mode_label();
-    if let Err(error) = clear_stale_profile_lock(&profile_dir) {
-        return Err(format!(
-            "Failed to relaunch browser in {mode} mode: {error}; the previous browser never exited"
-        ));
-    }
-    let mut runtime = BrowserRuntime::launch(profile_dir.clone(), options).map_err(|e| {
-        format!(
-            "Failed to relaunch browser in {} mode: {}",
-            mode,
-            describe_launch_failure(&e, &profile_dir)
-        )
-    })?;
+    let mut runtime = launch_with_lock_recovery(profile_dir, options, previous_pid)
+        .await
+        .map_err(|error| format!("Failed to relaunch browser in {mode} mode: {error}"))?;
     runtime.reattach(chat_id);
     runtime.fence_after_relaunch(RELAUNCH_FENCE);
     let runtime_id = register_browser_runtime(app.clone(), runtime).await;
@@ -1413,15 +1611,20 @@ mod tests {
         #[cfg(unix)]
         {
             let dead_pid = 4_294_000_003u32;
-            std::os::unix::fs::symlink(
-                format!("hostname-{dead_pid}"),
-                dir.path().join("SingletonLock"),
-            )
-            .unwrap();
+            let lock = dir.path().join("SingletonLock");
+            std::os::unix::fs::symlink(format!("{}-{dead_pid}", local_hostname()), &lock).unwrap();
             std::fs::write(dir.path().join("SingletonCookie"), b"cookie").unwrap();
             assert_eq!(clear_stale_profile_lock(dir.path()), Ok(()));
-            assert!(std::fs::symlink_metadata(dir.path().join("SingletonLock")).is_err());
+            assert!(std::fs::symlink_metadata(&lock).is_err());
             assert!(!dir.path().join("SingletonCookie").exists());
+
+            let foreign_host = format!("not-{}", local_hostname());
+            std::os::unix::fs::symlink(format!("{foreign_host}-{dead_pid}"), &lock).unwrap();
+            let error = clear_stale_profile_lock(dir.path())
+                .expect_err("a lock written on another host must never be cleared from here");
+            assert!(error.contains(&foreign_host), "{error}");
+            assert!(error.contains(&dead_pid.to_string()), "{error}");
+            assert!(std::fs::symlink_metadata(&lock).is_ok());
         }
     }
 
@@ -1571,12 +1774,19 @@ mod tests {
         // cannot run elsewhere; liveness itself is checked on every platform above.
         #[cfg(unix)]
         {
+            let host = local_hostname();
             std::os::unix::fs::symlink(
-                format!("hostname-{dead_pid}"),
+                format!("{host}-{dead_pid}"),
                 dir.path().join("SingletonLock"),
             )
             .unwrap();
-            assert_eq!(profile_lock_pid(dir.path()), Some(dead_pid));
+            assert_eq!(
+                profile_lock_state(dir.path()),
+                ProfileLockState::Stale(ProfileLock {
+                    host,
+                    pid: dead_pid
+                })
+            );
             assert_eq!(profile_lock_is_live(dir.path()), None);
         }
     }
@@ -1596,11 +1806,71 @@ mod tests {
         assert!(pid_is_alive(own_pid));
         #[cfg(unix)]
         std::os::unix::fs::symlink(
-            format!("hostname-{own_pid}"),
+            format!("{}-{own_pid}", local_hostname()),
             dir.path().join("SingletonLock"),
         )
         .unwrap();
         assert_eq!(profile_lock_is_live(dir.path()), None);
+
+        #[cfg(target_os = "linux")]
+        {
+            let profile = dir.path().join("abc");
+            std::fs::create_dir(&profile).unwrap();
+            let holder = |user_data_dir: String| {
+                std::process::Command::new("sh")
+                    .args(["-c", "sleep 30; true", "sh"])
+                    .arg(format!("--user-data-dir={user_data_dir}"))
+                    .spawn()
+                    .unwrap()
+            };
+            let lock = profile.join("SingletonLock");
+            for (user_data_dir, owns) in [
+                (format!("{}-sub", profile.display()), false),
+                (profile.display().to_string(), true),
+            ] {
+                let mut child = holder(user_data_dir.clone());
+                let pid = child.id();
+                let _ = std::fs::remove_file(&lock);
+                std::os::unix::fs::symlink(format!("{}-{pid}", local_hostname()), &lock).unwrap();
+                let live = profile_lock_is_live(&profile);
+                let _ = child.kill();
+                let _ = child.wait();
+                assert_eq!(live, owns.then_some(pid), "--user-data-dir={user_data_dir}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_launch_is_retried_once_only_for_a_startup_death_on_a_free_profile() {
+        let stale = ProfileLockState::Stale(ProfileLock {
+            host: "here".to_string(),
+            pid: 7,
+        });
+        let live = ProfileLockState::Live(ProfileLock {
+            host: "here".to_string(),
+            pid: 7,
+        });
+        let foreign = ProfileLockState::Foreign(ProfileLock {
+            host: "there".to_string(),
+            pid: 7,
+        });
+        let closed = "Unable to make method calls because underlying connection is closed";
+        let no_port = "There are no available ports between 8000 and 9000 for debugging";
+        for error in [closed, no_port] {
+            assert!(should_retry_launch(error, 1, &stale), "{error}");
+            assert!(
+                should_retry_launch(error, 1, &ProfileLockState::Absent),
+                "{error}"
+            );
+            assert!(!should_retry_launch(error, 2, &stale), "{error}");
+            assert!(!should_retry_launch(error, 1, &live), "{error}");
+            assert!(!should_retry_launch(error, 1, &foreign), "{error}");
+        }
+        assert!(!should_retry_launch(
+            "Failed to create profile dir: permission denied",
+            1,
+            &stale
+        ));
     }
 
     #[test]
