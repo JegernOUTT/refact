@@ -321,7 +321,14 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
         if (result.status !== "pending") {
           activeSessionRef.current = null;
           setIsDevicePolling(false);
-          setError(result.auth_status || `${serviceName} sign-in failed`);
+          const failure = result.auth_status.trim();
+          setError(
+            failure && !/^(error|failed)$/i.test(failure)
+              ? failure
+              : backend === "bedrock"
+                ? "AWS SSO sign-in failed on the engine host. Check the AWS profile and SSO configuration, then try again. SSO login is not required when using existing AWS credentials or a Bedrock API key."
+                : `${serviceName} sign-in failed on the engine host. Check the cloud account configuration, then try again.`,
+          );
           return;
         }
         setDeviceStatus(
@@ -345,6 +352,7 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
       }
     }
   }, [
+    backend,
     invalidateProviderAndCaps,
     isCurrentSession,
     oauthExchange,

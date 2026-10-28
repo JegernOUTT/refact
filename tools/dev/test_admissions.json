@@ -2314,6 +2314,172 @@
         },
         "env": "Env: REFACT_SKIP_GUI_BUILD=1 RUST_MIN_STACK=16777216 RUSTC_WRAPPER=sccache, W4 worktree target."
       }
+    },
+    {
+      "fingerprint": "fe63d15b573a24b56f9936d14d146ef14c64958ceed1f8f9170b99f3d63b8d8b",
+      "occurrences": 1,
+      "failure_mode": "Bedrock rejects protocol cache TTL extensions, while overbroad recursion corrupts signed thinking, tool input/schema or tool-result user data.",
+      "importance": "Preserve Bedrock request compatibility and safe actionable engine-host native sign-in without leaking CLI credentials.",
+      "nearest_retained": {
+        "fingerprint": "a87ecebb4040c7066f38fcd72f4d027c32085ed3e57cc1fe0aed20d469475d62",
+        "why_insufficient": "Retained ordinary Custom auth/body test has no Bedrock cache TTL, opaque signed blocks or nested user data."
+      },
+      "oracle": "Bedrock expected whole JSON differs only in model/stream removal, protocol version/betas and three protocol TTL removals; assistant block serialized bytes identical, nested user TTLs/schema untouched. Direct Anthropic body bytes equal original. Existing China ARN endpoint, bearer/sensitive header and beta isolation assertions retained. Two transport scenarios: Bedrock and direct Anthropic.",
+      "prerequisites": "Synthetic in-memory transport config/body; no cloud credentials or network.",
+      "shipping_implementation": "refact_claude_cloud::prepare_attempt and normalize_bedrock_cache_control",
+      "determinism": "Fixed JSON/config, exact serialization and equality, no network or clocks.",
+      "layer": "Existing cloud transport unit test",
+      "why_cheapest": "Extend existing fixture at the shipping decision seam, retaining old assertions rather than adding physical tests or live cloud/browser infrastructure.",
+      "meaningful_cases": 2,
+      "critical": true,
+      "criticality_reason": "Critical credential privacy or signed payload integrity; executed targeted mutant/old implementation failure and restored pass below.",
+      "removed_coverage": "None; existing physical definition extended, no new test definition.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "refact-agent/engine/crates/refact-claude-cloud/src/lib.rs::normalize_bedrock_cache_control and Bedrock prepare_attempt branch",
+        "before_fix": {
+          "reference": "refact-agent/engine/target/bedrock-repair-evidence/cloud-before-fix.patch",
+          "fingerprint": "e8eff138f0b878750e4709ce729d28ec282797848f35c76281966c57d9d3e285"
+        },
+        "intended_diagnostic": "Removing normalization fails only protocol cache TTLs should change; removing signed/thinking skip fails exact serialized signed thinking and tool input bytes.",
+        "failing": {
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "refact-claude-cloud",
+            "--lib",
+            "--locked",
+            "tests::bedrock_partition_arn_body_and_bearer",
+            "--",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": "refact-agent/engine/target/bedrock-repair-evidence/cloud-before-fix.log SHA256 63f265ed0ecb8ac6af6b5b999cf6a19640010238f35e9f673473181d68fbaf55. Additional cloud-signature-mutant.log SHA256 e5df222e6162a998563f79b22e2ced41364fc811c4c3ef04714a8adbececa57a exits101; patch SHA256 354ba355db3cf6667d55497e7c9b2d842a6b179aef3f66a51e2332b2f13143d8"
+        },
+        "passing": {
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "refact-claude-cloud",
+            "--lib",
+            "--locked"
+          ],
+          "exit_code": 0,
+          "evidence": "refact-agent/engine/target/bedrock-repair-evidence/cloud-restored.log SHA256 19c1c479b5721e1c0db70b0de3fe11a06df30893bb619c28cca1059b3198faea. Actual Cargo library suite: 23 passed, 0 failed."
+        }
+      },
+      "author": "background_agent:bgagent-389d3107-f05f-4807-a48c-331d090e6ce3",
+      "reviewer": "background_agent:bgagent-e10b3472-7a39-4987-a091-a43043fd42f5",
+      "review_evidence": "Parent-forwarded independent semantic approval by background_agent:bgagent-e10b3472-7a39-4987-a091-a43043fd42f5 for scoped diff SHA256 b384bbec7ec517046b9dac6e4f25f495baf1dbc4c6c7bba8f810954a4b486c3d. Admission author read current test bodies/diffs, manifest, patches and actual negative/restored logs and verified every manifest log SHA256. Cloud actual Cargo result is 23/23; native is exact-module snapshot #[path] rustc harness 9/9, NOT full root Cargo. No claim author directly received original reviewer transcript."
+    },
+    {
+      "fingerprint": "2f38b394ec4e8e072cc113a9f99e7a509b5e7e6ac9557c50e478a2c59399352a",
+      "occurrences": 1,
+      "failure_mode": "Known AWS failures lose actionable fixed diagnosis or unknown output is misclassified.",
+      "importance": "Preserve Bedrock request compatibility and safe actionable engine-host native sign-in without leaking CLI credentials.",
+      "nearest_retained": {
+        "fingerprint": "4573cd4b99f320d44593427cc65d11a9eb05fed65c495daf80e3a2a36d705b52",
+        "why_insufficient": "Argument/profile refusal does not classify CLI failure categories or validate safe diagnostic text."
+      },
+      "oracle": "Five exact fixed diagnostic messages: missing profile, missing SSO, unsupported device flag, network/TLS, denied/expired; unknown sixth category returns None. Retain AWS/Azure URL/device-code allowlist and secret/unsafe-URL rejection as seventh scenario group.",
+      "prerequisites": "Isolated in-memory registry/state and synthetic CLI output; process scenarios use temporary /bin/sh scripts on Unix, not real AWS CLI or credentials.",
+      "shipping_implementation": "providers::native_auth production diagnosis, capture/flush, run, poll_in and start_command seams; no copied implementation",
+      "determinism": "Fixed synthetic strings; isolated tempdirs/registry; Unix subprocess scenarios poll terminal under five-second bound and clean up. No external provider or ambient credential oracle.",
+      "layer": "Existing native-auth unit/subprocess seam test",
+      "why_cheapest": "Extend existing fixture at the shipping decision seam, retaining old assertions rather than adding physical tests or live cloud/browser infrastructure.",
+      "meaningful_cases": 7,
+      "critical": false,
+      "criticality_reason": "Narrow deterministic diagnostic mapping or initializer-only support adaptation; does not claim independent end-to-end privacy mutant coverage.",
+      "removed_coverage": "None; existing physical definition extended, no new test definition.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Wrong or removed classifier branch fails its exact message row; broad fallback fails unknown None. Retained allowlist checks still reject secret and unsafe URL output. No independent executed per-category mutant claimed.",
+        "evidence": "refact-agent/engine/target/bedrock-repair-evidence/native-restored.log SHA256 3b7cbd84f11253ba3339f3323514764e211f13c58c17195210b49d3a81eac25d; exact-module rustc harness 9 passed, 0 failed."
+      },
+      "author": "background_agent:bgagent-389d3107-f05f-4807-a48c-331d090e6ce3",
+      "reviewer": "background_agent:bgagent-e10b3472-7a39-4987-a091-a43043fd42f5",
+      "review_evidence": "Parent-forwarded independent semantic approval by background_agent:bgagent-e10b3472-7a39-4987-a091-a43043fd42f5 for scoped diff SHA256 b384bbec7ec517046b9dac6e4f25f495baf1dbc4c6c7bba8f810954a4b486c3d. Admission author read current test bodies/diffs, manifest, patches and actual negative/restored logs and verified every manifest log SHA256. Cloud actual Cargo result is 23/23; native is exact-module snapshot #[path] rustc harness 9/9, NOT full root Cargo. No claim author directly received original reviewer transcript."
+    },
+    {
+      "fingerprint": "ae6d060faddbafee59e22b269a28be914d054d251a6b3e6c5209a8b67b1f4fdc",
+      "occurrences": 1,
+      "failure_mode": "Existing capacity/retention and partial output fixture must construct expanded State without changing its contract.",
+      "importance": "Preserve Bedrock request compatibility and safe actionable engine-host native sign-in without leaking CLI credentials.",
+      "nearest_retained": {
+        "fingerprint": "f01ede5dda19024272168aab4a261c9fe0f1fa0c211f9d4d2022f81686b8a8d2",
+        "why_insufficient": "Retained completion fixture lacks registry-capacity refusal and fragmented device-output assembly."
+      },
+      "oracle": "Existing completed first session stays pollable at full registry; over-limit refuses; fragmented Azure URL/code assembles; cleanup empties registry. Two retained groups: capacity/retention and fragmented output.",
+      "prerequisites": "Isolated in-memory registry/state and synthetic CLI output; process scenarios use temporary /bin/sh scripts on Unix, not real AWS CLI or credentials.",
+      "shipping_implementation": "providers::native_auth production diagnosis, capture/flush, run, poll_in and start_command seams; no copied implementation",
+      "determinism": "Fixed synthetic strings; isolated tempdirs/registry; Unix subprocess scenarios poll terminal under five-second bound and clean up. No external provider or ambient credential oracle.",
+      "layer": "Existing native-auth unit/subprocess seam test",
+      "why_cheapest": "Extend existing fixture at the shipping decision seam, retaining old assertions rather than adding physical tests or live cloud/browser infrastructure.",
+      "meaningful_cases": 2,
+      "critical": false,
+      "criticality_reason": "Narrow deterministic diagnostic mapping or initializer-only support adaptation; does not claim independent end-to-end privacy mutant coverage.",
+      "removed_coverage": "None; initializer-only support adaptation, no new contract or physical test.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Only diagnosis:None and failure:None added to existing State initializer; no new behavioral contract. Existing over-capacity and fragmented-output assertions remain unchanged.",
+        "evidence": "refact-agent/engine/target/bedrock-repair-evidence/native-restored.log SHA256 3b7cbd84f11253ba3339f3323514764e211f13c58c17195210b49d3a81eac25d; full exact snapshot module9/9."
+      },
+      "author": "background_agent:bgagent-389d3107-f05f-4807-a48c-331d090e6ce3",
+      "reviewer": "background_agent:bgagent-e10b3472-7a39-4987-a091-a43043fd42f5",
+      "review_evidence": "Parent-forwarded independent semantic approval by background_agent:bgagent-e10b3472-7a39-4987-a091-a43043fd42f5 for scoped diff SHA256 b384bbec7ec517046b9dac6e4f25f495baf1dbc4c6c7bba8f810954a4b486c3d. Admission author read current test bodies/diffs, manifest, patches and actual negative/restored logs and verified every manifest log SHA256. Cloud actual Cargo result is 23/23; native is exact-module snapshot #[path] rustc harness 9/9, NOT full root Cargo. No claim author directly received original reviewer transcript."
+    },
+    {
+      "fingerprint": "ec0f5113773cca0ad9df918d241e747a2fa0f89f52089825bff10e0c27176821",
+      "occurrences": 1,
+      "failure_mode": "Failed AWS child returns bare error or leaks raw profile/credential/URL diagnostics, especially when stdout/stderr lack terminal newlines.",
+      "importance": "Preserve Bedrock request compatibility and safe actionable engine-host native sign-in without leaking CLI credentials.",
+      "nearest_retained": {
+        "fingerprint": "f01ede5dda19024272168aab4a261c9fe0f1fa0c211f9d4d2022f81686b8a8d2",
+        "why_insufficient": "Retained success path cannot detect a recognized failure leaking raw diagnostics, immediate non-newline stderr loss or missing actionable failure auth_status."
+      },
+      "oracle": "Four scenario groups: retained unknown exit7 with literal argv/private cwd and exact fixed auth_status/output; retained bounded capture; retained missing executable refusal; extra immediate exit255 process writes non-newline recognized SSO stderr plus secret JSON stdout, independently records raw stimulus, requires exact fixed auth_status/output, no synthetic secrets/profile/host anywhere in poll JSON, stable repeated poll and cleanup.",
+      "prerequisites": "Isolated in-memory registry/state and synthetic CLI output; process scenarios use temporary /bin/sh scripts on Unix, not real AWS CLI or credentials.",
+      "shipping_implementation": "providers::native_auth production diagnosis, capture/flush, run, poll_in and start_command seams; no copied implementation",
+      "determinism": "Fixed synthetic strings; isolated tempdirs/registry; Unix subprocess scenarios poll terminal under five-second bound and clean up. No external provider or ambient credential oracle.",
+      "layer": "Existing native-auth unit/subprocess seam test",
+      "why_cheapest": "Extend existing fixture at the shipping decision seam, retaining old assertions rather than adding physical tests or live cloud/browser infrastructure.",
+      "meaningful_cases": 4,
+      "critical": true,
+      "criticality_reason": "Critical credential privacy or signed payload integrity; executed targeted mutant/old implementation failure and restored pass below.",
+      "removed_coverage": "None; existing physical definition extended, no new test definition.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "refact-agent/engine/src/providers/native_auth.rs::flush_output/run/poll_in",
+        "before_fix": {
+          "reference": "refact-agent/engine/target/bedrock-repair-evidence/native-diagnostic-mutant.patch",
+          "fingerprint": "1962424ece1cb6521e7a1fd56b5e4f26f26174e383e36c960489e3ffe1a12eb7"
+        },
+        "intended_diagnostic": "Recognized-diagnostic-only raw echo mutant fails CLI secret leaked into poll at line1142. Bare-status mutant separately fails line1079 auth_status error versus fixed exit-code message.",
+        "failing": {
+          "command": [
+            "/home/svakhreev/.cache/refact/worktrees/a5ef23b532caf0f6/b0268635-6679-489f-98fa-4c1eaa51ac90/refact-agent/engine/target/bedrock-repair-evidence/native-diagnostic-mutant-tests",
+            "native_auth::tests::argv_cwd_output_bounds_and_cli_failure",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": "refact-agent/engine/target/bedrock-repair-evidence/native-diagnostic-mutant.log SHA256 a05f2ce8b4854301d177cf9a84292506ab77e2a31ad1e99de6b8df9147003df6. Additional native-status-mutant.log SHA256 88d1d883c67e539ae42749c5f963ae41a7ba4e517c89b4f06aea75152f36ab18 exits101; patch SHA256 a9436382e96d1ed76bde8ee7db0299c22dd582e4d27126ad2a6f2d931b1dff06"
+        },
+        "passing": {
+          "command": [
+            "/home/svakhreev/.cache/refact/worktrees/a5ef23b532caf0f6/b0268635-6679-489f-98fa-4c1eaa51ac90/refact-agent/engine/target/bedrock-repair-evidence/native-restored-tests",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "evidence": "refact-agent/engine/target/bedrock-repair-evidence/native-restored.log SHA256 3b7cbd84f11253ba3339f3323514764e211f13c58c17195210b49d3a81eac25d. 9 passed0 failed; rustc --test #[path] includes byte-identical native-restored-source.rs with cached dependency rlibs. Compile command and hashes in witnesses.json. Not full engine Cargo."
+        }
+      },
+      "author": "background_agent:bgagent-389d3107-f05f-4807-a48c-331d090e6ce3",
+      "reviewer": "background_agent:bgagent-e10b3472-7a39-4987-a091-a43043fd42f5",
+      "review_evidence": "Parent-forwarded independent semantic approval by background_agent:bgagent-e10b3472-7a39-4987-a091-a43043fd42f5 for scoped diff SHA256 b384bbec7ec517046b9dac6e4f25f495baf1dbc4c6c7bba8f810954a4b486c3d. Admission author read current test bodies/diffs, manifest, patches and actual negative/restored logs and verified every manifest log SHA256. Cloud actual Cargo result is 23/23; native is exact-module snapshot #[path] rustc harness 9/9, NOT full root Cargo. No claim author directly received original reviewer transcript."
     }
   ],
   "classifications": [
@@ -10834,6 +11000,74 @@
       "author": "background_agent:bgagent-w4-chrome-stream (W4 subagent)",
       "reviewer": "parent planner chat (W4 brief author); pending independent review via review tool",
       "review_evidence": "Parent reviewed W4 status report and diffs; review tool run on W4 branch (see W4 final report). Mutant patches and logs under .refact/evidence/w4/."
+    },
+    {
+      "path": "refact-agent/engine/crates/refact-claude-cloud/src/lib.rs",
+      "before_sha256": "b45031f25d05fa298c0a6e792586db0d3cad4e2a6a11c859ec7cc43b9254c8fe",
+      "after_sha256": "6ae67def5e0d636aea3ab8157f41b950f31f6f74c61f1bb95f30161812b5afff",
+      "affected_tests": [
+        "ba814ffe871bbb95f013590dfea87358ac2f854a6a1c591ba159a11a52393f36",
+        "2a6fd6d7eea0383a1c3432d0d67f4f6e8920c7ac07ab234993921696cde736c1",
+        "374576d65824a776078760d9af78d131a37806f5ba36fbbf0eebab7f29339c97",
+        "4846b66a068342646b00ceb42ac516982ae33bb51d73820b7babe9c589e86ccf",
+        "2b9a149a0d1bf0b47ef2d9a7505c53cce32b8900afc16a81d1ff426b7c685a09",
+        "a87ecebb4040c7066f38fcd72f4d027c32085ed3e57cc1fe0aed20d469475d62",
+        "fe63d15b573a24b56f9936d14d146ef14c64958ceed1f8f9170b99f3d63b8d8b",
+        "afae9145de3ec65cbd4e8977bfc3a5ce61266774b873b8f2b38f3d3643f7bb8b",
+        "e9e8b16ed8704fce10dbbc764fee04c30ea44522a9df722e3206b7526234ca72",
+        "4b61e2d22c8c3f2e47511bb09944997b3d9fbb1f79f2ffaaf819a5f335558f36",
+        "b102e70e1a1a1ad61ec4a935ee3924dfabe9cf98f679e496f8ade611b9a1fd47",
+        "12fecc86f12f2843d76d54b4a8bf6ea9d4f071ed7c882399385f6f7f05ef1ff4",
+        "434235d0bd0e5accfeeced2f16bf889ecece5a36451d8c933f5a72d786ac4391",
+        "10a1448a0916831634b461820c900fd7e0d8b1709409c087dddad5ab00f88389",
+        "b7e82220eca374d325861abf05fde0d71b57db23ed195ded156f0b25639b6a83",
+        "0c63d37274211dd7da4f9f3298e8a016be3e5499fbe57fb9f4d8f9f1799b03ea",
+        "9c0db59a75ac0514afcdc509d07f58a62faea8eaf4f52326926316690b83b137",
+        "7ce55ad0fa0ac09c266fcf9975066fde8542f13d1af43da4a6124c9e051c1e32",
+        "22390534f50475fd74dc8f7d247a4eb0c8c62cee297a0e853b5b8c19886fc031",
+        "54a663e828b939c23b3b21277c7b273408be1bf4b7862ca06d83fab158638523",
+        "c2a89749d36beb654943167f7912e03af99538ee25809fd026c102fdc40488fc",
+        "351da3635c850777ef1f12f1915088cf67400aa923e09cd170455bd243a3b569",
+        "9b7057cefe35031bbe1456d093f2cc75fad47928790226a48628c846fa352447"
+      ],
+      "impact": "Bedrock branch normalizes only protocol cache-control TTL fields, preserving opaque signed/thinking blocks and user data; no mutation of other backends.",
+      "execution_context": "Actual cloud Cargo lib suite23/23 plus old-normalization and signature-skip mutant failures; tests remain in existing tests.rs module.",
+      "author": "background_agent:bgagent-389d3107-f05f-4807-a48c-331d090e6ce3",
+      "reviewer": "background_agent:bgagent-e10b3472-7a39-4987-a091-a43043fd42f5",
+      "review_evidence": "Parent-forwarded independent semantic approval by background_agent:bgagent-e10b3472-7a39-4987-a091-a43043fd42f5 for scoped diff SHA256 b384bbec7ec517046b9dac6e4f25f495baf1dbc4c6c7bba8f810954a4b486c3d. Admission author read current test bodies/diffs, manifest, patches and actual negative/restored logs and verified every manifest log SHA256. Cloud actual Cargo result is 23/23; native is exact-module snapshot #[path] rustc harness 9/9, NOT full root Cargo. No claim author directly received original reviewer transcript."
+    },
+    {
+      "path": "refact-agent/engine/crates/refact-providers/src/claude_backend.rs",
+      "before_sha256": "d23ef9b4bfb41f7afe6e962d71ba56eecbfa0d6d6bc3997f42ff0096ee53cd07",
+      "after_sha256": "b078cc0da731adb3ee7f59b830dc163a142e173f2cf61f42bfea9dd16375147f",
+      "affected_tests": [],
+      "impact": "Schema only: AWS Profile no longer extra/hidden advanced field; help explains preconfigured SSO profile and other AWS credential flows. No runtime authentication/credential chain change.",
+      "execution_context": "No physical Rust tests defined in this schema source; static schema visibility/help reviewed, not claimed as runtime auth proof.",
+      "author": "background_agent:bgagent-389d3107-f05f-4807-a48c-331d090e6ce3",
+      "reviewer": "background_agent:bgagent-e10b3472-7a39-4987-a091-a43043fd42f5",
+      "review_evidence": "Parent-forwarded independent semantic approval by background_agent:bgagent-e10b3472-7a39-4987-a091-a43043fd42f5 for scoped diff SHA256 b384bbec7ec517046b9dac6e4f25f495baf1dbc4c6c7bba8f810954a4b486c3d. Admission author read current test bodies/diffs, manifest, patches and actual negative/restored logs and verified every manifest log SHA256. Cloud actual Cargo result is 23/23; native is exact-module snapshot #[path] rustc harness 9/9, NOT full root Cargo. No claim author directly received original reviewer transcript.",
+      "no_tests_reason": "Provider schema source contains no Rust test definitions; visibility/help-only change, no runtime auth change."
+    },
+    {
+      "path": "refact-agent/engine/src/providers/native_auth.rs",
+      "before_sha256": "be36fa4d5629e1ce3b46c605fac181cf8ec6753548d8228a7b578fc78a3ba528",
+      "after_sha256": "4f20735e5aeb3f2eb1ef8b8d5266d98fdab5b4d0f18fa587e8dd13c2fcc19827",
+      "affected_tests": [
+        "4573cd4b99f320d44593427cc65d11a9eb05fed65c495daf80e3a2a36d705b52",
+        "2f38b394ec4e8e072cc113a9f99e7a509b5e7e6ac9557c50e478a2c59399352a",
+        "c9cfe5a26e580204a997306e6b3bd1446f46b4632cecd08fe76dc7ba133ee00c",
+        "36d328844ad33cca8753bbe442edd848e3dd816dfba8c20e83deed138207dea4",
+        "f01ede5dda19024272168aab4a261c9fe0f1fa0c211f9d4d2022f81686b8a8d2",
+        "ba6ef92cda42926b4ad23fdb88770607c27f81b32723e36622072aa06675e10f",
+        "ae6d060faddbafee59e22b269a28be914d054d251a6b3e6c5209a8b67b1f4fdc",
+        "54e51361c6771cc25df31d4a79a8c2ae8f1fba917c79119ba0df1492f2952557",
+        "ec0f5113773cca0ad9df918d241e747a2fa0f89f52089825bff10e0c27176821"
+      ],
+      "impact": "Adds bounded fixed Bedrock diagnostic classification with deterministic priority, drains/flushes immediate child output, retains safe-output allowlist and exposes fixed failure message in auth_status; State initialization updated. All nine native tests conservatively affected.",
+      "execution_context": "Same native module/test cfg; source snapshot SHA256 4f20735e5aeb3f2eb1ef8b8d5266d98fdab5b4d0f18fa587e8dd13c2fcc19827 equals current file; rustc #[path] harness9/9 with cached shipping dependency rlibs, not full engine build.",
+      "author": "background_agent:bgagent-389d3107-f05f-4807-a48c-331d090e6ce3",
+      "reviewer": "background_agent:bgagent-e10b3472-7a39-4987-a091-a43043fd42f5",
+      "review_evidence": "Parent-forwarded independent semantic approval by background_agent:bgagent-e10b3472-7a39-4987-a091-a43043fd42f5 for scoped diff SHA256 b384bbec7ec517046b9dac6e4f25f495baf1dbc4c6c7bba8f810954a4b486c3d. Admission author read current test bodies/diffs, manifest, patches and actual negative/restored logs and verified every manifest log SHA256. Cloud actual Cargo result is 23/23; native is exact-module snapshot #[path] rustc harness 9/9, NOT full root Cargo. No claim author directly received original reviewer transcript."
     }
   ]
 }

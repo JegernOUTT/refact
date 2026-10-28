@@ -256,6 +256,7 @@ pub async fn prepare_attempt(
                 ],
             )?;
             transform(&mut body, "bedrock-2023-05-31")?;
+            normalize_bedrock_cache_control(&mut body);
             if let Some(beta) = headers.remove("anthropic-beta") {
                 let betas = beta
                     .to_str()
@@ -384,6 +385,36 @@ pub async fn prepare_attempt(
         body_bytes: serde_json::to_vec(&body).map_err(|e| e.to_string())?,
         framing,
     })
+}
+
+fn normalize_bedrock_cache_control(body: &mut Value) {
+    let normalize = |block: &mut Value| {
+        if matches!(
+            block.get("type").and_then(Value::as_str),
+            Some("thinking" | "redacted_thinking")
+        ) || block.get("signature").is_some()
+        {
+            return;
+        }
+        if let Some(cache) = block
+            .get_mut("cache_control")
+            .and_then(Value::as_object_mut)
+        {
+            cache.remove("ttl");
+        }
+    };
+    for field in ["tools", "system"] {
+        if let Some(blocks) = body.get_mut(field).and_then(Value::as_array_mut) {
+            blocks.iter_mut().for_each(normalize);
+        }
+    }
+    if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
+        for message in messages {
+            if let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) {
+                blocks.iter_mut().for_each(normalize);
+            }
+        }
+    }
 }
 
 fn transform(body: &mut Value, version: &str) -> Result<(), String> {

@@ -337,6 +337,27 @@ describe("ProviderOAuth Claude Code sign-in paths", () => {
     expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
   });
 
+  test("replaces a bare native failure status with actionable guidance", async () => {
+    mockNativeFlow([
+      {
+        success: false,
+        status: "failed",
+        auth_status: "error",
+      },
+    ]);
+    const { user } = renderNative({ backend: "bedrock" });
+    await user.click(screen.getByRole("button", { name: "Login" }));
+    expect(
+      await screen.findByRole("alert", {}, { timeout: 3000 }),
+    ).toHaveTextContent(
+      "AWS SSO sign-in failed on the engine host. Check the AWS profile and SSO configuration, then try again. SSO login is not required when using existing AWS credentials or a Bedrock API key.",
+    );
+    expect(
+      screen.queryByText("error", { exact: true }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
+  });
+
   test("surfaces a missing CLI error from start", async () => {
     server.use(
       http.post("*/v1/providers/claude_code/oauth/start", () =>

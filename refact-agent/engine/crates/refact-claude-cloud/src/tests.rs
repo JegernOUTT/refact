@@ -266,10 +266,36 @@ async fn bedrock_partition_arn_body_and_bearer() {
     )
     .unwrap();
     let model = "arn:aws-cn:bedrock:cn-north-1:123:inference-profile/a";
+    let input = json!({
+        "model": model, "stream": true, "max_tokens": 4096,
+        "metadata": {"user_id": "cache-regression"},
+        "tools": [{"name": "inspect", "description": "Inspect payload", "input_schema": {
+            "type": "object", "cache_control": {"type": "ephemeral", "ttl": "1h"}
+        }, "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
+        "system": [{"type": "text", "text": "Use inspect", "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
+        "messages": [
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "Opaque reasoning\n café", "signature": "sig+/=\n",
+                 "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+                {"type": "redacted_thinking", "data": "opaque+/=",
+                 "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+                {"type": "tool_use", "id": "call_1", "name": "inspect", "input": {
+                    "cache_control": {"type": "ephemeral", "ttl": "1h"}, "ttl": "user-value"
+                }}
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "call_1", "content": [
+                    {"type": "text", "text": "User data", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+                ], "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+                {"type": "text", "text": "Continue", "cache_control": {"type": "ephemeral"}}
+            ]}
+        ]
+    });
+    let signed_blocks = serde_json::to_vec(&input["messages"][0]["content"]).unwrap();
     let p = prepare_attempt(
         "https://ignored.invalid".into(),
         headers,
-        json!({"model":model,"stream":true,"messages":[]}),
+        input.clone(),
         model,
         true,
         &c,
@@ -289,6 +315,33 @@ async fn bedrock_partition_arn_body_and_bearer() {
         body["anthropic_beta"],
         json!(["interleaved-thinking-2025-05-14"])
     );
+    assert_eq!(
+        serde_json::to_vec(&body["messages"][0]["content"]).unwrap(),
+        signed_blocks,
+        "signed thinking and tool input must retain exact serialized bytes"
+    );
+    let mut expected = input.clone();
+    expected.as_object_mut().unwrap().remove("model");
+    expected.as_object_mut().unwrap().remove("stream");
+    expected["anthropic_version"] = json!("bedrock-2023-05-31");
+    expected["anthropic_beta"] = json!(["interleaved-thinking-2025-05-14"]);
+    expected["tools"][0]["cache_control"] = json!({"type": "ephemeral"});
+    expected["system"][0]["cache_control"] = json!({"type": "ephemeral"});
+    expected["messages"][1]["content"][0]["cache_control"] = json!({"type": "ephemeral"});
+    assert_eq!(body, expected, "only protocol cache TTLs should change");
+    let mut anthropic = config(ClaudeBackend::Anthropic);
+    anthropic.api_key = Some("test-key".into());
+    let direct = prepare_attempt(
+        "https://ignored.invalid".into(),
+        HeaderMap::new(),
+        input.clone(),
+        model,
+        true,
+        &anthropic,
+    )
+    .await
+    .unwrap();
+    assert_eq!(direct.body_bytes, serde_json::to_vec(&input).unwrap());
     assert!(!p.headers.contains_key("anthropic-beta"));
     assert_eq!(p.headers["authorization"], "Bearer aws-token");
     assert!(p.headers["authorization"].is_sensitive());

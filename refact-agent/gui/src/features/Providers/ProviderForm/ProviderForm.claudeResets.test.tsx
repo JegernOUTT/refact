@@ -387,13 +387,17 @@ describe("Claude Code sign-in actions", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("explains native credential precedence for cloud backends", async () => {
+  it("explains Bedrock credential precedence and optional SSO login", async () => {
     useBackendHandlers({ backend: "bedrock" });
     render(<ProviderForm currentProvider={provider} />, { preloadedState });
     expect(
       await screen.findByText(
-        /Credential fields saved here win first, then engine environment variables, then the engine host's native credential store/,
+        /AWS_BEARER_TOKEN_BEDROCK takes precedence over AWS credentials/,
       ),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/AWS SSO Login is optional/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/aws configure sso --profile your-profile/),
     ).toBeInTheDocument();
   });
 

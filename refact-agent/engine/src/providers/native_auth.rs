@@ -27,6 +27,79 @@ struct Session {
 struct State {
     status: &'static str,
     output: String,
+    diagnosis: Option<BedrockDiagnosis>,
+    failure: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum BedrockDiagnosis {
+    MissingProfile,
+    MissingSso,
+    UnsupportedDeviceFlag,
+    Network,
+    DeniedOrExpired,
+}
+
+impl BedrockDiagnosis {
+    fn classify(text: &str) -> Option<Self> {
+        let text = text.to_ascii_lowercase();
+        if text.contains("config profile") && text.contains("could not be found") {
+            Some(Self::MissingProfile)
+        } else if (text.contains("missing")
+            && text.contains("sso")
+            && (text.contains("configuration")
+                || text.contains("sso_start_url")
+                || text.contains("sso_region")))
+            || (text.contains("sso-session") && text.contains("does not exist"))
+        {
+            Some(Self::MissingSso)
+        } else if text.contains("--use-device-code")
+            && (text.contains("unknown options") || text.contains("unrecognized arguments"))
+        {
+            Some(Self::UnsupportedDeviceFlag)
+        } else if [
+            "ssl validation failed",
+            "certificate verify failed",
+            "could not connect to the endpoint url",
+            "connection was closed",
+            "connect timeout",
+            "read timeout",
+            "proxyconnectionerror",
+            "failed to connect to proxy",
+            "name or service not known",
+            "temporary failure in name resolution",
+        ]
+        .iter()
+        .any(|pattern| text.contains(pattern))
+        {
+            Some(Self::Network)
+        } else if [
+            "accessdenied",
+            "access denied",
+            "authorization_declined",
+            "expiredtoken",
+            "expired_token",
+            "token has expired",
+            "authorization has expired",
+        ]
+        .iter()
+        .any(|pattern| text.contains(pattern))
+        {
+            Some(Self::DeniedOrExpired)
+        } else {
+            None
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::MissingProfile => "AWS CLI could not find the selected profile. Create or correct that profile on the engine host, save the provider, then retry sign-in.",
+            Self::MissingSso => "AWS CLI reports missing required SSO configuration. Run aws configure sso for the selected profile on the engine host, then retry sign-in.",
+            Self::UnsupportedDeviceFlag => "AWS CLI does not support --use-device-code. Upgrade AWS CLI on the engine host, restart the engine, then retry sign-in.",
+            Self::Network => "AWS CLI could not complete sign-in due to a network or TLS error. Check connectivity, proxy settings, and trusted certificates on the engine host, then retry.",
+            Self::DeniedOrExpired => "AWS SSO sign-in was denied or expired. Retry sign-in and approve the request; check account access with your administrator if it is denied again.",
+        }
+    }
 }
 
 fn sessions() -> &'static Mutex<HashMap<String, Session>> {
@@ -224,6 +297,8 @@ async fn start_command(
     let state = Arc::new(Mutex::new(State {
         status: "pending",
         output: instructions.clone(),
+        diagnosis: None,
+        failure: None,
     }));
     let stop = Arc::new(AtomicBool::new(false));
     let worker_state = state.clone();
@@ -287,6 +362,8 @@ async fn run(
     let mut err_line = Vec::new();
     let deadline = tokio::time::Instant::now() + ttl;
     let mut tick = tokio::time::interval(Duration::from_millis(100));
+    let mut cli_failed = false;
+    let mut exit_code = None;
     let result = loop {
         tokio::select! {
             biased;
@@ -310,7 +387,11 @@ async fn run(
             },
             exit = child.wait() => break match exit {
                 Ok(status) if status.success() => Ok(()),
-                _ => Err("Native sign-in CLI failed; check its installation and cloud account/profile configuration on the engine host, then retry"),
+                exit => {
+                    cli_failed = true;
+                    exit_code = exit.ok().and_then(|status| status.code());
+                    Err("Native sign-in CLI failed; check its installation and cloud account/profile configuration on the engine host, then retry")
+                }
             },
         }
     };
@@ -344,7 +425,22 @@ async fn run(
         "failed"
     };
     state.output.push('\n');
-    state.output.push_str(result.err().unwrap_or("Native sign-in completed on the engine host. Cloud permissions and model access are checked on the next request."));
+    let message = match result {
+        Ok(()) => "Native sign-in completed on the engine host. Cloud permissions and model access are checked on the next request.".to_owned(),
+        Err(error) => {
+            let message = if cli_failed && backend == ClaudeBackend::Bedrock {
+                state.diagnosis.map(|d| d.message().to_owned()).unwrap_or_else(|| {
+                    let exit = exit_code.map(|code| format!(" (exit code {code})")).unwrap_or_default();
+                    format!("AWS CLI sign-in failed{exit}. Check the CLI installation and selected SSO profile configuration on the engine host, then retry.")
+                })
+            } else {
+                error.to_owned()
+            };
+            state.failure = Some(message.clone());
+            message
+        }
+    };
+    state.output.push_str(&message);
 }
 
 async fn capture(state: &Mutex<State>, backend: ClaudeBackend, line: &mut Vec<u8>, bytes: &[u8]) {
@@ -360,8 +456,14 @@ async fn capture(state: &Mutex<State>, backend: ClaudeBackend, line: &mut Vec<u8
 async fn flush_output(state: &Mutex<State>, backend: ClaudeBackend, line: &mut Vec<u8>) {
     let text = String::from_utf8_lossy(line);
     let safe = safe_output(backend, &text);
+    let diagnosis = (backend == ClaudeBackend::Bedrock)
+        .then(|| BedrockDiagnosis::classify(&text))
+        .flatten();
+    let mut state = state.lock().await;
+    if let Some(diagnosis) = diagnosis {
+        state.diagnosis = Some(state.diagnosis.map_or(diagnosis, |old| old.min(diagnosis)));
+    }
     if !safe.is_empty() {
-        let mut state = state.lock().await;
         if state.output.len() + safe.len() < OUTPUT_LIMIT - 256 && !state.output.contains(&safe) {
             state.output.push('\n');
             state.output.push_str(&safe);
@@ -457,7 +559,7 @@ async fn poll_in(
         )?;
     let state = session.state.lock().await;
     let mut value = json!({"success": state.status == "completed", "status": state.status,
-        "auth_status": if state.status == "completed" { "authenticated" } else if state.status == "pending" { "pending" } else { "error" }, "output": state.output});
+        "auth_status": if state.status == "completed" { "authenticated" } else if state.status == "pending" { "pending" } else { state.failure.as_deref().unwrap_or("error") }, "output": state.output});
     if state.status == "pending" {
         value["poll_interval"] = json!(2);
     }
@@ -576,6 +678,16 @@ mod tests {
         ]
         .map(|line| safe_output(ClaudeBackend::Bedrock, line))
         .join("\n");
+        for (text, message) in [
+            ("The config profile (private-secret) could not be found", "AWS CLI could not find the selected profile. Create or correct that profile on the engine host, save the provider, then retry sign-in."),
+            ("Missing the following required SSO configuration values: sso_start_url, sso_region", "AWS CLI reports missing required SSO configuration. Run aws configure sso for the selected profile on the engine host, then retry sign-in."),
+            ("Unknown options: --use-device-code", "AWS CLI does not support --use-device-code. Upgrade AWS CLI on the engine host, restart the engine, then retry sign-in."),
+            ("SSL validation failed for https://private.invalid/?token=private-secret", "AWS CLI could not complete sign-in due to a network or TLS error. Check connectivity, proxy settings, and trusted certificates on the engine host, then retry."),
+            ("AccessDeniedException: private-secret", "AWS SSO sign-in was denied or expired. Retry sign-in and approve the request; check account access with your administrator if it is denied again."),
+        ] {
+            assert_eq!(BedrockDiagnosis::classify(text).unwrap().message(), message);
+        }
+        assert!(BedrockDiagnosis::classify("unrecognized failure private-secret").is_none());
         assert!(aws.contains("Login URL:"));
         assert!(aws.contains("Device code: ABCD-EFGH"));
         assert!(!aws.contains("secret"));
@@ -855,6 +967,8 @@ mod tests {
         let state = Mutex::new(State {
             status: "pending",
             output: String::new(),
+            diagnosis: None,
+            failure: None,
         });
         let mut line = Vec::new();
         for part in [
@@ -962,6 +1076,11 @@ mod tests {
         let result = terminal(&registry, "failure", &cfg, id).await;
         assert_eq!(result["status"], "failed");
         assert_eq!(result["success"], false);
+        assert_eq!(result["auth_status"], "AWS CLI sign-in failed (exit code 7). Check the CLI installation and selected SSO profile configuration on the engine host, then retry.");
+        assert_eq!(
+            result["output"],
+            format!("instructions\n{}", result["auth_status"].as_str().unwrap())
+        );
         let record = std::fs::read_to_string(record).unwrap();
         let lines: Vec<_> = record.lines().collect();
         assert!(lines[0].contains("refact-native-auth-"));
@@ -972,6 +1091,8 @@ mod tests {
         let state = Mutex::new(State {
             status: "pending",
             output: String::new(),
+            diagnosis: None,
+            failure: None,
         });
         let mut line = Vec::new();
         capture(
@@ -998,5 +1119,40 @@ mod tests {
         .await;
         assert!(result.unwrap_err().contains("Cannot start"));
         cancel_in(&registry, "failure", None).await.unwrap();
+        let raw = "Missing the following required SSO configuration values: sso_start_url, sso_region; profile=private-profile; AWS_SECRET_ACCESS_KEY=synthetic-secret; https://private.invalid/?token=synthetic-secret";
+        let record = dir.path().join("diagnostic");
+        let mut command = fake(dir.path(), "printf '%s' \"$DIAGNOSTIC\" >&2; printf '%s' '{\"accessToken\":\"synthetic-stdout-secret\"}'; printf '%s' \"$DIAGNOSTIC\" > \"$RECORD\"; exit 255");
+        command.env("DIAGNOSTIC", raw).env("RECORD", &record);
+        let result = start_command(
+            &registry,
+            "diagnostic",
+            &cfg,
+            Arc::new(AtomicBool::new(false)),
+            command,
+            "instructions".into(),
+            TTL,
+        )
+        .await
+        .unwrap();
+        let id = result["session_id"].as_str().unwrap();
+        let result = terminal(&registry, "diagnostic", &cfg, id).await;
+        assert_eq!(std::fs::read_to_string(record).unwrap(), raw);
+        assert_eq!(result["status"], "failed");
+        let serialized = result.to_string();
+        assert!(
+            !serialized.contains("synthetic-secret"),
+            "CLI secret leaked into poll"
+        );
+        assert!(!serialized.contains("synthetic-stdout-secret"));
+        assert!(!serialized.contains("private-profile"));
+        assert!(!serialized.contains("private.invalid"));
+        let message = "AWS CLI reports missing required SSO configuration. Run aws configure sso for the selected profile on the engine host, then retry sign-in.";
+        assert_eq!(result["auth_status"], message);
+        assert_eq!(result["output"], format!("instructions\n{message}"));
+        assert_eq!(
+            poll_in(&registry, "diagnostic", &cfg, id).await.unwrap(),
+            result
+        );
+        cancel_in(&registry, "diagnostic", None).await.unwrap();
     }
 }

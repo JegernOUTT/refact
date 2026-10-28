@@ -532,9 +532,13 @@ export const ProviderQuotaPanel: React.FC<ProviderQuotaPanelProps> = ({
 };
 const describeClaudeCredentialSources = (
   loginKind: ClaudeLoginKind | undefined,
+  backend: string | undefined,
 ): string => {
   if (loginKind === "console") {
     return "Credentials are resolved by the engine, not the browser. Anthropic Console sign-in stores an OAuth credential for this provider instance on the engine host.";
+  }
+  if (backend === "bedrock") {
+    return "Credentials are resolved by the engine, not the browser. Like Claude Code, Bedrock uses the engine host's AWS credential chain: environment credentials, the selected AWS profile (including SSO), or workload roles. AWS_BEARER_TOKEN_BEDROCK takes precedence over AWS credentials; explicit access keys saved here override the credential chain. AWS SSO Login is optional and only refreshes an already configured SSO profile. To create one, run aws configure sso --profile your-profile on the engine host, then enter that AWS Profile below. Add the Bedrock model or inference-profile ID under Available Models. Credentials and model access are checked on request, not on save.";
   }
   if (loginKind === "native") {
     return "Credentials are resolved by the engine, not the browser. Credential fields saved here win first, then engine environment variables, then the engine host's native credential store (AWS profiles and SSO cache, Google Application Default Credentials, or Azure CLI and managed identity). Signing in updates that native store on the engine host and only takes effect while explicit credentials are blank.";
@@ -653,7 +657,7 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
         <div className={styles.formSection}>
           {claudeBackend && claudeBackend !== "oauth" ? (
             <div className={styles.providerDescription}>
-              {describeClaudeCredentialSources(loginKind)}
+              {describeClaudeCredentialSources(loginKind, claudeBackend)}
             </div>
           ) : null}
           {hasOAuth ? (

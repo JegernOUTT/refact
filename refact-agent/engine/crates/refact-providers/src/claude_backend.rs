@@ -368,9 +368,8 @@ fields:
   aws_profile:
     f_type: string
     f_label: "AWS Profile"
-    f_extra: true
     f_visible_when: {backend: [bedrock]}
-    f_desc: "Optional named profile or $ENV. Empty uses AWS_PROFILE and the native AWS credential chain (profiles, SSO, roles)."
+    f_desc: "Optional named profile or $ENV. Empty uses AWS_PROFILE and the native AWS credential chain. SSO Login only refreshes a profile already created with aws configure sso on the engine host; it is not needed for other AWS credentials."
     f_placeholder: "default"
   aws_access_key_id:
     f_type: string_long
