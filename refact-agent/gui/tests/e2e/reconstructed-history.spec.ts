@@ -26,14 +26,14 @@ test("rebuilt disclosures, archive, legacy gate, cap reset and navigation", asyn
   await expect(
     page.getByText("Between reports sentinel", { exact: true }),
   ).toBeVisible();
-  await reports.nth(1).locator("summary").click();
+  await reports.nth(1).getByTestId("transcript-toggle").click();
   await expect(
     page.getByText("Latest rebuilt sentinel", { exact: true }),
   ).toBeVisible();
   await expect(
     page.getByText("Earlier rebuilt sentinel", { exact: true }),
   ).toBeHidden();
-  await reports.nth(0).locator("summary").click();
+  await reports.nth(0).getByTestId("transcript-toggle").click();
   await expect(
     page.getByText("Earlier rebuilt sentinel", { exact: true }),
   ).toBeVisible();

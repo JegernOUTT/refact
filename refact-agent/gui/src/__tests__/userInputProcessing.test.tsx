@@ -67,8 +67,9 @@ describe("DiffTitle uses numeric counts", () => {
 
     expect(content).toContain("addCount");
     expect(content).toContain("removeCount");
-    const greenIdx = content.indexOf("+{addCount}");
-    const redIdx = content.indexOf("-{removeCount}");
+    const greenIdx = content.indexOf("+${addCount}");
+    const redIdx = content.indexOf("−${removeCount}");
+    expect(greenIdx).toBeGreaterThan(-1);
     expect(greenIdx).toBeLessThan(redIdx);
     expect(content).not.toContain('"+".repeat');
     expect(content).not.toContain('"-".repeat');

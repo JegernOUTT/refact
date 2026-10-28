@@ -1,514 +1,262 @@
-import React, { useId, useMemo, useState } from "react";
+import React, { useMemo } from "react";
 import type { LucideIcon } from "lucide-react";
-import { Archive, Brain, ChevronDown, ChevronUp, GitMerge } from "lucide-react";
+import { Archive, Brain, GitMerge } from "lucide-react";
 import {
   getAssistantCompressionMetadata,
   getReconstructedHistoryMetadata,
   getCompressionReportMetadata,
 } from "../../services/refact/types";
 import type {
-  ChatCompressionReportMetadata,
   ReconstructedHistoryMetadata,
   SummarizationMessage as SummarizationMessageType,
   SummarizationTier,
 } from "../../services/refact/types";
 import { ToolMarkdown } from "../Markdown";
 import { Icon } from "../ui";
+import {
+  TranscriptClamp,
+  TranscriptFacts,
+  TranscriptItem,
+  type TranscriptFact,
+} from "./TranscriptItem";
+import {
+  compressionMeta,
+  finiteNumber,
+  isRecord,
+  isSourcePreservingReport,
+  parseReactiveStats,
+  reconstructionTriggerLabel,
+  sourceMessageCountFromReport,
+  statsFromCompressionReportMetadata,
+  statsFromReconstructionMetrics,
+  type StatCell,
+} from "./SummarizationMessage.stats";
 import styles from "./SummarizationMessage.module.css";
 
 interface SummarizationMessageProps {
   message: SummarizationMessageType;
 }
 
-type TierMeta = {
-  label: string;
-  icon: LucideIcon;
-  badgeClass: string;
-};
-
+const RECONSTRUCTION_DESCRIPTION =
+  "The model context was rebuilt so this chat can continue within its limit. Original messages remain in the transcript.";
 const LLM_SEGMENT_SUMMARY_DESCRIPTION =
   "Older context was summarized so this chat can continue within the model limit.";
 const SOURCE_PRESERVING_SUMMARY_DESCRIPTION =
   "Original messages remain visible. A compact summary was added for future model context.";
 
+type TierMeta = { label: string; icon: LucideIcon };
+
 function metaForTier(
   tier: SummarizationTier | undefined,
-  isSegmentCompressionReport: boolean,
+  isSegmentReport: boolean,
 ): TierMeta {
-  if (isSegmentCompressionReport) {
-    return {
-      label: "Context compressed",
-      icon: Archive,
-      badgeClass: styles.tierBadgeTier1,
-    };
-  }
-
+  if (isSegmentReport) return { label: "Context compressed", icon: Archive };
   switch (tier) {
     case "tier0_deterministic":
-      return {
-        label: "Deterministic compaction",
-        icon: Archive,
-        badgeClass: styles.tierBadgeTier0,
-      };
+      return { label: "Deterministic compaction", icon: Archive };
     case "tier1_llm":
-      return {
-        label: "LLM summary",
-        icon: Brain,
-        badgeClass: styles.tierBadgeTier1,
-      };
+      return { label: "LLM summary", icon: Brain };
     case "tier1_merged":
-      return {
-        label: "Merged history summary",
-        icon: GitMerge,
-        badgeClass: styles.tierBadgeTier1Merged,
-      };
+      return { label: "Merged history summary", icon: GitMerge };
     case "tier2_reactive":
-      return {
-        label: "Reactive compaction",
-        icon: Archive,
-        badgeClass: styles.tierBadgeTier2,
-      };
+      return { label: "Reactive compaction", icon: Archive };
     default:
-      return {
-        label: "Context compression",
-        icon: Archive,
-        badgeClass: styles.tierBadgeTier0,
-      };
+      return { label: "Context compression", icon: Archive };
   }
 }
 
-function tokenLabelFor(
-  tier: SummarizationTier | undefined,
-  estimate: number,
-  isSegmentCompressionReport: boolean,
-): string {
-  const formatted = `~${estimate.toLocaleString()} tokens`;
-  if (isSegmentCompressionReport) return `${formatted} saved`;
-  switch (tier) {
-    case "tier1_llm":
-    case "tier1_merged":
-      return `${formatted} summarized`;
-    case "tier0_deterministic":
-    case "tier2_reactive":
-    default:
-      return `${formatted} saved`;
-  }
+function statFacts(stats: StatCell[] | null): TranscriptFact[] {
+  return (stats ?? []).map((stat) => ({
+    label: stat.label,
+    value: stat.value,
+  }));
 }
 
-type StatCell = { label: string; value: string };
+const SummaryBlock: React.FC<{
+  description?: string | null;
+  facts: TranscriptFact[];
+}> = ({ description, facts }) => (
+  <div className={styles.summary} data-testid="summarization-card-summary">
+    {description && <p className={styles.description}>{description}</p>}
+    {facts.length > 0 && (
+      <div data-testid="summarization-card-stats">
+        <TranscriptFacts facts={facts} />
+      </div>
+    )}
+  </div>
+);
 
-function parseNumberStat(value: unknown, suffix = ""): string | null {
-  if (typeof value !== "number" || !Number.isFinite(value)) return null;
-  return `${value.toLocaleString()}${suffix}`;
-}
-
-function sourceMessageCountFromReport(
-  report: ChatCompressionReportMetadata,
-): number | null {
-  if (
-    typeof report.source_message_count === "number" &&
-    Number.isFinite(report.source_message_count)
-  ) {
-    return report.source_message_count;
+function messageCountMeta(before: number | null, after: number | null) {
+  if (before !== null && after !== null) {
+    return `${before.toLocaleString()} → ${after.toLocaleString()} messages`;
   }
-  if (Array.isArray(report.summarized_source_message_ids)) {
-    return report.summarized_source_message_ids.length;
-  }
-  if (Array.isArray(report.source_message_ids)) {
-    return report.source_message_ids.length;
-  }
+  if (before !== null) return `${before.toLocaleString()} messages`;
   return null;
-}
-
-function isSourcePreservingReport(
-  report: ChatCompressionReportMetadata | null,
-): boolean {
-  return report?.insert_mode === "source_preserving";
-}
-
-function statCell(label: string, value: string | null): StatCell[] {
-  return value ? [{ label, value }] : [];
-}
-
-function statsFromCompressionReportMetadata(
-  message: SummarizationMessageType,
-): StatCell[] | null {
-  const report = getCompressionReportMetadata(message);
-  if (!report) return null;
-
-  const sourceMessageCount = sourceMessageCountFromReport(report);
-  const sourcePreserving = isSourcePreservingReport(report);
-  const stats: StatCell[] = [
-    ...statCell(
-      sourcePreserving ? "Messages summarized" : "Messages compressed",
-      sourceMessageCount !== null ? sourceMessageCount.toLocaleString() : null,
-    ),
-    ...statCell("Tokens saved", parseNumberStat(report.estimated_tokens_saved)),
-    ...statCell("Reduction", parseNumberStat(report.reduction_percent, "%")),
-    ...statCell(
-      sourcePreserving ? "Context files preserved" : "Context files removed",
-      parseNumberStat(
-        sourcePreserving
-          ? report.preserved_context_file_count
-          : report.context_files_removed,
-      ),
-    ),
-    ...statCell(
-      sourcePreserving ? "Tool outputs compressed" : "Tool outputs truncated",
-      parseNumberStat(
-        sourcePreserving
-          ? report.compressed_tool_output_count
-          : report.tool_results_truncated,
-      ),
-    ),
-    ...statCell("Tokens before", parseNumberStat(report.tokens_before)),
-    ...statCell("Tokens after", parseNumberStat(report.tokens_after)),
-    ...statCell(
-      "Context messages dropped",
-      parseNumberStat(report.context_messages_dropped),
-    ),
-  ];
-  return stats.length > 0 ? stats : null;
-}
-
-function isPrimaryReportStat(stat: StatCell): boolean {
-  return (
-    stat.label === "Messages summarized" ||
-    stat.label === "Messages compressed" ||
-    stat.label === "Tokens saved" ||
-    stat.label === "Reduction" ||
-    stat.label === "Context files preserved" ||
-    stat.label === "Tool outputs compressed"
-  );
-}
-
-function primaryReportStats(stats: StatCell[] | null): StatCell[] | null {
-  if (!stats) return null;
-  const primary = stats.filter(isPrimaryReportStat);
-  return primary.length > 0 ? primary : null;
-}
-
-function parseReactiveStats(content: string): StatCell[] | null {
-  const STAT_PATTERNS: { key: string; label: string }[] = [
-    { key: "Attempt", label: "Attempt" },
-    {
-      key: "Context file entries deduplicated",
-      label: "Context files deduped",
-    },
-    { key: "Context files removed", label: "Context files removed" },
-    { key: "Tool outputs truncated", label: "Tool outputs truncated" },
-    { key: "Tokens before", label: "Tokens before" },
-    { key: "Tokens after", label: "Tokens after" },
-    { key: "Estimated tokens saved", label: "Tokens saved" },
-    { key: "Reduction", label: "Reduction" },
-  ];
-  const lines = content.split("\n");
-  const stats: StatCell[] = [];
-  for (const { key, label } of STAT_PATTERNS) {
-    const re = new RegExp(`^\\s*-\\s*${key}:\\s*(.+?)\\s*$`);
-    for (const line of lines) {
-      const m = re.exec(line);
-      if (m && typeof m[1] === "string") {
-        stats.push({ label, value: m[1] });
-        break;
-      }
-    }
-  }
-  return stats.length > 0 ? stats : null;
-}
-
-function StatsGrid({ stats }: { stats: StatCell[] }) {
-  return (
-    <div className={styles.statsGrid} data-testid="summarization-card-stats">
-      {stats.map((s) => (
-        <div key={s.label} className={styles.statCell}>
-          <span className={styles.statLabel}>{s.label}</span>
-          <span className={styles.statValue}>{s.value}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-const RECONSTRUCTION_DESCRIPTION =
-  "The model context was rebuilt so this chat can continue within its limit. Original messages remain in the transcript.";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function statsFromReconstructionMetrics(metrics: unknown): StatCell[] | null {
-  if (!isRecord(metrics)) return null;
-  const stats: StatCell[] = [
-    ...statCell("Messages before", parseNumberStat(metrics.messages_before)),
-    ...statCell("Messages after", parseNumberStat(metrics.messages_after)),
-    ...statCell("Tokens before", parseNumberStat(metrics.tokens_before)),
-    ...statCell("Tokens after", parseNumberStat(metrics.tokens_after)),
-    ...statCell(
-      "Tokens saved",
-      parseNumberStat(metrics.estimated_tokens_saved),
-    ),
-    ...statCell("Reduction", parseNumberStat(metrics.reduction_percent, "%")),
-  ];
-  return stats.length > 0 ? stats : null;
-}
-
-function reconstructionTriggerLabel(trigger: string): string {
-  switch (trigger) {
-    case "automatic":
-      return "automatic at cap";
-    case "overflow":
-      return "after provider limit";
-    case "manual":
-      return "manual";
-    default:
-      return trigger;
-  }
 }
 
 const ReconstructedHistoryReport: React.FC<{
   metadata: ReconstructedHistoryMetadata;
 }> = ({ metadata }) => {
-  const [open, setOpen] = useState(false);
   const stats = useMemo(
     () => statsFromReconstructionMetrics(metadata.metrics),
     [metadata.metrics],
   );
+  const metrics = isRecord(metadata.metrics) ? metadata.metrics : {};
   const rebuiltCount = metadata.payload.messages.length;
+  const meta = compressionMeta(
+    messageCountMeta(
+      finiteNumber(metrics.messages_before),
+      finiteNumber(metrics.messages_after) ?? rebuiltCount,
+    ) ?? `${rebuiltCount} ${rebuiltCount === 1 ? "message" : "messages"}`,
+    finiteNumber(metrics.estimated_tokens_saved),
+  );
+  const facts: TranscriptFact[] = [
+    { label: "Kind", value: "Context rebuilt" },
+    ...(metadata.model ? [{ label: "Model", value: metadata.model }] : []),
+    ...(metadata.trigger
+      ? [
+          {
+            label: "Trigger",
+            value: reconstructionTriggerLabel(metadata.trigger),
+          },
+        ]
+      : []),
+    ...((metadata.from_mode ?? metadata.to_mode) &&
+    metadata.from_mode !== metadata.to_mode
+      ? [
+          {
+            label: "Mode",
+            value: `${metadata.from_mode ?? "—"} → ${metadata.to_mode ?? "—"}`,
+          },
+        ]
+      : []),
+    ...statFacts(stats),
+  ];
+
   return (
-    <div className={`${styles.card} ${styles.reportCard}`}>
-      <details
-        className={styles.disclosure}
-        data-testid="reconstructed-history-report"
-        open={open}
-        onToggle={(event) => setOpen(event.currentTarget.open)}
-      >
-        <summary
-          className={styles.header}
-          data-testid="summarization-card-header"
-        >
-          <span className={styles.headerLeft}>
-            <span className={styles.icon} aria-hidden>
-              <Icon icon={Archive} size="sm" />
-            </span>
-            <span
-              className={`${styles.tierBadge} ${styles.tierBadgeTier2}`}
-              data-testid="summarization-card-tier"
-            >
-              Context rebuilt
-            </span>
-            <span className={styles.rangeLabel}>
-              {rebuiltCount} {rebuiltCount === 1 ? "message" : "messages"}
-            </span>
-            {metadata.model && (
-              <span className={styles.tokenLabel}>· {metadata.model}</span>
-            )}
-            {metadata.trigger && (
-              <span className={styles.tokenLabel}>
-                · {reconstructionTriggerLabel(metadata.trigger)}
-              </span>
-            )}
-          </span>
-          <span className={styles.toggle}>
-            <Icon icon={ChevronDown} size="sm" tone="muted" />
-          </span>
-        </summary>
-        {open && (
-          <div className={styles.body}>
-            {(metadata.from_mode ?? metadata.to_mode) &&
-              metadata.from_mode !== metadata.to_mode && (
-                <p>
-                  Mode: {metadata.from_mode ?? "—"} → {metadata.to_mode ?? "—"}
-                </p>
-              )}
-            {metadata.payload.messages.map((item, index) => (
-              <section key={item.message_id ?? index}>
-                <strong>{item.role}</strong>
-                <ToolMarkdown>
-                  {typeof item.content === "string"
-                    ? item.content
-                    : JSON.stringify(item.content, null, 2)}
-                </ToolMarkdown>
-                {"tool_calls" in item && item.tool_calls && (
-                  <pre>{JSON.stringify(item.tool_calls, null, 2)}</pre>
-                )}
-              </section>
-            ))}
-          </div>
-        )}
-      </details>
-      <div
-        className={styles.eventSummary}
-        data-testid="summarization-card-summary"
-      >
-        <p className={styles.description}>{RECONSTRUCTION_DESCRIPTION}</p>
-        {stats && <StatsGrid stats={stats} />}
-      </div>
-    </div>
+    <TranscriptItem
+      data-testid="reconstructed-history-report"
+      icon={<Icon icon={Archive} size="sm" />}
+      verb="Compressed"
+      target="context"
+      meta={meta}
+      summary={
+        <SummaryBlock description={RECONSTRUCTION_DESCRIPTION} facts={facts} />
+      }
+      sectionLabels={{ output: "Rebuilt messages" }}
+      output={
+        <TranscriptClamp>
+          {metadata.payload.messages.map((item, index) => (
+            <section className={styles.rebuilt} key={item.message_id ?? index}>
+              <strong>{item.role}</strong>
+              <ToolMarkdown>
+                {typeof item.content === "string"
+                  ? item.content
+                  : JSON.stringify(item.content, null, 2)}
+              </ToolMarkdown>
+            </section>
+          ))}
+        </TranscriptClamp>
+      }
+      raw={metadata.payload.messages.flatMap((item, index) =>
+        "tool_calls" in item && item.tool_calls
+          ? [{ label: `Tool calls ${index + 1}`, value: item.tool_calls }]
+          : [],
+      )}
+    />
   );
 };
 
 const LegacySummarizationMessage: React.FC<SummarizationMessageProps> = ({
   message,
 }) => {
-  const [open, setOpen] = useState(false);
-  const bodyId = useId();
-
   const tier = message.summarization_tier;
   const contentText =
-    typeof message.content === "string" ? message.content : "";
-  const hasContentText = contentText.trim().length > 0;
-  const pairedSummaryContent =
+    typeof message.content === "string" ? message.content.trim() : "";
+  const pairedSummary =
     typeof message.paired_summary_content === "string"
       ? message.paired_summary_content.trim()
       : "";
-  const compressionReport = getCompressionReportMetadata(message);
-  const isSegmentCompressionReport =
-    compressionReport?.compression_kind === "llm_segment_summary";
-
+  const report = getCompressionReportMetadata(message);
+  const isSegmentReport = report?.compression_kind === "llm_segment_summary";
   const reportStats = useMemo(
     () => statsFromCompressionReportMetadata(message),
     [message],
   );
-  const bodyStats = useMemo(() => {
-    if (reportStats !== null || tier !== "tier2_reactive") return null;
-    return parseReactiveStats(contentText);
-  }, [tier, reportStats, contentText]);
-
-  const meta = metaForTier(tier, isSegmentCompressionReport);
-
-  const rangeLabel = message.summarized_range
+  const bodyStats = useMemo(
+    () =>
+      reportStats === null && tier === "tier2_reactive"
+        ? parseReactiveStats(contentText)
+        : null,
+    [tier, reportStats, contentText],
+  );
+  const tierMeta = metaForTier(tier, isSegmentReport);
+  const compression = getAssistantCompressionMetadata(message);
+  const sourceCount =
+    (report ? sourceMessageCountFromReport(report) : null) ??
+    (Array.isArray(compression?.source_message_ids)
+      ? compression.source_message_ids.length
+      : null);
+  const summaryModel =
+    typeof report?.summary_model === "string"
+      ? report.summary_model
+      : typeof compression?.summary_model === "string"
+        ? compression.summary_model
+        : null;
+  const range = message.summarized_range
     ? `messages ${message.summarized_range[0] + 1}–${
         message.summarized_range[1] + 1
       }`
     : null;
-
-  const compressionMeta = getAssistantCompressionMetadata(message);
-  const sourcePreservingReport = isSourcePreservingReport(compressionReport);
-  const reportSourceCount = compressionReport
-    ? sourceMessageCountFromReport(compressionReport)
+  const tokensSaved =
+    finiteNumber(report?.estimated_tokens_saved) ??
+    finiteNumber(message.summarized_token_estimate);
+  const meta = compressionMeta(
+    messageCountMeta(sourceCount, null) ?? range,
+    tokensSaved,
+  );
+  const description = isSegmentReport
+    ? isSourcePreservingReport(report)
+      ? SOURCE_PRESERVING_SUMMARY_DESCRIPTION
+      : LLM_SEGMENT_SUMMARY_DESCRIPTION
     : null;
-  const sourceCount =
-    reportSourceCount ??
-    (Array.isArray(compressionMeta?.source_message_ids)
-      ? compressionMeta.source_message_ids.length
-      : null);
-  const summaryModel =
-    typeof compressionReport?.summary_model === "string"
-      ? compressionReport.summary_model
-      : typeof compressionMeta?.summary_model === "string"
-        ? compressionMeta.summary_model
-        : null;
-
-  const tokenLabel =
-    typeof message.summarized_token_estimate === "number"
-      ? tokenLabelFor(
-          tier,
-          message.summarized_token_estimate,
-          isSegmentCompressionReport,
-        )
-      : null;
-
-  const showHeaderMetrics = reportStats === null;
-  const reportSummaryStats = isSegmentCompressionReport
-    ? primaryReportStats(reportStats)
-    : reportStats;
-  const hasMetadataReport = compressionReport !== null;
-  const hasReportSummary = hasMetadataReport && reportSummaryStats !== null;
-  const cardClassName = compressionReport
-    ? `${styles.card} ${styles.reportCard}`
-    : styles.card;
-  const toggleOpen = () => setOpen((v) => !v);
+  const facts: TranscriptFact[] = [
+    { label: "Kind", value: tierMeta.label },
+    ...(range ? [{ label: "Range", value: range }] : []),
+    ...(summaryModel ? [{ label: "Model", value: summaryModel }] : []),
+    ...statFacts(reportStats ?? bodyStats),
+  ];
 
   return (
-    <div className={cardClassName} data-testid="summarization-card">
-      <div
-        className={styles.header}
-        onClick={toggleOpen}
-        role="button"
-        tabIndex={0}
-        aria-expanded={open}
-        aria-controls={bodyId}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            toggleOpen();
-          }
-        }}
-        data-testid="summarization-card-header"
-      >
-        <div className={styles.headerLeft}>
-          <span className={styles.icon} aria-hidden>
-            <Icon icon={meta.icon} size="sm" />
-          </span>
-          <span
-            className={`${styles.tierBadge} ${meta.badgeClass}`}
-            data-testid="summarization-card-tier"
-          >
-            {meta.label}
-          </span>
-          {rangeLabel && (
-            <span className={styles.rangeLabel}>{rangeLabel}</span>
-          )}
-          {showHeaderMetrics && sourceCount !== null && (
-            <span className={styles.rangeLabel}>{sourceCount} messages</span>
-          )}
-          {showHeaderMetrics && summaryModel && (
-            <span className={styles.tokenLabel}>· {summaryModel}</span>
-          )}
-          {showHeaderMetrics && tokenLabel && (
-            <span className={styles.tokenLabel}>· {tokenLabel}</span>
-          )}
-        </div>
-        <span className={styles.toggle}>
-          <Icon icon={open ? ChevronUp : ChevronDown} size="sm" tone="muted" />
-        </span>
-      </div>
-      {hasReportSummary && (
-        <div
-          className={styles.eventSummary}
-          data-testid="summarization-card-summary"
-        >
-          {isSegmentCompressionReport && (
-            <p className={styles.description}>
-              {sourcePreservingReport
-                ? SOURCE_PRESERVING_SUMMARY_DESCRIPTION
-                : LLM_SEGMENT_SUMMARY_DESCRIPTION}
-            </p>
-          )}
-          <StatsGrid stats={reportSummaryStats} />
-        </div>
-      )}
-      {open && (
-        <div
-          id={bodyId}
-          className={styles.body}
-          data-testid="summarization-card-body"
-        >
-          {hasContentText && <ToolMarkdown>{contentText}</ToolMarkdown>}
-          {pairedSummaryContent.length > 0 && (
-            <>
-              <p className={styles.description}>
-                <strong>Model summary</strong>
-              </p>
-              <ToolMarkdown>{pairedSummaryContent}</ToolMarkdown>
-            </>
-          )}
-          {reportStats && reportStats.length > 0 && (
-            <StatsGrid stats={reportStats} />
-          )}
-          {!hasContentText &&
-            pairedSummaryContent.length === 0 &&
-            !reportStats &&
-            !bodyStats && <span>No details available.</span>}
-          {bodyStats && bodyStats.length > 0 && <StatsGrid stats={bodyStats} />}
-        </div>
-      )}
-    </div>
+    <TranscriptItem
+      data-testid="summarization-card"
+      icon={<Icon icon={tierMeta.icon} size="sm" />}
+      verb="Compressed"
+      target="context"
+      meta={meta}
+      summary={<SummaryBlock description={description} facts={facts} />}
+      sectionLabels={{ output: "Summary" }}
+      output={
+        contentText || pairedSummary ? (
+          <TranscriptClamp>
+            <div data-testid="summarization-card-body">
+              {contentText && <ToolMarkdown>{contentText}</ToolMarkdown>}
+              {pairedSummary && (
+                <>
+                  <p className={styles.description}>
+                    <strong>Model summary</strong>
+                  </p>
+                  <ToolMarkdown>{pairedSummary}</ToolMarkdown>
+                </>
+              )}
+            </div>
+          </TranscriptClamp>
+        ) : null
+      }
+    />
   );
 };
 
-/** Rebuilt messages belong inside this disclosure, never beside the report. */
 export const SummarizationMessage = React.memo(function SummarizationMessage({
   message,
 }: SummarizationMessageProps) {
@@ -517,12 +265,19 @@ export const SummarizationMessage = React.memo(function SummarizationMessage({
     role: "compression_report",
   });
   if (!report) return <LegacySummarizationMessage message={message} />;
-  if (!report.ok)
+  if (!report.ok) {
     return (
-      <div role="alert">
-        Rebuilt context could not be read ({report.reason}). The archived
-        transcript is still available.
-      </div>
+      <TranscriptItem
+        data-testid="reconstructed-history-report"
+        icon={<Icon icon={Archive} size="sm" />}
+        verb="Compressed"
+        target="context"
+        meta="unreadable"
+        status="failed"
+        defaultOpen
+        error={`Rebuilt context could not be read (${report.reason}). The archived transcript is still available.`}
+      />
     );
+  }
   return <ReconstructedHistoryReport metadata={report.metadata} />;
 });

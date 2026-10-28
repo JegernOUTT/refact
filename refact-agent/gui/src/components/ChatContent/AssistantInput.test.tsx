@@ -29,7 +29,13 @@ vi.mock("../../features/Buddy/reportBuddyFrontendError", async () => {
   };
 });
 
-import { fireEvent, render, screen, waitFor } from "../../utils/test-utils";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "../../utils/test-utils";
 import { AssistantInput } from "./AssistantInput";
 import type {
   DiffChunk,
@@ -39,6 +45,7 @@ import type {
 
 function expandReasoning() {
   fireEvent.click(screen.getByRole("button", { name: /Thought/i }));
+  return within(screen.getByTestId("transcript-panel"));
 }
 
 type MermaidInitializeConfig = {
@@ -329,11 +336,9 @@ describe("AssistantInput", () => {
       />,
     );
 
-    expandReasoning();
+    const panel = expandReasoning();
 
-    expect(
-      screen.getByText("Responses summary is visible"),
-    ).toBeInTheDocument();
+    expect(panel.getByText("Responses summary is visible")).toBeInTheDocument();
   });
 
   test("never renders encrypted content or raw reasoning content from Responses reasoning blocks", () => {
@@ -365,9 +370,9 @@ describe("AssistantInput", () => {
       />,
     );
 
-    expandReasoning();
+    const panel = expandReasoning();
 
-    expect(screen.getByText("Safe summary text")).toBeInTheDocument();
+    expect(panel.getByText("Safe summary text")).toBeInTheDocument();
     expect(
       screen.queryByText(/ENCRYPTED_SHOULD_NOT_APPEAR/),
     ).not.toBeInTheDocument();
@@ -403,9 +408,9 @@ describe("AssistantInput", () => {
       />,
     );
 
-    expandReasoning();
+    const panel = expandReasoning();
 
-    expect(screen.getAllByText(reasoning)).toHaveLength(1);
+    expect(panel.getAllByText(reasoning)).toHaveLength(1);
   });
 
   test("collapses repeated identical Responses summary entries into a single rendering", () => {
@@ -427,8 +432,8 @@ describe("AssistantInput", () => {
       />,
     );
 
-    expandReasoning();
+    const panel = expandReasoning();
 
-    expect(screen.getAllByText("Repeated summary entry")).toHaveLength(1);
+    expect(panel.getAllByText("Repeated summary entry")).toHaveLength(1);
   });
 });

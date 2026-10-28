@@ -24,19 +24,23 @@ describe("reconstructed history disclosure", () => {
     });
     const { user } = render(<SummarizationMessage message={message} />);
     const disclosure = screen.getByTestId("reconstructed-history-report");
-    expect(disclosure).not.toHaveAttribute("open");
-    expect(screen.getByTestId("summarization-card-tier")).toHaveTextContent(
+    expect(disclosure).toHaveAttribute("data-open", "false");
+    expect(screen.getByTestId("transcript-verb")).toHaveTextContent(
+      "Compressed",
+    );
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
+      "1 message",
+    );
+    expect(screen.queryByText("Reconstructed request")).toBeNull();
+    await user.click(screen.getByTestId("transcript-toggle"));
+    expect(disclosure).toHaveAttribute("data-open", "true");
+    expect(screen.getByTestId("summarization-card-stats")).toHaveTextContent(
       "Context rebuilt",
     );
-    expect(screen.queryByTestId("summarization-card-stats")).toBeNull();
-    expect(screen.getByText(/Context rebuilt/)).toBeInTheDocument();
-    expect(screen.queryByText("Reconstructed request")).toBeNull();
-    await user.click(screen.getByTestId("summarization-card-header"));
-    expect(disclosure).toHaveAttribute("open");
     expect(screen.getAllByText("Reconstructed request")).toHaveLength(1);
   });
 
-  it("shows rebuild metrics and trigger while collapsed", () => {
+  it("shows rebuild metrics in the meta and trigger in the summary", async () => {
     const message = syntheticCompressionReportMessage({
       role: "compression_report",
       content: "Conversation context reconstructed.",
@@ -66,10 +70,11 @@ describe("reconstructed history disclosure", () => {
         },
       },
     });
-    render(<SummarizationMessage message={message} />);
-    expect(
-      screen.getByTestId("reconstructed-history-report"),
-    ).not.toHaveAttribute("open");
+    const { user } = render(<SummarizationMessage message={message} />);
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
+      "41 → 6 messages · −93k tokens",
+    );
+    await user.click(screen.getByTestId("transcript-toggle"));
     expect(screen.getByText(/automatic at cap/)).toBeInTheDocument();
     expect(screen.getByText(/claude_code\/claude-opus-5/)).toBeInTheDocument();
     const stats = screen.getByTestId("summarization-card-stats");

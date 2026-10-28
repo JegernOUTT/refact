@@ -20,7 +20,23 @@ describe("ErrorMessageCard", () => {
     expect(container.querySelector("ul")).not.toBeInTheDocument();
   });
 
-  test("keeps a single structured error flat inside one card", () => {
+  test("renders unclassified errors as an Error row", () => {
+    render(
+      <ErrorMessageCard
+        errors={[{ role: "error", content: "429 usage limit reached" }]}
+      />,
+    );
+    const card = screen.getByTestId("error-message-card");
+    expect(card).toHaveAttribute("data-transcript-status", "failed");
+    expect(card).toHaveAttribute("data-open", "true");
+    expect(screen.getByTestId("transcript-verb")).toHaveTextContent("Error");
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent("429");
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "429 usage limit reached",
+    );
+  });
+
+  test("renders one failed row with the error callout open", () => {
     const error: ErrorMessage = {
       role: "error",
       content: "provider overloaded",
@@ -36,8 +52,16 @@ describe("ErrorMessageCard", () => {
 
     const { container } = render(<ErrorMessageCard errors={[error]} />);
 
-    expect(screen.getByText("Provider is busy")).toBeInTheDocument();
-    expect(screen.getByText("Temporary provider issue")).toBeInTheDocument();
+    expect(screen.getByTestId("transcript-verb")).toHaveTextContent(
+      "Request failed",
+    );
+    expect(screen.getByTestId("transcript-target")).toHaveTextContent(
+      "Provider is busy",
+    );
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
+      "503 · Temporary provider issue",
+    );
+    expect(screen.getAllByTestId("transcript-row")).toHaveLength(1);
     expect(
       screen.queryByRole("button", { name: "Retry" }),
     ).not.toBeInTheDocument();
@@ -197,7 +221,24 @@ describe("ErrorMessageCard", () => {
     expect(
       screen.queryByRole("button", { name: "Retry" }),
     ).not.toBeInTheDocument();
-    expect(screen.getByText("Retrying 15s · 2/5")).toBeInTheDocument();
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "Retrying 15s · 2/5",
+    );
     expect(onRetryGeneration).not.toHaveBeenCalled();
+  });
+});
+
+describe("ErrorMessageCard row mapping", () => {
+  test("labels unclassified errors with the provider/model target", () => {
+    const error: ErrorMessage = {
+      role: "error",
+      content: "openai/gpt-5 returned 429: usage limit reached",
+    };
+    render(<ErrorMessageCard errors={[error]} />);
+    expect(screen.getByTestId("transcript-verb")).toHaveTextContent("Error");
+    expect(screen.getByTestId("transcript-target")).toHaveTextContent(
+      "openai/gpt-5",
+    );
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent("429");
   });
 });

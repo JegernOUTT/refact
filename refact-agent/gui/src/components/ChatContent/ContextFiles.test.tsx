@@ -93,3 +93,21 @@ describe("ContextFiles file clicks", () => {
     );
   });
 });
+
+describe("ContextFiles transcript row", () => {
+  it("renders one row with the count and a flat file list", () => {
+    render(
+      <ContextFiles
+        files={[...files, { ...files[0], file_name: "/workspace/b.ts" }]}
+        toolCallId="project_context"
+        open={true}
+      />,
+      { preloadedState: { config: makeConfig("web") } },
+    );
+    expect(screen.getByTestId("transcript-verb").textContent).toBe("Context");
+    expect(screen.getByTestId("transcript-target").textContent).toBe("2 files");
+    expect(screen.getByTestId("transcript-meta").textContent).toBe("24 B");
+    expect(screen.getAllByTestId("context-file")).toHaveLength(2);
+    expect(screen.getAllByTestId("transcript-toggle")).toHaveLength(1);
+  });
+});

@@ -324,14 +324,3 @@ export function eventDetailFields(event: EventMessage): EventDetailField[] {
     ...typedFields(event, eventPayloadRecord(event)),
   ];
 }
-
-export function eventPayloadJson(event: EventMessage): string | null {
-  const payload = event.payload;
-  if (payload === undefined || payload === null) return null;
-  if (isRecord(payload) && Object.keys(payload).length === 0) return null;
-  try {
-    return JSON.stringify(payload, null, 2);
-  } catch {
-    return null;
-  }
-}

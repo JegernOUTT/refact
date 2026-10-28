@@ -1,154 +1,106 @@
 import type React from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
-import { act } from "react-dom/test-utils";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CollapsibleStoreProvider } from "../useStoredOpen";
 import type { CollapsibleStore } from "../CollapsibleStore";
 import { ReasoningContent } from "./ReasoningContent";
-
-vi.mock("../../Markdown", () => ({
-  Markdown: ({ children }: { children: React.ReactNode }) => (
-    <div data-testid="reasoning-markdown">{children}</div>
-  ),
-}));
 
 vi.mock("../../../features/Buddy/reportBuddyFrontendError", () => ({
   addBuddyCrashBreadcrumb: vi.fn(),
   setBuddyCrashHotSlot: vi.fn(),
 }));
 
-function renderReasoning(
+const CONTENT = "**Planning** the change\nchecking files\nlast line now";
+
+function memoryStore(entries: [string, boolean][] = []): CollapsibleStore {
+  const map = new Map(entries);
+  return {
+    get: (key) => map.get(key),
+    set: (key, open) => map.set(key, open),
+  };
+}
+
+function element(
   props: Partial<React.ComponentProps<typeof ReasoningContent>> = {},
-  store?: CollapsibleStore,
 ) {
-  const element = (
+  return (
     <ReasoningContent
-      reasoningContent="Reasoning details are visible"
+      reasoningContent={CONTENT}
       onCopyClick={vi.fn()}
       {...props}
     />
   );
+}
 
+function renderReasoning(
+  props: Partial<React.ComponentProps<typeof ReasoningContent>> = {},
+  store: CollapsibleStore = memoryStore(),
+) {
   return render(
-    store ? (
-      <CollapsibleStoreProvider value={store}>
-        {element}
-      </CollapsibleStoreProvider>
-    ) : (
-      element
-    ),
+    <CollapsibleStoreProvider value={store}>
+      {element(props)}
+    </CollapsibleStoreProvider>,
   );
 }
 
+const toggle = () => screen.getByTestId("transcript-toggle");
+
 describe("ReasoningContent", () => {
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it("keeps actively streaming reasoning visible", () => {
-    const storedOpen = new Map<string, boolean>([["reasoning:1", false]]);
-    const store: CollapsibleStore = {
-      get: (key) => storedOpen.get(key),
-      set: (key, open) => storedOpen.set(key, open),
-    };
-
-    renderReasoning(
-      {
-        isStreaming: true,
-        hasMessageContent: false,
-        stateKey: "reasoning:1",
-      },
-      store,
-    );
-
-    const trigger = screen.getByRole("button", { name: /thinking/i });
-
-    expect(trigger).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByText("Thinking...")).toBeInTheDocument();
-    expect(
-      screen.getByText("Reasoning details are visible"),
-    ).toBeInTheDocument();
-  });
-
-  it("opens collapsed reasoning and reveals the body", () => {
-    const storedOpen = new Map<string, boolean>([["reasoning:2", false]]);
-    const store: CollapsibleStore = {
-      get: (key) => storedOpen.get(key),
-      set: (key, open) => storedOpen.set(key, open),
-    };
-
-    renderReasoning({ stateKey: "reasoning:2" }, store);
-
-    const trigger = screen.getByRole("button", { name: /thought/i });
-
-    expect(trigger).toHaveAttribute("aria-expanded", "false");
-    expect(screen.getByText("Thought")).toBeInTheDocument();
-    expect(
-      screen.queryByText("Reasoning details are visible"),
-    ).not.toBeInTheDocument();
-
-    fireEvent.click(trigger);
-
-    expect(trigger).toHaveAttribute("aria-expanded", "true");
-    expect(
-      screen.getByText("Reasoning details are visible"),
-    ).toBeInTheDocument();
-  });
-
-  it("shows a header for historical reasoning blocks", () => {
+  it("renders the Thought row with the first line as target", () => {
     renderReasoning();
-
-    const trigger = screen.getByRole("button", { name: /thought/i });
-
-    expect(trigger).toHaveAttribute("aria-expanded", "false");
-    expect(screen.getByText("Thought")).toBeInTheDocument();
+    expect(screen.getByTestId("transcript-verb").textContent).toBe("Thought");
+    expect(screen.getByTestId("transcript-target").textContent).toBe(
+      "Planning the change",
+    );
+    expect(toggle()).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("checking files")).toBeNull();
   });
 
-  it("reopens after auto-collapse and reveals content again", () => {
-    vi.useFakeTimers();
+  it("stays collapsed while streaming and shows a live last-line hint", () => {
     const { rerender } = renderReasoning({
       isStreaming: true,
       hasMessageContent: false,
+      stateKey: "re:1",
     });
-
+    expect(toggle()).toHaveAttribute("aria-expanded", "false");
     expect(
-      screen.getByText("Reasoning details are visible"),
-    ).toBeInTheDocument();
-
-    rerender(
-      <ReasoningContent
-        reasoningContent="Reasoning details are visible"
-        onCopyClick={vi.fn()}
-        isStreaming={false}
-        hasMessageContent={true}
-      />,
+      screen.getByTestId("reasoning-content").getAttribute("data-status"),
+    ).toBe("running");
+    expect(screen.getByTestId("transcript-meta").textContent).toBe(
+      "last line now",
     );
+    rerender(
+      <CollapsibleStoreProvider value={memoryStore()}>
+        {element({ isStreaming: false, hasMessageContent: true })}
+      </CollapsibleStoreProvider>,
+    );
+    expect(toggle()).toHaveAttribute("aria-expanded", "false");
+  });
 
-    act(() => {
-      vi.advanceTimersByTime(500);
-    });
+  it("opens only when the user asks and keeps it open across updates", () => {
+    const store = memoryStore();
+    const { rerender } = renderReasoning(
+      { isStreaming: true, stateKey: "re:2" },
+      store,
+    );
+    fireEvent.click(toggle());
+    expect(toggle()).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText(/checking files/)).toBeInTheDocument();
+    rerender(
+      <CollapsibleStoreProvider value={store}>
+        {element({
+          isStreaming: false,
+          hasMessageContent: true,
+          stateKey: "re:2",
+        })}
+      </CollapsibleStoreProvider>,
+    );
+    expect(toggle()).toHaveAttribute("aria-expanded", "true");
+    expect(store.get("re:2")).toBe(true);
+  });
 
-    const trigger = screen.getByRole("button", { name: /thought for/i });
-
-    expect(trigger).toHaveAttribute("aria-expanded", "false");
-    expect(screen.getByText(/Thought for/u)).toBeInTheDocument();
-    expect(
-      screen.getByText("Reasoning details are visible"),
-    ).toBeInTheDocument();
-
-    act(() => {
-      vi.advanceTimersByTime(250);
-    });
-
-    expect(
-      screen.queryByText("Reasoning details are visible"),
-    ).not.toBeInTheDocument();
-
-    fireEvent.click(trigger);
-
-    expect(trigger).toHaveAttribute("aria-expanded", "true");
-    expect(
-      screen.getByText("Reasoning details are visible"),
-    ).toBeInTheDocument();
+  it("restores the stored open state", () => {
+    renderReasoning({ stateKey: "re:3" }, memoryStore([["re:3", true]]));
+    expect(toggle()).toHaveAttribute("aria-expanded", "true");
   });
 });

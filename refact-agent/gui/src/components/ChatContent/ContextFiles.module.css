@@ -1,72 +1,49 @@
-.card {
-  overflow: hidden;
+.list {
+  display: grid;
+  gap: var(--rf-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
-.icon {
+.file {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+}
+
+.fileHeader {
   display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: center;
+  min-width: 0;
+  align-items: baseline;
+  gap: var(--rf-space-2);
 }
 
-.summary {
+.fileName,
+.fileLink {
   overflow: hidden;
-  color: inherit;
+  min-width: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.content {
-  padding: var(--rf-space-2) 0 var(--rf-space-1) var(--rf-space-4);
-}
-
-.section {
-  margin-bottom: var(--rf-space-2);
-}
-
-.sectionHeader {
-  margin-bottom: var(--rf-space-1);
-}
-
-.sectionIcon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: var(--rf-icon);
-  height: var(--rf-icon);
-  color: var(--rf-color-muted);
-}
-
-.sectionTitle {
-  color: var(--rf-color-muted);
-}
-
-.sectionContent {
-  padding-left: var(--rf-space-3);
-}
-
-.fileItem {
-  overflow: hidden;
-}
-
-.fileName {
-  overflow: hidden;
+.fileLink {
+  padding: 0;
   color: var(--rf-color-accent);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: var(--rf-radius-chip);
   cursor: pointer;
-  font-family: var(--rf-font-mono);
+  font: inherit;
 }
 
-.fileName:hover {
+.fileLink:hover {
   text-decoration: underline;
 }
 
-.fileNamePlain {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--rf-font-mono);
+.fileLink:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
 }
 
 .relevance {
@@ -74,9 +51,7 @@
   color: var(--rf-color-muted);
 }
 
-.fileContent {
-  composes: scrollbarThin from "../shared/scrollbar.module.css";
-  max-height: 300px;
-  margin-left: var(--rf-space-3);
-  overflow-y: auto;
+.preview {
+  min-width: 0;
+  overflow: hidden;
 }

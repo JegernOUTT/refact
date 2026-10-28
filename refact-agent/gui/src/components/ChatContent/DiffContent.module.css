@@ -1,0 +1,6 @@
+.blocks {
+  display: grid;
+  min-width: 0;
+  max-width: 100%;
+  gap: var(--rf-space-2);
+}

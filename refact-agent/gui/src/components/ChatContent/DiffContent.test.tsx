@@ -1,4 +1,4 @@
-import { describe, test, vi, expect } from "vitest";
+import { describe, test, expect } from "vitest";
 import { render, screen } from "../../utils/test-utils";
 import { DiffContent } from "./DiffContent";
 import groupBy from "lodash.groupby";
@@ -77,141 +77,34 @@ const STUB_DIFFS_1 = groupBy(
   (diff) => diff.file_name,
 );
 
-describe("diff content disclosure", () => {
-  test("renders a semantic trigger with aria state and controls", () => {
+describe("diff message transcript item", () => {
+  test("renders one open Changes row with files and +/- meta", () => {
     render(<DiffContent diffs={STUB_DIFFS_1} />);
 
-    const trigger = screen.getByRole("button", {
-      name: /frog\.py \+7 -7 , holiday\.py \+5 -5 , jump_to_conclusions\.py \+6 -6/i,
-    });
-    const content = document.getElementById(
-      trigger.getAttribute("aria-controls") ?? "",
+    const item = screen.getByTestId("diff-content");
+    expect(item).toHaveAttribute("data-open", "true");
+    expect(screen.getByTestId("transcript-verb")).toHaveTextContent("Changes");
+    expect(screen.getByTestId("transcript-target")).toHaveTextContent(
+      "frog.py, holiday.py, jump_to_conclusions.py",
     );
-
-    expect(trigger).toHaveAttribute("aria-expanded", "false");
-    expect(content).toBeTruthy();
-    expect(content).toHaveAttribute("data-open", "false");
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent("+10 −10");
+    expect(screen.getAllByTestId("transcript-toggle")).toHaveLength(1);
   });
 
-  test("toggles with mouse and keyboard", async () => {
+  test("renders the rich diff blocks with file headers", () => {
+    render(<DiffContent diffs={STUB_DIFFS_1} />);
+    expect(screen.getAllByText("class Bird:").length).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText("/emergency_frog_situation/frog.py").length,
+    ).toBe(3);
+  });
+
+  test("collapses and reopens from the row", async () => {
     const { user } = render(<DiffContent diffs={STUB_DIFFS_1} />);
-    const trigger = screen.getByRole("button", { name: /frog\.py/i });
-    const content = document.getElementById(
-      trigger.getAttribute("aria-controls") ?? "",
-    );
-
-    await user.click(trigger);
-
-    expect(trigger).toHaveAttribute("aria-expanded", "true");
-    expect(content).toHaveAttribute("data-open", "true");
-
-    trigger.focus();
-    await user.keyboard("{Enter}");
-
-    expect(trigger).toHaveAttribute("aria-expanded", "false");
-    expect(content).toHaveAttribute("data-open", "false");
-
-    await user.keyboard(" ");
-
-    expect(trigger).toHaveAttribute("aria-expanded", "true");
-    expect(content).toHaveAttribute("data-open", "true");
-  });
-});
-
-// TODO: mock requests with msw when chat has been migrated.
-describe.skip("diff content", () => {
-  test("apply all, none applied", async () => {
-    const onSumbitSpy = vi.fn();
-    const { user, ...app } = render(<DiffContent diffs={STUB_DIFFS_1} />);
-
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    await user.click(app.container.querySelector('[type="button"]')!);
-    const btn = app.getByText(/Apply all/i);
-    await user.click(btn);
-    expect(onSumbitSpy).toHaveBeenCalledWith([
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-    ]);
-  });
-  test("apply all", async () => {
-    const onSumbitSpy = vi.fn();
-    const { user, ...app } = render(<DiffContent diffs={STUB_DIFFS_1} />);
-
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    await user.click(app.container.querySelector('[type="button"]')!);
-    const btn = app.getByText(/Apply all/i);
-    await user.click(btn);
-    expect(onSumbitSpy).toHaveBeenCalledWith([
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-    ]);
-  });
-
-  test("unapply all", async () => {
-    const onSumbitSpy = vi.fn();
-    const { user, ...app } = render(<DiffContent diffs={STUB_DIFFS_1} />);
-
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    await user.click(app.container.querySelector('[type="button"]')!);
-    const btn = app.getByText(/unapply all/i);
-    await user.click(btn);
-    expect(onSumbitSpy).toHaveBeenCalledWith([
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-    ]);
-  });
-
-  test("disable apply all", async () => {
-    const onSumbitSpy = vi.fn();
-    const { user, ...app } = render(<DiffContent diffs={STUB_DIFFS_1} />);
-
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    await user.click(app.container.querySelector('[type="button"]')!);
-    const btn = app.getByText(/apply all/i) as HTMLButtonElement;
-    expect(btn.disabled).toBe(true);
-    await user.click(btn);
-    expect(onSumbitSpy).not.toHaveBeenCalled();
-  });
-
-  test("apply individual file", async () => {
-    const onSumbitSpy = vi.fn();
-    const { user, ...app } = render(<DiffContent diffs={STUB_DIFFS_1} />);
-
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    await user.click(app.container.querySelector('[type="button"]')!);
-    const btns = app.getAllByText(/apply/i);
-    await user.click(btns[0]);
-    expect(onSumbitSpy).toHaveBeenCalledWith([
-      true,
-      true,
-      true,
-      false,
-      false,
-      false,
-      false,
-      false,
-    ]);
-
-    app.rerender(<DiffContent diffs={STUB_DIFFS_1} />);
-
-    expect(() => app.queryByText(/applied/i)).not.toBeNull();
+    const toggle = screen.getByTestId("transcript-toggle");
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
   });
 });

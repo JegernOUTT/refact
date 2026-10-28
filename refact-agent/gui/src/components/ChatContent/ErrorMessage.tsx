@@ -1,9 +1,9 @@
 import React from "react";
-import { Flex, Text } from "@radix-ui/themes";
-import { AlertTriangle, LoaderCircle } from "lucide-react";
-import { Badge, Button, Icon } from "../ui";
+import { AlertTriangle } from "lucide-react";
+import { Button, Icon } from "../ui";
 import { humanizeIdentifier } from "../../utils/displayNames";
-import styles from "./ChatContent.module.css";
+import { TranscriptItem, type TranscriptFact } from "./TranscriptItem";
+import styles from "./ErrorMessage.module.css";
 import type {
   ErrorMessage,
   RetryStatus,
@@ -20,23 +20,6 @@ type ParsedError = {
   message: string;
   info?: UserErrorInfo;
   retry?: RetryStatus;
-};
-
-type ErrorTone = React.ComponentProps<typeof Badge>["tone"];
-
-const CATEGORY_TONES: Record<UserErrorCategory, ErrorTone> = {
-  ProviderTransient: "warning",
-  ProviderRateLimit: "warning",
-  ContextTooLarge: "warning",
-  AuthenticationFailed: "danger",
-  ModelUnavailable: "accent",
-  BillingQuota: "danger",
-  InvalidRequest: "danger",
-  NetworkFailure: "warning",
-  StreamCorrupted: "warning",
-  ToolSchemaInvalid: "danger",
-  ContentPolicy: "danger",
-  Unknown: "danger",
 };
 
 const ACTION_LABELS: Partial<Record<string, string>> = {
@@ -153,80 +136,72 @@ function shouldShowRawError(rawError: string, error: ParsedError): boolean {
   return true;
 }
 
-const RetryingBadge: React.FC<{
-  retry: RetryStatus;
-  tone: ErrorTone;
-}> = ({ retry, tone }) => (
-  <Badge tone={tone}>
-    <Icon
-      className={styles.retryingBadgeIcon}
-      icon={LoaderCircle}
-      size="sm"
-      tone={tone === "danger" ? "danger" : "warning"}
-    />
-    Retrying {retry.delay_secs}s · {retry.attempt}/{retry.max_attempts}
-  </Badge>
-);
+const HTTP_CODE = /\b([45]\d{2})\b/;
+const PROVIDER_MODEL = /\b([a-z0-9_-]+\/[A-Za-z0-9._:-]+)\b/;
+const MAX_TARGET_LENGTH = 80;
 
-const ClassifiedError: React.FC<{
-  error: ParsedError;
-  showHeader: boolean;
-  autoRetryActive: boolean;
-  onRetryGeneration?: () => void;
-}> = ({ error, showHeader, autoRetryActive, onRetryGeneration }) => {
+function firstLine(text: string): string {
+  const line = text.split("\n").find((part) => part.trim().length > 0) ?? "";
+  const trimmed = line.trim();
+  return trimmed.length > MAX_TARGET_LENGTH
+    ? `${trimmed.slice(0, MAX_TARGET_LENGTH - 1)}…`
+    : trimmed;
+}
+
+function errorText(error: ParsedError): string {
+  return [error.info?.raw_error, error.message].filter(Boolean).join("\n");
+}
+
+function errorTarget(errors: ParsedError[]): string {
+  for (const error of errors) {
+    const match = PROVIDER_MODEL.exec(errorText(error));
+    if (match) return match[1];
+  }
+  const info = errors.find((error) => error.info)?.info;
+  if (info) return info.title;
+  return errors.length > 1
+    ? `${errors.length} errors`
+    : firstLine(errors[0]?.message ?? "");
+}
+
+function errorMeta(errors: ParsedError[]): string | null {
+  const code = errors
+    .map((error) => HTTP_CODE.exec(errorText(error))?.[1])
+    .find((value): value is string => value !== undefined);
+  const info = errors.find((error) => error.info)?.info;
+  const reason = info ? humanizeIdentifier(info.category) : null;
+  const parts = [code, reason].filter((part): part is string => Boolean(part));
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+function retryHint(info: UserErrorInfo, retry: RetryStatus | undefined) {
+  if (retry) {
+    return `Auto-retrying in ${retry.delay_secs}s (attempt ${retry.attempt}/${retry.max_attempts}).`;
+  }
+  return info.is_retryable
+    ? "Retrying may succeed after the condition clears."
+    : "Retrying unchanged is unlikely to fix this.";
+}
+
+const ErrorCallout: React.FC<{ error: ParsedError; showTitle: boolean }> = ({
+  error,
+  showTitle,
+}) => {
   const info = error.info;
   if (!info) {
-    return <div className={styles.errorMessageBody}>{error.message}</div>;
+    return <div className={styles.message}>{error.message}</div>;
   }
-
-  const tone = CATEGORY_TONES[info.category];
   const rawError = info.raw_error ?? error.message;
   const retry = error.retry?.in_progress ? error.retry : undefined;
-  const canRetry =
-    !autoRetryActive &&
-    info.is_retryable &&
-    info.suggested_action === "retry" &&
-    typeof onRetryGeneration === "function";
-
   return (
-    <Flex direction="column" gap="2" className={styles.errorMessageBody}>
-      {showHeader && (
-        <Flex align="center" justify="between" gap="2" wrap="wrap">
-          <Flex align="center" gap="2" wrap="wrap">
-            <Text size="2" weight="bold">
-              {info.title}
-            </Text>
-            <Badge tone={tone}>{humanizeIdentifier(info.category)}</Badge>
-          </Flex>
-          {retry ? (
-            <RetryingBadge retry={retry} tone={tone} />
-          ) : canRetry ? (
-            <Button
-              size="sm"
-              variant={tone === "danger" ? "danger" : "soft"}
-              onClick={onRetryGeneration}
-            >
-              {errorActionLabel(info.suggested_action)}
-            </Button>
-          ) : info.suggested_action !== "retry" ? (
-            <Button size="sm" variant={tone === "danger" ? "danger" : "soft"}>
-              {errorActionLabel(info.suggested_action)}
-            </Button>
-          ) : null}
-        </Flex>
-      )}
-      <Text size="2">{info.explanation}</Text>
-      <Text className={styles.errorMessageHint}>
-        {retry
-          ? `Auto-retrying in ${retry.delay_secs}s (attempt ${retry.attempt}/${retry.max_attempts}).`
-          : info.is_retryable
-            ? "Retrying may succeed after the condition clears."
-            : "Retrying unchanged is unlikely to fix this."}
-      </Text>
+    <div className={styles.callout}>
+      {showTitle && <strong>{info.title}</strong>}
+      <div className={styles.message}>{info.explanation}</div>
+      <div className={styles.hint}>{retryHint(info, retry)}</div>
       {shouldShowRawError(rawError, error) && (
-        <div className={styles.errorMessageRaw}>{rawError}</div>
+        <div className={styles.raw}>{rawError}</div>
       )}
-    </Flex>
+    </div>
   );
 };
 
@@ -240,68 +215,52 @@ export const ErrorMessageCard: React.FC<ErrorMessageCardProps> = ({
     .map((error) => error.retry)
     .filter((retry): retry is RetryStatus => Boolean(retry?.in_progress))
     .pop();
-  const title = firstClassified
-    ? firstClassified.title
-    : errors.length === 1
-      ? "Generation error"
-      : `${errors.length} generation errors`;
-  const tone = firstClassified
-    ? CATEGORY_TONES[firstClassified.category]
-    : "danger";
-  const showPerErrorHeader = parsedErrors.length > 1;
   const canRetry =
     !latestRetry &&
-    firstClassified?.is_retryable &&
+    firstClassified?.is_retryable === true &&
     firstClassified.suggested_action === "retry" &&
     typeof onRetryGeneration === "function";
+  const suggestion =
+    firstClassified && firstClassified.suggested_action !== "retry"
+      ? errorActionLabel(firstClassified.suggested_action)
+      : null;
+  const facts: TranscriptFact[] = suggestion
+    ? [{ label: "Suggested", value: suggestion }]
+    : [];
 
   return (
-    <div className={`${styles.errorMessageCard} rf-enter-rise`}>
-      <Flex direction="column" gap="2">
-        <Flex align="center" justify="between" gap="2" wrap="wrap">
-          <Flex align="center" gap="2" wrap="wrap">
-            <span className={styles.errorMessageIcon}>
-              <Icon icon={AlertTriangle} size="md" tone="danger" />
-            </span>
-            <Text size="2" weight="medium">
-              {title}
-            </Text>
-            {firstClassified && (
-              <Badge tone={tone}>
-                {humanizeIdentifier(firstClassified.category)}
-              </Badge>
-            )}
-          </Flex>
-          {firstClassified &&
-            !showPerErrorHeader &&
-            (latestRetry ? (
-              <RetryingBadge retry={latestRetry} tone={tone} />
-            ) : canRetry ? (
-              <Button
-                size="sm"
-                variant={tone === "danger" ? "danger" : "soft"}
-                onClick={onRetryGeneration}
-              >
-                {errorActionLabel(firstClassified.suggested_action)}
-              </Button>
-            ) : firstClassified.suggested_action !== "retry" ? (
-              <Button size="sm" variant={tone === "danger" ? "danger" : "soft"}>
-                {errorActionLabel(firstClassified.suggested_action)}
-              </Button>
-            ) : null)}
-        </Flex>
-        <Flex direction="column" gap="3">
+    <TranscriptItem
+      data-testid="error-message-card"
+      icon={<Icon icon={AlertTriangle} size="sm" />}
+      verb={firstClassified ? "Request failed" : "Error"}
+      target={errorTarget(parsedErrors)}
+      meta={errorMeta(parsedErrors)}
+      status={latestRetry ? "running" : "failed"}
+      statusLabel={
+        latestRetry
+          ? `Retrying ${latestRetry.delay_secs}s · ${latestRetry.attempt}/${latestRetry.max_attempts}`
+          : undefined
+      }
+      defaultOpen
+      summary={facts}
+      error={
+        <div className={styles.errors}>
           {parsedErrors.map((error, index) => (
-            <ClassifiedError
+            <ErrorCallout
               key={`${index}-${error.message}-${error.info?.category ?? "raw"}`}
               error={error}
-              showHeader={showPerErrorHeader}
-              autoRetryActive={Boolean(latestRetry)}
-              onRetryGeneration={onRetryGeneration}
+              showTitle={parsedErrors.length > 1}
             />
           ))}
-        </Flex>
-      </Flex>
-    </div>
+        </div>
+      }
+      actions={
+        canRetry ? (
+          <Button size="sm" variant="soft" onClick={onRetryGeneration}>
+            Retry
+          </Button>
+        ) : null
+      }
+    />
   );
 };

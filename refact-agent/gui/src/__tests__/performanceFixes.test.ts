@@ -532,7 +532,7 @@ describe("chat rendering regressions", () => {
     await waitFor(() => {
       expect(container.textContent).toContain("Here is the plan.");
       expect(container.textContent).toContain("README.md");
-      expect(container.textContent).toContain("+2 -2");
+      expect(container.textContent).toContain("+1 −1");
     });
   });
 

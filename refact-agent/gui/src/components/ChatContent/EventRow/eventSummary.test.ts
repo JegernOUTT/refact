@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { EventMessage } from "../../../services/refact/types";
 import { eventSummary } from "./eventSummary";
-import { eventDetailFields, eventPayloadJson } from "./eventDetails";
+import { eventDetailFields } from "./eventDetails";
 import { eventTimestamp } from "./eventTimestamp";
 const event = (
   subkind: string,
@@ -100,8 +100,7 @@ describe("event presentation", () => {
     ).toEqual(["Source", "Kind", "Message", "Event kind"]);
   });
 
-  it("omits empty payloads and missing or invalid timestamps", () => {
-    expect(eventPayloadJson(event("tick"))).toBeNull();
+  it("omits missing or invalid timestamps", () => {
     expect(eventTimestamp(event("tick"))).toBeNull();
     expect(eventTimestamp(event("tick", { timestamp: "invalid" }))).toBeNull();
     expect(
