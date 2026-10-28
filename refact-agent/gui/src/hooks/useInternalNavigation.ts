@@ -29,23 +29,19 @@ import {
   type WorktreeRecordView,
 } from "../services/refact/worktrees";
 import { trajectoriesApi } from "../services/refact/trajectories";
-import type { TrajectoryData } from "../services/refact/trajectories";
-import type { ChatThread } from "../features/Chat/Thread/types";
 import {
   getProjectStorageNamespace,
   saveTaskWorkspaceTab,
 } from "../utils/chatUiPersistence";
 
 const useAppStore = useStore.withTypes<AppStore>();
+export const INTERNAL_NAVIGATION_TIMEOUT_MS = 15_000;
 type NavigationOptions = {
   scope?: string;
   onChatOpened?: (chatId: string) => void;
   onCardOpened?: (taskId: string, cardId: string) => void;
   onWorktreeOpened?: (record: WorktreeRecordView) => void;
 };
-
-type NavigationTrajectory = TrajectoryData &
-  Pick<ChatThread, "parent_id" | "link_type" | "root_chat_id" | "task_meta">;
 
 export function useInternalNavigation({
   scope = "",
@@ -58,14 +54,17 @@ export function useInternalNavigation({
   const currentScope = useRef(scope);
   currentScope.current = scope;
   const inFlight = useRef(false);
+  const cancellation = useRef<AbortController | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
+      cancellation.current?.abort();
     };
   }, []);
+  useEffect(() => () => cancellation.current?.abort(), [scope]);
 
   const navigate = useCallback(
     async (url: string, origin: InternalLinkOrigin = {}): Promise<boolean> => {
@@ -97,6 +96,8 @@ export function useInternalNavigation({
         ? selectTaskActiveChat(initial, origin.taskId)?.chatId
         : undefined;
       let valid = true;
+      const controller = new AbortController();
+      cancellation.current = controller;
       const checkSource = () => {
         const state = store.getState();
         valid =
@@ -113,20 +114,43 @@ export function useInternalNavigation({
           (!origin.taskId ||
             selectTaskActiveChat(state, origin.taskId)?.chatId ===
               sourceTaskChat);
+        if (!valid) controller.abort();
         return valid;
       };
       const unsubscribe = store.subscribe(checkSource);
+      const deadline = { timedOut: false };
+      let rejectCancellation: (reason: Error) => void = () => undefined;
+      const cancelled = new Promise<never>((_resolve, reject) => {
+        rejectCancellation = reject;
+      });
+      const onAbort = () =>
+        rejectCancellation(new Error("Navigation cancelled."));
+      controller.signal.addEventListener("abort", onAbort, { once: true });
+      const timer = setTimeout(() => {
+        deadline.timedOut = true;
+        controller.abort();
+      }, INTERNAL_NAVIGATION_TIMEOUT_MS);
+      const read = async <T>(request: {
+        abort: () => void;
+        unwrap: () => Promise<T>;
+      }): Promise<T> => {
+        try {
+          return await Promise.race([request.unwrap(), cancelled]);
+        } finally {
+          if (controller.signal.aborted) request.abort();
+        }
+      };
       const queryOptions = { forceRefetch: true, subscribe: false };
       try {
         if (target.type === "worktree") {
-          const inventory = await store
-            .dispatch(
+          const inventory = await read(
+            store.dispatch(
               worktreesApi.endpoints.listWorktrees.initiate(
                 undefined,
                 queryOptions,
               ),
-            )
-            .unwrap();
+            ),
+          );
           if (!checkSource()) return false;
           const record = inventory.worktrees.find(
             (candidate) => candidate.meta.id === target.id,
@@ -144,22 +168,22 @@ export function useInternalNavigation({
           return true;
         }
         if (target.type === "task") {
-          const task = await store
-            .dispatch(
+          const task = await read(
+            store.dispatch(
               tasksApi.endpoints.getTask.initiate(target.id, queryOptions),
-            )
-            .unwrap();
+            ),
+          );
           if (!checkSource()) return false;
           if (task.id !== target.id)
             throw new Error(
               "Task response did not match the requested target.",
             );
           if (target.cardId) {
-            const board = await store
-              .dispatch(
+            const board = await read(
+              store.dispatch(
                 tasksApi.endpoints.getBoard.initiate(target.id, queryOptions),
-              )
-              .unwrap();
+              ),
+            );
             if (!checkSource()) return false;
             if (!board.cards.some((card) => card.id === target.cardId))
               throw new Error(`Card not found on this task: ${target.cardId}`);
@@ -181,16 +205,16 @@ export function useInternalNavigation({
           return true;
         }
 
-        const data: NavigationTrajectory = await store
-          .dispatch(
-            trajectoriesApi.endpoints.getTrajectory.initiate(
+        const data = await read(
+          store.dispatch(
+            trajectoriesApi.endpoints.getTrajectoryMetadata.initiate(
               target.id,
               queryOptions,
             ),
-          )
-          .unwrap();
+          ),
+        );
         if (!checkSource()) return false;
-        if (data.id !== target.id || !Array.isArray(data.messages))
+        if (data.id !== target.id)
           throw new Error("Chat response did not match the requested target.");
         const source = origin.chatId
           ? selectThreadById(initial, origin.chatId)
@@ -218,26 +242,28 @@ export function useInternalNavigation({
         if (taskId) {
           if (!parseRefactLink(`refact://task/${taskId}`))
             throw new Error("Invalid task reference in chat response.");
-          validatedTask = await store
-            .dispatch(tasksApi.endpoints.getTask.initiate(taskId, queryOptions))
-            .unwrap();
+          validatedTask = await read(
+            store.dispatch(
+              tasksApi.endpoints.getTask.initiate(taskId, queryOptions),
+            ),
+          );
           if (!checkSource()) return false;
           if (validatedTask.id !== taskId)
             throw new Error("Task response did not match the chat.");
-          const board = await store
-            .dispatch(
+          const board = await read(
+            store.dispatch(
               tasksApi.endpoints.getBoard.initiate(taskId, queryOptions),
-            )
-            .unwrap();
+            ),
+          );
           if (!checkSource()) return false;
-          const planners = await store
-            .dispatch(
+          const planners = await read(
+            store.dispatch(
               tasksApi.endpoints.listTaskTrajectories.initiate(
                 { taskId, role: "planner" },
                 queryOptions,
               ),
-            )
-            .unwrap();
+            ),
+          );
           if (!checkSource()) return false;
           const resolved = resolveChatLink(target.id, planners, board);
           if (
@@ -315,10 +341,17 @@ export function useInternalNavigation({
         return true;
       } catch (cause) {
         if (checkSource())
-          setError(`Could not open link: ${taskErrorMessage(cause)}`);
+          setError(
+            deadline.timedOut
+              ? "Could not open link: Navigation timed out. Please try again."
+              : `Could not open link: ${taskErrorMessage(cause)}`,
+          );
         return false;
       } finally {
         unsubscribe();
+        clearTimeout(timer);
+        controller.signal.removeEventListener("abort", onAbort);
+        if (cancellation.current === controller) cancellation.current = null;
         inFlight.current = false;
         if (mounted.current) setPending(false);
       }

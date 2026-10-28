@@ -114,15 +114,16 @@ describe("Markdown internal links", () => {
   it("routes once from the explicit originating pane without inventing the global parent", async () => {
     let reads = 0;
     server.use(
-      http.get("*/v1/trajectories/child-chat-1", () => {
+      http.get("*/v1/trajectories/child-chat-1", ({ request }) => {
+        expect(new URL(request.url).searchParams.get("metadata_only")).toBe(
+          "true",
+        );
         reads += 1;
         return HttpResponse.json({
           id: "child-chat-1",
           title: "Child",
           mode: "AGENT",
           model: "",
-          messages: [],
-          tool_use: "agent",
           parent_id: "origin-pane",
           link_type: "subagent",
           root_chat_id: "origin-root",

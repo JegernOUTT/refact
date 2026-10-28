@@ -8658,9 +8658,51 @@ async fn enrich_with_session_state(app: AppState, trajectories: &mut Vec<Traject
     }
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct TrajectoryGetQuery {
+    #[serde(default)]
+    pub metadata_only: bool,
+}
+
+fn trajectory_navigation_metadata(
+    json: &serde_json::Value,
+) -> Result<serde_json::Value, ScratchError> {
+    let object = json.as_object().ok_or_else(|| {
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Trajectory is not a JSON object".to_string(),
+        )
+    })?;
+    let mut out = serde_json::Map::new();
+    for key in [
+        "id",
+        "title",
+        "model",
+        "mode",
+        "parent_id",
+        "link_type",
+        "root_chat_id",
+    ] {
+        if let Some(value) = object.get(key).and_then(|value| value.as_str()) {
+            out.insert(key.to_string(), json!(value));
+        }
+    }
+    if let Some(value) = object.get("task_meta").filter(|value| !value.is_null()) {
+        let task_meta = serde_json::from_value::<TaskMeta>(value.clone()).map_err(|_| {
+            ScratchError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Trajectory task_meta is malformed".to_string(),
+            )
+        })?;
+        out.insert("task_meta".to_string(), json!(task_meta));
+    }
+    Ok(serde_json::Value::Object(out))
+}
+
 pub async fn handle_v1_trajectories_get(
     State(app): State<AppState>,
     AxumPath(id): AxumPath<String>,
+    axum::extract::Query(params): axum::extract::Query<TrajectoryGetQuery>,
 ) -> Result<Response<Body>, ScratchError> {
     let gcx = app.gcx.clone();
     validate_trajectory_id(&id)?;
@@ -8669,7 +8711,11 @@ pub async fn handle_v1_trajectories_get(
         .ok_or_else(|| {
             ScratchError::new(StatusCode::NOT_FOUND, "Trajectory not found".to_string())
         })?;
-    let content = candidate.content;
+    let content = if params.metadata_only {
+        trajectory_navigation_metadata(&candidate.json)?.to_string()
+    } else {
+        candidate.content
+    };
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
@@ -12442,6 +12488,73 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn trajectory_get_metadata_only_projects_whitelist_and_keeps_raw_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "get-metadata-only";
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        let mut trajectory = sample_trajectory(chat_id, "Linked Child", "2024-01-01T00:00:01Z");
+        trajectory["mode"] = json!("agent");
+        trajectory["parent_id"] = json!("parent-chat");
+        trajectory["link_type"] = json!("subagent");
+        trajectory["root_chat_id"] = json!("root-chat");
+        trajectory["task_meta"] = json!({
+            "task_id": "task-1",
+            "role": "agents",
+            "card_id": "T-1",
+            "secret_extra": "drop-me",
+        });
+        trajectory["messages"] = json!([{ "role": "user", "content": "private history" }]);
+        trajectory["goal"] = json!({ "content": "private goal" });
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        let raw = serde_json::to_string_pretty(&trajectory).unwrap();
+        tokio::fs::write(&path, &raw).await.unwrap();
+        let get = |metadata_only: bool| {
+            handle_v1_trajectories_get(
+                State(app.clone()),
+                AxumPath(chat_id.to_string()),
+                axum::extract::Query(TrajectoryGetQuery { metadata_only }),
+            )
+        };
+
+        let full = hyper::body::to_bytes(get(false).await.unwrap().into_body())
+            .await
+            .unwrap();
+        assert_eq!(full.as_ref(), raw.as_bytes());
+        let metadata = hyper::body::to_bytes(get(true).await.unwrap().into_body())
+            .await
+            .unwrap();
+        let metadata: serde_json::Value = serde_json::from_slice(&metadata).unwrap();
+        assert_eq!(
+            metadata,
+            json!({
+                "id": chat_id,
+                "title": "Linked Child",
+                "model": "model",
+                "mode": "agent",
+                "parent_id": "parent-chat",
+                "link_type": "subagent",
+                "root_chat_id": "root-chat",
+                "task_meta": { "task_id": "task-1", "role": "agents", "card_id": "T-1" },
+            })
+        );
+
+        trajectory["task_meta"] = json!({ "role": "agents" });
+        tokio::fs::write(&path, serde_json::to_string(&trajectory).unwrap())
+            .await
+            .unwrap();
+        let err = get(true).await.unwrap_err();
+        assert_eq!(err.status_code, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(get(false).await.is_ok());
     }
 
     #[tokio::test]

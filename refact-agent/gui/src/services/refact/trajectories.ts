@@ -62,6 +62,12 @@ export type TrajectoryData = {
   isTitleGenerated?: boolean;
 };
 
+export type TrajectoryNavigationMetadata = Pick<
+  TrajectoryData,
+  "id" | "title" | "model" | "mode"
+> &
+  Pick<ChatThread, "parent_id" | "link_type" | "root_chat_id" | "task_meta">;
+
 export type TrajectoryEvent = {
   type: "created" | "updated" | "deleted";
   id: string;
@@ -214,6 +220,20 @@ export const trajectoriesApi = createApi({
         return { data: result.data as TrajectoryMeta[] };
       },
       providesTags: ["Trajectory"],
+    }),
+    getTrajectoryMetadata: builder.query<TrajectoryNavigationMetadata, string>({
+      queryFn: async (id, api, _opts, baseQuery) => {
+        const state = api.getState() as RootState;
+        const url = buildApiUrlFromState(
+          state,
+          `/v1/trajectories/${encodeURIComponent(id)}`,
+          new URLSearchParams({ metadata_only: "true" }),
+        );
+        const result = await baseQuery({ url });
+        if (result.error) return { error: result.error };
+        return { data: result.data as TrajectoryNavigationMetadata };
+      },
+      providesTags: (_result, _error, id) => [{ type: "Trajectory", id }],
     }),
     getTrajectory: builder.query<TrajectoryData, string>({
       queryFn: async (id, api, _opts, baseQuery) => {

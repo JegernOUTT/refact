@@ -77,26 +77,29 @@ for (const viewport of viewports) {
         ],
       }),
     );
-    await page.route(`**/v1/trajectories/${deniedId}`, async (route) => {
-      await deniedHeld;
-      await route.fulfill({
-        status: 403,
-        headers: cors,
-        json: { detail: "Access denied" },
-      });
-    });
-    await page.route(`**/v1/trajectories/${openedId}`, (route) =>
-      route.fulfill({
-        headers: cors,
-        json: {
-          id: openedId,
-          title: "Opened child",
-          model: "",
-          mode: "AGENT",
-          tool_use: "agent",
-          messages: [],
-        },
-      }),
+    await page.route(
+      `**/v1/trajectories/${deniedId}?metadata_only=true`,
+      async (route) => {
+        await deniedHeld;
+        await route.fulfill({
+          status: 403,
+          headers: cors,
+          json: { detail: "Access denied" },
+        });
+      },
+    );
+    await page.route(
+      `**/v1/trajectories/${openedId}?metadata_only=true`,
+      (route) =>
+        route.fulfill({
+          headers: cors,
+          json: {
+            id: openedId,
+            title: "Opened child",
+            model: "",
+            mode: "AGENT",
+          },
+        }),
     );
 
     await page.goto("/tests/e2e/route-showcase.html?route=chat");

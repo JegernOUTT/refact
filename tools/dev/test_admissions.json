@@ -2480,6 +2480,34 @@
       "author": "background_agent:bgagent-389d3107-f05f-4807-a48c-331d090e6ce3",
       "reviewer": "background_agent:bgagent-e10b3472-7a39-4987-a091-a43043fd42f5",
       "review_evidence": "Parent-forwarded independent semantic approval by background_agent:bgagent-e10b3472-7a39-4987-a091-a43043fd42f5 for scoped diff SHA256 b384bbec7ec517046b9dac6e4f25f495baf1dbc4c6c7bba8f810954a4b486c3d. Admission author read current test bodies/diffs, manifest, patches and actual negative/restored logs and verified every manifest log SHA256. Cloud actual Cargo result is 23/23; native is exact-module snapshot #[path] rustc harness 9/9, NOT full root Cargo. No claim author directly received original reviewer transcript."
+    },
+    {
+      "fingerprint": "54578815a3cec47347e01c8d07acb5feaff9f72c7c2bcab6c0f254a0f6837e81",
+      "occurrences": 1,
+      "author": "background_agent:bgagent metadata-only backend subagent (parent chat a887973d)",
+      "reviewer": "Independent admission reviewer bgagent-de3bd30c (source/policy review subchat-9affa603-b0c5-4e0b-af32-5c1af320a582); source review bgagent-27e8cb8b / subchat-359d53d4-709c-405c-b174-9daa4aba51fc. Reviewers are not the implementation author.",
+      "review_evidence": "Reviewer de3bd30c approved ordinary/counterfactual classification (1 physical case, 2 meaningful states: raw default + metadata projection/422). Corrected pass: cargo test --lib trajectory_get_metadata_only EXIT=0, log /tmp/meta-only-pass.log sha256 187fc066e83da40052cd83475d33e98d6d1b42acf9a210d25de262a2ae94c363 at source sha256 721616a8b40067a4785518cf75eb70c94a282425e63f968dc7c2101230047758.",
+      "removed_coverage": "none",
+      "failure_mode": "GET /v1/trajectories/:id?metadata_only=true returns the full raw trajectory (messages, goal, arbitrary task_meta extras), or drops/renames navigation fields, or accepts malformed task_meta silently; or the opt-in changes the default raw response bytes.",
+      "importance": "Linked-chat navigation fetches only navigation metadata; returning multi-megabyte transcripts stalls the GUI, and silently omitting malformed task_meta would route a task chat as an ordinary chat. Default full-history consumers must see unchanged bytes.",
+      "nearest_retained": {
+        "fingerprint": "169e225ffa85b8de940fbcb4a857e2f509b559e1ab2650159b51c852f56b2dbb",
+        "why_insufficient": "trajectory_path_handler_returns_400_for_invalid_id only covers id validation on the path handler; no retained test calls handle_v1_trajectories_get, compares its raw body bytes, or observes any metadata projection."
+      },
+      "oracle": "Default handler body equals the exact on-disk pretty JSON bytes; metadata_only body equals exactly {id,title,model,mode,parent_id,link_type,root_chat_id,task_meta{task_id,role,card_id}} (no messages, goal or secret_extra); after task_meta loses task_id the metadata request returns 422 while the default request still succeeds.",
+      "prerequisites": "Fixture file written in an isolated tempdir workspace contains non-empty messages, a goal and an unknown task_meta field, so exact equality would fail if any leaked; the raw body is compared against the bytes actually written.",
+      "shipping_implementation": "handle_v1_trajectories_get with production candidate lookup (find_trajectory_or_buddy_file) and trajectory_navigation_metadata.",
+      "determinism": "Tempdir workspace via make_app_with_workspace; no clocks, network or sleeps.",
+      "layer": "Engine lib unit test calling the axum handler directly",
+      "why_cheapest": "One handler-level case covers default-branch preservation, whitelist projection and malformed task_meta refusal; HTTP router wiring adds no distinct decision.",
+      "meaningful_cases": 2,
+      "critical": false,
+      "criticality_reason": "Payload-size/availability contract: the full authorized GET intentionally returns the same messages/goal, so the whitelist is not a new confidentiality boundary. Ordinary classification accepted by independent reviewer bgagent-de3bd30c.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Precise counterfactuals against handle_v1_trajectories_get/trajectory_navigation_metadata: (1) pre-feature behavior returning candidate.content for metadata_only -> metadata assert_eq fails (messages, goal, tool_use, created_at, updated_at and task_meta.secret_extra present); (2) default branch altered (e.g. reserialized JSON) -> raw byte assert_eq fails against the pretty on-disk bytes; (3) copying task_meta raw instead of typed TaskMeta -> assert_eq fails on secret_extra; (4) ignoring a malformed task_meta parse -> unwrap_err panics on Ok, or status != 422. Executed mutant builds judged disproportionate (~30 min cold rebuild of the refact_lsp lib test per mutant) for an ordinary contract; accepted by the independent reviewer.",
+        "evidence": "Corrected pass: RUST_MIN_STACK=16777216 CARGO_TARGET_DIR=/tmp/refact-meta-only-target cargo test --lib trajectory_get_metadata_only, EXIT=0, 1 passed, /tmp/meta-only-pass.log (sha256 187fc066e83da40052cd83475d33e98d6d1b42acf9a210d25de262a2ae94c363)."
+      }
     }
   ],
   "classifications": [
@@ -11068,6 +11096,19 @@
       "author": "background_agent:bgagent-389d3107-f05f-4807-a48c-331d090e6ce3",
       "reviewer": "background_agent:bgagent-e10b3472-7a39-4987-a091-a43043fd42f5",
       "review_evidence": "Parent-forwarded independent semantic approval by background_agent:bgagent-e10b3472-7a39-4987-a091-a43043fd42f5 for scoped diff SHA256 b384bbec7ec517046b9dac6e4f25f495baf1dbc4c6c7bba8f810954a4b486c3d. Admission author read current test bodies/diffs, manifest, patches and actual negative/restored logs and verified every manifest log SHA256. Cloud actual Cargo result is 23/23; native is exact-module snapshot #[path] rustc harness 9/9, NOT full root Cargo. No claim author directly received original reviewer transcript."
+    },
+    {
+      "path": "refact-agent/engine/src/chat/trajectories.rs",
+      "before_sha256": "b04945e20b8cbd884967ee1ddcb5e23f1ae2faf7dfefe93b01aa485dbb75d742",
+      "after_sha256": "721616a8b40067a4785518cf75eb70c94a282425e63f968dc7c2101230047758",
+      "affected_tests": [
+        "54578815a3cec47347e01c8d07acb5feaff9f72c7c2bcab6c0f254a0f6837e81"
+      ],
+      "impact": "Adds TrajectoryGetQuery and trajectory_navigation_metadata; handle_v1_trajectories_get gains a Query extractor with default branch returning candidate.content unchanged. No shared fixture/helper changed; the only test calling the handler is the new one.",
+      "execution_context": "Engine lib tests (cargo test --lib); RUST_MIN_STACK=16777216.",
+      "author": "background_agent:bgagent metadata-only backend subagent (parent chat a887973d)",
+      "reviewer": "Independent admission reviewer bgagent-de3bd30c (source/policy review subchat-9affa603-b0c5-4e0b-af32-5c1af320a582); source review bgagent-27e8cb8b / subchat-359d53d4-709c-405c-b174-9daa4aba51fc. Reviewers are not the implementation author.",
+      "review_evidence": "Reviewer de3bd30c approved ordinary/counterfactual classification (1 physical case, 2 meaningful states: raw default + metadata projection/422). Corrected pass: cargo test --lib trajectory_get_metadata_only EXIT=0, log /tmp/meta-only-pass.log sha256 187fc066e83da40052cd83475d33e98d6d1b42acf9a210d25de262a2ae94c363 at source sha256 721616a8b40067a4785518cf75eb70c94a282425e63f968dc7c2101230047758."
     }
   ]
 }
