@@ -499,6 +499,12 @@ async fn handle_set_params(
         }
         (session.chat_id.clone(), session.thread.clone())
     };
+    if let Err(error) =
+        check_worktree_setparams_authority(&app, &chat_id, &thread_before, &patch).await
+    {
+        reject_guard(&mut *session_arc.lock().await, &context.request_id, error);
+        return QueueCommandOutcome::Continue;
+    }
     let worktree_update = match resolve_worktree_setparams_update(
         app.clone(),
         &chat_id,
@@ -511,31 +517,25 @@ async fn handle_set_params(
         Err(e) => {
             warn!("SetParams worktree update rejected: {}", e);
             let mut session = session_arc.lock().await;
-            reject_guard(&mut session, &context.request_id, e.clone());
-            let compression_phase = session.compression_phase;
-            let compression_reason = session.compression_reason;
-            let event = session.runtime_update_event(
-                SessionState::Error,
-                Some(e),
-                false,
-                compression_phase,
-                compression_reason,
-            );
-            session.emit(event);
-            session.set_runtime_state(SessionState::Idle, None);
+            session.emit(ChatEvent::Ack {
+                client_request_id: context.request_id.clone(),
+                accepted: false,
+                result: Some(serde_json::json!({"error": e})),
+            });
             return QueueCommandOutcome::Continue;
         }
     };
     let mut session = session_arc.lock().await;
-    if crate::chat::worktree_lifecycle::changes_attachment(&session.thread, &patch) {
-        if let Err(error) = crate::chat::worktree_lifecycle::check_idle_attachment(&session)
-            .and_then(|_| {
-                crate::chat::worktree_lifecycle::check_unchanged_attachment(
-                    &session,
-                    &thread_before,
-                )
-            })
+    if scope_patch {
+        if let Err(error) =
+            crate::chat::worktree_lifecycle::check_unchanged_attachment(&session, &thread_before)
         {
+            reject_guard(&mut session, &context.request_id, error);
+            return QueueCommandOutcome::Continue;
+        }
+    }
+    if crate::chat::worktree_lifecycle::changes_attachment(&session.thread, &patch) {
+        if let Err(error) = crate::chat::worktree_lifecycle::check_idle_attachment(&session) {
             reject_guard(&mut session, &context.request_id, error);
             return QueueCommandOutcome::Continue;
         }

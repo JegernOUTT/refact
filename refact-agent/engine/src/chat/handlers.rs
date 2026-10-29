@@ -771,12 +771,19 @@ pub async fn handle_v1_chat_command(
                 }
             };
         let mut session = session_arc.lock().await;
-        if super::worktree_lifecycle::changes_attachment(&session.thread, patch) {
+        if scope_patch {
             if let Err(error) =
-                super::worktree_lifecycle::check_idle_attachment(&session).and_then(|_| {
-                    super::worktree_lifecycle::check_unchanged_attachment(&session, &thread_before)
-                })
+                super::worktree_lifecycle::check_unchanged_attachment(&session, &thread_before)
             {
+                return Ok(command_error_response(
+                    StatusCode::CONFLICT,
+                    "scope_changed",
+                    error,
+                ));
+            }
+        }
+        if super::worktree_lifecycle::changes_attachment(&session.thread, patch) {
+            if let Err(error) = super::worktree_lifecycle::check_idle_attachment(&session) {
                 return Ok(command_error_response(
                     StatusCode::CONFLICT,
                     "scope_changed",

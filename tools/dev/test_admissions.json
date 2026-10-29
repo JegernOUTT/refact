@@ -1599,7 +1599,7 @@
       "failure_mode": "worktree_create creates/attaches a worktree but does not scope later tools in the same batch (execution_scope not updated), fails to persist the attachment, fails to emit the UI thread_updated event, or creates a duplicate registry record on repeat.",
       "importance": "Writes after attach would land in the user's source checkout despite the chat claiming isolation (destructive filesystem scope), and lost persistence/UI desync or nested duplicates break worktree lifecycle.",
       "nearest_retained": {
-        "fingerprint": "3a94975d09816438e21f3ad8893f69e05ebd128aa7a041dfd1d8c9fc54568f51",
+        "fingerprint": "e4c5ed8c3e9d19f351030ed992d1c9659e5dbb61271659ea36a4dff683cddba0",
         "why_insufficient": "Queue set_params attach-by-id test resolves an EXISTING registry record via resolve_worktree_setparams_update; it never runs the tool, never creates a worktree, never updates AtCommandsContext.execution_scope for the remainder of a running tool batch, and does not cover repeat-call reuse."
       },
       "oracle": "After tool call: session.thread.worktree is Some; context.execution_scope resolves relative 'following.txt' to exactly attached.root/following.txt; write there leaves source/following.txt absent; saved trajectory JSON worktree.id == attached.id; a broadcast event with type=='thread_updated' and worktree.id==attached.id exists; second call succeeds with registry records.len()==1 and same attached id.",
@@ -1711,7 +1711,7 @@
       "failure_mode": "Privacy record computation fails after the worktree is created but the chat is already half-attached (thread.worktree, execution_scope, message, version or event mutated) or error lacks recoverable worktree id.",
       "importance": "Privacy policy failure must not leave an attached scope without privacy records; the retained checkout must be recoverable.",
       "nearest_retained": {
-        "fingerprint": "3a94975d09816438e21f3ad8893f69e05ebd128aa7a041dfd1d8c9fc54568f51",
+        "fingerprint": "e4c5ed8c3e9d19f351030ed992d1c9659e5dbb61271659ea36a4dff683cddba0",
         "why_insufficient": "Queue attach test has a valid privacy policy and no ordering between privacy record computation and session mutation."
       },
       "oracle": "Error starts with exact policy.compile() error of the invalid fixture policy and contains the single registry id; registry has exactly 1 record; execution_scope None; thread.worktree None; messages empty; trajectory_version unchanged; no broadcast event.",
@@ -2704,6 +2704,216 @@
       "author": "parent planner chat (context-cap fix and test author, mutant/restored evidence runner)",
       "reviewer": "background_agent:bgagent-225c2d36-ce33-43f6-b90b-cb667ed02f98 (independent evidence and ledger review)",
       "review_evidence": "Reviewer read the test body (subchat.rs 5667-5780) and production save_through_runner_session/save_subchat_trajectory/save_failed_subchat_trajectory; confirmed line 5776 is assert_eq!(saved.thread.context_tokens_cap, None); sha256-verified source binary, mutant binary and both logs; cmp shows only 17 differing bytes inside the 21-byte patch at offset 0x970a730, original bytes in the source binary match metadata, nm places the closure at 0x970b730, disassembly of replacement confirmed. Source reviewer subchat-b5ed3883-90be-441b-a9ee-4a950c547ebb approved test relevance contingent on this red/green. Limits: the mutation is a binary-level approximation of the no-live-session path, the witness covers only the persisted-None assertion, and the other ten scenarios are admitted as meaningful workload by semantic inspection, not individually mutated."
+    },
+    {
+      "fingerprint": "e4c5ed8c3e9d19f351030ed992d1c9659e5dbb61271659ea36a4dff683cddba0",
+      "failure_mode": "Generic SetParams permits task-managed attachment or detachment, or ambiguous scope fields mutate registry references.",
+      "importance": "Task checkout ownership must remain planner-controlled; refused transitions cannot change real registry references.",
+      "nearest_retained": {
+        "fingerprint": "3f5626bb342e0a780a4ff926bf150ff2477366b078b08fd470b9e14d075e7d73",
+        "why_insufficient": "The unchanged HTTP running-child scenario protects background-child rebind refusal and same-ID temperature update, not task-agent-kind with missing task metadata, guessed task target, or ambiguous scope fields."
+      },
+      "oracle": "Exact refusal reason and registry equality after ambiguous/task-target/current-task refusals; ordinary by-ID attach resolves creatable path inside isolated checkout and adds exactly the expected chat reference.",
+      "prerequisites": "Fresh temporary git repo, real ordinary checkout and task_agent target with task ownership/reference. Ambiguous-field refusal precedes ordinary attach; successful ordinary attach precedes task-target and current-task refusals. Current-task fixture deliberately has task_agent kind with no task_meta.",
+      "shipping_implementation": "resolve_worktree_setparams_update -> check_worktree_setparams_authority; real WorktreeService and ExecutionScope.",
+      "layer": "Existing queue module test with isolated real filesystem/registry.",
+      "why_cheapest": "Extends the existing registry fixture without a new test, daemon or provider; it exercises actual resolver refusal and reference side effects.",
+      "meaningful_cases": 4,
+      "occurrences": 1,
+      "critical": true,
+      "criticality_reason": "Checkout ownership, paused controls and stale transition fencing are critical lifecycle/authority contracts.",
+      "removed_coverage": "No physical cases removed or added; prior ordinary attach/detach and busy/idle decisions remain in the same existing fixtures.",
+      "determinism": "Temporary isolated fixture; no provider/network or readiness sleep. Commands run in reviewed offline CA-bound ci-test lane with RUST_MIN_STACK=16777216.",
+      "author": "task agent-WT-HOTFIX-FINAL-49f55167 fixture corrections; inherited hotfix production guarded implementation",
+      "reviewer": "background_agent:bgagent-21dee9f8-04bf-4916-a9b5-e9c78a456f27",
+      "review_evidence": "Planner authorized exact metadata update after actual independent review, WT-HOTFIX-FINAL card comment2031ebbb-a02f-4adc-ad40-1099c04d014a; full data draft memory0db422d2 and corrections in planner authorization. Parent-authenticated lossless artifact SHA85e8f37351c37f696b5abe048befaf0b43ccb913a3b6b0ec34bf6579b7e6f9bb (manifest883e8774), all six raw log/command hashes bound in witness records. Source/nonmasking peer951 review also reported by parent. Reviewer inspected source and witness evidence; reviewer did not execute tests. Exact prerequisite, mixed queued/direct-layer, in-memory and narrow-mutant limitations recorded, no all-permutation/parent-mutant claim.",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "/qual-toolchain/bin/cargo",
+            "test",
+            "--offline",
+            "--locked",
+            "--profile",
+            "ci-test",
+            "-p",
+            "refact-lsp",
+            "--lib",
+            "chat::queue::tests::worktree_setparams_attach_by_id_resolves_registry_and_scopes_create",
+            "--",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/wt-hotfix-final/ca-results/rust-witness-mutant-0.log SHA256 18769ce136959d1cb46e077fea6834a50093b9cf808116741df9754b234be907; command record SHA256 bac93e7b974474822897d7cdba2e1c4e02bcdb81f04408629bcd66dabc979552; exactly 0 passed, 1 failed"
+        },
+        "passing": {
+          "command": [
+            "/qual-toolchain/bin/cargo",
+            "test",
+            "--offline",
+            "--locked",
+            "--profile",
+            "ci-test",
+            "-p",
+            "refact-lsp",
+            "--lib",
+            "chat::queue::tests::worktree_setparams_attach_by_id_resolves_registry_and_scopes_create",
+            "--",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/wt-hotfix-final/ca-results/rust-witness-restored-0.log SHA256 7e939608b5a9a35668f6e1e978dede6bddeeb028a91d06b9fa7a082581526885; command record SHA256 3c8599de940455ed223f6ffa3418b1800df17f09cd5d30349280797f2013509e; exactly 1 passed, 0 failed"
+        },
+        "intended_diagnostic": "src/chat/queue.rs:3180:9: left None; right Some(task_worktree_scope_owned refusal); only current task_agent-kind guard removed; guessed-target stage passes before the witnessed failure, not a guessed-target mutation witness.",
+        "production_target": "check_worktree_setparams_authority current worktree.kind task_agent predicate",
+        "before_fix": {
+          "reference": ".refact/wt-hotfix-final/bootstrap-ca/rust-aggregate.patch; combined three-disjoint-hunk shipping mutant, not three separate mutant builds",
+          "fingerprint": "e74943270fafd3ed8adffcd74b7e619e2161fdc156d574a960624c568e834d55"
+        }
+      }
+    },
+    {
+      "fingerprint": "a292120e33406ffbfe5ed92925a9235b63f763d23a3ec0cfeb7af6a18a4b0d9a",
+      "failure_mode": "Queued ownership/detach refusal erases Paused pending controls or task identity; legitimate same-binding mode/model edits are blocked; explicit ordinary detach removes the wrong registry references.",
+      "importance": "A rejected scope change must not resume pending tools or lose task ownership; legitimate non-rebinding changes must preserve controls.",
+      "nearest_retained": {
+        "fingerprint": "6096f28d4843168d8234ae56e5c08d3432e0ab079d2331b7e295e1c09b9c93a8",
+        "why_insufficient": "The unchanged sealed-child HTTP test refuses three rebind forms and accepts model edits for completed background children; it does not inspect queued task-agent Paused controls, live task admission with absent metadata, or selected registry-reference removal."
+      },
+      "oracle": "For queued guessed-task-target resolver refusal, full serialized Paused runtime/thread/messages and pending-control oracles occur before ACK/cardinality checks. Initial role-agents identity-strip/detach refusals also preserve controls through the earlier authority branch. Same-binding request mode no_tools changes genuinely non-explore source mode to canonical explore and changes model while preserving identity/Paused controls; model-only update also accepted. Final direct ordinary resolver detach removes only selected ordinary references and retains task-target references.",
+      "prerequisites": "Real ordinary and task_agent checkouts with nonempty references; actual pending assistant tool call, confirmation reason, approved sibling, confirmation timestamp and interruptible wait in Paused state. Source mode asserted non-explore, request no_tools normalizes to explore, and source model differs before positive mutation; live admission reserved then ended.",
+      "shipping_implementation": "First five stages drive command_handlers::handle_queue_command SetParams through handle_set_params; final role-agent null strip, metadata-absent live admission refusal, and ordinary explicit detach stages call resolve_worktree_setparams_update directly. Real WorktreeService registry and production task admission tracking.",
+      "layer": "Existing queue module test driving real queued command consumer.",
+      "why_cheapest": "The retained detach fixture can inspect actual Paused state and reference effects without new test declarations or HTTP/daemon duplication.",
+      "meaningful_cases": 8,
+      "occurrences": 1,
+      "critical": true,
+      "criticality_reason": "Checkout ownership, paused controls and stale transition fencing are critical lifecycle/authority contracts.",
+      "removed_coverage": "No physical cases removed or added; prior ordinary attach/detach and busy/idle decisions remain in the same existing fixtures.",
+      "determinism": "Temporary isolated fixture; no provider/network or readiness sleep. Commands run in reviewed offline CA-bound ci-test lane with RUST_MIN_STACK=16777216.",
+      "author": "task agent-WT-HOTFIX-FINAL-49f55167 fixture corrections; inherited hotfix production guarded implementation",
+      "reviewer": "background_agent:bgagent-21dee9f8-04bf-4916-a9b5-e9c78a456f27",
+      "review_evidence": "Planner authorized exact metadata update after actual independent review, WT-HOTFIX-FINAL card comment2031ebbb-a02f-4adc-ad40-1099c04d014a; full data draft memory0db422d2 and corrections in planner authorization. Parent-authenticated lossless artifact SHA85e8f37351c37f696b5abe048befaf0b43ccb913a3b6b0ec34bf6579b7e6f9bb (manifest883e8774), all six raw log/command hashes bound in witness records. Source/nonmasking peer951 review also reported by parent. Reviewer inspected source and witness evidence; reviewer did not execute tests. Exact prerequisite, mixed queued/direct-layer, in-memory and narrow-mutant limitations recorded, no all-permutation/parent-mutant claim.",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "/qual-toolchain/bin/cargo",
+            "test",
+            "--offline",
+            "--locked",
+            "--profile",
+            "ci-test",
+            "-p",
+            "refact-lsp",
+            "--lib",
+            "chat::queue::tests::worktree_setparams_detach_clears_registry_reference",
+            "--",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/wt-hotfix-final/ca-results/rust-witness-mutant-1.log SHA256 23574de7e65691943ba1cdd240f8136bc4cc79e13e27d610aeda48261dccda48; command record SHA256 f525d0f5ab3bccf81c11d8dd5e6bd9d2696fd7d8962e02a1906029c39865031b; exactly 0 passed, 1 failed"
+        },
+        "passing": {
+          "command": [
+            "/qual-toolchain/bin/cargo",
+            "test",
+            "--offline",
+            "--locked",
+            "--profile",
+            "ci-test",
+            "-p",
+            "refact-lsp",
+            "--lib",
+            "chat::queue::tests::worktree_setparams_detach_clears_registry_reference",
+            "--",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/wt-hotfix-final/ca-results/rust-witness-restored-1.log SHA256 3d8ff270d6d64c0cd169a4f2cdb2070d82a4f535eaee6062fb94e98560e608df; command record SHA256 4bb24a80640946509d7f22a8c55c1aa851c1f1a54d9b422efd6a18b821c2286b; exactly 1 passed, 0 failed"
+        },
+        "intended_diagnostic": "src/chat/queue.rs:3351:13: left Idle; right Paused; task-role guards were not mutated; their early authority-refusal branch preserves state. Only queued guessed-target resolver-error stage demonstrates old Idle reset sensitivity before its ACK oracle.",
+        "production_target": "command_handlers::handle_set_params resolver-error branch",
+        "before_fix": {
+          "reference": ".refact/wt-hotfix-final/bootstrap-ca/rust-aggregate.patch; combined three-disjoint-hunk shipping mutant, not three separate mutant builds",
+          "fingerprint": "e74943270fafd3ed8adffcd74b7e619e2161fdc156d574a960624c568e834d55"
+        }
+      }
+    },
+    {
+      "fingerprint": "e67e7e863cb573816f2865e852e8ade8202f8b8f7477c7b419b396564fa26a10",
+      "failure_mode": "After an awaited transition the lifecycle helper accepts changed task-card ownership or parent identity; busy refusal and unchanged-ownership allowance must stay valid.",
+      "importance": "Stale attachment completion cannot apply to a different task owner.",
+      "nearest_retained": {
+        "fingerprint": "3b14ca5b64d02b1797755cbd9ff9e44db9e783818ea174076b537e662999f41d",
+        "why_insufficient": "The unchanged production-tool child identity test rejects a mismatched root before creating a checkout; it does not compare saved and current task metadata after an awaited boundary."
+      },
+      "oracle": "Exact Error for ExecutingTools, exact Ok for Idle and unchanged populated task identity, exact ownership-changed Error after task card drift and separately after parent drift.",
+      "prerequisites": "Populate full task identity and root before cloning snapshot; assert unchanged identity is accepted; actually change card T-1 to T-2, then restore snapshot and change absent parent to a different parent.",
+      "shipping_implementation": "check_idle_attachment and check_unchanged_attachment used by queued/HTTP/tool attachment consumers.",
+      "layer": "Existing pure production-helper module test.",
+      "why_cheapest": "Direct helper decisions are sufficient for this guard; no additional async harness or test declaration.",
+      "meaningful_cases": 5,
+      "occurrences": 1,
+      "critical": true,
+      "criticality_reason": "Checkout ownership, paused controls and stale transition fencing are critical lifecycle/authority contracts.",
+      "removed_coverage": "No physical cases added or removed. Existing busy/idle checks retained and extended by unchanged populated ownership, task-card drift and parent drift guard checks; no filesystem/queued/HTTP race coverage claimed.",
+      "determinism": "Pure in-memory synchronous production-helper test; populated task identity and explicit deterministic state/field mutations, no temporary filesystem, network, tasks or timing. Actual witness command used reviewed offline ci-test lane and RUST_MIN_STACK=16777216.",
+      "author": "task agent-WT-HOTFIX-FINAL-49f55167 fixture corrections; inherited hotfix production guarded implementation",
+      "reviewer": "background_agent:bgagent-21dee9f8-04bf-4916-a9b5-e9c78a456f27",
+      "review_evidence": "Planner authorized exact metadata update after actual independent review, WT-HOTFIX-FINAL card comment2031ebbb-a02f-4adc-ad40-1099c04d014a; full data draft memory0db422d2 and corrections in planner authorization. Parent-authenticated lossless artifact SHA85e8f37351c37f696b5abe048befaf0b43ccb913a3b6b0ec34bf6579b7e6f9bb (manifest883e8774), all six raw log/command hashes bound in witness records. Source/nonmasking peer951 review also reported by parent. Reviewer inspected source and witness evidence; reviewer did not execute tests. Exact prerequisite, mixed queued/direct-layer, in-memory and narrow-mutant limitations recorded, no all-permutation/parent-mutant claim.",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "/qual-toolchain/bin/cargo",
+            "test",
+            "--offline",
+            "--locked",
+            "--profile",
+            "ci-test",
+            "-p",
+            "refact-lsp",
+            "--lib",
+            "chat::worktree_lifecycle::tests::worktree_create_ui_attachment_refuses_executing_scope_but_accepts_idle",
+            "--",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": ".refact/wt-hotfix-final/ca-results/rust-witness-mutant-2.log SHA256 e61b6891d669340b463a40de869cccee544d535bfc1ffc75382d1c577eda08d6; command record SHA256 a697832505cdc4f774b8d84f23a183eb86520187b90b246c05d128dc0a3c43ae; exactly 0 passed, 1 failed"
+        },
+        "passing": {
+          "command": [
+            "/qual-toolchain/bin/cargo",
+            "test",
+            "--offline",
+            "--locked",
+            "--profile",
+            "ci-test",
+            "-p",
+            "refact-lsp",
+            "--lib",
+            "chat::worktree_lifecycle::tests::worktree_create_ui_attachment_refuses_executing_scope_but_accepts_idle",
+            "--",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "evidence": ".refact/wt-hotfix-final/ca-results/rust-witness-restored-2.log SHA256 821539836a4ebdc63773042fe94b3498d1f141b99fe7d3be5c6afba831d5634b; command record SHA256 c5c2bc35b0f5e5f700c1a4074dc3634291d50fe1fa96c9189f4024321f654a73; exactly 1 passed, 0 failed"
+        },
+        "intended_diagnostic": "src/chat/worktree_lifecycle.rs:127:9: left Ok(()); right Err(Worktree attachment canceled: chat scope or ownership changed)",
+        "production_target": "check_unchanged_attachment task_meta comparison",
+        "before_fix": {
+          "reference": ".refact/wt-hotfix-final/bootstrap-ca/rust-aggregate.patch; combined three-disjoint-hunk shipping mutant, not three separate mutant builds",
+          "fingerprint": "e74943270fafd3ed8adffcd74b7e619e2161fdc156d574a960624c568e834d55"
+        }
+      }
     }
   ],
   "classifications": [
@@ -10857,20 +11067,23 @@
     },
     {
       "path": "refact-agent/engine/src/chat/worktree_lifecycle.rs",
-      "before_sha256": null,
-      "after_sha256": "bbc022c09ae256db857827a87889f76af15e415e8ae0243208c1ded1a79843e9",
+      "before_sha256": "bbc022c09ae256db857827a87889f76af15e415e8ae0243208c1ded1a79843e9",
+      "after_sha256": "ba61f0e0e51d327a6d9afbead76efc53b41f52a136dbe68da09c40130a7a7dd0",
       "affected_tests": [
+        "e67e7e863cb573816f2865e852e8ade8202f8b8f7477c7b419b396564fa26a10",
+        "e4c5ed8c3e9d19f351030ed992d1c9659e5dbb61271659ea36a4dff683cddba0",
+        "a292120e33406ffbfe5ed92925a9235b63f763d23a3ec0cfeb7af6a18a4b0d9a",
         "36f42119424520746f299cd88e4a8b4940df61714068fdc50e8fe9c0b38bcca3",
+        "6fa237cb85be9565d9a7f7bbeb28bdfa57190abce87dc9da1bf98f6f2852f768",
         "3b14ca5b64d02b1797755cbd9ff9e44db9e783818ea174076b537e662999f41d",
         "3f5626bb342e0a780a4ff926bf150ff2477366b078b08fd470b9e14d075e7d73",
-        "6fa237cb85be9565d9a7f7bbeb28bdfa57190abce87dc9da1bf98f6f2852f768",
-        "bcb7422e8beadea3423beaa5c266d65f31390fd6b50399b7f4df48ca88f2037d"
+        "6096f28d4843168d8234ae56e5c08d3432e0ab079d2331b7e295e1c09b9c93a8"
       ],
-      "impact": "New helpers transition_lock/is_worktree_patch/changes_attachment/check_idle_attachment/check_unchanged_attachment; changes_attachment is the old resolver rebind predicate moved verbatim and shared by queue authority check and HTTP/queued busy guards. Tool tests exercise transition_lock/check_unchanged_attachment (happy path) and the idle helper; seal_refusal test exercises changes_attachment through HTTP.",
-      "execution_context": "Module test plus tool module consumer.",
-      "author": "parent: worktree_create root-chat tool feature",
-      "reviewer": "background_agent: final ledger-refresh reviewer subagent of parent (independent of production author; own id not self-visible)",
-      "review_evidence": "Independent final read of exact diffs vs base 87e9902492eef2dad02005e069ca0b4131bff54e: authority preflight is a pure extraction of the unchanged resolver clauses (resolver still calls it first); busy/recheck guards now fire only when shared changes_attachment(thread,patch) is true (same predicate as the authority check), evaluated under transition_lock + session lock, so same-ID echo with other params skips the guard and real rebinds of running chats still 409 after the authority 400 preflight. Unchanged retained seal_refusal_tests.rs:443-508 asserts both running-child rebind/unbind 400 and same-worktree temperature 200. Hashes from current files."
+      "impact": "Scope-patch classification includes ownership fields; changes_ownership checks task/root/parent/link; post-await unchanged check includes parent/link. Existing helper fixture adds populated task-card and parent drift. Shared idle/transition/tool helper consumers remain mapped; executed new witness isolates task_meta comparison, not parent/link races.",
+      "execution_context": "Pure production-helper test plus queued/HTTP/tool consumers; existing historical tool witnesses preserved, not replayed.",
+      "author": "task agent-WT-HOTFIX-FINAL-49f55167 data-only proposal for inherited hotfix impact",
+      "reviewer": "background_agent:bgagent-2cbaabd0-8198-4f47-9c66-821ae3e54a44",
+      "review_evidence": "Actual independent semantic source/mapping/nearest review reported and authorized by planner; WT-HOTFIX-FINAL card comment2031ebbb-a02f-4adc-ad40-1099c04d014a. Parent crosschecked raw Git base2b5/head a380 file hashes. Root library actual3642 passed0failed11ignored under admitted normal CA; three mutant/restored exact witnesses authenticated in artifact85e8f373. Witnesses narrowly cover current task-kind, queued resolver Idle reset and helper task_meta; shared HTTP helper/resolver coverage is indirect, no dedicated HTTP await-race failure witness. Historical tool combined-mutant provenance and rerun limitations remain unchanged. Reviewer did not execute tests."
     },
     {
       "path": "refact-agent/engine/src/tools/mod.rs",
@@ -10917,32 +11130,32 @@
     },
     {
       "path": "refact-agent/engine/src/chat/handlers.rs",
-      "before_sha256": "a7073c528c75165f08e05ccb45742a6da7d0a5c23150c4326232e247faaa98e1",
-      "after_sha256": "f0b4cc266a015253d00d3a01db954521a38624a32b185c0852f8fdbac5fe3a0a",
+      "before_sha256": "f0b4cc266a015253d00d3a01db954521a38624a32b185c0852f8fdbac5fe3a0a",
+      "after_sha256": "94d75310e6496ffffd8301f4b8c5ceeea738f9542cbc196205fbdc1d6aaabd95",
       "affected_tests": [
         "3f5626bb342e0a780a4ff926bf150ff2477366b078b08fd470b9e14d075e7d73",
-        "3a94975d09816438e21f3ad8893f69e05ebd128aa7a041dfd1d8c9fc54568f51"
+        "6096f28d4843168d8234ae56e5c08d3432e0ab079d2331b7e295e1c09b9c93a8",
+        "e4c5ed8c3e9d19f351030ed992d1c9659e5dbb61271659ea36a4dff683cddba0",
+        "a292120e33406ffbfe5ed92925a9235b63f763d23a3ec0cfeb7af6a18a4b0d9a"
       ],
-      "impact": "HTTP set_params worktree patch takes transition_lock, preflights check_worktree_setparams_authority (400 bad_request + rejected Ack) before any busy check, and applies busy (409 busy) and post-resolution scope_changed (409) guards only when changes_attachment says the patch actually rebinds. Same-ID echo plus other params bypasses only the guards, not authority/resolution. Busy/scope_changed HTTP 409 wiring has no dedicated test; retained unchanged seal_refusal test covers running-child 400 rebind/unbind and 200 same-ID temperature update.",
-      "execution_context": "agents::seal_refusal_tests drives this handler over HTTP; queue attach test shares the resolver.",
-      "author": "parent: worktree_create root-chat tool feature",
-      "reviewer": "background_agent: final ledger-refresh reviewer subagent of parent (independent of production author; own id not self-visible)",
-      "review_evidence": "Independent final read of exact diffs vs base 87e9902492eef2dad02005e069ca0b4131bff54e: authority preflight is a pure extraction of the unchanged resolver clauses (resolver still calls it first); busy/recheck guards now fire only when shared changes_attachment(thread,patch) is true (same predicate as the authority check), evaluated under transition_lock + session lock, so same-ID echo with other params skips the guard and real rebinds of running chats still 409 after the authority 400 preflight. Unchanged retained seal_refusal_tests.rs:443-508 asserts both running-child rebind/unbind 400 and same-worktree temperature 200. Hashes from current files."
+      "impact": "HTTP post-resolution unchanged ownership recheck now applies to ownership patches as well as rebindings; separate busy check stays attachment-only. Running/sealed background-child HTTP tests are direct consumers; attach/detach share authority resolver, not dedicated HTTP ownership-drift coverage.",
+      "execution_context": "Retained HTTP boundary tests plus shared resolver tests; no claim that helper task_meta mutant proves HTTP await-race wiring.",
+      "author": "task agent-WT-HOTFIX-FINAL-49f55167 data-only proposal for inherited hotfix impact",
+      "reviewer": "background_agent:bgagent-2cbaabd0-8198-4f47-9c66-821ae3e54a44",
+      "review_evidence": "Actual independent semantic source/mapping/nearest review reported and authorized by planner; WT-HOTFIX-FINAL card comment2031ebbb-a02f-4adc-ad40-1099c04d014a. Parent crosschecked raw Git base2b5/head a380 file hashes. Root library actual3642 passed0failed11ignored under admitted normal CA; three mutant/restored exact witnesses authenticated in artifact85e8f373. Witnesses narrowly cover current task-kind, queued resolver Idle reset and helper task_meta; shared HTTP helper/resolver coverage is indirect, no dedicated HTTP await-race failure witness. Historical tool combined-mutant provenance and rerun limitations remain unchanged. Reviewer did not execute tests."
     },
     {
       "path": "refact-agent/engine/src/chat/command_handlers.rs",
-      "before_sha256": "309cf36525d536bc472896b20c7e7380decebade710ef40b1ed4b7f86e9cd09e",
-      "after_sha256": "e2682bf7eda86296a65a131eae21cdbd49cbbbed57af59ce19006584df43239d",
+      "before_sha256": "e2682bf7eda86296a65a131eae21cdbd49cbbbed57af59ce19006584df43239d",
+      "after_sha256": "38002554f4a05451f09189dc59ec0688606ddb63bde983d2e25e738514a9c472",
       "affected_tests": [
-        "3a94975d09816438e21f3ad8893f69e05ebd128aa7a041dfd1d8c9fc54568f51",
-        "48e72f3eacee5cfe92778ff0203d5049bdd70cc437c4c15090904a929a30c40b",
-        "f4254c9e677161fae2f874214c0cddcc545d7a2a4cb2984bb72eb1fd42d9580b"
+        "a292120e33406ffbfe5ed92925a9235b63f763d23a3ec0cfeb7af6a18a4b0d9a"
       ],
-      "impact": "Queued set_params worktree patch takes transition_lock and, only when changes_attachment is true, rejects busy before resolution and busy/changed scope after resolution via reject_guard; idle attach/detach and same-ID echo paths unchanged. Busy wiring untested (helper-only coverage).",
-      "execution_context": "Queue worktree set_params tests.",
-      "author": "parent: worktree_create root-chat tool feature",
-      "reviewer": "background_agent: final ledger-refresh reviewer subagent of parent (independent of production author; own id not self-visible)",
-      "review_evidence": "Independent final read of exact diffs vs base 87e9902492eef2dad02005e069ca0b4131bff54e: authority preflight is a pure extraction of the unchanged resolver clauses (resolver still calls it first); busy/recheck guards now fire only when shared changes_attachment(thread,patch) is true (same predicate as the authority check), evaluated under transition_lock + session lock, so same-ID echo with other params skips the guard and real rebinds of running chats still 409 after the authority 400 preflight. Unchanged retained seal_refusal_tests.rs:443-508 asserts both running-child rebind/unbind 400 and same-worktree temperature 200. Hashes from current files."
+      "impact": "Queued authority preflight refuses ownership edits before generic parameter application; resolver errors emit rejected ACK without Error/Idle runtime reset; post-await unchanged-ownership guard applies to scope patches. Existing detach drives real consumer, same-binding edits and refusal side effects.",
+      "execution_context": "Queued consumer test; no separate HTTP race mutant.",
+      "author": "task agent-WT-HOTFIX-FINAL-49f55167 data-only proposal for inherited hotfix impact",
+      "reviewer": "background_agent:bgagent-2cbaabd0-8198-4f47-9c66-821ae3e54a44",
+      "review_evidence": "Actual independent semantic source/mapping/nearest review reported and authorized by planner; WT-HOTFIX-FINAL card comment2031ebbb-a02f-4adc-ad40-1099c04d014a. Parent crosschecked raw Git base2b5/head a380 file hashes. Root library actual3642 passed0failed11ignored under admitted normal CA; three mutant/restored exact witnesses authenticated in artifact85e8f373. Witnesses narrowly cover current task-kind, queued resolver Idle reset and helper task_meta; shared HTTP helper/resolver coverage is indirect, no dedicated HTTP await-race failure witness. Historical tool combined-mutant provenance and rerun limitations remain unchanged. Reviewer did not execute tests."
     },
     {
       "path": "refact-agent/engine/crates/refact-tui/src/history/cells/tool_family.rs",
@@ -11050,19 +11263,19 @@
     },
     {
       "path": "refact-agent/engine/src/chat/queue.rs",
-      "before_sha256": "467797997191a57f66560dfb85a4888cb0cc0dceb91d18e210dc8ba6f05dd856",
-      "after_sha256": "8d18a9dcf2a4913ef75fc5158f11f1add442b1653f3a569bc3a936b7a10bc29a",
+      "before_sha256": "8d18a9dcf2a4913ef75fc5158f11f1add442b1653f3a569bc3a936b7a10bc29a",
+      "after_sha256": "f30d9533839b246f06d679485a1de2799a4675f2625c10d861fc32657199e048",
       "affected_tests": [
+        "e4c5ed8c3e9d19f351030ed992d1c9659e5dbb61271659ea36a4dff683cddba0",
+        "a292120e33406ffbfe5ed92925a9235b63f763d23a3ec0cfeb7af6a18a4b0d9a",
         "3f5626bb342e0a780a4ff926bf150ff2477366b078b08fd470b9e14d075e7d73",
-        "3a94975d09816438e21f3ad8893f69e05ebd128aa7a041dfd1d8c9fc54568f51",
-        "f4254c9e677161fae2f874214c0cddcc545d7a2a4cb2984bb72eb1fd42d9580b",
-        "48e72f3eacee5cfe92778ff0203d5049bdd70cc437c4c15090904a929a30c40b"
+        "6096f28d4843168d8234ae56e5c08d3432e0ab079d2331b7e295e1c09b9c93a8"
       ],
-      "impact": "Extracts the existing child-rebind authority clauses from resolve_worktree_setparams_update into pub(crate) check_worktree_setparams_authority with identical clauses; inline rebind predicate moved verbatim to worktree_lifecycle::changes_attachment. Resolver still calls the check first, so queue behavior is unchanged; HTTP handler reuses it as preflight.",
-      "execution_context": "Same queue module tests and seal_refusal HTTP test; no test body or helper changed.",
-      "author": "parent: worktree_create root-chat tool feature",
-      "reviewer": "background_agent: final ledger-refresh reviewer subagent of parent (independent of production author; own id not self-visible)",
-      "review_evidence": "Independent final read of exact diffs vs base 87e9902492eef2dad02005e069ca0b4131bff54e: authority preflight is a pure extraction of the unchanged resolver clauses (resolver still calls it first); busy/recheck guards now fire only when shared changes_attachment(thread,patch) is true (same predicate as the authority check), evaluated under transition_lock + session lock, so same-ID echo with other params skips the guard and real rebinds of running chats still 409 after the authority 400 preflight. Unchanged retained seal_refusal_tests.rs:443-508 asserts both running-child rebind/unbind 400 and same-worktree temperature 200. Hashes from current files."
+      "impact": "Authority rejects ambiguous id/object fields, task roles/kind, task ownership replacement and tracked task admission; ordinary caller cannot attach task_agent target. Existing retained registry fixtures extended with full Paused-state refusals, selected-reference detach and genuine canonical mode/model positive controls. Six cfg(test) constant qualifiers corrected; no shipping qualifier change.",
+      "execution_context": "Real registry/resolver and queued tests; shared HTTP authority consumer.",
+      "author": "task agent-WT-HOTFIX-FINAL-49f55167 data-only proposal for inherited hotfix impact",
+      "reviewer": "background_agent:bgagent-2cbaabd0-8198-4f47-9c66-821ae3e54a44",
+      "review_evidence": "Actual independent semantic source/mapping/nearest review reported and authorized by planner; WT-HOTFIX-FINAL card comment2031ebbb-a02f-4adc-ad40-1099c04d014a. Parent crosschecked raw Git base2b5/head a380 file hashes. Root library actual3642 passed0failed11ignored under admitted normal CA; three mutant/restored exact witnesses authenticated in artifact85e8f373. Witnesses narrowly cover current task-kind, queued resolver Idle reset and helper task_meta; shared HTTP helper/resolver coverage is indirect, no dedicated HTTP await-race failure witness. Historical tool combined-mutant provenance and rerun limitations remain unchanged. Reviewer did not execute tests."
     },
     {
       "path": "refact-agent/engine/crates/refact-worktrees/src/service.rs",

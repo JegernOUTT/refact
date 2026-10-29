@@ -1400,7 +1400,32 @@ pub(crate) async fn check_worktree_setparams_authority(
     thread: &ThreadParams,
     patch: &serde_json::Value,
 ) -> Result<(), String> {
+    if patch.get("worktree_id").is_some() && patch.get("worktree").is_some() {
+        return Err("ambiguous_worktree_scope: SetParams cannot contain both worktree_id and worktree; attachment unchanged".into());
+    }
     let rebinds_worktree = super::worktree_lifecycle::changes_attachment(thread, patch);
+    let changes_ownership = super::worktree_lifecycle::changes_ownership(thread, patch);
+    if rebinds_worktree || changes_ownership {
+        let task_agent = thread
+            .task_meta
+            .as_ref()
+            .is_some_and(|meta| matches!(meta.role.as_str(), "agent" | "agents"))
+            || thread
+                .worktree
+                .as_ref()
+                .is_some_and(|worktree| worktree.kind == "task_agent")
+            || patch
+                .get("task_meta")
+                .and_then(|meta| meta.get("role"))
+                .and_then(|role| role.as_str())
+                .is_some_and(|role| matches!(role, "agent" | "agents"));
+        if task_agent
+            || (changes_ownership && thread.task_meta.is_some())
+            || crate::tasks::admission::is_tracked(chat_id).await
+        {
+            return Err(super::worktree_lifecycle::TASK_SCOPE_REFUSAL.into());
+        }
+    }
     if rebinds_worktree {
         if let Some(reason) = crate::agents::seal::seal_reason(&app, chat_id).await {
             return Err(reason.message());
@@ -1439,6 +1464,9 @@ pub async fn resolve_worktree_setparams_update(
         }
         let service = worktree_service_from_gcx(app.clone(), None).await?;
         let view = service.get_worktree(worktree_id).await?;
+        if view.meta.kind == "task_agent" {
+            return Err(super::worktree_lifecycle::TASK_SCOPE_REFUSAL.into());
+        }
         let reference = reference_for_thread(chat_id, thread, &view.meta.kind);
         let view = service.add_reference(worktree_id, reference).await?;
         if let Some(old) = thread
@@ -3087,8 +3115,18 @@ mod tests {
             .unwrap();
         let mut thread = ThreadParams::default();
         thread.id = "chat-attach".to_string();
+        let registry_before = service.load_registry().await.unwrap();
+        let ambiguous = resolve_worktree_setparams_update(
+            app.clone(),
+            "chat-attach",
+            &thread,
+            &json!({"worktree_id": created.worktree.meta.id, "worktree": null}),
+        )
+        .await;
+        assert_eq!(ambiguous.err().as_deref(), Some("ambiguous_worktree_scope: SetParams cannot contain both worktree_id and worktree; attachment unchanged"));
+        assert_eq!(service.load_registry().await.unwrap(), registry_before);
         let update = resolve_worktree_setparams_update(
-            app,
+            app.clone(),
             "chat-attach",
             &thread,
             &json!({"worktree_id": created.worktree.meta.id.clone()}),
@@ -3109,6 +3147,46 @@ mod tests {
             registry.records[0].references[0].chat_id.as_deref(),
             Some("chat-attach")
         );
+        let task_checkout = service
+            .create_worktree(crate::worktrees::types::CreateWorktreeRequest {
+                kind: Some("task_agent".into()),
+                chat_id: Some("task-owner".into()),
+                task_id: Some("task-1".into()),
+                card_id: Some("T-1".into()),
+                agent_id: Some("agent-1".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let registry_before = service.load_registry().await.unwrap();
+        let refused = resolve_worktree_setparams_update(
+            app.clone(),
+            "chat-attach",
+            &thread,
+            &json!({"worktree_id": task_checkout.worktree.meta.id}),
+        )
+        .await;
+        assert_eq!(
+            refused.err().as_deref(),
+            Some(crate::chat::worktree_lifecycle::TASK_SCOPE_REFUSAL)
+        );
+        let task_thread = ThreadParams {
+            worktree: Some(task_checkout.worktree.meta),
+            ..Default::default()
+        };
+        let refused = resolve_worktree_setparams_update(
+            app,
+            "task-owner",
+            &task_thread,
+            &json!({"worktree": null}),
+        )
+        .await;
+        assert_eq!(
+            refused.err().as_deref(),
+            Some(crate::chat::worktree_lifecycle::TASK_SCOPE_REFUSAL)
+        );
+        assert_eq!(service.load_registry().await.unwrap(), registry_before);
+        assert_eq!(thread.worktree, Some(created.worktree.meta));
     }
 
     #[tokio::test]
@@ -3139,6 +3217,257 @@ mod tests {
             .unwrap();
         let mut thread = ThreadParams::default();
         thread.worktree = Some(created.worktree.meta.clone());
+        let registry_before = service.load_registry().await.unwrap();
+        assert!(!registry_before.records[0].references.is_empty());
+        let owner = TaskMeta {
+            task_id: "task-1".into(),
+            role: "agents".into(),
+            agent_id: Some("agent-1".into()),
+            card_id: Some("T-1".into()),
+            planner_chat_id: Some("planner-1".into()),
+        };
+        thread.task_meta = Some(owner.clone());
+        let mut session = ChatSession::new("chat-detach".into());
+        session.thread = thread.clone();
+        session.add_message(ChatMessage {
+            role: "assistant".into(),
+            tool_calls: Some(vec![serde_json::from_value(json!({
+                "id": "pending-shell", "type": "function",
+                "function": {"name": "shell", "arguments": "{\"command\":\"pwd\"}"}
+            }))
+            .unwrap()]),
+            ..Default::default()
+        });
+        session.set_paused_with_reasons_and_auto_approved(
+            vec![PauseReason {
+                reason_type: "confirmation".into(),
+                tool_name: "shell".into(),
+                command: "pwd".into(),
+                rule: "ask".into(),
+                tool_call_id: "pending-shell".into(),
+                integr_config_path: None,
+            }],
+            vec!["approved-sibling".into()],
+            Some(0),
+        );
+        session.confirmation_paused_at = Some((
+            std::time::Instant::now(),
+            std::collections::HashSet::from(["pending-shell".into()]),
+        ));
+        session.begin_interruptible_wait();
+        assert_eq!(session.runtime.state, SessionState::Paused);
+        assert!(session.runtime.paused);
+        assert_eq!(session.runtime.pause_reasons.len(), 1);
+        assert_eq!(session.messages[0].tool_calls.as_ref().unwrap().len(), 1);
+        assert_eq!(session.interruptible_waits, 1);
+        assert!(session.runtime.waiting_interruptible);
+        let before_runtime = serde_json::to_value(&session.runtime).unwrap();
+        let before_messages = serde_json::to_value(&session.messages).unwrap();
+        let before_thread = serde_json::to_value(&session.thread).unwrap();
+        let before_confirmation = session.confirmation_paused_at.clone();
+        let before_version = session.trajectory_version;
+        let mut events = session.subscribe();
+        let session = Arc::new(AMutex::new(session));
+        let strip = make_request(ChatCommand::SetParams {
+            patch: json!({"task_meta": {"task_id": "task-1", "role": "planner"}}),
+        });
+        assert!(matches!(
+            command_handlers::handle_queue_command(app.clone(), session.clone(), strip).await,
+            command_handlers::QueueCommandOutcome::Continue
+        ));
+        let detach = make_request(ChatCommand::SetParams {
+            patch: json!({"worktree": null}),
+        });
+        assert!(matches!(
+            command_handlers::handle_queue_command(app.clone(), session.clone(), detach).await,
+            command_handlers::QueueCommandOutcome::Continue
+        ));
+        let refused = drain_events(&mut events);
+        let acks: Vec<_> = refused
+            .iter()
+            .filter_map(|event| match event {
+                ChatEvent::Ack {
+                    accepted, result, ..
+                } => Some((accepted, result)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(acks.len(), 2);
+        for (accepted, result) in acks {
+            assert!(!accepted);
+            assert_eq!(
+                result.as_ref().unwrap()["error"],
+                crate::chat::worktree_lifecycle::TASK_SCOPE_REFUSAL
+            );
+        }
+        {
+            let session = session.lock().await;
+            assert_eq!(session.thread.task_meta, Some(owner));
+            assert_eq!(session.thread.worktree, thread.worktree);
+            assert_eq!(
+                serde_json::to_value(&session.thread).unwrap(),
+                before_thread
+            );
+            assert_eq!(
+                serde_json::to_value(&session.runtime).unwrap(),
+                before_runtime
+            );
+            assert_eq!(session.runtime.paused_message_index, Some(0));
+            assert_eq!(session.runtime.auto_approved_tool_ids, ["approved-sibling"]);
+            assert!(session.runtime.accepted_tool_ids.is_empty());
+            assert_eq!(session.confirmation_paused_at, before_confirmation);
+            assert_eq!(session.interruptible_waits, 1);
+            assert!(!session.wait_interrupt_flag.load(Ordering::SeqCst));
+            assert_eq!(session.trajectory_version, before_version);
+            assert_eq!(
+                serde_json::to_value(&session.messages).unwrap(),
+                before_messages
+            );
+        }
+        assert_eq!(service.load_registry().await.unwrap(), registry_before);
+        let task_checkout = service
+            .create_worktree(crate::worktrees::types::CreateWorktreeRequest {
+                kind: Some("task_agent".into()),
+                chat_id: Some("task-owner".into()),
+                task_id: Some("task-1".into()),
+                card_id: Some("T-1".into()),
+                agent_id: Some("agent-1".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let registry_with_target = service.load_registry().await.unwrap();
+        let ordinary_thread = {
+            let mut session = session.lock().await;
+            session.thread.task_meta = None;
+            serde_json::to_value(&session.thread).unwrap()
+        };
+        let target = make_request(ChatCommand::SetParams {
+            patch: json!({"worktree_id": task_checkout.worktree.meta.id}),
+        });
+        assert!(matches!(
+            command_handlers::handle_queue_command(app.clone(), session.clone(), target).await,
+            command_handlers::QueueCommandOutcome::Continue
+        ));
+        let refused = drain_events(&mut events);
+        {
+            let session = session.lock().await;
+            assert_eq!(session.runtime.state, SessionState::Paused);
+            assert_eq!(
+                serde_json::to_value(&session.runtime).unwrap(),
+                before_runtime
+            );
+            assert_eq!(
+                serde_json::to_value(&session.thread).unwrap(),
+                ordinary_thread
+            );
+            assert_eq!(session.runtime.paused_message_index, Some(0));
+            assert_eq!(session.runtime.auto_approved_tool_ids, ["approved-sibling"]);
+            assert!(session.runtime.accepted_tool_ids.is_empty());
+            assert_eq!(session.confirmation_paused_at, before_confirmation);
+            assert_eq!(session.interruptible_waits, 1);
+            assert!(!session.wait_interrupt_flag.load(Ordering::SeqCst));
+            assert_eq!(session.trajectory_version, before_version);
+            assert_eq!(
+                serde_json::to_value(&session.messages).unwrap(),
+                before_messages
+            );
+        }
+        assert_eq!(refused.len(), 1);
+        assert!(matches!(
+            &refused[0],
+            ChatEvent::Ack { accepted: false, result: Some(result), .. }
+                if result["error"] == crate::chat::worktree_lifecycle::TASK_SCOPE_REFUSAL
+        ));
+        assert_eq!(service.load_registry().await.unwrap(), registry_with_target);
+        session.lock().await.thread.task_meta = thread.task_meta.clone();
+        let same_binding = make_request(ChatCommand::SetParams {
+            patch: json!({
+                "task_meta": thread.task_meta,
+                "worktree_id": created.worktree.meta.id,
+                "mode": "no_tools", "model": "hotfix-model"
+            }),
+        });
+        assert_ne!(session.lock().await.thread.mode, "explore");
+        assert_ne!(session.lock().await.thread.model, "hotfix-model");
+        assert!(matches!(
+            command_handlers::handle_queue_command(app.clone(), session.clone(), same_binding)
+                .await,
+            command_handlers::QueueCommandOutcome::Finished
+        ));
+        {
+            let session = session.lock().await;
+            assert_eq!(session.thread.mode, "explore");
+            assert_eq!(session.thread.model, "hotfix-model");
+            assert_eq!(session.thread.task_meta, thread.task_meta);
+            assert_eq!(session.thread.worktree, thread.worktree);
+            assert_eq!(session.runtime.state, SessionState::Paused);
+            assert!(session.runtime.paused);
+            assert_eq!(
+                serde_json::to_value(&session.runtime.pause_reasons).unwrap(),
+                before_runtime["pause_reasons"]
+            );
+            assert_eq!(session.runtime.paused_message_index, Some(0));
+            assert_eq!(session.runtime.auto_approved_tool_ids, ["approved-sibling"]);
+            assert!(session.runtime.accepted_tool_ids.is_empty());
+            assert_eq!(session.confirmation_paused_at, before_confirmation);
+            assert_eq!(session.interruptible_waits, 1);
+            assert!(session.runtime.waiting_interruptible);
+            assert!(!session.wait_interrupt_flag.load(Ordering::SeqCst));
+            assert_eq!(
+                serde_json::to_value(&session.messages[0]).unwrap(),
+                before_messages[0]
+            );
+        }
+        let model_only = make_request(ChatCommand::SetParams {
+            patch: json!({"model": "hotfix-model-only"}),
+        });
+        assert!(matches!(
+            command_handlers::handle_queue_command(app.clone(), session.clone(), model_only).await,
+            command_handlers::QueueCommandOutcome::Finished
+        ));
+        {
+            let session = session.lock().await;
+            assert_eq!(session.thread.model, "hotfix-model-only");
+            assert_eq!(session.thread.mode, "explore");
+            assert_eq!(session.thread.task_meta, thread.task_meta);
+            assert_eq!(session.thread.worktree, thread.worktree);
+            assert_eq!(session.runtime.state, SessionState::Paused);
+            assert!(session.runtime.paused);
+            assert_eq!(session.runtime.pause_reasons.len(), 1);
+        }
+        assert_eq!(service.load_registry().await.unwrap(), registry_with_target);
+        thread.task_meta.as_mut().unwrap().role = "agent".into();
+        let refused = resolve_worktree_setparams_update(
+            app.clone(),
+            "chat-detach",
+            &thread,
+            &json!({"task_meta": null}),
+        )
+        .await;
+        assert_eq!(
+            refused.err().as_deref(),
+            Some(crate::chat::worktree_lifecycle::TASK_SCOPE_REFUSAL)
+        );
+        thread.task_meta = None;
+        let admission_id = format!("metadata-missing-{}", Uuid::new_v4());
+        crate::tasks::admission::reserve(&app, &admission_id, "project", "planner-1", 0)
+            .await
+            .unwrap();
+        assert!(crate::tasks::admission::is_tracked(&admission_id).await);
+        let refused = resolve_worktree_setparams_update(
+            app.clone(),
+            &admission_id,
+            &thread,
+            &json!({"worktree": null}),
+        )
+        .await;
+        crate::tasks::admission::end(&admission_id).await;
+        assert_eq!(
+            refused.err().as_deref(),
+            Some(crate::chat::worktree_lifecycle::TASK_SCOPE_REFUSAL)
+        );
+        assert_eq!(service.load_registry().await.unwrap(), registry_with_target);
         let update = resolve_worktree_setparams_update(
             app,
             "chat-detach",
@@ -3150,7 +3479,24 @@ mod tests {
         .unwrap();
         assert!(update.worktree.is_none());
         let registry = service.load_registry().await.unwrap();
-        assert!(registry.records[0].references.is_empty());
+        let detached = registry
+            .records
+            .iter()
+            .find(|record| record.meta.id == created.worktree.meta.id)
+            .unwrap();
+        assert!(detached.references.is_empty());
+        let task_target = registry
+            .records
+            .iter()
+            .find(|record| record.meta.id == task_checkout.worktree.meta.id)
+            .unwrap();
+        let task_target_before = registry_with_target
+            .records
+            .iter()
+            .find(|record| record.meta.id == task_checkout.worktree.meta.id)
+            .unwrap();
+        assert!(!task_target_before.references.is_empty());
+        assert_eq!(task_target.references, task_target_before.references);
     }
 
     #[tokio::test]

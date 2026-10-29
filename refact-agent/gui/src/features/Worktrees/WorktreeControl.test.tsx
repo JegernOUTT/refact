@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
+import { act } from "react-dom/test-utils";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { http, HttpResponse } from "msw";
 import { fireEvent, screen, waitFor, render } from "../../utils/test-utils";
 import type { Chat } from "../Chat/Thread/types";
-import { ChatThreadProvider } from "../Chat/Thread";
+import { ChatThreadProvider, selectThreadWorktreeById } from "../Chat/Thread";
+import { worktreesApi } from "../../services/refact/worktrees";
 import type {
   WorktreeDiffResponse,
   WorktreeListResponse,
@@ -316,20 +318,88 @@ describe("WorktreeControl", () => {
     ).toBeInTheDocument();
   });
 
-  test("label shows worktree branch", async () => {
+  test("empty, stale, and failed inventory retain attached scope without commands", async () => {
     const record = makeWorktreeRecord("wt-branch", "refact/chat/branch");
+    const other = makeWorktreeRecord("wt-other", "refact/chat/other");
+    const commandCalls: JsonObject[] = [];
+    server.use(commandCapture(commandCalls));
+    const { store, user } = renderControl([], record.meta);
 
-    renderControl([record], record.meta);
-
-    await waitFor(() => {
-      expect(screen.getByTestId("worktree-control-trigger")).toHaveTextContent(
-        "refact/chat/branch",
-      );
+    await act(async () => {
+      await store
+        .dispatch(
+          worktreesApi.endpoints.listWorktrees.initiate(undefined, {
+            subscribe: false,
+          }),
+        )
+        .unwrap();
     });
+    expect(selectThreadWorktreeById(store.getState(), "chat-1")).toEqual(
+      record.meta,
+    );
+    expect(screen.getByTestId("worktree-control-trigger")).toHaveTextContent(
+      "refact/chat/branch",
+    );
+    expect(commandCalls).toHaveLength(0);
+
+    server.use(worktreesList([other]));
+    await act(async () => {
+      await store
+        .dispatch(
+          worktreesApi.endpoints.listWorktrees.initiate(undefined, {
+            subscribe: false,
+            forceRefetch: true,
+          }),
+        )
+        .unwrap();
+    });
+    expect(selectThreadWorktreeById(store.getState(), "chat-1")).toEqual(
+      record.meta,
+    );
+    expect(commandCalls).toHaveLength(0);
+    await user.click(screen.getByTestId("worktree-control-trigger"));
+    expect(
+      await screen.findByText(
+        "Worktree inventory is unavailable or incomplete; scope unchanged.",
+      ),
+    ).toBeInTheDocument();
+    await act(async () => {
+      await store
+        .dispatch(
+          worktreesApi.endpoints.listWorktrees.initiate(undefined, {
+            subscribe: false,
+          }),
+        )
+        .unwrap();
+    });
+    await user.keyboard("{Escape}");
+
+    server.use(
+      http.get("*/v1/worktrees", () =>
+        HttpResponse.json({ error: "Inventory unavailable" }, { status: 503 }),
+      ),
+    );
+    await act(async () => {
+      const result = await store.dispatch(
+        worktreesApi.endpoints.listWorktrees.initiate(undefined, {
+          subscribe: false,
+          forceRefetch: true,
+        }),
+      );
+      expect(result).toMatchObject({ error: { status: 503 } });
+    });
+    expect(selectThreadWorktreeById(store.getState(), "chat-1")).toEqual(
+      record.meta,
+    );
+    expect(screen.getByTestId("worktree-control-trigger")).toHaveTextContent(
+      "refact/chat/branch",
+    );
+    expect(commandCalls).toHaveLength(0);
   });
 
-  test("pane providers scope worktree labels to each pane thread", async () => {
+  test("pane providers retain managed worktree labels and refuse scope changes before transport", async () => {
     const global = makeWorktreeRecord("wt-global", "refact/chat/global");
+    global.meta.kind = "task_agent";
     const left = makeWorktreeRecord("wt-left", "refact/chat/left");
     const right = makeWorktreeRecord("wt-right", "refact/chat/right");
     const chat = makeChatState("global-chat", global.meta);
@@ -342,6 +412,7 @@ describe("WorktreeControl", () => {
         ...globalRuntime.thread,
         id: "left-chat",
         worktree: left.meta,
+        task_meta: { task_id: "task-1", role: "agent" },
       },
     };
     chat.threads["right-chat"] = {
@@ -350,11 +421,20 @@ describe("WorktreeControl", () => {
         ...globalRuntime.thread,
         id: "right-chat",
         worktree: right.meta,
+        task_meta: { task_id: "task-1", role: "agents" },
       },
     };
-    server.use(worktreesList([global, left, right]));
+    const commandCalls: JsonObject[] = [];
+    const createCalls: JsonObject[] = [];
+    const deleteCalls: string[] = [];
+    server.use(
+      worktreesList([]),
+      commandCapture(commandCalls),
+      createWorktreeHandler(global, createCalls),
+      deleteWorktreeHandler(deleteCalls),
+    );
 
-    render(
+    const { user, store } = render(
       <>
         <ChatThreadProvider chatId="left-chat">
           <WorktreeControl />
@@ -362,6 +442,7 @@ describe("WorktreeControl", () => {
         <ChatThreadProvider chatId="right-chat">
           <WorktreeControl />
         </ChatThreadProvider>
+        <WorktreeControl />
       </>,
       {
         preloadedState: {
@@ -371,14 +452,54 @@ describe("WorktreeControl", () => {
       },
     );
 
-    await waitFor(() => {
-      const triggers = screen.getAllByTestId("worktree-control-trigger");
-      expect(triggers).toHaveLength(2);
-      expect(triggers[0]).toHaveTextContent("refact/chat/left");
-      expect(triggers[1]).toHaveTextContent("refact/chat/right");
-      expect(triggers[0]).not.toHaveTextContent("refact/chat/global");
-      expect(triggers[1]).not.toHaveTextContent("refact/chat/global");
+    await act(async () => {
+      await store
+        .dispatch(
+          worktreesApi.endpoints.listWorktrees.initiate(undefined, {
+            subscribe: false,
+          }),
+        )
+        .unwrap();
     });
+    const triggers = screen.getAllByTestId("worktree-control-trigger");
+    expect(triggers).toHaveLength(3);
+    expect(triggers[0]).toHaveTextContent("refact/chat/left");
+    expect(triggers[1]).toHaveTextContent("refact/chat/right");
+    expect(triggers[2]).toHaveTextContent("refact/chat/global");
+    expect(triggers[0]).not.toHaveTextContent("refact/chat/global");
+    expect(triggers[1]).not.toHaveTextContent("refact/chat/global");
+    for (const trigger of triggers) {
+      expect(trigger).toBeDisabled();
+      expect(trigger).toHaveAttribute(
+        "title",
+        expect.stringContaining("Task-managed scope"),
+      );
+      await user.click(trigger);
+      fireEvent.click(trigger);
+    }
+    expect(
+      screen.queryByRole("button", { name: "Create worktree" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", {
+        name: "Detach worktree and use main workspace",
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Select worktree/ }),
+    ).not.toBeInTheDocument();
+    expect(selectThreadWorktreeById(store.getState(), "left-chat")).toEqual(
+      left.meta,
+    );
+    expect(selectThreadWorktreeById(store.getState(), "right-chat")).toEqual(
+      right.meta,
+    );
+    expect(selectThreadWorktreeById(store.getState(), "global-chat")).toEqual(
+      global.meta,
+    );
+    expect(commandCalls).toHaveLength(0);
+    expect(createCalls).toHaveLength(0);
+    expect(deleteCalls).toHaveLength(0);
   });
 
   test("pane provider attaches selected worktree to pane thread", async () => {
@@ -807,9 +928,10 @@ describe("WorktreeControl", () => {
       deleteWorktreeHandler(deleteCalls),
     );
 
-    const { user } = renderControl([record], record.meta);
+    const { user, store } = renderControl([record], record.meta);
 
     await user.click(screen.getByTestId("worktree-control-trigger"));
+    expect(commandCalls).toHaveLength(0);
     await user.click(
       await screen.findByRole("button", {
         name: "Detach worktree and use main workspace",
@@ -822,6 +944,7 @@ describe("WorktreeControl", () => {
       patch: { worktree: null },
     });
     expect(deleteCalls).toHaveLength(0);
+    expect(selectThreadWorktreeById(store.getState(), "chat-1")).toBeNull();
     expect(screen.getByTestId("worktree-control-trigger")).toHaveTextContent(
       "dev",
     );

@@ -1,15 +1,10 @@
-import React, {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import React, { useCallback, useMemo, useRef, useState } from "react";
 import { skipToken } from "@reduxjs/toolkit/query";
 import { GitBranch } from "lucide-react";
 import { Icon, Popover } from "../../components/ui";
 import {
   DEFAULT_MODE,
+  selectThreadById,
   selectThreadWorktreeById,
   setThreadWorktree,
   useThreadId,
@@ -98,6 +93,14 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
   const currentWorktree = useAppSelector((state) =>
     selectThreadWorktreeById(state, chatId),
   );
+  const taskRole = useAppSelector(
+    (state) => selectThreadById(state, chatId)?.task_meta?.role,
+  );
+  const managedScope =
+    taskRole === "agent" ||
+    taskRole === "agents" ||
+    currentWorktree?.kind === "task_agent";
+  const scopeDisabled = Boolean(disabled) || managedScope;
   const host = useAppSelector(selectHost);
   const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey) ?? undefined;
@@ -105,6 +108,7 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
   const {
     data,
     isLoading,
+    isError,
     refetch: refetchList,
   } = useListWorktreesQuery(undefined, {
     refetchOnFocus: true,
@@ -112,29 +116,22 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
   });
   const handleMenuOpenChange = useCallback(
     (open: boolean) => {
+      if (open && scopeDisabled) return;
       setMenuOpen(open);
       if (open) void refetchList();
       onOpenChange?.(open);
     },
-    [onOpenChange, refetchList],
+    [onOpenChange, refetchList, scopeDisabled],
   );
   const [createOpen, setCreateOpen] = useState(false);
   const createInFlightRef = useRef(false);
   const [isCreatingTransaction, setIsCreatingTransaction] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
-  const pendingCreatedWorktreeIdRef = useRef<string | null>(null);
-  const [pendingCreatedWorktreeId, setPendingCreatedWorktreeIdState] = useState<
-    string | null
-  >(null);
-  const setPendingCreatedWorktreeId = useCallback((id: string | null) => {
-    pendingCreatedWorktreeIdRef.current = id;
-    setPendingCreatedWorktreeIdState(id);
-  }, []);
   const copyToClipboard = useCopyToClipboard();
   const { openFolderInNewWindow } = useEventsBusForIDE();
   const { data: branchData } = useListWorktreesQuery(
-    createOpen ? WORKTREE_BRANCH_ARGS : skipToken,
+    createOpen && !scopeDisabled ? WORKTREE_BRANCH_ARGS : skipToken,
   );
   const [createWorktree] = useCreateWorktreeMutation();
   const [deleteWorktree] = useDeleteWorktreeMutation();
@@ -145,9 +142,10 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
     () => records.find((record) => record.meta.id === currentWorktree?.id),
     [currentWorktree?.id, records],
   );
-  const isPendingCreatedWorktree =
-    currentWorktree?.id !== undefined &&
-    pendingCreatedWorktreeIdRef.current === currentWorktree.id;
+  const inventoryWarning =
+    currentWorktree && !isLoading && (isError || (data && !currentRecord))
+      ? "Worktree inventory is unavailable or incomplete; scope unchanged."
+      : null;
   const currentDiffQuery = currentRecord
     ? {
         id: currentRecord.meta.id,
@@ -175,7 +173,9 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
     : sourceBranch
       ? `Main workspace · ${sourceBranch}`
       : "Main workspace · no branch detected";
-  const triggerLabel = fullLabel;
+  const triggerLabel = managedScope
+    ? `${fullLabel} · Task-managed scope`
+    : fullLabel;
   const hostCanOpenFolder =
     host === "vscode" || host === "jetbrains" || host === "ide";
   const branchSuggestion = useMemo(
@@ -201,7 +201,7 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
       worktree: WorktreeMeta | null,
       { optimistic = true }: AttachWorktreeOptions = {},
     ): Promise<boolean> => {
-      if (!chatId) return false;
+      if (!chatId || scopeDisabled) return false;
       const previousWorktree = currentWorktree;
       if (optimistic) {
         dispatch(setThreadWorktree({ chatId, worktree }));
@@ -229,36 +229,8 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
         return false;
       }
     },
-    [apiKey, chatId, config, currentWorktree, dispatch],
+    [apiKey, chatId, config, currentWorktree, dispatch, scopeDisabled],
   );
-
-  useEffect(() => {
-    if (
-      !currentWorktree ||
-      !data ||
-      currentRecord !== undefined ||
-      isPendingCreatedWorktree
-    ) {
-      return;
-    }
-    void attachWorktree(null);
-  }, [
-    attachWorktree,
-    currentRecord,
-    currentWorktree,
-    data,
-    isPendingCreatedWorktree,
-  ]);
-
-  useEffect(() => {
-    if (currentRecord?.meta.id === pendingCreatedWorktreeId) {
-      setPendingCreatedWorktreeId(null);
-    }
-  }, [
-    currentRecord?.meta.id,
-    pendingCreatedWorktreeId,
-    setPendingCreatedWorktreeId,
-  ]);
 
   const handleSelect = useCallback(
     (record: WorktreeRecordView) => {
@@ -277,7 +249,7 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
 
   const handleCreate = useCallback(
     async ({ branch, baseBranch }: CreateWorktreeValues) => {
-      if (!chatId || createInFlightRef.current) return;
+      if (!chatId || scopeDisabled || createInFlightRef.current) return;
       createInFlightRef.current = true;
       setIsCreatingTransaction(true);
       setCreateError(null);
@@ -288,7 +260,6 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
       };
       try {
         const response = await createWorktree(request).unwrap();
-        setPendingCreatedWorktreeId(response.worktree.meta.id);
         const attached = await attachWorktree(response.worktree.meta, {
           optimistic: false,
         });
@@ -296,7 +267,6 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
           setCreateOpen(false);
           handleMenuOpenChange(false);
         } else {
-          setPendingCreatedWorktreeId(null);
           await deleteWorktree({
             id: response.worktree.meta.id,
             delete_branch: true,
@@ -306,7 +276,6 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
           );
         }
       } catch (error) {
-        setPendingCreatedWorktreeId(null);
         setCreateError(worktreeErrorText(error));
       } finally {
         createInFlightRef.current = false;
@@ -319,7 +288,7 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
       createWorktree,
       deleteWorktree,
       handleMenuOpenChange,
-      setPendingCreatedWorktreeId,
+      scopeDisabled,
     ],
   );
 
@@ -360,7 +329,10 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
 
   return (
     <>
-      <Popover open={menuOpen} onOpenChange={handleMenuOpenChange}>
+      <Popover
+        open={menuOpen && !scopeDisabled}
+        onOpenChange={handleMenuOpenChange}
+      >
         <Popover.Trigger asChild>
           <button
             type="button"
@@ -370,7 +342,7 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
             }`}
             title={triggerLabel}
             aria-label={`Worktree scope: ${triggerLabel}`}
-            disabled={disabled}
+            disabled={scopeDisabled}
           >
             <span className={styles.triggerInner}>
               {!currentWorktree && sourceBranch && (
@@ -393,27 +365,29 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
             </span>
           </button>
         </Popover.Trigger>
-        <WorktreeMenu
-          chatId={chatId}
-          currentWorktree={currentWorktree}
-          currentRecord={currentRecord}
-          records={records}
-          isLoading={isLoading}
-          feedback={feedback}
-          canCopyPath={Boolean(copyPath)}
-          onCreate={() => {
-            setCreateError(null);
-            setCreateOpen(true);
-          }}
-          onSelect={handleSelect}
-          onDetach={handleDetach}
-          onOpenInNewWindow={() => void handleOpenInNewWindow()}
-          onCopyPath={handleCopyPath}
-        />
+        {!scopeDisabled && (
+          <WorktreeMenu
+            chatId={chatId}
+            currentWorktree={currentWorktree}
+            currentRecord={currentRecord}
+            records={records}
+            isLoading={isLoading}
+            feedback={inventoryWarning ?? feedback}
+            canCopyPath={Boolean(copyPath)}
+            onCreate={() => {
+              setCreateError(null);
+              setCreateOpen(true);
+            }}
+            onSelect={handleSelect}
+            onDetach={handleDetach}
+            onOpenInNewWindow={() => void handleOpenInNewWindow()}
+            onCopyPath={handleCopyPath}
+          />
+        )}
       </Popover>
 
       <CreateWorktreeModal
-        open={createOpen}
+        open={createOpen && !scopeDisabled}
         defaultBranch={branchSuggestion}
         defaultBaseBranch={baseBranch}
         baseBranchOptions={baseBranchOptions}
