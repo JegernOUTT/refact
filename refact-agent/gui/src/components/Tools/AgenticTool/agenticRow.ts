@@ -57,12 +57,27 @@ function fallbackRow(input: AgenticRowInput, name: string): AgenticRow {
     presentation.headline.startsWith(`Request ${verb.toLowerCase()}`)
       ? null
       : presentation.headline;
+  const facts = presentation.facts.filter(
+    (fact) => !FILLER_FACTS.has(fact.label),
+  );
+  if (name === "wait") {
+    const interrupted = presentation.stateLabel === "Interrupted";
+    return {
+      ...emptyRow(verb),
+      target,
+      meta: quiet ? presentation.stateLabel.toLowerCase() : null,
+      status: interrupted ? "cancelled" : quiet ? "done" : status,
+      statusLabel: interrupted ? presentation.stateLabel : null,
+      facts,
+      useFamilyView: true,
+    };
+  }
   return {
     ...emptyRow(verb),
     target,
     status: quiet && status !== "failed" ? "done" : status,
     statusLabel: quiet ? null : presentation.stateLabel,
-    facts: presentation.facts.filter((fact) => !FILLER_FACTS.has(fact.label)),
+    facts,
     useFamilyView: true,
   };
 }

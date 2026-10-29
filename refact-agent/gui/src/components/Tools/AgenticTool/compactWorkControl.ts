@@ -455,20 +455,20 @@ export function buildCompactWorkControlPresentation(
       const outcome = readCompactText(result, "outcome");
       const labels: Partial<Record<string, State>> = {
         completed: {
-          stateLabel: "Wait completed · target success unconfirmed",
+          stateLabel: "Completed",
           tone: "neutral",
         },
         timed_out: {
-          stateLabel: "Wait timed out · target unchanged",
-          tone: "warning",
+          stateLabel: "Timed out",
+          tone: "neutral",
         },
         interrupted: {
-          stateLabel: "Wait interrupted · target unchanged",
+          stateLabel: "Interrupted",
           tone: "warning",
         },
         parked: {
-          stateLabel: "Planner parked · agents nonterminal",
-          tone: "warning",
+          stateLabel: "Parked",
+          tone: "neutral",
         },
         no_matching_agents: {
           stateLabel: "No matching agents",

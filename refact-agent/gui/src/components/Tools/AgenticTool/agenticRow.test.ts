@@ -239,6 +239,24 @@ describe("buildAgenticRow agent inspection", () => {
     expect(result.status).toBe("done");
     expect(result.statusLabel).toBeNull();
   });
+
+  test.each([
+    ["timed_out", "done", null, "timed out"],
+    ["completed", "done", null, "completed"],
+    ["interrupted", "cancelled", "Interrupted", null],
+  ] as const)(
+    "wait outcome %s is a %s row without a long pill",
+    (outcome, status, statusLabel, meta) => {
+      const result = row({
+        toolName: "wait",
+        args: { target: { kind: "process", process_id: "exec_1" } },
+        content: JSON.stringify({ target: "process", outcome }),
+      });
+      expect(result.status).toBe(status);
+      expect(result.statusLabel).toBe(statusLabel);
+      expect(result.meta).toBe(meta);
+    },
+  );
 });
 
 describe("buildAgenticRow goal and plan", () => {
