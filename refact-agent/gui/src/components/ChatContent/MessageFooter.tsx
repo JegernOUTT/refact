@@ -1,4 +1,4 @@
-import React, { useCallback } from "react";
+import React, { useCallback, useLayoutEffect, useRef } from "react";
 import { Flex, Text } from "@radix-ui/themes";
 import * as HoverCard from "@radix-ui/react-hover-card";
 import { BarChart3, Copy, GitBranch, Trash2 } from "lucide-react";
@@ -15,6 +15,8 @@ import { CheckpointButton } from "../../features/Checkpoints";
 import { Portal } from "../Portal";
 import { Icon, IconButton, Tooltip } from "../ui";
 import styles from "./MessageFooter.module.css";
+
+const FOOTER_OVERLAY_WIDTH_VAR = "--rf-footer-overlay-w";
 
 type MessageFooterProps = {
   messageId?: string;
@@ -61,6 +63,28 @@ export const MessageFooter: React.FC<MessageFooterProps> = ({
   messageIndex,
   overlay = false,
 }) => {
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    if (!overlay) return;
+    const content = contentRef.current;
+    const wrapper = content?.parentElement?.parentElement;
+    if (!content || !wrapper) return;
+    const apply = () =>
+      wrapper.style.setProperty(
+        FOOTER_OVERLAY_WIDTH_VAR,
+        `${content.offsetWidth}px`,
+      );
+    apply();
+    const observer =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(apply);
+    observer?.observe(content);
+    return () => {
+      observer?.disconnect();
+      wrapper.style.removeProperty(FOOTER_OVERLAY_WIDTH_VAR);
+    };
+  }, [overlay]);
+
   const handleBranch = useCallback(() => {
     if (messageId && onBranch) {
       onBranch(messageId);
@@ -99,7 +123,7 @@ export const MessageFooter: React.FC<MessageFooterProps> = ({
       data-testid="message-footer"
       data-overlay={overlay}
     >
-      <div className={styles.footerContent}>
+      <div className={styles.footerContent} ref={contentRef}>
         {checkpoints &&
           checkpoints.length > 0 &&
           messageIndex !== undefined && (

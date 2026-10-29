@@ -43,6 +43,15 @@
   display: none;
 }
 
+.messageWrapper:hover
+  > [data-transcript-item]:first-child
+  [data-transcript-row],
+.messageWrapper:focus-within
+  > [data-transcript-item]:first-child
+  [data-transcript-row] {
+  margin-inline-end: var(--rf-footer-overlay-w, 0);
+}
+
 .messageWrapper:hover .footerContent,
 .messageWrapper:focus-within .footerContent,
 .messageWrapper:focus-visible .footerContent {

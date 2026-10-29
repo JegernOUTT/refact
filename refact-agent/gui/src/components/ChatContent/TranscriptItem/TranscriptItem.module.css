@@ -291,7 +291,9 @@
 
 @media (prefers-reduced-motion: no-preference) {
   .row {
-    transition: background-color var(--rf-dur-fast) var(--rf-ease-standard);
+    transition:
+      background-color var(--rf-dur-fast) var(--rf-ease-standard),
+      margin-inline-end var(--rf-dur-fast) var(--rf-ease-standard);
   }
 
   .icon {

@@ -286,6 +286,7 @@ export function TranscriptItem({
       className={classNames(styles.row, rowClassName)}
       data-expandable={canExpand}
       data-testid="transcript-row"
+      data-transcript-row=""
       onClick={canExpand ? handleRowClick : undefined}
     >
       {rowTooltip ? <Tooltip content={rowTooltip}>{head}</Tooltip> : head}
