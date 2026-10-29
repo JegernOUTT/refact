@@ -5,6 +5,7 @@ import {
 import {
   NO_RESULT_LABEL,
   fromAgentStatus,
+  transcriptStatusLabel,
   type TranscriptStatus,
   type UnrecordedResultState,
 } from "../../ChatContent/TranscriptItem";
@@ -212,4 +213,28 @@ export function applyTransport(
       useFamilyView: false,
     };
   return row;
+}
+
+function isLiveStatus(status: TranscriptStatus): boolean {
+  return status === "running" || status === "waiting";
+}
+
+export function settleRecordedRow(
+  row: AgenticRow,
+  transport: CompactTransportState,
+): AgenticRow {
+  if (transport !== "succeeded" || !isLiveStatus(row.status)) return row;
+  const reported = (
+    row.statusLabel ?? transcriptStatusLabel(row.status)
+  ).toLowerCase();
+  const meta =
+    row.meta?.toLowerCase().includes(reported) === true
+      ? row.meta
+      : [row.meta, reported].filter(Boolean).join(" · ");
+  return {
+    ...row,
+    status: "done",
+    statusLabel: null,
+    meta: compactText(meta, META_CHARS),
+  };
 }

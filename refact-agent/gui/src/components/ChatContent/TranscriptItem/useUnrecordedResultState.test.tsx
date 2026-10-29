@@ -88,4 +88,31 @@ describe("useUnrecordedResultState", () => {
       );
     },
   );
+
+  it("a pause on a different tool call id does not make this row needs_you", () => {
+    renderProbes({ busy: false, pausedCallId: "stale" });
+    expect(screen.getByTestId("probe-latest")).toHaveTextContent(
+      `unknown|${NO_RESULT_LABEL}`,
+    );
+  });
+
+  it("a server-executed tool in the latest assistant group runs while streaming", () => {
+    const chat = createDefaultChatState();
+    const runtime = chat.threads[chat.current_thread_id];
+    runtime.streaming = true;
+    runtime.thread.messages = [
+      { role: "user", content: "search the web" },
+      {
+        role: "assistant",
+        content: "",
+        server_executed_tools: [call("server-search")],
+      },
+    ];
+    render(<Probe toolCallId="server-search" />, {
+      preloadedState: { chat },
+    });
+    expect(screen.getByTestId("probe-server-search")).toHaveTextContent(
+      "running|",
+    );
+  });
 });

@@ -3,7 +3,6 @@ import classNames from "classnames";
 import {
   CircleAlert,
   CircleStop,
-  ClipboardList,
   Eye,
   FileDiff,
   Hand,
@@ -30,10 +29,6 @@ import {
 } from "../ui";
 import { useUnrecordedResultState } from "./TranscriptItem/useUnrecordedResultState";
 import { TranscriptItem, type TranscriptStatus } from "./TranscriptItem";
-import {
-  COLLAPSE_ANIMATION_MS,
-  useDelayedUnmount,
-} from "../shared/useDelayedUnmount";
 import {
   DEFAULT_CANCEL_REASON,
   STATUS_TABS,
@@ -164,30 +159,18 @@ function tabCount(rows: AgentStatusRow[], tab: AgentStatusTab): number {
   return rows.filter((row) => row.state === tab).length;
 }
 
-function renderDetailValue(
-  value: string | null,
-  empty: string,
-): React.ReactNode {
-  if (!value) return <span className={styles.mutedValue}>{empty}</span>;
-  return value;
-}
-
 function AgentRowCard({
   row,
-  isExpanded,
   actionsDisabled,
   isSubmitting,
-  onToggle,
   onPulse,
   onDiff,
   onSteer,
   onCancel,
 }: {
   row: AgentStatusRow;
-  isExpanded: boolean;
   actionsDisabled: boolean;
   isSubmitting: boolean;
-  onToggle: (cardId: string) => void;
   onPulse: (row: AgentStatusRow) => void;
   onDiff: (row: AgentStatusRow) => void;
   onSteer: (row: AgentStatusRow) => void;
@@ -195,15 +178,9 @@ function AgentRowCard({
 }) {
   const disabled = actionsDisabled || isSubmitting;
   const isVariant = /[/:]/u.test(row.cardId);
-  const detailsId = React.useId();
-  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(
-    isExpanded,
-    COLLAPSE_ANIMATION_MS,
-  );
-  const shouldRenderDetails = isExpanded || shouldRender;
 
   return (
-    <article className={classNames(styles.agentCard, "rf-enter-rise")}>
+    <article className={styles.agentCard}>
       <div className={styles.agentCardHeader}>
         <div className={styles.agentCardMain}>
           <div className={styles.cardTitleRow}>
@@ -214,30 +191,14 @@ function AgentRowCard({
             <span className={styles.cardTitle}>{row.title}</span>
           </div>
           <div className={styles.stateRow}>
-            <StatusDot
-              status={stateStatus(row.state)}
-              pulse={row.state === "running"}
-            />
+            <StatusDot status={stateStatus(row.state)} />
             <span
-              className={classNames(
-                styles.stateText,
-                stateClass(row.state),
-                row.state === "running" && "rf-status-pulse",
-              )}
+              className={classNames(styles.stateText, stateClass(row.state))}
             >
               {row.stateText}
             </span>
           </div>
         </div>
-        <IconButton
-          aria-controls={detailsId}
-          aria-expanded={isExpanded}
-          aria-label={`Toggle details ${row.cardId}`}
-          icon={ClipboardList}
-          size="sm"
-          variant={isExpanded ? "soft" : "ghost"}
-          onClick={() => onToggle(row.cardId)}
-        />
       </div>
 
       <div className={styles.cardMetaGrid}>
@@ -307,34 +268,22 @@ function AgentRowCard({
         </div>
       )}
 
-      {shouldRenderDetails && (
-        <div
-          className={classNames("rf-expand-grid", styles.detailsGrid)}
-          data-open={isAnimatingOpen}
-          id={detailsId}
-        >
-          <div className={styles.detailsShell}>
-            <div className={styles.details}>
-              <div className={styles.detailBlock}>
-                <span className={styles.detailLabel}>Last status update</span>
-                <div className={styles.detailValue}>
-                  {renderDetailValue(
-                    row.lastStatusUpdate,
-                    "Not included in compact output.",
-                  )}
-                </div>
-              </div>
-              <div className={styles.detailBlock}>
-                <span className={styles.detailLabel}>Final report excerpt</span>
-                <div className={styles.detailValue}>
-                  {renderDetailValue(
-                    row.finalReport ? truncateText(row.finalReport, 300) : null,
-                    "No final report in this output.",
-                  )}
-                </div>
+      {(row.lastStatusUpdate ?? row.finalReport) && (
+        <div className={styles.details} data-testid="agent-status-details">
+          {row.lastStatusUpdate && (
+            <div className={styles.detailBlock}>
+              <span className={styles.detailLabel}>Last status update</span>
+              <div className={styles.detailValue}>{row.lastStatusUpdate}</div>
+            </div>
+          )}
+          {row.finalReport && (
+            <div className={styles.detailBlock}>
+              <span className={styles.detailLabel}>Final report excerpt</span>
+              <div className={styles.detailValue}>
+                {truncateText(row.finalReport, 300)}
               </div>
             </div>
-          </div>
+          )}
         </div>
       )}
     </article>
@@ -349,9 +298,6 @@ export const AgentStatusContent: React.FC<AgentStatusContentProps> = ({
   const [tab, setTab] = useState<AgentStatusTab>("all");
   const [priority, setPriority] = useState<PriorityFilter>("all");
   const [ageFilter, setAgeFilter] = useState<AgeFilter>("all");
-  const [expandedRows, setExpandedRows] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
   const [dialog, setDialog] = useState<DialogState>(null);
   const [steerMessage, setSteerMessage] = useState("");
   const [cancelReason, setCancelReason] = useState(DEFAULT_CANCEL_REASON);
@@ -389,18 +335,6 @@ export const AgentStatusContent: React.FC<AgentStatusContentProps> = ({
     ) {
       setAgeFilter(value);
     }
-  }, []);
-
-  const toggleExpanded = useCallback((cardId: string) => {
-    setExpandedRows((previous) => {
-      const next = new Set(previous);
-      if (next.has(cardId)) {
-        next.delete(cardId);
-      } else {
-        next.add(cardId);
-      }
-      return next;
-    });
   }, []);
 
   const submitCommand = useCallback(
@@ -531,15 +465,13 @@ export const AgentStatusContent: React.FC<AgentStatusContentProps> = ({
         Actions send requests to the planner chat, not direct tool executions.
       </div>
 
-      <div className={classNames(styles.cards, "rf-stagger")} role="table">
+      <div className={styles.cards} role="table">
         {visibleRows.map((row) => (
           <AgentRowCard
             key={row.cardId}
             row={row}
-            isExpanded={expandedRows.has(row.cardId)}
             actionsDisabled={actionsDisabled || !onSubmitCommand}
             isSubmitting={isSubmitting}
-            onToggle={toggleExpanded}
             onPulse={(selectedRow) => {
               void submitCommand(
                 `View pulse ${selectedRow.cardId}`,

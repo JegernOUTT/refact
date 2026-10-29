@@ -239,30 +239,6 @@
   background: var(--rf-surface-glass);
 }
 
-.plainTextCollapsible {
-  color: var(--rf-color-muted);
-}
-
-.plainTextHeader {
-  min-width: 0;
-  flex: 1;
-}
-
-.plainTextLabel {
-  flex-shrink: 0;
-  color: var(--rf-color-muted);
-}
-
-.plainTextPreview {
-  flex: 1;
-  color: var(--rf-color-faint);
-}
-
-.plainTextBody {
-  max-height: 300px;
-  padding-left: var(--rf-space-4);
-}
-
 .virtualizedListWrapper[data-following-scrollbar="true"] .virtuosoScroller {
   scrollbar-color: transparent transparent;
 }

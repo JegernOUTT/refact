@@ -5,10 +5,7 @@ import { useToolCallActivity } from "./useToolCallActivity";
 import { useCopyToClipboard } from "../../../hooks/useCopyToClipboard";
 import { useAppSelector } from "../../../hooks/useAppSelector";
 import type { ToolCall } from "../../../services/refact/types";
-import {
-  extractExecMetadata,
-  getToolEnrichmentPathReferences,
-} from "../../../services/refact/types";
+import { getToolEnrichmentPathReferences } from "../../../services/refact/types";
 import { Button } from "../../ui";
 import {
   TranscriptClamp,
@@ -24,6 +21,7 @@ import { useExecProcessActions } from "./useExecProcessActions";
 import {
   displayProcess,
   durationText,
+  execMetadataFromResult,
   execMeta,
   execStatusLabel,
   execTarget,
@@ -66,7 +64,10 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
   const copyToClipboard = useCopyToClipboard();
   const { result, isRunning, threadId } = useToolCallActivity(toolCall.id);
   const content = typeof result?.content === "string" ? result.content : null;
-  const metadata = extractExecMetadata(result?.extra) ?? null;
+  const metadata = useMemo(
+    () => execMetadataFromResult(result?.extra, result?.content),
+    [result?.extra, result?.content],
+  );
   const pathReferences = getToolEnrichmentPathReferences(result?.extra);
   const args = useMemo(
     () => parseProcessArgs(toolCall.function.arguments),

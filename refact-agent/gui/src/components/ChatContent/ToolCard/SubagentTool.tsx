@@ -9,6 +9,11 @@ import {
 } from "../../Tools/AgenticTool/compactPresentation";
 import { Markdown } from "../../Markdown";
 import { TranscriptClamp, type TranscriptFact } from "../TranscriptItem";
+import { useAppSelector } from "../../../hooks/useAppSelector";
+import { useThreadId } from "../../../features/Chat/Thread";
+import { selectFoldedAgentEvent } from "../foldedEventSelectors";
+import { BackgroundAgentCard } from "../../BackgroundAgentCard";
+import { agentFromLaunchEvent } from "../../BackgroundAgentCard/foldedAgentEvent";
 
 interface SubagentToolProps {
   toolCall: ToolCall;
@@ -45,6 +50,29 @@ export const SubagentTool: React.FC<SubagentToolProps> = ({ toolCall }) => {
       : []),
   ];
   const tools = readCompactText(args, "tools");
+  const threadId = useThreadId();
+  const foldedEvent = useAppSelector((state) =>
+    selectFoldedAgentEvent(state, threadId, toolCall.id),
+  );
+  const foldedAgent = useMemo(
+    () =>
+      foldedEvent
+        ? agentFromLaunchEvent(foldedEvent, task || "Background work")
+        : null,
+    [foldedEvent, task],
+  );
+
+  if (foldedAgent) {
+    return (
+      <BackgroundAgentCard
+        agent={foldedAgent}
+        agentId={foldedAgent.agent_id}
+        presentation="inline"
+        threadId={threadId}
+        toolCall={toolCall}
+      />
+    );
+  }
 
   return (
     <ReportToolCard

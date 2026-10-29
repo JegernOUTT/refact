@@ -6,7 +6,15 @@ import type {
   ExecToolMetadata,
   ToolCall,
 } from "../../../services/refact/types";
-import { isExecProcessStatus } from "../../../services/refact/types";
+import {
+  extractExecMetadata,
+  isExecProcessStatus,
+} from "../../../services/refact/types";
+import {
+  eventPayloadRecord,
+  payloadNumber,
+  payloadString,
+} from "../EventRow/eventPayload";
 import {
   fromProcessStatus,
   type TranscriptStatus,
@@ -235,8 +243,6 @@ export function execMeta(
   const parts: string[] = [];
   if (isRunning) {
     parts.push("running");
-  } else if (process.status === "running_in_background") {
-    parts.push("background");
   } else if (typeof process.exitCode === "number") {
     parts.push(`exit ${process.exitCode}`);
   }
@@ -308,33 +314,102 @@ export type FoldedProcessOutcome = {
   durationMs: number | null;
 };
 
-function payloadRecord(event: EventMessage): Record<string, unknown> | null {
-  const payload = event.payload;
-  return typeof payload === "object" &&
-    payload !== null &&
-    !Array.isArray(payload)
-    ? (payload as Record<string, unknown>)
-    : null;
+const HEADER_LINE = /^([a-z_]+):\s?(.*)$/u;
+const HEADER_NONE = "<none>";
+const HEADER_SOME = /^Some\((.*)\)$/u;
+const HEADER_ID_MAX_LINE = 1;
+
+export type ProcessStartHeader = Readonly<Record<string, string | null>>;
+
+export function parseProcessStartHeader(
+  content: unknown,
+): ProcessStartHeader | null {
+  if (typeof content !== "string") return null;
+  const fields: Record<string, string | null> = {};
+  const lines = content.split("\n");
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index].trim();
+    if (line === "") break;
+    const match = HEADER_LINE.exec(line);
+    if (!match) continue;
+    if (match[1] === "process_id" && index > HEADER_ID_MAX_LINE) return null;
+    const value = match[2].trim();
+    const unwrapped = (HEADER_SOME.exec(value)?.[1] ?? value).trim();
+    fields[match[1]] =
+      value === HEADER_NONE || unwrapped === "" ? null : unwrapped;
+  }
+  return fields.process_id ? fields : null;
 }
 
-function finiteNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
+function headerStatus(header: ProcessStartHeader): ExecProcessStatus | null {
+  const status = header.status;
+  if (isExecProcessStatus(status)) return status;
+  return status?.includes("failed") ? "failed" : null;
+}
+
+function headerNumber(header: ProcessStartHeader, key: string): number | null {
+  const value = header[key];
+  if (!value) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function headerText(
+  header: ProcessStartHeader,
+  key: string,
+): string | undefined {
+  return header[key] ?? undefined;
+}
+
+export function processIdFromStartResult(
+  extra: Record<string, unknown> | undefined,
+  content: unknown,
+): string | null {
+  const metadata = extractExecMetadata(extra);
+  if (metadata && !Array.isArray(metadata.processes)) {
+    const id = metadata.process_id?.trim();
+    if (id) return id;
+  }
+  return parseProcessStartHeader(content)?.process_id ?? null;
+}
+
+export function execMetadataFromResult(
+  extra: Record<string, unknown> | undefined,
+  content: unknown,
+): ExecToolMetadata | null {
+  const metadata = extractExecMetadata(extra);
+  if (metadata) return metadata;
+  const header = parseProcessStartHeader(content);
+  const processId = header?.process_id;
+  const status = header ? headerStatus(header) : null;
+  if (!header || !processId || !status) return null;
+  return {
+    process_id: processId,
+    status,
+    short_description: headerText(header, "short_description"),
+    mode: headerText(header, "mode"),
+    service_name: header.service_name ?? null,
+    command: headerText(header, "command"),
+    cwd: header.cwd ?? null,
+    started_at_ms: headerNumber(header, "started_at") ?? undefined,
+    exit_code: headerNumber(header, "exit_code"),
+  };
 }
 
 export function foldedProcessOutcome(
   event: EventMessage | undefined,
 ): FoldedProcessOutcome | null {
   if (!event) return null;
-  const payload = payloadRecord(event);
-  const rawStatus = payload?.status;
-  const exitCode = finiteNumber(payload?.exit_code);
+  const payload = eventPayloadRecord(event);
+  const rawStatus = payloadString(payload, "status");
+  const exitCode = payloadNumber(payload, "exit_code");
   const nonZeroExit = exitCode !== null && exitCode !== 0;
   const status: ExecDisplayStatus =
     rawStatus === "exited" && nonZeroExit
       ? "failed"
       : isExecProcessStatus(rawStatus)
         ? rawStatus
-        : typeof rawStatus === "string" && rawStatus.includes("failed")
+        : rawStatus?.includes("failed")
           ? "failed"
           : exitCode === null
             ? "unknown"
@@ -344,7 +419,7 @@ export function foldedProcessOutcome(
   return {
     status,
     exitCode,
-    durationMs: finiteNumber(payload?.duration_ms),
+    durationMs: payloadNumber(payload, "duration_ms"),
   };
 }
 

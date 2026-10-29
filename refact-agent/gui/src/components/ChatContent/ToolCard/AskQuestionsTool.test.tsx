@@ -617,7 +617,7 @@ describe("AskQuestionsTool", () => {
         }),
       );
     });
-    await waitFor(() => expect(card).toHaveTextContent("State unknown"));
+    await waitFor(() => expect(card).toHaveTextContent("Unknown"));
     headerState(false);
     expect(screen.queryByRole("button", { name: "Submit Answers" })).toBeNull();
   });
@@ -646,7 +646,7 @@ describe("AskQuestionsTool", () => {
     );
     const card = container.querySelector("section");
     headerState(false);
-    expect(card).toHaveTextContent("State unknown");
+    expect(card).toHaveTextContent("Unknown");
     expect(card).not.toHaveTextContent("Expired");
     expect(screen.queryByRole("button", { name: "More details" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Submit Answers" })).toBeNull();
@@ -692,9 +692,7 @@ describe("AskQuestionsTool", () => {
         preloadedState: { chat },
       });
 
-      expect(container.querySelector("section")).toHaveTextContent(
-        "State unknown",
-      );
+      expect(container.querySelector("section")).toHaveTextContent("Unknown");
       expect(container.querySelector("section")).not.toHaveTextContent(
         "answered",
       );

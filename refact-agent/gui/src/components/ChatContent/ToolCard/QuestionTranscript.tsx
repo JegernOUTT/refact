@@ -67,7 +67,7 @@ function stateView(state: QuestionState, count: number): StateView {
         tone: "error",
       };
     default:
-      return { status: "unknown", statusLabel: "State unknown", tone: "idle" };
+      return { status: "unknown", tone: "idle" };
   }
 }
 

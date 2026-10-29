@@ -175,26 +175,22 @@ export function inspectRow(
   const interrupted = wait.outcome === "interrupted";
   const step = detailValue(text, "Step count");
   const timeout = num(args, "timeout_ms");
+  const state = word ? word.replace(/_/gu, " ") : null;
   const meta =
-    name === "agent_wait"
-      ? timedOut
-        ? timeout !== null
-          ? `timed out after ${Math.round(timeout / 1000)}s`
-          : "timed out"
-        : interrupted
-          ? "interrupted"
-          : word
-            ? word.replace(/_/gu, " ")
-            : null
-      : step !== null
-        ? `step ${step}`
-        : word
-          ? word.replace(/_/gu, " ")
-          : null;
-  const status =
-    name === "agent_wait" && (timedOut || interrupted) ? "done" : mapped.status;
-  const statusLabel =
-    name === "agent_wait" && (timedOut || interrupted) ? null : mapped.label;
+    name === "agent_wait" && timedOut
+      ? timeout !== null
+        ? `timed out after ${Math.round(timeout / 1000)}s`
+        : "timed out"
+      : name === "agent_wait" && interrupted
+        ? "interrupted"
+        : [state, step !== null ? `step ${step}` : null]
+            .filter((part): part is string => part !== null)
+            .join(" · ") || null;
+  const settled = name === "agent_wait" && (timedOut || interrupted);
+  const alert =
+    !settled && (mapped.status === "failed" || mapped.status === "needs_you");
+  const status = alert ? mapped.status : "done";
+  const statusLabel = alert ? mapped.label : null;
   const error = detailValue(text, "Error");
   return {
     ...emptyRow(verb),

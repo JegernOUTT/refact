@@ -8,6 +8,7 @@ import { goalRow, planRow, resumeRow, workRow } from "./agenticRowGoal";
 import {
   applyTransport,
   emptyRow,
+  settleRecordedRow,
   type AgenticRow,
   type AgenticRowInput,
 } from "./agenticRowShared";
@@ -88,7 +89,7 @@ function rowFor(input: AgenticRowInput, name: string): AgenticRow {
 export function buildAgenticRow(input: AgenticRowInput): AgenticRow {
   const name = normalizeToolName(input.toolName) ?? input.toolName;
   return applyTransport(
-    rowFor(input, name),
+    settleRecordedRow(rowFor(input, name), input.transport),
     input.transport,
     input.content,
     input.unrecorded,

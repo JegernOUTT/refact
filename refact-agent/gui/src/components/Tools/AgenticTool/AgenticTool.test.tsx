@@ -244,6 +244,46 @@ describe("AgenticTool other agentic rows", () => {
     ).toBeInTheDocument();
   });
 
+  test("a recorded snapshot of a running agent shows no spinner and no Running pill", () => {
+    const content = [
+      "# Subagent: Subagent: Implement a standalone approval page",
+      "- Status: 🟢 running",
+      `- Agent ID: ${CHILD_ID}`,
+      "- Step count: 2",
+    ].join("\n");
+    const { container } = renderTools(
+      [toolResult("agent_status", content)],
+      [toolCall("agent_status", { agent_id: CHILD_ID })],
+    );
+    const item = container.querySelector("[data-transcript-status]");
+    expect(item).toHaveAttribute("data-transcript-status", "done");
+    expect(container.querySelector(".rf-spin")).toBeNull();
+    expect(screen.queryByTestId("transcript-status-pill")).toBeNull();
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
+      "running · step 2",
+    );
+  });
+
+  test("a recorded overview listing running agents is not itself running", () => {
+    const content = [
+      "# Agents Overview",
+      "",
+      `- ${CHILD_ID.slice(
+        0,
+        16,
+      )} — Subagent: Migrate the exec family — 🟢 running — step 4 — tool: cat — targets: -`,
+    ].join("\n");
+    const { container } = renderTools(
+      [toolResult("agents_overview", content)],
+      [toolCall("agents_overview")],
+    );
+    expect(container.querySelector("[data-transcript-status]")).toHaveAttribute(
+      "data-transcript-status",
+      "done",
+    );
+    expect(container.querySelector(".rf-spin")).toBeNull();
+  });
+
   test("unrecorded calls show the shared No result pill without a panel claim", () => {
     renderTools([], [toolCall("agent_status", { agent_id: CHILD_ID })]);
     expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(

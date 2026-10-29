@@ -27,8 +27,10 @@ export function selectIsToolCallInFlight(
     const message = messages[index];
     if (message.role === "user") return false;
     if (message.role === "assistant") {
+      const owns = (call: { id?: string }) => call.id === toolCallId;
       return (
-        message.tool_calls?.some((call) => call.id === toolCallId) === true
+        message.tool_calls?.some(owns) === true ||
+        message.server_executed_tools?.some(owns) === true
       );
     }
   }

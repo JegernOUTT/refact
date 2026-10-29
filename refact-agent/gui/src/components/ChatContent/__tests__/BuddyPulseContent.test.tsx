@@ -54,6 +54,18 @@ describe("BuddyPulseContent", () => {
     expect(screen.queryByText(/Preferences/)).toBeNull();
   });
 
+  it("renders_as_a_transcript_item_row", () => {
+    const { container } = renderPulse();
+
+    expect(
+      container.querySelectorAll('[data-transcript-item="true"]'),
+    ).toHaveLength(1);
+    expect(screen.getByTestId("transcript-verb")).toHaveTextContent("Recall");
+    expect(screen.getByTestId("transcript-target")).toHaveTextContent(
+      "Project pulse",
+    );
+  });
+
   it("expands_on_header_click", () => {
     renderPulse();
 

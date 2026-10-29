@@ -1,6 +1,6 @@
 import {
-  extractExecMetadata,
   isAssistantMessage,
+  getAssistantCompressionMetadata,
   isEventMessage,
   isToolMessage,
   normalizeEventMessageMetadata,
@@ -10,6 +10,12 @@ import {
   type ToolMessage,
 } from "../../services/refact";
 import { normalizeToolName } from "../../utils/toolNameAliases";
+import {
+  eventPayloadRecord,
+  isRecord,
+  payloadString,
+} from "./EventRow/eventPayload";
+import { processIdFromStartResult } from "./ToolCard/execToolModel";
 
 export type FoldedEventIndex = {
   foldedMessageIndices: ReadonlySet<number>;
@@ -39,16 +45,6 @@ const EMPTY_INDEX: FoldedEventIndex = {
   agentEventByToolCallId: new Map(),
 };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function nonEmptyString(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0
-    ? value.trim()
-    : null;
-}
-
 function parseArgs(raw: string | undefined): Record<string, unknown> {
   if (!raw) return {};
   try {
@@ -62,26 +58,23 @@ function parseArgs(raw: string | undefined): Record<string, unknown> {
 function startsProcess(name: string, rawArgs: string | undefined): boolean {
   if (PROCESS_START_TOOLS.has(name)) return true;
   if (name !== "shell_service") return false;
-  const action = nonEmptyString(parseArgs(rawArgs).action);
+  const action = payloadString(parseArgs(rawArgs), "action");
   return action !== null && SERVICE_START_ACTIONS.has(action);
 }
 
 function startedProcessId(message: ToolMessage): string | null {
-  const metadata = extractExecMetadata(message.extra);
-  if (!metadata || "processes" in metadata) return null;
-  return nonEmptyString(metadata.process_id);
+  return processIdFromStartResult(message.extra, message.content);
 }
 
 function launchedAgentId(message: ToolMessage): string | null {
-  return (
-    nonEmptyString(message.background_agent_id) ??
-    nonEmptyString(message.extra?.background_agent_id)
-  );
+  const direct = message.background_agent_id?.trim();
+  return direct
+    ? direct
+    : payloadString(message.extra ?? null, "background_agent_id");
 }
 
 function payloadField(event: EventMessage, field: string): string | null {
-  const payload = event.payload;
-  return isRecord(payload) ? nonEmptyString(payload[field]) : null;
+  return payloadString(eventPayloadRecord(event), field);
 }
 
 export function isAgentStatus(value: unknown): value is BackgroundAgentStatus {
@@ -93,19 +86,24 @@ function processCompletedId(event: EventMessage): string | null {
   return payloadField(event, "process_id");
 }
 
-function finishedAgentId(event: EventMessage): string | null {
-  if (event.source !== AGENT_FINISHED_SOURCE) return null;
-  const status = payloadField(event, "status");
-  if (!isAgentStatus(status)) return null;
-  return payloadField(event, "agent_id");
+function isAgentFinishedEvent(event: EventMessage): boolean {
+  return (
+    event.source === AGENT_FINISHED_SOURCE &&
+    isAgentStatus(payloadField(event, "status"))
+  );
 }
 
-function normalizedEvent(
-  message: ChatMessages[number],
-): EventMessage | undefined {
-  return isEventMessage(message)
-    ? normalizeEventMessageMetadata(message)
-    : undefined;
+function agentLaunchCallId(
+  event: EventMessage,
+  startKinds: ReadonlyMap<string, "process" | "agent">,
+  toolCallByAgentId: ReadonlyMap<string, string>,
+): string | undefined {
+  const parentCallId = payloadField(event, "parent_tool_call_id");
+  if (parentCallId && startKinds.get(parentCallId) === "agent") {
+    return parentCallId;
+  }
+  const agentId = payloadField(event, "agent_id");
+  return agentId ? toolCallByAgentId.get(agentId) : undefined;
 }
 
 export function buildFoldedEventIndex(
@@ -117,6 +115,7 @@ export function buildFoldedEventIndex(
 
   for (const message of messages) {
     if (isAssistantMessage(message)) {
+      if (getAssistantCompressionMetadata(message)) continue;
       for (const call of message.tool_calls ?? []) {
         const name = normalizeToolName(call.function.name);
         if (!call.id || !name) continue;
@@ -143,17 +142,16 @@ export function buildFoldedEventIndex(
     }
   }
 
-  if (toolCallByProcessId.size === 0 && toolCallByAgentId.size === 0) {
-    return EMPTY_INDEX;
-  }
+  const hasAgentLaunch = [...startKinds.values()].includes("agent");
+  if (toolCallByProcessId.size === 0 && !hasAgentLaunch) return EMPTY_INDEX;
 
   const foldedMessageIndices = new Set<number>();
   const processEventByToolCallId = new Map<string, EventMessage>();
   const agentEventByToolCallId = new Map<string, EventMessage>();
 
   messages.forEach((message, index) => {
-    const event = normalizedEvent(message);
-    if (!event) return;
+    if (!isEventMessage(message)) return;
+    const event = normalizeEventMessageMetadata(message);
     const processId = processCompletedId(event);
     const processToolCallId = processId
       ? toolCallByProcessId.get(processId)
@@ -163,10 +161,12 @@ export function buildFoldedEventIndex(
       processEventByToolCallId.set(processToolCallId, event);
       return;
     }
-    const agentId = finishedAgentId(event);
-    const agentToolCallId = agentId
-      ? toolCallByAgentId.get(agentId)
-      : undefined;
+    if (!isAgentFinishedEvent(event)) return;
+    const agentToolCallId = agentLaunchCallId(
+      event,
+      startKinds,
+      toolCallByAgentId,
+    );
     if (agentToolCallId) {
       foldedMessageIndices.add(index);
       agentEventByToolCallId.set(agentToolCallId, event);

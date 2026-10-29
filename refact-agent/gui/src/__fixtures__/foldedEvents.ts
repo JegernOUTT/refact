@@ -102,3 +102,98 @@ export function agentFinished(
     },
   };
 }
+
+export function storedProcessStartResult(
+  toolCallId: string,
+  processId: string,
+): ToolMessage {
+  return {
+    message_id: `tool-${toolCallId}`,
+    role: "tool",
+    content: [
+      "Process started",
+      `process_id: ${processId}`,
+      "short_description: Start local GUI preview for the Buddy page audit",
+      "status: failed",
+      "mode: background",
+      "service_name: <none>",
+      "command: npm run dev -- --host 127.0.0.1 --port 5173 --strictPort",
+      "cwd: /workspace/refact-agent/gui",
+      "started_at: Some(1792930874877)",
+      "exit_code: <none>",
+      "failure_reason: startup readiness timed out after 1.000s",
+      "",
+      "stdout:",
+      "<empty>",
+      "",
+      "stderr:",
+      "<empty>",
+    ].join("\n"),
+    tool_call_id: toolCallId,
+    tool_failed: true,
+  };
+}
+
+function storedEvent(raw: Record<string, unknown>): EventMessage {
+  return raw as EventMessage;
+}
+
+export function storedProcessCompleted(processId: string): EventMessage {
+  return storedEvent({
+    message_id: `event-${processId}`,
+    role: "event",
+    content:
+      "Background process 'Start local GUI preview for the Buddy page audit' failed (exit unknown)",
+    event: {
+      subkind: "process_completed",
+      source: "exec.registry",
+      payload: {
+        process_id: processId,
+        status: "failed",
+        exit_code: null,
+        duration_ms: 1281,
+        short_description: "Start local GUI preview for the Buddy page audit",
+        mode: "background",
+        push: "append",
+      },
+    },
+  });
+}
+
+export function storedSubagentLaunchResult(
+  toolCallId: string,
+  agentId: string,
+): ToolMessage {
+  return {
+    message_id: `tool-${toolCallId}`,
+    role: "tool",
+    content: `✓ Accepted background subagent: Read-only reconnaissance\n- agent_id: ${agentId}\n- status: queued\n- child_chat_id: subchat-1\n\nThe completion will be pushed back into this chat automatically.`,
+    tool_call_id: toolCallId,
+    tool_failed: false,
+  };
+}
+
+export function storedSubagentFinished(
+  parentToolCallId: string,
+  agentId: string,
+  status = "completed",
+): EventMessage {
+  return storedEvent({
+    message_id: `event-${agentId}`,
+    role: "event",
+    content: `[background subagent finished]\nagent_id: ${agentId}\nstatus: ${status}\ntitle: Subagent: Read-only reconnaissance\n\nSummary:\nThe page renders fine.\n\n(call agent_result(agent_id="${agentId}", include_details=true) for stored payload/details, or open the child trajectory)`,
+    event: {
+      subkind: "system_notice",
+      source: "agents.spawn",
+      payload: {
+        agent_id: agentId,
+        parent_tool_call_id: parentToolCallId,
+        kind: "subagent",
+        status,
+        title: "Subagent: Read-only reconnaissance",
+        child_chat_id: "subchat-1",
+        tokens_used: 2355037,
+      },
+    },
+  });
+}

@@ -550,11 +550,8 @@ function rebuildDisplayItemsFromStart(
     hidden,
     rebuildStart,
   );
-  const folded = foldedEventIndexFor(nextMessages).foldedMessageIndices;
   const prefixItems = previousItems.filter(
-    (item) =>
-      item.messageIndex < rebuildStart &&
-      !(item.type === "event" && folded.has(item.messageIndex)),
+    (item) => item.messageIndex < rebuildStart,
   );
 
   return withEventRunPositions(
@@ -571,9 +568,21 @@ function assistantGroupingSignature(message: AssistantMessage): string {
     .map((toolCall) => {
       const name = normalizeToolName(toolCall.function.name) ?? "";
       const id = toolCall.id ?? "";
-      return `${id}:${name}`;
+      const args =
+        name === "shell_service" ? `:${toolCall.function.arguments}` : "";
+      return `${id}:${name}${args}`;
     })
     .join("|");
+}
+
+function sameIndices(
+  left: ReadonlySet<number>,
+  right: ReadonlySet<number>,
+): boolean {
+  if (left === right) return true;
+  if (left.size !== right.size) return false;
+  for (const value of left) if (!right.has(value)) return false;
+  return true;
 }
 
 function buildDisplayItemsFromIndex(
@@ -1048,6 +1057,14 @@ export function tryIncrementalDisplayItemsUpdate(
   isStreaming: boolean,
 ): DisplayItem[] | null {
   if (!previousMessages || !previousItems) return null;
+  if (
+    !sameIndices(
+      foldedEventIndexFor(previousMessages).foldedMessageIndices,
+      foldedEventIndexFor(nextMessages).foldedMessageIndices,
+    )
+  ) {
+    return null;
+  }
   if (previousMessages.length !== nextMessages.length) {
     const replacementIndex = findReportAndSummaryReplacementIndex(
       previousMessages,

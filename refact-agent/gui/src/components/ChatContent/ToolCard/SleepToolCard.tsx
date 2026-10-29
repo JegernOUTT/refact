@@ -217,7 +217,7 @@ function sleepOutcome(
   if (result.tool_failed) return { status: "failed" };
   if (sleep?.interrupted) return { status: "cancelled", label: "Interrupted" };
   if (sleep) return { status: "done" };
-  return { status: "unknown", label: "Outcome unknown" };
+  return { status: "unknown" };
 }
 
 export const SleepToolCard: React.FC<SleepToolCardProps> = ({

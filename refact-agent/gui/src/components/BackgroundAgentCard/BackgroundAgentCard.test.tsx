@@ -20,8 +20,11 @@ import { SubagentTool } from "../ChatContent/ToolCard/SubagentTool";
 import {
   agentFinished,
   agentResult,
+  storedSubagentFinished,
+  storedSubagentLaunchResult,
   toolCallMessage,
 } from "../../__fixtures__/foldedEvents";
+import { buildDisplayItems } from "../ChatContent/ChatContentDisplayItems";
 
 const AGENT_ID = "bgagent-1f0c9a7b-3d21-4a55-9f0e-11223344abcd";
 const ISO_TIMESTAMP = "2026-02-11T09:14:22.123456789Z";
@@ -377,7 +380,8 @@ describe("inline background agents", () => {
       />,
     );
     const pill = screen.getByTestId("transcript-status-pill");
-    expect(pill).toHaveTextContent("Status unknown");
+    expect(pill).toHaveTextContent("Unknown");
+    expect(pill).not.toHaveTextContent("Status unknown");
     expect(pill).toHaveAttribute("data-tone", "unknown");
     expect(screen.getByTestId("transcript-row")).not.toHaveTextContent(
       /paused|verified|pushed/i,
@@ -400,7 +404,25 @@ describe("inline background agents", () => {
       { preloadedState: { chat } },
     );
     expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
-      "Status unknown",
+      "Unknown",
+    );
+  });
+
+  it("uses the shared No result rule when the launch call has no recorded result", () => {
+    const chat = createDefaultChatState();
+    const threadId = chat.current_thread_id;
+    render(
+      <BackgroundAgentCard
+        presentation="inline"
+        statusKnown={false}
+        threadId={threadId}
+        toolCallId="call-without-result"
+        agent={makeAgent({ status: "queued", pending_questions: 0 })}
+      />,
+      { preloadedState: { chat } },
+    );
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "No result",
     );
   });
 
@@ -770,6 +792,57 @@ describe("BackgroundAgentCard folded finished event", () => {
     expect(screen.getByTestId("background-agent-inline")).toHaveAttribute(
       "data-status",
       "running",
+    );
+  });
+});
+
+describe("SubagentTool with a stored launch result and a folded finished event", () => {
+  function renderStored(status: string) {
+    const chat = createDefaultChatState();
+    const threadId = chat.current_thread_id;
+    const launch = toolCallMessage("call_f2c0e2", "subagent", {
+      task: "Read-only reconnaissance",
+    });
+    const call = launch.tool_calls?.[0];
+    if (!call) throw new Error("Missing launch call");
+    const messages: ChatMessage[] = [
+      launch,
+      storedSubagentLaunchResult("call_f2c0e2", "bgagent-b54f"),
+      storedSubagentFinished("call_f2c0e2", "bgagent-b54f", status),
+    ];
+    chat.threads[threadId].thread.messages = messages;
+    return {
+      messages,
+      ...render(
+        <ChatThreadProvider chatId={threadId}>
+          <SubagentTool toolCall={call} />
+        </ChatThreadProvider>,
+        { preloadedState: { chat } },
+      ),
+    };
+  }
+
+  it("shows the event's final status and summary on the launch row", async () => {
+    const { user, messages } = renderStored("completed");
+    const row = screen.getByTestId("background-agent-inline");
+
+    expect(row).toHaveAttribute("data-status", "done");
+    expect(screen.queryByTestId("transcript-status-pill")).toBeNull();
+    await user.click(toggleOf(row));
+    expect(screen.getByText("The page renders fine.")).toBeInTheDocument();
+    expect(
+      buildDisplayItems(messages, false).filter(
+        (item) => item.type === "event",
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("shows a failed final status from the folded event", () => {
+    renderStored("failed");
+
+    expect(screen.getByTestId("background-agent-inline")).toHaveAttribute(
+      "data-status",
+      "failed",
     );
   });
 });

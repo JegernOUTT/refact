@@ -66,12 +66,16 @@ describe("non-tool chat collapsibles", () => {
     expect(screen.getByText("System content")).toBeInTheDocument();
   });
 
-  it("renders PlainText header as an aria-expanded button", () => {
-    renderWithTheme(
+  it("renders PlainText as a closed TranscriptItem row", () => {
+    const { container } = renderWithTheme(
       <PlainText>{`${"x".repeat(110)}\nHidden tail marker`}</PlainText>,
     );
 
-    const trigger = screen.getByRole("button", { name: /plain text/i });
+    expect(
+      container.querySelectorAll('[data-transcript-item="true"]'),
+    ).toHaveLength(1);
+    expect(screen.getByTestId("transcript-verb")).toHaveTextContent("Note");
+    const trigger = screen.getByTestId("transcript-toggle");
     expect(trigger).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByText(/Hidden tail marker/i)).not.toBeInTheDocument();
 

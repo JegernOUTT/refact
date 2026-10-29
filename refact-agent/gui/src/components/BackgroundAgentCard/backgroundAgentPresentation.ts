@@ -12,6 +12,7 @@ import {
   fromAgentStatus,
   type TranscriptFact,
   type TranscriptStatus,
+  type UnrecordedResultState,
 } from "../ChatContent/TranscriptItem";
 
 const TERMINAL_STATUSES = new Set<BackgroundAgentSummary["status"]>([
@@ -44,8 +45,12 @@ export function agentTranscriptStatus(
   agent: BackgroundAgentSummary,
   statusKnown: boolean,
   launchFailed: boolean,
+  unrecorded: UnrecordedResultState | null = null,
 ): { status: TranscriptStatus; label?: string } {
   if (launchFailed) return { status: "failed", label: "Request failed" };
+  if (!statusKnown && unrecorded) {
+    return { status: unrecorded.status, label: unrecorded.statusLabel };
+  }
   const questions = pendingQuestions(agent);
   if (questions > 0) {
     return {
@@ -53,12 +58,12 @@ export function agentTranscriptStatus(
       label: `${questions} ${questions === 1 ? "question" : "questions"}`,
     };
   }
-  if (!statusKnown) return { status: "unknown", label: "Status unknown" };
+  if (!statusKnown) return { status: "unknown" };
   if (agent.status === "waiting_for_approval") {
     return { status: "needs_you", label: "Approval needed" };
   }
   const status = fromAgentStatus(agent.status);
-  if (status === "unknown") return { status, label: "Status unknown" };
+  if (status === "unknown") return { status };
   return {
     status,
     label: status === "done" ? undefined : humanizeIdentifier(agent.status),

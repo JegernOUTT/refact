@@ -989,7 +989,7 @@ describe("compact dedicated transcript composition", () => {
       );
       const expected =
         !status || status === "future_state"
-          ? "Status unknown"
+          ? "Unknown"
           : status === "waiting_for_approval"
             ? "Approval needed"
             : status === "completed"

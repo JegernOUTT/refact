@@ -151,17 +151,29 @@ describe("AgentStatusContent", () => {
     });
   });
 
-  it("toggles agent row details with aria-expanded", async () => {
-    const { user } = render(<AgentStatusContent report={parsedReport()} />);
-    const toggle = screen.getByLabelText("Toggle details T-1");
+  it("shows per-agent details inline without nested disclosure toggles", () => {
+    const base = parsedReport();
+    const report: AgentStatusReport = {
+      ...base,
+      rows: base.rows.map((row, index) =>
+        index === 0
+          ? {
+              ...row,
+              lastStatusUpdate: "Wired the renderer",
+              finalReport: "Renderer shipped",
+            }
+          : row,
+      ),
+    };
+    render(<AgentStatusContent report={report} />);
 
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByText("Last status update")).not.toBeInTheDocument();
-
-    await user.click(toggle);
-
-    expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByText("Last status update")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Toggle details T-1")).toBeNull();
+    expect(screen.queryAllByRole("button", { expanded: false })).toHaveLength(
+      0,
+    );
+    expect(screen.queryAllByRole("button", { expanded: true })).toHaveLength(0);
+    expect(screen.getByText("Wired the renderer")).toBeVisible();
+    expect(screen.getByText("Renderer shipped")).toBeVisible();
   });
 
   it("dispatches action commands on button clicks", async () => {
@@ -246,10 +258,9 @@ describe("AgentStatusContent", () => {
       );
     });
     expect(outer).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByLabelText("Toggle details T-1")).toHaveAttribute(
-      "aria-expanded",
-      "false",
-    );
+    expect(
+      within(itemOf(outer)).queryAllByRole("button", { expanded: false }),
+    ).toHaveLength(0);
   });
 });
 
@@ -602,7 +613,6 @@ T-AB: ⚠ needs attention: summary attention sentinel (since 2026-05-21T23:30:00
     const { store, unmount } = render(view(), { preloadedState: { chat } });
     const [outer, sibling] = screen.getAllByTestId("transcript-toggle");
     expect(outer).toHaveAttribute("aria-expanded", "true");
-    fireEvent.click(screen.getByLabelText("Toggle details T-1"));
     act(() => {
       store.dispatch(
         applyChatEvent({
@@ -623,10 +633,6 @@ T-AB: ⚠ needs attention: summary attention sentinel (since 2026-05-21T23:30:00
     expect(
       within(itemOf(outer)).getByTestId("transcript-status-pill"),
     ).toHaveTextContent("2 failed");
-    expect(screen.getByLabelText("Toggle details T-1")).toHaveAttribute(
-      "aria-expanded",
-      "true",
-    );
     expect(sibling).toHaveAttribute("aria-expanded", "false");
     fireEvent.click(outer);
     act(() => {

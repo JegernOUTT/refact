@@ -368,7 +368,7 @@ describe("SleepToolCard", () => {
       { role: "tool", tool_call_id: "call-sleep", content: "{}" },
     ]);
     expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
-      "Outcome unknown",
+      "Unknown",
     );
     expect(screen.queryByRole("button", { name: /wake up/i })).toBeNull();
   });

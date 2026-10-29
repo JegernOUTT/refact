@@ -1172,6 +1172,20 @@ describe("ChatContent display items", () => {
   });
 
   describe("finished events folded into their start rows", () => {
+    function resolved(
+      previousMessages: ChatMessages,
+      nextMessages: ChatMessages,
+    ) {
+      return (
+        tryIncrementalDisplayItemsUpdate(
+          previousMessages,
+          nextMessages,
+          buildDisplayItems(previousMessages, false),
+          false,
+        ) ?? buildDisplayItems(nextMessages, false)
+      );
+    }
+
     function eventIds(messages: ChatMessages): (string | undefined)[] {
       return buildDisplayItems(messages, false).flatMap((item) =>
         item.type === "event" ? [item.event.message_id] : [],
@@ -1231,19 +1245,10 @@ describe("ChatContent display items", () => {
         ...previousMessages,
         processCompleted("proc-1"),
       ];
-      const previousItems = buildDisplayItems(previousMessages, false);
-
-      const incremental = tryIncrementalDisplayItemsUpdate(
-        previousMessages,
-        nextMessages,
-        previousItems,
-        false,
-      );
+      const incremental = resolved(previousMessages, nextMessages);
 
       expect(incremental).toEqual(buildDisplayItems(nextMessages, false));
-      expect((incremental ?? []).some((item) => item.type === "event")).toBe(
-        false,
-      );
+      expect(incremental.some((item) => item.type === "event")).toBe(false);
     });
 
     it("removes an already rendered event when its start result arrives later", () => {
@@ -1255,20 +1260,81 @@ describe("ChatContent display items", () => {
         ...previousMessages,
         execResult("call-start", "proc-1"),
       ];
-      const previousItems = buildDisplayItems(previousMessages, false);
-      expect(previousItems[0]?.type).toBe("event");
+      expect(buildDisplayItems(previousMessages, false)[0]?.type).toBe("event");
 
-      const incremental = tryIncrementalDisplayItemsUpdate(
-        previousMessages,
-        nextMessages,
-        previousItems,
-        false,
-      );
+      const incremental = resolved(previousMessages, nextMessages);
 
       expect(incremental).toEqual(buildDisplayItems(nextMessages, false));
-      expect((incremental ?? []).some((item) => item.type === "event")).toBe(
-        false,
-      );
+      expect(incremental.some((item) => item.type === "event")).toBe(false);
+    });
+
+    it("restores a completion row when the assistant update drops the start call", () => {
+      const start = toolCallMessage("call-c", "process_start");
+      const previousMessages: ChatMessages = [
+        processCompleted("proc-p", "completion"),
+        start,
+        execResult("call-c", "proc-p"),
+      ];
+      const nextMessages: ChatMessages = [
+        previousMessages[0],
+        { ...start, tool_calls: [], content: "changed my mind" },
+        previousMessages[2],
+      ];
+      expect(eventIds(previousMessages)).toEqual([]);
+
+      const incremental = resolved(previousMessages, nextMessages);
+
+      expect(incremental).toEqual(buildDisplayItems(nextMessages, false));
+      expect(
+        incremental.flatMap((item) =>
+          item.type === "event" ? [item.event.message_id] : [],
+        ),
+      ).toEqual(["completion"]);
+    });
+
+    it("rebuilds when only shell_service args change whether a call starts a process", () => {
+      const service = (action: string) =>
+        toolCallMessage("call-svc", "shell_service", {
+          action,
+          service_name: "api",
+        });
+      const previousMessages: ChatMessages = [
+        processCompleted("proc-svc", "svc-done"),
+        service("status"),
+        execResult("call-svc", "proc-svc"),
+      ];
+      const nextMessages: ChatMessages = [
+        previousMessages[0],
+        service("start"),
+        previousMessages[2],
+      ];
+      expect(eventIds(previousMessages)).toEqual(["svc-done"]);
+
+      const incremental = resolved(previousMessages, nextMessages);
+
+      expect(incremental).toEqual(buildDisplayItems(nextMessages, false));
+      expect(incremental.some((item) => item.type === "event")).toBe(false);
+    });
+
+    it("never folds events into a compressed assistant that renders as a summary", () => {
+      const compressed: AssistantMessage = {
+        ...toolCallMessage("call-old", "process_start"),
+        content: "Summary of earlier work",
+        extra: {
+          compression: {
+            kind: "llm_segment_summary",
+            source_hash: "h1",
+            source_message_ids: ["m1"],
+          },
+        },
+      };
+      const messages: ChatMessages = [
+        compressed,
+        execResult("call-old", "proc-old"),
+        processCompleted("proc-old"),
+      ];
+
+      expect(eventIds(messages)).toEqual(["event-proc-old"]);
     });
   });
 

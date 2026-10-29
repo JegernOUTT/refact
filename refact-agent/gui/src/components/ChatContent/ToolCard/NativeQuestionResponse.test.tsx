@@ -683,7 +683,7 @@ describe("compact protocol-v2 question responses", () => {
       { store: view.store },
     );
     const card = container.querySelector("section");
-    expect(card).toHaveTextContent("State unknown");
+    expect(card).toHaveTextContent("Unknown");
     expect(card).toHaveAttribute("data-status", "idle");
     await userEvent.setup().click(headerState(false));
     expect(container.querySelector("script")).toBeNull();

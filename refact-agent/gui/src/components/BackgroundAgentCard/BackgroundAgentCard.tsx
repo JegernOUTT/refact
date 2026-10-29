@@ -15,6 +15,7 @@ import {
   selectToolResultByThreadAndId,
 } from "../../features/Chat/Thread/selectors";
 import { useThreadId } from "../../features/Chat/Thread";
+import { useUnrecordedResultState } from "../ChatContent/TranscriptItem/useUnrecordedResultState";
 import { selectFoldedAgentEvent } from "../ChatContent/foldedEventSelectors";
 import { agentFromFinishedEvent } from "./foldedAgentEvent";
 import { parseAgenticArgs } from "../Tools/AgenticTool/agenticToolModel";
@@ -108,10 +109,15 @@ const _BackgroundAgentCard: React.FC<BackgroundAgentCardProps> = ({
   const known = inline
     ? Boolean(subscribedAgent) || Boolean(foldedEvent) || statusKnown
     : true;
+  const unrecorded = useUnrecordedResultState(
+    resolvedToolCallId,
+    threadId ?? contextThreadId,
+  );
   const { status, label } = agentTranscriptStatus(
     displayed,
     known,
     inline && launchFailed,
+    resolvedToolCallId && !toolResult ? unrecorded : null,
   );
 
   const report = useMemo(() => {

@@ -133,6 +133,62 @@ describe("buildAgenticRow agent inspection", () => {
     expect(result.error).toBe("compile error");
   });
 
+  test("agent_status snapshot of a running agent never spins; meta carries the state", () => {
+    const content = [
+      "# Agent Status: Subagent: Fix parser",
+      "- Status: 🟢 running",
+      "- Step count: 2",
+    ].join("\n");
+    const result = row({
+      toolName: "agent_status",
+      args: { agent_id: "x" },
+      content,
+    });
+    expect(result.status).toBe("done");
+    expect(result.statusLabel).toBeNull();
+    expect(result.meta).toBe("running · step 2");
+  });
+
+  test.each(["queued", "paused", "waiting"])(
+    "agent_result snapshot reporting %s is not a live row status",
+    (state) => {
+      const result = row({
+        toolName: "agent_result",
+        args: { agent_id: "x" },
+        content: `# Agent Result: Subagent: Fix parser\n- Status: ${state}`,
+      });
+      expect(result.status).toBe("done");
+      expect(result.meta).toBe(state);
+    },
+  );
+
+  test("a reported approval wait stays an alert", () => {
+    const result = row({
+      toolName: "agent_status",
+      args: { agent_id: "x" },
+      content: "# Agent Status: X\n- Status: waiting_for_approval",
+    });
+    expect(result.status).toBe("needs_you");
+  });
+
+  test("a failed status call is failed and a missing result follows the shared rule", () => {
+    expect(
+      row({
+        toolName: "agent_status",
+        args: { agent_id: "x" },
+        content: "boom",
+        transport: "failed",
+      }).status,
+    ).toBe("failed");
+    const missing = row({
+      toolName: "agent_status",
+      args: { agent_id: "x" },
+      transport: "pending",
+    });
+    expect(missing.status).toBe("unknown");
+    expect(missing.statusLabel).toBe("No result");
+  });
+
   test("agent_wait reports a timeout in meta, not as a failure pill", () => {
     const result = row({
       toolName: "agent_wait",

@@ -222,7 +222,7 @@ describe("AgentPulseView transcript route", () => {
     const { user } = renderPulse(PULSE_OUTPUT);
     const outer = screen.getByTestId("transcript-toggle");
     expect(outer).toHaveAttribute("aria-expanded", "false");
-    expect(itemOf(outer)).toHaveAttribute("data-status", "running");
+    expect(itemOf(outer)).toHaveAttribute("data-status", "done");
     expect(within(outer).getByTestId("transcript-verb")).toHaveTextContent(
       "Pulse",
     );
@@ -230,8 +230,10 @@ describe("AgentPulseView transcript route", () => {
       "check-agents redesign",
     );
     expect(outer).not.toHaveTextContent("T-29");
-    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
-      "Running",
+    expect(screen.queryByTestId("transcript-status-pill")).toBeNull();
+    expect(itemOf(outer).querySelector(".rf-spin")).toBeNull();
+    expect(within(outer).getByTestId("transcript-meta")).toHaveTextContent(
+      "generating response",
     );
     expect(
       screen.queryByRole("button", { name: "Pause" }),
@@ -261,13 +263,13 @@ describe("AgentPulseView transcript route", () => {
 
   it.each([
     ["💤 idle", "done", null],
-    ["⏸️ paused", "waiting", "Paused"],
-    ["⏳ waiting for user input", "waiting", "Waiting"],
+    ["⏸️ paused", "done", null],
+    ["⏳ waiting for user input", "done", null],
     ["✅ completed", "done", null],
     ["❌ error", "failed", "Failed"],
-    ["unknown", "unknown", "Unknown"],
+    ["unknown", "done", null],
   ])(
-    "maps only the explicit reported state %s, never activity as progress",
+    "reports the snapshot state %s in meta; only alerts become the row status",
     (state, status, pillText) => {
       renderPulse(PULSE_OUTPUT.replace("🔄 generating response", state));
       const outer = screen.getByTestId("transcript-toggle");
@@ -311,7 +313,7 @@ describe("AgentPulseView transcript route", () => {
     expect(within(outer).getByTestId("transcript-target")).toHaveTextContent(
       "T-29",
     );
-    expect(itemOf(outer)).toHaveAttribute("data-status", "unknown");
+    expect(itemOf(outer)).toHaveAttribute("data-status", "done");
   });
 
   it("shows a failed request in the Error section without pulse controls", async () => {
@@ -360,8 +362,8 @@ describe("AgentPulseView transcript route", () => {
     });
     expect(outer).toHaveAttribute("aria-expanded", "true");
     expect(
-      within(itemOf(outer)).getByTestId("transcript-status-pill"),
-    ).toHaveTextContent("Paused");
+      within(itemOf(outer)).getByTestId("transcript-meta"),
+    ).toHaveTextContent("paused");
     expect(sibling).toHaveAttribute("aria-expanded", "false");
     fireEvent.click(outer);
     act(() => {

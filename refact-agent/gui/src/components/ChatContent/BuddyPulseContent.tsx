@@ -1,4 +1,4 @@
-import { type ReactNode, useState } from "react";
+import type { ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
   BookOpen,
@@ -13,6 +13,7 @@ import {
   isBuddyPulsePayload,
 } from "../../services/refact/types";
 import { Badge, Icon } from "../ui";
+import { TranscriptItem } from "./TranscriptItem";
 import styles from "./BuddyPulseContent.module.css";
 
 type Props = {
@@ -28,8 +29,6 @@ const SECTION_ICONS = {
 } as const;
 
 export const BuddyPulseContent = ({ rawExtra }: Props) => {
-  const [expanded, setExpanded] = useState(false);
-
   const payload =
     rawExtra &&
     isBuddyPulsePayload(
@@ -44,89 +43,84 @@ export const BuddyPulseContent = ({ rawExtra }: Props) => {
   const generated = new Date(payload.generated_at);
   const minutesAgo = Math.floor((Date.now() - generated.getTime()) / 60_000);
 
-  return (
-    <div className={styles.card}>
-      <button
-        type="button"
-        className={styles.header}
-        aria-expanded={expanded}
-        aria-controls="buddy-pulse-sections"
-        onClick={() => setExpanded((x) => !x)}
+  const sections = (
+    <div className={styles.sections}>
+      <Section
+        icon={SECTION_ICONS.preferences}
+        title="Preferences"
+        count={payload.preferences.length}
       >
-        <h3 className={styles.headerTitle}>
-          <Icon icon={Sparkles} size="sm" tone="accent" /> Project pulse ·
-          updated {minutesAgo}m ago
-        </h3>
-      </button>
-      {expanded && (
-        <div id="buddy-pulse-sections" className={styles.sections}>
-          <Section
-            icon={SECTION_ICONS.preferences}
-            title="Preferences"
-            count={payload.preferences.length}
-          >
-            {payload.preferences.map((preference) => (
-              <p key={preference.statement} className={styles.line}>
-                {preference.statement}{" "}
-                <Badge tone="muted">
-                  conf {preference.confidence.toFixed(2)}
-                </Badge>
-              </p>
-            ))}
-          </Section>
-          <Section
-            icon={SECTION_ICONS.lessons}
-            title="Lessons"
-            count={payload.lessons.length}
-          >
-            {payload.lessons.map((lesson) => (
-              <p key={lesson.title} className={styles.line}>
-                <strong>{lesson.title}</strong> — {lesson.preview}
-              </p>
-            ))}
-          </Section>
-          <Section
-            icon={SECTION_ICONS.friction}
-            title="Friction"
-            count={payload.friction.top_error_types.length}
-          >
-            <p className={styles.line}>
-              Stuck tasks: {payload.friction.stuck_tasks}
-            </p>
-            {payload.friction.top_error_types.map((error) => (
-              <p key={error.type} className={styles.line}>
-                {error.type}: {error.count}
-              </p>
-            ))}
-          </Section>
-          <Section
-            icon={SECTION_ICONS.reports}
-            title="Recent reports"
-            count={payload.recent_reports.length}
-          >
-            {payload.recent_reports.map((report) => (
-              <p key={report.chat_id} className={styles.line}>
-                <strong>{report.title}</strong> — {report.preview}
-              </p>
-            ))}
-          </Section>
-          <Section
-            icon={SECTION_ICONS.activity}
-            title="Activity (24h)"
-            count={payload.user_activity.grouped.length}
-          >
-            <p className={styles.line}>
-              {payload.user_activity.time_of_day_pattern}
-            </p>
-            {payload.user_activity.grouped.map((group) => (
-              <p key={group.type} className={styles.line}>
-                {group.type}: {group.count}
-              </p>
-            ))}
-          </Section>
-        </div>
-      )}
+        {payload.preferences.map((preference) => (
+          <p key={preference.statement} className={styles.line}>
+            {preference.statement}{" "}
+            <Badge tone="muted">conf {preference.confidence.toFixed(2)}</Badge>
+          </p>
+        ))}
+      </Section>
+      <Section
+        icon={SECTION_ICONS.lessons}
+        title="Lessons"
+        count={payload.lessons.length}
+      >
+        {payload.lessons.map((lesson) => (
+          <p key={lesson.title} className={styles.line}>
+            <strong>{lesson.title}</strong> — {lesson.preview}
+          </p>
+        ))}
+      </Section>
+      <Section
+        icon={SECTION_ICONS.friction}
+        title="Friction"
+        count={payload.friction.top_error_types.length}
+      >
+        <p className={styles.line}>
+          Stuck tasks: {payload.friction.stuck_tasks}
+        </p>
+        {payload.friction.top_error_types.map((error) => (
+          <p key={error.type} className={styles.line}>
+            {error.type}: {error.count}
+          </p>
+        ))}
+      </Section>
+      <Section
+        icon={SECTION_ICONS.reports}
+        title="Recent reports"
+        count={payload.recent_reports.length}
+      >
+        {payload.recent_reports.map((report) => (
+          <p key={report.chat_id} className={styles.line}>
+            <strong>{report.title}</strong> — {report.preview}
+          </p>
+        ))}
+      </Section>
+      <Section
+        icon={SECTION_ICONS.activity}
+        title="Activity (24h)"
+        count={payload.user_activity.grouped.length}
+      >
+        <p className={styles.line}>
+          {payload.user_activity.time_of_day_pattern}
+        </p>
+        {payload.user_activity.grouped.map((group) => (
+          <p key={group.type} className={styles.line}>
+            {group.type}: {group.count}
+          </p>
+        ))}
+      </Section>
     </div>
+  );
+
+  return (
+    <TranscriptItem
+      data-testid="buddy-pulse"
+      icon={<Sparkles aria-hidden />}
+      meta={`updated ${minutesAgo}m ago`}
+      openKey={`buddy-pulse:${payload.generated_at}`}
+      output={sections}
+      status="done"
+      target="Project pulse"
+      verb="Recall"
+    />
   );
 };
 

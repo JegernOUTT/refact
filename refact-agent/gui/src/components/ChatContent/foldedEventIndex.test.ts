@@ -9,9 +9,19 @@ import {
   agentResult,
   execResult,
   processCompleted,
+  storedProcessCompleted,
+  storedProcessStartResult,
+  storedSubagentFinished,
+  storedSubagentLaunchResult,
   toolCallMessage,
 } from "../../__fixtures__/foldedEvents";
-import { buildFoldedEventIndex } from "./foldedEventIndex";
+import { chatReducer } from "../../features/Chat/Thread/reducer";
+import {
+  applyChatEvent,
+  newChatAction,
+} from "../../features/Chat/Thread/actions";
+import type { ChatEventEnvelope } from "../../services/refact/chatSubscription";
+import { buildFoldedEventIndex, foldedEventIndexFor } from "./foldedEventIndex";
 
 describe("buildFoldedEventIndex", () => {
   it("folds a process_completed event into the process_start row that started it", () => {
@@ -154,5 +164,115 @@ describe("buildFoldedEventIndex", () => {
     ];
 
     expect(buildFoldedEventIndex(messages).foldedMessageIndices.size).toBe(0);
+  });
+
+  it("folds a stored process_start result that carries the process id only in its content header", () => {
+    const messages: ChatMessages = [
+      toolCallMessage("call_811546", "process_start", {
+        command: "npm run dev",
+      }),
+      storedProcessStartResult("call_811546", "exec_7e7788ba"),
+      storedProcessCompleted("exec_7e7788ba"),
+    ];
+
+    const index = buildFoldedEventIndex(messages);
+
+    expect([...index.foldedMessageIndices]).toEqual([2]);
+    expect(index.processEventByToolCallId.get("call_811546")?.subkind).toBe(
+      "process_completed",
+    );
+  });
+
+  it("folds a stored subagent finished event by parent_tool_call_id when the launch result has no agent id", () => {
+    const messages: ChatMessages = [
+      toolCallMessage("call_f2c0e2", "subagent", { task: "Recon" }),
+      storedSubagentLaunchResult("call_f2c0e2", "bgagent-b54f"),
+      storedSubagentFinished("call_f2c0e2", "bgagent-b54f", "failed"),
+    ];
+
+    const index = buildFoldedEventIndex(messages);
+
+    expect([...index.foldedMessageIndices]).toEqual([2]);
+    expect(index.agentEventByToolCallId.get("call_f2c0e2")?.message_id).toBe(
+      "event-bgagent-b54f",
+    );
+  });
+
+  it("ignores a parent_tool_call_id that is not a subagent launch in this thread", () => {
+    const messages: ChatMessages = [
+      toolCallMessage("call-shell", "shell", { command: "ls" }),
+      storedSubagentFinished("call-shell", "bgagent-x"),
+      storedSubagentFinished("call-elsewhere", "bgagent-y"),
+    ];
+
+    expect(buildFoldedEventIndex(messages).foldedMessageIndices.size).toBe(0);
+  });
+
+  it("does not let a compressed assistant absorb events", () => {
+    const compressed = {
+      ...toolCallMessage("call-old", "process_start"),
+      extra: {
+        compression: {
+          kind: "llm_segment_summary",
+          source_hash: "h1",
+          source_message_ids: ["m1"],
+        },
+      },
+    };
+    const messages: ChatMessages = [
+      compressed,
+      storedProcessStartResult("call-old", "exec_old"),
+      storedProcessCompleted("exec_old"),
+    ];
+
+    expect(buildFoldedEventIndex(messages).foldedMessageIndices.size).toBe(0);
+  });
+
+  it("folds stored messages delivered through the real snapshot reducer path", () => {
+    const empty = chatReducer(undefined, { type: "@@INIT" });
+    const initial = chatReducer(empty, newChatAction(undefined));
+    const chatId = initial.current_thread_id;
+    const snapshot: ChatEventEnvelope = {
+      chat_id: chatId,
+      seq: "1",
+      type: "snapshot",
+      thread: {
+        id: chatId,
+        title: "audit",
+        model: "gpt-4",
+        mode: "AGENT",
+        tool_use: "agent",
+        boost_reasoning: false,
+        context_tokens_cap: 8192,
+        include_project_info: true,
+        checkpoints_enabled: true,
+        is_title_generated: true,
+      },
+      runtime: {
+        state: "idle",
+        paused: false,
+        error: null,
+        queue_size: 0,
+        pause_reasons: [],
+        queued_items: [],
+      },
+      background_agents: [],
+      messages: [
+        toolCallMessage("call_811546", "process_start", { command: "npm" }),
+        storedProcessStartResult("call_811546", "exec_7e7788ba"),
+        toolCallMessage("call_f2c0e2", "subagent", { task: "Recon" }),
+        storedSubagentLaunchResult("call_f2c0e2", "bgagent-b54f"),
+        storedProcessCompleted("exec_7e7788ba"),
+        storedSubagentFinished("call_f2c0e2", "bgagent-b54f"),
+      ],
+    };
+
+    const state = chatReducer(initial, applyChatEvent(snapshot));
+    const messages = state.threads[chatId]?.thread.messages ?? [];
+    const index = foldedEventIndexFor(messages);
+
+    expect(index.processEventByToolCallId.has("call_811546")).toBe(true);
+    expect(index.agentEventByToolCallId.has("call_f2c0e2")).toBe(true);
+    expect(index.foldedMessageIndices.size).toBe(2);
   });
 });

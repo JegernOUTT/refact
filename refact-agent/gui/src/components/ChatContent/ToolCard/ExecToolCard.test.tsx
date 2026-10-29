@@ -33,6 +33,10 @@ import {
 } from "../../../services/refact/types";
 import type { ToolConfirmationPauseReason } from "../../../services/refact/tools";
 import { INCIDENTAL_EXTRA_EXEC } from "../../../__fixtures__";
+import {
+  storedProcessCompleted,
+  storedProcessStartResult,
+} from "../../../__fixtures__/foldedEvents";
 
 type RenderExecToolOptions = {
   toolName?: React.ComponentProps<typeof ExecToolCard>["toolName"];
@@ -773,9 +777,7 @@ describe("ExecToolCard", () => {
     expect(document.querySelector(".rf-text-shimmer")).toBeNull();
     expect(screen.queryByText("Recorded")).toBeNull();
     expect(screen.getByText("Start dev server")).toBeInTheDocument();
-    expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
-      "background",
-    );
+    expect(screen.queryByTestId("transcript-meta")).toBeNull();
     expect(
       screen.getByTestId("exec-status-running_in_background"),
     ).toHaveTextContent("Background");
@@ -816,7 +818,7 @@ describe("ExecToolCard", () => {
     });
 
     expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
-      "background · server ready",
+      "server ready",
     );
   });
 
@@ -1057,6 +1059,53 @@ describe("ExecToolCard folded completion and missing results", () => {
     expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
       "Needs approval",
     );
+  });
+});
+
+describe("ExecToolCard historical rows without extra.exec", () => {
+  afterEach(cleanup);
+
+  test("a stored process_start result shows facts from its content header", () => {
+    const stored = storedProcessStartResult("tc-exec", "exec_7e7788ba");
+    renderExecTool({
+      toolName: "process_start",
+      args: { command: "npm run dev" },
+      content: stored.content as string,
+      failed: true,
+    });
+
+    const card = screen.getByTestId("exec-tool-card");
+    expect(card).toHaveAttribute("data-exec-process-id", "exec_7e7788ba");
+    expect(card).toHaveAttribute("data-exec-status", "failed");
+    expect(screen.getByTestId("transcript-target")).toHaveTextContent(
+      "Start local GUI preview for the Buddy page audit",
+    );
+    expect(
+      screen.queryByText(/structured process metadata was not available/u),
+    ).toBeNull();
+
+    fireEvent.click(screen.getByTestId("transcript-target"));
+    expect(screen.getByText("exec_7e7788ba")).toBeInTheDocument();
+    expect(screen.getByText("Mode")).toBeInTheDocument();
+    expect(screen.getByText("background")).toBeInTheDocument();
+    expect(screen.getByText("/workspace/refact-agent/gui")).toBeInTheDocument();
+  });
+
+  test("a stored completion event folds into the header-only start row", () => {
+    const stored = storedProcessStartResult("tc-exec", "exec_7e7788ba");
+    renderExecTool({
+      toolName: "process_start",
+      args: { command: "npm run dev" },
+      content: stored.content as string,
+      failed: true,
+      extraMessages: [storedProcessCompleted("exec_7e7788ba")],
+    });
+
+    expect(screen.getByTestId("exec-tool-card")).toHaveAttribute(
+      "data-exec-status",
+      "failed",
+    );
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent("1.3s");
   });
 });
 

@@ -93,16 +93,6 @@ function maybeValue(value: string): string {
   return value && value !== "unknown" ? value : "—";
 }
 
-const PULSE_STATUS: Record<AgentPulseState, TranscriptStatus> = {
-  running: "running",
-  waiting: "waiting",
-  paused: "waiting",
-  done: "done",
-  error: "failed",
-  idle: "done",
-  unknown: "unknown",
-};
-
 export const AgentPulseContent: React.FC<AgentPulseContentProps> = ({
   report,
   onSubmitCommand,
@@ -159,10 +149,7 @@ export const AgentPulseContent: React.FC<AgentPulseContentProps> = ({
         <div className={styles.headerTop}>
           <span className={styles.title}>Pulse: {report.cardId}</span>
           <Badge className={styles.stateBadge} tone="accent">
-            <StatusDot
-              status={stateStatus(report.stateKind)}
-              pulse={report.stateKind === "running"}
-            />
+            <StatusDot status={stateStatus(report.stateKind)} />
             <span
               className={classNames(
                 styles.stateText,
@@ -384,10 +371,10 @@ export const AgentPulseView: React.FC<AgentPulseViewProps> = ({ toolCall }) => {
   const failed = maybeResult?.tool_failed === true;
   const status: TranscriptStatus = !maybeResult
     ? unrecorded.status
-    : failed
+    : failed || report?.stateKind === "error"
       ? "failed"
       : report
-        ? PULSE_STATUS[report.stateKind]
+        ? "done"
         : "unknown";
   const title =
     report && report.cardTitle !== report.cardId
@@ -421,13 +408,8 @@ export const AgentPulseView: React.FC<AgentPulseViewProps> = ({ toolCall }) => {
       verb="Pulse"
       target={title ?? undefined}
       status={status}
-      statusLabel={
-        !maybeResult
-          ? unrecorded.statusLabel
-          : report?.stateKind === "paused"
-            ? "Paused"
-            : undefined
-      }
+      statusLabel={!maybeResult ? unrecorded.statusLabel : undefined}
+      meta={maybeResult && !failed && report ? report.state : undefined}
       summary={facts}
       output={
         report ? (
