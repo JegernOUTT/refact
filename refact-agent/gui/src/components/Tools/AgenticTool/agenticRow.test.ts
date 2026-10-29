@@ -162,6 +162,40 @@ describe("buildAgenticRow agent inspection", () => {
     },
   );
 
+  test("a reported unknown state keeps the unknown row status with the default label", () => {
+    const result = row({
+      toolName: "agent_status",
+      args: { agent_id: "x" },
+      content: "# Agent Status: X\n- Status: unknown",
+    });
+    expect(result.status).toBe("unknown");
+    expect(result.statusLabel).toBeNull();
+    expect(result.meta).toBe("unknown");
+  });
+
+  test.each(["cancelled", "interrupted"])(
+    "a reported %s state stays cancelled, not quiet done",
+    (state) => {
+      const result = row({
+        toolName: "agent_result",
+        args: { agent_id: "x" },
+        content: `# Agent Result: Subagent: Fix parser\n- Status: ${state}`,
+      });
+      expect(result.status).toBe("cancelled");
+      expect(result.meta).toBe(state);
+    },
+  );
+
+  test("a reported running state settles to done with the state in meta", () => {
+    const result = row({
+      toolName: "agent_result",
+      args: { agent_id: "x" },
+      content: "# Agent Result: X\n- Status: running",
+    });
+    expect(result.status).toBe("done");
+    expect(result.meta).toBe("running");
+  });
+
   test("a reported approval wait stays an alert", () => {
     const result = row({
       toolName: "agent_status",

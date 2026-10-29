@@ -276,3 +276,127 @@ describe("buildFoldedEventIndex", () => {
     expect(index.foldedMessageIndices.size).toBe(2);
   });
 });
+
+function plainResult(toolCallId: string, content: string): ToolMessage {
+  return { role: "tool", tool_call_id: toolCallId, content };
+}
+
+const SANDBOX_WARNING =
+  "⚠️ Sandbox preferred but full enforcement is unavailable (bwrap: partial); command ran unconfined.";
+
+describe("buildFoldedEventIndex start parsing", () => {
+  it("folds a header-only background shell start that has warnings before the banner", () => {
+    const content = [
+      "⚠️ Worktree scope: shell cwd/workdir is enforced as '/wt'; OS confinement follows the terminal security mode",
+      SANDBOX_WARNING,
+      "Process started in background",
+      "process_id: exec_bg",
+      "short_description: watcher",
+      "status: running",
+      "mode: background",
+      "Use process_read or wait with a process target to retrieve output later.",
+    ].join("\n");
+    const messages: ChatMessages = [
+      toolCallMessage("call-bg", "shell", {
+        command: "npm run watch",
+        run_in_background: true,
+      }),
+      plainResult("call-bg", content),
+      storedProcessCompleted("exec_bg"),
+    ];
+
+    expect([...buildFoldedEventIndex(messages).foldedMessageIndices]).toEqual([
+      2,
+    ]);
+  });
+
+  it("never registers a launch from foreground shell stdout that impersonates a header", () => {
+    const messages: ChatMessages = [
+      toolCallMessage("call-fg", "shell", { command: "cat state.txt" }),
+      plainResult(
+        "call-fg",
+        "process_id: exec_other\nstatus: running\nmode: background",
+      ),
+      storedProcessCompleted("exec_other"),
+    ];
+
+    const index = buildFoldedEventIndex(messages);
+    expect(index.foldedMessageIndices.size).toBe(0);
+    expect(index.processEventByToolCallId.has("call-fg")).toBe(false);
+  });
+
+  it("never registers a launch from a process_read result", () => {
+    const messages: ChatMessages = [
+      toolCallMessage("call-read", "process_read", { process_id: "exec_r" }),
+      plainResult("call-read", "Process started\nprocess_id: exec_r\n"),
+      storedProcessCompleted("exec_r"),
+    ];
+
+    expect(buildFoldedEventIndex(messages).foldedMessageIndices.size).toBe(0);
+  });
+});
+
+describe("foldedEventIndexFor caching", () => {
+  function streamingThread(text: string): ChatMessages {
+    return [
+      toolCallMessage("call-start", "process_start", { command: "npm" }),
+      execResult("call-start", "proc-1"),
+      processCompleted("proc-1"),
+      { role: "user", content: "next" },
+      { role: "assistant", content: text, message_id: "assistant-live" },
+    ];
+  }
+
+  it("reuses the index object across a text-only streaming update", () => {
+    const first = streamingThread("Hel");
+    const base = foldedEventIndexFor(first);
+    const next: ChatMessages = [
+      ...first.slice(0, -1),
+      { role: "assistant", content: "Hello", message_id: "assistant-live" },
+    ];
+
+    expect(base.foldedMessageIndices.size).toBe(1);
+    expect(foldedEventIndexFor(next)).toBe(base);
+  });
+
+  it("recomputes when a start call appears on the streaming assistant", () => {
+    const first = streamingThread("Hel");
+    const base = foldedEventIndexFor(first);
+    const next: ChatMessages = [
+      ...first.slice(0, -1),
+      {
+        ...toolCallMessage("call-two", "process_start", { command: "x" }),
+        message_id: "assistant-live",
+      },
+    ];
+
+    expect(foldedEventIndexFor(next)).not.toBe(base);
+  });
+
+  it("recomputes when a result or an event changes", () => {
+    const first = streamingThread("Hel");
+    const base = foldedEventIndexFor(first);
+    const withEvent: ChatMessages = [...first, processCompleted("proc-9")];
+    expect(foldedEventIndexFor(withEvent)).not.toBe(base);
+
+    const changedResult: ChatMessages = [
+      first[0],
+      execResult("call-start", "proc-2"),
+      ...first.slice(2),
+    ];
+    const recomputed = foldedEventIndexFor(changedResult);
+    expect(recomputed).not.toBe(base);
+    expect(recomputed.foldedMessageIndices.size).toBe(0);
+
+    const changedEvent: ChatMessages = [
+      ...first.slice(0, 2),
+      processCompleted("proc-1", "event-replaced"),
+      ...first.slice(3),
+    ];
+    const afterEvent = foldedEventIndexFor(changedEvent);
+    expect(afterEvent).not.toBe(base);
+    expect(
+      afterEvent.processEventByToolCallId.get("call-start")?.message_id,
+    ).toBe("event-replaced");
+  });
+});

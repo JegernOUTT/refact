@@ -41,6 +41,7 @@ export type ProcessArgs = {
   action?: string;
   status?: string;
   scope?: string;
+  run_in_background?: unknown;
 };
 
 export type ExecDisplayStatus = ExecProcessStatus | "unknown";
@@ -317,28 +318,110 @@ export type FoldedProcessOutcome = {
 const HEADER_LINE = /^([a-z_]+):\s?(.*)$/u;
 const HEADER_NONE = "<none>";
 const HEADER_SOME = /^Some\((.*)\)$/u;
-const HEADER_ID_MAX_LINE = 1;
+const WARNING_PREFIX = "⚠️";
+
+const START_BANNERS: ReadonlySet<string> = new Set([
+  "Process started",
+  "Process started in background",
+  "Service started",
+]);
+
+const SNAPSHOT_BANNERS: ReadonlySet<string> = new Set([
+  "Process output",
+  "Process wait completed",
+  "Process still running",
+  "Process killed",
+  "Service status",
+  "Service stopped",
+]);
+
+const SERVICE_START_ACTIONS: ReadonlySet<string> = new Set([
+  "start",
+  "restart",
+]);
+
+const SNAPSHOT_TOOLS: ReadonlySet<ExecToolName> = new Set<ExecToolName>([
+  "process_read",
+  "process_wait",
+  "process_list",
+  "process_write_stdin",
+]);
 
 export type ProcessStartHeader = Readonly<Record<string, string | null>>;
 
-export function parseProcessStartHeader(
+function parseBannerBlock(
   content: unknown,
+  banners: ReadonlySet<string>,
+  skipLeading: (line: string) => boolean,
 ): ProcessStartHeader | null {
   if (typeof content !== "string") return null;
-  const fields: Record<string, string | null> = {};
   const lines = content.split("\n");
-  for (let index = 0; index < lines.length; index++) {
-    const line = lines[index].trim();
-    if (line === "") break;
-    const match = HEADER_LINE.exec(line);
-    if (!match) continue;
-    if (match[1] === "process_id" && index > HEADER_ID_MAX_LINE) return null;
+  let index = 0;
+  while (index < lines.length && skipLeading(lines[index].trim())) index++;
+  if (index >= lines.length || !banners.has(lines[index].trim())) return null;
+  const fields: Record<string, string | null> = {};
+  for (index += 1; index < lines.length; index++) {
+    const match = HEADER_LINE.exec(lines[index].trim());
+    if (!match) break;
     const value = match[2].trim();
     const unwrapped = (HEADER_SOME.exec(value)?.[1] ?? value).trim();
     fields[match[1]] =
       value === HEADER_NONE || unwrapped === "" ? null : unwrapped;
   }
   return fields.process_id ? fields : null;
+}
+
+function isWarningLine(line: string): boolean {
+  return line.startsWith(WARNING_PREFIX);
+}
+
+export function parseProcessStartHeader(
+  content: unknown,
+): ProcessStartHeader | null {
+  return parseBannerBlock(content, START_BANNERS, isWarningLine);
+}
+
+function isWaitEnvelopeLine(line: string): boolean {
+  return line.startsWith("outcome: ") || line.startsWith("target: ");
+}
+
+export function parseProcessSnapshotHeader(
+  content: unknown,
+): ProcessStartHeader | null {
+  return parseBannerBlock(content, SNAPSHOT_BANNERS, isWaitEnvelopeLine);
+}
+
+const TRUE_WORDS: ReadonlySet<string> = new Set([
+  "true",
+  "t",
+  "yes",
+  "y",
+  "on",
+  "1",
+]);
+
+function isTruthyFlag(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value === 1;
+  return (
+    typeof value === "string" && TRUE_WORDS.has(value.trim().toLowerCase())
+  );
+}
+
+export function isProcessStartCall(
+  toolName: string,
+  args: Readonly<Record<string, unknown>>,
+): boolean {
+  if (toolName === "process_start") return true;
+  if (toolName === "shell") return isTruthyFlag(args.run_in_background);
+  if (toolName !== "shell_service") return false;
+  return (
+    typeof args.action === "string" && SERVICE_START_ACTIONS.has(args.action)
+  );
+}
+
+export function isProcessSnapshotTool(toolName: ExecToolName): boolean {
+  return SNAPSHOT_TOOLS.has(toolName);
 }
 
 function headerStatus(header: ProcessStartHeader): ExecProcessStatus | null {
@@ -361,25 +444,29 @@ function headerText(
   return header[key] ?? undefined;
 }
 
+export function processIdFromExecMetadata(
+  extra: Record<string, unknown> | undefined,
+): string | null {
+  const metadata = extractExecMetadata(extra);
+  if (!metadata || Array.isArray(metadata.processes)) return null;
+  const id = metadata.process_id?.trim();
+  return id ? id : null;
+}
+
 export function processIdFromStartResult(
   extra: Record<string, unknown> | undefined,
   content: unknown,
 ): string | null {
-  const metadata = extractExecMetadata(extra);
-  if (metadata && !Array.isArray(metadata.processes)) {
-    const id = metadata.process_id?.trim();
-    if (id) return id;
-  }
-  return parseProcessStartHeader(content)?.process_id ?? null;
+  return (
+    processIdFromExecMetadata(extra) ??
+    parseProcessStartHeader(content)?.process_id ??
+    null
+  );
 }
 
-export function execMetadataFromResult(
-  extra: Record<string, unknown> | undefined,
-  content: unknown,
+function metadataFromHeader(
+  header: ProcessStartHeader | null,
 ): ExecToolMetadata | null {
-  const metadata = extractExecMetadata(extra);
-  if (metadata) return metadata;
-  const header = parseProcessStartHeader(content);
   const processId = header?.process_id;
   const status = header ? headerStatus(header) : null;
   if (!header || !processId || !status) return null;
@@ -394,6 +481,69 @@ export function execMetadataFromResult(
     started_at_ms: headerNumber(header, "started_at") ?? undefined,
     exit_code: headerNumber(header, "exit_code"),
   };
+}
+
+export type ExecResultSource = "start" | "snapshot" | "none";
+
+export function execMetadataFromResult(
+  extra: Record<string, unknown> | undefined,
+  content: unknown,
+  source: ExecResultSource,
+): ExecToolMetadata | null {
+  const metadata = extractExecMetadata(extra);
+  if (metadata) return metadata;
+  if (source === "start") {
+    return metadataFromHeader(parseProcessStartHeader(content));
+  }
+  if (source === "snapshot") {
+    return metadataFromHeader(parseProcessSnapshotHeader(content));
+  }
+  return null;
+}
+
+const SNAPSHOT_STATE_TEXT: Record<ExecDisplayStatus, string> = {
+  starting: "starting",
+  running: "running",
+  running_in_background: "running in background",
+  exited: "exited",
+  failed: "failed",
+  killed: "killed",
+  timed_out: "timed out",
+  unknown: "",
+};
+
+export function snapshotTranscriptStatus(
+  reported: ExecDisplayStatus,
+  toolFailed: boolean,
+): TranscriptStatus {
+  if (toolFailed || reported === "failed" || reported === "timed_out") {
+    return "failed";
+  }
+  if (reported === "killed") return "cancelled";
+  return "done";
+}
+
+export function snapshotMeta(
+  toolName: ExecToolName,
+  process: DisplayProcess,
+  metadata: ExecToolMetadata | null,
+): string {
+  if (toolName === "process_list" || toolName === "process_write_stdin") {
+    const specific = execMeta(toolName, process, metadata, null, false, null);
+    if (specific || toolName === "process_list") return specific;
+  }
+  if (!metadata) return "";
+  const state =
+    typeof process.exitCode === "number"
+      ? `exit ${process.exitCode}`
+      : SNAPSHOT_STATE_TEXT[process.status];
+  const duration =
+    typeof process.durationMs === "number"
+      ? formatSeconds(process.durationMs, isBusyStatus(process.status) ? 0 : 1)
+      : null;
+  return [state, duration]
+    .filter((part): part is string => Boolean(part))
+    .join(" · ");
 }
 
 export function foldedProcessOutcome(

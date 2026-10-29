@@ -1133,3 +1133,136 @@ describe("isExecToolMetadata", () => {
     expect(isExecToolMetadata({})).toBe(false);
   });
 });
+
+describe("ExecToolCard snapshot rows and strict start parsing", () => {
+  afterEach(cleanup);
+
+  test.each(["process_read", "process_wait"] as const)(
+    "%s of a running background process is a quiet snapshot with the state in meta",
+    (toolName) => {
+      renderExecTool({
+        toolName,
+        args: { process_id: "exec_folded" },
+        content: "Process output\nprocess_id: exec_folded\n",
+        extra: { ...RUNNING_START, duration_ms: 12_000 },
+      });
+
+      const card = screen.getByTestId("exec-tool-card");
+      expect(card).toHaveAttribute("data-transcript-status", "done");
+      expect(screen.queryByTestId("transcript-status-pill")).toBeNull();
+      expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
+        "running in background · 12s",
+      );
+      expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+    },
+  );
+
+  test("a historical header-only process_read snapshot never shows a live pill", () => {
+    renderExecTool({
+      toolName: "process_read",
+      args: { process_id: "exec_hist" },
+      content: [
+        "Process output",
+        "process_id: exec_hist",
+        "short_description: dev server",
+        "status: running",
+        "mode: background",
+        "",
+        "since_seq: 0",
+      ].join("\n"),
+    });
+
+    expect(screen.getByTestId("exec-tool-card")).toHaveAttribute(
+      "data-transcript-status",
+      "done",
+    );
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
+      "running in background",
+    );
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  });
+
+  test("a reported killed or failed state stays an alert on a read row", () => {
+    renderExecTool({
+      toolName: "process_read",
+      args: { process_id: "exec_folded" },
+      content: "Process output",
+      extra: { ...RUNNING_START, status: "failed" },
+    });
+    expect(screen.getByTestId("exec-tool-card")).toHaveAttribute(
+      "data-transcript-status",
+      "failed",
+    );
+  });
+
+  test("a failed read call is failed and a missing read follows the shared no-result rule", () => {
+    renderExecTool({
+      toolName: "process_read",
+      args: { process_id: "exec_folded" },
+      content: "process not found",
+      failed: true,
+    });
+    expect(screen.getByTestId("exec-tool-card")).toHaveAttribute(
+      "data-transcript-status",
+      "failed",
+    );
+    cleanup();
+    renderExecTool({
+      toolName: "process_wait",
+      args: { process_id: "exec_folded" },
+    });
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "No result",
+    );
+  });
+
+  test("a background start without a recorded completion keeps its Background status", () => {
+    renderExecTool({
+      toolName: "process_start",
+      args: { command: "npm run dev" },
+      content: "Process started",
+      extra: RUNNING_START,
+    });
+    expect(screen.getByTestId("exec-tool-card")).toHaveAttribute(
+      "data-transcript-status",
+      "waiting",
+    );
+  });
+
+  test("a header-only background shell start with warning prefixes is a start row", () => {
+    renderExecTool({
+      toolName: "shell",
+      args: { command: "npm run watch", run_in_background: true },
+      content: [
+        "⚠️ Worktree scope: shell cwd/workdir is enforced as '/wt'; OS confinement follows the terminal security mode",
+        "⚠️ Sandbox preferred but full enforcement is unavailable (bwrap: partial); command ran unconfined.",
+        "Process started in background",
+        "process_id: exec_bg_hdr",
+        "short_description: Watch files",
+        "status: running",
+        "mode: background",
+        "Use process_read or wait with a process target to retrieve output later.",
+      ].join("\n"),
+    });
+
+    const card = screen.getByTestId("exec-tool-card");
+    expect(card).toHaveAttribute("data-exec-process-id", "exec_bg_hdr");
+    expect(card).toHaveAttribute("data-transcript-status", "waiting");
+    expect(screen.getByTestId("transcript-target")).toHaveTextContent(
+      "Watch files",
+    );
+  });
+
+  test("foreground shell stdout impersonating a start header is not a launch", () => {
+    renderExecTool({
+      toolName: "shell",
+      args: { command: "cat state.txt" },
+      content: "process_id: exec_other\nstatus: running\nmode: background",
+    });
+
+    const card = screen.getByTestId("exec-tool-card");
+    expect(card).not.toHaveAttribute("data-exec-process-id");
+    expect(card).toHaveAttribute("data-transcript-status", "done");
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  });
+});

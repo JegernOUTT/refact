@@ -1,4 +1,5 @@
 import { stripAgentKindPrefix } from "../../../utils/displayNames";
+import type { TranscriptStatus } from "../../ChatContent/TranscriptItem";
 import { compactText } from "./compactPresentation";
 import { boardReceipt, receiptState } from "./messageReceipt";
 import {
@@ -141,6 +142,20 @@ function waitEnvelope(content: string | null): {
   return { outcome: null, evidence: content };
 }
 
+const KEPT_SNAPSHOT_STATUSES: ReadonlySet<TranscriptStatus> = new Set([
+  "failed",
+  "needs_you",
+  "cancelled",
+  "unknown",
+]);
+
+const LIVE_SNAPSHOT_WORDS: ReadonlySet<string> = new Set([
+  "running",
+  "queued",
+  "waiting",
+  "paused",
+]);
+
 export function inspectRow(
   input: AgenticRowInput,
   name: "agent_status" | "agent_result" | "agent_wait",
@@ -187,10 +202,13 @@ export function inspectRow(
             .filter((part): part is string => part !== null)
             .join(" · ") || null;
   const settled = name === "agent_wait" && (timedOut || interrupted);
-  const alert =
-    !settled && (mapped.status === "failed" || mapped.status === "needs_you");
-  const status = alert ? mapped.status : "done";
-  const statusLabel = alert ? mapped.label : null;
+  const kept =
+    !settled &&
+    word !== null &&
+    !LIVE_SNAPSHOT_WORDS.has(word) &&
+    KEPT_SNAPSHOT_STATUSES.has(mapped.status);
+  const status = kept ? mapped.status : "done";
+  const statusLabel = kept && mapped.status !== "unknown" ? mapped.label : null;
   const error = detailValue(text, "Error");
   return {
     ...emptyRow(verb),
