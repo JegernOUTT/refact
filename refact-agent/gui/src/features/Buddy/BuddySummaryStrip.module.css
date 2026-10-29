@@ -1,5 +1,6 @@
-.strip {
+.strip.strip {
   display: flex;
+  flex-direction: row;
   align-items: center;
   flex-wrap: wrap;
   gap: var(--rf-space-3);
@@ -21,21 +22,17 @@
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  width: 36px;
-  height: 36px;
+  width: var(--rf-control-h-lg);
+  height: var(--rf-control-h-lg);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-ctl);
   background: var(--rf-surface-2);
-  color: var(--buddy-tint, var(--rf-color-accent));
+  color: var(--rf-color-accent);
 }
 
-@supports (background: color-mix(in srgb, #000 12%, transparent)) {
+@supports (background: color-mix(in srgb, transparent 12%, transparent)) {
   .avatar {
-    background: color-mix(
-      in srgb,
-      var(--buddy-tint, var(--rf-color-accent)) 16%,
-      transparent
-    );
+    background: color-mix(in srgb, var(--rf-color-accent) 16%, transparent);
   }
 }
 
@@ -54,6 +51,10 @@
   min-width: 0;
 }
 
+.name {
+  flex: 0 0 auto;
+}
+
 .name,
 .stageMeta {
   min-width: 0;
@@ -66,25 +67,37 @@
   overflow: hidden;
   width: 100%;
   max-width: 220px;
-  height: 4px;
+  height: var(--rf-space-1);
   border-radius: var(--rf-radius-pill);
+  background: var(--rf-surface-2);
+  appearance: none;
+  border: none;
+}
+
+.xpBar::-webkit-progress-bar {
+  border-radius: inherit;
   background: var(--rf-surface-2);
 }
 
-.xpFill {
-  width: var(--buddy-xp-fill);
-  height: 100%;
+.xpBar::-webkit-progress-value {
   border-radius: inherit;
   background: var(--rf-color-accent);
-  transition: width var(--rf-dur-med) var(--rf-ease-standard);
 }
 
-.divider {
-  align-self: stretch;
-  flex: 0 0 auto;
-  width: var(--rf-hairline);
-  min-height: 28px;
-  background: var(--rf-border);
+.xpBar::-moz-progress-bar {
+  border-radius: inherit;
+  background: var(--rf-color-accent);
+}
+
+.stats {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--rf-space-3);
+  min-width: 0;
+  padding-left: var(--rf-space-3);
+  border-left: var(--rf-hairline) solid var(--rf-border);
 }
 
 .stat {
@@ -104,8 +117,8 @@
   white-space: nowrap;
 }
 
-.spacer {
-  flex: 1 1 auto;
+.statsLink {
+  margin-left: auto;
 }
 
 @media (max-width: 520px) {
@@ -113,12 +126,14 @@
     padding: var(--rf-space-2);
   }
 
-  .divider,
-  .spacer {
-    display: none;
-  }
-
   .identity {
     flex: 1 1 100%;
+  }
+
+  .stats {
+    flex: 1 1 100%;
+    gap: var(--rf-space-2) var(--rf-space-3);
+    padding-left: 0;
+    border-left: 0;
   }
 }

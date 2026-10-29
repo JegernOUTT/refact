@@ -268,17 +268,15 @@ for (const width of [240, 360, 768, 1280]) {
       page.getByRole("heading", { name: "Saved assessment" }),
       requests.join("\n"),
     ).toBeVisible();
-    await page.getByRole("button", { name: "Mark this revision read" }).click();
-    await expect(
-      page.getByText("This report revision is marked read."),
-    ).toBeVisible();
+    await page.getByRole("button", { name: "Mark as read" }).click();
+    await expect(page.getByText("This revision is marked read.")).toBeVisible();
     await expect(
       page.getByRole("link", { name: "Untrusted link" }),
     ).toHaveCount(0);
     await expect(page.locator('img[src*="example.invalid"]')).toHaveCount(0);
     await page.getByRole("button", { name: "Snooze for one hour" }).click();
     await expect(page.getByText(/Snoozed until/)).toBeVisible();
-    await page.getByText("Saved report revisions", { exact: true }).click();
+    await page.getByText("Earlier revisions", { exact: true }).click();
     await expect(page.getByText("Revision 1 · Prior report")).toBeVisible();
     await page
       .getByRole("button", { name: "Check saved evidence links" })
@@ -287,7 +285,7 @@ for (const width of [240, 360, 768, 1280]) {
     await expect(
       page.getByText("Findings are not independently verified."),
     ).toBeVisible();
-    await page.getByRole("button", { name: "Back to work list" }).click();
+    await page.getByRole("button", { name: "Back to reports" }).click();
     await expect(row).toBeFocused();
     await row.click();
     await expect(page.getByText("Saved evidence check: Partial")).toBeVisible();
@@ -295,9 +293,7 @@ for (const width of [240, 360, 768, 1280]) {
     await row.click();
     await expect(page.getByText("Saved evidence check: Partial")).toBeVisible();
     expect(executions).toBe(1);
-    await expect(
-      page.getByText("This report revision is marked read."),
-    ).toBeVisible();
+    await expect(page.getByText("This revision is marked read.")).toBeVisible();
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= window.innerWidth,

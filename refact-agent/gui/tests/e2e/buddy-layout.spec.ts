@@ -20,11 +20,7 @@ const REASSURING_EMPTY_COPY = [
   "No approvals or warnings found",
 ];
 
-const NATIVE_PANEL_LABELS = [
-  "Native questions",
-  "Native approvals",
-  "Buddy supervision",
-];
+const NATIVE_PANEL_LABELS = ["Questions", "Approvals", "Buddy supervision"];
 
 const EMPTY_DECISIONS = {
   schema_version: 1,
@@ -303,11 +299,13 @@ test.describe("Buddy layout", () => {
     page,
   }) => {
     await openBuddy(page, { width: 1280 });
-    await expect(page.getByLabel("Native work status")).toHaveCount(1);
+    await expect(
+      page.getByRole("button", { name: /Background work/ }),
+    ).toHaveCount(1);
 
     for (const label of NATIVE_PANEL_LABELS) {
       await expect(
-        page.getByLabel(label),
+        page.getByRole("region", { name: label, exact: true }),
         `${label} rendered with no decisions, approvals or mandate`,
       ).toHaveCount(0);
     }
@@ -334,16 +332,28 @@ test.describe("Buddy layout", () => {
   }) => {
     await openBuddy(page, { width: 1280, fixture: "unavailable" });
 
-    for (const label of NATIVE_PANEL_LABELS) {
-      if (label === "Buddy supervision")
-        await page.getByRole("tab", { name: "Activity", exact: true }).click();
-      const panel = page.getByLabel(label);
-      await expect(panel).toHaveCount(1);
-      await expect(panel.getByRole("alert")).toHaveCount(1);
-      await expect(
-        panel.getByRole("button", { name: "Retry", exact: true }),
-      ).toBeVisible();
-    }
+    const merged = page.getByTestId("buddy-home-requests-error");
+    await expect(merged).toContainText(
+      "Couldn't load questions and approvals.",
+    );
+    await expect(
+      merged.getByRole("button", { name: "Retry", exact: true }),
+    ).toHaveCount(1);
+    await expect(
+      page.getByTestId("buddy-home-questions").getByRole("alert"),
+    ).toHaveCount(0);
+    await expect(
+      page.getByTestId("buddy-home-approvals").getByRole("alert"),
+    ).toHaveCount(0);
+    await page.getByRole("tab", { name: "Activity", exact: true }).click();
+    const panel = page.getByRole("region", {
+      name: "Buddy supervision",
+      exact: true,
+    });
+    await expect(panel.getByRole("alert")).toHaveCount(1);
+    await expect(
+      panel.getByRole("button", { name: "Retry", exact: true }),
+    ).toBeVisible();
 
     for (const copy of REASSURING_EMPTY_COPY) {
       await expect(
@@ -358,49 +368,23 @@ test.describe("Buddy layout", () => {
   }) => {
     await openBuddy(page, { width: 1280, fixture: "supervision-blocked" });
     await page.getByRole("tab", { name: "Activity", exact: true }).click();
-    await page
-      .getByRole("button", { name: "Grant a bounded mandate", exact: true })
-      .click();
-
-    const affordances = await page.evaluate(() =>
-      [
-        ...document.querySelectorAll(
-          "fieldset[disabled], [data-disabled='true']",
-        ),
-      ].map((group) => {
-        const style = getComputedStyle(group);
-        const fields = [
-          ...group.querySelectorAll<HTMLElement>(
-            "input:disabled, select:disabled, textarea:disabled, button:disabled",
-          ),
-        ];
-        return {
-          label:
-            group.getAttribute("aria-label") ?? group.tagName.toLowerCase(),
-          opacity: Number.parseFloat(style.opacity),
-          cursor: style.cursor,
-          fieldCount: fields.length,
-          fieldCursors: [
-            ...new Set(fields.map((field) => getComputedStyle(field).cursor)),
-          ],
-        };
+    await expect(
+      page.getByRole("button", {
+        name: "Let Pixel work on its own",
+        exact: true,
       }),
-    );
+    ).toHaveCount(0);
+    await expect(
+      page.getByText(
+        "Buddy storage is unavailable, so this project can't save a permission.",
+      ),
+    ).toBeVisible();
 
-    expect(
-      affordances.length,
-      "no inert control groups rendered, so the disabled affordance was not exercised",
-    ).toBeGreaterThan(0);
-    for (const group of affordances) {
-      expect(group.fieldCount).toBeGreaterThan(0);
-      expect(
-        group.opacity < 1 || group.cursor === "not-allowed",
-        `inert group "${group.label}" looks fully active: opacity ${group.opacity}, cursor ${group.cursor}`,
-      ).toBe(true);
-      expect(
-        group.fieldCursors,
-        `inert fields in "${group.label}" do not carry a not-allowed cursor`,
-      ).toEqual(["not-allowed"]);
-    }
+    await expect(
+      page.getByRole("button", { name: "Grant permission", exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("textbox", { name: "Existing permission ID" }),
+    ).toHaveCount(0);
   });
 });

@@ -86,11 +86,11 @@ test("rebuilt disclosures, archive, legacy gate, cap reset and navigation", asyn
   await page.keyboard.press("Escape");
   await page.getByRole("tab", { name: "Idle Legacy archive fixture" }).click();
   await expect(
-    page.getByRole("button", { name: "New Chat", exact: true }),
+    page.getByRole("button", { name: "New chat", exact: true }),
   ).toBeEnabled();
   await page.reload();
   await expect(reports).toHaveCount(2);
-  await page.getByRole("button", { name: "New Chat", exact: true }).click();
+  await page.getByRole("button", { name: "New chat", exact: true }).click();
   await expect(
     page.getByRole("tab", { name: "Idle Rebuilt archive fixture" }),
   ).toBeVisible();

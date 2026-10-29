@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { resetBuddyPersistentState } from "../ui";
 import { http, HttpResponse } from "msw";
 import { fireEvent, render, screen, waitFor } from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
@@ -26,6 +28,10 @@ const context = {
     improvement: false,
   },
 };
+
+HTMLElement.prototype.hasPointerCapture = () => false;
+HTMLElement.prototype.releasePointerCapture = () => undefined;
+afterEach(() => resetBuddyPersistentState());
 
 /** The status capability is native-provided: no controls are inferred locally. */
 describe("BuddySupervision native controls", () => {
@@ -84,45 +90,39 @@ describe("BuddySupervision native controls", () => {
     );
     render(<BuddySupervision />, { preloadedState: config });
     fireEvent.click(
-      await screen.findByRole("button", { name: "Grant a bounded mandate" }),
+      await screen.findByRole("button", { name: /work on its own/ }),
     );
-    await screen.findByLabelText("Existing mandate ID");
-    fireEvent.change(screen.getByLabelText("Existing mandate ID"), {
+    await screen.findByLabelText("Existing permission ID");
+    fireEvent.change(screen.getByLabelText("Existing permission ID"), {
       target: { value: "mandate" },
     });
     fireEvent.click(
-      screen.getByRole("button", { name: "Observe existing mandate" }),
+      screen.getByRole("button", { name: "Check existing permission" }),
     );
-    const notes = await screen.findByLabelText("Pre-authorized steering note");
-    expect(
-      screen.getByRole("button", { name: "Send steering note by ID" }),
-    ).toBeDisabled();
-    fireEvent.change(notes, { target: { value: "N1" } });
-    fireEvent.click(
-      screen.getByRole("button", { name: "Send steering note by ID" }),
+    const notes = await screen.findByRole("combobox", {
+      name: "Pre-written note",
+    });
+    expect(screen.getByRole("button", { name: "Send note" })).toBeDisabled();
+    const user = userEvent.setup();
+    await user.click(notes);
+    await user.click(
+      await screen.findByRole("option", { name: "N1: Keep scope bounded" }),
     );
+    fireEvent.click(screen.getByRole("button", { name: "Send note" }));
     await waitFor(() => expect(received).toHaveLength(1));
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Request unconfirmed",
     );
-    expect(
-      screen.getByRole("button", { name: "Send steering note by ID" }),
-    ).toBeDisabled();
-    fireEvent.click(
-      screen.getByRole("button", { name: "Refresh native supervision status" }),
-    );
+    expect(screen.getByRole("button", { name: "Send note" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh status" }));
     await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "Send steering note by ID" }),
-      ).toBeEnabled(),
+      expect(screen.getByRole("button", { name: "Send note" })).toBeEnabled(),
     );
-    fireEvent.click(
-      screen.getByRole("button", { name: "Send steering note by ID" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Send note" }));
     await waitFor(() => expect(received).toHaveLength(2));
     expect(received).toEqual([
       expect.objectContaining({
-        control_id: expect.any(String),
+        control_id: expect.any(String) as unknown,
         note_id: "N1",
       }),
       expect.objectContaining({
@@ -139,28 +139,28 @@ describe("BuddySupervision native controls", () => {
     );
     render(<BuddySupervision />, { preloadedState: config });
     fireEvent.click(
-      await screen.findByRole("button", { name: "Grant a bounded mandate" }),
+      await screen.findByRole("button", { name: /work on its own/ }),
     );
-    const model = await screen.findByLabelText("Exact model ID");
+    const model = await screen.findByLabelText("Model ID");
     fireEvent.change(model, { target: { value: "provider/model" } });
-    fireEvent.change(screen.getByLabelText(/Mandate expires/), {
+    fireEvent.change(screen.getByLabelText(/^Expires/), {
       target: { value: "2030-01-01T00:00" },
     });
-    const confirmation = screen.getByLabelText(
-      /I grant only the exact project/,
-    );
+    const confirmation = screen.getByLabelText(/I grant only this project/);
     fireEvent.click(confirmation);
     expect(
-      screen.getByRole("button", { name: "Grant bounded mandate" }),
+      screen.getByRole("button", { name: "Grant permission" }),
     ).toBeEnabled();
     fireEvent.change(model, { target: { value: "provider/other-model" } });
     expect(confirmation).not.toBeChecked();
     expect(
-      screen.getByRole("button", { name: "Grant bounded mandate" }),
+      screen.getByRole("button", { name: "Grant permission" }),
     ).toBeDisabled();
-    fireEvent.change(screen.getByLabelText("Worker scope"), {
-      target: { value: "engineering" },
-    });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("combobox", { name: "What it may do" }));
+    await user.click(
+      await screen.findByRole("option", { name: "Edit listed files" }),
+    );
     expect(screen.getByLabelText("apply_patch")).toBeChecked();
   });
 });

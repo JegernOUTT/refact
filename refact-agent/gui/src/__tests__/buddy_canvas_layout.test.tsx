@@ -146,11 +146,13 @@ describe("BuddyCanvas compact speech layout", () => {
 
     expect(bubbleElement).not.toBeNull();
     await waitFor(() => {
-      expect(bubbleElement).toHaveStyle({
-        width: "220px",
-        maxWidth: "min(220px, calc(100dvw - 16px))",
-        whiteSpace: "normal",
-      });
+      expect(bubbleElement).toHaveStyle({ width: "220px" });
+      expect(bubbleElement?.getAttribute("style")).toContain(
+        "max-width: min(220px, calc(100dvw - 16px), var(--buddy-bubble-max, 100dvw))",
+      );
+      expect(bubbleElement?.getAttribute("style")).toContain(
+        "white-space: normal",
+      );
       expect(bubbleElement).toHaveAttribute("data-bubble-position", "top");
     });
   });
@@ -182,7 +184,7 @@ describe("BuddyCanvas compact speech layout", () => {
         width: "300px",
       });
       expect(bubbleElement?.getAttribute("style")).toContain(
-        "max-width: min(min(460px, 72vw), calc(100dvw - 16px))",
+        "max-width: min(min(460px, 72vw), calc(100dvw - 16px), var(--buddy-bubble-max, 100dvw))",
       );
       expect(bubbleElement?.getAttribute("style")).toContain(
         "right: calc(78% - 0px)",
@@ -216,11 +218,13 @@ describe("BuddyCanvas compact speech layout", () => {
 
     expect(bubbleElement).not.toBeNull();
     await waitFor(() => {
-      expect(bubbleElement).toHaveStyle({
-        width: "220px",
-        maxWidth: "min(220px, calc(100dvw - 16px))",
-        whiteSpace: "normal",
-      });
+      expect(bubbleElement).toHaveStyle({ width: "220px" });
+      expect(bubbleElement?.getAttribute("style")).toContain(
+        "max-width: min(220px, calc(100dvw - 16px), var(--buddy-bubble-max, 100dvw))",
+      );
+      expect(bubbleElement?.getAttribute("style")).toContain(
+        "white-space: normal",
+      );
       expect(bubbleElement).toHaveAttribute("data-bubble-position", "left");
     });
   });
@@ -246,10 +250,10 @@ describe("BuddyCanvas compact speech layout", () => {
 
     expect(bubbleElement).not.toBeNull();
     await waitFor(() => {
-      expect(bubbleElement).toHaveStyle({
-        width: "270px",
-        maxWidth: "min(300px, calc(100dvw - 16px))",
-      });
+      expect(bubbleElement).toHaveStyle({ width: "270px" });
+      expect(bubbleElement?.getAttribute("style")).toContain(
+        "max-width: min(300px, calc(100dvw - 16px), var(--buddy-bubble-max, 100dvw))",
+      );
       expect(bubbleElement).toHaveAttribute("data-bubble-position", "left");
     });
   });

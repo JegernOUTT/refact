@@ -1,25 +1,25 @@
 import React from "react";
-import { Pin, RefreshCw, Smile, Target, Zap } from "lucide-react";
-import { Badge, Button, Icon, Surface, Text } from "../../components/ui";
+import { RefreshCw, Smile, Target } from "lucide-react";
+import { Badge, Button, Icon, Text } from "../../components/ui";
 import { SKILLS } from "./constants";
-import { BuddySectionHeader } from "./BuddySectionHeader";
 import { skillIcon } from "./buddyIcons";
+import {
+  BuddyEmptyState,
+  BuddySection,
+  BuddyStatusBadge,
+  BuddySurface,
+  buddyName,
+  buddyTraitLabel,
+  type BuddyStatusTone,
+} from "./ui";
+import type { NeedRow } from "./sections/buddyNeedRows";
 import type {
   BuddyControl,
-  BuddyNeeds,
   BuddyPersonalityProfile,
   BuddyQuest,
   BuddySettings,
 } from "./types";
 import styles from "./BuddyPersonalityPanel.module.css";
-
-export interface NeedRow {
-  key: keyof BuddyNeeds;
-  label: string;
-  value: number;
-  fill: number;
-  invert?: boolean;
-}
 
 interface BuddyPersonalityPanelProps {
   personality: BuddyPersonalityProfile | undefined;
@@ -28,29 +28,34 @@ interface BuddyPersonalityPanelProps {
   activeQuest: BuddyQuest | null;
   name: string;
   settings: BuddySettings | undefined;
-  isSavingSettings: boolean;
   onQuestControl: (control: BuddyControl) => void;
   onReroll: () => void;
-  onToggleProactive: () => void;
-  onPromptChange: (prompt: string | null) => void;
+  onOpenSettings?: () => void;
 }
 
-const fillStyle = (fill: number): React.CSSProperties =>
-  ({ "--buddy-fill": `${fill}%` }) as React.CSSProperties;
+function percent(value: number, max = 100): number {
+  if (!Number.isFinite(value) || max <= 0) return 0;
+  return Math.max(0, Math.min(100, Math.round((value / max) * 100)));
+}
 
 const Meter: React.FC<{
   label: string;
   value: React.ReactNode;
   fill: number;
-}> = ({ label, value, fill }) => (
+  tone?: BuddyStatusTone;
+}> = ({ label, value, fill, tone }) => (
   <div className={styles.meterRow}>
     <div className={styles.meterHeader}>
       <span className={styles.meterName}>{label}</span>
       <span className={styles.meterValue}>{value}</span>
     </div>
-    <div className={styles.meterBar}>
-      <div className={styles.meterFill} style={fillStyle(fill)} />
-    </div>
+    <progress
+      className={styles.meterBar}
+      data-tone={tone ?? "accent"}
+      value={fill}
+      max={100}
+      aria-label={label}
+    />
   </div>
 );
 
@@ -61,45 +66,53 @@ export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
   activeQuest,
   name,
   settings,
-  isSavingSettings,
   onQuestControl,
   onReroll,
-  onToggleProactive,
-  onPromptChange,
-}) => (
-  <Surface
-    className={styles.panel}
-    data-testid="buddy-personality-panel"
-    animated="rise"
-    radius="card"
-    variant="glass"
-  >
-    <BuddySectionHeader icon={Smile} label="Personality" />
-    <div className={styles.archetype}>
-      <Text
-        size="2"
-        weight="bold"
-        className={styles.archetypeName}
-        title={personality?.archetype_label ?? name}
-      >
-        {personality?.archetype_label ?? name}
-      </Text>
-      <Text
-        size="1"
-        color="gray"
-        className={styles.vibe}
-        title={personality?.vibe ?? "Playful, quirky, helpful"}
-      >
-        {personality?.vibe ?? "Playful, quirky, helpful"}
-      </Text>
-    </div>
-
-    <div className={styles.scrollBody}>
-      {personality?.summary && (
-        <Text size="1" className={styles.summary}>
-          {personality.summary}
+  onOpenSettings,
+}) => {
+  const displayName = buddyName(name);
+  const skills = unlockedSkills
+    .map((id) => SKILLS.find((skill) => skill.id === id))
+    .filter((skill): skill is (typeof SKILLS)[number] => Boolean(skill));
+  return (
+    <BuddySection
+      title="Personality"
+      icon={Smile}
+      testId="buddy-personality-panel"
+      className={styles.panel}
+      action={
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          leftIcon={RefreshCw}
+          onClick={onReroll}
+        >
+          Reroll personality
+        </Button>
+      }
+    >
+      <div className={styles.archetype}>
+        <Text
+          as="h3"
+          size="2"
+          weight="bold"
+          className={styles.archetypeName}
+          title={personality?.archetype_label ?? displayName}
+        >
+          {personality?.archetype_label ?? displayName}
         </Text>
-      )}
+        {personality?.vibe ? (
+          <Text size="1" color="gray" className={styles.vibe}>
+            {personality.vibe}
+          </Text>
+        ) : null}
+        {personality?.summary ? (
+          <Text size="1" className={styles.summary}>
+            {personality.summary}
+          </Text>
+        ) : null}
+      </div>
 
       <div className={styles.meterColumns}>
         <section className={styles.meterSection}>
@@ -112,6 +125,7 @@ export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
               label={item.label}
               value={item.value}
               fill={item.fill}
+              tone={item.tone}
             />
           ))}
         </section>
@@ -120,8 +134,15 @@ export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
             Traits
           </Text>
           {Object.entries(personality?.traits ?? {}).map(([key, value]) => {
-            const fill = Math.max(0, Math.min(100, Number(value) || 0));
-            return <Meter key={key} label={key} value={value} fill={fill} />;
+            const score = Number(value);
+            return (
+              <Meter
+                key={key}
+                label={buddyTraitLabel(key)}
+                value={Number.isFinite(score) ? score : 0}
+                fill={percent(score)}
+              />
+            );
           })}
         </section>
       </div>
@@ -130,53 +151,57 @@ export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
         <Text as="h3" size="2" weight="bold" className={styles.sectionLabel}>
           Skills
         </Text>
-        <div className={styles.skillsRow}>
-          {unlockedSkills.length === 0 && (
-            <Text size="1" color="gray">
-              None yet
-            </Text>
-          )}
-          {unlockedSkills.map((id) => {
-            const skill = SKILLS.find((s) => s.id === id);
-            return skill ? (
-              <Badge key={id} tone="muted" className={styles.skillChip}>
-                <Icon icon={skillIcon(id)} size="sm" />
+        {skills.length === 0 ? (
+          <BuddyEmptyState compact title="No skills unlocked yet." />
+        ) : (
+          <div className={styles.skillsRow}>
+            {skills.map((skill) => (
+              <Badge
+                key={skill.id}
+                size="xs"
+                tone="muted"
+                className={styles.skillChip}
+              >
+                <Icon icon={skillIcon(skill.id)} size="sm" />
                 {skill.name}
               </Badge>
-            ) : null;
-          })}
-        </div>
+            ))}
+          </div>
+        )}
       </section>
 
-      {activeQuest && (
-        <div className={styles.questCard}>
+      {activeQuest ? (
+        <BuddySurface level="inset" className={styles.questCard}>
           <div className={styles.questHeader}>
             <span className={styles.questTitleGroup}>
-              <Icon icon={Target} size="sm" tone="accent" />
-              <Text size="2" weight="bold" className={styles.questTitle}>
+              <Icon icon={Target} size="sm" tone="muted" />
+              <Text
+                as="h3"
+                size="2"
+                weight="bold"
+                className={styles.questTitle}
+                title={activeQuest.title}
+              >
                 {activeQuest.title}
               </Text>
             </span>
-            <Badge tone="accent">+{activeQuest.reward_xp} growth</Badge>
+            <Badge size="xs" tone="default">
+              +{activeQuest.reward_xp} growth
+            </Badge>
           </div>
-
           <Text size="1" className={styles.questDescription}>
             {activeQuest.description}
           </Text>
-
           <Meter
             label="Progress"
             value={`${Math.min(activeQuest.progress, activeQuest.goal)} / ${
               activeQuest.goal
             }`}
-            fill={Math.min(
-              100,
-              (Math.max(0, activeQuest.progress) /
-                Math.max(1, activeQuest.goal)) *
-                100,
+            fill={percent(
+              Math.max(0, activeQuest.progress),
+              Math.max(1, activeQuest.goal),
             )}
           />
-
           <div className={styles.questControls}>
             {activeQuest.controls.map((ctrl) => (
               <Button
@@ -190,46 +215,36 @@ export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
               </Button>
             ))}
           </div>
-        </div>
-      )}
+        </BuddySurface>
+      ) : null}
 
-      <div className={styles.actionRow}>
-        <Button
-          type="button"
-          size="sm"
-          variant="ghost"
-          leftIcon={RefreshCw}
-          onClick={onReroll}
-        >
-          Reroll personality
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant={settings?.proactive_enabled ? "primary" : "ghost"}
-          leftIcon={Zap}
-          onClick={onToggleProactive}
-          disabled={isSavingSettings}
-          aria-pressed={settings?.proactive_enabled}
-        >
-          Proactive {settings?.proactive_enabled ? "on" : "off"}
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant={settings?.personality_prompt ? "primary" : "ghost"}
-          leftIcon={Pin}
-          onClick={() =>
-            onPromptChange(
-              settings?.personality_prompt ? null : personality?.prompt ?? null,
-            )
-          }
-          disabled={isSavingSettings}
-          aria-pressed={!!settings?.personality_prompt}
-        >
-          Pin current vibe
-        </Button>
+      <div className={styles.stateRow} data-testid="buddy-personality-state">
+        <span className={styles.stateItem}>
+          Proactive suggestions
+          <BuddyStatusBadge
+            dimension="enabled"
+            value={settings?.proactive_enabled ? "enabled" : "disabled"}
+          />
+        </span>
+        <span className={styles.stateItem}>
+          Custom personality prompt
+          <BuddyStatusBadge
+            dimension="enabled"
+            value={settings?.personality_prompt ? "enabled" : "disabled"}
+          />
+        </span>
+        {onOpenSettings ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            onClick={onOpenSettings}
+            className={styles.stateLink}
+          >
+            Change in settings
+          </Button>
+        ) : null}
       </div>
-    </div>
-  </Surface>
-);
+    </BuddySection>
+  );
+};

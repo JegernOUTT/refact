@@ -12,50 +12,6 @@
   color: var(--rf-color-fg);
 }
 
-/* Applied to the existing scene only inside the fixture approval boundary. */
-.presenceScene.presenceScene {
-  height: auto;
-  padding-top: 280px;
-}
-.presenceScene > canvas {
-  height: 280px;
-}
-.sceneControls.sceneControls {
-  position: relative;
-  inset: auto;
-  z-index: 8;
-  max-width: none;
-  opacity: 1;
-  pointer-events: auto;
-  justify-content: flex-start;
-  padding: var(--rf-space-2);
-  background: var(--rf-surface-1);
-  color: var(--rf-color-fg);
-}
-.sceneControls > span {
-  flex-basis: 100%;
-  overflow-wrap: anywhere;
-}
-.sceneControls button {
-  min-height: 44px;
-  height: auto;
-  min-width: 44px;
-  max-width: 100%;
-  white-space: normal;
-  background: var(--rf-surface-2);
-  color: var(--rf-color-fg);
-  border: 1px solid var(--rf-border-strong);
-}
-.sceneControls button:focus-visible {
-  outline: 2px solid var(--rf-color-accent);
-  outline-offset: -2px;
-}
-.textScene.textScene {
-  padding-top: 0;
-}
-.textScene > canvas {
-  visibility: hidden;
-}
 .preview pre {
   white-space: pre-wrap;
   overflow-wrap: anywhere;

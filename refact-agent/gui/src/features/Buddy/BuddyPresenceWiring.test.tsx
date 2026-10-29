@@ -2,13 +2,8 @@ import { http, HttpResponse } from "msw";
 import { setupListeners } from "@reduxjs/toolkit/query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setUpStore } from "../../app/store";
-import {
-  act,
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-} from "../../utils/test-utils";
+import { act } from "react-dom/test-utils";
+import { fireEvent, render, screen, waitFor } from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
 import { BuddyCanvas } from "./BuddyCanvas";
 import { BuddyWorld } from "./BuddyWorld";
@@ -345,9 +340,7 @@ describe("BuddyPresenceProvider wiring", () => {
       </BuddyPresenceProvider>,
     );
 
-    expect(screen.getByTestId("buddy-world-canvas")).toHaveStyle({
-      visibility: "hidden",
-    });
+    expect(screen.getByTestId("buddy-world").className).toMatch(/textScene/);
     expect(screen.queryByTestId("buddy-sprite-hit")).toBeNull();
   });
 
@@ -360,9 +353,9 @@ describe("BuddyPresenceProvider wiring", () => {
       </BuddyPresenceProvider>,
     );
 
-    expect(screen.getByTestId("buddy-world-canvas")).not.toHaveStyle({
-      visibility: "hidden",
-    });
+    expect(screen.getByTestId("buddy-world").className).not.toMatch(
+      /textScene/,
+    );
     expect(screen.getByTestId("buddy-sprite-hit")).toBeInTheDocument();
   });
 

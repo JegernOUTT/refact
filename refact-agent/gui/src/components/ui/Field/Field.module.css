@@ -95,7 +95,7 @@
 .input:focus-visible,
 .textarea:focus-visible {
   outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
-  outline-offset: var(--rf-hairline);
+  outline-offset: var(--rf-focus-ring-offset);
 }
 
 .input:disabled,

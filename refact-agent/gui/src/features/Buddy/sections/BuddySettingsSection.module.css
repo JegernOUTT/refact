@@ -1,0 +1,52 @@
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  min-width: 0;
+}
+
+.section:focus-visible {
+  outline: none;
+}
+
+.section > * {
+  flex-shrink: 0;
+}
+
+.settingsSection {
+  min-width: 0;
+}
+
+.setupGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 7.5rem), 1fr));
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+
+.setupGrid[data-disabled="true"] {
+  cursor: not-allowed;
+}
+
+.setupGrid > * {
+  justify-content: flex-start;
+  min-width: 0;
+  height: auto;
+  min-height: var(--rf-control-h-sm);
+  padding-block: var(--rf-space-1);
+  text-align: start;
+}
+
+.setupGrid > * > span {
+  overflow: visible;
+  line-height: var(--rf-line-1);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.setupNotice {
+  margin: 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+}

@@ -3,207 +3,115 @@
   flex-direction: column;
   gap: var(--rf-space-3);
   min-width: 0;
-  padding: var(--rf-panel-pad);
-  border-color: var(--rf-border);
-  box-shadow: var(--rf-elev-panel);
 }
 
-.panelHeader {
+.headerRow {
   display: flex;
-  align-items: flex-start;
+  flex-wrap: wrap;
+  align-items: center;
   justify-content: space-between;
   gap: var(--rf-space-2);
   min-width: 0;
-}
-
-.headerCopy {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-1);
-  min-width: 0;
-}
-
-.label {
-  font-size: var(--rf-text-1);
 }
 
 .headerDescription,
-.settingDescription {
+.note {
+  margin: 0;
   color: var(--rf-color-muted);
-  font-size: var(--font-size-1);
-  line-height: var(--line-height-1);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
 }
 
-.sectionGrid {
+.rows {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--rf-space-3);
   min-width: 0;
 }
 
-.section,
-.sectionWide {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-2);
-  min-width: 0;
-  padding: var(--rf-panel-pad);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-glass);
+.rows > * + * {
+  border-top: var(--rf-hairline) solid var(--rf-border);
 }
 
-.sectionWide {
-  grid-column: 1 / -1;
-}
-
-.sectionHeader {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--rf-space-2);
-  min-width: 0;
-}
-
-.row {
-  display: flex;
+.inlineRow.inlineRow {
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--rf-row-gap);
+  column-gap: var(--rf-space-3);
+}
+
+.inlineRow.inlineRow > :last-child {
+  width: auto;
+  max-width: none;
+  justify-self: end;
+  justify-items: end;
+}
+
+.controlRow > :last-child {
+  justify-items: end;
+}
+
+.numberField {
+  width: calc(var(--rf-control-h) * 3);
+  text-align: end;
+}
+
+.hourPair {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}
+
+.toggleGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 16rem), 1fr));
+  column-gap: var(--rf-space-4);
   min-width: 0;
-  padding: var(--rf-row-pad);
-  border: var(--rf-hairline) solid transparent;
-  border-radius: var(--rf-radius-ctl);
-  background: transparent;
 }
 
-.row:hover {
-  border-color: var(--rf-border);
-  background: var(--rf-surface-1);
-}
-
-.settingText {
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  gap: var(--rf-space-1);
+.rowList {
+  display: grid;
+  gap: var(--rf-space-2xs);
   min-width: 0;
-}
-
-.segmentedRow {
-  align-items: flex-start;
-  flex-direction: column;
-}
-
-.segmentedControl {
-  width: 100%;
-  max-width: 360px;
 }
 
 .promptActions {
   display: flex;
   justify-content: flex-end;
-  gap: var(--rf-space-2);
 }
 
-.digestInput {
-  width: 72px;
-  min-width: 0;
-  padding: var(--rf-space-1) var(--rf-space-2);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-ctl);
-  background: var(--rf-surface-1);
-  color: inherit;
-  font-size: var(--font-size-1);
-  text-align: right;
-}
-
-.digestInput:focus {
-  outline: 2px solid var(--rf-color-accent);
-  outline-offset: 1px;
-}
-
-.observersGrid {
+.pathRow {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--rf-space-2);
-  min-width: 0;
-}
-
-.toggleRow {
-  display: flex;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--rf-row-gap);
-  min-width: 0;
-  padding: var(--rf-row-pad);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-ctl);
-  background: var(--rf-surface-1);
-}
-
-.toggleLabel {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.diagnosticsGrid {
-  display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
   gap: var(--rf-space-1) var(--rf-space-2);
-  align-items: baseline;
   min-width: 0;
+}
+
+.pathLabel {
+  grid-column: 1 / -1;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
 }
 
 .pathValue {
   min-width: 0;
-  overflow-wrap: anywhere;
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border-radius: var(--rf-radius-chip);
+  background: var(--rf-surface-1);
   color: var(--rf-color-fg);
-  font-size: var(--font-size-1);
-  line-height: var(--line-height-1);
+  font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line-1)
+    var(--rf-font-mono);
+  overflow-wrap: anywhere;
+}
+
+.diagnostics {
+  display: grid;
+  gap: var(--rf-space-2);
+  min-width: 0;
 }
 
 .footer {
   display: flex;
-  gap: var(--rf-space-2);
   justify-content: flex-end;
-}
-
-@media (prefers-reduced-transparency: reduce) {
-  .section,
-  .sectionWide {
-    backdrop-filter: none;
-  }
-}
-
-@media (max-width: 840px) {
-  .sectionGrid,
-  .observersGrid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-@media (max-width: 520px) {
-  .panel,
-  .section,
-  .sectionWide {
-    padding: var(--rf-panel-pad-compact);
-  }
-
-  .panelHeader,
-  .row,
-  .sectionHeader {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .row {
-    gap: var(--rf-row-gap);
-  }
-
-  .segmentedControl {
-    max-width: 100%;
-  }
 }

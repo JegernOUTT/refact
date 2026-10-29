@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CircleHelp, ShieldAlert } from "lucide-react";
-import { Badge, Button, Icon, Surface, Text } from "../../components/ui";
+import { CircleHelp, RefreshCw } from "lucide-react";
+import { Button, IconButton, Text } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import { useIsDocumentVisible } from "../../hooks/useIsDocumentVisible";
 import { v4 as uuidv4 } from "uuid";
@@ -23,23 +23,21 @@ import {
   loadAskQuestionsDraft,
   saveAskQuestionsDraft,
 } from "../../utils/chatUiPersistence";
-import { BuddySectionHeader } from "./BuddySectionHeader";
+import {
+  BUDDY_TERMS,
+  BuddyDisclosure,
+  BuddyErrorCallout,
+  BuddySection,
+  humanizeBuddyIdentifier,
+} from "./ui";
 import styles from "./BuddyNativeDecisions.module.css";
-import { BuddyNativeWork } from "./BuddyNativeWork";
 
 const DECISION_POLLING_INTERVAL_MS = 5000;
 const RETAINED_QUESTION_LIMIT = 20;
 const RENDERED_QUESTION_LIMIT = 100;
-const CHAT_ID_PREVIEW_LENGTH = 8;
 
 function chatTitleKey(projectRoot: string, chatId: string): string {
   return JSON.stringify([projectRoot, chatId]);
-}
-
-function shortChatId(chatId: string): string {
-  return chatId.length > CHAT_ID_PREVIEW_LENGTH
-    ? `${chatId.slice(0, CHAT_ID_PREVIEW_LENGTH)}…`
-    : chatId;
 }
 
 function questionKey(row: NativeQuestionView): string {
@@ -213,25 +211,22 @@ function QuestionForm({
       setSending(false);
     }
   };
+  const chatLabel = humanizeBuddyIdentifier(initial.chat_id);
   return (
-    <Surface
-      as="article"
-      variant="surface-1"
-      radius="control"
-      className={styles.question}
-      aria-label="Native decision"
-    >
-      <Text as="p" size="2" weight="medium" className={styles.questionTitle}>
+    <li className={styles.question} aria-label="Question">
+      <Text as="h3" size="2" weight="medium" className={styles.questionTitle}>
         {chatTitle ?? "Question from an untitled chat"}
       </Text>
-      <Text
-        as="p"
-        size="1"
-        className={styles.questionMeta}
-        title={initial.chat_id}
-      >
-        {`Chat ${shortChatId(initial.chat_id)}`}
-      </Text>
+      {!chatTitle && (
+        <Text
+          as="p"
+          size="1"
+          className={styles.questionMeta}
+          title={chatLabel.full}
+        >
+          {`Chat ${chatLabel.label}`}
+        </Text>
+      )}
       {initial.question.response_protocol_version === 2 ? (
         <QuestionResponseForm
           questions={initial.question.questions}
@@ -371,7 +366,7 @@ function QuestionForm({
       </div>
       {sent && pending && (
         <Text as="p" size="1" role="status" className={styles.note}>
-          Answer queued. Waiting for native resolution; this is not yet
+          Answer queued. Waiting for the chat to confirm; this is not yet
           resolved.
         </Text>
       )}
@@ -380,7 +375,7 @@ function QuestionForm({
         question.asked_at_ms === initial.question.asked_at_ms &&
         sameQuestions && (
           <Text as="p" size="1" role="status" className={styles.note}>
-            Answered — confirmed by the native chat.
+            Answered — confirmed by the chat.
           </Text>
         )}
       {!status.error &&
@@ -388,7 +383,7 @@ function QuestionForm({
         question.asked_at_ms === initial.question.asked_at_ms &&
         sameQuestions && (
           <Text as="p" size="1" role="status" className={styles.note}>
-            Cancelled in the native chat. No answer will be applied.
+            Cancelled in the chat. No answer will be applied.
           </Text>
         )}
       {question &&
@@ -400,14 +395,21 @@ function QuestionForm({
         )}
       {(error || status.error) && (
         <Text as="p" size="1" role="alert" className={styles.alert}>
-          Native response is not confirmed. Refresh status before retrying.
+          The chat hasn&apos;t confirmed this answer. Refresh status before
+          retrying.
         </Text>
       )}
-    </Surface>
+    </li>
   );
 }
 
-function Decisions({ identity }: { identity: string }) {
+function Decisions({
+  identity,
+  hideError,
+}: {
+  identity: string;
+  hideError: boolean;
+}) {
   const [halted, setHalted] = useState(false);
   const refetchRef = useRef<() => void>(() => undefined);
   const visible = useIsDocumentVisible(() => refetchRef.current());
@@ -467,67 +469,73 @@ function Decisions({ identity }: { identity: string }) {
   );
   const truncated = !failed && Boolean(snapshot?.truncated);
   if (!failed && !truncated && questions.length === 0) return null;
+  const visibleQuestions = failed ? [] : questions;
+  const first = visibleQuestions.at(0);
+  const rest = visibleQuestions.slice(1);
+  const renderQuestion = (question: NativeQuestionView) => (
+    <QuestionForm
+      key={`${questionKey(question)}:${JSON.stringify(
+        question.question.questions,
+      )}`}
+      initial={question}
+      identity={identity}
+      chatTitle={chatTitles.get(
+        chatTitleKey(question.project_root, question.chat_id),
+      )}
+    />
+  );
+  if (failed && hideError) return null;
   return (
-    <Surface
-      as="section"
-      variant="glass"
-      radius="card"
-      className={styles.decisions}
-      aria-label="Native questions"
+    <BuddySection
+      title={BUDDY_TERMS.questions}
+      icon={CircleHelp}
+      count={visibleQuestions.length > 0 ? visibleQuestions.length : undefined}
+      testId="buddy-home-questions"
+      action={
+        <IconButton
+          size="sm"
+          variant="ghost"
+          icon={RefreshCw}
+          aria-label="Refresh questions"
+          onClick={() => void refetch()}
+        />
+      }
     >
-      <BuddySectionHeader
-        icon={CircleHelp}
-        label="Questions that need you"
-        badge={
-          questions.length > 0 ? (
-            <Badge tone="accent">{questions.length}</Badge>
-          ) : undefined
-        }
-        actions={
-          <Button size="sm" variant="ghost" onClick={() => void refetch()}>
-            Refresh questions
-          </Button>
-        }
-      />
       {failed && (
-        <div className={styles.errorRow} role="alert">
-          <Icon icon={ShieldAlert} size="sm" tone="danger" />
-          <Text as="p" size="1" className={styles.errorText}>
-            Native questions could not be loaded. Pending decisions cannot be
-            listed right now — this is a connection failure, not an empty queue.
-          </Text>
-          <Button size="sm" onClick={() => void refetch()}>
-            Retry
-          </Button>
-        </div>
+        <BuddyErrorCallout
+          compact
+          thing="questions"
+          error={query.error}
+          retrying={query.isFetching}
+          onRetry={() => void refetch()}
+        />
       )}
       {truncated && (
         <Text as="p" size="1" className={styles.note}>
-          Coverage is partial. Open the remaining native chats to inspect their
-          decisions.
+          Some chats weren&apos;t checked. Open the remaining chats to see their
+          questions.
         </Text>
       )}
-      {questions.map((question) => (
-        <QuestionForm
-          key={`${questionKey(question)}:${JSON.stringify(
-            question.question.questions,
-          )}`}
-          initial={question}
-          identity={identity}
-          chatTitle={chatTitles.get(
-            chatTitleKey(question.project_root, question.chat_id),
-          )}
-        />
-      ))}
-    </Surface>
+      {first && (
+        <ul className={styles.questionList}>{renderQuestion(first)}</ul>
+      )}
+      {rest.length > 0 && (
+        <BuddyDisclosure
+          label={`${rest.length} more question${rest.length === 1 ? "" : "s"}`}
+          persistKey="buddy.home.moreQuestions"
+        >
+          <ul className={styles.questionList}>{rest.map(renderQuestion)}</ul>
+        </BuddyDisclosure>
+      )}
+    </BuddySection>
   );
 }
-export function BuddyNativeDecisions() {
+
+export function BuddyNativeDecisions({
+  hideError = false,
+}: {
+  hideError?: boolean;
+}) {
   const identity = useAppSelector(buddyOperatorIdentity);
-  return (
-    <>
-      <Decisions key={identity} identity={identity} />
-      <BuddyNativeWork />
-    </>
-  );
+  return <Decisions key={identity} identity={identity} hideError={hideError} />;
 }

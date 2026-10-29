@@ -3,7 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 const BUDDY_ROUTE = "/tests/e2e/route-showcase.html?route=buddy";
 const ENABLED_ROUTE = `${BUDDY_ROUTE}&operator=enabled`;
 const UNAVAILABLE_ROUTE = `${BUDDY_ROUTE}&operator=unavailable`;
-const DESK = "[aria-label='Buddy Desk']";
+const DESK = "[data-testid='buddy-desk']";
 const FOLD_PX = 900;
 const NARROW_PX = 360;
 
@@ -526,7 +526,10 @@ function readRows(page: Page) {
     return rows.map((row) => {
       const rect = row.getBoundingClientRect();
       return {
-        title: (row.firstElementChild?.textContent ?? "").trim(),
+        title: (
+          row.querySelector('[data-testid="buddy-desk-row-title"]')
+            ?.textContent ?? ""
+        ).trim(),
         text: (row.textContent ?? "").replace(/\s+/g, " ").trim(),
         top: Math.round(rect.top),
         bottom: Math.round(rect.bottom),
@@ -628,7 +631,7 @@ test.describe("Buddy with realistic saved work", () => {
     await page
       .getByRole("button", { name: /Knowledge base needs attention/ })
       .click();
-    await expect(page.getByLabel("Work detail")).toBeVisible();
+    await expect(page.getByRole("article")).toBeVisible();
 
     const jsonish = await page.evaluate((desk: string) => {
       const node = document.querySelector<HTMLElement>(desk);
@@ -657,7 +660,9 @@ test.describe("Buddy with realistic saved work", () => {
       ["Needs you", NEEDS_YOU_TITLES.length],
       ["Watching", WATCHING_TITLES.length],
     ] as const) {
-      await page.getByRole("button", { name: view, exact: true }).click();
+      await page
+        .getByRole("radio", { name: view, exact: true })
+        .check({ force: true });
       await waitForDeskRows(page, expected);
       const rows = await readRows(page);
       const titles = rows.map((row) => row.title);
@@ -755,7 +760,7 @@ test.describe("Buddy with realistic saved work", () => {
       ).toHaveCount(0);
     }
     await expect(
-      page.getByRole("button", { name: "Retry work authority", exact: true }),
+      page.getByRole("button", { name: "Retry connection", exact: true }),
     ).toBeVisible();
   });
 
@@ -766,15 +771,16 @@ test.describe("Buddy with realistic saved work", () => {
 
     const alert = page.getByTestId("buddy-operator-degraded");
     await expect(alert).toContainText(
-      "Another Refact process is using saved work",
+      "Another Refact process has the reports open",
     );
+    await alert.getByRole("button", { name: "Technical details" }).click();
     await expect(alert).toContainText("pid 2810136");
     await expect(alert).toContainText("refact-lsp --http-port 8001");
     await expect(alert).toContainText(
-      "Buddy is already trying again in about 15 minutes.",
+      "Pixel is already trying again in about 15 minutes.",
     );
     await page
-      .getByRole("button", { name: "Retry work authority", exact: true })
+      .getByRole("button", { name: "Retry connection", exact: true })
       .click();
     await expect
       .poll(() =>
@@ -791,7 +797,7 @@ test.describe("Buddy with realistic saved work", () => {
       )
       .toBe(1);
     await expect(alert.getByRole("status")).toContainText(
-      "Saved work is still unavailable.",
+      "Reports are still unavailable.",
     );
   });
 

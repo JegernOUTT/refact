@@ -2,7 +2,8 @@ import { useRef, useState } from "react";
 import { v4 as uuidv4 } from "uuid";
 import { Button } from "../../components/ui";
 import { humanizeIdentifier } from "../../utils/displayNames";
-import { formatReportTime, humanizeResourceReference } from "./buddyUtils";
+import { humanizeResourceReference } from "./buddyUtils";
+import { BuddyTimestamp } from "./ui";
 import type { ActionExecution, ActionSpec } from "./operatorTypes";
 import {
   usePreviewBuddyResourceMutation,
@@ -243,10 +244,9 @@ function ResourceControl({
     execution?.recovery?.available === true &&
     spec.capabilities.can_recover &&
     tracking?.recovery_execution_id == null;
-  const executionTime = formatReportTime(execution?.ended_at);
   return (
     <section className={styles.action} aria-label={label}>
-      <h4>{label}</h4>
+      <h5 className={styles.title}>{label}</h5>
       <p>
         Availability: {humanizeIdentifier(spec.availability)}. Actions require
         server rollout and explicit consent; nothing runs automatically.
@@ -288,14 +288,14 @@ function ResourceControl({
           </pre>
           {preview.reload_needed && (
             <p>
-              Disk changes may require a separate native reload. This control
-              does not activate or reload them.
+              Disk changes may require a separate reload. This control does not
+              activate or reload them.
             </p>
           )}
-          <h5>Separate native rights</h5>
+          <h6 className={styles.label}>Separate permissions</h6>
           <pre className={styles.preview}>
             {rights === null
-              ? "No additional native rights requested by the server."
+              ? "No additional permissions requested by the server."
               : JSON.stringify(rights, null, 2)}
           </pre>
           {rights !== null && (
@@ -336,7 +336,7 @@ function ResourceControl({
           </Button>
         </>
       )}
-      {(tracking || execution) && (
+      {(tracking !== null || execution !== null) && (
         <>
           <p>This action cannot be replayed from this control.</p>
           <Button size="sm" disabled={blocked} onClick={() => void refresh()}>
@@ -365,16 +365,14 @@ function ResourceControl({
           </ul>
           <p>
             {execution.ended_at ? (
-              <time title={executionTime.absolute ?? undefined}>
-                {executionTime.relative}
-              </time>
+              <BuddyTimestamp value={execution.ended_at} prefix="Finished" />
             ) : (
               "No terminal observation recorded."
             )}
           </p>
         </div>
       )}
-      {canRecover && execution && (
+      {canRecover && (
         <>
           <p>
             Recovery applies only to the original execution, at post-version{" "}

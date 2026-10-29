@@ -6,41 +6,22 @@ import React, {
   useState,
 } from "react";
 import {
-  Badge,
   Button,
   Flex,
-  Icon,
   IconButton,
   LoadingState,
   Surface,
   Tabs,
   Text,
 } from "../../components/ui";
-import {
-  AlertTriangle,
-  ArrowLeft,
-  MessageCircle,
-  Settings,
-  Wrench,
-} from "lucide-react";
+import { Settings } from "lucide-react";
 import classNames from "classnames";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { pop, push, selectCurrentPage } from "../Pages/pagesSlice";
-import { BuddyRecentChats } from "./BuddyRecentChats";
-import { BuddyPulseCard } from "./BuddyPulseCard";
-import { BuddyOpportunitiesFeed } from "./BuddyOpportunitiesFeed";
 import { BuddySettingsPanel } from "./BuddySettingsPanel";
-import { BuddyAppliedChangesCard } from "./BuddyAppliedChangesCard";
 import { BuddyWorld } from "./BuddyWorld";
 import { BuddyErrorBoundary } from "./BuddyErrorBoundary";
-import { BuddySummaryStrip } from "./BuddySummaryStrip";
-import { BuddySectionHeader } from "./BuddySectionHeader";
-import { BuddyPersonalityPanel, type NeedRow } from "./BuddyPersonalityPanel";
-import { BuddyActivityPanel } from "./BuddyActivityPanel";
-import {
-  BuddyRecentErrorsPanel,
-  type RecentBuddyError,
-} from "./BuddyRecentErrorsPanel";
+import type { RecentBuddyError } from "./BuddyRecentErrorsPanel";
 import { useBuddyState } from "./hooks/useBuddyState";
 import {
   selectBuddySnapshot,
@@ -82,21 +63,14 @@ import {
 } from "./buddySceneSpeech";
 import { buddyActionResultMessage } from "./hooks/useExecuteBuddyAction";
 import { useBuddyControlAction } from "./hooks/useBuddyControlAction";
-import { BuddyDesk } from "./BuddyDesk";
-import {
-  computeXpFill,
-  formatFailureLabel,
-  formatRelativeTime,
-} from "./buddyUtils";
-import { HISTORY_PAGE_SIZE } from "./buddyHistory";
+import { computeXpFill } from "./buddyUtils";
+import { buddyFailureLabel, resetBuddyPersistentState } from "./ui";
 import {
   buddyOperatorIdentity,
   useGetBuddyOperatorStatusQuery,
   useGetBuddyLegacyDraftWorkQuery,
   useReopenBuddyOperatorMutation,
-  type OperatorUnavailableReason,
 } from "../../services/refact/buddyOperator";
-import { BuddyPresence } from "./BuddyPresence";
 import { BuddyNativeDecisions } from "./BuddyNativeDecisions";
 import { BuddyNativeApprovals } from "./BuddyNativeApprovals";
 import { BuddySupervision } from "./BuddySupervision";
@@ -110,59 +84,37 @@ import {
 } from "./buddyOpportunityActions";
 import {
   buddyApi,
-  useDeleteDraftMutation,
   useDismissBuddyRuntimeEventMutation,
-  useGetDraftQuery,
   useUpdateBuddySettingsMutation,
 } from "../../services/refact/buddy";
 import type {
   BuddyCareAction,
   BuddyControl,
-  BuddyDraft,
-  BuddyNeeds,
   BuddyPage,
   BuddyRuntimeEvent,
   DiagnosticContext,
-  DraftKind,
 } from "./types";
 import { PALETTES, STAGES } from "./constants";
 import { useGetStatsSummaryQuery } from "../../services/refact/stats";
 import { useGetSetupStatusQuery } from "../../services/refact/setupStatus";
-import { SETUP_MODES } from "../Setup/setupModes";
 import { BuddyPresenceProvider } from "./BuddyPresenceProvider";
+import type { BuddyHomeWorkMode } from "./BuddyHomeOverview";
 import {
-  BuddyHomeLatestReport,
-  BuddyHomeSavedWork,
-  BuddyHomeTalk,
-  type BuddyHomeWorkMode,
-} from "./BuddyHomeOverview";
+  BuddyDegradedBanner,
+  BuddyPageHeader,
+  BuddyStatusPill,
+} from "./sections/BuddyPageHeader";
+import { BuddyHomeSection as BuddyHomeOverviewSection } from "./sections/BuddyHomeSection";
+import { BuddyReportsSection } from "./sections/BuddyReportsSection";
+import { BuddyActivitySection } from "./sections/BuddyActivitySection";
+import { BuddyPlaySection } from "./sections/BuddyPlaySection";
+import { BuddySettingsSection } from "./sections/BuddySettingsSection";
+import type {
+  BuddyHomeSection,
+  BuddyOperatorFailure,
+  BuddyOperatorMode,
+} from "./sections/shared";
 import styles from "./BuddyHome.module.css";
-
-const NEED_ROWS: {
-  key: keyof BuddyNeeds;
-  label: string;
-  invert?: boolean;
-}[] = [
-  { key: "hunger", label: "Hunger" },
-  { key: "energy", label: "Energy" },
-  { key: "hygiene", label: "Hygiene" },
-  { key: "boredom", label: "Boredom", invert: true },
-  { key: "affection", label: "Affection" },
-];
-const DRAFT_KIND_LABELS: Record<DraftKind, string> = {
-  skill: "Skill",
-  command: "Command",
-  delegate: "Delegate",
-  mode: "Mode",
-  agents_md: "AGENTS.md",
-  defaults_model: "Default Models",
-  hook: "Hooks",
-  pulse_report: "Pulse Report",
-};
-
-const REVIEWABLE_DRAFT_KINDS: DraftKind[] = ["agents_md", "pulse_report"];
-
-type BuddyHomeSection = "home" | "reports" | "activity" | "play" | "settings";
 
 const SECTION_ORDER: BuddyHomeSection[] = [
   "home",
@@ -178,81 +130,6 @@ const SECTION_LABELS: Record<BuddyHomeSection, string> = {
   activity: "Activity",
   play: "Play",
   settings: "Settings",
-};
-
-type BuddyOperatorMode =
-  | "loading"
-  | "error"
-  | "enabled"
-  | "disabled"
-  | "unavailable";
-
-const OPERATOR_MODE_LABELS: Record<BuddyOperatorMode, string> = {
-  loading: "Checking",
-  error: "Broken",
-  enabled: "Enabled",
-  disabled: "Local only",
-  unavailable: "Not responding",
-};
-
-const OPERATOR_MODE_TONES: Record<
-  BuddyOperatorMode,
-  React.ComponentProps<typeof Badge>["tone"]
-> = {
-  loading: "muted",
-  error: "danger",
-  enabled: "success",
-  disabled: "accent",
-  unavailable: "danger",
-};
-
-type BuddyOperatorFailure = Extract<BuddyOperatorMode, "error" | "unavailable">;
-
-const OPERATOR_FAILURE_TITLES: Record<BuddyOperatorFailure, string> = {
-  error: "Buddy's work service answered with an error",
-  unavailable: "Buddy's work service is not responding",
-};
-
-const OPERATOR_FAILURE_DETAIL: Record<BuddyOperatorFailure, string> = {
-  error:
-    "The engine replied, but not with anything this page can trust — so this is a connection failure, not an empty queue.",
-  unavailable:
-    "Nothing answered for saved work, proposals or pulse reports — so this is a connection failure, not an empty queue.",
-};
-
-const OPERATOR_FAILURE_SCOPE =
-  "Your chats, files and recent warnings are untouched. Progress, counters and project setup stay hidden until something can confirm them.";
-
-const OPERATOR_UNAVAILABLE_REASON_TITLES: Record<string, string> = {
-  already_owned: "Another Refact process is using saved work",
-  io_error: "Buddy could not open saved work",
-  project_mismatch: "Saved work belongs to a different project",
-  not_attempted: "Buddy has not opened saved work yet",
-};
-
-function unavailableReasonTitle(
-  reason: OperatorUnavailableReason | undefined,
-): string {
-  if (!reason) return OPERATOR_FAILURE_TITLES.unavailable;
-  return reason.kind in OPERATOR_UNAVAILABLE_REASON_TITLES
-    ? OPERATOR_UNAVAILABLE_REASON_TITLES[reason.kind]
-    : "Buddy could not open saved work";
-}
-
-function retryScheduleCopy(retryInSeconds: number | undefined): string | null {
-  if (retryInSeconds === undefined) return null;
-  if (retryInSeconds < 60)
-    return "Buddy is already trying again in under a minute.";
-  const minutes = Math.ceil(retryInSeconds / 60);
-  return `Buddy is already trying again in about ${minutes} minute${
-    minutes === 1 ? "" : "s"
-  }.`;
-}
-
-type ClipboardWriter = {
-  clipboard?: {
-    writeText?: (text: string) => Promise<void>;
-  };
 };
 
 const RECENT_ERROR_WINDOW_MS = 6 * 60 * 60 * 1000;
@@ -290,123 +167,6 @@ function isGroupedRecentError(event: RecentBuddyError): boolean {
   return (event.relatedIds?.length ?? 0) > 1 || (event.occurrences ?? 1) > 1;
 }
 
-function draftKindLabel(draft: BuddyDraft): string {
-  return DRAFT_KIND_LABELS[draft.kind];
-}
-
-const BuddyHomeDraftReview: React.FC<{ draftId: string }> = ({ draftId }) => {
-  const { data: draft, isLoading, isError } = useGetDraftQuery(draftId);
-  const [deleteDraft, { isLoading: isDeleting }] = useDeleteDraftMutation();
-  const [copied, setCopied] = useState(false);
-  const [copyError, setCopyError] = useState<string | null>(null);
-  const [dismissError, setDismissError] = useState(false);
-
-  const handleCopy = useCallback(async () => {
-    if (!draft) return;
-    setCopyError(null);
-    try {
-      const clipboard = (navigator as ClipboardWriter).clipboard;
-      if (!clipboard?.writeText) {
-        throw new Error("Clipboard API unavailable");
-      }
-      await clipboard.writeText(draft.yaml_or_json);
-      setCopied(true);
-    } catch {
-      setCopied(false);
-      setCopyError(
-        "Clipboard unavailable — select the draft text and copy it manually.",
-      );
-    }
-  }, [draft]);
-
-  const handleDismiss = useCallback(async () => {
-    setDismissError(false);
-    try {
-      await deleteDraft(draftId).unwrap();
-    } catch {
-      setDismissError(true);
-    }
-  }, [deleteDraft, draftId]);
-
-  if (isLoading) {
-    return (
-      <Surface className={styles.draftPanel} radius="card" variant="glass">
-        <LoadingState label="Loading Buddy draft…" variant="compact" />
-      </Surface>
-    );
-  }
-
-  if (isError || !draft) {
-    return (
-      <Surface className={styles.draftPanel} radius="card" variant="glass">
-        <Text size="2" color="red">
-          Draft unavailable or expired.
-        </Text>
-      </Surface>
-    );
-  }
-
-  const reviewable = REVIEWABLE_DRAFT_KINDS.includes(draft.kind);
-
-  return (
-    <Surface className={styles.draftPanel} radius="card" variant="glass">
-      <div className={styles.draftHeader}>
-        <div className={styles.draftTitleGroup}>
-          <Text size="1" color="gray" className={styles.draftLabel}>
-            Buddy draft review
-          </Text>
-          <Text as="h2" size="3" weight="bold">
-            {draft.title}
-          </Text>
-        </div>
-        <Text size="1" color="gray" className={styles.draftMeta}>
-          {draftKindLabel(draft)} · {draft.id}
-        </Text>
-      </div>
-      {draft.explanation && (
-        <Text size="2" color="gray">
-          {draft.explanation}
-        </Text>
-      )}
-      {!reviewable && (
-        <Text size="2" color="orange">
-          This draft opens in its dedicated editor from the opportunity action.
-        </Text>
-      )}
-      <pre className={styles.draftContent}>{draft.yaml_or_json}</pre>
-      <div className={styles.draftActions}>
-        <Button
-          type="button"
-          size="sm"
-          variant="primary"
-          onClick={() => void handleCopy()}
-        >
-          {copied ? "Copied" : "Copy content"}
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant="ghost"
-          disabled={isDeleting}
-          onClick={() => void handleDismiss()}
-        >
-          Dismiss draft
-        </Button>
-      </div>
-      {copyError && (
-        <Text size="1" color="orange">
-          {copyError}
-        </Text>
-      )}
-      {dismissError && (
-        <Text size="1" color="red" role="alert">
-          Draft was not dismissed. Try again.
-        </Text>
-      )}
-    </Surface>
-  );
-};
-
 const BuddyHomeContent: React.FC = () => {
   const dispatch = useAppDispatch();
   const currentPage = useAppSelector(selectCurrentPage);
@@ -414,6 +174,13 @@ const BuddyHomeContent: React.FC = () => {
     currentPage?.name === "buddy" ? currentPage.draftId : undefined;
   const snapshot = useAppSelector(selectBuddySnapshot);
   const operatorIdentity = useAppSelector(buddyOperatorIdentity);
+  const previousIdentity = useRef(operatorIdentity);
+  useEffect(() => {
+    if (previousIdentity.current !== operatorIdentity) {
+      previousIdentity.current = operatorIdentity;
+      resetBuddyPersistentState();
+    }
+  }, [operatorIdentity]);
   const operator = useGetBuddyOperatorStatusQuery(operatorIdentity, {
     refetchOnMountOrArgChange: true,
     refetchOnFocus: true,
@@ -434,20 +201,7 @@ const BuddyHomeContent: React.FC = () => {
       : null;
   const operatorNeedsRetry = degraded !== null;
   const statusPill = (
-    <Badge
-      size={degraded ? "md" : "xs"}
-      variant={degraded ? "outline" : "soft"}
-      tone={OPERATOR_MODE_TONES[operatorMode]}
-      className={classNames(
-        styles.statusPill,
-        degraded && styles.statusPillAlert,
-      )}
-      data-testid="buddy-operator-status"
-      data-state={operatorMode}
-    >
-      {degraded && <Icon icon={AlertTriangle} size="sm" tone="danger" />}
-      {OPERATOR_MODE_LABELS[operatorMode]}
-    </Badge>
+    <BuddyStatusPill operatorMode={operatorMode} degraded={degraded} />
   );
   const mappedDraft = useGetBuddyLegacyDraftWorkQuery(
     {
@@ -510,8 +264,6 @@ const BuddyHomeContent: React.FC = () => {
   const verdictReaction = useAppSelector(selectVerdictReaction);
   const [speechIndex, setSpeechIndex] = useState(0);
   const [recentErrorNow, setRecentErrorNow] = useState(() => Date.now());
-  const [recentErrorsVisibleCount, setRecentErrorsVisibleCount] =
-    useState(HISTORY_PAGE_SIZE);
   const [isRetryingBuddySnapshot, setIsRetryingBuddySnapshot] = useState(false);
   const [operatorRetryOutcome, setOperatorRetryOutcome] = useState<
     "recovered" | "unavailable" | "failed" | null
@@ -592,19 +344,6 @@ const BuddyHomeContent: React.FC = () => {
   const xpFill = useMemo(() => computeXpFill(xp, xpNext ?? 0), [xp, xpNext]);
 
   const name = identity?.name ?? state.name;
-  const needRows = useMemo<NeedRow[]>(
-    () =>
-      NEED_ROWS.map((item) => {
-        const value = pet?.needs[item.key] ?? 0;
-        const fill = item.invert ? 100 - value : value;
-        return {
-          ...item,
-          value,
-          fill: Math.max(0, Math.min(100, fill)),
-        };
-      }),
-    [pet],
-  );
 
   const successRate = useMemo(() => {
     if (!statsData || statsData.totals.total_calls === 0) return null;
@@ -616,10 +355,6 @@ const BuddyHomeContent: React.FC = () => {
   const handleBack = useCallback(() => {
     dispatch(pop());
   }, [dispatch]);
-
-  const handleSettings = useCallback(() => {
-    void updateSettings({ proactive_enabled: !settings?.proactive_enabled });
-  }, [settings?.proactive_enabled, updateSettings]);
 
   const handleEnable = useCallback(() => {
     void updateSettings({ enabled: true });
@@ -697,17 +432,6 @@ const BuddyHomeContent: React.FC = () => {
       );
     },
     [buddySignal, dispatch],
-  );
-
-  const handlePromptChange = useCallback(
-    async (prompt: string | null) => {
-      if (prompt === null) {
-        await updateSettings({ clear_personality_prompt: true });
-        return;
-      }
-      await updateSettings({ personality_prompt: prompt });
-    },
-    [updateSettings],
   );
 
   const handleReroll = useCallback(async () => {
@@ -1080,8 +804,9 @@ const BuddyHomeContent: React.FC = () => {
         continue;
       }
 
-      const title =
-        formatFailureLabel(diagnostic.error_type) ?? diagnostic.error_message;
+      const title = diagnostic.error_type.trim()
+        ? buddyFailureLabel(diagnostic.error_type)
+        : diagnostic.error_message;
       const id =
         diagnostic.diagnostic_id ??
         `diagnostic-${signature([
@@ -1230,10 +955,6 @@ const BuddyHomeContent: React.FC = () => {
     }
     return rows;
   }, [operatorRecentErrors]);
-  const visibleRecentErrorRows = recentErrorRows.slice(
-    0,
-    recentErrorsVisibleCount,
-  );
 
   const handleInvestigateError = useCallback(
     (event: RecentBuddyError) => {
@@ -1292,16 +1013,7 @@ const BuddyHomeContent: React.FC = () => {
   if (snapshot === null) {
     return (
       <div className={classNames(styles.page, "rf-enter")}>
-        <div className={styles.topBar}>
-          <Button
-            variant="ghost"
-            size="sm"
-            leftIcon={ArrowLeft}
-            onClick={handleBack}
-          >
-            Back
-          </Button>
-        </div>
+        <BuddyPageHeader onBack={handleBack} />
         <Flex
           align="center"
           justify="center"
@@ -1332,29 +1044,19 @@ const BuddyHomeContent: React.FC = () => {
   if (!enabled) {
     return (
       <div className={classNames(styles.page, "rf-enter")}>
-        <div className={styles.topBar}>
-          <Button
-            variant="ghost"
-            size="sm"
-            leftIcon={ArrowLeft}
-            onClick={handleBack}
-          >
-            Back
-          </Button>
-          <div className={styles.topIdentity}>
-            <Text as="h1" size="5" weight="bold" className={styles.topTitle}>
-              {name}
-            </Text>
-            {statusPill}
-          </div>
-          <IconButton
-            variant="ghost"
-            size="sm"
-            aria-label="Settings"
-            icon={Settings}
-            onClick={() => setShowSettings((v) => !v)}
-          />
-        </div>
+        <BuddyPageHeader
+          onBack={handleBack}
+          identity={{ name, statusPill }}
+          trailing={
+            <IconButton
+              variant="ghost"
+              size="sm"
+              aria-label="Settings"
+              icon={Settings}
+              onClick={() => setShowSettings((v) => !v)}
+            />
+          }
+        />
         <main
           className={classNames(styles.content, styles.contentPadded)}
           data-testid="buddy-home-disabled"
@@ -1411,6 +1113,7 @@ const BuddyHomeContent: React.FC = () => {
       <BuddyWorld
         homeDoorDisabled
         compact={!play}
+        portrait={!play}
         palette={palette}
         stage={stage}
         state={state}
@@ -1437,33 +1140,10 @@ const BuddyHomeContent: React.FC = () => {
 
   return (
     <div className={classNames(styles.page, "rf-enter")}>
-      <div className={styles.topBar}>
-        <Button
-          variant="ghost"
-          size="sm"
-          leftIcon={ArrowLeft}
-          onClick={handleBack}
-        >
-          Back
-        </Button>
-        <div className={styles.topIdentity}>
-          <Text as="h1" size="5" weight="bold" className={styles.topTitle}>
-            {name}
-          </Text>
-          {projectName && (
-            <Text
-              size="1"
-              color="gray"
-              className={styles.topProject}
-              title={projectRoot}
-            >
-              {projectName}
-            </Text>
-          )}
-          {statusPill}
-        </div>
-        <span className={styles.topBarSpacer} aria-hidden />
-      </div>
+      <BuddyPageHeader
+        onBack={handleBack}
+        identity={{ name, statusPill, projectName, projectRoot }}
+      />
 
       <Tabs
         value={section}
@@ -1492,476 +1172,100 @@ const BuddyHomeContent: React.FC = () => {
           data-section={section}
         >
           {degraded && (
-            <Surface
-              as="section"
-              variant="glass"
-              radius="card"
-              className={styles.degradedCard}
-              role="alert"
-              data-testid="buddy-operator-degraded"
-            >
-              <div className={styles.degradedHeader}>
-                <Icon icon={AlertTriangle} size="sm" tone="danger" />
-                <Text size="3" weight="bold" className={styles.degradedTitle}>
-                  {degraded === "unavailable"
-                    ? unavailableReasonTitle(
-                        operator.currentData?.unavailable_reason,
-                      )
-                    : OPERATOR_FAILURE_TITLES[degraded]}
-                </Text>
-              </div>
-              <Text size="2" className={styles.degradedText}>
-                {degraded === "unavailable" &&
-                operator.currentData?.unavailable_reason
-                  ? operator.currentData.unavailable_reason.detail
-                  : OPERATOR_FAILURE_DETAIL[degraded]}
-              </Text>
-              {degraded === "unavailable" &&
-                retryScheduleCopy(
-                  operator.currentData?.unavailable_reason?.retry_in_seconds,
-                ) && (
-                  <Text size="2" color="gray" className={styles.degradedText}>
-                    {retryScheduleCopy(
-                      operator.currentData?.unavailable_reason
-                        ?.retry_in_seconds,
-                    )}{" "}
-                    This button tries now.
-                  </Text>
-                )}
-              <Text size="2" color="gray" className={styles.degradedText}>
-                {OPERATOR_FAILURE_SCOPE}
-              </Text>
-              <div className={styles.degradedActions}>
-                <Button
-                  size="sm"
-                  variant="primary"
-                  onClick={() => void handleRetryOperator()}
-                  disabled={isReopeningOperator}
-                >
-                  {isReopeningOperator
-                    ? "Retrying work authority…"
-                    : !operator.currentData?.unavailable_reason
-                      ? "Check work authority"
-                      : "Retry work authority"}
-                </Button>
-              </div>
-              {operatorRetryOutcome && (
-                <Text size="2" role="status" className={styles.degradedText}>
-                  {operatorRetryOutcome === "recovered"
-                    ? "Saved work is available again."
-                    : operatorRetryOutcome === "unavailable"
-                      ? "Saved work is still unavailable. Buddy will keep trying."
-                      : "Buddy could not try saved work. Check work authority again later."}
-                </Text>
-              )}
-            </Surface>
+            <BuddyDegradedBanner
+              name={name}
+              degraded={degraded}
+              unavailableReason={operator.currentData?.unavailable_reason}
+              isRetrying={isReopeningOperator}
+              retryOutcome={operatorRetryOutcome}
+              onRetry={handleRetryOperator}
+            />
           )}
 
           <Tabs.Content value="home" className={styles.tabContent}>
-            <div
-              data-section-panel="home"
-              tabIndex={-1}
-              className={styles.section}
-              data-testid="buddy-home-overview"
-            >
-              <Surface
-                as="section"
-                variant="glass"
-                radius="card"
-                className={styles.identityCard}
-                aria-label={`${name} summary`}
-              >
-                {!degraded && (
-                  <div
-                    className={classNames(styles.heroCard, styles.portrait)}
-                    id="buddy-home-hero"
-                    data-testid="buddy-home-hero"
-                  >
-                    {renderWorld(false)}
-                  </div>
-                )}
-                <div className={styles.identityBody}>
-                  <BuddyPresence
-                    state={state}
-                    headline={snapshot.state.semantic.headline}
-                    speech={heroSpeech}
-                    sceneMounted={!degraded}
-                    sceneToggleLabel="Open Play"
-                    onToggleScene={() => selectSection("play")}
-                    onControl={handleSpeechControl}
-                  />
-                  <BuddyHomeTalk name={name} />
-                </div>
-              </Surface>
-
-              {editorial.canFeedback && editorial.speech && (
-                <Surface
-                  as="section"
-                  variant="glass"
-                  radius="card"
-                  className={styles.editorialCard}
-                  aria-label="Buddy editorial message"
-                >
-                  <BuddySectionHeader
-                    icon={MessageCircle}
-                    label={`${name} says`}
-                  />
-                  <Text size="2" className={styles.editorialText}>
-                    {editorial.speech.text}
-                  </Text>
-                  <div className={styles.editorialActions}>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => void editorial.sendFeedback("useful")}
-                    >
-                      Helpful
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => void editorial.sendFeedback("noisy")}
-                    >
-                      Noisy
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() =>
-                        void editorial.sendFeedback("less_like_this")
-                      }
-                    >
-                      Less like this
-                    </Button>
-                  </div>
-                  {editorial.feedbackStatus && (
-                    <Text
-                      size="1"
-                      color="gray"
-                      role="status"
-                      className={styles.editorialStatus}
-                    >
-                      {editorial.feedbackStatus}
-                    </Text>
-                  )}
-                </Surface>
-              )}
-
-              <div className={styles.homeColumns}>
-                <div className={styles.homeMain}>
-                  <BuddyHomeSavedWork
-                    mode={homeWorkMode}
-                    project={operator.currentData?.project ?? null}
-                    onOpen={handleOpenWork}
-                    onShowReports={handleShowReports}
-                  />
-                  <BuddyHomeLatestReport
-                    mode={homeWorkMode}
-                    project={operator.currentData?.project ?? null}
-                    onOpen={handleOpenWork}
-                    onShowReports={handleShowReports}
-                  />
-                </div>
-                <div className={styles.homeAside}>
-                  <div
-                    className={styles.nativeSlot}
-                    data-testid="buddy-home-native"
-                  >
-                    <BuddyNativeDecisions />
-                    <BuddyNativeApprovals />
-                  </div>
-                  <BuddyRecentChats
-                    compact
-                    maxItems={3}
-                    initialFilter="chat"
-                    title="Recent conversations"
-                    onViewAll={() => selectSection("activity")}
-                  />
-                </div>
-              </div>
-            </div>
+            <BuddyHomeOverviewSection
+              name={name}
+              degraded={degraded !== null}
+              world={renderWorld(false)}
+              state={state}
+              headline={snapshot.state.semantic.headline}
+              vibe={personality?.vibe}
+              heroSpeech={heroSpeech}
+              onSelectSection={selectSection}
+              onSpeechControl={handleSpeechControl}
+              editorial={editorial}
+              homeWorkMode={homeWorkMode}
+              project={operator.currentData?.project ?? null}
+              onOpenWork={handleOpenWork}
+              onShowReports={handleShowReports}
+            />
           </Tabs.Content>
 
           <Tabs.Content value="reports" className={styles.tabContent}>
-            <div
-              data-section-panel="reports"
-              tabIndex={-1}
-              className={styles.section}
-              data-testid="buddy-home-reports"
-            >
-              {legacyCompatibility && draftId && (
-                <div
-                  className={classNames(styles.draftSection, "rf-enter-rise")}
-                >
-                  <BuddyHomeDraftReview draftId={draftId} />
-                </div>
-              )}
-
-              {!legacyCompatibility && draftId && (
-                <Surface
-                  as="section"
-                  variant="glass"
-                  radius="card"
-                  className={styles.draftNotice}
-                >
-                  <Text
-                    size="2"
-                    color="gray"
-                    className={styles.draftNoticeText}
-                  >
-                    Draft editing sessions may expire. Saved proposals stay
-                    below.
-                  </Text>
-                  {mappedDraft.isFetching && (
-                    <Text
-                      size="1"
-                      color="gray"
-                      role="status"
-                      className={styles.draftNoticeText}
-                    >
-                      Finding the saved proposal…
-                    </Text>
-                  )}
-                  {mappedDraft.error && (
-                    <Text
-                      size="1"
-                      color="red"
-                      role="alert"
-                      className={styles.draftNoticeText}
-                    >
-                      No saved proposal could be loaded for this editing
-                      session.
-                    </Text>
-                  )}
-                </Surface>
-              )}
-              {operatorEnabled ? (
-                <BuddyDesk
-                  key={JSON.stringify([
-                    operator.currentData?.worker,
-                    mappedDraft.currentData?.data.value.id,
-                    selectedWork?.workId,
-                  ])}
-                  workId={selectedWork?.workId ?? pageWorkId}
-                  projectId={selectedWork?.projectId ?? pageProjectId}
-                />
-              ) : legacyCompatibility ? (
-                <>
-                  <BuddyPulseCard />
-                  <BuddyOpportunitiesFeed />
-                </>
-              ) : (
-                <Text size="2" color="gray" className={styles.tabNotice}>
-                  {degraded
-                    ? "Saved reports cannot be listed while work authority is down. This is a connection failure, not an empty list."
-                    : "Checking saved reports…"}
-                </Text>
-              )}
-            </div>
+            <BuddyReportsSection
+              legacyCompatibility={legacyCompatibility}
+              operatorEnabled={operatorEnabled}
+              degraded={degraded !== null}
+              draftId={draftId}
+              mappedDraft={mappedDraft}
+              deskKey={JSON.stringify([
+                operator.currentData?.worker,
+                mappedDraft.currentData?.data.value.id,
+                selectedWork?.workId,
+              ])}
+              workId={selectedWork?.workId ?? pageWorkId}
+              projectId={selectedWork?.projectId ?? pageProjectId}
+            />
           </Tabs.Content>
 
           <Tabs.Content value="activity" className={styles.tabContent}>
-            <div
-              data-section-panel="activity"
-              tabIndex={-1}
-              className={styles.section}
-              data-testid="buddy-home-activity"
-            >
-              {legacyCompatibility ? (
-                <div className={styles.tabPanel}>
-                  <BuddyRecentErrorsPanel
-                    recentErrors={legacyRecentErrors.slice(0, 25)}
-                    onInvestigate={handleInvestigateError}
-                    onDismiss={handleDismissError}
-                  />
-                </div>
-              ) : (
-                <div className={styles.tabNoticeList}>
-                  <Text size="2" color="gray" className={styles.tabNotice}>
-                    {operatorRecentErrors.length === 0
-                      ? "No warnings in the last six hours."
-                      : "Recent warnings, read-only."}
-                  </Text>
-                  {recentErrorRows.length > 0 && (
-                    <ul
-                      aria-label="Recent warnings"
-                      className={styles.tabNoticeItems}
-                    >
-                      {visibleRecentErrorRows.map(
-                        ({ event, detail, count }) => (
-                          <li key={event.id} className={styles.tabNoticeRow}>
-                            <Text size="1" color="gray">
-                              {event.title}
-                              {count > 1 && ` ×${count}`}
-                            </Text>
-                            {detail && (
-                              <details className={styles.noticeDetail}>
-                                <summary>Technical details</summary>
-                                <Text size="1" color="gray">
-                                  {detail}
-                                </Text>
-                              </details>
-                            )}
-                            {event.created_at && (
-                              <Text size="1" color="gray">
-                                {formatRelativeTime(event.created_at)}
-                              </Text>
-                            )}
-                          </li>
-                        ),
-                      )}
-                    </ul>
-                  )}
-                  {visibleRecentErrorRows.length < recentErrorRows.length && (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      onClick={() =>
-                        setRecentErrorsVisibleCount(
-                          (count) => count + HISTORY_PAGE_SIZE,
-                        )
-                      }
-                    >
-                      Show more
-                    </Button>
-                  )}
-                </div>
-              )}
-              {legacyCompatibility ? (
-                <div className={styles.tabPanelSplit}>
-                  <BuddyActivityPanel
-                    activities={activities}
-                    onOpenChat={handleOpenActivityChat}
-                  />
-                  <BuddyRecentChats title="Recent chats" />
-                </div>
-              ) : (
-                <div className={styles.tabPanel}>
-                  <BuddyRecentChats title="Recent chats" />
-                </div>
-              )}
-              <BuddySupervision />
-            </div>
+            <BuddyActivitySection
+              legacyCompatibility={legacyCompatibility}
+              legacyRecentErrors={legacyRecentErrors}
+              recentErrorRows={recentErrorRows}
+              activities={activities}
+              onInvestigateError={handleInvestigateError}
+              onDismissError={handleDismissError}
+              onOpenActivityChat={handleOpenActivityChat}
+            />
           </Tabs.Content>
 
           <Tabs.Content value="play" className={styles.tabContent}>
-            <div
-              data-section-panel="play"
-              tabIndex={-1}
-              aria-label="Buddy Play"
-              className={classNames(styles.section, styles.playPanel)}
-              data-testid="buddy-home-play"
-            >
-              <Surface
-                variant="glass"
-                radius="card"
-                className={classNames(styles.heroCard, styles.heroCardExpanded)}
-                id="buddy-home-hero"
-                data-testid="buddy-home-hero"
-              >
-                {renderWorld(true)}
-              </Surface>
-              <div className={styles.playActions}>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  onClick={handleResetWorld}
-                  aria-label="Reset Buddy scene"
-                >
-                  Reset scene
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => selectSection("home")}
-                >
-                  Leave Play
-                </Button>
-              </div>
-              {!degraded && (
-                <BuddySummaryStrip
-                  name={name}
-                  palette={palette}
-                  stage={stage}
-                  stageIndex={stageIndex}
-                  xp={xp}
-                  xpNext={xpNext}
-                  xpFill={xpFill}
-                  atMaxStage={atMaxStage}
-                  pet={pet}
-                  statsData={statsData}
-                  successRate={successRate}
-                  onViewStats={handleViewStats}
-                />
-              )}
-            </div>
+            <BuddyPlaySection
+              world={renderWorld(true)}
+              degraded={degraded !== null}
+              onResetWorld={handleResetWorld}
+              summary={{
+                name,
+                palette,
+                stage,
+                stageIndex,
+                xp,
+                xpNext,
+                xpFill,
+                atMaxStage,
+                pet,
+                statsData,
+                successRate,
+                onViewStats: handleViewStats,
+              }}
+            />
           </Tabs.Content>
 
           <Tabs.Content value="settings" className={styles.tabContent}>
-            <div
-              data-section-panel="settings"
-              tabIndex={-1}
-              className={classNames(
-                styles.section,
-                styles.settingsSection,
-                styles.settingsStack,
-              )}
-              data-testid="buddy-home-settings-section"
-            >
-              <BuddyPersonalityPanel
-                personality={personality}
-                needRows={needRows}
-                unlockedSkills={unlockedSkills}
-                activeQuest={activeQuest}
-                name={name}
-                settings={settings}
-                isSavingSettings={isSavingSettings}
-                onQuestControl={(control) => void handleQuestControl(control)}
-                onReroll={() => void handleReroll()}
-                onToggleProactive={handleSettings}
-                onPromptChange={(prompt) => void handlePromptChange(prompt)}
-              />
-              <BuddyAppliedChangesCard />
-              <BuddySettingsPanel />
-              <Surface
-                as="section"
-                variant="glass"
-                radius="card"
-                animated="rise"
-                className={styles.setupStrip}
-                data-testid="buddy-setup-strip"
-                data-disabled={degraded ? "true" : undefined}
-              >
-                <Text
-                  as="h2"
-                  size="3"
-                  weight="bold"
-                  className={styles.setupLabel}
-                >
-                  <Icon icon={Wrench} size="sm" tone="muted" />
-                  Project setup
-                </Text>
-                {SETUP_MODES.map((m) => (
-                  <Button
-                    key={m.mode}
-                    type="button"
-                    size="sm"
-                    variant={m.mode === "setup" ? "primary" : "ghost"}
-                    disabled={operatorNeedsRetry}
-                    onClick={() => handleRunMode(m.mode)}
-                  >
-                    {m.label}
-                  </Button>
-                ))}
-                {degraded && (
-                  <Text size="1" color="gray" className={styles.setupNotice}>
-                    Setup runs need the engine that just stopped answering.
-                  </Text>
-                )}
-              </Surface>
-            </div>
+            <BuddySettingsSection
+              personality={personality}
+              pet={pet}
+              unlockedSkills={unlockedSkills}
+              activeQuest={activeQuest}
+              name={name}
+              settings={settings}
+              degraded={degraded !== null}
+              operatorNeedsRetry={operatorNeedsRetry}
+              onQuestControl={handleQuestControl}
+              onReroll={handleReroll}
+              onRunMode={handleRunMode}
+            />
           </Tabs.Content>
         </main>
       </Tabs>

@@ -1,0 +1,159 @@
+.empty {
+  min-width: 0;
+}
+
+.emptyCompact {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2);
+  color: var(--rf-color-muted);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line-2)
+    var(--rf-font-ui);
+}
+
+.emptyCopy {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.emptyTitle {
+  color: var(--rf-color-fg);
+}
+
+.hint {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+}
+
+.inlineAction {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.error {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border: var(--rf-hairline) solid var(--rf-color-danger-soft);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-color-danger-soft);
+  color: var(--rf-color-fg);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line-2)
+    var(--rf-font-ui);
+}
+
+.errorCompact {
+  padding: var(--rf-space-1) var(--rf-space-2);
+}
+
+.errorLine {
+  display: flex;
+  min-width: 0;
+  min-height: var(--rf-control-h-sm);
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
+.errorTitle {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: var(--rf-weight-medium);
+}
+
+.retry {
+  flex: 0 0 auto;
+}
+
+.details {
+  min-width: 0;
+}
+
+.raw {
+  max-height: calc(var(--rf-line-1) * 8);
+  margin: 0;
+  overflow: auto;
+  color: var(--rf-color-muted);
+  font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line-1)
+    var(--rf-font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.loading {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+}
+
+.cards {
+  gap: var(--rf-section-gap);
+}
+
+.rowShell {
+  display: flex;
+  height: calc(var(--rf-line-2) + var(--rf-line-1) + 2 * var(--rf-space-2));
+  align-items: stretch;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2);
+}
+
+.loadingCompact .rowShell {
+  height: calc(var(--rf-line-2) + 2 * var(--rf-space-1));
+  padding: var(--rf-space-1) var(--rf-space-2);
+}
+
+.rowTick {
+  width: var(--rf-space-2xs);
+  height: auto;
+}
+
+.rowLines {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--rf-space-1);
+}
+
+.cardShell {
+  display: flex;
+  height: calc(var(--rf-control-h) * 3);
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  padding: var(--rf-panel-pad);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+}
+
+.cardTitle {
+  width: 40%;
+  height: var(--rf-line-3);
+}
+
+.lineLong {
+  width: 85%;
+  height: var(--rf-text-2);
+}
+
+.lineShort {
+  width: 55%;
+  height: var(--rf-text-1);
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  white-space: nowrap;
+  clip-path: inset(50%);
+}

@@ -1,6 +1,7 @@
 import React from "react";
 import { ArrowRight } from "lucide-react";
-import { Button, Icon, Surface, Text } from "../../components/ui";
+import { Button, Icon, Text } from "../../components/ui";
+import { BuddySurface } from "./ui";
 import { formatCompactNumber, xpDisplay } from "./buddyUtils";
 import { stageIcon } from "./buddyIcons";
 import type { BuddyPetState, Palette, Stage } from "./types";
@@ -43,14 +44,8 @@ const StatItem: React.FC<{ label: string; value: React.ReactNode }> = ({
   </div>
 );
 
-/**
- * Identity & stats bar: compact avatar + name + stage/XP cluster on the
- * left, key counters in the middle, "View stats" on the right. Replaces
- * the old wide hero identity column.
- */
 export const BuddySummaryStrip: React.FC<BuddySummaryStripProps> = ({
   name,
-  palette,
   stage,
   stageIndex,
   xp,
@@ -62,21 +57,17 @@ export const BuddySummaryStrip: React.FC<BuddySummaryStripProps> = ({
   successRate,
   onViewStats,
 }) => {
-  const xpLabel = xpDisplay(xp, xpNext, atMaxStage);
-  const displayedXpFill = atMaxStage ? 100 : xpFill;
+  const xpLabel = atMaxStage
+    ? `${xp} XP · max stage`
+    : xpDisplay(xp, xpNext, atMaxStage);
 
   return (
-    <Surface
+    <BuddySurface
+      level="inset"
       className={styles.strip}
-      data-testid="buddy-summary-strip"
-      radius="card"
-      variant="glass"
-      animated="rise"
+      testId="buddy-summary-strip"
     >
-      <div
-        className={styles.identity}
-        style={{ "--buddy-tint": palette.body } as React.CSSProperties}
-      >
+      <div className={styles.identity}>
         <span className={styles.avatar} aria-hidden>
           <Icon icon={stageIcon(stageIndex)} size="lg" />
         </span>
@@ -89,53 +80,49 @@ export const BuddySummaryStrip: React.FC<BuddySummaryStripProps> = ({
               {stage.name} · {xpLabel}
             </Text>
           </span>
-          <div className={styles.xpBar}>
-            <div
-              className={styles.xpFill}
-              style={
-                {
-                  "--buddy-xp-fill": `${displayedXpFill}%`,
-                } as React.CSSProperties
-              }
+          {!atMaxStage && (
+            <progress
+              className={styles.xpBar}
+              aria-label="Progress to next stage"
+              max={100}
+              value={Math.round(xpFill)}
             />
-          </div>
+          )}
         </div>
       </div>
-      {pet && (
-        <>
-          <div className={styles.divider} aria-hidden />
+      <div className={styles.stats}>
+        {pet && (
           <StatItem
             label="Care"
             value={formatCompactNumber(pet.evolution.care_score)}
           />
-        </>
-      )}
-      {statsData && (
-        <>
-          <div className={styles.divider} aria-hidden />
-          <StatItem
-            label="Messages"
-            value={formatCompactNumber(statsData.totals.total_calls)}
-          />
-          <StatItem
-            label="Tokens"
-            value={formatCompactNumber(statsData.totals.total_tokens)}
-          />
-          <StatItem label="Success" value={`${successRate ?? 0}%`} />
-        </>
-      )}
-      <span className={styles.spacer} aria-hidden />
-      {statsData && (
-        <Button
-          type="button"
-          size="sm"
-          variant="ghost"
-          rightIcon={ArrowRight}
-          onClick={onViewStats}
-        >
-          View stats
-        </Button>
-      )}
-    </Surface>
+        )}
+        {statsData && (
+          <>
+            <StatItem
+              label="Messages"
+              value={formatCompactNumber(statsData.totals.total_calls)}
+            />
+            <StatItem
+              label="Tokens"
+              value={formatCompactNumber(statsData.totals.total_tokens)}
+            />
+            <StatItem label="Success" value={`${successRate ?? 0}%`} />
+          </>
+        )}
+        {statsData && (
+          <Button
+            type="button"
+            size="sm"
+            variant="plain"
+            rightIcon={ArrowRight}
+            onClick={onViewStats}
+            className={styles.statsLink}
+          >
+            View stats
+          </Button>
+        )}
+      </div>
+    </BuddySurface>
   );
 };

@@ -1,14 +1,174 @@
 import { useRef, useState } from "react";
-import { Button } from "../../components/ui";
+import { Activity, RefreshCw, Users } from "lucide-react";
+import { Button, IconButton, Text } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import { useIsDocumentVisible } from "../../hooks/useIsDocumentVisible";
 import { buddyOperatorIdentity } from "../../services/refact/buddyOperator";
-import { useGetBuddyNativeWorkQuery } from "../../services/refact/buddyNativeWork";
+import {
+  useGetBuddyNativeWorkQuery,
+  type NativeWorkView,
+} from "../../services/refact/buddyNativeWork";
 import { humanizeIdentifier } from "../../utils/displayNames";
+import {
+  BUDDY_TERMS,
+  BuddyDisclosure,
+  BuddyEmptyState,
+  BuddyErrorCallout,
+  BuddyLoading,
+  BuddyRow,
+  BuddySection,
+  useBuddyPersistentState,
+} from "./ui";
 import styles from "./BuddyNativeDecisions.module.css";
 
+const BUDDY_BACKGROUND_WORK_KEY = "buddy.home.backgroundWork";
+
+function modelLabel(model: string): string {
+  return model.split("/").filter(Boolean).at(-1) ?? model;
+}
+
+function limitText(used: number, max: number | null): string {
+  return max === null ? `${used}` : `${used} of ${max}`;
+}
+
+function sessionNotes(row: NativeWorkView): string[] {
+  return [
+    row.pending_questions > 0 &&
+      `${row.pending_questions} question set${
+        row.pending_questions === 1 ? "" : "s"
+      } need a response.`,
+    row.approval_count > 0 &&
+      `${row.approval_count} tool or privacy approvals are waiting in the chat.`,
+    row.browser_decision_pending &&
+      "A browser-context choice is waiting in the chat.",
+    row.persistence_pending &&
+      "Live changes are awaiting persistence and may not survive a restart.",
+  ].filter((note): note is string => Boolean(note));
+}
+
+function SessionGoal({ goal }: { goal: NonNullable<NativeWorkView["goal"]> }) {
+  return (
+    <div className={styles.workGoal}>
+      <Text
+        as="p"
+        size="2"
+        className={styles.workGoalText}
+        title={goal.content}
+      >
+        {goal.content}
+      </Text>
+      <Text as="p" size="1" className={styles.note}>
+        {[
+          `Goal ${humanizeIdentifier(goal.status).toLowerCase()}`,
+          goal.active ? "owned by this chat" : "not owned by this chat",
+          `turns ${limitText(goal.turns_used, goal.max_turns)}`,
+          `tokens ${limitText(goal.tokens_used, goal.max_tokens)}`,
+        ].join(" · ")}
+      </Text>
+      <Text as="p" size="1" className={styles.note}>
+        {goal.latest_verdict
+          ? `Latest check: ${goal.latest_verdict}`
+          : "Not checked yet. Worker completion is not verification."}
+      </Text>
+      {goal.verification_blocked && (
+        <Text as="p" size="1" className={styles.note}>
+          Verification is blocked, so completion isn&apos;t claimed.
+        </Text>
+      )}
+      {goal.gaps.map((gap, index) => (
+        <Text as="p" size="1" className={styles.note} key={index}>
+          {gap}
+        </Text>
+      ))}
+      {goal.truncated && (
+        <Text as="p" size="1" className={styles.note}>
+          Shortened here. The full goal is in the chat.
+        </Text>
+      )}
+    </div>
+  );
+}
+
+function SessionCard({ row }: { row: NativeWorkView }) {
+  return (
+    <li className={styles.workItem}>
+      <BuddyRow
+        title={row.title.trim() || "Untitled chat"}
+        meta={[
+          humanizeIdentifier(row.state),
+          row.model ? modelLabel(row.model) : "No model selected",
+        ]}
+      />
+      <div className={styles.workBody}>
+        {sessionNotes(row).map((note) => (
+          <Text as="p" size="1" className={styles.note} key={note}>
+            {note}
+          </Text>
+        ))}
+        {row.error && (
+          <Text as="p" size="1" role="alert" className={styles.alert}>
+            {row.error}
+          </Text>
+        )}
+        <BuddyDisclosure
+          label="Goal and workers"
+          summary={
+            row.goal
+              ? `Goal ${humanizeIdentifier(row.goal.status).toLowerCase()}`
+              : undefined
+          }
+          lazy
+        >
+          <div className={styles.workDetails}>
+            {row.goal && <SessionGoal goal={row.goal} />}
+            {row.agents.length > 0 && (
+              <BuddyDisclosure
+                label="Workers"
+                icon={Users}
+                count={row.agents.length}
+              >
+                <ul className={styles.workList}>
+                  {row.agents.map((agent) => (
+                    <li key={agent.agent_id}>
+                      <BuddyRow
+                        density="compact"
+                        title={agent.title || "Worker"}
+                        description={agent.progress}
+                        meta={[
+                          humanizeIdentifier(agent.status),
+                          agent.model
+                            ? modelLabel(agent.model)
+                            : "Model not reported",
+                        ]}
+                      />
+                    </li>
+                  ))}
+                </ul>
+                {row.agents_truncated && (
+                  <Text as="p" size="1" className={styles.note}>
+                    Only the first twenty workers are shown.
+                  </Text>
+                )}
+              </BuddyDisclosure>
+            )}
+            <BuddyDisclosure label={BUDDY_TERMS.technicalDetails}>
+              <Text as="p" size="1" className={styles.note}>
+                Chat ID: {row.chat_id}
+                {row.model ? ` · Model: ${row.model}` : ""}
+              </Text>
+            </BuddyDisclosure>
+          </div>
+        </BuddyDisclosure>
+      </div>
+    </li>
+  );
+}
+
 function NativeWork({ identity }: { identity: string }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useBuddyPersistentState(
+    BUDDY_BACKGROUND_WORK_KEY,
+    false,
+  );
   const [after, setAfter] = useState<string>();
   const refetchRef = useRef<() => void>(() => undefined);
   const visible = useIsDocumentVisible(() => refetchRef.current());
@@ -24,153 +184,86 @@ function NativeWork({ identity }: { identity: string }) {
   refetchRef.current = () => {
     if (open) void query.refetch();
   };
+  const data = query.currentData;
+  const sessions = data?.sessions;
+  const nextCursor = data?.next_cursor ?? null;
   return (
-    <details onToggle={(event) => setOpen(event.currentTarget.open)}>
-      <summary>Live chats, goals and workers</summary>
-      <section className={styles.decisions} aria-label="Native work status">
-        <p>
-          Live native state for loaded chats only, not a second goal ledger.
-          This view does not grant Buddy supervision authority.
-        </p>
-        <Button
-          size="sm"
-          variant="ghost"
-          disabled={!open || query.isFetching}
-          onClick={() => void query.refetch()}
-        >
-          Refresh native work
-        </Button>
-        {query.isFetching && <p role="status">Loading native work…</p>}
-        {query.error ? (
-          <p role="alert">
-            Native work is unavailable. Use the existing chat and goal controls;
-            no work is reported as resumed.
-          </p>
-        ) : (
-          query.currentData && (
-            <>
-              {query.currentData.sessions.length === 0 && (
-                <p>No loaded sessions on this page.</p>
-              )}
-              {query.currentData.sessions.map((row) => (
-                <article key={row.chat_id} className={styles.question}>
-                  <h3>{row.title || "Untitled chat"}</h3>
-                  <p>
-                    {humanizeIdentifier(row.state)} ·{" "}
-                    {row.model || "No model selected"}
-                  </p>
-                  {row.persistence_pending && (
-                    <p>
-                      Live changes are awaiting persistence. This is not a
-                      restart-safe completion acknowledgment.
-                    </p>
-                  )}
-                  {row.error && <p role="alert">{row.error}</p>}
-                  {row.pending_questions > 0 && (
-                    <p>
-                      {row.pending_questions} question sets need a response.
-                    </p>
-                  )}
-                  {row.approval_count > 0 && (
-                    <p>
-                      {row.approval_count} tool or privacy approvals await the
-                      native chat controls.
-                    </p>
-                  )}
-                  {row.browser_decision_pending && (
-                    <p>
-                      A browser-context choice awaits the native chat controls.
-                    </p>
-                  )}
-                  {row.goal && (
-                    <section aria-label="Native goal">
-                      <h4>Goal · {humanizeIdentifier(row.goal.status)}</h4>
-                      <p>{row.goal.content}</p>
-                      <p>
-                        {row.goal.active
-                          ? "This chat owns the goal."
-                          : "This chat does not own goal pursuit."}
-                      </p>
-                      <p>
-                        Turns: {row.goal.turns_used}
-                        {row.goal.max_turns === null
-                          ? " (no turn limit)"
-                          : ` / ${row.goal.max_turns}`}{" "}
-                        · Tokens: {row.goal.tokens_used}
-                        {row.goal.max_tokens === null
-                          ? " (no token limit)"
-                          : ` / ${row.goal.max_tokens}`}
-                      </p>
-                      <p>
-                        {row.goal.latest_verdict
-                          ? `Latest recorded verifier verdict: ${row.goal.latest_verdict}`
-                          : "No verifier verdict recorded. Worker completion is not verification."}
-                      </p>
-                      {row.goal.verification_blocked && (
-                        <p>
-                          Verification is blocked; no completion proof is
-                          claimed.
-                        </p>
-                      )}
-                      {row.goal.gaps.length > 0 && (
-                        <ul>
-                          {row.goal.gaps.map((gap, index) => (
-                            <li key={index}>{gap}</li>
-                          ))}
-                        </ul>
-                      )}
-                      {row.goal.truncated && (
-                        <p>
-                          Goal evidence is shortened here; full criteria and
-                          history remain in the native goal.
-                        </p>
-                      )}
-                    </section>
-                  )}
-                  {row.agents.length > 0 && (
-                    <details>
-                      <summary>Workers</summary>
-                      <ul>
-                        {row.agents.map((agent) => (
-                          <li key={agent.agent_id}>
-                            <strong>{agent.title || "Worker"}</strong> ·{" "}
-                            {humanizeIdentifier(agent.status)} ·{" "}
-                            {agent.model || "Model not reported"}
-                            {agent.progress && <p>{agent.progress}</p>}
-                          </li>
-                        ))}
-                      </ul>
-                      {row.agents_truncated && (
-                        <p>Only the first twenty workers are shown.</p>
-                      )}
-                    </details>
-                  )}
-                  <p>Native chat identity: {row.chat_id}</p>
-                </article>
-              ))}
-              {query.currentData.next_cursor !== null && (
-                <Button
-                  size="sm"
-                  disabled={query.isFetching}
-                  onClick={() =>
-                    setAfter(query.currentData?.next_cursor ?? undefined)
-                  }
-                >
-                  Next loaded chats
-                </Button>
-              )}
-            </>
-          )
-        )}
-        {after !== undefined && (
-          <Button size="sm" variant="ghost" onClick={() => setAfter(undefined)}>
-            First loaded chats
-          </Button>
-        )}
-      </section>
-    </details>
+    <BuddySection
+      title={BUDDY_TERMS.backgroundWork}
+      icon={Activity}
+      count={sessions?.length}
+      testId="buddy-home-background-work"
+      collapsible={{ open, onOpenChange: setOpen, lazy: true }}
+      action={
+        open ? (
+          <IconButton
+            size="sm"
+            variant="ghost"
+            icon={RefreshCw}
+            aria-label="Refresh background work"
+            disabled={query.isFetching}
+            onClick={() => void query.refetch()}
+          />
+        ) : undefined
+      }
+      description="Live chats, goals and workers in the chats open right now. Read-only."
+      footer={
+        nextCursor !== null || after !== undefined ? (
+          <>
+            {after !== undefined && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setAfter(undefined)}
+              >
+                First page
+              </Button>
+            )}
+            {nextCursor !== null && (
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={query.isFetching}
+                onClick={() => setAfter(nextCursor)}
+              >
+                Show more
+              </Button>
+            )}
+          </>
+        ) : undefined
+      }
+    >
+      {query.error ? (
+        <BuddyErrorCallout
+          compact
+          thing="background work"
+          error={query.error}
+          retrying={query.isFetching}
+          onRetry={() => void query.refetch()}
+        />
+      ) : !sessions ? (
+        <BuddyLoading
+          variant="rows"
+          count={2}
+          label="Loading background work"
+        />
+      ) : sessions.length === 0 ? (
+        <BuddyEmptyState
+          compact
+          icon={Activity}
+          title="No background work in open chats."
+        />
+      ) : (
+        <ul className={styles.workList}>
+          {sessions.map((row) => (
+            <SessionCard key={row.chat_id} row={row} />
+          ))}
+        </ul>
+      )}
+    </BuddySection>
   );
 }
+
 export function BuddyNativeWork() {
   const identity = useAppSelector(buddyOperatorIdentity);
   return <NativeWork key={identity} identity={identity} />;

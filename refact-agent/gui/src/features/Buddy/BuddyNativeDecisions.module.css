@@ -1,5 +1,7 @@
-.decisions,
-.question {
+.question,
+.workItem,
+.workBody,
+.workGoal {
   display: flex;
   box-sizing: border-box;
   flex-direction: column;
@@ -9,27 +11,62 @@
   overflow-wrap: anywhere;
 }
 
-.decisions {
-  padding: var(--rf-panel-pad);
-}
-
-.decisions :is(button, input, select, summary) {
+.question :is(button, input, select) {
   min-height: var(--rf-hit-min);
   min-width: var(--rf-hit-min);
 }
 
-.question {
-  padding: var(--rf-space-3);
+.question + .question,
+.workItem + .workItem {
+  padding-top: var(--rf-space-3);
+  border-top: var(--rf-hairline) solid var(--rf-border);
+}
+
+.questionTitle,
+.questionMeta {
+  margin: 0;
+  min-width: 0;
 }
 
 .questionTitle {
-  margin: 0;
   color: var(--rf-color-fg);
 }
 
 .questionMeta {
-  margin: 0;
   color: var(--rf-color-muted);
+}
+
+.questionList,
+.workList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.workBody {
+  padding-left: var(--rf-space-3);
+}
+
+.workDetails {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  padding: var(--rf-space-1) 0 0 var(--rf-space-3);
+}
+
+.workGoalText {
+  display: -webkit-box;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
 }
 
 .answerGroup {
@@ -50,7 +87,7 @@
 
 .answerLabel {
   margin: 0;
-  color: var(--rf-color-muted);
+  color: var(--rf-color-fg);
 }
 
 .answerInput {
@@ -68,13 +105,12 @@
 
 .answerInput:focus-visible {
   outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
-  outline-offset: var(--rf-space-1);
+  outline-offset: var(--rf-focus-ring-offset);
 }
 
 .answerInput:disabled {
   cursor: not-allowed;
   color: var(--rf-color-muted);
-  border-color: var(--rf-border);
   background: var(--rf-surface-2);
 }
 
@@ -116,24 +152,4 @@
 .alert {
   margin: 0;
   color: var(--rf-color-danger);
-}
-
-.errorRow {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--rf-space-2);
-  min-width: 0;
-  max-width: 100%;
-  padding: var(--rf-space-2);
-  border: var(--rf-hairline) solid var(--rf-color-danger);
-  border-radius: var(--rf-radius-ctl);
-  background: var(--rf-color-danger-soft);
-}
-
-.errorText {
-  flex: 1 1 12rem;
-  margin: 0;
-  min-width: 0;
-  color: var(--rf-color-fg);
 }

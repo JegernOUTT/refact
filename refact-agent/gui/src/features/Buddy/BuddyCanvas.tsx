@@ -131,7 +131,9 @@ function bubbleAnchorStyle(
   };
 }
 
-export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
+export const BuddyCanvas: React.FC<
+  BuddyCanvasProps & { showSpeech?: boolean }
+> = ({
   state,
   onEvent,
   displaySize = 512,
@@ -150,6 +152,7 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
   randomizeBubblePosition = false,
   compactBubble: compactBubbleOverride = false,
   chatCompanionBubble: chatCompanionBubbleOverride = false,
+  showSpeech = true,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const presence = useBuddyPresencePreferences();
@@ -680,20 +683,6 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
         ...style,
       }}
     >
-      {presence.textOnly && (
-        <span>
-          {state.name}. {speechOverride ?? "Companion present."}
-          {speechControls?.map((control) => (
-            <button
-              type="button"
-              key={control.id}
-              onClick={() => onSpeechControlClick?.(control)}
-            >
-              {control.label}
-            </button>
-          ))}
-        </span>
-      )}
       <canvas
         ref={canvasRef}
         width={displaySize}
@@ -702,7 +691,6 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
           width: displaySize,
           height: displaySize,
           display: "block",
-          visibility: presence.textOnly ? "hidden" : undefined,
           cursor: spritePointer ? "default" : "pointer",
           pointerEvents: spritePointer ? "none" : undefined,
         }}
@@ -712,7 +700,7 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
         onMouseUp={spritePointer ? undefined : onMouseUp}
         onClick={spritePointer ? undefined : onClick}
       />
-      {spritePointer && !presence.textOnly && (
+      {spritePointer && (
         <div
           data-testid="buddy-sprite-hit"
           style={{
@@ -733,7 +721,7 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
           onClick={onClick}
         />
       )}
-      {displaySize >= 100 && !presence.textOnly && (
+      {showSpeech && displaySize >= 100 && (
         <BuddySpeechBubble
           text={bubbleView.text}
           textKey={bubbleView.textKey}

@@ -1,15 +1,11 @@
 import { http, HttpResponse } from "msw";
 import { setupListeners } from "@reduxjs/toolkit/query";
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
-import {
-  act,
-  render,
-  screen,
-  fireEvent,
-  waitFor,
-} from "../../utils/test-utils";
+import { act } from "react-dom/test-utils";
+import { render, screen, fireEvent, waitFor } from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
 import { BuddyNativeWork } from "./BuddyNativeWork";
+import { resetBuddyPersistentState } from "./ui";
 import { setUpStore } from "../../app/store";
 import { parseNativeWork } from "../../services/refact/buddyNativeWork";
 
@@ -68,6 +64,7 @@ describe("Native work status", () => {
 
   beforeEach(() => {
     visibilityState = "visible";
+    resetBuddyPersistentState();
   });
 
   afterEach(() => {
@@ -91,13 +88,15 @@ describe("Native work status", () => {
     );
     render(<BuddyNativeWork />, { preloadedState: config });
     expect(reads).toBe(0);
-    const details = screen
-      .getByText("Live chats, goals and workers")
-      .closest("details");
-    if (!details) throw new Error("native work disclosure missing");
-    details.open = true;
-    fireEvent(details, new Event("toggle"));
+    const trigger = screen.getByRole("button", { name: /Background work/ });
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(trigger);
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
     expect(await screen.findByText("Provider reliability")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Goal and workers/ }));
+    expect(screen.queryByText("native")).toBeNull();
+    expect(screen.getByText("Paused")).toBeTruthy();
+    expect(screen.getAllByText("model").length).toBeGreaterThan(0);
     expect(screen.getByText("Keep the selected model")).toBeTruthy();
     expect(
       screen.getByText(/Worker completion is not verification/),
@@ -124,12 +123,7 @@ describe("Native work status", () => {
     const store = setUpStore(config);
     const stopListeners = setupListeners(store.dispatch);
     const view = render(<BuddyNativeWork />, { store });
-    const details = screen
-      .getByText("Live chats, goals and workers")
-      .closest("details");
-    if (!details) throw new Error("native work disclosure missing");
-    details.open = true;
-    fireEvent(details, new Event("toggle"));
+    fireEvent.click(screen.getByRole("button", { name: /Background work/ }));
     await vi.waitFor(async () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(10);
@@ -149,7 +143,7 @@ describe("Native work status", () => {
     };
     expect(
       Object.values(subscriptionState.subscriptions)
-        .flatMap(Object.values)
+        .flatMap((entries) => Object.values(entries))
         .some((s) => s.pollingInterval === 5000),
     ).toBe(true);
 

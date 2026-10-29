@@ -225,6 +225,8 @@
   --rf-transcript-label-tracking: 0.06em;
   --rf-transcript-facts-col: 160px;
   --rf-focus-ring-w: 2px;
+  --rf-focus-ring-offset: var(--rf-hairline);
+  --rf-focus-ring-offset-inset: calc(-1 * var(--rf-focus-ring-w));
   --rf-line: 1.5;
   --rf-rail-w: 44px;
   --rf-nav-w: 220px;

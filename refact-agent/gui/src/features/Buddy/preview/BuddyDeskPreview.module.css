@@ -143,26 +143,6 @@
   font-size: var(--rf-text-1);
   font-weight: 600;
 }
-.state_proposed {
-  background: var(--rf-color-accent-soft);
-  color: var(--rf-color-accent);
-}
-.state_verified {
-  background: var(--rf-color-success-soft);
-  color: var(--rf-color-success);
-}
-.state_blocked {
-  background: var(--rf-color-danger-soft);
-  color: var(--rf-color-danger);
-}
-.state_partial {
-  background: var(--rf-color-warning-soft);
-  color: var(--rf-color-warning);
-}
-.state_watching {
-  background: var(--rf-surface-2);
-  color: var(--rf-color-muted);
-}
 .detail {
   display: grid;
   align-content: start;

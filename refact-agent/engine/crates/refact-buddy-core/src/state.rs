@@ -454,7 +454,6 @@ fn sync_conditions_keep_sleep(state: &mut BuddyState) {
 
 fn sync_semantic(state: &mut BuddyState) {
     let condition = &state.pet.condition;
-    let vibe = state.personality.vibe.clone();
     let quest_headline = state
         .active_quest
         .as_ref()
@@ -463,7 +462,7 @@ fn sync_semantic(state: &mut BuddyState) {
             (
                 "Questing",
                 quest.quest_type.as_str(),
-                format!("{} Quest ready: {}", vibe, quest.title),
+                format!("Quest ready: {}", quest.title),
             )
         });
     let (mood, focus, headline) = if let Some((mood, focus, headline)) = quest_headline {
@@ -472,61 +471,43 @@ fn sync_semantic(state: &mut BuddyState) {
         (
             "Sleepy",
             "dreaming",
-            format!(
-                "{} Taking a tiny power nap and recharging mischief reserves",
-                vibe
-            ),
+            "Taking a tiny power nap and recharging mischief reserves".to_string(),
         )
     } else if condition.hungry {
         (
             "Hungry",
             "snack time",
-            format!(
-                "{} Snack reserves are running low — I could use a nibble",
-                vibe
-            ),
+            "Snack reserves are running low — I could use a nibble".to_string(),
         )
     } else if condition.sleepy {
         (
             "Sleepy",
             "resting",
-            format!(
-                "{} Battery paws are dipping — a quick rest would help",
-                vibe
-            ),
+            "Battery paws are dipping — a quick rest would help".to_string(),
         )
     } else if condition.dirty {
         (
             "Grimy",
             "cleaning up",
-            format!(
-                "{} I’m still helpful, but I could use a cleanup first",
-                vibe
-            ),
+            "I’m still helpful, but I could use a cleanup first".to_string(),
         )
     } else if condition.bored {
         (
             "Restless",
             "play time",
-            format!(
-                "{} Gentle mischief levels rising — play with me a bit?",
-                vibe
-            ),
+            "Gentle mischief levels rising — play with me a bit?".to_string(),
         )
     } else if condition.lonely {
         (
             "Needy",
             "attention",
-            format!("{} A little affection would go a long way right now", vibe),
+            "A little affection would go a long way right now".to_string(),
         )
     } else {
         (
             "Playful",
             "helping",
-            format!(
-                "{} — ready to help and celebrate small wins",
-                state.personality.summary
-            ),
+            "Ready to help and celebrate small wins".to_string(),
         )
     };
 

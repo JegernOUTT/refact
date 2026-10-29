@@ -1,18 +1,24 @@
 import React from "react";
-import { Bug, CircleCheck, ShieldAlert } from "lucide-react";
+import { Bug, CircleCheck, ShieldAlert, TriangleAlert } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import {
-  Badge,
-  Button,
-  Icon,
-  Surface,
-  Text,
-  Tooltip,
-} from "../../components/ui";
-import type { BadgeTone } from "../../components/ui";
+import { Button } from "../../components/ui";
 import type { BuddyRuntimeEvent } from "./types";
-import { formatBuddyTime, formatFailureLabel } from "./buddyUtils";
-import { BuddySectionHeader } from "./BuddySectionHeader";
+import {
+  BUDDY_FAILURE_LABELS,
+  BUDDY_TERMS,
+  BUDDY_VERBS,
+  BuddyDisclosure,
+  BuddyEmptyState,
+  BuddyRow,
+  BuddySection,
+  BuddyTimestamp,
+  buddyFailureLabel,
+  buddyWorkflowLabel,
+  parseBuddyTime,
+  useBuddyPersistentState,
+  type BuddyStatusTone,
+} from "./ui";
+import { HISTORY_PAGE_SIZE } from "./buddyHistory";
 import styles from "./BuddyRecentErrorsPanel.module.css";
 
 export type RecentBuddyError = BuddyRuntimeEvent & {
@@ -22,29 +28,194 @@ export type RecentBuddyError = BuddyRuntimeEvent & {
   relatedIds?: string[];
 };
 
+export interface BuddyWarningRow {
+  event: RecentBuddyError;
+  detail: string | null;
+  count: number;
+}
+
+const CODE_PREFIX = /^([a-z][a-z0-9]*(?:_[a-z0-9]+)+):\s*(.+)$/s;
+const WORKFLOW_PREFIX = /^([a-z][a-z0-9]*(?:_[a-z0-9]+)+)(\s.+)$/s;
+
+const BRACKET_CODE = /\[[a-z0-9_]+(?::[a-z0-9_]+)*\]\s*/gi;
+
+function clean(value: string | null | undefined): string {
+  return (value ?? "").trim().replace(/\s+/g, " ");
+}
+
+function firstSentence(value: string): string {
+  const match = /^(.+?[.!?])(\s|$)/.exec(value);
+  return match ? match[1] : value;
+}
+
+function knownFailureKey(value: string): string | null {
+  const key = value.toLowerCase().replace(/[\s-]+/g, "_");
+  return BUDDY_FAILURE_LABELS[key] ? key : null;
+}
+
+function untruncated(event: RecentBuddyError, raw: string): string {
+  const fuller = [event.failure_summary, event.description]
+    .map(clean)
+    .find((text) => text.length > raw.length && text.startsWith(raw));
+  return fuller ?? raw;
+}
+
+function warningTitle(raw: string, detail: string | null): string {
+  const prefixed = CODE_PREFIX.exec(raw);
+  if (prefixed) return `${buddyFailureLabel(prefixed[1])}: ${prefixed[2]}`;
+  const workflow = WORKFLOW_PREFIX.exec(raw);
+  if (workflow) return `${buddyWorkflowLabel(workflow[1])}${workflow[2]}`;
+  const key = knownFailureKey(raw);
+  if (!key) return raw || buddyFailureLabel(null);
+  const label = buddyFailureLabel(key);
+  const extra = clean(detail);
+  if (!extra || label.toLowerCase() === raw.toLowerCase()) return label;
+  return `${label}: ${firstSentence(extra)}`;
+}
+
+function warningLeading(
+  event: RecentBuddyError,
+  acknowledged: boolean,
+): { icon: LucideIcon; tone: BuddyStatusTone } {
+  if (acknowledged) return { icon: CircleCheck, tone: "success" };
+  if (event.priority === "critical")
+    return { icon: ShieldAlert, tone: "danger" };
+  if (event.priority === "high")
+    return { icon: TriangleAlert, tone: "warning" };
+  return { icon: Bug, tone: "default" };
+}
+
+function technicalText(
+  event: RecentBuddyError,
+  raw: string,
+  title: string,
+  detail: string | null,
+): string {
+  const parts = [raw !== title ? raw : null, clean(detail) || null];
+  if (event.failure_category) parts.push(`Category: ${event.failure_category}`);
+  if (event.chat_id) parts.push(`Chat: ${event.chat_id}`);
+  return parts.filter(Boolean).join("\n");
+}
+
+const WarningItem: React.FC<{
+  row: BuddyWarningRow;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  actions?: React.ReactNode;
+}> = ({ row: { event, detail, count }, open, onOpenChange, actions }) => {
+  const acknowledged = Boolean(event.dismissedAll ?? event.dismissed);
+  const raw = clean(event.title);
+  const title = warningTitle(
+    untruncated(event, raw).replace(BRACKET_CODE, "").trim(),
+    detail?.replace(BRACKET_CODE, "") ?? null,
+  );
+  const technical = technicalText(event, raw, title, detail);
+  const hasTime = parseBuddyTime(event.created_at) !== null;
+  return (
+    <li
+      className={styles.item}
+      data-priority={event.priority}
+      data-acknowledged={acknowledged ? "true" : undefined}
+    >
+      <BuddyRow
+        title={title}
+        leading={warningLeading(event, acknowledged)}
+        meta={[
+          hasTime ? <BuddyTimestamp value={event.created_at} /> : null,
+          count > 1 ? `×${count}` : null,
+          acknowledged ? "Dismissed" : null,
+        ]}
+        actions={actions}
+      />
+      {technical ? (
+        <BuddyDisclosure
+          label={BUDDY_TERMS.technicalDetails}
+          open={open}
+          onOpenChange={onOpenChange}
+          lazy
+          className={styles.details}
+        >
+          <pre className={styles.raw}>{technical}</pre>
+        </BuddyDisclosure>
+      ) : null}
+    </li>
+  );
+};
+
+export const BuddyRecentWarnings: React.FC<{
+  rows: BuddyWarningRow[];
+  persistKey: string;
+  testId?: string;
+  renderActions?: (event: RecentBuddyError) => React.ReactNode;
+}> = ({ rows, persistKey, testId, renderActions }) => {
+  const [visibleCount, setVisibleCount] = useBuddyPersistentState(
+    `${persistKey}.visible`,
+    HISTORY_PAGE_SIZE,
+  );
+  const [openIds, setOpenIds] = useBuddyPersistentState<string[]>(
+    `${persistKey}.openIds`,
+    [],
+  );
+  React.useEffect(() => {
+    const ids = new Set(rows.map((row) => row.event.id));
+    const pruned = openIds.filter((id) => ids.has(id));
+    if (pruned.length !== openIds.length) setOpenIds(pruned);
+  }, [rows, openIds, setOpenIds]);
+  const visible = rows.slice(0, visibleCount);
+  return (
+    <BuddySection
+      title="Recent warnings"
+      icon={TriangleAlert}
+      count={rows.length}
+      testId={testId}
+      footer={
+        visible.length < rows.length ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            onClick={() =>
+              setVisibleCount((value) => value + HISTORY_PAGE_SIZE)
+            }
+          >
+            {BUDDY_VERBS.showMore}
+          </Button>
+        ) : null
+      }
+    >
+      {rows.length === 0 ? (
+        <BuddyEmptyState
+          compact
+          icon={CircleCheck}
+          title="No warnings in the last six hours"
+        />
+      ) : (
+        <ul aria-label="Recent warnings" className={styles.list}>
+          {visible.map((row) => (
+            <WarningItem
+              key={row.event.id}
+              row={row}
+              open={openIds.includes(row.event.id)}
+              onOpenChange={(open) =>
+                setOpenIds((ids) =>
+                  open
+                    ? [...ids, row.event.id]
+                    : ids.filter((id) => id !== row.event.id),
+                )
+              }
+              actions={renderActions?.(row.event)}
+            />
+          ))}
+        </ul>
+      )}
+    </BuddySection>
+  );
+};
+
 interface BuddyRecentErrorsPanelProps {
   recentErrors: RecentBuddyError[];
   onInvestigate: (event: RecentBuddyError) => void | Promise<void>;
   onDismiss: (event: RecentBuddyError) => void | Promise<void>;
-}
-
-const priorityTone = (priority: RecentBuddyError["priority"]): BadgeTone => {
-  if (priority === "critical") return "danger";
-  if (priority === "high") return "warning";
-  return "muted";
-};
-
-function errorIcon(
-  event: RecentBuddyError,
-  acknowledged: boolean,
-): {
-  icon: LucideIcon;
-  tone: React.ComponentProps<typeof Icon>["tone"];
-} {
-  if (acknowledged) return { icon: CircleCheck, tone: "success" };
-  if (event.priority === "critical")
-    return { icon: ShieldAlert, tone: "danger" };
-  return { icon: Bug, tone: "warning" };
 }
 
 export const BuddyRecentErrorsPanel: React.FC<BuddyRecentErrorsPanelProps> = ({
@@ -52,85 +223,35 @@ export const BuddyRecentErrorsPanel: React.FC<BuddyRecentErrorsPanelProps> = ({
   onInvestigate,
   onDismiss,
 }) => (
-  <Surface
-    className={styles.panel}
-    data-testid="buddy-recent-errors-panel"
-    animated="rise"
-    radius="card"
-    variant="glass"
-  >
-    <BuddySectionHeader icon={Bug} label="Recent errors" />
-    <div className={`${styles.scrollList} rf-stagger`}>
-      {recentErrors.length === 0 && (
-        <Text size="1" className={styles.emptyText}>
-          No errors recorded — all clear
-        </Text>
-      )}
-      {recentErrors.map((e) => {
-        const acknowledged = Boolean(e.dismissedAll ?? e.dismissed);
-        const { icon, tone } = errorIcon(e, acknowledged);
-        const subtitle = [
-          e.source,
-          e.chat_id ? `chat ${e.chat_id.slice(0, 8)}` : null,
-        ]
-          .filter(Boolean)
-          .join(" · ");
-        const failureLabel = formatFailureLabel(e.failure_category);
-        const detail = e.failure_summary ?? e.description ?? subtitle;
-        return (
-          <div
-            key={e.id}
-            className={`${styles.listRow} rf-enter-rise`}
-            data-acknowledged={acknowledged ? "true" : undefined}
-            data-priority={e.priority}
+  <BuddyRecentWarnings
+    testId="buddy-recent-errors-panel"
+    persistKey="buddy.activity.legacyWarnings"
+    rows={recentErrors.map((event) => ({
+      event,
+      detail: event.failure_summary ?? event.description ?? null,
+      count: event.occurrences ?? 1,
+    }))}
+    renderActions={(event) => (
+      <>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          onClick={() => void onInvestigate(event)}
+        >
+          Investigate
+        </Button>
+        {!(event.dismissedAll ?? event.dismissed) && (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            onClick={() => void onDismiss(event)}
           >
-            <span className={styles.listIcon}>
-              <Icon icon={icon} size="sm" tone={tone} />
-            </span>
-            <div className={styles.listContent}>
-              <span className={styles.listTitle}>
-                {e.title}
-                {e.occurrences != null && e.occurrences > 1 && (
-                  <Badge tone="accent">×{e.occurrences}</Badge>
-                )}
-                {failureLabel && <Badge tone="warning">{failureLabel}</Badge>}
-                {acknowledged && <Badge tone="success">acknowledged</Badge>}
-                {!acknowledged && (
-                  <Badge tone={priorityTone(e.priority)}>{e.priority}</Badge>
-                )}
-              </span>
-              {detail && <span className={styles.listSubtitle}>{detail}</span>}
-              <span className={styles.listMeta}>
-                {formatBuddyTime(e.created_at)}
-              </span>
-            </div>
-            <div className={styles.errorActions}>
-              <Tooltip content="Open a companion investigation and sniff the log crumbs">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="primary"
-                  onClick={() => void onInvestigate(e)}
-                >
-                  Sniff logs
-                </Button>
-              </Tooltip>
-              {!acknowledged && (
-                <Tooltip content="Mark this gremlin as handled">
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => void onDismiss(e)}
-                  >
-                    Shoo
-                  </Button>
-                </Tooltip>
-              )}
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  </Surface>
+            {BUDDY_VERBS.dismiss}
+          </Button>
+        )}
+      </>
+    )}
+  />
 );

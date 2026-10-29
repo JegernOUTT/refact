@@ -23,6 +23,7 @@ interface BuddyCharacterProps {
   bubblePosition?: BubblePosition;
   randomizeBubblePosition?: boolean;
   compactBubble?: boolean;
+  showSpeech?: boolean;
   sceneXPercent?: number;
   sceneYPercent?: number;
   sceneDepthScale?: number;
@@ -75,6 +76,7 @@ export const BuddyCharacter: React.FC<BuddyCharacterProps> = ({
   bubblePosition = "top",
   randomizeBubblePosition = false,
   compactBubble = false,
+  showSpeech = true,
   sceneXPercent,
   sceneYPercent,
   sceneDepthScale,
@@ -132,6 +134,7 @@ export const BuddyCharacter: React.FC<BuddyCharacterProps> = ({
         bubblePosition={bubblePosition}
         randomizeBubblePosition={randomizeBubblePosition}
         compactBubble={compactBubble}
+        showSpeech={showSpeech}
       />
       {showStageBadge && (
         <div

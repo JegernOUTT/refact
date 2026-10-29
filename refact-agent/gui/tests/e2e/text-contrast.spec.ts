@@ -314,14 +314,15 @@ for (const { name, mode } of BUDDY_ROUTES) {
         );
         await page.getByTestId("buddy-home-content").waitFor();
         if (mode === "enabled") {
+          await page.getByRole("tab", { name: "Reports", exact: true }).click();
           const row = page.getByRole("button", {
             name: /Readability contrast report/,
           });
           await expect(row).toBeVisible();
           await row.click();
-          await expect(page.getByLabel("Work detail")).toBeVisible();
-          await expect(page.getByLabel("Registered actions")).toBeVisible();
-          await expect(page.getByText("What this did not cover")).toBeVisible();
+          await expect(page.getByRole("article")).toBeVisible();
+          await expect(page.getByLabel("Report actions")).toBeVisible();
+          await expect(page.getByText("What this didn't cover")).toBeVisible();
           await checkContrast(
             page,
             `${name} report detail`,
@@ -332,16 +333,12 @@ for (const { name, mode } of BUDDY_ROUTES) {
           await page
             .getByRole("tab", { name: "Settings", exact: true })
             .click();
-          await expect(
-            page.getByText("SETTINGS", { exact: true }),
-          ).toBeVisible();
+          await expect(page.getByTestId("buddy-settings-panel")).toBeVisible();
         } else {
           await page
             .getByRole("tab", { name: "Settings", exact: true })
             .click();
-          await expect(
-            page.getByText("SETTINGS", { exact: true }),
-          ).toBeVisible();
+          await expect(page.getByTestId("buddy-settings-panel")).toBeVisible();
         }
         await checkContrast(page, name, width, theme, true);
       });

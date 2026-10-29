@@ -61,6 +61,20 @@ for (const theme of THEMES) {
   }) => {
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
+      if (url.pathname === "/v1/buddy/approvals/current") {
+        await route.fulfill({
+          json: {
+            schema_version: 1,
+            project_root: "/workspace/refact",
+            engine_identity: "showcase-engine",
+            coverage: "loaded_native_sessions",
+            truncated: false,
+            warnings: [],
+            sessions: [],
+          },
+        });
+        return;
+      }
       if (url.pathname === "/v1/buddy/decisions/current") {
         await route.fulfill({ status: 503, json: { detail: "unavailable" } });
         return;
@@ -70,20 +84,28 @@ for (const theme of THEMES) {
     await page.goto(`${BUDDY_ROUTE}&theme=${theme}`);
 
     const errorRow = page
-      .getByRole("region", { name: "Native questions" })
-      .locator("[class*='errorRow']");
+      .getByRole("region", { name: "Questions" })
+      .getByRole("alert");
     await expect(errorRow).toBeVisible();
     const colors = await errorRow.evaluate((row) => {
-      const text = row.querySelector<HTMLElement>("[class*='errorText']");
+      const text = row.querySelector<HTMLElement>("[class*='errorTitle']");
       if (!text) return null;
       const rowStyle = getComputedStyle(row);
       const textStyle = getComputedStyle(text);
+      const backgrounds: string[] = [];
+      for (
+        let parent = row.parentElement;
+        parent;
+        parent = parent.parentElement
+      )
+        backgrounds.push(getComputedStyle(parent).backgroundColor);
       return {
+        backgrounds,
         background: rowStyle.backgroundColor,
         foreground: textStyle.color,
-        parentBackground: row.parentElement
-          ? getComputedStyle(row.parentElement).backgroundColor
-          : "transparent",
+        parentBackground: getComputedStyle(document.documentElement)
+          .getPropertyValue("--rf-surface-1")
+          .trim(),
       };
     });
     expect(colors).not.toBeNull();
@@ -100,7 +122,14 @@ for (const theme of THEMES) {
     expect(parentBackground).not.toBeNull();
     if (!foreground || !background || !parentBackground) return;
 
-    const effectiveBackground = blend(background, parentBackground);
+    const backdrop = colors.backgrounds.reverse().reduce<Rgba>(
+      (base, color) => {
+        const parsed = parseCssColor(color);
+        return parsed ? blend(parsed, base) : base;
+      },
+      { red: 255, green: 255, blue: 255, alpha: 1 },
+    );
+    const effectiveBackground = blend(background, backdrop);
     const effectiveForeground = blend(foreground, effectiveBackground);
     expect(
       contrastRatio(effectiveForeground, effectiveBackground),

@@ -146,11 +146,11 @@ export function useExecuteBuddyAction() {
         }),
       );
       if (!isCurrent()) return { status: "ignored", reason: "stale" };
-      if (authority.error || authority.data?.mode !== "disabled") {
+      if (Boolean(authority.error) || authority.data?.mode !== "disabled") {
         return {
           status: "unsupported",
           message:
-            "Open this proposal in Buddy Desk saved work to use its current registered actions. Legacy opportunity actions are available only when operator storage is explicitly disabled.",
+            "Open this proposal in Reports to use its current actions. Older proposal actions only work when Reports storage is turned off.",
         };
       }
 

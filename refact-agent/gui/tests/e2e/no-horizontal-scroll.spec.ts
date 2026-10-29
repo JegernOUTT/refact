@@ -703,7 +703,7 @@ test.describe("Buddy route smoke", () => {
     await expect(
       page.getByRole("button", { name: "Close Play", exact: true }),
     ).toHaveCount(0);
-    await page.getByRole("button", { name: "Leave Play", exact: true }).click();
+    await page.getByRole("tab", { name: "Home", exact: true }).click();
     await expect(
       page.getByRole("tab", { name: "Home", exact: true }),
     ).toHaveAttribute("aria-selected", "true");
@@ -721,7 +721,9 @@ test.describe("Buddy route smoke", () => {
     await expect(page.getByTestId("buddy-recent-errors-panel")).toBeVisible();
     await expect(page.getByTestId("buddy-activity-panel")).toBeVisible();
 
-    await page.getByText("buddy_*").click();
+    await page
+      .getByRole("radio", { name: "Buddy workflows", exact: true })
+      .check({ force: true });
     await expect(
       page.getByText("Buddy reviewed responsive surfaces"),
     ).toBeVisible();

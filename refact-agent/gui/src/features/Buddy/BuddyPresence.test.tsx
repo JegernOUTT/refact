@@ -34,10 +34,9 @@ describe("Buddy presence", () => {
       <BuddyPresence {...props} sceneMounted sceneToggleLabel="Close Play" />,
     );
     expect(screen.queryByTestId("buddy-presence-avatar")).toBeNull();
-    expect(screen.getByRole("button", { name: "Close Play" })).toHaveAttribute(
-      "aria-expanded",
-      "true",
-    );
+    expect(
+      screen.getByRole("button", { name: "Close Play" }),
+    ).not.toHaveAttribute("aria-expanded");
     view.rerender(
       <BuddyPresence
         {...props}
@@ -46,9 +45,50 @@ describe("Buddy presence", () => {
       />,
     );
     expect(screen.getByTestId("buddy-presence-avatar")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Open Play" })).toHaveAttribute(
-      "aria-expanded",
-      "false",
+    expect(
+      screen.getByRole("button", { name: "Open Play" }),
+    ).not.toHaveAttribute("aria-expanded");
+  });
+  it("hides the mood line when the headline is blank", () => {
+    render(
+      <BuddyPresence
+        state={createInitialSemanticState()}
+        headline="   "
+        vibe="Cheerful, supportive"
+        speech={null}
+        sceneMounted
+        sceneToggleLabel="Open Play"
+        onToggleScene={vi.fn()}
+        onControl={vi.fn()}
+      />,
+    );
+    expect(screen.queryByTestId("buddy-presence-mood")).toBeNull();
+    expect(screen.getByTestId("buddy-presence-vibe")).toHaveTextContent(
+      "Cheerful, supportive",
+    );
+  });
+  it("shows the name as a heading, the vibe as a meta line and the mood and speech as text", () => {
+    render(
+      <BuddyPresence
+        state={createInitialSemanticState()}
+        headline="Snack reserves are running low"
+        vibe="Cheerful, supportive"
+        speech={speech}
+        sceneMounted
+        sceneToggleLabel="Open Play"
+        onToggleScene={vi.fn()}
+        onControl={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("heading", { level: 2 })).toBeTruthy();
+    expect(screen.getByTestId("buddy-presence-vibe")).toHaveTextContent(
+      "Cheerful, supportive",
+    );
+    expect(screen.getByTestId("buddy-presence-mood")).toHaveTextContent(
+      /^Snack reserves are running low$/,
+    );
+    expect(screen.getByTestId("buddy-presence-speech")).toHaveTextContent(
+      "Choose the next step",
     );
   });
   it("unmounts the decorative avatar in text-only mode while keeping controls usable", () => {

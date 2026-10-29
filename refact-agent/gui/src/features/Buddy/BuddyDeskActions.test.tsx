@@ -149,8 +149,7 @@ const envelope = <T,>(data: T, envelopeProject = project) => ({
   next_cursor: null,
 });
 const actionButton = { name: action.label };
-const emptyState =
-  /No registered actions are available for this report revision/;
+const emptyState = /No actions are available for this report revision/;
 
 function renderActions() {
   const store = setUpStore(config);
@@ -186,6 +185,37 @@ describe("BuddyDeskActions", () => {
     expect(screen.getByText(action.description)).toBeTruthy();
     expect(screen.queryByText(emptyState)).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("keeps the primary action stacked and lays lifecycle and secondary controls out in one row", async () => {
+    server.use(
+      http.get("*/v1/buddy/work/:id/actions", () =>
+        HttpResponse.json(envelope([action, dismissAction])),
+      ),
+    );
+    const store = setUpStore(config);
+    render(
+      <BuddyDeskActions
+        item={item}
+        artifact={artifact}
+        endpointIdentity={buddyOperatorIdentity(store.getState())}
+        secondary={<button type="button">Mark as read</button>}
+      />,
+      { store },
+    );
+    const primary = await screen.findByRole("button", actionButton);
+    expect(screen.getByText(action.description).tagName).toBe("P");
+    const dismiss = screen.getByRole("button", { name: dismissAction.label });
+    expect(dismiss).toHaveAccessibleDescription(dismissAction.description);
+    const row = screen.getByRole("button", {
+      name: "Mark as read",
+    }).parentElement;
+    if (!row) throw new Error("Expected the secondary actions row");
+    expect(row).toContainElement(dismiss);
+    expect(row).toContainElement(
+      screen.getByRole("button", { name: "Refresh actions" }),
+    );
+    expect(row).not.toContainElement(primary);
   });
 
   it("does not render an action registered against another project root", async () => {
@@ -225,7 +255,7 @@ describe("BuddyDeskActions", () => {
     );
     renderActions();
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Registered actions could not be loaded. Saved execution status is unavailable.",
+      "Couldn't load actions for this report.",
     );
     expect(screen.queryByText(emptyState)).toBeNull();
     expect(screen.queryByRole("button", actionButton)).toBeNull();

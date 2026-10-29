@@ -1,378 +1,70 @@
 import {
   useCallback,
   useEffect,
-  useId,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
-import {
-  ChevronRight,
-  ClipboardList,
-  FileSearch,
-  Inbox,
-  RefreshCw,
-} from "lucide-react";
-import { Button, Icon, Surface, Text } from "../../components/ui";
+import { ClipboardList, FileText, Inbox, RefreshCw } from "lucide-react";
+import { Button } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import {
-  useGetBuddyDeskActionsQuery,
   useGetBuddyDeskActionsBatchQuery,
   useGetBuddyOperatorWorkQuery,
   useGetBuddyOperatorWorkItemQuery,
   buddyOperatorIdentity,
-  type DeskActionBatchEntry,
   type OperatorRecord,
 } from "../../services/refact/buddyOperator";
-import type { WorkItem, WorkItemState } from "./operatorTypes";
-import { humanizeIdentifier } from "../../utils/displayNames";
+import type { WorkItem } from "./operatorTypes";
 import { useConfig } from "../../hooks/useConfig";
-import { BuddyDeskDetail } from "./BuddyDeskDetail";
 import { headline } from "./buddyUtils";
+import {
+  CANCELLED_GROUP,
+  DEFAULT_DESK_VIEW,
+  EMPTY_VIEW_COPY,
+  PENDING_ROW_ACTIONS,
+  ROW_SELECTOR,
+  VIEW_DEFAULT_STATE,
+  VIEW_FOR_STATE,
+  chunkWork,
+  groupDeskRecords,
+  plural,
+  sameChunkActions,
+  type ChunkActions,
+  type DeskAttention,
+  type DeskListMode,
+  type RowActions,
+} from "./BuddyDeskModel";
+import {
+  BUDDY_REPORTS_SELECTION_KEY,
+  BUDDY_REPORTS_VIEW_KEY,
+  type BuddyReportsSelection,
+  type BuddyReportsView,
+} from "./sections/buddyReportsLink";
+import {
+  BUDDY_TERMS,
+  BuddyEmptyState,
+  BuddyErrorCallout,
+  BuddyLoading,
+  BuddySection,
+  useBuddyPersistentState,
+} from "./ui";
+import { BuddyDeskDetail } from "./BuddyDeskDetail";
+import { DeskRow } from "./BuddyDeskRow";
+import { BuddyDeskList } from "./BuddyDeskList";
+import {
+  BuddyDeskFilters,
+  BuddyDeskListTools,
+  BuddyDeskViews,
+} from "./BuddyDeskToolbar";
 import styles from "./BuddyDesk.module.css";
-
-const views = ["Needs you", "Working on", "Delivered", "Watching"] as const;
-type WorkView = (typeof views)[number];
-const viewQuery = {
-  "Needs you": "needs_you",
-  "Working on": "working_on",
-  Delivered: "delivered",
-  Watching: "watching",
-} as const;
-
-const DEFAULT_VIEW: WorkView = "Needs you";
-
-const viewForState: Record<WorkItemState, WorkView> = {
-  needs_attention: "Needs you",
-  blocked: "Needs you",
-  working: "Working on",
-  delivered: "Delivered",
-  cancelled: "Delivered",
-  watching: "Watching",
-};
-
-const emptyView: Record<WorkView, string> = {
-  "Needs you": "Nothing needs you right now.",
-  "Working on": "Nothing is in progress right now.",
-  Delivered: "No delivered work is saved in this project.",
-  Watching: "Nothing is being watched right now.",
-};
-
-const NO_RESULT_YET = "No result yet";
-const NO_ACTION = "No action to take";
-const ACTION_STATUS_UNAVAILABLE = "Action status unavailable";
-const ROW_GROUP_SIZE = 50;
-
-const opaqueIdentifier = /[0-9a-f]{24,}/i;
-const ROW_SELECTOR = "button[data-desk-row]";
-const CANCELLED_GROUP = "cancelled";
-
-const listModes = ["Latest by subject", "Run history"] as const;
-type ListMode = (typeof listModes)[number];
-
-type DeskRecordGroup = {
-  key: string;
-  head: OperatorRecord<WorkItem>;
-  others: OperatorRecord<WorkItem>[];
-};
-
-function deskSubjectKey(item: WorkItem): string | null {
-  const kind = item.kind.trim();
-  const resourceKind = item.subject.resource_kind.trim();
-  const resourceId = item.subject.resource_id.trim();
-  if (kind === "" || resourceKind === "" || resourceId === "") return null;
-  return JSON.stringify([
-    item.project.project_id,
-    item.project.canonical_root,
-    kind,
-    resourceKind,
-    resourceId,
-  ]);
-}
-
-function groupDeskRecords(
-  records: OperatorRecord<WorkItem>[],
-): DeskRecordGroup[] {
-  const groups = new Map<string, DeskRecordGroup>();
-  for (const record of records) {
-    const key = deskSubjectKey(record.value) ?? `work:${record.value.id}`;
-    const group = groups.get(key);
-    if (group) group.others.push(record);
-    else groups.set(key, { key, head: record, others: [] });
-  }
-  return [...groups.values()];
-}
-
-function chunkWork(
-  records: OperatorRecord<WorkItem>[],
-  endpointIdentity: string,
-): { key: string; items: WorkItem[] }[] {
-  return Array.from(
-    { length: Math.ceil(records.length / ROW_GROUP_SIZE) },
-    (_, index) => {
-      const items = records
-        .slice(index * ROW_GROUP_SIZE, (index + 1) * ROW_GROUP_SIZE)
-        .map(({ value }) => value);
-      return {
-        key: JSON.stringify([
-          endpointIdentity,
-          ...items.map((value) => [
-            value.id,
-            value.project.project_id,
-            value.current_artifact_id,
-            value.current_artifact_revision,
-          ]),
-        ]),
-        items,
-      };
-    },
-  );
-}
-
-function sameChunkActions(
-  left: ChunkActions | undefined,
-  right: Record<string, RowActions>,
-): boolean {
-  if (!left) return false;
-  const keys = Object.keys(right);
-  if (Object.keys(left).length !== keys.length) return false;
-  return keys.every((id) => {
-    const a = left[id];
-    const b = right[id];
-    if (!(id in left) || a.mode !== b.mode) return false;
-    if (a.mode === "per_row" || b.mode === "per_row") return true;
-    return (
-      a.entry === b.entry &&
-      a.loaded === b.loaded &&
-      a.pending === b.pending &&
-      a.failed === b.failed
-    );
-  });
-}
 
 function visibleRows(list: HTMLElement | null): HTMLButtonElement[] {
   return [
     ...(list?.querySelectorAll<HTMLButtonElement>(ROW_SELECTOR) ?? []),
-  ].filter((row) => !row.closest("details:not([open])"));
+  ].filter((row) => !row.closest("[hidden]"));
 }
-
-function plural(count: number, one: string, many = `${one}s`): string {
-  return `${count} ${count === 1 ? one : many}`;
-}
-
-function meaningfulText(value: string | null | undefined): string | null {
-  const text = value?.trim() ?? "";
-  if (text === "" || opaqueIdentifier.test(text)) return null;
-  return text;
-}
-
-function comparableText(value: string): string {
-  return value
-    .toLocaleLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .replace(/\b(?:a|an|the|issue|problem|finding|report|review)\b/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function problemSummary(item: WorkItem): string | null {
-  const summary = meaningfulText(item.problem_summary);
-  if (!summary) return null;
-  const title = comparableText(item.title);
-  const comparableSummary = comparableText(summary);
-  if (
-    comparableSummary === "" ||
-    comparableSummary === title ||
-    comparableSummary.includes(title) ||
-    title.includes(comparableSummary)
-  )
-    return null;
-  return summary;
-}
-
-function severityLabel(item: WorkItem): string | null {
-  if (!item.severity || item.severity === "unknown") return null;
-  return `${humanizeIdentifier(item.severity)} severity`;
-}
-
-function changedAt(value: string): string | null {
-  const parsed = Date.parse(value);
-  if (!Number.isFinite(parsed)) return null;
-  const minutes = Math.round((Date.now() - parsed) / 60_000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.round(hours / 24)}d ago`;
-}
-
-function changedAtAbsolute(value: string): string | null {
-  const parsed = Date.parse(value);
-  if (!Number.isFinite(parsed)) return null;
-  return new Date(parsed).toLocaleString();
-}
-
-function WorkRow({
-  item,
-  endpointIdentity,
-  showState,
-  showActionVerb,
-  rowActions,
-  selected,
-  onOpen,
-  onActionVerb,
-}: {
-  item: WorkItem;
-  endpointIdentity: string;
-  showState: boolean;
-  showActionVerb: boolean;
-  rowActions: RowActions;
-  selected: boolean;
-  onOpen: (item: WorkItem, trigger: HTMLButtonElement) => void;
-  onActionVerb: (id: string, verb: string) => void;
-}) {
-  const artifactId = item.current_artifact_id;
-  const { currentData, isFetching, error } = useGetBuddyDeskActionsQuery(
-    {
-      id: item.id,
-      project_id: item.project.project_id,
-      endpoint_identity: endpointIdentity,
-    },
-    { skip: !artifactId || rowActions.mode !== "per_row" },
-  );
-  const actions =
-    rowActions.mode === "per_row"
-      ? currentData?.data
-      : rowActions.entry?.actions;
-  const action = actions?.find(
-    (candidate) =>
-      candidate.artifact_id === artifactId &&
-      candidate.artifact_revision === item.current_artifact_revision &&
-      candidate.spec.project.canonical_root === item.project.canonical_root,
-  );
-  const failed =
-    rowActions.mode === "per_row"
-      ? Boolean(error)
-      : rowActions.failed ||
-        (rowActions.loaded &&
-          (rowActions.entry === undefined || rowActions.entry.error !== null));
-  const pending =
-    rowActions.mode === "per_row"
-      ? isFetching && !currentData
-      : rowActions.pending;
-  let verb: string | null = NO_ACTION;
-  if (!artifactId) verb = NO_RESULT_YET;
-  else if (failed) verb = ACTION_STATUS_UNAVAILABLE;
-  else if (pending) verb = null;
-  else if (action) verb = action.label;
-  const changed = changedAt(item.last_material_change_at);
-  const absolute = changedAtAbsolute(item.last_material_change_at);
-  const absoluteTimeId = useId();
-  const severity = severityLabel(item);
-  const scope = meaningfulText(item.scope);
-  const summary = problemSummary(item);
-  useEffect(() => {
-    if (verb !== null) onActionVerb(item.id, verb);
-  }, [item.id, onActionVerb, verb]);
-  return (
-    <li>
-      <button
-        data-desk-row={item.id}
-        className={styles.item}
-        aria-current={selected ? "true" : undefined}
-        aria-describedby={absolute ? absoluteTimeId : undefined}
-        onClick={(event) => onOpen(item, event.currentTarget)}
-      >
-        <span className={styles.itemContent}>
-          <span className={styles.titleLine}>
-            {severity && (
-              <span
-                aria-label={severity}
-                className={styles.severity}
-                data-severity={item.severity}
-                role="img"
-              />
-            )}
-            <Text
-              size="2"
-              weight="medium"
-              className={styles.name}
-              data-testid="buddy-desk-row-title"
-            >
-              {headline(item.title)}
-            </Text>
-          </span>
-          {summary && (
-            <Text size="1" className={styles.problemSummary}>
-              {summary}
-            </Text>
-          )}
-          <span className={styles.itemMeta}>
-            {scope && (
-              <Text size="1" className={styles.scope}>
-                {scope}
-              </Text>
-            )}
-            {scope && showActionVerb && verb !== null && (
-              <span aria-hidden className={styles.metaSeparator}>
-                ·
-              </span>
-            )}
-            {showActionVerb && verb !== null && (
-              <Text
-                size="1"
-                weight={action ? "medium" : "regular"}
-                className={styles.actionVerb}
-              >
-                {verb}
-              </Text>
-            )}
-            <Text
-              size="1"
-              color="gray"
-              className={showState ? undefined : styles.srOnly}
-            >
-              {humanizeIdentifier(item.state)}
-            </Text>
-            {changed && (
-              <Text size="1" color="gray" title={absolute ?? undefined}>
-                {changed}
-              </Text>
-            )}
-            {absolute && (
-              <span
-                id={absoluteTimeId}
-                className={styles.srOnly}
-                aria-hidden="true"
-              >
-                {absolute}
-              </span>
-            )}
-          </span>
-        </span>
-        <Icon
-          icon={ChevronRight}
-          size="sm"
-          tone="muted"
-          className={styles.chevron}
-        />
-      </button>
-    </li>
-  );
-}
-
-type RowActions =
-  | { mode: "per_row" }
-  | {
-      mode: "batch";
-      entry: DeskActionBatchEntry | undefined;
-      loaded: boolean;
-      pending: boolean;
-      failed: boolean;
-    };
-
-type ChunkActions = Record<string, RowActions>;
 
 function ActionBatchSubscriber({
   chunkKey,
@@ -422,15 +114,6 @@ function ActionBatchSubscriber({
   useEffect(() => () => onResult(chunkKey, null), [chunkKey, onResult]);
   return null;
 }
-
-const PENDING_ROW_ACTIONS: RowActions = {
-  mode: "batch",
-  entry: undefined,
-  loaded: false,
-  pending: true,
-  failed: false,
-};
-
 function DeskContent({
   endpointIdentity,
   workId,
@@ -446,8 +129,23 @@ function DeskContent({
   const [actionVerbs, setActionVerbs] = useState<
     Partial<Record<string, string>>
   >({});
-  const [view, setView] = useState<WorkView>(DEFAULT_VIEW);
-  const [listMode, setListMode] = useState<ListMode>("Latest by subject");
+  const [view, setStoredView] = useBuddyPersistentState<BuddyReportsView>(
+    BUDDY_REPORTS_VIEW_KEY,
+    DEFAULT_DESK_VIEW,
+  );
+  const [storedSelection, setStoredSelection] =
+    useBuddyPersistentState<BuddyReportsSelection | null>(
+      BUDDY_REPORTS_SELECTION_KEY,
+      null,
+    );
+  const [restored] = useState(() =>
+    !workId &&
+    storedSelection?.endpointIdentity === endpointIdentity &&
+    storedSelection.view === view
+      ? storedSelection
+      : null,
+  );
+  const [listMode, setListMode] = useState<DeskListMode>("latest");
   const [chunkActions, setChunkActions] = useState<
     Partial<Record<string, ChunkActions>>
   >({});
@@ -478,7 +176,9 @@ function DeskContent({
       return next;
     });
   }, []);
-  const [selectedId, setSelectedId] = useState<string | null>(workId ?? null);
+  const [selectedId, setSelectedId] = useState<string | null>(
+    workId ?? restored?.workId ?? null,
+  );
   const [selectedOverride, setSelectedOverride] = useState<WorkItem | null>(
     null,
   );
@@ -493,12 +193,18 @@ function DeskContent({
     { skip: !workId || !projectId, refetchOnMountOrArgChange: true },
   );
   const [search, setSearch] = useState("");
-  const [attention, setAttention] = useState<
-    "all" | "unread" | "snoozed" | "unsnoozed"
-  >("unsnoozed");
+  const [attention, setAttention] = useState<DeskAttention>("unsnoozed");
+  const restoredWork = useGetBuddyOperatorWorkItemQuery(
+    {
+      id: restored?.workId ?? "",
+      project_id: restored?.projectId,
+      endpoint_identity: endpointIdentity,
+    },
+    { skip: !restored || selectedId !== restored.workId },
+  );
   const listRef = useRef<HTMLDivElement>(null);
-  const trigger = useRef<HTMLButtonElement | null>(null);
-  const viewTrigger = useRef<HTMLButtonElement | null>(null);
+  const trigger = useRef<HTMLElement | null>(null);
+  const viewTrigger = useRef<HTMLDivElement | null>(null);
   const restoreViewFocus = useRef(false);
   const expandButton = useRef<HTMLButtonElement>(null);
   const refreshButton = useRef<HTMLButtonElement>(null);
@@ -527,12 +233,29 @@ function DeskContent({
       cursor,
       limit: 50,
       endpoint_identity: endpointIdentity,
-      view: viewQuery[view],
+      view,
       search: search.trim(),
       attention,
     },
     { refetchOnMountOrArgChange: true },
   );
+  const unreadSkipped = attention === "unread" || !currentData?.data.length;
+  const unreadQuery = useGetBuddyOperatorWorkQuery(
+    {
+      limit: 200,
+      endpoint_identity: endpointIdentity,
+      view,
+      search: search.trim(),
+      attention: "unread",
+    },
+    { skip: unreadSkipped },
+  );
+  const unreadIds = useMemo(
+    () => new Set(unreadQuery.currentData?.data.map(({ value }) => value.id)),
+    [unreadQuery.currentData],
+  );
+  const isUnread = (item: WorkItem) =>
+    attention === "unread" || unreadIds.has(item.id);
   const records = useMemo(() => {
     const compatiblePrevious = currentData
       ? previous.filter(
@@ -576,12 +299,17 @@ function DeskContent({
         (selectedOverride?.id === selectedId ? selectedOverride : undefined) ??
         (dismissSnapshotRef.current?.id === selectedId
           ? dismissSnapshotRef.current
+          : undefined) ??
+        (restored?.workId === selectedId &&
+        restoredWork.currentData?.data.value.id === selectedId &&
+        restoredWork.currentData.data.value.project.project_id ===
+          restored.projectId
+          ? restoredWork.currentData.data.value
           : undefined);
   const query = search.trim().toLocaleLowerCase();
   const filtered = records.filter(
-    ({ value }) => viewForState[value.state] === view,
+    ({ value }) => VIEW_FOR_STATE[value.state] === view,
   );
-  const distinctStates = new Set(filtered.map(({ value }) => value.state));
   const primary = filtered.filter(({ value }) => value.state !== "cancelled");
   const cancelled = filtered.filter(({ value }) => value.state === "cancelled");
   const groups = groupDeskRecords(primary);
@@ -603,7 +331,7 @@ function DeskContent({
       ? null
       : cancelled.some(({ value }) => value.id === selectedId)
         ? CANCELLED_GROUP
-        : listMode === "Latest by subject"
+        : listMode === "latest"
           ? groups.find((group) =>
               group.others.some(({ value }) => value.id === selectedId),
             )?.key ?? null
@@ -622,7 +350,7 @@ function DeskContent({
     !workId &&
     !error &&
     !filtersApplied &&
-    view === DEFAULT_VIEW &&
+    view === DEFAULT_DESK_VIEW &&
     Boolean(currentData) &&
     records.length === 0;
 
@@ -657,7 +385,10 @@ function DeskContent({
     const firstRow =
       listRef.current?.querySelector<HTMLButtonElement>(ROW_SELECTOR);
     if (firstRow) firstRow.focus({ preventScroll: true });
-    else viewTrigger.current?.focus({ preventScroll: true });
+    else
+      viewTrigger.current
+        ?.querySelector<HTMLInputElement>("input:checked")
+        ?.focus({ preventScroll: true });
     restoreViewFocus.current = false;
   }, [isFetching, selectedId, view]);
 
@@ -703,6 +434,7 @@ function DeskContent({
       setExpanded(true);
       setRefreshNotice(true);
       setSelectedId(null);
+      setStoredSelection(null);
     }
   }, [
     currentData,
@@ -710,6 +442,7 @@ function DeskContent({
     isError,
     isFetching,
     refreshPending,
+    setStoredSelection,
     selectedId,
     startedTimeStamp,
     workId,
@@ -765,6 +498,8 @@ function DeskContent({
     else setCursor(undefined);
   };
   const back = () => {
+    setStoredSelection(null);
+    if (!unreadSkipped) void unreadQuery.refetch();
     setSelectedId(null);
     setSelectedOverride(null);
     snoozedSelectionId.current = null;
@@ -783,14 +518,31 @@ function DeskContent({
     url.searchParams.delete("chat");
     window.history.replaceState(window.history.state, "", url);
   };
-  const open = (item: WorkItem, source: HTMLButtonElement) => {
+  const open = (item: WorkItem, source: HTMLElement) => {
     trigger.current = source;
     setDismissalNotice(null);
     setSelectedOverride(null);
     dismissedSelectionId.current = null;
     snoozedSelectionId.current = null;
     setSelectedId(item.id);
+    setStoredSelection({
+      workId: item.id,
+      projectId: item.project.project_id,
+      endpointIdentity,
+      view,
+    });
     updateLink(item);
+  };
+  const resetList = () => {
+    setCursor(undefined);
+    setPrevious([]);
+    setSelectedId(null);
+    setStoredSelection(null);
+  };
+  const changeView = (next: BuddyReportsView) => {
+    restoreViewFocus.current = selectedId !== null;
+    setStoredView(next);
+    resetList();
   };
   const onDismissPending = (item: WorkItem) => {
     const index = rowIndex(item.id);
@@ -823,6 +575,7 @@ function DeskContent({
       `Dismissed "${headline(item.title)}". You can find it under Delivered.`,
     );
     setSelectedId(null);
+    setStoredSelection(null);
     if (config.host === "web" && config.engineServed) {
       const url = new URL(window.location.href);
       url.searchParams.delete("buddy_work");
@@ -843,249 +596,185 @@ function DeskContent({
     );
   }, []);
 
+  const countText = [
+    plural(filtered.length, "report"),
+    listMode === "latest" && primary.length > 0
+      ? plural(groups.length, "subject")
+      : null,
+    cancelled.length > 0 ? `${cancelled.length} cancelled` : null,
+    moreAvailable ? "more available" : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const defaultState = VIEW_DEFAULT_STATE[view];
+  const renderRow = (record: OperatorRecord<WorkItem>) => (
+    <DeskRow
+      key={record.value.id}
+      item={record.value}
+      endpointIdentity={endpointIdentity}
+      defaultState={defaultState}
+      showActionVerb={showActionVerb}
+      rowActions={rowActionsFor(record.value.id)}
+      selected={selectedId === record.value.id}
+      unread={isUnread(record.value)}
+      onOpen={open}
+      onActionVerb={recordActionVerb}
+    />
+  );
+  const refreshAction = (
+    <Button
+      ref={refreshButton}
+      size="sm"
+      variant="ghost"
+      leftIcon={RefreshCw}
+      onClick={refresh}
+    >
+      Refresh reports
+    </Button>
+  );
+
   if (collapsed) {
     return (
-      <section
-        className={styles.collapsed}
-        aria-label="Buddy Desk"
-        data-detail-open={false}
+      <BuddySection
+        title={BUDDY_TERMS.reports}
+        icon={ClipboardList}
+        className={styles.desk}
+        aria-label={BUDDY_TERMS.reports}
+        testId="buddy-desk"
       >
-        <Text
-          size="2"
-          color="gray"
-          className={styles.collapsedText}
-          role={dismissalNotice !== null ? "status" : undefined}
-        >
-          {dismissalNotice ?? "Nothing needs you right now."}
-        </Text>
-        <Button
-          ref={expandButton}
-          size="sm"
-          variant="ghost"
-          leftIcon={Inbox}
-          onClick={() => setExpanded(true)}
-        >
-          Browse saved work
-        </Button>
-      </section>
+        <BuddyEmptyState
+          compact
+          icon={Inbox}
+          title={
+            dismissalNotice ? (
+              <span role="status">{dismissalNotice}</span>
+            ) : (
+              EMPTY_VIEW_COPY.needs_you
+            )
+          }
+          action={
+            <Button
+              ref={expandButton}
+              size="sm"
+              variant="ghost"
+              onClick={() => setExpanded(true)}
+            >
+              Browse reports
+            </Button>
+          }
+        />
+      </BuddySection>
     );
   }
 
+  const detailOpen = Boolean(selected);
+  const showDetail =
+    selected !== undefined && !(selectedId === workId ? linkedFailure : error);
   return (
-    <Surface
-      as="section"
-      variant="glass"
-      radius="card"
+    <BuddySection
+      title={BUDDY_TERMS.reports}
+      icon={ClipboardList}
       className={styles.desk}
-      aria-label="Buddy Desk"
-      data-detail-open={Boolean(selected)}
+      bodyClassName={styles.deskBody}
+      aria-label={BUDDY_TERMS.reports}
+      testId="buddy-desk"
+      action={refreshAction}
+      footer={
+        moreAvailable && !error ? (
+          <Button
+            size="sm"
+            variant="soft"
+            disabled={isFetching}
+            onClick={() => {
+              setPrevious(records);
+              setCursor(currentData.next_cursor ?? undefined);
+            }}
+          >
+            Load more reports
+          </Button>
+        ) : undefined
+      }
     >
-      <header className={styles.header}>
-        <Icon icon={ClipboardList} size="sm" tone="muted" />
-        <h2 className={styles.heading}>Buddy Desk</h2>
-        <span className={styles.headerSpacer} aria-hidden />
-        <Button
-          ref={refreshButton}
-          size="sm"
-          variant="ghost"
-          leftIcon={RefreshCw}
-          onClick={refresh}
-        >
-          Refresh work
-        </Button>
-      </header>
-      {refreshNotice && !dismissalNotice && (
-        <Text as="p" size="1" color="gray" role="status">
-          That item is no longer in this view.
-        </Text>
-      )}
-      {dismissalNotice && (
-        <Text as="p" size="1" color="gray" role="status">
-          {dismissalNotice}
-        </Text>
+      {(refreshNotice || dismissalNotice) && (
+        <p role="status" className={styles.notice}>
+          {dismissalNotice ?? "That report is no longer in this view."}
+        </p>
       )}
       {selectedId === workId && linkedWork.isFetching && (
-        <Surface variant="surface-1" className={styles.note} role="status">
-          <Text size="2" color="gray">
-            Opening that item…
-          </Text>
-        </Surface>
+        <BuddyLoading variant="rows" count={1} label="Opening that report" />
       )}
       {selectedId === workId && linkedFailure && (
-        <Surface variant="surface-1" className={styles.note} role="alert">
-          <Text size="2" color="red">
-            {projectId
-              ? "The linked work is unavailable in this project. No other report was substituted."
-              : "This link does not name a project, so the linked work was not opened. No other report was substituted."}
-          </Text>
-          <div className={styles.noteActions}>
-            {projectId && (
-              <Button size="sm" onClick={() => void linkedWork.refetch()}>
-                Retry linked work
-              </Button>
-            )}
-            <Button size="sm" variant="ghost" onClick={back}>
-              Back to work list
-            </Button>
-          </div>
-        </Surface>
+        <BuddyErrorCallout
+          thing="that report"
+          title={
+            projectId
+              ? "Couldn't open that report in this project. No other report was opened."
+              : "This link doesn't name a project, so the report wasn't opened."
+          }
+          error={linkedWork.error}
+          onRetry={projectId ? () => void linkedWork.refetch() : undefined}
+        />
       )}
       <div
         className={styles.layout}
-        data-split={Boolean(selected) || filtered.length > 0}
+        data-detail-open={detailOpen}
+        data-detail-visible={Boolean(showDetail)}
+        data-testid="buddy-desk-layout"
       >
         <div className={styles.list} ref={listRef}>
-          <nav className={styles.views} aria-label="Work views">
-            {views.map((label) => (
-              <Button
-                key={label}
-                size="sm"
-                variant={view === label ? "primary" : "ghost"}
-                aria-pressed={view === label}
-                onClick={(event) => {
-                  viewTrigger.current = event.currentTarget;
-                  restoreViewFocus.current = selectedId !== null;
-                  setView(label);
-                  setSelectedId(null);
-                  setCursor(undefined);
-                  setPrevious([]);
-                }}
-              >
-                {label}
-              </Button>
-            ))}
-          </nav>
+          <BuddyDeskViews
+            view={view}
+            onChange={changeView}
+            viewsRef={viewTrigger}
+          />
           {(records.length > 0 || filtersApplied || expanded) && !error && (
-            <div className={styles.filters}>
-              {(records.length > 0 || query !== "") && (
-                <label className={styles.search}>
-                  <Text size="1" color="gray">
-                    Search saved work
-                  </Text>
-                  <input
-                    type="search"
-                    value={search}
-                    maxLength={256}
-                    onChange={(event) => {
-                      setSearch(event.target.value);
-                      setCursor(undefined);
-                      setPrevious([]);
-                      setSelectedId(null);
-                    }}
-                  />
-                </label>
-              )}
-              <label className={styles.search}>
-                <Text size="1" color="gray">
-                  Report attention
-                </Text>
-                <select
-                  value={attention}
-                  onChange={(event) => {
-                    const value = event.target.value;
-                    if (
-                      value !== "all" &&
-                      value !== "unread" &&
-                      value !== "snoozed" &&
-                      value !== "unsnoozed"
-                    )
-                      return;
-                    setAttention(value);
-                    setCursor(undefined);
-                    setPrevious([]);
-                    setSelectedId(null);
-                  }}
-                >
-                  <option value="unsnoozed">Active reports</option>
-                  <option value="unread">Unread reports</option>
-                  <option value="snoozed">Snoozed reports</option>
-                  <option value="all">All saved work, including snoozed</option>
-                </select>
-              </label>
-            </div>
+            <BuddyDeskFilters
+              search={search}
+              showSearch={records.length > 0 || query !== ""}
+              attention={attention}
+              onSearch={(value) => {
+                setSearch(value);
+                resetList();
+              }}
+              onAttention={(value) => {
+                setAttention(value);
+                resetList();
+              }}
+            />
           )}
           {!error && filtered.length > 0 && (
-            <div className={styles.listTools}>
-              {primary.length > 0 && (
-                <div
-                  className={styles.modes}
-                  role="group"
-                  aria-label="List layout"
-                >
-                  {listModes.map((label) => (
-                    <Button
-                      key={label}
-                      size="sm"
-                      variant={listMode === label ? "soft" : "ghost"}
-                      aria-pressed={listMode === label}
-                      onClick={() => setListMode(label)}
-                    >
-                      {label}
-                    </Button>
-                  ))}
-                </div>
-              )}
-              <Text
-                size="1"
-                color="gray"
-                className={styles.count}
-                data-testid="buddy-desk-count"
-              >
-                {[
-                  `${plural(filtered.length, "record")} loaded`,
-                  listMode === "Latest by subject" && primary.length > 0
-                    ? `${plural(groups.length, "subject")}`
-                    : null,
-                  cancelled.length > 0 ? `${cancelled.length} cancelled` : null,
-                  moreAvailable ? "more saved work not loaded yet" : null,
-                ]
-                  .filter(Boolean)
-                  .join(" · ")}
-              </Text>
-              {listMode === "Latest by subject" &&
-                repeatedSubjects.length > 0 && (
-                  <Text size="1" color="gray" className={styles.count}>
-                    Records are grouped only when they share the same work kind
-                    and saved subject. Grouping covers loaded records only.
-                  </Text>
-                )}
-            </div>
+            <BuddyDeskListTools
+              listMode={listMode}
+              showModes={primary.length > 0}
+              count={countText}
+              grouped={listMode === "latest" && repeatedSubjects.length > 0}
+              onListMode={setListMode}
+            />
           )}
           {isFetching && (
-            <Text
-              as="p"
-              size="1"
-              color="gray"
-              role="status"
-              className={styles.inlineStatus}
-            >
-              Loading work…
-            </Text>
+            <BuddyLoading variant="rows" count={3} label="Loading reports" />
           )}
           {error ? (
-            <Surface variant="surface-1" className={styles.note} role="alert">
-              <Text size="2" color="red">
-                Buddy could not reach your saved work.
-              </Text>
-              <Button size="sm" onClick={refresh}>
-                Retry work
-              </Button>
-            </Surface>
+            <BuddyErrorCallout
+              thing="reports"
+              error={error}
+              onRetry={refresh}
+              retryLabel="Retry reports"
+            />
           ) : (
             <>
               {currentData && primary.length === 0 && (
-                <Text
-                  as="p"
-                  size="2"
-                  color="gray"
-                  className={styles.inlineStatus}
-                >
-                  {cancelled.length > 0
-                    ? "No delivered results among the loaded records. Cancelled work is listed separately."
-                    : filtersApplied
-                      ? "Nothing here matches those filters."
-                      : emptyView[view]}
-                </Text>
+                <BuddyEmptyState
+                  compact
+                  icon={Inbox}
+                  title={
+                    cancelled.length > 0
+                      ? "No delivered reports here. Cancelled reports are listed below."
+                      : filtersApplied
+                        ? "No reports match these filters."
+                        : EMPTY_VIEW_COPY[view]
+                  }
+                />
               )}
               {actionChunks.map((chunk) => (
                 <ActionBatchSubscriber
@@ -1096,106 +785,31 @@ function DeskContent({
                   onResult={recordChunkActions}
                 />
               ))}
-              {(() => {
-                const row = (record: OperatorRecord<WorkItem>) => (
-                  <WorkRow
-                    key={record.value.id}
-                    item={record.value}
-                    endpointIdentity={endpointIdentity}
-                    showState={distinctStates.size > 1}
-                    showActionVerb={showActionVerb}
-                    rowActions={rowActionsFor(record.value.id)}
-                    selected={selectedId === record.value.id}
-                    onOpen={open}
-                    onActionVerb={recordActionVerb}
-                  />
-                );
-                return (
-                  <div
-                    className={styles.scroller}
-                    data-testid="buddy-desk-scroller"
-                  >
-                    {primary.length > 0 && listMode === "Run history" && (
-                      <ul className={styles.items}>{primary.map(row)}</ul>
-                    )}
-                    {primary.length > 0 && listMode === "Latest by subject" && (
-                      <ul className={styles.items}>
-                        {groups.map((group) => (
-                          <li key={group.key} className={styles.group}>
-                            <ul className={styles.items}>{row(group.head)}</ul>
-                            {group.others.length > 0 && (
-                              <details
-                                className={styles.history}
-                                open={openGroups.has(group.key)}
-                                onToggle={(event) =>
-                                  toggleGroup(
-                                    group.key,
-                                    event.currentTarget.open,
-                                  )
-                                }
-                              >
-                                <summary className={styles.historySummary}>
-                                  {`${plural(
-                                    group.others.length,
-                                    "other loaded record",
-                                  )} for this subject (${
-                                    group.others.length + 1
-                                  } loaded)`}
-                                </summary>
-                                <ul className={styles.items}>
-                                  {group.others.map(row)}
-                                </ul>
-                              </details>
-                            )}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                    {cancelled.length > 0 && primary.length === 0 && (
-                      <section
-                        className={styles.cancelled}
-                        aria-label="Cancelled work"
-                      >
-                        <Text size="1" color="gray">
-                          {`Cancelled (${cancelled.length} loaded) — kept for history, not delivered results`}
-                        </Text>
-                        <ul className={styles.items}>{cancelled.map(row)}</ul>
-                      </section>
-                    )}
-                    {cancelled.length > 0 && primary.length > 0 && (
-                      <details
-                        className={styles.cancelled}
-                        aria-label="Cancelled work"
-                        open={openGroups.has(CANCELLED_GROUP)}
-                        onToggle={(event) =>
-                          toggleGroup(CANCELLED_GROUP, event.currentTarget.open)
-                        }
-                      >
-                        <summary className={styles.historySummary}>
-                          {`Cancelled (${cancelled.length} loaded) — kept for history, not delivered results`}
-                        </summary>
-                        <ul className={styles.items}>{cancelled.map(row)}</ul>
-                      </details>
-                    )}
-                  </div>
-                );
-              })()}
-              {currentData?.next_cursor != null && (
-                <Button
-                  size="sm"
-                  disabled={isFetching}
-                  onClick={() => {
-                    setPrevious(records);
-                    setCursor(currentData.next_cursor ?? undefined);
-                  }}
-                >
-                  Load more work
-                </Button>
-              )}
+              <BuddyDeskList
+                listMode={listMode}
+                primary={primary}
+                cancelled={cancelled}
+                groups={groups}
+                openGroups={openGroups}
+                onToggleGroup={toggleGroup}
+                renderRow={renderRow}
+              />
             </>
           )}
         </div>
-        {selected && !(selectedId === workId ? linkedFailure : error) ? (
+        {selectedId === null && (
+          <div
+            className={styles.detailHint}
+            data-testid="buddy-desk-detail-hint"
+          >
+            <BuddyEmptyState
+              icon={FileText}
+              title="Pick a report to read it here"
+              hint="Findings, write-up and evidence open on this side."
+            />
+          </div>
+        )}
+        {showDetail && (
           <div className={styles.detail}>
             <BuddyDeskDetail
               key={`${selected.id}:${selected.current_artifact_revision ?? 0}`}
@@ -1208,18 +822,9 @@ function DeskContent({
               onDismissFailure={onDismissFailure}
             />
           </div>
-        ) : (
-          filtered.length > 0 && (
-            <div className={styles.placeholder}>
-              <Icon icon={FileSearch} size="md" tone="muted" />
-              <Text size="2" color="gray">
-                Choose a report to read what Buddy found.
-              </Text>
-            </div>
-          )
         )}
       </div>
-    </Surface>
+    </BuddySection>
   );
 }
 

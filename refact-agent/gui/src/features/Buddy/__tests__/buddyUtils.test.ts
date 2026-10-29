@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   anxietyFromNeglect,
   computeXpFill,
-  formatReportTime,
   headline,
   humanizeResourceReference,
   xpDisplay,
@@ -74,19 +73,7 @@ describe("computeXpFill", () => {
   });
 });
 
-describe("report labels", () => {
-  it("formats relative report times with local absolute titles", () => {
-    const now = Date.parse("2026-09-24T00:00:00Z");
-    expect(formatReportTime("2026-09-23T23:59:00Z", now)).toEqual({
-      relative: "1 min ago",
-      absolute: new Date("2026-09-23T23:59:00Z").toLocaleString(),
-    });
-    expect(formatReportTime("invalid", now)).toEqual({
-      relative: "Unknown time",
-      absolute: null,
-    });
-  });
-
+describe("resource labels", () => {
   it("uses the resource kind for opaque ids and humanizes readable ids", () => {
     expect(
       humanizeResourceReference(

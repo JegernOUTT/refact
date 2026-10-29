@@ -101,8 +101,9 @@ describe("BuddyAppliedChangesCard", () => {
     render(<BuddyAppliedChangesCard />, { preloadedState: CONFIG_STATE });
 
     expect(
-      await screen.findByText("That list could not be loaded just now."),
+      await screen.findByText("Couldn't load changed files."),
     ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
     expect(
       screen.queryByText("Buddy has not changed any of your files yet."),
     ).not.toBeInTheDocument();

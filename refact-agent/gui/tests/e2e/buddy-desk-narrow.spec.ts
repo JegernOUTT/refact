@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 const ROUTE = "/tests/e2e/route-showcase.html?route=buddy&operator=enabled";
-const DESK = '[aria-label="Buddy Desk"]';
+const DESK = '[data-testid="buddy-desk"]';
 const project = { project_id: "showcase", canonical_root: "/workspace/refact" };
 const rows = Array.from({ length: 6 }, (_, index) => {
   const id = `narrow-work-${index}`;
@@ -65,7 +65,11 @@ async function expectFirstRowBelowControlsInTopHalf(
     const list = root?.querySelector("ul");
     if (!root || !list) throw new Error("Desk controls are missing");
     return Math.max(
-      ...[...root.querySelectorAll<HTMLElement>("nav, input, select, button")]
+      ...[
+        ...root.querySelectorAll<HTMLElement>(
+          '[role="radiogroup"], input:not([type="radio"]), select, button',
+        ),
+      ]
         .filter(
           (control) =>
             !list.contains(control) &&
@@ -81,45 +85,34 @@ async function expectFirstRowBelowControlsInTopHalf(
   ).toBeGreaterThanOrEqual(controlsBottom - 1);
 }
 
-test.describe("Buddy Desk narrow layout", () => {
+test.describe("Reports narrow layout", () => {
   test("compacts the controls and first work row into the first half-screen at 360px", async ({
     page,
   }) => {
     await openDesk(page, 360, 900);
+    await expect(page.getByTestId("buddy-desk-detail-hint")).toBeHidden();
     await expectFirstRowBelowControlsInTopHalf(page, 900);
 
     const viewButtons = page
-      .getByRole("navigation", { name: "Work views" })
-      .getByRole("button");
-    await expect(viewButtons).toHaveText([
-      "Needs you",
-      "Working on",
-      "Delivered",
-      "Watching",
-    ]);
-    const viewBoxes = await viewButtons.evaluateAll((buttons) =>
-      buttons.map((button) => {
-        const { x, y, width } = button.getBoundingClientRect();
-        return { x, y, width, right: x + width };
-      }),
-    );
-    expect(
-      Math.max(...viewBoxes.map(({ y }) => y)) -
-        Math.min(...viewBoxes.map(({ y }) => y)),
-    ).toBeLessThanOrEqual(2);
-    for (const [index, box] of viewBoxes.entries()) {
-      expect(
-        box.x,
-        `view button ${index} starts offscreen`,
-      ).toBeGreaterThanOrEqual(0);
-      expect(
-        box.right,
-        `view button ${index} ends offscreen`,
-      ).toBeLessThanOrEqual(360);
+      .getByRole("radiogroup", { name: "Report views" })
+      .getByRole("radio");
+    await expect(viewButtons).toHaveCount(4);
+    for (const name of ["Needs you", "Working on", "Delivered", "Watching"])
+      await expect(
+        page.getByRole("radio", { name, exact: true }),
+      ).toBeVisible();
+    for (const name of ["Needs you", "Working on", "Delivered", "Watching"]) {
+      const control = page.getByRole("radio", { name, exact: true });
+      await control.locator("..").scrollIntoViewIfNeeded();
+      await control.focus();
+      const box = await control.locator("..").boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.x).toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(360);
     }
 
-    const search = page.getByRole("searchbox", { name: "Search saved work" });
-    const attention = page.getByLabel("Report attention");
+    const search = page.getByRole("searchbox", { name: "Search reports" });
+    const attention = page.getByLabel("Show reports");
     await expect(search).toBeVisible();
     await expect(attention).toBeVisible();
     for (const control of [search, attention]) {
@@ -151,6 +144,7 @@ test.describe("Buddy Desk narrow layout", () => {
     page,
   }) => {
     await openDesk(page, 1280, 900);
+    await expect(page.getByTestId("buddy-desk-detail-hint")).toBeVisible();
     await expectFirstRowBelowControlsInTopHalf(page, 900);
   });
 });

@@ -184,7 +184,7 @@ describe("executeBuddyAction production control contract", () => {
       ).resolves.toMatchObject({ status: "unsupported" });
       expect(requests).toEqual([]);
       expect(store.getState().buddy.activeSpeech?.text).toContain(
-        "current revision-bound actions",
+        "Open Reports for the current actions.",
       );
     },
   );
@@ -244,12 +244,13 @@ describe("executeBuddyAction production control contract", () => {
     async (action, actionParam, message) => {
       const dispatch = makeDispatch();
 
-      await expect(
-        executeBuddyAction(control(action, actionParam), dispatch),
-      ).resolves.toEqual({
-        status: "unsupported",
-        message: expect.stringContaining(message),
-      });
+      const outcome = await executeBuddyAction(
+        control(action, actionParam),
+        dispatch,
+      );
+      expect(outcome.status).toBe("unsupported");
+      if (outcome.status !== "unsupported") throw new Error(outcome.status);
+      expect(outcome.message).toContain(message);
       expect(dispatch).toHaveBeenCalledWith(
         expect.objectContaining({ type: "buddy/setActiveSpeech" }),
       );

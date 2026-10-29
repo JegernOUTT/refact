@@ -1,18 +1,32 @@
 import React, { useState } from "react";
-import classNames from "classnames";
-import { FileClock, Undo2 } from "lucide-react";
-import { Badge, Button, Surface, Text } from "../../components/ui";
+import { FileClock, FileText, Undo2 } from "lucide-react";
+import { Button } from "../../components/ui";
+import { useAppSelector } from "../../hooks";
 import {
   useGetBuddyReceiptsQuery,
   useUndoBuddyActionMutation,
 } from "../../services/refact/buddy";
-import { BuddySectionHeader } from "./BuddySectionHeader";
-import { formatTimestamp } from "./buddyUtils";
+import { selectBuddyState } from "./buddySlice";
 import { formatOpportunityActionError } from "./hooks/useExecuteBuddyAction";
+import {
+  BuddyEmptyState,
+  BuddyErrorCallout,
+  BuddyRow,
+  BuddySection,
+  BuddyTimestamp,
+  buddyName,
+} from "./ui";
 import styles from "./BuddyAppliedChangesCard.module.css";
 
 export const BuddyAppliedChangesCard: React.FC = () => {
-  const { data: receipts, isError } = useGetBuddyReceiptsQuery(undefined);
+  const name = buddyName(useAppSelector(selectBuddyState)?.identity.name);
+  const {
+    data: receipts,
+    isError,
+    error,
+    isFetching,
+    refetch,
+  } = useGetBuddyReceiptsQuery(undefined);
   const [undoAction] = useUndoBuddyActionMutation();
   const [undoError, setUndoError] = useState<string | null>(null);
 
@@ -24,72 +38,71 @@ export const BuddyAppliedChangesCard: React.FC = () => {
     setUndoError(null);
     try {
       await undoAction({ receipt_id: receiptId }).unwrap();
-    } catch (error) {
-      setUndoError(`Could not undo: ${formatOpportunityActionError(error)}`);
+    } catch (undoFailure) {
+      setUndoError(
+        `Could not undo: ${formatOpportunityActionError(undoFailure)}`,
+      );
     }
   };
 
   return (
-    <Surface
-      className={styles.card}
-      data-testid="buddy-applied-changes-card"
-      animated="rise"
-      radius="card"
-      variant="glass"
+    <BuddySection
+      title={`Files ${name} changed`}
+      icon={FileClock}
+      count={undoable.length > 0 ? undoable.length : undefined}
+      testId="buddy-applied-changes-card"
     >
-      <BuddySectionHeader
-        icon={FileClock}
-        label="Files Buddy changed"
-        badge={
-          undoable.length > 0 ? (
-            <Badge size="xs" tone="accent">
-              {undoable.length}
-            </Badge>
-          ) : undefined
-        }
-      />
-      <div className={classNames(styles.body, "rf-stagger")}>
-        {isError && (
-          <Text size="1" color="gray">
-            That list could not be loaded just now.
-          </Text>
-        )}
-        {!isError && undoable.length === 0 && (
-          <Text size="1" color="gray">
-            Buddy has not changed any of your files yet.
-          </Text>
-        )}
-        {undoable.map((receipt) => (
-          <div key={receipt.id} className={styles.row}>
-            <span className={styles.rowText}>
-              <Text
-                size="1"
-                className={styles.path}
-                title={receipt.target_path}
-              >
-                {receipt.target_path}
-              </Text>
-              <Text size="1" color="gray">
-                {formatTimestamp(receipt.created_at)}
-              </Text>
-            </span>
-            <Button
-              size="sm"
-              variant="ghost"
-              aria-label={`Undo ${receipt.target_path}`}
-              onClick={() => void handleUndo(receipt.id)}
-            >
-              <Undo2 size={14} />
-              Undo
-            </Button>
-          </div>
-        ))}
-        {undoError && (
-          <Text size="1" color="red" role="alert">
-            {undoError}
-          </Text>
-        )}
-      </div>
-    </Surface>
+      {isError ? (
+        <BuddyErrorCallout
+          compact
+          thing="changed files"
+          error={error}
+          retrying={isFetching}
+          onRetry={() => void refetch()}
+        />
+      ) : null}
+      {!isError && undoable.length === 0 ? (
+        <BuddyEmptyState
+          compact
+          icon={FileClock}
+          title={`${name} has not changed any of your files yet.`}
+        />
+      ) : null}
+      {undoable.length > 0 ? (
+        <div className={styles.body}>
+          {undoable.map((receipt) => (
+            <BuddyRow
+              key={receipt.id}
+              density="compact"
+              leading={{ icon: FileText }}
+              title={receipt.target_path}
+              meta={[
+                <BuddyTimestamp
+                  key="at"
+                  value={receipt.created_at}
+                  prefix="Changed"
+                />,
+              ]}
+              actions={
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  leftIcon={Undo2}
+                  aria-label={`Undo ${receipt.target_path}`}
+                  onClick={() => void handleUndo(receipt.id)}
+                >
+                  Undo
+                </Button>
+              }
+            />
+          ))}
+        </div>
+      ) : null}
+      {undoError ? (
+        <p className={styles.error} role="alert">
+          {undoError}
+        </p>
+      ) : null}
+    </BuddySection>
   );
 };

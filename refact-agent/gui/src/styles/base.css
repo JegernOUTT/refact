@@ -73,3 +73,13 @@
 .radix-themes .rt-Text[data-accent-color="gray"] {
   color: var(--rf-color-muted);
 }
+
+.rf-focus-ring:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-focus-ring-offset);
+}
+
+.rf-focus-ring-inset:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-focus-ring-offset-inset);
+}

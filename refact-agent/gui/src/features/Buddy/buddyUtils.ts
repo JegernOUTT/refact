@@ -38,59 +38,6 @@ export function anxietyFromNeglect(neglectScore: number): number {
   return Math.min(100, Math.max(0, Math.round(neglectScore / 2)));
 }
 
-export function formatBuddyTime(ts: string | null | undefined): string {
-  if (!ts) return "";
-  const date = new Date(ts);
-  if (!Number.isFinite(date.getTime())) return "";
-  return date.toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-export function formatRelativeTime(ts: string | null | undefined): string {
-  if (!ts) return "";
-  const time = Date.parse(ts);
-  if (!Number.isFinite(time)) return "unknown";
-  const diff = Date.now() - time;
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return `${Math.floor(hrs / 24)}d ago`;
-}
-
-export function formatReportTime(
-  ts: string | null | undefined,
-  now = Date.now(),
-): { relative: string; absolute: string | null } {
-  if (!ts) return { relative: "Unknown time", absolute: null };
-  const timestamp = Date.parse(ts);
-  if (!Number.isFinite(timestamp))
-    return { relative: "Unknown time", absolute: null };
-  const absolute = new Date(timestamp).toLocaleString();
-  const minutes = Math.floor(Math.abs(now - timestamp) / 60_000);
-  const direction = timestamp > now ? "from now" : "ago";
-  if (minutes < 1) return { relative: "just now", absolute };
-  if (minutes < 60)
-    return {
-      relative: `${minutes} min${minutes === 1 ? "" : "s"} ${direction}`,
-      absolute,
-    };
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24)
-    return {
-      relative: `${hours} hr${hours === 1 ? "" : "s"} ${direction}`,
-      absolute,
-    };
-  const days = Math.floor(hours / 24);
-  return {
-    relative: `${days} day${days === 1 ? "" : "s"} ${direction}`,
-    absolute,
-  };
-}
-
 export function humanizeResourceReference(
   resourceKind: string,
   resourceId: string,
@@ -104,32 +51,6 @@ export function humanizeResourceReference(
   return humanizeIdentifier(opaque ? resourceKind : resourceId);
 }
 
-export function formatTimestamp(value: string | null | undefined): string {
-  if (!value) return "—";
-  return value.slice(0, 16).replace("T", " ");
-}
-
-export function formatFailureLabel(
-  value: string | null | undefined,
-): string | null {
-  const trimmed = value?.trim();
-  if (!trimmed) return null;
-  return trimmed
-    .split(/[_\s-]+/)
-    .filter(Boolean)
-    .map((part) => {
-      const normalized = part.toLowerCase();
-      return normalized.charAt(0).toUpperCase() + normalized.slice(1);
-    })
-    .join(" ");
-}
-
-/**
- * Format a large integer count (tokens, messages, …) using compact unit
- * suffixes (k, M, B, T). Picks the largest unit that keeps the value
- * above 1 so very large totals (8_130_081_100) render as "8.1B" rather
- * than the broken "8130081.1k" produced by a fixed `/1000` formatter.
- */
 export function formatCompactNumber(value: number): string {
   if (!Number.isFinite(value)) return "0";
   const abs = Math.abs(value);

@@ -7,7 +7,7 @@ import { BuddyDeskPreview } from "../../src/features/Buddy/preview/BuddyDeskPrev
 import { BuddyDesk } from "../../src/features/Buddy/BuddyDesk";
 import { BuddyNativeDecisions } from "../../src/features/Buddy/BuddyNativeDecisions";
 import { BuddyOperatorPlayPreview } from "../../src/features/Buddy/BuddyOperatorPlayPreview";
-import { BuddyPresenceProvider } from "../../src/features/Buddy/BuddyPresenceProvider";
+import { BuddyPresencePreviewContext } from "../../src/features/Buddy/buddyPresenceMotion";
 import { BuddyWorld } from "../../src/features/Buddy/BuddyWorld";
 import { createInitialSemanticState } from "../../src/features/Buddy/state";
 import { setBuddyTextPresence } from "../../src/features/Buddy/useBuddyTextPresence";
@@ -16,7 +16,7 @@ import "../../src/lib/render/web.css";
 
 const root = document.getElementById("refact-chat");
 const params = new URLSearchParams(window.location.search);
-if (!root) throw new Error("Buddy Desk preview root is missing");
+if (!root) throw new Error("Reports preview root is missing");
 const store = setUpStore({
   config: {
     host: "web",
@@ -35,7 +35,15 @@ const sceneState = { ...createInitialSemanticState(), name: "Pixel" };
 const noAction = () => undefined;
 function PlayFixture() {
   return (
-    <BuddyPresenceProvider lowPower={lowPower}>
+    <BuddyPresencePreviewContext.Provider
+      value={{
+        enabled: true,
+        workState: "idle",
+        lowPower,
+        textOnly: params.get("textonly") === "1",
+        reducedMotion: undefined,
+      }}
+    >
       <BuddyWorld
         palette={PALETTES[sceneState.paletteIndex]}
         stage={STAGES[sceneState.progress.stage]}
@@ -54,7 +62,7 @@ function PlayFixture() {
         onSpeechControl={noAction}
       />
       <BuddyOperatorPlayPreview enabled lowPower={lowPower} />
-    </BuddyPresenceProvider>
+    </BuddyPresencePreviewContext.Provider>
   );
 }
 createRoot(root).render(

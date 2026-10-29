@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 const ROUTE = "/tests/e2e/route-showcase.html?route=buddy&operator=enabled";
-const DESK = '[aria-label="Buddy Desk"]';
+const DESK = '[data-testid="buddy-desk"]';
 const project = { project_id: "showcase", canonical_root: "/workspace/refact" };
 
 const titles = [
@@ -91,7 +91,7 @@ async function openDesk(page: Page, width: number) {
   ).toBeVisible();
 }
 
-test.describe("Buddy Desk rows", () => {
+test.describe("Reports rows", () => {
   test("rows fill the list and keep action hints in metadata styling without overflow", async ({
     page,
   }) => {
@@ -104,16 +104,15 @@ test.describe("Buddy Desk rows", () => {
       const measurements = await page.evaluate((deskSelector) => {
         const desk = document.querySelector<HTMLElement>(deskSelector);
         const list = desk?.querySelector<HTMLElement>("ul");
-        if (!desk || !list) throw new Error("Buddy Desk rows are missing");
+        if (!desk || !list) throw new Error("Reports rows are missing");
         const listWidth = list.getBoundingClientRect().width;
         const rowWidths = [...list.querySelectorAll("li button")].map(
           (row) => row.getBoundingClientRect().width,
         );
         const hint = desk.querySelector<HTMLElement>(
-          "li button [class*='actionVerb']",
+          "li button [class*='metaPart']:nth-child(3)",
         );
-        const relativeTime =
-          desk.querySelector<HTMLElement>("li button [title]");
+        const relativeTime = desk.querySelector<HTMLElement>("li button time");
         if (!hint || !relativeTime)
           throw new Error("Row metadata styling targets are missing");
         return {

@@ -101,7 +101,7 @@ for (const width of [360, 1280]) {
     });
     await expect(row).toBeVisible();
     await row.click();
-    const detail = page.getByLabel("Work detail");
+    const detail = page.getByRole("article");
     const snooze = detail.getByRole("region", { name: "Work snooze" });
     await expect(
       page.getByRole("heading", { name: "Saved Error Detective assessment" }),
@@ -112,19 +112,22 @@ for (const width of [360, 1280]) {
     await expect(snoozeButton).toBeEnabled();
     await snoozeButton.click();
     await expect(snooze.getByText(/Snoozed until/)).toBeVisible();
-    await page.getByRole("button", { name: "Back to work list" }).click();
+    await page.getByRole("button", { name: "Back to reports" }).click();
     await expect(row).toHaveCount(0);
-    await page.getByRole("button", { name: "Browse saved work" }).click();
-    const attention = page.getByRole("combobox", { name: "Report attention" });
-    await expect(attention).toHaveValue("unsnoozed");
-    await attention.selectOption("snoozed");
+    await page.getByRole("button", { name: "Browse reports" }).click();
+    const attention = page.getByRole("combobox", { name: "Show reports" });
+    await expect(attention).toHaveText("Active reports");
+    await attention.click();
+    await page
+      .getByRole("option", { name: "Snoozed reports", exact: true })
+      .click();
     await expect(row).toBeVisible();
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.getByRole("tab", { name: "Reports", exact: true }).click();
-    await page.getByRole("button", { name: "Browse saved work" }).click();
+    await page.getByRole("button", { name: "Browse reports" }).click();
     await expect(
-      page.getByRole("combobox", { name: "Report attention" }),
-    ).toHaveValue("unsnoozed");
+      page.getByRole("combobox", { name: "Show reports" }),
+    ).toHaveText("Active reports");
     await expect(row).toHaveCount(0);
     const snoozedWork = page.waitForResponse((response) => {
       const url = new URL(response.url());
@@ -133,9 +136,10 @@ for (const width of [360, 1280]) {
         url.searchParams.get("attention") === "snoozed"
       );
     });
+    await page.getByRole("combobox", { name: "Show reports" }).click();
     await page
-      .getByRole("combobox", { name: "Report attention" })
-      .selectOption("snoozed");
+      .getByRole("option", { name: "Snoozed reports", exact: true })
+      .click();
     await snoozedWork;
     await expect(row).toBeVisible();
   });

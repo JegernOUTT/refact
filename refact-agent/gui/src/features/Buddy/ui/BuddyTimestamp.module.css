@@ -1,0 +1,6 @@
+.time {
+  border-radius: var(--rf-radius-chip);
+  color: inherit;
+  white-space: nowrap;
+  cursor: default;
+}

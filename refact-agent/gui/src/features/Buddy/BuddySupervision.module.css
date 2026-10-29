@@ -1,19 +1,7 @@
-.supervision {
-  display: flex;
-  box-sizing: border-box;
-  flex-direction: column;
-  gap: var(--rf-space-2);
-  min-width: 0;
-  max-width: 100%;
-  padding: var(--rf-panel-pad);
-  overflow-wrap: anywhere;
-}
-
 .controls,
 .group,
 .subgroup {
   display: flex;
-  box-sizing: border-box;
   flex-direction: column;
   gap: var(--rf-space-2);
   min-width: 0;
@@ -21,87 +9,33 @@
 }
 
 .group {
-  gap: var(--rf-space-3);
-  padding: var(--rf-space-3);
+  --rf-input-max: var(--rf-content-max);
+
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-2) var(--rf-space-3);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-ctl);
 }
 
 .subgroup {
   gap: var(--rf-space-1);
-  padding-left: var(--rf-space-2);
-}
-
-/* Native fieldset[disabled] does not cascade opacity, and these groups are
- * inert long before a mandate exists, so the affordance is explicit. */
-.group[data-disabled="true"] {
-  opacity: 0.55;
-}
-
-.group[data-disabled="true"] .field,
-.group[data-disabled="true"] .choice {
-  cursor: not-allowed;
 }
 
 .field {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-1);
-  min-width: 0;
-  max-width: 100%;
+  --rf-input-max: var(--rf-content-max);
+
+  padding: 0;
+}
+
+.field input:disabled,
+.field textarea:disabled,
+.select[data-disabled] {
   color: var(--rf-color-muted);
-  font-size: var(--rf-text-1);
+  opacity: 1;
 }
 
-.choice {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: var(--rf-space-2);
-  min-width: 0;
-  max-width: 100%;
-  color: var(--rf-color-fg);
-}
-
-.input,
-.select {
-  box-sizing: border-box;
-  width: 100%;
-  min-width: 0;
-  max-width: 100%;
-  padding: var(--rf-space-1) var(--rf-space-2);
-  color: var(--rf-color-fg);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-ctl);
-  background: var(--rf-surface-1);
-  font: inherit;
-}
-
-/* The scope select used to render a bare OS widget whose longest option
- * interpolated the whole read-tool list, overflowing narrow viewports. */
-.select {
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  appearance: none;
-}
-
-.input:focus-visible,
-.select:focus-visible {
-  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
-  outline-offset: var(--rf-space-1);
-}
-
-.input:disabled,
-.select:disabled {
-  cursor: not-allowed;
-  color: var(--rf-color-muted);
-  border-color: var(--rf-border);
-  background: var(--rf-surface-2);
-}
-
-.choice input:disabled {
+.group[data-disabled="true"] .field,
+.group[data-disabled="true"] label {
   cursor: not-allowed;
 }
 
@@ -118,20 +52,11 @@
   flex: 1 1 12rem;
 }
 
-.note {
-  margin: 0;
-  color: var(--rf-color-muted);
-}
-
+.note,
 .reason {
+  max-width: 68ch;
   margin: 0;
   color: var(--rf-color-muted);
-}
-
-.disclosureBlocked {
-  align-self: flex-start;
-  color: var(--rf-color-muted);
-  border-color: transparent;
 }
 
 .alert {
@@ -140,7 +65,6 @@
 }
 
 .details {
-  box-sizing: border-box;
   max-width: 100%;
   max-height: 16rem;
   margin: 0;
@@ -151,24 +75,6 @@
   color: var(--rf-color-fg);
   border-radius: var(--rf-radius-ctl);
   background: var(--rf-surface-2);
-}
-
-.errorRow {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--rf-space-2);
-  min-width: 0;
-  max-width: 100%;
-  padding: var(--rf-space-2);
-  border: var(--rf-hairline) solid var(--rf-color-danger);
-  border-radius: var(--rf-radius-ctl);
-  background: var(--rf-color-danger-soft);
-}
-
-.errorText {
-  flex: 1 1 12rem;
-  margin: 0;
-  min-width: 0;
-  color: var(--rf-color-fg);
+  font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line-1)
+    var(--rf-font-mono);
 }

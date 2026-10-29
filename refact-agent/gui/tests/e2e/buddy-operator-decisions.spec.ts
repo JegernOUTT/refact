@@ -98,7 +98,10 @@ test("web decision acknowledgment is not resolution; native takeover and reconne
     });
   });
   await page.goto("/tests/e2e/buddy-operator-preview.html?connected=1");
-  const decision = page.getByRole("article", { name: "Native decision" });
+  const decision = page.getByRole("listitem", {
+    name: "Question",
+    exact: true,
+  });
   await decision.getByRole("radio", { name: "Yes", exact: true }).check();
   await decision
     .getByRole("button", { name: "Submit answer", exact: true })
@@ -107,7 +110,7 @@ test("web decision acknowledgment is not resolution; native takeover and reconne
     decision.getByText("Answer queued.", { exact: false }),
   ).toBeVisible();
   await expect(
-    decision.getByText("Answered — confirmed by the native chat."),
+    decision.getByText("Answered — confirmed by the chat."),
   ).toHaveCount(0);
   expect(posts).toBe(1);
   unavailable = true;
@@ -124,13 +127,11 @@ test("web decision acknowledgment is not resolution; native takeover and reconne
     .getByRole("button", { name: "Refresh decision status" })
     .click();
   await expect(
-    decision.getByText(
-      "Cancelled in the native chat. No answer will be applied.",
-    ),
+    decision.getByText("Cancelled in the chat. No answer will be applied."),
   ).toBeVisible();
   await page.reload();
   await expect(
-    page.getByText("Cancelled in the native chat. No answer will be applied."),
+    page.getByText("Cancelled in the chat. No answer will be applied."),
   ).toBeVisible();
   expect(posts).toBe(1);
   expect(denied).toEqual([]);

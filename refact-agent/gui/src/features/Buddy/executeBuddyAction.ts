@@ -309,13 +309,6 @@ async function createWorktreesPulseReport(
   }
 }
 
-/**
- * Central executor for all Buddy control actions.
- *
- * Every Buddy surface (BuddyHome, BuddyPanel, BuddySpeechCloud,
- * NavigationRequest handler) must route through this single function
- * so that action semantics are defined in exactly one place.
- */
 export async function executeBuddyAction(
   ctrl: BuddyControl,
   dispatch: AppDispatch,
@@ -324,7 +317,8 @@ export async function executeBuddyAction(
 ): Promise<BuddyActionOutcome> {
   if (!isCurrent()) return ACTION_OK;
   if (
-    (ctrl.action === "dismiss_suggestion" && ctrl.action_param?.trim()) ||
+    (ctrl.action === "dismiss_suggestion" &&
+      Boolean(ctrl.action_param?.trim())) ||
     ctrl.action === "create_worktrees_pulse" ||
     context?.suggestionId
   ) {
@@ -337,10 +331,10 @@ export async function executeBuddyAction(
       ),
     );
     if (!isCurrent()) return ACTION_OK;
-    if (authority.error || authority.data?.mode !== "disabled") {
+    if (Boolean(authority.error) || authority.data?.mode !== "disabled") {
       return actionUnavailable(
         dispatch,
-        "This legacy work control is unavailable. Open Buddy Desk saved work for current revision-bound actions.",
+        "This older control is unavailable. Open Reports for the current actions.",
       );
     }
   }

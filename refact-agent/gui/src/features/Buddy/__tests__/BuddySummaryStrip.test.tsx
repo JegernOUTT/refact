@@ -49,4 +49,58 @@ describe("BuddySummaryStrip", () => {
     expect(screen.queryByText("Neglect")).not.toBeInTheDocument();
     expect(screen.queryByText("83")).not.toBeInTheDocument();
   });
+
+  it("hides the XP bar at max stage and keeps View stats with the stats", () => {
+    render(
+      <BuddySummaryStrip
+        name="Pixel"
+        palette={PALETTES[0]}
+        stage={STAGES[STAGES.length - 1]}
+        stageIndex={STAGES.length - 1}
+        xp={210}
+        xpNext={undefined}
+        xpFill={100}
+        atMaxStage
+        pet={undefined}
+        statsData={{
+          totals: { total_calls: 10, successful_calls: 9, total_tokens: 100 },
+        }}
+        successRate={90}
+        onViewStats={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    expect(screen.getByText(/max stage/)).toBeInTheDocument();
+    const viewStats = screen.getByRole("button", { name: "View stats" });
+    expect(viewStats.parentElement).toBe(
+      screen.getByText("Messages").closest("div")?.parentElement,
+    );
+  });
+
+  it("shows XP progress below max stage", () => {
+    render(
+      <BuddySummaryStrip
+        name="Pixel"
+        palette={PALETTES[0]}
+        stage={STAGES[0]}
+        stageIndex={0}
+        xp={5}
+        xpNext={20}
+        xpFill={25}
+        atMaxStage={false}
+        pet={undefined}
+        statsData={undefined}
+        successRate={null}
+        onViewStats={vi.fn()}
+      />,
+    );
+
+    const progress = screen.getByRole("progressbar", {
+      name: "Progress to next stage",
+    });
+    expect(progress).toHaveAttribute("value", "25");
+    expect(progress).toHaveAttribute("max", "100");
+    expect(progress.tagName).toBe("PROGRESS");
+  });
 });

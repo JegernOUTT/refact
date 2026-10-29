@@ -6,7 +6,8 @@ import {
   type WorkSnooze,
 } from "../../services/refact/buddyOperator";
 import type { ArtifactRevision, WorkItem } from "./operatorTypes";
-import { formatReportTime } from "./buddyUtils";
+import { BuddyTimestamp } from "./ui";
+import styles from "./BuddyDeskDetail.module.css";
 
 export function BuddyWorkSnooze({
   item,
@@ -42,7 +43,6 @@ export function BuddyWorkSnooze({
     snooze?.artifact_id === artifact.artifact_id &&
     snooze.artifact_revision === artifact.revision &&
     Date.parse(snooze.until) > Date.now();
-  const snoozeTime = formatReportTime(snooze?.until);
   const statusKnown =
     query.currentData !== undefined ||
     result.data !== undefined ||
@@ -69,20 +69,22 @@ export function BuddyWorkSnooze({
     }
   };
   return (
-    <section aria-label="Work snooze">
+    <section aria-label="Work snooze" className={styles.inlineControl}>
       {loading ? (
-        <p role="status">Loading snooze status…</p>
-      ) : statusKnown ? (
-        <p title={active ? snoozeTime.absolute ?? undefined : undefined}>
-          {active
-            ? `Snoozed until ${snoozeTime.relative}.`
-            : "This report is not snoozed."}
+        <p role="status" className={styles.hint}>
+          Loading snooze status…
+        </p>
+      ) : statusKnown && active ? (
+        <p className={styles.hint}>
+          Snoozed until <BuddyTimestamp value={snooze.until} mode="absolute" />.
+          A new revision ends the snooze.
         </p>
       ) : null}
-      {active ? <p>Still open — a new revision ends the snooze.</p> : null}
       {query.error ? (
         <>
-          <p role="alert">Snooze status is unavailable.</p>
+          <p role="alert" className={styles.hint}>
+            Couldn&apos;t load snooze status.
+          </p>
           <Button
             size="sm"
             variant="ghost"
@@ -113,10 +115,14 @@ export function BuddyWorkSnooze({
           )}
         </>
       )}
-      {result.isLoading && <p role="status">Saving snooze…</p>}
+      {result.isLoading && (
+        <p role="status" className={styles.hint}>
+          Saving snooze…
+        </p>
+      )}
       {failed && (
-        <p role="alert">
-          Snooze was not acknowledged. Reload if the report changed.
+        <p role="alert" className={styles.hint}>
+          Couldn&apos;t save the snooze. Refresh the report and try again.
         </p>
       )}
     </section>

@@ -1,10 +1,12 @@
 import { StrictMode } from "react";
-import { act } from "@testing-library/react";
+import { act } from "react-dom/test-utils";
 import { useBuddyEditorialDelivery } from "./useBuddyEditorialDelivery";
 import { updateConfig } from "../Config/configSlice";
 import { http, HttpResponse } from "msw";
 import { setupListeners } from "@reduxjs/toolkit/query";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { resetBuddyPersistentState } from "./ui";
 import { setUpStore } from "../../app/store";
 import { fireEvent, render, screen, waitFor } from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
@@ -34,16 +36,17 @@ const context: SupervisionContext = {
     improvement: false,
   },
 };
+HTMLElement.prototype.hasPointerCapture = () => false;
+HTMLElement.prototype.releasePointerCapture = () => undefined;
+afterEach(() => resetBuddyPersistentState());
 async function openGrantForm() {
   fireEvent.click(
-    await screen.findByRole("button", { name: "Grant a bounded mandate" }),
+    await screen.findByRole("button", { name: /work on its own/ }),
   );
-  await waitFor(() =>
-    expect(screen.getByLabelText("Exact model ID")).toBeEnabled(),
-  );
+  await waitFor(() => expect(screen.getByLabelText("Model ID")).toBeEnabled());
 }
 function fillGrant() {
-  fireEvent.change(screen.getByLabelText("Exact model ID"), {
+  fireEvent.change(screen.getByLabelText("Model ID"), {
     target: { value: "provider/model" },
   });
   const expires = new Date(Date.now() + 3600000);
@@ -53,11 +56,11 @@ function fillGrant() {
     .toISOString()
     .slice(0, 16);
   fireEvent.change(
-    screen.getByLabelText("Mandate expires (local time, within 24 hours)"),
+    screen.getByLabelText("Expires (local time, within 24 hours)"),
     { target: { value: local } },
   );
   fireEvent.click(
-    screen.getByRole("checkbox", { name: /I grant only the exact project/ }),
+    screen.getByRole("checkbox", { name: /I grant only this project/ }),
   );
 }
 describe("Buddy supervision controls", () => {
@@ -92,10 +95,10 @@ describe("Buddy supervision controls", () => {
     await waitFor(() => expect(reads).toBeGreaterThan(0));
     expect(screen.queryByLabelText("Buddy supervision")).toBeNull();
     expect(
-      screen.queryByRole("button", { name: "Grant a bounded mandate" }),
+      screen.queryByRole("button", { name: /work on its own/ }),
     ).toBeNull();
     expect(
-      screen.queryByRole("button", { name: "Grant bounded mandate" }),
+      screen.queryByRole("button", { name: "Grant permission" }),
     ).toBeNull();
     expect(writes).toBe(0);
   });
@@ -210,12 +213,12 @@ describe("Buddy supervision controls", () => {
     const view = render(<BuddySupervision />, { store });
     try {
       await openGrantForm();
-      fireEvent.change(screen.getByLabelText("Existing mandate ID"), {
+      fireEvent.change(screen.getByLabelText("Existing permission ID"), {
         target: { value: "mandate-1" },
       });
       vi.useFakeTimers();
       fireEvent.click(
-        screen.getByRole("button", { name: "Observe existing mandate" }),
+        screen.getByRole("button", { name: "Check existing permission" }),
       );
       await act(async () => {
         await vi.advanceTimersByTimeAsync(10);
@@ -270,13 +273,13 @@ describe("Buddy supervision controls", () => {
     );
     render(<BuddySupervision />, { preloadedState: config });
     expect(
-      await screen.findByText(/Supervision context could not be loaded/),
+      await screen.findByText("Couldn't load supervision."),
     ).toBeInTheDocument();
     const seen = reads;
     offline = false;
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(
-      await screen.findByRole("button", { name: "Grant a bounded mandate" }),
+      await screen.findByRole("button", { name: /work on its own/ }),
     ).toBeInTheDocument();
     expect(reads).toBeGreaterThan(seen);
   });
@@ -288,16 +291,16 @@ describe("Buddy supervision controls", () => {
       ),
     );
     render(<BuddySupervision />, { preloadedState: config });
-    await screen.findByRole("button", { name: "Grant a bounded mandate" });
-    expect(screen.queryByLabelText("Exact model ID")).toBeNull();
+    await screen.findByRole("button", { name: /work on its own/ });
+    expect(screen.queryByLabelText("Model ID")).toBeNull();
     expect(
-      screen.queryByRole("button", { name: "Grant bounded mandate" }),
+      screen.queryByRole("button", { name: "Grant permission" }),
     ).toBeNull();
     await openGrantForm();
-    expect(screen.getByLabelText("Exact model ID")).toBeInTheDocument();
+    expect(screen.getByLabelText("Model ID")).toBeInTheDocument();
   });
 
-  it("explains the missing owner before opening the disabled mandate form", async () => {
+  it("shows only the missing-owner reason instead of a dead form", async () => {
     server.use(
       http.get("*/v1/buddy/supervision/context", () =>
         HttpResponse.json({ ...context, authenticated_owner: null }),
@@ -306,16 +309,14 @@ describe("Buddy supervision controls", () => {
     render(<BuddySupervision />, { preloadedState: config });
 
     const reason = await screen.findByText(
-      "Granting a mandate needs this project's signed-in owner.",
+      "Only this project's signed-in owner can grant a permission.",
     );
-    const disclosure = screen.getByRole("button", {
-      name: "Grant a bounded mandate",
-    });
 
     expect(reason).toBeVisible();
-    expect(disclosure).toHaveAccessibleDescription(reason.textContent);
-    expect(disclosure).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByLabelText("Exact model ID")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /work on its own/ }),
+    ).toBeNull();
+    expect(screen.queryByLabelText("Model ID")).toBeNull();
   });
 
   it("keeps the whole read-tool list out of the worker scope options", async () => {
@@ -326,14 +327,21 @@ describe("Buddy supervision controls", () => {
     );
     render(<BuddySupervision />, { preloadedState: config });
     await openGrantForm();
-    const scope = screen.getByLabelText("Worker scope");
-    for (const option of Array.from(scope.querySelectorAll("option")))
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("combobox", { name: "What it may do" }));
+    const options = await screen.findAllByRole("option");
+    expect(options.map((option) => option.textContent)).toEqual([
+      "Think only (no tools)",
+      "Read files",
+      "Edit listed files",
+    ]);
+    for (const option of options)
       expect(option.textContent ?? "").not.toMatch(/,/);
-    fireEvent.change(scope, { target: { value: "read_only" } });
+    await user.click(screen.getByRole("option", { name: "Read files" }));
     expect(screen.getByText(/^Read tools:/)).toBeInTheDocument();
   });
 
-  it("marks the mandate fields as visibly disabled while storage is unavailable", async () => {
+  it("explains unavailable storage without offering the permission form", async () => {
     server.use(
       http.get("*/v1/buddy/supervision/context", () =>
         HttpResponse.json({
@@ -343,17 +351,13 @@ describe("Buddy supervision controls", () => {
       ),
     );
     render(<BuddySupervision />, { preloadedState: config });
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Grant a bounded mandate" }),
-    );
-    const group = await screen.findByRole("group", {
-      name: "Explicit, expiring mandate",
-    });
-    expect(group).toHaveAttribute("data-disabled", "true");
-    expect(screen.getByLabelText("Exact model ID")).toBeDisabled();
     expect(
-      screen.getByText(/Buddy storage is unavailable/),
+      await screen.findByText(/Buddy storage is unavailable/),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /work on its own/ }),
+    ).toBeNull();
+    expect(screen.queryByLabelText("Model ID")).toBeNull();
   });
   it("requires renewed confirmation after editing and never repeats uncertain grant", async () => {
     let writes = 0;
@@ -376,26 +380,24 @@ describe("Buddy supervision controls", () => {
       target: { value: "5" },
     });
     expect(
-      screen.getByRole("checkbox", { name: /I grant only the exact project/ }),
+      screen.getByRole("checkbox", { name: /I grant only this project/ }),
     ).not.toBeChecked();
     expect(
-      screen.getByRole("button", { name: "Grant bounded mandate" }),
+      screen.getByRole("button", { name: "Grant permission" }),
     ).toBeDisabled();
     fireEvent.click(
-      screen.getByRole("checkbox", { name: /I grant only the exact project/ }),
+      screen.getByRole("checkbox", { name: /I grant only this project/ }),
     );
-    fireEvent.click(
-      screen.getByRole("button", { name: "Grant bounded mandate" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Grant permission" }));
     expect(
-      await screen.findByText(/Request unconfirmed. Do not repeat intake/),
+      await screen.findByText(/Request unconfirmed. Don't set the goal/),
     ).toBeInTheDocument();
     expect(writes).toBe(1);
     expect(
-      screen.queryByRole("button", { name: "Grant bounded mandate" }),
+      screen.queryByRole("button", { name: "Grant permission" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Stop and revoke mandate" }),
+      screen.getByRole("button", { name: "Stop and revoke permission" }),
     ).toBeEnabled();
   });
   it("creates exact bounded grant then paused intake, never automatically spawns", async () => {
@@ -460,33 +462,27 @@ describe("Buddy supervision controls", () => {
     render(<BuddySupervision />, { preloadedState: config });
     await openGrantForm();
     fillGrant();
-    fireEvent.click(
-      screen.getByRole("button", { name: "Grant bounded mandate" }),
-    );
-    await screen.findByRole("button", { name: "Create paused native goal" });
+    fireEvent.click(screen.getByRole("button", { name: "Grant permission" }));
+    await screen.findByRole("button", { name: "Set goal (paused)" });
     expect(grant?.mandate.model_constraints).toEqual(["provider/model"]);
     expect(grant?.max_workers).toBe(1);
-    fireEvent.change(screen.getByLabelText("Objective"), {
+    fireEvent.change(screen.getByLabelText("Goal"), {
       target: { value: "Explain the design" },
     });
     fireEvent.change(
-      screen.getByLabelText("Explicit success criteria, one per line"),
+      screen.getByLabelText("How you'll know it's done, one per line"),
       { target: { value: "Explain limitations" } },
     );
-    fireEvent.click(
-      screen.getByRole("button", { name: "Create paused native goal" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Set goal (paused)" }));
     await screen.findByText("Native observations only");
     expect(intake).toEqual({
       content: "Explain the design",
       criteria: [{ id: "C1", text: "Explain limitations", verify_hint: null }],
     });
     expect(spawns).toBe(0);
+    expect(screen.getByText(/No verified delivery yet/)).toBeInTheDocument();
     expect(
-      screen.getByText(/No verified delivery observed/),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Start one bounded analysis worker" }),
+      screen.getByRole("button", { name: "Start the worker" }),
     ).toBeEnabled();
   });
 });

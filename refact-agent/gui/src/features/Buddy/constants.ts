@@ -607,22 +607,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   },
 };
 
-export const UNKNOWN_SIGNAL: SignalDef = {
-  mood: "idle",
-  animationType: "idle",
-  icon: "✨",
-  isError: false,
-  isWin: false,
-  scene: "idle",
-  category: "transient",
-  duration: 3000,
-};
-
-export function getSignalDef(signalType: string): SignalDef {
-  const signal = (SIGNALS as Partial<Record<string, SignalDef>>)[signalType];
-  return signal ?? UNKNOWN_SIGNAL;
-}
-
 export const SKILLS: SkillDef[] = [
   { id: "edit", name: "Code Patching", icon: "📝", xpThreshold: 20 },
   { id: "search", name: "grep Master", icon: "🔍", xpThreshold: 30 },

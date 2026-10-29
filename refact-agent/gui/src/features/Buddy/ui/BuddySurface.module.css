@@ -1,0 +1,31 @@
+.surface {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.section {
+  gap: var(--rf-section-gap);
+  padding: var(--rf-panel-pad);
+}
+
+.inset {
+  gap: var(--rf-space-2);
+  padding: var(--rf-panel-pad-compact);
+  box-shadow: none;
+}
+
+.compact {
+  gap: var(--rf-space-2);
+  padding: var(--rf-panel-pad-compact);
+}
+
+.inset .inset,
+.inset .section,
+.section .section {
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+}

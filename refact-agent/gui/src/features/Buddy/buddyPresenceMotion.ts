@@ -185,7 +185,6 @@ export function buddyPresenceMotion(
   return MOTION_GRAMMAR[state];
 }
 
-/** Only native execution or saved work facts; a goal alone is not execution. */
 export function buddyWorkStateFromFacts(
   work: readonly Pick<WorkItem, "state">[],
   native: readonly Pick<

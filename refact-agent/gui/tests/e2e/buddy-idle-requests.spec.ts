@@ -115,7 +115,7 @@ async function openDesk(
   await page.bringToFront();
   await page.getByRole("tab", { name: "Reports", exact: true }).click();
   await expect(
-    page.locator('[aria-label="Buddy Desk"] ul li button'),
+    page.locator('[data-testid="buddy-desk"] ul li button'),
   ).toHaveCount(rows.length);
 }
 
@@ -162,12 +162,11 @@ test.describe("Buddy idle request behavior", () => {
       window.dispatchEvent(new Event("visibilitychange"));
     });
     await page.getByRole("tab", { name: "Home", exact: true }).click();
-    const summary = page.getByText("Live chats, goals and workers");
+    const summary = page.getByRole("button", { name: /Background work/ });
     await summary.click();
-    const detail = page.locator("details").filter({ has: summary });
-    await expect(detail).toHaveAttribute("open", "");
+    await expect(summary).toHaveAttribute("aria-expanded", "true");
     await expect(
-      page.getByText("No loaded sessions on this page."),
+      page.getByText("No background work in open chats."),
     ).toBeVisible();
     let visibleCount = nativeWorkRequests("visible").length;
     for (let interval = 0; interval < 2; interval += 1) {

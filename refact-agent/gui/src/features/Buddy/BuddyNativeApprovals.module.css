@@ -1,4 +1,3 @@
-.approvals,
 .session {
   display: flex;
   box-sizing: border-box;
@@ -9,12 +8,19 @@
   overflow-wrap: anywhere;
 }
 
-.approvals {
-  padding: var(--rf-panel-pad);
+.sessionList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
-.session {
-  padding: var(--rf-space-3);
+.session + .session {
+  padding-top: var(--rf-space-3);
+  border-top: var(--rf-hairline) solid var(--rf-border);
 }
 
 .sessionTitle {
@@ -104,15 +110,4 @@
   gap: var(--rf-space-2);
   min-width: 0;
   max-width: 100%;
-  padding: var(--rf-space-2);
-  border: var(--rf-hairline) solid var(--rf-color-danger);
-  border-radius: var(--rf-radius-ctl);
-  background: var(--rf-color-danger-soft);
-}
-
-.errorText {
-  flex: 1 1 12rem;
-  margin: 0;
-  min-width: 0;
-  color: var(--rf-color-fg);
 }

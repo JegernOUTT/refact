@@ -18,6 +18,7 @@ export interface SegmentedControlProps
   value: string;
   onValueChange: (value: string) => void;
   size?: "sm" | "md";
+  layout?: "fill" | "content";
   name?: string;
 }
 
@@ -42,6 +43,7 @@ function isIconOnlyLabel(label: React.ReactNode): boolean {
  */
 export function SegmentedControl({
   className,
+  layout = "fill",
   name,
   onValueChange,
   options,
@@ -53,6 +55,7 @@ export function SegmentedControl({
   const fallbackName = React.useId();
   const groupName = name ?? fallbackName;
   const hasOptions = options.length > 0;
+  const sharedIndicator = hasOptions && layout === "fill";
   const activeIndex = hasOptions
     ? Math.max(
         0,
@@ -64,7 +67,13 @@ export function SegmentedControl({
     <div
       {...props}
       aria-disabled={hasOptions ? props["aria-disabled"] : true}
-      className={classNames(styles.root, styles[`size-${size}`], className)}
+      className={classNames(
+        styles.root,
+        styles[`size-${size}`],
+        styles[`layout-${layout}`],
+        className,
+      )}
+      data-layout={layout}
       role="radiogroup"
       style={
         {
@@ -74,7 +83,7 @@ export function SegmentedControl({
         } as React.CSSProperties
       }
     >
-      {hasOptions ? (
+      {sharedIndicator ? (
         <span aria-hidden="true" className={styles.indicator} />
       ) : null}
       {options.map((option) => {

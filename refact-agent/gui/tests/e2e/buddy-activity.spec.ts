@@ -17,7 +17,7 @@ test.describe("Buddy Activity conversation history", () => {
       const panel = page.getByTestId("buddy-recent-chats");
       await expect(panel).toBeVisible();
       const list = panel.getByRole("list");
-      await expect(list.getByRole("listitem")).toHaveCount(20);
+      await expect(list.getByRole("listitem")).toHaveCount(10);
       await expect(
         panel.getByRole("button", { name: "Show more" }),
       ).toBeVisible();
@@ -33,7 +33,7 @@ test.describe("Buddy Activity conversation history", () => {
       ).toBeLessThanOrEqual(width);
 
       await panel.getByRole("button", { name: "Show more" }).click();
-      await expect(list.getByRole("listitem")).toHaveCount(40);
+      await expect(list.getByRole("listitem")).toHaveCount(20);
     });
 
     test(`renders real-shaped workflow rows consistently at ${width}px`, async ({

@@ -1,13 +1,8 @@
 import { http, HttpResponse } from "msw";
 import { setupListeners } from "@reduxjs/toolkit/query";
 import { afterEach, describe, it, expect, vi } from "vitest";
-import {
-  act,
-  render,
-  screen,
-  fireEvent,
-  waitFor,
-} from "../../utils/test-utils";
+import { act } from "react-dom/test-utils";
+import { render, screen, fireEvent, waitFor } from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
 import { BuddyNativeDecisions } from "./BuddyNativeDecisions";
 import { parseNativeDecisionSnapshot } from "../../services/refact/buddyDecisions";
@@ -100,7 +95,7 @@ describe("Buddy native decisions", () => {
       await screen.findByText("Finish multi-agent parity M1–M10"),
     ).toBeTruthy();
     expect(screen.queryByText("Question from an untitled chat")).toBeNull();
-    expect(screen.getByText("Chat chat-a")).toHaveAttribute("title", "chat-a");
+    expect(screen.queryByText("Chat chat-a")).toBeNull();
   });
 
   it("names an untitled chat and truncates its id instead of headlining a UUID", async () => {
@@ -129,7 +124,7 @@ describe("Buddy native decisions", () => {
       await screen.findByText("Question from an untitled chat"),
     ).toBeTruthy();
     expect(screen.queryByText(chatId)).toBeNull();
-    expect(screen.getByText("Chat 53ee2bb5…")).toHaveAttribute("title", chatId);
+    expect(screen.getByText("Chat 53ee2bb5")).toHaveAttribute("title", chatId);
   });
 
   it("does not borrow a chat title from another project root", async () => {
@@ -205,9 +200,7 @@ describe("Buddy native decisions", () => {
       ),
     );
     render(<BuddyNativeDecisions />, { preloadedState: config });
-    expect(
-      await screen.findByText(/Cancelled in the native chat/),
-    ).toBeTruthy();
+    expect(await screen.findByText(/Cancelled in the chat/)).toBeTruthy();
     expect(
       screen.getByRole("button", { name: "Submit answer" }),
     ).toBeDisabled();
@@ -376,7 +369,7 @@ describe("Buddy native decisions", () => {
     );
     render(<BuddyNativeDecisions />, { preloadedState: config });
     await waitFor(() => expect(lists).toBeGreaterThan(0));
-    expect(screen.queryByLabelText("Native questions")).toBeNull();
+    expect(screen.queryByTestId("buddy-home-questions")).toBeNull();
     expect(
       screen.queryByRole("button", { name: "Refresh questions" }),
     ).toBeNull();
@@ -394,21 +387,17 @@ describe("Buddy native decisions", () => {
       }),
     );
     render(<BuddyNativeDecisions />, { preloadedState: config });
-    expect(
-      await screen.findByText(/Native questions could not be loaded/),
-    ).toBeTruthy();
+    expect(await screen.findByText("Couldn't load questions.")).toBeTruthy();
     expect(screen.queryByText(/No pending questions/)).toBeNull();
     const retry = screen.getByRole("button", { name: "Retry" });
     const seen = lists;
     offline = false;
     fireEvent.click(retry);
     await waitFor(() =>
-      expect(
-        screen.queryByText(/Native questions could not be loaded/),
-      ).toBeNull(),
+      expect(screen.queryByText("Couldn't load questions.")).toBeNull(),
     );
     expect(lists).toBeGreaterThan(seen);
-    expect(screen.queryByLabelText("Native questions")).toBeNull();
+    expect(screen.queryByTestId("buddy-home-questions")).toBeNull();
   });
 
   it("stops the repoll loop while the request keeps failing", async () => {
@@ -421,7 +410,7 @@ describe("Buddy native decisions", () => {
     );
     const view = render(<BuddyNativeDecisions />, { preloadedState: config });
     try {
-      await screen.findByText(/Native questions could not be loaded/);
+      await screen.findByText("Couldn't load questions.");
       const settled = lists;
       vi.useFakeTimers();
       await act(async () => {

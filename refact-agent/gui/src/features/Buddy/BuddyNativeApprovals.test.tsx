@@ -1,13 +1,8 @@
 import { http, HttpResponse } from "msw";
 import { setupListeners } from "@reduxjs/toolkit/query";
 import { afterEach, describe, it, expect, vi } from "vitest";
-import {
-  act,
-  render,
-  screen,
-  fireEvent,
-  waitFor,
-} from "../../utils/test-utils";
+import { act } from "react-dom/test-utils";
+import { render, screen, fireEvent, waitFor } from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
 import { BuddyNativeApprovals } from "./BuddyNativeApprovals";
 import { setUpStore } from "../../app/store";
@@ -339,7 +334,7 @@ describe("Buddy native approvals without intelligence", () => {
       fireEvent.click(choice);
       current = { ...current, ...change };
       fireEvent.click(
-        screen.getByRole("button", { name: "Refresh native approvals" }),
+        screen.getByRole("button", { name: "Refresh approvals" }),
       );
       await waitFor(() =>
         expect(
@@ -348,10 +343,8 @@ describe("Buddy native approvals without intelligence", () => {
       );
     }
     offline = true;
-    fireEvent.click(
-      screen.getByRole("button", { name: "Refresh native approvals" }),
-    );
-    await screen.findByText(/Native approvals could not be loaded/);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh approvals" }));
+    await screen.findByText("Couldn't load approvals.");
     expect(
       screen.getByRole("radio", { name: "Accept this request" }),
     ).toBeDisabled();
@@ -368,9 +361,9 @@ describe("Buddy native approvals without intelligence", () => {
     );
     render(<BuddyNativeApprovals />, { preloadedState: config });
     await waitFor(() => expect(reads).toBeGreaterThan(0));
-    expect(screen.queryByLabelText("Native approvals")).toBeNull();
+    expect(screen.queryByTestId("buddy-home-approvals")).toBeNull();
     expect(
-      screen.queryByRole("button", { name: "Refresh native approvals" }),
+      screen.queryByRole("button", { name: "Refresh approvals" }),
     ).toBeNull();
   });
 
@@ -386,15 +379,13 @@ describe("Buddy native approvals without intelligence", () => {
       }),
     );
     render(<BuddyNativeApprovals />, { preloadedState: config });
-    expect(
-      await screen.findByText(/Native approvals could not be loaded/),
-    ).toBeTruthy();
+    expect(await screen.findByText("Couldn't load approvals.")).toBeTruthy();
     expect(screen.queryByText(/No approvals or warnings/)).toBeNull();
     const seen = reads;
     offline = false;
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() =>
-      expect(screen.queryByLabelText("Native approvals")).toBeNull(),
+      expect(screen.queryByTestId("buddy-home-approvals")).toBeNull(),
     );
     expect(reads).toBeGreaterThan(seen);
   });

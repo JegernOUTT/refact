@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 const ROUTE = "/tests/e2e/route-showcase.html?route=buddy&operator=enabled";
-const DESK = '[aria-label="Buddy Desk"]';
+const DESK = '[data-testid="buddy-desk"]';
 const project = { project_id: "showcase", canonical_root: "/workspace/refact" };
 const titles = [
   "Diff growing fast",
@@ -61,12 +61,14 @@ async function openDesk(page: Page, width: number) {
 async function viewMetrics(page: Page) {
   return page.evaluate((deskSelector) => {
     const desk = document.querySelector<HTMLElement>(deskSelector);
-    const nav = desk?.querySelector<HTMLElement>("nav");
+    const nav = desk?.querySelector<HTMLElement>(
+      '[role="radiogroup"][aria-label="Report views"]',
+    );
     const list = desk?.querySelector<HTMLElement>("ul");
     if (!desk || !nav || !list)
-      throw new Error("Buddy Desk view controls are missing");
+      throw new Error("Reports view controls are missing");
     const navBox = nav.getBoundingClientRect();
-    const buttons = [...nav.querySelectorAll<HTMLElement>("button")].map(
+    const buttons = [...nav.querySelectorAll<HTMLElement>("label")].map(
       (button) => {
         const box = button.getBoundingClientRect();
         const label = button.querySelector<HTMLElement>("span");
@@ -103,7 +105,7 @@ async function chevronMetrics(page: Page) {
   return page.evaluate((deskSelector) => {
     const desk = document.querySelector<HTMLElement>(deskSelector);
     const list = desk?.querySelector<HTMLElement>("ul");
-    if (!desk || !list) throw new Error("Buddy Desk work list is missing");
+    if (!desk || !list) throw new Error("Reports work list is missing");
     const listWidth = list.getBoundingClientRect().width;
     const rows = [...list.querySelectorAll<HTMLElement>("li button")].map(
       (row) => {
@@ -124,15 +126,15 @@ for (const width of [240, 280, 320, 360]) {
     page,
   }) => {
     await openDesk(page, width);
+    await expect(page.getByTestId("buddy-desk-detail-hint")).toBeHidden();
     const buttons = page
-      .getByRole("navigation", { name: "Work views" })
-      .getByRole("button");
-    await expect(buttons).toHaveText([
-      "Needs you",
-      "Working on",
-      "Delivered",
-      "Watching",
-    ]);
+      .getByRole("radiogroup", { name: "Report views" })
+      .getByRole("radio");
+    await expect(buttons).toHaveCount(4);
+    for (const name of ["Needs you", "Working on", "Delivered", "Watching"])
+      await expect(
+        page.getByRole("radio", { name, exact: true }),
+      ).toBeVisible();
     const metrics = await viewMetrics(page);
     expect(
       metrics.navScrollWidth,

@@ -1,0 +1,15 @@
+.badge {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.severity {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--rf-space-1);
+  color: var(--rf-color-muted);
+  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line-1)
+    var(--rf-font-ui);
+  white-space: nowrap;
+}

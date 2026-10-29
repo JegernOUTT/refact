@@ -1,13 +1,6 @@
 import React, { useCallback } from "react";
 import { FileText, Inbox, MessageCircle } from "lucide-react";
-import {
-  Badge,
-  Button,
-  Icon,
-  LoadingState,
-  Surface,
-  Text,
-} from "../../components/ui";
+import { Button, Text } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { push } from "../Pages/pagesSlice";
 import { newBuddyChatAction, openBuddyChat } from "../Chat/Thread";
@@ -18,8 +11,23 @@ import {
   type OperatorRecord,
 } from "../../services/refact/buddyOperator";
 import type { ProjectIdentity, WorkItem, WorkItemState } from "./operatorTypes";
-import { BuddySectionHeader } from "./BuddySectionHeader";
-import { formatRelativeTime, headline, sameText } from "./buddyUtils";
+import {
+  BuddyEmptyState,
+  BuddyErrorCallout,
+  BuddyLoading,
+  BuddyRow,
+  BuddySection,
+  BuddyStatusBadge,
+  BuddyTimestamp,
+  buddyStatus,
+  buddyTalkTo,
+  toBuddyWorkState,
+} from "./ui";
+import {
+  requestBuddyReportsView,
+  type BuddyReportsView,
+} from "./sections/buddyReportsLink";
+import { headline, sameText } from "./buddyUtils";
 import styles from "./BuddyHomeOverview.module.css";
 
 export const HOME_SAVED_LIMIT = 3;
@@ -31,29 +39,9 @@ const HOUSEKEEPING_WORKFLOWS = new Set([
   "kg_deprecate",
   "title_generation",
 ]);
+const SCOPE_ECHO_PREFIX = /^(latest|last|recent)\s+run\s+of\s+/i;
 
 export type BuddyHomeWorkMode = "enabled" | "legacy" | "loading" | "degraded";
-
-const STATE_LABELS: Record<WorkItemState, string> = {
-  needs_attention: "Needs you",
-  blocked: "Blocked",
-  working: "Working",
-  delivered: "Delivered",
-  watching: "Watching",
-  cancelled: "Cancelled",
-};
-
-const STATE_TONES: Record<
-  WorkItemState,
-  React.ComponentProps<typeof Badge>["tone"]
-> = {
-  needs_attention: "accent",
-  blocked: "danger",
-  working: "muted",
-  delivered: "success",
-  watching: "muted",
-  cancelled: "muted",
-};
 
 type OpenWork = (workId: string, projectId: string) => void;
 
@@ -90,10 +78,22 @@ function projectRecords(
   );
 }
 
+function normalized(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function scopeEchoesTitle(scope: string, title: string): boolean {
+  const left = normalized(scope.replace(SCOPE_ECHO_PREFIX, ""));
+  const right = normalized(title);
+  if (!left) return true;
+  return left === right || right.includes(left) || left.includes(right);
+}
+
 const WorkRow: React.FC<{
   item: WorkItem;
+  listState: WorkItemState;
   onOpen: OpenWork;
-}> = ({ item, onOpen }) => {
+}> = ({ item, listState, onOpen }) => {
   const title = headline(item.title) || "Untitled report";
   const rawSummary = item.problem_summary?.trim();
   const summary =
@@ -102,73 +102,65 @@ const WorkRow: React.FC<{
     !sameText(headline(rawSummary), title)
       ? rawSummary
       : null;
-  const freshness = formatRelativeTime(item.last_material_change_at);
+  const scope = item.scope?.trim();
+  const workState = toBuddyWorkState(item.state) ?? "watching";
   return (
-    <li className={styles.row} data-state={item.state}>
-      <span className={styles.rowTick} aria-hidden />
-      <div className={styles.rowBody}>
-        <div className={styles.rowTitle}>
-          <Text as="h3" size="2" weight="bold" className={styles.rowHeading}>
-            {title}
-          </Text>
-          <Badge size="xs" tone={STATE_TONES[item.state]}>
-            {STATE_LABELS[item.state]}
-          </Badge>
-        </div>
-        {summary && (
-          <Text size="1" color="gray" className={styles.rowText}>
-            {summary}
-          </Text>
-        )}
-        <Text size="1" color="gray" className={styles.rowMeta}>
-          {[item.scope?.trim(), freshness && `Changed ${freshness}`]
-            .filter(Boolean)
-            .join(" · ")}
-        </Text>
-      </div>
-      <Button
-        type="button"
-        size="sm"
-        variant="ghost"
+    <li className={styles.item} data-state={item.state}>
+      <BuddyRow
+        title={title}
+        titleLines={2}
+        leading={{ tick: buddyStatus("work", workState).tone }}
+        status={
+          item.state !== listState ? (
+            <BuddyStatusBadge dimension="work" value={workState} />
+          ) : undefined
+        }
+        description={summary}
+        meta={[
+          scope && !scopeEchoesTitle(scope, title) ? scope : null,
+          <BuddyTimestamp
+            key="changed"
+            value={item.last_material_change_at}
+            prefix="Changed"
+          />,
+        ]}
         aria-label={`Open ${title}`}
         onClick={() => onOpen(item.id, item.project.project_id)}
-      >
-        Open
-      </Button>
+      />
     </li>
   );
 };
 
-const QueryFailure: React.FC<{ text: string; onRetry: () => void }> = ({
-  text,
-  onRetry,
-}) => (
-  <div className={styles.failure} role="alert">
-    <Text size="1" className={styles.rowText}>
-      {text}
-    </Text>
-    <Button type="button" size="sm" variant="ghost" onClick={onRetry}>
-      Retry
-    </Button>
-  </div>
-);
-
-const ModeNotice: React.FC<{ mode: BuddyHomeWorkMode; label: string }> = ({
-  mode,
-  label,
-}) => {
+const ModeNotice: React.FC<{ mode: BuddyHomeWorkMode }> = ({ mode }) => {
   if (mode === "loading")
-    return <LoadingState label={`Checking ${label}…`} variant="compact" />;
+    return <BuddyLoading variant="rows" count={2} label="Loading reports" />;
   return (
-    <Text size="1" color="gray" className={styles.calm}>
-      {mode === "degraded"
-        ? `${label[0].toUpperCase()}${label.slice(
-            1,
-          )} cannot be listed while work authority is down. This is a connection failure, not an empty list.`
-        : "Saved reports are off in this project. Pulse and opportunities are under Reports."}
-    </Text>
+    <BuddyEmptyState
+      compact
+      icon={Inbox}
+      title={
+        mode === "degraded"
+          ? "Reports can't be listed while the connection is down."
+          : "Reports are off in this project."
+      }
+      hint={
+        mode === "degraded"
+          ? "This is a connection failure, not an empty list."
+          : "Pulse and opportunities are under Reports."
+      }
+    />
   );
 };
+
+function showReportsView(
+  view: BuddyReportsView,
+  onShowReports: () => void,
+): () => void {
+  return () => {
+    requestBuddyReportsView(view);
+    onShowReports();
+  };
+}
 
 export const BuddyHomeSavedWork: React.FC<{
   mode: BuddyHomeWorkMode;
@@ -190,55 +182,59 @@ export const BuddyHomeSavedWork: React.FC<{
     0,
     HOME_SAVED_LIMIT,
   );
-  const hasMore = query.currentData?.next_cursor != null;
+  const mismatch = hasProjectMismatch(query.currentData, project);
   return (
-    <Surface
-      as="section"
-      variant="glass"
-      radius="card"
-      className={styles.card}
-      aria-label="Worth your attention"
-      data-testid="buddy-home-saved-work"
+    <BuddySection
+      title="Worth your attention"
+      icon={Inbox}
+      testId="buddy-home-saved-work"
+      action={
+        mode === "enabled" ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            onClick={showReportsView("needs_you", onShowReports)}
+          >
+            View all reports
+          </Button>
+        ) : undefined
+      }
     >
-      <BuddySectionHeader icon={Inbox} label="Worth your attention" />
       {mode !== "enabled" ? (
-        <ModeNotice mode={mode} label="saved work" />
-      ) : Boolean(query.error) ||
-        hasProjectMismatch(query.currentData, project) ? (
-        <QueryFailure
-          text="Saved work could not be loaded. This is a connection failure, not an empty queue."
+        <ModeNotice mode={mode} />
+      ) : Boolean(query.error) || mismatch ? (
+        <BuddyErrorCallout
+          compact
+          thing="reports"
+          error={query.error}
+          details={
+            mismatch ? "The reports belong to another project." : undefined
+          }
+          retrying={query.isFetching}
           onRetry={() => void query.refetch()}
         />
       ) : !query.currentData ? (
-        <LoadingState label="Loading saved work…" variant="compact" />
+        <BuddyLoading variant="rows" count={2} label="Loading reports" />
       ) : rows.length === 0 ? (
-        <Text size="1" color="gray" className={styles.calm}>
-          Nothing saved needs a decision right now.
-        </Text>
+        <BuddyEmptyState
+          compact
+          icon={Inbox}
+          title="Nothing needs you right now."
+        />
       ) : (
-        <ul className={styles.list} aria-label="Saved work preview">
+        <ul className={styles.list} aria-label="Reports that need you">
           {rows.map((record) => (
             <WorkRow
               key={record.value.id}
               item={record.value}
+              listState="needs_attention"
               onOpen={onOpen}
             />
           ))}
         </ul>
       )}
-      {mode === "enabled" && (
-        <div className={styles.footer}>
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            onClick={onShowReports}
-          >
-            {hasMore ? "More reports" : "All reports"}
-          </Button>
-        </div>
-      )}
-    </Surface>
+    </BuddySection>
   );
 };
 
@@ -266,41 +262,50 @@ export const BuddyHomeLatestReport: React.FC<{
         HOUSEKEEPING_WORKFLOWS.has(value.subject.resource_id)
       ),
   );
+  const mismatch = hasProjectMismatch(query.currentData, project);
   if (mode !== "enabled") return null;
   return (
-    <Surface
-      as="section"
-      variant="glass"
-      radius="card"
-      className={styles.card}
-      aria-label="Latest delivered report"
-      data-testid="buddy-home-latest-report"
+    <BuddySection
+      title="Latest delivered report"
+      icon={FileText}
+      testId="buddy-home-latest-report"
+      action={
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          onClick={showReportsView("delivered", onShowReports)}
+        >
+          View delivered
+        </Button>
+      }
     >
-      <BuddySectionHeader icon={FileText} label="Latest delivered report" />
-      {Boolean(query.error) ||
-      hasProjectMismatch(query.currentData, project) ? (
-        <QueryFailure
-          text="Delivered reports could not be loaded right now."
+      {Boolean(query.error) || mismatch ? (
+        <BuddyErrorCallout
+          compact
+          thing="delivered reports"
+          error={query.error}
+          details={
+            mismatch ? "The reports belong to another project." : undefined
+          }
+          retrying={query.isFetching}
           onRetry={() => void query.refetch()}
         />
       ) : !query.currentData ? (
-        <LoadingState label="Loading reports…" variant="compact" />
+        <BuddyLoading variant="rows" count={1} label="Loading reports" />
       ) : latest ? (
-        <ul className={styles.list}>
-          <WorkRow item={latest.value} onOpen={onOpen} />
+        <ul className={styles.list} aria-label="Latest delivered report">
+          <WorkRow item={latest.value} listState="delivered" onOpen={onOpen} />
         </ul>
       ) : (
-        <Text size="1" color="gray" className={styles.calm}>
-          No report to feature from the most recent saved runs. Housekeeping and
-          older reports stay in Reports.
-        </Text>
+        <BuddyEmptyState
+          compact
+          icon={FileText}
+          title="No delivered reports yet."
+          hint="Housekeeping runs and older reports stay in Reports."
+        />
       )}
-      <div className={styles.footer}>
-        <Button type="button" size="sm" variant="ghost" onClick={onShowReports}>
-          More reports
-        </Button>
-      </div>
-    </Surface>
+    </BuddySection>
   );
 };
 
@@ -322,23 +327,23 @@ export const BuddyHomeTalk: React.FC<{ name: string }> = ({ name }) => {
     }
   }, [createConversation, dispatch]);
   return (
-    <div className={styles.talk}>
+    <>
       <Button
         type="button"
         size="sm"
         variant="primary"
         leftIcon={MessageCircle}
         loading={isLoading}
+        className={styles.talk}
         onClick={() => void handleTalk()}
       >
-        Talk to {name}
+        {buddyTalkTo(name)}
       </Button>
       {isError && (
-        <Text size="1" color="red" role="alert">
-          <Icon icon={MessageCircle} size="sm" tone="danger" /> The conversation
-          did not start. Try again.
+        <Text size="1" role="alert" className={styles.talkError}>
+          The conversation didn&apos;t start. Try again.
         </Text>
       )}
-    </div>
+    </>
   );
 };

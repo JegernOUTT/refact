@@ -1,11 +1,3 @@
-.card {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-2);
-  min-width: 0;
-  padding: var(--rf-panel-pad);
-}
-
 .list {
   display: flex;
   flex-direction: column;
@@ -15,109 +7,22 @@
   list-style: none;
 }
 
-.row {
-  display: grid;
-  grid-template-columns: var(--rf-space-1) minmax(0, 1fr) auto;
-  align-items: start;
-  gap: 0 var(--rf-space-3);
+.item {
   min-width: 0;
-  padding: var(--rf-space-2) 0;
   border-top: var(--rf-hairline) solid var(--rf-border);
 }
 
-.row:first-child {
+.item:first-child {
   border-top: 0;
 }
 
-.rowTick {
-  align-self: stretch;
-  border-radius: var(--rf-radius-pill);
-  background: var(--rf-color-muted);
+.talk.talk:hover:not(:disabled) {
+  border-color: var(--rf-color-accent);
+  background: var(--rf-color-accent-soft);
 }
 
-.row[data-state="needs_attention"] .rowTick {
-  background: var(--rf-color-accent);
-}
-
-.row[data-state="blocked"] .rowTick {
-  background: var(--rf-color-danger);
-}
-
-.row[data-state="delivered"] .rowTick {
-  background: var(--rf-color-success);
-}
-
-.rowBody {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-1);
+.talkError {
+  flex: 1 1 100%;
   min-width: 0;
-}
-
-.rowTitle {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--rf-space-1) var(--rf-space-2);
-  min-width: 0;
-}
-
-.rowHeading,
-.rowText,
-.rowMeta {
-  min-width: 0;
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
-.rowText {
-  display: -webkit-box;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-}
-
-.calm {
-  display: block;
-  min-width: 0;
-  padding: var(--rf-space-3);
-  border: var(--rf-hairline) dashed var(--rf-border);
-  border-radius: var(--rf-radius-card);
-}
-
-.failure {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--rf-space-2);
-  min-width: 0;
-  padding: var(--rf-space-2) var(--rf-space-3);
-  border: var(--rf-hairline) solid var(--rf-color-danger);
-  border-radius: var(--rf-radius-card);
-}
-
-.footer {
-  display: flex;
-  justify-content: flex-end;
-  min-width: 0;
-}
-
-.talk {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--rf-space-2);
-  min-width: 0;
-}
-
-@media (max-width: 520px) {
-  .row {
-    grid-template-columns: var(--rf-space-1) minmax(0, 1fr);
-  }
-
-  .row > button {
-    grid-column: 2;
-    justify-self: start;
-    margin-top: var(--rf-space-1);
-  }
+  color: var(--rf-color-danger);
 }

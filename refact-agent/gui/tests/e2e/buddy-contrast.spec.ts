@@ -187,16 +187,25 @@ test.describe("Buddy scene contrast", () => {
   test("scene_labels_pass_in_light", async ({ page }) => {
     await openBuddy(page, "light", 1280);
 
-    const labels = page.locator(
-      "[data-testid='buddy-world'] [class*='objectLabel'], [data-testid='buddy-world'] [class*='objectValue']",
-    );
-    await expect(labels.first()).toBeVisible();
-    const colors = await labels.evaluateAll((elements) =>
-      elements.map((element) => getComputedStyle(element).color),
-    );
-
-    expect(colors.length).toBeGreaterThan(1);
-    expect(colors.every((color) => color.includes("0, 0, 0"))).toBe(true);
+    const hotspot = page
+      .getByTestId("buddy-world")
+      .locator("button[aria-label]")
+      .first();
+    await hotspot.focus();
+    const tooltip = page.getByRole("tooltip");
+    await expect(tooltip).toBeVisible();
+    const colors = await tooltip.evaluate((element) => {
+      const skin =
+        element.closest("[data-state][class]") ?? element.parentElement!;
+      const style = getComputedStyle(skin);
+      return { foreground: style.color, background: style.backgroundColor };
+    });
+    const foreground = parseCssColor(colors.foreground);
+    const background = parseCssColor(colors.background);
+    expect(foreground).not.toBeNull();
+    expect(background).not.toBeNull();
+    if (foreground && background)
+      expect(contrastRatio(foreground, background)).toBeGreaterThanOrEqual(4.5);
   });
 });
 

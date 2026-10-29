@@ -109,6 +109,32 @@ describe("SegmentedControl", () => {
     expect(container.querySelector("span[aria-hidden='true']")).toBeNull();
   });
 
+  it("sizes content-layout segments to their labels without a shared indicator", async () => {
+    const { container } = render(
+      <SegmentedControl
+        layout="content"
+        options={options}
+        value="roomy"
+        onValueChange={() => undefined}
+      />,
+    );
+
+    expect(screen.getByRole("radiogroup")).toHaveAttribute(
+      "data-layout",
+      "content",
+    );
+    expect(container.querySelector("span[aria-hidden='true']")).toBeNull();
+    expect(screen.getByRole("radio", { name: "Roomy" })).toBeChecked();
+
+    const css = await readFile(
+      path.resolve(__dirname, "SegmentedControl.module.css"),
+      "utf8",
+    );
+    const block = css.match(/\.layout-content \{[^}]+\}/)?.[0] ?? "";
+    expect(block).toContain("grid-auto-columns: max-content;");
+    expect(css).toMatch(/\.input:focus-visible \{\s*outline: none;/);
+  });
+
   it("positions the selected indicator from segment variables", () => {
     const { container } = render(
       <SegmentedControl
@@ -189,5 +215,18 @@ describe("SegmentedControl", () => {
     expect(css).toContain("2 * var(--rf-segment-padding)");
     expect(css).toContain("gap: var(--rf-space-1);");
     expect(css).toContain("line-height: 0;");
+  });
+
+  it("uses the standard outset focus ring", async () => {
+    const css = await readFile(
+      path.resolve(__dirname, "SegmentedControl.module.css"),
+      "utf8",
+    );
+    const focus =
+      css.match(/\.input:focus-visible \+ \.label \{[^}]+\}/)?.[0] ?? "";
+    expect(focus).toContain(
+      "outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);",
+    );
+    expect(focus).toContain("outline-offset: var(--rf-focus-ring-offset);");
   });
 });

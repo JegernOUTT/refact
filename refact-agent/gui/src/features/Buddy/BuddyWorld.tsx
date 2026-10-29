@@ -6,6 +6,15 @@ import React, {
   useState,
 } from "react";
 import classNames from "classnames";
+import {
+  Bug,
+  Moon,
+  ShowerHead,
+  Soup,
+  Sparkles,
+  Volleyball,
+  type LucideIcon,
+} from "lucide-react";
 import { BuddyCharacter } from "./BuddyCharacter";
 import type {
   BuddyCareAction,
@@ -41,7 +50,7 @@ import type {
   BuddyWorldActorTravel,
   BuddyWorldTokenPalette,
 } from "./buddyWorldDrawHelpers";
-import { useTokens } from "../../components/ui";
+import { Button, IconButton, Tooltip, useTokens } from "../../components/ui";
 import {
   chooseBuddyWorldIntent,
   type BuddyWorldIntent,
@@ -90,7 +99,6 @@ import { pickBuddyDream } from "./buddyDreams";
 import { BuddyDreamCanvas } from "./BuddyDreamCanvas";
 import { bubblePositionForSceneX } from "./buddyWorldUtils";
 import styles from "./BuddyWorld.module.css";
-import previewStyles from "./BuddyOperatorPlayPreview.module.css";
 
 interface BuddyWorldProps {
   palette: Palette;
@@ -108,6 +116,7 @@ interface BuddyWorldProps {
   } | null;
   setupNeeded: boolean;
   compact?: boolean;
+  portrait?: boolean;
   homeDoorDisabled?: boolean;
   onCanvasEvent: (event: BuddyEvent) => void;
   onCare: (action: BuddyCareAction, toy?: string) => void;
@@ -398,6 +407,77 @@ function backendSpeechCandidate(
   };
 }
 
+const SceneTip: React.FC<{ label: string; value: string }> = ({
+  label,
+  value,
+}) => (
+  <span className={styles.tip}>
+    <span className={styles.tipLabel}>{label}</span>
+    <span className={styles.tipValue}>{value}</span>
+  </span>
+);
+
+const SceneHotspot = React.forwardRef<
+  HTMLButtonElement,
+  {
+    label: string;
+    value: string;
+    ariaLabel: string;
+    className: string;
+    left: number;
+    top: number;
+    onClick: () => void;
+  }
+>(function SceneHotspot(
+  { label, value, ariaLabel, className, left, top, onClick },
+  ref,
+) {
+  return (
+    <Tooltip content={<SceneTip label={label} value={value} />}>
+      <button
+        ref={ref}
+        type="button"
+        className={className}
+        style={{ left: `${left}%`, top: `${top}%` }}
+        onClick={onClick}
+        aria-label={ariaLabel}
+      />
+    </Tooltip>
+  );
+});
+
+const CareButton = React.forwardRef<
+  HTMLButtonElement,
+  {
+    icon: LucideIcon;
+    label: string;
+    hint: string;
+    disabledReason?: string | null;
+    onClick: () => void;
+  }
+>(function CareButton({ icon, label, hint, disabledReason, onClick }, ref) {
+  const disabled = Boolean(disabledReason);
+  return (
+    <Tooltip content={disabledReason ? `${hint}: ${disabledReason}` : hint}>
+      <IconButton
+        ref={ref}
+        icon={icon}
+        size="sm"
+        variant="soft"
+        aria-label={label}
+        aria-disabled={disabled || undefined}
+        aria-description={disabledReason ?? undefined}
+        className={classNames(styles.careButton, {
+          [styles.careButtonDisabled]: disabled,
+        })}
+        onClick={() => {
+          if (!disabled) onClick();
+        }}
+      />
+    </Tooltip>
+  );
+});
+
 export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   palette,
   stage,
@@ -409,6 +489,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   activeSpeech,
   setupNeeded,
   compact = false,
+  portrait = false,
   homeDoorDisabled = false,
   onCanvasEvent,
   onCare,
@@ -642,6 +723,13 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       playStartRef.current?.focus();
     }
   }, [attentionBusy, playSession, suspension]);
+  const fetchDisabledReason = !presence.enabled
+    ? null
+    : playSession !== null || suspension !== null
+      ? "A game is already running"
+      : attentionBusy
+        ? `${state.name} is busy with work right now`
+        : null;
   const { arcRun, arcStep, arcLine, arcLanternLitCount, cancelArc } =
     useBuddyWorldArcs({
       world,
@@ -662,8 +750,8 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   const playBody = playSessionBodyTarget(playSession);
   const giftBody = playGift !== null && playBody === null;
   const effectiveDirectorIntent =
-    presenceMotion?.ownsAttention ||
-    suspension ||
+    presenceMotion?.ownsAttention === true ||
+    suspension !== null ||
     activeSpeech !== null ||
     showcaseRun !== null ||
     careActivity !== null ||
@@ -965,7 +1053,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   }, [showcaseRun]);
 
   useEffect(() => {
-    if (!directorIntent || directorIntent.speech === null) {
+    if (directorIntent?.speech == null) {
       setDirectorLine(null);
       return;
     }
@@ -1104,7 +1192,8 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       if (attentionBusy || suspension) return false;
       if (showcaseRun) return false;
       if (careActivity) return false;
-      if (playSession || playGift || requestPrompt) return false;
+      if (playSession !== null || playGift !== null || requestPrompt !== null)
+        return false;
       if (!strongRuntimeTrigger && arcRun) return false;
       const nowMs = Date.now();
       const run = createBuddyShowcaseRun({
@@ -1179,15 +1268,23 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       showcaseRun,
       showcaseTargets,
       state.name,
+      world.atmosphere.layers,
       world.phase,
+      world.season,
       world.weather,
     ],
   );
 
   useEffect(() => {
-    if (attentionBusy || suspension) return;
+    if (attentionBusy || suspension !== null) return;
     if (activeSpeech ?? reaction ?? showcaseRun ?? directorIntent) return;
-    if (careActivity || arcRun || playSession || playGift || requestPrompt) {
+    if (
+      careActivity !== null ||
+      arcRun !== null ||
+      playSession !== null ||
+      playGift !== null ||
+      requestPrompt !== null
+    ) {
       return;
     }
     const delay = 4200 + Math.random() * 7200;
@@ -1230,9 +1327,15 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   ]);
 
   useEffect(() => {
-    if (attentionBusy || suspension) return;
+    if (attentionBusy || suspension !== null) return;
     if (activeSpeech ?? reaction ?? showcaseRun ?? directorIntent) return;
-    if (careActivity || arcRun || playSession || playGift || requestPrompt) {
+    if (
+      careActivity !== null ||
+      arcRun !== null ||
+      playSession !== null ||
+      playGift !== null ||
+      requestPrompt !== null
+    ) {
       return;
     }
     if (lastWaypoint?.id === activeWaypoint.id) return;
@@ -1422,7 +1525,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     const canvas = canvasRef.current;
     if (!canvas || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver((entries) => {
-      const entry = entries[0];
+      const entry = entries.at(0);
       if (!entry) return;
       canvasCssSizeRef.current = {
         width: Math.max(1, Math.round(entry.contentRect.width)),
@@ -1528,7 +1631,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
           worldOverrides: lanternLitCount === null ? null : { lanternLitCount },
           companions,
         });
-        if (playSession || playGift) {
+        if (playSession !== null || playGift !== null) {
           drawBuddyPlayEffects(
             {
               ctx,
@@ -1683,9 +1786,11 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     <section
       className={classNames(styles.scene, {
         [styles.compact]: compact,
-        [previewStyles.presenceScene]: presence.enabled,
-        [previewStyles.textScene]: presence.textOnly,
+        [styles.portrait]: portrait,
+        [styles.withBar]: presence.enabled && !portrait,
+        [styles.textScene]: presence.textOnly,
       })}
+      data-portrait={portrait || undefined}
       data-phase={world.phase}
       data-weather={world.weather}
       data-atmosphere-mood={world.atmosphere.mood}
@@ -1739,329 +1844,329 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       }
       onMouseLeave={() => cursorBridgeRef.current?.leave()}
     >
-      <canvas
-        ref={canvasRef}
-        className={styles.canvas}
-        data-testid="buddy-world-canvas"
-        style={presence.textOnly ? { visibility: "hidden" } : undefined}
-      />
-
-      <button
-        type="button"
-        className={classNames(styles.hotspot, styles.celestialHotspot)}
-        style={{ left: `${world.celestialX}%`, top: `${world.celestialY}%` }}
-        onClick={handleCelestialClick}
-        aria-label={`${world.celestialAction} with ${world.celestialLabel}`}
-        title={`${world.celestialAction} with ${world.celestialLabel}`}
-      >
-        <span className={styles.objectTooltip}>
-          <span className={styles.objectLabel}>{world.celestialLabel}</span>
-          <span className={styles.objectValue}>{world.celestialAction}</span>
-        </span>
-      </button>
-
-      <button
-        type="button"
-        className={classNames(styles.hotspot, styles.weatherHotspot)}
-        style={{ left: `${world.weatherX}%`, top: `${world.weatherY}%` }}
-        onClick={handleWeatherClick}
-        aria-label={`Interact with ${world.weatherLabel}`}
-        title={world.weatherLabel}
-      >
-        <span className={styles.objectTooltip}>
-          <span className={styles.objectLabel}>{world.weatherLabel}</span>
-          <span className={styles.objectValue}>
-            {world.weather === "storm"
-              ? "inspect the storm"
-              : world.weather === "rain"
-                ? "follow the rain"
-                : `cheer up ${state.name}`}
-          </span>
-        </span>
-      </button>
-
-      <button
-        type="button"
-        className={classNames(styles.hotspot, styles.homeHotspot)}
-        style={{ left: `${HOME_HOTSPOT.x}%`, top: `${HOME_HOTSPOT.y}%` }}
-        onClick={handleHomeClick}
-        aria-label={
-          homeDoorDisabled
-            ? `${state.name} home entrance`
-            : `Open ${state.name} home`
-        }
-        title={
-          homeDoorDisabled ? `${state.name} is home` : `Open ${state.name} home`
-        }
-      >
-        <span className={styles.objectTooltip}>
-          <span className={styles.objectLabel}>{`${state.name}'s den`}</span>
-          <span className={styles.objectValue}>
-            {homeDoorDisabled ? "already home" : "open home"}
-          </span>
-        </span>
-      </button>
-
-      {world.objects.map((item) => (
-        <button
-          key={item.id}
-          type="button"
-          className={styles.objectHotspot}
-          style={{ left: `${item.x}%`, top: `${item.y}%` }}
-          onClick={() => {
-            if (!showcaseRun) {
-              setActiveWaypointIndex(
-                Math.max(
-                  0,
-                  waypoints.findIndex((point) => point.id === item.id),
-                ),
-              );
-            }
-            if (item.sprite === "proposal_mailbox" && onOpenInbox) {
-              onOpenInbox();
-              if (!showcaseRun) {
-                setReaction(`${state.name} rummages through the mailbox.`);
-              }
-              return;
-            }
-            onOpenPage(item.page);
-            if (!showcaseRun) {
-              setReaction(
-                `${state.name} hops toward ${item.label.toLowerCase()}.`,
-              );
-            }
-          }}
-          aria-label={`Open ${item.label}`}
-          title={`${item.label}: ${item.description}`}
-        >
-          <span className={styles.objectTooltip}>
-            <span className={styles.objectLabel}>{item.label}</span>
-            <span className={styles.objectValue}>{item.value}</span>
-          </span>
-        </button>
-      ))}
-
-      {lastWaypoint && (
-        <div
-          className={styles.waypointPing}
-          style={{ left: `${lastWaypoint.x}%`, top: `${lastWaypoint.y}%` }}
-          aria-hidden
-        />
-      )}
-
-      {!presence.textOnly && (
-        <BuddyCharacter
-          state={state}
-          stage={stage}
-          palette={palette}
-          displaySize={compact ? 230 : 282}
-          bubblePosition={bubblePosition}
-          randomizeBubblePosition={false}
-          compactBubble={compact}
-          sceneXPercent={characterSceneX}
-          sceneYPercent={characterSceneY}
-          sceneDepthScale={characterDepthScale}
-          scenePose={characterPose}
-          traveling={travelPhase === "traveling"}
-          arrived={travelPhase === "arrived"}
-          travelDirection={travelDirection}
-          spritePointer
-          cursorBridgeRef={cursorBridgeRef}
-          envContext={{
-            phase: world.phase,
-            weather: world.weather,
-            season: world.season,
-          }}
-          speechText={speechOverride}
-          speechStyle={speechStyle}
-          speechMedia={
-            dreamKind !== null && speechStyle === "think" ? (
-              <BuddyDreamCanvas
-                kind={dreamKind}
-                reducedMotion={reducedMotion}
-                visible={surfaceVisible}
-              />
-            ) : undefined
-          }
-          speechControls={
-            activeSpeech ? activeSpeech.controls : requestPrompt?.controls
-          }
-          speechIntent={activeSpeech?.speech_intent}
-          onCanvasEvent={onCanvasEvent}
-          onSpeechControl={
-            activeSpeech || requestPrompt ? handleSpeechControlAll : undefined
-          }
-        />
-      )}
-
-      <canvas
-        ref={foregroundCanvasRef}
-        className={styles.foregroundCanvas}
-        data-testid="buddy-world-foreground"
-        style={presence.textOnly ? { visibility: "hidden" } : undefined}
-      />
-
-      {setupNeeded && (
-        <div className={styles.setupDock}>
-          {SETUP_MODE_ACTIONS.map((item) => (
-            <button
-              key={item.mode}
-              type="button"
-              className={styles.sceneButton}
-              onClick={() => onRunMode(item.mode)}
-            >
-              {item.label}
-            </button>
-          ))}
-          <button
-            type="button"
-            className={styles.sceneButtonGhost}
-            onClick={onDismissSetup}
-          >
-            Later
-          </button>
-        </div>
-      )}
-
-      {playSession?.phase === "armed" && (
-        <div
-          className={styles.playCatcher}
-          data-testid="buddy-play-catcher"
-          aria-label={
-            playSession.kind === "fetch"
-              ? "Click the meadow to throw the ball"
-              : "Click a glow to pounce"
-          }
-          onClick={handleCatcherClick}
-        />
-      )}
-
       <div
-        className={classNames(styles.careDock, {
-          [previewStyles.sceneControls]: presence.enabled,
-        })}
-        aria-label={`${state.name} scene care actions`}
+        className={styles.stage}
+        data-testid="buddy-world-stage"
+        data-buddy-scene-bounds
       >
-        {presence.enabled && (
+        <canvas
+          ref={canvasRef}
+          className={styles.canvas}
+          data-testid="buddy-world-canvas"
+        />
+
+        {!portrait && (
           <>
-            <span role="status">
-              {presenceMotion?.label}{" "}
-              {describePlaySessionForScreenReader(
-                playSession ?? suspension?.session ?? null,
-                suspension !== null,
-              )}
-            </span>
-            {presence.textOnly && activeSpeech && (
-              <span>
-                {activeSpeech.text}
-                {activeSpeech.controls.map((control) => (
-                  <button
-                    key={control.id}
-                    onClick={() => onSpeechControl(control)}
-                  >
-                    {control.label}
-                  </button>
-                ))}
-              </span>
-            )}
-            {playSession?.phase === "armed" &&
-              playKeyboardTargets(playSession.kind).map((target) => (
-                <button
-                  type="button"
-                  key={target.id}
-                  className={styles.sceneButton}
-                  onClick={() => handleSceneClick(target.x, target.y)}
-                >
-                  {target.key}: {target.label}
-                </button>
-              ))}
-            {playSession && (
-              <button type="button" onClick={pausePlay}>
-                Pause play
-              </button>
-            )}
-            {suspension && (
-              <button
-                type="button"
-                disabled={
-                  presenceMotion?.ownsAttention ||
-                  activeSpeech !== null ||
-                  careActivity !== null
-                }
-                onClick={resumePlay}
-              >
-                Resume play
-              </button>
-            )}
-            {(playSession || suspension) && (
-              <button
-                type="button"
+            <SceneHotspot
+              className={classNames(styles.hotspot, styles.celestialHotspot)}
+              left={world.celestialX}
+              top={world.celestialY}
+              onClick={handleCelestialClick}
+              ariaLabel={`${world.celestialAction} with ${world.celestialLabel}`}
+              label={world.celestialLabel}
+              value={world.celestialAction}
+            />
+            <SceneHotspot
+              className={classNames(styles.hotspot, styles.weatherHotspot)}
+              left={world.weatherX}
+              top={world.weatherY}
+              onClick={handleWeatherClick}
+              ariaLabel={`Interact with ${world.weatherLabel}`}
+              label={world.weatherLabel}
+              value={
+                world.weather === "storm"
+                  ? "Inspect the storm"
+                  : world.weather === "rain"
+                    ? "Follow the rain"
+                    : `Cheer up ${state.name}`
+              }
+            />
+            <SceneHotspot
+              className={classNames(styles.hotspot, styles.homeHotspot)}
+              left={HOME_HOTSPOT.x}
+              top={HOME_HOTSPOT.y}
+              onClick={handleHomeClick}
+              ariaLabel={
+                homeDoorDisabled
+                  ? `${state.name} home entrance`
+                  : `Open ${state.name} home`
+              }
+              label={`${state.name}'s den`}
+              value={homeDoorDisabled ? "Already home" : "Open home"}
+            />
+            {world.objects.map((item) => (
+              <SceneHotspot
+                key={item.id}
+                className={styles.objectHotspot}
+                left={item.x}
+                top={item.y}
+                ariaLabel={`Open ${item.label}`}
+                label={item.label}
+                value={item.value}
                 onClick={() => {
-                  restorePlayFocusRef.current = true;
-                  cancelPlay();
+                  if (!showcaseRun) {
+                    setActiveWaypointIndex(
+                      Math.max(
+                        0,
+                        waypoints.findIndex((point) => point.id === item.id),
+                      ),
+                    );
+                  }
+                  if (item.sprite === "proposal_mailbox" && onOpenInbox) {
+                    onOpenInbox();
+                    if (!showcaseRun) {
+                      setReaction(
+                        `${state.name} rummages through the mailbox.`,
+                      );
+                    }
+                    return;
+                  }
+                  onOpenPage(item.page);
+                  if (!showcaseRun) {
+                    setReaction(
+                      `${state.name} hops toward ${item.label.toLowerCase()}.`,
+                    );
+                  }
                 }}
-              >
-                Stop play
-              </button>
-            )}
+              />
+            ))}
           </>
         )}
-        <button
-          ref={playStartRef}
-          disabled={
-            presence.enabled &&
-            (attentionBusy || Boolean(playSession || suspension))
-          }
-          type="button"
-          className={styles.sceneButton}
-          aria-label={`Play fetch with ${state.name}`}
-          onClick={handleStartFetch}
-        >
-          🎾
-        </button>
-        {world.atmosphere.layers.includes("fireflies") && (
-          <button
-            type="button"
-            className={styles.sceneButton}
-            aria-label={`Catch fireflies with ${state.name}`}
-            onClick={handleStartFirefly}
-          >
-            🏮
-          </button>
+
+        {lastWaypoint && (
+          <div
+            className={styles.waypointPing}
+            style={{ left: `${lastWaypoint.x}%`, top: `${lastWaypoint.y}%` }}
+            aria-hidden
+          />
         )}
-        <button
-          type="button"
-          className={styles.sceneButton}
-          aria-label={`Feed ${state.name}`}
-          onClick={() => runCareActivity("feed")}
-        >
-          🍜
-        </button>
-        <button
-          type="button"
-          className={styles.sceneButton}
-          aria-label={`Hunt bugs with ${state.name}`}
-          onClick={() => runCareActivity("play", "bug")}
-        >
-          🐛
-        </button>
-        <button
-          type="button"
-          className={styles.sceneButton}
-          aria-label={`Clean ${state.name}`}
-          onClick={() => runCareActivity("clean")}
-        >
-          🧼
-        </button>
-        <button
-          type="button"
-          className={styles.sceneButton}
-          aria-label={`Let ${state.name} rest`}
-          onClick={() => runCareActivity("sleep")}
-        >
-          😴
-        </button>
+
+        {!presence.textOnly && (
+          <BuddyCharacter
+            state={state}
+            stage={stage}
+            palette={palette}
+            displaySize={compact ? 230 : 282}
+            bubblePosition={bubblePosition}
+            randomizeBubblePosition={false}
+            compactBubble={compact}
+            showSpeech={!portrait}
+            sceneXPercent={characterSceneX}
+            sceneYPercent={characterSceneY}
+            sceneDepthScale={characterDepthScale}
+            scenePose={characterPose}
+            traveling={travelPhase === "traveling"}
+            arrived={travelPhase === "arrived"}
+            travelDirection={travelDirection}
+            spritePointer
+            cursorBridgeRef={cursorBridgeRef}
+            envContext={{
+              phase: world.phase,
+              weather: world.weather,
+              season: world.season,
+            }}
+            speechText={speechOverride}
+            speechStyle={speechStyle}
+            speechMedia={
+              dreamKind !== null && speechStyle === "think" ? (
+                <BuddyDreamCanvas
+                  kind={dreamKind}
+                  reducedMotion={reducedMotion}
+                  visible={surfaceVisible}
+                />
+              ) : undefined
+            }
+            speechControls={
+              activeSpeech ? activeSpeech.controls : requestPrompt?.controls
+            }
+            speechIntent={activeSpeech?.speech_intent}
+            onCanvasEvent={onCanvasEvent}
+            onSpeechControl={
+              activeSpeech !== null || requestPrompt !== null
+                ? handleSpeechControlAll
+                : undefined
+            }
+          />
+        )}
+
+        <canvas
+          ref={foregroundCanvasRef}
+          className={styles.foregroundCanvas}
+          data-testid="buddy-world-foreground"
+        />
+
+        {setupNeeded && !portrait && (
+          <div className={styles.setupDock}>
+            {SETUP_MODE_ACTIONS.map((item) => (
+              <Button
+                key={item.mode}
+                type="button"
+                size="sm"
+                variant="soft"
+                onClick={() => onRunMode(item.mode)}
+              >
+                {item.label}
+              </Button>
+            ))}
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              onClick={onDismissSetup}
+            >
+              Later
+            </Button>
+          </div>
+        )}
+
+        {playSession?.phase === "armed" && (
+          <div
+            className={styles.playCatcher}
+            data-testid="buddy-play-catcher"
+            aria-label={
+              playSession.kind === "fetch"
+                ? "Click the meadow to throw the ball"
+                : "Click a glow to pounce"
+            }
+            onClick={handleCatcherClick}
+          />
+        )}
       </div>
+
+      {!portrait && (
+        <div
+          className={classNames(styles.sceneBar, {
+            [styles.overlayDock]: !presence.enabled,
+          })}
+          data-testid="buddy-world-controls"
+        >
+          {presence.enabled && (
+            <div className={styles.sceneStatus}>
+              <span role="status" className={styles.statusLine}>
+                {presenceMotion?.label}{" "}
+                {describePlaySessionForScreenReader(
+                  playSession ?? suspension?.session ?? null,
+                  suspension !== null,
+                )}
+              </span>
+              {presence.textOnly && activeSpeech && (
+                <span className={styles.statusLine}>
+                  {activeSpeech.text}
+                  {activeSpeech.controls.map((control) => (
+                    <Button
+                      key={control.id}
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => onSpeechControl(control)}
+                    >
+                      {control.label}
+                    </Button>
+                  ))}
+                </span>
+              )}
+              {(playSession !== null || suspension !== null) && (
+                <div className={styles.playControls}>
+                  {playSession?.phase === "armed" &&
+                    playKeyboardTargets(playSession.kind).map((target) => (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="soft"
+                        key={target.id}
+                        onClick={() => handleSceneClick(target.x, target.y)}
+                      >
+                        {target.key}: {target.label}
+                      </Button>
+                    ))}
+                  {playSession && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      onClick={pausePlay}
+                    >
+                      Pause play
+                    </Button>
+                  )}
+                  {suspension && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      disabled={
+                        presenceMotion?.ownsAttention === true ||
+                        activeSpeech !== null ||
+                        careActivity !== null
+                      }
+                      onClick={resumePlay}
+                    >
+                      Resume play
+                    </Button>
+                  )}
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      restorePlayFocusRef.current = true;
+                      cancelPlay();
+                    }}
+                  >
+                    Stop play
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+          <div
+            role="group"
+            className={styles.careDock}
+            aria-label={`${state.name} scene care actions`}
+          >
+            <CareButton
+              ref={playStartRef}
+              icon={Volleyball}
+              label={`Play fetch with ${state.name}`}
+              hint="Play fetch"
+              disabledReason={fetchDisabledReason}
+              onClick={handleStartFetch}
+            />
+            {world.atmosphere.layers.includes("fireflies") && (
+              <CareButton
+                icon={Sparkles}
+                label={`Catch fireflies with ${state.name}`}
+                hint="Catch fireflies"
+                onClick={handleStartFirefly}
+              />
+            )}
+            <CareButton
+              icon={Soup}
+              label={`Feed ${state.name}`}
+              hint="Feed"
+              onClick={() => runCareActivity("feed")}
+            />
+            <CareButton
+              icon={Bug}
+              label={`Hunt bugs with ${state.name}`}
+              hint="Hunt bugs"
+              onClick={() => runCareActivity("play", "bug")}
+            />
+            <CareButton
+              icon={ShowerHead}
+              label={`Clean ${state.name}`}
+              hint="Clean"
+              onClick={() => runCareActivity("clean")}
+            />
+            <CareButton
+              icon={Moon}
+              label={`Let ${state.name} rest`}
+              hint="Let rest"
+              onClick={() => runCareActivity("sleep")}
+            />
+          </div>
+        </div>
+      )}
     </section>
   );
 };

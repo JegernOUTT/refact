@@ -1,18 +1,16 @@
 .scene {
-  --buddy-scene-ink: var(--rf-color-fg);
-  --buddy-scene-ink-muted: var(--rf-color-fg);
-  --buddy-scene-control-bg: var(--rf-surface-overlay);
-  --buddy-scene-control-border: var(--rf-border-strong);
-  --buddy-scene-tooltip-bg: var(--rf-surface-overlay);
+  --buddy-stage-h: 280px;
   position: relative;
+  display: flex;
+  flex-direction: column;
   height: 280px;
   min-height: 220px;
   margin: 0 var(--rf-space-3) var(--rf-space-2);
   overflow: hidden;
-  border: 1px solid var(--rf-surface-2);
+  border: var(--rf-hairline) solid var(--rf-surface-2);
   border-radius: var(--rf-radius-card);
   background: transparent;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+  box-shadow: inset 0 0 0 var(--rf-hairline) var(--rf-surface-2);
   flex-shrink: 0;
 }
 
@@ -22,10 +20,30 @@
   margin: 0;
 }
 
+.stage {
+  --buddy-bubble-max: calc(100cqw - 2 * var(--rf-space-2));
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  container-type: inline-size;
+}
+
+.withBar.withBar.withBar {
+  height: auto;
+  min-height: 0;
+}
+
+.withBar .stage {
+  position: relative;
+  inset: auto;
+  flex: 0 0 auto;
+  height: var(--buddy-stage-h);
+}
+
 .scene[data-weather="storm"] {
   box-shadow:
-    inset 0 0 0 1px rgba(239, 68, 68, 0.16),
-    0 0 18px rgba(239, 68, 68, 0.08);
+    inset 0 0 0 var(--rf-hairline) var(--rf-color-danger-soft),
+    0 0 var(--rf-space-4) var(--rf-color-danger-soft);
 }
 
 .scene[data-weather="dream"] {
@@ -41,65 +59,57 @@
 }
 
 .hotspot,
-.objectHotspot,
-.sceneButton,
-.sceneButtonGhost {
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
-}
-
-.hotspot,
 .objectHotspot {
   position: absolute;
   z-index: 4;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  padding: 0;
   transform: translate(-50%, -50%);
-  border: 1px solid transparent;
+  border: var(--rf-hairline) solid transparent;
   border-radius: var(--rf-radius-pill);
   background: transparent;
-  color: var(--buddy-scene-ink);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
   transition:
-    transform 0.12s ease,
-    background 0.12s ease,
-    border-color 0.12s ease;
+    transform var(--rf-dur-fast) var(--rf-ease-standard),
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    border-color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .hotspot {
-  width: 52px;
-  height: 52px;
-  padding: 0;
+  width: calc(var(--rf-space-6) + var(--rf-space-5));
+  height: calc(var(--rf-space-6) + var(--rf-space-5));
 }
 
 .objectHotspot {
-  width: 44px;
-  height: 44px;
-  padding: 0;
+  width: calc(var(--rf-space-6) + var(--rf-space-3));
+  height: calc(var(--rf-space-6) + var(--rf-space-3));
 }
 
 .hotspot::after,
 .objectHotspot::after {
   content: "";
   position: absolute;
-  width: 6px;
-  height: 6px;
+  width: var(--rf-space-1);
+  height: var(--rf-space-1);
   border-radius: var(--rf-radius-pill);
-  background: rgba(255, 255, 255, 0.85);
-  box-shadow: 0 0 6px 2px rgba(255, 255, 255, 0.35);
+  background: var(--rf-color-accent);
+  box-shadow: 0 0 var(--rf-space-1) var(--rf-hairline) var(--rf-color-accent);
   opacity: 0;
   transform: scale(0.6);
   transition:
-    opacity 0.16s ease,
-    transform 0.16s ease;
+    opacity var(--rf-dur-fast) var(--rf-ease-standard),
+    transform var(--rf-dur-fast) var(--rf-ease-standard);
   pointer-events: none;
 }
 
-.scene:hover .hotspot::after,
-.scene:focus-within .hotspot::after,
-.scene:hover .objectHotspot::after,
-.scene:focus-within .objectHotspot::after {
+.stage:hover .hotspot::after,
+.stage:focus-within .hotspot::after,
+.stage:hover .objectHotspot::after,
+.stage:focus-within .objectHotspot::after {
   opacity: 0.55;
   transform: scale(1);
   animation: buddyHotspotTwinkle 2.2s ease-in-out infinite;
@@ -118,66 +128,33 @@
 .objectHotspot:hover,
 .objectHotspot:focus-visible {
   transform: translate(-50%, -52%) scale(1.04);
-  background: rgba(255, 255, 255, 0.08);
-  outline: none;
+  background: var(--rf-color-accent-soft);
 }
 
 .hotspot:focus-visible,
 .objectHotspot:focus-visible {
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.48);
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-focus-ring-offset);
 }
 
 .homeHotspot {
-  width: 64px;
-  height: 56px;
+  width: calc(2 * var(--rf-space-6));
+  height: calc(var(--rf-space-6) + var(--rf-space-5));
 }
 
-.objectTooltip {
-  position: absolute;
-  left: 50%;
-  bottom: calc(100% + 6px);
+.tip {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  min-width: 88px;
-  max-width: 122px;
-  padding: 4px 7px;
-  border: 1px solid var(--buddy-scene-control-border);
-  border-radius: var(--rf-radius-card);
-  background: var(--buddy-scene-tooltip-bg);
-  color: var(--buddy-scene-ink);
-  opacity: 0;
-  pointer-events: none;
-  transform: translateX(-50%) translateY(4px);
-  transition:
-    opacity 0.12s ease,
-    transform 0.12s ease;
-  backdrop-filter: blur(8px);
+  gap: var(--rf-space-2xs);
 }
 
-.hotspot:hover .objectTooltip,
-.hotspot:focus-visible .objectTooltip,
-.objectHotspot:hover .objectTooltip,
-.objectHotspot:focus-visible .objectTooltip {
-  opacity: 1;
-  transform: translateX(-50%) translateY(0);
+.tipLabel {
+  font-weight: var(--rf-weight-semibold);
 }
 
-.objectLabel {
-  max-width: 96px;
-  overflow: hidden;
-  font-weight: var(--rf-weight-bold);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.objectValue {
-  max-width: 96px;
-  overflow: hidden;
-  color: var(--buddy-scene-ink-muted);
+.tipValue {
+  color: var(--rf-color-muted);
   font-size: var(--rf-text-1);
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .characterAnchor {
@@ -188,7 +165,9 @@
   pointer-events: none;
   transform: translateX(-50%) scale(var(--buddy-scene-scale, 1));
   transform-origin: 50% 100%;
-  filter: drop-shadow(0 14px 18px rgba(0, 0, 0, 0.18));
+  filter: drop-shadow(
+    0 14px 18px color-mix(in srgb, var(--rf-scrim) 33%, transparent)
+  );
   transition:
     left 3.8s cubic-bezier(0.4, 0, 0.2, 1),
     bottom 3.8s cubic-bezier(0.4, 0, 0.2, 1),
@@ -203,11 +182,15 @@
 }
 
 .scene:hover .characterAnchor {
-  filter: drop-shadow(0 16px 22px rgba(0, 0, 0, 0.26));
+  filter: drop-shadow(
+    0 16px 22px color-mix(in srgb, var(--rf-scrim) 47%, transparent)
+  );
 }
 
 .scene[data-showcase-phase="cooldown"] .characterAnchor {
-  filter: drop-shadow(0 10px 14px rgba(0, 0, 0, 0.16));
+  filter: drop-shadow(
+    0 10px 14px color-mix(in srgb, var(--rf-scrim) 29%, transparent)
+  );
 }
 
 .characterBody[data-pose="spin"] {
@@ -296,106 +279,131 @@
 .waypointPing {
   position: absolute;
   z-index: 3;
-  width: 10px;
-  height: 10px;
+  width: var(--rf-space-2);
+  height: var(--rf-space-2);
   pointer-events: none;
-  border: 2px solid rgba(255, 255, 255, 0.72);
+  border: var(--rf-focus-ring-w) solid var(--rf-color-accent);
   border-radius: var(--rf-radius-pill);
   transform: translate(-50%, -50%);
   animation: buddyWaypointPing 1.4s ease-out forwards;
 }
 
 .stageBadge {
-  margin-top: -10px;
-  padding: 3px 9px;
-  border: 1px solid;
+  margin-top: calc(-1 * var(--rf-space-2));
+  padding: var(--rf-space-2xs) var(--rf-space-2);
+  border: var(--rf-hairline) solid;
   border-radius: var(--rf-radius-pill);
-  background: rgba(17, 24, 39, 0.58);
+  background: var(--rf-surface-overlay);
   font-size: var(--rf-text-1);
   font-weight: var(--rf-weight-bold);
-  backdrop-filter: blur(6px);
-}
-
-.setupDock,
-.careDock {
-  position: absolute;
-  z-index: 6;
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--rf-space-1);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.12s ease;
 }
 
 .setupDock {
+  position: absolute;
+  z-index: 6;
   left: var(--rf-space-2);
   bottom: var(--rf-space-2);
-  max-width: 36%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rf-space-1);
+  max-width: 48%;
+}
+
+.sceneBar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  padding: var(--rf-space-2);
+  border-top: var(--rf-hairline) solid var(--rf-border);
+  background: var(--rf-surface-overlay);
+  color: var(--rf-color-fg);
+}
+
+.sceneStatus {
+  display: flex;
+  flex: 1 1 16rem;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+
+.statusLine {
+  min-width: 0;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-2);
+  overflow-wrap: anywhere;
+}
+
+.playControls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rf-space-1);
+  min-width: 0;
 }
 
 .careDock {
-  right: var(--rf-space-2);
-  bottom: var(--rf-space-2);
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
   justify-content: flex-end;
-  max-width: 36%;
+  gap: var(--rf-space-1);
+  margin-left: auto;
 }
 
-.scene:hover .setupDock,
-.scene:focus-within .setupDock,
-.scene:hover .careDock,
-.scene:focus-within .careDock,
-.setupDock:focus-within,
-.careDock:focus-within {
+.careButton.careButton {
+  width: var(--rf-control-h-icon-sm);
+  min-width: var(--rf-control-h-icon-sm);
+  height: var(--rf-control-h-icon-sm);
+}
+
+.careButtonDisabled.careButtonDisabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.overlayDock {
+  position: absolute;
+  z-index: 6;
+  right: var(--rf-space-2);
+  bottom: var(--rf-space-2);
+  max-width: 48%;
+  padding: var(--rf-space-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.scene:hover .overlayDock,
+.overlayDock:focus-within {
   opacity: 1;
   pointer-events: auto;
 }
 
-.sceneButton,
-.sceneButtonGhost {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 24px;
-  height: 24px;
-  padding: 0 7px;
-  border: 1px solid var(--buddy-scene-control-border);
-  border-radius: var(--rf-radius-pill);
-  background: var(--buddy-scene-control-bg);
-  color: var(--buddy-scene-ink);
-  font-size: var(--rf-text-1);
-  backdrop-filter: blur(4px);
-  transition:
-    background 0.12s ease,
-    border-color 0.12s ease,
-    transform 0.12s ease;
+.textScene .canvas,
+.textScene .foregroundCanvas {
+  visibility: hidden;
 }
 
-.sceneButtonGhost {
-  color: var(--buddy-scene-ink-muted);
+.withBar.textScene .stage {
+  height: 0;
 }
 
-.sceneButton:hover,
-.sceneButton:focus-visible,
-.sceneButtonGhost:hover,
-.sceneButtonGhost:focus-visible {
-  background: var(--rf-surface-overlay);
-  border-color: var(--rf-color-accent);
-  transform: translateY(-1px);
-  outline: none;
-}
-
+.portrait .characterAnchor,
 .compact .characterAnchor {
-  bottom: -18px;
+  bottom: calc(-1 * var(--rf-space-4));
 }
 
 .compact .objectHotspot {
-  width: 40px;
-  height: 40px;
+  width: var(--rf-control-h-lg);
+  height: var(--rf-control-h-lg);
 }
 
 .compact .setupDock,
-.compact .careDock {
+.compact .overlayDock {
   bottom: var(--rf-space-1);
 }
 
@@ -461,54 +469,6 @@
   }
 }
 
-@keyframes buddySceneStargaze {
-  0%,
-  100% {
-    transform: translateY(0) rotate(0deg);
-  }
-
-  45% {
-    transform: translateY(-5px) rotate(-2deg);
-  }
-}
-
-@keyframes buddySceneMeditate {
-  0%,
-  100% {
-    transform: translateY(0) scale(1);
-  }
-
-  50% {
-    transform: translateY(-7px) scale(1.015);
-  }
-}
-
-@keyframes buddySceneCheer {
-  0%,
-  100% {
-    transform: translateY(0) rotate(0deg);
-  }
-
-  32% {
-    transform: translateY(-10px) rotate(-2deg);
-  }
-
-  58% {
-    transform: translateY(-3px) rotate(2deg);
-  }
-}
-
-@keyframes buddyScenePoseSoft {
-  0%,
-  100% {
-    transform: translateY(0);
-  }
-
-  50% {
-    transform: translateY(-4px);
-  }
-}
-
 @keyframes buddySceneTravelHop {
   0%,
   100% {
@@ -545,11 +505,7 @@
 @media (prefers-reduced-motion: reduce) {
   .hotspot,
   .objectHotspot,
-  .objectTooltip,
-  .setupDock,
-  .careDock,
-  .sceneButton,
-  .sceneButtonGhost {
+  .overlayDock {
     transition-duration: 0.01ms;
   }
 
@@ -577,25 +533,28 @@
     height: 250px;
   }
 
+  .withBar {
+    --buddy-stage-h: 250px;
+  }
+
   .objectHotspot {
-    width: 64px;
-    height: 64px;
-  }
-
-  .objectTooltip {
-    bottom: calc(100% + 4px);
-    min-width: 72px;
-    max-width: min(108px, 32vw);
-    padding: 3px 5px;
-  }
-
-  .objectLabel,
-  .objectValue {
-    max-width: 92px;
+    width: calc(2 * var(--rf-space-6));
+    height: calc(2 * var(--rf-space-6));
   }
 
   .setupDock,
-  .careDock {
+  .overlayDock {
     max-width: 48%;
+  }
+}
+
+@media (max-width: 520px) {
+  .withBar {
+    --buddy-stage-h: 220px;
+  }
+
+  .careDock {
+    justify-content: flex-start;
+    margin-left: 0;
   }
 }

@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 const ROUTE = "/tests/e2e/route-showcase.html?route=buddy&operator=enabled";
-const DESK = '[aria-label="Buddy Desk"]';
+const DESK = '[data-testid="buddy-desk"]';
 const CONTENT = '[data-testid="buddy-home-content"]';
 const project = { project_id: "showcase", canonical_root: "/workspace/refact" };
 const rows = Array.from({ length: 8 }, (_, index) => ({
@@ -192,7 +192,7 @@ async function countTabsToFirstRow(page: Page, limit: number) {
 
 async function openSelectedItem(page: Page) {
   await page.locator(`${DESK} ul li button`).first().click();
-  await expect(page.getByLabel("Work detail")).toBeVisible();
+  await expect(page.getByRole("article")).toBeVisible();
 }
 
 test.describe("Buddy keyboard access", () => {
@@ -200,7 +200,7 @@ test.describe("Buddy keyboard access", () => {
     await openBuddy(page);
     const freshLoad = await page.evaluate((deskSelector) => {
       const desk = document.querySelector<HTMLElement>(deskSelector);
-      if (!desk) throw new Error("Buddy Desk is missing");
+      if (!desk) throw new Error("Reports is missing");
       const selection = document.getSelection();
       const style = getComputedStyle(desk);
       return {
@@ -231,15 +231,25 @@ test.describe("Buddy keyboard access", () => {
       }),
     );
     expect(rawLoad.count).toBeLessThanOrEqual(12);
-    expect(rawLoad.targets.slice(0, -1).map((target) => target.text)).toEqual(
-      expect.arrayContaining([
-        "Refresh work",
-        "Needs you",
-        "Working on",
-        "Delivered",
-        "Watching",
-      ]),
-    );
+    expect(
+      rawLoad.targets.some((target) => target.text === "Refresh reports"),
+    ).toBe(true);
+    expect(
+      rawLoad.targets.filter(
+        (target) => target.tag === "INPUT" && target.role === "",
+      ),
+    ).toHaveLength(3);
+    const views = page.getByRole("radiogroup", { name: "Report views" });
+    const needsYou = views.getByRole("radio", {
+      name: "Needs you",
+      exact: true,
+    });
+    await expect(needsYou).toBeChecked();
+    await needsYou.focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(
+      views.getByRole("radio", { name: "Working on", exact: true }),
+    ).toBeChecked();
     expect(rawLoad.targets.some((target) => target.body)).toBe(false);
 
     await page.goto(ROUTE);
@@ -289,15 +299,15 @@ test.describe("Buddy keyboard access", () => {
   }) => {
     await openBuddy(page);
     for (const view of ["Watching", "Needs you", "Working on", "Delivered"]) {
-      const control = page.getByRole("button", { name: view, exact: true });
-      await control.click();
+      const control = page.getByRole("radio", { name: view, exact: true });
+      await control.check({ force: true });
       await expect(control).toBeFocused();
       expect((await activeElement(page)).body).toBe(false);
     }
     for (const view of ["Watching", "Needs you", "Working on", "Delivered"]) {
-      const control = page.getByRole("button", { name: view, exact: true });
+      const control = page.getByRole("radio", { name: view, exact: true });
       await control.focus();
-      await page.keyboard.press("Enter");
+      await page.keyboard.press("Space");
       await expect(control).toBeFocused();
       expect((await activeElement(page)).body).toBe(false);
     }
@@ -308,7 +318,9 @@ test.describe("Buddy keyboard access", () => {
   }) => {
     await openBuddy(page);
     await openSelectedItem(page);
-    await page.getByRole("button", { name: "Watching", exact: true }).click();
+    await page
+      .getByRole("radio", { name: "Watching", exact: true })
+      .check({ force: true });
     const firstRow = page.locator(`${DESK} ul li button`).first();
     await expect(firstRow).toHaveCount(1);
     await expect(firstRow).toBeFocused();
@@ -318,21 +330,23 @@ test.describe("Buddy keyboard access", () => {
   test("switching_to_an_empty_view_with_a_selection_open_keeps_focus_on_the_view_control", async ({
     page,
   }) => {
-    const workingOn = page.getByRole("button", {
+    const workingOn = page.getByRole("radio", {
       name: "Working on",
       exact: true,
     });
     await openBuddy(page);
     await openSelectedItem(page);
-    await workingOn.click();
+    await workingOn.check({ force: true });
     await expect(page.locator(`${DESK} ul li button`)).toHaveCount(0);
     await expect(workingOn).toBeFocused();
     expect((await activeElement(page)).body).toBe(false);
 
-    await page.getByRole("button", { name: "Needs you", exact: true }).click();
+    await page
+      .getByRole("radio", { name: "Needs you", exact: true })
+      .check({ force: true });
     await openSelectedItem(page);
     await workingOn.focus();
-    await page.keyboard.press("Enter");
+    await page.keyboard.press("Space");
     await expect(page.locator(`${DESK} ul li button`)).toHaveCount(0);
     await expect(workingOn).toBeFocused();
     expect((await activeElement(page)).body).toBe(false);
@@ -343,7 +357,7 @@ test.describe("Buddy keyboard access", () => {
   }) => {
     await openBuddy(page);
     await openSelectedItem(page);
-    await page.getByRole("button", { name: "Back to work list" }).click();
+    await page.getByRole("button", { name: "Back to reports" }).click();
     const search = page.locator(`${DESK} input[type="search"]`);
     await search.focus();
     const searchedResponse = page.waitForResponse((response) => {
@@ -354,7 +368,7 @@ test.describe("Buddy keyboard access", () => {
       );
     });
     await search.fill("needle");
-    const loading = page.getByText("Loading work…", { exact: true });
+    const loading = page.getByRole("status", { name: "Loading reports" });
     await expect(loading).toBeVisible();
     await expect(search).toBeFocused();
     await searchedResponse;
@@ -369,13 +383,13 @@ test.describe("Buddy keyboard access", () => {
     const content = page.locator(CONTENT);
     await page.locator(`${DESK} ul li button`).first().focus();
     await page.keyboard.press("Enter");
-    await expect(page.getByLabel("Work detail")).toBeVisible();
-    const back = page.getByRole("button", { name: "Back to work list" });
+    await expect(page.getByRole("article")).toBeVisible();
+    const back = page.getByRole("button", { name: "Back to reports" });
     await expect(back).toBeFocused();
     await content.evaluate((element) => element.scrollTo(0, 200));
     const before = await content.evaluate((element) => element.scrollTop);
     await page.keyboard.press("Enter");
-    await expect(page.getByLabel("Work detail")).toHaveCount(0);
+    await expect(page.getByRole("article")).toHaveCount(0);
     await expect(page.locator(`${DESK} ul li button`).first()).toBeFocused();
     const after = await content.evaluate((element) => element.scrollTop);
     expect(Math.abs(after - before)).toBeLessThan(48);

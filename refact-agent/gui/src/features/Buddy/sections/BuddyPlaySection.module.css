@@ -1,0 +1,37 @@
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  min-width: 0;
+}
+
+.section:focus-visible {
+  outline: none;
+}
+
+.body {
+  gap: var(--rf-space-3);
+}
+
+.scene {
+  min-width: 0;
+}
+
+.scene.scene [data-testid="buddy-world"] {
+  --buddy-stage-h: clamp(280px, 38vh, 430px);
+  margin: 0;
+  border-color: var(--rf-border);
+  background: var(--rf-surface-1);
+}
+
+@media (max-width: 720px) {
+  .scene.scene [data-testid="buddy-world"] {
+    --buddy-stage-h: 250px;
+  }
+}
+
+@media (max-width: 520px) {
+  .scene.scene [data-testid="buddy-world"] {
+    --buddy-stage-h: 230px;
+  }
+}

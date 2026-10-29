@@ -1,8 +1,9 @@
 import { http, HttpResponse } from "msw";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
-import { BuddyRecentChats } from "../BuddyRecentChats";
+import { BuddyRecentChats, CHATS_PAGE_SIZE } from "../BuddyRecentChats";
+import { readBuddyPersistentState, resetBuddyPersistentState } from "../ui";
 import type { BuddyConversationEntry } from "../types";
 
 const CONFIG_STATE = {
@@ -31,7 +32,35 @@ function makeConversation(
   };
 }
 
+afterEach(() => resetBuddyPersistentState());
+
 describe("BuddyRecentChats", () => {
+  it("pages the Activity chats list ten rows at a time", async () => {
+    const entries = Array.from({ length: 25 }, (_, index) =>
+      makeConversation({
+        id: `chat-${index}`,
+        title: `Chat ${index}`,
+        updated_at: new Date(Date.UTC(2026, 0, 1, 0, 59 - index)).toISOString(),
+      }),
+    );
+    server.use(
+      http.get("*/v1/buddy/conversations", () => HttpResponse.json(entries)),
+    );
+
+    const { user } = render(<BuddyRecentChats initialFilter="all" />, {
+      preloadedState: CONFIG_STATE,
+    });
+
+    await screen.findByRole("list");
+    expect(CHATS_PAGE_SIZE).toBe(10);
+    expect(screen.getAllByRole("listitem")).toHaveLength(10);
+    await user.click(screen.getByRole("button", { name: "Show more" }));
+    expect(screen.getAllByRole("listitem")).toHaveLength(20);
+    await user.click(screen.getByRole("button", { name: "Show more" }));
+    expect(screen.getAllByRole("listitem")).toHaveLength(25);
+    expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
+  });
+
   it("renders capped workflow history as human-readable entry-counted lists", async () => {
     const entries = Array.from({ length: 60 }, (_, index) => {
       const workflow = Math.floor(index / 12);
@@ -73,7 +102,7 @@ describe("BuddyRecentChats", () => {
     });
 
     await screen.findByRole("list");
-    expect(screen.getAllByRole("listitem")).toHaveLength(20);
+    expect(screen.getAllByRole("listitem")).toHaveLength(CHATS_PAGE_SIZE);
     expect(document.body.textContent).toContain("1 entry");
     expect(screen.getAllByText("2 chats").length).toBeGreaterThan(0);
     expect(document.body.textContent).not.toMatch(/\b[a-z]+(?: [a-z]+){2,} \(/);
@@ -86,7 +115,7 @@ describe("BuddyRecentChats", () => {
     ).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Show more" }));
-    expect(screen.getAllByRole("listitem")).toHaveLength(40);
+    expect(screen.getAllByRole("listitem")).toHaveLength(2 * CHATS_PAGE_SIZE);
   });
 
   it("opens a recent chat row and navigates to chat", async () => {
@@ -107,11 +136,13 @@ describe("BuddyRecentChats", () => {
       ),
     );
 
-    const { store, user } = render(<BuddyRecentChats title="RECENT CHATS" />, {
+    const { store, user } = render(<BuddyRecentChats initialFilter="chat" />, {
       preloadedState: CONFIG_STATE,
     });
 
-    expect(await screen.findByText("RECENT CHATS")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Conversations" }),
+    ).toBeInTheDocument();
     expect(screen.getByText(/3 messages/)).toBeInTheDocument();
     await user.click(
       await screen.findByRole("button", { name: /Gremlin triage chat/i }),
@@ -190,7 +221,7 @@ describe("BuddyRecentChats", () => {
       ),
     );
 
-    render(<BuddyRecentChats title="RECENT CHATS" />, {
+    render(<BuddyRecentChats initialFilter="all" />, {
       preloadedState: CONFIG_STATE,
     });
 
@@ -351,12 +382,7 @@ describe("BuddyRecentChats", () => {
       }
     }
     expect(screen.getAllByText("Failed")).toHaveLength(4);
-    expect(rows[0].querySelectorAll('[class*="entryBadge"]')).toHaveLength(0);
-    expect(rows[1].querySelectorAll('[class*="entryBadge"]')).toHaveLength(0);
-    expect(rows[2].querySelectorAll('[class*="entryBadge"]')).toHaveLength(0);
-    expect(rows[3].querySelector('[class*="entryBadge"]')).toHaveTextContent(
-      "Commit Msg",
-    );
+    expect(rows[3]).toHaveTextContent("Commit Msg");
     expect(rows[0]).toHaveTextContent("Memo extraction");
     expect(rows[0].textContent?.match(/Memo/g)).toHaveLength(1);
     expect(rows[1]).toHaveTextContent("Knowledge graph enrichment");
@@ -374,5 +400,103 @@ describe("BuddyRecentChats", () => {
         workflow_id: "memo_extraction",
       });
     });
+  });
+});
+
+describe("BuddyRecentChats filters", () => {
+  const mixed = [
+    makeConversation({ id: "human", kind: "chat", title: "Human chat" }),
+    makeConversation({
+      id: "buddy_memory_garden",
+      kind: "workflow",
+      title: "Memory garden",
+      badge: "Memory garden",
+    }),
+    makeConversation({ id: "setup-1", kind: "setup", title: "Setup run" }),
+  ];
+
+  it("defaults Activity to background chats, follows the filter heading and persists it", async () => {
+    server.use(
+      http.get("*/v1/buddy/conversations", () => HttpResponse.json(mixed)),
+    );
+    const { user, unmount } = render(<BuddyRecentChats />, {
+      preloadedState: CONFIG_STATE,
+    });
+    expect(
+      await screen.findByRole("heading", { name: "Background chats" }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("Memory garden")).toBeInTheDocument();
+    expect(screen.queryByText("Human chat")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New chat" })).toBeEnabled();
+
+    await user.click(screen.getByRole("radio", { name: "Chats" }));
+    expect(
+      screen.getByRole("heading", { name: "Conversations" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Human chat")).toBeInTheDocument();
+    unmount();
+
+    render(<BuddyRecentChats />, { preloadedState: CONFIG_STATE });
+    expect(
+      await screen.findByRole("heading", { name: "Conversations" }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows a filter-specific empty state without template leaks", async () => {
+    server.use(
+      http.get("*/v1/buddy/conversations", () => HttpResponse.json([mixed[0]])),
+    );
+    const { user } = render(<BuddyRecentChats />, {
+      preloadedState: CONFIG_STATE,
+    });
+    expect(
+      await screen.findByText("No background chats yet"),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("radio", { name: "Setup" }));
+    expect(screen.getByText("No setup chats yet")).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/No \w+ entries/);
+  });
+
+  it("compact Home list shows recent conversations and View all preselects Conversations", async () => {
+    server.use(
+      http.get("*/v1/buddy/conversations", () => HttpResponse.json(mixed)),
+    );
+    const onViewAll = vi.fn();
+    const { user } = render(
+      <BuddyRecentChats
+        compact
+        maxItems={3}
+        initialFilter="chat"
+        onViewAll={onViewAll}
+      />,
+      { preloadedState: CONFIG_STATE },
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Recent conversations" }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("Human chat")).toBeInTheDocument();
+    expect(screen.queryByText("Memory garden")).not.toBeInTheDocument();
+    expect(screen.queryByRole("radiogroup")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "View all" }));
+    expect(onViewAll).toHaveBeenCalledTimes(1);
+    expect(readBuddyPersistentState("buddy.activity.chatsFilter")).toBe("chat");
+  });
+
+  it("shows one-line error with retry when conversations fail to load", async () => {
+    let calls = 0;
+    server.use(
+      http.get("*/v1/buddy/conversations", () => {
+        calls += 1;
+        return calls === 1
+          ? HttpResponse.json({}, { status: 500 })
+          : HttpResponse.json(mixed);
+      }),
+    );
+    const { user } = render(<BuddyRecentChats initialFilter="chat" />, {
+      preloadedState: CONFIG_STATE,
+    });
+    expect(await screen.findByText("Couldn't load chats.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("Human chat")).toBeInTheDocument();
   });
 });

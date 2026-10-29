@@ -1,52 +1,33 @@
 .panel {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-2);
-  height: 100%;
   min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-  padding: var(--rf-panel-pad);
 }
 
 .archetype {
   display: flex;
-  flex-shrink: 0;
   flex-direction: column;
   gap: var(--rf-space-2xs);
   min-width: 0;
 }
 
-.archetypeName,
-.vibe {
+.archetypeName {
+  margin: 0;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.scrollBody {
-  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  gap: var(--rf-space-3);
-  min-width: 0;
-  min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
-}
-
+.vibe,
 .summary {
-  display: -webkit-box;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  min-width: 0;
   color: var(--rf-color-muted);
-  line-height: 1.5;
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+  overflow-wrap: anywhere;
 }
 
 .sectionLabel {
+  margin: 0;
   color: var(--rf-color-fg);
 }
 
@@ -58,7 +39,8 @@
   min-width: 0;
 }
 
-.meterSection {
+.meterSection,
+.skillsSection {
   display: flex;
   flex-direction: column;
   gap: var(--rf-space-1);
@@ -79,6 +61,7 @@
   min-width: 0;
   color: var(--rf-color-muted);
   font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
 }
 
 .meterName,
@@ -89,36 +72,56 @@
   white-space: nowrap;
 }
 
-.meterName {
-  text-transform: capitalize;
-}
-
 .meterValue {
   flex: 0 0 auto;
+  color: var(--rf-color-fg);
   font-variant-numeric: tabular-nums;
   font-weight: var(--rf-weight-semibold);
 }
 
 .meterBar {
+  --buddy-meter-fill: var(--rf-color-accent);
+
+  display: block;
+  width: 100%;
+  height: var(--rf-space-1);
   overflow: hidden;
-  height: 4px;
+  border: 0;
   border-radius: var(--rf-radius-pill);
+  background: var(--rf-surface-2);
+  appearance: none;
+}
+
+.meterBar[data-tone="success"] {
+  --buddy-meter-fill: var(--rf-color-success);
+}
+
+.meterBar[data-tone="warning"] {
+  --buddy-meter-fill: var(--rf-color-warning);
+}
+
+.meterBar[data-tone="danger"] {
+  --buddy-meter-fill: var(--rf-color-danger);
+}
+
+.meterBar[data-tone="default"] {
+  --buddy-meter-fill: var(--rf-color-muted);
+}
+
+.meterBar::-webkit-progress-bar {
+  border-radius: inherit;
   background: var(--rf-surface-2);
 }
 
-.meterFill {
-  width: var(--buddy-fill);
-  height: 100%;
+.meterBar::-webkit-progress-value {
   border-radius: inherit;
-  background: var(--rf-color-accent);
+  background: var(--buddy-meter-fill);
   transition: width var(--rf-dur-med) var(--rf-ease-standard);
 }
 
-.skillsSection {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-1);
-  min-width: 0;
+.meterBar::-moz-progress-bar {
+  border-radius: inherit;
+  background: var(--buddy-meter-fill);
 }
 
 .skillsRow {
@@ -138,10 +141,6 @@
   flex-direction: column;
   gap: var(--rf-space-2);
   min-width: 0;
-  padding: var(--rf-space-2);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-ctl);
-  background: var(--rf-surface-1);
 }
 
 .questHeader {
@@ -160,6 +159,7 @@
 }
 
 .questTitle {
+  margin: 0;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -168,31 +168,36 @@
 
 .questDescription {
   color: var(--rf-color-muted);
-  line-height: 1.5;
+  line-height: var(--rf-line-1);
   overflow-wrap: anywhere;
 }
 
-.questControls {
+.questControls,
+.stateRow {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: var(--rf-space-2);
   min-width: 0;
 }
 
-.actionRow {
-  display: flex;
-  flex-shrink: 0;
-  flex-wrap: wrap;
-  gap: var(--rf-space-1);
-  min-width: 0;
+.stateRow {
   padding-top: var(--rf-space-2);
   border-top: var(--rf-hairline) solid var(--rf-border);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
 }
 
-@media (max-width: 720px) {
-  .panel {
-    padding: var(--rf-panel-pad-compact);
-  }
+.stateItem {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+
+.stateLink {
+  margin-inline-start: auto;
 }
 
 @media (max-width: 360px) {

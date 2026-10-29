@@ -58,7 +58,7 @@ test("refresh keeps an open report and safely closes it when it disappears", asy
     if (url.pathname === "/v1/buddy/work") {
       if (Number(url.searchParams.get("limit")) <= 10)
         return route.fulfill({ json: envelope([]) });
-      listRequests += 1;
+      if (url.searchParams.get("attention") !== "unread") listRequests += 1;
       return route.fulfill({
         json: envelope(listRequests < 3 ? [record(work)] : []),
       });
@@ -80,20 +80,19 @@ test("refresh keeps an open report and safely closes it when it disappears", asy
   });
   await expect(reportHeading).toBeVisible();
 
-  const refresh = page.getByRole("button", { name: "Refresh work" });
+  const refresh = page.getByRole("button", { name: "Refresh reports" });
   await refresh.click();
   await expect(reportHeading).toBeVisible();
-  await expect(page.getByLabel("Work detail")).toBeVisible();
+  await expect(page.getByRole("article")).toBeVisible();
   await expect(row).toBeVisible();
 
-  await row.click();
   await refresh.click();
   await expect(
     page.getByRole("status").filter({
-      hasText: "That item is no longer in this view.",
+      hasText: "That report is no longer in this view.",
     }),
   ).toBeVisible();
-  await expect(page.getByLabel("Work detail")).toHaveCount(0);
+  await expect(page.getByRole("article")).toHaveCount(0);
   await expect(refresh).toBeFocused();
   expect(
     await page.evaluate(() => document.activeElement === document.body),

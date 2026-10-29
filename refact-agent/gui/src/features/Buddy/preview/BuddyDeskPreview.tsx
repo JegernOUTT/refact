@@ -79,7 +79,10 @@ export function BuddyDeskPreview() {
   const playTimerRef = useRef<number | null>(null);
   const selected =
     buddyDeskFixtures.find((item) => item.id === selectedId) ?? null;
-  const status = selected ? actionStatus[selected.id] ?? "idle" : "idle";
+  const status: ActionStatus =
+    selected && selected.id in actionStatus
+      ? actionStatus[selected.id]
+      : "idle";
   const grouped = useMemo(
     () =>
       Object.fromEntries(
@@ -92,9 +95,10 @@ export function BuddyDeskPreview() {
   );
 
   useEffect(() => {
+    const actionTimers = actionTimersRef.current;
     return () => {
       mountedRef.current = false;
-      actionTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+      actionTimers.forEach((timer) => window.clearTimeout(timer));
       if (playTimerRef.current !== null)
         window.clearTimeout(playTimerRef.current);
     };
@@ -168,7 +172,7 @@ export function BuddyDeskPreview() {
             <BuddyCanvas state={buddyState} displaySize={76} />
           </div>
           <div>
-            <p className={styles.eyebrow}>Buddy Desk</p>
+            <p className={styles.eyebrow}>Reports</p>
             <h1>Pixel is focused</h1>
             <p className={styles.presence}>
               Present · sorting fixture evidence, not changing your project

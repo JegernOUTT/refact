@@ -3,13 +3,28 @@
 .speech {
   display: flex;
   flex-direction: column;
-  gap: var(--rf-space-2);
   min-width: 0;
   overflow-wrap: anywhere;
 }
 
+.presence {
+  gap: var(--rf-space-2);
+}
+
+.identity {
+  flex: 1 1 auto;
+  gap: 0;
+}
+
+.speech {
+  gap: var(--rf-space-2);
+  padding-left: var(--rf-space-3);
+  border-left: var(--rf-focus-ring-w) solid var(--rf-border-strong);
+}
+
 .header,
-.controls {
+.controls,
+.actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -17,8 +32,17 @@
   min-width: 0;
 }
 
-.identity {
-  flex: 1;
+.name,
+.vibe,
+.mood,
+.speechText,
+.alert {
+  min-width: 0;
+  margin: 0;
+}
+
+.alert {
+  color: var(--rf-color-danger);
 }
 
 .avatar {
@@ -26,6 +50,12 @@
   pointer-events: none;
 }
 
-.speech p {
-  margin: 0;
+.actions {
+  padding-top: var(--rf-space-1);
+}
+
+.toggle.toggleOn {
+  border-color: var(--rf-color-accent);
+  background: var(--rf-color-accent-soft);
+  color: var(--rf-color-fg);
 }

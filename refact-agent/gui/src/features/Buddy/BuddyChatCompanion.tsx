@@ -324,10 +324,6 @@ function isChatCompanionSuggestion(suggestion: BuddySuggestion): boolean {
 }
 
 function isChatCompanionOpportunity(opportunity: BuddyOpportunity): boolean {
-  // Diagnostic investigations are surfaced through the BuddyPanel/BuddyHome
-  // hero flow rather than the chat-companion bubble. We still include any
-  // opportunity that carries user-facing actions so the chat companion can
-  // render accept/dismiss/investigate affordances for diagnostic kinds too.
   if (opportunity.kind === "diagnostic_investigation") {
     return opportunity.proposed_actions.length > 0;
   }

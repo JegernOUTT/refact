@@ -179,7 +179,7 @@ for (const width of [360, 1280]) {
     await page.getByRole("tab", { name: "Reports", exact: true }).click();
     await page.getByRole("button", { name: "Dismissed finding" }).click();
     await page
-      .getByRole("region", { name: "Registered actions" })
+      .getByRole("region", { name: "Report actions" })
       .getByRole("button", { name: "Dismiss — not a problem", exact: true })
       .click();
     const status = page.getByRole("status").filter({
@@ -195,7 +195,7 @@ for (const width of [360, 1280]) {
       page.getByRole("button", { name: "Following finding" }),
     ).toBeFocused();
     await expect(
-      page.getByText("That item is no longer in this view."),
+      page.getByText("That report is no longer in this view."),
     ).toHaveCount(0);
   });
 }

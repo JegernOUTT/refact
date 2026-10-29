@@ -144,3 +144,54 @@ describe("BuddySpeechBubble control choreography", () => {
     expect(bubbleAnchor(closedContainer).style.pointerEvents).toBe("none");
   });
 });
+
+describe("BuddySpeechBubble scene bounds", () => {
+  const rect = (left: number, top: number, width: number, height: number) =>
+    ({
+      left,
+      top,
+      width,
+      height,
+      right: left + width,
+      bottom: top + height,
+      x: left,
+      y: top,
+      toJSON: () => ({}),
+    }) as DOMRect;
+
+  it("shifts the bubble back inside the scene stage", () => {
+    const scene = document.createElement("div");
+    scene.setAttribute("data-buddy-scene-bounds", "");
+    document.body.appendChild(scene);
+    vi.spyOn(scene, "getBoundingClientRect").mockReturnValue(
+      rect(100, 100, 300, 200),
+    );
+    const spy = vi
+      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: HTMLElement) {
+        if (this === scene) return rect(100, 100, 300, 200);
+        return rect(320, 60, 160, 40);
+      });
+    vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(160);
+    const { container } = render(
+      <BuddySpeechBubble
+        text="Hello meadow"
+        textKey={1}
+        position="right"
+        palette={PALETTES[0]}
+        visible
+        opacity={1}
+        compact={false}
+        width="max-content"
+        maxWidth="300px"
+        whiteSpace="nowrap"
+        anchorStyle={{}}
+      />,
+      { container: scene },
+    );
+    expect(bubbleAnchor(container).style.translate).toBe("-88px 48px");
+    spy.mockRestore();
+    vi.restoreAllMocks();
+    scene.remove();
+  });
+});

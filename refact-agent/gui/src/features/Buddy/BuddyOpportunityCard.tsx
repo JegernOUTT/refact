@@ -1,10 +1,10 @@
 import React, { useState } from "react";
-import { Text } from "../../components/ui";
-import { Badge, Button, Surface } from "../../components/ui";
+import { Badge, Button } from "../../components/ui";
 import type { BuddyOpportunity } from "./types";
 import { buddyActionResultMessage } from "./hooks/useExecuteBuddyAction";
 import { useBuddyControlAction } from "./hooks/useBuddyControlAction";
 import { actionLabel } from "./buddyOpportunityActions";
+import { BuddyRow, BuddyStatusBadge, buddyStatus, toBuddySeverity } from "./ui";
 import styles from "./BuddyOpportunityCard.module.css";
 
 interface Props {
@@ -20,13 +20,6 @@ export const BuddyOpportunityCard: React.FC<Props> = ({ opportunity }) => {
   const [actionError, setActionError] = useState<string | null>(null);
   const isActive =
     opportunity.status === "new" || opportunity.status === "shown";
-
-  const priorityClass = {
-    critical: styles.priorityCritical,
-    high: styles.priorityHigh,
-    normal: styles.priorityNormal,
-    low: styles.priorityLow,
-  }[opportunity.priority];
 
   const handleActionClick = async (idx: number, never?: boolean) => {
     if (!isActive) return;
@@ -45,67 +38,78 @@ export const BuddyOpportunityCard: React.FC<Props> = ({ opportunity }) => {
   );
   const isQuest = opportunity.kind === "quest";
   const busy = pendingActionIds.size > 0;
+  const primaryIndex = opportunity.proposed_actions.findIndex(
+    (action) => action.kind !== "dismiss",
+  );
+
+  const severity = toBuddySeverity(opportunity.priority);
+  const actions =
+    opportunity.proposed_actions.length > 0 ? (
+      <div className={styles.actions}>
+        {opportunity.proposed_actions.map((action, idx) => (
+          <Button
+            key={`${action.kind}-${JSON.stringify(action)}`}
+            size="sm"
+            type="button"
+            variant={
+              action.kind !== "dismiss" && idx === primaryIndex
+                ? "primary"
+                : "ghost"
+            }
+            disabled={!isActive || busy}
+            aria-label={actionLabel(action)}
+            aria-busy={pendingActionIndex === idx}
+            loading={pendingActionIndex === idx}
+            onClick={() => void handleActionClick(idx)}
+          >
+            {pendingActionIndex === idx ? "Working…" : actionLabel(action)}
+          </Button>
+        ))}
+        {dismissIndex >= 0 && (
+          <Button
+            size="sm"
+            type="button"
+            variant="ghost"
+            disabled={!isActive || busy}
+            aria-label="Never show this again"
+            onClick={() => void handleActionClick(dismissIndex, true)}
+          >
+            Never
+          </Button>
+        )}
+      </div>
+    ) : null;
 
   return (
-    <Surface className={styles.card} radius="control" variant="plain">
-      <div className={styles.header}>
-        <Badge
-          className={`${styles.priorityBadge} ${priorityClass}`}
-          aria-label={`Priority: ${opportunity.priority}`}
-          tone="muted"
-        >
-          {opportunity.priority}
-        </Badge>
-        {isQuest && (
-          <Badge tone="accent" size="xs" aria-label="Quest">
-            quest
-          </Badge>
-        )}
-        <Text size="2" className={styles.summary}>
-          {opportunity.summary}
-        </Text>
-      </div>
-      {opportunity.humor && (
-        <Text size="1" className={styles.humor}>
-          {opportunity.humor}
-        </Text>
-      )}
-      {opportunity.proposed_actions.length > 0 && (
-        <div className={styles.actions}>
-          {opportunity.proposed_actions.map((action, idx) => (
-            <Button
-              key={`${action.kind}-${JSON.stringify(action)}`}
-              size="sm"
-              type="button"
-              variant={action.kind === "dismiss" ? "ghost" : "primary"}
-              disabled={!isActive || busy}
-              aria-label={actionLabel(action)}
-              aria-busy={pendingActionIndex === idx}
-              loading={pendingActionIndex === idx}
-              onClick={() => void handleActionClick(idx)}
-            >
-              {pendingActionIndex === idx ? "Working…" : actionLabel(action)}
-            </Button>
-          ))}
-          {dismissIndex >= 0 && (
-            <Button
-              size="sm"
-              type="button"
-              variant="ghost"
-              disabled={!isActive || busy}
-              aria-label="Never show this again"
-              onClick={() => void handleActionClick(dismissIndex, true)}
-            >
-              Never
-            </Button>
-          )}
-        </div>
-      )}
+    <div className={styles.card}>
+      <BuddyRow
+        title={opportunity.summary}
+        titleLines={2}
+        description={opportunity.humor ?? undefined}
+        leading={{
+          tick: severity ? buddyStatus("severity", severity).tone : "default",
+        }}
+        status={
+          <>
+            {severity && (
+              <span aria-label={`Priority: ${opportunity.priority}`}>
+                <BuddyStatusBadge dimension="severity" value={severity} />
+              </span>
+            )}
+            {isQuest && (
+              <Badge tone="default" size="xs" aria-label="Quest">
+                Quest
+              </Badge>
+            )}
+          </>
+        }
+      />
+      {actions}
       {actionError && (
-        <Text size="1" color="red" className={styles.actionError} role="alert">
+        <p className={styles.actionError} role="alert">
           {actionError}
-        </Text>
+        </p>
       )}
-    </Surface>
+    </div>
   );
 };

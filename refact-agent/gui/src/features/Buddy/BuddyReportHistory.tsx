@@ -1,99 +1,22 @@
 import { useState } from "react";
-import { Button, Text } from "../../components/ui";
+import { Button } from "../../components/ui";
 import {
   useGetBuddyArtifactHistoryQuery,
-  useGetBuddyRunOutcomeQuery,
   useGetBuddyWorkOutcomesQuery,
 } from "../../services/refact/buddyOperator";
 import type { ArtifactRevision, WorkItem } from "./operatorTypes";
 import { humanizeIdentifier } from "../../utils/displayNames";
-import { formatReportTime, humanizeResourceReference } from "./buddyUtils";
 import { BuddyArtifactBody } from "./BuddyArtifactBody";
+import { stripLeadingTitleHeading } from "./BuddyArtifactBodyText";
+import { BuddyReportRun } from "./BuddyReportRun";
+import {
+  BuddyDisclosure,
+  BuddyErrorCallout,
+  BuddyLoading,
+  BuddyRow,
+  BuddyTimestamp,
+} from "./ui";
 import styles from "./BuddyReportHistory.module.css";
-
-function RunEvidence({
-  runId,
-  item,
-  identity,
-}: {
-  runId: string;
-  item: WorkItem;
-  identity: string;
-}) {
-  const query = useGetBuddyRunOutcomeQuery({
-    id: runId,
-    project_id: item.project.project_id,
-    endpoint_identity: identity,
-  });
-  const run = query.currentData?.data.value;
-  const matches =
-    run?.work_id === item.id &&
-    run.project.canonical_root === item.project.canonical_root;
-  const startedAt = formatReportTime(run?.started_at);
-  const endedAt = formatReportTime(run?.ended_at);
-  return (
-    <section aria-label="Recorded run" className={styles.run}>
-      {query.isFetching && (
-        <Text as="p" size="1" color="gray" role="status">
-          Loading recorded run…
-        </Text>
-      )}
-      {Boolean(query.error) || (run && !matches) ? (
-        <Text as="p" size="2" color="red" role="alert">
-          Recorded run could not be matched to this work.
-        </Text>
-      ) : (
-        run && (
-          <>
-            <Text
-              as="p"
-              size="1"
-              color="gray"
-              title={startedAt.absolute ?? undefined}
-            >
-              {humanizeIdentifier(run.status)} · {startedAt.relative} —{" "}
-              {run.ended_at ? (
-                <time title={endedAt.absolute ?? undefined}>
-                  {endedAt.relative}
-                </time>
-              ) : (
-                "No terminal time"
-              )}
-            </Text>
-            <h3 className={styles.heading}>Observed scope</h3>
-            <Text as="p" size="2">
-              {run.coverage}
-            </Text>
-            {run.failure_class && (
-              <Text as="p" size="1" color="orange">
-                {humanizeIdentifier(run.failure_class)}
-              </Text>
-            )}
-            {run.effects.length === 0 ? (
-              <Text as="p" size="1" color="gray">
-                No resource effects were recorded.
-              </Text>
-            ) : (
-              <ul className={styles.effects}>
-                {run.effects.map((effect, index) => (
-                  <li key={index}>
-                    <Text size="1" color="gray">
-                      {humanizeResourceReference(
-                        effect.resource.resource_kind,
-                        effect.resource.resource_id,
-                      )}
-                      : {humanizeIdentifier(effect.state)}
-                    </Text>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </>
-        )
-      )}
-    </section>
-  );
-}
 
 export function BuddyReportHistory({
   item,
@@ -129,60 +52,57 @@ export function BuddyReportHistory({
   );
   return (
     <div className={styles.history}>
-      <details
-        className={styles.disclosure}
-        onToggle={(event) => setOpen(event.currentTarget.open)}
+      <BuddyDisclosure
+        label="Earlier revisions"
+        open={open}
+        onOpenChange={setOpen}
+        testId="buddy-report-revisions"
+        contentClassName={styles.body}
       >
-        <summary className={styles.summary}>Saved report revisions</summary>
-        <div className={styles.body}>
-          {history.isFetching && (
-            <Text as="p" size="1" color="gray" role="status">
-              Loading report history…
-            </Text>
-          )}
-          {history.error && (
-            <Text as="p" size="2" color="red" role="alert">
-              Report history is unavailable.
-            </Text>
-          )}
-          {history.currentData?.data.map(({ value }) =>
-            value.project.canonical_root !== item.project.canonical_root ? (
-              <Text
-                as="p"
-                size="2"
-                color="red"
-                key={value.revision}
-                role="alert"
-              >
-                Historical report belongs to another project.
-              </Text>
-            ) : (
-              <details key={value.revision} className={styles.disclosure}>
-                <summary className={styles.summary}>
-                  Revision {value.revision} · {value.title}
-                </summary>
-                <div className={styles.body}>
-                  <Text as="p" size="2">
-                    {value.conclusion}
-                  </Text>
-                  <BuddyArtifactBody body={value.body} />
-                  <Text as="p" size="1" color="gray">
-                    Historical evidence only. Actions are available on the
-                    current revision.
-                  </Text>
-                </div>
-              </details>
-            ),
-          )}
+        {history.isFetching && (
+          <BuddyLoading variant="rows" count={2} label="Loading revisions" />
+        )}
+        {history.error && (
+          <BuddyErrorCallout
+            thing="earlier revisions"
+            error={history.error}
+            onRetry={() => void history.refetch()}
+            compact
+          />
+        )}
+        {history.currentData?.data.map(({ value }) =>
+          value.project.canonical_root !== item.project.canonical_root ? (
+            <p key={value.revision} role="alert" className={styles.warning}>
+              This revision belongs to another project.
+            </p>
+          ) : (
+            <BuddyDisclosure
+              key={value.revision}
+              label={`Revision ${value.revision} · ${value.title}`}
+              lazy
+              contentClassName={styles.body}
+            >
+              <p className={styles.text}>{value.conclusion}</p>
+              <BuddyArtifactBody
+                body={stripLeadingTitleHeading(value.body, value.title)}
+              />
+              <p className={styles.hint}>
+                Earlier revision. Actions apply to the current revision only.
+              </p>
+            </BuddyDisclosure>
+          ),
+        )}
+        <div className={styles.pager}>
           {history.currentData?.next_cursor != null && (
             <Button
               size="sm"
+              variant="soft"
               disabled={history.isFetching}
               onClick={() =>
                 setCursor(history.currentData?.next_cursor ?? undefined)
               }
             >
-              Next revisions
+              Older revisions
             </Button>
           )}
           {cursor !== undefined && (
@@ -191,78 +111,67 @@ export function BuddyReportHistory({
               variant="ghost"
               onClick={() => setCursor(undefined)}
             >
-              First revisions
+              Newest revisions
             </Button>
           )}
         </div>
-      </details>
-      <details
-        className={styles.disclosure}
-        onToggle={(event) => setRunsOpen(event.currentTarget.open)}
+      </BuddyDisclosure>
+      <BuddyDisclosure
+        label="Run history"
+        summary="Every check, including runs with no change"
+        open={runsOpen}
+        onOpenChange={setRunsOpen}
+        testId="buddy-report-runs"
+        contentClassName={styles.body}
       >
-        <summary className={styles.summary}>
-          All recorded checks, including unchanged runs
-        </summary>
-        <div className={styles.body}>
-          <Text as="p" size="1" color="gray">
-            Every repeat check is kept here, even when nothing changed.
-          </Text>
-          {runs.isFetching && (
-            <Text as="p" size="1" color="gray" role="status">
-              Loading recorded checks…
-            </Text>
-          )}
-          {runs.error && (
-            <Text as="p" size="2" color="red" role="alert">
-              Recorded checks are unavailable.
-            </Text>
-          )}
-          {!runs.error &&
-            runs.currentData?.data.map(({ value }) =>
+        {runs.isFetching && (
+          <BuddyLoading variant="rows" count={2} label="Loading run history" />
+        )}
+        {runs.error && (
+          <BuddyErrorCallout
+            thing="run history"
+            error={runs.error}
+            onRetry={() => void runs.refetch()}
+            compact
+          />
+        )}
+        {!runs.error && (
+          <ul className={styles.rows} aria-label="Runs">
+            {runs.currentData?.data.map(({ value }) =>
               value.project.canonical_root !== item.project.canonical_root ? (
-                <Text
-                  as="p"
-                  size="2"
-                  color="red"
-                  role="alert"
-                  key={value.run_id}
-                >
-                  Recorded check belongs to another project.
-                </Text>
+                <li key={value.run_id} role="alert" className={styles.warning}>
+                  This run belongs to another project.
+                </li>
               ) : (
-                <Button
-                  key={value.run_id}
-                  size="sm"
-                  variant="ghost"
-                  className={styles.runRow}
-                  onClick={() => setSelectedRun(value.run_id)}
-                  title={`Run ID: ${value.run_id} · ${new Date(
-                    value.ended_at ?? value.started_at,
-                  ).toLocaleString()}`}
-                >
-                  {humanizeIdentifier(value.status)} ·{" "}
-                  <time
-                    title={new Date(
-                      value.ended_at ?? value.started_at,
-                    ).toLocaleString()}
-                  >
-                    {
-                      formatReportTime(value.ended_at ?? value.started_at)
-                        .relative
-                    }
-                  </time>
-                </Button>
+                <li key={value.run_id}>
+                  <BuddyRow
+                    density="compact"
+                    title={humanizeIdentifier(value.status)}
+                    meta={[
+                      <BuddyTimestamp
+                        key="time"
+                        value={value.ended_at ?? value.started_at}
+                      />,
+                    ]}
+                    selected={selectedRun === value.run_id}
+                    onClick={() => setSelectedRun(value.run_id)}
+                  />
+                </li>
               ),
             )}
+          </ul>
+        )}
+        <div className={styles.pager}>
           {runs.currentData?.next_cursor != null && (
             <Button
               size="sm"
+              variant="soft"
               disabled={runs.isFetching}
               onClick={() =>
                 setRunCursor(runs.currentData?.next_cursor ?? undefined)
               }
             >
-              Next recorded checks
+              Older runs
             </Button>
           )}
           {runCursor !== undefined && (
@@ -271,36 +180,38 @@ export function BuddyReportHistory({
               variant="ghost"
               onClick={() => setRunCursor(undefined)}
             >
-              First recorded checks
+              Newest runs
             </Button>
           )}
         </div>
-      </details>
+      </BuddyDisclosure>
       {artifact.source_run_ids.length > 0 && (
-        <details className={styles.disclosure}>
-          <summary className={styles.summary}>Source runs</summary>
-          <div className={styles.body}>
+        <BuddyDisclosure
+          label="Source runs"
+          count={artifact.source_run_ids.length}
+          contentClassName={styles.body}
+        >
+          <ul className={styles.rows} aria-label="Source runs">
             {artifact.source_run_ids.map((id, index) => (
-              <Button
-                key={id}
-                size="sm"
-                variant="ghost"
-                className={styles.runRow}
-                onClick={() => setSelectedRun(id)}
-                title={`Run ID: ${id}`}
-              >
-                Source run {index + 1}
-              </Button>
+              <li key={id}>
+                <BuddyRow
+                  density="compact"
+                  title={`Source run ${index + 1}`}
+                  selected={selectedRun === id}
+                  onClick={() => setSelectedRun(id)}
+                />
+              </li>
             ))}
-          </div>
-        </details>
+          </ul>
+        </BuddyDisclosure>
       )}
       {selectedRun && (
-        <RunEvidence
+        <BuddyReportRun
           key={selectedRun}
           runId={selectedRun}
           item={item}
           identity={identity}
+          onClose={() => setSelectedRun(undefined)}
         />
       )}
     </div>

@@ -1,0 +1,115 @@
+.disclosure {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
+.heading {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font: inherit;
+}
+
+.trigger {
+  display: inline-flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: var(--rf-control-h-icon-sm);
+  align-items: center;
+  gap: var(--rf-space-1);
+  padding: 0 var(--rf-space-1);
+  margin: 0;
+  border: 0;
+  border-radius: var(--rf-radius-chip);
+  background: transparent;
+  color: var(--rf-color-fg);
+  font: var(--rf-weight-medium) var(--rf-text-2) / var(--rf-line-2)
+    var(--rf-font-ui);
+  text-align: start;
+  cursor: pointer;
+}
+
+.trigger:disabled {
+  color: var(--rf-color-faint);
+  cursor: not-allowed;
+}
+
+.section .trigger {
+  height: var(--rf-control-h);
+  font-size: var(--rf-text-3);
+  font-weight: var(--rf-weight-semibold);
+  line-height: var(--rf-line-3);
+}
+
+.trigger:hover:not(:disabled) {
+  background: var(--rf-surface-1);
+}
+
+.chevron {
+  color: var(--rf-color-muted);
+  transform: rotate(0deg);
+}
+
+.disclosure[data-state="open"] > .header .chevron {
+  transform: rotate(90deg);
+}
+
+.label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.count {
+  flex: 0 0 auto;
+}
+
+.summary {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  font-weight: var(--rf-weight-regular);
+  line-height: var(--rf-line-1);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trailing {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--rf-space-1);
+}
+
+.content {
+  min-width: 0;
+}
+
+.inline .content {
+  padding: var(--rf-space-1) 0 0 calc(var(--rf-icon-sm) + var(--rf-space-2));
+}
+
+.section .content {
+  padding-top: var(--rf-space-2);
+}
+
+.content[hidden] {
+  display: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .chevron {
+    transition: transform var(--rf-dur-fast) var(--rf-ease-standard);
+  }
+}

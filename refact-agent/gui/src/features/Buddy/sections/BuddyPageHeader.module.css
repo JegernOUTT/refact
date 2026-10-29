@@ -1,0 +1,79 @@
+.topBar {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  flex-shrink: 0;
+  min-width: 0;
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+  background: transparent;
+}
+
+.topIdentity {
+  display: flex;
+  align-items: baseline;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: 0 var(--rf-space-2);
+  min-width: 0;
+}
+
+.topTitle {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topMeta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+
+.topProject {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.metaSeparator {
+  color: var(--rf-color-muted);
+}
+
+.statusPill {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.statusPillAlert {
+  gap: var(--rf-space-1);
+}
+
+.degradedCard {
+  border-color: var(--rf-color-danger);
+}
+
+.degradedHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  min-height: var(--rf-control-h);
+}
+
+.degradedTitle {
+  flex: 1 1 12rem;
+  min-width: 0;
+  margin: 0;
+}
+
+.degradedText {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}

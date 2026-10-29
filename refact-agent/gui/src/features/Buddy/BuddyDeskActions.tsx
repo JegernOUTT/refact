@@ -1,7 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { v4 as uuidv4 } from "uuid";
-import { Zap } from "lucide-react";
-import { Button, Surface, Text } from "../../components/ui";
+import { Button, Text, Tooltip } from "../../components/ui";
 import {
   useGetBuddyDeskActionsQuery,
   useExecuteBuddyDeskActionMutation,
@@ -14,9 +13,14 @@ import type {
   WorkItem,
 } from "./operatorTypes";
 import { humanizeIdentifier } from "../../utils/displayNames";
-import { BuddySectionHeader } from "./BuddySectionHeader";
 import { BuddyResourceAction } from "./BuddyResourceAction";
 import { buddyRegisteredActionHandler } from "./executeBuddyAction";
+import {
+  BUDDY_TERMS,
+  BuddyDisclosure,
+  BuddyErrorCallout,
+  BuddyTimestamp,
+} from "./ui";
 import styles from "./BuddyDeskActions.module.css";
 
 function ActionControl({
@@ -28,7 +32,9 @@ function ActionControl({
   onDismiss,
   onDismissPending,
   onDismissFailure,
+  inline = false,
 }: {
+  inline?: boolean;
   action: DeskAction;
   item: WorkItem;
   endpointIdentity: string;
@@ -39,6 +45,7 @@ function ActionControl({
   onDismissFailure?: (item: WorkItem) => void;
 }) {
   const [execute] = useExecuteBuddyDeskActionMutation();
+  const descriptionId = useId();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<OperatorRecord<ActionExecution> | null>(
@@ -101,7 +108,7 @@ function ActionControl({
         action.spec.action_id === "dismiss_not_a_problem" &&
         response.data.value.status === "completed";
       if (dismissed && onDismissRef.current) {
-        onDismissRef.current?.(itemRef.current);
+        onDismissRef.current(itemRef.current);
         key.current = undefined;
         return;
       }
@@ -130,23 +137,41 @@ function ActionControl({
       if (mounted.current) setPending(false);
     }
   };
+  const button = (
+    <Button
+      size="sm"
+      variant={inline ? "ghost" : lifecycle ? "soft" : "primary"}
+      disabled={disabled || pending || !available}
+      aria-describedby={inline ? descriptionId : undefined}
+      onClick={() => void run()}
+    >
+      {pending
+        ? lifecycle
+          ? "Dismissing item…"
+          : "Verifying saved evidence…"
+        : action.label}
+    </Button>
+  );
   return (
-    <section className={styles.action} aria-label={action.label}>
-      <Text as="p" size="2" className={styles.description}>
-        {action.description}
-      </Text>
-      <Button
-        size="sm"
-        variant="primary"
-        disabled={disabled || pending || !available}
-        onClick={() => void run()}
-      >
-        {pending
-          ? lifecycle
-            ? "Dismissing item…"
-            : "Verifying saved evidence…"
-          : action.label}
-      </Button>
+    <section
+      className={inline ? styles.actionInline : styles.action}
+      aria-label={action.label}
+    >
+      {inline ? (
+        <>
+          <span id={descriptionId} className={styles.srOnly}>
+            {action.description}
+          </span>
+          <Tooltip content={action.description}>{button}</Tooltip>
+        </>
+      ) : (
+        <>
+          <Text as="p" size="2" className={styles.description}>
+            {action.description}
+          </Text>
+          {button}
+        </>
+      )}
       {!supported && (
         <Text as="p" size="1" color="gray" className={styles.description}>
           This action type is not supported by this client.
@@ -172,15 +197,22 @@ function ActionControl({
               </li>
             ))}
           </ul>
-          <details className={styles.disclosure}>
-            <summary className={styles.summary}>Execution receipt</summary>
+          <BuddyDisclosure label={BUDDY_TERMS.technicalDetails} lazy>
             <Text as="p" size="1" color="gray" className={styles.description}>
-              {latest.execution_id}
+              Receipt {latest.execution_id}
             </Text>
             <Text as="p" size="1" color="gray" className={styles.description}>
-              {latest.ended_at ?? "No terminal observation recorded yet."}
+              {latest.ended_at ? (
+                <BuddyTimestamp
+                  value={latest.ended_at}
+                  mode="absolute"
+                  prefix="Finished"
+                />
+              ) : (
+                "Not finished yet."
+              )}
             </Text>
-          </details>
+          </BuddyDisclosure>
         </div>
       )}
     </section>
@@ -194,6 +226,7 @@ export function BuddyDeskActions({
   onDismiss,
   onDismissPending,
   onDismissFailure,
+  secondary,
 }: {
   item: WorkItem;
   artifact: ArtifactRevision;
@@ -201,6 +234,7 @@ export function BuddyDeskActions({
   onDismiss?: (item: WorkItem) => void;
   onDismissPending?: (item: WorkItem) => void;
   onDismissFailure?: (item: WorkItem) => void;
+  secondary?: ReactNode;
 }) {
   const { currentData, error, isFetching, refetch } =
     useGetBuddyDeskActionsQuery(
@@ -224,85 +258,79 @@ export function BuddyDeskActions({
   const returned = currentData?.data.length ?? 0;
   const stale = !isFetching && !error && returned > 0 && actions?.length === 0;
   const proposals = artifact.proposed_action_ids.length > 0;
-  if (!error && !isFetching && !stale && (actions?.length ?? 0) === 0) {
-    return proposals ? (
-      <Text as="p" size="1" color="gray" className={styles.footnote}>
-        Buddy only describes what it found; no proposed fix is applied
-        automatically.
-      </Text>
-    ) : null;
-  }
+  const footnote = proposals ? (
+    <Text as="p" size="1" color="gray" className={styles.footnote}>
+      Suggested fixes are never applied automatically.
+    </Text>
+  ) : null;
+  const empty = !error && !isFetching && !stale && (actions?.length ?? 0) === 0;
+  if (empty && !secondary) return footnote;
+  const control = (action: DeskAction, inline: boolean) =>
+    buddyRegisteredActionHandler(action.spec) === "resource" ? (
+      <BuddyResourceAction
+        key={`${endpointIdentity}:${item.id}:${action.spec_hash}`}
+        spec={action.spec}
+        label={action.label}
+        endpointIdentity={endpointIdentity}
+        disabled={isFetching}
+        latestExecution={action.latest_execution?.value ?? null}
+      />
+    ) : (
+      <ActionControl
+        key={`${endpointIdentity}:${item.id}:${action.spec_hash}`}
+        action={action}
+        item={item}
+        endpointIdentity={endpointIdentity}
+        disabled={isFetching}
+        inline={inline}
+        refresh={() => void refetch()}
+        onDismiss={onDismiss}
+        onDismissPending={onDismissPending}
+        onDismissFailure={onDismissFailure}
+      />
+    );
+  const isLifecycle = (action: DeskAction) =>
+    buddyRegisteredActionHandler(action.spec) === "work_lifecycle";
+  const shown = error ? [] : actions ?? [];
+  const primary = shown.filter((action) => !isLifecycle(action));
+  const lifecycle = shown.filter(isLifecycle);
   return (
-    <Surface
-      as="section"
-      variant="surface-1"
-      radius="card"
-      className={styles.panel}
-      aria-label="Registered actions"
-    >
-      <BuddySectionHeader icon={Zap} label="What you can do" level="h3" />
+    <section className={styles.panel} aria-label="Report actions">
       {isFetching && (
         <Text as="p" size="1" color="gray" role="status">
-          Loading current actions…
+          Loading actions…
         </Text>
       )}
       {error && (
-        <div role="alert" className={styles.alert}>
-          <Text as="p" size="2" color="red">
-            Registered actions could not be loaded. Saved execution status is
-            unavailable.
-          </Text>
-          <Button size="sm" onClick={() => void refetch()}>
-            Retry actions
-          </Button>
-        </div>
+        <BuddyErrorCallout
+          thing="actions for this report"
+          error={error}
+          onRetry={() => void refetch()}
+          retryLabel="Retry actions"
+          compact
+        />
       )}
-      {!error &&
-        actions?.map((action) =>
-          buddyRegisteredActionHandler(action.spec) === "resource" ? (
-            <BuddyResourceAction
-              key={`${endpointIdentity}:${item.id}:${action.spec_hash}`}
-              spec={action.spec}
-              label={action.label}
-              endpointIdentity={endpointIdentity}
-              disabled={isFetching}
-              latestExecution={action.latest_execution?.value ?? null}
-            />
-          ) : (
-            <ActionControl
-              key={`${endpointIdentity}:${item.id}:${action.spec_hash}`}
-              action={action}
-              item={item}
-              endpointIdentity={endpointIdentity}
-              disabled={isFetching}
-              refresh={() => void refetch()}
-              onDismiss={onDismiss}
-              onDismissPending={onDismissPending}
-              onDismissFailure={onDismissFailure}
-            />
-          ),
-        )}
+      {primary.map((action) => control(action, false))}
       {stale && (
         <Text as="p" size="2" color="gray" className={styles.description}>
-          No registered actions are available for this report revision.
+          No actions are available for this report revision.
         </Text>
       )}
-      {!error && (
-        <Button
-          size="sm"
-          variant="ghost"
-          disabled={isFetching}
-          onClick={() => void refetch()}
-        >
-          Reload action status
-        </Button>
-      )}
-      {proposals && (
-        <Text as="p" size="1" color="gray" className={styles.footnote}>
-          Buddy only describes what it found; no proposed fix is applied
-          automatically.
-        </Text>
-      )}
-    </Surface>
+      <div className={styles.secondary}>
+        {lifecycle.map((action) => control(action, true))}
+        {secondary}
+        {!error && !empty && (
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={isFetching}
+            onClick={() => void refetch()}
+          >
+            Refresh actions
+          </Button>
+        )}
+      </div>
+      {footnote}
+    </section>
   );
 }

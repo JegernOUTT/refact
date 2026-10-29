@@ -59,12 +59,7 @@ import {
 } from "../features/Buddy/buddySlice";
 import { registerBuddySpeechTtlListener } from "../features/Buddy/buddySpeechTtl";
 import { BuddyActivityPanel } from "../features/Buddy/BuddyActivityPanel";
-import {
-  getSignalDef,
-  PALETTES,
-  SIGNALS,
-  STAGES,
-} from "../features/Buddy/constants";
+import { PALETTES, SIGNALS, STAGES } from "../features/Buddy/constants";
 import { buildColorMap } from "../features/Buddy/canvas/colorMap";
 import {
   stepAnimFrame,
@@ -2472,12 +2467,6 @@ describe("BuddyChatCompanion triggers", () => {
     expect(SIGNALS.chat_completed.isError).toBe(false);
   });
 
-  test("unknown signal type uses fallback definition", () => {
-    const fallback = getSignalDef("future_backend_signal");
-    expect(fallback.icon).toBe("✨");
-    expect(fallback.isError).toBe(false);
-  });
-
   test.each<[string, string, string]>([
     ["speech_humor", "happy", "perk"],
     ["speech_chat_reaction", "happy", "perk"],
@@ -3175,12 +3164,7 @@ describe("BuddyChatCompanion chat_id scoping", () => {
   });
 });
 
-describe("BuddyPanel hero layout", () => {
-  test("BuddyPanel does not render BuddyRecentChats", () => {
-    const src = fs.readFileSync(path.join(buddyDir, "BuddyPanel.tsx"), "utf8");
-    expect(src).not.toContain("BuddyRecentChats");
-  });
-
+describe("Buddy hero layout", () => {
   test("BuddyCanvas accepts speechControls prop", () => {
     const src = fs.readFileSync(path.join(buddyDir, "BuddyCanvas.tsx"), "utf8");
     expect(src).toContain("speechControls");
@@ -3195,27 +3179,12 @@ describe("BuddyPanel hero layout", () => {
     expect(source).not.toContain("dispatch(updateBuddySettings(");
   });
 
-  test("panel dismiss targets only the top opportunity", () => {
-    const panel = fs.readFileSync(
-      path.join(buddyDir, "BuddyPanel.tsx"),
-      "utf8",
-    );
+  test("companion dismiss settles every opportunity", () => {
     const companion = fs.readFileSync(
       path.join(buddyDir, "BuddyChatCompanion.tsx"),
       "utf8",
     );
-    expect(panel).not.toContain("Promise.allSettled");
-    expect(panel).toContain("getOpportunityDismissAction(topOpportunity)");
     expect(companion).toContain("Promise.allSettled");
-  });
-
-  test("runtime signal chrome uses fallback lookup", () => {
-    const panel = fs.readFileSync(
-      path.join(buddyDir, "BuddyPanel.tsx"),
-      "utf8",
-    );
-    expect(panel).toContain("getSignalDef(activeRuntime.signal_type)");
-    expect(panel).not.toContain("SIGNALS[activeRuntime.signal_type]");
   });
 });
 
@@ -5916,11 +5885,11 @@ describe("buddy chat reactions settings and bubbles", () => {
 
   test("settings panel renders chat reactions toggle", () => {
     const source = fs.readFileSync(
-      path.join(buddyDir, "BuddySettingsPanel.tsx"),
+      path.join(buddyDir, "BuddySettingsGroups.tsx"),
       "utf8",
     );
     expect(source).toContain("chat_reactions_enabled");
-    expect(source).toContain("chat reactions enabled");
+    expect(source).toContain("Live chat reactions");
     expect(source).toContain("redacted");
   });
 

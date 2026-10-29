@@ -1,82 +1,22 @@
 .card {
   display: flex;
   flex-direction: column;
-  gap: var(--rf-space-2);
+  gap: var(--rf-space-1);
   min-width: 0;
-  padding: var(--rf-space-2);
-  border: var(--rf-hairline) solid transparent;
-  background: transparent;
-  transition:
-    background var(--rf-dur-fast) var(--rf-ease-standard),
-    border-color var(--rf-dur-fast) var(--rf-ease-standard);
-}
-
-.card:hover {
-  border-color: var(--rf-border-strong);
-  background: var(--rf-surface-2);
-}
-
-.header {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--rf-space-2);
-}
-
-.priorityBadge {
-  display: inline-flex;
-  align-items: center;
-  padding: var(--rf-space-2xs) var(--rf-space-xs);
-  border-radius: var(--rf-radius-pill);
-  font-size: var(--rf-text-1);
-  font-weight: var(--rf-weight-semibold);
-  flex-shrink: 0;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.priorityCritical {
-  background: color-mix(in srgb, var(--rf-color-danger) 18%, transparent);
-  color: var(--rf-color-danger);
-}
-
-.priorityHigh {
-  background: color-mix(in srgb, var(--rf-color-warning) 18%, transparent);
-  color: var(--rf-color-warning);
-}
-
-.priorityNormal {
-  background: var(--rf-surface-2);
-  color: var(--rf-color-fg);
-}
-
-.priorityLow {
-  background: var(--rf-surface-2);
-  color: var(--rf-color-muted);
-}
-
-.summary {
-  flex: 1;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.humor {
-  font-style: italic;
-  color: var(--rf-color-muted);
+  padding-bottom: var(--rf-space-2);
 }
 
 .actions {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--rf-space-1);
-  min-width: 0;
-}
-
-.actions > * {
-  min-width: 0;
+  gap: var(--rf-space-2);
+  padding-inline-start: var(--rf-space-4);
 }
 
 .actionError {
+  margin: 0;
+  padding-inline-start: var(--rf-space-4);
   color: var(--rf-color-danger);
-  overflow-wrap: anywhere;
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
 }

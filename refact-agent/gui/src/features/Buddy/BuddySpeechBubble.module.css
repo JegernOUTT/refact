@@ -1,7 +1,9 @@
 .anchor {
   position: absolute;
   z-index: 5;
-  filter: drop-shadow(0 4px 10px rgba(15, 18, 26, 0.32));
+  filter: drop-shadow(
+    0 4px 10px color-mix(in srgb, var(--rf-scrim) 58%, transparent)
+  );
 }
 
 .anchor[data-bubble-position="top"] {
@@ -85,7 +87,7 @@
 }
 
 .anchor[data-style="alert"] .skin {
-  border-color: #d8736d;
+  border-color: var(--rf-color-danger);
 }
 
 .anchor[data-closing="true"] .skin {
@@ -150,12 +152,12 @@
   border-radius: inherit;
   background: radial-gradient(
       ellipse 130% 70% at 22% 8%,
-      rgba(255, 255, 255, 0.75),
+      color-mix(in srgb, var(--rf-bg) 75%, transparent),
       transparent 55%
     ),
     radial-gradient(
       ellipse 60% 36% at 84% 96%,
-      rgba(193, 161, 100, 0.12),
+      var(--rf-color-warning-soft),
       transparent 70%
     );
 }
@@ -164,7 +166,7 @@
   position: absolute;
   inset: -6px;
   pointer-events: none;
-  border: 2px solid #d8736d;
+  border: 2px solid var(--rf-color-danger);
   border-radius: inherit;
   opacity: 0;
   animation: bb-alert-ring 0.9s ease-out 0.12s 1;
@@ -225,8 +227,6 @@
   color: var(--bb-ink);
   font-size: var(--rf-text-1);
   font-weight: var(--rf-weight-bold);
-  letter-spacing: 0.4px;
-  text-transform: uppercase;
 }
 
 .controls {

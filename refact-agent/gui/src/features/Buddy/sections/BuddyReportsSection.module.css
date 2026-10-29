@@ -1,0 +1,51 @@
+.section:focus-visible {
+  outline: none;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  min-width: 0;
+}
+
+.section > * {
+  flex-shrink: 0;
+}
+
+.draftMeta {
+  min-width: 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+  overflow-wrap: anywhere;
+}
+
+.draftText {
+  margin: 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line-2);
+}
+
+.draftContent {
+  composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
+  max-height: 40vh;
+  margin: 0;
+  padding: var(--rf-space-3);
+  overflow: auto;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-2);
+  color: var(--rf-color-fg);
+  font: var(--rf-text-1) / var(--rf-line-1) var(--rf-font-mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.draftActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}

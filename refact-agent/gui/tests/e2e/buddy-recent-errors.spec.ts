@@ -26,13 +26,18 @@ test.describe("Buddy Recent errors", () => {
       await expect(
         titleSummaryRow.getByText("Model unavailable: Model unavailable"),
       ).toHaveCount(0);
-      expect(await list.getByText("just now").count()).toBeGreaterThan(0);
+      await expect(list.locator("time").first()).toContainText(
+        /^(now|\d+m ago)$/,
+      );
       await expect(
-        list.getByText("Provider unavailable ×3", { exact: true }),
+        list
+          .getByRole("listitem")
+          .filter({ hasText: "Provider unavailable" })
+          .getByText("×3", { exact: true }),
       ).toBeVisible();
       await expect(
-        list.getByText("Provider unavailable — retry later"),
-      ).toHaveCount(0);
+        list.getByText("Provider unavailable — retry later", { exact: true }),
+      ).toHaveCount(1);
       await expect(
         list.getByText("Distinct warning 0: Additional detail 0"),
       ).toHaveCount(0);

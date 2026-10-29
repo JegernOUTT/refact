@@ -5,7 +5,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 const ROUTE = "/tests/e2e/route-showcase.html?route=buddy&operator=enabled";
-const DESK = '[aria-label="Buddy Desk"]';
+const DESK = '[data-testid="buddy-desk"]';
 const SECTIONS = ["Home", "Reports", "Activity", "Play", "Settings"] as const;
 const project = { project_id: "showcase", canonical_root: "/workspace/refact" };
 
@@ -121,13 +121,15 @@ test.describe("Buddy Home redesign (operator enabled, 50 saved items)", () => {
 
       const saved = page.getByTestId("buddy-home-saved-work");
       await expect(saved).toBeVisible();
-      const preview = saved.getByRole("list", { name: "Saved work preview" });
+      const preview = saved.getByRole("list", {
+        name: "Reports that need you",
+      });
       await expect(preview.getByRole("listitem").first()).toBeVisible();
       expect(await preview.getByRole("listitem").count()).toBeLessThanOrEqual(
         3,
       );
       await expect(
-        saved.getByRole("button", { name: "More reports" }),
+        saved.getByRole("button", { name: "View all reports" }),
       ).toBeVisible();
 
       // The unbounded Desk is not on Home.
@@ -172,13 +174,13 @@ test.describe("Buddy Home redesign (operator enabled, 50 saved items)", () => {
     });
   }
 
-  test("Reports owns the Desk; More reports navigates there", async ({
+  test("Reports owns the Desk; View all reports navigates there", async ({
     page,
   }) => {
     await openBuddy(page, 360);
     await page
       .getByTestId("buddy-home-saved-work")
-      .getByRole("button", { name: "More reports" })
+      .getByRole("button", { name: "View all reports" })
       .click();
     await expect(
       page.getByRole("tab", { name: "Reports", exact: true }),

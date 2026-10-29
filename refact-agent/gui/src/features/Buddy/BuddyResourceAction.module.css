@@ -16,3 +16,22 @@
   font-size: var(--rf-text-1);
   line-height: var(--rf-line-1);
 }
+
+.action p,
+.action dl {
+  margin: 0;
+}
+
+.title {
+  margin: 0;
+  color: var(--rf-color-fg);
+  font: var(--rf-weight-semibold) var(--rf-text-2) / var(--rf-line-2)
+    var(--rf-font-ui);
+}
+
+.label {
+  margin: 0;
+  color: var(--rf-color-muted);
+  font: var(--rf-weight-semibold) var(--rf-text-1) / var(--rf-line-1)
+    var(--rf-font-ui);
+}

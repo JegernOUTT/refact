@@ -127,7 +127,7 @@ if (native) {
       seq: "1",
       thread: {
         id,
-        title: "Native questions",
+        title: "Questions",
         model: "",
         mode: "agent",
         tool_use: "agent",

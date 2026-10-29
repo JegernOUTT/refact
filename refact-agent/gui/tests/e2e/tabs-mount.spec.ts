@@ -48,7 +48,8 @@ test("shared Tabs does not scroll Buddy or the document on mount", async ({
   ]) {
     await page.setViewportSize({ width, height });
     await page.goto(ROUTE);
-    const desk = page.locator('[aria-label="Buddy Desk"]');
+    await page.getByRole("tab", { name: "Reports", exact: true }).click();
+    const desk = page.locator('[data-testid="buddy-desk"]');
     await expect(desk).toBeVisible();
     await expect(desk.locator("ul li button")).toHaveCount(7);
 

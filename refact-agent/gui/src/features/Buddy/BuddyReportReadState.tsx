@@ -1,5 +1,7 @@
 import { useRef, useState } from "react";
 import { Button } from "../../components/ui";
+import { BuddyStatusBadge } from "./ui";
+import styles from "./BuddyDeskDetail.module.css";
 import {
   useGetBuddyWorkReadStateQuery,
   useMarkBuddyWorkReadMutation,
@@ -53,17 +55,22 @@ export function BuddyReportReadState({
     }
   };
   return (
-    <section aria-label="Report reading status">
-      <p>
+    <section
+      aria-label="Report reading status"
+      className={styles.inlineControl}
+    >
+      {!error && !isFetching && (
+        <BuddyStatusBadge dimension="read" value={read ? "read" : "unread"} />
+      )}
+      <p className={styles.hint}>
         {read
-          ? "This report revision is marked read."
+          ? "This revision is marked read."
           : error
-            ? "Saved reading status is unavailable."
+            ? "Couldn't load reading status."
             : isFetching
               ? "Loading reading status…"
-              : "New report revision since last read."}
+              : "New revision since you last read it."}
       </p>
-      {read && <p>Marked read. Still open.</p>}
       {error && (
         <Button size="sm" variant="ghost" onClick={() => void refetch()}>
           Retry reading status
@@ -76,15 +83,12 @@ export function BuddyReportReadState({
           disabled={result.isLoading || isFetching || Boolean(error)}
           onClick={() => void mark()}
         >
-          {result.isLoading
-            ? "Saving reading status…"
-            : "Mark this revision read"}
+          {result.isLoading ? "Saving…" : "Mark as read"}
         </Button>
       )}
       {failed && (
-        <p role="alert">
-          Reading status was not acknowledged. Reload the report if it changed,
-          then try again.
+        <p role="alert" className={styles.hint}>
+          Couldn&apos;t save reading status. Refresh the report and try again.
         </p>
       )}
     </section>

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { v4 as uuidv4 } from "uuid";
-import { ShieldAlert, ShieldCheck } from "lucide-react";
-import { Badge, Button, Icon, Surface, Text } from "../../components/ui";
+import { RefreshCw, ShieldCheck } from "lucide-react";
+import { Button, IconButton, Text } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { useIsDocumentVisible } from "../../hooks/useIsDocumentVisible";
 import { buddyOperatorIdentity } from "../../services/refact/buddyOperator";
@@ -13,7 +13,7 @@ import {
   type NativeApprovalSession,
   type NativeApprovalsSnapshot,
 } from "../../services/refact/buddyApprovals";
-import { BuddySectionHeader } from "./BuddySectionHeader";
+import { BUDDY_TERMS, BuddyErrorCallout, BuddySection } from "./ui";
 import styles from "./BuddyNativeApprovals.module.css";
 import { humanizeIdentifier } from "../../utils/displayNames";
 import { openBuddyChat } from "../Chat/Thread";
@@ -23,13 +23,13 @@ const APPROVAL_POLLING_INTERVAL_MS = 5000;
 
 const warningText = {
   native_provider_error:
-    "Native model/provider configuration reported a load error. Check provider settings; this does not prove the network is offline.",
+    "The model provider setup reported a load error. Check provider settings; the network may still be fine.",
   native_privacy_policy_error:
-    "Native privacy policy could not be loaded reliably. Native restrictive policy remains authoritative; review privacy settings.",
+    "The privacy policy didn't load reliably. The stricter policy still applies; review privacy settings.",
   native_storage_error:
-    "Native chat storage reported a save error. Changes may not survive a restart.",
+    "Chat storage reported a save error. Changes may not survive a restart.",
   native_runtime_error:
-    "Native chat reported a runtime error. Open the chat for its diagnostic details.",
+    "The chat reported a runtime error. Open the chat for details.",
   provider_usage_stale:
     "Provider usage is stale. Current usage and cost are not confirmed.",
 };
@@ -100,14 +100,11 @@ function ApprovalSession({
     }
   };
   return (
-    <Surface
-      as="article"
-      variant="surface-1"
-      radius="control"
+    <li
       className={styles.session}
-      aria-label={`Native approvals for ${chatTitle ?? "untitled chat"}`}
+      aria-label={`Approvals for ${chatTitle ?? "untitled chat"}`}
     >
-      <Text as="p" size="2" weight="medium" className={styles.sessionTitle}>
+      <Text as="h3" size="2" weight="medium" className={styles.sessionTitle}>
         {chatTitle ?? "Untitled chat"}
       </Text>
       {session.warnings.map((warning) => (
@@ -158,8 +155,8 @@ function ApprovalSession({
               </Text>
             ) : (
               <Text as="p" size="1" className={styles.note}>
-                This responds only to this native confirmation. It does not
-                change permission rules or approve other tools.
+                This answers only this request. It does not change permission
+                rules or approve other tools.
               </Text>
             )}
             {(["accept", "reject"] as const).map((choice) => (
@@ -269,12 +266,12 @@ function ApprovalSession({
       )}
       {sending && (
         <Text as="p" size="1" role="status" className={styles.note}>
-          Submitting to the native owner…
+          Submitting to the chat…
         </Text>
       )}
       {sent && (
         <Text as="p" size="1" role="status" className={styles.note}>
-          Response queued, not resolved. Waiting for a fresh native snapshot.
+          Response queued, not resolved. Waiting for the chat to confirm.
         </Text>
       )}
       {failed && (
@@ -282,7 +279,7 @@ function ApprovalSession({
           <Text as="p" size="1" className={styles.alert}>
             {chatTitle
               ? `Buddy couldn't confirm your response. Open the chat "${chatTitle}" to check whether your response was applied. No success is assumed.`
-              : "Buddy couldn't confirm your response. Open the relevant chat from Recent chats to check whether your response was applied. No success is assumed."}
+              : "Buddy couldn't confirm your response. Open the relevant chat from Recent conversations to check whether your response was applied. No success is assumed."}
           </Text>
           <Button
             size="sm"
@@ -300,11 +297,17 @@ function ApprovalSession({
           </Button>
         </div>
       )}
-    </Surface>
+    </li>
   );
 }
 
-function Approvals({ identity }: { identity: string }) {
+function Approvals({
+  identity,
+  hideError,
+}: {
+  identity: string;
+  hideError: boolean;
+}) {
   const [halted, setHalted] = useState(false);
   const refetchRef = useRef<() => void>(() => undefined);
   const visible = useIsDocumentVisible(() => refetchRef.current());
@@ -351,57 +354,43 @@ function Approvals({ identity }: { identity: string }) {
   const sessions =
     snapshot?.sessions.filter(
       (session) =>
-        session.tools.length ||
-        session.browser_request_id ||
-        session.warnings.length,
+        session.tools.length > 0 ||
+        Boolean(session.browser_request_id) ||
+        session.warnings.length > 0,
     ) ?? [];
   const warnings = failed ? [] : snapshot?.warnings ?? [];
   const truncated = !failed && Boolean(snapshot?.truncated);
   if (!failed && !truncated && !warnings.length && !sessions.length)
     return null;
+  if (failed && hideError) return null;
   return (
-    <Surface
-      as="section"
-      variant="glass"
-      radius="card"
-      className={styles.approvals}
-      aria-label="Native approvals"
+    <BuddySection
+      title={BUDDY_TERMS.approvals}
+      icon={ShieldCheck}
+      count={!failed && sessions.length > 0 ? sessions.length : undefined}
+      testId="buddy-home-approvals"
+      action={
+        <IconButton
+          size="sm"
+          variant="ghost"
+          icon={RefreshCw}
+          aria-label="Refresh approvals"
+          onClick={() => void query.refetch()}
+        />
+      }
     >
-      <BuddySectionHeader
-        icon={ShieldCheck}
-        label="Native approvals"
-        badge={
-          sessions.length > 0 ? (
-            <Badge tone="accent">{sessions.length}</Badge>
-          ) : undefined
-        }
-        actions={
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => void query.refetch()}
-          >
-            Refresh native approvals
-          </Button>
-        }
-      />
       {failed && (
-        <div className={styles.errorRow} role="alert">
-          <Icon icon={ShieldAlert} size="sm" tone="danger" />
-          <Text as="p" size="1" className={styles.errorText}>
-            Native approvals could not be loaded, so approval controls are
-            disabled. Open the relevant chat from Recent chats to review its
-            request, or retry.
-          </Text>
-          <Button size="sm" onClick={() => void query.refetch()}>
-            Retry
-          </Button>
-        </div>
+        <BuddyErrorCallout
+          compact
+          thing="approvals"
+          error={query.error}
+          retrying={query.isFetching}
+          onRetry={() => void query.refetch()}
+        />
       )}
       {truncated && (
         <Text as="p" size="1" role="status" className={styles.note}>
-          Partial coverage: more native requests may exist. Open the remaining
-          chats.
+          Some chats weren&apos;t checked. More approvals may be waiting.
         </Text>
       )}
       {warnings.map((warning) => (
@@ -415,32 +404,40 @@ function Approvals({ identity }: { identity: string }) {
           {warningText[warning]}
         </Text>
       ))}
-      {snapshot &&
-        sessions.map((session) => (
-          <ApprovalSession
-            key={JSON.stringify([
-              identity,
-              snapshot.project_root,
-              snapshot.engine_identity,
-              session.chat_id,
-              session.source_version,
-            ])}
-            session={session}
-            snapshot={snapshot}
-            identity={identity}
-            chatTitle={chatTitles.get(
-              JSON.stringify([snapshot.project_root, session.chat_id]),
-            )}
-            disabled={failed || query.isFetching}
-            refresh={() => {
-              void query.refetch();
-            }}
-          />
-        ))}
-    </Surface>
+      {snapshot && sessions.length > 0 && (
+        <ul className={styles.sessionList}>
+          {sessions.map((session) => (
+            <ApprovalSession
+              key={JSON.stringify([
+                identity,
+                snapshot.project_root,
+                snapshot.engine_identity,
+                session.chat_id,
+                session.source_version,
+              ])}
+              session={session}
+              snapshot={snapshot}
+              identity={identity}
+              chatTitle={chatTitles.get(
+                JSON.stringify([snapshot.project_root, session.chat_id]),
+              )}
+              disabled={failed || query.isFetching}
+              refresh={() => {
+                void query.refetch();
+              }}
+            />
+          ))}
+        </ul>
+      )}
+    </BuddySection>
   );
 }
-export function BuddyNativeApprovals() {
+
+export function BuddyNativeApprovals({
+  hideError = false,
+}: {
+  hideError?: boolean;
+}) {
   const identity = useAppSelector(buddyOperatorIdentity);
-  return <Approvals key={identity} identity={identity} />;
+  return <Approvals key={identity} identity={identity} hideError={hideError} />;
 }

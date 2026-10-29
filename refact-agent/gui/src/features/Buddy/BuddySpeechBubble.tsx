@@ -80,38 +80,63 @@ export const BuddySpeechBubble: React.FC<BuddySpeechBubbleProps> = ({
   }, [textKey]);
 
   const anchorRef = useRef<HTMLDivElement | null>(null);
-  const [edgeShiftPx, setEdgeShiftPx] = useState(0);
+  const anchorKey = JSON.stringify(anchorStyle);
+  const [edgeShift, setEdgeShift] = useState({ x: 0, y: 0 });
 
   useLayoutEffect(() => {
     const el = anchorRef.current;
     if (!el || !visible) {
-      setEdgeShiftPx(0);
+      setEdgeShift({ x: 0, y: 0 });
       return;
     }
     const clampToViewport = () => {
       const margin = 8;
       el.style.translate = "0px 0px";
       const rect = el.getBoundingClientRect();
+      const bounds = el
+        .closest<HTMLElement>("[data-buddy-scene-bounds]")
+        ?.getBoundingClientRect();
+      const minLeft = Math.max(bounds?.left ?? 0, 0) + margin;
+      const maxRight =
+        Math.min(bounds?.right ?? window.innerWidth, window.innerWidth) -
+        margin;
+      const minTop = (bounds?.top ?? 0) + margin;
+      const maxBottom = (bounds?.bottom ?? window.innerHeight) - margin;
+      let shiftY = 0;
+      if (bounds && rect.height > 0) {
+        if (rect.top < minTop) shiftY = minTop - rect.top;
+        else if (rect.bottom > maxBottom) shiftY = maxBottom - rect.bottom;
+      }
       let shift = 0;
       if (rect.width > 0) {
-        if (rect.left < margin) {
-          shift = margin - rect.left;
-        } else if (rect.right > window.innerWidth - margin) {
-          shift = window.innerWidth - margin - rect.right;
+        if (rect.width > maxRight - minLeft) {
+          shift = minLeft - rect.left;
+        } else if (rect.left < minLeft) {
+          shift = minLeft - rect.left;
+        } else if (rect.right > maxRight) {
+          shift = maxRight - rect.right;
         }
       }
       el.style.translate = "";
-      setEdgeShiftPx(Math.round(shift));
+      const scale = el.offsetWidth > 0 ? rect.width / el.offsetWidth : 1;
+      const unscale = (value: number) =>
+        Math.round(scale > 0 ? value / scale : value);
+      setEdgeShift({ x: unscale(shift), y: unscale(shiftY) });
     };
     clampToViewport();
+    const scene = el.closest<HTMLElement>("[data-buddy-scene-bounds]");
     window.addEventListener("resize", clampToViewport);
-    return () => window.removeEventListener("resize", clampToViewport);
-  }, [textKey, position, compact, visible, width, maxWidth]);
+    scene?.addEventListener("transitionend", clampToViewport);
+    return () => {
+      window.removeEventListener("resize", clampToViewport);
+      scene?.removeEventListener("transitionend", clampToViewport);
+    };
+  }, [textKey, position, compact, visible, width, maxWidth, anchorKey]);
 
   const style: BubbleVars = {
     ...anchorStyle,
     width,
-    maxWidth: `min(${maxWidth}, calc(100dvw - 16px))`,
+    maxWidth: `min(${maxWidth}, calc(100dvw - 16px), var(--buddy-bubble-max, 100dvw))`,
     whiteSpace,
     overflowWrap: "break-word",
     pointerEvents: hasControls && !closing ? "auto" : "none",
@@ -122,7 +147,10 @@ export const BuddySpeechBubble: React.FC<BuddySpeechBubbleProps> = ({
     "--bb-border": palette.dark,
     "--bb-accent": palette.body,
     "--bb-accent-soft": `${palette.body}55`,
-    translate: edgeShiftPx === 0 ? undefined : `${edgeShiftPx}px 0px`,
+    translate:
+      edgeShift.x === 0 && edgeShift.y === 0
+        ? undefined
+        : `${edgeShift.x}px ${edgeShift.y}px`,
   };
 
   return (

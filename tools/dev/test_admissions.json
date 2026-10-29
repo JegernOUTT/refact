@@ -11227,6 +11227,24 @@
       "review_evidence": "Parent reviewed W4 status report and diffs; review tool run on W4 branch (see W4 final report). Mutant patches and logs under .refact/evidence/w4/."
     },
     {
+      "path": "refact-agent/engine/crates/refact-buddy-core/src/state.rs",
+      "before_sha256": "1b3ebcf59ba75319cc4e43054368a6ff7fa6c37e643694aa41a89c2b2a950df5",
+      "after_sha256": "2d751401a15c107bd6d15e8b3f04dc7956e4b299013fc83dbe93767a804d851b",
+      "affected_tests": [
+        "c787b63ae8090011b5d947cb70e331229714e46ca6777a410471e77de748c40a",
+        "d74405ed7c84e010a3007cbbb041c8d04387aec65f839225320313b518a7840a",
+        "6a131f7e048c1696945e84d5b0181dcd4465dfc39215c1f502bcaf6982e18a41",
+        "60ce6053768bb054261be87cde64b6ee2c615ae781be39a4a72456efbc9e2a4a",
+        "46f915adc074140bb8a4410da764bfd045fcaf5080292398b4622bc8b4a15828",
+        "84caa678d70409698ef6e04b0b013586f6aac899e331afdd3d952b865d3be4a5"
+      ],
+      "impact": "Production-only change in sync_semantic: semantic.headline no longer prefixes the personality vibe (and the idle branch no longer prefixes the personality summary); each branch now yields only its standalone mood sentence. No test bodies, fixtures or helpers changed; affected tests reach sync_semantic via default_buddy_state/sync_state but assert progression, skills, needs, migration and persona-block values, never semantic.headline.",
+      "execution_context": "Crate unit tests in refact-buddy-core (cargo test -p refact-buddy-core), default features, no gated lanes.",
+      "author": "background_agent:engine-pixel-headline subagent",
+      "reviewer": "parent planner chat (brief author); pending independent review",
+      "review_evidence": "Diff limited to sync_semantic string construction in state.rs; grep shows no Rust or GUI test asserting the old vibe-prefixed headline strings; cargo test -p refact-buddy-core result in subagent final report."
+    },
+    {
       "path": "refact-agent/engine/crates/refact-claude-cloud/src/lib.rs",
       "before_sha256": "b45031f25d05fa298c0a6e792586db0d3cad4e2a6a11c859ec7cc43b9254c8fe",
       "after_sha256": "6ae67def5e0d636aea3ab8157f41b950f31f6f74c61f1bb95f30161812b5afff",

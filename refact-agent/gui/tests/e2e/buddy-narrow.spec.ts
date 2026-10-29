@@ -97,7 +97,7 @@ async function openBuddy(
 async function openReports(page: Page) {
   await page.getByRole("tab", { name: "Reports", exact: true }).click();
   await expect(
-    page.locator('[aria-label="Buddy Desk"] ul li button'),
+    page.locator('[data-testid="buddy-desk"] ul li button'),
   ).toHaveCount(1);
 }
 
@@ -163,7 +163,7 @@ async function measureLayout(page: Page): Promise<Layout> {
     }
     const controls = [
       ...main!.querySelectorAll<HTMLElement>(
-        'button, [role="tab"], select, input, summary, a[href]',
+        'button, [role="tab"], select, input:not([type="radio"]), summary, a[href]',
       ),
     ]
       .filter(
@@ -172,7 +172,10 @@ async function measureLayout(page: Page): Promise<Layout> {
           getComputedStyle(element).visibility !== "hidden",
       )
       .map((element) => ({
-        name: element.getAttribute("aria-label") || element.innerText,
+        name:
+          element.getAttribute("aria-label") ||
+          element.closest("label")?.innerText ||
+          element.innerText,
         ...box(element),
       }));
     const overflowingControlStrip = [
@@ -331,7 +334,10 @@ for (const theme of ["dark", "light"] as const) {
           ),
           offscreenControls: controls
             .map((element) => ({
-              name: element.getAttribute("aria-label") || element.innerText,
+              name:
+                element.getAttribute("aria-label") ||
+                element.closest("label")?.innerText ||
+                element.innerText,
               left: element.getBoundingClientRect().left,
               right: element.getBoundingClientRect().right,
             }))

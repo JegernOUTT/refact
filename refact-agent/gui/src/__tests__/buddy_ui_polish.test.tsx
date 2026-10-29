@@ -8,9 +8,6 @@ import { setUpStore } from "../app/store";
 import { actionLabel } from "../features/Buddy/buddyOpportunityActions";
 import { BuddyHome } from "../features/Buddy/BuddyHome";
 import { BuddyDashboardScene } from "../features/Buddy/BuddyDashboardScene";
-import { BuddyActivityPanel } from "../features/Buddy/BuddyActivityPanel";
-import { BuddyRecentErrorsPanel } from "../features/Buddy/BuddyRecentErrorsPanel";
-import { BuddySettingsPanel } from "../features/Buddy/BuddySettingsPanel";
 import { formatCompactNumber } from "../features/Buddy/buddyUtils";
 import {
   addOpportunity,
@@ -24,7 +21,6 @@ import type {
   BuddyOpportunity,
   BuddyPage,
   BuddyPulse,
-  BuddyRuntimeEvent,
   BuddySnapshot,
 } from "../features/Buddy/types";
 
@@ -359,12 +355,17 @@ describe("buddy UI polish", () => {
     expect(styleSource).not.toContain(".character[data-pose");
   });
 
-  it("BuddyWorld_keeps_narrow_object_tooltips_available", async () => {
-    const source = await readGuiSource("features/Buddy/BuddyWorld.module.css");
+  it("BuddyWorld_uses_kit_tooltips_and_focus_ring_for_hotspots", async () => {
+    const source = await readGuiSource("features/Buddy/BuddyWorld.tsx");
+    const css = await readGuiSource("features/Buddy/BuddyWorld.module.css");
 
-    expect(source).toContain("@media (max-width: 720px)");
-    expect(source).toContain("max-width: min(108px, 32vw)");
-    expect(source).not.toMatch(/\.objectTooltip\s*\{[^}]*display:\s*none/u);
+    expect(source).toContain("<Tooltip content={<SceneTip");
+    expect(source).not.toMatch(/\btitle=\{/u);
+    expect(css).not.toContain(".objectTooltip");
+    expect(css).toContain(
+      "outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring)",
+    );
+    expect(css).not.toMatch(/rgba\(255,\s*255,\s*255/u);
   });
 
   it("BuddyWorld_preserves_compact_height_in_narrow_media", async () => {
@@ -443,7 +444,8 @@ describe("buddy UI polish", () => {
     expect(screen.getByTestId("buddy-world-canvas")).toBeInTheDocument();
     expect(screen.getByTestId("buddy-summary-strip")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Leave Play" }));
+    expect(screen.queryByRole("button", { name: "Leave Play" })).toBeNull();
+    await user.click(screen.getByRole("tab", { name: "Home" }));
     expect(screen.getByRole("tab", { name: "Home" })).toHaveAttribute(
       "aria-selected",
       "true",
@@ -486,235 +488,6 @@ describe("buddy UI polish", () => {
       expect(screen.getByTestId("buddy-world-canvas")).toBeInTheDocument();
       expect(screen.getByTestId("buddy-world-character")).toBeInTheDocument();
     });
-  });
-
-  it("non_clickable_activity_rows_are_not_tabbable_buttons", () => {
-    render(
-      <BuddyActivityPanel
-        activities={[
-          {
-            icon: "📝",
-            title: "Read-only activity",
-            description: "No chat to open",
-            timestamp: "2024-01-01T00:00:00Z",
-            activity_type: "buddy_memory_garden",
-            chat_id: null,
-          },
-        ]}
-      />,
-      { preloadedState: CONFIG_STATE },
-    );
-
-    const row =
-      screen.getByText("Read-only activity").parentElement?.parentElement;
-    expect(row).toBeInTheDocument();
-    expect(row).not.toHaveAttribute("tabindex", "0");
-    expect(row).not.toHaveAttribute("role");
-    expect(
-      screen.queryByRole("button", { name: /read-only activity/i }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("invalid_buddy_timestamps_render_empty_text", () => {
-    const recentError: BuddyRuntimeEvent = {
-      id: "runtime-invalid-time",
-      signal_type: "chat_error",
-      title: "Runtime error",
-      source: "test",
-      status: "failed",
-      priority: "high",
-      created_at: "not-a-date",
-    };
-
-    render(
-      <>
-        <BuddyActivityPanel
-          activities={[
-            {
-              icon: "📝",
-              title: "Invalid activity time",
-              description: "Invalid time should be omitted",
-              timestamp: "not-a-date",
-              activity_type: "buddy_memory_garden",
-              chat_id: null,
-            },
-          ]}
-        />
-        <BuddyRecentErrorsPanel
-          recentErrors={[recentError]}
-          onInvestigate={vi.fn()}
-          onDismiss={vi.fn()}
-        />
-      </>,
-      { preloadedState: CONFIG_STATE },
-    );
-
-    expect(screen.getByText("Invalid activity time")).toBeInTheDocument();
-    expect(screen.getByText("Runtime error")).toBeInTheDocument();
-    expect(screen.queryByText("Invalid Date")).not.toBeInTheDocument();
-  });
-
-  it("BuddySettingsPanel_renders_job_telemetry_table", async () => {
-    const store = setUpStore({ ...CONFIG_STATE });
-    const snapshot = makeSnapshot();
-    snapshot.state.workflow_summaries = [
-      {
-        workflow_id: "refact_error_detective",
-        last_run: "2026-07-01T10:00:00Z",
-        run_count: 12,
-        last_outcome: "success",
-        llm_calls: 48,
-        tokens_in: 125_000,
-        tokens_out: 9_400,
-        outputs: 11,
-        last_output_at: "2026-07-01T10:05:00Z",
-      },
-      {
-        workflow_id: "buddy_voice",
-        last_run: null,
-        run_count: 0,
-        last_outcome: null,
-        llm_calls: 3,
-        tokens_in: 1_500,
-        tokens_out: 120,
-        outputs: 3,
-        last_output_at: "2026-07-01T09:00:00Z",
-      },
-    ];
-    store.dispatch(setBuddySnapshot(snapshot));
-
-    render(<BuddySettingsPanel />, {
-      preloadedState: { ...CONFIG_STATE, buddy: store.getState().buddy },
-    });
-
-    const section = await screen.findByTestId("buddy-job-telemetry");
-    expect(section).toHaveTextContent("JOB TELEMETRY");
-    expect(section).toHaveTextContent("2 jobs");
-    expect(section).toHaveTextContent("Refact error detective");
-    expect(section).not.toHaveTextContent("refact_error_detective");
-    expect(section).toHaveTextContent("125k");
-    expect(section).toHaveTextContent("9.4k");
-    expect(section).toHaveTextContent("Buddy voice");
-    expect(section).not.toHaveTextContent("buddy_voice");
-    expect(section).toHaveTextContent("2026-07-01 10:05");
-  });
-
-  it("BuddySettingsPanel_shows_empty_telemetry_placeholder", async () => {
-    const store = setUpStore({ ...CONFIG_STATE });
-    store.dispatch(setBuddySnapshot(makeSnapshot()));
-
-    render(<BuddySettingsPanel />, {
-      preloadedState: { ...CONFIG_STATE, buddy: store.getState().buddy },
-    });
-
-    const section = await screen.findByTestId("buddy-job-telemetry");
-    expect(section).toHaveTextContent("No job runs recorded yet");
-  });
-
-  it.each([
-    ["missing", undefined, "Emitted 0, skipped 0."],
-    ["partial", { emitted: 4 }, "Emitted 4, skipped 0."],
-    ["zero", { emitted: 0, skipped: 0 }, "Emitted 0, skipped 0."],
-  ] as const)(
-    "settings_never_renders_undefined when counts_by_result is %s",
-    async (_, countsByResult, expectedStatus) => {
-      const store = setUpStore({ ...CONFIG_STATE });
-      const snapshot = makeSnapshot();
-      snapshot.chat_reaction_debug = {
-        recent_attempts: [],
-        ...(countsByResult === undefined
-          ? {}
-          : { counts_by_result: countsByResult }),
-      } as NonNullable<BuddySnapshot["chat_reaction_debug"]>;
-      store.dispatch(setBuddySnapshot(snapshot));
-
-      render(<BuddySettingsPanel />, {
-        preloadedState: { ...CONFIG_STATE, buddy: store.getState().buddy },
-      });
-
-      const diagnostics = await screen.findByTestId(
-        "buddy-chat-reaction-diagnostics",
-      );
-      expect(diagnostics).not.toHaveTextContent("undefined");
-      expect(diagnostics).toHaveTextContent(expectedStatus);
-    },
-  );
-
-  it("settings_uses_the_live_buddy_name", async () => {
-    const store = setUpStore({ ...CONFIG_STATE });
-    const snapshot = makeSnapshot();
-    snapshot.state.identity = { ...snapshot.state.identity, name: "Spark" };
-    store.dispatch(setBuddySnapshot(snapshot));
-
-    render(<BuddySettingsPanel />, {
-      preloadedState: { ...CONFIG_STATE, buddy: store.getState().buddy },
-    });
-
-    expect(
-      await screen.findByText(
-        "Tune Spark's autonomy, observations, and tiny-chaos operating hours.",
-      ),
-    ).toBeVisible();
-    expect(screen.getByText(/Spark reacts to your messages/)).toBeVisible();
-    expect(screen.queryByText(/Pixel/)).not.toBeInTheDocument();
-  });
-
-  it("BuddySettingsPanel_shows_chat_observation_and_reactions_as_independent", async () => {
-    const store = setUpStore({ ...CONFIG_STATE });
-    const snapshot = makeSnapshot();
-    snapshot.settings = {
-      ...snapshot.settings,
-      message_observation_enabled: false,
-      chat_reactions_enabled: true,
-      observers: {
-        ...snapshot.settings.observers,
-        chat_pattern: false,
-      },
-    };
-    store.dispatch(setBuddySnapshot(snapshot));
-
-    server.use(
-      http.post("*/v1/buddy/settings", async ({ request }) => {
-        const body = (await request.json()) as Partial<
-          BuddySnapshot["settings"]
-        >;
-        return HttpResponse.json({
-          ...snapshot.settings,
-          ...body,
-        });
-      }),
-    );
-
-    const { user } = render(<BuddySettingsPanel />, {
-      preloadedState: { ...CONFIG_STATE, buddy: store.getState().buddy },
-    });
-
-    const patternToggle = await screen.findByTestId(
-      "buddy-toggle-chat-pattern-observation",
-    );
-    const reactionsToggle = screen.getByTestId(
-      "buddy-toggle-live-chat-reactions",
-    );
-
-    expect(
-      screen.getByRole("switch", { name: /chat pattern observation enabled/i }),
-    ).toBe(patternToggle);
-    expect(
-      screen.getByRole("switch", { name: /live chat reactions enabled/i }),
-    ).toBe(reactionsToggle);
-    expect(screen.getByText("Chat pattern observation")).toBeInTheDocument();
-    expect(screen.getByText("Live chat reactions")).toBeInTheDocument();
-    expect(
-      screen.getByText(/Independent from live chat reactions/i),
-    ).toBeVisible();
-    expect(screen.getByText(/Buddy reacts to your messages/i)).toBeVisible();
-    expect(patternToggle).toHaveAttribute("data-state", "unchecked");
-    expect(reactionsToggle).toHaveAttribute("data-state", "checked");
-
-    await user.click(patternToggle);
-
-    expect(patternToggle).toHaveAttribute("data-state", "checked");
-    expect(reactionsToggle).toHaveAttribute("data-state", "checked");
   });
 
   it("formatCompactNumber_truncates_decimal_values_below_1000", () => {

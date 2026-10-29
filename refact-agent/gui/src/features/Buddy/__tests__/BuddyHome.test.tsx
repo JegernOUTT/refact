@@ -1,3 +1,4 @@
+import { act } from "react-dom/test-utils";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import { render, screen, waitFor, within } from "../../../utils/test-utils";
@@ -10,6 +11,12 @@ import {
   setBuddySnapshot,
 } from "../buddySlice";
 import { BuddyHome } from "../BuddyHome";
+import { setCurrentProjectInfo } from "../../Chat/currentProject";
+import {
+  readBuddyPersistentState,
+  resetBuddyPersistentState,
+  writeBuddyPersistentState,
+} from "../ui";
 import type {
   BuddyActivityEntry,
   BuddyConversationEntry,
@@ -282,6 +289,36 @@ function installBuddyHomeHandlers(settings = makeSettings()) {
 }
 
 describe("BuddyHome", () => {
+  it("resets view filter and disclosure state on project identity changes only", async () => {
+    resetBuddyPersistentState();
+    installBuddyHomeHandlers();
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot()));
+    const first = render(<BuddyHome />, { store });
+    await screen.findByTestId("buddy-home-content");
+    const keys = [
+      "buddy.reports.view",
+      "buddy.activity.filter",
+      "buddy.home.background",
+      "buddy.settings.details",
+    ];
+    act(() => keys.forEach((key) => writeBuddyPersistentState(key, "changed")));
+    await first.user.click(screen.getByRole("tab", { name: "Play" }));
+    await first.user.click(screen.getByRole("tab", { name: "Home" }));
+    keys.forEach((key) =>
+      expect(readBuddyPersistentState(key)).toBe("changed"),
+    );
+    act(() => {
+      store.dispatch(
+        setCurrentProjectInfo({ name: "Other", workspaceRoots: ["/other"] }),
+      );
+    });
+    keys.forEach((key) =>
+      expect(readBuddyPersistentState(key)).toBeUndefined(),
+    );
+    resetBuddyPersistentState();
+  });
+
   it("mounts the scene with presence motion enabled", async () => {
     installBuddyHomeHandlers();
     const store = setUpStore({ ...CONFIG_STATE });
@@ -352,7 +389,7 @@ describe("BuddyHome", () => {
     expect(screen.getByText("Helper Sprite")).toBeInTheDocument();
     expect(screen.getByText("Project setup")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Run Setup" }),
+      screen.getByRole("button", { name: "Run setup" }),
     ).toBeInTheDocument();
   });
 
@@ -397,31 +434,6 @@ describe("BuddyHome", () => {
     expect(screen.getByText("Loading Buddy")).toBeInTheDocument();
   });
 
-  it("opens settings and personality from the trailing settings tab", async () => {
-    installBuddyHomeHandlers();
-    const store = setUpStore({ ...CONFIG_STATE });
-    store.dispatch(setBuddySnapshot(makeSnapshot()));
-
-    const { user } = render(<BuddyHome />, { store });
-
-    expect(await screen.findByTestId("buddy-home-content")).toBeInTheDocument();
-    // Configuration trails the useful tabs, so neither panel is mounted until
-    // the last tab is selected.
-    expect(
-      screen.queryByTestId("buddy-settings-panel"),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByTestId("buddy-personality-panel"),
-    ).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("tab", { name: "Settings" }));
-
-    expect(
-      await screen.findByTestId("buddy-settings-panel"),
-    ).toBeInTheDocument();
-    expect(screen.getByTestId("buddy-personality-panel")).toBeInTheDocument();
-  });
-
   it("resets workspace-scoped Buddy state while preserving seen notifications", () => {
     const store = setUpStore({ ...CONFIG_STATE });
     store.dispatch(setBuddySnapshot(makeSnapshot()));
@@ -441,122 +453,5 @@ describe("BuddyHome", () => {
     expect(buddyState.loaded).toBe(false);
     expect(buddyState.pendingSettingsRequests).toEqual([]);
     expect(buddyState.seenNotificationIds["opp-1"]).toBeGreaterThan(0);
-  });
-
-  it("shows memory operation and candidate counters in the pulse card", async () => {
-    installBuddyHomeHandlers();
-    const store = setUpStore({ ...CONFIG_STATE });
-    store.dispatch(
-      setBuddySnapshot(
-        makeSnapshot({
-          pulse: makePulse({
-            memory: {
-              total: 50,
-              orphan: 5,
-              stale_conflicts: 1,
-              merge_candidates: 2,
-              archive_candidates: 3,
-              review_candidates: 4,
-              conflict_candidates: 1,
-              pending_ops: 6,
-              applied_ops: 7,
-              failed_ops: 1,
-            },
-          }),
-        }),
-      ),
-    );
-
-    const { user } = render(<BuddyHome />, { store });
-
-    await screen.findByTestId("buddy-home-content");
-    await user.click(screen.getByRole("tab", { name: "Reports" }));
-
-    expect(await screen.findByTestId("buddy-pulse-card")).toHaveTextContent(
-      "50 docs · 5 orphan · 1 conflict · 6 pending · 7 applied · 1 failed · 10 candidates",
-    );
-  });
-
-  it("renders enabled recent errors as a deduplicated, expandable list", async () => {
-    installBuddyHomeHandlers();
-    server.use(
-      http.get("*/v1/buddy/operator/status", () =>
-        HttpResponse.json({
-          schema_version: 1,
-          mode: "enabled",
-          features: {
-            storage: true,
-            actions: true,
-            supervision: false,
-            improvement: false,
-            editorial: false,
-          },
-          project: { project_id: "project", canonical_root: "/workspace" },
-          worker: {
-            worker_id: "worker",
-            engine_instance_id: "engine",
-            epoch: 1,
-          },
-        }),
-      ),
-    );
-    const currentTime = Date.now();
-    const duplicateSignature = {
-      title: "Repeated failure",
-      description: "Provider issue detected.",
-      failure_summary: "Repeated failure",
-      source: "test-provider",
-      signal_type: "provider_failed",
-    } as const;
-    const events = [
-      makeRuntimeEvent({
-        id: "same-title",
-        title: "Repeated warning",
-        failure_summary: "Repeated warning",
-        created_at: new Date(currentTime).toISOString(),
-      }),
-      ...Array.from({ length: 3 }, (_, index) =>
-        makeRuntimeEvent({
-          ...duplicateSignature,
-          id: `duplicate-${index}`,
-          created_at: new Date(currentTime - 1000).toISOString(),
-        }),
-      ),
-      ...Array.from({ length: 25 }, (_, index) =>
-        makeRuntimeEvent({
-          id: `distinct-${index}`,
-          title: `Distinct warning ${index}`,
-          description: `Provider detail ${index}.`,
-          failure_summary: `Additional detail ${index}`,
-          source: `test-provider-${index}`,
-          created_at: new Date(currentTime - 2000 - index * 1000).toISOString(),
-        }),
-      ),
-    ];
-    const store = setUpStore({ ...CONFIG_STATE });
-    store.dispatch(setBuddySnapshot(makeSnapshot({ runtime_queue: events })));
-
-    const { user } = render(<BuddyHome />, { store });
-    await screen.findByTestId("buddy-home-content");
-    await user.click(screen.getByRole("tab", { name: "Activity" }));
-
-    const list = await screen.findByRole("list", { name: "Recent warnings" });
-    expect(within(list).getByText("Repeated warning")).toBeInTheDocument();
-    expect(
-      within(list).getAllByText("Repeated warning", { exact: true }),
-    ).toHaveLength(1);
-    expect(within(list).getByText("Repeated failure ×3")).toBeInTheDocument();
-    expect(within(list).getAllByText("just now").length).toBeGreaterThan(0);
-    expect(
-      within(list).queryByText("Repeated warning: Repeated warning"),
-    ).toBeNull();
-    expect(within(list).getAllByRole("listitem")).toHaveLength(20);
-    expect(
-      screen.getByRole("button", { name: "Show more" }),
-    ).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Show more" }));
-    expect(within(list).getAllByRole("listitem")).toHaveLength(27);
-    expect(within(list).getByText("Additional detail 24")).toBeInTheDocument();
   });
 });

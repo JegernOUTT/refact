@@ -49,7 +49,7 @@ async function openApprovalsError(page: Page) {
   });
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto(ROUTE);
-  await expect(page.getByLabel("Native approvals")).toBeVisible();
+  await expect(page.getByTestId("buddy-home-approvals")).toBeVisible();
 }
 
 test.describe("Buddy native approval Retry reachability", () => {
@@ -59,7 +59,7 @@ test.describe("Buddy native approval Retry reachability", () => {
       await page.setViewportSize({ width, height: 900 });
 
       const retry = page
-        .getByLabel("Native approvals")
+        .getByTestId("buddy-home-approvals")
         .getByRole("button", { name: "Retry", exact: true });
       await expect(retry).toBeVisible();
       await retry.click({ trial: true });

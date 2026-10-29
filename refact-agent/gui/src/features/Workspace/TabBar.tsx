@@ -294,6 +294,10 @@ function displayInfoForSurface(
   };
 }
 
+function sameKindLabel(title: string, kind: string): boolean {
+  return title.trim().toLowerCase() === kind.toLowerCase();
+}
+
 export type TabBarProps = {
   placement?: "workspace" | "toolbar";
 };
@@ -908,26 +912,28 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
                       {tab.paneCount}
                     </Badge>
                   )}
-                  {(tab.kind === "buddy" || tab.is_buddy_chat) && (
-                    <Badge
-                      tone="accent"
-                      size="xs"
-                      variant="outline"
-                      className={styles.kindBadge}
-                    >
-                      Buddy
-                    </Badge>
-                  )}
-                  {(tab.kind === "task" || tab.is_task_chat) && (
-                    <Badge
-                      tone="muted"
-                      size="xs"
-                      variant="outline"
-                      className={styles.kindBadge}
-                    >
-                      Task
-                    </Badge>
-                  )}
+                  {(tab.kind === "buddy" || tab.is_buddy_chat) &&
+                    !sameKindLabel(tab.title, "Buddy") && (
+                      <Badge
+                        tone="accent"
+                        size="xs"
+                        variant="outline"
+                        className={styles.kindBadge}
+                      >
+                        Buddy
+                      </Badge>
+                    )}
+                  {(tab.kind === "task" || tab.is_task_chat) &&
+                    !sameKindLabel(tab.title, "Task") && (
+                      <Badge
+                        tone="muted"
+                        size="xs"
+                        variant="outline"
+                        className={styles.kindBadge}
+                      >
+                        Task
+                      </Badge>
+                    )}
                   <span className={styles.tabTitle}>{tab.title}</span>
                   {tab.unreadNotificationCount > 0 && (
                     <Badge

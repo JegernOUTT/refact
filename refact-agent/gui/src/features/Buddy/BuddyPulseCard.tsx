@@ -1,10 +1,14 @@
 import React from "react";
 import { Activity } from "lucide-react";
-import { LoadingState, StatusDot, Surface, Text } from "../../components/ui";
+import { StatusDot, Text } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import { selectPulse } from "./buddySlice";
-import { BuddySectionHeader } from "./BuddySectionHeader";
+import { BuddyLoading, BuddySection } from "./ui";
 import styles from "./BuddyPulseCard.module.css";
+
+function count(value: number | null | undefined): number {
+  return value ?? 0;
+}
 
 const PulseRow: React.FC<{
   label: string;
@@ -26,42 +30,29 @@ export const BuddyPulseCard: React.FC = () => {
 
   if (!pulse) {
     return (
-      <Surface
-        animated="rise"
-        className={styles.card}
-        radius="card"
-        variant="glass"
-      >
-        <BuddySectionHeader icon={Activity} label="Pulse" />
-        <LoadingState label="Loading pulse" variant="compact" />
-      </Surface>
+      <BuddySection title="Pulse" icon={Activity}>
+        <BuddyLoading variant="rows" count={3} compact label="Loading pulse" />
+      </BuddySection>
     );
   }
 
   const memoryOps = [
-    { label: "pending", value: pulse.memory.pending_ops ?? 0 },
-    { label: "applied", value: pulse.memory.applied_ops ?? 0 },
-    { label: "failed", value: pulse.memory.failed_ops ?? 0 },
+    { label: "pending", value: count(pulse.memory.pending_ops) },
+    { label: "applied", value: count(pulse.memory.applied_ops) },
+    { label: "failed", value: count(pulse.memory.failed_ops) },
   ].filter((item) => item.value > 0);
   const memoryCandidateTotal =
-    (pulse.memory.merge_candidates ?? 0) +
-    (pulse.memory.archive_candidates ?? 0) +
-    (pulse.memory.review_candidates ?? 0) +
-    (pulse.memory.conflict_candidates ?? 0);
+    count(pulse.memory.merge_candidates) +
+    count(pulse.memory.archive_candidates) +
+    count(pulse.memory.review_candidates) +
+    count(pulse.memory.conflict_candidates);
   const memoryDetails = [
     ...memoryOps.map((item) => `${item.value} ${item.label}`),
     ...(memoryCandidateTotal > 0 ? [`${memoryCandidateTotal} candidates`] : []),
   ];
 
   return (
-    <Surface
-      className={styles.card}
-      data-testid="buddy-pulse-card"
-      animated="rise"
-      radius="card"
-      variant="glass"
-    >
-      <BuddySectionHeader icon={Activity} label="Pulse" />
+    <BuddySection title="Pulse" icon={Activity} testId="buddy-pulse-card">
       {pulse.humor && (
         <Text size="1" className={styles.humor}>
           {pulse.humor}
@@ -69,16 +60,17 @@ export const BuddyPulseCard: React.FC = () => {
       )}
       <div className={styles.rows} role="list">
         <PulseRow label="Tasks">
-          {pulse.tasks.total ?? 0} open · {pulse.tasks.stuck ?? 0} stuck ·{" "}
-          {pulse.tasks.abandoned ?? 0} abandoned
+          {count(pulse.tasks.total)} open · {count(pulse.tasks.stuck)} stuck ·{" "}
+          {count(pulse.tasks.abandoned)} abandoned
         </PulseRow>
         <PulseRow label="Trajectories">
-          {pulse.trajectories.total ?? 0} · {pulse.trajectories.untitled ?? 0}{" "}
-          untitled · oldest {pulse.trajectories.oldest_age_days ?? 0}d
+          {count(pulse.trajectories.total)} ·{" "}
+          {count(pulse.trajectories.untitled)} untitled · oldest{" "}
+          {count(pulse.trajectories.oldest_age_days)}d
         </PulseRow>
         <PulseRow label="Memory">
-          {pulse.memory.total ?? 0} docs · {pulse.memory.orphan ?? 0} orphan ·{" "}
-          {pulse.memory.stale_conflicts ?? 0} conflict
+          {count(pulse.memory.total)} docs · {count(pulse.memory.orphan)} orphan
+          · {count(pulse.memory.stale_conflicts)} conflict
           {memoryDetails.length > 0 ? ` · ${memoryDetails.join(" · ")}` : ""}
         </PulseRow>
         <PulseRow label="Providers">
@@ -93,41 +85,42 @@ export const BuddyPulseCard: React.FC = () => {
               status={pulse.providers.defaults_ok ? "success" : "warning"}
             />
           </span>{" "}
-          defaults · {pulse.providers.broken_refs ?? 0} broken refs
+          defaults · {count(pulse.providers.broken_refs)} broken refs
         </PulseRow>
         <PulseRow label="MCP">
-          {pulse.mcp.total ?? 0} · {pulse.mcp.failing ?? 0} failing ·{" "}
-          {pulse.mcp.auth_expiring ?? 0} expiring
+          {count(pulse.mcp.total)} · {count(pulse.mcp.failing)} failing ·{" "}
+          {count(pulse.mcp.auth_expiring)} expiring
         </PulseRow>
         <PulseRow label="Customization">
-          {pulse.customization.modes ?? 0}M · {pulse.customization.skills ?? 0}S
-          · {pulse.customization.commands ?? 0}C ·{" "}
-          {pulse.customization.subagents ?? 0}A ·{" "}
-          {pulse.customization.hooks ?? 0}H
+          {count(pulse.customization.modes)}M ·{" "}
+          {count(pulse.customization.skills)}S ·{" "}
+          {count(pulse.customization.commands)}C ·{" "}
+          {count(pulse.customization.subagents)}A ·{" "}
+          {count(pulse.customization.hooks)}H
         </PulseRow>
         <PulseRow
           label="Diagnostics"
-          title={`${pulse.diagnostics.last_hour ?? 0} in last hour${
+          title={`${count(pulse.diagnostics.last_hour)} in last hour${
             pulse.diagnostics.top_error_types.length > 0
               ? ` [${pulse.diagnostics.top_error_types.join(", ")}]`
               : ""
           }`}
         >
-          {pulse.diagnostics.last_hour ?? 0} in last hour
+          {count(pulse.diagnostics.last_hour)} in last hour
           {pulse.diagnostics.top_error_types.length > 0
             ? ` [${pulse.diagnostics.top_error_types.join(", ")}]`
             : ""}
         </PulseRow>
         <PulseRow label="Git">
-          {pulse.git.uncommitted_files ?? 0} files ·{" "}
-          {pulse.git.diff_lines_4h ?? 0} lines / 4h
+          {count(pulse.git.uncommitted_files)} files ·{" "}
+          {count(pulse.git.diff_lines_4h)} lines / 4h
         </PulseRow>
         <PulseRow label="Worktrees">
-          {pulse.worktrees.total ?? 0} total ·{" "}
-          {pulse.worktrees.abandoned_clean ?? 0} clean abandoned ·{" "}
-          {pulse.worktrees.dirty ?? 0} dirty
+          {count(pulse.worktrees.total)} total ·{" "}
+          {count(pulse.worktrees.abandoned_clean)} clean abandoned ·{" "}
+          {count(pulse.worktrees.dirty)} dirty
         </PulseRow>
       </div>
-    </Surface>
+    </BuddySection>
   );
 };

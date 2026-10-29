@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 const BUDDY_ROUTE =
   "/tests/e2e/route-showcase.html?route=buddy&operator=enabled";
-const DESK = "[aria-label='Buddy Desk']";
+const DESK = "[data-testid='buddy-desk']";
 const CONTENT = "[data-testid='buddy-home-content']";
 const FOLD_PX = 900;
 const project = { project_id: "showcase", canonical_root: "/workspace/refact" };
@@ -203,11 +203,13 @@ async function deskMetrics(page: Page) {
   return page.evaluate((desk: string) => {
     const root = document.querySelector<HTMLElement>(desk);
     const row = root?.querySelector<HTMLElement>("ul li button");
-    const name = row?.querySelector<HTMLElement>("span");
-    const chevron = row?.querySelector<HTMLElement>("svg");
+    const name = row?.querySelector<HTMLElement>("[class*='titleLine']");
+    const chevron = row?.querySelector<HTMLElement>("svg:last-child");
     const items = root?.querySelector<HTMLElement>("ul");
     const heading = root?.querySelector<HTMLElement>("h2");
-    const views = root?.querySelector<HTMLElement>("nav");
+    const views = root?.querySelector<HTMLElement>(
+      '[role="radiogroup"][aria-label="Report views"]',
+    );
     if (!root || !row || !name || !chevron || !heading || !views || !items)
       throw new Error("Desk geometry is unavailable");
     const rowBox = row.getBoundingClientRect();
@@ -229,7 +231,7 @@ async function deskMetrics(page: Page) {
   }, DESK);
 }
 
-test.describe("Buddy Desk layout", () => {
+test.describe("Reports layout", () => {
   for (const width of [768, 1280, 1600]) {
     test(`row measure and chevron remain legible at ${width}px`, async ({
       page,
@@ -262,13 +264,20 @@ test.describe("Buddy Desk layout", () => {
       page,
     }) => {
       await openBuddy(page, 1280, theme);
+      await expect(page.getByTestId("buddy-desk-detail-hint")).toBeVisible();
+      const row = page.locator(`${DESK} ul li button`).first();
+      const before = await row.boundingBox();
+      await row.click();
+      await expect(page.getByRole("article")).toBeVisible();
+      await expect(page.getByTestId("buddy-desk-detail-hint")).toHaveCount(0);
+      const after = await row.boundingBox();
+      expect(after?.x).toBe(before?.x);
+      expect(after?.width).toBe(before?.width);
+      await page.getByRole("button", { name: "Back to reports" }).click();
+      await expect(page.getByTestId("buddy-desk-detail-hint")).toBeVisible();
       const desktop = await deskMetrics(page);
-      const placeholder = page.locator(`${DESK} [class*='placeholder']`);
-      await expect(placeholder).toBeVisible();
-      const placeholderLeft = await placeholder.evaluate((element) =>
-        Math.round(element.getBoundingClientRect().left),
-      );
-      const rails = [...new Set([...desktop.leftEdges, placeholderLeft])];
+      await expect(page.getByRole("article")).toHaveCount(0);
+      const rails = [...new Set(desktop.leftEdges)];
       expect(
         rails.length,
         `${theme} Desk left rails: ${rails.join(", ")}`,
@@ -279,6 +288,7 @@ test.describe("Buddy Desk layout", () => {
       page,
     }) => {
       await openBuddy(page, 360, theme);
+      await expect(page.getByTestId("buddy-desk-detail-hint")).toBeHidden();
       const narrow = await deskMetrics(page);
       expect(
         narrow.fill,
@@ -294,30 +304,30 @@ test.describe("Buddy Desk layout", () => {
     await openBuddy(page, 1280);
     const rows = page.locator(`${DESK} ul li button`);
     await rows.first().click();
-    await expect(page.getByLabel("Work detail")).toBeVisible();
+    await expect(page.getByRole("article")).toBeVisible();
     await page.locator(CONTENT).evaluate((element) => element.scrollTo(0, 200));
     const selectionBefore = await page.locator(CONTENT).evaluate((element) => ({
       top: element.scrollTop,
       desk: Math.round(
         document
-          .querySelector<HTMLElement>("[aria-label='Buddy Desk']")!
+          .querySelector<HTMLElement>("[data-testid='buddy-desk']")!
           .getBoundingClientRect().height,
       ),
     }));
     await page
-      .getByRole("button", { name: "Needs you", exact: true })
+      .getByRole("button", { name: "Back to reports", exact: true })
       .evaluate((button) => (button as HTMLButtonElement).click());
-    await expect(page.getByLabel("Work detail")).toHaveCount(0);
+    await expect(page.getByRole("article")).toHaveCount(0);
     const selectionAfter = await page.locator(CONTENT).evaluate((element) => ({
       top: element.scrollTop,
       desk: Math.round(
         document
-          .querySelector<HTMLElement>("[aria-label='Buddy Desk']")!
+          .querySelector<HTMLElement>("[data-testid='buddy-desk']")!
           .getBoundingClientRect().height,
       ),
       activeRow:
         document.activeElement ===
-        document.querySelector("[aria-label='Buddy Desk'] ul li button"),
+        document.querySelector("[data-testid='buddy-desk'] ul li button"),
     }));
     expect(Math.abs(selectionAfter.top - selectionBefore.top)).toBeLessThan(48);
     expect(Math.abs(selectionAfter.desk - selectionBefore.desk)).toBeLessThan(
@@ -328,40 +338,48 @@ test.describe("Buddy Desk layout", () => {
     const readGeometry = () =>
       page.locator(CONTENT).evaluate((element) => {
         const desk = document.querySelector<HTMLElement>(
-          "[aria-label='Buddy Desk']",
+          "[data-testid='buddy-desk']",
         )!;
         return {
           top: element.scrollTop,
+          maxScroll: element.scrollHeight - element.clientHeight,
           nav: Math.round(
-            desk.querySelector("nav")!.getBoundingClientRect().top,
+            desk
+              .querySelector('[role="radiogroup"][aria-label="Report views"]')!
+              .getBoundingClientRect().top,
           ),
           desk: Math.round(desk.getBoundingClientRect().height),
           rows: desk.querySelectorAll("ul li button").length,
         };
       });
-    const before = await readGeometry();
+    await page
+      .getByRole("radio", { name: "Needs you", exact: true })
+      .evaluate((control) => (control as HTMLInputElement).click());
+    let before = await readGeometry();
     for (const view of ["Working on", "Delivered", "Watching", "Needs you"]) {
       await page
-        .getByRole("button", { name: view, exact: true })
+        .getByRole("radio", { name: view, exact: true })
         .evaluate((button) => (button as HTMLButtonElement).click());
       await page.waitForTimeout(50);
       const after = await readGeometry();
       expect(
-        Math.abs(after.top - before.top),
+        Math.abs(after.top - Math.min(before.top, after.maxScroll)),
         `${view} scroll delta ${before.top} -> ${after.top}`,
       ).toBeLessThan(48);
       expect(
-        Math.abs(after.nav - before.nav),
+        Math.abs(after.nav + after.top - (before.nav + before.top)),
         `${view} view controls moved ${before.nav} -> ${after.nav}`,
       ).toBeLessThan(2);
-      if (after.rows === 0)
+      const previous = before;
+      before = after;
+      if (after.rows === 0 && previous.rows > 0)
         expect(
           after.desk,
           `${view} empty Desk reserves ${after.desk}px`,
-        ).toBeLessThan(before.desk);
-      else if (after.rows === before.rows)
+        ).toBeLessThan(previous.desk);
+      else if (after.rows === previous.rows)
         expect(
-          Math.abs(after.desk - before.desk),
+          Math.abs(after.desk - previous.desk),
           `${view} Desk height delta ${before.desk} -> ${after.desk}`,
         ).toBeLessThan(48);
     }

@@ -256,7 +256,7 @@ test("actual GUI effect, receipt, two native clients and restart with intelligen
       page.getByRole("button", { name: "Refresh questions", exact: true }),
     ).toBeEnabled();
     await expect(
-      page.getByRole("button", { name: "Refresh work", exact: true }),
+      page.getByRole("button", { name: "Refresh reports", exact: true }),
     ).toBeEnabled();
     expect(
       requests.filter(

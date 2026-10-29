@@ -12,7 +12,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 const BUDDY_ROUTE =
   "/tests/e2e/route-showcase.html?route=buddy&operator=enabled";
-const DESK = "[aria-label='Buddy Desk']";
+const DESK = "[data-testid='buddy-desk']";
 const SAVED = "[data-testid='buddy-home-saved-work']";
 const HOME_SCENE =
   "[data-testid='buddy-home-overview'] [data-testid='buddy-home-hero']";
@@ -179,10 +179,10 @@ test.describe("Buddy home prominence", () => {
       page.getByRole("button", { name: "Close Play", exact: true }),
     ).toHaveCount(0);
     await expect(
-      page.getByRole("button", { name: "Reset Buddy scene", exact: true }),
+      page.getByRole("button", { name: "Reset scene", exact: true }),
     ).toBeVisible();
 
-    await page.getByRole("button", { name: "Leave Play", exact: true }).click();
+    await page.getByRole("tab", { name: "Home", exact: true }).click();
     await expect(
       page.getByRole("tab", { name: "Home", exact: true }),
     ).toHaveAttribute("aria-selected", "true");
@@ -201,7 +201,9 @@ test.describe("Buddy home prominence", () => {
     await panel
       .getByRole("radio", { name: "Chats", exact: true })
       .click({ force: true });
-    await expect(panel.locator("[data-clickable]")).toHaveCount(1);
+    await expect(panel.getByRole("listitem").getByRole("button")).toHaveCount(
+      1,
+    );
 
     const geometry = await panel.evaluate((element) => {
       const panelHeight = element.getBoundingClientRect().height;

@@ -1,0 +1,42 @@
+.rail {
+  composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
+
+  --rf-rail-fade: var(--rf-space-5);
+
+  position: relative;
+  max-width: 100%;
+  min-width: 0;
+  overflow: auto hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+
+.rail::-webkit-scrollbar {
+  display: none;
+}
+
+.rail[data-overflow-end] {
+  mask-image: linear-gradient(
+    to right,
+    var(--rf-color-fg) calc(100% - var(--rf-rail-fade)),
+    transparent
+  );
+}
+
+.rail[data-overflow-start] {
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    var(--rf-color-fg) var(--rf-rail-fade)
+  );
+}
+
+.rail[data-overflow-start][data-overflow-end] {
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    var(--rf-color-fg) var(--rf-rail-fade),
+    var(--rf-color-fg) calc(100% - var(--rf-rail-fade)),
+    transparent
+  );
+}
