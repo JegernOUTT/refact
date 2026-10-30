@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum, ContextFile};
 use crate::chat::internal_roles::{event, EventSubkind};
+use crate::chat::types::GoalSnapshotBudgetExt;
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, StatusUpdate};

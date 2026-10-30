@@ -856,6 +856,10 @@ impl LoadedTrajectory {
 
 pub use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
 
+pub(super) fn retain_in_snapshot(message: &ChatMessage) -> bool {
+    message.role != "assistant" || has_displayable_assistant_content(message)
+}
+
 pub(crate) fn trajectory_snapshot_from_session(session: &ChatSession) -> TrajectorySnapshot {
     let span = perf_diagnostics::span(
         PerfComponent::TrajectorySnapshot,
@@ -865,7 +869,7 @@ pub(crate) fn trajectory_snapshot_from_session(session: &ChatSession) -> Traject
     let messages = session
         .messages
         .iter()
-        .filter(|message| message.role != "assistant" || has_displayable_assistant_content(message))
+        .filter(|message| retain_in_snapshot(message))
         .cloned()
         .collect();
 

@@ -1375,9 +1375,13 @@ mod tests {
         );
         assert_eq!(restored["command"], "printf original-command");
 
-        let mut registry = service.load_registry().await.unwrap();
+        let expected_registry = service.load_registry().await.unwrap();
+        let mut registry = expected_registry.clone();
         registry.records.clear();
-        service.save_registry(&registry).await.unwrap();
+        service
+            .compare_and_save_registry(&expected_registry, &registry)
+            .await
+            .unwrap();
         let (status, _) = json_response(
             router.clone(),
             Request::builder()

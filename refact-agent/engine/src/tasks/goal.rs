@@ -1661,13 +1661,13 @@ mod tests {
                         chat_id.clone(),
                         binding.scope(async {
                             let unchanged =
-                                TaskGoalSessionEpoch::state(&restored.lock().await).unwrap();
+                                TaskGoalSessionEpoch::state(&*restored.lock().await).unwrap();
                             assert!(hydrate_session_task_goal(app.gcx.clone(), &restored)
                                 .await
                                 .unwrap_err()
                                 .contains("not acknowledged"));
                             assert_eq!(
-                                TaskGoalSessionEpoch::state(&restored.lock().await).unwrap(),
+                                TaskGoalSessionEpoch::state(&*restored.lock().await).unwrap(),
                                 unchanged
                             );
                             assert_eq!(tokio::fs::read(&goal_path).await.unwrap(), bytes);
@@ -1689,13 +1689,13 @@ mod tests {
                         chat_id.clone(),
                         binding.scope(async {
                             let unchanged =
-                                TaskGoalSessionEpoch::state(&restored.lock().await).unwrap();
+                                TaskGoalSessionEpoch::state(&*restored.lock().await).unwrap();
                             assert!(commit_session_task_goal(app.gcx.clone(), &restored)
                                 .await
                                 .unwrap_err()
                                 .contains("identity superseded"));
                             assert_eq!(
-                                TaskGoalSessionEpoch::state(&restored.lock().await).unwrap(),
+                                TaskGoalSessionEpoch::state(&*restored.lock().await).unwrap(),
                                 unchanged
                             );
                             assert_eq!(tokio::fs::read(&goal_path).await.unwrap(), bytes);
@@ -1714,13 +1714,13 @@ mod tests {
                         chat_id.clone(),
                         binding.scope(async {
                             let unchanged =
-                                TaskGoalSessionEpoch::state(&restored.lock().await).unwrap();
+                                TaskGoalSessionEpoch::state(&*restored.lock().await).unwrap();
                             assert!(hydrate_session_task_goal(app.gcx.clone(), &restored)
                                 .await
                                 .unwrap_err()
                                 .contains("goal/budget superseded"));
                             assert_eq!(
-                                TaskGoalSessionEpoch::state(&restored.lock().await).unwrap(),
+                                TaskGoalSessionEpoch::state(&*restored.lock().await).unwrap(),
                                 unchanged
                             );
                             assert_eq!(tokio::fs::read(&goal_path).await.unwrap(), bytes);
@@ -1739,13 +1739,13 @@ mod tests {
                         chat_id.clone(),
                         binding.scope(async {
                             let unchanged =
-                                TaskGoalSessionEpoch::state(&restored.lock().await).unwrap();
+                                TaskGoalSessionEpoch::state(&*restored.lock().await).unwrap();
                             assert!(hydrate_session_task_goal(app.gcx.clone(), &restored)
                                 .await
                                 .unwrap_err()
                                 .contains("verification generation superseded"));
                             assert_eq!(
-                                TaskGoalSessionEpoch::state(&restored.lock().await).unwrap(),
+                                TaskGoalSessionEpoch::state(&*restored.lock().await).unwrap(),
                                 unchanged
                             );
                             assert_eq!(tokio::fs::read(&goal_path).await.unwrap(), bytes);
@@ -1859,7 +1859,7 @@ mod tests {
         assert!(restored.lock().await.task_goal_partial_write.is_none());
         assert_eq!(tokio::fs::read(&goal_path).await.unwrap(), before);
         assert_eq!(
-            TaskGoalSessionEpoch::state(&restored.lock().await).unwrap(),
+            TaskGoalSessionEpoch::state(&*restored.lock().await).unwrap(),
             held
         );
         crate::file_activity::TOOL_ACTOR
@@ -1871,7 +1871,7 @@ mod tests {
                         .unwrap_err()
                         .contains("held session goal"));
                     assert_eq!(
-                        TaskGoalSessionEpoch::state(&restored.lock().await).unwrap(),
+                        TaskGoalSessionEpoch::state(&*restored.lock().await).unwrap(),
                         held
                     );
                     commit_session_task_goal(app.gcx.clone(), &restored)
@@ -1979,7 +1979,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(error, format!("Task goal revision {} persisted; session projection not applied: Task goal session changed while awaiting persistence; retry", prior.revision + 1));
         assert_eq!(
-            TaskGoalSessionEpoch::state(&restored.lock().await).unwrap(),
+            TaskGoalSessionEpoch::state(&*restored.lock().await).unwrap(),
             held
         );
         let partial = read_record(&goal_path).await.unwrap().unwrap();
@@ -2137,7 +2137,7 @@ mod tests {
                         .contains("control content/ledger superseded"));
                     assert_eq!(tokio::fs::read(&goal_path).await.unwrap(), own_bytes);
                     assert_eq!(
-                        TaskGoalSessionEpoch::state(&restored.lock().await).unwrap(),
+                        TaskGoalSessionEpoch::state(&*restored.lock().await).unwrap(),
                         held
                     );
                     assert_eq!(
@@ -2186,7 +2186,7 @@ mod tests {
                         .contains("canonical revision/content superseded"));
                     assert_eq!(tokio::fs::read(&goal_path).await.unwrap(), bytes);
                     assert_eq!(
-                        TaskGoalSessionEpoch::state(&restored.lock().await).unwrap(),
+                        TaskGoalSessionEpoch::state(&*restored.lock().await).unwrap(),
                         held
                     );
                     assert!(restored.lock().await.task_goal_partial_write.is_some());
@@ -2198,7 +2198,7 @@ mod tests {
         *app.gcx.documents_state.workspace_folders.lock().unwrap() =
             vec![foreign.clone(), temp.path().into()];
         restored.lock().await.work_project_root = Some(foreign.clone());
-        let foreign_state = TaskGoalSessionEpoch::state(&restored.lock().await).unwrap();
+        let foreign_state = TaskGoalSessionEpoch::state(&*restored.lock().await).unwrap();
         let bytes = tokio::fs::read(&goal_path).await.unwrap();
         assert!(hydrate_session_task_goal(app.gcx.clone(), &restored)
             .await
@@ -2206,7 +2206,7 @@ mod tests {
             .contains("authenticated source/task domain"));
         assert_eq!(tokio::fs::read(&goal_path).await.unwrap(), bytes);
         assert_eq!(
-            TaskGoalSessionEpoch::state(&restored.lock().await).unwrap(),
+            TaskGoalSessionEpoch::state(&*restored.lock().await).unwrap(),
             foreign_state
         );
         assert!(!foreign.join(".refact/tasks").join(&task_id).exists());
@@ -2276,7 +2276,7 @@ mod tests {
         );
         assert!(!dir.join("goal.json").exists());
         assert!(refused.lock().await.task_goal_partial_write.is_none());
-        let state = TaskGoalSessionEpoch::state(&refused.lock().await).unwrap();
+        let state = TaskGoalSessionEpoch::state(&*refused.lock().await).unwrap();
         let queue = serde_json::to_value(&refused.lock().await.command_queue).unwrap();
         let error = commit_session_task_goal(app.gcx.clone(), &refused)
             .await
@@ -2297,7 +2297,7 @@ mod tests {
             board_before
         );
         assert_eq!(
-            TaskGoalSessionEpoch::state(&refused.lock().await).unwrap(),
+            TaskGoalSessionEpoch::state(&*refused.lock().await).unwrap(),
             state
         );
         assert_eq!(
@@ -2405,7 +2405,7 @@ mod tests {
             ..Default::default()
         });
         let stale = Arc::new(Mutex::new(stale));
-        let stale_state = TaskGoalSessionEpoch::state(&stale.lock().await).unwrap();
+        let stale_state = TaskGoalSessionEpoch::state(&*stale.lock().await).unwrap();
         super::super::storage::update_board_atomic(app.gcx.clone(), &task_id, |board| {
             board.owner_chat_id = Some("replacement-planner".into());
             Ok(())
@@ -2428,7 +2428,7 @@ mod tests {
             goal_bytes
         );
         assert_eq!(
-            TaskGoalSessionEpoch::state(&stale.lock().await).unwrap(),
+            TaskGoalSessionEpoch::state(&*stale.lock().await).unwrap(),
             stale_state
         );
         let (mut corrupted, corrupted_controls) = replayed_session(&owner);

@@ -2457,7 +2457,7 @@ async fn execute_regular_tool_calls(
         )
         .await;
 
-        if super::session_runtime::board_execution_interrupted(&session_arc.lock().await) {
+        if super::session_runtime::board_execution_interrupted(&*session_arc.lock().await) {
             let mut session = session_arc.lock().await;
             for message in tool_results {
                 session.add_message(message);
@@ -2771,7 +2771,7 @@ mod tests {
         {
             let mut state = app.model.caps.write().await;
             state.caps = Some(Arc::new(caps));
-            state.loaded_project_root = Some(source.clone());
+            state.loaded_project_root = Some(Some(source.clone()));
             state.last_attempted_ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -4150,6 +4150,7 @@ mod tests {
             &json!({"worktree": null}),
         )
         .await
+        .unwrap()
         .unwrap();
         assert!(update.worktree.is_none());
         let registry = service.load_registry().await.unwrap();

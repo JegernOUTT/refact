@@ -2286,7 +2286,7 @@ pub async fn process_tool_calls_once(
         result = tool_execution => result,
         _ = wait_for_tool_abort(session_arc.clone(), tool_interrupt_flag) => (Vec::new(), false),
     };
-    if super::session_runtime::board_execution_interrupted(&session_arc.lock().await) {
+    if super::session_runtime::board_execution_interrupted(&*session_arc.lock().await) {
         let mut session = session_arc.lock().await;
         for message in tool_results {
             session.add_message(message);

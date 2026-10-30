@@ -638,7 +638,9 @@ async fn known_landing_survives_post_commit_revocation_and_release() {
             .unwrap()
             .unwrap();
         let project_key = refact_work_core::identity::ProjectKey::new(manager.project());
-        let lease_key = crate::coordination::merge_gate::checkout_key(&root);
+        let lease_key = crate::coordination::merge_gate::merge_lease_key(
+            &crate::coordination::merge_gate::checkout_key(&root),
+        );
         let observed = service.with_merge_authority(Arc::new(move || {
             let repo = git2::Repository::open(&target).unwrap();
             let head = repo
@@ -764,7 +766,9 @@ async fn known_landing_survives_post_commit_revocation_and_release() {
         .unwrap()
         .unwrap()
         .inspect(
-            &crate::coordination::merge_gate::checkout_key(&root),
+            &crate::coordination::merge_gate::merge_lease_key(
+                &crate::coordination::merge_gate::checkout_key(&root),
+            ),
             refact_work_core::store::records::now_ms(),
         )
         .await
