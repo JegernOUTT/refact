@@ -1069,6 +1069,9 @@ fn should_observe_thread_skips_buddy_task_setup_and_subchats() {
         is_buddy_chat: true,
         buddy_chat_kind: "investigation".to_string(),
         workflow_id: None,
+        source_chat_id: None,
+        source_project: None,
+        source_created_at: None,
     });
     assert!(!super::chat_reactions::should_observe_thread(&thread));
 

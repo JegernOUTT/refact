@@ -1518,6 +1518,9 @@ async fn create_investigation_chat(
             is_buddy_chat: true,
             buddy_chat_kind: "investigation".to_string(),
             workflow_id: None,
+            source_chat_id: None,
+            source_project: None,
+            source_created_at: None,
         }),
         auto_compact_enabled: None,
         frozen_request_prefix: None,
@@ -1526,6 +1529,7 @@ async fn create_investigation_chat(
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
         pending_questions: Vec::new(),
+        native_decision_receipts: Vec::new(),
     };
 
     crate::chat::trajectories::save_trajectory_snapshot(gcx, snapshot)

@@ -2606,6 +2606,9 @@ async fn observe_autonomous_run(
         is_buddy_chat: true,
         buddy_chat_kind: "system".to_string(),
         workflow_id: Some(spec.workflow_id.clone()),
+        source_chat_id: None,
+        source_project: None,
+        source_created_at: None,
     });
 
     let result = match crate::subchat::run_subchat(gcx.gcx.clone(), messages, config).await {

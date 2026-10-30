@@ -303,6 +303,30 @@ pub async fn prepare_chat_passthrough(
     sampling_parameters: &mut SamplingParameters,
     options: &ChatPrepareOptions,
 ) -> Result<PreparedChat, String> {
+    let companion = crate::buddy::companion::is_companion(thread);
+    let companion_options;
+    let options = if companion {
+        companion_options = ChatPrepareOptions {
+            prepend_system_prompt: false,
+            allow_at_commands: false,
+            allow_tool_prerun: false,
+            supports_tools: false,
+            tool_choice: Some(ToolChoice::None),
+            parallel_tool_calls: Some(false),
+            cache_control: options.cache_control,
+            frozen_request_prefix: None,
+        };
+        &companion_options
+    } else {
+        options
+    };
+    let tools = if companion { vec![] } else { tools };
+    let messages = if companion {
+        crate::buddy::companion::prepare_context(gcx.clone(), &meta.chat_id, thread, messages)
+            .await?
+    } else {
+        messages
+    };
     // Boundary projection must precede UI filtering, enrichment, and provider conversion.
     let messages = apply_summarization_linearize(messages)?;
     let mut has_rag_results = HasRagResults::new();
@@ -453,7 +477,8 @@ pub async fn prepare_chat_passthrough(
 
     // OpenAI Responses API stateful multi-turn: when we chain with previous_response_id,
     // we should send only the new tail items (tool outputs and/or new user message).
-    if model_record.base.wire_format == WireFormat::OpenaiResponses
+    if !companion
+        && model_record.base.wire_format == WireFormat::OpenaiResponses
         && thread
             .previous_response_id
             .as_ref()
@@ -508,7 +533,7 @@ pub async fn prepare_chat_passthrough(
         )
         .with_cache_control(options.cache_control);
 
-    if model_record.base.wire_format == WireFormat::OpenaiResponses {
+    if !companion && model_record.base.wire_format == WireFormat::OpenaiResponses {
         llm_request = llm_request.with_previous_response_id(thread.previous_response_id.clone());
     }
 

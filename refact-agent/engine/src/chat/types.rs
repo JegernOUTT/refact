@@ -417,6 +417,7 @@ pub struct ChatSession {
     pub goal_verification_blocked_until_ms: Option<u64>,
     pub goal_verification_generation: u64,
     pub pending_questions: Vec<PendingQuestionSet>,
+    pub native_decision_receipts: Vec<serde_json::Value>,
 }
 
 #[derive(Default)]

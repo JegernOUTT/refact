@@ -65,8 +65,33 @@ fn should_compact_context_limit_error(
         && !is_aborted(abort_flag)
 }
 
+fn validate_refusal_reply(config: &SubchatConfig, messages: &[ChatMessage]) -> Result<(), String> {
+    if config.tool_name != "refusal_followup" {
+        return Ok(());
+    }
+    let message = messages
+        .last()
+        .ok_or("Refusal acknowledgement has no reply")?;
+    if !matches!(config.tools, ToolsPolicy::None)
+        || config.max_steps != 1
+        || config.stateful
+        || message.role != "assistant"
+        || message
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty())
+        || !matches!(&message.content, ChatContent::SimpleText(text) if !text.trim().is_empty())
+    {
+        return Err("Refusal acknowledgement must be one nonempty text-only reply; no action was dispatched".into());
+    }
+    Ok(())
+}
+
 fn subchat_retries_allowed(config: &SubchatConfig) -> bool {
-    config.tool_name != "mode_transition" && !matches!(config.tools, ToolsPolicy::Supervised { .. })
+    !matches!(
+        config.tool_name.as_str(),
+        "mode_transition" | "refusal_followup"
+    ) && !matches!(config.tools, ToolsPolicy::Supervised { .. })
 }
 
 fn append_runner_deliveries(
@@ -3118,6 +3143,7 @@ async fn run_subchat_loop(
         let gcx = ccx.lock().await.global_context.clone();
         emit_usage_progress(&gcx, config, &results).await;
         messages = results.into_iter().next().unwrap_or(messages);
+        validate_refusal_reply(config, &messages)?;
         persist_subchat_progress(&ccx, config, progress, &messages).await;
 
         if has_final_answer(&messages) {
@@ -5314,6 +5340,24 @@ mod subchat_tests {
             .content
             .content_text_only()
             .contains("Subchat run failed")));
+    }
+
+    #[test]
+    fn refusal_reply_rejects_tool_dispatch_and_retries_at_shipping_boundary() {
+        let mut config = test_subchat_config();
+        config.tool_name = "refusal_followup".into();
+        let mut reply = ChatMessage::new(
+            "assistant".into(),
+            "I will not run that. We could inspect the documentation instead.".into(),
+        );
+        assert!(super::validate_refusal_reply(&config, &[reply.clone()]).is_ok());
+        reply.tool_calls = Some(vec![serde_json::from_value(serde_json::json!({
+            "id":"forbidden", "type":"function", "function":{"name":"shell", "arguments":"{}"}
+        }))
+        .unwrap()]);
+        assert_eq!(super::validate_refusal_reply(&config, &[reply]).unwrap_err(),
+            "Refusal acknowledgement must be one nonempty text-only reply; no action was dispatched");
+        assert!(!subchat_retries_allowed(&config));
     }
 
     #[test]

@@ -67,6 +67,7 @@ pub mod prompts;
 #[cfg(test)]
 pub(crate) mod questions_closure_tests;
 pub(crate) mod queue;
+pub(crate) mod refusal_followup;
 pub(crate) mod retry_policy;
 mod session;
 pub(crate) mod worktree_lifecycle;

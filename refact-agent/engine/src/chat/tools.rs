@@ -962,6 +962,72 @@ mod tests {
         sink.events().iter().map(|event| event.component).collect()
     }
 
+    #[tokio::test]
+    async fn companion_tool_calls_never_reach_execution_catalog() {
+        let base_app =
+            AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let catalog_reads = Arc::new(AtomicUsize::new(0));
+        let reads = catalog_reads.clone();
+        let app = AppState {
+            tool_registry: Arc::new(
+                crate::app_state::AppToolRegistry::with_fixture_tool_factory(
+                    base_app.gcx.clone(),
+                    Arc::new(move || {
+                        reads.fetch_add(1, AtomicOrdering::SeqCst);
+                        DeterministicToolRegistry {
+                            confirmation_result: MatchConfirmDenyResult::PASS,
+                            runtime_failure: false,
+                        }
+                        .tools()
+                    }),
+                ),
+            ),
+            ..base_app
+        };
+        let mut session = ChatSession::new("companion-tool-guard".into());
+        session.thread.mode = "agent".into();
+        session.thread.model = "model".into();
+        session.thread.buddy_meta = Some(BuddyThreadMeta {
+            is_buddy_chat: true,
+            buddy_chat_kind: "companion".into(),
+            workflow_id: None,
+            source_chat_id: Some("source-chat".into()),
+            source_project: None,
+            source_created_at: None,
+        });
+        let call = deterministic_tool_call("unexpected-call", "alpha");
+        let mut assistant = ChatMessage::new("assistant".into(), String::new());
+        assistant.tool_calls = Some(vec![call.clone()]);
+        session.add_message(assistant);
+        let session = Arc::new(AMutex::new(session));
+        let outcome = process_tool_calls_once(app.clone(), session.clone(), "agent", None).await;
+        assert!(matches!(outcome, ToolStepOutcome::Stop));
+        assert_eq!(catalog_reads.load(AtomicOrdering::SeqCst), 0);
+        let stale_thread = ThreadParams {
+            id: "companion-tool-guard".into(),
+            ..Default::default()
+        };
+        let (results, _) = execute_tools_with_session(
+            app,
+            session,
+            &[call],
+            &[],
+            &stale_thread,
+            "agent",
+            None,
+            ExecuteToolsOptions::default(),
+        )
+        .await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].tool_call_id, "unexpected-call");
+        assert_eq!(results[0].tool_failed, Some(true));
+        assert_eq!(
+            results[0].content.content_text_only(),
+            "Invalid active context: Buddy companions cannot execute tools"
+        );
+        assert_eq!(catalog_reads.load(AtomicOrdering::SeqCst), 0);
+    }
+
     #[serial(trajectory_perf)]
     #[tokio::test]
     async fn same_turn_tool_diagnostics_cover_stages_without_confirmation_wait() {
@@ -1844,6 +1910,9 @@ pub async fn process_tool_calls_once(
     mode_id: &str,
     model_id: Option<&str>,
 ) -> ToolStepOutcome {
+    if crate::buddy::companion::is_companion(&session_arc.lock().await.thread) {
+        return ToolStepOutcome::Stop;
+    }
     if session_arc.lock().await.planner_pause_at_boundary() {
         return ToolStepOutcome::Stop;
     }
@@ -2804,6 +2873,12 @@ pub async fn execute_tools_with_session(
 ) -> (Vec<ChatMessage>, bool) {
     if tool_calls.is_empty() {
         return (vec![], false);
+    }
+
+    if crate::buddy::companion::is_companion(thread)
+        || crate::buddy::companion::is_companion(&session_arc.lock().await.thread)
+    {
+        return context_error_results(tool_calls, "Buddy companions cannot execute tools".into());
     }
 
     let Ok(operation) = super::session_runtime::begin_board_operation(&app, &session_arc).await

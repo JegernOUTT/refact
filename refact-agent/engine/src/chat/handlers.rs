@@ -524,6 +524,16 @@ pub async fn handle_v1_chat_command(
     spawn_pending_background_agent_flush(app.clone(), chat_id.clone());
     let mut session = session_arc.lock().await;
 
+    if crate::buddy::companion::is_companion(&session.thread)
+        && !crate::buddy::companion::command_allowed(&request.command)
+    {
+        let error =
+            "Companion conversations cannot change execution settings or restore another session"
+                .to_string();
+        super::queue::reject_guard(&mut session, &request.client_request_id, error.clone());
+        return Err(ScratchError::new(StatusCode::FORBIDDEN, error));
+    }
+
     if session.has_seen_request(&request.client_request_id) {
         session.emit(ChatEvent::Ack {
             client_request_id: request.client_request_id.clone(),
@@ -600,14 +610,37 @@ pub async fn handle_v1_chat_command(
             )
             .await;
             let mut session = session_arc.lock().await;
-            if result.is_ok() {
-                session.remember_accepted_request(&request.client_request_id);
-            }
             let accepted = result.is_ok();
+            crate::buddy::decision_receipts::transition(
+                &mut session,
+                &request.client_request_id,
+                if accepted { "applied" } else { "unknown" },
+                (!accepted).then(|| {
+                    "Original command approval policy did not acknowledge application".into()
+                }),
+            );
             let payload = match result {
                 Ok(()) => serde_json::json!({"applied":true}),
                 Err(error) => serde_json::json!({"error":error}),
             };
+            drop(session);
+            if let Err(error) =
+                super::trajectories::flush_trajectory_for_session(app.clone(), session_arc.clone())
+                    .await
+            {
+                session_arc.lock().await.emit(ChatEvent::Ack {
+                    client_request_id: request.client_request_id.clone(), accepted: false,
+                    result: Some(serde_json::json!({"status":"unknown", "error":"Approval outcome durability is uncertain"})),
+                });
+                return Err(ScratchError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("Approval outcome durability is uncertain: {error}"),
+                ));
+            }
+            let mut session = session_arc.lock().await;
+            if accepted {
+                session.remember_accepted_request(&request.client_request_id);
+            }
             session.emit(ChatEvent::Ack {
                 client_request_id: request.client_request_id,
                 accepted,
@@ -1280,6 +1313,47 @@ mod tests {
             .lock()
             .unwrap() = vec![root.to_path_buf()];
         app
+    }
+
+    #[tokio::test]
+    async fn companion_http_settings_cannot_remove_source_binding() {
+        let workspace = tempfile::tempdir().unwrap();
+        let app = test_app_with_workspace(workspace.path()).await;
+        let chat_id = "companion-http-guard";
+        let mut session = ChatSession::new(chat_id.into());
+        session.thread.mode = "no_tools".into();
+        session.thread.tool_use = "none".into();
+        session.thread.buddy_meta = Some(crate::chat::types::BuddyThreadMeta {
+            is_buddy_chat: true,
+            buddy_chat_kind: "companion".into(),
+            workflow_id: None,
+            source_chat_id: Some("source-chat".into()),
+            source_project: Some(workspace.path().to_string_lossy().into_owned()),
+            source_created_at: Some("source-origin".into()),
+        });
+        let before = serde_json::to_value(&session.thread).unwrap();
+        let session = Arc::new(tokio::sync::Mutex::new(session));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.into(), session.clone());
+        let response = handle_v1_chat_command(
+            State(app),
+            Path(chat_id.into()),
+            serde_json::to_vec(&json!({
+                "client_request_id": "replace-binding",
+                "type": "set_params",
+                "patch": {"mode": "agent", "tool_use": "agent", "buddy_meta": null}
+            }))
+            .unwrap()
+            .into(),
+        )
+        .await;
+        assert_eq!(response.unwrap_err().status_code, StatusCode::FORBIDDEN);
+        let session = session.lock().await;
+        assert_eq!(serde_json::to_value(&session.thread).unwrap(), before);
+        assert!(session.command_queue.is_empty());
     }
 
     #[tokio::test]

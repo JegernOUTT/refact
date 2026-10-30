@@ -3561,6 +3561,16 @@ async fn finish_stream_attempt(
 
     recover_stream_tool_calls(&mut result, &llm_request.tools)?;
 
+    if !result.tool_calls_raw.is_empty()
+        && crate::buddy::companion::is_companion(&session_arc.lock().await.thread)
+    {
+        return Err(
+            "Buddy companion returned tool calls; no action was authorized or dispatched"
+                .to_string()
+                .into(),
+        );
+    }
+
     let draft_usage_for_success = {
         let session = session_arc.lock().await;
         session.draft_usage.clone()

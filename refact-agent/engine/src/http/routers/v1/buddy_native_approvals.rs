@@ -57,13 +57,34 @@ pub(crate) fn validate_native_approval(
     engine_identity: &str,
     version: &str,
 ) -> Result<(), String> {
-    if session.closed
+    if crate::coordination::scope::session_source_root(session).is_none_or(|source| {
+        crate::coordination::roots::project_identity(&source)
+            != crate::coordination::roots::project_identity(std::path::Path::new(root))
+    }) || session.closed
         || engine_identity != native_engine_identity()
         || version != source_version(session, root)
     {
         return Err("Native approval source changed; refresh before responding".into());
     }
     Ok(())
+}
+
+pub(crate) fn request_identity(session: &ChatSession, target: &str) -> String {
+    crate::buddy::decision_receipts::digest(&serde_json::json!([
+        session.chat_id,
+        session.created_at,
+        target,
+        session
+            .messages
+            .iter()
+            .flat_map(|m| m
+                .tool_calls
+                .iter()
+                .flatten()
+                .filter(|call| call.id == target)
+                .map(move |call| (&m.message_id, call)))
+            .collect::<Vec<_>>()
+    ]))
 }
 
 #[derive(Serialize)]
@@ -180,7 +201,7 @@ pub async fn handle_current_approvals(
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ApprovalResponse {
     Tool {
@@ -197,7 +218,7 @@ pub enum ApprovalResponse {
     },
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeApprovalRequest {
     project_root: String,
@@ -205,6 +226,8 @@ pub struct NativeApprovalRequest {
     source_version: String,
     client_request_id: String,
     response: ApprovalResponse,
+    #[serde(default)]
+    refusal_followup: bool,
 }
 
 fn response_command(
@@ -292,8 +315,56 @@ pub async fn handle_approval_response(
         .ok_or_else(|| {
             ScratchError::new(StatusCode::NOT_FOUND, "Native chat is not loaded".into())
         })?;
+    let payload_hash = crate::buddy::decision_receipts::digest(
+        &serde_json::to_value(&request)
+            .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e.to_string()))?,
+    );
     let command = {
-        let session = session.lock().await;
+        let mut locked = session.lock().await;
+        if crate::coordination::scope::session_source_root(&locked).is_none_or(|source| {
+            crate::coordination::roots::project_identity(&source)
+                != crate::coordination::roots::project_identity(std::path::Path::new(&root))
+        }) {
+            return Err(ScratchError::new(
+                StatusCode::CONFLICT,
+                "Native approval source project unavailable".into(),
+            ));
+        }
+        if let Some(old) =
+            crate::buddy::decision_receipts::find(&locked, &request.client_request_id)
+                .map_err(|e| ScratchError::new(StatusCode::CONFLICT, e))?
+        {
+            if old.payload_hash != payload_hash {
+                return Err(ScratchError::new(
+                    StatusCode::CONFLICT,
+                    "Request identity payload conflict".into(),
+                ));
+            }
+            let outcome =
+                crate::buddy::decision_receipts::visible(&locked, old, native_engine_identity());
+            return Ok(hyper::Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(hyper::Body::from(
+                    serde_json::to_string(&outcome).unwrap_or_default(),
+                ))
+                .unwrap());
+        }
+        let session = &mut *locked;
+        if request.refusal_followup
+            && !matches!(
+                &request.response,
+                ApprovalResponse::Tool {
+                    accepted: false,
+                    ..
+                }
+            )
+        {
+            return Err(ScratchError::new(
+                StatusCode::BAD_REQUEST,
+                "Followup requires an explicit refusal".into(),
+            ));
+        }
         validate_native_approval(
             &session,
             &root,
@@ -301,21 +372,98 @@ pub async fn handle_approval_response(
             &request.source_version,
         )
         .map_err(|e| ScratchError::new(StatusCode::CONFLICT, e))?;
-        response_command(&session, request.response)
-            .map_err(|e| ScratchError::new(StatusCode::CONFLICT, e))?
+        let command = response_command(&session, request.response)
+            .map_err(|e| ScratchError::new(StatusCode::CONFLICT, e))?;
+        let target = match &command {
+            refact_chat_api::ChatCommand::ToolDecision { tool_call_id, .. } => {
+                tool_call_id.as_str()
+            }
+            refact_chat_api::ChatCommand::BrowserContextDecision {
+                pending_message_id, ..
+            } => pending_message_id.as_str(),
+            _ => "",
+        };
+        let request_identity = request_identity(session, target);
+        crate::buddy::decision_receipts::reserve(
+            session,
+            crate::buddy::decision_receipts::DecisionReceipt {
+                source_user_id: session
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == "user")
+                    .map(|m| m.message_id.clone()),
+                schema_version: 1,
+                project_root: root.clone(),
+                engine_identity: request.engine_identity.clone(),
+                chat_id: chat_id.clone(),
+                client_request_id: request.client_request_id.clone(),
+                target_id: target.to_string(),
+                accepted: match &command {
+                    refact_chat_api::ChatCommand::ToolDecision { accepted, .. } => Some(*accepted),
+                    _ => None,
+                },
+                request_identity,
+                source_version: request.source_version.clone(),
+                payload_hash,
+                status: "queued".into(),
+                followup: if request.refusal_followup {
+                    "pending"
+                } else {
+                    "not_requested"
+                }
+                .into(),
+                reason: None,
+                message_id: None,
+                decision_version: 0,
+                version: 0,
+            },
+        )
+        .map_err(|e| ScratchError::new(StatusCode::CONFLICT, e))?;
+        command
     };
+    if let Err(error) =
+        crate::chat::trajectories::flush_trajectory_for_session(app.clone(), session.clone()).await
+    {
+        crate::buddy::decision_receipts::transition(
+            &mut *session.lock().await,
+            &request.client_request_id,
+            "unknown",
+            Some("Decision admission durability is uncertain; no command was dispatched".into()),
+        );
+        let _ =
+            crate::chat::trajectories::flush_trajectory_for_session(app.clone(), session.clone())
+                .await;
+        return Err(ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, error));
+    }
     let mut body = serde_json::to_value(command)
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     body["client_request_id"] = serde_json::json!(request.client_request_id);
     body["native_approval_guard"] = serde_json::json!({
         "project_root": root, "engine_identity": request.engine_identity, "source_version": request.source_version,
     });
-    crate::chat::handle_v1_chat_command(
-        State(app),
+    let receipt_request_id = request.client_request_id.clone();
+    let result = crate::chat::handle_v1_chat_command(
+        State(app.clone()),
         Path(chat_id),
         hyper::body::Bytes::from(body.to_string()),
     )
-    .await
+    .await;
+    if result
+        .as_ref()
+        .map_or(true, |response| !response.status().is_success())
+    {
+        crate::buddy::decision_receipts::transition(
+            &mut *session.lock().await,
+            &receipt_request_id,
+            "unknown",
+            Some(
+                "Native command admission was not acknowledged; not automatically replayed".into(),
+            ),
+        );
+        let _ = crate::chat::trajectories::flush_trajectory_for_session(app, session).await;
+    }
+    result
 }
 
 #[cfg(test)]
@@ -324,6 +472,7 @@ mod tests {
 
     fn paused() -> ChatSession {
         let mut session = ChatSession::new("chat".into());
+        session.work_project_root = Some("/project".into());
         session.runtime.state = refact_chat_api::SessionState::Paused;
         session
             .runtime
@@ -387,7 +536,9 @@ mod tests {
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.path().to_path_buf()];
         let app = AppState::from_gcx(gcx).await;
         let root = root.path().to_string_lossy().into_owned();
-        let session = std::sync::Arc::new(tokio::sync::Mutex::new(paused()));
+        let mut paused = paused();
+        paused.work_project_root = Some(std::path::PathBuf::from(&root));
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(paused));
         session
             .lock()
             .await
@@ -425,6 +576,7 @@ mod tests {
                     engine_identity: snapshot.engine_identity.clone(),
                     source_version: version,
                     client_request_id: "invalid".into(),
+                    refusal_followup: false,
                     response: ApprovalResponse::Tool {
                         tool_call_id: tool_call_id.into(),
                         accepted: true
@@ -443,6 +595,7 @@ mod tests {
                 engine_identity: snapshot.engine_identity,
                 source_version: snapshot.sessions[0].source_version.clone(),
                 client_request_id: "queued".into(),
+                refusal_followup: false,
                 response: ApprovalResponse::Tool {
                     tool_call_id: "tool".into(),
                     accepted: false,
@@ -559,4 +712,86 @@ mod tests {
         )
         .is_err());
     }
+}
+
+#[derive(Deserialize)]
+pub struct OutcomeQuery {
+    pub project_root: String,
+}
+
+pub async fn handle_approval_outcome(
+    State(app): State<AppState>,
+    Path((chat_id, client_request_id)): Path<(String, String)>,
+    axum::extract::Query(query): axum::extract::Query<OutcomeQuery>,
+) -> Result<axum::Json<crate::buddy::decision_receipts::DecisionReceipt>, ScratchError> {
+    let root = super::buddy_decisions::decision_root(&app).await?;
+    if root != query.project_root {
+        return Err(ScratchError::new(
+            StatusCode::CONFLICT,
+            "Project changed".into(),
+        ));
+    }
+    let loaded = app.chat.sessions.read().await.get(&chat_id).cloned();
+    if let Some(session) = loaded {
+        let session = session.lock().await;
+        if crate::coordination::scope::session_source_root(&session).is_none_or(|source| {
+            crate::coordination::roots::project_identity(&source)
+                != crate::coordination::roots::project_identity(std::path::Path::new(&root))
+        }) {
+            return Err(ScratchError::new(
+                StatusCode::CONFLICT,
+                "Receipt source project unavailable".into(),
+            ));
+        }
+        let receipt = crate::buddy::decision_receipts::find(&session, &client_request_id)
+            .map_err(|e| ScratchError::new(StatusCode::CONFLICT, e))?
+            .ok_or_else(|| {
+                ScratchError::new(StatusCode::NOT_FOUND, "Outcome not recorded".into())
+            })?;
+        if receipt.project_root != root {
+            return Err(ScratchError::new(
+                StatusCode::CONFLICT,
+                "Receipt project mismatch".into(),
+            ));
+        }
+        return Ok(axum::Json(crate::buddy::decision_receipts::visible(
+            &session,
+            receipt,
+            native_engine_identity(),
+        )));
+    }
+    let loaded = crate::chat::trajectories::load_trajectory_for_chat(app.gcx.clone(), &chat_id)
+        .await
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::NOT_FOUND,
+                "Native trajectory is unavailable".into(),
+            )
+        })?;
+    let source = tokio::fs::canonicalize(&loaded.source_path)
+        .await
+        .map_err(|_| {
+            ScratchError::new(
+                StatusCode::NOT_FOUND,
+                "Receipt trajectory unavailable".into(),
+            )
+        })?;
+    if !source.starts_with(std::path::Path::new(&root).join(".refact")) {
+        return Err(ScratchError::new(
+            StatusCode::CONFLICT,
+            "Receipt trajectory belongs to another project".into(),
+        ));
+    }
+    let mut session = ChatSession::new(chat_id);
+    session.native_decision_receipts = loaded.native_decision_receipts;
+    session.trajectory_committed_version = u64::MAX; // Every entry here came from the authoritative disk snapshot.
+    let receipt = crate::buddy::decision_receipts::find(&session, &client_request_id)
+        .map_err(|e| ScratchError::new(StatusCode::CONFLICT, e))?
+        .filter(|r| r.project_root == root)
+        .ok_or_else(|| ScratchError::new(StatusCode::NOT_FOUND, "Outcome not recorded".into()))?;
+    Ok(axum::Json(crate::buddy::decision_receipts::visible(
+        &session,
+        receipt,
+        native_engine_identity(),
+    )))
 }

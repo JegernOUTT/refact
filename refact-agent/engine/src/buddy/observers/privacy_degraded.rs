@@ -74,6 +74,9 @@ async fn create_warning_chat(gcx: Arc<GlobalContext>, reason: &str) -> Result<St
             is_buddy_chat: true,
             buddy_chat_kind: "system".to_string(),
             workflow_id: Some("privacy_degraded".to_string()),
+            source_chat_id: None,
+            source_project: None,
+            source_created_at: None,
         }),
         auto_compact_enabled: None,
         frozen_request_prefix: None,
@@ -82,6 +85,7 @@ async fn create_warning_chat(gcx: Arc<GlobalContext>, reason: &str) -> Result<St
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
         pending_questions: Vec::new(),
+        native_decision_receipts: Vec::new(),
     };
     crate::chat::trajectories::save_trajectory_snapshot(gcx, snapshot).await?;
     Ok(chat_id)

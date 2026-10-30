@@ -58,6 +58,7 @@ import { BugReportPage, installWebuiConsoleCapture } from "./BugReport";
 import { Dashboard } from "./Dashboard";
 import { SettingsHub, isSettingsPage } from "./Settings";
 import { BuddyHome } from "./Buddy/BuddyHome";
+import { FloatingBuddy } from "./Buddy/Companion/FloatingBuddy";
 import { BuddyErrorBoundary } from "./Buddy/BuddyErrorBoundary";
 
 import { ChatLoading } from "../components/ChatContent/ChatLoading";
@@ -687,6 +688,7 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
             />
           )}
           <ProcessCompletedToasts />
+          {renderedPage.name !== "login page" && <FloatingBuddy />}
           <MCPInteractionCenter />
           {isPointerDragHost(config.host) && <PointerDragGhost />}
         </>

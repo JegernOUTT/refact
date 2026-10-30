@@ -820,6 +820,7 @@ pub struct LoadedTrajectory {
     pub goal_ledger: Vec<GoalLedgerEntry>,
     pub goal_verification_blocked_until_ms: Option<u64>,
     pub pending_questions: Vec<PendingQuestionSet>,
+    pub native_decision_receipts: Vec<serde_json::Value>,
     pub pending_browser_decision: Option<super::browser_decisions::PendingBrowserDecisionSnapshot>,
     pub created_at: String,
     pub updated_at: String,
@@ -888,6 +889,7 @@ pub(crate) fn trajectory_snapshot_from_session(session: &ChatSession) -> Traject
     snapshot.goal_ledger = session.goal_ledger.clone();
     snapshot.goal_verification_blocked_until_ms = session.goal_verification_blocked_until_ms;
     snapshot.pending_questions = session.pending_questions.clone();
+    snapshot.native_decision_receipts = session.native_decision_receipts.clone();
     snapshot.pending_browser_decision = session.pending_browser_message.as_ref().map(|pending| {
         super::browser_decisions::snapshot_pending_browser_decision(
             pending,
@@ -2595,6 +2597,7 @@ fn is_known_trajectory_top_level_key(key: &str) -> bool {
             | "wake_up_at"
             | "waiting_for_card_ids"
             | "pending_questions"
+            | "native_decision_receipts"
             | "pending_browser_decision"
             | "pending_deliveries"
             | "dropped_deliveries"
@@ -3292,6 +3295,11 @@ async fn load_trajectory_candidate(
     let goal_verification_blocked_until_ms = t
         .get("goal_verification_blocked_until_ms")
         .and_then(|v| v.as_u64());
+    let native_decision_receipts = t
+        .get("native_decision_receipts")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     let pending_questions = t
         .get("pending_questions")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -3507,6 +3515,7 @@ async fn load_trajectory_candidate(
         goal_ledger,
         goal_verification_blocked_until_ms,
         pending_questions,
+        native_decision_receipts,
         pending_browser_decision,
         source_path: traj_path,
         messages,
@@ -3838,6 +3847,7 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
         pending_questions: Vec::new(),
+        native_decision_receipts: Vec::new(),
     };
 
     save_trajectory_snapshot(gcx, snapshot).await
@@ -3872,23 +3882,29 @@ pub async fn save_trajectory_as_with_intent_checked(
         return Ok(());
     }
     let existing_session = gcx.chat_sessions.read().await.get(&thread.id).cloned();
-    let (pending_questions, pending_browser_decision) = if let Some(session) = existing_session {
-        let session = session.lock().await;
-        let browser = session.pending_browser_message.as_ref().map(|pending| {
-            super::browser_decisions::snapshot_pending_browser_decision(pending, None)
-        });
-        (session.pending_questions.clone(), browser)
-    } else {
-        load_trajectory_for_chat(gcx.clone(), &thread.id)
-            .await
-            .map(|trajectory| {
-                (
-                    trajectory.pending_questions,
-                    trajectory.pending_browser_decision,
-                )
-            })
-            .unwrap_or_default()
-    };
+    let (pending_questions, pending_browser_decision, native_decision_receipts) =
+        if let Some(session) = existing_session {
+            let session = session.lock().await;
+            let browser = session.pending_browser_message.as_ref().map(|pending| {
+                super::browser_decisions::snapshot_pending_browser_decision(pending, None)
+            });
+            (
+                session.pending_questions.clone(),
+                browser,
+                session.native_decision_receipts.clone(),
+            )
+        } else {
+            load_trajectory_for_chat(gcx.clone(), &thread.id)
+                .await
+                .map(|trajectory| {
+                    (
+                        trajectory.pending_questions,
+                        trajectory.pending_browser_decision,
+                        trajectory.native_decision_receipts,
+                    )
+                })
+                .unwrap_or_default()
+        };
     let snapshot = TrajectorySnapshot {
         recovery: None,
         recovery_policy: None,
@@ -3939,6 +3955,7 @@ pub async fn save_trajectory_as_with_intent_checked(
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
         pending_questions,
+        native_decision_receipts,
     };
     persist_trajectory_snapshot_with_intent(gcx, snapshot, intent).await
 }
@@ -4698,6 +4715,9 @@ fn trajectory_value_from_snapshot(
     }
     if !snapshot.waiting_for_card_ids.is_empty() {
         trajectory["waiting_for_card_ids"] = json!(snapshot.waiting_for_card_ids);
+    }
+    if !snapshot.native_decision_receipts.is_empty() {
+        trajectory["native_decision_receipts"] = json!(snapshot.native_decision_receipts);
     }
     if !snapshot.pending_questions.is_empty() {
         trajectory["pending_questions"] = serde_json::to_value(&snapshot.pending_questions)
@@ -6007,6 +6027,8 @@ fn apply_loaded_external_update_to_session(
     session.set_goal_ledger(loaded.goal_ledger);
     session.goal_verification_blocked_until_ms = loaded.goal_verification_blocked_until_ms;
     session.pending_questions = loaded.pending_questions;
+    session.native_decision_receipts =
+        crate::buddy::decision_receipts::restored(loaded.native_decision_receipts);
     session.pending_browser_message = None;
     if let Some(pending) = loaded.pending_browser_decision {
         super::browser_decisions::expire_restored_browser_decision(session, pending);
@@ -11049,6 +11071,9 @@ mod tests {
             is_buddy_chat: true,
             buddy_chat_kind: "investigation".to_string(),
             workflow_id: None,
+            source_chat_id: None,
+            source_project: None,
+            source_created_at: None,
         }
     }
 
@@ -12118,6 +12143,7 @@ mod tests {
             recovery: None,
             recovery_policy: None,
             pending_questions: Vec::new(),
+            native_decision_receipts: Vec::new(),
             goal: None,
             goal_ledger: Vec::new(),
             pending_deliveries: Vec::new(),
@@ -17165,6 +17191,7 @@ mod tests {
             planner_pause_pending_tools: false,
             board_restored_pending_tools: false,
             pending_questions: Vec::new(),
+            native_decision_receipts: Vec::new(),
             chat_id: "test-123".to_string(),
             work_provenance: Default::default(),
             interruptible_waits: 0,
@@ -17340,6 +17367,7 @@ mod tests {
             planner_pause_pending_tools: false,
             board_restored_pending_tools: false,
             pending_questions: Vec::new(),
+            native_decision_receipts: Vec::new(),
             chat_id: "skill-test".to_string(),
             work_provenance: Default::default(),
             interruptible_waits: 0,
@@ -18204,6 +18232,7 @@ mod tests {
             recovery: None,
             recovery_policy: None,
             pending_questions: Vec::new(),
+            native_decision_receipts: Vec::new(),
             goal: None,
             goal_ledger: Vec::new(),
             pending_deliveries: Vec::new(),
@@ -21082,6 +21111,9 @@ mod tests {
                 is_buddy_chat: true,
                 buddy_chat_kind: "investigation".to_string(),
                 workflow_id: None,
+                source_chat_id: None,
+                source_project: None,
+                source_created_at: None,
             });
         }
         gcx.chat_sessions
@@ -21127,6 +21159,9 @@ mod tests {
                 is_buddy_chat: true,
                 buddy_chat_kind: "investigation".to_string(),
                 workflow_id: None,
+                source_chat_id: None,
+                source_project: None,
+                source_created_at: None,
             });
         }
         gcx.chat_sessions

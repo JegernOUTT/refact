@@ -891,6 +891,7 @@ impl ChatSession {
             goal_verification_blocked_until_ms: None,
             goal_verification_generation: 0,
             pending_questions: Vec::new(),
+            native_decision_receipts: Vec::new(),
         }
     }
 
@@ -1038,6 +1039,7 @@ impl ChatSession {
             goal_verification_blocked_until_ms: None,
             goal_verification_generation: 0,
             pending_questions: Vec::new(),
+            native_decision_receipts: Vec::new(),
         }
     }
 

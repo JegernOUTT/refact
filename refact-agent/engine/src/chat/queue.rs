@@ -153,6 +153,7 @@ async fn aborted_before_start_generation(
 }
 
 pub(crate) fn reject_guard(session: &mut ChatSession, request_id: &str, error: String) {
+    crate::buddy::decision_receipts::transition(session, request_id, "stale", Some(error.clone()));
     session.emit(ChatEvent::Ack {
         client_request_id: request_id.to_string(),
         accepted: false,
@@ -216,6 +217,15 @@ fn consume_native_guard(
     let Some(guard) = guard else {
         return true;
     };
+    match crate::buddy::decision_receipts::find(session, request_id) {
+        Err(_) => return false,
+        Ok(Some(receipt))
+            if receipt.status != "queued" || receipt.engine_identity != guard.engine_identity =>
+        {
+            return false
+        }
+        _ => {}
+    }
     let result = if root != Some(guard.project_root.as_str()) {
         Err("Native project changed; refresh before responding".into())
     } else {
@@ -244,6 +254,19 @@ fn consume_tool_guard(
         return false;
     }
     if guard.is_some() {
+        if let Ok(Some(receipt)) = crate::buddy::decision_receipts::find(session, request_id) {
+            if decisions.len() != 1
+                || decisions[0].tool_call_id != receipt.target_id
+                || Some(decisions[0].accepted) != receipt.accepted
+            {
+                reject_guard(
+                    session,
+                    request_id,
+                    "Queued decision payload does not match immutable receipt".into(),
+                );
+                return false;
+            }
+        }
         let mut ids = BTreeSet::new();
         if session.runtime.state != SessionState::Paused
             || decisions.is_empty()
@@ -1792,6 +1815,7 @@ async fn process_command_queue_inner(
     }
 
     loop {
+        super::refusal_followup::drain_pending(app.clone(), session_arc.clone()).await;
         let Some(SelectedCommand { command, waiter }) = select_next_command(&session_arc).await
         else {
             return;
@@ -1824,6 +1848,12 @@ async fn process_command_queue_inner(
             request,
         ))
         .await;
+        let has_receipts = !session_arc.lock().await.native_decision_receipts.is_empty();
+        if has_receipts {
+            let _ =
+                super::trajectories::flush_trajectory_for_session(app.clone(), session_arc.clone())
+                    .await;
+        }
         if outcome == command_handlers::QueueCommandOutcome::Continue {
             continue;
         }
@@ -2115,6 +2145,7 @@ async fn handle_shell_privacy_tool_decisions(
         }
         session.add_tool_decision_event("approve", accepted_ids, "once");
         session.add_tool_decision_event("reject", rejected_ids, "once");
+        crate::buddy::decision_receipts::transition(&mut session, request_id, "applied", None);
         session.drain_post_tool_side_effects();
         let remaining = session
             .runtime
@@ -2134,6 +2165,17 @@ async fn handle_shell_privacy_tool_decisions(
         }
     };
     drop(operation);
+    if native_guard.is_some()
+        && super::trajectories::flush_trajectory_for_session(app.clone(), session_arc.clone())
+            .await
+            .is_err()
+    {
+        return;
+    }
+    if decisions.iter().any(|d| !d.accepted) {
+        super::refusal_followup::after_refusal(app.clone(), session_arc.clone(), request_id).await;
+        return;
+    }
     if should_continue && !aborted_before_start_generation(&session_arc).await {
         start_generation(app, session_arc).await;
     }
@@ -2171,6 +2213,7 @@ async fn handle_cache_guard_tool_decisions(
             .collect::<Vec<_>>();
         session.add_tool_decision_event("approve", approved_ids, "once");
         session.add_tool_decision_event("reject", rejected_ids, "once");
+        crate::buddy::decision_receipts::transition(&mut session, request_id, "applied", None);
         session.drain_post_tool_side_effects();
         session.runtime.pause_reasons.clear();
         session.runtime.accepted_tool_ids.clear();
@@ -2187,6 +2230,16 @@ async fn handle_cache_guard_tool_decisions(
     }
 
     drop(operation);
+    if native_guard.is_some()
+        && super::trajectories::flush_trajectory_for_session(app.clone(), session_arc.clone())
+            .await
+            .is_err()
+    {
+        return;
+    }
+    if !accepted_any {
+        super::refusal_followup::after_refusal(app.clone(), session_arc.clone(), request_id).await;
+    }
     if accepted_any {
         if !aborted_before_start_generation(&session_arc).await {
             start_generation(app.clone(), session_arc.clone()).await;
@@ -2232,6 +2285,7 @@ async fn handle_regular_tool_decisions(
         let auto_approved = session.runtime.auto_approved_tool_ids.clone();
         let paused_msg_idx = session.runtime.paused_message_index;
         let outcome = session.process_tool_decisions_with_reasons(decisions, denial_reasons);
+        crate::buddy::decision_receipts::transition(&mut session, request_id, "applied", None);
         let any_rejected = !outcome.denied_ids.is_empty();
 
         for id in &outcome.denied_ids {
@@ -2429,6 +2483,13 @@ async fn handle_regular_tool_decisions(
         )
     };
 
+    if native_guard.is_some()
+        && super::trajectories::flush_trajectory_for_session(app.clone(), session_arc.clone())
+            .await
+            .is_err()
+    {
+        return; // No tool execution or generation before the receipt and decision are durable.
+    }
     if has_remaining_pauses {
         return;
     }
@@ -2703,7 +2764,13 @@ async fn execute_regular_tool_calls(
             session.set_runtime_state(SessionState::Idle, None);
             session.release_turn_only_state();
         }
-        maybe_save_trajectory_with_intent(app, session_arc, TrajectoryCommitIntent::Required).await;
+        maybe_save_trajectory_with_intent(
+            app.clone(),
+            session_arc.clone(),
+            TrajectoryCommitIntent::Required,
+        )
+        .await;
+        super::refusal_followup::drain_pending(app, session_arc).await;
     } else if had_tool_calls {
         if !aborted_before_start_generation(&session_arc).await {
             start_generation(app, session_arc).await;
@@ -3391,6 +3458,142 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_refusal_receipt_commits_with_consumer_and_rejects_payload_reuse() {
+        use crate::buddy::decision_receipts as receipts;
+        let workspace = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            workspace.path().join("cache"),
+            workspace.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        let app = AppState::from_gcx(gcx.clone()).await;
+        let root = crate::http::routers::v1::buddy_decisions::decision_root(&app)
+            .await
+            .unwrap();
+        let mut session = ChatSession::new("receipt-consumer".into());
+        session.work_project_root = Some(workspace.path().canonicalize().unwrap());
+        session.thread.title = "Refusal receipt".into();
+        session.thread.is_title_generated = true;
+        session.runtime.state = SessionState::Paused;
+        session.runtime.paused_message_index = Some(0);
+        session.messages.push(ChatMessage {
+            role: "assistant".into(),
+            message_id: "requesting-assistant".into(),
+            tool_calls: Some(vec![crate::call_validation::ChatToolCall {
+                id: "pending".into(),
+                tool_type: "function".into(),
+                index: None,
+                function: crate::call_validation::ChatToolFunction {
+                    name: "shell".into(),
+                    arguments: "{}".into(),
+                },
+                extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
+            }]),
+            ..Default::default()
+        });
+        session.runtime.pause_reasons.push(PauseReason {
+            reason_type: "confirmation".into(),
+            tool_name: "shell".into(),
+            command: "shell".into(),
+            rule: "ask".into(),
+            tool_call_id: "pending".into(),
+            integr_config_path: None,
+        });
+        let guard = refact_chat_api::NativeApprovalGuard {
+            project_root: root.clone(),
+            engine_identity:
+                crate::http::routers::v1::buddy_native_approvals::native_engine_identity().into(),
+            source_version: crate::http::routers::v1::buddy_native_approvals::source_version(
+                &session, &root,
+            ),
+        };
+        let receipt = receipts::DecisionReceipt {
+            source_user_id: None,
+            schema_version: 1,
+            project_root: root.clone(),
+            engine_identity: guard.engine_identity.clone(),
+            chat_id: session.chat_id.clone(),
+            client_request_id: "once".into(),
+            target_id: "pending".into(),
+            accepted: Some(false),
+            request_identity: crate::http::routers::v1::buddy_native_approvals::request_identity(
+                &session, "pending",
+            ),
+            source_version: guard.source_version.clone(),
+            payload_hash: "refuse".into(),
+            status: "queued".into(),
+            followup: "not_requested".into(),
+            reason: None,
+            message_id: None,
+            decision_version: 0,
+            version: 0,
+        };
+        assert!(receipts::reserve(&mut session, receipt.clone()).unwrap());
+        assert!(!receipts::reserve(&mut session, receipt.clone()).unwrap());
+        let mut conflicting = receipt.clone();
+        conflicting.payload_hash = "approve".into();
+        assert!(receipts::reserve(&mut session, conflicting).is_err());
+        let session_arc = Arc::new(AMutex::new(session));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("receipt-consumer".into(), session_arc.clone());
+        super::super::trajectories::flush_trajectory_for_session(app.clone(), session_arc.clone())
+            .await
+            .unwrap();
+        handle_tool_decisions_guarded(
+            app,
+            session_arc.clone(),
+            &[ToolDecisionItem {
+                tool_call_id: "pending".into(),
+                accepted: false,
+            }],
+            Some(&guard),
+            "once",
+        )
+        .await;
+        let session = session_arc.lock().await;
+        let applied = receipts::find(&session, "once").unwrap().unwrap();
+        assert_eq!(
+            receipts::visible(&session, applied, &guard.engine_identity).status,
+            "applied"
+        );
+        assert!(session.runtime.pause_reasons.is_empty());
+        assert_eq!(
+            session
+                .messages
+                .iter()
+                .filter(|m| m.role == "tool" && m.tool_call_id == "pending")
+                .count(),
+            1
+        );
+        drop(session);
+        let loaded = super::super::trajectories::load_trajectory_for_chat(gcx, "receipt-consumer")
+            .await
+            .unwrap();
+        let mut restored = ChatSession::new("receipt-consumer".into());
+        restored.native_decision_receipts = loaded.native_decision_receipts;
+        restored.trajectory_committed_version = u64::MAX;
+        assert_eq!(
+            receipts::visible(
+                &restored,
+                receipts::find(&restored, "once").unwrap().unwrap(),
+                "new-engine"
+            )
+            .status,
+            "applied"
+        );
+        let mut second = receipt;
+        second.client_request_id = "other-client".into();
+        assert!(receipts::reserve(&mut restored, second).is_err());
+    }
+
+    #[tokio::test]
     async fn guarded_tool_decision_rechecks_source_after_waiting_for_session_lock() {
         let workspace = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
@@ -3406,6 +3609,7 @@ mod tests {
             .unwrap();
         let session_arc = Arc::new(AMutex::new(ChatSession::new("guard-toctou".into())));
         let mut session = session_arc.lock().await;
+        session.work_project_root = Some(workspace.path().canonicalize().unwrap());
         session.runtime.state = SessionState::Paused;
         session.runtime.pause_reasons.push(PauseReason {
             reason_type: "confirmation".into(),

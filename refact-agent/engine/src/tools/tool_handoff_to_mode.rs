@@ -895,6 +895,7 @@ async fn finalize_handoff_inner(
         recovery_policy: None,
         pending_browser_decision: None,
         pending_questions: Vec::new(),
+        native_decision_receipts: Vec::new(),
         goal_verification_blocked_until_ms: None,
         goal: transferred_goal.target_goal.clone(),
         goal_ledger: transferred_goal

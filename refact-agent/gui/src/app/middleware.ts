@@ -21,7 +21,6 @@ import {
   applyChatEvent,
   clearThreadPauseReasons,
   setThreadConfirmationStatus,
-  setThreadPauseReasons,
   resetThreadImages,
   switchToThread,
   ideToolRequired,
@@ -52,7 +51,6 @@ import {
   createChatWithId,
   buildThreadParamsPatch,
   buildThreadScopePatch,
-  selectCurrentThreadId,
   hydratePersistedChatTabs,
   removeChatFromCache,
   closeThread,
@@ -1439,19 +1437,6 @@ startListening({
       // Drop classes written for previous explicit choices so "inherit"
       // resolves from the host/system signal instead of a stale class.
       document.body.classList.remove("vscode-light", "vscode-dark");
-    }
-  },
-});
-
-startListening({
-  actionCreator: setThreadPauseReasons,
-  effect: (action, listenerApi) => {
-    const state = listenerApi.getState();
-    const currentThreadId = selectCurrentThreadId(state);
-    const threadIdNeedingConfirmation = action.payload.id;
-
-    if (threadIdNeedingConfirmation !== currentThreadId) {
-      listenerApi.dispatch(switchToThread({ id: threadIdNeedingConfirmation }));
     }
   },
 });

@@ -524,6 +524,8 @@ pub async fn get_or_create_session_with_trajectory(
         session.runtime.recovery = loaded.recovery;
         session.set_goal_ledger(loaded.goal_ledger);
         session.pending_questions = loaded.pending_questions;
+        session.native_decision_receipts =
+            crate::buddy::decision_receipts::restored(loaded.native_decision_receipts);
         if let Some(pending) = loaded.pending_browser_decision {
             super::browser_decisions::expire_restored_browser_decision(&mut session, pending);
         }

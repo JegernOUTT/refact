@@ -148,6 +148,8 @@ mod attention;
 mod background_agents;
 pub mod browser_settings;
 pub mod buddy;
+pub mod buddy_attention;
+pub mod buddy_companion;
 pub mod buddy_decisions;
 pub mod buddy_drafts;
 pub mod buddy_editorial;
@@ -1620,6 +1622,14 @@ fn buddy_operator_routes() -> Router<AppState> {
 fn buddy_decisions_routes() -> Router<AppState> {
     Router::new()
         .route(
+            "/buddy/companion/:source_id",
+            post(buddy_companion::handle_v1_buddy_companion),
+        )
+        .route(
+            "/buddy/attention",
+            get(buddy_attention::handle_current_attention),
+        )
+        .route(
             "/buddy/decisions/current",
             get(buddy_decisions::handle_current_decisions),
         )
@@ -1630,6 +1640,10 @@ fn buddy_decisions_routes() -> Router<AppState> {
         .route(
             "/buddy/approvals/:chat_id/response",
             post(buddy_native_approvals::handle_approval_response),
+        )
+        .route(
+            "/buddy/approvals/:chat_id/outcomes/:client_request_id",
+            get(buddy_native_approvals::handle_approval_outcome),
         )
         .route(
             "/buddy/decisions/questions/:chat_id/:tool_call_id",

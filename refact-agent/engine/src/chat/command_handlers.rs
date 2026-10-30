@@ -32,11 +32,41 @@ impl QueueCommandContext {
     }
 }
 
+fn companion_command_allowed(command: &ChatCommand) -> bool {
+    crate::buddy::companion::command_allowed(command)
+}
+
+#[cfg(test)]
+mod companion_command_gate_tests {
+    use super::*;
+
+    #[test]
+    fn companion_rejects_settings_and_history_mutation() {
+        for value in [
+            serde_json::json!({"type":"set_params","patch":{"tool_use":"agent"}}),
+            serde_json::json!({"type":"restore_messages","messages":[]}),
+            serde_json::json!({"type":"regenerate"}),
+        ] {
+            let command: ChatCommand = serde_json::from_value(value).unwrap();
+            assert!(!companion_command_allowed(&command));
+        }
+    }
+}
+
 pub(super) async fn handle_queue_command(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
     request: CommandRequest,
 ) -> QueueCommandOutcome {
+    {
+        let mut session = session_arc.lock().await;
+        if crate::buddy::companion::is_companion(&session.thread)
+            && !companion_command_allowed(&request.command)
+        {
+            reject_guard(&mut session, &request.client_request_id, "Companion conversations cannot change execution settings or restore another session".into());
+            return QueueCommandOutcome::Continue;
+        }
+    }
     let board_operation = if matches!(
         &request.command,
         ChatCommand::BrowserContextDecision { .. }
@@ -994,6 +1024,12 @@ async fn handle_answer_questions(
                     );
                     staged_message_id = Some(message.message_id.clone());
                     session.add_message(message);
+                    crate::buddy::decision_receipts::transition(
+                        &mut session,
+                        &resolution_id,
+                        "applied",
+                        None,
+                    );
                 }
                 resolved
                     || session.pending_questions.iter().any(|set| {
@@ -1003,6 +1039,12 @@ async fn handle_answer_questions(
                     })
             }
             Err(error) => {
+                crate::buddy::decision_receipts::transition(
+                    &mut session,
+                    &resolution_id,
+                    "rejected",
+                    Some(error.clone()),
+                );
                 reject_question_answers(&mut session, &resolution_id, error);
                 return QueueCommandOutcome::Continue;
             }
@@ -1022,6 +1064,16 @@ async fn handle_answer_questions(
                 &resolution_id,
                 staged_message_id.as_deref(),
             );
+            if let Ok(Some(mut receipt)) =
+                crate::buddy::decision_receipts::find(&session, &resolution_id)
+            {
+                receipt.status = "unknown".into();
+                receipt.reason =
+                    Some("Answer persistence failed; application is not acknowledged".into());
+                session.increment_version();
+                receipt.version = session.trajectory_version;
+                crate::buddy::decision_receipts::replace(&mut session, receipt);
+            }
             let error = if rolled_back {
                 format!(
                 "failed to persist question answers: {error}; the answer was not applied, please answer again"
@@ -1045,6 +1097,12 @@ async fn handle_answer_questions(
             Ok(false) => {}
             Err(error) => {
                 let mut session = session_arc.lock().await;
+                crate::buddy::decision_receipts::transition(
+                    &mut session,
+                    &resolution_id,
+                    "rejected",
+                    Some(error.clone()),
+                );
                 reject_question_answers(&mut session, &resolution_id, error);
                 return QueueCommandOutcome::Continue;
             }
@@ -1404,6 +1462,15 @@ async fn handle_branch_from_chat(
         };
     let (messages_to_copy, root_id, source_worktree, source_before) = {
         let source_session = source_session_arc.lock().await;
+        if crate::buddy::companion::is_companion(&source_session.thread) {
+            drop(source_session);
+            reject_guard(
+                &mut *session_arc.lock().await,
+                &context.request_id,
+                "Cannot branch a source-bound companion conversation".into(),
+            );
+            return QueueCommandOutcome::Continue;
+        }
         let mut msgs = Vec::new();
         let mut found = false;
         for m in &source_session.messages {
@@ -1704,8 +1771,15 @@ async fn handle_browser_context_decision(
             session.set_active_skill(skill_name.clone());
         }
         session.set_runtime_state(SessionState::Idle, None);
+        crate::buddy::decision_receipts::transition(&mut session, &request_id, "applied", None);
     }
 
+    if trajectories::flush_trajectory_for_session(app.clone(), session_arc.clone())
+        .await
+        .is_err()
+    {
+        return QueueCommandOutcome::Continue;
+    }
     browser_context::commit_browser_cursors(app.gcx.clone(), &browser_chat_id).await;
     maybe_save_trajectory_background_with_intent(
         app.clone(),
@@ -1822,6 +1896,94 @@ async fn handle_user_message(
     suppress_auto_enrichment: bool,
     client_message_id: Option<String>,
 ) -> QueueCommandOutcome {
+    let is_companion = {
+        let session = context.session_arc.lock().await;
+        crate::buddy::companion::is_companion(&session.thread)
+    };
+    if is_companion {
+        if !attachments.is_empty() || !context_files.is_empty() {
+            reject_guard(
+                &mut *context.session_arc.lock().await,
+                &context.request_id,
+                "Companion questions must be text-only".into(),
+            );
+            return QueueCommandOutcome::Continue;
+        }
+        let Some(text) = content.as_str() else {
+            reject_guard(
+                &mut *context.session_arc.lock().await,
+                &context.request_id,
+                "Companion questions must be text-only".into(),
+            );
+            return QueueCommandOutcome::Continue;
+        };
+        let (chat_id, thread, history, version) = {
+            let session = context.session_arc.lock().await;
+            (
+                session.chat_id.clone(),
+                session.thread.clone(),
+                session.messages.clone(),
+                session.trajectory_version,
+            )
+        };
+        let mut message = user_message_with_client_message_id(
+            parse_content_with_attachments(&serde_json::json!(text), &[]),
+            Vec::new(),
+            client_message_id,
+        );
+        if let Err(error) = crate::buddy::companion::stamp_question_provenance(
+            context.app.gcx.clone(),
+            &chat_id,
+            &thread,
+            &history,
+            &mut message,
+        )
+        .await
+        {
+            reject_guard(
+                &mut *context.session_arc.lock().await,
+                &context.request_id,
+                error,
+            );
+            return QueueCommandOutcome::Continue;
+        }
+        let message_id = message.message_id.clone();
+        {
+            let mut session = context.session_arc.lock().await;
+            if session.closed
+                || session.trajectory_version != version
+                || !crate::buddy::companion::is_companion(&session.thread)
+                || serde_json::to_value(&session.thread).ok() != serde_json::to_value(&thread).ok()
+            {
+                reject_guard(
+                    &mut session,
+                    &context.request_id,
+                    "Companion changed while preparing the question; retry".into(),
+                );
+                return QueueCommandOutcome::Continue;
+            }
+            session.add_message(message);
+        }
+        if let Err(error) = trajectories::try_save_trajectory_with_intent(
+            context.app.clone(),
+            context.session_arc.clone(),
+            TrajectoryCommitIntent::Required,
+        )
+        .await
+        {
+            let mut session = context.session_arc.lock().await;
+            session.remove_message(&message_id);
+            reject_guard(
+                &mut session,
+                &context.request_id,
+                format!("Could not persist companion question: {error}"),
+            );
+            return QueueCommandOutcome::Continue;
+        }
+        context.release_board_operation().await;
+        start_generation(context.app.clone(), context.session_arc.clone()).await;
+        return QueueCommandOutcome::Finished;
+    }
     let chat_id = context.session_arc.lock().await.chat_id.clone();
     if let Some(reason) = crate::agents::seal::seal_reason(&context.app, &chat_id).await {
         let mut session = context.session_arc.lock().await;

@@ -65,6 +65,8 @@ pub struct TrajectorySnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_questions: Vec<refact_chat_api::PendingQuestionSet>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_decision_receipts: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_deliveries: Vec<PendingDelivery>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dropped_deliveries: Vec<DeliveryStatusRecord>,
@@ -144,6 +146,7 @@ impl TrajectorySnapshot {
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
             pending_questions: Vec::new(),
+            native_decision_receipts: Vec::new(),
             pending_deliveries: Vec::new(),
             dropped_deliveries: Vec::new(),
             goal: None,

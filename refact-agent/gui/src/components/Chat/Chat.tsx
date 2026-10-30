@@ -16,7 +16,6 @@ import {
   selectIsBuddyChat,
   useThreadId,
 } from "../../features/Chat/Thread";
-import { BuddyChatCompanion } from "../../features/Buddy";
 import { DropzoneProvider } from "../Dropzone";
 import { useCheckpoints } from "../../hooks/useCheckpoints";
 import { Checkpoints } from "../../features/Checkpoints";
@@ -207,7 +206,6 @@ export const Chat: React.FC<ChatProps> = ({
 
             <Container>
               <div className={styles.dockColumn}>
-                {!isBuddyChat && <BuddyChatCompanion chatId={chatId} />}
                 {showTerminalWorkbench ? (
                   <div className={styles.terminalWorkbench}>
                     <TerminalPanel chatId={chatId} />

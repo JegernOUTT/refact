@@ -1334,6 +1334,9 @@ export interface BuddyThreadMeta {
   is_buddy_chat: boolean;
   buddy_chat_kind: string;
   workflow_id: string | null;
+  source_chat_id?: string | null;
+  source_project?: string | null;
+  source_created_at?: string | null;
 }
 
 export interface DiagnosticContext {

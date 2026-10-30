@@ -558,6 +558,7 @@ mod tests {
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
             pending_questions: Vec::new(),
+            native_decision_receipts: Vec::new(),
             pending_deliveries: Default::default(),
             dropped_deliveries: Default::default(),
         }

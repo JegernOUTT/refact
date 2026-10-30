@@ -29,7 +29,13 @@ pub(crate) async fn decision_root(app: &AppState) -> Result<String, ScratchError
             "native question aggregation requires one unambiguous project root".into(),
         ));
     }
-    Ok(roots[0].to_string_lossy().into_owned())
+    let root = tokio::fs::canonicalize(&roots[0]).await.map_err(|_| {
+        ScratchError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Native project root is unavailable".into(),
+        )
+    })?;
+    Ok(root.to_string_lossy().into_owned())
 }
 
 pub async fn handle_current_decisions(
@@ -86,7 +92,7 @@ pub struct DecisionProjectQuery {
     project_root: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DecisionAnswerRequest {
     project_root: String,
@@ -131,8 +137,46 @@ pub async fn handle_question_answer(
         .ok_or_else(|| {
             ScratchError::new(StatusCode::NOT_FOUND, "native session is not loaded".into())
         })?;
+    let payload_hash = crate::buddy::decision_receipts::digest(
+        &serde_json::to_value(&request)
+            .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e.to_string()))?,
+    );
     {
-        let session = session.lock().await;
+        let mut session = session.lock().await;
+        if crate::coordination::scope::session_source_root(&session).is_none_or(|source| {
+            crate::coordination::roots::project_identity(&source)
+                != crate::coordination::roots::project_identity(std::path::Path::new(
+                    &request.project_root,
+                ))
+        }) {
+            return Err(ScratchError::new(
+                StatusCode::CONFLICT,
+                "Question source belongs to another project".into(),
+            ));
+        }
+        if let Some(old) =
+            crate::buddy::decision_receipts::find(&session, &request.client_request_id)
+                .map_err(|e| ScratchError::new(StatusCode::CONFLICT, e))?
+        {
+            if old.payload_hash != payload_hash {
+                return Err(ScratchError::new(
+                    StatusCode::CONFLICT,
+                    "Answer identity payload conflict".into(),
+                ));
+            }
+            let old = crate::buddy::decision_receipts::visible(
+                &session,
+                old,
+                super::buddy_native_approvals::native_engine_identity(),
+            );
+            return Ok(hyper::Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(hyper::Body::from(
+                    serde_json::to_string(&old).unwrap_or_default(),
+                ))
+                .unwrap());
+        }
         if !session.pending_questions.iter().any(|question| {
             question.tool_call_id == tool_call_id
                 && question.asked_at_ms == request.asked_at_ms
@@ -143,6 +187,49 @@ pub async fn handle_question_answer(
                 "native question is no longer pending".into(),
             ));
         }
+        let request_identity = crate::buddy::decision_receipts::digest(&serde_json::json!([
+            session.chat_id,
+            session.created_at,
+            tool_call_id,
+            request.asked_at_ms
+        ]));
+        crate::buddy::decision_receipts::reserve(
+            &mut session,
+            crate::buddy::decision_receipts::DecisionReceipt {
+                source_user_id: None,
+                schema_version: 1,
+                project_root: request.project_root.clone(),
+                engine_identity: super::buddy_native_approvals::native_engine_identity().into(),
+                chat_id: chat_id.clone(),
+                client_request_id: request.client_request_id.clone(),
+                target_id: tool_call_id.clone(),
+                accepted: None,
+                request_identity,
+                source_version: request.asked_at_ms.to_string(),
+                payload_hash,
+                status: "queued".into(),
+                followup: "not_requested".into(),
+                reason: None,
+                message_id: None,
+                decision_version: 0,
+                version: 0,
+            },
+        )
+        .map_err(|e| ScratchError::new(StatusCode::CONFLICT, e))?;
+    }
+    if let Err(error) =
+        crate::chat::trajectories::flush_trajectory_for_session(app.clone(), session.clone()).await
+    {
+        crate::buddy::decision_receipts::transition(
+            &mut *session.lock().await,
+            &request.client_request_id,
+            "unknown",
+            Some("Decision admission durability is uncertain; no command was dispatched".into()),
+        );
+        let _ =
+            crate::chat::trajectories::flush_trajectory_for_session(app.clone(), session.clone())
+                .await;
+        return Err(ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, error));
     }
     let command = if let Some(response) = request.response {
         serde_json::json!({
@@ -157,12 +244,28 @@ pub async fn handle_question_answer(
             "asked_at_ms": request.asked_at_ms,
         })
     };
-    crate::chat::handle_v1_chat_command(
-        State(app),
+    let receipt_request_id = request.client_request_id.clone();
+    let result = crate::chat::handle_v1_chat_command(
+        State(app.clone()),
         Path(chat_id),
         hyper::body::Bytes::from(command.to_string()),
     )
-    .await
+    .await;
+    if result
+        .as_ref()
+        .map_or(true, |response| !response.status().is_success())
+    {
+        crate::buddy::decision_receipts::transition(
+            &mut *session.lock().await,
+            &receipt_request_id,
+            "unknown",
+            Some(
+                "Native command admission was not acknowledged; not automatically replayed".into(),
+            ),
+        );
+        let _ = crate::chat::trajectories::flush_trajectory_for_session(app, session).await;
+    }
+    result
 }
 
 pub async fn handle_question_state(
@@ -230,6 +333,7 @@ mod tests {
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.path().to_path_buf()];
         let app = AppState::from_gcx(gcx).await;
         let mut session = ChatSession::new("native-chat".into());
+        session.work_project_root = Some(root.path().canonicalize().unwrap());
         session
             .register_pending_questions(PendingQuestionSet {
                 tool_call_id: "native-question".into(),

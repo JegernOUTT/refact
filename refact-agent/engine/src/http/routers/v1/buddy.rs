@@ -929,6 +929,9 @@ pub async fn handle_v1_buddy_conversations_create(
             is_buddy_chat: true,
             buddy_chat_kind: "conversation".to_string(),
             workflow_id: None,
+            source_chat_id: None,
+            source_project: None,
+            source_created_at: None,
         }),
         auto_compact_enabled: None,
         frozen_request_prefix: None,
@@ -937,6 +940,7 @@ pub async fn handle_v1_buddy_conversations_create(
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
         pending_questions: Vec::new(),
+        native_decision_receipts: Vec::new(),
     };
 
     crate::chat::trajectories::save_trajectory_snapshot(gcx.clone(), snapshot)
@@ -1096,6 +1100,9 @@ pub async fn handle_v1_buddy_conversations_create_setup(
             is_buddy_chat: true,
             buddy_chat_kind: "setup".to_string(),
             workflow_id: None,
+            source_chat_id: None,
+            source_project: None,
+            source_created_at: None,
         }),
         auto_compact_enabled: None,
         frozen_request_prefix: None,
@@ -1104,6 +1111,7 @@ pub async fn handle_v1_buddy_conversations_create_setup(
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
         pending_questions: Vec::new(),
+        native_decision_receipts: Vec::new(),
     };
     crate::chat::trajectories::save_trajectory_snapshot(app.gcx.clone(), snapshot)
         .await
