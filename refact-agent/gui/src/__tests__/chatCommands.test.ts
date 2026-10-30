@@ -16,6 +16,7 @@ import {
   respondToToolConfirmation,
   respondToToolConfirmations,
   answerQuestions,
+  submitQuestionResponse,
   updateMessage,
   removeMessage,
   cancelQueuedItem,
@@ -312,6 +313,7 @@ describe("chatCommands", () => {
       const calledBody = getRequestBody(mockFetch.mock.calls[0] as MockCall);
       expect(calledBody.type).toBe("user_message");
       expect(calledBody.content).toBe("Hello world");
+      expect(calledBody).not.toHaveProperty("priority");
     });
 
     it("sends user_message command with multi-modal content", async () => {
@@ -581,6 +583,7 @@ describe("chatCommands", () => {
       expect(getRequestBody(mockFetch.mock.calls[0] as MockCall)).toMatchObject(
         {
           type: "answer_questions",
+          priority: true,
           tool_call_id: "call-questions",
           answers: [
             { id: "confirm", answer: true },
@@ -591,6 +594,47 @@ describe("chatCommands", () => {
       expect(requestId).toBe(
         getRequestBody(mockFetch.mock.calls[0] as MockCall).client_request_id,
       );
+    });
+  });
+
+  describe("submitQuestionResponse", () => {
+    it("prioritizes native responses while preserving the retry request ID", async () => {
+      mockFetch.mockResolvedValue({ ok: true } as Response);
+      const response = {
+        answers: [
+          { id: "scope", disposition: "answered" as const, answer: "GUI" },
+        ],
+        overall_comments: "Keep this context",
+      };
+
+      await submitQuestionResponse(
+        "test-chat",
+        "call-questions",
+        123,
+        response,
+        "retry-request-id",
+        8001,
+      );
+      await submitQuestionResponse(
+        "test-chat",
+        "call-questions",
+        123,
+        response,
+        "retry-request-id",
+        8001,
+      );
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      for (const call of mockFetch.mock.calls) {
+        expect(getRequestBody(call as MockCall)).toEqual({
+          type: "submit_question_response",
+          priority: true,
+          tool_call_id: "call-questions",
+          asked_at_ms: 123,
+          response,
+          client_request_id: "retry-request-id",
+        });
+      }
     });
   });
 

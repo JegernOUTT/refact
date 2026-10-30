@@ -329,6 +329,7 @@ pub struct ChatSession {
     pub abort_notify: Arc<Notify>,
     pub interruptible_waits: usize,
     pub wait_delivery_boundary: bool,
+    pub(crate) wait_tool_window_active: bool,
     pub wait_interrupt_flag: Arc<AtomicBool>,
     pub user_interrupt_flag: Arc<AtomicBool>,
     pub queue_processor_running: Arc<AtomicBool>,

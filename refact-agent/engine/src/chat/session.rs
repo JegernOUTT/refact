@@ -820,6 +820,7 @@ impl ChatSession {
             abort_notify: Arc::new(Notify::new()),
             interruptible_waits: 0,
             wait_delivery_boundary: false,
+            wait_tool_window_active: false,
             wait_interrupt_flag: Arc::new(AtomicBool::new(false)),
             user_interrupt_flag: Arc::new(AtomicBool::new(false)),
             queue_processor_running: Arc::new(AtomicBool::new(false)),
@@ -961,6 +962,7 @@ impl ChatSession {
             abort_notify: Arc::new(Notify::new()),
             interruptible_waits: 0,
             wait_delivery_boundary: false,
+            wait_tool_window_active: false,
             wait_interrupt_flag: Arc::new(AtomicBool::new(false)),
             user_interrupt_flag: Arc::new(AtomicBool::new(false)),
             queue_processor_running: Arc::new(AtomicBool::new(false)),
@@ -2247,6 +2249,7 @@ impl ChatSession {
                     .insert(request.client_request_id.clone(), Instant::now());
             }
             self.command_queue.push_back(request);
+            self.interrupt_wait_for_delivery();
             self.touch();
             self.emit_queue_update();
             self.queue_notify.notify_one();
@@ -2484,6 +2487,7 @@ impl ChatSession {
             self.wait_interrupt_flag.store(false, Ordering::SeqCst);
         }
         self.interruptible_waits += 1;
+        self.wait_tool_window_active = true;
         self.runtime.waiting_interruptible = true;
         self.emit_goal_status();
         self.interrupt_wait_for_delivery();
@@ -2496,19 +2500,48 @@ impl ChatSession {
     }
 
     pub fn interrupt_wait_for_delivery(&mut self) {
-        if self.interruptible_waits > 0
-            && self
-                .pending_deliveries
-                .iter()
-                .chain(self.runner_pending_deliveries.iter())
-                .any(|delivery| {
-                    delivery.push != PushMode::Preempt && delivery.after_tool_call_id.is_none()
-                })
+        if (self.wait_tool_window_active && !self.command_queue.is_empty())
+            || (self.interruptible_waits > 0
+                && self
+                    .pending_deliveries
+                    .iter()
+                    .chain(self.runner_pending_deliveries.iter())
+                    .any(|delivery| {
+                        delivery.push != PushMode::Preempt && delivery.after_tool_call_id.is_none()
+                    }))
         {
             self.wait_delivery_boundary = true;
             self.wait_interrupt_flag.store(true, Ordering::SeqCst);
             self.abort_notify.notify_waiters();
         }
+    }
+
+    pub(crate) fn yield_to_queued_commands_at_boundary(&mut self) -> bool {
+        if self.command_queue.is_empty()
+            || !(self.wait_delivery_boundary
+                || self.command_queue.iter().any(|request| {
+                    request.priority
+                        && matches!(
+                            request.command,
+                            ChatCommand::AnswerQuestions { .. }
+                                | ChatCommand::SubmitQuestionResponse { .. }
+                        )
+                }))
+            || self.draft_message.is_some()
+            || self.has_pending_tool_result_window()
+            || self.interruptible_waits > 0
+            || self.planner_paused()
+            || !matches!(
+                self.runtime.state,
+                SessionState::Idle | SessionState::Generating | SessionState::ExecutingTools
+            )
+        {
+            return false;
+        }
+        self.delivery_wake_sources.insert("queue-boundary".into());
+        self.set_runtime_state(SessionState::Idle, None);
+        self.queue_notify.notify_one();
+        true
     }
 
     /// Whether a delivery with this `push` may land right now.
@@ -2796,6 +2829,7 @@ impl ChatSession {
         if self.runner_pending_deliveries.is_empty()
             && !self.has_pending_tool_result_window()
             && self.interruptible_waits == 0
+            && self.command_queue.is_empty()
         {
             self.wait_delivery_boundary = false;
         }
@@ -3617,7 +3651,12 @@ impl ChatSession {
             self.runtime.state,
             SessionState::Generating | SessionState::ExecutingTools
         );
-        if interrupts_active_loop && active {
+        if interrupts_active_loop
+            && active
+            && ((self.interruptible_waits == 0
+                && !(self.wait_tool_window_active && self.has_pending_tool_result_window()))
+                || matches!(self.command_queue[index].command, ChatCommand::Abort {}))
+        {
             self.abort_stream();
             self.clear_pending_tool_calls_for_interruption();
         }
@@ -3635,6 +3674,7 @@ impl ChatSession {
         } else {
             self.command_queue.push_back(request);
         }
+        self.interrupt_wait_for_delivery();
         self.touch();
         self.emit_queue_update();
         self.queue_notify.notify_one();
@@ -3683,7 +3723,12 @@ impl ChatSession {
             self.runtime.state,
             SessionState::Generating | SessionState::ExecutingTools
         );
-        if interrupts_active_loop && active {
+        if interrupts_active_loop
+            && active
+            && ((self.interruptible_waits == 0
+                && !(self.wait_tool_window_active && self.has_pending_tool_result_window()))
+                || matches!(request.command, ChatCommand::Abort {}))
+        {
             self.abort_stream();
             self.clear_pending_tool_calls_for_interruption();
         }
@@ -3697,6 +3742,7 @@ impl ChatSession {
                 .insert(request.client_request_id.clone(), Instant::now());
         }
         self.command_queue.insert(insert_pos, request);
+        self.interrupt_wait_for_delivery();
         self.touch();
         self.emit_queue_update();
         self.queue_notify.notify_one();
@@ -3758,6 +3804,9 @@ impl ChatSession {
     }
 
     pub fn start_stream(&mut self) -> Option<(String, Arc<AtomicBool>)> {
+        if self.yield_to_queued_commands_at_boundary() {
+            return None;
+        }
         if self.planner_pause_at_boundary() {
             return None;
         }
@@ -3772,6 +3821,8 @@ impl ChatSession {
             return None;
         }
         self.wait_delivery_boundary = false;
+        self.wait_tool_window_active = false;
+        self.delivery_wake_sources.remove("queue-boundary");
         self.abort_flag.store(false, Ordering::SeqCst);
         self.user_interrupt_flag.store(false, Ordering::SeqCst);
         let message_id = Uuid::new_v4().to_string();
@@ -5327,6 +5378,94 @@ mod tests {
                     .unwrap();
                 assert!(session.drain_pending_deliveries().0.is_empty());
             }
+        }
+    }
+
+    #[test]
+    fn queued_commands_yield_waits_only_after_sibling_results() {
+        for arrival in ["natural", "before", "during", "after"] {
+            let already_queued = arrival == "before";
+            let mut session = make_session();
+            session.turn_depth = 1;
+            session.start_stream().unwrap();
+            session.emit_stream_delta(vec![DeltaOp::SetToolCalls {
+                tool_calls: vec![
+                    json!({"id":"wait","type":"function","function":{"name":"wait","arguments":"{}"}}),
+                    json!({"id":"work","type":"function","function":{"name":"shell","arguments":"{}"}}),
+                ],
+            }]);
+            session.finish_stream_with_next_state(
+                Some("tool_calls".into()),
+                SessionState::ExecutingTools,
+            );
+            let request = CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
+                client_request_id: "queued".into(),
+                priority: !already_queued,
+                command: ChatCommand::Regenerate {},
+            };
+            if already_queued {
+                assert_eq!(
+                    session.enqueue_command(request.clone()),
+                    EnqueueCommandOutcome::Accepted
+                );
+            }
+            session.begin_interruptible_wait();
+            if matches!(arrival, "after" | "natural") {
+                session.end_interruptible_wait();
+            }
+            if !already_queued && arrival != "natural" {
+                assert_eq!(
+                    session.enqueue_command(request),
+                    EnqueueCommandOutcome::Accepted
+                );
+            }
+            if !matches!(arrival, "after" | "natural") {
+                assert!(session.wait_interrupt_flag.load(Ordering::SeqCst));
+            }
+            assert!(!session.abort_flag.load(Ordering::SeqCst));
+            assert!(!session.user_interrupt_flag.load(Ordering::SeqCst));
+            assert_eq!(session.messages[0].tool_calls.as_ref().unwrap().len(), 2);
+            if !matches!(arrival, "after" | "natural") {
+                session.end_interruptible_wait();
+            }
+            session.add_message(ChatMessage {
+                role: "tool".into(),
+                tool_call_id: "wait".into(),
+                ..Default::default()
+            });
+            assert!(!session.yield_to_queued_commands_at_boundary());
+            session.add_message(ChatMessage {
+                role: "tool".into(),
+                tool_call_id: "work".into(),
+                content: ChatContent::SimpleText("real result".into()),
+                ..Default::default()
+            });
+            if arrival == "natural" {
+                assert!(!session.wait_delivery_boundary);
+                session
+                    .enqueue_delivery(delivery_fixture("later", PushMode::WhenIdle))
+                    .unwrap();
+                assert_eq!(session.drain_pending_deliveries(), (vec![], false));
+                assert_eq!(session.pending_deliveries.len(), 1);
+                session.set_runtime_state(SessionState::Generating, None);
+                assert!(session.start_stream().is_some());
+                assert!(!session.wait_tool_window_active);
+                session.finish_stream_with_next_state(None, SessionState::Idle);
+                session.turn_depth = 0;
+                assert_eq!(session.drain_pending_deliveries().0, vec!["later"]);
+                continue;
+            }
+            session.drain_pending_deliveries();
+            assert!(session.yield_to_queued_commands_at_boundary());
+            assert_eq!(session.runtime.state, SessionState::Idle);
+            assert_eq!(session.command_queue[0].client_request_id, "queued");
+            assert_eq!(session.messages.len(), 3);
+            assert_eq!(
+                session.messages[2].content.content_text_only(),
+                "real result"
+            );
         }
     }
 

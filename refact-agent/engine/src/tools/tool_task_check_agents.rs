@@ -1796,7 +1796,7 @@ mod tests {
             let ccx_lock = ccx.lock().await;
             ccx_lock.abort_flag.load(Ordering::SeqCst)
         };
-        assert!(aborted);
+        assert!(!aborted);
     }
 
     #[tokio::test]

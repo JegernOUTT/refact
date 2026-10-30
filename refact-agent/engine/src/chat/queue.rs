@@ -137,6 +137,9 @@ async fn aborted_before_start_generation(
     session_arc: &Arc<AMutex<super::types::ChatSession>>,
 ) -> bool {
     let mut session = session_arc.lock().await;
+    if session.yield_to_queued_commands_at_boundary() {
+        return true;
+    }
     if !session.user_interrupt_flag.load(Ordering::SeqCst) {
         return false;
     }
@@ -1606,7 +1609,7 @@ async fn select_next_command(session_arc: &Arc<AMutex<ChatSession>>) -> Option<S
                 .fetch_add(1, Ordering::Relaxed);
             (None, Some(waiter))
         }
-    } else if !session.delivery_wake_sources.is_empty() {
+    } else if !session.delivery_wake_sources.is_empty() && session.command_queue.is_empty() {
         session.delivery_wake_sources.clear();
         session.abort_flag.store(false, Ordering::SeqCst);
         session.user_interrupt_flag.store(false, Ordering::SeqCst);
@@ -2830,6 +2833,33 @@ mod tests {
             match_models: None,
             override_config: None,
         }
+    }
+
+    #[tokio::test]
+    async fn approval_continuation_yields_to_queue_before_delivery_wake() {
+        let session = Arc::new(AMutex::new(ChatSession::new("approval-boundary".into())));
+        {
+            let mut locked = session.lock().await;
+            locked.set_runtime_state(SessionState::ExecutingTools, None);
+            assert_eq!(
+                locked.enqueue_command(make_request(ChatCommand::Regenerate {})),
+                EnqueueCommandOutcome::Accepted
+            );
+            locked.begin_interruptible_wait();
+            locked.end_interruptible_wait();
+            locked.drain_pending_deliveries();
+            locked.delivery_wake_sources.insert("delivery".into());
+        }
+        assert!(aborted_before_start_generation(&session).await);
+        let selected = select_next_command(&session)
+            .await
+            .unwrap()
+            .command
+            .unwrap();
+        assert_eq!(selected.client_request_id, "req-1");
+        let locked = session.lock().await;
+        assert!(locked.delivery_wake_sources.contains("delivery"));
+        assert!(!locked.abort_flag.load(Ordering::SeqCst));
     }
 
     fn make_request(cmd: ChatCommand) -> CommandRequest {

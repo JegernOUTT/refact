@@ -147,17 +147,18 @@ pub(crate) async fn execute_task_agents_wait(
         let sessions = app.chat.sessions.read().await;
         if let Some(session_arc) = sessions.get(&chat_id) {
             let mut session = session_arc.lock().await;
+            if !session.command_queue.is_empty() {
+                return Ok((false, vec![ContextEnum::ChatMessage(ChatMessage {
+                    role: "tool".into(),
+                    tool_call_id: tool_call_id.clone(),
+                    content: ChatContent::SimpleText(json!({"outcome":"interrupted","target":"task_agents","reason":"queued command"}).to_string()),
+                    ..Default::default()
+                })]));
+            }
             replace_session_wake_up_at(&mut session, wake_up_secs);
             session.waiting_for_card_ids = resolved_card_ids.clone();
             session.mark_persisted_runtime_changed();
         }
-    }
-
-    {
-        let ccx_lock = ccx.lock().await;
-        ccx_lock
-            .abort_flag
-            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     Ok((
@@ -204,6 +205,87 @@ mod tests {
         let mut status = make_status(card_id, "doing");
         status.session_state = None;
         status
+    }
+
+    #[tokio::test]
+    async fn queued_command_interrupts_task_agents_without_parking_or_aborting_siblings() {
+        use crate::chat::types::{ChatCommand, CommandRequest, EnqueueCommandOutcome, SessionState};
+        use std::sync::atomic::Ordering;
+
+        let (_temp, app, _task_id, _agent_id, agent, planner) =
+            crate::chat::task_agent_monitor::tests::setup_monitor_case(
+                "doing",
+                SessionState::Generating,
+                std::time::Duration::ZERO,
+                vec![],
+            )
+            .await;
+        let (chat_id, meta) = {
+            let locked = planner.lock().await;
+            (locked.chat_id.clone(), locked.thread.task_meta.clone())
+        };
+        let ccx = Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                app,
+                4096,
+                20,
+                false,
+                vec![],
+                chat_id,
+                None,
+                "model".into(),
+                meta,
+                None,
+            )
+            .await,
+        ));
+        {
+            let mut locked = planner.lock().await;
+            assert_eq!(
+                locked.enqueue_command(CommandRequest {
+                    native_approval_guard: None,
+                    supervision_guard: None,
+                    client_request_id: "queued".into(),
+                    priority: false,
+                    command: ChatCommand::SetParams { patch: json!({}) },
+                }),
+                EnqueueCommandOutcome::Accepted
+            );
+        }
+        let args = HashMap::from([("wake_up_after_secs".into(), json!(30))]);
+        let (_, messages) = execute_task_agents_wait(ccx.clone(), &"wait".into(), &args)
+            .await
+            .unwrap();
+        let ContextEnum::ChatMessage(message) = &messages[0] else {
+            panic!("missing tool result");
+        };
+        let result: Value = serde_json::from_str(&message.content.content_text_only()).unwrap();
+        assert_eq!(result["outcome"], "interrupted");
+        {
+            let mut locked = planner.lock().await;
+            assert!(locked.waiting_for_card_ids.is_empty());
+            assert!(locked.wake_up_at.is_none());
+            assert!(!locked.abort_flag.load(Ordering::SeqCst));
+            assert!(!locked.user_interrupt_flag.load(Ordering::SeqCst));
+            locked.command_queue.clear();
+        }
+        let (_, messages) = execute_task_agents_wait(ccx, &"wait-again".into(), &args)
+            .await
+            .unwrap();
+        let ContextEnum::ChatMessage(message) = &messages[0] else {
+            panic!("missing parked result");
+        };
+        let result: Value = serde_json::from_str(&message.content.content_text_only()).unwrap();
+        assert_eq!(result["outcome"], "parked");
+        assert_eq!(result["card_ids"], json!(["T-1"]));
+        let locked = planner.lock().await;
+        assert_eq!(locked.waiting_for_card_ids, vec!["T-1"]);
+        assert!(locked.wake_up_at.is_some());
+        assert!(!locked.abort_flag.load(Ordering::SeqCst));
+        assert!(!locked.user_interrupt_flag.load(Ordering::SeqCst));
+        let agent = agent.lock().await;
+        assert_eq!(agent.runtime.state, SessionState::Generating);
+        assert!(!agent.abort_flag.load(Ordering::SeqCst));
     }
 
     #[test]

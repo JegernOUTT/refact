@@ -3949,7 +3949,7 @@ mod interruptible_wait_tests {
     async fn live_sleep_execution_yields_to_append_and_when_idle() {
         use crate::tools::tools_description::Tool;
         use refact_core::chat_types::{PendingDelivery, PushMode};
-        for push in [PushMode::Append, PushMode::WhenIdle] {
+        for push in [Some(PushMode::Append), Some(PushMode::WhenIdle), None] {
             let gcx = crate::global_context::tests::make_test_gcx().await;
             let base_app = AppState::from_gcx(gcx).await;
             let app = AppState {
@@ -4053,19 +4053,34 @@ mod interruptible_wait_tests {
             .expect("sleep did not enter wait wrapper");
             {
                 let mut locked = session.lock().await;
-                locked
-                    .enqueue_delivery(PendingDelivery::with_id(
-                        "incoming",
-                        vec![ChatMessage {
-                            role: "user".into(),
-                            content: ChatContent::SimpleText("wake up".into()),
-                            ..Default::default()
-                        }],
-                        push,
-                        "test",
-                        true,
-                    ))
-                    .unwrap();
+                if let Some(push) = push {
+                    locked
+                        .enqueue_delivery(PendingDelivery::with_id(
+                            "incoming",
+                            vec![ChatMessage {
+                                role: "user".into(),
+                                content: ChatContent::SimpleText("wake up".into()),
+                                ..Default::default()
+                            }],
+                            push,
+                            "test",
+                            true,
+                        ))
+                        .unwrap();
+                } else {
+                    assert_eq!(
+                        locked.enqueue_command(crate::chat::types::CommandRequest {
+                            native_approval_guard: None,
+                            supervision_guard: None,
+                            client_request_id: "command".into(),
+                            priority: false,
+                            command: crate::chat::types::ChatCommand::SetParams {
+                                patch: serde_json::json!({})
+                            },
+                        }),
+                        crate::chat::types::EnqueueCommandOutcome::Accepted
+                    );
+                }
             }
             let (_, corrected, messages, _) =
                 tokio::time::timeout(std::time::Duration::from_secs(10), run)
@@ -4084,18 +4099,25 @@ mod interruptible_wait_tests {
             for message in messages {
                 locked.add_message(message);
             }
-            assert_eq!(
-                locked.drain_pending_deliveries(),
-                (vec!["incoming".into()], true)
-            );
+            if push.is_some() {
+                assert_eq!(
+                    locked.drain_pending_deliveries(),
+                    (vec!["incoming".into()], true)
+                );
+            } else {
+                assert!(locked.yield_to_queued_commands_at_boundary());
+                assert_eq!(locked.command_queue[0].client_request_id, "command");
+            }
             assert_eq!(locked.drain_pending_deliveries(), (vec![], false));
             assert_eq!(locked.messages[0].role, "assistant");
             assert_eq!(locked.messages[1].role, "tool");
-            assert!(locked
-                .messages
-                .iter()
-                .skip(2)
-                .any(|message| message.content.content_text_only().contains("wake up")));
+            if push.is_some() {
+                assert!(locked
+                    .messages
+                    .iter()
+                    .skip(2)
+                    .any(|message| message.content.content_text_only().contains("wake up")));
+            }
         }
     }
 

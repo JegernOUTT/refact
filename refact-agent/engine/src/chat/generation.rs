@@ -1611,6 +1611,13 @@ async fn start_generation_iteration(
     session_arc: &Arc<AMutex<ChatSession>>,
     gcx: &Arc<crate::global_context::GlobalContext>,
 ) -> GenerationAttemptStart {
+    if session_arc
+        .lock()
+        .await
+        .yield_to_queued_commands_at_boundary()
+    {
+        return GenerationAttemptStart::Stop;
+    }
     let chat_id = session_arc.lock().await.chat_id.clone();
     if crate::agents::seal::is_sealed(app, &chat_id).await {
         return GenerationAttemptStart::Stop;
@@ -2174,6 +2181,16 @@ async fn handle_tool_step_outcome(
         chat_label,
         ..
     } = context;
+    if matches!(
+        outcome,
+        ToolStepOutcome::NoToolCalls | ToolStepOutcome::Continue
+    ) && session_arc
+        .lock()
+        .await
+        .yield_to_queued_commands_at_boundary()
+    {
+        return GenerationLoopControl::Stop;
+    }
     match outcome {
         ToolStepOutcome::NoToolCalls => {
             if handle_task_agent_reasoning_token_stop(
@@ -4360,6 +4377,64 @@ mod tests {
             make_tool_msg("srvtoolu_456", "search results 2"),
         ];
         assert!(!tail_needs_assistant(&messages));
+    }
+
+    #[tokio::test]
+    async fn priority_question_response_yields_before_next_generation() {
+        let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let session = Arc::new(AMutex::new(ChatSession::new("question-boundary".into())));
+        {
+            let mut locked = session.lock().await;
+            locked.set_runtime_state(SessionState::ExecutingTools, None);
+            locked.messages = vec![make_assistant_with_tool_call("work", "cat")];
+            assert_eq!(
+                locked.enqueue_command(crate::chat::types::CommandRequest {
+                    native_approval_guard: None,
+                    supervision_guard: None,
+                    client_request_id: "answer".into(),
+                    priority: true,
+                    command: crate::chat::types::ChatCommand::AnswerQuestions {
+                        tool_call_id: "question".into(),
+                        answers: vec![],
+                        asked_at_ms: None,
+                    },
+                }),
+                crate::chat::types::EnqueueCommandOutcome::Accepted
+            );
+            assert!(!locked.abort_flag.load(Ordering::SeqCst));
+            assert!(!locked.yield_to_queued_commands_at_boundary());
+            locked.messages.push(make_tool_msg("work", "finished"));
+        }
+        assert!(matches!(
+            start_generation_iteration(&app, &session, &app.gcx).await,
+            GenerationAttemptStart::Stop
+        ));
+        let mut locked = session.lock().await;
+        assert_eq!(locked.runtime.state, SessionState::Idle);
+        assert_eq!(locked.command_queue[0].client_request_id, "answer");
+        assert_eq!(locked.messages[1].content.content_text_only(), "finished");
+        assert!(locked.draft_message.is_none());
+        locked.command_queue.clear();
+        assert!(!locked.yield_to_queued_commands_at_boundary());
+        locked.set_runtime_state(SessionState::Generating, None);
+        assert_eq!(
+            locked.enqueue_command(crate::chat::types::CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
+                client_request_id: "late-answer".into(),
+                priority: true,
+                command: crate::chat::types::ChatCommand::AnswerQuestions {
+                    tool_call_id: "late-question".into(),
+                    answers: vec![],
+                    asked_at_ms: None,
+                },
+            }),
+            crate::chat::types::EnqueueCommandOutcome::Accepted
+        );
+        assert!(locked.start_stream().is_none());
+        assert_eq!(locked.runtime.state, SessionState::Idle);
+        assert_eq!(locked.command_queue[0].client_request_id, "late-answer");
+        assert!(locked.draft_message.is_none());
     }
 
     #[test]

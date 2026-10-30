@@ -16791,6 +16791,7 @@ mod tests {
             work_provenance: Default::default(),
             interruptible_waits: 0,
             wait_delivery_boundary: false,
+            wait_tool_window_active: false,
             wait_interrupt_flag: Arc::new(AtomicBool::new(false)),
             derived_privacy_zones: crate::privacy::records::new_derived_privacy_zones(),
             thread: ThreadParams {
@@ -16959,6 +16960,7 @@ mod tests {
             work_provenance: Default::default(),
             interruptible_waits: 0,
             wait_delivery_boundary: false,
+            wait_tool_window_active: false,
             wait_interrupt_flag: Arc::new(AtomicBool::new(false)),
             derived_privacy_zones: crate::privacy::records::new_derived_privacy_zones(),
             thread: ThreadParams {

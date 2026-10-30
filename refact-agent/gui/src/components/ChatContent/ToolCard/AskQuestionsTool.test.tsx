@@ -183,6 +183,7 @@ describe("AskQuestionsTool", () => {
     const [, request] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(JSON.parse(String(request.body))).toMatchObject({
       type: "answer_questions",
+      priority: true,
       tool_call_id: "ask-questions-single-select",
       answers: [
         { id: "continue", answer: true },
