@@ -2,6 +2,48 @@
   "version": 1,
   "tests": [
     {
+      "fingerprint": "d4f7673a921f9f564a339e18ce3cc64578fd60a4ce55e7ed7d5af24d1d516312",
+      "occurrences": 1,
+      "failure_mode": "The project worker refuses the owning chat's strictly registered attached-worktree process, or a permissive repair grants foreign, forged, detached or unregistered process access.",
+      "importance": "Worktree-backed terminal tabs must attach and reconnect without weakening chat and workspace authorization.",
+      "nearest_retained": {
+        "fingerprint": "45c5273b19f2c77b566fc7cb51c8db72c1696c30919caa2bd5898bc1cc37c00a",
+        "why_insufficient": "The retained source-workspace ownership test has no registered linked worktree, chat attachment or persisted-session restoration, so cannot detect this source-worker/worktree mismatch."
+      },
+      "oracle": "Exact 200 for attached-worktree read and first SSE snapshot, exact original command rather than friendly description, exact listed process identity; exact 403 for missing/wrong chat, foreign workspace, absent/forged attachment and deregistration; restored attachment and persisted-session eviction return 200, deregistered list is empty.",
+      "prerequisites": "Create a real isolated Git repository and linked worktree with shipping WorktreeService; validate registration, bind an enforced chat attachment, register existing owned and foreign process records with distinct roots; save the populated attachment then require removal of its live session before restoration.",
+      "shipping_implementation": "HTTP exec read/list/subscribe handlers, shared authorize_process and chat_worktree_workspace, strict WorktreeService registry validation, and existing session trajectory restoration.",
+      "layer": "One HTTP router integration scenario with in-memory process records and a temporary real Git worktree.",
+      "why_cheapest": "The defect is wiring between HTTP, live/persisted chat attachment and exec/worktree registries. No subprocess is needed for the authorization decision; existing action-route tests retain stdin/resize/kill coverage through the same helper.",
+      "meaningful_cases": 13,
+      "critical": true,
+      "criticality_reason": "Exact chat/workspace ownership, strict registry authorization and restored lifecycle authority are critical security contracts.",
+      "removed_coverage": "No retained test removed or changed. One physical test added. No claim of a concurrency-race reproduction, cross-source permutation, raw-TTY command payload, real spawned-worktree cwd or all-action end-to-end coverage.",
+      "determinism": "Temporary source/cache/config directories, real service-created Git worktree, metadata-only process registration, awaited persistence and explicit live-session removal. First SSE snapshot has a bounded read; no sleeps, ambient credentials, daemon or network service.",
+      "author": "chat:6a931b48-4762-4b5e-b813-07e03213ad68",
+      "reviewer": "background_agent:bgagent-7bdd848d-9d33-49c2-ad46-02618ed26469",
+      "review_evidence": "Independent claude-opus-5-5 final challenger inspected actual v3 source and test, approved security/lifecycle and semantics conditional on passing execution; source reference subchat-982b1d43-9498-4117-a679-f69a62dd0a54. Earlier independent Sonnet/Terra reviews challenged invalid kill fixture, forged-root sensitivity, unloaded-session restoration and stale Arc identity; fixes incorporated. Parent observed v3 module run 10 passed including this test, exit 0. Reviewers did not execute commands. Before-fix witness used the initial regression with the same first authorization oracle; final test removes later invalid kill/spawn probes and adds command/restoration/forged-root assertions, so the red witness does not establish sensitivity of every final branch.",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": ["env", "REFACT_SKIP_GUI_BUILD=1", "RUST_MIN_STACK=16777216", "cargo", "test", "--offline", "--profile", "ci-test", "--lib", "registered_chat_worktree_process_access_requires_trusted_attachment", "--", "--exact", "http::routers::v1::exec::tests::registered_chat_worktree_process_access_requires_trusted_attachment", "--nocapture"],
+          "exit_code": 101,
+          "evidence": "Runtime process exec_6bc3f681-072e-45b9-96a9-56bbfb8f5fa5, output seq344-351: one test failed at original exec.rs:1088, owning-chat registered-worktree read returned 403 instead of 200. Frozen source .refact/terminal-verification/exec-before.rs SHA256 2bbb424f87b18d443abaea36d05784023a952f5fda14dcf1e16c9b38ce1589d6."
+        },
+        "passing": {
+          "command": ["env", "REFACT_SKIP_GUI_BUILD=1", "RUST_MIN_STACK=16777216", "cargo", "test", "--offline", "--profile", "ci-test", "--lib", "http::routers::v1::exec::tests::", "--", "--nocapture", "--test-threads=1"],
+          "exit_code": 0,
+          "evidence": "Runtime process exec_8f99da8f-ad84-4741-8ea7-818f55ab9a90, output seq344-358: all 10 terminal API tests passed including final registered_chat_worktree_process_access_requires_trusted_attachment. Final exec.rs SHA256 8b39a742472673a24ac100932ebb531f36e6f91fde48277af48e8c240431826b; candidate-v3.diff SHA256 9fbfc55847af83909f140552a0da18e5845b2560fe6ab4efdc4ea45b0e01d7ca."
+        },
+        "intended_diagnostic": "owning chat must read its registered worktree process: left 403, right 200",
+        "production_target": "HTTP authorize_process rejects a registered attached worktree because it checks only the source active workspace.",
+        "before_fix": {
+          "reference": "Base f7797cab4828027059f9023ba27bcace53ed7d49 production with initial failing regression; frozen .refact/terminal-verification/exec-before.rs",
+          "fingerprint": "2bbb424f87b18d443abaea36d05784023a952f5fda14dcf1e16c9b38ce1589d6"
+        }
+      }
+    },
+    {
       "fingerprint": "04bd825060410cbf9b66832b11659116f4e902a93aadf02fdb299641a71361cb",
       "occurrences": 1,
       "failure_mode": "Git routes reject a registered current-project linked worktree; an overbroad fix can instead authorize another cached project's worktree or a checkout whose actual repository differs from its registry source.",
@@ -3975,6 +4017,28 @@
     }
   ],
   "impacts": [
+    {
+      "path": "refact-agent/engine/src/http/routers/v1/exec.rs",
+      "before_sha256": "4c1f6a4b2cdfe1ef686b1a34c85a75e0e6ce89bb02359830a34cc92109f90b2e",
+      "after_sha256": "8b39a742472673a24ac100932ebb531f36e6f91fde48277af48e8c240431826b",
+      "affected_tests": [
+        "eb64526fde5823b96453e1d356dc841ef9c23bb04598befbdda36e8862f81df7",
+        "75224796554e5804353ba666a5c92ae63e3c8fca3747d34c6571189f8797b94b",
+        "523d2f92acbc7776fc47a146646c577071f92e582dcec0c091655b8da5e6c3e1",
+        "45ce35fb5046f6d2755af86c91f8a68fc25056a2531b849ef38ea7f769c40cab",
+        "66637ea0b06eed1f55139179869e2aea0026325af84df024c0c59b2cc26a31b9",
+        "d4f7673a921f9f564a339e18ce3cc64578fd60a4ce55e7ed7d5af24d1d516312",
+        "45c5273b19f2c77b566fc7cb51c8db72c1696c30919caa2bd5898bc1cc37c00a",
+        "0035350077d8a19c4e39623642e09f38f4c3221c01b8684bff6f9b66a4041b21",
+        "03e7ed91975510d1f86163f259814638c0e806e0e108ffe2898a68e2e9e98ec2",
+        "097011a93784ba2fe2659c261c1b9995494308fe8839e3f547539526b5723367"
+      ],
+      "impact": "Shared terminal HTTP authorization accepts only the exact owner's strictly validated attached worktree, restores persisted owner sessions, aligns browser spawn root and lists authorized worktree processes; authenticated read/SSE snapshot adds actual command. All same-file retained handler tests mapped; their support helpers and bodies are unchanged.",
+      "execution_context": "Same library module and annotations retained. New temporary registry/session test uses existing helpers; one physical test added. Parent executed all ten module tests in offline ci-test profile with RUST_MIN_STACK=16777216: exit 0. This mapping does not claim complete cross-file caller or race coverage.",
+      "author": "chat:6a931b48-4762-4b5e-b813-07e03213ad68",
+      "reviewer": "background_agent:bgagent-7bdd848d-9d33-49c2-ad46-02618ed26469",
+      "review_evidence": "Actual candidate-v3.diff SHA256 9fbfc55847af83909f140552a0da18e5845b2560fe6ab4efdc4ea45b0e01d7ca reviewed independently by claude-opus-5-5 after Sonnet/Terra challenge exchange. Final challenger approved source and actual test semantics subject to pass; parent then observed runtime process exec_8f99da8f-ad84-4741-8ea7-818f55ab9a90 output seq344-358: 10 passed. Source-backed adjudication confirmed task deletion removes before close, strict map identity recheck protects the new grant, and restore fixes eviction. Reviewer execution not claimed."
+    },
     {
       "path": ".github/PULL_REQUEST_TEMPLATE.md",
       "before_sha256": "0222965a2a5f7baad0d6877617729f77d8884b4639f04c399b44503a5b954dad",

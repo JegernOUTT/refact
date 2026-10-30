@@ -1,7 +1,12 @@
-import { waitFor } from "@testing-library/react";
+import { act as rtlAct, renderHook, waitFor } from "@testing-library/react";
+import type { Terminal } from "@xterm/xterm";
+import type { FitAddon } from "@xterm/addon-fit";
+import type { ExecReadResponse } from "../../../services/refact/exec";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { terminalKeyHandler } from "./terminalKeys";
+
+const act = rtlAct as typeof import("react-dom/test-utils").act;
 
 type TerminalSessionComponent =
   typeof import("./TerminalSession").TerminalSession;
@@ -328,5 +333,345 @@ describe("TerminalSession", () => {
     expect(useExecSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({ interactive: false }),
     );
+  });
+});
+
+describe("useExecSession attachment lifecycle", () => {
+  let useExecSession: typeof import("./useExecSession").useExecSession;
+  let ExecHttpError: typeof import("../../../services/refact/exec").ExecHttpError;
+  const read = vi.fn<typeof import("../../../services/refact/exec").readExec>();
+  const resize =
+    vi.fn<typeof import("../../../services/refact/exec").resizeExec>();
+  const stdin =
+    vi.fn<typeof import("../../../services/refact/exec").writeProcessStdin>();
+  const terminalWrite = vi.fn<(text: string) => void>();
+  let sendData: (chars: string) => void;
+  let notifyResize: () => void;
+  let options: Parameters<typeof useExecSession>[0];
+  let streams: TestEventSource[];
+
+  class TestEventSource extends EventTarget {
+    onopen: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    close = vi.fn();
+    constructor(readonly url: string) {
+      super();
+      streams.push(this);
+    }
+  }
+
+  const running: ExecReadResponse = {
+    chunks: [{ seq: 0, offset: 4, stream: "combined", text: "old" }],
+    next_seq: 4,
+    status: "running",
+  };
+
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    streams = [];
+    terminalWrite.mockClear();
+    read.mockReset().mockResolvedValue(running);
+    resize.mockReset().mockResolvedValue({});
+    stdin.mockReset().mockResolvedValue({
+      process_id: "proc",
+      status: "running",
+      bytes_written: 1,
+      since_seq: 0,
+      next_seq: 0,
+      latest_seq: 0,
+    });
+    vi.doUnmock("./useExecSession");
+    vi.doMock("../../../services/refact/exec", async (importOriginal) => ({
+      ...(await importOriginal<
+        typeof import("../../../services/refact/exec")
+      >()),
+      readExec: read,
+      resizeExec: resize,
+      writeProcessStdin: stdin,
+    }));
+    ({ ExecHttpError } = await import("../../../services/refact/exec"));
+    ({ useExecSession } = await import("./useExecSession"));
+    vi.stubGlobal("EventSource", TestEventSource);
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: () => void) {
+          notifyResize = callback;
+        }
+        observe = vi.fn();
+        disconnect = vi.fn();
+      },
+    );
+    options = {
+      processId: "proc",
+      chatId: "chat",
+      connection: { host: "web", lspPort: 8001 },
+      onStatusChange: vi.fn(),
+      runtime: {
+        terminal: {
+          rows: 24,
+          cols: 80,
+          write: terminalWrite,
+          onData: (callback: (chars: string) => void) => {
+            sendData = callback;
+            return { dispose: vi.fn() };
+          },
+        } as unknown as Terminal,
+        fitAddon: { fit: vi.fn() } as unknown as FitAddon,
+        container: document.createElement("div"),
+      },
+    };
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.doUnmock("../../../services/refact/exec");
+  });
+
+  async function settle() {
+    await act(async () => {
+      await Promise.resolve();
+    });
+  }
+
+  test("writes the original command before output once across reconnect and context changes", async () => {
+    const command = "printf 'actual command'";
+    read.mockResolvedValue({ ...running, command });
+    const { rerender, unmount } = renderHook(() => useExecSession(options));
+    await settle();
+    const header = `\u001b[2m$ ${command}\u001b[22m\r\n`;
+    expect(terminalWrite.mock.calls).toEqual([[header], ["old"]]);
+    expect(stdin).not.toHaveBeenCalled();
+    expect(
+      new URL(streams[0].url, "http://localhost").searchParams.get("since_seq"),
+    ).toBe("4");
+
+    act(() => {
+      streams[0].dispatchEvent(
+        new MessageEvent("snapshot", {
+          data: JSON.stringify({ ...running, command }),
+        }),
+      );
+      streams[0].onerror?.();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+    });
+    expect(read.mock.calls[1][1]).toBe(4);
+    options = { ...options, chatId: "other-chat" };
+    rerender();
+    await settle();
+    expect(read.mock.calls[2][1]).toBe(4);
+    expect(terminalWrite.mock.calls).toEqual([[header], ["old"]]);
+    unmount();
+  });
+
+  test("normalizes command newlines and renders terminal controls as inert text", async () => {
+    read.mockResolvedValue({
+      ...running,
+      command:
+        "echo one\r\necho two\recho three\n\u001b[2J\u009d52;c;bad\u0007\t\b",
+    });
+    const { unmount } = renderHook(() => useExecSession(options));
+    await settle();
+    expect(terminalWrite.mock.calls).toEqual([
+      [
+        "\u001b[2m$ echo one\r\necho two\r\necho three\r\n\\x1b[2J\\x9d52;c;bad\\x07\\x09\\x08\u001b[22m\r\n",
+      ],
+      ["old"],
+    ]);
+    expect(stdin).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  test("accepts a snapshot command before the first output and prefixes a fresh terminal history", async () => {
+    read.mockResolvedValue({ ...running, chunks: [], next_seq: 0 });
+    const { rerender, unmount } = renderHook(() => useExecSession(options));
+    await settle();
+    const snapshot = { ...running, command: "echo original" };
+    act(() => {
+      streams[0].dispatchEvent(
+        new MessageEvent("snapshot", { data: JSON.stringify(snapshot) }),
+      );
+    });
+    const header = "\u001b[2m$ echo original\u001b[22m\r\n";
+    expect(terminalWrite.mock.calls).toEqual([[header], ["old"]]);
+
+    const freshWrite = vi.fn();
+    const runtime = options.runtime;
+    if (!runtime) throw new Error("test requires a terminal runtime");
+    read.mockResolvedValue(snapshot);
+    options = {
+      ...options,
+      runtime: {
+        ...runtime,
+        terminal: {
+          ...runtime.terminal,
+          write: freshWrite,
+        } as unknown as Terminal,
+      },
+    };
+    rerender();
+    await settle();
+    expect(freshWrite).toHaveBeenCalledExactlyOnceWith(header);
+    expect(read.mock.calls[1][1]).toBe(4);
+    unmount();
+  });
+
+  test("keeps older workers without command metadata compatible", async () => {
+    const { unmount } = renderHook(() => useExecSession(options));
+    await settle();
+    act(() => {
+      streams[0].dispatchEvent(
+        new MessageEvent("snapshot", {
+          data: JSON.stringify({ ...running, command: "late metadata" }),
+        }),
+      );
+    });
+    expect(terminalWrite).toHaveBeenCalledExactlyOnceWith("old");
+    expect(stdin).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  test.each([401, 403, 404])(
+    "stops retry and queued IO after read HTTP %s without inventing process exit",
+    async (status) => {
+      read.mockRejectedValue(new ExecHttpError("attachment denied", status));
+      const { result, unmount } = renderHook(() => useExecSession(options));
+      await settle();
+      expect(result.current).toEqual({
+        error: "attachment denied",
+        reconnecting: false,
+      });
+      sendData("x");
+      notifyResize();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(20_000);
+      });
+      expect(read).toHaveBeenCalledOnce();
+      expect(resize).toHaveBeenCalledOnce();
+      expect(stdin).not.toHaveBeenCalled();
+      expect(streams).toHaveLength(0);
+      expect(options.onStatusChange).not.toHaveBeenCalled();
+      expect(terminalWrite).not.toHaveBeenCalled();
+      unmount();
+    },
+  );
+
+  test("resize denial blocks initial read", async () => {
+    let rejectResize: (cause: Error) => void = () => undefined;
+    resize.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectResize = reject;
+        }),
+    );
+    const { result, unmount } = renderHook(() => useExecSession(options));
+    await settle();
+    act(() => {
+      rejectResize(new ExecHttpError("resize denied", 403));
+    });
+    await settle();
+    expect(result.current).toEqual({
+      error: "resize denied",
+      reconnecting: false,
+    });
+    expect(read).not.toHaveBeenCalled();
+    expect(streams).toHaveLength(0);
+    unmount();
+  });
+
+  test.each([new TypeError("network down")])(
+    "reconnects transient failures, deduplicates output and clears stale errors",
+    async () => {
+      const cause = new TypeError("network down");
+      read
+        .mockRejectedValueOnce(cause)
+        .mockRejectedValueOnce(new ExecHttpError("unavailable", 503));
+      const { result, unmount } = renderHook(() => useExecSession(options));
+      await settle();
+      expect(result.current.reconnecting).toBe(true);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(750);
+      });
+      expect(read).toHaveBeenCalledTimes(3);
+      expect(streams).toHaveLength(1);
+      act(() => streams[0].onopen?.());
+      expect(result.current).toEqual({ error: null, reconnecting: false });
+      act(() => streams[0].onerror?.());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(250);
+      });
+      expect(read.mock.calls[3][1]).toBe(4);
+      expect(terminalWrite).toHaveBeenCalledExactlyOnceWith("old");
+      unmount();
+      const calls = read.mock.calls.length;
+      act(() => streams[0].onerror?.());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(20_000);
+      });
+      expect(read).toHaveBeenCalledTimes(calls);
+    },
+  );
+
+  test("late backfill and stream callbacks cannot overwrite stdin denial, and changed context can attach", async () => {
+    const { result, rerender, unmount } = renderHook(() =>
+      useExecSession(options),
+    );
+    await settle();
+    act(() => streams[0].onopen?.());
+    let resolveRead: (value: ExecReadResponse) => void = () => undefined;
+    read.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveRead = resolve;
+        }),
+    );
+    act(() => streams[0].onerror?.());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+    });
+    stdin.mockRejectedValueOnce(new ExecHttpError("stdin denied", 403));
+    act(() => {
+      sendData("x");
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(16);
+    });
+    act(() => {
+      resolveRead({
+        ...running,
+        next_seq: 8,
+        chunks: [{ seq: 4, text: "late", stream: "combined" }],
+      });
+    });
+    await settle();
+    await settle();
+    act(() => streams[0].onopen?.());
+    expect(result.current).toEqual({
+      error: "stdin denied",
+      reconnecting: false,
+    });
+    expect(streams).toHaveLength(1);
+    expect(terminalWrite).not.toHaveBeenCalledWith("late");
+    expect(streams[0].close).toHaveBeenCalled();
+    const calls = stdin.mock.calls.length;
+    act(() => {
+      sendData("blocked");
+      notifyResize();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+    expect(stdin).toHaveBeenCalledTimes(calls);
+    options = { ...options, chatId: "other-chat" };
+    rerender();
+    await settle();
+    expect(streams).toHaveLength(2);
+    act(() => streams[1].onopen?.());
+    expect(result.current).toEqual({ error: null, reconnecting: false });
+    unmount();
   });
 });

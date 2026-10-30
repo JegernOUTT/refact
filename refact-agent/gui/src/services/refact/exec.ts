@@ -50,6 +50,7 @@ export type ExecOutputChunk = {
 };
 
 export type ExecReadResponse = {
+  command?: string;
   chunks: ExecOutputChunk[];
   next_seq: number;
   status: ExecStatus;
@@ -72,6 +73,7 @@ export type ExecStdinResponse = {
 };
 
 export type ExecSnapshotEvent = {
+  command?: string;
   status: ExecStatus;
   chunks: ExecOutputChunk[];
   next_seq: number;
