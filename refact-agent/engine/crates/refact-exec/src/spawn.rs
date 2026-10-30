@@ -684,6 +684,7 @@ async fn monitor_process(
     process_id: ExecProcessId,
     child: Arc<Mutex<RuntimeChild>>,
     mut control_rx: mpsc::Receiver<ExecProcessCommand>,
+    control_tx: mpsc::WeakSender<ExecProcessCommand>,
     timeout: Option<Duration>,
     output_drain_timeout: Option<Duration>,
     abort_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -841,7 +842,19 @@ async fn monitor_process(
         }
         ExecStatus::Starting | ExecStatus::Running => terminal_status,
     };
-    let final_snapshot = registry.complete_status(&process_id, terminal_status).await;
+    let final_snapshot = match control_tx.upgrade() {
+        Some(control_tx) => {
+            registry
+                .complete_status(&process_id, &control_tx, terminal_status)
+                .await
+        }
+        None => Err(format!(
+            "process runtime retired; terminal outcome not applied: {process_id}"
+        )),
+    };
+    if let Err(error) = &final_snapshot {
+        tracing::warn!(%process_id, %error, "Process terminal outcome not applied to registered runtime");
+    }
     if let Some(response) = finish_response {
         let _ = response.send(final_snapshot);
     }
@@ -967,6 +980,7 @@ impl ExecRegistry {
         });
         let child = Arc::new(Mutex::new(RuntimeChild::Tokio(child)));
         let (control_tx, control_rx) = mpsc::channel(8);
+        let monitor_tx = control_tx.downgrade();
         let terminal = Arc::new(Notify::new());
         if let Err(message) = self
             .register_new_with_runtime(
@@ -1015,6 +1029,7 @@ impl ExecRegistry {
             process_id.clone(),
             child,
             control_rx,
+            monitor_tx,
             request.timeout,
             request.output_drain_timeout,
             request.abort_flag.clone(),
@@ -1088,6 +1103,7 @@ impl ExecRegistry {
             master: Some(pty_handle.master),
         })));
         let (control_tx, control_rx) = mpsc::channel(8);
+        let monitor_tx = control_tx.downgrade();
         let terminal = Arc::new(Notify::new());
         if let Err(message) = self
             .register_new_with_runtime(
@@ -1137,6 +1153,7 @@ impl ExecRegistry {
             process_id.clone(),
             child,
             control_rx,
+            monitor_tx,
             request.timeout,
             request.output_drain_timeout,
             request.abort_flag.clone(),
@@ -1485,6 +1502,7 @@ mod tests {
             master: Some(pty_handle.master),
         })));
         let (control_tx, control_rx) = mpsc::channel(8);
+        let monitor_tx = control_tx.downgrade();
         registry
             .register_new_with_runtime(
                 meta,
@@ -1513,6 +1531,7 @@ mod tests {
             process_id.clone(),
             child.clone(),
             control_rx,
+            monitor_tx,
             None,
             None,
             None,
@@ -2055,7 +2074,8 @@ mod tests {
             .await
             .unwrap();
         let process_id = result.snapshot.meta.process_id.clone();
-        let (replacement_tx, _replacement_rx) = mpsc::channel(1);
+        let mut completion = registry.subscribe_completion();
+        let (replacement_tx, mut replacement_rx) = mpsc::channel(1);
         registry
             .attach_runtime(
                 &process_id,
@@ -2068,19 +2088,24 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                let snapshot = registry.get(&process_id).await.unwrap();
-                if snapshot.status.is_terminal() {
-                    return snapshot;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("monitor should finish after control channel closes");
-
-        assert_eq!(snapshot.status, ExecStatus::Killed);
+        let joined =
+            tokio::time::timeout(Duration::from_secs(10), registry.join_monitors_for_test())
+                .await
+                .expect("monitor should finish after control channel closes");
+        assert_eq!(joined, 1);
+        let snapshot = registry.get(&process_id).await.unwrap();
+        assert_eq!(snapshot.meta, result.snapshot.meta);
+        assert_eq!(snapshot.status, ExecStatus::Running);
+        assert!(matches!(
+            replacement_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            completion.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        drop(replacement_rx);
+        registry.remove_record_for_test(&process_id).await;
     }
 
     async fn assert_instant_chat_owned_process_broadcast_order(tty: bool) {

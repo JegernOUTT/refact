@@ -379,11 +379,24 @@ pub fn canonical_common_dir(repo: &Repository) -> Result<PathBuf, String> {
 }
 
 pub fn run_git(path: &Path, args: &[&str]) -> Result<String, String> {
+    run_git_observed(path, args, || Ok(()))
+}
+
+fn run_git_observed(
+    path: &Path,
+    args: &[&str],
+    succeeded: impl FnOnce() -> Result<(), String>,
+) -> Result<String, String> {
+    crate::locking::checkpoint_git_phase()?;
     let output = Command::new("git")
         .args(args)
         .current_dir(path)
         .output()
         .map_err(|e| format!("Failed to run git {:?}: {}", args, e))?;
+    if output.status.success() {
+        succeeded()?;
+    }
+    crate::locking::checkpoint_git_phase()?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
@@ -398,6 +411,14 @@ pub fn run_git(path: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 pub fn run_git_with_refact_author(path: &Path, args: &[&str]) -> Result<String, String> {
+    run_git_with_refact_author_observed(path, args, || Ok(()))
+}
+
+pub(crate) fn run_git_with_refact_author_observed(
+    path: &Path,
+    args: &[&str],
+    succeeded: impl FnOnce() -> Result<(), String>,
+) -> Result<String, String> {
     let mut full_args = vec![
         "-c",
         "user.name=Refact Agent",
@@ -405,7 +426,7 @@ pub fn run_git_with_refact_author(path: &Path, args: &[&str]) -> Result<String, 
         "user.email=agent@refact.ai",
     ];
     full_args.extend_from_slice(args);
-    run_git(path, &full_args)
+    run_git_observed(path, &full_args, succeeded)
 }
 
 pub fn run_git_lossy(path: &Path, args: &[&str]) -> String {
@@ -482,17 +503,16 @@ pub struct MergeCheckout {
     pub root: PathBuf,
     source_root: PathBuf,
     temporary: Option<tempfile::TempDir>,
+    observed_branch: Option<String>,
+    observed_head: String,
+    target_head: String,
+    target_branch: String,
 }
 
 impl Drop for MergeCheckout {
     fn drop(&mut self) {
         if let Some(temporary) = self.temporary.take() {
-            if run_git(
-                &self.source_root,
-                &["worktree", "remove", &self.root.to_string_lossy()],
-            )
-            .is_err()
-            {
+            if self.root.exists() {
                 temporary.keep();
             }
         }
@@ -501,6 +521,9 @@ impl Drop for MergeCheckout {
 
 pub fn prepare_merge_checkout(source_root: &Path, target: &str) -> Result<MergeCheckout, String> {
     run_git(source_root, &["worktree", "list", "--porcelain"])?;
+    let target_head = run_git(source_root, &["rev-parse", "--verify", target])?
+        .trim()
+        .to_string();
     let mut targets = list_git_worktrees(source_root)
         .into_iter()
         .filter(|entry| entry.branch.as_deref() == Some(target));
@@ -516,6 +539,10 @@ pub fn prepare_merge_checkout(source_root: &Path, target: &str) -> Result<MergeC
             root: dunce::canonicalize(&entry.root).map_err(|error| error.to_string())?,
             source_root: source_root.to_path_buf(),
             temporary: None,
+            observed_branch: current_branch(&discover_repo(&entry.root)?),
+            observed_head: head_rev(&entry.root)?,
+            target_head,
+            target_branch: target.to_string(),
         });
     }
     if ensure_clean_worktree(source_root, "Source workspace").is_ok() {
@@ -523,6 +550,10 @@ pub fn prepare_merge_checkout(source_root: &Path, target: &str) -> Result<MergeC
             root: source_root.to_path_buf(),
             source_root: source_root.to_path_buf(),
             temporary: None,
+            observed_branch: current_branch(&discover_repo(source_root)?),
+            observed_head: head_rev(source_root)?,
+            target_head,
+            target_branch: target.to_string(),
         });
     }
     let temporary = tempfile::Builder::new()
@@ -530,15 +561,68 @@ pub fn prepare_merge_checkout(source_root: &Path, target: &str) -> Result<MergeC
         .tempdir()
         .map_err(|error| error.to_string())?;
     let root = temporary.path().join("worktree");
-    run_git(
-        source_root,
-        &["worktree", "add", &root.to_string_lossy(), target],
-    )?;
     Ok(MergeCheckout {
         root,
         source_root: source_root.to_path_buf(),
         temporary: Some(temporary),
+        observed_branch: None,
+        observed_head: String::new(),
+        target_head,
+        target_branch: target.to_string(),
     })
+}
+
+impl MergeCheckout {
+    pub fn target_branch(&self) -> &str {
+        &self.target_branch
+    }
+
+    pub fn cleanup(&self) -> Result<(), String> {
+        if self.temporary.is_some() && self.root.exists() {
+            ensure_checkout_on_branch(&self.root, "Temporary merge target", &self.target_branch)?;
+            ensure_no_merge_in_progress(&self.root, "Temporary merge target")?;
+            ensure_clean_worktree(&self.root, "Temporary merge target")?;
+            run_git(
+                &self.source_root,
+                &["worktree", "remove", &self.root.to_string_lossy()],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn materialize(&self) -> Result<(), String> {
+        if run_git(
+            &self.source_root,
+            &["rev-parse", "--verify", &self.target_branch],
+        )?
+        .trim()
+            != self.target_head
+        {
+            return Err(
+                "Merge target HEAD changed after resolution; resolve again before retrying".into(),
+            );
+        }
+        if self.temporary.is_some() {
+            if !self.root.exists() {
+                run_git(
+                    &self.source_root,
+                    &[
+                        "worktree",
+                        "add",
+                        &self.root.to_string_lossy(),
+                        &self.target_branch,
+                    ],
+                )?;
+            }
+        } else if head_rev(&self.root)? != self.observed_head
+            || current_branch(&discover_repo(&self.root)?) != self.observed_branch
+        {
+            return Err(
+                "Merge target HEAD or branch changed after resolution; no writes performed".into(),
+            );
+        }
+        Ok(())
+    }
 }
 
 pub fn validate_merge_checkout(root: &Path, target: &str) -> Result<(), String> {
@@ -977,10 +1061,12 @@ pub fn stash_dirty_worktree(
     let stash_marker = format!("Refact worktree merge target workspace {}", Uuid::new_v4());
     let stasher = Signature::now("Refact Agent", "agent@refact.ai")
         .map_err(|e| format!("Failed to create stash author: {}", e))?;
+    crate::locking::checkpoint_git_phase()?;
     let stash_oid = repo
         .stash_save(&stasher, &stash_marker, Some(StashFlags::INCLUDE_UNTRACKED))
         .map_err(|e| format!("Failed to stash target workspace changes: {}", e))?
         .to_string();
+    crate::locking::checkpoint_git_phase()?;
     let stash = DirtyWorktreeStash {
         original_branch,
         original_head,
@@ -1039,7 +1125,8 @@ pub fn apply_and_drop_stash(
 
     let mut warnings = Vec::new();
     match stash_entry_for_marker(root, &stash.stash_marker) {
-        Ok(Some(stash_ref)) => {
+        Ok(Some(stash_ref)) if stash_ref.1 == stash.stash_oid => {
+            crate::locking::checkpoint_git_phase()?;
             if let Err(e) = run_git(root, &["stash", "drop", &stash_ref.0]) {
                 warnings.push(format!(
                     "Target workspace changes were reapplied, but dropping git stash {} failed: {}",
@@ -1047,8 +1134,8 @@ pub fn apply_and_drop_stash(
                 ));
             }
         }
-        Ok(None) => warnings.push(format!(
-            "Target workspace changes were reapplied, but git stash {} was not found for cleanup",
+        Ok(_) => warnings.push(format!(
+            "Target workspace changes were reapplied, but exact owned git stash {} was not found for cleanup",
             stash.stash_oid
         )),
         Err(e) => warnings.push(format!(
@@ -1303,64 +1390,76 @@ pub fn preflight_merge_conflicts(
     source_branch: &str,
     strategy: &str,
 ) -> Result<PreflightMergeResult, String> {
+    crate::locking::checkpoint_git_phase()?;
     let temp = tempfile::Builder::new()
         .prefix("refact-merge-preflight-")
         .tempdir()
-        .map_err(|e| format!("Failed to create merge preflight directory: {}", e))?;
-    let preflight_path = temp.path().join("worktree");
+        .map_err(|e| format!("Failed to create merge preflight directory: {}", e))?
+        .keep();
+    let preflight_path = temp.join("worktree");
+    let retained = |reason: String| {
+        format!(
+            "Merge preflight stopped; inspect retained directory '{}' (worktree '{}'); do not replay: {}",
+            temp.display(),
+            preflight_path.display(),
+            reason
+        )
+    };
     let preflight_str = preflight_path
         .to_str()
-        .ok_or_else(|| "Merge preflight path is not valid UTF-8".to_string())?;
+        .ok_or_else(|| retained("Merge preflight path is not valid UTF-8".to_string()))?;
     run_git(
         source_root,
         &["worktree", "add", "--detach", preflight_str, target_branch],
-    )?;
-    let merge_result = if strategy == "squash" {
-        run_git(&preflight_path, &["merge", "--squash", source_branch])
+    )
+    .map_err(&retained)?;
+    crate::locking::checkpoint_git_phase().map_err(&retained)?;
+    let merge_args = if strategy == "squash" {
+        vec!["merge", "--squash", source_branch]
     } else {
-        run_git(
-            &preflight_path,
-            &["merge", "--no-commit", "--no-ff", source_branch],
-        )
+        vec!["merge", "--no-commit", "--no-ff", source_branch]
     };
-    let conflicts = conflict_files_for_path(&preflight_path);
-    let mut warnings = Vec::new();
-    if let Err(e) = run_git(
+    let merge_output = Command::new("git")
+        .args(&merge_args)
+        .current_dir(&preflight_path)
+        .output()
+        .map_err(|e| retained(format!("Merge preflight Git outcome unknown: {}", e)))?;
+    crate::locking::checkpoint_git_phase().map_err(&retained)?;
+    if !merge_output.status.success() && merge_output.status.code() != Some(1) {
+        return Err(retained(format!(
+            "Merge preflight did not complete normally: {}",
+            merge_output.status
+        )));
+    }
+    let conflicts = run_git(&preflight_path, &["diff", "--name-only", "--diff-filter=U"])
+        .map_err(&retained)?
+        .lines()
+        .map(str::trim)
+        .filter(|file| !file.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if !merge_output.status.success() && conflicts.is_empty() {
+        return Err(retained(format!(
+            "Merge preflight failed without reported conflicts: {}",
+            String::from_utf8_lossy(&merge_output.stderr)
+        )));
+    }
+    run_git(
         source_root,
         &["worktree", "remove", "--force", preflight_str],
-    ) {
-        warnings.push(format!("Failed to remove merge preflight worktree: {}", e));
-    }
-    if preflight_path.exists() {
-        if let Err(e) = std::fs::remove_dir_all(&preflight_path) {
-            warnings.push(format!(
-                "Failed to remove merge preflight directory '{}': {}",
-                preflight_path.display(),
-                e
-            ));
-        }
-    }
-    match merge_result {
-        Ok(_) => Ok(PreflightMergeResult {
-            conflicts: Vec::new(),
-            warnings,
-        }),
-        Err(_e) if !conflicts.is_empty() => Ok(PreflightMergeResult {
-            conflicts,
-            warnings,
-        }),
-        Err(e) => {
-            if warnings.is_empty() {
-                Err(format!("Merge preflight failed: {}", e))
-            } else {
-                Err(format!(
-                    "Merge preflight failed: {}; cleanup warnings: {}",
-                    e,
-                    warnings.join("; ")
-                ))
-            }
-        }
-    }
+    )
+    .map_err(&retained)?;
+    crate::locking::checkpoint_git_phase().map_err(&retained)?;
+    std::fs::remove_dir(&temp)
+        .map_err(|e| retained(format!("Failed to remove empty preflight directory: {}", e)))?;
+    Ok(PreflightMergeResult {
+        conflicts: if merge_output.status.success() {
+            Vec::new()
+        } else {
+            conflicts
+        },
+        warnings: Vec::new(),
+    })
 }
 
 #[allow(dead_code)]

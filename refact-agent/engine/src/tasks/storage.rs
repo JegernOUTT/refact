@@ -172,6 +172,592 @@ impl std::fmt::Display for BoardSaveError {
     }
 }
 
+#[derive(Clone)]
+enum TaskPrincipal {
+    Internal,
+    OwnerPlanner(PlannerProof),
+    BoundPlanner(PlannerProof),
+}
+
+#[derive(Clone)]
+struct PlannerProof {
+    principal: String,
+    source_root: PathBuf,
+    model: crate::caps::BaseModelRecord,
+    origin: PlannerOrigin,
+}
+
+#[derive(Clone)]
+enum PlannerOrigin {
+    Live {
+        session: Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
+        worktree: Option<crate::worktrees::types::WorktreeMeta>,
+    },
+    Persisted {
+        path: PathBuf,
+        digest: String,
+    },
+}
+
+impl PlannerProof {
+    async fn capture(
+        gcx: Arc<GlobalContext>,
+        task_id: &str,
+        principal: &str,
+    ) -> Result<Self, String> {
+        if crate::file_activity::current_actor().is_some_and(|actor| actor != principal) {
+            return Err("Task principal does not match the authenticated caller".into());
+        }
+        let live = gcx.chat_sessions.read().await.get(principal).cloned();
+        if let Some(live) = live {
+            let session = live
+                .try_lock()
+                .map_err(|_| "Task planner identity is busy; retry")?;
+            if session.chat_id != principal
+                || !session
+                    .thread
+                    .task_meta
+                    .as_ref()
+                    .is_some_and(|meta| meta.role == "planner" && meta.task_id == task_id)
+                || session.thread.model.trim().is_empty()
+            {
+                return Err("Task principal is not a bound planner with a model".into());
+            }
+            let source = crate::coordination::scope::session_source_root(&session)
+                .ok_or("Task planner has no authenticated source project")?;
+            let worktree = session.thread.worktree.clone();
+            let model = crate::caps::BaseModelRecord {
+                id: session.thread.model.clone(),
+                ..Default::default()
+            };
+            drop(session);
+            let source_root = crate::coordination::roots::resolve_source_workspace_root(
+                gcx.clone(),
+                source.to_str(),
+            )
+            .await?;
+            if let Some(worktree) = &worktree {
+                let service = crate::worktrees::service::WorktreeService::new_async(
+                    gcx.cache_dir.clone(),
+                    source_root.clone(),
+                )
+                .await?;
+                if service.validate_worktree_meta_strict(worktree).await? != *worktree {
+                    return Err("Task planner checkout identity changed".into());
+                }
+            }
+            return Ok(Self {
+                principal: principal.into(),
+                source_root,
+                model,
+                origin: PlannerOrigin::Live {
+                    session: live,
+                    worktree,
+                },
+            });
+        }
+        if !crate::chat::trajectories::chat_id_is_planner_for_task(gcx.clone(), principal, task_id)
+            .await
+        {
+            return Err("Task finalization requires an authenticated bound planner".into());
+        }
+        let path = crate::chat::trajectories::find_trajectory_path(gcx.clone(), principal)
+            .await
+            .ok_or("Task planner trajectory is unavailable")?;
+        let app = AppState::from_gcx(gcx.clone()).await;
+        let source_root = crate::coordination::scope::restored_source_root(&app, &path)
+            .await
+            .ok_or("Task planner trajectory has no authenticated source project")?;
+        let path = dunce::canonicalize(path).map_err(|error| error.to_string())?;
+        require_regular_task_file(&path).await?;
+        let body = crate::coordination::board_bootstrap::read_bounded(
+            &path,
+            &source_root,
+            crate::file_activity::settings().max_work_history_bytes,
+        )
+        .await
+        .map_err(|_| "Task planner trajectory cannot be authenticated")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&body).map_err(|error| error.to_string())?;
+        if value.get("id").and_then(serde_json::Value::as_str) != Some(principal)
+            || value
+                .get("task_meta")
+                .and_then(|value| value.get("task_id"))
+                .and_then(serde_json::Value::as_str)
+                != Some(task_id)
+            || value
+                .get("task_meta")
+                .and_then(|value| value.get("role"))
+                .and_then(serde_json::Value::as_str)
+                != Some("planner")
+            || value
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|model| model.trim().is_empty())
+        {
+            return Err("Task planner saved binding changed".into());
+        }
+        Ok(Self {
+            principal: principal.into(),
+            source_root,
+            model: crate::caps::BaseModelRecord {
+                id: value
+                    .get("model")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .into(),
+                ..Default::default()
+            },
+            origin: PlannerOrigin::Persisted {
+                path,
+                digest: crate::file_activity::digest_of(&body),
+            },
+        })
+    }
+
+    async fn validate(
+        &self,
+        gcx: &Arc<GlobalContext>,
+        task_id: &str,
+        task_dir: &Path,
+    ) -> Result<crate::caps::BaseModelRecord, String> {
+        let live = gcx.chat_sessions.read().await.get(&self.principal).cloned();
+        match (&self.origin, live) {
+            (
+                PlannerOrigin::Live {
+                    session: accepted,
+                    worktree,
+                },
+                Some(current),
+            ) if Arc::ptr_eq(accepted, &current) => {
+                let session = current
+                    .try_lock()
+                    .map_err(|_| "Task planner identity is busy; retry")?;
+                if session.chat_id != self.principal
+                    || !session
+                        .thread
+                        .task_meta
+                        .as_ref()
+                        .is_some_and(|meta| meta.role == "planner" && meta.task_id == task_id)
+                    || session.thread.model != self.model.id
+                    || &session.thread.worktree != worktree
+                    || crate::coordination::scope::session_source_root(&session)
+                        .and_then(|path| dunce::canonicalize(path).ok())
+                        .as_ref()
+                        != Some(&self.source_root)
+                {
+                    return Err("Task planner source or task binding changed".into());
+                }
+                Ok(crate::caps::BaseModelRecord {
+                    id: session.thread.model.clone(),
+                    ..Default::default()
+                })
+            }
+            (PlannerOrigin::Persisted { path, digest }, None) => {
+                if !path.starts_with(task_dir) {
+                    return Err(
+                        "Saved planner does not belong to the accepted task directory".into(),
+                    );
+                }
+                require_regular_task_file(path).await?;
+                let body = crate::coordination::board_bootstrap::read_bounded(
+                    path,
+                    task_dir,
+                    crate::file_activity::settings().max_work_history_bytes,
+                )
+                .await
+                .map_err(|_| "Saved task planner identity unavailable")?;
+                if crate::file_activity::digest_of(&body) != *digest {
+                    return Err("Saved task planner revision changed; retry".into());
+                }
+                Ok(self.model.clone())
+            }
+            _ => Err("Task planner live identity changed; retry".into()),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct TaskDirectoryBinding {
+    task_id: String,
+    task_dir: PathBuf,
+    source_root: PathBuf,
+    source_identity: std::fs::Metadata,
+    task_identity: std::fs::Metadata,
+    owner: Option<String>,
+    actor: Option<String>,
+    principal: TaskPrincipal,
+    attempt: Option<super::admission::Attempt>,
+    claim: Option<AcceptedTaskClaim>,
+}
+
+#[derive(Clone)]
+struct AcceptedTaskClaim {
+    card_id: String,
+    agent_id: String,
+    variant: Option<&'static str>,
+}
+
+impl std::fmt::Debug for TaskDirectoryBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskDirectoryBinding")
+            .field("task_id", &self.task_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for AcceptedTaskAttempt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AcceptedTaskAttempt")
+            .field("binding", &self.binding)
+            .finish_non_exhaustive()
+    }
+}
+
+pub(crate) fn bound_task_matches(task_id: Option<&str>) -> Result<bool, String> {
+    match BOUND_TASK.try_with(|access| access.binding.task_id.clone()) {
+        Ok(bound) => match task_id {
+            Some(task) if bound == task => Ok(true),
+            Some(_) => Err("Task transaction does not match the accepted binding".into()),
+            None => Ok(false),
+        },
+        Err(_) => Ok(false),
+    }
+}
+
+pub(crate) fn bound_task_active() -> bool {
+    BOUND_TASK.try_with(|_| ()).is_ok()
+}
+
+#[derive(Clone)]
+struct BoundTaskAccess {
+    binding: TaskDirectoryBinding,
+    reconciliation: bool,
+}
+
+tokio::task_local! {
+    static BOUND_TASK: BoundTaskAccess;
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(super) static TASK_BOARD_LOCK_WAIT: Arc<tokio::sync::Notify>;
+}
+
+impl TaskDirectoryBinding {
+    pub(crate) async fn capture(
+        gcx: Arc<GlobalContext>,
+        source_root: &Path,
+        task_id: &str,
+    ) -> Result<Self, String> {
+        let principal = match crate::file_activity::current_actor() {
+            Some(actor) => TaskPrincipal::OwnerPlanner(
+                PlannerProof::capture(gcx.clone(), task_id, &actor).await?,
+            ),
+            None => TaskPrincipal::Internal,
+        };
+        Self::capture_as(gcx, source_root, task_id, principal).await
+    }
+
+    async fn capture_as(
+        gcx: Arc<GlobalContext>,
+        source_root: &Path,
+        task_id: &str,
+        principal: TaskPrincipal,
+    ) -> Result<Self, String> {
+        validate_task_id(task_id)?;
+        let source_root = crate::coordination::roots::resolve_source_workspace_root(
+            gcx.clone(),
+            Some(&source_root.to_string_lossy()),
+        )
+        .await?;
+        let task_dir = find_task_dir(gcx.clone(), task_id).await?;
+        let canonical = dunce::canonicalize(&task_dir).map_err(|e| e.to_string())?;
+        let local = source_root.join(".refact/tasks").join(task_id);
+        let global = gcx.config_dir.join("tasks").join(task_id);
+        let accepted = [local, global]
+            .into_iter()
+            .find(|path| dunce::canonicalize(path).ok().as_ref() == Some(&canonical))
+            .ok_or("Task directory does not belong to the accepted source project")?;
+        for path in accepted.ancestors().take(3) {
+            require_regular_directory(path).await?;
+        }
+        let actor = crate::file_activity::current_actor();
+        if let TaskPrincipal::OwnerPlanner(proof) | TaskPrincipal::BoundPlanner(proof) = &principal
+        {
+            if proof.source_root != source_root {
+                return Err("Task planner does not belong to the accepted source project".into());
+            }
+        }
+        let identity = std::fs::metadata(&canonical).map_err(|e| e.to_string())?;
+        let guard = board_lock::acquire_board(&canonical).await?;
+        if guard.dir() != canonical || !same_directory_identity(&identity, &canonical)? {
+            return Err("Accepted task directory changed before capture".into());
+        }
+        require_regular_task_file(&canonical.join("board.yaml")).await?;
+        let board = read_board_from_dir(&gcx, &canonical).await?;
+        if let TaskPrincipal::OwnerPlanner(proof) = &principal {
+            if board.owner_chat_id.is_some() {
+                board.require_owner(&proof.principal)?;
+            }
+        }
+        if guard.dir() != canonical || !same_directory_identity(&identity, &canonical)? {
+            return Err("Accepted task directory changed during capture".into());
+        }
+        let binding = Self {
+            task_id: task_id.into(),
+            task_identity: std::fs::metadata(&canonical).map_err(|e| e.to_string())?,
+            source_identity: std::fs::metadata(&source_root).map_err(|e| e.to_string())?,
+            task_dir: canonical,
+            source_root,
+            owner: board.owner_chat_id,
+            actor,
+            principal,
+            attempt: None,
+            claim: None,
+        };
+        drop(guard);
+        binding.validate_identity()?;
+        Ok(binding)
+    }
+
+    pub(crate) async fn scope<F: std::future::Future>(&self, future: F) -> F::Output {
+        BOUND_TASK
+            .scope(
+                BoundTaskAccess {
+                    binding: self.clone(),
+                    reconciliation: false,
+                },
+                future,
+            )
+            .await
+    }
+
+    pub(crate) fn with_attempt(
+        &self,
+        attempt: &super::admission::Attempt,
+        card_id: &str,
+        agent_id: &str,
+        variant: Option<&'static str>,
+    ) -> Self {
+        let mut binding = self.clone();
+        binding.attempt = Some(attempt.clone());
+        binding.claim = Some(AcceptedTaskClaim {
+            card_id: card_id.into(),
+            agent_id: agent_id.into(),
+            variant,
+        });
+        binding
+    }
+
+    pub(crate) fn task_id(&self) -> &str {
+        &self.task_id
+    }
+
+    pub(crate) fn validate_task(&self, task_id: &str) -> Result<(), String> {
+        if self.task_id != task_id {
+            return Err("Accepted task identity does not match the transaction".into());
+        }
+        self.validate_identity()
+    }
+
+    fn validate_identity(&self) -> Result<(), String> {
+        if dunce::canonicalize(&self.task_dir).ok().as_ref() != Some(&self.task_dir)
+            || !same_directory_identity(&self.task_identity, &self.task_dir)?
+            || !same_directory_identity(&self.source_identity, &self.source_root)?
+        {
+            return Err(
+                "Accepted task directory changed; claim retained for reconciliation".into(),
+            );
+        }
+        Ok(())
+    }
+
+    fn require_owner(&self, board: &TaskBoard) -> Result<(), String> {
+        if board.owner_chat_id != self.owner
+            && !(self.owner.is_none() && self.actor.is_some() && board.owner_chat_id == self.actor)
+        {
+            return Err("Accepted task owner changed; claim retained for reconciliation".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct AcceptedTaskAttempt {
+    binding: TaskDirectoryBinding,
+    attempt: super::admission::Attempt,
+    original: BoardCard,
+    agent_id: String,
+    variant: Option<&'static str>,
+}
+
+impl AcceptedTaskAttempt {
+    pub(crate) fn new(
+        binding: &TaskDirectoryBinding,
+        original: &BoardCard,
+        agent_id: &str,
+        attempt: super::admission::Attempt,
+        variant: Option<&'static str>,
+    ) -> Self {
+        Self {
+            binding: binding.clone(),
+            attempt,
+            original: original.clone(),
+            agent_id: agent_id.into(),
+            variant,
+        }
+    }
+
+    pub(crate) async fn reconcile(
+        &self,
+        gcx: Arc<GlobalContext>,
+        restore_original: bool,
+        error: &str,
+    ) -> Result<(), String> {
+        let access = BoundTaskAccess {
+            binding: self.binding.clone(),
+            reconciliation: true,
+        };
+        BOUND_TASK.scope(access, async {
+            let reason: String = error.chars().take(300).collect();
+            update_board_atomic_with_reviewer(
+                gcx, &self.binding.task_id, BoardWriter::Internal, |_, _| Ok(()), |board, _| {
+                    if !self.attempt.owns_setup() {
+                        return Err("Accepted task attempt changed; reconciliation required".into());
+                    }
+                    let card = board.get_card_mut(&self.original.id)
+                        .ok_or("Accepted task card was removed; reconciliation required")?;
+                    if card.column != "doing" {
+                        return Err("Accepted task claim is no longer current".into());
+                    }
+                    if let Some(key) = self.variant {
+                        let variant = card.ab_variants.as_mut()
+                            .filter(|variants| variants.winner.is_none())
+                            .and_then(|variants| variants.variant_mut(key))
+                            .filter(|variant| variant.agent_id == self.agent_id
+                                && variant.chat_id == self.attempt.chat_id() && variant.finish.is_none())
+                            .ok_or("Accepted A/B claim was replaced")?;
+                        variant.finish = Some(super::types::AbVariantFinish {
+                            success: false, final_report: format!("A/B setup failed: {reason}"),
+                            completed_at: Utc::now().to_rfc3339(), ..Default::default()
+                        });
+                    } else {
+                        if card.assignee.as_deref() != Some(self.agent_id.as_str())
+                            || card.agent_chat_id.as_deref() != Some(self.attempt.chat_id())
+                        {
+                            return Err("Accepted task claim was replaced".into());
+                        }
+                        if restore_original {
+                            card.assignee = self.original.assignee.clone();
+                            card.agent_chat_id = self.original.agent_chat_id.clone();
+                            card.column = self.original.column.clone();
+                            card.started_at = self.original.started_at.clone();
+                            card.completed_at = self.original.completed_at.clone();
+                            card.final_report = self.original.final_report.clone();
+                            card.final_report_structured = self.original.final_report_structured.clone();
+                            card.agent_worktree = self.original.agent_worktree.clone();
+                            card.agent_worktree_name = self.original.agent_worktree_name.clone();
+                            card.agent_branch = self.original.agent_branch.clone();
+                            card.base_branch = self.original.base_branch.clone();
+                            card.base_commit = self.original.base_commit.clone();
+                        } else {
+                            card.column = "failed".into();
+                            card.completed_at = Some(Utc::now().to_rfc3339());
+                            card.final_report = Some(format!("Agent setup failed: {reason}"));
+                        }
+                    }
+                    card.status_updates.push(super::types::StatusUpdate {
+                        timestamp: Utc::now().to_rfc3339(),
+                        message: format!("Agent setup failed: {reason}. Previous checkout retained for inspection."),
+                    });
+                    Ok(())
+                },
+            ).await.map(|_| ())
+        }).await
+    }
+}
+
+pub(crate) fn same_directory_identity(
+    before: &std::fs::Metadata,
+    path: &Path,
+) -> Result<bool, String> {
+    let after = std::fs::symlink_metadata(path)
+        .map_err(|e| format!("Accepted directory unavailable; reconciliation required: {e}"))?;
+    if !after.is_dir()
+        || after.file_type().is_symlink()
+        || before.created().ok() != after.created().ok()
+    {
+        return Ok(false);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if before.dev() != after.dev() || before.ino() != after.ino() {
+            return Ok(false);
+        }
+    }
+    #[cfg(not(unix))]
+    if before.created().is_err() || after.created().is_err() {
+        return Err("Accepted directory identity is unavailable".into());
+    }
+    Ok(true)
+}
+
+async fn require_regular_directory(path: &Path) -> Result<(), String> {
+    let meta = fs::symlink_metadata(path)
+        .await
+        .map_err(|e| e.to_string())?;
+    if !meta.is_dir() || meta.file_type().is_symlink() {
+        return Err("Unsafe accepted task directory alias".into());
+    }
+    Ok(())
+}
+
+pub(crate) async fn require_regular_task_file(path: &Path) -> Result<(), String> {
+    let meta = fs::symlink_metadata(path)
+        .await
+        .map_err(|e| e.to_string())?;
+    if !meta.is_file() || meta.file_type().is_symlink() {
+        return Err("Accepted task file is not a regular non-symlink file".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.nlink() != 1 {
+            return Err("Accepted task file has an unsafe hardlink alias".into());
+        }
+    }
+    #[cfg(windows)]
+    if task_meta_windows_link_count(path).await? != 1 {
+        return Err("Accepted task file has an unsafe hardlink alias".into());
+    }
+    Ok(())
+}
+
+async fn resolve_bound_task_dir(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    access: &BoundTaskAccess,
+) -> Result<PathBuf, String> {
+    access.binding.validate_task(task_id)?;
+    for path in access.binding.task_dir.ancestors().take(3) {
+        require_regular_directory(path).await?;
+    }
+    if !access.reconciliation {
+        crate::coordination::roots::resolve_source_workspace_root(
+            gcx,
+            Some(&access.binding.source_root.to_string_lossy()),
+        )
+        .await
+        .map_err(|e| format!("Accepted task source is no longer authorized: {e}"))?;
+        if crate::file_activity::current_actor() != access.binding.actor {
+            return Err("Accepted task principal changed".into());
+        }
+    }
+    Ok(access.binding.task_dir.clone())
+}
+
 pub async fn get_tasks_dir(gcx: Arc<GlobalContext>) -> Result<PathBuf, String> {
     let project_dirs = get_project_dirs(gcx).await;
     let workspace_root = project_dirs.first().ok_or("No workspace folder found")?;
@@ -201,6 +787,9 @@ pub async fn get_all_tasks_dirs(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
 
 pub async fn find_task_dir(gcx: Arc<GlobalContext>, task_id: &str) -> Result<PathBuf, String> {
     validate_task_id(task_id)?;
+    if let Ok(access) = BOUND_TASK.try_with(Clone::clone) {
+        return resolve_bound_task_dir(gcx, task_id, &access).await;
+    }
     for tasks_dir in get_all_tasks_dirs(gcx).await {
         let candidate = tasks_dir.join(task_id);
         if candidate.is_dir() {
@@ -269,9 +858,18 @@ async fn load_task_meta_from_path(path: &PathBuf) -> Result<TaskMeta, String> {
 }
 
 pub async fn load_task_meta(gcx: Arc<GlobalContext>, task_id: &str) -> Result<TaskMeta, String> {
+    if BOUND_TASK.try_with(|_| ()).is_ok() {
+        let (task_dir, _guard) = locked_task_dir(gcx, task_id).await?;
+        let meta_path = task_dir.join("meta.yaml");
+        require_regular_task_file(&meta_path).await?;
+        let meta = load_task_meta_from_path(&meta_path).await?;
+        if meta.id != task_id {
+            return Err("Accepted task metadata identity changed".into());
+        }
+        return Ok(meta);
+    }
     let task_dir = find_task_dir(gcx, task_id).await?;
-    let meta_path = task_dir.join("meta.yaml");
-    load_task_meta_from_path(&meta_path).await
+    load_task_meta_from_path(&task_dir.join("meta.yaml")).await
 }
 
 #[cfg(windows)]
@@ -413,8 +1011,26 @@ pub async fn save_task_meta(
 }
 
 pub async fn load_board(gcx: Arc<GlobalContext>, task_id: &str) -> Result<TaskBoard, String> {
+    if BOUND_TASK.try_with(|_| ()).is_ok() {
+        let (_, guard) = locked_task_dir(gcx.clone(), task_id).await?;
+        return load_board_locked(gcx, task_id, &guard).await;
+    }
     let task_dir = find_task_dir(gcx.clone(), task_id).await?;
     read_board_from_dir(&gcx, &task_dir).await
+}
+
+pub(crate) async fn load_board_locked(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    guard: &BoardLockGuard,
+) -> Result<TaskBoard, String> {
+    validate_task_id(task_id)?;
+    validate_locked_task_dir(gcx.clone(), task_id, guard).await?;
+    let task_dir = find_task_dir(gcx.clone(), task_id).await?;
+    if dunce::canonicalize(task_dir).map_err(|error| error.to_string())? != guard.dir() {
+        return Err("Board read attempted under a different task lock domain".into());
+    }
+    read_board_from_dir(&gcx, guard.dir()).await
 }
 
 async fn read_board_from_dir(gcx: &GlobalContext, task_dir: &Path) -> Result<TaskBoard, String> {
@@ -489,14 +1105,173 @@ async fn write_board_locked(
     Ok(())
 }
 
-async fn locked_task_dir(
+pub(crate) async fn locked_task_dir(
     gcx: Arc<GlobalContext>,
     task_id: &str,
 ) -> Result<(PathBuf, BoardLockGuard), String> {
-    let task_dir = find_task_dir(gcx, task_id).await?;
-    let guard = board_lock::acquire_board(&task_dir).await?;
+    let task_dir = find_task_dir(gcx.clone(), task_id).await?;
+    let canonical_before = dunce::canonicalize(&task_dir).map_err(|e| e.to_string())?;
+    let identity = std::fs::metadata(&canonical_before).map_err(|e| e.to_string())?;
+    #[cfg(not(test))]
+    let guard = board_lock::acquire_board(&canonical_before).await?;
+    #[cfg(test)]
+    let guard = {
+        use std::future::Future;
+        let mut acquire = std::pin::pin!(board_lock::acquire_board(&canonical_before));
+        let mut notified = false;
+        std::future::poll_fn(|cx| {
+            let result = acquire.as_mut().poll(cx);
+            if result.is_pending() && !notified {
+                notified = true;
+                let _ = TASK_BOARD_LOCK_WAIT.try_with(|waiting| waiting.notify_one());
+            }
+            result
+        })
+        .await?
+    };
     let canonical = guard.dir().to_path_buf();
+    if canonical != canonical_before || !same_directory_identity(&identity, &canonical)? {
+        return Err(
+            "Task directory changed while awaiting its lock; reconciliation required".into(),
+        );
+    }
+    validate_locked_task_dir(gcx, task_id, &guard).await?;
     Ok((canonical, guard))
+}
+
+async fn validate_locked_task_dir(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    guard: &BoardLockGuard,
+) -> Result<(), String> {
+    if !guard.guards(BOARD_LOCK_FILE) {
+        return Err("Task validation requires its board lock".into());
+    }
+    let canonical = guard.dir();
+    if let Ok(access) = BOUND_TASK.try_with(Clone::clone) {
+        let checked = resolve_bound_task_dir(gcx.clone(), task_id, &access).await?;
+        if checked != canonical {
+            return Err("Accepted task lock domain changed".into());
+        }
+        require_regular_task_file(&canonical.join("board.yaml")).await?;
+        require_regular_task_file(&canonical.join("meta.yaml")).await?;
+        if load_task_meta_from_path(&canonical.join("meta.yaml"))
+            .await?
+            .id
+            != task_id
+        {
+            return Err("Accepted task metadata identity changed".into());
+        }
+        let board = read_board_from_dir(&gcx, canonical).await?;
+        access.binding.require_owner(&board)?;
+        if !access.reconciliation {
+            if access
+                .binding
+                .attempt
+                .as_ref()
+                .is_some_and(|attempt| !attempt.owns_setup())
+            {
+                return Err("Accepted task admission attempt changed".into());
+            }
+            if let TaskPrincipal::OwnerPlanner(proof) | TaskPrincipal::BoundPlanner(proof) =
+                &access.binding.principal
+            {
+                let policy = crate::coordination::privacy_guard::policy_key(&gcx, &proof.model)
+                    .map_err(|error| error.to_string())?;
+                let (_, provenance) = read_board_with_provenance(&gcx, canonical).await?;
+                let mut records = crate::privacy::records::declared_file_records(
+                    &gcx,
+                    [canonical.join("board.yaml"), canonical.join("meta.yaml")],
+                )?;
+                records.extend(provenance.records);
+                let model = proof.validate(&gcx, task_id, canonical).await?;
+                crate::privacy::destinations::clear_for_model(
+                    &gcx,
+                    DiscoveryAudit(records),
+                    &model,
+                )
+                .map_err(|error| error.to_string())?;
+                if crate::coordination::privacy_guard::policy_key(&gcx, &model)
+                    .map_err(|error| error.to_string())?
+                    != policy
+                {
+                    return Err("Accepted task privacy policy changed".into());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn validate_task_trajectory_publication(
+    gcx: Arc<GlobalContext>,
+    guard: &BoardLockGuard,
+    task_meta: &crate::chat::types::TaskMeta,
+    chat_id: &str,
+    file_path: &Path,
+) -> Result<(), String> {
+    let access = BOUND_TASK
+        .try_with(Clone::clone)
+        .map_err(|_| "Accepted task publication binding is unavailable")?;
+    let task_dir = guard.dir();
+    access.binding.validate_task(&task_meta.task_id)?;
+    if access.reconciliation
+        || !guard.guards(BOARD_LOCK_FILE)
+        || task_dir != access.binding.task_dir
+        || !file_path.starts_with(task_dir)
+    {
+        return Err("Accepted task trajectory escaped its publication binding".into());
+    }
+    if let Some(attempt) = &access.binding.attempt {
+        let claim = access
+            .binding
+            .claim
+            .as_ref()
+            .ok_or("Accepted task publication claim is unavailable")?;
+        if !attempt.owns_setup()
+            || attempt.chat_id() != chat_id
+            || task_meta.role != "agents"
+            || task_meta.card_id.as_deref() != Some(claim.card_id.as_str())
+            || task_meta.agent_id.as_deref() != Some(claim.agent_id.as_str())
+        {
+            return Err("Accepted task snapshot does not match its admission claim".into());
+        }
+        let board = read_board_from_dir(&gcx, task_dir).await?;
+        let card = board
+            .get_card(&claim.card_id)
+            .filter(|card| card.column == "doing")
+            .ok_or("Accepted task publication claim is no longer current")?;
+        if let Some(key) = claim.variant {
+            card.ab_variants
+                .as_ref()
+                .filter(|variants| variants.winner.is_none())
+                .and_then(|variants| variants.variant(key))
+                .filter(|variant| {
+                    variant.agent_id == claim.agent_id
+                        && variant.chat_id == chat_id
+                        && variant.finish.is_none()
+                })
+                .ok_or("Accepted A/B publication claim was replaced")?;
+        } else if card.ab_variants.is_some()
+            || card.assignee.as_deref() != Some(claim.agent_id.as_str())
+            || card.agent_chat_id.as_deref() != Some(chat_id)
+        {
+            return Err("Accepted task publication claim was replaced".into());
+        }
+    } else if task_meta.role == "agents" {
+        return Err("Accepted task publication admission attempt is unavailable".into());
+    }
+    validate_locked_task_dir(gcx, &task_meta.task_id, guard).await?;
+    access.binding.validate_identity()?;
+    if access
+        .binding
+        .attempt
+        .as_ref()
+        .is_some_and(|attempt| !attempt.owns_setup())
+    {
+        return Err("Accepted task admission attempt changed".into());
+    }
+    Ok(())
 }
 
 fn record_board_withdrawals(
@@ -519,10 +1294,12 @@ fn record_board_withdrawals(
             }
         };
         if ended {
+            let replied =
+                crate::tools::tool_agent_planner_qna::canonical_reply_ids(board, &previous.id);
             let mut removed = previous.clone();
             let card = board.get_card_mut(&previous.id).unwrap_or(&mut removed);
             let ids = crate::tools::tool_agent_planner_qna::record_withdrawn_questions(
-                gcx, task_id, card,
+                gcx, task_id, card, &replied,
             );
             withdrawals.push((card.clone(), ids));
         }
@@ -574,7 +1351,10 @@ async fn commit_board(
                         .is_some_and(|id| id != chat_id)
             }) && stopped.insert(chat_id.to_string())
             {
-                crate::chat::notifications::stop_chat_processes(gcx, chat_id).await;
+                crate::chat::notifications::stop_task_chat_processes(
+                    gcx, chat_id, task_id, &card.id,
+                )
+                .await;
             }
         }
     }
@@ -616,7 +1396,8 @@ async fn commit_board(
                     .is_some_and(|id| id != chat_id)
         }) && stopped.insert(chat_id.clone())
         {
-            crate::chat::notifications::stop_chat_processes(gcx, &chat_id).await;
+            crate::chat::notifications::stop_task_chat_processes(gcx, &chat_id, task_id, &card_id)
+                .await;
         }
     }
     Ok(())
@@ -627,6 +1408,12 @@ async fn board_coordination(
     task_id: &str,
 ) -> Result<refact_work_core::CoordinationSettings, String> {
     let task_dir = find_task_dir(gcx, task_id).await?;
+    board_coordination_at(&task_dir).await
+}
+
+async fn board_coordination_at(
+    task_dir: &Path,
+) -> Result<refact_work_core::CoordinationSettings, String> {
     let project_root = task_dir
         .parent()
         .and_then(Path::parent)
@@ -635,10 +1422,124 @@ async fn board_coordination(
     crate::runtime_settings::coordination_for_project(project_root).await
 }
 
+fn require_reply_metadata_unchanged(existing: &TaskBoard, board: &TaskBoard) -> Result<(), String> {
+    if existing.planner_replies != board.planner_replies
+        || existing.card_attempt_generations != board.card_attempt_generations
+    {
+        return Err("Planner reply metadata is coordinator-owned".into());
+    }
+    Ok(())
+}
+
+fn demote_untrusted_reply_statuses(existing: &TaskBoard, board: &mut TaskBoard) {
+    for card in &mut board.cards {
+        for (index, update) in card.status_updates.iter_mut().enumerate() {
+            let unchanged = existing
+                .get_card(&card.id)
+                .and_then(|card| card.status_updates.get(index))
+                .is_some_and(|old| {
+                    old.timestamp == update.timestamp && old.message == update.message
+                });
+            if !unchanged
+                && (update.message.starts_with("[REPLY:")
+                    || update.message.starts_with("[REPLY-DELIVERY:"))
+            {
+                update.message.insert_str(0, "[UNTRUSTED STATUS] ");
+            }
+        }
+    }
+}
+
+fn advance_card_attempt_generations(
+    existing: &TaskBoard,
+    board: &mut TaskBoard,
+) -> Result<(), String> {
+    let next = existing
+        .card_attempt_generations
+        .values()
+        .copied()
+        .chain(
+            existing
+                .planner_replies
+                .values()
+                .flat_map(|rows| rows.values())
+                .map(|reply| reply.attempt.generation),
+        )
+        .max()
+        .unwrap_or(existing.rev)
+        .max(existing.rev)
+        .checked_add(1)
+        .ok_or("Task board generation exhausted")?;
+    board.card_attempt_generations = board
+        .cards
+        .iter()
+        .map(|card| {
+            let unchanged = existing.get_card(&card.id).is_some_and(|old| {
+                old.assignee == card.assignee
+                    && old.agent_chat_id == card.agent_chat_id
+                    && old.started_at == card.started_at
+                    && old.column == card.column
+            });
+            let generation = if unchanged {
+                existing
+                    .card_attempt_generations
+                    .get(&card.id)
+                    .copied()
+                    .unwrap_or(0)
+            } else {
+                next
+            };
+            (card.id.clone(), generation)
+        })
+        .collect();
+    Ok(())
+}
+
+pub(crate) async fn bound_planner_binding(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    principal: &str,
+) -> Result<TaskDirectoryBinding, String> {
+    let proof = PlannerProof::capture(gcx.clone(), task_id, principal).await?;
+    TaskDirectoryBinding::capture_as(
+        gcx,
+        &proof.source_root.clone(),
+        task_id,
+        TaskPrincipal::BoundPlanner(proof),
+    )
+    .await
+}
+
+pub(crate) async fn accept_planner_reply<T>(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    accept: impl FnOnce(&TaskBoard) -> Result<T, String>,
+) -> Result<T, String> {
+    let (_, guard) = locked_task_dir(gcx.clone(), task_id).await?;
+    let board = load_board_locked(gcx, task_id, &guard).await?;
+    let result = accept(&board);
+    drop(guard);
+    result
+}
+
 fn validate_board(
     board: &TaskBoard,
     settings: &refact_work_core::CoordinationSettings,
 ) -> Result<(), String> {
+    if crate::coordination::bounds::serialized_size(
+        &(&board.planner_replies, &board.card_attempt_generations),
+        settings.max_work_history_bytes,
+    )
+    .is_none()
+        || board
+            .planner_replies
+            .values()
+            .map(|rows| rows.len())
+            .sum::<usize>()
+            > settings.max_work_history_rows
+    {
+        return Err("Planner reply metadata exceeds the configured limit".into());
+    }
     board.validate_for_write(
         settings.board_max_reviewers,
         settings.board_claim_key_max_len,
@@ -658,12 +1559,10 @@ pub async fn create_board(
     task_id: &str,
     board: &TaskBoard,
 ) -> Result<(), BoardSaveError> {
-    let settings = board_coordination(gcx.clone(), task_id)
-        .await
-        .map_err(BoardSaveError::from)?;
-    validate_board(board, &settings).map_err(BoardSaveError::from)?;
     let source = board_rows::actor_provenance(&gcx).await?;
     let (task_dir, guard) = locked_task_dir(gcx.clone(), task_id).await?;
+    let settings = board_coordination_at(&task_dir).await?;
+    validate_board(board, &settings)?;
     let existing = read_board_from_dir(&gcx, &task_dir).await?;
     if task_dir.join("board.yaml").exists() {
         return Err(BoardSaveError::Conflict(BoardConflict {
@@ -671,7 +1570,11 @@ pub async fn create_board(
             actual: existing.rev,
         }));
     }
+    require_reply_metadata_unchanged(&existing, board)?;
     let mut board = board.clone();
+    demote_untrusted_reply_statuses(&existing, &mut board);
+    advance_card_attempt_generations(&existing, &mut board)?;
+    validate_board(&board, &settings)?;
     let withdrawals = record_board_withdrawals(&gcx, task_id, &existing, &mut board);
     let provenance = board_rows::write_provenance(&board, None, source);
     commit_board(
@@ -709,12 +1612,10 @@ pub async fn save_board_checked(
     expected_rev: u64,
     board: &TaskBoard,
 ) -> Result<(), BoardSaveError> {
-    let settings = board_coordination(gcx.clone(), task_id)
-        .await
-        .map_err(BoardSaveError::from)?;
-    validate_board(board, &settings).map_err(BoardSaveError::Failed)?;
     let source = board_rows::actor_provenance(&gcx).await?;
     let (task_dir, guard) = locked_task_dir(gcx.clone(), task_id).await?;
+    let settings = board_coordination_at(&task_dir).await?;
+    validate_board(board, &settings)?;
     let (existing, previous) = read_board_with_provenance(&gcx, &task_dir).await?;
     if existing.rev != expected_rev {
         return Err(BoardSaveError::Conflict(BoardConflict {
@@ -722,7 +1623,11 @@ pub async fn save_board_checked(
             actual: existing.rev,
         }));
     }
+    require_reply_metadata_unchanged(&existing, board)?;
     let mut board = board.clone();
+    demote_untrusted_reply_statuses(&existing, &mut board);
+    advance_card_attempt_generations(&existing, &mut board)?;
+    validate_board(&board, &settings)?;
     let withdrawals = record_board_withdrawals(&gcx, task_id, &existing, &mut board);
     let provenance = board_rows::write_provenance(&board, Some((&existing, &previous)), source);
     commit_board(
@@ -760,7 +1665,35 @@ where
         }
         _ => None,
     };
-    update_board_atomic_with_reviewer(gcx, task_id, planner_actor, None, updater).await
+    update_board_atomic_with_reviewer(
+        gcx,
+        task_id,
+        planner_actor.map_or(BoardWriter::Internal, BoardWriter::Planner),
+        |_, _| Ok(()),
+        |board, _| updater(board),
+    )
+    .await
+}
+
+pub(crate) async fn update_board_atomic_with_owner_guard<F, G, T>(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    expected_owner: &str,
+    owner_guard: G,
+    updater: F,
+) -> Result<(TaskBoard, T), String>
+where
+    F: FnOnce(&mut TaskBoard) -> Result<T, String>,
+    G: FnOnce(&TaskBoard) -> Result<(), String>,
+{
+    update_board_atomic_as_bound_planner(gcx, task_id, expected_owner, |board, _| {
+        if board.owner_chat_id.is_some() {
+            board.require_owner(expected_owner)?;
+        }
+        owner_guard(board)?;
+        updater(board)
+    })
+    .await
 }
 
 pub async fn update_board_atomic_as_reviewer<F, T>(
@@ -784,11 +1717,39 @@ where
     update_board_atomic_with_reviewer(
         gcx,
         task_id,
-        None,
-        Some(reviewer_chat_id.to_string()),
-        updater,
+        BoardWriter::Reviewer(reviewer_chat_id.to_string()),
+        |_, _| Ok(()),
+        |board, _| updater(board),
     )
     .await
+}
+
+pub(crate) async fn update_board_atomic_as_bound_planner<F, T>(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    principal: &str,
+    updater: F,
+) -> Result<(TaskBoard, T), String>
+where
+    F: FnOnce(&mut TaskBoard, bool) -> Result<T, String>,
+{
+    let proof = PlannerProof::capture(gcx.clone(), task_id, principal).await?;
+    let binding = TaskDirectoryBinding::capture_as(
+        gcx.clone(),
+        &proof.source_root.clone(),
+        task_id,
+        TaskPrincipal::BoundPlanner(proof),
+    )
+    .await?;
+    binding
+        .scope(update_board_atomic_with_reviewer(
+            gcx,
+            task_id,
+            BoardWriter::BoundPlanner(principal.into()),
+            |_, _| Ok(()),
+            updater,
+        ))
+        .await
 }
 
 pub async fn attest_card_review(
@@ -844,21 +1805,37 @@ pub async fn attest_card_review(
     .await
 }
 
-async fn update_board_atomic_with_reviewer<F, T>(
+enum BoardWriter {
+    Internal,
+    Planner(String),
+    Reviewer(String),
+    BoundPlanner(String),
+}
+
+async fn update_board_atomic_with_reviewer<F, G, T>(
     gcx: Arc<GlobalContext>,
     task_id: &str,
-    planner_actor: Option<String>,
-    reviewer_actor: Option<String>,
+    writer: BoardWriter,
+    pre_authorize: G,
     updater: F,
 ) -> Result<(TaskBoard, T), String>
 where
-    F: FnOnce(&mut TaskBoard) -> Result<T, String>,
+    F: FnOnce(&mut TaskBoard, bool) -> Result<T, String>,
+    G: FnOnce(&TaskBoard, &refact_work_core::CoordinationSettings) -> Result<(), String>,
 {
-    let settings = board_coordination(gcx.clone(), task_id).await?;
-    let source = board_rows::actor_provenance(&gcx).await?;
+    let reconciling = BOUND_TASK
+        .try_with(|access| access.reconciliation)
+        .unwrap_or(false);
+    let source = if reconciling {
+        None
+    } else {
+        board_rows::actor_provenance(&gcx).await?
+    };
     let (task_dir, guard) = locked_task_dir(gcx.clone(), task_id).await?;
+    let settings = board_coordination_at(&task_dir).await?;
 
     let (existing, previous) = read_board_with_provenance(&gcx, &task_dir).await?;
+    pre_authorize(&existing, &settings)?;
     let mut board = existing.clone();
     let failed_before: HashSet<String> = board
         .cards
@@ -866,13 +1843,29 @@ where
         .filter(|card| card.column == "failed" || card.column == "regressed")
         .map(|card| card.id.clone())
         .collect();
-    if let Some(actor) = planner_actor.as_deref() {
-        board.authorize_owner(actor)?;
+    match &writer {
+        BoardWriter::Internal => {}
+        BoardWriter::Planner(actor) => board.authorize_owner(actor)?,
+        BoardWriter::Reviewer(actor) => {
+            board.authorize_reviewer(actor, settings.board_allow_self_review)?
+        }
+        BoardWriter::BoundPlanner(principal) => {
+            if crate::file_activity::current_actor().is_some_and(|actor| actor != *principal) {
+                return Err("Task principal changed".into());
+            }
+        }
     }
-    if let Some(reviewer) = reviewer_actor.as_deref() {
-        board.authorize_reviewer(reviewer, settings.board_allow_self_review)?;
+    let result = updater(&mut board, settings.board_allow_self_review)?;
+    if board.card_attempt_generations != existing.card_attempt_generations
+        || (!matches!(&writer, BoardWriter::BoundPlanner(_))
+            && board.planner_replies != existing.planner_replies)
+    {
+        return Err("Planner reply metadata is coordinator-owned".into());
     }
-    let result = updater(&mut board)?;
+    if !matches!(&writer, BoardWriter::BoundPlanner(_)) {
+        demote_untrusted_reply_statuses(&existing, &mut board);
+    }
+    advance_card_attempt_generations(&existing, &mut board)?;
     for card in &mut board.cards {
         if card.column != "doing"
             || existing.get_card(&card.id).is_some_and(|old| {
@@ -2280,6 +3273,130 @@ mod tests {
             .unwrap()
             .card_claims
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn bound_task_transaction_keeps_original_after_workspace_reorder_and_refuses_relocation()
+    {
+        let original_root = tempfile::tempdir().unwrap();
+        let foreign_root = tempfile::tempdir().unwrap();
+        let task_id = "duplicate-task";
+        let gcx = task_with_cards(
+            original_root.path(),
+            task_id,
+            vec![claimable_card("T-1", vec![], "planned")],
+        )
+        .await;
+        let foreign_gcx = task_with_cards(
+            foreign_root.path(),
+            task_id,
+            vec![claimable_card("T-1", vec![], "planned")],
+        )
+        .await;
+        update_board_atomic(foreign_gcx, task_id, |board| {
+            board.cards[0].title = "foreign sentinel, never mutate".into();
+            board.cards[0].instructions = "nonempty foreign task".into();
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let original_dir = original_root.path().join(".refact/tasks").join(task_id);
+        let foreign_dir = foreign_root.path().join(".refact/tasks").join(task_id);
+        let sentinel = fs::read(foreign_dir.join("board.yaml")).await.unwrap();
+        assert!(!sentinel.is_empty());
+        let binding = TaskDirectoryBinding::capture(gcx.clone(), original_root.path(), task_id)
+            .await
+            .unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![foreign_root.path().into(), original_root.path().into()];
+        binding
+            .scope(async {
+                assert_eq!(
+                    load_board(gcx.clone(), task_id).await.unwrap().cards[0].title,
+                    "T-1"
+                );
+                update_board_atomic(gcx.clone(), task_id, |board| {
+                    board.cards[0].title = "accepted original mutation".into();
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            })
+            .await;
+        assert_eq!(
+            fs::read(foreign_dir.join("board.yaml")).await.unwrap(),
+            sentinel
+        );
+        let app = AppState::from_gcx(gcx.clone()).await;
+        let chat_id = format!("binding-{}", Uuid::new_v4());
+        super::super::admission::reserve(&app, &chat_id, "original", "planner", 0)
+            .await
+            .unwrap();
+        let original_card = binding
+            .scope(load_board(gcx.clone(), task_id))
+            .await
+            .unwrap()
+            .cards[0]
+            .clone();
+        let receipt = AcceptedTaskAttempt::new(
+            &binding,
+            &original_card,
+            "accepted-agent",
+            super::super::admission::current_attempt(&chat_id).unwrap(),
+            None,
+        );
+        binding
+            .scope(update_board_atomic(gcx.clone(), task_id, |board| {
+                let card = &mut board.cards[0];
+                card.column = "doing".into();
+                card.assignee = Some("accepted-agent".into());
+                card.agent_chat_id = Some(chat_id.clone());
+                Ok(())
+            }))
+            .await
+            .unwrap();
+        let original = fs::read(original_dir.join("board.yaml")).await.unwrap();
+        assert!(String::from_utf8(original.clone())
+            .unwrap()
+            .contains("accepted original mutation"));
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![foreign_root.path().into()];
+        let error = binding
+            .scope(update_board_atomic(gcx.clone(), task_id, |_| Ok(())))
+            .await
+            .unwrap_err();
+        assert!(error.contains("no longer authorized"), "{error}");
+        let retained_dir = original_root.path().join("retained-task");
+        fs::rename(&original_dir, &retained_dir).await.unwrap();
+        fs::create_dir(&original_dir).await.unwrap();
+        fs::copy(
+            foreign_dir.join("board.yaml"),
+            original_dir.join("board.yaml"),
+        )
+        .await
+        .unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![original_root.path().into(), foreign_root.path().into()];
+        assert!(binding
+            .scope(load_board(gcx.clone(), task_id))
+            .await
+            .is_err());
+        assert!(receipt
+            .reconcile(gcx, true, "original relocated")
+            .await
+            .is_err());
+        assert_eq!(
+            fs::read(original_dir.join("board.yaml")).await.unwrap(),
+            sentinel
+        );
+        super::super::admission::end(&chat_id).await;
+        assert_eq!(
+            fs::read(retained_dir.join("board.yaml")).await.unwrap(),
+            original
+        );
+        assert_eq!(
+            fs::read(foreign_dir.join("board.yaml")).await.unwrap(),
+            sentinel
+        );
     }
 
     #[tokio::test]

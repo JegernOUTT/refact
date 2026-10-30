@@ -452,7 +452,7 @@ pub async fn handle_resource_recover(
     ScratchError,
 > {
     let requester = authenticated_operator_request(&app, &headers).map_err(action_error)?;
-    let _gate = resources::execution_gate().lock().await;
+    let gate = resources::execution_gate().lock().await;
     let runtime = gated_runtime(&app, OperatorCapability::Actions)
         .await
         .map_err(action_error)?;
@@ -497,6 +497,14 @@ pub async fn handle_resource_recover(
         requester,
         decision: grant.decision.clone(),
         worker: runtime.worker(),
+    };
+    let _gate = if recovery_request.original_spec.adapter
+        == crate::buddy::improvement::activation::ADAPTER
+    {
+        drop(gate);
+        None
+    } else {
+        Some(gate)
     };
     match catalog
         .recover(

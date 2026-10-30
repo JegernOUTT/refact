@@ -317,6 +317,9 @@ impl ChatSessionFacade for EngineChatSessionFacade {
     }
 
     async fn create_session(&self, request: CreateSessionRequest) -> Result<(), String> {
+        if request.thread.id != request.chat_id {
+            return Err("New session thread identity does not match requested chat".into());
+        }
         let app = AppState::from_gcx(self.gcx.clone()).await;
         let session_arc = chat::get_or_create_session_with_trajectory(
             app,
@@ -324,7 +327,33 @@ impl ChatSessionFacade for EngineChatSessionFacade {
             &request.chat_id,
         )
         .await;
-        let mut session = session_arc.lock().await;
+        let _transition = chat::worktree_lifecycle::try_transition_lock(&session_arc)?;
+        let sessions = self
+            .gcx
+            .chat_sessions
+            .try_read()
+            .map_err(|_| "Session registry busy; retry setup")?;
+        if !sessions
+            .get(&request.chat_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &session_arc))
+        {
+            return Err("Session changed during setup".into());
+        }
+        let mut session = session_arc
+            .try_lock()
+            .map_err(|_| "Session busy; retry setup")?;
+        chat::worktree_lifecycle::check_idle_attachment(&session)?;
+        if !session.messages.is_empty()
+            || session.thread.worktree.is_some()
+            || session.thread.task_meta.is_some()
+            || session.thread.buddy_meta.is_some()
+            || session.thread.parent_id.is_some()
+            || session.thread.root_chat_id.is_some()
+            || session.goal.is_some()
+            || !session.command_queue.is_empty()
+        {
+            return Err("Session already exists; retain its history and checkout and use authorized lifecycle recovery".into());
+        }
         session.thread = request.thread;
         for message in request.messages {
             session.add_message(message);
@@ -379,6 +408,26 @@ impl ChatSessionFacade for EngineChatSessionFacade {
             let sessions = self.gcx.chat_sessions.read().await;
             sessions.get(chat_id).cloned()
         };
+        if crate::tasks::storage::bound_task_active() {
+            let session_arc = session_arc.ok_or("Accepted task session unavailable before save")?;
+            let task_id = session_arc
+                .lock()
+                .await
+                .thread
+                .task_meta
+                .as_ref()
+                .map(|meta| meta.task_id.clone());
+            if !crate::tasks::storage::bound_task_matches(task_id.as_deref())? {
+                return Err("Accepted task session lost its task binding".into());
+            }
+            trajectories::try_save_trajectory_with_intent(
+                AppState::from_gcx(self.gcx.clone()).await,
+                session_arc,
+                crate::chat::types::TrajectoryCommitIntent::Required,
+            )
+            .await?;
+            return Ok(());
+        }
         if let Some(session_arc) = session_arc {
             trajectories::maybe_save_trajectory_with_intent(
                 AppState::from_gcx(self.gcx.clone()).await,

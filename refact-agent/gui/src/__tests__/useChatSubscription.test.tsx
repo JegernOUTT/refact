@@ -1,9 +1,17 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { Provider } from "react-redux";
 import { configureStore } from "@reduxjs/toolkit";
 import { useChatSubscription } from "../hooks/useChatSubscription";
 import { chatReducer } from "../features/Chat/Thread/reducer";
+import { createChatWithId } from "../features/Chat/Thread/actions";
+import {
+  agentsPanelSlice,
+  agentDisclosureDenied,
+  agentRecoveryRequested,
+  selectAgentRosterSource,
+} from "../features/AgentsPanel/agentsPanelSlice";
+import type { RootState } from "../app/store";
 import {
   reducer as configReducer,
   updateConfig,
@@ -14,6 +22,8 @@ const createTestStore = () => {
     reducer: {
       chat: chatReducer,
       config: configReducer,
+      current_project: (state = { name: "" }) => state,
+      agentsPanel: agentsPanelSlice.reducer,
     },
   });
 };
@@ -28,6 +38,7 @@ describe("useChatSubscription", () => {
   afterEach(() => {
     mockFetch.mockReset();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
@@ -121,5 +132,179 @@ describe("useChatSubscription", () => {
         expect.objectContaining({ method: "GET" }),
       );
     });
+  });
+
+  it("keeps chat reconnect and sequence recovery working after invalid roster data without redisclosure", async () => {
+    vi.useFakeTimers();
+    const streams: ReadableStreamDefaultController<Uint8Array>[] = [];
+    vi.stubGlobal("fetch", mockFetch);
+    mockFetch.mockImplementation(() =>
+      Promise.resolve(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              streams.push(controller);
+            },
+          }),
+        ),
+      ),
+    );
+    const store = createTestStore();
+    store.dispatch(updateConfig({ host: "vscode", lspPort: 8123 }));
+    store.dispatch(createChatWithId({ id: "test-chat" }));
+    const onEvent = vi.fn();
+    const { result, unmount } = renderHook(
+      () => useChatSubscription("test-chat", { onEvent, reconnectDelay: 10 }),
+      {
+        wrapper: ({ children }) => (
+          <Provider store={store}>{children}</Provider>
+        ),
+      },
+    );
+    const send = async (index: number, event: object) => {
+      await act(async () => {
+        streams[index].enqueue(
+          new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`),
+        );
+      });
+    };
+    const queue = (seq: string) => ({
+      type: "queue_updated",
+      chat_id: "test-chat",
+      seq,
+      queue_size: 0,
+      queued_items: [],
+    });
+    await send(0, {
+      type: "background_agent_updated",
+      chat_id: "test-chat",
+      seq: "1",
+      agent: { agent_id: "invalid" },
+    });
+    expect(store.getState().agentsPanel.denied).toBe(true);
+    await send(0, queue("2"));
+    expect(store.getState().chat.threads["test-chat"].last_applied_seq).toBe(
+      "2",
+    );
+    await act(async () => {
+      streams[0].close();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10);
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    const privateEvent = {
+      type: "background_agent_updated",
+      chat_id: "test-chat",
+      seq: "1",
+      agent: {
+        agent_id: "withheld",
+        parent_chat_id: "test-chat",
+        kind: "subagent",
+        status: "running",
+      },
+    };
+    await send(1, privateEvent);
+    await send(1, queue("2"));
+    act(() => {
+      store.dispatch(agentRecoveryRequested());
+    });
+    await send(1, { ...privateEvent, seq: "3" });
+    expect(store.getState().agentsPanel.liveAgents).toEqual({});
+    expect(store.getState().agentsPanel.authorized).toBe(false);
+    expect(
+      store.getState().chat.threads["test-chat"].background_agents,
+    ).toEqual({});
+    expect(onEvent).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "background_agent_updated" }),
+    );
+    await send(1, queue("5"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    await send(2, {
+      type: "snapshot",
+      chat_id: "test-chat",
+      seq: "0",
+      thread: {
+        id: "test-chat",
+        title: "Recovered chat",
+        model: "",
+        mode: "agent",
+        tool_use: "agent",
+      },
+      runtime: {
+        state: "idle",
+        paused: false,
+        pause_reasons: [],
+        queued_items: [],
+      },
+      messages: [],
+      background_agents: [privateEvent.agent],
+    });
+    await send(2, queue("1"));
+    expect(result.current.status).toBe("connected");
+    expect(store.getState().chat.threads["test-chat"].last_applied_seq).toBe(
+      "1",
+    );
+    expect(store.getState().agentsPanel.liveAgents).toEqual({});
+    expect(
+      store.getState().chat.threads["test-chat"].background_agents,
+    ).toEqual({});
+    expect(onEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "snapshot", background_agents: [] }),
+    );
+    unmount();
+  });
+
+  it("connects with a denied roster but does not retry an actual chat authorization denial", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", mockFetch);
+    let stream: ReadableStreamDefaultController<Uint8Array> | undefined;
+    mockFetch
+      .mockResolvedValueOnce(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              stream = controller;
+            },
+          }),
+        ),
+      )
+      .mockResolvedValue(new Response(null, { status: 403 }));
+    const store = createTestStore();
+    store.dispatch(updateConfig({ host: "vscode", lspPort: 8123 }));
+    store.dispatch(
+      agentDisclosureDenied({
+        source: selectAgentRosterSource(store.getState() as RootState),
+        error: { status: 401, data: null },
+      }),
+    );
+    const { result, unmount } = renderHook(
+      () => useChatSubscription("test-chat", { reconnectDelay: 10 }),
+      {
+        wrapper: ({ children }) => (
+          <Provider store={store}>{children}</Provider>
+        ),
+      },
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(result.current.status).toBe("connected");
+    expect(store.getState().agentsPanel.denied).toBe(true);
+    await act(async () => {
+      if (!stream) throw new Error("Chat stream did not connect");
+      stream.close();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(result.current.error?.message).toBe("SSE connection failed: 403");
+    expect(store.getState().agentsPanel.denied).toBe(true);
+    unmount();
   });
 });

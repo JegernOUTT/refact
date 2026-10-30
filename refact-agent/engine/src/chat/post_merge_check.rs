@@ -77,6 +77,7 @@ pub trait PostMergeCommandRunner: Send {
 
 struct SystemPostMergeCommandRunner {
     gcx: Arc<GlobalContext>,
+    merge_service: Option<crate::worktrees::service::WorktreeService>,
 }
 
 #[async_trait]
@@ -87,6 +88,16 @@ impl PostMergeCommandRunner for SystemPostMergeCommandRunner {
         command: PostMergeCommand,
         timeout: Duration,
     ) -> PostMergeCommandOutput {
+        if let Some(service) = &self.merge_service {
+            if let Err(error) = service.checkpoint_merge_phase().await {
+                return PostMergeCommandOutput {
+                    exit_code: None,
+                    success: false,
+                    output: error,
+                    outcome: VerificationOutcome::InfrastructureFailed,
+                };
+            }
+        }
         match command {
             PostMergeCommand::Verify { cwd, env, argv } => {
                 let label = argv.join(" ");
@@ -251,7 +262,10 @@ async fn post_merge_check_with_revert_policy(
     request: PostMergeCheckRequest,
     allow_revert: bool,
 ) -> Result<PostMergeCheckResult, String> {
-    let mut runner = SystemPostMergeCommandRunner { gcx: gcx.clone() };
+    let mut runner = SystemPostMergeCommandRunner {
+        gcx: gcx.clone(),
+        merge_service: crate::coordination::merge_gate::verification_service(),
+    };
     post_merge_check_with_runner_and_revert_policy(gcx, request, &mut runner, allow_revert).await
 }
 
@@ -1038,6 +1052,79 @@ mod tests {
                 VerificationOutcome::InfrastructureFailed
             },
         }
+    }
+
+    #[tokio::test]
+    async fn managed_system_runner_refuses_revert_after_persisted_lease_expiry() {
+        use crate::coordination::leases::LeaseManager;
+        use crate::coordination::merge_gate::{checkout_key, merge_lease_key};
+        use refact_work_core::{ProjectKey, settings::CoordinationSettings, store::CoordinationStore};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["init"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "user.email", "test@example.com"]);
+        std::fs::write(root.join("file.txt"), "before\n").unwrap();
+        git(&["add", "file.txt"]);
+        git(&["commit", "-m", "before"]);
+        std::fs::write(root.join("file.txt"), "after\n").unwrap();
+        git(&["commit", "-am", "after"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let settings = CoordinationSettings::default();
+        let store = Arc::new(CoordinationStore::open_in_memory(&settings).await.unwrap());
+        let access = store.authorize(ProjectKey::new("expiry-fixture"));
+        let leases =
+            Arc::new(LeaseManager::new(store, access, "fixture-engine", &settings).unwrap());
+        let holder = leases
+            .acquire(&merge_lease_key(&checkout_key(&root)), 1)
+            .await
+            .unwrap();
+        let service = crate::worktrees::service::WorktreeService::new(
+            temp.path().join("cache"),
+            root.clone(),
+        )
+        .unwrap()
+        .acquire_merge_permit()
+        .await
+        .unwrap()
+        .with_merge_authority(leases.phase_validator(holder));
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut runner = crate::coordination::merge_gate::MERGE_PHASE_SCOPE
+            .scope(service, async {
+                SystemPostMergeCommandRunner {
+                    gcx,
+                    merge_service: crate::coordination::merge_gate::verification_service(),
+                }
+            })
+            .await;
+        let result = runner
+            .run(
+                &root,
+                PostMergeCommand::Git(vec!["revert".into(), "--no-edit".into(), head.clone()]),
+                Duration::from_secs(5),
+            )
+            .await;
+        assert_eq!(result.outcome, VerificationOutcome::InfrastructureFailed);
+        assert!(result.output.contains("expired"), "{}", result.output);
+        assert_eq!(git(&["rev-parse", "HEAD"]), head);
+        assert_eq!(
+            std::fs::read_to_string(root.join("file.txt")).unwrap(),
+            "after\n"
+        );
     }
 
     #[cfg(unix)]

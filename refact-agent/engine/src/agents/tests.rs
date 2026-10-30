@@ -1119,6 +1119,40 @@ async fn runner_pending_recovery_retains_followups_until_explicit_continue() {
         .mark_running(&record.agent_id, "runner-recovery".to_string())
         .await
         .unwrap();
+    let board_reply = refact_core::chat_types::PendingDelivery::with_id(
+        "planner-reply:legacy",
+        vec![ChatMessage::new(
+            "user".into(),
+            "legacy board answer".into(),
+        )],
+        refact_core::chat_types::PushMode::Append,
+        "planner_reply",
+        true,
+    );
+    assert!(crate::agents::delivery::deliver_to_agent(
+        app.clone(),
+        &record.agent_id,
+        board_reply.clone()
+    )
+    .await
+    .unwrap_err()
+    .contains("authenticated board session acceptance"));
+    app.agents
+        .enqueue_delivery(&record.agent_id, board_reply)
+        .await
+        .unwrap();
+    assert!(
+        crate::agents::delivery::drain_authorized(&app, &record.agent_id, true)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        app.agents
+            .delivery_status(&record.agent_id, "planner-reply:legacy")
+            .await,
+        refact_core::chat_types::DeliveryStatus::Failed
+    );
     let delivery = refact_core::chat_types::PendingDelivery::with_id(
         "recover-id",
         vec![ChatMessage::new("user".into(), "recover me".into())],

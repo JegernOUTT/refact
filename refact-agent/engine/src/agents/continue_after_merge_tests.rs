@@ -158,6 +158,23 @@ async fn settled(app: &AppState, agent: &BackgroundAgent) -> BackgroundAgent {
     .expect("generation settled")
 }
 
+async fn block_admission(app: &AppState) -> refact_work_core::Permit {
+    let mut limits = crate::file_activity::settings();
+    limits.max_active_engine = 1;
+    limits.max_active_project = 1;
+    limits.max_active_root = 1;
+    app.work_scheduler.configure(limits).unwrap();
+    app.work_scheduler
+        .reserve(refact_work_core::AdmissionRequest::new(
+            refact_work_core::WorkKey::background_agent("continuation-blocker").run(1),
+            refact_work_core::WorkScope::single("blocker"),
+        ))
+        .unwrap()
+        .acquire()
+        .await
+        .unwrap()
+}
+
 async fn continue_child(app: &AppState, before: &BackgroundAgent) -> BackgroundAgent {
     let queued = resume_agent(
         app.clone(),
@@ -224,7 +241,61 @@ async fn continue_after_merge_runs_in_a_fresh_worktree() {
                 .remove(first.child_chat_id.as_ref().unwrap());
             git(&fixture.source, &["checkout", "main"]);
         }
-        let done = continue_child(&fixture.app, &first).await;
+        let blocker = block_admission(&fixture.app).await;
+        let checkouts = git(&fixture.source, &["worktree", "list", "--porcelain"]);
+        let branches = git(
+            &fixture.source,
+            &[
+                "for-each-ref",
+                "--format=%(refname):%(objectname)",
+                "refs/heads",
+            ],
+        );
+        let queued = resume_agent(
+            fixture.app.clone(),
+            PARENT,
+            &first.agent_id,
+            None,
+            first.change_seq,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(queued.status, BgAgentStatus::Queued);
+        assert_eq!(queued.child_chat_id, first.child_chat_id);
+        assert!(queued.worktree_id.is_none());
+        assert!(queued.worktree_branch.is_none());
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while fixture.app.work_scheduler.snapshot().pending == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            git(&fixture.source, &["worktree", "list", "--porcelain"]),
+            checkouts
+        );
+        assert_eq!(
+            git(
+                &fixture.source,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname):%(objectname)",
+                    "refs/heads"
+                ]
+            ),
+            branches
+        );
+        assert_eq!(seen.lock().await.len(), 1);
+        let recovered =
+            crate::agents::spawn::recover_run_config(&fixture.app, PARENT, &first.agent_id)
+                .await
+                .unwrap();
+        assert_eq!(recovered.config.worktree, Some(original.clone()));
+        drop(blocker);
+        let done = settled(&fixture.app, &queued).await;
         assert_eq!(done.status, BgAgentStatus::Completed, "{:?}", done.error);
         assert_eq!(
             done.merge_status.as_deref(),
@@ -302,6 +373,7 @@ async fn continue_after_merge_refuses_when_target_is_gone() {
     .await;
     let first = settled(&fixture.app, &first).await;
     assert_eq!(first.merge_status.as_deref(), Some("merged"));
+    let merged = git(&fixture.source, &["rev-parse", "refs/heads/work"]);
     git(&fixture.source, &["checkout", "main"]);
     git(&fixture.source, &["branch", "-D", "work"]);
     let error = resume_agent(
@@ -319,6 +391,140 @@ async fn continue_after_merge_refuses_when_target_is_gone() {
     let unchanged = fixture.app.agents.get_any(&first.agent_id).await.unwrap();
     assert_eq!(unchanged, first);
     assert_eq!(seen.lock().await.len(), 1);
+    let original = seen.lock().await[0].clone().unwrap();
+    git(&fixture.source, &["branch", "work", &merged]);
+    let child = first.child_chat_id.as_deref().unwrap();
+    let before =
+        crate::chat::trajectories::load_trajectory_for_chat(fixture.app.gcx.clone(), child)
+            .await
+            .unwrap();
+    let original_messages = serde_json::to_value(&before.messages).unwrap();
+    let runs = fixture.cache.join(".refact/background_agents/runs");
+    let first_seed = std::fs::read(runs.join(format!("{}.1.json", first.agent_id))).unwrap();
+    let launch_path = fixture
+        .cache
+        .join(".refact/background_agents/launches")
+        .join(format!("{}.json", first.agent_id));
+    let launch = std::fs::read(&launch_path).unwrap();
+    let result_path = first.result_payload_path.as_ref().unwrap();
+    let result = std::fs::read(result_path).unwrap();
+
+    let checkouts = git(&fixture.source, &["worktree", "list", "--porcelain"]);
+    let branches = git(
+        &fixture.source,
+        &[
+            "for-each-ref",
+            "--format=%(refname):%(objectname)",
+            "refs/heads",
+        ],
+    );
+    let (ack, receive) = tokio::sync::oneshot::channel();
+    let queued = crate::agents::spawn::resume_agent_inner(
+        fixture.app.clone(),
+        PARENT,
+        &first.agent_id,
+        None,
+        first.change_seq,
+        None,
+        false,
+        receive,
+    )
+    .await
+    .unwrap();
+    assert!(queued.worktree_id.is_none());
+    assert!(queued.worktree_branch.is_none());
+    assert_eq!(
+        git(&fixture.source, &["worktree", "list", "--porcelain"]),
+        checkouts
+    );
+    assert_eq!(
+        git(
+            &fixture.source,
+            &[
+                "for-each-ref",
+                "--format=%(refname):%(objectname)",
+                "refs/heads"
+            ]
+        ),
+        branches
+    );
+    drop(ack);
+    let cancelled = settled(&fixture.app, &queued).await;
+    assert_eq!(cancelled.status, BgAgentStatus::Cancelled);
+    assert_eq!(seen.lock().await.len(), 1);
+    assert_eq!(
+        git(&fixture.source, &["worktree", "list", "--porcelain"]),
+        checkouts
+    );
+    assert_eq!(
+        serde_json::to_value(
+            crate::chat::trajectories::load_trajectory_for_chat(fixture.app.gcx.clone(), child)
+                .await
+                .unwrap()
+                .messages
+        )
+        .unwrap(),
+        original_messages
+    );
+    assert!(
+        crate::agents::spawn::recover_run_config(&fixture.app, PARENT, &first.agent_id)
+            .await
+            .is_ok()
+    );
+    let blocker = block_admission(&fixture.app).await;
+    let queued = resume_agent(
+        fixture.app.clone(),
+        PARENT,
+        &first.agent_id,
+        None,
+        cancelled.change_seq,
+        None,
+        false,
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while fixture.app.work_scheduler.snapshot().pending == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    git(&fixture.source, &["branch", "-D", "work"]);
+    drop(blocker);
+    let failed = settled(&fixture.app, &queued).await;
+    assert_eq!(failed.status, BgAgentStatus::Failed);
+    assert!(failed
+        .error
+        .as_ref()
+        .unwrap()
+        .contains("spawn a new agent instead"));
+    assert_eq!(seen.lock().await.len(), 1);
+    assert_eq!(failed.worktree_id.as_ref(), Some(&original.id));
+    assert!(!original.root.exists());
+    assert_eq!(
+        git(&fixture.source, &["worktree", "list", "--porcelain"]),
+        checkouts
+    );
+    git(&fixture.source, &["branch", "work", &merged]);
+    let recovered = crate::agents::spawn::recover_run_config(&fixture.app, PARENT, &first.agent_id)
+        .await
+        .unwrap();
+    assert_eq!(recovered.config.worktree, Some(original.clone()));
+    assert_eq!(std::fs::read(result_path).unwrap(), result);
+    let done = continue_child(&fixture.app, &failed).await;
+    assert_eq!(done.agent_id, first.agent_id);
+    assert_eq!(done.child_chat_id, first.child_chat_id);
+    assert_eq!(done.run_generation, 4);
+    assert_eq!(done.status, BgAgentStatus::Completed, "{:?}", done.error);
+    assert_eq!(done.previous_runs[0].result_summary, first.result_summary);
+    assert_eq!(done.previous_runs[0].worktree_id, first.worktree_id);
+    assert_eq!(
+        std::fs::read(runs.join(format!("{}.1.json", first.agent_id))).unwrap(),
+        first_seed
+    );
+    assert_eq!(std::fs::read(launch_path).unwrap(), launch);
+    assert_eq!(seen.lock().await.len(), 2);
     fixture.app.agent_executions.shutdown().await;
 }
 

@@ -546,16 +546,7 @@ pub async fn parent_command_policy(
         .await,
     ));
     super::tool_authority::ensure_context_tool(&child_context, &pending.tool_name).await?;
-    let binding = super::command_approval::prepare(
-        &child_context,
-        &call,
-        pending
-            .execution
-            .as_ref()
-            .map(|execution| execution.reason.as_str())
-            .unwrap_or(""),
-    )
-    .await?;
+    let binding = super::command_approval::validate_pending(&child_context, &call, pending).await?;
     if binding != pending.execution {
         return Err("child approval execution binding changed".into());
     }

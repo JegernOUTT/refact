@@ -111,6 +111,66 @@ pub struct WorktreeRecordView {
     pub references: Vec<WorktreeReference>,
     pub reference_count: usize,
     pub status: WorktreeStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_report: Option<CachePreparationReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheOutcome {
+    Applied,
+    Reused,
+    Miss,
+    Degraded,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheReason {
+    CheckoutLocal,
+    VerifiedCopy,
+    VerifiedExisting,
+    NoTrustedEntry,
+    PackageAbsent,
+    UnsafeDaemonBoundary,
+    UnverifiedIsolation,
+    UntrustedController,
+    UntrustedProducer,
+    InputMismatch,
+    CorruptBlob,
+    UnsafePath,
+    ExistingUnownedOutput,
+    IdentityChanged,
+    LimitExceeded,
+    Cancelled,
+    IoFailure,
+    UnsupportedPlatform,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CacheComponentReport {
+    pub outcome: CacheOutcome,
+    pub reason: CacheReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheTrustBoundary {
+    Unverified,
+    RootProtectedHostStore,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CachePreparationReport {
+    pub schema_version: u32,
+    pub cargo_target: CacheComponentReport,
+    pub compiler_cache: CacheComponentReport,
+    pub dependencies: CacheComponentReport,
+    pub trust: CacheTrustBoundary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

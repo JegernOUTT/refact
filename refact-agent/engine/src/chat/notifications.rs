@@ -87,36 +87,132 @@ pub(crate) async fn stop_sealed_chat_processes(app: &crate::app_state::AppState)
         let Some(chat_id) = process.meta.owner.chat_id.as_deref() else {
             continue;
         };
-        if owners.insert(chat_id.to_string()) && crate::agents::seal::is_sealed(app, chat_id).await
-        {
-            stop_chat_processes(&app.gcx, chat_id).await;
+        if owners.insert(chat_id.to_string()) {
+            if let Some(cleanup) =
+                prepare_sealed_chat_process_cleanup(app, chat_id, ProcessCleanupOwner::Sealed).await
+            {
+                stop_chat_processes(&app.gcx, cleanup).await;
+            }
         }
     }
 }
 
-pub(crate) async fn stop_chat_processes(gcx: &SharedGlobalContext, chat_id: &str) {
-    let processes = gcx
+pub(crate) enum ProcessCleanupOwner<'a> {
+    Sealed,
+    AgentTerminal {
+        agent_id: &'a str,
+        run_generation: u64,
+    },
+    TaskCard {
+        task_id: &'a str,
+        card_id: &'a str,
+    },
+}
+
+pub(crate) struct ChatProcessCleanup {
+    chat_id: String,
+    reason: crate::agents::seal::SealReason,
+    targets: Vec<crate::exec::ExecProcessCleanupTarget>,
+}
+
+#[cfg(test)]
+impl ChatProcessCleanup {
+    pub(crate) fn process_ids(&self) -> Vec<crate::exec::ExecProcessId> {
+        self.targets
+            .iter()
+            .map(|target| target.process_id().clone())
+            .collect()
+    }
+}
+
+pub(crate) async fn prepare_sealed_chat_process_cleanup(
+    app: &crate::app_state::AppState,
+    chat_id: &str,
+    owner: ProcessCleanupOwner<'_>,
+) -> Option<ChatProcessCleanup> {
+    let capture = app
+        .gcx
         .exec_registry
-        .list(crate::exec::ExecProcessFilter {
-            chat_id: Some(chat_id.to_string()),
-            ..Default::default()
-        })
+        .capture_chat_cleanup_targets(chat_id)
         .await;
-    for process in processes.into_iter().filter(|process| {
-        !process.status.is_terminal() && process.meta.mode != crate::exec::ExecMode::Foreground
-    }) {
+    let reason = match &owner {
+        ProcessCleanupOwner::TaskCard { task_id, card_id } => {
+            crate::agents::seal::task_card_seal_reason(app, chat_id, task_id, card_id).await?
+        }
+        _ => crate::agents::seal::seal_reason(app, chat_id).await?,
+    };
+    let matches = match (&owner, &reason) {
+        (ProcessCleanupOwner::Sealed, _) => true,
+        (
+            ProcessCleanupOwner::AgentTerminal {
+                agent_id,
+                run_generation,
+            },
+            crate::agents::seal::SealReason::AgentTerminal {
+                agent_id: current_agent,
+                run_generation: current_generation,
+                ..
+            },
+        ) => *agent_id == current_agent && run_generation == current_generation,
+        (
+            ProcessCleanupOwner::TaskCard { task_id, card_id },
+            crate::agents::seal::SealReason::TaskCardLeftDoing {
+                task_id: current_task,
+                card_id: current_card,
+                ..
+            },
+        ) => *task_id == current_task && *card_id == current_card,
+        _ => false,
+    };
+    if !matches {
+        return None;
+    }
+    if capture.unavailable != 0 || capture.omitted != 0 || capture.pending != 0 {
+        tracing::warn!(%chat_id, unavailable = capture.unavailable, omitted = capture.omitted,
+            pending = capture.pending,
+            "Sealed process cleanup capture incomplete; unconfirmed processes remain registered");
+    }
+    Some(ChatProcessCleanup {
+        chat_id: chat_id.to_string(),
+        reason,
+        targets: capture.targets,
+    })
+}
+
+pub(crate) async fn stop_task_chat_processes(
+    gcx: &SharedGlobalContext,
+    chat_id: &str,
+    task_id: &str,
+    card_id: &str,
+) {
+    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    if let Some(cleanup) = prepare_sealed_chat_process_cleanup(
+        &app,
+        chat_id,
+        ProcessCleanupOwner::TaskCard { task_id, card_id },
+    )
+    .await
+    {
+        stop_chat_processes(gcx, cleanup).await;
+    }
+}
+
+pub(crate) async fn stop_chat_processes(gcx: &SharedGlobalContext, cleanup: ChatProcessCleanup) {
+    for target in cleanup.targets {
         match tokio::time::timeout(
             SEALED_PROCESS_KILL_TIMEOUT,
-            gcx.exec_registry.kill(&process.meta.process_id),
+            gcx.exec_registry.kill_cleanup_target(&target),
         )
         .await
         {
             Ok(Ok(_)) => {}
             Ok(Err(error)) => {
-                tracing::warn!(%chat_id, process_id = %process.meta.process_id, %error, "Failed to stop sealed chat process")
+                tracing::warn!(chat_id = %cleanup.chat_id, reason = ?cleanup.reason,
+                    process_id = %target.process_id(), %error, "Sealed process cleanup not confirmed")
             }
             Err(_) => {
-                tracing::warn!(%chat_id, process_id = %process.meta.process_id, "Timed out stopping sealed chat process")
+                tracing::warn!(chat_id = %cleanup.chat_id, reason = ?cleanup.reason,
+                    process_id = %target.process_id(), "Sealed process cleanup timed out; outcome unknown")
             }
         }
     }
@@ -130,8 +226,10 @@ async fn wait_for_shutdown(gcx: SharedGlobalContext) {
 
 pub(crate) async fn handle_process_spawn(gcx: SharedGlobalContext, event: ProcessSpawnEvent) {
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
-    if crate::agents::seal::is_sealed(&app, &event.chat_id).await {
-        stop_chat_processes(&gcx, &event.chat_id).await;
+    if let Some(cleanup) =
+        prepare_sealed_chat_process_cleanup(&app, &event.chat_id, ProcessCleanupOwner::Sealed).await
+    {
+        stop_chat_processes(&gcx, cleanup).await;
     }
     let session_arc = {
         let sessions = gcx.chat_sessions.read().await;

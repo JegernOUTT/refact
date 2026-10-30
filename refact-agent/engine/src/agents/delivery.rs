@@ -28,7 +28,12 @@ async fn retain_authorized(
 ) -> Vec<PendingDelivery> {
     let mut authorized = Vec::with_capacity(deliveries.len());
     for delivery in deliveries {
-        if peer_delivery_authorized(app, &delivery) {
+        if crate::tools::tool_agent_planner_qna::is_planner_reply_delivery(&delivery) {
+            tracing::warn!(%agent_id, delivery_id = %delivery.id, "Rejected runner planner reply: authenticated board acceptance required; not consumed");
+        }
+        if !crate::tools::tool_agent_planner_qna::is_planner_reply_delivery(&delivery)
+            && peer_delivery_authorized(app, &delivery)
+        {
             authorized.push(delivery);
             continue;
         }
@@ -41,7 +46,7 @@ async fn retain_authorized(
             )
             .await
         {
-            tracing::warn!(%agent_id, %error, "Failed to drop a revoked peer delivery");
+            tracing::warn!(%agent_id, %error, "Failed to reject an unauthorized runner delivery");
         }
     }
     authorized
@@ -85,6 +90,11 @@ pub async fn deliver_to_agent(
     agent_id: &str,
     delivery: PendingDelivery,
 ) -> Result<DeliveryOutcome, String> {
+    if crate::tools::tool_agent_planner_qna::is_planner_reply_delivery(&delivery) {
+        return Err(
+            "Planner replies require authenticated board session acceptance, not a runner".into(),
+        );
+    }
     if delivery.thread_patch.is_some() {
         return Err(
             "thread parameter overrides are not supported by a live background runner".to_string(),

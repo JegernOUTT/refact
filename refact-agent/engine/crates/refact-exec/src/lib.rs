@@ -12,8 +12,8 @@ pub use observe::{ObservationReader, ObservationStatus, ObservedAccess};
 #[cfg(target_os = "linux")]
 pub use observe::{ObservationRuntime, ObservationSetup};
 pub use registry::{
-    ExecRegistry, ExecShutdownCleanupSummary, ProcessCompletionEvent, ProcessCompletionTx,
-    ProcessSpawnEvent, ProcessSpawnTx,
+    ExecProcessCleanupCapture, ExecProcessCleanupTarget, ExecRegistry, ExecShutdownCleanupSummary,
+    ProcessCompletionEvent, ProcessCompletionTx, ProcessSpawnEvent, ProcessSpawnTx,
 };
 pub use spawn::ExecSpawnResult;
 pub use transcript::{ExecRawOutput, ExecRawRead, ExecTranscript};

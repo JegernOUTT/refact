@@ -369,6 +369,52 @@ impl LeaseManager {
             .await?)
     }
 
+    pub async fn validate_current(&self, holder: &LeaseHolder) -> Result<(), LeaseError> {
+        let current = self
+            .store
+            .get_lease(&self.access, &holder.lease_key)
+            .await?
+            .ok_or_else(|| LeaseError::NotHeld {
+                lease_key: holder.lease_key.clone(),
+            })?;
+        if current.fencing_generation != holder.fencing_generation {
+            return Err(LeaseError::Fenced {
+                lease_key: holder.lease_key.clone(),
+                presented: holder.fencing_generation,
+                held: current.fencing_generation,
+            });
+        }
+        if current.owner_token != holder.owner_token
+            || current.holder_instance != holder.holder_instance
+        {
+            return Err(LeaseError::NotHeld {
+                lease_key: holder.lease_key.clone(),
+            });
+        }
+        let at_ms = now_ms();
+        if at_ms >= current.expires_at_ms {
+            return Err(LeaseError::Expired {
+                lease_key: holder.lease_key.clone(),
+                expires_at_ms: current.expires_at_ms,
+                at_ms,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn phase_validator(
+        self: &Arc<Self>,
+        holder: LeaseHolder,
+    ) -> refact_worktrees::locking::PhaseValidator {
+        let manager = self.clone();
+        let runtime = tokio::runtime::Handle::current();
+        Arc::new(move || {
+            runtime
+                .block_on(manager.validate_current(&holder))
+                .map_err(|e| e.to_string())
+        })
+    }
+
     /// What is known about whoever holds `lease_key` right now.
     pub async fn inspect(
         &self,
@@ -482,6 +528,25 @@ impl LeaseManager {
 pub async fn leases_for(app: &AppState) -> Option<Arc<LeaseManager>> {
     let settings = crate::file_activity::settings();
     leases_for_settings(app, &settings).await
+}
+
+pub async fn merge_leases_for(
+    app: &AppState,
+    root: &std::path::Path,
+) -> Result<Option<Arc<LeaseManager>>, String> {
+    let settings = crate::file_activity::settings();
+    if !settings.enabled {
+        return Ok(None);
+    }
+    let path = default_store_path(&app.paths.cache_dir);
+    let project = super::outbox::project_key_for_root(app, Some(root.to_path_buf())).await;
+    let store = super::outbox::store_for_path(&path, &settings)
+        .await
+        .map_err(|e| format!("Merge coordination unavailable; refusing mutation: {e}"))?;
+    let access = store.authorize(project);
+    LeaseManager::new(store, access, super::engine_instance_id(), &settings)
+        .map(|manager| Some(Arc::new(manager)))
+        .map_err(|e| e.to_string())
 }
 
 pub(super) async fn leases_for_settings(

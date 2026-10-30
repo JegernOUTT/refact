@@ -1,5 +1,17 @@
 use serde::Serialize;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkFailureCause {
+    SnapshotRowCapacity,
+    SnapshotByteCapacity,
+    ScopedSourceUnavailable,
+    PolicyUnavailable,
+    SettingsUnavailable,
+    SnapshotEncodingUnavailable,
+    ProjectionUnavailable,
+}
+
 /// Safe public errors: details from filesystem, policy or peer state are never
 /// interpolated here. The same envelope is used by tools and HTTP.
 #[derive(Debug, Clone, Serialize)]
@@ -8,6 +20,8 @@ pub struct WorkError {
     pub message: String,
     pub retryable: bool,
     pub request_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cause: Option<WorkFailureCause>,
 }
 
 impl WorkError {
@@ -17,7 +31,45 @@ impl WorkError {
             message: message.into(),
             retryable,
             request_id: uuid::Uuid::new_v4().to_string(),
+            cause: None,
         }
+    }
+
+    pub fn projection_failure(cause: WorkFailureCause) -> Self {
+        let (code, message) = match cause {
+            WorkFailureCause::SnapshotRowCapacity => (
+                "unavailable",
+                "requested visible snapshot exceeds its retained item capacity; narrow the request with root scope, states or an authorized path, then fetch a fresh snapshot. Reducing limit only changes page size, not whole-snapshot capacity",
+            ),
+            WorkFailureCause::SnapshotByteCapacity => (
+                "unavailable",
+                "requested visible snapshot exceeds its retained byte capacity; narrow the request with root scope, states or an authorized path, then fetch a fresh snapshot. Reducing limit only changes page size, not whole-snapshot capacity",
+            ),
+            WorkFailureCause::ScopedSourceUnavailable => (
+                "unavailable",
+                "the caller's scoped project source is unavailable; check that the project is still open and accessible, then retry with a fresh snapshot",
+            ),
+            WorkFailureCause::PolicyUnavailable => (
+                "policy_unavailable",
+                "current destination privacy policy is unavailable; restore a valid policy and model selection, then retry with a fresh snapshot",
+            ),
+            WorkFailureCause::SettingsUnavailable => (
+                "unavailable",
+                "work projection settings are unavailable or invalid; ask the local operator to validate coordination settings, then retry with a fresh snapshot",
+            ),
+            WorkFailureCause::SnapshotEncodingUnavailable => (
+                "unavailable",
+                "work snapshot could not be encoded; retry with a fresh snapshot and report request_id to the local operator if it persists",
+            ),
+            WorkFailureCause::ProjectionUnavailable => (
+                "unavailable",
+                "work projection is unavailable; retry with a fresh snapshot, narrow scope or filters, and report request_id to the local operator if it persists",
+            ),
+        };
+        let mut error = Self::new(code, message, true);
+        error.cause = Some(cause);
+        tracing::debug!(request_id = %error.request_id, cause = ?cause, "work projection failure");
+        error
     }
 
     pub fn invalid(message: impl Into<String>) -> Self {
@@ -49,11 +101,7 @@ impl WorkError {
     }
 
     pub fn policy_unavailable() -> Self {
-        Self::new(
-            "policy_unavailable",
-            "current destination privacy policy is unavailable",
-            true,
-        )
+        Self::projection_failure(WorkFailureCause::PolicyUnavailable)
     }
 
     pub fn scope_denied() -> Self {
@@ -61,7 +109,7 @@ impl WorkError {
     }
 
     pub fn unavailable() -> Self {
-        Self::new("unavailable", "work projection is unavailable", true)
+        Self::projection_failure(WorkFailureCause::ProjectionUnavailable)
     }
 }
 

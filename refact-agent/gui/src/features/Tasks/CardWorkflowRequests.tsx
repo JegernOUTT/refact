@@ -6,6 +6,7 @@ import {
   Button,
   Field,
   FieldSelect,
+  FieldSwitch,
   FieldText,
   FieldTextarea,
 } from "../../components/ui";
@@ -147,6 +148,40 @@ type CardWorkflowRequestsProps = {
   onOpenOwner: (chatId: string) => void;
 };
 
+type OwnerRequestReceipt = {
+  owner: string;
+  requestId: string;
+  rev: number;
+  phase: "sending" | "sent" | "uncertain";
+  acknowledgement?: { accepted: boolean; result: unknown };
+};
+
+function OwnerRequestStatus({ receipt }: { receipt: OwnerRequestReceipt }) {
+  const liveAck = useAppSelector((state) =>
+    selectCommandAckByThreadAndId(state, receipt.owner, receipt.requestId),
+  );
+  const ack = liveAck ?? receipt.acknowledgement;
+  return (
+    <div role="status">
+      {ack
+        ? ack.accepted
+          ? "Planner ACK accepted"
+          : "Planner ACK rejected"
+        : receipt.phase === "sending"
+          ? "Sending owner request; delivery is not yet confirmed"
+          : receipt.phase === "uncertain"
+            ? "Owner request delivery is unconfirmed; inspect the owner chat before any separate action"
+            : "Request submitted; awaiting planner ACK"}
+      . Owner {receipt.owner}, request {receipt.requestId}, observed revision{" "}
+      {receipt.rev}. Workflow outcome pending — only updated board/evidence
+      establishes results.
+      {ack && !ack.accepted && (
+        <div>Rejection details: {JSON.stringify(ack.result)}</div>
+      )}
+    </div>
+  );
+}
+
 export function CardWorkflowRequests(props: CardWorkflowRequestsProps) {
   const config = useAppSelector(selectConfig);
   const principal = useRef({ key: config.apiKey, epoch: 0 });
@@ -188,12 +223,11 @@ function CardWorkflowRequestsInstance({
   });
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [receipt, setReceipt] = useState<{
-    owner: string;
-    requestId: string;
-    rev: number;
-    phase: "sending" | "sent" | "uncertain";
-  } | null>(null);
+  const [receipt, setReceipt] = useState<OwnerRequestReceipt | null>(null);
+  const [previousReceipts, setPreviousReceipts] = useState<
+    OwnerRequestReceipt[]
+  >([]);
+  const [inspected, setInspected] = useState(false);
   const owner = board.owner_chat_id;
   const runtime = useAppSelector((state) =>
     owner ? selectRuntimeById(state, owner) : null,
@@ -543,20 +577,53 @@ function CardWorkflowRequestsInstance({
         </div>
       )}
       {receipt ? (
-        <div role="status">
-          {ack
-            ? ack.accepted
-              ? "Planner ACK accepted"
-              : "Planner ACK rejected"
-            : receipt.phase === "sending"
-              ? "Sending owner request; delivery is not yet confirmed"
-              : receipt.phase === "uncertain"
-                ? "Owner request delivery is unconfirmed; inspect the owner chat before any separate action"
-                : "Request submitted; awaiting planner ACK"}
-          . Owner {receipt.owner}, request {receipt.requestId}, observed
-          revision {receipt.rev}. Workflow outcome pending — only updated
-          board/evidence establishes results.
-        </div>
+        <>
+          <OwnerRequestStatus receipt={receipt} />
+          {!pending && receipt.phase !== "sending" && (
+            <>
+              <div role="alert">
+                {ack?.accepted === false
+                  ? "Inspect the rejection and correct your draft before a separate request."
+                  : "Inspect the original owner chat and current board evidence first. This request may already be queued or executed; a separate request can duplicate its effects."}{" "}
+                Preparing another request does not cancel or replay this one.
+              </div>
+              <Button
+                size="sm"
+                variant="soft"
+                onClick={() => onOpenOwner(receipt.owner)}
+              >
+                Inspect request in original owner planner
+              </Button>
+              <Field
+                label="I inspected the prior request and current board evidence"
+                htmlFor={`${fieldId}-inspected`}
+              >
+                <FieldSwitch
+                  id={`${fieldId}-inspected`}
+                  checked={inspected}
+                  onChange={setInspected}
+                />
+              </Field>
+              <Button
+                size="sm"
+                variant="soft"
+                disabled={!inspected}
+                onClick={() => {
+                  if (inFlight.current || !inspected) return;
+                  setPreviousReceipts((previous) => [
+                    ...previous.slice(-4),
+                    { ...receipt, acknowledgement: ack },
+                  ]);
+                  setReceipt(null);
+                  setInspected(false);
+                  setError(null);
+                }}
+              >
+                Prepare a separate request
+              </Button>
+            </>
+          )}
+        </>
       ) : (
         <Button
           size="sm"
@@ -574,6 +641,19 @@ function CardWorkflowRequestsInstance({
             ? "Preparing owner request..."
             : `Request ${operation.label.toLowerCase()} from owner planner`}
         </Button>
+      )}
+      {previousReceipts.length > 0 && (
+        <details>
+          <summary>Prior owner request receipts (most recent 5)</summary>
+          <div className={styles.hint}>
+            Retained for this workspace instance. Unconfirmed delivery remains
+            unknown; preparing a separate request does not resolve prior
+            effects.
+          </div>
+          {previousReceipts.map((previous) => (
+            <OwnerRequestStatus key={previous.requestId} receipt={previous} />
+          ))}
+        </details>
       )}
       <Button
         size="sm"

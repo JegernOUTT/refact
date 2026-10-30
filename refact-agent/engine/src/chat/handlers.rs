@@ -719,7 +719,7 @@ pub async fn handle_v1_chat_command(
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        let scope_patch = super::worktree_lifecycle::is_worktree_patch(patch);
+        let scope_patch = super::worktree_lifecycle::is_scope_patch(patch);
         drop(session);
         let _scope_transition = if scope_patch {
             Some(super::worktree_lifecycle::transition_lock(&session_arc).await)
@@ -743,9 +743,10 @@ pub async fn handle_v1_chat_command(
                 error,
             ));
         }
-        let session = session_arc.lock().await;
+        let mut session = session_arc.lock().await;
         if super::worktree_lifecycle::changes_attachment(&session.thread, patch) {
             if let Err(error) = super::worktree_lifecycle::check_idle_attachment(&session) {
+                super::queue::reject_guard(&mut session, &request.client_request_id, error.clone());
                 return Ok(command_error_response(StatusCode::CONFLICT, "busy", error));
             }
         }
@@ -775,6 +776,7 @@ pub async fn handle_v1_chat_command(
             if let Err(error) =
                 super::worktree_lifecycle::check_unchanged_attachment(&session, &thread_before)
             {
+                super::queue::reject_guard(&mut session, &request.client_request_id, error.clone());
                 return Ok(command_error_response(
                     StatusCode::CONFLICT,
                     "scope_changed",
@@ -784,6 +786,7 @@ pub async fn handle_v1_chat_command(
         }
         if super::worktree_lifecycle::changes_attachment(&session.thread, patch) {
             if let Err(error) = super::worktree_lifecycle::check_idle_attachment(&session) {
+                super::queue::reject_guard(&mut session, &request.client_request_id, error.clone());
                 return Ok(command_error_response(
                     StatusCode::CONFLICT,
                     "scope_changed",

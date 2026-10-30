@@ -1,9 +1,19 @@
-import React, { useCallback, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { useStore } from "react-redux";
+import { v4 as uuidv4 } from "uuid";
 import { skipToken } from "@reduxjs/toolkit/query";
 import { GitBranch } from "lucide-react";
+import type { AppStore } from "../../app/store";
 import { Icon, Popover } from "../../components/ui";
 import {
   DEFAULT_MODE,
+  selectRuntimeById,
   selectThreadById,
   selectThreadWorktreeById,
   setThreadWorktree,
@@ -13,8 +23,12 @@ import { selectApiKey, selectConfig, selectHost } from "../Config/configSlice";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useEventsBusForIDE } from "../../hooks/useEventBusForIDE";
+import { getEngineEndpointIdentity } from "../../services/refact/apiUrl";
 import {
-  updateChatParams,
+  ChatCommandHttpError,
+  sendChatCommand,
+} from "../../services/refact/chatCommands";
+import {
   useCreateWorktreeMutation,
   useDeleteWorktreeMutation,
   useGetWorktreeDiffQuery,
@@ -34,10 +48,14 @@ import styles from "./Worktrees.module.css";
 
 const EMPTY_WORKTREE_RECORDS: WorktreeRecordView[] = [];
 const WORKTREE_BRANCH_ARGS = { include_branches: true };
+const useAppStore = useStore.withTypes<AppStore>();
 
-type AttachWorktreeOptions = {
-  optimistic?: boolean;
-};
+type AttachmentOutcome =
+  | "attached"
+  | "rejected"
+  | "unconfirmed"
+  | "blocked"
+  | "stale";
 
 function compactPath(path: string): string {
   const normalized = path.replace(/[\\/]+$/, "");
@@ -84,30 +102,78 @@ type WorktreeControlProps = {
   onOpenChange?: (open: boolean) => void;
 };
 
-export const WorktreeControl: React.FC<WorktreeControlProps> = ({
-  disabled,
-  onOpenChange,
-}) => {
-  const dispatch = useAppDispatch();
+export const WorktreeControl: React.FC<WorktreeControlProps> = (props) => {
   const chatId = useThreadId();
+  const config = useAppSelector(selectConfig);
+  const project = useAppSelector((state) => state.current_project);
+  const principal = useRef({ key: config.apiKey, epoch: 0 });
+  if (principal.current.key !== config.apiKey) {
+    principal.current = {
+      key: config.apiKey,
+      epoch: principal.current.epoch + 1,
+    };
+  }
+  const identity = JSON.stringify([
+    chatId,
+    getEngineEndpointIdentity(config),
+    principal.current.epoch,
+    project,
+  ]);
+  return <WorktreeControlInstance key={identity} {...props} chatId={chatId} />;
+};
+
+const WorktreeControlInstance: React.FC<
+  WorktreeControlProps & { chatId: string }
+> = ({ disabled, onOpenChange, chatId }) => {
+  const dispatch = useAppDispatch();
+  const store = useAppStore();
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const currentWorktree = useAppSelector((state) =>
     selectThreadWorktreeById(state, chatId),
   );
-  const taskRole = useAppSelector(
-    (state) => selectThreadById(state, chatId)?.task_meta?.role,
+  const boundTaskMeta = useAppSelector(
+    (state) => selectThreadById(state, chatId)?.task_meta,
   );
+  const isChatRunning = useAppSelector((state) => {
+    const runtime = selectRuntimeById(state, chatId);
+    return (
+      runtime?.streaming === true ||
+      runtime?.waiting_for_response === true ||
+      runtime?.session_state === "generating" ||
+      runtime?.session_state === "executing_tools"
+    );
+  });
   const managedScope =
-    taskRole === "agent" ||
-    taskRole === "agents" ||
+    boundTaskMeta?.role === "agent" ||
+    boundTaskMeta?.role === "agents" ||
     currentWorktree?.kind === "task_agent";
   const scopeDisabled = Boolean(disabled) || managedScope;
   const host = useAppSelector(selectHost);
   const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey) ?? undefined;
+  const project = useAppSelector((state) => state.current_project);
+  const projectIdentity = JSON.stringify(project);
+  const sourceIsCurrent = useCallback(() => {
+    const state = store.getState();
+    return (
+      mounted.current &&
+      getEngineEndpointIdentity(state.config) ===
+        getEngineEndpointIdentity(config) &&
+      state.config.apiKey === config.apiKey &&
+      JSON.stringify(state.current_project) === projectIdentity
+    );
+  }, [config, projectIdentity, store]);
   const [menuOpen, setMenuOpen] = useState(false);
   const {
     data,
     isLoading,
+    isFetching,
     isError,
     refetch: refetchList,
   } = useListWorktreesQuery(undefined, {
@@ -125,6 +191,8 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
   );
   const [createOpen, setCreateOpen] = useState(false);
   const createInFlightRef = useRef(false);
+  const attachInFlightRef = useRef(false);
+  const [isAttaching, setIsAttaching] = useState(false);
   const [isCreatingTransaction, setIsCreatingTransaction] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
@@ -142,9 +210,17 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
     () => records.find((record) => record.meta.id === currentWorktree?.id),
     [currentWorktree?.id, records],
   );
-  const inventoryWarning =
-    currentWorktree && !isLoading && (isError || (data && !currentRecord))
-      ? "Worktree inventory is unavailable or incomplete; scope unchanged."
+  const inventoryNotice = isError
+    ? currentWorktree
+      ? "Worktree list unavailable. Attached checkout unchanged."
+      : "Worktree list unavailable."
+    : currentWorktree && data && !currentRecord
+      ? "Attached checkout is not in this list. It may be stale or incomplete; attachment unchanged."
+      : null;
+  const scopeChangeBlockedReason = managedScope
+    ? "Checkout managed by task lifecycle. Use the task card's owner planner workflow requests for recovery or resume."
+    : isChatRunning
+      ? "Checkout scope cannot change while this chat is running. Retry when idle."
       : null;
   const currentDiffQuery = currentRecord
     ? {
@@ -197,59 +273,130 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
   }, [branchData?.source_branches, records, sourceBranch]);
 
   const attachWorktree = useCallback(
-    async (
-      worktree: WorktreeMeta | null,
-      { optimistic = true }: AttachWorktreeOptions = {},
-    ): Promise<boolean> => {
-      if (!chatId || scopeDisabled) return false;
-      const previousWorktree = currentWorktree;
-      if (optimistic) {
-        dispatch(setThreadWorktree({ chatId, worktree }));
-        setFeedback(worktree ? "Worktree attached." : "Using main workspace.");
+    async (worktree: WorktreeMeta | null): Promise<AttachmentOutcome> => {
+      if (!sourceIsCurrent()) return "stale";
+      if (!chatId || scopeDisabled || attachInFlightRef.current)
+        return "blocked";
+      const before = selectRuntimeById(store.getState(), chatId);
+      const taskMeta = before?.thread.task_meta;
+      if (
+        !before ||
+        before.streaming ||
+        before.waiting_for_response ||
+        before.session_state === "generating" ||
+        before.session_state === "executing_tools"
+      )
+        return "blocked";
+      if (
+        scopeChangeBlockedReason ||
+        taskMeta?.role === "agent" ||
+        taskMeta?.role === "agents" ||
+        before?.thread.worktree?.kind === "task_agent" ||
+        worktree?.kind === "task_agent"
+      ) {
+        setFeedback(
+          scopeChangeBlockedReason ??
+            "This checkout is managed by task lifecycle.",
+        );
+        return "blocked";
       }
+      attachInFlightRef.current = true;
+      setIsAttaching(true);
+      setFeedback("Updating checkout scope...");
       try {
-        await updateChatParams(
+        await sendChatCommand(
           chatId,
-          worktree ? { worktree_id: worktree.id } : { worktree: null },
           config,
           apiKey,
+          {
+            type: "set_params",
+            patch: worktree ? { worktree_id: worktree.id } : { worktree: null },
+          },
+          false,
+          uuidv4(),
         );
-        if (!optimistic) {
-          dispatch(setThreadWorktree({ chatId, worktree }));
+        if (!sourceIsCurrent()) return "stale";
+        const after = selectThreadById(store.getState(), chatId);
+        if (
+          !after ||
+          JSON.stringify(after.task_meta) !== JSON.stringify(taskMeta) ||
+          (after.worktree?.id !== before?.thread.worktree?.id &&
+            after.worktree?.id !== worktree?.id)
+        ) {
           setFeedback(
-            worktree ? "Worktree attached." : "Using main workspace.",
+            "Checkout context changed; inspect the current attachment before another action.",
           );
+          return "stale";
         }
-        return true;
+        dispatch(
+          setThreadWorktree({
+            chatId,
+            worktree:
+              worktree && after.worktree?.id === worktree.id
+                ? after.worktree
+                : worktree,
+          }),
+        );
+        setFeedback(worktree ? "Worktree attached." : "Using main workspace.");
+        return "attached";
       } catch (error) {
-        if (optimistic) {
-          dispatch(setThreadWorktree({ chatId, worktree: previousWorktree }));
-        }
-        setFeedback(`Worktree update failed: ${worktreeErrorText(error)}`);
-        return false;
+        if (!sourceIsCurrent()) return "stale";
+        const rejected =
+          error instanceof ChatCommandHttpError &&
+          [400, 401, 403, 404, 409, 422].includes(error.status);
+        setFeedback(
+          rejected
+            ? `Worktree update failed: ${worktreeErrorText(error)}`
+            : `Worktree update unconfirmed: ${worktreeErrorText(
+                error,
+              )}. Inspect the chat attachment before retrying.`,
+        );
+        return rejected ? "rejected" : "unconfirmed";
+      } finally {
+        attachInFlightRef.current = false;
+        if (sourceIsCurrent()) setIsAttaching(false);
       }
     },
-    [apiKey, chatId, config, currentWorktree, dispatch, scopeDisabled],
+    [
+      apiKey,
+      chatId,
+      config,
+      dispatch,
+      scopeDisabled,
+      scopeChangeBlockedReason,
+      sourceIsCurrent,
+      store,
+    ],
   );
 
   const handleSelect = useCallback(
     (record: WorktreeRecordView) => {
-      void attachWorktree(record.meta).then((attached) => {
-        if (attached) handleMenuOpenChange(false);
+      void attachWorktree(record.meta).then((outcome) => {
+        if (outcome === "attached" && sourceIsCurrent())
+          handleMenuOpenChange(false);
       });
     },
-    [attachWorktree, handleMenuOpenChange],
+    [attachWorktree, handleMenuOpenChange, sourceIsCurrent],
   );
 
   const handleDetach = useCallback(() => {
-    void attachWorktree(null).then((detached) => {
-      if (detached) handleMenuOpenChange(false);
+    void attachWorktree(null).then((outcome) => {
+      if (outcome === "attached" && sourceIsCurrent())
+        handleMenuOpenChange(false);
     });
-  }, [attachWorktree, handleMenuOpenChange]);
+  }, [attachWorktree, handleMenuOpenChange, sourceIsCurrent]);
 
   const handleCreate = useCallback(
     async ({ branch, baseBranch }: CreateWorktreeValues) => {
-      if (!chatId || scopeDisabled || createInFlightRef.current) return;
+      if (
+        !chatId ||
+        scopeDisabled ||
+        !sourceIsCurrent() ||
+        createInFlightRef.current ||
+        attachInFlightRef.current ||
+        scopeChangeBlockedReason
+      )
+        return;
       createInFlightRef.current = true;
       setIsCreatingTransaction(true);
       setCreateError(null);
@@ -260,26 +407,65 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
       };
       try {
         const response = await createWorktree(request).unwrap();
-        const attached = await attachWorktree(response.worktree.meta, {
-          optimistic: false,
-        });
-        if (attached) {
+        if (!sourceIsCurrent()) return;
+        const outcome = await attachWorktree(response.worktree.meta);
+        if (!sourceIsCurrent() || outcome === "stale") return;
+        if (outcome === "attached") {
           setCreateOpen(false);
           handleMenuOpenChange(false);
+        } else if (
+          outcome === "rejected" &&
+          response.worktree.meta.kind === "chat" &&
+          response.worktree.reference_count === 0 &&
+          response.worktree.references.length === 0 &&
+          selectThreadWorktreeById(store.getState(), chatId)?.id !==
+            response.worktree.meta.id &&
+          (response.worktree.referencing_chat_ids?.length ?? 0) === 0
+        ) {
+          try {
+            const cleanup = await deleteWorktree({
+              id: response.worktree.meta.id,
+              source_workspace_root:
+                response.worktree.meta.source_workspace_root,
+              delete_branch: true,
+            }).unwrap();
+            if (!sourceIsCurrent()) return;
+            if (!cleanup.deleted)
+              setFeedback(
+                `Inspect created checkout ${response.worktree.meta.id} at ${response.worktree.meta.root}; cleanup is not confirmed.`,
+              );
+            setCreateError(
+              cleanup.deleted
+                ? "Worktree attach failed; created worktree was deleted."
+                : `Cleanup not confirmed for created worktree ${response.worktree.meta.id}. Inspect it before another action.`,
+            );
+          } catch (error) {
+            if (sourceIsCurrent()) {
+              setFeedback(
+                `Inspect created checkout ${response.worktree.meta.id} at ${response.worktree.meta.root}; cleanup is not confirmed.`,
+              );
+              setCreateError(
+                `Cleanup not confirmed for created worktree ${
+                  response.worktree.meta.id
+                }: ${worktreeErrorText(
+                  error,
+                )}. Inspect it before another action.`,
+              );
+            }
+          }
         } else {
-          await deleteWorktree({
-            id: response.worktree.meta.id,
-            delete_branch: true,
-          }).unwrap();
+          setFeedback(
+            `Created checkout retained: ${response.worktree.meta.id} at ${response.worktree.meta.root}. Inspect its attachment before another action.`,
+          );
           setCreateError(
-            "Worktree attach failed; created worktree was deleted.",
+            `Attachment not confirmed; created worktree retained (${response.worktree.meta.id}). Inspect the chat attachment before retrying or cleanup.`,
           );
         }
       } catch (error) {
-        setCreateError(worktreeErrorText(error));
+        if (sourceIsCurrent()) setCreateError(worktreeErrorText(error));
       } finally {
         createInFlightRef.current = false;
-        setIsCreatingTransaction(false);
+        if (sourceIsCurrent()) setIsCreatingTransaction(false);
       }
     },
     [
@@ -289,6 +475,9 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
       deleteWorktree,
       handleMenuOpenChange,
       scopeDisabled,
+      scopeChangeBlockedReason,
+      sourceIsCurrent,
+      store,
     ],
   );
 
@@ -307,7 +496,11 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
       return;
     }
     try {
-      const response = await openWorktree({ id: currentWorktree.id }).unwrap();
+      const response = await openWorktree({
+        id: currentWorktree.id,
+        source_workspace_root: currentWorktree.source_workspace_root,
+      }).unwrap();
+      if (!sourceIsCurrent()) return;
       if (response.can_open_folder && hostCanOpenFolder) {
         openFolderInNewWindow(response.path);
         setFeedback("Opening worktree in a new window.");
@@ -316,7 +509,8 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
         setFeedback("Path copied to clipboard.");
       }
     } catch (error) {
-      setFeedback(`Open failed: ${worktreeErrorText(error)}`);
+      if (sourceIsCurrent())
+        setFeedback(`Open failed: ${worktreeErrorText(error)}`);
     }
   }, [
     copyToClipboard,
@@ -325,6 +519,7 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
     hostCanOpenFolder,
     openFolderInNewWindow,
     openWorktree,
+    sourceIsCurrent,
   ]);
 
   return (
@@ -372,9 +567,20 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
             currentRecord={currentRecord}
             records={records}
             isLoading={isLoading}
-            feedback={inventoryWarning ?? feedback}
+            feedback={feedback}
+            inventoryNotice={inventoryNotice}
+            isRefreshing={isFetching}
+            onRefresh={() => void refetchList()}
+            scopeChangeBlockedReason={scopeChangeBlockedReason}
+            scopeChangePending={isAttaching || isCreatingTransaction}
             canCopyPath={Boolean(copyPath)}
             onCreate={() => {
+              if (
+                scopeChangeBlockedReason ||
+                isAttaching ||
+                isCreatingTransaction
+              )
+                return;
               setCreateError(null);
               setCreateOpen(true);
             }}

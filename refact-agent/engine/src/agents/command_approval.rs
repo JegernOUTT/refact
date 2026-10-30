@@ -82,7 +82,7 @@ pub async fn prepare(
     }
     let args: HashMap<String, serde_json::Value> =
         serde_json::from_str(&call.function.arguments).map_err(|_| "invalid command arguments")?;
-    let (mut request, checkout) = match call.function.name.as_str() {
+    let (mut request, checkout, cache) = match call.function.name.as_str() {
         "shell" => crate::tools::shell_approval_request(ccx, &args).await?,
         _ => crate::tools::process_approval_request(ccx, &args).await?,
     };
@@ -92,6 +92,142 @@ pub async fn prepare(
         checkout.revalidate(ccx, &args, &request).await?;
         checkout.bind_approval(&mut approval, &request)?;
     }
+    if let Some(cache) = &cache {
+        cache.revalidate(ccx, &request).await?;
+        cache.bind_approval(&mut approval);
+    }
+    Ok(Some(approval))
+}
+
+pub(crate) struct PendingCommandValidation {
+    pending: refact_work_core::PendingApproval,
+    chat_id: String,
+    execution: Arc<super::execution::RunExecution>,
+}
+
+impl PendingCommandValidation {
+    pub(crate) async fn check(&self, ccx: &Arc<Mutex<AtCommandsContext>>) -> Result<(), String> {
+        let (app, chat_id, model, task, worktree, root) = {
+            let context = ccx.lock().await;
+            (
+                context.app.clone(),
+                context.chat_id.clone(),
+                context.current_model.clone(),
+                context.task_meta.clone(),
+                context.execution_scope_worktree(),
+                context.root_chat_id.clone(),
+            )
+        };
+        let now = super::approval::now_ms();
+        if chat_id != self.chat_id
+            || now >= self.pending.expires_at
+            || app
+                .agent_approvals
+                .get(&self.pending.parent_chat_id, &self.pending.id, now)
+                .map_err(|_| "pending command approval unavailable")?
+                != self.pending
+            || app.agent_approvals.wait_now(&self.pending.id, now)
+                != Err(refact_work_core::ApprovalError::NotApproved)
+        {
+            return Err("pending command approval changed or expired".into());
+        }
+        let target = super::approval_target::ApprovalTarget::from_context(&app, ccx).await?;
+        target.check(&self.pending)?;
+        let current = crate::tasks::admission::current_execution(&app, &chat_id)
+            .map_err(|_| "pending command execution unavailable")?;
+        if !Arc::ptr_eq(&current, &self.execution)
+            || current.admission_generation() != self.pending.run_generation
+            || current.is_cancelled()
+            || current.holds_permit()
+            || current.state() != super::execution::ExecutionState::Parked
+        {
+            return Err("pending command execution is not the current parked owner".into());
+        }
+        let session = app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get(&chat_id)
+            .cloned()
+            .ok_or("pending command session unavailable")?;
+        let session = session.lock().await;
+        if session.closed
+            || session
+                .abort_flag
+                .load(std::sync::atomic::Ordering::Relaxed)
+            || app
+                .runtime
+                .shutdown_flag
+                .load(std::sync::atomic::Ordering::Relaxed)
+            || session.runtime.state != crate::chat::types::SessionState::WaitingUserInput
+            || session.thread.model != model
+            || session.thread.task_meta != task
+            || session.thread.worktree != worktree
+            || session.thread.root_chat_id.as_deref().unwrap_or(&chat_id) != root
+            || session.thread.parent_id.as_deref() != Some(self.pending.parent_chat_id.as_str())
+        {
+            return Err("pending command session is no longer waiting".into());
+        }
+        Ok(())
+    }
+}
+
+pub(crate) async fn validate_pending(
+    ccx: &Arc<Mutex<AtCommandsContext>>,
+    call: &ChatToolCall,
+    pending: &refact_work_core::PendingApproval,
+) -> Result<Option<ExecutionApproval>, String> {
+    let reason = pending
+        .execution
+        .as_ref()
+        .map(|execution| execution.reason.as_str())
+        .unwrap_or("");
+    let managed_board = pending.child_work_id.starts_with("board:")
+        && ccx
+            .lock()
+            .await
+            .execution_scope
+            .as_ref()
+            .is_some_and(|scope| scope.is_enforced() && scope.worktree().kind == "task_agent");
+    if !managed_board {
+        return prepare(ccx, call, reason).await;
+    }
+    if !matches!(pending.tool_name.as_str(), "shell" | "process_start") {
+        return Ok(None);
+    }
+    let (app, chat_id) = {
+        let context = ccx.lock().await;
+        (context.app.clone(), context.chat_id.clone())
+    };
+    let proof = PendingCommandValidation {
+        pending: pending.clone(),
+        execution: app
+            .agent_executions
+            .get(&chat_id)
+            .ok_or("pending command execution unavailable")?,
+        chat_id,
+    };
+    proof.check(ccx).await?;
+    let args: HashMap<String, serde_json::Value> =
+        serde_json::from_value(pending.args.clone()).map_err(|_| "invalid command arguments")?;
+    let (mut request, checkout) = match pending.tool_name.as_str() {
+        "shell" => crate::tools::shell_approval_request_without_cache(ccx, &args).await?,
+        _ => crate::tools::process_approval_request_without_cache(ccx, &args).await?,
+    };
+    freeze(&mut request)?;
+    if let Some(checkout) = &checkout {
+        checkout.revalidate(ccx, &args, &request).await?;
+    }
+    let approval = crate::exec::command_policy::validate_pending_managed_cache(
+        ccx,
+        checkout.as_ref(),
+        request,
+        reason,
+        &proof,
+    )
+    .await?;
+    proof.check(ccx).await?;
     Ok(Some(approval))
 }
 
@@ -102,7 +238,19 @@ pub(crate) async fn enforce(
     args: &HashMap<String, serde_json::Value>,
     request: &mut ExecSpawnRequest,
     checkout: Option<&crate::tools::command_checkout::ValidatedCommandCheckout>,
+    cache: Option<&crate::exec::command_policy::ManagedCacheDecision>,
 ) -> Result<(), String> {
+    let managed_task = {
+        let context = ccx.lock().await;
+        context
+            .execution_scope
+            .as_ref()
+            .filter(|scope| scope.is_enforced() && scope.worktree().kind == "task_agent")
+            .map(|scope| scope.worktree().clone())
+    };
+    if let Some(meta) = managed_task {
+        crate::exec::command_policy::ensure_managed_task_execution(ccx, &meta).await?;
+    }
     let (approval, app) = {
         let mut context = ccx.lock().await;
         let approval = match context.approved_executions.get_mut(call_id) {
@@ -160,6 +308,9 @@ pub(crate) async fn enforce(
     if let Some(checkout) = checkout {
         checkout.bind_approval(&mut current, request)?;
     }
+    if let Some(cache) = cache {
+        cache.bind_approval(&mut current);
+    }
     if current != execution {
         return Err("approved command, working directory, environment or privilege changed; request approval again".into());
     }
@@ -213,7 +364,11 @@ mod tests {
     #[tokio::test]
     async fn approved_execution_rejects_mutation_and_can_never_be_consumed_twice() {
         let dir = tempfile::tempdir().unwrap();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            dir.path().join("config"),
+        )
+        .await;
         let app = crate::app_state::AppState::from_gcx(gcx).await;
         let (record, _, _) = app
             .agents
@@ -278,9 +433,17 @@ mod tests {
                 attempted.command = "echo changed".into();
             }
             assert_eq!(
-                enforce(&ccx, call, "shell", &HashMap::new(), &mut attempted, None)
-                    .await
-                    .is_ok(),
+                enforce(
+                    &ccx,
+                    call,
+                    "shell",
+                    &HashMap::new(),
+                    &mut attempted,
+                    None,
+                    None
+                )
+                .await
+                .is_ok(),
                 !change
             );
             assert!(enforce(
@@ -289,11 +452,144 @@ mod tests {
                 "shell",
                 &HashMap::new(),
                 &mut request.clone(),
+                None,
                 None
             )
             .await
             .unwrap_err()
             .contains("already been used"));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let source = dir.path().join("repo");
+            std::fs::create_dir_all(source.join("refact-agent/engine")).unwrap();
+            std::fs::write(
+                source.join("refact-agent/engine/Cargo.toml"),
+                "[workspace]\n",
+            )
+            .unwrap();
+            for args in [
+                vec!["init"],
+                vec!["checkout", "-b", "main"],
+                vec!["add", "."],
+                vec![
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "commit",
+                    "-m",
+                    "base",
+                ],
+            ] {
+                crate::worktrees::git::run_git(&source, &args).unwrap();
+            }
+            let service =
+                crate::worktrees::service::WorktreeService::new(app.gcx.cache_dir.clone(), source)
+                    .unwrap();
+            let meta = service
+                .create_worktree(crate::worktrees::types::CreateWorktreeRequest {
+                    branch: Some("refact/subagent/cache-approval".into()),
+                    chat_id: Some("child".into()),
+                    kind: Some("subagent".into()),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .worktree
+                .meta;
+            app.agents
+                .set_worktree_metadata(&record.agent_id, Some(meta.id.clone()), meta.branch.clone())
+                .await
+                .unwrap();
+            let mut config = crate::subchat::test_support::minimal_config("child", "parent");
+            config.worktree = Some(meta.clone());
+            app.agent_executions
+                .remember_config(&record.agent_id, config);
+            ccx.lock().await.execution_scope = Some(
+                crate::worktrees::scope::ExecutionScope::from_worktree(&meta),
+            );
+            let mut session = crate::chat::types::ChatSession::new("child".into());
+            session.thread.mode = "agent".into();
+            session.thread.worktree = Some(meta.clone());
+            app.chat
+                .sessions
+                .write()
+                .await
+                .insert("child".into(), Arc::new(Mutex::new(session)));
+            let raw = ExecSpawnRequest::foreground("printf ok").with_cwd(meta.root.clone());
+            let mut prepared = raw.clone();
+            let cache =
+                crate::exec::command_policy::prepare_managed_cache(&ccx, None, &mut prepared)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                prepared.env["CARGO_TARGET_DIR"],
+                meta.root
+                    .join("refact-agent/engine/target")
+                    .to_str()
+                    .unwrap()
+            );
+            let mut approved = descriptor(&prepared, "managed cache").unwrap();
+            cache.bind_approval(&mut approved);
+            for call in ["managed-good", "managed-stale"] {
+                ccx.lock().await.approved_executions.insert(
+                    call.into(),
+                    ApprovedExecution {
+                        agent_id: record.agent_id.clone(),
+                        generation: record.run_generation,
+                        expires_at: super::super::approval::now_ms() + 60_000,
+                        tool_name: "shell".into(),
+                        args: serde_json::json!({}),
+                        execution: approved.clone(),
+                        consumed: false,
+                    },
+                );
+            }
+            let mut actual = raw.clone();
+            let current =
+                crate::exec::command_policy::prepare_managed_cache(&ccx, None, &mut actual)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            enforce(
+                &ccx,
+                "managed-good",
+                "shell",
+                &HashMap::new(),
+                &mut actual,
+                None,
+                Some(&current),
+            )
+            .await
+            .unwrap();
+            current.revalidate(&ccx, &actual).await.unwrap();
+            assert_eq!(actual.env, prepared.env);
+            std::fs::write(
+                meta.root.join("refact-agent/engine/Cargo.toml"),
+                "[workspace]\nmembers = []\n",
+            )
+            .unwrap();
+            let mut stale = raw;
+            let changed =
+                crate::exec::command_policy::prepare_managed_cache(&ccx, None, &mut stale)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(enforce(
+                &ccx,
+                "managed-stale",
+                "shell",
+                &HashMap::new(),
+                &mut stale,
+                None,
+                Some(&changed)
+            )
+            .await
+            .unwrap_err()
+            .contains("changed"));
+            assert!(ccx.lock().await.approved_executions["managed-stale"].consumed);
         }
     }
 }

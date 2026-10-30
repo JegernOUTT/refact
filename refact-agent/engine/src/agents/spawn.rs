@@ -246,6 +246,10 @@ struct PreparedLaunch {
     worktree_mode: SpawnWorktreeMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     profile: Option<super::profile::ResolvedProfile>,
+    #[serde(skip)]
+    parent_run: Option<refact_agents_core::registry::ParentRun>,
+    #[serde(skip)]
+    parent_abort: Option<Arc<AtomicBool>>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -255,6 +259,32 @@ struct DurableRunConfig {
     launch_digest: String,
     project_root: PathBuf,
     config: SubchatConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replacement: Option<ReplacementIntent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_attachment: Option<RecoveryAttachment>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct RecoveryAttachment {
+    worktree: Option<WorktreeMeta>,
+    trajectory_revision: String,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct ReplacementIntent {
+    operation: Uuid,
+    previous_generation: u64,
+    previous_digest: String,
+    attachment: RecoveryAttachment,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AppliedCheckout {
+    schema_version: u32,
+    operation: Uuid,
+    seed_digest: String,
+    worktree: WorktreeMeta,
 }
 
 async fn persist_run_config(
@@ -263,6 +293,17 @@ async fn persist_run_config(
     config: &SubchatConfig,
 ) -> Result<(), String> {
     let record = app.agents.get_any(agent_id).await?;
+    persist_resume_config(app, &record, config, None, None).await
+}
+
+async fn persist_resume_config(
+    app: &AppState,
+    record: &BackgroundAgent,
+    config: &SubchatConfig,
+    replacement: Option<ReplacementIntent>,
+    previous_attachment: Option<RecoveryAttachment>,
+) -> Result<(), String> {
+    let agent_id = record.agent_id.as_str();
     let root = app
         .agent_executions
         .saved_scope(agent_id)
@@ -282,6 +323,8 @@ async fn persist_run_config(
         launch_digest: launch_digest(&accepted),
         project_root: root,
         config: config.clone(),
+        replacement,
+        previous_attachment,
     };
     let payload = refact_agents_core::storage::AcceptedLaunchPayload::serialize(
         &payload,
@@ -298,6 +341,8 @@ pub(crate) struct RecoveredRun {
     pub authority_migrated: bool,
     isolated_worktree: Option<SpawnedWorktree>,
     replace_worktree: bool,
+    previous_attachment: Option<RecoveryAttachment>,
+    pending_replacement: Option<ReplacementIntent>,
 }
 
 pub(crate) async fn recover_run_config(
@@ -326,22 +371,131 @@ pub(crate) async fn recover_run_config(
     };
     let root = trusted_project_root(app, source).await?;
     let limits = crate::runtime_settings::coordination_for_project(&root).await?;
-    let saved: DurableRunConfig = app
+    let (saved_payload, applied) = app
         .agents
-        .run_config(
+        .recovery_run_config(
             parent_chat_id,
             agent_id,
             record.run_generation,
+            record.run_generation,
             limits.launch_context_bytes,
         )
-        .await?
-        .decode()?;
+        .await?;
+    let saved: DurableRunConfig = saved_payload.decode()?;
     let accepted = app
         .agents
         .accepted_launch(parent_chat_id, agent_id, limits.launch_context_bytes)
         .await?;
     let seed: PreparedLaunch = accepted.decode()?;
     let mut config = saved.config;
+    let mut previous_attachment = saved.previous_attachment;
+    let replacement_pending = saved.replacement.is_some() && applied.is_none();
+    if let Some(intent) = &saved.replacement {
+        if intent.operation.is_nil()
+            || intent.previous_generation == 0
+            || intent.previous_generation >= record.run_generation
+            || intent.attachment.trajectory_revision.len() != 64
+            || !record.previous_runs.iter().any(|run| {
+                run.run_generation == intent.previous_generation
+                    && run.status == crate::agents::types::BgAgentStatus::Completed
+            })
+        {
+            return Err("invalid accepted checkout replacement intent".into());
+        }
+        let (previous, previous_applied) = app
+            .agents
+            .recovery_run_config(
+                parent_chat_id,
+                agent_id,
+                record.run_generation,
+                intent.previous_generation,
+                limits.launch_context_bytes,
+            )
+            .await?;
+        let previous_config: DurableRunConfig = previous.decode()?;
+        let previous_worktree = match previous_applied {
+            Some(applied) => {
+                let applied: AppliedCheckout = applied.decode()?;
+                if applied.schema_version != 1
+                    || applied.seed_digest != launch_digest(&previous)
+                    || previous_config
+                        .replacement
+                        .as_ref()
+                        .map(|intent| intent.operation)
+                        != Some(applied.operation)
+                {
+                    return Err("previous checkout setup does not match its seed".into());
+                }
+                Some(applied.worktree)
+            }
+            None => previous_config.config.worktree.clone(),
+        };
+        if launch_digest(&previous) != intent.previous_digest
+            || previous_config.schema_version != 1
+            || previous_config.run_generation != intent.previous_generation
+            || previous_config.launch_digest != launch_digest(&accepted)
+            || previous_config.project_root != root
+            || previous_config.config.chat_id != config.chat_id
+            || previous_config.config.parent_id != config.parent_id
+            || previous_config.config.background_agent_id != config.background_agent_id
+            || previous_config.config.model != config.model
+            || previous_worktree != config.worktree
+            || !record.previous_runs.iter().any(|run| {
+                run.run_generation == intent.previous_generation
+                    && run.worktree_id.as_ref()
+                        == previous_worktree.as_ref().map(|worktree| &worktree.id)
+                    && run.worktree_branch
+                        == previous_worktree
+                            .as_ref()
+                            .and_then(|worktree| worktree.branch.clone())
+            })
+        {
+            return Err("checkout replacement intent does not match prior committed seed".into());
+        }
+        if let Some(applied) = applied {
+            let applied: AppliedCheckout = applied.decode()?;
+            if applied.schema_version != 1
+                || applied.operation != intent.operation
+                || applied.seed_digest != launch_digest(&saved_payload)
+                || applied.worktree.source_workspace_root != root
+                || applied.worktree.branch.as_deref()
+                    != Some(format!("refact/subagent/{}", intent.operation.simple()).as_str())
+                || config.worktree.as_ref().is_none_or(|previous| {
+                    applied.worktree.id == previous.id
+                        || applied.worktree.root == previous.root
+                        || applied.worktree.base_branch != previous.base_branch
+                        || applied.worktree.kind != previous.kind
+                })
+                || Some(&applied.worktree.id) != record.worktree_id.as_ref()
+                || applied.worktree.branch != record.worktree_branch
+            {
+                return Err(
+                    "checkout publication outcome unknown; inspect retained setup before recovery"
+                        .into(),
+                );
+            }
+            if applied.worktree.root.is_dir() {
+                let service =
+                    WorktreeService::new_async(app.gcx.cache_dir.clone(), root.clone()).await?;
+                if service.get_worktree(&applied.worktree.id).await?.meta != applied.worktree {
+                    return Err("committed replacement checkout registration changed".into());
+                }
+            }
+            config.worktree = Some(applied.worktree);
+            previous_attachment = Some(intent.attachment.clone());
+        }
+    } else if applied.is_some() {
+        return Err("checkout setup has no accepted replacement intent".into());
+    }
+    if previous_attachment.as_ref().is_some_and(|previous| {
+        previous.trajectory_revision.len() != 64
+            || previous
+                .worktree
+                .as_ref()
+                .is_some_and(|worktree| worktree.source_workspace_root != root)
+    }) {
+        return Err("invalid previous checkout attachment receipt".into());
+    }
     if saved.schema_version != 1
         || seed.schema_version != 1
         || seed.revision != 1
@@ -389,9 +543,10 @@ pub(crate) async fn recover_run_config(
         }),
         _ => None,
     };
-    let replace_worktree = config.worktree.as_ref().is_some_and(|worktree| {
-        record.merge_status.as_deref() == Some("merged") || !worktree.root.is_dir()
-    });
+    let replace_worktree = replacement_pending
+        || config.worktree.as_ref().is_some_and(|worktree| {
+            record.merge_status.as_deref() == Some("merged") || !worktree.root.is_dir()
+        });
     if let Some(worktree) = &config.worktree {
         if worktree.source_workspace_root.canonicalize().ok().as_ref() != Some(&root) {
             return Err("original child checkout is unavailable".into());
@@ -399,7 +554,10 @@ pub(crate) async fn recover_run_config(
         if replace_worktree {
             let isolated = isolated_worktree
                 .as_ref()
-                .filter(|_| record.status == crate::agents::types::BgAgentStatus::Completed)
+                .filter(|_| {
+                    replacement_pending
+                        || record.status == crate::agents::types::BgAgentStatus::Completed
+                })
                 .ok_or("original child checkout is unavailable; spawn a new agent instead")?;
             continuation_base_commit(isolated).await?;
         }
@@ -427,7 +585,32 @@ pub(crate) async fn recover_run_config(
         authority_migrated,
         isolated_worktree,
         replace_worktree,
+        previous_attachment,
+        pending_replacement: if replacement_pending {
+            saved.replacement
+        } else {
+            None
+        },
     })
+}
+
+async fn ensure_replacement_not_started(
+    root: &Path,
+    replacement: Option<&ReplacementIntent>,
+) -> Result<(), String> {
+    let Some(replacement) = replacement else {
+        return Ok(());
+    };
+    let root = root.to_path_buf();
+    let reference = format!(
+        "refs/heads/refact/subagent/{}",
+        replacement.operation.simple()
+    );
+    tokio::task::spawn_blocking(move || {
+        let repo = crate::worktrees::git::discover_repo(&root)?;
+        let absent = matches!(repo.find_reference(&reference), Err(error) if error.code() == git2::ErrorCode::NotFound);
+        if absent { Ok(()) } else { Err("replacement checkout setup was already attempted; inspect retained checkout and publication evidence before recovery".into()) }
+    }).await.map_err(|_| "replacement checkout inspection unavailable".to_string())?
 }
 
 fn tools_within_ceiling(
@@ -464,6 +647,7 @@ fn validate_recovery_trajectory(
     record: &BackgroundAgent,
     config: &SubchatConfig,
     replace_worktree: bool,
+    previous_attachment: Option<&RecoveryAttachment>,
     trajectory: &crate::chat::trajectories::LoadedTrajectory,
 ) -> Result<(), String> {
     if Some(&trajectory.thread.id) != record.child_chat_id.as_ref()
@@ -475,7 +659,12 @@ fn validate_recovery_trajectory(
             .as_ref()
             .map(|w| (&w.id, &w.root))
             != config.worktree.as_ref().map(|w| (&w.id, &w.root))
-            && !(replace_worktree && trajectory.thread.worktree.is_none()))
+            && !(replace_worktree && trajectory.thread.worktree.is_none())
+            && !previous_attachment.is_some_and(|previous| {
+                trajectory.thread.worktree == previous.worktree
+                    && resume_trajectory_revision(trajectory).ok().as_deref()
+                        == Some(previous.trajectory_revision.as_str())
+            }))
     {
         return Err("saved trajectory identity does not match this child".into());
     }
@@ -509,8 +698,17 @@ pub(crate) async fn recovery_unavailable_reason(
     else {
         return Some("saved child trajectory is unavailable".into());
     };
+    if let Err(error) = validate_recovery_trajectory(
+        record,
+        &run.config,
+        run.replace_worktree,
+        run.previous_attachment.as_ref(),
+        &trajectory,
+    ) {
+        return Some(error);
+    }
     if let Err(error) =
-        validate_recovery_trajectory(record, &run.config, run.replace_worktree, &trajectory)
+        ensure_replacement_not_started(&run.root, run.pending_replacement.as_ref()).await
     {
         return Some(error);
     }
@@ -749,6 +947,7 @@ pub async fn spawn_background_agent(
     app: AppState,
     req: SpawnRequest,
 ) -> Result<SpawnHandle, String> {
+    let (parent_run, parent_abort) = launch_parent_state(&app, &req.parent_chat_id).await?;
     if let Some(guard) = &req.native_supervision_guard {
         guard.validate_request(&req)?;
     }
@@ -763,8 +962,15 @@ pub async fn spawn_background_agent(
         guard.bind_child(&child_chat_id)?;
     }
     crate::coordination::causal::record_spawn(&app, &req.parent_chat_id, &child_chat_id).await;
-    let (prepared, launch_payload) =
-        prepare_launch(&app, &req, &child_chat_id, project_root.clone()).await?;
+    let (prepared, launch_payload) = prepare_launch_for_parent_run(
+        &app,
+        &req,
+        &child_chat_id,
+        project_root.clone(),
+        (parent_run, parent_abort),
+    )
+    .await?;
+    validate_launch_parent(&app, &req.parent_chat_id, &prepared).await?;
     let launch_digest = launch_digest(&launch_payload);
     let parent_session = app
         .chat
@@ -848,6 +1054,7 @@ async fn accept_prepared_launch(
     if launch_stopping(&app) {
         return Err("launch cancelled before acceptance".into());
     }
+    validate_launch_parent(&app, &req.parent_chat_id, &prepared).await?;
     // Native startup effects are rolled back on every error and on future
     // cancellation; the consumed mandate binding is deliberately retained.
     let mut rollback = SupervisedStartupRollback {
@@ -862,22 +1069,25 @@ async fn accept_prepared_launch(
     }
     let (record, abort_flag, cancel_notify) = app
         .agents
-        .create(CreateAgentRequest {
-            parent_chat_id: req.parent_chat_id.clone(),
-            parent_root_chat_id: req.parent_root_chat_id.clone(),
-            parent_tool_call_id: req.parent_tool_call_id.clone(),
-            kind: req.kind,
-            config_name: req.config_name.clone(),
-            title: req.title.clone(),
-            prompt: req.prompt.clone(),
-            target_files: req.target_files.clone(),
-            model: req.model.clone(),
-            model_type: req.model_type.clone(),
-            goal_summary: req.goal.as_ref().map(|goal| goal.content.clone()),
-            plan_present: req.plan.is_some(),
-            worktree_id: None,
-            worktree_branch: None,
-        })
+        .create_for_parent_run(
+            CreateAgentRequest {
+                parent_chat_id: req.parent_chat_id.clone(),
+                parent_root_chat_id: req.parent_root_chat_id.clone(),
+                parent_tool_call_id: req.parent_tool_call_id.clone(),
+                kind: req.kind,
+                config_name: req.config_name.clone(),
+                title: req.title.clone(),
+                prompt: req.prompt.clone(),
+                target_files: req.target_files.clone(),
+                model: req.model.clone(),
+                model_type: req.model_type.clone(),
+                goal_summary: req.goal.as_ref().map(|goal| goal.content.clone()),
+                plan_present: req.plan.is_some(),
+                worktree_id: None,
+                worktree_branch: None,
+            },
+            prepared.parent_run.as_ref(),
+        )
         .await?;
     let agent_id = record.agent_id.clone();
     let launch_intent = crate::coordination::launch_intents::LaunchIntentSlot::persist_for_agent(
@@ -907,7 +1117,7 @@ async fn accept_prepared_launch(
             return Err(error);
         }
     }
-    if launch_stopping(&app) {
+    if launch_stopping(&app) || abort_flag.load(Ordering::Acquire) {
         launch_intent.settle().await;
         app.agents
             .mark_cancelled(&agent_id, Some("launch cancelled during acceptance".into()))
@@ -1186,6 +1396,19 @@ async fn prepare_and_run(
                 .unwrap_or_else(|error| fallback_failed_record(agent_id, req, error));
         }
     };
+    if abort_flag.load(Ordering::Acquire)
+        || launch_stopping(&app)
+        || validate_launch_parent(&app, &req.parent_chat_id, &prepared)
+            .await
+            .is_err()
+    {
+        cleanup_spawn_worktree(app.clone(), spawned_worktree.as_ref()).await;
+        return app
+            .agents
+            .mark_cancelled(&agent_id, Some("Cancelled during setup".into()))
+            .await
+            .unwrap_or_else(|error| fallback_failed_record(agent_id, req, error));
+    }
     if let Some(guard) = &req.native_supervision_guard {
         if let Err(error) = guard.bind_edit_scope(
             &child_chat_id,
@@ -1231,6 +1454,7 @@ async fn prepare_and_run(
         child_chat_id,
         abort_flag,
         spawned_worktree,
+        prepared.parent_run,
     )
     .await
 }
@@ -1247,6 +1471,27 @@ async fn prepare_launch(
     ),
     String,
 > {
+    let parent_state = launch_parent_state(app, &req.parent_chat_id).await?;
+    prepare_launch_for_parent_run(app, req, child_chat_id, project_root, parent_state).await
+}
+
+async fn prepare_launch_for_parent_run(
+    app: &AppState,
+    req: &SpawnRequest,
+    child_chat_id: &str,
+    project_root: PathBuf,
+    parent_state: (
+        Option<refact_agents_core::registry::ParentRun>,
+        Arc<AtomicBool>,
+    ),
+) -> Result<
+    (
+        PreparedLaunch,
+        refact_agents_core::storage::AcceptedLaunchPayload,
+    ),
+    String,
+> {
+    let (parent_run, parent_abort) = parent_state;
     let limits = crate::runtime_settings::coordination_for_project(&project_root).await?;
     if req.initial_context_messages.len() > limits.launch_context_messages
         || crate::coordination::bounds::serialized_size(
@@ -1489,6 +1734,8 @@ async fn prepare_launch(
         project_root,
         worktree_mode: req.worktree_mode.clone(),
         profile: req.profile.clone(),
+        parent_run,
+        parent_abort: Some(parent_abort),
     };
     let payload = refact_agents_core::storage::AcceptedLaunchPayload::serialize(
         &prepared,
@@ -1681,6 +1928,151 @@ mod accepted_launch_tests {
         assert_eq!(
             app.agents
                 .list_for_parent("unacked-parent", Default::default())
+                .await
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(test_runner)]
+    async fn subtree_cancel_settles_unacknowledged_launch_and_rejects_prepared_descendant() {
+        let (_gcx, app, _parent, workspace) =
+            super::super::tests::app_with_parent_session("cancel-launcher").await;
+        let owner = app
+            .agents
+            .create(CreateAgentRequest {
+                parent_chat_id: "root-owner".into(),
+                parent_root_chat_id: Some("root-owner".into()),
+                parent_tool_call_id: Some("launch-parent".into()),
+                kind: BgAgentKind::Subagent,
+                config_name: "test_spawn".into(),
+                title: "Parent".into(),
+                prompt: "Parent".into(),
+                target_files: vec!["src/a.rs".into()],
+                model: "model".into(),
+                model_type: None,
+                goal_summary: None,
+                plan_present: false,
+                worktree_id: None,
+                worktree_branch: None,
+            })
+            .await
+            .unwrap()
+            .0;
+        let mut authority_request =
+            super::super::tests::subagent_spawn_request("cancel-launcher", "src/a.rs");
+        authority_request.tools = Some(vec!["cat".into()]);
+        let authority = prepare_launch(
+            &app,
+            &authority_request,
+            "authority-seed",
+            workspace.path().canonicalize().unwrap(),
+        )
+        .await
+        .unwrap()
+        .0
+        .config;
+        app.agents
+            .mark_running(&owner.agent_id, "cancel-launcher".into())
+            .await
+            .unwrap();
+        app.agent_executions
+            .remember_config(&owner.agent_id, authority);
+        let mut req = super::super::tests::subagent_spawn_request("cancel-launcher", "src/a.rs");
+        req.parent_root_chat_id = Some("root-owner".into());
+        req.subchat_depth = 1;
+        req.worktree_mode = SpawnWorktreeMode::Isolated { auto_merge: false };
+        let root = workspace.path().canonicalize().unwrap();
+        let child_uuid = Uuid::new_v4();
+        let child = format!("subchat-{child_uuid}");
+        let (prepared, payload) = prepare_launch(&app, &req, &child, root.clone())
+            .await
+            .unwrap();
+        assert!(prepared.parent_run.is_some());
+        let late_uuid = Uuid::new_v4();
+        let late_child = format!("subchat-{late_uuid}");
+        let (late, late_payload) = prepare_launch(&app, &req, &late_child, root.clone())
+            .await
+            .unwrap();
+        let dispatched = Arc::new(AtomicBool::new(false));
+        let observed = dispatched.clone();
+        let _runner = install_test_runner(Arc::new(move |_, _, _| {
+            observed.store(true, Ordering::SeqCst);
+            Box::pin(async { Err("cancelled child dispatched".into()) })
+        }));
+        let (send, receive) = oneshot::channel();
+        let digest = launch_digest(&payload);
+        let handle = accept_prepared_launch(
+            app.clone(),
+            req.clone(),
+            prepared,
+            payload,
+            digest,
+            root.clone(),
+            (Vec::new(), true),
+            child_uuid,
+            child.clone(),
+            receive,
+        )
+        .await
+        .unwrap();
+        assert!(!handle.agent_id.is_empty());
+        assert_eq!(
+            app.agents
+                .get_any(&handle.agent_id)
+                .await
+                .unwrap()
+                .run_generation,
+            1
+        );
+        assert!(app.agent_executions.task_active(&child));
+        assert_eq!(app.work_scheduler.snapshot().outstanding, 1);
+        let cancelled = app
+            .agents
+            .cancel_subtree("root-owner", &owner.agent_id, true, None)
+            .await
+            .unwrap();
+        assert_eq!(cancelled.len(), 2);
+        let _ = send.send(());
+        let record = tokio::time::timeout(Duration::from_secs(5), handle.completion_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            record.status,
+            crate::agents::types::BgAgentStatus::Cancelled
+        );
+        let (_, late_receive) = oneshot::channel();
+        let late_digest = launch_digest(&late_payload);
+        let rejected = accept_prepared_launch(
+            app.clone(),
+            req,
+            late,
+            late_payload,
+            late_digest,
+            root,
+            (Vec::new(), true),
+            late_uuid,
+            late_child.clone(),
+            late_receive,
+        )
+        .await;
+        assert!(rejected.is_err());
+        app.agent_executions.shutdown().await;
+        assert!(!dispatched.load(Ordering::SeqCst));
+        assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
+        assert!(!app.agent_executions.task_active(&child));
+        assert!(!app.chat.sessions.read().await.contains_key(&child));
+        assert!(!app.chat.sessions.read().await.contains_key(&late_child));
+        assert!(record.worktree_id.is_none());
+        assert!(app
+            .agent_executions
+            .launch_provenance(&record.agent_id)
+            .is_none());
+        assert_eq!(
+            app.agents
+                .list_for_parent("cancel-launcher", Default::default())
                 .await
                 .len(),
             1
@@ -1926,11 +2318,55 @@ async fn narrow_parent_approval(app: &AppState, req: &SpawnRequest, config: &mut
     }
 }
 
+async fn launch_parent_state(
+    app: &AppState,
+    chat_id: &str,
+) -> Result<
+    (
+        Option<refact_agents_core::registry::ParentRun>,
+        Arc<AtomicBool>,
+    ),
+    String,
+> {
+    let parent_run = app.agents.parent_run(chat_id).await?;
+    let parent = app
+        .chat
+        .sessions
+        .read()
+        .await
+        .get(chat_id)
+        .cloned()
+        .ok_or("parent session unavailable")?;
+    let parent = parent.lock().await;
+    if parent.closed || parent.abort_flag.load(Ordering::Acquire) {
+        return Err("parent launch was cancelled or closed".into());
+    }
+    Ok((parent_run, parent.abort_flag.clone()))
+}
+
+async fn validate_launch_parent(
+    app: &AppState,
+    chat_id: &str,
+    prepared: &PreparedLaunch,
+) -> Result<(), String> {
+    if prepared
+        .parent_abort
+        .as_ref()
+        .is_none_or(|flag| flag.load(Ordering::Acquire))
+    {
+        return Err("parent launch was cancelled".into());
+    }
+    app.agents
+        .validate_parent_run(chat_id, prepared.parent_run.as_ref())
+        .await
+}
+
 async fn revalidate_prepared_launch(
     app: &AppState,
     req: &SpawnRequest,
     prepared: &mut PreparedLaunch,
 ) -> Result<(), String> {
+    validate_launch_parent(app, &req.parent_chat_id, prepared).await?;
     if prepared
         .config
         .worktree
@@ -1949,6 +2385,9 @@ async fn revalidate_prepared_launch(
         .ok_or("parent session unavailable")?;
     {
         let parent = parent.lock().await;
+        if parent.closed || parent.abort_flag.load(Ordering::Acquire) {
+            return Err("parent launch was cancelled or closed".into());
+        }
         if crate::coordination::scope::session_source_root(&parent)
             .and_then(|root| root.canonicalize().ok())
             .as_ref()
@@ -2037,6 +2476,7 @@ pub async fn resume_agent(
     instruction: Option<String>,
     reconcile_incomplete: bool,
 ) -> Result<BackgroundAgent, String> {
+    let parent_state = launch_parent_state(&app, parent_chat_id).await?;
     let intent = app.agent_executions.reserve_resume(agent_id)?;
     let parent_chat_id = parent_chat_id.to_string();
     let agent_id = agent_id.to_string();
@@ -2050,7 +2490,7 @@ pub async fn resume_agent(
         Arc::new(tokio::sync::Notify::new()),
         async move {
             let _intent = intent;
-            let result = resume_agent_inner(
+            let result = resume_agent_for_parent_run(
                 app,
                 &parent_chat_id,
                 &agent_id,
@@ -2059,6 +2499,7 @@ pub async fn resume_agent(
                 instruction,
                 reconcile_incomplete,
                 start_receive,
+                parent_state,
             )
             .await;
             let _ = send.send(result);
@@ -2073,6 +2514,7 @@ pub async fn resume_agent(
     Ok(record)
 }
 
+#[cfg(test)]
 pub(super) async fn resume_agent_inner(
     app: AppState,
     parent_chat_id: &str,
@@ -2083,8 +2525,38 @@ pub(super) async fn resume_agent_inner(
     reconcile_incomplete: bool,
     start_receive: oneshot::Receiver<()>,
 ) -> Result<BackgroundAgent, String> {
+    let parent_state = launch_parent_state(&app, parent_chat_id).await?;
+    resume_agent_for_parent_run(
+        app,
+        parent_chat_id,
+        agent_id,
+        raised_max_steps,
+        expected_change_seq,
+        instruction,
+        reconcile_incomplete,
+        start_receive,
+        parent_state,
+    )
+    .await
+}
+
+async fn resume_agent_for_parent_run(
+    app: AppState,
+    parent_chat_id: &str,
+    agent_id: &str,
+    raised_max_steps: Option<usize>,
+    expected_change_seq: u64,
+    instruction: Option<String>,
+    reconcile_incomplete: bool,
+    start_receive: oneshot::Receiver<()>,
+    parent_state: (
+        Option<refact_agents_core::registry::ParentRun>,
+        Arc<AtomicBool>,
+    ),
+) -> Result<BackgroundAgent, String> {
+    let (parent_run, parent_abort) = parent_state;
     use refact_agents_core::types::CapStop;
-    if launch_stopping(&app) {
+    if launch_stopping(&app) || parent_abort.load(Ordering::Acquire) {
         return Err("resume cancelled before preparation".into());
     }
     let old = app.agents.get_any(agent_id).await?;
@@ -2110,7 +2582,10 @@ pub(super) async fn resume_agent_inner(
         authority_migrated,
         mut isolated_worktree,
         replace_worktree,
+        previous_attachment,
+        pending_replacement,
     } = recover_run_config(&app, parent_chat_id, agent_id).await?;
+    ensure_replacement_not_started(&accepted_root, pending_replacement.as_ref()).await?;
     let limits = crate::runtime_settings::coordination_for_project(&accepted_root).await?;
     if instruction
         .as_ref()
@@ -2162,11 +2637,17 @@ pub(super) async fn resume_agent_inner(
         crate::chat::trajectories::load_trajectory_for_chat(app.gcx.clone(), &child_chat_id)
             .await
             .ok_or_else(|| "saved child trajectory is unavailable".to_string())?;
-    validate_recovery_trajectory(&old, &config, replace_worktree, &trajectory)?;
+    validate_recovery_trajectory(
+        &old,
+        &config,
+        replace_worktree,
+        previous_attachment.as_ref(),
+        &trajectory,
+    )?;
     config.autonomous_no_confirm &= trajectory.thread.autonomous_no_confirm;
     config.auto_approve_editing_tools &= trajectory.thread.auto_approve_editing_tools;
     config.auto_approve_dangerous_commands &= trajectory.thread.auto_approve_dangerous_commands;
-    let mut trajectory_revision = resume_trajectory_revision(&trajectory)?;
+    let trajectory_revision = resume_trajectory_revision(&trajectory)?;
     let mut messages = trajectory.messages.clone();
     reconcile_resume_tool_pairs(&mut messages, reconcile_incomplete)?;
     let remaining = remaining_goal_steps(&trajectory, used_steps, max_steps - used_steps)?;
@@ -2232,17 +2713,45 @@ pub(super) async fn resume_agent_inner(
     if launcher_depth > 0 {
         request = request.with_priority(refact_work_core::WorkPriority::Speculative);
     }
+    let replacement = if replace_worktree {
+        let (previous_generation, previous_digest) = if let Some(pending) = pending_replacement {
+            (pending.previous_generation, pending.previous_digest)
+        } else {
+            let previous = app
+                .agents
+                .run_config(
+                    parent_chat_id,
+                    agent_id,
+                    old.run_generation,
+                    limits.launch_context_bytes,
+                )
+                .await?;
+            (old.run_generation, launch_digest(&previous))
+        };
+        Some(ReplacementIntent {
+            operation: Uuid::new_v4(),
+            previous_generation,
+            previous_digest,
+            attachment: RecoveryAttachment {
+                worktree: trajectory.thread.worktree.clone(),
+                trajectory_revision: trajectory_revision.clone(),
+            },
+        })
+    } else {
+        None
+    };
     let ticket = app
         .work_scheduler
         .reserve(request)
         .map_err(|error| error.to_string())?;
-    let (mut record, abort, notify) = app
+    let (record, abort, notify) = app
         .agents
-        .reopen(
+        .reopen_for_parent_run(
             agent_id,
             parent_chat_id,
             expected_change_seq,
             raised_max_steps.is_some(),
+            parent_run.as_ref(),
         )
         .await?;
     emit_background_agent_update(app.clone(), &record).await;
@@ -2251,66 +2760,6 @@ pub(super) async fn resume_agent_inner(
     )
     .await;
     app.agent_executions.remember_scope(agent_id, accepted_root);
-    if replace_worktree {
-        let mut fresh_worktree = None;
-        let prepared = async {
-            let previous = isolated_worktree
-                .as_ref()
-                .ok_or("original merge target unavailable; spawn a new agent instead")?;
-            let fresh = create_continued_worktree(&app, previous, &child_chat_id).await?;
-            fresh_worktree = Some(fresh.clone());
-            let current = crate::chat::trajectories::load_trajectory_for_chat(
-                app.gcx.clone(),
-                &child_chat_id,
-            )
-            .await
-            .ok_or("saved child trajectory unavailable")?;
-            if resume_trajectory_revision(&current)? != trajectory_revision {
-                return Err("child trajectory changed while preparing continuation".to_string());
-            }
-            config.worktree = Some(fresh.meta.clone());
-            record = app
-                .agents
-                .set_worktree_metadata(
-                    &agent_id,
-                    Some(fresh.meta.id.clone()),
-                    fresh.meta.branch.clone(),
-                )
-                .await?;
-            install_resumed_session(
-                &app,
-                &trajectory,
-                &trajectory.messages,
-                &config,
-                &project_root,
-                live_session.as_ref(),
-                live_revision.as_deref(),
-                false,
-            )
-            .await?;
-            live_session = app.chat.sessions.read().await.get(&child_chat_id).cloned();
-            let session = live_session.as_ref().ok_or("child session unavailable")?;
-            crate::chat::trajectories::flush_trajectory_for_session(app.clone(), session.clone())
-                .await?;
-            live_revision = Some(resume_session_revision(&*session.lock().await)?);
-            trajectory = crate::chat::trajectories::load_trajectory_for_chat(
-                app.gcx.clone(),
-                &child_chat_id,
-            )
-            .await
-            .ok_or("saved child trajectory unavailable")?;
-            trajectory_revision = resume_trajectory_revision(&trajectory)?;
-            isolated_worktree = Some(fresh);
-            Ok::<_, String>(())
-        }
-        .await;
-        if let Err(error) = prepared {
-            cleanup_spawn_worktree(app.clone(), fresh_worktree.as_ref()).await;
-            launch_intent.settle().await;
-            finish_resume_error(&app, agent_id, error.clone(), false).await;
-            return Err(error);
-        }
-    }
     let continuation_start = messages.len();
     let (notice_source, notice_text) = continuation_notice(old.status);
     messages.push(event(
@@ -2338,13 +2787,59 @@ pub(super) async fn resume_agent_inner(
     config.max_steps = max_steps;
     config.abort_flag = Some(abort.clone());
     config.step_progress = None;
-    if let Err(error) = persist_run_config(&app, agent_id, &config).await {
+    if let Err(error) = persist_resume_config(
+        &app,
+        &record,
+        &config,
+        replacement.clone(),
+        previous_attachment,
+    )
+    .await
+    {
         launch_intent.settle().await;
-        finish_resume_error(&app, agent_id, error.clone(), false).await;
+        let rollback = app
+            .agents
+            .rollback_unaccepted_resume(&old, &record, &abort)
+            .await;
+        if !matches!(rollback, Ok(true)) {
+            finish_resume_error(&app, agent_id, generation, &abort, error.clone(), false).await;
+        }
+        return Err(format!("{error}; resume not accepted; inspect before retrying (metadata rollback: {rollback:?})"));
+    }
+    let attempt = match app
+        .agents
+        .begin_checkout_setup(
+            parent_chat_id,
+            agent_id,
+            generation,
+            record.change_seq,
+            &abort,
+            parent_run.as_ref(),
+            replacement
+                .as_ref()
+                .map_or_else(Uuid::new_v4, |intent| intent.operation),
+        )
+        .await
+    {
+        Ok(attempt) => attempt,
+        Err(error) => {
+            launch_intent.settle().await;
+            finish_resume_error(&app, agent_id, generation, &abort, error.clone(), true).await;
+            return Err(error);
+        }
+    };
+    if let Err(error) = app
+        .agents
+        .with_checkout_setup(&attempt, |_| {
+            app.agent_executions
+                .remember_config(agent_id, config.clone())
+        })
+        .await
+    {
+        launch_intent.settle().await;
+        finish_resume_error(&app, agent_id, generation, &abort, error.clone(), true).await;
         return Err(error);
     }
-    app.agent_executions
-        .remember_config(agent_id, config.clone());
     config.max_steps = remaining;
     config.prepend_system_prompt = false;
     let agent_id = agent_id.to_string();
@@ -2353,7 +2848,13 @@ pub(super) async fn resume_agent_inner(
     let parent_chat_id = parent_chat_id.to_string();
     let rejected_app = app.clone();
     let rejected_agent = agent_id.clone();
+    let rejected_abort = abort.clone();
     let task_intent = launch_intent.clone();
+    let mut response = record.clone();
+    if replace_worktree {
+        response.worktree_id = None;
+        response.worktree_branch = None;
+    }
     let registration =
         executions.spawn_owned(task_chat, abort.clone(), notify.clone(), async move {
             if !wait_for_acceptance(start_receive, &abort, &notify).await {
@@ -2362,6 +2863,8 @@ pub(super) async fn resume_agent_inner(
                 finish_resume_error(
                     &app,
                     &agent_id,
+                    generation,
+                    &abort,
                     "Resume caller left before acceptance".into(),
                     true,
                 )
@@ -2390,6 +2893,8 @@ pub(super) async fn resume_agent_inner(
                     finish_resume_error(
                         &app,
                         &agent_id,
+                        generation,
+                        &abort,
                         error.to_string(),
                         abort.load(Ordering::Relaxed)
                             || matches!(error, refact_work_core::AdmissionError::Cancelled),
@@ -2398,10 +2903,26 @@ pub(super) async fn resume_agent_inner(
                     return;
                 }
             };
-            if abort.load(Ordering::Relaxed) || launch_stopping(&app) {
+            if abort.load(Ordering::Relaxed)
+                || launch_stopping(&app)
+                || parent_abort.load(Ordering::Acquire)
+                || app
+                    .agents
+                    .validate_parent_run(&parent_chat_id, parent_run.as_ref())
+                    .await
+                    .is_err()
+            {
                 task_intent.settle().await;
                 app.agent_executions.forget_launch_intent(&child_chat_id);
-                finish_resume_error(&app, &agent_id, "Cancelled while queued".into(), true).await;
+                finish_resume_error(
+                    &app,
+                    &agent_id,
+                    generation,
+                    &abort,
+                    "Cancelled while queued".into(),
+                    true,
+                )
+                .await;
                 return;
             }
             let execution = match app.agent_executions.install(&child_chat_id, permit) {
@@ -2409,7 +2930,7 @@ pub(super) async fn resume_agent_inner(
                 Err(error) => {
                     task_intent.settle().await;
                     app.agent_executions.forget_launch_intent(&child_chat_id);
-                    finish_resume_error(&app, &agent_id, error, true).await;
+                    finish_resume_error(&app, &agent_id, generation, &abort, error, true).await;
                     return;
                 }
             };
@@ -2484,6 +3005,262 @@ pub(super) async fn resume_agent_inner(
                         changed.join(", ")
                     ));
                 }
+                config.max_steps = config.max_steps.min(remaining_goal_steps(
+                    &current,
+                    used_steps,
+                    max_steps - used_steps,
+                )?);
+                if replacement.is_some() {
+                    let setup = &attempt;
+                    app.agents.with_checkout_setup(setup, |_| ()).await?;
+                    let mut fresh_worktree = None;
+                    let mut retain_checkout = false;
+                    let prepared = async {
+                        let transition = live_session
+                            .as_ref()
+                            .map(crate::chat::worktree_lifecycle::try_transition_lock)
+                            .transpose()?;
+                        if let Some(session) = live_session.as_ref() {
+                            let sessions = app
+                                .chat
+                                .sessions
+                                .try_read()
+                                .map_err(|_| "Child registry busy; retry continuation")?;
+                            if !sessions
+                                .get(&child_chat_id)
+                                .is_some_and(|current| Arc::ptr_eq(current, session))
+                            {
+                                return Err(
+                                    "Child session changed before checkout preparation".to_string()
+                                );
+                            }
+                            let guarded = session
+                                .try_lock()
+                                .map_err(|_| "Child session busy; retry continuation")?;
+                            if Some(resume_session_revision(&guarded)?.as_str())
+                                != live_revision.as_deref()
+                            {
+                                return Err(
+                                    "Child session changed before checkout preparation".to_string()
+                                );
+                            }
+                        }
+                        let previous = isolated_worktree.as_ref().ok_or(
+                            "original merge target unavailable; spawn a new agent instead",
+                        )?;
+                        let (current_parent, current_abort) =
+                            launch_parent_state(&app, &parent_chat_id).await?;
+                        app.agents
+                            .validate_parent_run(&parent_chat_id, parent_run.as_ref())
+                            .await?;
+                        if !Arc::ptr_eq(&current_abort, &parent_abort)
+                            || current_abort.load(Ordering::Acquire)
+                            || abort.load(Ordering::Acquire)
+                            || launch_stopping(&app)
+                        {
+                            return Err("Cancelled before checkout preparation".into());
+                        }
+                        app.agents
+                            .validate_parent_run(&parent_chat_id, current_parent.as_ref())
+                            .await?;
+                        let fresh =
+                            create_continued_worktree(&app, previous, &child_chat_id, setup.operation()).await?;
+                        fresh_worktree = Some(fresh.clone());
+                        if abort.load(Ordering::Acquire)
+                            || parent_abort.load(Ordering::Acquire)
+                            || launch_stopping(&app)
+                        {
+                            return Err("Cancelled during checkout preparation".into());
+                        }
+                        let current = recover_run_config(&app, &parent_chat_id, &agent_id).await?;
+                        config.tools =
+                            super::tool_authority::intersect(&config.tools, &current.config.tools);
+                        config.autonomous_no_confirm &= current.config.autonomous_no_confirm;
+                        config.auto_approve_editing_tools &=
+                            current.config.auto_approve_editing_tools;
+                        config.auto_approve_dangerous_commands &=
+                            current.config.auto_approve_dangerous_commands;
+                        super::launch_spec::clear_current_context(
+                            &app.gcx,
+                            &messages,
+                            &model.base,
+                        )?;
+                        let current = crate::chat::trajectories::load_trajectory_for_chat(
+                            app.gcx.clone(),
+                            &child_chat_id,
+                        )
+                        .await
+                        .ok_or("saved child trajectory unavailable")?;
+                        if resume_trajectory_revision(&current)? != trajectory_revision {
+                            return Err(
+                                "child trajectory changed while preparing continuation".into()
+                            );
+                        }
+                        let seed = app
+                            .agents
+                            .run_config(
+                                &parent_chat_id,
+                                &agent_id,
+                                generation,
+                                limits.launch_context_bytes,
+                            )
+                            .await?;
+                        let applied =
+                            refact_agents_core::storage::AcceptedLaunchPayload::serialize(
+                                &AppliedCheckout {
+                                    schema_version: 1,
+                                    operation: setup.operation(),
+                                    seed_digest: launch_digest(&seed),
+                                    worktree: fresh.meta.clone(),
+                                },
+                                limits.launch_context_bytes,
+                            )?;
+                        let mut saved_config = config.clone();
+                        saved_config.worktree = Some(fresh.meta.clone());
+                        saved_config.max_steps = max_steps;
+                        match app
+                            .agents
+                            .commit_checkout_setup(
+                                setup,
+                                fresh.meta.id.clone(),
+                                fresh.meta.branch.clone(),
+                                &applied,
+                                |_| {
+                                    app.agent_executions
+                                        .remember_config(&agent_id, saved_config)
+                                },
+                            )
+                            .await
+                        {
+                            Ok(_) => retain_checkout = true,
+                            Err(error) => {
+                                retain_checkout = error.retain_checkout;
+                                return Err(error.message);
+                            }
+                        }
+                        config.worktree = Some(fresh.meta.clone());
+                        app.agents
+                            .validate_parent_run(&parent_chat_id, parent_run.as_ref())
+                            .await?;
+                        if abort.load(Ordering::Acquire)
+                            || parent_abort.load(Ordering::Acquire)
+                            || launch_stopping(&app)
+                        {
+                            return Err(
+                                "Cancelled after checkout publication; retain for recovery".into(),
+                            );
+                        }
+                        let current = recover_run_config(&app, &parent_chat_id, &agent_id).await?;
+                        config.tools =
+                            super::tool_authority::intersect(&config.tools, &current.config.tools);
+                        config.autonomous_no_confirm &= current.config.autonomous_no_confirm;
+                        config.auto_approve_editing_tools &=
+                            current.config.auto_approve_editing_tools;
+                        config.auto_approve_dangerous_commands &=
+                            current.config.auto_approve_dangerous_commands;
+                        super::launch_spec::clear_current_context(
+                            &app.gcx,
+                            &messages,
+                            &model.base,
+                        )?;
+                        install_resumed_session(
+                            &app,
+                            &trajectory,
+                            &trajectory.messages,
+                            &config,
+                            &project_root,
+                            live_session.as_ref(),
+                            live_revision.as_deref(),
+                            false,
+                            transition.as_ref(),
+                        )
+                        .await?;
+                        live_session = app.chat.sessions.read().await.get(&child_chat_id).cloned();
+                        let session = live_session.as_ref().ok_or("child session unavailable")?;
+                        crate::chat::trajectories::flush_trajectory_for_session(
+                            app.clone(),
+                            session.clone(),
+                        )
+                        .await?;
+                        live_revision = Some(resume_session_revision(&*session.lock().await)?);
+                        trajectory = crate::chat::trajectories::load_trajectory_for_chat(
+                            app.gcx.clone(),
+                            &child_chat_id,
+                        )
+                        .await
+                        .ok_or("saved child trajectory unavailable")?;
+                        isolated_worktree = Some(fresh);
+                        Ok::<_, String>(())
+                    }
+                    .await;
+                    if let Err(error) = prepared {
+                        if !retain_checkout {
+                            if let Some(fresh) = fresh_worktree.as_ref() {
+                                let cleanup = async {
+                                    app.agents.with_checkout_setup(&attempt, |_| ()).await?;
+                                    if parent_abort.load(Ordering::Acquire) || launch_stopping(&app) {
+                                        return Err("checkout cleanup authority changed; retained for inspection".to_string());
+                                    }
+                                    let service = WorktreeService::new_async(
+                                        app.gcx.cache_dir.clone(),
+                                        fresh.source_workspace_root.clone(),
+                                    )
+                                    .await?;
+                                    let observed = service.get_worktree(&fresh.meta.id).await?;
+                                    if observed.meta != fresh.meta
+                                        || observed.status.dirty
+                                        || observed.status.conflicted
+                                        || observed.status.error.is_some()
+                                        || !observed.status.is_git_worktree
+                                        || observed.status.head_commit != fresh.meta.base_commit
+                                        || observed.references.iter().any(|reference| {
+                                            reference.chat_id.as_deref()
+                                                != Some(child_chat_id.as_str())
+                                                || reference.agent_id.is_some()
+                                                || reference.task_id.is_some()
+                                                || reference.card_id.is_some()
+                                        })
+                                    {
+                                        return Err(
+                                            "unpublished checkout changed; retained for inspection"
+                                                .to_string(),
+                                        );
+                                    }
+                                    for reference in observed.references {
+                                        service
+                                            .remove_reference(&fresh.meta.id, &reference)
+                                            .await?;
+                                    }
+                                    let archive =
+                                        service.preview_worktree_archive(&fresh.meta.id).await?;
+                                    if archive.record.meta != fresh.meta
+                                        || Some(&archive.head) != fresh.meta.base_commit.as_ref()
+                                    {
+                                        return Err(
+                                            "unpublished checkout changed; retained for inspection"
+                                                .to_string(),
+                                        );
+                                    }
+                                    service.archive_worktree_checked(archive).await
+                                }
+                                .await;
+                                if let Err(cleanup) = cleanup {
+                                    return Err(format!("{error}; {cleanup}"));
+                                }
+                            }
+                        }
+                        return Err(error);
+                    }
+                }
+                if replacement.is_none() {
+                    app.agents.with_checkout_setup(&attempt, |_| ()).await?;
+                }
+                if abort.load(Ordering::Acquire)
+                    || parent_abort.load(Ordering::Acquire)
+                    || launch_stopping(&app)
+                {
+                    return Err("Cancelled before resumed session start".into());
+                }
                 install_resumed_session(
                     &app,
                     &trajectory,
@@ -2493,6 +3270,7 @@ pub(super) async fn resume_agent_inner(
                     live_session.as_ref(),
                     live_revision.as_deref(),
                     true,
+                    None,
                 )
                 .await?;
                 let session = app
@@ -2515,7 +3293,7 @@ pub(super) async fn resume_agent_inner(
             if let Err(error) = validation {
                 task_intent.settle().await;
                 app.agent_executions.forget_launch_intent(&child_chat_id);
-                finish_resume_error(&app, &agent_id, error, false).await;
+                finish_resume_error(&app, &agent_id, generation, &abort, error, false).await;
                 return;
             }
             let progress_task = install_agent_progress(&app, &agent_id, &mut config, used_steps);
@@ -2537,7 +3315,11 @@ pub(super) async fn resume_agent_inner(
                     }
                     emit_subagent_hook(&app, HookEvent::SubagentStart, &running, true).await;
                     emit_background_agent_update(app.clone(), &running).await;
-                    run_background_subchat(app.gcx.clone(), messages, config).await
+                    if abort.load(Ordering::Acquire) || launch_stopping(&app) {
+                        Err("Aborted before resumed execution".into())
+                    } else {
+                        run_background_subchat(app.gcx.clone(), messages, config).await
+                    }
                 }
                 Ok(_) => Err("Aborted before resumed execution".into()),
                 Err(error) => Err(error),
@@ -2594,6 +3376,7 @@ pub(super) async fn resume_agent_inner(
                         &agent_id,
                         &old.title,
                         isolated_worktree,
+                        parent_run.clone(),
                     )
                     .await
                     .unwrap_or(record);
@@ -2605,10 +3388,18 @@ pub(super) async fn resume_agent_inner(
         });
     if let Err(error) = registration {
         launch_intent.settle().await;
-        finish_resume_error(&rejected_app, &rejected_agent, error.clone(), true).await;
+        finish_resume_error(
+            &rejected_app,
+            &rejected_agent,
+            generation,
+            &rejected_abort,
+            error.clone(),
+            true,
+        )
+        .await;
         return Err(error);
     }
-    Ok(record)
+    Ok(response)
 }
 
 /// The notice a resumed child sees, derived from the state it actually stopped
@@ -2686,7 +3477,9 @@ fn resume_trajectory_revision(
     ))
 }
 
-fn resume_session_revision(session: &crate::chat::types::ChatSession) -> Result<String, String> {
+pub(super) fn resume_session_revision(
+    session: &crate::chat::types::ChatSession,
+) -> Result<String, String> {
     if session.closed
         || session.turn_depth > 0
         || session.is_compressing
@@ -2701,10 +3494,11 @@ fn resume_session_revision(session: &crate::chat::types::ChatSession) -> Result<
         &session.goal,
         &session.goal_ledger,
         session.trajectory_version,
+        &session.work_project_root,
     ))
 }
 
-async fn install_resumed_session(
+pub(super) async fn install_resumed_session(
     app: &AppState,
     trajectory: &crate::chat::trajectories::LoadedTrajectory,
     messages: &[ChatMessage],
@@ -2713,21 +3507,57 @@ async fn install_resumed_session(
     expected_session: Option<&Arc<AMutex<crate::chat::types::ChatSession>>>,
     expected_revision: Option<&str>,
     start: bool,
+    held_transition: Option<&crate::chat::worktree_lifecycle::AttachmentTransitionGuard>,
 ) -> Result<(), String> {
     let chat_id = &trajectory.thread.id;
-    let mut sessions = app.chat.sessions.write().await;
-    if let Some(session) = sessions.get(chat_id) {
-        if !expected_session.is_some_and(|expected| Arc::ptr_eq(expected, session)) {
-            return Err("child session changed while resume was queued".into());
-        }
-        let mut session = session.lock().await;
-        if Some(resume_session_revision(&session)?.as_str()) != expected_revision {
-            return Err("child session was edited while resume was queued".into());
-        }
-        if crate::coordination::scope::session_source_root(&session)
+    if let Some(expected) = expected_session {
+        let acquired;
+        let _transition = match held_transition {
+            Some(transition) if transition.is_for(expected) => transition,
+            Some(_) => return Err("Resume attachment guard does not match child session".into()),
+            None => {
+                acquired = crate::chat::worktree_lifecycle::try_transition_lock(expected)?;
+                &acquired
+            }
+        };
+        let (saved_source, requests, aborted, interrupted) = {
+            let session = expected.lock().await;
+            (
+                crate::coordination::scope::session_source_root(&session),
+                session.recent_request_ids.clone(),
+                session.abort_flag.load(Ordering::Acquire),
+                session.user_interrupt_flag.load(Ordering::Acquire),
+            )
+        };
+        if saved_source
+            .as_ref()
             .is_some_and(|saved| saved.canonicalize().ok().as_deref() != Some(source))
         {
             return Err("saved child session does not match accepted project scope".into());
+        }
+        let sessions = app
+            .chat
+            .sessions
+            .try_read()
+            .map_err(|_| "child session registry busy; retry resume")?;
+        if !sessions
+            .get(chat_id)
+            .is_some_and(|session| Arc::ptr_eq(expected, session))
+        {
+            return Err("child session changed while resume was queued".into());
+        }
+        let mut session = expected
+            .try_lock()
+            .map_err(|_| "child session busy; retry resume")?;
+        if Some(resume_session_revision(&session)?.as_str()) != expected_revision {
+            return Err("child session was edited while resume was queued".into());
+        }
+        if crate::coordination::scope::session_source_root(&session) != saved_source
+            || session.recent_request_ids != requests
+            || session.abort_flag.load(Ordering::Acquire) != aborted
+            || session.user_interrupt_flag.load(Ordering::Acquire) != interrupted
+        {
+            return Err("child session scope changed or resume was cancelled".into());
         }
         session.work_project_root = Some(source.to_path_buf());
         session.thread.autonomous_no_confirm &= config.autonomous_no_confirm;
@@ -2741,9 +3571,6 @@ async fn install_resumed_session(
             session.increment_version();
         }
     } else {
-        if expected_session.is_some() {
-            return Err("child session disappeared while resume was queued".into());
-        }
         let mut thread = trajectory.thread.clone();
         thread.autonomous_no_confirm &= config.autonomous_no_confirm;
         thread.auto_approve_editing_tools &= config.auto_approve_editing_tools;
@@ -2767,7 +3594,13 @@ async fn install_resumed_session(
         } else {
             session.increment_version();
         }
-        sessions.insert(chat_id.clone(), Arc::new(AMutex::new(session)));
+        let session = Arc::new(AMutex::new(session));
+        let _transition = crate::chat::worktree_lifecycle::try_transition_lock(&session)?;
+        let mut sessions = app.chat.sessions.write().await;
+        if sessions.contains_key(chat_id) {
+            return Err("child session appeared while resume was queued".into());
+        }
+        sessions.insert(chat_id.clone(), session);
     }
     Ok(())
 }
@@ -2849,12 +3682,18 @@ fn validate_resume_tool_pairs(messages: &[ChatMessage]) -> Result<(), String> {
     }
 }
 
-async fn finish_resume_error(app: &AppState, agent_id: &str, error: String, cancelled: bool) {
-    let terminal = if cancelled {
-        app.agents.mark_cancelled(agent_id, Some(error)).await
-    } else {
-        app.agents.mark_failed(agent_id, error).await
-    };
+async fn finish_resume_error(
+    app: &AppState,
+    agent_id: &str,
+    generation: u64,
+    abort: &Arc<AtomicBool>,
+    error: String,
+    cancelled: bool,
+) {
+    let terminal = app
+        .agents
+        .finish_queued_resume(agent_id, generation, abort, error, cancelled)
+        .await;
     if let Ok(record) = terminal {
         emit_background_agent_update(app.clone(), &record).await;
         let _ = crate::agents::push::push_completion_to_parent(app.clone(), &record).await;
@@ -2965,12 +3804,14 @@ async fn run_spawned_agent(
     child_chat_id: String,
     abort_flag: Arc<AtomicBool>,
     spawned_worktree: Option<SpawnedWorktree>,
+    parent_run: Option<refact_agents_core::registry::ParentRun>,
 ) -> BackgroundAgent {
     config.abort_flag = Some(abort_flag.clone());
     config.background_agent_id = Some(agent_id.clone());
     config.chat_id = Some(stable_child_chat_id(&config, &child_chat_id));
     config.final_step_force_answer = req.native_supervision_guard.is_none();
     if let Err(error) = persist_run_config(&app, &agent_id, &config).await {
+        cleanup_spawn_worktree(app.clone(), spawned_worktree.as_ref()).await;
         return app
             .agents
             .mark_failed(&agent_id, error)
@@ -2999,10 +3840,12 @@ async fn run_spawned_agent(
         }
         Ok(record) if record.status.is_terminal() => {
             progress_task.finish().await;
+            cleanup_spawn_worktree(app.clone(), spawned_worktree.as_ref()).await;
             return record;
         }
         result => {
             progress_task.finish().await;
+            cleanup_spawn_worktree(app.clone(), spawned_worktree.as_ref()).await;
             return app
                 .agents
                 .mark_cancelled(&agent_id, Some("Launch stopped before execution".into()))
@@ -3093,9 +3936,15 @@ async fn run_spawned_agent(
     let final_record = match final_record {
         Ok(record) => {
             let record = if record.status == crate::agents::types::BgAgentStatus::Completed {
-                finalize_spawn_worktree(app.clone(), &agent_id, &req.title, spawned_worktree)
-                    .await
-                    .unwrap_or(record)
+                finalize_spawn_worktree(
+                    app.clone(),
+                    &agent_id,
+                    &req.title,
+                    spawned_worktree,
+                    parent_run,
+                )
+                .await
+                .unwrap_or(record)
             } else {
                 record
             };
@@ -3369,6 +4218,7 @@ async fn create_continued_worktree(
     app: &AppState,
     previous: &SpawnedWorktree,
     child_chat_id: &str,
+    operation: Uuid,
 ) -> Result<SpawnedWorktree, String> {
     let base_commit = continuation_base_commit(previous).await?;
     let service = WorktreeService::new_async(
@@ -3378,7 +4228,7 @@ async fn create_continued_worktree(
     .await?;
     let created = service
         .create_worktree(CreateWorktreeRequest {
-            branch: Some(format!("refact/subagent/{}", Uuid::new_v4().simple())),
+            branch: Some(format!("refact/subagent/{}", operation.simple())),
             base_branch: previous.base_branch.clone(),
             base_commit: Some(base_commit),
             chat_id: Some(child_chat_id.to_string()),
@@ -3423,6 +4273,7 @@ async fn finalize_spawn_worktree(
     agent_id: &str,
     title: &str,
     spawned: Option<SpawnedWorktree>,
+    parent_run: Option<refact_agents_core::registry::ParentRun>,
 ) -> Result<BackgroundAgent, String> {
     let Some(spawned) = spawned else {
         return app.agents.get_any(agent_id).await;
@@ -3432,27 +4283,7 @@ async fn finalize_spawn_worktree(
     }
     let pending = app.agents.set_merge_status(agent_id, "pending").await?;
     emit_background_agent_update(app.clone(), &pending).await;
-    if let Some(parent_worktree) = spawned.parent_worktree.clone() {
-        return finalize_nested_spawn_worktree(app, agent_id, title, spawned, &parent_worktree)
-            .await;
-    }
-    let service =
-        WorktreeService::new_async(app.gcx.cache_dir.clone(), spawned.source_workspace_root)
-            .await?;
-    let result = service
-        .merge_worktree(
-            &spawned.meta.id,
-            MergeWorktreeRequest {
-                strategy: WorktreeMergeStrategy::Squash,
-                delete_after_merge: true,
-                include_uncommitted: true,
-                target_branch: spawned.base_branch,
-                commit_message: Some(format!("subagent: {}", title)),
-                generate_commit_message: false,
-                acknowledge_dirty_baseline: false,
-            },
-        )
-        .await;
+    let result = merge_spawn_worktree(&app, agent_id, title, spawned, parent_run).await;
     match result {
         Ok(result) if result.merged || result.status == "nothing_to_merge" => {
             app.agents.set_merge_status(agent_id, "merged").await
@@ -3496,69 +4327,145 @@ async fn finalize_spawn_worktree(
     }
 }
 
-async fn finalize_nested_spawn_worktree(
-    app: AppState,
+async fn merge_spawn_worktree(
+    app: &AppState,
     agent_id: &str,
     title: &str,
     spawned: SpawnedWorktree,
-    parent_worktree: &WorktreeMeta,
-) -> Result<BackgroundAgent, String> {
-    let child_branch = spawned
-        .meta
-        .branch
-        .as_deref()
-        .ok_or_else(|| "isolated subagent worktree has no branch".to_string())?
-        .to_string();
-    let parent_root = parent_worktree.root.clone();
-    let child_root = spawned.meta.root.clone();
-    let commit_message = format!("subagent: {title}");
-    let merge_result = tokio::task::spawn_blocking(move || {
-        let result = crate::worktrees::git::commit_all(&child_root, &commit_message)
-            .and_then(|_| {
-                crate::worktrees::git::run_git(&parent_root, &["merge", "--squash", &child_branch])
-            })
-            .and_then(|_| {
-                crate::worktrees::git::run_git_with_refact_author(
-                    &parent_root,
-                    &["commit", "-m", &commit_message, "--no-gpg-sign"],
-                )
-            });
-        if result.is_err() {
-            crate::worktrees::git::cleanup_failed_merge(&parent_root);
-        }
-        result
-    })
+    parent_run: Option<refact_agents_core::registry::ParentRun>,
+) -> Result<crate::worktrees::types::MergeWorktreeResponse, String> {
+    let service = prepare_spawn_merge_service(
+        app,
+        agent_id,
+        spawned.source_workspace_root,
+        spawned.meta.clone(),
+        spawned.parent_worktree,
+        parent_run,
+    )
+    .await?;
+    crate::tools::tool_task_merge_agent::merge_under_available_lease(
+        app,
+        &service,
+        &spawned.meta.id,
+        MergeWorktreeRequest {
+            strategy: WorktreeMergeStrategy::Squash,
+            delete_after_merge: true,
+            include_uncommitted: true,
+            target_branch: spawned.base_branch,
+            commit_message: Some(format!("subagent: {title}")),
+            generate_commit_message: false,
+            acknowledge_dirty_baseline: false,
+        },
+        None,
+        |_gcx, _request| async { Err("No subagent post-merge check requested".to_string()) },
+    )
     .await
-    .map_err(|error| format!("nested subagent merge task failed: {error}"))?;
-    match merge_result {
-        Ok(_) => {
-            let service = WorktreeService::new_async(
-                app.gcx.cache_dir.clone(),
-                spawned.source_workspace_root,
-            )
-            .await?;
-            service
-                .delete_worktree(&spawned.meta.id, true, true)
-                .await?;
-            app.agents.set_merge_status(agent_id, "merged").await
-        }
-        Err(error) => {
-            if error.to_lowercase().contains("conflict") {
-                app.agents
-                    .set_merge_outcome(agent_id, "conflict", Some(error), None)
-                    .await
-            } else {
-                app.agents
-                    .set_merge_outcome(
-                        agent_id,
-                        "failed",
-                        None,
-                        Some(format!("Auto-merge failed: {error}")),
-                    )
-                    .await
+    .map(|(response, _, _)| response)
+}
+
+pub(super) async fn prepare_spawn_merge_service(
+    app: &AppState,
+    agent_id: &str,
+    source_workspace_root: PathBuf,
+    source: WorktreeMeta,
+    parent_worktree: Option<WorktreeMeta>,
+    parent_run: Option<refact_agents_core::registry::ParentRun>,
+) -> Result<WorktreeService, String> {
+    let parent_authority = if parent_worktree.is_some() {
+        let record = app.agents.get_any(agent_id).await?;
+        let parent_session = app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get(&record.parent_chat_id)
+            .cloned()
+            .ok_or("Nested merge parent session unavailable")?;
+        let (thread, project_root, version, requests) = {
+            let parent = parent_session.lock().await;
+            if parent.closed
+                || parent.abort_flag.load(Ordering::Acquire)
+                || parent.user_interrupt_flag.load(Ordering::Acquire)
+                || parent.thread.worktree != parent_worktree
+            {
+                return Err("Nested merge parent session checkout changed or cancelled".into());
             }
-        }
+            (
+                parent.thread.clone(),
+                parent.work_project_root.clone(),
+                parent.trajectory_version,
+                parent.recent_request_ids.clone(),
+            )
+        };
+        let app = app.clone();
+        let runtime = tokio::runtime::Handle::current();
+        let transition = std::sync::Mutex::new(None);
+        let authority: refact_worktrees::locking::PhaseValidator = Arc::new(move || {
+            if launch_stopping(&app) {
+                return Err("Nested merge stopped; retain source".into());
+            }
+            runtime.block_on(
+                app.agents
+                    .validate_parent_run(&record.parent_chat_id, parent_run.as_ref()),
+            )?;
+            let mut transition = transition
+                .try_lock()
+                .map_err(|_| "Nested merge parent validation already in progress")?;
+            if transition.is_none() {
+                *transition = Some(crate::chat::worktree_lifecycle::try_transition_lock(
+                    &parent_session,
+                )?);
+            }
+            let sessions = app
+                .chat
+                .sessions
+                .try_read()
+                .map_err(|_| "Nested merge parent session registry busy; retain source")?;
+            if !sessions
+                .get(&record.parent_chat_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &parent_session))
+            {
+                return Err("Nested merge parent session identity changed".into());
+            }
+            let parent = parent_session
+                .try_lock()
+                .map_err(|_| "Nested merge parent session busy; retain source")?;
+            crate::chat::worktree_lifecycle::check_unchanged_attachment(&parent, &thread)?;
+            if parent.chat_id != record.parent_chat_id
+                || parent.thread.id != thread.id
+                || parent.work_project_root != project_root
+                || parent.abort_flag.load(Ordering::Acquire)
+                || parent.user_interrupt_flag.load(Ordering::Acquire)
+                || parent.trajectory_version != version
+                || parent.recent_request_ids != requests
+                || parent.command_queue.iter().any(|request| {
+                    matches!(
+                        request.command,
+                        crate::chat::types::ChatCommand::UserMessage { .. }
+                            | crate::chat::types::ChatCommand::Abort { .. }
+                            | crate::chat::types::ChatCommand::SetParams { .. }
+                    )
+                })
+            {
+                return Err(
+                    "Nested merge parent control changed or cancelled; retain source".into(),
+                );
+            }
+            Ok(())
+        });
+        Some(authority)
+    } else {
+        None
+    };
+    let mut service =
+        WorktreeService::new_async(app.gcx.cache_dir.clone(), source_workspace_root).await?;
+    if let Some(parent) = parent_worktree {
+        service = service.with_nested_merge_identity(source, parent);
     }
+    if let Some(authority) = parent_authority {
+        service = service.with_merge_authority(authority);
+    }
+    Ok(service)
 }
 
 pub(crate) async fn push_sibling_notice(
@@ -3667,8 +4574,17 @@ async fn emit_subagent_hook(
 pub async fn emit_background_agent_update(app: AppState, record: &BackgroundAgent) {
     if record.status.is_terminal() {
         if let Some(chat_id) = record.child_chat_id.as_deref() {
-            if crate::agents::seal::is_sealed(&app, chat_id).await {
-                crate::chat::notifications::stop_chat_processes(&app.gcx, chat_id).await;
+            if let Some(cleanup) = crate::chat::notifications::prepare_sealed_chat_process_cleanup(
+                &app,
+                chat_id,
+                crate::chat::notifications::ProcessCleanupOwner::AgentTerminal {
+                    agent_id: &record.agent_id,
+                    run_generation: record.run_generation,
+                },
+            )
+            .await
+            {
+                crate::chat::notifications::stop_chat_processes(&app.gcx, cleanup).await;
             }
         }
     }

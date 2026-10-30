@@ -332,20 +332,24 @@ impl Tool for ToolWorktreeMerge {
             }
         };
 
-        let response = service
-            .merge_worktree(
-                &worktree_id,
-                MergeWorktreeRequest {
-                    strategy,
-                    delete_after_merge,
-                    include_uncommitted,
-                    target_branch,
-                    commit_message,
-                    generate_commit_message: false,
-                    acknowledge_dirty_baseline,
-                },
-            )
-            .await?;
+        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let (response, _, _) = crate::tools::tool_task_merge_agent::merge_under_available_lease(
+            &app,
+            &service,
+            &worktree_id,
+            MergeWorktreeRequest {
+                strategy,
+                delete_after_merge,
+                include_uncommitted,
+                target_branch,
+                commit_message,
+                generate_commit_message: false,
+                acknowledge_dirty_baseline,
+            },
+            None,
+            |_, _| async { Err("No post-merge check requested".into()) },
+        )
+        .await?;
 
         Ok((
             false,

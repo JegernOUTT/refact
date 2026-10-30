@@ -77,6 +77,13 @@ pub struct CreateCardCommentRequest {
 }
 
 #[derive(Deserialize)]
+pub struct CreateCardCommentByIdRequest {
+    pub card_id: String,
+    #[serde(flatten)]
+    pub comment: CreateCardCommentRequest,
+}
+
+#[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum BoardPatch {
     CreateCard {
@@ -384,6 +391,26 @@ pub async fn handle_create_card_comment(
     Path((task_id, card_id)): Path<(String, String)>,
     Json(req): Json<CreateCardCommentRequest>,
 ) -> Result<Json<TaskBoard>, (StatusCode, String)> {
+    create_card_comment_for_api(app, task_id, card_id, req).await
+}
+
+pub async fn handle_create_card_comment_by_id(
+    State(app): State<AppState>,
+    Path(task_id): Path<String>,
+    Json(req): Json<CreateCardCommentByIdRequest>,
+) -> Result<Json<TaskBoard>, (StatusCode, String)> {
+    create_card_comment_for_api(app, task_id, req.card_id, req.comment).await
+}
+
+async fn create_card_comment_for_api(
+    app: AppState,
+    task_id: String,
+    card_id: String,
+    req: CreateCardCommentRequest,
+) -> Result<Json<TaskBoard>, (StatusCode, String)> {
+    if card_id.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Card ID cannot be empty".into()));
+    }
     let (board, _) = comments::create_card_comment(
         app.gcx.clone(),
         &task_id,
@@ -1838,6 +1865,176 @@ mod tests {
         assert!(comment.reply_to.is_none());
         assert_eq!(comment.id.len(), 36);
         assert!(Uuid::parse_str(&comment.id).is_ok());
+    }
+
+    #[tokio::test]
+    async fn comment_routes_preserve_opaque_card_identity_and_task_scope() {
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        async fn post(router: &axum::Router, uri: &str, body: Value) -> (StatusCode, Vec<u8>) {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            (status, bytes.to_vec())
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let task_id = "task-opaque-comments";
+        let gcx = setup_task(temp.path(), task_id).await;
+        let long_id = "legacy".repeat(50);
+        let card_ids = [
+            ".",
+            "..",
+            "A/B",
+            "x?y",
+            " x?y&card_id=control#%2F+ ",
+            &long_id,
+        ];
+        let mut board = storage::load_board(gcx.clone(), task_id).await.unwrap();
+        for card_id in card_ids.iter().copied().chain(["control"]) {
+            board = handle_patch_board(
+                State(app(gcx.clone())),
+                Path(task_id.to_string()),
+                Json(create_card_request(board.rev, card_id)),
+            )
+            .await
+            .unwrap()
+            .0;
+            assert_eq!(board.get_card(card_id).unwrap().id, card_id);
+        }
+        let (board, _) = storage::update_board_atomic(gcx.clone(), task_id, |board| {
+            board.owner_chat_id = Some("planner-opaque".into());
+            comments::add_comment_to_board(
+                board,
+                CreateCardComment {
+                    card_id: "control".into(),
+                    body: "Existing control comment".into(),
+                    author_role: "user".into(),
+                    author_id: None,
+                    reply_to: None,
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let control = serde_json::to_value(board.get_card("control").unwrap()).unwrap();
+        assert_eq!(board.get_card("control").unwrap().comments.len(), 1);
+        let foreign = storage::create_task(gcx.clone(), "Foreign task")
+            .await
+            .unwrap();
+        let mut foreign_board = board.clone();
+        foreign_board.get_card_mut("control").unwrap().id = "foreign-only".into();
+        storage::save_board_checked(gcx.clone(), &foreign.id, 0, &foreign_board)
+            .await
+            .unwrap();
+        let foreign_before =
+            serde_json::to_value(storage::load_board(gcx.clone(), &foreign.id).await.unwrap())
+                .unwrap();
+        assert!(foreign_before["cards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|card| {
+                card["id"] == "foreign-only" && card["comments"].as_array().unwrap().len() == 1
+            }));
+        let router = crate::http::routers::make_refact_http_server(app(gcx.clone()));
+        let uri = format!(
+            "/v1/tasks/{task_id}/cards/comments?card_id=control&task_id={}",
+            foreign.id
+        );
+        let mut expected_rev = board.rev;
+        for card_id in card_ids {
+            let (status, bytes) = post(&router, &uri, json!({
+                "card_id": card_id, "body": format!("Comment on {card_id}"), "author_role": "user",
+            })).await;
+            assert_eq!(status, StatusCode::OK, "card {card_id}");
+            let returned: TaskBoard = serde_json::from_slice(&bytes).unwrap();
+            expected_rev += 1;
+            assert_eq!(returned.rev, expected_rev);
+            assert_eq!(returned.owner_chat_id.as_deref(), Some("planner-opaque"));
+            let target = returned.get_card(card_id).unwrap();
+            assert_eq!(target.comments.len(), 1);
+            assert_eq!(target.comments[0].body, format!("Comment on {card_id}"));
+            assert_eq!(
+                serde_json::to_value(returned.get_card("control").unwrap()).unwrap(),
+                control
+            );
+        }
+        let (status, _) = post(
+            &router,
+            &format!("/v1/tasks/{task_id}/cards/A%2FB/comments"),
+            json!({
+                "body": "Legacy path comment", "author_role": "user"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        expected_rev += 1;
+        let before_rejections = storage::load_board(gcx.clone(), task_id).await.unwrap();
+        assert_eq!(before_rejections.rev, expected_rev);
+        assert_eq!(
+            before_rejections.get_card("A/B").unwrap().comments[1].body,
+            "Legacy path comment"
+        );
+        for (card_id, expected) in [
+            ("foreign-only", StatusCode::NOT_FOUND),
+            ("", StatusCode::BAD_REQUEST),
+        ] {
+            let (status, _) = post(
+                &router,
+                &uri,
+                json!({
+                    "card_id": card_id, "body": "Must not be written", "author_role": "user"
+                }),
+            )
+            .await;
+            assert_eq!(status, expected, "card {card_id}");
+        }
+        let (status, _) = post(
+            &router,
+            &uri,
+            json!({
+                "body": "Missing target", "author_role": "user"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let (status, _) = post(
+            &router,
+            &uri,
+            json!({
+                "card_id": "x".repeat(15 * 1024 * 1024),
+                "body": "Over transport limit", "author_role": "user"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        let stored = storage::load_board(gcx.clone(), task_id).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&stored).unwrap(),
+            serde_json::to_value(before_rejections).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(stored.get_card("control").unwrap()).unwrap(),
+            control
+        );
+        assert_eq!(
+            serde_json::to_value(storage::load_board(gcx, &foreign.id).await.unwrap()).unwrap(),
+            foreign_before
+        );
     }
 
     #[tokio::test]

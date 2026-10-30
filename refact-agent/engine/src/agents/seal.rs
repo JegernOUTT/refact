@@ -22,10 +22,19 @@ pub async fn seal_reason(app: &AppState, chat_id: &str) -> Option<SealReason> {
         return None;
     }
     let card_id = task_meta.card_id?;
-    let card = match storage::card_seal_state(app.gcx.clone(), &task_meta.task_id, &card_id).await {
+    task_card_seal_reason(app, chat_id, &task_meta.task_id, &card_id).await
+}
+
+pub(crate) async fn task_card_seal_reason(
+    app: &AppState,
+    chat_id: &str,
+    task_id: &str,
+    card_id: &str,
+) -> Option<SealReason> {
+    let card = match storage::card_seal_state(app.gcx.clone(), task_id, card_id).await {
         Ok(card) => card,
         Err(error) => {
-            tracing::warn!(chat_id, task_id = %task_meta.task_id, %error, "Failed to read task board for chat seal");
+            tracing::warn!(chat_id, task_id = %task_id, %error, "Failed to read task board for chat seal");
             return None;
         }
     };
@@ -43,8 +52,8 @@ pub async fn seal_reason(app: &AppState, chat_id: &str) -> Option<SealReason> {
         Some(_) => return None,
     };
     Some(SealReason::TaskCardLeftDoing {
-        task_id: task_meta.task_id,
-        card_id,
+        task_id: task_id.to_string(),
+        card_id: card_id.to_string(),
         column,
     })
 }

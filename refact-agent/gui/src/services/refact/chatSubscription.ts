@@ -480,6 +480,7 @@ export type ChatSubscriptionCallbacks = {
   onConnected?: () => void;
   onDisconnected?: () => void;
   onActivity?: () => void;
+  onAgentRosterDenied?: (event: EventEnvelope) => void;
 };
 
 export type SubscriptionOptions = {
@@ -659,7 +660,8 @@ export function subscribeToChatEvents(
               ) {
                 throw new Error("Invalid chunked snapshot metadata");
               }
-              normalizeBackgroundAgentFields(parsed);
+              if (!normalizeBackgroundAgentFields(parsed))
+                callbacks.onAgentRosterDenied?.(parsed);
               chunkedSnapshot = {
                 snapshot: { ...parsed, messages: [] },
                 chunks: [],
@@ -712,7 +714,10 @@ export function subscribeToChatEvents(
             if (chunkedSnapshot !== undefined) {
               throw new Error("Unexpected event during chunked snapshot");
             }
-            normalizeBackgroundAgentFields(parsed);
+            if (!normalizeBackgroundAgentFields(parsed)) {
+              callbacks.onAgentRosterDenied?.(parsed);
+              if (parsed.type === "background_agent_updated") continue;
+            }
             normalizeExecProcessSpawnedFields(parsed);
             callbacks.onEvent(parsed);
           } catch (e) {
@@ -812,22 +817,28 @@ function normalizeSeq(obj: EventEnvelope): void {
   throw new Error("Missing/invalid seq");
 }
 
-function normalizeBackgroundAgentFields(obj: EventEnvelope): void {
+function normalizeBackgroundAgentFields(obj: EventEnvelope): boolean {
   if (obj.type === "background_agent_updated") {
     if (!isValidBackgroundAgent(obj.agent)) {
-      throw new Error("Invalid background agent");
+      return false;
     }
     obj.agent = normalizeBackgroundAgentSummary(obj.agent);
-    return;
+    return true;
   }
   if (obj.type === "snapshot") {
-    const backgroundAgents = Array.isArray(obj.background_agents)
-      ? obj.background_agents
-      : [];
-    obj.background_agents = backgroundAgents
-      .filter(isValidBackgroundAgent)
-      .map((agent) => normalizeBackgroundAgentSummary(agent));
+    if (obj.background_agents === undefined) obj.background_agents = [];
+    if (
+      !Array.isArray(obj.background_agents) ||
+      !obj.background_agents.every(isValidBackgroundAgent)
+    ) {
+      obj.background_agents = [];
+      return false;
+    }
+    obj.background_agents = obj.background_agents.map(
+      normalizeBackgroundAgentSummary,
+    );
   }
+  return true;
 }
 
 function normalizeExecProcessSpawnedFields(obj: EventEnvelope): void {

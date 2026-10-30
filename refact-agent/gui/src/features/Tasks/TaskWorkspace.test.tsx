@@ -566,7 +566,7 @@ describe("TaskWorkspace owner workflow requests", () => {
       ),
       http.post("*/v1/privacy/inspect", () =>
         HttpResponse.json({
-          chat_id: ownerId,
+          chat_id: board.owner_chat_id,
           destination: {
             id: "test-provider",
             kind: "provider",
@@ -669,6 +669,24 @@ describe("TaskWorkspace owner workflow requests", () => {
       store.getState().tasksUI.openTasks.find((task) => task.id === TASK_ID)
         ?.activeChat?.chatId,
     ).toBe(PLANNER_ID);
+    await user.click(
+      screen.getByLabelText(
+        "I inspected the prior request and current board evidence",
+      ),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Prepare a separate request" }),
+    );
+    expect(fixture.commands).toHaveLength(1);
+    expect(screen.getByLabelText("Request text")).toHaveValue(
+      "Please verify without merging.",
+    );
+    await user.click(
+      screen.getByText("Prior owner request receipts (most recent 5)"),
+    );
+    expect(screen.getByText(/Planner ACK accepted/)).toHaveTextContent(
+      String(fixture.commands[0].body.client_request_id),
+    );
     act(() => {
       store.dispatch(updateConfig({ apiKey: "synthetic-owner-principal" }));
     });
@@ -727,6 +745,203 @@ describe("TaskWorkspace owner workflow requests", () => {
     expect(screen.queryByText(/Planner ACK accepted/)).not.toBeInTheDocument();
     expect(await screen.findByLabelText("Request text")).toBeEnabled();
     expect(fixture.commands).toHaveLength(2);
+  });
+
+  it("retains a rejected receipt while deliberately correcting and submitting to the reviewed current owner", async () => {
+    const fixture = setupOwnerRequest();
+    fixture.preloadedState.chat.threads[PLANNER_ID].thread.model =
+      "test-provider/test-model";
+    const { user, store } = render(
+      <TaskWorkspace taskId={TASK_ID} cardId={CARD_ID} />,
+      { preloadedState: fixture.preloadedState },
+    );
+    const submit = await screen.findByRole("button", {
+      name: "Request verify card from owner planner",
+    });
+    await waitFor(() => expect(submit).toBeEnabled());
+    await user.clear(screen.getByLabelText("Request text"));
+    await user.type(
+      screen.getByLabelText("Request text"),
+      "Keep the request draft",
+    );
+    await user.click(submit);
+    await screen.findByText(/Request submitted; awaiting planner ACK/);
+    const firstId = String(fixture.commands[0].body.client_request_id);
+    act(() => {
+      store.dispatch(
+        applyChatEvent({
+          type: "ack",
+          chat_id: ownerId,
+          seq: "1",
+          client_request_id: firstId,
+          accepted: false,
+          result: { error: "Inspect updated evidence" },
+        }),
+      );
+    });
+    expect(await screen.findByText(/Planner ACK rejected/)).toHaveTextContent(
+      firstId,
+    );
+    const prepare = screen.getByRole("button", {
+      name: "Prepare a separate request",
+    });
+    expect(prepare).toBeDisabled();
+    fixture.setBoard({
+      ...fixture.getBoard(),
+      owner_chat_id: PLANNER_ID,
+      rev: 2,
+    });
+    await act(async () => {
+      await store
+        .dispatch(
+          tasksApi.endpoints.getBoard.initiate(TASK_ID, {
+            forceRefetch: true,
+            subscribe: false,
+          }),
+        )
+        .unwrap();
+    });
+    await user.click(
+      screen.getByLabelText(
+        "I inspected the prior request and current board evidence",
+      ),
+    );
+    await user.click(prepare);
+    expect(fixture.commands).toHaveLength(1);
+    expect(screen.getByLabelText("Request text")).toHaveValue(
+      "Keep the request draft",
+    );
+    const nextSubmit = screen.getByRole("button", {
+      name: "Request verify card from owner planner",
+    });
+    expect(nextSubmit).toBeDisabled();
+    await user.click(
+      screen.getByRole("button", {
+        name: "Use current owner and revision after review",
+      }),
+    );
+    await user.type(
+      screen.getByLabelText("Request text"),
+      " with corrected evidence",
+    );
+    await user.click(nextSubmit);
+    await screen.findByText(/Request submitted; awaiting planner ACK/);
+    expect(fixture.commands).toHaveLength(2);
+    expect(fixture.commands[1].chatId).toBe(PLANNER_ID);
+    expect(fixture.commands[1].body.client_request_id).not.toBe(firstId);
+    expect(fixture.commands[1].body.content).toContain(
+      `observed board revision: 2; owner: ${PLANNER_ID}`,
+    );
+    expect(fixture.commands[1].body.content).toContain(
+      "Keep the request draft with corrected evidence",
+    );
+    await user.click(
+      screen.getByText("Prior owner request receipts (most recent 5)"),
+    );
+    const prior = screen.getByText(/Planner ACK rejected/);
+    expect(prior).toHaveTextContent(
+      `Owner ${ownerId}, request ${firstId}, observed revision 1`,
+    );
+    expect(prior).toHaveTextContent("Inspect updated evidence");
+    expect(fixture.mutations).toEqual([]);
+  });
+
+  it("requires inspection after uncertain delivery and reruns privacy before any separate request", async () => {
+    const fixture = setupOwnerRequest();
+    server.use(
+      http.post("*/v1/chats/:id/commands", async ({ params, request }) => {
+        fixture.commands.push({
+          chatId: String(params.id),
+          body: (await request.json()) as Record<string, unknown>,
+        });
+        return HttpResponse.error();
+      }),
+    );
+    const { user } = render(
+      <TaskWorkspace taskId={TASK_ID} cardId={CARD_ID} />,
+      { preloadedState: fixture.preloadedState },
+    );
+    const submit = await screen.findByRole("button", {
+      name: "Request verify card from owner planner",
+    });
+    await waitFor(() => expect(submit).toBeEnabled());
+    await user.click(submit);
+    await screen.findByText(/Owner request delivery is unconfirmed/);
+    const firstId = String(fixture.commands[0].body.client_request_id);
+    const draft = (screen.getByLabelText("Request text") as HTMLTextAreaElement)
+      .value;
+    expect(
+      screen.getByText(/This request may already be queued or executed/),
+    ).toBeVisible();
+    const prepare = screen.getByRole("button", {
+      name: "Prepare a separate request",
+    });
+    expect(prepare).toBeDisabled();
+    await user.click(prepare);
+    expect(screen.getByLabelText("Request text")).toBeDisabled();
+    await user.click(
+      screen.getByLabelText(
+        "I inspected the prior request and current board evidence",
+      ),
+    );
+    await user.click(prepare);
+    expect(fixture.commands).toHaveLength(1);
+    expect(screen.getByLabelText("Request text")).toHaveValue(draft);
+    await user.click(
+      screen.getByText("Prior owner request receipts (most recent 5)"),
+    );
+    expect(
+      screen.getByText(/Owner request delivery is unconfirmed/),
+    ).toHaveTextContent(firstId);
+    let inspections = 0;
+    server.use(
+      http.post("*/v1/privacy/inspect", () => {
+        inspections += 1;
+        return HttpResponse.json({
+          chat_id: ownerId,
+          destination: { id: "test-provider" },
+          sendable: false,
+          refusal: "Separate request privacy denied",
+        });
+      }),
+    );
+    await user.click(
+      screen.getByRole("button", {
+        name: "Request verify card from owner planner",
+      }),
+    );
+    await screen.findByText(/Separate request privacy denied/);
+    expect(inspections).toBe(1);
+    expect(fixture.commands).toHaveLength(1);
+    server.use(
+      http.post("*/v1/privacy/inspect", () =>
+        HttpResponse.json({
+          chat_id: ownerId,
+          destination: { id: "test-provider" },
+          sendable: true,
+        }),
+      ),
+      http.post("*/v1/chats/:id/commands", async ({ params, request }) => {
+        fixture.commands.push({
+          chatId: String(params.id),
+          body: (await request.json()) as Record<string, unknown>,
+        });
+        return HttpResponse.json({ queued: true }, { status: 202 });
+      }),
+    );
+    await user.click(
+      screen.getByRole("button", {
+        name: "Request verify card from owner planner",
+      }),
+    );
+    await screen.findByText(/Request submitted; awaiting planner ACK/);
+    expect(fixture.commands).toHaveLength(2);
+    expect(fixture.commands[1].chatId).toBe(ownerId);
+    expect(fixture.commands[1].body.client_request_id).not.toBe(firstId);
+    expect(
+      screen.getByText(/Owner request delivery is unconfirmed/),
+    ).toHaveTextContent(firstId);
+    expect(fixture.mutations).toEqual([]);
   });
 
   it("blocks missing owners without substituting or creating a planner", async () => {

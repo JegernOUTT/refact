@@ -90,6 +90,7 @@ import { reportBuddyFrontendError } from "../features/Buddy/reportBuddyFrontendE
 import { setBackendStatus } from "../features/Connection";
 import {
   selectCapabilities,
+  setApiKey,
   setThemeMode,
   updateConfig,
 } from "../features/Config/configSlice";
@@ -210,6 +211,11 @@ import {
   setEditPlayerStatus,
 } from "../features/Workspace/FilesPanel/filesPanelSlice";
 import { EDIT_PLAYER_STEP_MS } from "../features/Workspace/FilesPanel/editPlayer";
+import { backgroundAgentsApi } from "../services/refact/backgroundAgents";
+import {
+  agentRosterIdentity,
+  agentSourceChanged,
+} from "../features/AgentsPanel/agentsPanelSlice";
 import { firstChangedLine } from "../features/Workspace/FilesPanel/liveFileModel";
 import { parentDirectoryPath } from "../features/Workspace/FilesPanel/fileTreeModel";
 import { selectActiveGitRoot } from "../features/Workspace/GitPanel/gitPanelSlice";
@@ -1307,6 +1313,26 @@ startListening({
   effect: (_action, listenerApi) => {
     if (listenerApi.getState().connection.backendStatus !== "unknown") return;
     listenerApi.dispatch(setBackendStatus({ status: "online" }));
+  },
+});
+
+startListening({
+  matcher: isAnyOf(updateConfig, setApiKey, setCurrentProjectInfo),
+  effect: (_action, listenerApi) => {
+    const previous = listenerApi.getOriginalState();
+    const current = listenerApi.getState();
+    if (
+      agentRosterIdentity(previous) === agentRosterIdentity(current) &&
+      previous.config.apiKey === current.config.apiKey
+    )
+      return;
+    listenerApi.dispatch(agentSourceChanged());
+    for (const query of listenerApi.dispatch(
+      backgroundAgentsApi.util.getRunningQueriesThunk(),
+    )) {
+      query.abort();
+    }
+    listenerApi.dispatch(backgroundAgentsApi.util.resetApiState());
   },
 });
 

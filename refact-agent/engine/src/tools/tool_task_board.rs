@@ -13,6 +13,7 @@ use crate::tools::tools_description::{
 };
 use crate::tasks::storage;
 use crate::tasks::types::{AbVariants, BoardCard, ScopeGuardMode, TaskBoard};
+use crate::tools::task_tool_helpers::require_bound_planner_task;
 
 fn make_source() -> ToolSource {
     ToolSource {
@@ -640,19 +641,55 @@ async fn get_task_id(
     ccx: &Arc<AMutex<AtCommandsContext>>,
     args: &HashMap<String, Value>,
 ) -> Result<String, String> {
-    if let Some(id) = args
-        .get("task_id")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
+    let ccx = ccx.lock().await;
+    if ccx.chat_id.is_empty() {
+        return Err("This board tool requires a bound task chat".to_string());
+    }
+    let meta = ccx
+        .task_meta
+        .as_ref()
+        .filter(|meta| matches!(meta.role.as_str(), "planner" | "agent" | "agents"))
+        .filter(|meta| !meta.task_id.is_empty())
+        .ok_or_else(|| {
+            "This board tool requires a bound task planner or agent context".to_string()
+        })?;
+    match args.get("task_id") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(id)) if id.trim() == meta.task_id => {}
+        Some(Value::String(_)) => {
+            return Err("task_id override is not allowed from this task chat".to_string());
+        }
+        Some(_) => return Err("task_id must be a string".to_string()),
+    }
+    Ok(meta.task_id.clone())
+}
+
+struct PlannerBoardContext {
+    gcx: Arc<crate::global_context::GlobalContext>,
+    task_id: String,
+    actor: String,
+}
+
+async fn planner_context(
+    ccx: &Arc<AMutex<AtCommandsContext>>,
+    args: &HashMap<String, Value>,
+) -> Result<PlannerBoardContext, String> {
+    let task_id = require_bound_planner_task(ccx, args).await?;
+    let ccx = ccx.lock().await;
+    if task_id.is_empty()
+        || !ccx
+            .task_meta
+            .as_ref()
+            .is_some_and(|meta| meta.role == "planner" && meta.task_id == task_id)
+        || ccx.chat_id.is_empty()
     {
-        return Ok(id.to_string());
+        return Err("This board tool requires a bound task planner context".to_string());
     }
-    let ccx_lock = ccx.lock().await;
-    if let Some(ref meta) = ccx_lock.task_meta {
-        return Ok(meta.task_id.clone());
-    }
-    storage::infer_task_id_from_chat_id(&ccx_lock.chat_id)
-        .ok_or_else(|| "Missing 'task_id' (and chat is not bound to a task)".to_string())
+    Ok(PlannerBoardContext {
+        gcx: ccx.app.gcx.clone(),
+        task_id,
+        actor: ccx.chat_id.clone(),
+    })
 }
 
 pub struct ToolTaskBoardGet;
@@ -676,8 +713,7 @@ impl Tool for ToolTaskBoardGet {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let task_id = get_task_id(&ccx, args).await?;
-        let gcx = ccx.lock().await.app.gcx.clone();
+        let PlannerBoardContext { gcx, task_id, .. } = planner_context(&ccx, args).await?;
         let board = storage::load_board(gcx, &task_id).await?;
         let card_id = args
             .get("card_id")
@@ -751,24 +787,11 @@ impl Tool for ToolTaskBoardCreateCard {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (is_planner, gcx) = {
-            let ccx_lock = ccx.lock().await;
-            let is_planner = ccx_lock
-                .task_meta
-                .as_ref()
-                .map(|m| m.role == "planner")
-                .unwrap_or(false);
-            let gcx = ccx_lock.app.gcx.clone();
-            (is_planner, gcx)
-        };
-
-        if !is_planner {
-            return Err("board_create can only be called by the task planner. \
-                 Switch to the planner chat to create cards."
-                .to_string());
-        }
-
-        let task_id = get_task_id(&ccx, args).await?;
+        let PlannerBoardContext {
+            gcx,
+            task_id,
+            actor,
+        } = planner_context(&ccx, args).await?;
         let card_id = args
             .get("card_id")
             .and_then(|v| v.as_str())
@@ -789,6 +812,7 @@ impl Tool for ToolTaskBoardCreateCard {
         let target_files = parse_target_files(args.get("target_files"), instructions);
 
         storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
+            board.authorize_owner(&actor)?;
             if board.cards.iter().any(|c| c.id == card_id) {
                 return Err(format!("Card {} already exists", card_id));
             }
@@ -876,24 +900,11 @@ impl Tool for ToolTaskBoardUpdateCard {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (is_planner, gcx) = {
-            let ccx_lock = ccx.lock().await;
-            let is_planner = ccx_lock
-                .task_meta
-                .as_ref()
-                .map(|m| m.role == "planner")
-                .unwrap_or(false);
-            let gcx = ccx_lock.app.gcx.clone();
-            (is_planner, gcx)
-        };
-
-        if !is_planner {
-            return Err("board_update can only be called by the task planner. \
-                 Switch to the planner chat to update cards."
-                .to_string());
-        }
-
-        let task_id = get_task_id(&ccx, args).await?;
+        let PlannerBoardContext {
+            gcx,
+            task_id,
+            actor,
+        } = planner_context(&ccx, args).await?;
         let card_id = args
             .get("card_id")
             .and_then(|v| v.as_str())
@@ -909,6 +920,7 @@ impl Tool for ToolTaskBoardUpdateCard {
             .then(|| args.get("target_files"));
 
         storage::update_board_atomic(gcx, &task_id, move |board| {
+            board.authorize_owner(&actor)?;
             let card = board
                 .get_card_mut(card_id)
                 .ok_or(format!("Card {} not found", card_id))?;
@@ -996,24 +1008,11 @@ impl Tool for ToolTaskBoardMoveCard {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (is_planner, gcx) = {
-            let ccx_lock = ccx.lock().await;
-            let is_planner = ccx_lock
-                .task_meta
-                .as_ref()
-                .map(|m| m.role == "planner")
-                .unwrap_or(false);
-            let gcx = ccx_lock.app.gcx.clone();
-            (is_planner, gcx)
-        };
-
-        if !is_planner {
-            return Err("board_move can only be called by the task planner. \
-                 Switch to the planner chat to move cards."
-                .to_string());
-        }
-
-        let task_id = get_task_id(&ccx, args).await?;
+        let PlannerBoardContext {
+            gcx,
+            task_id,
+            actor,
+        } = planner_context(&ccx, args).await?;
         let card_id = args
             .get("card_id")
             .and_then(|v| v.as_str())
@@ -1034,6 +1033,7 @@ impl Tool for ToolTaskBoardMoveCard {
 
         let (board, old_column) =
             storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
+                board.authorize_owner(&actor)?;
                 board
                     .ensure_column_move_allowed(card_id, column)
                     .map_err(storage::violation_error)?;
@@ -1113,29 +1113,34 @@ impl Tool for ToolTaskBoardDeleteCard {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (is_planner, gcx) = {
-            let ccx_lock = ccx.lock().await;
-            let is_planner = ccx_lock
-                .task_meta
-                .as_ref()
-                .map(|m| m.role == "planner")
-                .unwrap_or(false);
-            let gcx = ccx_lock.app.gcx.clone();
-            (is_planner, gcx)
-        };
-
-        if !is_planner {
-            return Err("board_delete can only be called by the task planner. \
-                 Switch to the planner chat to delete cards."
-                .to_string());
-        }
-
-        let task_id = get_task_id(&ccx, args).await?;
+        let PlannerBoardContext {
+            gcx,
+            task_id,
+            actor,
+        } = planner_context(&ccx, args).await?;
         let card_id = args
             .get("card_id")
             .and_then(|v| v.as_str())
             .ok_or("Missing 'card_id'")?;
         storage::update_board_atomic(gcx.clone(), &task_id, |board| {
+            board.authorize_owner(&actor)?;
+            let card = board
+                .get_card(card_id)
+                .ok_or_else(|| format!("Card {} not found", card_id))?;
+            if card.column == "doing"
+                || card.assignee.is_some()
+                || card.agent_chat_id.is_some()
+                || card.agent_worktree.is_some()
+                || card.agent_worktree_name.is_some()
+                || card.agent_branch.is_some()
+                || card.ab_variants.is_some()
+                || !card.team_members.is_empty()
+            {
+                return Err(format!(
+                    "Cannot delete active or referenced card {}. Use the task agent lifecycle to stop or resolve its work, preserve its evidence, and merge or explicitly clean up retained worktrees and branches before deleting an inactive card. board_delete never cancels work or forces deletion.",
+                    card_id
+                ));
+            }
             board
                 .remove_card(card_id)
                 .ok_or_else(|| format!("Card {} not found", card_id))?;
@@ -1193,9 +1198,7 @@ impl Tool for ToolTaskReadyCards {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let task_id = get_task_id(&ccx, args).await?;
-
-        let gcx = ccx.lock().await.app.gcx.clone();
+        let PlannerBoardContext { gcx, task_id, .. } = planner_context(&ccx, args).await?;
         let board = storage::load_board(gcx, &task_id).await?;
         let result = render_ready_cards(&board);
 
@@ -1562,6 +1565,58 @@ mod tests {
         let (gcx, _temp) = setup_task(board).await;
         let ccx = chat_ccx(gcx.clone(), "planner-chat").await;
 
+        let inactive = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+            board.cards[0].column = "doing".into();
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let active = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        let denied = ToolTaskBoardDeleteCard::new()
+            .tool_execute(
+                ccx.clone(),
+                &"active-delete".into(),
+                &HashMap::from([("card_id".to_string(), json!("T-1"))]),
+            )
+            .await
+            .unwrap_err();
+        assert!(denied.contains("Cannot delete active or referenced card T-1"));
+        assert!(denied.contains("task agent lifecycle"));
+        assert_eq!(
+            serde_json::to_value(storage::load_board(gcx.clone(), "task-1").await.unwrap())
+                .unwrap(),
+            serde_json::to_value(&active).unwrap()
+        );
+        storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+            board.cards = inactive.cards;
+            board.cards[0].agent_branch = Some("retained-agent-branch".into());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let referenced = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        let denied = ToolTaskBoardDeleteCard::new()
+            .tool_execute(
+                ccx.clone(),
+                &"referenced-delete".into(),
+                &HashMap::from([("card_id".to_string(), json!("T-1"))]),
+            )
+            .await
+            .unwrap_err();
+        assert!(denied.contains("Cannot delete active or referenced card T-1"));
+        assert_eq!(
+            serde_json::to_value(storage::load_board(gcx.clone(), "task-1").await.unwrap())
+                .unwrap(),
+            serde_json::to_value(&referenced).unwrap()
+        );
+        storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+            board.cards[0].agent_branch = None;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
         ToolTaskBoardDeleteCard::new()
             .tool_execute(
                 ccx.clone(),
@@ -1572,7 +1627,7 @@ mod tests {
             .expect("deleting an attested and finalized card must persist");
 
         let deleted = storage::load_board(gcx.clone(), "task-1").await.unwrap();
-        assert_eq!(deleted.rev, 1);
+        assert_eq!(deleted.rev, referenced.rev + 2);
         assert!(deleted.get_card("T-1").is_none());
         assert!(deleted.review_attestations.is_empty());
         assert!(deleted.card_claims.is_empty());
@@ -1592,7 +1647,7 @@ mod tests {
             .unwrap();
 
         let recreated = storage::load_board(gcx, "task-1").await.unwrap();
-        assert_eq!(recreated.rev, 2);
+        assert_eq!(recreated.rev, deleted.rev + 1);
         assert_eq!(recreated.get_card("T-1").unwrap().column, "planned");
         assert!(!recreated.card_is_finalized("T-1"));
         assert!(recreated.review_attestations.is_empty());
@@ -1610,12 +1665,68 @@ mod tests {
             ],
             ..Default::default()
         };
-        let (gcx, _temp) = setup_task(board).await;
+        let (gcx, temp) = setup_task(board).await;
         let ccx = chat_ccx(gcx.clone(), "planner-chat").await;
         let args = HashMap::from([
             ("card_id".to_string(), json!("T-2")),
             ("column".to_string(), json!("doing")),
         ]);
+
+        let foreign_dir = temp.path().join(".refact/tasks/task-2");
+        tokio::fs::create_dir_all(&foreign_dir).await.unwrap();
+        let bound_path = temp.path().join(".refact/tasks/task-1/board.yaml");
+        let before_override = tokio::fs::read(&bound_path).await.unwrap();
+        tokio::fs::write(foreign_dir.join("board.yaml"), &before_override)
+            .await
+            .unwrap();
+        let mut foreign_args = HashMap::from([
+            ("task_id".to_string(), json!("task-2")),
+            ("card_id".to_string(), json!("T-3")),
+            ("title".to_string(), json!("Changed")),
+            ("column".to_string(), json!("failed")),
+        ]);
+        let mut mutations: Vec<Box<dyn Tool>> = vec![
+            Box::new(ToolTaskBoardCreateCard::new()),
+            Box::new(ToolTaskBoardUpdateCard::new()),
+            Box::new(ToolTaskBoardMoveCard::new()),
+            Box::new(ToolTaskBoardDeleteCard::new()),
+        ];
+        for tool in &mut mutations {
+            foreign_args.insert(
+                "card_id".into(),
+                json!(if tool.tool_description().name == "board_create" {
+                    "T-3"
+                } else {
+                    "T-2"
+                }),
+            );
+            let denied = tool
+                .tool_execute(ccx.clone(), &"foreign".into(), &foreign_args)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                denied,
+                "task_id override is not allowed from this planner chat"
+            );
+        }
+        assert_eq!(
+            tokio::fs::read(foreign_dir.join("board.yaml"))
+                .await
+                .unwrap(),
+            before_override
+        );
+        assert_eq!(tokio::fs::read(bound_path).await.unwrap(), before_override);
+
+        let unbound = chat_ccx(gcx.clone(), "planner-task-1-1").await;
+        unbound.lock().await.task_meta = None;
+        for tool in &mut mutations {
+            assert_eq!(
+                tool.tool_execute(unbound.clone(), &"unbound".into(), &args)
+                    .await
+                    .unwrap_err(),
+                "This board tool requires a bound task planner context"
+            );
+        }
 
         let blocked = ToolTaskBoardMoveCard::new()
             .tool_execute(ccx.clone(), &"call".to_string(), &args)
@@ -1659,6 +1770,35 @@ mod tests {
         .await
         .unwrap();
 
+        let before = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        let stranger = chat_ccx(gcx.clone(), "other-planner").await;
+        assert!(crate::file_activity::current_actor().is_none());
+        for tool in &mut mutations {
+            let card_id = if tool.tool_description().name == "board_create" {
+                "T-3"
+            } else {
+                "T-2"
+            };
+            let args = HashMap::from([
+                ("card_id".to_string(), json!(card_id)),
+                ("title".to_string(), json!("Changed")),
+                ("column".to_string(), json!("failed")),
+            ]);
+            let denied = tool
+                .tool_execute(stranger.clone(), &"nonowner".into(), &args)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                denied,
+                "task board mutation requires the owning planner chat"
+            );
+            assert_eq!(
+                serde_json::to_value(storage::load_board(gcx.clone(), "task-1").await.unwrap())
+                    .unwrap(),
+                serde_json::to_value(&before).unwrap()
+            );
+        }
+
         ToolTaskBoardMoveCard::new()
             .tool_execute(ccx, &"call".to_string(), &args)
             .await
@@ -1678,10 +1818,79 @@ mod tests {
             cards: vec![card("T-1", "Claimable", "planned", "P1", vec![])],
             ..Default::default()
         };
-        let (gcx, _temp) = setup_task(board).await;
+        let (gcx, temp) = setup_task(board).await;
         let first = chat_ccx(gcx.clone(), "agent-one").await;
         let second = chat_ccx(gcx.clone(), "agent-two").await;
+        let planner = chat_ccx(gcx.clone(), "planner-chat").await;
+        first.lock().await.task_meta.as_mut().unwrap().role = "agents".into();
+        second.lock().await.task_meta.as_mut().unwrap().role = "agent".into();
         let args = HashMap::from([("card_id".to_string(), json!("T-1"))]);
+
+        let foreign_dir = temp.path().join(".refact/tasks/task-2");
+        tokio::fs::create_dir_all(&foreign_dir).await.unwrap();
+        let foreign = TaskBoard {
+            cards: vec![card("T-1", "Foreign card", "planned", "P1", vec![])],
+            ..Default::default()
+        };
+        let foreign_yaml = serde_yaml::to_string(&foreign).unwrap();
+        tokio::fs::write(foreign_dir.join("board.yaml"), &foreign_yaml)
+            .await
+            .unwrap();
+        assert!(storage::load_board(gcx.clone(), "task-2")
+            .await
+            .unwrap()
+            .get_card("T-1")
+            .is_some());
+        let foreign_args = HashMap::from([
+            ("task_id".to_string(), json!("task-2")),
+            ("card_id".to_string(), json!("T-1")),
+        ]);
+        let mut tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(ToolTaskBoardGet::new()),
+            Box::new(ToolTaskReadyCards::new()),
+            Box::new(ToolTaskBoardClaimCard::new()),
+        ];
+        for tool in &mut tools {
+            let (caller, expected) = if tool.tool_description().name == "board_claim" {
+                (
+                    first.clone(),
+                    "task_id override is not allowed from this task chat",
+                )
+            } else {
+                (
+                    planner.clone(),
+                    "task_id override is not allowed from this planner chat",
+                )
+            };
+            let denied = tool
+                .tool_execute(caller, &"foreign".into(), &foreign_args)
+                .await
+                .unwrap_err();
+            assert_eq!(denied, expected);
+        }
+        assert_eq!(
+            tokio::fs::read(foreign_dir.join("board.yaml"))
+                .await
+                .unwrap(),
+            foreign_yaml.as_bytes()
+        );
+        assert!(tool_text(
+            ToolTaskBoardGet::new()
+                .tool_execute(planner, &"bound".into(), &args)
+                .await
+                .unwrap()
+                .1
+        )
+        .contains("Claimable"));
+        let unbound = chat_ccx(gcx.clone(), "planner-task-2-1").await;
+        unbound.lock().await.task_meta = None;
+        for tool in &mut tools {
+            assert!(tool
+                .tool_execute(unbound.clone(), &"unbound".into(), &args)
+                .await
+                .unwrap_err()
+                .contains("requires a bound task"));
+        }
 
         let claimed: Value = serde_json::from_str(&tool_text(
             ToolTaskBoardClaimCard::new()

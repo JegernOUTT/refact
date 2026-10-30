@@ -235,7 +235,7 @@ pub async fn save_assignment(
     task_id: &str,
     assignment: &Assignment,
 ) -> Result<(), String> {
-    let task_dir = storage::find_task_dir(gcx, task_id).await?;
+    let (task_dir, _guard) = storage::locked_task_dir(gcx, task_id).await?;
     let path = assignment_path(&task_dir, &assignment.card_id)?;
     let parent = path
         .parent()
@@ -243,6 +243,13 @@ pub async fn save_assignment(
     tokio::fs::create_dir_all(parent)
         .await
         .map_err(|error| error.to_string())?;
+    let canonical_parent = dunce::canonicalize(parent).map_err(|error| error.to_string())?;
+    if canonical_parent != parent {
+        return Err("Assignment directory is an unsafe alias".into());
+    }
+    if tokio::fs::symlink_metadata(&path).await.is_ok() {
+        storage::require_regular_task_file(&path).await?;
+    }
     let content = serde_json::to_vec_pretty(assignment).map_err(|error| error.to_string())?;
     crate::file_activity::write_file_durably(
         &path,
@@ -269,8 +276,14 @@ pub async fn record_assignment(gcx: Arc<GlobalContext>, task_id: &str, assignmen
 /// A/B run whose variants received different prose.
 pub async fn clear_assignment(gcx: Arc<GlobalContext>, task_id: &str, card_id: &str) {
     let removed = async {
-        let task_dir = storage::find_task_dir(gcx, task_id).await?;
+        let (task_dir, _guard) = storage::locked_task_dir(gcx, task_id).await?;
         let path = assignment_path(&task_dir, card_id)?;
+        let parent = path.parent().ok_or("Assignment parent missing")?;
+        if parent.exists()
+            && dunce::canonicalize(parent).map_err(|error| error.to_string())? != parent
+        {
+            return Err("Assignment directory is an unsafe alias".into());
+        }
         match tokio::fs::remove_file(&path).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),

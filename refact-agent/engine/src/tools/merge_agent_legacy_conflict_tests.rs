@@ -252,3 +252,125 @@ async fn dirty_target_is_refused_before_any_merge_attempt() {
         }
     }
 }
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial(runtime_settings, coordination_metrics)]
+async fn legacy_squash_commit_failure_retains_recoverable_state_and_user_edits() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new(true).await;
+    for file in ["file.txt", "second.txt"] {
+        std::fs::write(fixture.agent.join(file), "target change\n").unwrap();
+    }
+    git(&fixture.agent, &["add", "-A"]);
+    git(
+        &fixture.agent,
+        &["commit", "-m", "resolve target conflicts"],
+    );
+    let hook = fixture._temp.path().join("hooks");
+    std::fs::create_dir(&hook).unwrap();
+    std::fs::write(hook.join("pre-commit"), "#!/bin/sh\nprintf 'staged user sentinel\\n' > file.txt\ngit add file.txt || exit 2\nprintf 'unstaged user sentinel\\n' > file.txt\nprintf 'untracked user sentinel\\n' > user-notes.txt\nexit 1\n").unwrap();
+    std::fs::set_permissions(
+        hook.join("pre-commit"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    git(
+        &fixture.target,
+        &["config", "core.hooksPath", hook.to_str().unwrap()],
+    );
+    let head = git(&fixture.target, &["rev-parse", "HEAD"]);
+    let source = snapshot(&fixture.source);
+    let agent = snapshot(&fixture.agent);
+    let board_path = fixture.source.join(".refact/tasks/task-1/board.yaml");
+    let board = std::fs::read(&board_path).unwrap();
+
+    let error = fixture.merge("squash").await.unwrap_err();
+
+    assert!(error.contains("Failed to commit squash merge"), "{error}");
+    assert!(error.contains("integration state retained"), "{error}");
+    assert_eq!(git(&fixture.target, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        git(&fixture.target, &["show", ":file.txt"]),
+        "staged user sentinel\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.target.join("file.txt")).unwrap(),
+        "unstaged user sentinel\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.target.join("user-notes.txt")).unwrap(),
+        "untracked user sentinel\n"
+    );
+    assert_eq!(
+        git(&fixture.target, &["show", ":agent-only.txt"]),
+        "cleanly merged addition\n"
+    );
+    assert_eq!(snapshot(&fixture.source), source);
+    assert_eq!(snapshot(&fixture.agent), agent);
+    assert_eq!(std::fs::read(board_path).unwrap(), board);
+    assert!(git_state_path(&fixture.target, "SQUASH_MSG").exists());
+}
+
+#[tokio::test]
+#[serial_test::serial(runtime_settings, coordination_metrics)]
+async fn legacy_merge_unavailable_post_check_preserves_source() {
+    let fixture = Fixture::new(true).await;
+    for file in ["file.txt", "second.txt"] {
+        std::fs::write(fixture.agent.join(file), "target change\n").unwrap();
+    }
+    git(&fixture.agent, &["add", "-A"]);
+    git(
+        &fixture.agent,
+        &["commit", "-m", "resolve target conflicts"],
+    );
+    let head = git(&fixture.target, &["rev-parse", "HEAD"]);
+    let source = snapshot(&fixture.source);
+    let agent = snapshot(&fixture.agent);
+    let facade = Arc::new(EngineChatSessionFacade::new(fixture.gcx.clone()));
+    let ccx = planner_ccx(fixture.gcx.clone(), facade, "planner").await;
+
+    let result = ToolTaskMergeAgent::new()
+        .tool_execute(
+            ccx,
+            &"legacy-post-check".to_string(),
+            &args(&[
+                ("card_id", json!("T-1")),
+                ("strategy", json!("squash")),
+                ("auto_revert", json!(true)),
+            ]),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(git(&fixture.target, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        std::fs::read_to_string(fixture.target.join("agent-only.txt")).unwrap(),
+        "cleanly merged addition\n"
+    );
+    let crate::call_validation::ContextEnum::ChatMessage(message) = &result.1[0] else {
+        panic!("expected tool message");
+    };
+    let crate::call_validation::ChatContent::SimpleText(text) = &message.content else {
+        panic!("expected text");
+    };
+    assert!(text.contains("no verification commands"), "{text}");
+    assert!(text.contains("Worktree and branch retained"), "{text}");
+    assert_eq!(snapshot(&fixture.source)[1..5], source[1..5]);
+    assert_eq!(snapshot(&fixture.agent)[1..5], agent[1..5]);
+    assert!(fixture.agent.exists());
+    assert_eq!(
+        git(&fixture.source, &["rev-parse", AGENT]),
+        git(&fixture.agent, &["rev-parse", "HEAD"])
+    );
+    let board = crate::tasks::storage::load_board(fixture.gcx.clone(), "task-1")
+        .await
+        .unwrap();
+    let card = board.get_card("T-1").unwrap();
+    assert_eq!(card.agent_branch.as_deref(), Some(AGENT));
+    assert_eq!(
+        card.agent_worktree.as_deref(),
+        Some(fixture.agent.to_str().unwrap())
+    );
+}

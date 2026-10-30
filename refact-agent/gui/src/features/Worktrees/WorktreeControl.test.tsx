@@ -7,6 +7,7 @@ import { fireEvent, screen, waitFor, render } from "../../utils/test-utils";
 import type { Chat } from "../Chat/Thread/types";
 import { ChatThreadProvider, selectThreadWorktreeById } from "../Chat/Thread";
 import { worktreesApi } from "../../services/refact/worktrees";
+import { updateConfig } from "../Config/configSlice";
 import type {
   WorktreeDiffResponse,
   WorktreeListResponse,
@@ -16,6 +17,8 @@ import type {
 import { WorktreeControl } from "./WorktreeControl";
 import { server } from "../../utils/mockServer";
 import { resetChatParamsSyncState } from "../../services/refact/chatCommands";
+import * as chatCommands from "../../services/refact/chatCommands";
+import { setCurrentProjectInfo } from "../Chat/currentProject";
 
 type JsonObject = Record<string, unknown>;
 type Host = "web" | "ide" | "vscode" | "jetbrains";
@@ -155,7 +158,7 @@ function chatModes() {
 function commandCapture(calls: JsonObject[]) {
   return http.post("*/v1/chats/:id/commands", async ({ request }) => {
     calls.push((await request.json()) as JsonObject);
-    return HttpResponse.json({ status: "queued" });
+    return HttpResponse.json({ status: "applied" });
   });
 }
 
@@ -165,7 +168,7 @@ function commandCaptureWithChatIds(calls: JsonObject[]) {
       ...((await request.json()) as JsonObject),
       route_chat_id: String(params.id),
     });
-    return HttpResponse.json({ status: "queued" });
+    return HttpResponse.json({ status: "applied" });
   });
 }
 
@@ -360,7 +363,7 @@ describe("WorktreeControl", () => {
     await user.click(screen.getByTestId("worktree-control-trigger"));
     expect(
       await screen.findByText(
-        "Worktree inventory is unavailable or incomplete; scope unchanged.",
+        "Attached checkout is not in this list. It may be stale or incomplete; attachment unchanged.",
       ),
     ).toBeInTheDocument();
     await act(async () => {
@@ -501,6 +504,165 @@ describe("WorktreeControl", () => {
     expect(createCalls).toHaveLength(0);
     expect(deleteCalls).toHaveLength(0);
   });
+
+  test("empty, mismatched and failed inventory refreshes never detach an attached checkout", async () => {
+    const record = makeWorktreeRecord("wt-retained", "refact/chat/retained");
+    const commandCalls: JsonObject[] = [];
+    let list = makeWorktreeList([]);
+    let fail = false;
+    const listSources: string[] = [];
+    server.use(
+      http.get("*/v1/worktrees", () => {
+        listSources.push(list.source_workspace_root);
+        return fail
+          ? HttpResponse.json(
+              { error: "inventory unavailable" },
+              { status: 503 },
+            )
+          : HttpResponse.json(list);
+      }),
+      commandCapture(commandCalls),
+    );
+    const { user, store } = render(<WorktreeControl />, {
+      preloadedState: {
+        chat: makeChatState("chat-1", record.meta),
+        config: configState(),
+      },
+    });
+
+    await user.click(screen.getByTestId("worktree-control-trigger"));
+    expect(
+      await screen.findByText(/Attached checkout is not in this list/),
+    ).toBeInTheDocument();
+    list = {
+      ...list,
+      source_workspace_root: "/other-repo",
+      source_current_branch: "other-main",
+    };
+    act(() => {
+      store.dispatch(
+        setCurrentProjectInfo({
+          name: "other-project",
+          projectRoot: "/other-repo",
+        }),
+      );
+    });
+    await user.click(screen.getByTestId("worktree-control-trigger"));
+    const refresh = screen.getByRole("button", {
+      name: "Refresh worktree list",
+    });
+    await waitFor(() => expect(refresh).toBeEnabled());
+    await user.click(refresh);
+    await waitFor(() => expect(listSources).toContain("/other-repo"));
+    await waitFor(() => expect(refresh).toBeEnabled());
+    fail = true;
+    await user.click(refresh);
+    expect(
+      await screen.findByText(
+        "Worktree list unavailable. Attached checkout unchanged.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("worktree-control-trigger")).toHaveTextContent(
+      "refact/chat/retained",
+    );
+    expect(selectThreadWorktreeById(store.getState(), "chat-1")).toEqual(
+      record.meta,
+    );
+    expect(commandCalls).toEqual([]);
+    expect(screen.queryByText("Using main workspace.")).not.toBeInTheDocument();
+  });
+
+  test.each(["agent", "agents", "worktree-kind"])(
+    "managed task scope %s retains pane identity and refuses all scope controls",
+    async (binding) => {
+      const record = makeWorktreeRecord("wt-managed", "refact/task/managed");
+      const target = makeWorktreeRecord(
+        "wt-replacement",
+        "refact/chat/replacement",
+      );
+      const global = makeWorktreeRecord("wt-global", "refact/chat/global");
+      if (binding === "worktree-kind") record.meta.kind = "task_agent";
+      const chat = makeChatState("pane-chat", record.meta);
+      const runtime = chat.threads["pane-chat"];
+      if (!runtime) throw new Error("pane test thread missing");
+      if (binding !== "worktree-kind") {
+        runtime.thread.task_meta = {
+          task_id: "task-1",
+          card_id: "T-1",
+          role: binding,
+        };
+      }
+      chat.threads["global-chat"] = makeChatState(
+        "global-chat",
+        global.meta,
+      ).threads["global-chat"];
+      chat.current_thread_id = "global-chat";
+      const commandCalls: JsonObject[] = [];
+      const createCalls: JsonObject[] = [];
+      const deleteCalls: string[] = [];
+      server.use(
+        worktreesList([record, target, global]),
+        commandCapture(commandCalls),
+        createWorktreeHandler(target, createCalls),
+        deleteWorktreeHandler(deleteCalls),
+      );
+      const { user, store } = render(
+        <ChatThreadProvider chatId="pane-chat">
+          <WorktreeControl />
+        </ChatThreadProvider>,
+        { preloadedState: { chat, config: configState() } },
+      );
+
+      await act(async () => {
+        await store
+          .dispatch(
+            worktreesApi.endpoints.listWorktrees.initiate(undefined, {
+              subscribe: false,
+            }),
+          )
+          .unwrap();
+      });
+      const trigger = screen.getByTestId("worktree-control-trigger");
+      expect(trigger).toHaveTextContent("refact/task/managed");
+      expect(trigger).not.toHaveTextContent("refact/chat/global");
+      expect(trigger).toBeDisabled();
+      expect(trigger).toHaveAttribute(
+        "title",
+        expect.stringContaining("Task-managed scope"),
+      );
+      await user.click(trigger);
+      fireEvent.click(trigger);
+      expect(
+        screen.queryByRole("button", { name: "Create worktree" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", {
+          name: "Detach worktree and use main workspace",
+        }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: /Select worktree/ }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Merge worktree" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Delete or discard worktree" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("heading", { name: "Create worktree" }),
+      ).not.toBeInTheDocument();
+      expect(selectThreadWorktreeById(store.getState(), "pane-chat")).toEqual(
+        record.meta,
+      );
+      expect(selectThreadWorktreeById(store.getState(), "global-chat")).toEqual(
+        global.meta,
+      );
+      expect(commandCalls).toEqual([]);
+      expect(createCalls).toEqual([]);
+      expect(deleteCalls).toEqual([]);
+    },
+  );
 
   test("pane provider attaches selected worktree to pane thread", async () => {
     const global = makeWorktreeRecord("wt-global", "refact/chat/global");
@@ -688,7 +850,7 @@ describe("WorktreeControl", () => {
       http.post("*/v1/chats/:id/commands", async ({ request }) => {
         commandCalls.push((await request.json()) as JsonObject);
         await attachGate;
-        return HttpResponse.json({ status: "queued" });
+        return HttpResponse.json({ status: "applied" });
       }),
     );
 
@@ -840,6 +1002,109 @@ describe("WorktreeControl", () => {
     );
   });
 
+  test("unconfirmed attachment retains the created worktree instead of deleting it", async () => {
+    const created = makeWorktreeRecord(
+      "wt-uncertain",
+      "refact/chat/uncertain",
+      0,
+    );
+    const createCalls: JsonObject[] = [];
+    const deleteCalls: string[] = [];
+    server.use(
+      createWorktreeHandler(created, createCalls),
+      deleteWorktreeHandler(deleteCalls),
+      http.post("*/v1/chats/:id/commands", () => HttpResponse.error()),
+    );
+    const { user, store } = renderControl([]);
+    await user.click(screen.getByTestId("worktree-control-trigger"));
+    await user.click(
+      await screen.findByRole("button", { name: "Create worktree" }),
+    );
+    await user.click(screen.getByRole("button", { name: /^Create$/ }));
+    expect(
+      await screen.findByText(
+        /Attachment not confirmed; created worktree retained \(wt-uncertain\)/,
+      ),
+    ).toBeInTheDocument();
+    expect(createCalls).toHaveLength(1);
+    expect(deleteCalls).toEqual([]);
+    expect(selectThreadWorktreeById(store.getState(), "chat-1")).toBeNull();
+  });
+
+  test("late applied attachment cannot mutate or report success in a changed pane or principal", async () => {
+    const first = makeWorktreeRecord("wt-first", "refact/chat/first");
+    const second = makeWorktreeRecord("wt-second", "refact/chat/second");
+    const target = makeWorktreeRecord("wt-late", "refact/chat/late");
+    const chat = makeChatState("first-chat", first.meta);
+    chat.threads["second-chat"] = makeChatState(
+      "second-chat",
+      second.meta,
+    ).threads["second-chat"];
+    const commandCalls: JsonObject[] = [];
+    const sendCommand = vi.spyOn(chatCommands, "sendChatCommand");
+    const onOpenChange = vi.fn();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      worktreesList([first, second, target]),
+      http.post("*/v1/chats/:id/commands", async ({ request }) => {
+        commandCalls.push((await request.json()) as JsonObject);
+        await gate;
+        return HttpResponse.json({ status: "applied" });
+      }),
+    );
+    const { user, store, rerender } = render(
+      <ChatThreadProvider chatId="first-chat">
+        <WorktreeControl onOpenChange={onOpenChange} />
+      </ChatThreadProvider>,
+      { preloadedState: { chat, config: configState() } },
+    );
+    try {
+      await user.click(screen.getByTestId("worktree-control-trigger"));
+      await user.click(
+        await screen.findByRole("button", {
+          name: "Select worktree refact/chat/late",
+        }),
+      );
+      await waitFor(() => expect(commandCalls).toHaveLength(1));
+      act(() => {
+        store.dispatch(
+          updateConfig({
+            apiKey: "different-principal",
+            lspUrl: "http://127.0.0.1:9999",
+          }),
+        );
+      });
+      rerender(
+        <ChatThreadProvider chatId="second-chat">
+          <WorktreeControl onOpenChange={onOpenChange} />
+        </ChatThreadProvider>,
+      );
+      onOpenChange.mockClear();
+    } finally {
+      await act(async () => {
+        release();
+        await sendCommand.mock.results[0]?.value;
+      });
+      sendCommand.mockRestore();
+    }
+    expect(selectThreadWorktreeById(store.getState(), "first-chat")).toEqual(
+      first.meta,
+    );
+    expect(selectThreadWorktreeById(store.getState(), "second-chat")).toEqual(
+      second.meta,
+    );
+    expect(screen.getByTestId("worktree-control-trigger")).toHaveTextContent(
+      "refact/chat/second",
+    );
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+    await user.click(screen.getByTestId("worktree-control-trigger"));
+    expect(screen.queryByText("Worktree attached.")).not.toBeInTheDocument();
+    expect(commandCalls).toHaveLength(1);
+  });
+
   test("selecting existing shared worktree attaches it to current chat", async () => {
     const shared = makeWorktreeRecord("wt-shared", "refact/chat/shared", 2);
     const commandCalls: JsonObject[] = [];
@@ -859,8 +1124,10 @@ describe("WorktreeControl", () => {
       type: "set_params",
       patch: { worktree_id: "wt-shared" },
     });
-    expect(screen.getByTestId("worktree-control-trigger")).toHaveTextContent(
-      "refact/chat/shared",
+    await waitFor(() =>
+      expect(screen.getByTestId("worktree-control-trigger")).toHaveTextContent(
+        "refact/chat/shared",
+      ),
     );
   });
 
@@ -918,13 +1185,21 @@ describe("WorktreeControl", () => {
     ).toBeInTheDocument();
   });
 
-  test("detach clears worktree without delete call", async () => {
+  test("explicit detach waits for applied ACK, blocks duplicates and never deletes", async () => {
     const record = makeWorktreeRecord("wt-detach", "refact/chat/detach");
     const commandCalls: JsonObject[] = [];
     const deleteCalls: string[] = [];
+    let releaseDetach: () => void = () => undefined;
+    const detachGate = new Promise<void>((resolve) => {
+      releaseDetach = resolve;
+    });
     server.use(
       worktreesList([record]),
-      commandCapture(commandCalls),
+      http.post("*/v1/chats/:id/commands", async ({ request }) => {
+        commandCalls.push((await request.json()) as JsonObject);
+        await detachGate;
+        return HttpResponse.json({ status: "applied" });
+      }),
       deleteWorktreeHandler(deleteCalls),
     );
 
@@ -943,11 +1218,79 @@ describe("WorktreeControl", () => {
       type: "set_params",
       patch: { worktree: null },
     });
+    try {
+      expect(selectThreadWorktreeById(store.getState(), "chat-1")).toEqual(
+        record.meta,
+      );
+      expect(screen.getByTestId("worktree-control-trigger")).toHaveTextContent(
+        "refact/chat/detach",
+      );
+      expect(
+        screen.queryByText("Using main workspace."),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.getByText("Updating checkout scope..."),
+      ).toBeInTheDocument();
+      const detach = screen.getByRole("button", {
+        name: "Detach worktree and use main workspace",
+      });
+      expect(detach).toBeDisabled();
+      await user.click(detach);
+      expect(commandCalls).toHaveLength(1);
+    } finally {
+      await act(async () => {
+        releaseDetach();
+      });
+    }
+    await waitFor(() =>
+      expect(selectThreadWorktreeById(store.getState(), "chat-1")).toBeNull(),
+    );
     expect(deleteCalls).toHaveLength(0);
     expect(selectThreadWorktreeById(store.getState(), "chat-1")).toBeNull();
     expect(screen.getByTestId("worktree-control-trigger")).toHaveTextContent(
       "dev",
     );
+    await user.click(screen.getByTestId("worktree-control-trigger"));
+    expect(
+      await screen.findByText("Using main workspace."),
+    ).toBeInTheDocument();
+  });
+
+  test("rejected explicit detach keeps its binding and never announces main", async () => {
+    const record = makeWorktreeRecord("wt-rejected", "refact/chat/rejected");
+    const commandCalls: JsonObject[] = [];
+    server.use(
+      worktreesList([record]),
+      http.post("*/v1/chats/:id/commands", async ({ request }) => {
+        commandCalls.push((await request.json()) as JsonObject);
+        return HttpResponse.json(
+          { error: "checkout is managed" },
+          { status: 409 },
+        );
+      }),
+    );
+    const { user, store } = renderControl([record], record.meta);
+    await user.click(screen.getByTestId("worktree-control-trigger"));
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Detach worktree and use main workspace",
+      }),
+    );
+    expect(
+      await screen.findByText("Worktree update failed: checkout is managed"),
+    ).toBeInTheDocument();
+    expect(selectThreadWorktreeById(store.getState(), "chat-1")).toEqual(
+      record.meta,
+    );
+    expect(screen.getByTestId("worktree-control-trigger")).toHaveTextContent(
+      "refact/chat/rejected",
+    );
+    expect(screen.queryByText("Using main workspace.")).not.toBeInTheDocument();
+    expect(commandCalls).toHaveLength(1);
+    expect(commandCalls[0]).toMatchObject({
+      type: "set_params",
+      patch: { worktree: null },
+    });
   });
 
   test("merge cleanup warnings remain inspectable after the registry and chat detach", async () => {

@@ -24,7 +24,7 @@ const CONFIG_STATE = {
 const TASK_ID = "task-1";
 const CARD_ID = "T-1";
 const BOARD_ENDPOINT = `*/v1/tasks/${TASK_ID}/board`;
-const COMMENT_ENDPOINT = `*/v1/tasks/${TASK_ID}/cards/${CARD_ID}/comments`;
+const COMMENT_ENDPOINT = `*/v1/tasks/${TASK_ID}/cards/comments`;
 
 interface CapturedRequest {
   method: string;
@@ -149,13 +149,51 @@ describe("CardCommentsSection", () => {
     });
     expect(requests[0]).toStrictEqual({
       method: "POST",
-      pathname: `/v1/tasks/${TASK_ID}/cards/${CARD_ID}/comments`,
+      pathname: `/v1/tasks/${TASK_ID}/cards/comments`,
       body: {
+        card_id: CARD_ID,
         body: "My new comment",
         author_role: "user",
       },
     });
     expect(textarea).toHaveValue("");
+  });
+
+  it("posts a reserved-character legacy card ID as an opaque body identifier", async () => {
+    const taskId = TASK_ID;
+    const cardId = "legacy/card ?#%2F+&";
+    const requests: Request[] = [];
+    server.use(
+      http.post(COMMENT_ENDPOINT, ({ request }) => {
+        requests.push(request.clone());
+        return HttpResponse.json({
+          ...makeBoard(),
+          cards: [makeCard({ id: cardId })],
+        });
+      }),
+    );
+    const { user } = render(
+      <CardCommentsSection taskId={taskId} cardId={cardId} comments={[]} />,
+      { preloadedState: CONFIG_STATE },
+    );
+    await user.type(
+      screen.getByPlaceholderText("Add a comment..."),
+      "Opaque ID comment",
+    );
+    await user.click(screen.getByRole("button", { name: "Comment" }));
+    await waitFor(() => expect(requests).toHaveLength(1));
+    const url = new URL(requests[0].url);
+    expect(url.pathname).toBe("/v1/tasks/task-1/cards/comments");
+    expect(url.search).toBe("");
+    expect(url.hash).toBe("");
+    expect(await requests[0].json()).toEqual({
+      card_id: cardId,
+      body: "Opaque ID comment",
+      author_role: "user",
+    });
+    await waitFor(() =>
+      expect(screen.getByPlaceholderText("Add a comment...")).toHaveValue(""),
+    );
   });
 
   it("submit_reply_comment_carries_reply_to_only_when_replying", async () => {
@@ -181,8 +219,9 @@ describe("CardCommentsSection", () => {
     });
     expect(requests[0]).toStrictEqual({
       method: "POST",
-      pathname: `/v1/tasks/${TASK_ID}/cards/${CARD_ID}/comments`,
+      pathname: `/v1/tasks/${TASK_ID}/cards/comments`,
       body: {
+        card_id: CARD_ID,
         body: "Reply body",
         author_role: "user",
         reply_to: "parent-comment-id",

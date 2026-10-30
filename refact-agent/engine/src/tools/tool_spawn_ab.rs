@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+#[cfg(test)]
 use std::process::Command;
 use std::sync::Arc;
 
@@ -19,7 +20,7 @@ use crate::tools::task_tool_helpers::{wait_for_agent_abort, AGENT_ABORT_TIMEOUT}
 use crate::tasks::assignment::{self, Assignment};
 use crate::tools::tool_task_spawn_agent::{
     build_agent_thread_params, scoped_worktree_gate, prepare_agent_worktree_with_suffix,
-    resolve_agent_model, resolve_invoking_planner_chat_id, PreparedWorktree,
+    resolve_agent_model, resolve_invoking_planner_chat_id, AcceptedAgentSource, PreparedWorktree,
 };
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::worktrees::service::WorktreeService;
@@ -236,6 +237,10 @@ async fn prepare_ab_worktrees(
     model_a: String,
     model_b: String,
 ) -> Result<PreparedAbVariants, String> {
+    let root = crate::files_correction::get_active_project_path(gcx.clone())
+        .await
+        .ok_or("No active project for A/B agents")?;
+    let source = AcceptedAgentSource::capture(gcx.clone(), &root, None).await?;
     let agent_id_a = Uuid::new_v4().to_string();
     let agent_id_b = Uuid::new_v4().to_string();
     let chat_id_a = format!("agent-{}-{}-a", card_id, &agent_id_a[..8]);
@@ -243,6 +248,7 @@ async fn prepare_ab_worktrees(
 
     let prepared_a = prepare_agent_worktree_with_suffix(
         gcx.clone(),
+        &source,
         task_meta,
         task_id,
         &agent_id_a,
@@ -254,6 +260,7 @@ async fn prepare_ab_worktrees(
 
     let prepared_b = match prepare_agent_worktree_with_suffix(
         gcx.clone(),
+        &source,
         task_meta,
         task_id,
         &agent_id_b,
@@ -368,6 +375,7 @@ fn queued_variant_is_current(card: &BoardCard, key: &str, chat_id: &str) -> bool
 
 async fn run_queued_ab_variant(
     app: crate::app_state::AppState,
+    source: AcceptedAgentSource,
     task_meta: crate::tasks::types::TaskMeta,
     planner_chat_id: String,
     card: BoardCard,
@@ -387,15 +395,17 @@ async fn run_queued_ab_variant(
         .begin_operation()
         .await
         .map_err(|e| e.to_string())?;
+    source.validate(app.gcx.clone()).await?;
+    source.validate_task(app.gcx.clone(), &task_meta.id).await?;
     let board = storage::load_board(app.gcx.clone(), &task_meta.id).await?;
-    if !board
-        .get_card(&card.id)
-        .is_some_and(|current| queued_variant_is_current(current, key, &queued.chat_id))
-    {
+    if !board.get_card(&card.id).is_some_and(|current| {
+        !execution.is_cancelled() && queued_variant_is_current(current, key, &queued.chat_id)
+    }) {
         return Err("queued A/B claim was cancelled or replaced".into());
     }
     let prepared = prepare_agent_worktree_with_suffix(
         app.gcx.clone(),
+        &source,
         &task_meta,
         &task_meta.id,
         &queued.agent_id,
@@ -414,6 +424,10 @@ async fn run_queued_ab_variant(
     let id = card.id.clone();
     let chat_id = queued.chat_id.clone();
     let link_execution = execution.clone();
+    if let Err(error) = source.validate_task(app.gcx.clone(), &task_meta.id).await {
+        variant.prepared.cleanup_unlinked(app.gcx.clone()).await;
+        return Err(error);
+    }
     let linked = storage::update_board_atomic(app.gcx.clone(), &task_meta.id, move |board| {
         let current = board.get_card_mut(&id).ok_or("A/B card removed")?;
         if link_execution.is_cancelled() || !queued_variant_is_current(current, key, &chat_id) {
@@ -444,6 +458,8 @@ async fn run_queued_ab_variant(
     if execution.is_cancelled() {
         return Err("A/B setup cancelled".into());
     }
+    source.validate(app.gcx.clone()).await?;
+    source.validate_task(app.gcx.clone(), &task_meta.id).await?;
     create_variant_session(
         app.clone(),
         &task_meta.id,
@@ -465,38 +481,15 @@ async fn run_queued_ab_variant(
 
 async fn mark_ab_setup_failed(
     gcx: Arc<GlobalContext>,
+    source: &AcceptedAgentSource,
     task_id: &str,
     card_id: String,
     key: &'static str,
     chat_id: String,
     error: String,
 ) {
-    let stats_gcx = gcx.clone();
-    let _ = storage::update_board_atomic(gcx, task_id, move |board| {
-        if let Some(card) = board.get_card_mut(&card_id) {
-            if queued_variant_is_current(card, key, &chat_id) {
-                let now = Utc::now().to_rfc3339();
-                card.ab_variants
-                    .as_mut()
-                    .unwrap()
-                    .variant_mut(key)
-                    .unwrap()
-                    .finish = Some(crate::tasks::types::AbVariantFinish {
-                    success: false,
-                    final_report: format!("A/B variant setup failed: {error}"),
-                    completed_at: now.clone(),
-                    ..Default::default()
-                });
-                card.status_updates.push(StatusUpdate {
-                    timestamp: now,
-                    message: format!("A/B variant {key} setup failed: {error}"),
-                });
-            }
-        }
-        Ok(())
-    })
-    .await;
-    let _ = storage::update_task_stats(stats_gcx, task_id).await;
+    let _ = (task_id, card_id, key, chat_id);
+    source.reconcile(gcx, false, &error).await;
 }
 
 pub(crate) async fn dispatch_ab_variants(
@@ -504,7 +497,7 @@ pub(crate) async fn dispatch_ab_variants(
     task_meta: crate::tasks::types::TaskMeta,
     planner_chat_id: String,
     root_chat_id: &str,
-    project: &str,
+    source: AcceptedAgentSource,
     card: BoardCard,
     dependency_context: String,
     a: QueuedAbVariant,
@@ -512,13 +505,21 @@ pub(crate) async fn dispatch_ab_variants(
     depth: usize,
 ) -> Result<AbVariants, String> {
     use crate::tasks::admission;
-    admission::reserve(&app, &a.chat_id, project, root_chat_id, depth)
+    admission::reserve(&app, &a.chat_id, source.project(), root_chat_id, depth)
         .await
         .map_err(|e| e.to_string())?;
-    if let Err(error) = admission::reserve(&app, &b.chat_id, project, root_chat_id, depth).await {
+    if let Err(error) =
+        admission::reserve(&app, &b.chat_id, source.project(), root_chat_id, depth).await
+    {
         admission::end(&a.chat_id).await;
         return Err(error.to_string());
     }
+    let source_b =
+        source
+            .clone()
+            .with_attempt(&task_meta.id, &card, &b.agent_id, &b.chat_id, Some("b"))?;
+    let source = source.with_attempt(&task_meta.id, &card, &a.agent_id, &a.chat_id, Some("a"))?;
+    let binding = source.task_binding(&task_meta.id)?.clone();
     let variants = AbVariants {
         a: a.info(),
         b: b.info(),
@@ -529,132 +530,162 @@ pub(crate) async fn dispatch_ab_variants(
     let cleanup_b = b.chat_id.clone();
     let (accepted, acceptance) = tokio::sync::oneshot::channel();
     let registered = admission::spawn_tracked(&tracked, async move {
-        use futures::FutureExt;
-        let mut accepted = Some(accepted);
-        let mut b_dispatched = false;
-        let setup = async {
-            if accepted.as_ref().is_none_or(|tx| tx.is_closed()) {
-                return Err("A/B caller cancelled before claim".to_string());
-            }
-            let card_id = card.id.clone();
-            let dependency_card_id = card_id.clone();
-            storage::update_board_atomic(app.gcx.clone(), &task_meta.id, move |board| {
-                board
-                    .dependency_gate(&dependency_card_id)
-                    .map_err(storage::violation_error)?;
-                let card = board
-                    .get_card_mut(&card_id)
-                    .ok_or("A/B card removed before claim")?;
-                if card.column != "planned"
-                    || card.ab_variants.is_some()
-                    || card.agent_chat_id.is_some()
-                {
-                    return Err("A/B card already claimed or no longer planned".into());
-                }
-                card.column = "doing".into();
-                card.assignee = Some("ab".into());
-                card.agent_branch = None;
-                card.agent_worktree = None;
-                card.agent_worktree_name = None;
-                card.started_at = None;
-                card.ab_variants = Some(claim);
-                card.status_updates.push(StatusUpdate {
-                    timestamp: Utc::now().to_rfc3339(),
-                    message: "A/B variants queued for execution capacity".into(),
-                });
-                Ok(())
-            })
-            .await?;
-            if accepted
-                .take()
-                .ok_or("A/B acceptance lost")?
-                .send(Ok(()))
-                .is_err()
-            {
-                return Err("A/B caller cancelled during claim".into());
-            }
-            // Registration contains no suspension. Both launchers are owned
-            // before this task waits for either permit (including at cap=1).
-            let child_app = app.clone();
-            let meta = task_meta.clone();
-            let planner = planner_chat_id.clone();
-            let child_card = card.clone();
-            let context = dependency_context.clone();
-            let child = b.clone();
-            admission::spawn_tracked(&b.chat_id, async move {
-                let result = std::panic::AssertUnwindSafe(run_queued_ab_variant(
-                    child_app.clone(),
-                    meta.clone(),
-                    planner,
-                    child_card.clone(),
-                    context,
-                    "b",
-                    child.clone(),
-                ))
-                .catch_unwind()
-                .await
-                .unwrap_or_else(|_| Err("A/B setup panicked".into()));
+        binding
+            .scope(async move {
+                use futures::FutureExt;
+                let mut accepted = Some(accepted);
+                let mut b_dispatched = false;
+                let setup = async {
+                    if accepted.as_ref().is_none_or(|tx| tx.is_closed()) {
+                        return Err("A/B caller cancelled before claim".to_string());
+                    }
+                    let card_id = card.id.clone();
+                    let dependency_card_id = card_id.clone();
+                    source.validate(app.gcx.clone()).await?;
+                    source.validate_task(app.gcx.clone(), &task_meta.id).await?;
+                    storage::update_board_atomic(app.gcx.clone(), &task_meta.id, move |board| {
+                        board
+                            .dependency_gate(&dependency_card_id)
+                            .map_err(storage::violation_error)?;
+                        let card = board
+                            .get_card_mut(&card_id)
+                            .ok_or("A/B card removed before claim")?;
+                        if card.column != "planned"
+                            || card.ab_variants.is_some()
+                            || card.agent_chat_id.is_some()
+                        {
+                            return Err("A/B card already claimed or no longer planned".into());
+                        }
+                        card.column = "doing".into();
+                        card.assignee = Some("ab".into());
+                        card.agent_branch = None;
+                        card.agent_worktree = None;
+                        card.agent_worktree_name = None;
+                        card.started_at = None;
+                        card.ab_variants = Some(claim);
+                        card.status_updates.push(StatusUpdate {
+                            timestamp: Utc::now().to_rfc3339(),
+                            message: "A/B variants queued for execution capacity".into(),
+                        });
+                        Ok(())
+                    })
+                    .await?;
+                    if accepted
+                        .take()
+                        .ok_or("A/B acceptance lost")?
+                        .send(Ok(()))
+                        .is_err()
+                    {
+                        return Err("A/B caller cancelled during claim".into());
+                    }
+                    // Registration contains no suspension. Both launchers are owned
+                    // before this task waits for either permit (including at cap=1).
+                    let child_app = app.clone();
+                    let meta = task_meta.clone();
+                    let planner = planner_chat_id.clone();
+                    let child_card = card.clone();
+                    let context = dependency_context.clone();
+                    let child = b.clone();
+                    let child_source = source_b.clone();
+                    let child_binding = child_source.task_binding(&meta.id)?.clone();
+                    admission::spawn_tracked(&b.chat_id, async move {
+                        child_binding
+                            .scope(async move {
+                                let result = std::panic::AssertUnwindSafe(run_queued_ab_variant(
+                                    child_app.clone(),
+                                    child_source.clone(),
+                                    meta.clone(),
+                                    planner,
+                                    child_card.clone(),
+                                    context,
+                                    "b",
+                                    child.clone(),
+                                ))
+                                .catch_unwind()
+                                .await
+                                .unwrap_or_else(|_| Err("A/B setup panicked".into()));
+                                if let Err(error) = result {
+                                    mark_ab_setup_failed(
+                                        child_app.gcx.clone(),
+                                        &child_source,
+                                        &meta.id,
+                                        child_card.id,
+                                        "b",
+                                        child.chat_id.clone(),
+                                        error,
+                                    )
+                                    .await;
+                                    admission::end(&child.chat_id).await;
+                                }
+                                if child_source
+                                    .validate_task(child_app.gcx.clone(), &meta.id)
+                                    .await
+                                    .is_ok()
+                                {
+                                    let _ =
+                                        storage::update_task_stats(child_app.gcx, &meta.id).await;
+                                }
+                            })
+                            .await
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?;
+                    b_dispatched = true;
+                    run_queued_ab_variant(
+                        app.clone(),
+                        source.clone(),
+                        task_meta.clone(),
+                        planner_chat_id,
+                        card.clone(),
+                        dependency_context,
+                        "a",
+                        a.clone(),
+                    )
+                    .await
+                };
+                let result = std::panic::AssertUnwindSafe(setup)
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|_| Err("A/B setup panicked".into()));
                 if let Err(error) = result {
+                    if let Some(accepted) = accepted.take() {
+                        let _ = accepted.send(Err(error.clone()));
+                    }
                     mark_ab_setup_failed(
-                        child_app.gcx.clone(),
-                        &meta.id,
-                        child_card.id,
-                        "b",
-                        child.chat_id.clone(),
-                        error,
+                        app.gcx.clone(),
+                        &source,
+                        &task_meta.id,
+                        card.id.clone(),
+                        "a",
+                        a.chat_id.clone(),
+                        error.clone(),
                     )
                     .await;
-                    admission::end(&child.chat_id).await;
+                    admission::end(&a.chat_id).await;
+                    // B is independent once registered; a failure in A must not stop it.
+                    if !b_dispatched {
+                        mark_ab_setup_failed(
+                            app.gcx.clone(),
+                            &source_b,
+                            &task_meta.id,
+                            card.id,
+                            "b",
+                            b.chat_id.clone(),
+                            error,
+                        )
+                        .await;
+                        admission::end(&b.chat_id).await;
+                    }
                 }
-                let _ = storage::update_task_stats(child_app.gcx, &meta.id).await;
+                if source
+                    .validate_task(app.gcx.clone(), &task_meta.id)
+                    .await
+                    .is_ok()
+                {
+                    let _ = storage::update_task_stats(app.gcx, &task_meta.id).await;
+                }
             })
             .await
-            .map_err(|e| e.to_string())?;
-            b_dispatched = true;
-            run_queued_ab_variant(
-                app.clone(),
-                task_meta.clone(),
-                planner_chat_id,
-                card.clone(),
-                dependency_context,
-                "a",
-                a.clone(),
-            )
-            .await
-        };
-        let result = std::panic::AssertUnwindSafe(setup)
-            .catch_unwind()
-            .await
-            .unwrap_or_else(|_| Err("A/B setup panicked".into()));
-        if let Err(error) = result {
-            if let Some(accepted) = accepted.take() {
-                let _ = accepted.send(Err(error.clone()));
-            }
-            mark_ab_setup_failed(
-                app.gcx.clone(),
-                &task_meta.id,
-                card.id.clone(),
-                "a",
-                a.chat_id.clone(),
-                error.clone(),
-            )
-            .await;
-            admission::end(&a.chat_id).await;
-            // B is independent once registered; a failure in A must not stop it.
-            if !b_dispatched {
-                mark_ab_setup_failed(
-                    app.gcx.clone(),
-                    &task_meta.id,
-                    card.id,
-                    "b",
-                    b.chat_id.clone(),
-                    error,
-                )
-                .await;
-                admission::end(&b.chat_id).await;
-            }
-        }
-        let _ = storage::update_task_stats(app.gcx, &task_meta.id).await;
     })
     .await;
     if let Err(error) = registered {
@@ -704,80 +735,33 @@ async fn cleanup_ab_variant_with_timeout(
         return Ok(());
     }
 
-    let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
-    let workspace_root = project_dirs.first().ok_or("No workspace folder found")?;
-
-    if let Some(worktree_name) = variant.worktree_name.as_deref() {
-        if let Ok(service) =
-            WorktreeService::new_async(gcx.cache_dir.clone(), workspace_root.clone()).await
+    let name = variant
+        .worktree_name
+        .as_deref()
+        .ok_or("A/B checkout registration is missing; checkout retained for reconciliation")?;
+    let expected_root = dunce::canonicalize(&variant.worktree)
+        .map_err(|e| format!("A/B checkout cannot be verified; retained: {e}"))?;
+    let mut selected = None;
+    for root in crate::files_correction::get_project_dirs(gcx.clone()).await {
+        let service = WorktreeService::new_async(gcx.cache_dir.clone(), root).await?;
+        let Ok(view) = service.get_worktree(name).await else {
+            continue;
+        };
+        if view.meta.root != expected_root
+            || view.meta.branch != variant.branch
+            || view.meta.agent_id.as_deref() != Some(variant.agent_id.as_str())
         {
-            if service
-                .delete_worktree(worktree_name, true, true)
-                .await
-                .is_ok()
-            {
-                return Ok(());
-            }
+            continue;
         }
-    }
-
-    fn removal_is_contended(error: &std::io::Error) -> bool {
-        #[cfg(windows)]
-        {
-            const ERROR_SHARING_VIOLATION: i32 = 32;
-            const ERROR_LOCK_VIOLATION: i32 = 33;
-            const ERROR_ACCESS_DENIED: i32 = 5;
-            return matches!(
-                error.raw_os_error(),
-                Some(ERROR_SHARING_VIOLATION)
-                    | Some(ERROR_LOCK_VIOLATION)
-                    | Some(ERROR_ACCESS_DENIED)
-            );
+        if selected.is_some() {
+            return Err("A/B checkout registration is ambiguous; checkout retained".into());
         }
-        #[cfg(not(windows))]
-        {
-            let _ = error;
-            false
-        }
+        selected = Some(service);
     }
-
-    fn remove_worktree_dir_with_retry(path: &str) -> std::io::Result<()> {
-        let mut delay = std::time::Duration::from_millis(20);
-        for _ in 0..6 {
-            match std::fs::remove_dir_all(path) {
-                Ok(()) => return Ok(()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-                Err(error) if removal_is_contended(&error) => {
-                    std::thread::sleep(delay);
-                    delay = (delay * 2).min(std::time::Duration::from_millis(400));
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        std::fs::remove_dir_all(path)
-    }
-
-    let worktree_removed = Command::new("git")
-        .args(["worktree", "remove", &variant.worktree, "--force"])
-        .current_dir(workspace_root)
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false);
-    if !worktree_removed && std::path::Path::new(&variant.worktree).exists() {
-        remove_worktree_dir_with_retry(&variant.worktree).map_err(|e| {
-            format!(
-                "Failed to remove loser worktree '{}': {}",
-                variant.worktree, e
-            )
-        })?;
-    }
-    if let Some(branch) = variant.branch.as_deref() {
-        let _ = Command::new("git")
-            .args(["branch", "-D", branch])
-            .current_dir(workspace_root)
-            .output();
-    }
-    Ok(())
+    let service = selected.ok_or(
+        "A/B checkout is not registered to an authorized source; checkout retained for reconciliation",
+    )?;
+    service.delete_worktree(name, true, true).await.map(|_| ())
 }
 
 async fn promote_ab_winner_if_current(
@@ -1086,6 +1070,27 @@ impl Tool for ToolSpawnAb {
         validate_id(card_id, "card_id")?;
         let variant_a = parse_variant(args, "variant_a")?;
         let variant_b = parse_variant(args, "variant_b")?;
+        let (app, root_chat_id, depth, planner_worktree) = {
+            let context = ccx.lock().await;
+            (
+                context.app.clone(),
+                context.root_chat_id.clone(),
+                context.subchat_depth,
+                context.execution_scope_worktree(),
+            )
+        };
+        let source_root = planner_worktree
+            .as_ref()
+            .map(|worktree| worktree.source_workspace_root.clone())
+            .or(crate::files_correction::get_active_project_path(gcx.clone()).await)
+            .ok_or("No active project for A/B agents")?;
+        let source =
+            AcceptedAgentSource::capture(gcx.clone(), &source_root, planner_worktree.as_ref())
+                .await?
+                .bind_task(gcx.clone(), &task_id)
+                .await?;
+        let binding = source.task_binding(&task_id)?.clone();
+        binding.scope(async {
         let task_meta = storage::load_task_meta(gcx.clone(), &task_id).await?;
         let model_a = match variant_a.model.as_deref() {
             Some(model) => model.to_string(),
@@ -1123,20 +1128,6 @@ impl Tool for ToolSpawnAb {
 
         crate::tools::task_tool_helpers::preflight_agent_model(gcx.clone(), &model_a).await?;
         crate::tools::task_tool_helpers::preflight_agent_model(gcx.clone(), &model_b).await?;
-        let (app, root_chat_id, depth, source_root) = {
-            let context = ccx.lock().await;
-            (
-                context.app.clone(),
-                context.root_chat_id.clone(),
-                context.subchat_depth,
-                context
-                    .execution_scope_worktree()
-                    .map(|worktree| worktree.source_workspace_root),
-            )
-        };
-        let source_root = source_root
-            .or(crate::files_correction::get_active_project_path(gcx.clone()).await)
-            .ok_or("No active project for A/B agents")?;
         let worktree_warning = scoped_worktree_gate(
             &board,
             card_id,
@@ -1146,7 +1137,6 @@ impl Tool for ToolSpawnAb {
             "spawn A/B agents",
         )
         .await?;
-        let project = crate::coordination::roots::project_identity(&source_root);
         let root_chat_id = if root_chat_id.is_empty() {
             &planner_chat_id
         } else {
@@ -1157,7 +1147,7 @@ impl Tool for ToolSpawnAb {
             task_meta,
             planner_chat_id.clone(),
             root_chat_id,
-            &project,
+            source,
             original_card,
             dependency_context,
             QueuedAbVariant::new(card_id, "a", model_a, variant_a),
@@ -1185,6 +1175,7 @@ impl Tool for ToolSpawnAb {
                 ..Default::default()
             })],
         ))
+        }).await
     }
 
     fn tool_depends_on(&self) -> Vec<String> {
@@ -1382,6 +1373,7 @@ pub(crate) mod tests {
     pub(crate) struct RecordingFacade {
         pub(crate) created: std::sync::Mutex<Vec<String>>,
         pub(crate) confirmation_flags: std::sync::Mutex<Vec<bool>>,
+        pub(crate) threads: std::sync::Mutex<Vec<crate::chat::types::ThreadParams>>,
         pub(crate) started: std::sync::Mutex<Vec<String>>,
         notify: tokio::sync::Notify,
     }
@@ -1407,6 +1399,7 @@ pub(crate) mod tests {
                 .lock()
                 .unwrap()
                 .push(request.thread.auto_approve_dangerous_commands);
+            self.threads.lock().unwrap().push(request.thread);
             self.created.lock().unwrap().push(request.chat_id);
             Ok(())
         }
@@ -1466,7 +1459,12 @@ pub(crate) mod tests {
         let mut app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
         let facade = Arc::new(RecordingFacade::default());
         app.chat.facade = facade.clone();
-        let project = crate::coordination::roots::project_identity(&source);
+        let accepted_source = AcceptedAgentSource::capture(gcx.clone(), &source, None)
+            .await
+            .unwrap()
+            .bind_task(gcx.clone(), "task-1")
+            .await
+            .unwrap();
         let lock = crate::tasks::board_lock::acquire_board(&source.join(".refact/tasks/task-1"))
             .await
             .unwrap();
@@ -1475,7 +1473,7 @@ pub(crate) mod tests {
             task_meta("task-1"),
             "planner".into(),
             "planner",
-            &project,
+            accepted_source,
             test_card(),
             String::new(),
             queued_variant("a"),
@@ -1515,13 +1513,31 @@ pub(crate) mod tests {
         let parent = Arc::new(AMutex::new(crate::chat::types::ChatSession::new(
             "planner".into(),
         )));
-        parent.lock().await.thread.auto_approve_dangerous_commands = true;
+        {
+            let mut session = parent.lock().await;
+            session.work_project_root = Some(source.clone());
+            session.thread.model = "test/model".into();
+            session.thread.task_meta = Some(refact_chat_api::TaskMeta {
+                task_id: "task-1".into(),
+                role: "planner".into(),
+                planner_chat_id: Some("planner".into()),
+                agent_id: None,
+                card_id: None,
+            });
+            session.thread.auto_approve_dangerous_commands = true;
+        }
         app.chat
             .sessions
             .write()
             .await
             .insert("planner".into(), parent.clone());
-        let project = crate::coordination::roots::project_identity(&source);
+        let accepted_source = AcceptedAgentSource::capture(gcx.clone(), &source, None)
+            .await
+            .unwrap()
+            .bind_task(gcx.clone(), "task-1")
+            .await
+            .unwrap();
+        let project = accepted_source.project();
         let holder = app
             .work_scheduler
             .reserve(refact_work_core::AdmissionRequest::new(
@@ -1540,7 +1556,7 @@ pub(crate) mod tests {
                 meta,
                 "planner".into(),
                 "planner",
-                &project,
+                accepted_source,
                 test_card(),
                 String::new(),
                 queued_variant("a"),
@@ -1556,6 +1572,18 @@ pub(crate) mod tests {
         assert!(!gcx.cache_dir.join("worktrees").exists());
         let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
         assert!(board.get_card("T-1").unwrap().started_at.is_none());
+        let (foreign_gcx, _foreign_temp, foreign_source) = setup_repo_task().await;
+        storage::update_board_atomic(foreign_gcx, "task-1", |board| {
+            board.cards[0].instructions = "foreign sentinel never dispatched".into();
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let foreign_path = foreign_source.join(".refact/tasks/task-1/board.yaml");
+        let foreign_before = std::fs::read(&foreign_path).unwrap();
+        assert!(!foreign_before.is_empty());
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![foreign_source, source.clone()];
         holder.release();
         await_started(&facade, 1).await;
         let first = facade.started.lock().unwrap()[0].clone();
@@ -1576,7 +1604,11 @@ pub(crate) mod tests {
         );
         assert_eq!(app.work_scheduler.snapshot().active, 1);
         crate::tasks::admission::end(other).await;
-        let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        assert_eq!(std::fs::read(&foreign_path).unwrap(), foreign_before);
+        let board: TaskBoard = serde_yaml::from_slice(
+            &std::fs::read(source.join(".refact/tasks/task-1/board.yaml")).unwrap(),
+        )
+        .unwrap();
         let stored = board.get_card("T-1").unwrap().ab_variants.as_ref().unwrap();
         assert!(!stored.a.worktree.is_empty() && !stored.b.worktree.is_empty());
         cleanup_ab_variant(gcx.clone(), &stored.a).await.unwrap();
@@ -1594,13 +1626,18 @@ pub(crate) mod tests {
                 ..Default::default()
             },
         ));
-        let project = crate::coordination::roots::project_identity(&source);
+        let accepted_source = AcceptedAgentSource::capture(gcx.clone(), &source, None)
+            .await
+            .unwrap()
+            .bind_task(gcx.clone(), "task-1")
+            .await
+            .unwrap();
         let error = dispatch_ab_variants(
             app.clone(),
             task_meta("task-1"),
             "planner".into(),
             "planner",
-            &project,
+            accepted_source,
             test_card(),
             String::new(),
             queued_variant("a"),
@@ -1629,7 +1666,13 @@ pub(crate) mod tests {
                 ..Default::default()
             },
         ));
-        let project = crate::coordination::roots::project_identity(&source);
+        let accepted_source = AcceptedAgentSource::capture(gcx.clone(), &source, None)
+            .await
+            .unwrap()
+            .bind_task(gcx.clone(), "task-1")
+            .await
+            .unwrap();
+        let project = accepted_source.project();
         let holder = app
             .work_scheduler
             .reserve(refact_work_core::AdmissionRequest::new(
@@ -1645,7 +1688,7 @@ pub(crate) mod tests {
             task_meta("task-1"),
             "planner".into(),
             "planner",
-            &project,
+            accepted_source,
             test_card(),
             String::new(),
             queued_variant("a"),

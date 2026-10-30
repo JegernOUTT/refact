@@ -10,6 +10,13 @@ use crate::exec::{ExecAuditMeta, ExecEnvPolicy, ExecMode, ExecSpawnRequest};
 use crate::exec::types::{ExecSandboxMode, ExecSandboxSpec};
 use crate::global_context::{GlobalContext, TerminalSecurityMode};
 
+#[path = "managed_cache_policy.rs"]
+mod managed_cache_policy;
+pub(crate) use managed_cache_policy::{prepare_managed_cache, ManagedCacheDecision};
+pub(crate) use managed_cache_policy::{ensure_managed_task_execution, validate_pending_managed_cache};
+#[cfg(test)]
+pub(crate) use managed_cache_policy::BEFORE_SPAWN as MANAGED_CACHE_BEFORE_SPAWN;
+
 pub type ChatMode = String;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -521,9 +528,32 @@ mod tests {
                     passthrough: vec!["HTTP_PROXY".to_string()]
                 }
             );
-            assert_eq!(request.request.audit.unwrap().source, expected);
+            assert_eq!(request.request.audit.as_ref().unwrap().source, expected);
             assert!(request.request.sandbox.is_none());
         }
+        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let ccx = Arc::new(tokio::sync::Mutex::new(
+            crate::at_commands::at_commands::AtCommandsContext::new_from_app(
+                app,
+                4096,
+                1,
+                false,
+                vec![],
+                "unmanaged".into(),
+                None,
+                "model".into(),
+                None,
+                None,
+            )
+            .await,
+        ));
+        let mut unmanaged = ExecSpawnRequest::foreground("printf ok");
+        let original = format!("{unmanaged:?}");
+        assert!(prepare_managed_cache(&ccx, None, &mut unmanaged)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(format!("{unmanaged:?}"), original);
     }
 
     #[test]

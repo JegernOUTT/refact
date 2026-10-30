@@ -195,11 +195,16 @@ async fn remove_agent_files(storage_root: &Path, agent_id: &str) {
     while let Ok(Some(entry)) = entries.next_entry().await {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        if name.starts_with(&prefix)
-            && name.ends_with(".json")
-            && name[prefix.len()..name.len() - ".json".len()]
-                .parse::<u64>()
-                .is_ok()
+        if name
+            .strip_prefix(&prefix)
+            .and_then(|name| name.strip_suffix(".json"))
+            .is_some_and(|generation| {
+                generation
+                    .strip_suffix(".checkout")
+                    .unwrap_or(generation)
+                    .parse::<u64>()
+                    .is_ok()
+            })
         {
             let _ = fs::remove_file(entry.path()).await;
         }
@@ -494,6 +499,54 @@ pub(crate) async fn load_run_config(
     .await
 }
 
+pub(crate) async fn run_config_absent(
+    storage_root: &Path,
+    agent_id: &str,
+    generation: u64,
+) -> bool {
+    let Ok(path) = run_config_path(storage_root, agent_id, generation) else {
+        return false;
+    };
+    matches!(fs::symlink_metadata(path).await, Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+}
+
+fn checkout_setup_path(
+    storage_root: &Path,
+    agent_id: &str,
+    generation: u64,
+) -> Result<PathBuf, String> {
+    let mut path = run_config_path(storage_root, agent_id, generation)?;
+    path.set_extension("checkout.json");
+    Ok(path)
+}
+
+pub(crate) async fn save_checkout_setup(
+    storage_root: &Path,
+    agent_id: &str,
+    generation: u64,
+    payload: &AcceptedLaunchPayload,
+) -> Result<(), String> {
+    save_launch_payload(
+        &checkout_setup_path(storage_root, agent_id, generation)?,
+        payload,
+    )
+    .await
+}
+
+pub(crate) async fn load_checkout_setup(
+    storage_root: &Path,
+    agent_id: &str,
+    generation: u64,
+    max_bytes: usize,
+) -> Result<Option<AcceptedLaunchPayload>, String> {
+    let path = checkout_setup_path(storage_root, agent_id, generation)?;
+    match fs::symlink_metadata(&path).await {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err("checkout setup unavailable".into()),
+        Ok(_) => load_launch_payload(&path, max_bytes).await.map(Some),
+    }
+}
+
 async fn save_launch_payload(path: &Path, payload: &AcceptedLaunchPayload) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
     let directory = path.parent().ok_or("launch directory unavailable")?;
@@ -656,6 +709,26 @@ mod tests {
             .unwrap();
         save_run_config(temp.path(), &id, 1, &first).await.unwrap();
         save_run_config(temp.path(), &id, 2, &second).await.unwrap();
+        assert!(load_checkout_setup(temp.path(), &id, 2, 128)
+            .await
+            .unwrap()
+            .is_none());
+        save_checkout_setup(temp.path(), &id, 2, &second)
+            .await
+            .unwrap();
+        assert!(save_checkout_setup(temp.path(), &id, 2, &first)
+            .await
+            .is_err());
+        assert!(load_checkout_setup(temp.path(), &id, 2, 1).await.is_err());
+        assert_eq!(
+            load_checkout_setup(temp.path(), &id, 2, 128)
+                .await
+                .unwrap()
+                .unwrap()
+                .as_bytes(),
+            second.as_bytes()
+        );
+
         assert!(save_run_config(temp.path(), &id, 1, &second).await.is_err());
         assert!(save_run_config(temp.path(), &id, 0, &first).await.is_err());
         assert!(load_run_config(temp.path(), &id, 3, 128).await.is_err());
@@ -1346,10 +1419,32 @@ mod tests {
                 Some(now),
             ));
         }
+        let setup =
+            AcceptedLaunchPayload::serialize(&serde_json::json!({"operation":"retained"}), 128)
+                .unwrap();
+        save_checkout_setup(temp.path(), &live, 2, &setup)
+            .await
+            .unwrap();
+        save_checkout_setup(temp.path(), &old, 2, &setup)
+            .await
+            .unwrap();
         save_all(temp.path(), records).await.unwrap();
         let loaded = load_all(temp.path()).await.unwrap();
         assert!(loaded.contains_key(&live));
         assert!(!loaded.contains_key(&old));
+        assert_eq!(
+            load_checkout_setup(temp.path(), &live, 2, 128)
+                .await
+                .unwrap()
+                .unwrap()
+                .as_bytes(),
+            setup.as_bytes()
+        );
+        assert!(load_checkout_setup(temp.path(), &old, 2, 128)
+            .await
+            .unwrap()
+            .is_none());
+
         assert!(load_accepted_launch(temp.path(), &live, 128).await.is_ok());
         assert!(load_run_config(temp.path(), &live, 1, 128).await.is_ok());
         assert!(load_run_config(temp.path(), &live, 2, 128).await.is_ok());

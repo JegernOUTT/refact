@@ -313,6 +313,7 @@ async fn registered_catalog_with_grant(
             (
                 super::improvement::activation::ACTION,
                 Arc::new(super::improvement::activation::LandingAdapter::new(
+                    app,
                     runtime.clone(),
                     worktrees,
                     bound_draft(runtime, spec).await?,
@@ -472,7 +473,7 @@ pub async fn execute_registered(
     runtime: OutcomeRuntime,
     request: super::action_execution::ActionRequest,
 ) -> Result<super::action_execution::ActionResult, String> {
-    let _gate = execution_gate().lock().await;
+    let gate = execution_gate().lock().await;
     let active = super::operator_runtime::runtime(
         &app,
         super::operator_runtime::OperatorCapability::Actions,
@@ -480,6 +481,8 @@ pub async fn execute_registered(
     .await?;
     if active.project() != runtime.project()
         || active.worker() != runtime.worker()
+        || (request.spec.adapter == super::improvement::activation::ADAPTER
+            && !active.same_owner(&runtime))
         || request.worker != runtime.worker()
     {
         return Err("operator project/worker changed".into());
@@ -530,6 +533,12 @@ pub async fn execute_registered(
     let catalog = registered_catalog_with_grant(app, &runtime, &request.spec, Some(grant.clone()))
         .await
         .map_err(|e| format!("{e:?}"))?;
+    let _gate = if request.spec.adapter == super::improvement::activation::ADAPTER {
+        drop(gate);
+        None
+    } else {
+        Some(gate)
+    };
     Ok(catalog
         .service(runtime, Arc::new(grant))
         .map_err(|_| "catalog registration failed")?
@@ -542,6 +551,104 @@ pub struct ResourceDocument<T> {
     pub schema_version: u16,
     pub project: ProjectIdentity,
     pub payload: T,
+}
+
+#[derive(Clone)]
+pub(crate) struct ResourceExecutionContext {
+    pub runtime: OutcomeRuntime,
+    pub execution:
+        super::operator_store::Stored<refact_buddy_core::operator_types::ActionExecution>,
+    pub recovery: Option<super::action_recovery::RecoveryRequest>,
+}
+
+tokio::task_local! {
+    static RESOURCE_EXECUTION: ResourceExecutionContext;
+}
+
+impl ResourceExecutionContext {
+    pub(crate) async fn scope<F: std::future::Future>(self, operation: F) -> F::Output {
+        RESOURCE_EXECUTION.scope(self, operation).await
+    }
+
+    pub(crate) async fn publish_receipt(
+        &self,
+        spec: &ActionSpec,
+        receipt: &ResourceApplyReceipt,
+    ) -> Result<(), OperatorStoreError> {
+        let execution = self.execution.clone();
+        let spec = spec.clone();
+        let value = ResourceDocument {
+            schema_version: 1,
+            project: spec.project.clone(),
+            payload: receipt.clone(),
+        };
+        self.runtime
+            .with_store(move |store| {
+                let id = &execution.value.execution_id;
+                if execution.value.status != ActionExecutionState::Running
+                    || execution.value.project != spec.project
+                    || execution.value.action_id != spec.action_id
+                    || execution.value.spec_hash
+                        != super::action_execution::action_spec_hash(&spec, &spec.parameter_ref)
+                    || store.identity() != &spec.project
+                    || store.get_execution(id)?.as_ref() != Some(&execution)
+                    || value.payload.resource_id != spec.resource.resource_id
+                {
+                    return Err(OperatorStoreError::Conflict(
+                        "receipt execution binding changed",
+                    ));
+                }
+                store
+                    .put_reserved_document(
+                        "resource_apply",
+                        id,
+                        "resource_receipt",
+                        id,
+                        &value,
+                        None,
+                    )
+                    .map(|_| ())
+            })
+            .await
+    }
+
+    async fn receipt_is_published(
+        &self,
+        spec: &ActionSpec,
+        receipt: &ResourceApplyReceipt,
+    ) -> bool {
+        let execution = self.execution.clone();
+        let spec = spec.clone();
+        let receipt = receipt.clone();
+        self.runtime
+            .with_store(move |store| {
+                let stored = store.get_document::<ResourceDocument<ResourceApplyReceipt>>(
+                    "resource_receipt",
+                    &execution.value.execution_id,
+                )?;
+                Ok(store.identity() == &spec.project
+                    && execution.value.project == spec.project
+                    && execution.value.action_id == spec.action_id
+                    && execution.value.spec_hash
+                        == super::action_execution::action_spec_hash(&spec, &spec.parameter_ref)
+                    && store.get_execution(&execution.value.execution_id)?.as_ref()
+                        == Some(&execution)
+                    && receipt.resource_id == spec.resource.resource_id
+                    && stored.is_some_and(|stored| {
+                        stored.value.schema_version == 1
+                            && stored.value.project == spec.project
+                            && stored.value.payload == receipt
+                    }))
+            })
+            .await
+            .unwrap_or(false)
+    }
+}
+
+pub(crate) fn current_resource_execution() -> Result<ResourceExecutionContext, ResourceError> {
+    RESOURCE_EXECUTION.try_with(Clone::clone).map_err(|_| {
+        ResourceError::ValidationFailed("current resource execution authority unavailable".into())
+    })
 }
 
 pub struct RuntimeActionRepository(pub OutcomeRuntime);
@@ -764,71 +871,85 @@ impl AsyncActionAdapter for ResourceActionAdapter {
         }
         let id = execution_id.to_owned();
         let binding = prepared.clone();
-        self.runtime
+        let execution = self
+            .runtime
             .with_store(move |store| {
                 let execution = store
                     .get_execution(&id)?
-                    .ok_or(OperatorStoreError::Conflict("execution claim missing"))?
-                    .value;
-                if execution.status != ActionExecutionState::Running
-                    || execution.spec_hash != binding.spec_hash
-                    || execution.action_id != binding.spec.action_id
-                    || execution.project != binding.spec.project
+                    .ok_or(OperatorStoreError::Conflict("execution claim missing"))?;
+                if execution.value.status != ActionExecutionState::Running
+                    || execution.value.spec_hash != binding.spec_hash
+                    || execution.value.action_id != binding.spec.action_id
+                    || execution.value.project != binding.spec.project
                 {
                     return Err(OperatorStoreError::Conflict("execution claim changed"));
                 }
                 let slots = [("resource_receipt", id.clone(), 1)];
                 if super::resources::retention::is_policy_action(&binding.spec) {
-                    store.reserve_policy_terminal_documents(&binding.spec, &id, &slots)
+                    store.reserve_policy_terminal_documents(&binding.spec, &id, &slots)?;
                 } else {
-                    store.reserve_terminal_documents("resource_apply", &id, &slots)
+                    store.reserve_terminal_documents("resource_apply", &id, &slots)?;
                 }
+                Ok(execution)
             })
             .await
             .map_err(|_| ApplyFailure {
                 effects_may_have_occurred: false,
             })?;
-        let receipt = self
-            .adapter
-            .apply(&prepared.spec)
+        let context = ResourceExecutionContext {
+            runtime: self.runtime.clone(),
+            execution,
+            recovery: None,
+        };
+        let (receipt, mut partial_reason) = match context
+            .clone()
+            .scope(self.adapter.apply(&prepared.spec))
             .await
-            .map_err(|_| ApplyFailure {
-                effects_may_have_occurred: true,
-            })?;
+        {
+            Ok(receipt) => (receipt, None),
+            Err(ResourceError::KnownPartial { receipt, reason }) => (receipt, Some(reason)),
+            Err(ResourceError::NotApplied(_)) => {
+                return Err(ApplyFailure {
+                    effects_may_have_occurred: false,
+                })
+            }
+            Err(_) => {
+                return Err(ApplyFailure {
+                    effects_may_have_occurred: true,
+                })
+            }
+        };
         if receipt.resource_id != prepared.spec.resource.resource_id {
             return Err(ApplyFailure {
                 effects_may_have_occurred: true,
             });
         }
-        let value = ResourceDocument {
-            schema_version: 1,
-            project: prepared.spec.project.clone(),
-            payload: receipt.clone(),
+        let published = if partial_reason.is_some() {
+            context.receipt_is_published(&prepared.spec, &receipt).await
+        } else {
+            context
+                .publish_receipt(&prepared.spec, &receipt)
+                .await
+                .is_ok()
         };
-        let id = execution_id.to_owned();
-        self.runtime
-            .with_store(move |store| {
-                store
-                    .put_reserved_document(
-                        "resource_apply",
-                        &id,
-                        "resource_receipt",
-                        &id,
-                        &value,
-                        None,
-                    )
-                    .map(|_| ())
-            })
-            .await
-            .map_err(|_| ApplyFailure {
-                effects_may_have_occurred: true,
-            })?;
+        if !published && partial_reason.is_none() {
+            if prepared.spec.adapter == super::improvement::activation::ADAPTER {
+                partial_reason = Some(
+                    "known landing receipt publication unavailable; inspect without replay".into(),
+                );
+            } else {
+                return Err(ApplyFailure {
+                    effects_may_have_occurred: true,
+                });
+            }
+        }
         if receipt.state == ResourceApplyState::NotApplied {
             return Err(ApplyFailure {
                 effects_may_have_occurred: false,
             });
         }
-        let verified = receipt.state == ResourceApplyState::Applied
+        let verified = partial_reason.is_none()
+            && receipt.state == ResourceApplyState::Applied
             && self.adapter.capabilities().verify
             && prepared.spec.capabilities.can_verify
             && self
@@ -846,10 +967,25 @@ impl AsyncActionAdapter for ResourceActionAdapter {
         } else {
             vec![]
         };
+        let mut effect_evidence = evidence.clone();
+        if let Some(reason) = partial_reason {
+            effect_evidence.push(format!(
+                "known_partial:{}:{}",
+                execution_id,
+                reason.chars().take(512).collect::<String>()
+            ));
+            effect_evidence.push(format!(
+                "resource_material:{}:{}",
+                execution_id, receipt.previous_material_reference
+            ));
+            if !published {
+                effect_evidence.push("resource_receipt_publication_unavailable".into());
+            }
+        }
         let effects = vec![ResourceEffect {
             resource,
             state: EffectState::Applied,
-            evidence_refs: evidence.clone(),
+            evidence_refs: effect_evidence,
         }];
         let recovery = (self.adapter.capabilities().recover
             && prepared.spec.capabilities.can_recover
@@ -858,7 +994,7 @@ impl AsyncActionAdapter for ResourceActionAdapter {
             recovery_id: execution_id.to_owned(),
             action_id: prepared.spec.action_id.clone(),
             expected_post_version: receipt.expected_post_version,
-            available: true,
+            available: published,
         });
         if verified {
             Ok(ApplyOutcome::CompletedWithRecovery {
@@ -1043,7 +1179,22 @@ impl ResourceCatalog {
         {
             return RecoveryResult::Rejected(RecoveryRejection::RepositoryFailure);
         }
-        match adapter.recover(&request.original_spec, &descriptor).await {
+        let result = if request.original_spec.adapter == super::improvement::activation::ADAPTER {
+            let execution = match runtime.get_execution(request.execution_id.clone()).await {
+                Ok(Some(execution)) => execution,
+                _ => return RecoveryResult::Rejected(RecoveryRejection::RepositoryFailure),
+            };
+            ResourceExecutionContext {
+                runtime: runtime.clone(),
+                execution,
+                recovery: Some(request.clone()),
+            }
+            .scope(adapter.recover(&request.original_spec, &descriptor))
+            .await
+        } else {
+            adapter.recover(&request.original_spec, &descriptor).await
+        };
+        match result {
             Ok(state) => {
                 let document = ResourceDocument {
                     schema_version: 1,

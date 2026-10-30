@@ -76,12 +76,31 @@ async fn ensure_planner_task_meta(
     card_id: Option<&str>,
     notification_kind: &str,
 ) -> Result<(), String> {
-    {
+    let _transition = super::worktree_lifecycle::try_transition_lock(planner_session)?;
+    let (before, source, version) = {
         let session = planner_session.lock().await;
-        if session.thread.task_meta.is_some() {
-            return Ok(());
+        if let Some(meta) = session.thread.task_meta.as_ref() {
+            return if session.chat_id == planner_chat_id
+                && meta.task_id == task_id
+                && meta.role == "planner"
+            {
+                Ok(())
+            } else {
+                Err("Planner notification scope changed; retain current ownership".into())
+            };
         }
-    }
+        if session.chat_id != planner_chat_id
+            || session.thread.id != planner_chat_id
+            || session.closed
+        {
+            return Err("Planner notification session is no longer current".into());
+        }
+        (
+            session.thread.clone(),
+            session.work_project_root.clone(),
+            session.trajectory_version,
+        )
+    };
     let known_planner = storage::list_task_trajectories_for(
         app.gcx.clone(),
         task_id,
@@ -103,7 +122,29 @@ async fn ensure_planner_task_meta(
             task_id,
             notification_kind
         );
-        let mut session = planner_session.lock().await;
+        let sessions = app
+            .chat
+            .sessions
+            .try_read()
+            .map_err(|_| "Planner registry busy; notification deferred")?;
+        if !sessions
+            .get(planner_chat_id)
+            .is_some_and(|current| Arc::ptr_eq(current, planner_session))
+        {
+            return Err("Planner session changed; notification deferred".into());
+        }
+        let mut session = planner_session
+            .try_lock()
+            .map_err(|_| "Planner session busy; notification deferred")?;
+        super::worktree_lifecycle::check_unchanged_attachment(&session, &before)?;
+        if session.work_project_root != source
+            || session.trajectory_version != version
+            || session.thread.task_meta.is_some()
+        {
+            return Err(
+                "Planner scope changed; notification deferred without replacing ownership".into(),
+            );
+        }
         session.thread.task_meta = Some(TaskMeta {
             task_id: task_id.to_string(),
             role: "planner".to_string(),
@@ -2520,6 +2561,48 @@ pub(crate) mod tests {
         let text = notice.content.content_text_only();
         assert!(text.contains("needs attention"));
         assert!(text.contains("idle, stream finished without agent_finish"));
+
+        drop(planner);
+        let saved_meta = planner_arc.lock().await.thread.task_meta.take().unwrap();
+        assert_eq!(saved_meta.task_id, task_id);
+        let transition =
+            super::super::worktree_lifecycle::try_transition_lock(&planner_arc).unwrap();
+        let error = ensure_planner_task_meta(
+            app.clone(),
+            &planner_arc,
+            &task_id,
+            "planner-test",
+            Some("T-1"),
+            "test-fence",
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("transition in progress"));
+        assert!(planner_arc.lock().await.thread.task_meta.is_none());
+        drop(transition);
+        planner_arc.lock().await.thread.task_meta = Some(saved_meta.clone());
+        ensure_planner_task_meta(
+            app.clone(),
+            &planner_arc,
+            &task_id,
+            "planner-test",
+            Some("T-1"),
+            "test-current",
+        )
+        .await
+        .unwrap();
+        let error = ensure_planner_task_meta(
+            app,
+            &planner_arc,
+            "foreign-task",
+            "planner-test",
+            Some("T-1"),
+            "test-foreign",
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("scope changed"));
+        assert_eq!(planner_arc.lock().await.thread.task_meta, Some(saved_meta));
     }
 
     #[tokio::test]

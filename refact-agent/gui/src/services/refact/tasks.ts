@@ -566,7 +566,10 @@ export const tasksApi = createApi({
       queryFn: async (taskId, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: buildApiUrlFromState(state, `/v1/tasks/${taskId}`),
+          url: buildApiUrlFromState(
+            state,
+            `/v1/tasks/${encodeURIComponent(taskId)}`,
+          ),
         });
         if (result.error) return { error: result.error };
         const response = result.data as { meta: TaskMeta };
@@ -598,7 +601,10 @@ export const tasksApi = createApi({
       queryFn: async (taskId, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: buildApiUrlFromState(state, `/v1/tasks/${taskId}`),
+          url: buildApiUrlFromState(
+            state,
+            `/v1/tasks/${encodeURIComponent(taskId)}`,
+          ),
           method: "DELETE",
         });
         if (result.error) return { error: result.error };
@@ -621,7 +627,10 @@ export const tasksApi = createApi({
       queryFn: async ({ taskId, status }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: buildApiUrlFromState(state, `/v1/tasks/${taskId}/status`),
+          url: buildApiUrlFromState(
+            state,
+            `/v1/tasks/${encodeURIComponent(taskId)}/status`,
+          ),
           method: "POST",
           body: { status },
         });
@@ -638,7 +647,10 @@ export const tasksApi = createApi({
       queryFn: async (taskId, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: buildApiUrlFromState(state, `/v1/tasks/${taskId}/board`),
+          url: buildApiUrlFromState(
+            state,
+            `/v1/tasks/${encodeURIComponent(taskId)}/board`,
+          ),
         });
         if (result.error) return { error: result.error };
         const raw = result.data;
@@ -693,7 +705,10 @@ export const tasksApi = createApi({
       queryFn: async (taskId, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: buildApiUrlFromState(state, `/v1/tasks/${taskId}/board/ready`),
+          url: buildApiUrlFromState(
+            state,
+            `/v1/tasks/${encodeURIComponent(taskId)}/board/ready`,
+          ),
         });
         if (result.error) return { error: result.error };
         return { data: result.data as ReadyCardsResult };
@@ -706,7 +721,7 @@ export const tasksApi = createApi({
         const result = await baseQuery({
           url: buildApiUrlFromState(
             state,
-            `/v1/tasks/${taskId}/planner-instructions`,
+            `/v1/tasks/${encodeURIComponent(taskId)}/planner-instructions`,
           ),
         });
         if (result.error) return { error: result.error };
@@ -726,7 +741,7 @@ export const tasksApi = createApi({
         const result = await baseQuery({
           url: buildApiUrlFromState(
             state,
-            `/v1/tasks/${taskId}/planner-instructions`,
+            `/v1/tasks/${encodeURIComponent(taskId)}/planner-instructions`,
           ),
           method: "PUT",
           body: { content },
@@ -745,7 +760,9 @@ export const tasksApi = createApi({
         const result = await baseQuery({
           url: buildApiUrlFromState(
             state,
-            `/v1/tasks/${taskId}/trajectories/${role}`,
+            `/v1/tasks/${encodeURIComponent(
+              taskId,
+            )}/trajectories/${encodeURIComponent(role)}`,
           ),
         });
         if (result.error) return { error: result.error };
@@ -763,7 +780,10 @@ export const tasksApi = createApi({
       queryFn: async ({ taskId, mode }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: buildApiUrlFromState(state, `/v1/tasks/${taskId}/planner-chats`),
+          url: buildApiUrlFromState(
+            state,
+            `/v1/tasks/${encodeURIComponent(taskId)}/planner-chats`,
+          ),
           method: "POST",
           body: mode ? { mode } : {},
         });
@@ -785,7 +805,9 @@ export const tasksApi = createApi({
         const result = await baseQuery({
           url: buildApiUrlFromState(
             state,
-            `/v1/tasks/${taskId}/planner-chats/${chatId}`,
+            `/v1/tasks/${encodeURIComponent(
+              taskId,
+            )}/planner-chats/${encodeURIComponent(chatId)}`,
           ),
           method: "DELETE",
         });
@@ -829,7 +851,9 @@ export const tasksApi = createApi({
         const result = await baseQuery({
           url: buildApiUrlFromState(
             state,
-            `/v1/tasks/${taskId}/planner-chats/from-transition`,
+            `/v1/tasks/${encodeURIComponent(
+              taskId,
+            )}/planner-chats/from-transition`,
           ),
           method: "POST",
           body: {
@@ -872,10 +896,12 @@ export const tasksApi = createApi({
       ) => {
         const state = api.getState() as RootState;
         const requestBody: {
+          card_id: string;
           body: string;
           author_role: "user";
           reply_to?: string;
         } = {
+          card_id: cardId,
           body,
           author_role: authorRole,
         };
@@ -885,7 +911,7 @@ export const tasksApi = createApi({
         const result = await baseQuery({
           url: buildApiUrlFromState(
             state,
-            `/v1/tasks/${taskId}/cards/${cardId}/comments`,
+            `/v1/tasks/${encodeURIComponent(taskId)}/cards/comments`,
           ),
           method: "POST",
           body: requestBody,
@@ -919,7 +945,10 @@ export const tasksApi = createApi({
         if (baseBranch !== undefined) body.base_branch = baseBranch;
         if (baseCommit !== undefined) body.base_commit = baseCommit;
         const result = await baseQuery({
-          url: buildApiUrlFromState(state, `/v1/tasks/${taskId}/meta`),
+          url: buildApiUrlFromState(
+            state,
+            `/v1/tasks/${encodeURIComponent(taskId)}/meta`,
+          ),
           method: "PATCH",
           body,
         });

@@ -23,6 +23,13 @@ struct QueueCommandContext {
     priority: bool,
     native_guard: Option<refact_chat_api::NativeApprovalGuard>,
     supervision_guard: Option<refact_chat_api::SupervisionCommandGuard>,
+    board_operation: AMutex<Option<crate::chat::session_runtime::BoardOperation>>,
+}
+
+impl QueueCommandContext {
+    async fn release_board_operation(&self) {
+        self.board_operation.lock().await.take();
+    }
 }
 
 pub(super) async fn handle_queue_command(
@@ -30,6 +37,38 @@ pub(super) async fn handle_queue_command(
     session_arc: Arc<AMutex<ChatSession>>,
     request: CommandRequest,
 ) -> QueueCommandOutcome {
+    let board_operation = if matches!(
+        &request.command,
+        ChatCommand::BrowserContextDecision { .. }
+            | ChatCommand::UserMessage { .. }
+            | ChatCommand::RetryFromIndex { .. }
+            | ChatCommand::Regenerate {}
+            | ChatCommand::AnswerQuestions { .. }
+            | ChatCommand::SubmitQuestionResponse { .. }
+            | ChatCommand::IdeToolResult { .. }
+            | ChatCommand::UpdateMessage {
+                regenerate: true,
+                ..
+            }
+            | ChatCommand::RemoveMessage {
+                regenerate: true,
+                ..
+            }
+    ) {
+        match super::super::session_runtime::begin_board_operation(&app, &session_arc).await {
+            Ok(operation) => operation,
+            Err(reason) => {
+                session_arc.lock().await.emit(ChatEvent::Ack {
+                    client_request_id: request.client_request_id,
+                    accepted: false,
+                    result: Some(serde_json::json!({ "error": reason.recovery_message() })),
+                });
+                return QueueCommandOutcome::Continue;
+            }
+        }
+    } else {
+        None
+    };
     let context = QueueCommandContext {
         app,
         session_arc,
@@ -37,6 +76,7 @@ pub(super) async fn handle_queue_command(
         priority: request.priority,
         native_guard: request.native_approval_guard,
         supervision_guard: request.supervision_guard,
+        board_operation: AMutex::new(board_operation),
     };
     if matches!(
         &request.command,
@@ -460,6 +500,7 @@ async fn handle_retry_from_index(
         session_arc.clone(),
         TrajectoryCommitIntent::Checkpoint,
     );
+    context.release_board_operation().await;
     prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
     if aborted_before_start_generation(&session_arc).await {
         return QueueCommandOutcome::Continue;
@@ -483,13 +524,24 @@ async fn handle_set_params(
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    let scope_patch = crate::chat::worktree_lifecycle::is_worktree_patch(&patch);
+    let scope_patch = crate::chat::worktree_lifecycle::is_scope_patch(&patch);
     let _scope_transition = if scope_patch {
         Some(crate::chat::worktree_lifecycle::transition_lock(&session_arc).await)
     } else {
         None
     };
     let (chat_id, thread_before) = {
+        let session = session_arc.lock().await;
+        (session.chat_id.clone(), session.thread.clone())
+    };
+    if let Err(error) =
+        check_worktree_setparams_authority(&app, &chat_id, &thread_before, &patch).await
+    {
+        let mut session = session_arc.lock().await;
+        reject_guard(&mut session, &context.request_id, error);
+        return QueueCommandOutcome::Continue;
+    }
+    {
         let mut session = session_arc.lock().await;
         if crate::chat::worktree_lifecycle::changes_attachment(&session.thread, &patch) {
             if let Err(error) = crate::chat::worktree_lifecycle::check_idle_attachment(&session) {
@@ -497,13 +549,6 @@ async fn handle_set_params(
                 return QueueCommandOutcome::Continue;
             }
         }
-        (session.chat_id.clone(), session.thread.clone())
-    };
-    if let Err(error) =
-        check_worktree_setparams_authority(&app, &chat_id, &thread_before, &patch).await
-    {
-        reject_guard(&mut *session_arc.lock().await, &context.request_id, error);
-        return QueueCommandOutcome::Continue;
     }
     let worktree_update = match resolve_worktree_setparams_update(
         app.clone(),
@@ -820,6 +865,7 @@ async fn handle_answer_questions(
                 return QueueCommandOutcome::Continue;
             }
         }
+        context.release_board_operation().await;
         prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
         {
             let session = session_arc.lock().await;
@@ -946,6 +992,7 @@ async fn handle_ide_tool_result(
     if !completed {
         return QueueCommandOutcome::Continue;
     }
+    context.release_board_operation().await;
     if aborted_before_start_generation(&session_arc).await {
         return QueueCommandOutcome::Continue;
     }
@@ -985,6 +1032,7 @@ async fn handle_update_message(
                 session_arc.clone(),
                 TrajectoryCommitIntent::Checkpoint,
             );
+            context.release_board_operation().await;
             prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
             if aborted_before_start_generation(&session_arc).await {
                 return QueueCommandOutcome::Continue;
@@ -1017,6 +1065,7 @@ async fn handle_remove_message(
                 session_arc.clone(),
                 TrajectoryCommitIntent::Checkpoint,
             );
+            context.release_board_operation().await;
             prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
             if aborted_before_start_generation(&session_arc).await {
                 return QueueCommandOutcome::Continue;
@@ -1039,6 +1088,7 @@ async fn handle_regenerate(context: &QueueCommandContext) -> QueueCommandOutcome
         session_arc.clone(),
         TrajectoryCommitIntent::Checkpoint,
     );
+    context.release_board_operation().await;
     prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
     if aborted_before_start_generation(&session_arc).await {
         return QueueCommandOutcome::Continue;
@@ -1085,6 +1135,32 @@ async fn handle_branch_from_chat(
         warn!("BranchFromChat: invalid source_chat_id: {}", e);
         return QueueCommandOutcome::Continue;
     }
+    let _transition = match crate::chat::worktree_lifecycle::try_transition_lock(&session_arc) {
+        Ok(transition) => transition,
+        Err(error) => {
+            reject_guard(&mut *session_arc.lock().await, &context.request_id, error);
+            return QueueCommandOutcome::Continue;
+        }
+    };
+    let (before, version, requests, aborted, interrupted) = {
+        let session = session_arc.lock().await;
+        if let Err(error) = crate::chat::worktree_lifecycle::check_idle_attachment(&session) {
+            drop(session);
+            reject_guard(&mut *session_arc.lock().await, &context.request_id, error);
+            return QueueCommandOutcome::Continue;
+        }
+        (
+            session.thread.clone(),
+            session.trajectory_version,
+            session.recent_request_ids.clone(),
+            session
+                .abort_flag
+                .load(std::sync::atomic::Ordering::Acquire),
+            session
+                .user_interrupt_flag
+                .load(std::sync::atomic::Ordering::Acquire),
+        )
+    };
 
     let sessions = app.chat.sessions.clone();
 
@@ -1092,7 +1168,23 @@ async fn handle_branch_from_chat(
         session::get_or_create_session_with_trajectory(app.clone(), &sessions, &source_chat_id)
             .await;
 
-    let (messages_to_copy, root_id, source_worktree) = {
+    if Arc::ptr_eq(&source_session_arc, &session_arc) {
+        reject_guard(
+            &mut *session_arc.lock().await,
+            &context.request_id,
+            "Cannot branch a chat into itself".into(),
+        );
+        return QueueCommandOutcome::Continue;
+    }
+    let _source_transition =
+        match crate::chat::worktree_lifecycle::try_transition_lock(&source_session_arc) {
+            Ok(transition) => transition,
+            Err(error) => {
+                reject_guard(&mut *session_arc.lock().await, &context.request_id, error);
+                return QueueCommandOutcome::Continue;
+            }
+        };
+    let (messages_to_copy, root_id, source_worktree, source_before) = {
         let source_session = source_session_arc.lock().await;
         let mut msgs = Vec::new();
         let mut found = false;
@@ -1118,26 +1210,164 @@ async fn handle_branch_from_chat(
             .root_chat_id
             .clone()
             .unwrap_or_else(|| source_chat_id.clone());
-        (msgs, root, source_session.thread.worktree.clone())
+        (
+            msgs,
+            root,
+            source_session.thread.worktree.clone(),
+            source_session.thread.clone(),
+        )
     };
 
-    let mut session = session_arc.lock().await;
-    session.thread.parent_id = Some(source_chat_id.clone());
-    session.thread.link_type = Some("branch".to_string());
-    session.thread.root_chat_id = Some(root_id);
-
-    for msg in messages_to_copy {
-        session.add_message(msg);
+    let mut target_thread = before.clone();
+    target_thread.parent_id = Some(source_chat_id.clone());
+    target_thread.link_type = Some("branch".to_string());
+    target_thread.root_chat_id = Some(root_id);
+    let patch = serde_json::json!({
+        "parent_id": target_thread.parent_id,
+        "link_type": target_thread.link_type,
+        "root_chat_id": target_thread.root_chat_id,
+        "worktree": source_worktree.as_ref().or(before.worktree.as_ref()),
+    });
+    if let Err(error) = check_worktree_setparams_authority(&app, &before.id, &before, &patch).await
+    {
+        reject_guard(&mut *session_arc.lock().await, &context.request_id, error);
+        return QueueCommandOutcome::Continue;
     }
-    let target_thread = session.thread.clone();
-    drop(session);
+    {
+        let session = session_arc.lock().await;
+        let sessions = app.chat.sessions.try_read();
+        if !sessions.as_ref().is_ok_and(|sessions| {
+            sessions
+                .get(&before.id)
+                .is_some_and(|current| Arc::ptr_eq(current, &session_arc))
+        }) || crate::chat::worktree_lifecycle::check_unchanged_attachment(&session, &before)
+            .is_err()
+            || session.trajectory_version != version
+        {
+            drop(sessions);
+            drop(session);
+            reject_guard(
+                &mut *session_arc.lock().await,
+                &context.request_id,
+                "Branch target changed before checkout authorization; retry".into(),
+            );
+            return QueueCommandOutcome::Continue;
+        }
+    }
+    {
+        let source = source_session_arc.lock().await;
+        let sessions = app.chat.sessions.try_read();
+        if !sessions.as_ref().is_ok_and(|sessions| {
+            sessions
+                .get(&source_chat_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &source_session_arc))
+        }) || crate::chat::worktree_lifecycle::check_unchanged_attachment(
+            &source,
+            &source_before,
+        )
+        .is_err()
+        {
+            drop(sessions);
+            drop(source);
+            reject_guard(
+                &mut *session_arc.lock().await,
+                &context.request_id,
+                "Branch source checkout changed; retain current scope and retry".into(),
+            );
+            return QueueCommandOutcome::Continue;
+        }
+    }
     if let Some(worktree) = source_worktree.as_ref() {
-        if let Some(validated) =
+        if worktree.kind == "task_agent" && before.worktree.as_ref() != Some(worktree) {
+            reject_guard(
+                &mut *session_arc.lock().await,
+                &context.request_id,
+                "Task-agent checkouts cannot be attached through branching".into(),
+            );
+            return QueueCommandOutcome::Continue;
+        }
+        let Some(validated) =
             add_thread_worktree_reference(app.clone(), &target_thread.id, &target_thread, worktree)
                 .await
+        else {
+            reject_guard(
+                &mut *session_arc.lock().await,
+                &context.request_id,
+                "Branch checkout is unavailable; retain the current checkout and retry".into(),
+            );
+            return QueueCommandOutcome::Continue;
+        };
+        target_thread.worktree = Some(validated);
+    }
+    {
+        let source = source_session_arc.lock().await;
+        let sessions = app.chat.sessions.try_read();
+        if !sessions.as_ref().is_ok_and(|sessions| {
+            sessions
+                .get(&source_chat_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &source_session_arc))
+        }) || crate::chat::worktree_lifecycle::check_unchanged_attachment(
+            &source,
+            &source_before,
+        )
+        .is_err()
         {
-            let mut session = session_arc.lock().await;
-            session.thread.worktree = Some(validated);
+            drop(sessions);
+            drop(source);
+            reject_guard(
+                &mut *session_arc.lock().await,
+                &context.request_id,
+                "Branch source no longer current; checkout retained".into(),
+            );
+            return QueueCommandOutcome::Continue;
+        }
+    }
+    {
+        let mut session = session_arc.lock().await;
+        let sessions = app.chat.sessions.try_read();
+        if !sessions.as_ref().is_ok_and(|sessions| {
+            sessions
+                .get(&before.id)
+                .is_some_and(|current| Arc::ptr_eq(current, &session_arc))
+        }) {
+            reject_guard(
+                &mut session,
+                &context.request_id,
+                "Branch target session changed or registry busy; retry".into(),
+            );
+            return QueueCommandOutcome::Continue;
+        }
+        if let Err(error) = crate::chat::worktree_lifecycle::check_idle_attachment(&session)
+            .and_then(|_| {
+                crate::chat::worktree_lifecycle::check_unchanged_attachment(&session, &before)
+            })
+            .and_then(|_| {
+                if session.trajectory_version != version
+                    || session.recent_request_ids != requests
+                    || session
+                        .abort_flag
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        != aborted
+                    || session
+                        .user_interrupt_flag
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        != interrupted
+                {
+                    Err("Branch canceled because the target chat changed".into())
+                } else {
+                    Ok(())
+                }
+            })
+        {
+            reject_guard(&mut session, &context.request_id, error);
+            return QueueCommandOutcome::Continue;
+        }
+        session.thread.parent_id = target_thread.parent_id;
+        session.thread.link_type = target_thread.link_type;
+        session.thread.root_chat_id = target_thread.root_chat_id;
+        session.thread.worktree = target_thread.worktree;
+        for msg in messages_to_copy {
+            session.add_message(msg);
         }
     }
     maybe_save_trajectory_with_intent(
@@ -1264,6 +1494,7 @@ async fn handle_browser_context_decision(
         session_arc.clone(),
         TrajectoryCommitIntent::Checkpoint,
     );
+    context.release_board_operation().await;
     prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
     if aborted_before_start_generation(&session_arc).await {
         return QueueCommandOutcome::Continue;
@@ -1391,6 +1622,7 @@ async fn handle_user_message(
     }
     let app = context.app.clone();
     let session_arc = context.session_arc.clone();
+    context.release_board_operation().await;
     prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
     if aborted_before_start_generation(&session_arc).await {
         return QueueCommandOutcome::Continue;

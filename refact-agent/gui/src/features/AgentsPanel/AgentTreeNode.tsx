@@ -7,7 +7,9 @@ import {
   MessageSquare,
   Send,
 } from "lucide-react";
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
+import { useStore } from "react-redux";
+import type { AppStore } from "../../app/store";
 
 import {
   Badge,
@@ -33,14 +35,22 @@ import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { setError } from "../Errors/errorsSlice";
 import { setInformation } from "../Errors/informationSlice";
 import { stripAgentKindPrefix } from "../../utils/displayNames";
+import { backgroundAgentErrorText } from "../../services/refact/backgroundAgentErrors";
+import {
+  isCurrentAgentRosterSource,
+  type AgentRosterSource,
+} from "./agentsPanelSlice";
 import styles from "./AgentsPanel.module.css";
 
 export type AgentTreeNodeProps = {
   chatId: string;
+  source: AgentRosterSource;
   node: AgentTreeNodeModel;
   depth?: number;
   onNavigate?: (chatId: string) => void;
 };
+
+const useAppStore = useStore.withTypes<AppStore>();
 
 function isTerminal(agent: BackgroundAgentSummary): boolean {
   return ["completed", "failed", "cancelled", "interrupted"].includes(
@@ -87,36 +97,32 @@ function detailFiles(agent: BackgroundAgentSummary): string[] {
   return [...new Set([...agent.edited_files, ...agent.target_files])];
 }
 
-function errorText(error: unknown): string {
-  if (typeof error === "string" && error.trim()) return error;
-  if (typeof error === "object" && error !== null) {
-    const data = "data" in error ? error.data : error;
-    if (typeof data === "string" && data.trim()) return data;
-    if (typeof data === "object" && data !== null) {
-      const fields = data as Record<string, unknown>;
-      for (const key of ["detail", "message", "error"] as const) {
-        const value = fields[key];
-        if (typeof value === "string" && value.trim()) return value;
-      }
-    }
-    if ("message" in error && typeof error.message === "string") {
-      return error.message;
-    }
-    if ("error" in error && typeof error.error === "string") {
-      return error.error;
-    }
-  }
-  return "Agent action failed.";
-}
-
 export function AgentTreeNode({
   chatId,
+  source,
   node,
   depth = 0,
   onNavigate,
 }: AgentTreeNodeProps) {
   const { agent, children } = node;
   const dispatch = useAppDispatch();
+  const store = useAppStore();
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const isCurrent = () => {
+    const state = store.getState();
+    return (
+      mounted.current &&
+      isCurrentAgentRosterSource(state, source) &&
+      state.agentsPanel.authorized &&
+      !state.agentsPanel.failure
+    );
+  };
   const copyToClipboard = useCopyToClipboard();
   const internalLinks = useInternalLinkHandler();
   const [expanded, setExpanded] = useState(false);
@@ -161,7 +167,7 @@ export function AgentTreeNode({
   const renderMessageForm = showMessageForm || messageMotion.shouldRender;
 
   const navigate = () => {
-    if (!agent.child_chat_id) return;
+    if (!isCurrent() || !agent.child_chat_id) return;
     if (onNavigate) {
       onNavigate(agent.child_chat_id);
       return;
@@ -172,6 +178,7 @@ export function AgentTreeNode({
   };
 
   const handleCopy = (target: "id" | "branch", value: string) => {
+    if (!isCurrent()) return;
     copyToClipboard(value);
     setCopied(target);
     window.setTimeout(() => setCopied(null), 1600);
@@ -181,31 +188,55 @@ export function AgentTreeNode({
   };
 
   const handleCancel = async () => {
-    if (cancelState.isLoading) return;
+    if (!isCurrent() || cancelState.isLoading) return;
     try {
       await cancelAgent({
         agentId: agent.agent_id,
         chatId,
+        source,
         subtree: true,
       }).unwrap();
+      if (!isCurrent()) return;
       dispatch(
         setInformation("Cancellation requested for this agent subtree."),
       );
     } catch (error) {
-      dispatch(setError(errorText(error)));
+      if (
+        mounted.current &&
+        isCurrentAgentRosterSource(store.getState(), source)
+      )
+        dispatch(
+          setError(
+            backgroundAgentErrorText(error, store.getState().config.apiKey),
+          ),
+        );
     }
   };
 
   const handleMessage = async () => {
     const text = message.trim();
-    if (!text || messageState.isLoading) return;
+    if (!isCurrent() || !text || messageState.isLoading) return;
     try {
-      await messageAgent({ agentId: agent.agent_id, chatId, text }).unwrap();
+      await messageAgent({
+        agentId: agent.agent_id,
+        chatId,
+        source,
+        text,
+      }).unwrap();
+      if (!isCurrent()) return;
       setMessage("");
       setMessageOpen(false);
       dispatch(setInformation("Message accepted for delivery to agent."));
     } catch (error) {
-      dispatch(setError(errorText(error)));
+      if (
+        mounted.current &&
+        isCurrentAgentRosterSource(store.getState(), source)
+      )
+        dispatch(
+          setError(
+            backgroundAgentErrorText(error, store.getState().config.apiKey),
+          ),
+        );
     }
   };
 
@@ -471,6 +502,7 @@ export function AgentTreeNode({
                 {children.map((child) => (
                   <AgentTreeNode
                     chatId={chatId}
+                    source={source}
                     key={child.agent.agent_id}
                     depth={depth + 1}
                     node={child}

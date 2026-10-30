@@ -10,6 +10,7 @@ use tokio::sync::Mutex as AMutex;
 use uuid::Uuid;
 
 use crate::git;
+use crate::locking::{MergeAuthority, MergePermit, PhysicalGuard};
 use crate::types::{
     CreateWorktreeRequest, CreateWorktreeResponse, DeleteWorktreeResponse, MergeWorktreeRequest,
     MergeWorktreeResponse, OpenWorktreeResponse, WorktreeCleanupDeleted, WorktreeCleanupPlan,
@@ -25,13 +26,8 @@ mod housekeeping;
 
 const DEFAULT_MAX_PATCH_BYTES: usize = 200_000;
 
-static REGISTRY_WRITE_LOCK: OnceLock<AMutex<()>> = OnceLock::new();
 #[allow(clippy::type_complexity)]
 static MERGE_LOCKS: OnceLock<Mutex<HashMap<String, Arc<AMutex<()>>>>> = OnceLock::new();
-
-fn registry_write_lock() -> &'static AMutex<()> {
-    REGISTRY_WRITE_LOCK.get_or_init(|| AMutex::new(()))
-}
 
 const LIST_PARALLELISM: usize = 8;
 const LIST_CACHE_TTL: Duration = Duration::from_secs(2);
@@ -88,11 +84,9 @@ fn prune_due(source_root: &Path, force: bool) -> bool {
     }
 }
 
-/// One merge at a time per target checkout. Two merges into the same checkout
-/// queue behind each other; merges into different checkouts never wait on one
-/// another, because they write to different working trees.
 pub fn merge_lock_for(checkout: &Path) -> Arc<AMutex<()>> {
-    let key = dunce::canonicalize(checkout)
+    let key = crate::locking::repository_identity(checkout)
+        .or_else(|_| dunce::canonicalize(checkout).map_err(|e| e.to_string()))
         .unwrap_or_else(|_| checkout.to_path_buf())
         .to_string_lossy()
         .to_string();
@@ -105,12 +99,30 @@ pub fn merge_lock_for(checkout: &Path) -> Arc<AMutex<()>> {
         .clone()
 }
 
+#[derive(Debug)]
+struct RegistryGuard {
+    _repository: Option<Arc<MergePermit>>,
+    _physical: PhysicalGuard,
+}
+
+#[derive(Clone, Debug)]
+pub struct KnownLandingCommit {
+    pub commit: String,
+    pub exact: crate::types::CheckedMergeIdentity,
+}
+
+pub type LandingCommitObserver =
+    Arc<dyn Fn(KnownLandingCommit) -> Result<(), String> + Send + Sync>;
+
 #[derive(Debug, Clone)]
 pub struct WorktreeService {
     cache_dir: PathBuf,
     source_workspace_root: PathBuf,
     project_hash: String,
     merge_checkout: Option<Arc<git::MergeCheckout>>,
+    nested_merge_identity: Option<(WorktreeMeta, WorktreeMeta)>,
+    merge_permit: Option<Arc<MergePermit>>,
+    merge_authority: Option<MergeAuthority>,
 }
 
 impl WorktreeService {
@@ -142,6 +154,9 @@ impl WorktreeService {
             source_workspace_root,
             project_hash,
             merge_checkout: None,
+            nested_merge_identity: None,
+            merge_permit: None,
+            merge_authority: None,
         }
     }
 
@@ -155,8 +170,182 @@ impl WorktreeService {
             .map_or(self.source_workspace_root(), |checkout| &checkout.root)
     }
 
+    pub async fn acquire_merge_permit(&self) -> Result<Self, String> {
+        if let Some(permit) = &self.merge_permit {
+            permit.validate(self.source_workspace_root())?;
+            return Ok(self.clone());
+        }
+        Ok(Self {
+            merge_permit: Some(MergePermit::acquire(self.source_workspace_root()).await?),
+            ..self.clone()
+        })
+    }
+
+    pub fn with_merge_authority(&self, validator: crate::locking::PhaseValidator) -> Self {
+        let previous = self.merge_authority.clone();
+        let validator = Arc::new(move || {
+            if let Some(previous) = &previous {
+                (previous.0)()?;
+            }
+            validator()
+        });
+        Self {
+            merge_authority: Some(MergeAuthority(validator)),
+            ..self.clone()
+        }
+    }
+
+    fn validate_merge_phase(&self) -> Result<(), String> {
+        let permit = self
+            .merge_permit
+            .as_ref()
+            .ok_or("Managed merge permit missing")?;
+        permit.validate(self.source_workspace_root())?;
+        if self.merge_checkout_root().exists() {
+            permit.validate(self.merge_checkout_root())?;
+        }
+        if let Some(authority) = &self.merge_authority {
+            (authority.0)().map_err(|e| format!("Managed merge authority lost; retain source and integration state, never replay: {e}"))?;
+        }
+        Ok(())
+    }
+
+    pub async fn checkpoint_merge_phase(&self) -> Result<(), String> {
+        let service = self.clone();
+        tokio::task::spawn_blocking(move || service.validate_merge_phase())
+            .await
+            .map_err(|e| e.to_string())?
+    }
+
+    pub async fn run_merge_git_phase<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce() -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String> {
+        let service = self.clone();
+        tokio::task::spawn_blocking(move || {
+            service.validate_merge_phase()?;
+            let result = crate::locking::with_git_phase(service.merge_authority.clone(), operation);
+            service.validate_merge_phase()?;
+            result
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    pub async fn materialize_merge_target(&self) -> Result<(), String> {
+        let service = self.clone();
+        tokio::task::spawn_blocking(move || {
+            service.validate_merge_phase()?;
+            service
+                .merge_checkout
+                .as_ref()
+                .ok_or("Merge target unresolved")?
+                .materialize()
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    pub async fn cleanup_merge_target(&self) -> Result<(), String> {
+        let service = self.clone();
+        tokio::task::spawn_blocking(move || {
+            service.validate_merge_phase()?;
+            service
+                .merge_checkout
+                .as_ref()
+                .ok_or("Merge target unresolved")?
+                .cleanup()
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    async fn registry_write_lock(&self) -> Result<Arc<RegistryGuard>, String> {
+        let repository = if crate::locking::repository_identity(self.source_workspace_root())
+            .is_ok()
+        {
+            self.acquire_merge_permit().await?.merge_permit
+        } else {
+            if self
+                .source_workspace_root
+                .join(".git")
+                .try_exists()
+                .map_err(|e| e.to_string())?
+            {
+                return Err("Cannot prove physical Git identity for registry transaction; mutation unsupported".into());
+            }
+            None
+        };
+        let path = match &repository {
+            Some(_) => crate::locking::repository_identity(self.source_workspace_root())?
+                .join("refact-worktree-registry.lock"),
+            None => self.registry_dir().join("index.lock"),
+        };
+        let physical = PhysicalGuard::acquire(&path).await?;
+        self.refuse_ambiguous_registry_aliases().await?;
+        Ok(Arc::new(RegistryGuard {
+            _repository: repository,
+            _physical: physical,
+        }))
+    }
+
+    async fn refuse_ambiguous_registry_aliases(&self) -> Result<(), String> {
+        let Some(parent) = self.registry_dir().parent().map(Path::to_path_buf) else {
+            return Ok(());
+        };
+        let mut entries = match tokio::fs::read_dir(parent).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.to_string()),
+        };
+        let mut count = 0;
+        while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
+            count += 1;
+            if count > 4096 {
+                return Err(
+                    "Registry alias inventory exceeds safe bound; mutation unsupported".into(),
+                );
+            }
+            if entry.file_name() == std::ffi::OsStr::new(&self.project_hash) {
+                continue;
+            }
+            let path = entry.path().join("index.json");
+            let content = match tokio::fs::read(&path).await {
+                Ok(content) => content,
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::NotFound
+                        || e.kind() == std::io::ErrorKind::NotADirectory =>
+                {
+                    continue
+                }
+                Err(e) => return Err(format!("Cannot exclude ambiguous registry alias: {e}")),
+            };
+            let other: WorktreeRegistry = serde_json::from_slice(&content)
+                .map_err(|e| format!("Cannot exclude ambiguous registry alias: {e}"))?;
+            if normalized_path_key_async(&other.source_workspace_root).await?
+                == self.source_workspace_root
+            {
+                return Err("Multiple legacy registry indices resolve to this physical project; inspect without merging or deleting metadata".into());
+            }
+        }
+        Ok(())
+    }
+
+    pub fn with_nested_merge_identity(&self, source: WorktreeMeta, parent: WorktreeMeta) -> Self {
+        Self {
+            nested_merge_identity: Some((source, parent)),
+            ..self.clone()
+        }
+    }
+
     pub async fn for_merge_target(&self, target: &str) -> Result<Self, String> {
         validate_branch_name(target)?;
+        if let Some(checkout) = &self.merge_checkout {
+            if checkout.target_branch() == target {
+                return Ok(self.clone());
+            }
+            return Err("Merge target changed on an already resolved service".into());
+        }
         let source = self.source_workspace_root.clone();
         let target = target.to_string();
         let checkout =
@@ -194,10 +383,17 @@ impl WorktreeService {
         self.load_registry_unlocked().await
     }
 
-    pub async fn save_registry(&self, registry: &WorktreeRegistry) -> Result<(), String> {
-        let _guard = registry_write_lock().lock().await;
+    pub async fn compare_and_save_registry(
+        &self,
+        expected: &WorktreeRegistry,
+        registry: &WorktreeRegistry,
+    ) -> Result<(), String> {
+        let _guard = self.registry_write_lock().await?;
         self.validate_registry(registry).await?;
-        self.save_registry_unlocked(registry).await
+        if self.load_registry_unlocked().await? != *expected {
+            return Err("Worktree registry snapshot changed; reload before applying edits".into());
+        }
+        self.save_registry_unlocked(registry, &_guard).await
     }
 
     async fn load_registry_for_listing(&self) -> Result<WorktreeRegistry, String> {
@@ -214,9 +410,13 @@ impl WorktreeService {
         if !prune_due(&self.source_workspace_root, !missing.is_empty()) {
             return Ok(registry);
         }
+        let _repository_guard = self.acquire_merge_permit().await?;
         let source_root = self.source_workspace_root.clone();
+        let repository_guard = _repository_guard.clone();
         let git_roots = tokio::task::spawn_blocking(move || {
+            repository_guard.validate_merge_phase()?;
             git::prune_worktrees(&source_root)?;
+            repository_guard.validate_merge_phase()?;
             Ok::<HashSet<PathBuf>, String>(
                 git::list_git_worktrees(&source_root)
                     .into_iter()
@@ -235,7 +435,7 @@ impl WorktreeService {
         if !registry.records.iter().any(is_stale) {
             return Ok(registry);
         }
-        let _guard = registry_write_lock().lock().await;
+        let _guard = _repository_guard.registry_write_lock().await?;
         let mut registry = self.load_registry_unlocked().await?;
         let before = registry.records.len();
         let mut retained = Vec::with_capacity(before);
@@ -252,7 +452,7 @@ impl WorktreeService {
         }
         registry.records = retained;
         if registry.records.len() != before {
-            let _ = self.save_registry_unlocked(&registry).await;
+            self.save_registry_unlocked(&registry, &_guard).await?;
         }
         Ok(registry)
     }
@@ -405,7 +605,8 @@ impl WorktreeService {
             validate_branch_name(base)?;
         }
 
-        let _guard = registry_write_lock().lock().await;
+        let _repository_guard = self.acquire_merge_permit().await?;
+        let _guard = _repository_guard.registry_write_lock().await?;
         let mut registry = self.load_registry_unlocked().await?;
         let id = self.next_worktree_id(&registry).await?;
         let worktree_path = self.worktree_path_for_id(&id)?;
@@ -428,7 +629,11 @@ impl WorktreeService {
         let create_branch = branch.clone();
         let create_base_branch = request.base_branch.clone();
         let create_base_commit = request.base_commit.clone();
+        let registry_guard = _guard.clone();
+        let repository_guard = _repository_guard.clone();
         let (created, status) = match tokio::task::spawn_blocking(move || {
+            let _registry_guard = registry_guard;
+            let _repository_guard = repository_guard;
             let created = git::create_worktree(
                 &create_source,
                 &create_worktree_path,
@@ -471,30 +676,28 @@ impl WorktreeService {
             last_known_status: Some(status.clone()),
         };
         registry.records.push(record.clone());
-        if let Err(e) = self.save_registry_unlocked(&registry).await {
-            let cleanup_source = self.source_workspace_root.clone();
-            let cleanup_id = id.clone();
-            let cleanup_path = worktree_path.clone();
-            let cleanup_branch = branch.clone();
-            let branch_was_created = created.branch_was_created;
-            let warnings = tokio::task::spawn_blocking(move || {
-                let mut warnings =
-                    git::remove_worktree(&cleanup_source, &cleanup_id, &cleanup_path);
-                if branch_was_created {
-                    if let Err(branch_err) = git::delete_branch(&cleanup_source, &cleanup_branch) {
-                        warnings.push(branch_err);
-                    }
-                }
-                warnings
-            })
-            .await
-            .unwrap_or_else(|join_error| vec![format!("Cleanup task failed: {}", join_error)]);
+        if let Err(e) = self.save_registry_unlocked(&registry, &_guard).await {
             return Err(format!(
-                "Failed to save worktree registry: {}; cleanup warnings: {}",
-                e,
-                warnings.join("; ")
+                "Failed to publish worktree registry: {}; created checkout '{}' and branch '{}' retained for inspection; never replay creation blindly",
+                e, worktree_path.display(), branch
             ));
         }
+        drop(_guard);
+        drop(_repository_guard);
+        let cancellation = crate::cache::PreparationCancellation::new();
+        let cancelled = cancellation.flag();
+        let cache_service = self.clone();
+        let cache_meta = record.meta.clone();
+        let cache_report = tokio::task::spawn_blocking(move || {
+            cache_service
+                .cache_execution_context_blocking(&cache_meta)
+                .map(|context| context.prepare(cancelled))
+                .unwrap_or_else(crate::cache::degraded)
+        })
+        .await
+        .unwrap_or_else(|_| crate::cache::degraded(crate::types::CacheReason::IoFailure));
+        drop(cancellation);
+        invalidate_list_cache();
 
         let mut warnings = Vec::new();
         if created.dirty_source {
@@ -503,8 +706,10 @@ impl WorktreeService {
                     .to_string(),
             );
         }
+        let mut worktree = self.record_view_with_status(&record, status).await?;
+        worktree.cache_report = Some(cache_report);
         Ok(CreateWorktreeResponse {
-            worktree: self.record_view_with_status(&record, status).await?,
+            worktree,
             branch_was_created: created.branch_was_created,
             dirty_source_warning: created.dirty_source,
             warnings,
@@ -520,7 +725,7 @@ impl WorktreeService {
         if !reference.has_identity() {
             return Err("Worktree reference must include at least one id".to_string());
         }
-        let _guard = registry_write_lock().lock().await;
+        let _guard = self.registry_write_lock().await?;
         let mut registry = self.load_registry_unlocked().await?;
         let (record, changed) = {
             let record = registry
@@ -536,7 +741,7 @@ impl WorktreeService {
             (record.clone(), changed)
         };
         if changed {
-            self.save_registry_unlocked(&registry).await?;
+            self.save_registry_unlocked(&registry, &_guard).await?;
         }
         drop(_guard);
         self.record_view(&record).await
@@ -551,7 +756,7 @@ impl WorktreeService {
         if !reference.has_identity() {
             return Err("Worktree reference must include at least one id".to_string());
         }
-        let _guard = registry_write_lock().lock().await;
+        let _guard = self.registry_write_lock().await?;
         let mut registry = self.load_registry_unlocked().await?;
         let (record, changed) = {
             let record = registry
@@ -568,7 +773,7 @@ impl WorktreeService {
             (record.clone(), changed)
         };
         if changed {
-            self.save_registry_unlocked(&registry).await?;
+            self.save_registry_unlocked(&registry, &_guard).await?;
         }
         drop(_guard);
         self.record_view(&record).await
@@ -772,7 +977,8 @@ impl WorktreeService {
         id: &str,
         request: MergeWorktreeRequest,
     ) -> Result<MergeWorktreeResponse, String> {
-        self.merge_worktree_checked_inner(id, request, None).await
+        self.merge_worktree_checked_inner(id, request, None, None)
+            .await
     }
 
     pub async fn merge_worktree_checked(
@@ -781,6 +987,33 @@ impl WorktreeService {
         request: MergeWorktreeRequest,
         expected: crate::types::CheckedMergeIdentity,
     ) -> Result<MergeWorktreeResponse, String> {
+        self.checked_landing(id, request, expected, None).await
+    }
+
+    pub async fn merge_worktree_checked_observed(
+        &self,
+        id: &str,
+        request: MergeWorktreeRequest,
+        expected: crate::types::CheckedMergeIdentity,
+        observer: LandingCommitObserver,
+    ) -> Result<MergeWorktreeResponse, String> {
+        if request.strategy != crate::types::WorktreeMergeStrategy::Squash {
+            return Err("Observed checked landing requires squash strategy".into());
+        }
+        self.checked_landing(id, request, expected, Some(observer))
+            .await
+    }
+
+    async fn checked_landing(
+        &self,
+        id: &str,
+        request: MergeWorktreeRequest,
+        expected: crate::types::CheckedMergeIdentity,
+        observer: Option<LandingCommitObserver>,
+    ) -> Result<MergeWorktreeResponse, String> {
+        if self.merge_authority.is_none() {
+            return Err("Checked landing unsupported without persisted merge phase authority; source retained".into());
+        }
         if request.include_uncommitted
             || request.delete_after_merge
             || request.target_branch.as_deref() != Some(expected.target_branch.as_str())
@@ -789,7 +1022,7 @@ impl WorktreeService {
                 "Checked landing requires explicit target and retained clean source".into(),
             );
         }
-        self.merge_worktree_checked_inner(id, request, Some(expected))
+        self.merge_worktree_checked_inner(id, request, Some(expected), observer)
             .await
     }
 
@@ -798,24 +1031,49 @@ impl WorktreeService {
         id: &str,
         request: MergeWorktreeRequest,
         expected: Option<crate::types::CheckedMergeIdentity>,
+        observer: Option<LandingCommitObserver>,
     ) -> Result<MergeWorktreeResponse, String> {
+        let cleanup_target = self.merge_permit.is_none();
         let service = self.clone();
         let id = id.to_string();
-        tokio::spawn(async move {
+        async move {
             validate_worktree_id(&id)?;
             if let Some(target_branch) = request.target_branch.as_deref() {
                 validate_branch_name(target_branch)?;
             }
-            let merge_lock = merge_lock_for(service.merge_checkout_root());
-            let _merge_guard = merge_lock.lock().await;
-            let _registry_guard = registry_write_lock().lock().await;
+            let service = service.acquire_merge_permit().await?;
+            let target = request.target_branch.clone();
+            let target = match target {
+                Some(target) => target,
+                None => service
+                    .get_worktree(&id)
+                    .await?
+                    .meta
+                    .base_branch
+                    .ok_or("Merge target branch missing")?,
+            };
+            let service = if service.merge_checkout.is_some() {
+                service
+            } else {
+                git::ensure_dirty_worktree_on_branch(
+                    service.source_workspace_root(),
+                    "Target workspace",
+                    &target,
+                )?;
+                service.for_merge_target(&target).await?
+            };
+            let _registry_guard = service.registry_write_lock().await?;
+            service.checkpoint_merge_phase().await?;
+            service.materialize_merge_target().await?;
             let registry = service.load_registry_unlocked().await?;
             if let Some(expected) = &expected {
                 service.validate_checked_merge(&id, expected).await?;
             }
             let blocking_service = service.clone();
             let blocking_id = id.clone();
+            let registry_guard = _registry_guard.clone();
             let merged = tokio::task::spawn_blocking(move || {
+                let _registry_guard = registry_guard;
                 let mut registry = registry;
                 let mut registry_changed = false;
                 let response = blocking_service.merge_worktree_inner_blocking(
@@ -823,6 +1081,7 @@ impl WorktreeService {
                     request,
                     &mut registry,
                     &mut registry_changed,
+                    expected.zip(observer),
                 )?;
                 Ok::<_, String>((response, registry_changed.then_some(registry)))
             })
@@ -830,13 +1089,18 @@ impl WorktreeService {
             invalidate_list_cache();
             let (response, updated_registry) =
                 merged.map_err(|e| format!("Worktree merge blocking task failed: {}", e))??;
+            service.checkpoint_merge_phase().await?;
             if let Some(registry) = updated_registry {
-                service.save_registry_unlocked(&registry).await?;
+                service
+                    .save_registry_unlocked(&registry, &_registry_guard)
+                    .await?;
+            }
+            if cleanup_target {
+                service.cleanup_merge_target().await?;
             }
             Ok(response)
-        })
+        }
         .await
-        .map_err(|e| format!("Worktree merge task failed: {}", e))?
     }
 
     pub async fn validate_checked_merge(
@@ -846,7 +1110,7 @@ impl WorktreeService {
     ) -> Result<(), String> {
         let view = self.get_worktree(id).await?;
         let diff = self.diff_worktree(id).await?;
-        let root = self.source_workspace_root.clone();
+        let root = self.merge_checkout_root().to_path_buf();
         let target = tokio::task::spawn_blocking(move || git::status_for_path(&root))
             .await
             .map_err(|e| e.to_string())?;
@@ -888,18 +1152,22 @@ impl WorktreeService {
         expected: crate::types::CheckedMergeIdentity,
         expected_post: String,
     ) -> Result<String, String> {
+        if self.merge_authority.is_none() {
+            return Err("Checked recovery unsupported without persisted merge phase authority; source retained".into());
+        }
         let service = self.clone();
         let id = id.to_string();
-        tokio::spawn(async move {
-            let merge_lock = merge_lock_for(service.source_workspace_root());
-            let _merge_guard = merge_lock.lock().await;
-            let _registry_guard = registry_write_lock().lock().await;
+        async move {
+            let service = service.acquire_merge_permit().await?;
+            let _registry_guard = service.registry_write_lock().await?;
             let view = service.get_worktree(&id).await?;
             if view.status.dirty || view.status.conflicted || view.status.error.is_some()
                 || view.status.head_commit.as_deref() != Some(expected.source_head.as_str()) {
                 return Err("Retained landing source changed; recovery blocked".into());
             }
             tokio::task::spawn_blocking(move || {
+                let _registry_guard = _registry_guard;
+                service.validate_merge_phase()?;
                 let root = service.source_workspace_root();
                 git::ensure_checkout_on_branch(root, "Recovery target", &expected.target_branch)?;
                 git::ensure_clean_worktree(root, "Recovery target")?;
@@ -913,7 +1181,9 @@ impl WorktreeService {
                 if post.parent_count() != 1 || post.parent_id(0).map_err(|e| e.to_string())?.to_string() != expected.target_head || post.tree_id() != source.tree_id() {
                     return Err("Recovery material is not the exact native squash landing".into());
                 }
+                service.validate_merge_phase()?;
                 git::run_git_with_refact_author(root, &["revert", "--no-edit", "--no-gpg-sign", &expected_post])?;
+                service.validate_merge_phase()?;
                 let recovered = git::head_rev(root)?;
                 let current = repo.find_commit(git2::Oid::from_str(&recovered).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
                 let previous = post.parent(0).map_err(|e| e.to_string())?;
@@ -923,7 +1193,7 @@ impl WorktreeService {
                 git::ensure_clean_worktree(root, "Recovered target")?;
                 Ok(recovered)
             }).await.map_err(|e| e.to_string())?
-        }).await.map_err(|e| e.to_string())?
+        }.await
     }
 
     fn merge_worktree_inner_blocking(
@@ -932,7 +1202,22 @@ impl WorktreeService {
         request: MergeWorktreeRequest,
         registry: &mut WorktreeRegistry,
         registry_changed: &mut bool,
+        observer: Option<(crate::types::CheckedMergeIdentity, LandingCommitObserver)>,
     ) -> Result<MergeWorktreeResponse, String> {
+        crate::locking::with_git_phase(self.merge_authority.clone(), || {
+            self.merge_worktree_guarded_inner(id, request, registry, registry_changed, observer)
+        })
+    }
+
+    fn merge_worktree_guarded_inner(
+        &self,
+        id: &str,
+        request: MergeWorktreeRequest,
+        registry: &mut WorktreeRegistry,
+        registry_changed: &mut bool,
+        observer: Option<(crate::types::CheckedMergeIdentity, LandingCommitObserver)>,
+    ) -> Result<MergeWorktreeResponse, String> {
+        self.validate_merge_phase()?;
         let index = registry
             .records
             .iter()
@@ -961,6 +1246,24 @@ impl WorktreeService {
         let affected_references = record.references.clone();
         let affected_reference_count = affected_references.len();
         let target_root = self.merge_checkout_root();
+        if let Some((source, parent)) = &self.nested_merge_identity {
+            if &record.meta != source
+                || parent.branch.as_deref() != Some(target_branch.as_str())
+                || source.base_branch != parent.branch
+                || normalized_path_key(&parent.source_workspace_root)? != self.source_workspace_root
+                || normalized_path_key(&source.source_workspace_root)? != self.source_workspace_root
+                || normalized_path_key(&parent.root)? != normalized_path_key(target_root)?
+                || normalized_path_key(&source.root)? == normalized_path_key(target_root)?
+            {
+                return Err("Nested merge source or parent checkout identity changed".to_string());
+            }
+            if normalized_path_key(&parent.root)? != self.source_workspace_root
+                && !registry.records.iter().any(|record| &record.meta == parent)
+            {
+                return Err("Nested merge parent registration changed".to_string());
+            }
+            validate_worktree_meta_checkout(parent)?;
+        }
         if self.merge_checkout.is_some() {
             git::validate_merge_checkout(target_root, &target_branch)?;
         }
@@ -979,8 +1282,8 @@ impl WorktreeService {
                     conflict: None,
                     warnings: vec![format!(
                         "Target workspace has {} uncommitted file(s) that were not merged; \
-                         commit or stash them, or retry with acknowledge_dirty_baseline=true \
-                         to stash and restore them around the merge",
+                     commit or stash them, or retry with acknowledge_dirty_baseline=true \
+                     to stash and restore them around the merge",
                         baseline.files.len()
                     )],
                     dirty_baseline: Some(baseline),
@@ -1000,19 +1303,23 @@ impl WorktreeService {
         if git::has_porcelain_changes(&record.meta.root)? {
             if !request.include_uncommitted {
                 return Err(format!(
-                    "Worktree '{}' has uncommitted changes; set include_uncommitted=true to auto-commit them first",
-                    id
-                ));
+                "Worktree '{}' has uncommitted changes; set include_uncommitted=true to auto-commit them first",
+                id
+            ));
             }
+            self.validate_merge_phase()?;
             committed_uncommitted = git::commit_all(&record.meta.root, &commit_message)?;
         }
+        self.validate_merge_phase()?;
         git::ensure_clean_worktree(&record.meta.root, "Source worktree")?;
         let ahead = git::commits_ahead(
             &record.meta.source_workspace_root,
             &target_branch,
             &source_branch,
         )?;
+        self.validate_merge_phase()?;
         if ahead == 0 {
+            self.validate_merge_phase()?;
             let cleanup = if request.delete_after_merge && source_branch != target_branch {
                 let removal =
                     self.cleanup_registered_worktree_blocking(registry, index, &record, true)?;
@@ -1064,9 +1371,23 @@ impl WorktreeService {
                 warnings: preflight_warnings,
             });
         }
-        let target_stash =
-            git::stash_dirty_worktree(target_root, "Target workspace", Some(&target_branch))?;
-        if let Err(e) = git::checkout_branch(target_root, &target_branch) {
+        self.validate_merge_phase()?;
+        let target_stash = if let Some((source, parent)) = &self.nested_merge_identity {
+            validate_worktree_meta_checkout(source)?;
+            validate_worktree_meta_checkout(parent)?;
+            git::ensure_clean_worktree(target_root, "Nested merge target")?;
+            None
+        } else {
+            git::stash_dirty_worktree(target_root, "Target workspace", Some(&target_branch))?
+        };
+        self.validate_merge_phase()?;
+        let checkout_result = if self.nested_merge_identity.is_some() {
+            Ok(())
+        } else {
+            git::checkout_branch(target_root, &target_branch)
+        };
+        if let Err(e) = checkout_result {
+            self.validate_merge_phase()?;
             let mut cleanup_warnings = Vec::new();
             if let Some(stash) = target_stash.as_ref() {
                 restore_target_stash(target_root, stash, &mut cleanup_warnings);
@@ -1077,6 +1398,7 @@ impl WorktreeService {
                 cleanup_warnings,
             ));
         }
+        self.validate_merge_phase()?;
         let target_pre_merge_head = match git::head_rev(target_root) {
             Ok(head) => head,
             Err(e) => {
@@ -1091,6 +1413,7 @@ impl WorktreeService {
                 ));
             }
         };
+        self.validate_merge_phase()?;
         let merge_result = if request.strategy.as_str() == "squash" {
             git::run_git(target_root, &["merge", "--squash", &source_branch])
         } else {
@@ -1106,9 +1429,17 @@ impl WorktreeService {
                 ],
             )
         };
+        self.validate_merge_phase()?;
         if let Err(e) = merge_result {
             let conflict_files = git::conflict_files_for_path(target_root);
-            let merge_abort_warnings = git::cleanup_failed_merge(target_root);
+            let merge_abort_warnings = if self.nested_merge_identity.is_some() {
+                vec![format!(
+                "Nested merge state retained at '{}'; inspect the target index and worktree before retrying",
+                target_root.display()
+            )]
+            } else {
+                git::cleanup_failed_merge(target_root)
+            };
             let merge_abort_ok = merge_abort_warnings.is_empty();
             let mut cleanup_warnings = merge_abort_warnings;
             let stash_restored = if let Some(stash) = target_stash.as_ref() {
@@ -1139,10 +1470,72 @@ impl WorktreeService {
             return Err(format_merge_failure("Merge failed", &e, cleanup_warnings));
         }
         if request.strategy.as_str() == "squash" {
-            if let Err(e) = git::run_git_with_refact_author(
+            self.validate_merge_phase()?;
+            let observed = observer.is_some();
+            let observed_repository = if let Some((exact, _)) = &observer {
+                let repo = git2::Repository::open(target_root).map_err(|e| e.to_string())?;
+                let head = repo.head().map_err(|e| e.to_string())?;
+                if head.shorthand() != Some(exact.target_branch.as_str())
+                    || head
+                        .peel_to_commit()
+                        .map_err(|e| e.to_string())?
+                        .id()
+                        .to_string()
+                        != exact.target_head
+                {
+                    return Err("Observed landing pre-commit target changed; retain state".into());
+                }
+                Some(git::canonical_common_dir(&repo)?)
+            } else {
+                None
+            };
+            if let Err(e) = git::run_git_with_refact_author_observed(
                 target_root,
                 &["commit", "-m", &commit_message, "--no-gpg-sign"],
+                || {
+                    if let Some((exact, observer)) = observer {
+                        let repo =
+                            git2::Repository::open(target_root).map_err(|e| e.to_string())?;
+                        let head = repo.head().map_err(|e| e.to_string())?;
+                        let landed = head.peel_to_commit().map_err(|e| e.to_string())?;
+                        let source = repo
+                            .find_commit(
+                                git2::Oid::from_str(&exact.source_head)
+                                    .map_err(|e| e.to_string())?,
+                            )
+                            .map_err(|e| e.to_string())?;
+                        if Some(git::canonical_common_dir(&repo)?) != observed_repository
+                            || dunce::canonicalize(target_root)
+                                .map_err(|e| e.to_string())?
+                                .as_path()
+                                != target_root
+                            || head.shorthand() != Some(exact.target_branch.as_str())
+                            || landed.parent_count() != 1
+                            || landed.parent_id(0).map_err(|e| e.to_string())?.to_string()
+                                != exact.target_head
+                            || landed.tree_id() != source.tree_id()
+                            || landed.id().to_string() == exact.target_head
+                        {
+                            return Err("Successful commit identity unavailable; retain state and inspect, never replay".into());
+                        }
+                        observer(KnownLandingCommit {
+                            commit: landed.id().to_string(),
+                            exact,
+                        })?;
+                    }
+                    Ok(())
+                },
             ) {
+                if observed {
+                    return Err(format!("Observed landing stopped; retain source and target, inspect without replay: {e}"));
+                }
+                self.validate_merge_phase()?;
+                if self.nested_merge_identity.is_some() {
+                    return Err(format!(
+                    "Failed to commit squash merge: {}; integration state retained at '{}' with source worktree '{}' intact; inspect the target index and worktree before retrying",
+                    e, target_root.display(), record.meta.root.display()
+                ));
+                }
                 let mut cleanup_warnings = git::cleanup_failed_merge(target_root);
                 if let Some(stash) = target_stash.as_ref() {
                     restore_target_stash(target_root, stash, &mut cleanup_warnings);
@@ -1154,6 +1547,7 @@ impl WorktreeService {
                 ));
             }
         }
+        self.validate_merge_phase()?;
         let mut warnings = preflight_warnings;
         let merge_commit = match git::head_rev(target_root) {
             Ok(head) => Some(head),
@@ -1163,9 +1557,11 @@ impl WorktreeService {
             }
         };
         if let Some(stash) = target_stash.as_ref() {
+            self.validate_merge_phase()?;
             match git::apply_and_drop_stash(target_root, stash) {
                 Ok(stash_warnings) => warnings.extend(stash_warnings),
                 Err(e) => {
+                    self.validate_merge_phase()?;
                     let conflict_files = git::conflict_files_for_path(target_root);
                     let mut cleanup_warnings = git::reset_hard(target_root, &target_pre_merge_head);
                     let reset_ok = cleanup_warnings.is_empty();
@@ -1173,12 +1569,12 @@ impl WorktreeService {
                         restore_target_stash(target_root, stash, &mut cleanup_warnings);
                     let restored_conflicts = git::conflict_files_for_path(target_root);
                     cleanup_warnings.insert(
-                        0,
-                        format!(
-                            "Failed to reapply target workspace changes after merge; merge was rolled back: {}",
-                            e
-                        ),
-                    );
+                    0,
+                    format!(
+                        "Failed to reapply target workspace changes after merge; merge was rolled back: {}",
+                        e
+                    ),
+                );
                     let cleanup_ok = reset_ok && stash_restored;
                     let conflict = post_cleanup_conflict_state(
                         target_root,
@@ -1208,6 +1604,7 @@ impl WorktreeService {
                 }
             }
         }
+        self.validate_merge_phase()?;
         let cleanup = if request.delete_after_merge && source_branch != target_branch {
             let removal =
                 self.cleanup_registered_worktree_blocking(registry, index, &record, true)?;
@@ -1245,7 +1642,8 @@ impl WorktreeService {
         force_referenced: bool,
     ) -> Result<DeleteWorktreeResponse, String> {
         validate_worktree_id(id)?;
-        let _guard = registry_write_lock().lock().await;
+        let _repository_guard = self.acquire_merge_permit().await?;
+        let _guard = _repository_guard.registry_write_lock().await?;
         let mut registry = self.load_registry_unlocked().await?;
         let index = registry
             .records
@@ -1267,27 +1665,41 @@ impl WorktreeService {
                     .join(", ")
             ));
         }
+        if self.merge_permit.is_some() {
+            self.checkpoint_merge_phase().await?;
+        }
+        let phase_service = _repository_guard.clone();
         let removal_source = record.meta.source_workspace_root.clone();
         let removal_id = record.meta.id.clone();
         let removal_root = record.meta.root.clone();
         let removal_branch = record.meta.branch.clone();
-        let removed = tokio::task::spawn_blocking(move || {
-            let stale_path = !removal_root.exists();
-            let warnings = git::remove_worktree(&removal_source, &removal_id, &removal_root);
-            let branch_result = if delete_branch {
-                removal_branch
-                    .as_deref()
-                    .map(|branch| git::delete_branch(&removal_source, branch))
-            } else {
-                None
-            };
-            let still_present = removal_root.exists();
-            (stale_path, warnings, branch_result, still_present)
-        })
+        let removed = {
+            let registry_guard = _guard.clone();
+            tokio::task::spawn_blocking(move || {
+                let _registry_guard = registry_guard;
+                if phase_service.merge_permit.is_some() {
+                    phase_service.validate_merge_phase()?;
+                }
+                let stale_path = !removal_root.exists();
+                let warnings = git::remove_worktree(&removal_source, &removal_id, &removal_root);
+                if phase_service.merge_permit.is_some() {
+                    phase_service.validate_merge_phase()?;
+                }
+                let branch_result = if delete_branch {
+                    removal_branch
+                        .as_deref()
+                        .map(|branch| git::delete_branch(&removal_source, branch))
+                } else {
+                    None
+                };
+                let still_present = removal_root.exists();
+                Ok::<_, String>((stale_path, warnings, branch_result, still_present))
+            })
+        }
         .await;
         invalidate_list_cache();
         let (stale_path, mut warnings, branch_result, still_present) = removed
-            .map_err(|e| format!("Worktree '{}' removal task failed: {}", record.meta.id, e))?;
+            .map_err(|e| format!("Worktree '{}' removal task failed: {}", record.meta.id, e))??;
         if still_present {
             return Err(format!(
                 "Failed to remove worktree directory '{}': {}",
@@ -1304,7 +1716,7 @@ impl WorktreeService {
             }
         }
         registry.records.remove(index);
-        self.save_registry_unlocked(&registry).await?;
+        self.save_registry_unlocked(&registry, &_guard).await?;
         let affected_reference_count = record.references.len();
         Ok(DeleteWorktreeResponse {
             deleted: true,
@@ -1364,12 +1776,15 @@ impl WorktreeService {
         request: WorktreeCleanupRequest,
     ) -> Result<WorktreeCleanupResult, String> {
         let service = self.clone();
-        tokio::spawn(async move {
+        async move {
             validate_cleanup_request(&request)?;
-            let _guard = registry_write_lock().lock().await;
+            let service = service.acquire_merge_permit().await?;
+            let _guard = service.registry_write_lock().await?;
             let registry = service.load_registry_unlocked().await?;
             let blocking_service = service.clone();
+            let registry_guard = _guard.clone();
             let cleaned = tokio::task::spawn_blocking(move || {
+                let _registry_guard = registry_guard;
                 let mut registry = registry;
                 let mut registry_changed = false;
                 let result = blocking_service.cleanup_worktrees_inner_blocking(
@@ -1384,12 +1799,11 @@ impl WorktreeService {
             let (result, updated_registry) =
                 cleaned.map_err(|e| format!("Worktree cleanup blocking task failed: {}", e))??;
             if let Some(registry) = updated_registry {
-                service.save_registry_unlocked(&registry).await?;
+                service.save_registry_unlocked(&registry, &_guard).await?;
             }
             Ok(result)
-        })
+        }
         .await
-        .map_err(|e| format!("Worktree cleanup task failed: {}", e))?
     }
 
     fn cleanup_worktrees_inner_blocking(
@@ -1868,6 +2282,9 @@ impl WorktreeService {
         record: &WorktreeRegistryRecord,
         delete_branch: bool,
     ) -> Result<WorktreeRemovalResult, String> {
+        if self.merge_permit.is_some() {
+            self.validate_merge_phase()?;
+        }
         validate_registered_record_checkout(record)?;
         let stale_path = !record.meta.root.exists();
         let mut warnings = git::remove_worktree(
@@ -1877,6 +2294,9 @@ impl WorktreeService {
         );
         let worktree_deleted = !record.meta.root.exists();
         let mut branch_deleted = false;
+        if self.merge_permit.is_some() {
+            self.validate_merge_phase()?;
+        }
         if delete_branch {
             if let Some(branch) = record.meta.branch.as_deref() {
                 match git::delete_branch(&record.meta.source_workspace_root, branch) {
@@ -1949,6 +2369,13 @@ impl WorktreeService {
             .cloned()
             .collect::<Vec<_>>();
         let reference_count = references.len();
+        let cache_meta = record.meta.clone();
+        let cache_report =
+            tokio::task::spawn_blocking(move || crate::cache::read_report(&cache_meta))
+                .await
+                .unwrap_or_else(|_| {
+                    Some(crate::cache::degraded(crate::types::CacheReason::IoFailure))
+                });
         Ok(WorktreeRecordView {
             meta: record.meta.clone(),
             created_at: record.created_at.clone(),
@@ -1957,12 +2384,46 @@ impl WorktreeService {
             references,
             reference_count,
             status,
+            cache_report,
         })
+    }
+
+    pub async fn cache_execution_context(
+        &self,
+        meta: &WorktreeMeta,
+    ) -> Result<crate::cache::CacheExecutionContext, crate::types::CacheReason> {
+        let service = self.clone();
+        let meta = meta.clone();
+        tokio::task::spawn_blocking(move || service.cache_execution_context_blocking(&meta))
+            .await
+            .map_err(|_| crate::types::CacheReason::IoFailure)?
+    }
+
+    fn cache_execution_context_blocking(
+        &self,
+        meta: &WorktreeMeta,
+    ) -> Result<crate::cache::CacheExecutionContext, crate::types::CacheReason> {
+        if meta.root
+            != self
+                .worktree_path_for_id(&meta.id)
+                .map_err(|_| crate::types::CacheReason::IdentityChanged)?
+            || meta.source_workspace_root != self.source_workspace_root
+            || meta.root == self.source_workspace_root
+            || !meta.enforce
+        {
+            return Err(crate::types::CacheReason::IdentityChanged);
+        }
+        validate_worktree_meta_checkout(meta)
+            .map_err(|_| crate::types::CacheReason::IdentityChanged)?;
+        crate::cache::CacheExecutionContext::from_registered(meta.clone(), self.registry_path())
     }
 
     async fn load_registry_unlocked(&self) -> Result<WorktreeRegistry, String> {
         let path = self.registry_path();
-        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+        if !tokio::fs::try_exists(&path)
+            .await
+            .map_err(|e| format!("Cannot inspect registry: {e}"))?
+        {
             return Ok(WorktreeRegistry {
                 schema_version: 1,
                 source_workspace_root: self.source_workspace_root.clone(),
@@ -1993,35 +2454,39 @@ impl WorktreeService {
         Ok(registry)
     }
 
-    async fn save_registry_unlocked(&self, registry: &WorktreeRegistry) -> Result<(), String> {
+    async fn save_registry_unlocked(
+        &self,
+        registry: &WorktreeRegistry,
+        guard: &Arc<RegistryGuard>,
+    ) -> Result<(), String> {
         self.validate_registry(registry).await?;
-        let dir = self.registry_dir();
-        tokio::fs::create_dir_all(&dir)
-            .await
-            .map_err(|e| format!("Failed to create worktree registry dir: {}", e))?;
         let path = self.registry_path();
-        let tmp_path = path.with_extension("json.tmp");
         let registry = registry.clone();
-        let content = tokio::task::spawn_blocking(move || {
-            serde_json::to_string_pretty(&registry)
-                .map_err(|e| format!("Failed to serialize worktree registry: {}", e))
-        })
-        .await
-        .map_err(|e| format!("Worktree registry serialization task failed: {}", e))??;
-        tokio::fs::write(&tmp_path, content)
-            .await
-            .map_err(|e| format!("Failed to write worktree registry temp file: {}", e))?;
-        #[cfg(windows)]
-        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
-            tokio::fs::remove_file(&path)
-                .await
-                .map_err(|e| format!("Failed to remove existing worktree registry: {}", e))?;
-        }
-        let replaced = tokio::fs::rename(&tmp_path, &path)
-            .await
-            .map_err(|e| format!("Failed to replace worktree registry: {}", e));
+        let guard = guard.clone();
+        let published = tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            use std::io::Write;
+            let dir = path.parent().ok_or("Registry directory missing")?;
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            let content = serde_json::to_vec_pretty(&registry).map_err(|e| e.to_string())?;
+            let mut temporary = tempfile::NamedTempFile::new_in(dir).map_err(|e| e.to_string())?;
+            temporary.write_all(&content).map_err(|e| e.to_string())?;
+            temporary.as_file().sync_all().map_err(|e| e.to_string())?;
+            if path.exists() {
+                let mut backup = tempfile::NamedTempFile::new_in(dir).map_err(|e| e.to_string())?;
+                let mut previous = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+                std::io::copy(&mut previous, backup.as_file_mut()).map_err(|e| e.to_string())?;
+                backup.as_file().sync_all().map_err(|e| e.to_string())?;
+                backup.persist(path.with_extension("json.bak")).map_err(|e| e.to_string())?;
+            }
+            temporary.persist(&path).map_err(|e| format!("Failed to publish registry without removing previous index: {e}"))?;
+            #[cfg(unix)]
+            std::fs::File::open(dir).and_then(|directory| directory.sync_all())
+                .map_err(|e| format!("Registry published but directory durability unknown; inspect before retrying: {e}"))?;
+            Ok(())
+        }).await;
         invalidate_list_cache();
-        replaced
+        published.map_err(|e| format!("Registry publication task failed: {e}"))?
     }
 
     async fn validate_registry(&self, registry: &WorktreeRegistry) -> Result<(), String> {
@@ -2693,6 +3158,22 @@ mod worktree_registry_tests {
         std::fs::create_dir(&root).unwrap();
         init_repo(&root);
         let service = WorktreeService::new(temp.path().join("cache"), root.clone()).unwrap();
+        let authorized_root = root.clone();
+        let owner_path = temp.path().join("landing-owner.json");
+        let owner = serde_json::json!({"owner":"fixture-owner", "generation":1});
+        std::fs::write(&owner_path, serde_json::to_vec(&owner).unwrap()).unwrap();
+        let service = service.with_merge_authority(Arc::new(move || {
+            let current: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&owner_path).map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?;
+            if current != owner
+                || git::current_branch(&git::discover_repo(&authorized_root)?).as_deref()
+                    != Some("main")
+            {
+                return Err("Fixture persisted owner or target binding changed".into());
+            }
+            Ok(())
+        }));
         let created = service
             .create_worktree(CreateWorktreeRequest {
                 branch: Some("refact/chat/checked".into()),
@@ -2842,6 +3323,224 @@ mod worktree_registry_tests {
         }
     }
 
+    struct RegistryChild {
+        child: std::process::Child,
+        lines: std::sync::mpsc::Receiver<String>,
+        reader: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl RegistryChild {
+        fn start(source: &Path, cache: &Path, id: &str, mode: &str) -> Self {
+            use std::io::BufRead;
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "service::worktree_registry_tests::worktree_registry_cooperating_process",
+                    "--nocapture",
+                ])
+                .env("REFACT_REGISTRY_CHILD", mode)
+                .env("REFACT_REGISTRY_SOURCE", source)
+                .env("REFACT_REGISTRY_CACHE", cache)
+                .env("REFACT_REGISTRY_ID", id)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::inherit())
+                .spawn()
+                .unwrap();
+            let output = child.stdout.take().unwrap();
+            let (tx, lines) = std::sync::mpsc::channel();
+            let reader = std::thread::spawn(move || {
+                for line in std::io::BufReader::new(output).lines() {
+                    if tx.send(line.unwrap()).is_err() {
+                        break;
+                    }
+                }
+            });
+            Self {
+                child,
+                lines,
+                reader: Some(reader),
+            }
+        }
+
+        fn expect(&self, expected: &str) {
+            loop {
+                let line = self
+                    .lines
+                    .recv_timeout(std::time::Duration::from_secs(15))
+                    .unwrap();
+                if line == expected {
+                    return;
+                }
+            }
+        }
+
+        fn release(&mut self) {
+            use std::io::Write;
+            self.child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(b"release\n")
+                .unwrap();
+        }
+
+        fn finish(&mut self) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            loop {
+                if let Some(status) = self.child.try_wait().unwrap() {
+                    assert!(status.success());
+                    self.reader.take().unwrap().join().unwrap();
+                    return;
+                }
+                assert!(std::time::Instant::now() < deadline, "child did not finish");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+
+    impl Drop for RegistryChild {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            if let Some(reader) = self.reader.take() {
+                let _ = reader.join();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn worktree_registry_cooperating_process() {
+        use std::io::Write;
+        let Some(mode) = std::env::var_os("REFACT_REGISTRY_CHILD") else {
+            return;
+        };
+        let source = PathBuf::from(std::env::var_os("REFACT_REGISTRY_SOURCE").unwrap());
+        let cache = PathBuf::from(std::env::var_os("REFACT_REGISTRY_CACHE").unwrap());
+        let id = std::env::var("REFACT_REGISTRY_ID").unwrap();
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let reference = WorktreeReference {
+            kind: "chat".into(),
+            chat_id: Some(mode.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        if mode == "first" {
+            let guard = service.registry_write_lock().await.unwrap();
+            let mut registry = service.load_registry_unlocked().await.unwrap();
+            println!("first-snapshot-loaded");
+            std::io::stdout().flush().unwrap();
+            let mut release = String::new();
+            std::io::stdin().read_line(&mut release).unwrap();
+            registry.records[0].references.push(reference);
+            service
+                .save_registry_unlocked(&registry, &guard)
+                .await
+                .unwrap();
+        } else if mode == "second" {
+            service.add_reference(&id, reference).await.unwrap();
+        } else {
+            let service = service.for_merge_target("main").await.unwrap();
+            println!("merge-target-resolved");
+            std::io::stdout().flush().unwrap();
+            let mut release = String::new();
+            std::io::stdin().read_line(&mut release).unwrap();
+            let error = service
+                .merge_worktree(
+                    &id,
+                    MergeWorktreeRequest {
+                        target_branch: Some("main".into()),
+                        delete_after_merge: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(error.contains("HEAD changed"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn worktree_registry_two_processes_preserve_exact_references_and_reject_stale_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir(&source).unwrap();
+        init_repo(&source);
+        let cache = temp.path().join("cache");
+        let service = WorktreeService::new(cache.clone(), source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest::default())
+            .await
+            .unwrap();
+        let before = service.load_registry().await.unwrap();
+        let id = &created.worktree.meta.id;
+        let mut first = RegistryChild::start(&source, &cache, id, "first");
+        first.expect("first-snapshot-loaded");
+        let mut second = RegistryChild::start(&source, &cache, id, "second");
+        second.expect("registry-lock-contended");
+        first.release();
+        first.finish();
+        second.finish();
+        let after = service.load_registry().await.unwrap();
+        assert_eq!(after.records.len(), 1);
+        let mut references = after.records[0]
+            .references
+            .iter()
+            .map(|r| r.chat_id.clone().unwrap())
+            .collect::<Vec<_>>();
+        references.sort();
+        assert_eq!(references, ["first", "second"]);
+        let bytes = std::fs::read(service.registry_path()).unwrap();
+        assert!(service
+            .compare_and_save_registry(&before, &before)
+            .await
+            .unwrap_err()
+            .contains("snapshot changed"));
+        assert_eq!(std::fs::read(service.registry_path()).unwrap(), bytes);
+        assert!(crate::locking::repository_identity(&source)
+            .unwrap()
+            .join("refact-worktree-registry.lock")
+            .is_file());
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_process_rechecks_head_after_wait_and_retains_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir(&source).unwrap();
+        init_repo(&source);
+        let cache = temp.path().join("cache");
+        let service = WorktreeService::new(cache.clone(), source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest::default())
+            .await
+            .unwrap();
+        commit_file(
+            &created.worktree.meta.root,
+            "candidate.txt",
+            "candidate\n",
+            "candidate",
+        );
+        let held = service.acquire_merge_permit().await.unwrap();
+        let mut child =
+            RegistryChild::start(&source, &cache, &created.worktree.meta.id, "stale-merge");
+        child.expect("merge-target-resolved");
+        child.release();
+        child.expect("registry-lock-contended");
+        commit_file(&source, "parent.txt", "parent\n", "parent");
+        let head = git::head_rev(&source).unwrap();
+        let registry = std::fs::read(service.registry_path()).unwrap();
+        drop(held);
+        child.finish();
+        assert_eq!(git::head_rev(&source).unwrap(), head);
+        assert_eq!(std::fs::read(service.registry_path()).unwrap(), registry);
+        assert_eq!(
+            std::fs::read_to_string(source.join("parent.txt")).unwrap(),
+            "parent\n"
+        );
+        assert!(!source.join("candidate.txt").exists());
+        assert!(created.worktree.meta.root.exists());
+    }
+
     #[tokio::test]
     async fn worktree_registry_multiple_references_share_metadata_without_duplication() {
         let temp = tempfile::tempdir().unwrap();
@@ -2850,8 +3549,12 @@ mod worktree_registry_tests {
         std::fs::create_dir_all(&source).unwrap();
         let service = WorktreeService::new(cache, source).unwrap();
         let mut registry = service.load_registry().await.unwrap();
+        let expected_registry = registry.clone();
         registry.records.push(sample_record(&service, "wt_1"));
-        service.save_registry(&registry).await.unwrap();
+        service
+            .compare_and_save_registry(&expected_registry, &registry)
+            .await
+            .unwrap();
         let first = WorktreeReference {
             kind: "chat".to_string(),
             chat_id: Some("chat-1".to_string()),
@@ -2972,6 +3675,20 @@ mod worktree_registry_tests {
             Some(dev_head.as_str())
         );
         assert!(created.worktree.meta.root.join("dev_only.txt").is_file());
+        let report = created.worktree.cache_report.clone().unwrap();
+        assert_eq!(
+            report.compiler_cache.reason,
+            crate::types::CacheReason::UnsafeDaemonBoundary
+        );
+        let loaded = service
+            .get_worktree(&created.worktree.meta.id)
+            .await
+            .unwrap();
+        #[cfg(target_os = "linux")]
+        assert_eq!(loaded.cache_report, Some(report));
+        let listed = service.list_worktrees().await.unwrap();
+        assert_eq!(listed.worktrees.len(), 1);
+        assert_eq!(listed.worktrees[0].cache_report, loaded.cache_report);
     }
 
     #[tokio::test]
@@ -3143,8 +3860,12 @@ mod worktree_registry_tests {
             .unwrap();
         mark_worktree_old(&service, &created.worktree.meta.id, 48).await;
         let mut registry = service.load_registry().await.unwrap();
+        let expected_registry = registry.clone();
         registry.records[0].meta.base_commit = Some("not-a-commit".to_string());
-        service.save_registry(&registry).await.unwrap();
+        service
+            .compare_and_save_registry(&expected_registry, &registry)
+            .await
+            .unwrap();
 
         assert!(service
             .diff_worktree_with_limit(&created.worktree.meta.id, 50_000)
@@ -3248,6 +3969,17 @@ mod worktree_registry_tests {
             "squash change\n",
             "agent change",
         );
+        let check_source = source.clone();
+        let preflight_path = Arc::new(std::sync::Mutex::new(None::<PathBuf>));
+        let observed_path = preflight_path.clone();
+        let service = service.with_merge_authority(Arc::new(move || {
+            for entry in git::list_git_worktrees(&check_source) {
+                if entry.branch.is_none() && entry.root.ends_with("worktree") {
+                    *observed_path.lock().unwrap() = Some(entry.root);
+                }
+            }
+            Ok(())
+        }));
 
         let merged = service
             .merge_worktree(
@@ -3264,6 +3996,10 @@ mod worktree_registry_tests {
             .unwrap();
 
         assert!(merged.merged);
+        assert!(merged.warnings.is_empty());
+        let preflight_path = preflight_path.lock().unwrap().take().unwrap();
+        assert!(!preflight_path.exists());
+        assert!(!preflight_path.parent().unwrap().exists());
         assert_eq!(
             std::fs::read_to_string(source.join("file.txt")).unwrap(),
             "squash change\n"
@@ -4345,6 +5081,65 @@ mod worktree_registry_tests {
             "source change\n",
             "source change",
         );
+        let target_head = git::head_rev(&source).unwrap();
+        let source_head = git::head_rev(&created.worktree.meta.root).unwrap();
+        let worktrees_before = run_git(&source, &["worktree", "list", "--porcelain"]);
+        let owner_path = temp.path().join("preflight-owner.json");
+        let owner = serde_json::json!({"owner":"preflight-fixture", "generation":1});
+        let revoked_owner = serde_json::json!({"owner":"replacement", "generation":2});
+        std::fs::write(&owner_path, serde_json::to_vec(&owner).unwrap()).unwrap();
+        let preflight_path = Arc::new(std::sync::Mutex::new(None::<PathBuf>));
+        let revoke = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed_path = preflight_path.clone();
+        let revoke_at_conflict = revoke.clone();
+        let check_source = source.clone();
+        let check_owner_path = owner_path.clone();
+        let replacement = revoked_owner.clone();
+        let service = service.with_merge_authority(Arc::new(move || {
+            let current: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(&check_owner_path).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            if current != owner {
+                return Err("Fixture persisted preflight owner changed".into());
+            }
+            for entry in git::list_git_worktrees(&check_source) {
+                if entry.branch.is_some() || !entry.root.ends_with("worktree") {
+                    continue;
+                }
+                assert!(entry.root.join(".git").is_file());
+                {
+                    let mut observed = observed_path.lock().unwrap();
+                    if observed.is_none() {
+                        assert_eq!(
+                            std::fs::read_to_string(entry.root.join("file.txt")).unwrap(),
+                            "target change\n"
+                        );
+                        std::fs::write(
+                            entry.root.join("preflight-evidence.txt"),
+                            "retain evidence\n",
+                        )
+                        .unwrap();
+                        *observed = Some(entry.root.clone());
+                    }
+                }
+                if revoke_at_conflict.load(std::sync::atomic::Ordering::SeqCst)
+                    && git::discover_repo(&entry.root)?
+                        .index()
+                        .map_err(|e| e.to_string())?
+                        .has_conflicts()
+                {
+                    assert_eq!(
+                        std::fs::read_to_string(entry.root.join("preflight-evidence.txt")).unwrap(),
+                        "retain evidence\n"
+                    );
+                    std::fs::write(&check_owner_path, serde_json::to_vec(&replacement).unwrap())
+                        .map_err(|e| e.to_string())?;
+                    return Err("Fixture persisted preflight owner changed".into());
+                }
+            }
+            Ok(())
+        }));
 
         let merged = service
             .merge_worktree(
@@ -4362,6 +5157,14 @@ mod worktree_registry_tests {
 
         assert_eq!(merged.status, "conflict");
         assert!(!merged.merged);
+        assert!(merged.warnings.is_empty());
+        let cleaned_path = preflight_path.lock().unwrap().take().unwrap();
+        assert!(!cleaned_path.exists());
+        assert!(!cleaned_path.parent().unwrap().exists());
+        assert_eq!(
+            run_git(&source, &["worktree", "list", "--porcelain"]),
+            worktrees_before
+        );
         assert!(merged
             .conflict
             .unwrap()
@@ -4376,10 +5179,75 @@ mod worktree_registry_tests {
             .get_worktree(&created.worktree.meta.id)
             .await
             .is_ok());
+
+        revoke.store(true, std::sync::atomic::Ordering::SeqCst);
+        let error = service
+            .merge_worktree(
+                &created.worktree.meta.id,
+                MergeWorktreeRequest {
+                    strategy: WorktreeMergeStrategy::Merge,
+                    delete_after_merge: false,
+                    target_branch: Some("main".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+
+        let retained_path = preflight_path.lock().unwrap().take().unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&owner_path).unwrap())
+                .unwrap(),
+            revoked_owner
+        );
+        assert_eq!(
+            std::fs::read_to_string(retained_path.join("preflight-evidence.txt")).unwrap(),
+            "retain evidence\n"
+        );
+        assert!(retained_path.join(".git").is_file());
+        assert_eq!(
+            git::conflict_files_for_path(&retained_path),
+            vec!["file.txt".to_string()]
+        );
+        assert!(
+            error.contains(&format!("worktree '{}'", retained_path.display())),
+            "{error}"
+        );
+        assert!(error.contains("Git phase authority lost"), "{error}");
+        assert!(error.contains("do not replay"), "{error}");
+        assert_eq!(git::head_rev(&source).unwrap(), target_head);
+        assert_eq!(
+            git::head_rev(&created.worktree.meta.root).unwrap(),
+            source_head
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join("file.txt")).unwrap(),
+            "target change\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(created.worktree.meta.root.join("file.txt")).unwrap(),
+            "source change\n"
+        );
+        assert!(run_git(&source, &["status", "--porcelain"]).is_empty());
+        assert!(run_git(&created.worktree.meta.root, &["status", "--porcelain"]).is_empty());
+        assert!(git::list_git_worktrees(&source)
+            .iter()
+            .any(|entry| entry.root == retained_path));
+        run_git(
+            &source,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                retained_path.to_str().unwrap(),
+            ],
+        );
+        std::fs::remove_dir(retained_path.parent().unwrap()).unwrap();
     }
 
     async fn mark_worktree_old(service: &WorktreeService, id: &str, hours: i64) {
         let mut registry = service.load_registry().await.unwrap();
+        let expected_registry = registry.clone();
         let record = registry
             .records
             .iter_mut()
@@ -4389,7 +5257,10 @@ mod worktree_registry_tests {
         record.created_at = ts.clone();
         record.updated_at = ts.clone();
         record.last_seen_at = Some(ts);
-        service.save_registry(&registry).await.unwrap();
+        service
+            .compare_and_save_registry(&expected_registry, &registry)
+            .await
+            .unwrap();
     }
 
     fn replace_registered_root_with_unrelated_repo(source: &Path, root: &Path, branch: &str) {
@@ -4796,15 +5667,23 @@ mod worktree_registry_tests {
             .unwrap_err()
             .contains("not a git repository"));
         let mut registry = service.load_registry().await.unwrap();
+        let expected_registry = registry.clone();
         let mut record = sample_record(&service, "wt_1");
         record.meta.root = temp.path().join("outside");
         registry.records.push(record);
-        assert!(service.save_registry(&registry).await.is_err());
+        assert!(service
+            .compare_and_save_registry(&expected_registry, &registry)
+            .await
+            .is_err());
         let mut registry = service.load_registry().await.unwrap();
+        let expected_registry = registry.clone();
         let mut record = sample_record(&service, "wt_2");
         record.meta.root = service.registry_dir();
         registry.records.push(record);
-        let error = service.save_registry(&registry).await.unwrap_err();
+        let error = service
+            .compare_and_save_registry(&expected_registry, &registry)
+            .await
+            .unwrap_err();
         assert!(error.contains("must exactly match registry path"));
     }
 
@@ -4821,11 +5700,15 @@ mod worktree_registry_tests {
         std::fs::create_dir_all(service.registry_dir()).unwrap();
         std::os::unix::fs::symlink(&outside, service.registry_dir().join("wt_1")).unwrap();
         let mut registry = service.load_registry().await.unwrap();
+        let expected_registry = registry.clone();
         let mut record = sample_record(&service, "wt_1");
         record.meta.root = outside;
         registry.records.push(record);
 
-        let error = service.save_registry(&registry).await.unwrap_err();
+        let error = service
+            .compare_and_save_registry(&expected_registry, &registry)
+            .await
+            .unwrap_err();
 
         assert!(error.contains("must exactly match registry path"));
     }
@@ -4843,9 +5726,13 @@ mod worktree_registry_tests {
         std::fs::create_dir_all(service.registry_dir()).unwrap();
         std::os::unix::fs::symlink(&outside, service.registry_dir().join("wt_1")).unwrap();
         let mut registry = service.load_registry().await.unwrap();
+        let expected_registry = registry.clone();
         registry.records.push(sample_record(&service, "wt_1"));
 
-        let error = service.save_registry(&registry).await.unwrap_err();
+        let error = service
+            .compare_and_save_registry(&expected_registry, &registry)
+            .await
+            .unwrap_err();
 
         assert!(error.contains("must not be a symlink"));
     }

@@ -791,7 +791,9 @@ impl ChatSession {
             planner_pause: None,
             planner_pause_revision: 0,
             planner_pause_pending_tools: false,
+            board_restored_pending_tools: false,
             task_goal_messages: None,
+            task_goal_partial_write: None,
             goal: None,
             goal_active: false,
             goal_status: None,
@@ -933,7 +935,9 @@ impl ChatSession {
             planner_pause: None,
             planner_pause_revision: 0,
             planner_pause_pending_tools: false,
+            board_restored_pending_tools: false,
             task_goal_messages: None,
+            task_goal_partial_write: None,
             goal,
             goal_active,
             goal_status,
@@ -2430,7 +2434,7 @@ impl ChatSession {
         tool_call_ids.iter().all(|id| result_ids.contains(id))
     }
 
-    fn has_pending_tool_result_window(&self) -> bool {
+    pub(super) fn has_pending_tool_result_window(&self) -> bool {
         self.latest_assistant_tool_call_window(None)
             .map(|(assistant_index, tool_call_ids)| {
                 !self.all_tool_call_ids_have_results_after(assistant_index, &tool_call_ids)
@@ -2597,6 +2601,7 @@ impl ChatSession {
                 .pending_deliveries
                 .iter()
                 .take_while(|pending| pending.id != delivery.id)
+                .filter(|pending| !delivery.supersedes(pending))
                 .flat_map(|pending| pending.messages.iter())
                 .chain(self.post_tool_side_effects.iter())
                 .any(|message| Self::control_kind(message).is_some_and(|kind| kinds.contains(kind)))
@@ -2749,22 +2754,19 @@ impl ChatSession {
             self.record_dropped_delivery(delivery.id.clone(), DeliveryStatus::Expired);
             return Ok(DeliveryOutcome::Expired);
         }
-        self.supersede_pending(&delivery);
-        if delivery
-            .messages
+        let pending_count = self
+            .pending_deliveries
             .iter()
-            .any(|message| Self::control_kind(message).is_some())
-        {
-            self.try_accepted_control_projection()?;
-        }
-        // Reject before any side effect rather than dropping an accepted delivery.
-        if self.pending_deliveries.len() >= max_pending_deliveries(&settings)
-            && delivery.push != PushMode::Preempt
-        {
+            .filter(|pending| !delivery.supersedes(pending))
+            .count();
+        let preempt_now =
+            delivery.push == PushMode::Preempt && self.delivery_envelope_boundary_open(&delivery);
+        if pending_count >= max_pending_deliveries(&settings) && !preempt_now {
             return Err("chat delivery queue is full".to_string());
         }
+        self.supersede_pending(&delivery);
 
-        if delivery.push == PushMode::Preempt && self.delivery_envelope_boundary_open(&delivery) {
+        if preempt_now {
             self.preempt_for_delivery(&delivery.source);
             self.append_delivery(&delivery);
             self.emit_queue_update();
@@ -5580,6 +5582,17 @@ mod tests {
             json!({}),
             "keep me",
         ));
+        let capacity = max_pending_deliveries(&crate::file_activity::settings());
+        for n in 2..capacity {
+            assert_eq!(
+                session
+                    .enqueue_delivery(delivery_fixture(&format!("queued-{n}"), PushMode::WhenIdle))
+                    .unwrap(),
+                DeliveryOutcome::Queued
+            );
+        }
+        assert_eq!(session.pending_deliveries.len(), capacity);
+        let accepted = session.pending_deliveries.clone();
         let urgent = delivery_fixture("a", PushMode::Preempt);
         assert_eq!(
             session.enqueue_delivery(urgent.clone()).unwrap(),
@@ -5594,7 +5607,7 @@ mod tests {
         assert_eq!(session.event_seq, seq);
         assert_eq!(session.messages.len(), count);
         assert!(session.draft_message.is_none());
-        assert_eq!(session.pending_deliveries.len(), 2);
+        assert_eq!(session.pending_deliveries, accepted);
         assert_eq!(session.post_tool_side_effects.len(), 1);
         assert_eq!(
             session
@@ -5606,7 +5619,14 @@ mod tests {
         );
         assert_eq!(session.drain_pending_deliveries().0, vec!["b"]);
         session.turn_depth = 0;
-        assert_eq!(session.drain_pending_deliveries().0, vec!["c"]);
+        assert_eq!(
+            session.drain_pending_deliveries().0,
+            accepted
+                .iter()
+                .skip(1)
+                .map(|delivery| delivery.id.clone())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -5630,25 +5650,122 @@ mod tests {
 
     #[test]
     fn delivery_full_and_invalid_rejections_have_no_side_effects() {
-        let mut session = make_session();
-        session.start_stream().unwrap();
-        let capacity = max_pending_deliveries(&crate::file_activity::settings());
-        for n in 0..capacity {
-            session
-                .enqueue_delivery(delivery_fixture(&format!("{n}"), PushMode::Append))
-                .unwrap();
+        for compressing in [false, true] {
+            let mut session = make_session();
+            session.add_message(ChatMessage::new("user".into(), "accepted prefix".into()));
+            session.start_stream().unwrap();
+            session.emit_stream_delta(vec![DeltaOp::AppendContent {
+                text: "pending draft".into(),
+            }]);
+            if compressing {
+                session.active_compression_attempt = Some(1);
+            } else {
+                session.set_planner_pause("held".into(), Some("planner".into()));
+            }
+            assert!(!session
+                .delivery_envelope_boundary_open(&delivery_fixture("probe", PushMode::Preempt)));
+            let capacity = max_pending_deliveries(&crate::file_activity::settings());
+            assert!(capacity > 0);
+            let mut first = delivery_fixture("0", PushMode::Append);
+            first.supersede_key = Some("steering".into());
+            assert_eq!(
+                session.enqueue_delivery(first).unwrap(),
+                DeliveryOutcome::Queued
+            );
+            for n in 1..capacity {
+                assert_eq!(
+                    session
+                        .enqueue_delivery(delivery_fixture(&format!("{n}"), PushMode::Preempt))
+                        .unwrap(),
+                    DeliveryOutcome::Queued
+                );
+            }
+            let accepted = session.pending_deliveries.clone();
+            let prefix = serde_json::to_value(&session.messages).unwrap();
+            let draft = serde_json::to_value(&session.draft_message).unwrap();
+            let seq = session.event_seq;
+            let version = session.trajectory_version;
+            let activity = session.last_activity;
+            for push in [PushMode::Append, PushMode::Preempt] {
+                assert_eq!(
+                    session.enqueue_delivery(delivery_fixture("overflow", push)),
+                    Err("chat delivery queue is full".into())
+                );
+            }
+            let mut empty = delivery_fixture("empty", PushMode::Preempt);
+            empty.messages.clear();
+            empty.supersede_key = Some("steering".into());
+            assert_eq!(
+                session.enqueue_delivery(empty),
+                Err("delivery must contain at least one message".into())
+            );
+            assert_eq!(session.pending_deliveries, accepted);
+            assert_eq!(session.delivery_status("overflow"), DeliveryStatus::Unknown);
+            assert!(session.dropped_deliveries.is_empty());
+            assert!(session.delivered_delivery_ids.is_empty());
+            assert!(session.delivery_wake_sources.is_empty());
+            assert_eq!(serde_json::to_value(&session.messages).unwrap(), prefix);
+            assert_eq!(serde_json::to_value(&session.draft_message).unwrap(), draft);
+            assert_eq!(session.runtime.state, SessionState::Generating);
+            assert!(!session.abort_flag.load(Ordering::SeqCst));
+            assert!(!session.user_interrupt_flag.load(Ordering::SeqCst));
+            assert_eq!(session.event_seq, seq);
+            assert_eq!(session.trajectory_version, version);
+            assert_eq!(session.last_activity, activity);
+            assert!(session.drain_pending_deliveries().0.is_empty());
+            assert_eq!(session.pending_deliveries, accepted);
+
+            let mut replacement = delivery_fixture("replacement", PushMode::Preempt);
+            replacement.supersede_key = Some("steering".into());
+            let mut expired = replacement.clone();
+            expired.id = "expired".into();
+            expired.expires_at_ms = Some(0);
+            assert_eq!(
+                session.enqueue_delivery(expired).unwrap(),
+                DeliveryOutcome::Expired
+            );
+            assert_eq!(session.pending_deliveries, accepted);
+            assert_eq!(
+                session.enqueue_delivery(replacement.clone()).unwrap(),
+                DeliveryOutcome::Queued
+            );
+            assert_eq!(session.pending_deliveries.len(), capacity);
+            assert_eq!(session.delivery_status("0"), DeliveryStatus::Superseded);
+            assert_eq!(session.pending_deliveries.back().unwrap().id, "replacement");
+            assert_eq!(
+                session
+                    .pending_deliveries
+                    .iter()
+                    .take(capacity - 1)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                accepted.iter().skip(1).cloned().collect::<Vec<_>>()
+            );
+            let seq = session.event_seq;
+            assert_eq!(
+                session.enqueue_delivery(replacement).unwrap(),
+                DeliveryOutcome::Duplicate
+            );
+            assert_eq!(session.event_seq, seq);
+            assert!(!session
+                .update_pending_delivery("replacement", None, true)
+                .unwrap());
+            assert_eq!(session.pending_deliveries.len(), capacity - 1);
+            assert_eq!(
+                session.delivery_status("replacement"),
+                DeliveryStatus::Failed
+            );
+            assert_eq!(
+                session
+                    .enqueue_delivery(delivery_fixture("overflow", PushMode::Preempt))
+                    .unwrap(),
+                DeliveryOutcome::Queued
+            );
+            assert_eq!(session.pending_deliveries.len(), capacity);
+            assert_eq!(session.delivery_status("overflow"), DeliveryStatus::Pending);
+            assert_eq!(session.planner_paused(), !compressing);
+            assert_eq!(session.active_compression_attempt, compressing.then_some(1));
         }
-        let seq = session.event_seq;
-        assert!(session
-            .enqueue_delivery(delivery_fixture("overflow", PushMode::Append))
-            .is_err());
-        assert_eq!(session.event_seq, seq);
-        assert!(!session.abort_flag.load(Ordering::SeqCst));
-        assert_eq!(session.pending_deliveries.len(), capacity);
-        let mut empty = delivery_fixture("empty", PushMode::Preempt);
-        empty.messages.clear();
-        assert!(session.enqueue_delivery(empty).is_err());
-        assert_eq!(session.event_seq, seq);
     }
 
     #[test]
@@ -7753,6 +7870,7 @@ mod tests {
     #[test]
     fn full_queue_abort_still_interrupts_active_generation() {
         let mut session = make_session();
+        session.add_message(ChatMessage::new("user".into(), "accepted prefix".into()));
         for i in 0..max_queue_size() {
             session.command_queue.push_back(CommandRequest {
                 native_approval_guard: None,
@@ -7765,10 +7883,31 @@ mod tests {
             });
         }
         session.emit_queue_update();
-        session.start_stream();
+        session.start_stream().unwrap();
         session.emit_stream_delta(vec![DeltaOp::AppendContent {
             text: "partial".into(),
         }]);
+        session.set_planner_pause("held".into(), Some("planner".into()));
+        session.active_compression_attempt = Some(1);
+        let compression_abort = Arc::new(AtomicBool::new(false));
+        session.compression_abort_flag = Some(compression_abort.clone());
+        let capacity = max_pending_deliveries(&crate::file_activity::settings());
+        for i in 0..capacity {
+            assert_eq!(
+                session
+                    .enqueue_delivery(delivery_fixture(&format!("preempt-{i}"), PushMode::Preempt))
+                    .unwrap(),
+                DeliveryOutcome::Queued
+            );
+        }
+        assert_eq!(
+            session.enqueue_delivery(delivery_fixture("overflow", PushMode::Preempt)),
+            Err("chat delivery queue is full".into())
+        );
+        assert!(!session.abort_flag.load(Ordering::SeqCst));
+        let pending = session.pending_deliveries.clone();
+        let commands = serde_json::to_value(&session.command_queue).unwrap();
+        let prefix = serde_json::to_value(&session.messages).unwrap();
 
         let outcome = session.enqueue_priority_command(CommandRequest {
             native_approval_guard: None,
@@ -7780,8 +7919,26 @@ mod tests {
 
         assert_eq!(outcome, EnqueueCommandOutcome::Accepted);
         assert!(session.abort_flag.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(compression_abort.load(Ordering::SeqCst));
+        assert!(session.draft_message.is_none());
         assert_eq!(session.runtime.state, SessionState::Idle);
         assert_eq!(session.command_queue.len(), max_queue_size() + 1);
+        assert_eq!(
+            serde_json::to_value(
+                session
+                    .command_queue
+                    .iter()
+                    .take(max_queue_size())
+                    .collect::<Vec<_>>()
+            )
+            .unwrap(),
+            commands
+        );
+        assert_eq!(serde_json::to_value(&session.messages).unwrap(), prefix);
+        assert_eq!(session.pending_deliveries, pending);
+        assert!(session.planner_paused());
+        assert!(session.drain_pending_deliveries().0.is_empty());
+        assert_eq!(session.pending_deliveries, pending);
         assert!(session
             .recent_request_ids_set
             .contains("priority-abort-full"));

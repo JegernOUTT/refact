@@ -6,8 +6,15 @@ import { screen, waitFor } from "@testing-library/react";
 import { delay, http, HttpResponse } from "msw";
 
 import type { BackgroundAgentSummary } from "../../services/refact";
-import { backgroundAgentsApi } from "../../services/refact/backgroundAgents";
+import {
+  backgroundAgentsApi,
+  receiveAgentRosterEvent,
+  rejectAgentRosterStream,
+} from "../../services/refact/backgroundAgents";
 import { applyChatEvent } from "../Chat/Thread";
+import { agentsPanelSlice, selectAgentRosterSource } from "./agentsPanelSlice";
+import { setApiKey, updateConfig } from "../Config/configSlice";
+import { setCurrentProjectInfo } from "../Chat/currentProject";
 import { clearError } from "../Errors/errorsSlice";
 import { clearInformation } from "../Errors/informationSlice";
 import { createDefaultChatState, render } from "../../utils/test-utils";
@@ -82,7 +89,17 @@ function panelState(agents: BackgroundAgentSummary[]) {
       ),
     },
   };
-  return { chat };
+  return {
+    chat,
+    config: { host: "ide" as const, lspPort: 8001, themeProps: {} },
+    agentsPanel: {
+      ...agentsPanelSlice.getInitialState(),
+      authorized: true,
+      liveAgents: Object.fromEntries(
+        agents.map((item) => [item.agent_id, item]),
+      ),
+    },
+  };
 }
 
 describe("AgentsSection", () => {
@@ -153,7 +170,7 @@ describe("AgentsSection", () => {
     );
     act(() => {
       store.dispatch(
-        applyChatEvent({
+        receiveAgentRosterEvent(selectAgentRosterSource(store.getState()), {
           type: "background_agent_updated",
           chat_id: chatId,
           seq: "1",
@@ -210,7 +227,7 @@ describe("AgentsSection", () => {
     await screen.findByText("No agents");
     act(() => {
       store.dispatch(
-        applyChatEvent({
+        receiveAgentRosterEvent(selectAgentRosterSource(store.getState()), {
           type: "background_agent_updated",
           chat_id: chatId,
           seq: "1",
@@ -224,7 +241,7 @@ describe("AgentsSection", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText("worker")).not.toBeInTheDocument();
     await user.click(screen.getByRole("radio", { name: /^All/ }));
-    expect(screen.getByLabelText("Expand worker")).toHaveAttribute(
+    expect(await screen.findByLabelText("Expand worker")).toHaveAttribute(
       "aria-expanded",
       "false",
     );
@@ -261,6 +278,189 @@ describe("AgentsSection", () => {
     );
     expect(screen.getByText("cached")).toBeInTheDocument();
     expect(screen.queryByText("No agents")).not.toBeInTheDocument();
+    fail = false;
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText("cached")).toBeInTheDocument();
+    act(() => {
+      store.dispatch(
+        rejectAgentRosterStream(
+          selectAgentRosterSource(store.getState()),
+          new Error("SSE idle timeout"),
+        ),
+      );
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Showing last known agent data",
+    );
+    expect(screen.getByText("cached")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument(),
+    );
+  });
+
+  test("fences endpoint, token and project switches on the same chat, including old live receipts and controls", async () => {
+    const worker = agent("private-worker", chatId, "private-child", {
+      tokens_used: 900,
+      cost_usd: 7,
+    });
+    let withheld = false;
+    server.use(
+      http.get("*/v1/background-agents", () =>
+        withheld
+          ? HttpResponse.json({ code: "scope_denied" }, { status: 403 })
+          : HttpResponse.json([worker]),
+      ),
+    );
+    const onNavigate = vi.fn();
+    const { user, store } = render(
+      <AgentsSection chatId={chatId} onNavigate={onNavigate} />,
+      { preloadedState: panelState([]) },
+    );
+    await screen.findByText("private-worker");
+    const oldSource = selectAgentRosterSource(store.getState());
+    const oldTitle = screen.getByRole("button", { name: "private-worker" });
+    const oldCancel = screen.getByLabelText("Cancel private-worker");
+    withheld = true;
+    act(() => {
+      store.dispatch(updateConfig({ lspUrl: "http://127.0.0.1:8124" }));
+    });
+    expect(screen.queryByText("private-worker")).not.toBeInTheDocument();
+    expect(screen.getByTestId("agents-aggregate-usage")).not.toHaveTextContent(
+      "$7",
+    );
+    await user.click(oldTitle);
+    await user.click(oldCancel);
+    expect(onNavigate).not.toHaveBeenCalled();
+    expect(screen.queryByText("Cancel subtree")).not.toBeInTheDocument();
+    await screen.findByRole("alert");
+    withheld = false;
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText("private-worker");
+    withheld = true;
+    act(() => {
+      store.dispatch(setApiKey("new-secret-principal"));
+    });
+    expect(screen.queryByText("private-worker")).not.toBeInTheDocument();
+    await screen.findByRole("alert");
+    act(() => {
+      store.dispatch(
+        receiveAgentRosterEvent(oldSource, {
+          type: "background_agent_updated",
+          chat_id: chatId,
+          seq: "200",
+          agent: { ...worker, change_seq: 200 },
+        }),
+      );
+      store.dispatch(
+        applyChatEvent({
+          type: "background_agent_updated",
+          chat_id: chatId,
+          seq: "201",
+          agent: worker,
+        }),
+      );
+    });
+    expect(screen.queryByText("private-worker")).not.toBeInTheDocument();
+    withheld = false;
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText("private-worker");
+    withheld = true;
+    act(() => {
+      store.dispatch(
+        setCurrentProjectInfo({
+          name: "other-project",
+          projectRoot: "/other-project",
+        }),
+      );
+    });
+    expect(screen.queryByText("private-worker")).not.toBeInTheDocument();
+    expect(JSON.stringify(store.getState().backgroundAgentsApi)).not.toContain(
+      "new-secret-principal",
+    );
+    expect(store.getState().chat.threads[chatId]).toBeDefined();
+    await screen.findByRole("alert");
+  });
+
+  test("denial clears REST and live rows and old receipts cannot restore them before or after fresh recovery", async () => {
+    const worker = agent("rest-private", chatId, null, { cost_usd: 5 });
+    const live = agent("live-private", chatId, null, { cost_usd: 3 });
+    let denied = false;
+    server.use(
+      http.get("*/v1/background-agents", () =>
+        denied
+          ? HttpResponse.json({ code: "policy_unavailable" }, { status: 503 })
+          : HttpResponse.json([worker]),
+      ),
+    );
+    const { user, store } = render(<AgentsSection chatId={chatId} />, {
+      preloadedState: panelState([]),
+    });
+    await screen.findByText("rest-private");
+    const source = selectAgentRosterSource(store.getState());
+    act(() => {
+      store.dispatch(
+        receiveAgentRosterEvent(source, {
+          type: "background_agent_updated",
+          chat_id: chatId,
+          seq: "1",
+          agent: live,
+        }),
+      );
+    });
+    expect(screen.getByText("live-private")).toBeInTheDocument();
+    denied = true;
+    act(() => {
+      store.dispatch(
+        backgroundAgentsApi.util.invalidateTags(["BackgroundAgents"]),
+      );
+    });
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Agent data is hidden",
+    );
+    act(() => {
+      store.dispatch(
+        receiveAgentRosterEvent(source, {
+          type: "background_agent_updated",
+          chat_id: chatId,
+          seq: "2",
+          agent: { ...live, change_seq: 2 },
+        }),
+      );
+    });
+    expect(screen.queryByText("rest-private")).not.toBeInTheDocument();
+    expect(screen.queryByText("live-private")).not.toBeInTheDocument();
+    expect(screen.getByTestId("agents-aggregate-usage")).toHaveTextContent(
+      "0 tokens",
+    );
+    denied = false;
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText("rest-private");
+    act(() => {
+      store.dispatch(
+        receiveAgentRosterEvent(source, {
+          type: "background_agent_updated",
+          chat_id: chatId,
+          seq: "3",
+          agent: { ...live, change_seq: 3 },
+        }),
+      );
+    });
+    expect(screen.queryByText("live-private")).not.toBeInTheDocument();
+    act(() => {
+      store.dispatch(
+        receiveAgentRosterEvent(selectAgentRosterSource(store.getState()), {
+          type: "background_agent_updated",
+          chat_id: chatId,
+          seq: "4",
+          agent: { ...live, change_seq: 4 },
+        }),
+      );
+    });
+    expect(screen.getByText("live-private")).toBeInTheDocument();
   });
 
   test("renders a three-level hierarchy and aggregate usage", async () => {
@@ -280,7 +480,7 @@ describe("AgentsSection", () => {
       preloadedState: panelState([root, child, grandchild]),
     });
 
-    expect(screen.getByText("Root agent")).toBeInTheDocument();
+    expect(await screen.findByText("Root agent")).toBeInTheDocument();
     expect(screen.getByTestId("agents-aggregate-usage")).toHaveTextContent(
       "2.0k tokens · $0.34",
     );
@@ -317,7 +517,7 @@ describe("AgentsSection", () => {
         preloadedState: panelState([worker]),
       },
     );
-    const expand = screen.getByRole("button", { name: "Expand leaf" });
+    const expand = await screen.findByRole("button", { name: "Expand leaf" });
     expand.focus();
     await user.keyboard("{Enter}");
     expect(onNavigate).not.toHaveBeenCalled();
@@ -372,7 +572,7 @@ describe("AgentsSection", () => {
       },
     );
 
-    await user.click(screen.getByRole("button", { name: "Worker" }));
+    await user.click(await screen.findByRole("button", { name: "Worker" }));
     expect(onNavigate).toHaveBeenCalledExactlyOnceWith("worker-chat");
     await user.click(screen.getByLabelText("Copy agent ID"));
     expect(
@@ -418,24 +618,35 @@ describe("AgentsSection", () => {
   });
 
   test("retains backend mutation errors and message drafts without implying successful control", async () => {
+    const token = "a2-ui-fixture-credential";
+    const opaque = "Q7bR9nVm4kXa2cDf8pLs6tHy3wUz5eGj";
+    const messageDetail = `Message not accepted: ownership changed ${token} ${opaque}`;
+    const cancelDetail = `Cancellation denied: ownership changed ${token} ${opaque}`;
+    expect(token.length).toBeGreaterThan(0);
+    expect(messageDetail).toContain(token);
+    expect(cancelDetail).toContain(token);
     server.use(
       http.post("*/v1/background-agents/worker/message", () =>
         HttpResponse.json(
-          { detail: "Message not accepted: ownership changed" },
+          { detail: messageDetail, nested: { credential: token } },
           { status: 409 },
         ),
       ),
       http.post("*/v1/background-agents/worker/cancel", () =>
         HttpResponse.json(
-          { error: "Cancellation denied: ownership changed" },
-          { status: 403 },
+          { error: cancelDetail, nested: { credential: token } },
+          { status: 401 },
         ),
       ),
     );
+    const initial = panelState([agent("worker", chatId, null)]);
     const { user, store } = render(<AgentsSection chatId={chatId} />, {
-      preloadedState: panelState([agent("worker", chatId, null)]),
+      preloadedState: {
+        ...initial,
+        config: { ...initial.config, apiKey: token },
+      },
     });
-    await user.click(screen.getByLabelText("Message worker"));
+    await user.click(await screen.findByLabelText("Message worker"));
     await user.type(
       screen.getByLabelText("Message for worker"),
       "Keep this draft",
@@ -443,13 +654,19 @@ describe("AgentsSection", () => {
     await user.click(screen.getByLabelText("Send message"));
     await waitFor(() => {
       expect(store.getState().error.message).toBe(
-        "Message not accepted: ownership changed",
+        "Message not accepted: ownership changed [REDACTED] [REDACTED]",
       );
     });
     expect(screen.getByLabelText("Message for worker")).toHaveValue(
       "Keep this draft",
     );
     expect(store.getState().information.message).toBeNull();
+    expect(JSON.stringify(store.getState().backgroundAgentsApi)).not.toContain(
+      token,
+    );
+    expect(store.getState().error.message).not.toContain(token);
+    expect(store.getState().error.message).not.toContain(opaque);
+    expect(document.body.textContent).not.toContain(token);
     act(() => {
       store.dispatch(clearError());
     });
@@ -457,11 +674,20 @@ describe("AgentsSection", () => {
     await user.click(screen.getByText("Cancel subtree"));
     await waitFor(() => {
       expect(store.getState().error.message).toBe(
-        "Cancellation denied: ownership changed",
+        "Cancellation denied: ownership changed [REDACTED] [REDACTED]",
+      );
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Agent data is hidden",
       );
     });
     expect(store.getState().information.message).toBeNull();
-    expect(screen.getByLabelText("Cancel worker")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Cancel worker")).not.toBeInTheDocument();
+    expect(JSON.stringify(store.getState().backgroundAgentsApi)).not.toContain(
+      token,
+    );
+    expect(store.getState().error.message).not.toContain(token);
+    expect(store.getState().error.message).not.toContain(opaque);
+    expect(document.body.textContent).not.toContain(token);
   });
 
   test("hides message and cancel actions for terminal agents", async () => {
@@ -474,7 +700,7 @@ describe("AgentsSection", () => {
     });
 
     await user.click(screen.getByRole("radio", { name: /^All/ }));
-    expect(screen.getByText("Finished agent")).toBeInTheDocument();
+    expect(await screen.findByText("Finished agent")).toBeInTheDocument();
     expect(
       screen.queryByLabelText("Message Finished agent"),
     ).not.toBeInTheDocument();
@@ -484,7 +710,7 @@ describe("AgentsSection", () => {
     expect(screen.getByLabelText("Copy agent ID")).toBeInTheDocument();
   });
 
-  test("strips agent-kind prefixes and markdown emphasis from displayed titles", () => {
+  test("strips agent-kind prefixes and markdown emphasis from displayed titles", async () => {
     const worker = agent("worker", chatId, "worker-chat", {
       title: "Subagent: **Fix the flaky test**",
     });
@@ -492,7 +718,9 @@ describe("AgentsSection", () => {
       preloadedState: panelState([worker]),
     });
 
-    const title = screen.getByRole("button", { name: "Fix the flaky test" });
+    const title = await screen.findByRole("button", {
+      name: "Fix the flaky test",
+    });
     expect(title).toBeInTheDocument();
     expect(title).toHaveAttribute("title", "Subagent: **Fix the flaky test**");
     expect(
@@ -500,7 +728,7 @@ describe("AgentsSection", () => {
     ).toBeInTheDocument();
   });
 
-  test("formats aggregate usage above a million tokens with an M suffix", () => {
+  test("formats aggregate usage above a million tokens with an M suffix", async () => {
     const heavy = agent("heavy", chatId, null, {
       title: "Heavy agent",
       tokens_used: 4_996_000,
@@ -509,8 +737,10 @@ describe("AgentsSection", () => {
       preloadedState: panelState([heavy]),
     });
 
-    expect(screen.getByTestId("agents-aggregate-usage")).toHaveTextContent(
-      "5.0M tokens",
+    await waitFor(() =>
+      expect(screen.getByTestId("agents-aggregate-usage")).toHaveTextContent(
+        "5.0M tokens",
+      ),
     );
     expect(screen.getByText("5.0M")).toBeInTheDocument();
   });

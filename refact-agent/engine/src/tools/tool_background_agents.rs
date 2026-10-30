@@ -1605,32 +1605,26 @@ impl Tool for ToolAgentCancel {
             &agent_id,
         )
         .await?;
-        let subtree_has_running_descendant = subtree
-            && app
-                .agents
-                .list_descendants(&agent_id)
-                .await
-                .iter()
-                .any(|record| !record.status.is_terminal());
-        if current.status.is_terminal() && !subtree_has_running_descendant {
+        let (updated, changed) = app
+            .agents
+            .cancel_subtree_with_outcome(&current.parent_chat_id, &agent_id, subtree, reason)
+            .await
+            .map_err(|error| map_registry_error(&agent_id, error))?;
+        if changed.is_empty() {
             return Ok(tool_message(
                 tool_call_id,
                 format!(
                     "Agent already in terminal state: {}. No action.",
-                    format_status_chip(current.status)
+                    format_status_chip(updated[0].status)
                 ),
             ));
         }
-        let updated = app
-            .agents
-            .cancel_subtree(&current.parent_chat_id, &agent_id, subtree, reason)
-            .await
-            .map_err(|error| map_registry_error(&agent_id, error))?;
         for record in &updated {
             crate::agents::spawn::emit_background_agent_update(app.clone(), record).await;
         }
         let cancelled = updated
             .iter()
+            .filter(|record| changed.contains(&record.agent_id))
             .map(|record| record.agent_id.as_str())
             .collect::<Vec<_>>()
             .join(", ");
@@ -2372,9 +2366,27 @@ mod tests {
             .mark_running(&parent.agent_id, "child-chat".to_string())
             .await
             .unwrap();
+        let parent_run = app.agents.parent_run("child-chat").await.unwrap().unwrap();
+        assert!(!parent.agent_id.is_empty());
+        assert_eq!(parent.run_generation, 1);
+        let completed = app
+            .agents
+            .mark_completed(
+                &parent.agent_id,
+                AgentCompletion {
+                    child_chat_id: Some("child-chat".into()),
+                    ..completion("parent finished while launch was preparing")
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(completed.status, BgAgentStatus::Completed);
         let (child, child_abort, _) = app
             .agents
-            .create(create_request("child-chat", BgAgentKind::Subagent, "Child"))
+            .create_for_parent_run(
+                create_request("child-chat", BgAgentKind::Subagent, "Child"),
+                Some(&parent_run),
+            )
             .await
             .unwrap();
         app.agents
@@ -2395,18 +2407,30 @@ mod tests {
             .unwrap(),
         );
 
-        assert!(parent_abort.load(Ordering::SeqCst));
+        assert!(!parent_abort.load(Ordering::SeqCst));
         assert!(child_abort.load(Ordering::SeqCst));
         assert_eq!(
             app.agents.get_any(&parent.agent_id).await.unwrap().status,
-            BgAgentStatus::Cancelled
+            BgAgentStatus::Completed
         );
         assert_eq!(
             app.agents.get_any(&child.agent_id).await.unwrap().status,
             BgAgentStatus::Cancelled
         );
-        assert!(output.contains(&parent.agent_id));
+        assert!(!output.contains(&parent.agent_id));
         assert!(output.contains(&child.agent_id));
+        assert!(app
+            .agents
+            .create_for_parent_run(
+                create_request("child-chat", BgAgentKind::Subagent, "Late"),
+                Some(&parent_run)
+            )
+            .await
+            .is_err());
+        assert_eq!(
+            app.agents.get_any(&parent.agent_id).await.unwrap().status,
+            BgAgentStatus::Completed
+        );
     }
 
     #[test]

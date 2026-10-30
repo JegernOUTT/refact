@@ -3,6 +3,9 @@ name = "refact-exec"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+test-support = []
+
 [dependencies]
 refact-core = { path = "../refact-core" }
 refact-sandbox = { path = "../refact-sandbox" }

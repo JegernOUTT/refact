@@ -16,9 +16,8 @@ import {
   type WorktreeRecordView,
 } from "../../services/refact";
 import { sendUserMessage } from "../../services/refact/chatCommands";
-import { useAppDispatch, useAppSelector } from "../../hooks";
+import { useAppSelector } from "../../hooks";
 import { selectApiKey, selectConfig } from "../Config/configSlice";
-import { setThreadWorktree } from "../Chat/Thread";
 import { WorktreeStatusBadge } from "./WorktreeStatusBadge";
 import { WorktreeDiffPanel } from "./WorktreeDiffPanel";
 import { MergeWorktreeModal } from "./MergeWorktreeModal";
@@ -33,6 +32,11 @@ type WorktreeMenuProps = {
   records: WorktreeRecordView[];
   isLoading: boolean;
   feedback?: string | null;
+  inventoryNotice?: string | null;
+  isRefreshing?: boolean;
+  onRefresh?: () => void;
+  scopeChangeBlockedReason?: string | null;
+  scopeChangePending?: boolean;
   canCopyPath: boolean;
   onCreate: () => void;
   onSelect: (record: WorktreeRecordView) => void;
@@ -119,6 +123,11 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
   records,
   isLoading,
   feedback,
+  inventoryNotice,
+  isRefreshing,
+  onRefresh,
+  scopeChangeBlockedReason,
+  scopeChangePending,
   canCopyPath,
   onCreate,
   onSelect,
@@ -126,7 +135,6 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
   onOpenInNewWindow,
   onCopyPath,
 }) => {
-  const dispatch = useAppDispatch();
   const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey) ?? undefined;
   const [diffOpen, setDiffOpen] = useState(false);
@@ -137,6 +145,8 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
   const [deleteWorktree, deleteState] = useDeleteWorktreeMutation();
   const sharedCount = referenceCount(currentWorktree, currentRecord);
   const worktreeAvailable = Boolean(currentWorktree);
+  const scopeChangeDisabled =
+    Boolean(scopeChangeBlockedReason) || scopeChangePending === true;
   const hasFeedback =
     (feedback?.length ?? 0) > 0 || (localFeedback?.length ?? 0) > 0;
   const detachLabel = currentWorktree ? "Detach" : "Main";
@@ -162,7 +172,7 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
   );
 
   const handleDelete = useCallback(async () => {
-    if (!currentWorktree) return;
+    if (!currentWorktree || scopeChangeDisabled) return;
     setLocalFeedback(null);
     try {
       await deleteWorktree({
@@ -174,7 +184,6 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
       setDeleteOpen(false);
       setLocalFeedback("Worktree deleted.");
       if (chatId && currentWorktree.id) {
-        dispatch(setThreadWorktree({ chatId, worktree: null }));
         onDetach();
       }
     } catch (error) {
@@ -185,8 +194,8 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
     currentWorktree,
     deleteBranch,
     deleteWorktree,
-    dispatch,
     onDetach,
+    scopeChangeDisabled,
   ]);
 
   const handleMerged = useCallback(
@@ -206,13 +215,10 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
         (cleanup?.worktree_deleted ?? false) ||
         (cleanup?.registry_deleted ?? false)
       ) {
-        if (chatId) {
-          dispatch(setThreadWorktree({ chatId, worktree: null }));
-        }
         onDetach();
       }
     },
-    [chatId, dispatch, onDetach],
+    [onDetach],
   );
 
   return (
@@ -239,6 +245,28 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
             chats.
           </p>
 
+          {scopeChangeBlockedReason && (
+            <p role="status" className={styles.feedbackText}>
+              {scopeChangeBlockedReason}
+            </p>
+          )}
+          {inventoryNotice && (
+            <div className={styles.feedbackStack}>
+              <p role="status" className={styles.feedbackText}>
+                {inventoryNotice}
+              </p>
+              {onRefresh && (
+                <Button
+                  size="sm"
+                  variant="soft"
+                  disabled={isRefreshing}
+                  onClick={onRefresh}
+                >
+                  Refresh worktree list
+                </Button>
+              )}
+            </div>
+          )}
           {hasFeedback && (
             <div className={styles.feedbackStack}>
               {feedback && <p className={styles.feedbackText}>{feedback}</p>}
@@ -254,6 +282,7 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
               title="Create worktree"
               icon={<Plus />}
               onClick={onCreate}
+              disabled={scopeChangeDisabled}
               primary
             />
             <ActionButton
@@ -261,7 +290,7 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
               title={detachTitle}
               icon={<LogOut />}
               onClick={onDetach}
-              disabled={!currentWorktree}
+              disabled={!currentWorktree || scopeChangeDisabled}
             />
             <ActionButton
               label="Open"
@@ -309,7 +338,14 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
                     onClick={() => onSelect(record)}
                     aria-label={`Select worktree ${title}`}
                     aria-current={selected ? "true" : undefined}
-                    title={`Use ${title}`}
+                    title={
+                      record.meta.kind === "task_agent"
+                        ? "Managed by task lifecycle"
+                        : `Use ${title}`
+                    }
+                    disabled={
+                      scopeChangeDisabled || record.meta.kind === "task_agent"
+                    }
                   >
                     <span className={styles.itemTitle}>
                       <span className={styles.itemHeader}>
@@ -346,14 +382,14 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
               title="Merge worktree"
               icon={<GitMerge />}
               onClick={() => setMergeOpen(true)}
-              disabled={!worktreeAvailable}
+              disabled={!worktreeAvailable || scopeChangeDisabled}
             />
             <ActionButton
               label="Delete"
               title="Delete or discard worktree"
               icon={<Trash2 />}
               onClick={() => setDeleteOpen(true)}
-              disabled={!worktreeAvailable}
+              disabled={!worktreeAvailable || scopeChangeDisabled}
               danger={worktreeAvailable}
             />
           </div>
@@ -376,7 +412,7 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
       />
 
       <MergeWorktreeModal
-        open={mergeOpen}
+        open={mergeOpen && !scopeChangeDisabled}
         worktreeId={currentWorktree?.id}
         worktree={currentWorktree}
         record={currentRecord}
@@ -386,7 +422,10 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
         onOpenWorktree={onOpenInNewWindow}
       />
 
-      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+      <Dialog
+        open={deleteOpen && !scopeChangeDisabled}
+        onOpenChange={setDeleteOpen}
+      >
         <Dialog.Content maxWidth="420px">
           <div>
             <Dialog.Title>Delete worktree</Dialog.Title>
@@ -439,7 +478,11 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
               <Button
                 variant="danger"
                 onClick={() => void handleDelete()}
-                disabled={!currentWorktree || deleteState.isLoading}
+                disabled={
+                  !currentWorktree ||
+                  deleteState.isLoading ||
+                  scopeChangeDisabled
+                }
                 loading={deleteState.isLoading}
               >
                 {deleteState.isLoading ? "Deleting..." : "Delete worktree"}

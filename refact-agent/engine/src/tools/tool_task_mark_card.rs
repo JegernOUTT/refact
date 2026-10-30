@@ -10,40 +10,57 @@ use crate::tools::tools_description::{
 };
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::at_commands::at_commands::AtCommandsContext;
+use crate::chat::trajectories::chat_id_is_planner_for_task;
+use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::{FinalizeDecision, StatusUpdate};
 
 const FINALIZE_REFUSAL_PREFIX: &str = "finalize_refusal:";
 
-async fn get_task_id(
-    ccx: &Arc<AMutex<AtCommandsContext>>,
-    args: &HashMap<String, Value>,
-) -> Result<String, String> {
-    if let Some(id) = args.get("task_id").and_then(|v| v.as_str()) {
-        return Ok(id.to_string());
-    }
-    let ccx_lock = ccx.lock().await;
-    ccx_lock
-        .task_meta
-        .as_ref()
-        .map(|m| m.task_id.clone())
-        .ok_or_else(|| "Missing 'task_id' (and chat is not bound to a task)".to_string())
+pub(crate) struct CompletionContext {
+    pub gcx: Arc<GlobalContext>,
+    pub task_id: String,
+    pub principal: String,
 }
 
-async fn authorize_finalizer(
+pub(crate) async fn completion_context(
     ccx: &Arc<AMutex<AtCommandsContext>>,
-    task_id: &str,
-    card_id: &str,
-) -> Result<(), String> {
-    let (gcx, principal) = {
-        let ccx_lock = ccx.lock().await;
-        (ccx_lock.app.gcx.clone(), ccx_lock.chat_id.clone())
+    args: &HashMap<String, Value>,
+) -> Result<CompletionContext, String> {
+    let context = {
+        let ccx = ccx.lock().await;
+        let meta = ccx
+            .task_meta
+            .as_ref()
+            .filter(|meta| meta.role == "planner" && !meta.task_id.is_empty())
+            .filter(|_| !ccx.chat_id.is_empty())
+            .ok_or_else(|| {
+                "Manual task completion can only be called by the task planner with a bound task context"
+                    .to_string()
+            })?;
+        match args.get("task_id") {
+            None | Some(Value::Null) => {}
+            Some(Value::String(id)) if id.trim() == meta.task_id => {}
+            Some(Value::String(_)) => {
+                return Err("task_id override is not allowed from this planner chat".to_string());
+            }
+            Some(_) => return Err("task_id must be a string".to_string()),
+        }
+        CompletionContext {
+            gcx: ccx.app.gcx.clone(),
+            task_id: meta.task_id.clone(),
+            principal: ccx.chat_id.clone(),
+        }
     };
-    let allow_self_review = storage::board_allows_self_review(gcx.clone(), task_id).await?;
-    storage::load_board(gcx, task_id)
-        .await?
-        .authorize_finalizer(card_id, &principal, allow_self_review)
-        .map_err(storage::violation_error)
+    if crate::file_activity::current_actor().is_some_and(|actor| actor != context.principal)
+        || !chat_id_is_planner_for_task(context.gcx.clone(), &context.principal, &context.task_id)
+            .await
+    {
+        return Err(
+            "Manual task completion requires an authenticated bound task planner".to_string(),
+        );
+    }
+    Ok(context)
 }
 
 pub struct ToolTaskMarkCardDone;
@@ -93,7 +110,11 @@ impl Tool for ToolTaskMarkCardDone {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let task_id = get_task_id(&ccx, args).await?;
+        let CompletionContext {
+            gcx,
+            task_id,
+            principal,
+        } = completion_context(&ccx, args).await?;
         let card_id = args
             .get("card_id")
             .and_then(|v| v.as_str())
@@ -102,33 +123,44 @@ impl Tool for ToolTaskMarkCardDone {
             .get("report")
             .and_then(|v| v.as_str())
             .ok_or("Missing 'report'")?;
-        authorize_finalizer(&ccx, &task_id, card_id).await?;
-
-        let gcx = ccx.lock().await.app.gcx.clone();
-
         let card_title = {
             let card_id_owned = card_id.to_string();
             let report_owned = report.to_string();
+            let principal_owned = principal.clone();
 
-            let (board, _) = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
-                let card = board
-                    .get_card_mut(&card_id_owned)
-                    .ok_or(format!("Card {} not found", card_id_owned))?;
+            let (board, _) = storage::update_board_atomic_as_bound_planner(
+                gcx.clone(),
+                &task_id,
+                &principal,
+                move |board, allow_self_review| {
+                    board
+                        .authorize_finalizer(&card_id_owned, &principal_owned, allow_self_review)
+                        .map_err(storage::violation_error)?;
+                    let card = board
+                        .get_card_mut(&card_id_owned)
+                        .ok_or(format!("Card {} not found", card_id_owned))?;
 
-                if card.column == "done" {
-                    return Err(format!("Card {} is already done", card_id_owned));
-                }
+                    if card.column == "done" {
+                        return Err(format!("Card {} is already done", card_id_owned));
+                    }
+                    if matches!(card.column.as_str(), "failed" | "regressed") {
+                        return Err(format!(
+                            "Card {}: manual completion cannot rewrite failed history",
+                            card_id_owned
+                        ));
+                    }
 
-                card.final_report = Some(report_owned.clone());
-                card.final_report_structured = None;
-                card.column = "done".to_string();
-                card.completed_at = Some(Utc::now().to_rfc3339());
-                card.status_updates.push(StatusUpdate {
-                    timestamp: Utc::now().to_rfc3339(),
-                    message: "Manually marked as done by planner".to_string(),
-                });
-                Ok(())
-            })
+                    card.final_report = Some(report_owned.clone());
+                    card.final_report_structured = None;
+                    card.column = "done".to_string();
+                    card.completed_at = Some(Utc::now().to_rfc3339());
+                    card.status_updates.push(StatusUpdate {
+                        timestamp: Utc::now().to_rfc3339(),
+                        message: "Manually marked as done by planner".to_string(),
+                    });
+                    Ok(())
+                },
+            )
             .await?;
 
             storage::update_task_stats(gcx.clone(), &task_id).await?;
@@ -191,34 +223,23 @@ impl Tool for ToolTaskFinalizeCard {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let task_id = get_task_id(&ccx, args).await?;
+        let CompletionContext {
+            gcx,
+            task_id,
+            principal,
+        } = completion_context(&ccx, args).await?;
         let card_id = args
             .get("card_id")
             .and_then(Value::as_str)
             .ok_or("Missing 'card_id'")?;
-        let (gcx, principal, is_planner) = {
-            let ccx_lock = ccx.lock().await;
-            (
-                ccx_lock.app.gcx.clone(),
-                ccx_lock.chat_id.clone(),
-                ccx_lock
-                    .task_meta
-                    .as_ref()
-                    .is_some_and(|meta| meta.role == "planner"),
-            )
-        };
-        if !is_planner {
-            return Err(
-                "finalize_card can only be called by the task planner. Switch to the planner chat to finalize cards."
-                    .to_string(),
-            );
-        }
-        let allow_self_review = storage::board_allows_self_review(gcx.clone(), &task_id).await?;
         let card_id_owned = card_id.to_string();
         let principal_owned = principal.clone();
         let finalized_at = Utc::now().to_rfc3339();
-        let result = storage::update_board_atomic(gcx, &task_id, move |board| {
-            match board.finalize_card(
+        let result = storage::update_board_atomic_as_bound_planner(
+            gcx,
+            &task_id,
+            &principal,
+            move |board, allow_self_review| match board.finalize_card(
                 &card_id_owned,
                 &principal_owned,
                 allow_self_review,
@@ -230,8 +251,8 @@ impl Tool for ToolTaskFinalizeCard {
                         serde_json::to_string(&decision).map_err(|error| error.to_string())?;
                     Err(format!("{FINALIZE_REFUSAL_PREFIX}{decision}"))
                 }
-            }
-        })
+            },
+        )
         .await;
         let (finalized, decision) = match result {
             Ok(_) => (true, FinalizeDecision::default()),
@@ -362,6 +383,26 @@ mod tests {
     }
 
     async fn chat_ccx(gcx: Arc<GlobalContext>, chat_id: &str) -> Arc<AMutex<AtCommandsContext>> {
+        let mut session = crate::chat::types::ChatSession::new(chat_id.to_string());
+        session.work_project_root = gcx
+            .documents_state
+            .workspace_folders
+            .lock()
+            .unwrap()
+            .first()
+            .cloned();
+        session.thread.model = "model".into();
+        session.thread.task_meta = Some(ThreadTaskMeta {
+            task_id: "task-1".to_string(),
+            role: "planner".to_string(),
+            agent_id: None,
+            card_id: None,
+            planner_chat_id: Some(chat_id.to_string()),
+        });
+        gcx.chat_sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), Arc::new(AMutex::new(session)));
         Arc::new(AMutex::new(
             AtCommandsContext::new_from_app(
                 AppState::from_gcx(gcx).await,
@@ -404,6 +445,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manual_completion_refuses_direct_foreign_task_overrides() {
+        let (gcx, temp) = setup_task().await;
+        let owner = chat_ccx(gcx.clone(), "planner-chat").await;
+        let bound_path = temp.path().join(".refact/tasks/task-1/board.yaml");
+        let foreign_dir = temp.path().join(".refact/tasks/task-2");
+        tokio::fs::create_dir_all(&foreign_dir).await.unwrap();
+        let mut foreign_meta = storage::load_task_meta(gcx.clone(), "task-1")
+            .await
+            .unwrap();
+        foreign_meta.id = "task-2".to_string();
+        storage::save_task_meta(gcx.clone(), "task-2", &foreign_meta)
+            .await
+            .unwrap();
+        let mut foreign = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        foreign.cards[0].title = "foreign-private-title".to_string();
+        storage::save_board(gcx.clone(), "task-2", &foreign)
+            .await
+            .unwrap();
+        let bound_before = tokio::fs::read(&bound_path).await.unwrap();
+        let foreign_path = foreign_dir.join("board.yaml");
+        let foreign_before = tokio::fs::read(&foreign_path).await.unwrap();
+        let args = HashMap::from([
+            ("task_id".to_string(), json!("task-2")),
+            ("card_id".to_string(), json!("T-1")),
+            ("report".to_string(), json!("finished")),
+            ("reason".to_string(), json!("failed")),
+        ]);
+        let mut tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(ToolTaskMarkCardDone::new()),
+            Box::new(ToolTaskMarkCardFailed::new()),
+            Box::new(ToolTaskFinalizeCard::new()),
+        ];
+        for tool in &mut tools {
+            assert_eq!(
+                tool.tool_execute(owner.clone(), &"foreign".to_string(), &args)
+                    .await
+                    .unwrap_err(),
+                "task_id override is not allowed from this planner chat"
+            );
+            assert_eq!(tokio::fs::read(&bound_path).await.unwrap(), bound_before);
+            assert_eq!(
+                tokio::fs::read(&foreign_path).await.unwrap(),
+                foreign_before
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_failure_requires_authenticated_task_binding_not_a_planner_prefix() {
+        let (gcx, temp) = setup_task().await;
+        let ccx = chat_ccx(gcx.clone(), "planner-task-1-1").await;
+        gcx.chat_sessions.write().await.remove("planner-task-1-1");
+        let path = temp.path().join(".refact/tasks/task-1/board.yaml");
+        let before = tokio::fs::read(&path).await.unwrap();
+        let args = HashMap::from([
+            ("task_id".to_string(), json!("task-1")),
+            ("card_id".to_string(), json!("T-1")),
+            ("reason".to_string(), json!("failed")),
+        ]);
+        assert_eq!(
+            ToolTaskMarkCardFailed::new()
+                .tool_execute(ccx.clone(), &"spoof".to_string(), &args)
+                .await
+                .unwrap_err(),
+            "Manual task completion requires an authenticated bound task planner"
+        );
+        ccx.lock().await.task_meta = None;
+        let denied = ToolTaskMarkCardFailed::new()
+            .tool_execute(ccx, &"unbound".to_string(), &args)
+            .await
+            .unwrap_err();
+        assert!(denied.contains("with a bound task context"));
+        assert_eq!(tokio::fs::read(path).await.unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn manual_completion_preserves_failed_history_and_verification() {
+        let (gcx, temp) = setup_task().await;
+        let ccx = chat_ccx(gcx.clone(), "planner-chat").await;
+        ToolTaskMarkCardFailed::new()
+            .tool_execute(
+                ccx.clone(),
+                &"failed".to_string(),
+                &HashMap::from([
+                    ("card_id".to_string(), json!("T-1")),
+                    ("reason".to_string(), json!("deterministic failure")),
+                ]),
+            )
+            .await
+            .unwrap();
+        storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+            board.cards[0].verifier_report = Some(VerifierReport {
+                passed: false,
+                classification: VerifierReportClassification::VerificationFailed,
+                ..Default::default()
+            });
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let path = temp.path().join(".refact/tasks/task-1/board.yaml");
+        let before = tokio::fs::read(&path).await.unwrap();
+        let mut args = done_args();
+        args.insert("force".to_string(), json!(true));
+        let denied = ToolTaskMarkCardDone::new()
+            .tool_execute(ccx.clone(), &"rewrite".to_string(), &args)
+            .await
+            .unwrap_err();
+        assert!(denied.contains("cannot rewrite failed history"));
+        let response = ToolTaskFinalizeCard::new()
+            .tool_execute(ccx, &"finalize-failed".to_string(), &args)
+            .await
+            .unwrap();
+        let response: Value = serde_json::from_str(&tool_text(response.1)).unwrap();
+        assert_eq!(response["finalized"], json!(false));
+        assert_eq!(
+            response["decision"]["blocks"][0]["kind"],
+            json!("not_completed")
+        );
+        assert_eq!(tokio::fs::read(path).await.unwrap(), before);
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert_eq!(card.column, "failed");
+        assert_eq!(
+            card.final_report.as_deref(),
+            Some("FAILED: deterministic failure")
+        );
+        assert!(
+            crate::tools::tool_task_merge_agent::ensure_verifier_allows_merge(card, true)
+                .unwrap_err()
+                .contains("force=true cannot bypass verification failures")
+        );
+    }
+
+    #[tokio::test]
     async fn finalising_refuses_a_principal_without_a_board_role() {
         let (gcx, _temp) = setup_task().await;
         storage::update_board_atomic(gcx.clone(), "task-1", |board| {
@@ -419,6 +595,36 @@ mod tests {
             .await
             .unwrap_err();
 
+        let failed_args = HashMap::from([
+            ("card_id".to_string(), json!("T-1")),
+            ("reason".to_string(), json!("not permitted")),
+        ]);
+        let failed_denied = ToolTaskMarkCardFailed::new()
+            .tool_execute(
+                chat_ccx(gcx.clone(), "stranger-chat").await,
+                &"failed".to_string(),
+                &failed_args,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            serde_json::from_str::<Value>(&failed_denied).unwrap()["code"],
+            "scope_denied"
+        );
+        let finalize_denied = ToolTaskFinalizeCard::new()
+            .tool_execute(
+                chat_ccx(gcx.clone(), "stranger-chat").await,
+                &"finalize".to_string(),
+                &HashMap::from([("card_id".to_string(), json!("T-1"))]),
+            )
+            .await
+            .unwrap();
+        let finalize_denied: Value = serde_json::from_str(&tool_text(finalize_denied.1)).unwrap();
+        assert_eq!(finalize_denied["finalized"], json!(false));
+        assert_eq!(
+            finalize_denied["decision"]["blocks"][1]["kind"],
+            json!("review_denied")
+        );
         let decoded: Value = serde_json::from_str(&denied).unwrap();
         assert_eq!(decoded["code"], "scope_denied");
         assert!(decoded["message"]
@@ -433,6 +639,34 @@ mod tests {
                 .unwrap()
                 .column,
             "doing"
+        );
+    }
+
+    #[tokio::test]
+    async fn assigned_reviewer_can_mark_done_under_its_own_tool_actor() {
+        let (gcx, _temp) = setup_task().await;
+        storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+            board.owner_chat_id = Some("planner-chat".to_string());
+            board.reviewer_chat_ids = vec!["reviewer-chat".to_string()];
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let reviewer = chat_ccx(gcx.clone(), "reviewer-chat").await;
+        crate::file_activity::TOOL_ACTOR
+            .scope("reviewer-chat".to_string(), async {
+                ToolTaskMarkCardDone::new()
+                    .tool_execute(reviewer, &"reviewer".to_string(), &done_args())
+                    .await
+                    .unwrap();
+            })
+            .await;
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        assert_eq!(board.owner_chat_id.as_deref(), Some("planner-chat"));
+        assert_eq!(board.get_card("T-1").unwrap().column, "done");
+        assert_eq!(
+            board.get_card("T-1").unwrap().final_report.as_deref(),
+            Some("finished")
         );
     }
 
@@ -497,6 +731,7 @@ mod tests {
         let board = storage::load_board(gcx, "task-1").await.unwrap();
         assert!(board.card_is_finalized("T-1"));
         assert_eq!(board.get_card("T-1").unwrap().column, "done");
+        assert_eq!(board.owner_chat_id, None);
     }
 
     #[tokio::test]
@@ -720,7 +955,11 @@ impl Tool for ToolTaskMarkCardFailed {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let task_id = get_task_id(&ccx, args).await?;
+        let CompletionContext {
+            gcx,
+            task_id,
+            principal,
+        } = completion_context(&ccx, args).await?;
         let card_id = args
             .get("card_id")
             .and_then(|v| v.as_str())
@@ -729,33 +968,41 @@ impl Tool for ToolTaskMarkCardFailed {
             .get("reason")
             .and_then(|v| v.as_str())
             .ok_or("Missing 'reason'")?;
-        authorize_finalizer(&ccx, &task_id, card_id).await?;
-
-        let gcx = ccx.lock().await.app.gcx.clone();
-
         let card_title = {
             let card_id_owned = card_id.to_string();
             let reason_owned = reason.to_string();
+            let principal_owned = principal.clone();
 
-            let (board, _) = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
-                let card = board
-                    .get_card_mut(&card_id_owned)
-                    .ok_or(format!("Card {} not found", card_id_owned))?;
+            let (board, _) = storage::update_board_atomic_as_bound_planner(
+                gcx.clone(),
+                &task_id,
+                &principal,
+                move |board, allow_self_review| {
+                    board
+                        .authorize_finalizer(&card_id_owned, &principal_owned, allow_self_review)
+                        .map_err(storage::violation_error)?;
+                    let card = board
+                        .get_card_mut(&card_id_owned)
+                        .ok_or(format!("Card {} not found", card_id_owned))?;
 
-                if card.column == "failed" {
-                    return Err(format!("Card {} is already failed", card_id_owned));
-                }
+                    if matches!(card.column.as_str(), "failed" | "regressed") {
+                        return Err(format!(
+                            "Card {} already has a recorded failure",
+                            card_id_owned
+                        ));
+                    }
 
-                card.final_report = Some(format!("FAILED: {}", reason_owned));
-                card.final_report_structured = None;
-                card.column = "failed".to_string();
-                card.completed_at = Some(Utc::now().to_rfc3339());
-                card.status_updates.push(StatusUpdate {
-                    timestamp: Utc::now().to_rfc3339(),
-                    message: format!("Manually marked as failed: {}", reason_owned),
-                });
-                Ok(())
-            })
+                    card.final_report = Some(format!("FAILED: {}", reason_owned));
+                    card.final_report_structured = None;
+                    card.column = "failed".to_string();
+                    card.completed_at = Some(Utc::now().to_rfc3339());
+                    card.status_updates.push(StatusUpdate {
+                        timestamp: Utc::now().to_rfc3339(),
+                        message: format!("Manually marked as failed: {}", reason_owned),
+                    });
+                    Ok(())
+                },
+            )
             .await?;
 
             storage::update_task_stats(gcx.clone(), &task_id).await?;

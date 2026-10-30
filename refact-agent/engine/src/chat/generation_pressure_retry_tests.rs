@@ -17,7 +17,7 @@ use crate::llm::pressure::install_provider_pressure;
 use refact_providers::pressure::{FailureReport, uninstall_pressure_registry};
 use refact_work_core::CoordinationSettings;
 
-async fn serve_statuses(
+pub(super) async fn serve_statuses(
     listener: tokio::net::TcpListener,
     statuses: Vec<(u16, Option<&'static str>, &'static str)>,
 ) -> (Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {

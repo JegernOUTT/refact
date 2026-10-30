@@ -19,6 +19,16 @@ import {
 import { invalidateChatParamsSyncState } from "../services/refact/chatCommands";
 import { processCompleted } from "../features/Notifications";
 import {
+  captureAgentRosterConnection,
+  isChatAuthorizationDenial,
+  receiveAgentRosterEvent,
+  rejectAgentRosterStream,
+} from "../services/refact/backgroundAgents";
+import {
+  selectAgentRosterSource,
+  type AgentRosterSource,
+} from "../features/AgentsPanel/agentsPanelSlice";
+import {
   MAX_BUFFERED_STREAM_TEXT_UNITS,
   MAX_MERGED_DELTA_OPS,
   streamDeltaFlushDelayMs,
@@ -96,6 +106,15 @@ export function useChatSubscription(
 
   const dispatch = useAppDispatch();
   const config = useAppSelector(selectConfig);
+  const agentSource = useAppSelector(selectAgentRosterSource);
+  const acceptedDisclosure = useAppSelector(
+    (state) => state.agentsPanel.acceptedDisclosure,
+  );
+  const agentIdentity = JSON.stringify([
+    agentSource.identity,
+    agentSource.generation,
+    acceptedDisclosure,
+  ]);
   const endpointIdentity = getEngineEndpointIdentity(config);
   const hasEndpoint = hasUsableEngineEndpoint(config);
   const subscriptionConfig = useMemo(
@@ -148,7 +167,13 @@ export function useChatSubscription(
   const pendingBackgroundAgentUpdatesRef = useRef<
     Map<
       string,
-      Extract<ChatEventEnvelope, { type: "background_agent_updated" }>
+      {
+        source: AgentRosterSource;
+        envelope: Extract<
+          ChatEventEnvelope,
+          { type: "background_agent_updated" }
+        >;
+      }
     >
   >(new Map());
   const streamedBytesRef = useRef(0);
@@ -184,7 +209,8 @@ export function useChatSubscription(
   const flushPendingBackgroundAgentUpdates = useCallback(() => {
     const pending = [...pendingBackgroundAgentUpdatesRef.current.values()];
     pendingBackgroundAgentUpdatesRef.current.clear();
-    for (const envelope of pending) {
+    for (const { source, envelope } of pending) {
+      if (!dispatch(receiveAgentRosterEvent(source, envelope))) continue;
       dispatch(applyChatEvent(envelope));
       callbacksRef.current.onEvent?.(envelope);
     }
@@ -262,11 +288,12 @@ export function useChatSubscription(
         ChatEventEnvelope,
         { type: "background_agent_updated" }
       >,
+      source: AgentRosterSource,
     ) => {
-      pendingBackgroundAgentUpdatesRef.current.set(
-        envelope.agent.agent_id,
+      pendingBackgroundAgentUpdatesRef.current.set(envelope.agent.agent_id, {
+        source,
         envelope,
-      );
+      });
       if (isImmediateBackgroundAgentUpdate(envelope.agent)) {
         clearBackgroundAgentFlush();
         flushPendingBackgroundAgentUpdates();
@@ -394,15 +421,18 @@ export function useChatSubscription(
     if (!chatId || !hasEndpoint || !enabled) return;
     if (connectingRef.current) return;
 
+    const connection = dispatch(captureAgentRosterConnection());
     cleanup();
     connectingRef.current = true;
     lastSeqRef.current = 0n;
     setStatus("connecting");
     setError(null);
 
+    const rosterSource = connection.source;
+    let chatDenied = false;
     unsubscribeRef.current = subscribeToChatEvents(
       chatId,
-      subscriptionConfig,
+      connection.config,
       {
         onEvent: (envelope) => {
           try {
@@ -446,6 +476,13 @@ export function useChatSubscription(
               }
               lastSeqRef.current = seq;
             }
+            const rosterAllowed =
+              connection.rosterAllowed &&
+              dispatch(receiveAgentRosterEvent(rosterSource, envelope));
+            if (envelope.type === "background_agent_updated" && !rosterAllowed)
+              return;
+            if (envelope.type === "snapshot" && !rosterAllowed)
+              envelope = { ...envelope, background_agents: [] };
             lastActivityAtRef.current = Date.now();
             if (envelope.type === "stream_delta") {
               enqueueStreamDelta(envelope);
@@ -454,7 +491,7 @@ export function useChatSubscription(
               enqueueSubchatUpdate(envelope);
             } else if (envelope.type === "background_agent_updated") {
               flushPendingStreamDelta();
-              enqueueBackgroundAgentUpdate(envelope);
+              enqueueBackgroundAgentUpdate(envelope, rosterSource);
             } else {
               clearBackgroundAgentFlush();
               flushPendingBackgroundAgentUpdates();
@@ -485,6 +522,12 @@ export function useChatSubscription(
           callbacksRef.current.onConnected?.();
         },
         onDisconnected: () => {
+          dispatch(
+            rejectAgentRosterStream(
+              rosterSource,
+              new Error("Agent stream disconnected"),
+            ),
+          );
           invalidateChatParamsSyncState(chatId, subscriptionConfig);
           flushPendingStreamDelta();
           clearSubchatFlush();
@@ -494,9 +537,24 @@ export function useChatSubscription(
           connectingRef.current = false;
           setStatus("disconnected");
           callbacksRef.current.onDisconnected?.();
-          scheduleReconnect(reconnectDelay);
+          if (!chatDenied) scheduleReconnect(reconnectDelay);
+        },
+        onAgentRosterDenied: (event) => {
+          if (
+            event.type === "background_agent_updated" &&
+            BigInt(event.seq) === lastSeqRef.current + 1n
+          )
+            lastSeqRef.current = BigInt(event.seq);
+          dispatch(
+            rejectAgentRosterStream(
+              rosterSource,
+              new Error("Invalid agent roster schema"),
+            ),
+          );
         },
         onError: (err) => {
+          chatDenied = isChatAuthorizationDenial(err);
+          dispatch(rejectAgentRosterStream(rosterSource, err));
           invalidateChatParamsSyncState(chatId, subscriptionConfig);
           flushPendingStreamDelta();
           clearSubchatFlush();
@@ -509,14 +567,15 @@ export function useChatSubscription(
           setError(err);
           callbacksRef.current.onError?.(err);
           cleanup();
-          scheduleReconnect(reconnectDelay);
+          if (!chatDenied) scheduleReconnect(reconnectDelay);
         },
       },
-      config.apiKey ?? undefined,
+      connection.config.apiKey ?? undefined,
     );
   }, [
     chatId,
     config.apiKey,
+    agentIdentity,
     hasEndpoint,
     enabled,
     subscriptionConfig,

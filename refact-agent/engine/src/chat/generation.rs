@@ -594,6 +594,11 @@ pub fn prepare_session_preamble_and_knowledge(
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> futures::future::BoxFuture<'static, ()> {
     Box::pin(async move {
+        let Ok(_operation) =
+            super::session_runtime::begin_board_operation(&app, &session_arc).await
+        else {
+            return;
+        };
         ensure_session_preamble_inner(app.clone(), session_arc.clone()).await;
         prepare_session_knowledge_inner(app.clone(), session_arc.clone()).await;
         prepare_project_work_context(&app, &session_arc).await;
@@ -1611,6 +1616,10 @@ async fn start_generation_iteration(
     session_arc: &Arc<AMutex<ChatSession>>,
     gcx: &Arc<crate::global_context::GlobalContext>,
 ) -> GenerationAttemptStart {
+    let Ok(_operation) = super::session_runtime::begin_board_operation(app, session_arc).await
+    else {
+        return GenerationAttemptStart::Stop;
+    };
     if session_arc
         .lock()
         .await
@@ -1841,6 +1850,7 @@ async fn start_generation_iteration(
         app.buddy_event_sink.enqueue_event(ev).await;
     }
 
+    drop(_operation);
     let generation_result = run_llm_generation(
         app.clone(),
         session_arc.clone(),
@@ -1870,6 +1880,10 @@ async fn handle_generation_error(
     mut error: LlmStreamError,
     network_retry_attempt: &mut usize,
 ) -> GenerationLoopControl {
+    let Ok(_operation) = super::session_runtime::begin_board_operation(app, session_arc).await
+    else {
+        return GenerationLoopControl::Stop;
+    };
     let GenerationAttemptContext {
         thread,
         chat_id,
@@ -2130,6 +2144,10 @@ async fn process_successful_generation(
         return GenerationLoopControl::Stop;
     }
 
+    let Ok(operation) = super::session_runtime::begin_board_operation(app, session_arc).await
+    else {
+        return GenerationLoopControl::Stop;
+    };
     let (mode_id, model_id, context_tokens_cap) = {
         let session = session_arc.lock().await;
         (
@@ -2154,6 +2172,7 @@ async fn process_successful_generation(
         TrajectoryCommitIntent::Checkpoint,
     );
 
+    drop(operation);
     let outcome =
         process_tool_calls_once(app.clone(), session_arc.clone(), &mode_id, model_id_opt).await;
     handle_tool_step_outcome(
@@ -2193,6 +2212,11 @@ async fn handle_tool_step_outcome(
     }
     match outcome {
         ToolStepOutcome::NoToolCalls => {
+            let Ok(_operation) =
+                super::session_runtime::begin_board_operation(app, session_arc).await
+            else {
+                return GenerationLoopControl::Stop;
+            };
             if handle_task_agent_reasoning_token_stop(
                 app.clone(),
                 session_arc.clone(),
@@ -2360,10 +2384,55 @@ pub fn start_generation(
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     Box::pin(async move {
+        let board_execution =
+            match super::session_runtime::board_execution(&app, &session_arc).await {
+                Ok(execution) => execution,
+                Err(reason) => {
+                    super::session_runtime::interrupt_board_execution(
+                        &mut *session_arc.lock().await,
+                        reason,
+                    );
+                    return;
+                }
+            };
+        if board_execution.is_some() {
+            let session = session_arc.lock().await;
+            if session.planner_paused()
+                || session.runtime.paused
+                || !session.runtime.pause_reasons.is_empty()
+            {
+                return;
+            }
+        }
         let gcx = app.gcx.clone();
+        let mut turn_guard = {
+            let _scope_transition = super::worktree_lifecycle::transition_lock(&session_arc).await;
+            let (chat_id, thread) = {
+                let session = session_arc.lock().await;
+                (session.chat_id.clone(), session.thread.clone())
+            };
+            if let Err(error) =
+                super::worktree_lifecycle::check_managed_attachment(&app, &chat_id, &thread).await
+            {
+                let mut session = session_arc.lock().await;
+                session.append_error_message_deduped(&error);
+                if !session.planner_paused()
+                    && !session.runtime.paused
+                    && session.runtime.pause_reasons.is_empty()
+                {
+                    session.set_runtime_state(SessionState::Error, Some(error));
+                }
+                return;
+            }
+            TurnDepthGuard::enter(app.clone(), session_arc.clone()).await
+        };
         let mut network_retry_attempt = 0usize;
-        let mut turn_guard = TurnDepthGuard::enter(app.clone(), session_arc.clone()).await;
         loop {
+            let Ok(operation) =
+                super::session_runtime::begin_board_operation(&app, &session_arc).await
+            else {
+                break;
+            };
             let resume_tools = {
                 let mut session = session_arc.lock().await;
                 if session.planner_paused() {
@@ -2392,6 +2461,7 @@ pub fn start_generation(
                     context.thread.context_tokens_cap,
                 )
                 .await;
+                drop(operation);
                 let outcome = process_tool_calls_once(
                     app.clone(),
                     session_arc.clone(),
@@ -2412,6 +2482,8 @@ pub fn start_generation(
                     GenerationLoopControl::Stop => break,
                     GenerationLoopControl::Continue => {}
                 }
+            } else {
+                drop(operation);
             }
             let (context, generation_result) =
                 match start_generation_iteration(&app, &session_arc, &gcx).await {
@@ -2575,11 +2647,21 @@ pub async fn run_llm_generation(
     abort_notify: Arc<tokio::sync::Notify>,
     stream_prepare_started_at: Option<Instant>,
 ) -> Result<GenerationResult, LlmStreamError> {
+    let Ok(_board_operation) =
+        super::session_runtime::begin_board_operation(&app, &session_arc).await
+    else {
+        return Ok(GenerationResult::PausedForUserDecision);
+    };
     let gcx = app.gcx.clone();
     crate::tasks::goal::hydrate_session_task_goal(gcx.clone(), &session_arc).await?;
     check_aborted_before_stream(&abort_flag)?;
+    let expected_board_execution = _board_operation
+        .as_ref()
+        .map(|operation| operation.execution.clone());
     let execution = app.agent_executions.get(&chat_id);
-    let _operation = if let Some(execution) = &execution {
+    let _operation = if _board_operation.is_some() {
+        None
+    } else if let Some(execution) = &execution {
         let acquisition = execution.begin_operation();
         tokio::pin!(acquisition);
         loop {
@@ -2842,6 +2924,7 @@ pub async fn run_llm_generation(
         abort_flag,
         abort_notify,
         stream_prepare_started_at,
+        expected_board_execution,
     )
     .await
 }
@@ -3087,7 +3170,31 @@ async fn run_stream_attempt(
     stream_prepare_started_at: Option<Instant>,
     chat_id: &str,
     task_role: Option<&str>,
+    expected_board_execution: Option<&Arc<crate::agents::execution::RunExecution>>,
 ) -> StreamAttemptOutcome {
+    let current = match super::session_runtime::board_execution(app, session_arc).await {
+        Ok(current) => current,
+        Err(reason) => {
+            super::session_runtime::interrupt_board_execution(
+                &mut *session_arc.lock().await,
+                reason,
+            );
+            return StreamAttemptOutcome::Paused;
+        }
+    };
+    if !match (expected_board_execution, current.as_ref()) {
+        (Some(expected), Some(current)) => {
+            Arc::ptr_eq(expected, current) && !expected.is_cancelled()
+        }
+        (None, None) => true,
+        _ => false,
+    } {
+        super::session_runtime::interrupt_board_execution(
+            &mut *session_arc.lock().await,
+            crate::tasks::admission::ExecutionUnavailable::StaleBinding,
+        );
+        return StreamAttemptOutcome::Paused;
+    }
     let params = StreamRunParams {
         llm_request: llm_request.clone(),
         model_rec: model_rec.base.clone(),
@@ -3643,6 +3750,7 @@ async fn run_streaming_generation(
     abort_flag: Arc<AtomicBool>,
     abort_notify: Arc<tokio::sync::Notify>,
     stream_prepare_started_at: Option<Instant>,
+    expected_board_execution: Option<Arc<crate::agents::execution::RunExecution>>,
 ) -> Result<GenerationResult, LlmStreamError> {
     info!(
         "session generation: model={}, messages={}",
@@ -3693,6 +3801,7 @@ async fn run_streaming_generation(
             stream_prepare_started_at,
             &chat_id,
             task_role.as_deref(),
+            expected_board_execution.as_ref(),
         )
         .await;
         let StreamAttemptOutcome::Completed(attempt_result) = attempt_result else {

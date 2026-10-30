@@ -11,7 +11,7 @@ use tokio::sync::Mutex as AMutex;
 use crate::exec::ExecRegistry;
 use crate::exec::command_policy::{
     build_exec_request, chat_mode_for_exec, escalation_from_args, queue_sandbox_audit, CommandKind,
-    CommandPolicyInput, ExecEscalation, ExecSource,
+    prepare_managed_cache, CommandPolicyInput, ExecEscalation, ExecSource, ManagedCacheDecision,
 };
 
 use crate::at_commands::at_commands::AtCommandsContext;
@@ -148,6 +148,22 @@ struct ProcessStartArgs {
 }
 
 pub(crate) async fn approval_request(
+    ccx: &Arc<AMutex<AtCommandsContext>>,
+    args: &HashMap<String, Value>,
+) -> Result<
+    (
+        crate::exec::ExecSpawnRequest,
+        Option<ValidatedCommandCheckout>,
+        Option<ManagedCacheDecision>,
+    ),
+    String,
+> {
+    let (mut request, checkout) = approval_request_without_cache(ccx, args).await?;
+    let cache = prepare_managed_cache(ccx, checkout.as_ref(), &mut request).await?;
+    Ok((request, checkout, cache))
+}
+
+pub(crate) async fn approval_request_without_cache(
     ccx: &Arc<AMutex<AtCommandsContext>>,
     args: &HashMap<String, Value>,
 ) -> Result<
@@ -355,6 +371,7 @@ impl Tool for ToolProcessStart {
         if let Some(readiness) = parsed.readiness.clone() {
             request = request.with_readiness(readiness);
         }
+        let cache = prepare_managed_cache(&ccx, checkout.as_ref(), &mut request).await?;
         crate::agents::command_approval::enforce(
             &ccx,
             tool_call_id,
@@ -362,12 +379,16 @@ impl Tool for ToolProcessStart {
             args,
             &mut request,
             checkout.as_ref(),
+            cache.as_ref(),
         )
         .await?;
         if let Some(checkout) = &checkout {
             #[cfg(test)]
             checkout_before_spawn();
             checkout.revalidate(&ccx, args, &request).await?;
+        }
+        if let Some(cache) = &cache {
+            cache.revalidate(&ccx, &request).await?;
         }
         let result = exec_registry.spawn(request).await?;
         let read = exec_registry
@@ -387,6 +408,9 @@ impl Tool for ToolProcessStart {
         ));
         append_sandbox_denial_hint(&mut content, &result.snapshot.status, sandbox_active);
         let mut extra = exec_extra(&result.snapshot, Some(&read), None, Some(tty));
+        if let Some(cache) = &cache {
+            cache.attach_report(&mut extra);
+        }
         attach_exec_path_references(
             &mut extra,
             gcx.clone(),
@@ -2932,6 +2956,17 @@ mod tests {
         selector: Value,
     }
 
+    struct CheckoutAttempt {
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        admission: crate::tasks::admission::Attempt,
+    }
+
+    impl Drop for CheckoutAttempt {
+        fn drop(&mut self) {
+            self.admission.end();
+        }
+    }
+
     impl CheckoutFixture {
         async fn new() -> Self {
             use crate::caps::{BaseModelRecord, ChatModelRecord, CodeAssistantCaps};
@@ -2946,7 +2981,13 @@ mod tests {
             git(&["config", "user.name", "Test User"]);
             git(&["config", "user.email", "test@example.com"]);
             std::fs::write(source.join("file"), "base").unwrap();
-            git(&["add", "file"]);
+            std::fs::create_dir_all(source.join("refact-agent/engine")).unwrap();
+            std::fs::write(
+                source.join("refact-agent/engine/Cargo.toml"),
+                "[workspace]\n",
+            )
+            .unwrap();
+            git(&["add", "file", "refact-agent/engine/Cargo.toml"]);
             git(&["commit", "-m", "base"]);
             let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
                 temp.path().join("cache"),
@@ -3076,6 +3117,101 @@ mod tests {
             }
         }
 
+        async fn retained_attempt(&self) -> CheckoutAttempt {
+            let creator = self.app.chat.sessions.read().await["worker-chat"].clone();
+            let worktree = creator.lock().await.thread.worktree.clone().unwrap();
+            let chat = format!("retained-cache-{}", uuid::Uuid::new_v4());
+            let agent = format!("retained-agent-{chat}");
+            let thread = crate::tools::tool_task_spawn_agent::build_agent_thread_params(
+                &chat,
+                "Retained checkout",
+                "model",
+                "task",
+                &agent,
+                "T-1",
+                "planner",
+                worktree.clone(),
+            );
+            assert!(!worktree.agent_id.as_deref().unwrap().is_empty());
+            assert!(!thread
+                .task_meta
+                .as_ref()
+                .unwrap()
+                .agent_id
+                .as_deref()
+                .unwrap()
+                .is_empty());
+            assert_ne!(
+                thread.task_meta.as_ref().unwrap().agent_id,
+                worktree.agent_id
+            );
+            crate::chat::worktree_lifecycle::check_managed_attachment(&self.app, &chat, &thread)
+                .await
+                .unwrap();
+            self.change_board(|board| {
+                let card = board.get_card_mut("T-1").unwrap();
+                card.column = "doing".into();
+                card.assignee = Some(agent);
+                card.agent_chat_id = Some(chat.clone());
+            })
+            .await;
+            let mut session = crate::chat::types::ChatSession::new(chat.clone());
+            session.thread = thread.clone();
+            session.work_project_root = Some(self.source.clone());
+            session
+                .queue_processor_running
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            self.app
+                .chat
+                .sessions
+                .write()
+                .await
+                .insert(chat.clone(), Arc::new(AMutex::new(session)));
+            let ccx = Arc::new(AMutex::new(
+                AtCommandsContext::new_from_app(
+                    self.app.clone(),
+                    4096,
+                    20,
+                    false,
+                    vec![],
+                    chat.clone(),
+                    thread.root_chat_id,
+                    thread.model,
+                    thread.task_meta,
+                    thread.worktree,
+                )
+                .await,
+            ));
+            crate::tasks::admission::reserve(
+                &self.app,
+                &chat,
+                &crate::coordination::roots::project_identity(&self.source),
+                "planner",
+                0,
+            )
+            .await
+            .unwrap();
+            let attempt = CheckoutAttempt {
+                ccx,
+                admission: crate::tasks::admission::current_attempt(&chat).unwrap(),
+            };
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                crate::tasks::admission::wait_for_permit(&chat),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(crate::tasks::admission::current_execution(&self.app, &chat)
+                .unwrap()
+                .holds_permit());
+            assert_eq!(
+                attempt.ccx.lock().await.execution_scope_worktree(),
+                Some(worktree)
+            );
+            attempt
+        }
+
         fn command_args(&self) -> HashMap<String, Value> {
             make_args_map(vec![
                 (
@@ -3122,7 +3258,7 @@ mod tests {
             args: HashMap<String, Value>,
             change: impl FnOnce() + Send + 'static,
         ) {
-            let (request, candidate) = approval_request(&self.ccx, &args).await.unwrap();
+            let (request, candidate, _) = approval_request(&self.ccx, &args).await.unwrap();
             let candidate = candidate.unwrap();
             assert_eq!(candidate.root(), self.root);
             assert_eq!(Some(candidate.cwd()), request.cwd.as_deref());
@@ -3148,10 +3284,193 @@ mod tests {
         }
     }
 
+    impl CheckoutAttempt {
+        async fn approve_process(&self, args: &HashMap<String, Value>, call_id: &str) {
+            let app = self.ccx.lock().await.app.clone();
+            let parent = app.chat.sessions.read().await["planner"].clone();
+            {
+                let mut parent = parent.lock().await;
+                parent.set_runtime_state(refact_runtime_api::SessionState::Generating, None);
+                parent
+                    .queue_processor_running
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            let call: crate::call_validation::ChatToolCall = serde_json::from_value(json!({
+                "id":call_id, "type":"function", "function":{
+                    "name":"process_start", "arguments":serde_json::to_string(args).unwrap()
+                }
+            }))
+            .unwrap();
+            let mut waiting = Box::pin(crate::agents::approval::request(
+                &app,
+                &self.ccx,
+                &call,
+                "saved managed-cache execution",
+            ));
+            let pending = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let polled = futures::poll!(waiting.as_mut());
+                    assert!(
+                        polled.is_pending(),
+                        "approval ended before decision: {polled:?}"
+                    );
+                    if let Some(pending) = app
+                        .agent_approvals
+                        .list_for_parent("planner", crate::agents::approval::now_ms())
+                        .into_iter()
+                        .find(|pending| pending.tool_call_id == call_id)
+                    {
+                        let execution = crate::tasks::admission::current_execution(
+                            &app,
+                            &self.ccx.lock().await.chat_id,
+                        )
+                        .unwrap();
+                        let chat = self.ccx.lock().await.chat_id.clone();
+                        let child = app.chat.sessions.read().await[&chat].clone();
+                        if execution.state() == crate::agents::execution::ExecutionState::Parked
+                            && child.lock().await.runtime.state
+                                == refact_runtime_api::SessionState::WaitingUserInput
+                        {
+                            assert!(!execution.holds_permit());
+                            break pending;
+                        }
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let target =
+                crate::agents::approval_target::ApprovalTarget::from_context(&app, &self.ccx)
+                    .await
+                    .unwrap();
+            target.check(&pending).unwrap();
+            assert_eq!(pending.child_work_id, target.work_id);
+            assert!(pending.execution.is_some());
+            assert!(!self
+                .ccx
+                .lock()
+                .await
+                .approved_executions
+                .contains_key(call_id));
+            let chat = self.ccx.lock().await.chat_id.clone();
+            let execution = crate::tasks::admission::current_execution(&app, &chat).unwrap();
+            let mut start = ToolProcessStart {
+                config_path: String::new(),
+            };
+            let error = start
+                .tool_execute(self.ccx.clone(), &call_id.to_string(), args)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error,
+                "managed task execution requires a held current permit"
+            );
+            assert!(!self
+                .ccx
+                .lock()
+                .await
+                .approved_executions
+                .contains_key(call_id));
+            let parent_thread = parent.lock().await.thread.clone();
+            let parent_ccx = Arc::new(AMutex::new(
+                AtCommandsContext::new_from_app(
+                    app.clone(),
+                    4096,
+                    20,
+                    false,
+                    vec![],
+                    target.parent_id.clone(),
+                    parent_thread.root_chat_id,
+                    parent_thread.model,
+                    parent_thread.task_meta,
+                    None,
+                )
+                .await,
+            ));
+            let wrapper_id = format!("approve-{call_id}");
+            let wrapper_args = json!({"action":"approve", "request_id":pending.id})
+                .as_object()
+                .unwrap()
+                .clone();
+            let decide = || {
+                app.tool_registry.execute_tool(
+                    &parent_ccx,
+                    "task_planner",
+                    Some("model"),
+                    &wrapper_id,
+                    "agent_approval",
+                    wrapper_args.clone(),
+                )
+            };
+            assert_eq!(
+                app.agent_approvals
+                    .wait_now(&pending.id, crate::agents::approval::now_ms()),
+                Err(refact_work_core::ApprovalError::NotApproved),
+            );
+            assert!(app
+                .runtime
+                .exec_registry
+                .list(Default::default())
+                .await
+                .is_empty());
+            app.agent_approvals
+                .grant_user_once(
+                    &target.parent_id,
+                    &pending.id,
+                    target.generation,
+                    &wrapper_id,
+                    crate::agents::approval::now_ms(),
+                )
+                .unwrap();
+            let output = decide()
+                .await
+                .unwrap()
+                .expect("public approval tool unavailable");
+            let response: Value =
+                serde_json::from_str(&output.messages[0].content.content_text_only()).unwrap();
+            assert_eq!(response["request_id"], pending.id);
+            assert_eq!(response["decision"], "approved");
+            assert_eq!(response["approval_source"], "user_once");
+            assert_eq!(
+                execution.state(),
+                crate::agents::execution::ExecutionState::Parked
+            );
+            assert!(!execution.holds_permit());
+            assert!(app
+                .runtime
+                .exec_registry
+                .list(Default::default())
+                .await
+                .is_empty());
+            assert!(tokio::time::timeout(Duration::from_secs(10), waiting)
+                .await
+                .unwrap()
+                .unwrap());
+            let context = self.ccx.lock().await;
+            let saved = &context.approved_executions[call_id];
+            assert_eq!(saved.agent_id, target.work_id);
+            assert_eq!(saved.generation, target.generation);
+            assert_eq!(Some(&saved.execution), pending.execution.as_ref());
+            assert!(!saved.consumed);
+            assert!(
+                crate::tasks::admission::current_execution(&app, &context.chat_id)
+                    .unwrap()
+                    .holds_permit()
+            );
+        }
+    }
+
     #[tokio::test]
     async fn command_checkout_process_confirmation_approval_and_spawn_preserve_child_cwd() {
         let fixture = CheckoutFixture::new().await;
         let mut args = fixture.command_args();
+        if cfg!(target_os = "linux") {
+            args.insert(
+                "command".into(),
+                json!("pwd -P; printf '%s' \"$CARGO_TARGET_DIR\""),
+            );
+        }
         args.insert("workdir".into(), json!("child"));
         args.insert("needs_confirmation".into(), json!(true));
         args.get_mut("checkout").unwrap()["expected_cwd"] = json!(fixture.root.join("child"));
@@ -3176,7 +3495,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let (mut request, candidate) = approval_request(&fixture.ccx, &args).await.unwrap();
+        let (mut request, candidate, cache) = approval_request(&fixture.ccx, &args).await.unwrap();
         crate::agents::command_approval::freeze(&mut request).unwrap();
         assert_eq!(approved.cwd, fixture.root.join("child").to_str().unwrap());
         assert_ne!(
@@ -3198,6 +3517,13 @@ mod tests {
         );
         let candidate = candidate.unwrap();
         assert_eq!(candidate.cwd(), request.cwd.as_deref().unwrap());
+        let mut actual =
+            crate::agents::command_approval::descriptor(&request, "cwd parity").unwrap();
+        candidate.bind_approval(&mut actual, &request).unwrap();
+        cache.as_ref().unwrap().bind_approval(&mut actual);
+        assert_eq!(approved, actual);
+        assert!(!request.env.contains_key("RUSTC_WRAPPER"));
+        assert!(!request.env.keys().any(|key| key.starts_with("SCCACHE_")));
         {
             use crate::http::routers::v1::buddy_native_approvals::{
                 handle_approval_response, handle_current_approvals, NativeApprovalRequest,
@@ -3337,16 +3663,282 @@ mod tests {
         let completed = fixture.app.runtime.exec_registry.wait(&id).await.unwrap();
         let output = fixture.app.runtime.exec_registry.read(&id, 0, None).await;
         assert_eq!(completed.meta.cwd, request.cwd);
+        let expected = if cfg!(target_os = "linux") {
+            assert_eq!(
+                request.env["CARGO_TARGET_DIR"],
+                fixture
+                    .root
+                    .join("refact-agent/engine/target")
+                    .to_str()
+                    .unwrap()
+            );
+            format!(
+                "{}\n{}",
+                candidate.cwd().display(),
+                request.env["CARGO_TARGET_DIR"]
+            )
+        } else {
+            candidate.cwd().to_str().unwrap().to_string()
+        };
+        assert_eq!(collect_combined(&output.chunks).trim(), expected);
+
+        let fixture = CheckoutFixture::new().await;
+        let attempt = fixture.retained_attempt().await;
+        let mut args = fixture.command_args();
+        args.remove("checkout");
+        args.insert("workdir".into(), json!(fixture.root.join("child")));
+        args.insert("needs_confirmation".into(), json!(true));
+        if cfg!(target_os = "linux") {
+            args.insert(
+                "command".into(),
+                json!("pwd -P; printf '%s' \"$CARGO_TARGET_DIR\""),
+            );
+        }
+        let (request, checkout, cache) = approval_request(&attempt.ccx, &args).await.unwrap();
+        assert!(checkout.is_none());
+        assert!(cache.is_some());
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                request.env["CARGO_TARGET_DIR"],
+                fixture
+                    .root
+                    .join("refact-agent/engine/target")
+                    .to_str()
+                    .unwrap()
+            );
+        }
+        attempt.approve_process(&args, "stale-context").await;
+        attempt.ccx.lock().await.current_model = "changed/model".into();
+        let error = start
+            .tool_execute(attempt.ccx.clone(), &"stale-context".into(), &args)
+            .await
+            .unwrap_err();
         assert_eq!(
-            collect_combined(&output.chunks).trim(),
-            candidate.cwd().to_str().unwrap()
+            error,
+            "approved command, working directory, environment or privilege changed; request approval again"
         );
+        assert!(attempt.ccx.lock().await.approved_executions["stale-context"].consumed);
+        assert!(fixture
+            .app
+            .runtime
+            .exec_registry
+            .list(Default::default())
+            .await
+            .is_empty());
+        attempt.ccx.lock().await.current_model = "model".into();
+        attempt.approve_process(&args, "saved-child").await;
+        let chat = attempt.ccx.lock().await.chat_id.clone();
+        let execution = crate::tasks::admission::current_execution(&fixture.app, &chat).unwrap();
+        execution.park().await.unwrap();
+        let error = start
+            .tool_execute(attempt.ccx.clone(), &"saved-child".into(), &args)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "managed task execution requires a held current permit"
+        );
+        assert!(!attempt.ccx.lock().await.approved_executions["saved-child"].consumed);
+        assert!(fixture
+            .app
+            .runtime
+            .exec_registry
+            .list(Default::default())
+            .await
+            .is_empty());
+        execution.resume().await.unwrap();
+        let (request, checkout, cache) = approval_request(&attempt.ccx, &args).await.unwrap();
+        assert!(checkout.is_none());
+        assert!(cache.is_some());
+        let (_, messages) = start
+            .tool_execute(attempt.ccx.clone(), &"saved-child".into(), &args)
+            .await
+            .unwrap();
+        assert!(attempt.ccx.lock().await.approved_executions["saved-child"].consumed);
+        let id = process_id(&only_message(messages));
+        let completed = tokio::time::timeout(
+            Duration::from_secs(10),
+            fixture.app.runtime.exec_registry.wait(&id),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(completed.status, ExecStatus::Exited { exit_code: Some(0) });
+        assert_eq!(completed.meta.cwd, request.cwd);
+        let output = fixture.app.runtime.exec_registry.read(&id, 0, None).await;
+        let expected = if cfg!(target_os = "linux") {
+            let target = fixture.root.join("refact-agent/engine/target");
+            assert_eq!(request.env["CARGO_TARGET_DIR"], target.to_str().unwrap());
+            format!(
+                "{}\n{}",
+                fixture.root.join("child").display(),
+                target.display()
+            )
+        } else {
+            fixture.root.join("child").to_str().unwrap().to_string()
+        };
+        assert_eq!(collect_combined(&output.chunks).trim(), expected);
+        let error = start
+            .tool_execute(attempt.ccx.clone(), &"saved-child".into(), &args)
+            .await
+            .unwrap_err();
+        assert_eq!(error, "command approval has already been used");
+        assert_eq!(
+            fixture
+                .app
+                .runtime
+                .exec_registry
+                .list(Default::default())
+                .await
+                .len(),
+            1
+        );
+
+        let fixture = CheckoutFixture::new().await;
+        let attempt = fixture.retained_attempt().await;
+        let mut args = fixture.command_args();
+        args.remove("checkout");
+        args.insert("workdir".into(), json!(fixture.root.join("child")));
+        args.insert("needs_confirmation".into(), json!(true));
+        let call: crate::call_validation::ChatToolCall = serde_json::from_value(json!({
+            "id":"changed-pending", "type":"function", "function":{
+                "name":"process_start", "arguments":serde_json::to_string(&args).unwrap()
+            }
+        }))
+        .unwrap();
+        let parent = fixture.app.chat.sessions.read().await["planner"].clone();
+        parent
+            .lock()
+            .await
+            .set_runtime_state(refact_runtime_api::SessionState::Generating, None);
+        let mut waiting = Box::pin(crate::agents::approval::request(
+            &fixture.app,
+            &attempt.ccx,
+            &call,
+            "pending changes",
+        ));
+        let chat = attempt.ccx.lock().await.chat_id.clone();
+        let execution = crate::tasks::admission::current_execution(&fixture.app, &chat).unwrap();
+        let pending = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                assert!(futures::poll!(waiting.as_mut()).is_pending());
+                if execution.state() == crate::agents::execution::ExecutionState::Parked {
+                    if let Some(pending) = fixture
+                        .app
+                        .agent_approvals
+                        .list_for_parent("planner", crate::agents::approval::now_ms())
+                        .into_iter()
+                        .find(|pending| pending.tool_call_id == call.id)
+                    {
+                        let child = fixture.app.chat.sessions.read().await[&chat].clone();
+                        if child.lock().await.runtime.state
+                            == refact_runtime_api::SessionState::WaitingUserInput
+                        {
+                            break pending;
+                        }
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!execution.holds_permit());
+        assert!(pending.execution.is_some());
+        fixture
+            .app
+            .agent_approvals
+            .grant_user_once(
+                "planner",
+                &pending.id,
+                pending.run_generation,
+                "stale-pending-wrapper",
+                crate::agents::approval::now_ms(),
+            )
+            .unwrap();
+        let wrapper_args = json!({"action":"approve", "request_id":pending.id})
+            .as_object()
+            .unwrap()
+            .clone();
+        let decide = || {
+            fixture.app.tool_registry.execute_tool(
+                &fixture.ccx,
+                "task_planner",
+                Some("model"),
+                "stale-pending-wrapper",
+                "agent_approval",
+                wrapper_args.clone(),
+            )
+        };
+        if cfg!(target_os = "linux") {
+            let manifest = fixture.root.join("refact-agent/engine/Cargo.toml");
+            let original = std::fs::read(&manifest).unwrap();
+            std::fs::write(&manifest, "[workspace]\nmembers = []\n").unwrap();
+            let error = decide().await.err().expect("changed cache input approved");
+            assert_eq!(error, "child approval execution binding changed");
+            std::fs::write(&manifest, original).unwrap();
+            let child = fixture.app.chat.sessions.read().await[&chat].clone();
+            child.lock().await.thread.model = "changed/model".into();
+            let error = decide().await.err().expect("changed model approved");
+            assert_eq!(error, "child approval execution binding changed");
+            child.lock().await.thread.model = "model".into();
+        }
+        assert_eq!(
+            crate::agents::command_approval::validate_pending(&attempt.ccx, &call, &pending)
+                .await
+                .unwrap(),
+            pending.execution,
+        );
+        assert!(!execution.holds_permit());
+        assert!(fixture
+            .app
+            .runtime
+            .exec_registry
+            .list(Default::default())
+            .await
+            .is_empty());
+        fixture
+            .change_board(|board| {
+                board.get_card_mut("T-1").unwrap().agent_chat_id = Some("replacement".into());
+            })
+            .await;
+        let error = decide().await.err().expect("reassigned card approved");
+        assert_eq!(error, "board approval belongs to a stale card attempt");
+        fixture
+            .change_board(|board| {
+                board.get_card_mut("T-1").unwrap().agent_chat_id = Some(chat.clone());
+            })
+            .await;
+        attempt.admission.end();
+        assert!(decide().await.is_err());
+        drop(waiting);
+        assert_eq!(
+            fixture
+                .app
+                .agent_approvals
+                .wait_now(&pending.id, crate::agents::approval::now_ms()),
+            Ok(refact_work_core::ApprovalDecision::Cancelled),
+        );
+        assert!(attempt.ccx.lock().await.approved_executions.is_empty());
+        assert!(fixture
+            .app
+            .runtime
+            .exec_registry
+            .list(Default::default())
+            .await
+            .is_empty());
     }
 
     #[tokio::test]
     async fn command_checkout_shell_confirmation_and_execution_use_same_root() {
         let fixture = CheckoutFixture::new().await;
-        let args = fixture.command_args();
+        let mut args = fixture.command_args();
+        if cfg!(target_os = "linux") {
+            args.insert(
+                "command".into(),
+                json!("pwd -P; printf '%s' \"$CARGO_TARGET_DIR\""),
+            );
+        }
         let mut inspect = crate::tools::tool_work_inspect::ToolWorkInspect {
             config_path: String::new(),
         };
@@ -3400,7 +3992,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(matched.command, args["command"].as_str().unwrap());
-        let (request, _) = crate::tools::shell_approval_request(&fixture.ccx, &args)
+        let (request, _, cache) = crate::tools::shell_approval_request(&fixture.ccx, &args)
             .await
             .unwrap();
         let message = run_tool(&mut shell, fixture.ccx.clone(), args)
@@ -3409,6 +4001,300 @@ mod tests {
         assert_eq!(exec(&message)["cwd"], json!(request.cwd));
         assert_eq!(exec(&message)["cwd"], json!(fixture.root));
         assert!(text(&message).contains(fixture.root.to_str().unwrap()));
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                request.env["CARGO_TARGET_DIR"],
+                fixture
+                    .root
+                    .join("refact-agent/engine/target")
+                    .to_str()
+                    .unwrap()
+            );
+            assert!(text(&message).contains(&format!(
+                "{}\n{}",
+                fixture.root.display(),
+                request.env["CARGO_TARGET_DIR"]
+            )));
+        }
+        assert!(cache.is_some());
+        assert_eq!(
+            exec(&message)["cache_report"]["compiler_cache"]["reason"],
+            "unsafe_daemon_boundary"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn command_checkout_managed_cache_policy_binds_target_and_degrades_conflicts() {
+        let fixture = CheckoutFixture::new().await;
+        let args = fixture.command_args();
+        let (mut request, checkout, _) = approval_request(&fixture.ccx, &args).await.unwrap();
+        request.env.remove("CARGO_TARGET_DIR");
+        request.sandbox = Some(crate::exec::types::ExecSandboxSpec {
+            mode: crate::exec::types::ExecSandboxMode::WorkspaceWrite,
+            ro_paths: vec![PathBuf::from("/")],
+            rw_paths: vec![fixture.root.clone()],
+            allow_network: false,
+        });
+        let target = fixture.root.join("refact-agent/engine/target");
+        let roots = request.sandbox.clone();
+        let cache = prepare_managed_cache(&fixture.ccx, checkout.as_ref(), &mut request)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(request.env["CARGO_TARGET_DIR"], target.to_str().unwrap());
+        assert_eq!(request.sandbox, roots);
+        let mut approved = crate::agents::command_approval::descriptor(&request, "cache").unwrap();
+        cache.bind_approval(&mut approved);
+        cache.revalidate(&fixture.ccx, &request).await.unwrap();
+        let mut conflict = request.clone();
+        conflict
+            .env
+            .insert("CARGO_TARGET_DIR".into(), "caller-choice".into());
+        let disabled = prepare_managed_cache(&fixture.ccx, checkout.as_ref(), &mut conflict)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut extra = serde_json::Map::from_iter([("exec".into(), json!({}))]);
+        disabled.attach_report(&mut extra);
+        assert_eq!(conflict.env["CARGO_TARGET_DIR"], "caller-choice");
+        assert_eq!(
+            extra["exec"]["cache_report"]["cargo_target"]["reason"],
+            "input_mismatch"
+        );
+        let mut readonly = request.clone();
+        readonly.env.remove("CARGO_TARGET_DIR");
+        readonly.sandbox.as_mut().unwrap().mode = crate::exec::types::ExecSandboxMode::ReadOnly;
+        let disabled = prepare_managed_cache(&fixture.ccx, checkout.as_ref(), &mut readonly)
+            .await
+            .unwrap()
+            .unwrap();
+        disabled.attach_report(&mut extra);
+        assert!(!readonly.env.contains_key("CARGO_TARGET_DIR"));
+        assert_eq!(
+            extra["exec"]["cache_report"]["cargo_target"]["reason"],
+            "unverified_isolation"
+        );
+        assert_eq!(
+            extra["exec"]["cache_report"]["compiler_cache"]["reason"],
+            "unsafe_daemon_boundary"
+        );
+        {
+            let previous_board =
+                crate::tools::command_checkout::read_board(&fixture.source, "task")
+                    .await
+                    .unwrap()
+                    .0;
+            let attempt = fixture.retained_attempt().await;
+            let mut args = fixture.command_args();
+            args.remove("checkout");
+            args.insert("workdir".into(), json!(fixture.root.join("child")));
+            let (retained, checkout, cache) = approval_request(&attempt.ccx, &args).await.unwrap();
+            assert!(checkout.is_none());
+            assert_eq!(retained.env["CARGO_TARGET_DIR"], target.to_str().unwrap());
+            let retained_cache = cache.unwrap();
+            retained_cache
+                .revalidate(&attempt.ccx, &retained)
+                .await
+                .unwrap();
+            let chat = attempt.ccx.lock().await.chat_id.clone();
+            let child = fixture.app.chat.sessions.read().await[&chat].clone();
+            let task = child.lock().await.thread.task_meta.clone().unwrap();
+            let worktree = child.lock().await.thread.worktree.clone().unwrap();
+            let board = crate::tools::command_checkout::read_board(&fixture.source, "task")
+                .await
+                .unwrap()
+                .0;
+            assert_eq!(board.get_card("T-1").unwrap().assignee, task.agent_id);
+            assert_eq!(
+                board.get_card("T-1").unwrap().agent_chat_id.as_deref(),
+                Some(chat.as_str())
+            );
+            child
+                .lock()
+                .await
+                .thread
+                .task_meta
+                .as_mut()
+                .unwrap()
+                .agent_id = worktree.agent_id;
+            let (denied, _, disabled) = approval_request(&attempt.ccx, &args).await.unwrap();
+            assert!(disabled.is_none());
+            assert!(!denied.env.contains_key("CARGO_TARGET_DIR"));
+            child.lock().await.thread.task_meta = Some(task);
+            fixture
+                .change_board(|board| board.owner_chat_id = Some("foreign-planner".into()))
+                .await;
+            let (denied, _, disabled) = approval_request(&attempt.ccx, &args).await.unwrap();
+            assert!(disabled.is_none());
+            assert!(!denied.env.contains_key("CARGO_TARGET_DIR"));
+            fixture
+                .change_board(|board| board.owner_chat_id = Some("planner".into()))
+                .await;
+            let execution =
+                crate::tasks::admission::current_execution(&fixture.app, &chat).unwrap();
+            execution.park().await.unwrap();
+            assert!(!execution.holds_permit());
+            let (denied, _, disabled) = approval_request(&attempt.ccx, &args).await.unwrap();
+            assert!(disabled.is_none());
+            assert!(!denied.env.contains_key("CARGO_TARGET_DIR"));
+            assert!(retained_cache
+                .revalidate(&attempt.ccx, &retained)
+                .await
+                .is_err());
+            tokio::time::timeout(Duration::from_secs(5), execution.resume())
+                .await
+                .unwrap()
+                .unwrap();
+            retained_cache
+                .revalidate(&attempt.ccx, &retained)
+                .await
+                .unwrap();
+            fixture
+                .change_board(|board| {
+                    board.get_card_mut("T-1").unwrap().paused_at = Some("now".into())
+                })
+                .await;
+            let (denied, _, disabled) = approval_request(&attempt.ccx, &args).await.unwrap();
+            assert!(disabled.is_none());
+            assert!(!denied.env.contains_key("CARGO_TARGET_DIR"));
+            fixture
+                .change_board(|board| board.get_card_mut("T-1").unwrap().paused_at = None)
+                .await;
+            attempt.admission.end();
+            assert!(crate::tasks::admission::current_execution(&fixture.app, &chat).is_err());
+            let (denied, _, disabled) = approval_request(&attempt.ccx, &args).await.unwrap();
+            assert!(disabled.is_none());
+            assert!(!denied.env.contains_key("CARGO_TARGET_DIR"));
+            fixture.change_board(|board| *board = previous_board).await;
+        }
+        let session = fixture.app.chat.sessions.read().await["planner"].clone();
+        session.lock().await.thread.mode = "explore".into();
+        let mut unconfined_readonly = readonly.clone();
+        unconfined_readonly.sandbox = None;
+        let disabled =
+            prepare_managed_cache(&fixture.ccx, checkout.as_ref(), &mut unconfined_readonly)
+                .await
+                .unwrap()
+                .unwrap();
+        disabled.attach_report(&mut extra);
+        assert!(!unconfined_readonly.env.contains_key("CARGO_TARGET_DIR"));
+        assert_eq!(
+            extra["exec"]["cache_report"]["cargo_target"]["reason"],
+            "unverified_isolation"
+        );
+        session.lock().await.thread.mode = "task_planner".into();
+        std::fs::write(
+            fixture.root.join("refact-agent/engine/Cargo.toml"),
+            "[workspace]\nmembers = []\n",
+        )
+        .unwrap();
+        assert!(cache.revalidate(&fixture.ccx, &request).await.is_err());
+        let mut current = request.clone();
+        current.env.remove("CARGO_TARGET_DIR");
+        let changed = prepare_managed_cache(&fixture.ccx, checkout.as_ref(), &mut current)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut current_approval =
+            crate::agents::command_approval::descriptor(&current, "cache").unwrap();
+        changed.bind_approval(&mut current_approval);
+        assert_ne!(approved, current_approval);
+        let mut unsupported = current;
+        unsupported.env.remove("CARGO_TARGET_DIR");
+        let config = fixture.root.join("refact-agent/engine/.cargo");
+        std::fs::create_dir(&config).unwrap();
+        std::fs::write(
+            config.join("config.toml"),
+            "[build]\n\"rustc-wrapper\" = \"host-sccache\"\n",
+        )
+        .unwrap();
+        let disabled = prepare_managed_cache(&fixture.ccx, checkout.as_ref(), &mut unsupported)
+            .await
+            .unwrap()
+            .unwrap();
+        disabled.attach_report(&mut extra);
+        assert_eq!(
+            unsupported.env["CARGO_TARGET_DIR"],
+            target.to_str().unwrap()
+        );
+        assert_eq!(
+            extra["exec"]["cache_report"]["cargo_target"]["reason"],
+            "checkout_local"
+        );
+        assert!(!unsupported.env.contains_key("RUSTC_WRAPPER"));
+        let public = serde_json::to_string(&extra).unwrap();
+        assert!(!public.contains(fixture.root.to_str().unwrap()));
+        assert!(!public.contains("host-sccache"));
+        assert_eq!(
+            extra["exec"]["cache_report"]["compiler_cache"]["reason"],
+            "unsafe_daemon_boundary"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn command_checkout_managed_input_change_at_shell_spawn_refuses() {
+        let fixture = CheckoutFixture::new().await;
+        let args = fixture.command_args();
+        let (request, _, cache) = crate::tools::shell_approval_request(&fixture.ccx, &args)
+            .await
+            .unwrap();
+        cache
+            .unwrap()
+            .revalidate(&fixture.ccx, &request)
+            .await
+            .unwrap();
+        let path = fixture.root.join("refact-agent/engine/Cargo.toml");
+        let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let changed = reached.clone();
+        let mut shell = crate::tools::tool_shell::ToolShell::default();
+        let result = crate::exec::command_policy::MANAGED_CACHE_BEFORE_SPAWN
+            .scope(
+                std::cell::RefCell::new(Some(Box::new(move || {
+                    std::fs::write(path, "[workspace]\nmembers = []\n").unwrap();
+                    changed.store(true, std::sync::atomic::Ordering::Relaxed);
+                }))),
+                shell.tool_execute(fixture.ccx.clone(), &"changed-input".into(), &args),
+            )
+            .await;
+        assert!(reached.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(
+            result.unwrap_err(),
+            "managed cache execution inputs changed; request command approval again"
+        );
+        assert!(fixture
+            .app
+            .runtime
+            .exec_registry
+            .list(Default::default())
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn command_checkout_registry_change_at_process_spawn_refuses() {
+        let fixture = CheckoutFixture::new().await;
+        let args = fixture.command_args();
+        let service = crate::worktrees::service::WorktreeService::new(
+            fixture.app.gcx.cache_dir.clone(),
+            fixture.source.clone(),
+        )
+        .unwrap();
+        let path = service.registry_path();
+        let id = fixture.selector["expected_worktree_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        fixture
+            .assert_refused_before_spawn(args, move || {
+                let mut registry: crate::worktrees::types::WorktreeRegistry =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                assert!(registry.records.iter().any(|record| record.meta.id == id));
+                registry.records.retain(|record| record.meta.id != id);
+                std::fs::write(path, serde_json::to_vec(&registry).unwrap()).unwrap();
+            })
+            .await;
     }
 
     #[tokio::test]
@@ -3561,6 +4447,13 @@ mod tests {
         let mut args = fixture.command_args();
         args.remove("checkout");
         args.insert("workdir".into(), json!(fixture.root));
+        let mut raw =
+            crate::exec::ExecSpawnRequest::foreground("pwd").with_cwd(fixture.root.clone());
+        assert!(prepare_managed_cache(&fixture.ccx, None, &mut raw)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!raw.env.contains_key("CARGO_TARGET_DIR"));
         let mut start = ToolProcessStart {
             config_path: String::new(),
         };

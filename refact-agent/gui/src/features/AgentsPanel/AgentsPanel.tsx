@@ -1,6 +1,6 @@
 import classNames from "classnames";
 import { Bot } from "lucide-react";
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 
 import {
   Badge,
@@ -13,15 +13,23 @@ import {
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { useIsDocumentVisible } from "../../hooks/useIsDocumentVisible";
 import { useGetBackgroundAgentsQuery } from "../../services/refact";
+import { backgroundAgentsApi } from "../../services/refact/backgroundAgents";
+import { hasUsableEngineEndpoint } from "../../services/refact/apiUrl";
 import {
   activeBackgroundAgents,
   aggregateBackgroundAgentUsage,
   buildBackgroundAgentsTree,
   flattenBackgroundAgentTree,
   reconcileBackgroundAgents,
-  selectBackgroundAgentPool,
 } from "../Chat/Thread";
-import { selectAgentsPanelTab, tabChanged } from "./agentsPanelSlice";
+import {
+  agentRecoveryRequested,
+  selectAgentRosterSource,
+  selectDisclosedAgentPool,
+  selectAgentsPanelTab,
+  tabChanged,
+  type AgentRosterSource,
+} from "./agentsPanelSlice";
 import { AgentTreeNode } from "./AgentTreeNode";
 import styles from "./AgentsPanel.module.css";
 
@@ -45,29 +53,54 @@ function formatCost(cost: number | null): string | null {
 
 function AgentsSectionContents({
   chatId,
+  source,
   onNavigate,
 }: {
   chatId: string;
+  source: AgentRosterSource;
   onNavigate?: (chatId: string) => void;
 }) {
   const dispatch = useAppDispatch();
   const visible = useIsDocumentVisible();
   const tab = useAppSelector(selectAgentsPanelTab);
-  const agentPool = useAppSelector((state) => selectBackgroundAgentPool(state));
+  const agentPool = useAppSelector(selectDisclosedAgentPool);
+  const { authorized, denied, failure, transportStale } = useAppSelector(
+    (state) => state.agentsPanel,
+  );
+  const ready = useAppSelector((state) =>
+    hasUsableEngineEndpoint(state.config),
+  );
+  const query = useMemo(() => ({ chatId, source }), [chatId, source]);
   const {
     currentData: fetchedAgents,
     isFetching,
     isError,
     refetch,
-  } = useGetBackgroundAgentsQuery(chatId, {
+  } = useGetBackgroundAgentsQuery(query, {
+    skip: !ready || denied,
     pollingInterval: visible ? 30_000 : 0,
     refetchOnFocus: true,
     refetchOnMountOrArgChange: true,
   });
 
+  useEffect(
+    () => () => {
+      dispatch(
+        backgroundAgentsApi.util.getRunningQueryThunk(
+          "getBackgroundAgents",
+          query,
+        ),
+      )?.abort();
+    },
+    [dispatch, query],
+  );
+
   const combinedAgents = useMemo(
-    () => reconcileBackgroundAgents(agentPool, fetchedAgents),
-    [agentPool, fetchedAgents],
+    () =>
+      authorized && !failure && ready && fetchedAgents !== undefined
+        ? reconcileBackgroundAgents(agentPool, fetchedAgents)
+        : {},
+    [agentPool, fetchedAgents, authorized, failure, ready],
   );
   const tree = useMemo(
     () => buildBackgroundAgentsTree(combinedAgents, chatId),
@@ -128,20 +161,25 @@ function AgentsSectionContents({
         />
       </header>
       <div className={styles.panelBody}>
-        {isError && (
+        {(isError || failure || !ready || transportStale) && (
           <ErrorState
             title="Could not refresh agents"
             description={
-              fetchedAgents !== undefined || roster.length > 0
-                ? "Showing last known agent data, which may be out of date."
-                : "Agent data is unavailable. Retry to load this chat's agents."
+              failure || !ready
+                ? "Agent data is hidden until access is revalidated for this connection and project."
+                : fetchedAgents !== undefined || roster.length > 0
+                  ? "Showing last known agent data, which may be out of date."
+                  : "Agent data is unavailable. Retry to load this chat's agents."
             }
             retry={
               <Button
                 size="sm"
                 variant="soft"
-                disabled={isFetching}
-                onClick={() => void refetch()}
+                disabled={isFetching || !ready}
+                onClick={() => {
+                  if (denied) dispatch(agentRecoveryRequested());
+                  else void refetch();
+                }}
               >
                 Retry
               </Button>
@@ -157,7 +195,7 @@ function AgentsSectionContents({
             }
           />
         )}
-        {visibleCount === 0 && !isError && !isFetching ? (
+        {visibleCount === 0 && !isError && !failure && ready && !isFetching ? (
           <EmptyState
             description={
               tab === "active"
@@ -173,6 +211,7 @@ function AgentsSectionContents({
             {visibleTree.map((node) => (
               <AgentTreeNode
                 chatId={chatId}
+                source={source}
                 key={node.agent.agent_id}
                 node={node}
                 onNavigate={onNavigate}
@@ -186,6 +225,7 @@ function AgentsSectionContents({
 }
 
 export function AgentsSection({ chatId, onNavigate }: AgentsSectionProps) {
+  const source = useAppSelector(selectAgentRosterSource);
   return (
     <section aria-label="Agents" className={styles.panel}>
       {chatId === null ? (
@@ -198,8 +238,9 @@ export function AgentsSection({ chatId, onNavigate }: AgentsSectionProps) {
         </div>
       ) : (
         <AgentsSectionContents
-          key={chatId}
+          key={JSON.stringify([chatId, source])}
           chatId={chatId}
+          source={source}
           onNavigate={onNavigate}
         />
       )}

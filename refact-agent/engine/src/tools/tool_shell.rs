@@ -15,7 +15,7 @@ use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::exec::types::normalize_workspace_path;
 use crate::exec::command_policy::{
     build_exec_request, chat_mode_for_exec, escalation_from_args, queue_sandbox_audit, CommandKind,
-    CommandPolicyInput, ExecEscalation, ExecSource,
+    prepare_managed_cache, CommandPolicyInput, ExecEscalation, ExecSource, ManagedCacheDecision,
 };
 use crate::exec::{
     sanitize_short_description, ExecOutputChunk, ExecOutputStream, ExecOwnerMeta,
@@ -78,6 +78,22 @@ struct ParsedShellArgs {
 }
 
 pub(crate) async fn approval_request(
+    ccx: &Arc<AMutex<AtCommandsContext>>,
+    args: &HashMap<String, Value>,
+) -> Result<
+    (
+        crate::exec::ExecSpawnRequest,
+        Option<ValidatedCommandCheckout>,
+        Option<ManagedCacheDecision>,
+    ),
+    String,
+> {
+    let (mut request, checkout) = approval_request_without_cache(ccx, args).await?;
+    let cache = prepare_managed_cache(ccx, checkout.as_ref(), &mut request).await?;
+    Ok((request, checkout, cache))
+}
+
+pub(crate) async fn approval_request_without_cache(
     ccx: &Arc<AMutex<AtCommandsContext>>,
     args: &HashMap<String, Value>,
 ) -> Result<
@@ -311,6 +327,16 @@ impl Tool for ToolShell {
             request = request.with_output_progress_tx(progress_tx);
         }
 
+        let cache = match prepare_managed_cache(&ccx, checkout.as_ref(), &mut request).await {
+            Ok(cache) => cache,
+            Err(error) => {
+                drop(request);
+                if let Some(progress_task) = progress_task {
+                    let _ = progress_task.await;
+                }
+                return Err(error);
+            }
+        };
         let started = tokio::time::Instant::now();
         if let Err(error) = crate::agents::command_approval::enforce(
             &ccx,
@@ -319,6 +345,7 @@ impl Tool for ToolShell {
             args,
             &mut request,
             checkout.as_ref(),
+            cache.as_ref(),
         )
         .await
         {
@@ -330,6 +357,15 @@ impl Tool for ToolShell {
         }
         if let Some(checkout) = &checkout {
             if let Err(error) = checkout.revalidate(&ccx, args, &request).await {
+                drop(request);
+                if let Some(progress_task) = progress_task {
+                    let _ = progress_task.await;
+                }
+                return Err(error);
+            }
+        }
+        if let Some(cache) = &cache {
+            if let Err(error) = cache.revalidate(&ccx, &request).await {
                 drop(request);
                 if let Some(progress_task) = progress_task {
                     let _ = progress_task.await;
@@ -371,6 +407,9 @@ impl Tool for ToolShell {
                 extra: exec_extra(&result.snapshot, &read, duration, None, tty),
                 ..Default::default()
             };
+            if let Some(cache) = &cache {
+                cache.attach_report(&mut message.extra);
+            }
             attach_exec_path_references(
                 &mut message.extra,
                 gcx.clone(),
@@ -447,6 +486,9 @@ impl Tool for ToolShell {
             extra: exec_extra(&result.snapshot, &read, duration, Some(timeout), tty),
             ..Default::default()
         };
+        if let Some(cache) = &cache {
+            cache.attach_report(&mut message.extra);
+        }
         attach_exec_path_references(
             &mut message.extra,
             gcx.clone(),
