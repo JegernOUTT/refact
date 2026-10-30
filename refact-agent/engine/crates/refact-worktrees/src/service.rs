@@ -628,7 +628,7 @@ impl WorktreeService {
         &self,
         chat_id: &str,
     ) -> Result<Option<WorktreeMeta>, String> {
-        let _guard = registry_write_lock().lock().await;
+        let _guard = self.registry_write_lock().await?;
         let registry = self.load_registry_unlocked().await?;
         let Some(record) = recoverable_chat_record(&registry, chat_id)? else {
             return Ok(None);
@@ -654,7 +654,7 @@ impl WorktreeService {
         expected: &WorktreeMeta,
         reference: WorktreeReference,
     ) -> Result<WorktreeRecordView, String> {
-        let _guard = registry_write_lock().lock().await;
+        let _guard = self.registry_write_lock().await?;
         let mut registry = self.load_registry_unlocked().await?;
         let record = recoverable_chat_record(&registry, chat_id)?
             .ok_or("Chat worktree recovery provenance is unavailable")?;
@@ -680,7 +680,7 @@ impl WorktreeService {
             record.updated_at = Utc::now().to_rfc3339();
         }
         let record = record.clone();
-        self.save_registry_unlocked(&registry).await?;
+        self.save_registry_unlocked(&registry, &_guard).await?;
         self.record_view(&record).await
     }
 

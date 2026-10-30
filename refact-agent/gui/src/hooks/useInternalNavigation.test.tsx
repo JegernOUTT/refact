@@ -5,6 +5,7 @@ import { Provider } from "react-redux";
 import { http, HttpResponse } from "msw";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setUpStore } from "../app/store";
+import { selectAgentRosterSource } from "../features/AgentsPanel/agentsPanelSlice";
 import { updateConfig } from "../features/Config/configSlice";
 import { server } from "../utils/mockServer";
 import { trajectoriesApi } from "../services/refact/trajectories";
@@ -453,19 +454,26 @@ describe("useInternalNavigation direct agents", () => {
       const source = store.getState().chat.current_thread_id;
       const root = intent === "descendant" ? "ancestor" : "pane-parent";
       await store.dispatch(
-        backgroundAgentsApi.util.upsertQueryData("getBackgroundAgents", root, [
-          ...(intent === "descendant"
-            ? [
-                {
-                  ...agent,
-                  agent_id: "ancestor-agent",
-                  parent_chat_id: root,
-                  child_chat_id: "pane-parent",
-                },
-              ]
-            : []),
-          ...(intent === "unknown" ? [] : [agent]),
-        ]),
+        backgroundAgentsApi.util.upsertQueryData(
+          "getBackgroundAgents",
+          {
+            chatId: root,
+            source: selectAgentRosterSource(store.getState()),
+          },
+          [
+            ...(intent === "descendant"
+              ? [
+                  {
+                    ...agent,
+                    agent_id: "ancestor-agent",
+                    parent_chat_id: root,
+                    child_chat_id: "pane-parent",
+                  },
+                ]
+              : []),
+            ...(intent === "unknown" ? [] : [agent]),
+          ],
+        ),
       );
       let navigation!: Promise<boolean>;
       act(() => {
@@ -513,7 +521,10 @@ describe("useInternalNavigation direct agents", () => {
       await store.dispatch(
         backgroundAgentsApi.util.upsertQueryData(
           "getBackgroundAgents",
-          "pane-parent",
+          {
+            chatId: "pane-parent",
+            source: selectAgentRosterSource(store.getState()),
+          },
           [agent],
         ),
       );
@@ -528,7 +539,10 @@ describe("useInternalNavigation direct agents", () => {
           await store.dispatch(
             backgroundAgentsApi.util.upsertQueryData(
               "getBackgroundAgents",
-              "pane-parent",
+              {
+                chatId: "pane-parent",
+                source: selectAgentRosterSource(store.getState()),
+              },
               change === "removed"
                 ? []
                 : [
@@ -581,7 +595,10 @@ describe("useInternalNavigation direct agents", () => {
     await store.dispatch(
       backgroundAgentsApi.util.upsertQueryData(
         "getBackgroundAgents",
-        "pane-parent",
+        {
+          chatId: "pane-parent",
+          source: selectAgentRosterSource(store.getState()),
+        },
         [agent],
       ),
     );

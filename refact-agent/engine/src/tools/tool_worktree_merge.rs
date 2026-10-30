@@ -793,7 +793,7 @@ fn start_self_merge(
     service: WorktreeService,
     worktree_id: String,
     request: MergeWorktreeRequest,
-    transition: tokio::sync::OwnedMutexGuard<()>,
+    transition: crate::chat::worktree_lifecycle::AttachmentTransitionGuard,
     app: crate::app_state::AppState,
 ) -> Result<tokio::sync::oneshot::Receiver<Result<MergeWorktreeResponse, String>>, String> {
     let (sender, receiver) = tokio::sync::oneshot::channel();

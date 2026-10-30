@@ -123,9 +123,10 @@ export function useInternalNavigation({
         buildBackgroundAgentsTree(
           reconcileBackgroundAgents(
             selectBackgroundAgentPool(state),
-            backgroundAgentsApi.endpoints.getBackgroundAgents.select(sourceId)(
-              state,
-            ).data,
+            backgroundAgentsApi.endpoints.getBackgroundAgents.select({
+              chatId: sourceId,
+              source: selectAgentRosterSource(state),
+            })(state).data,
           ),
           sourceId,
         ),
