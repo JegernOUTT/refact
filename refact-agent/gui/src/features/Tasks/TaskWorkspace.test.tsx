@@ -1778,6 +1778,11 @@ describe("TaskWorkspace layout and chat surfaces", () => {
   });
 
   it("selects_planner_and_agent_chats_and_renders_workspace_tabs", async () => {
+    const reads = { task: 0, board: 0, planners: 0, metadata: 0 };
+    let releaseMetadata: () => void = () => undefined;
+    const metadataHeld = new Promise<void>((resolve) => {
+      releaseMetadata = resolve;
+    });
     const card = makeCard({
       title: "Agent selectable card",
       column: "doing",
@@ -1786,16 +1791,35 @@ describe("TaskWorkspace layout and chat surfaces", () => {
     });
     server.use(...taskWorkspaceHandlers(card, []));
     server.use(
-      http.get("*/v1/tasks/task-1/trajectories/planner", () =>
-        HttpResponse.json([
+      http.get("*/v1/tasks/task-1", () => {
+        reads.task++;
+        return HttpResponse.json({ meta: makeTask() });
+      }),
+      http.get("*/v1/tasks/task-1/board", () => {
+        reads.board++;
+        return HttpResponse.json(makeBoard(card));
+      }),
+      http.get("*/v1/trajectories/:id", async ({ params }) => {
+        reads.metadata++;
+        await metadataHeld;
+        return HttpResponse.json({
+          id: String(params.id),
+          title: "Stored chat",
+          model: "",
+          mode: "AGENT",
+        });
+      }),
+      http.get("*/v1/tasks/task-1/trajectories/planner", () => {
+        reads.planners++;
+        return HttpResponse.json([
           {
             id: PLANNER_ID,
             title: "Planner Restored",
             created_at: "2026-01-01T00:00:00Z",
             updated_at: "2026-01-02T00:00:00Z",
           },
-        ]),
-      ),
+        ]);
+      }),
     );
 
     const { store, user } = render(<TaskWorkspace taskId={TASK_ID} />, {
@@ -1836,7 +1860,16 @@ describe("TaskWorkspace layout and chat surfaces", () => {
 
     await user.click(screen.getByRole("tab", { name: /^Board/ }));
     await screen.findAllByText(card.title);
+    const initialReads = { ...reads };
     await user.click(screen.getByRole("button", { name: "Agent" }));
+    await waitFor(() => expect(reads.metadata).toBe(1));
+    expect(
+      screen.queryByText("Opening linked target..."),
+    ).not.toBeInTheDocument();
+    expect(store.getState().tasksUI.openTasks[0]?.activeChat?.chatId).toBe(
+      PLANNER_ID,
+    );
+    releaseMetadata();
 
     await waitFor(() =>
       expect(
@@ -1866,6 +1899,7 @@ describe("TaskWorkspace layout and chat surfaces", () => {
     expect(
       screen.getByRole("button", { name: "Switch chat" }),
     ).toHaveTextContent("Planner");
+    expect(reads).toEqual({ ...initialReads, metadata: 2 });
 
     await user.click(screen.getByRole("tab", { name: "Memories" }));
     await screen.findByText(/memories shown/i);

@@ -666,6 +666,7 @@ mod tests {
             source_workspace_root: source.clone(),
             project_hash: hash,
             records: vec![WorktreeRegistryRecord {
+                creator_chat_id: None,
                 meta: WorktreeMeta {
                     id: "wt".to_string(),
                     kind: "chat".to_string(),

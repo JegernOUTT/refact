@@ -677,6 +677,7 @@ mod tests {
             let root = dunce::canonicalize(&root).unwrap();
             roots.push(root.clone());
             records.push(refact_worktrees::types::WorktreeRegistryRecord {
+                creator_chat_id: None,
                 meta: refact_worktrees::types::WorktreeMeta {
                     id: (*id).to_string(),
                     kind: "chat".to_string(),

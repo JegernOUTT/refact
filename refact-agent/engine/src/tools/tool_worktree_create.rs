@@ -11,7 +11,7 @@ use crate::chat::worktree_lifecycle::{check_unchanged_attachment, transition_loc
 use crate::tools::tools_description::{
     MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolDesc, ToolSource, ToolSourceType,
 };
-use crate::worktrees::{scope::ExecutionScope, service::WorktreeService, types::CreateWorktreeRequest};
+use crate::worktrees::{scope::ExecutionScope, service::WorktreeService};
 
 pub struct ToolWorktreeCreate;
 
@@ -117,7 +117,7 @@ impl Tool for ToolWorktreeCreate {
             )
         };
         let service = WorktreeService::new_async(app.gcx.cache_dir.clone(), source.clone()).await?;
-        let (worktree, reused) = if let Some(worktree) = before.worktree.as_ref() {
+        let (worktree, reused, reattached) = if let Some(worktree) = before.worktree.as_ref() {
             let view = service.get_worktree(&worktree.id).await?;
             if view.meta != *worktree {
                 return Err(
@@ -125,16 +125,12 @@ impl Tool for ToolWorktreeCreate {
                         .into(),
                 );
             }
-            (view.meta, true)
+            (view.meta, true, false)
+        } else if let Some(worktree) = service.recover_chat_worktree(&chat_id).await? {
+            (worktree, false, true)
         } else {
-            let created = service
-                .create_worktree(CreateWorktreeRequest {
-                    kind: Some("chat".into()),
-                    chat_id: Some(chat_id.clone()),
-                    ..Default::default()
-                })
-                .await?;
-            (created.worktree.meta, false)
+            let created = service.create_chat_worktree(&chat_id).await?;
+            (created.worktree.meta, false, false)
         };
         let records = crate::privacy::records::declared_file_records(
             &app.gcx,
@@ -150,13 +146,23 @@ impl Tool for ToolWorktreeCreate {
                 worktree.id
             )
         })?;
-        let update = crate::chat::queue::resolve_worktree_setparams_update(
-            app.clone(),
-            &chat_id,
-            &before,
-            &json!({"worktree_id":worktree.id}),
-        )
-        .await
+        let update = if reattached {
+            crate::chat::queue::resolve_recovered_worktree_setparams_update(
+                app.clone(),
+                &chat_id,
+                &before,
+                &worktree,
+            )
+            .await
+        } else {
+            crate::chat::queue::resolve_worktree_setparams_update(
+                app.clone(),
+                &chat_id,
+                &before,
+                &json!({"worktree_id":worktree.id}),
+            )
+            .await
+        }
         .map_err(|error| {
             format!(
                 "{error}; registered worktree {} was retained for recovery",
@@ -211,7 +217,7 @@ impl Tool for ToolWorktreeCreate {
         })?;
         let mut message = ChatMessage {
             role: "tool".into(), tool_call_id: tool_call_id.clone(),
-            content: ChatContent::SimpleText(json!({"status":if reused {"already_attached"} else {"attached"},"worktree":worktree}).to_string()),
+            content: ChatContent::SimpleText(json!({"status":if reused {"already_attached"} else if reattached {"reattached"} else {"attached"},"worktree":worktree}).to_string()),
             ..Default::default()
         };
         crate::privacy::records::merge_records(&mut message, records);
@@ -323,6 +329,151 @@ mod tests {
             session.lock().await.thread.worktree.as_ref().unwrap().id,
             attached.id
         );
+        let app = context.lock().await.app.clone();
+        let before = session.lock().await.thread.clone();
+        let detached = crate::chat::queue::resolve_worktree_setparams_update(
+            app,
+            "worktree-create-root",
+            &before,
+            &json!({"worktree": null}),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        session.lock().await.thread.worktree = detached.worktree;
+        context.lock().await.execution_scope = None;
+        assert!(service.load_registry().await.unwrap().records[0]
+            .references
+            .is_empty());
+        let mut recovery_events = session.lock().await.event_tx.subscribe();
+        let before_messages = session.lock().await.messages.len();
+        let (_, result) = tool
+            .tool_execute(context.clone(), &"recover".into(), &HashMap::new())
+            .await
+            .expect("detached chat must recover its exact registered checkout");
+        let ContextEnum::ChatMessage(message) = &result[0] else {
+            panic!("tool result missing")
+        };
+        let result: Value = serde_json::from_str(&message.content.content_text_only()).unwrap();
+        assert_eq!(result["status"], "reattached");
+        assert_eq!(
+            session.lock().await.thread.worktree.as_ref(),
+            Some(&attached)
+        );
+        assert_eq!(
+            context.lock().await.execution_scope_worktree(),
+            Some(attached.clone())
+        );
+        assert_eq!(
+            std::fs::read_to_string(attached.root.join("following.txt")).unwrap(),
+            "isolated"
+        );
+        let session_guard = session.lock().await;
+        let activation = session_guard.messages.last().unwrap();
+        assert_eq!(session_guard.messages.len(), before_messages + 1);
+        assert_eq!(activation.tool_call_id, "worktree_enabled");
+        assert!(activation.extra.get("privacy").is_some());
+        drop(session_guard);
+        let mut recovered_event = false;
+        while let Ok(event) = recovery_events.try_recv() {
+            let event: Value = serde_json::from_str(&event).unwrap();
+            if event["type"] == "thread_updated" && event["worktree"]["id"] == attached.id {
+                recovered_event = true;
+            }
+        }
+        assert!(recovered_event, "recovery must emit attachment to the UI");
+        let registry = service.load_registry().await.unwrap();
+        assert_eq!(registry.records.len(), 1);
+        assert_eq!(registry.records[0].references.len(), 1);
+        let saved: Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                service
+                    .source_workspace_root()
+                    .join(".refact/trajectories/worktree-create-root/worktree-create-root.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["worktree"]["id"], attached.id);
+    }
+
+    #[tokio::test]
+    async fn worktree_create_recovery_refuses_foreign_reference() {
+        let (_temp, context, session, service) = fixture().await;
+        let created = service
+            .create_chat_worktree("worktree-create-root")
+            .await
+            .unwrap();
+        let expected = service
+            .recover_chat_worktree("worktree-create-root")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(expected, created.worktree.meta);
+        let foreign = crate::worktrees::types::WorktreeReference {
+            kind: "chat".into(),
+            chat_id: Some("foreign-chat".into()),
+            ..Default::default()
+        };
+        service
+            .add_reference(&created.worktree.meta.id, foreign.clone())
+            .await
+            .unwrap();
+        let before = service.load_registry().await.unwrap();
+        assert!(before.records[0].references.contains(&foreign));
+        let own = crate::worktrees::types::WorktreeReference {
+            kind: "chat".into(),
+            chat_id: Some("worktree-create-root".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            service
+                .add_recovered_chat_reference(&expected.id, "worktree-create-root", &expected, own)
+                .await
+                .unwrap_err(),
+            "Chat worktree recovery refused: checkout ownership does not match"
+        );
+        assert_eq!(service.load_registry().await.unwrap(), before);
+        let error = ToolWorktreeCreate
+            .tool_execute(context.clone(), &"foreign".into(), &HashMap::new())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "Chat worktree recovery refused: checkout ownership does not match"
+        );
+        assert_eq!(service.load_registry().await.unwrap(), before);
+        assert!(session.lock().await.thread.worktree.is_none());
+        assert!(context.lock().await.execution_scope.is_none());
+        assert!(created.worktree.meta.root.join("tracked").exists());
+    }
+
+    #[tokio::test]
+    async fn worktree_create_recovery_refuses_unverified_request_identity() {
+        let (_temp, context, session, service) = fixture().await;
+        let created = service
+            .create_worktree(crate::worktrees::types::CreateWorktreeRequest {
+                kind: Some("chat".into()),
+                chat_id: Some("worktree-create-root".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let before = service.load_registry().await.unwrap();
+        assert_eq!(before.records.len(), 1);
+        assert_eq!(
+            before.records[0].references[0].chat_id.as_deref(),
+            Some("worktree-create-root")
+        );
+        let error = ToolWorktreeCreate
+            .tool_execute(context.clone(), &"unverified".into(), &HashMap::new())
+            .await
+            .unwrap_err();
+        assert!(error.contains("already exists"), "wrong refusal: {error}");
+        assert_eq!(service.load_registry().await.unwrap(), before);
+        assert!(session.lock().await.thread.worktree.is_none());
+        assert!(context.lock().await.execution_scope.is_none());
+        assert!(created.worktree.meta.root.join("tracked").exists());
     }
 
     #[tokio::test]

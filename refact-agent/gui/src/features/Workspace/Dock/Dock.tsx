@@ -72,12 +72,24 @@ export function Dock() {
     }
   }, [activeSection, dispatch, dock.section]);
 
-  const handleAgentNavigation = useCallback(
+  const handleNavigation = useCallback(
     (childChatId: string) => {
       void navigation
         .navigate(`refact://chat/${childChatId}`, {
           chatId: focusedChatId ?? undefined,
         })
+        .then((opened) => {
+          if (opened && isNarrow) dispatch(setDockOpen(false));
+        });
+    },
+    [dispatch, focusedChatId, isNarrow, navigation],
+  );
+
+  const handleAgentNavigation = useCallback(
+    (childChatId: string) => {
+      if (!focusedChatId) return;
+      void navigation
+        .navigateKnownAgent(childChatId, focusedChatId)
         .then((opened) => {
           if (opened && isNarrow) dispatch(setDockOpen(false));
         });
@@ -153,7 +165,7 @@ export function Dock() {
         data-testid="workspace-dock-section"
         data-section={activeSection}
       >
-        {navigation.pending && (
+        {navigation.showProgress && (
           <div role="status">Opening linked target...</div>
         )}
         {navigation.error && <div role="alert">{navigation.error}</div>}
@@ -162,7 +174,8 @@ export function Dock() {
         {activeSection === "agents" ? (
           <AgentWorkSection
             chatId={focusedChatId}
-            onNavigate={handleAgentNavigation}
+            onNavigate={handleNavigation}
+            onAgentNavigate={handleAgentNavigation}
           />
         ) : null}
         {activeSection === "tasks" ? <TasksSection /> : null}

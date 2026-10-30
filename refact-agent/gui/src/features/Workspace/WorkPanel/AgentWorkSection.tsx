@@ -11,9 +11,11 @@ import styles from "./WorkPanel.module.css";
 export function AgentWorkSection({
   chatId,
   onNavigate,
+  onAgentNavigate,
 }: {
   chatId: string | null;
   onNavigate?: (id: string) => void;
+  onAgentNavigate?: (id: string) => void;
 }) {
   const [view, setView] = useState("agents");
   return (
@@ -44,7 +46,7 @@ export function AgentWorkSection({
         ))}
       </div>
       {view === "agents" && (
-        <AgentsSection chatId={chatId} onNavigate={onNavigate} />
+        <AgentsSection chatId={chatId} onNavigate={onAgentNavigate} />
       )}
       {view === "work" && <WorkPanel onNavigate={onNavigate} />}
       {view === "causal" && (

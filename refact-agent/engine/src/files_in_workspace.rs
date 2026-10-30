@@ -3147,6 +3147,7 @@ mod tests {
             source_workspace_root: source.clone(),
             project_hash: hash,
             records: vec![refact_worktrees::types::WorktreeRegistryRecord {
+                creator_chat_id: None,
                 meta: refact_worktrees::types::WorktreeMeta {
                     id: "wt".to_string(),
                     kind: "chat".to_string(),

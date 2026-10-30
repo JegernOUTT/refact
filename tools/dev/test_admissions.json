@@ -2914,6 +2914,742 @@
           "fingerprint": "e74943270fafd3ed8adffcd74b7e619e2161fdc156d574a960624c568e834d55"
         }
       }
+    },
+    {
+      "fingerprint": "6d10ea967f92c5d84163b08efe8ac0533792f9e11a5879c296ce3d5a46d37a48",
+      "failure_mode": "Registered checkout root outside cache could be exposed by file read; existing test body changes only to provide absent new provenance field.",
+      "importance": "Checkout ownership and durable retry recovery must not select a foreign or unverified execution root.",
+      "nearest_retained": {
+        "fingerprint": "6fa237cb85be9565d9a7f7bbeb28bdfa57190abce87dc9da1bf98f6f2852f768",
+        "why_insufficient": "Retained privacy failure tests initial creation/unchanged attachment, not detached retry, foreign registry ownership, or request-supplied provenance."
+      },
+      "oracle": "Existing read refusal/status and secret withholding assertions unchanged.",
+      "prerequisites": "Existing adversarial outside-cache checkout fixture remains intact; only creator_chat_id: None added.",
+      "shipping_implementation": "Actual ToolWorktreeCreate, WorktreeService and existing queue resolver; schema-only retained file read test uses original handler.",
+      "determinism": "TempDir isolated Git repositories; no ambient checkout mutation, services, sleeps or credentials.",
+      "layer": "Existing engine library shipping-path fixture.",
+      "why_cheapest": "Extend existing lifecycle scenario and add only two distinct security refusals; no duplicate integration/E2E layer.",
+      "critical": false,
+      "criticality_reason": "Absent serde-default field constructor update only; retained security behavior/oracles unchanged.",
+      "meaningful_cases": 1,
+      "occurrences": 1,
+      "removed_coverage": "None; existing lifecycle assertions retained.",
+      "author": "background_agent:bgagent-4d903db1-cc13-4a55-9bcc-fd6e4d789637",
+      "reviewer": "background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513",
+      "review_evidence": "Independent reviewer background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513 authenticated actual three intended composite-mutant assertion failures (exit 101), restored five-test pass (exit 0), corrected source hashes and formatting-only service hash change, and approved narrow semantic admission/support impacts. Second-model source review background_agent:bgagent-f0c13d5c-ed31-499d-94e0-762e467a155e accepted ownership/atomic registration design and distinct scenarios. No claim all eligibility disjuncts individually executed or full suite pass from these focused runs.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Schema-only constructor compatibility edit; omission fails compilation, not a new behavioral mutation.",
+        "evidence": "Parent None-only fixture diff plus independent source review; original security oracle unchanged."
+      }
+    },
+    {
+      "fingerprint": "4d01b64d22f96e7cd540f5d2193d7e805b2f404eb47b198d5dfa879e49f4136b",
+      "failure_mode": "Detached chat retry creates a second checkout/branch collision or returns success without restoring exact retained checkout scope and durable attachment.",
+      "importance": "Checkout ownership and durable retry recovery must not select a foreign or unverified execution root.",
+      "nearest_retained": {
+        "fingerprint": "6fa237cb85be9565d9a7f7bbeb28bdfa57190abce87dc9da1bf98f6f2852f768",
+        "why_insufficient": "Retained privacy failure tests initial creation/unchanged attachment, not detached retry, foreign registry ownership, or request-supplied provenance."
+      },
+      "oracle": "Exact reattached result, same complete worktree metadata and execution scope, retained WIP content, one registry record and own reference, persisted worktree id, additional privacy-attributed activation and recovery ThreadUpdated event.",
+      "prerequisites": "Actual tool creates registered checkout, following scoped write exists only in checkout, real detach resolver removes own reference and session/context attachments are cleared.",
+      "shipping_implementation": "Actual ToolWorktreeCreate, WorktreeService and existing queue resolver; schema-only retained file read test uses original handler.",
+      "determinism": "TempDir isolated Git repositories; no ambient checkout mutation, services, sleeps or credentials.",
+      "layer": "Existing engine library shipping-path fixture.",
+      "why_cheapest": "Extend existing lifecycle scenario and add only two distinct security refusals; no duplicate integration/E2E layer.",
+      "critical": true,
+      "criticality_reason": "Checkout identity/ownership, lifecycle and required durable attachment.",
+      "meaningful_cases": 2,
+      "occurrences": 1,
+      "removed_coverage": "None; existing lifecycle assertions retained.",
+      "author": "background_agent:bgagent-4d903db1-cc13-4a55-9bcc-fd6e4d789637",
+      "reviewer": "background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513",
+      "review_evidence": "Independent reviewer background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513 authenticated actual three intended composite-mutant assertion failures (exit 101), restored five-test pass (exit 0), corrected source hashes and formatting-only service hash change, and approved narrow semantic admission/support impacts. Second-model source review background_agent:bgagent-f0c13d5c-ed31-499d-94e0-762e467a155e accepted ownership/atomic registration design and distinct scenarios. No claim all eligibility disjuncts individually executed or full suite pass from these focused runs.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "ToolWorktreeCreate and recoverable_chat_record/create_worktree production decisions",
+        "before_fix": {
+          "reference": "refact-agent/engine/target/worktree-recovery-evidence/composite-mutant.patch (three simultaneous faults, not isolated mutations)",
+          "fingerprint": "06b3219fdf90a2bab46342814e3a56f6ed05e5b94fa4843090177a83e9a7300c"
+        },
+        "intended_diagnostic": "mutant.log:359 assertion left None right Some(exact retained WorktreeMeta)",
+        "failing": {
+          "command": [
+            "cargo",
+            "test",
+            "--profile",
+            "ci-test",
+            "--lib",
+            "tools::tool_worktree_create::tests",
+            "--",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": "refact-agent/engine/target/worktree-recovery-evidence/mutant.log: 2 passed, 3 intended assertion failures. Composite skips reattach session update, disables foreign-reference predicate, stamps caller-supplied chat_id on generic create; these independent diagnostics are not claimed as isolated mutation runs. Durable authenticated excerpt: worktree_create_attaches_scopes_following_write_and_persists at tool_worktree_create.rs:359: assertion left == right failed; left: None, right: Some(WorktreeMeta of exact created checkout)."
+        },
+        "passing": {
+          "command": [
+            "cargo",
+            "test",
+            "--profile",
+            "ci-test",
+            "--lib",
+            "tools::tool_worktree_create::tests",
+            "--",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "evidence": "refact-agent/engine/target/worktree-recovery-evidence/restored.log: all 5 targeted tests passed, 0 failed; witness.json restored_exit=0. Service-only subsequent formatting is line wrapping and optional trailing argument commas, evidenced by format-only.patch and corrected-before-format-service.rs; final full-suite execution of formatted candidate is tracked separately, not asserted by this focused witness. Durable authenticated summary: test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 3650 filtered out. Final service SHA256 5800242151926cd7d199e5025cff6e95f3536258203ea3f5a0bbe63770782114 differs only formatting/trailing argument commas from reviewed 8df34eea5bdba9dbafe34ec7ccd23f8ad5f5f59ee89b6f5669313b93f86fb26e."
+        }
+      }
+    },
+    {
+      "fingerprint": "6f1a084e8fd9db36f05bdb4f5507528f90921ff9603fd50d4e997b22ba0a47f9",
+      "failure_mode": "Recovery adopts a checkout after a foreign reference appears between lookup and atomic reference registration.",
+      "importance": "Checkout ownership and durable retry recovery must not select a foreign or unverified execution root.",
+      "nearest_retained": {
+        "fingerprint": "6fa237cb85be9565d9a7f7bbeb28bdfa57190abce87dc9da1bf98f6f2852f768",
+        "why_insufficient": "Retained privacy failure tests initial creation/unchanged attachment, not detached retry, foreign registry ownership, or request-supplied provenance."
+      },
+      "oracle": "Exact ownership refusal from atomic registration after initially successful lookup, registry byte-semantic identity unchanged, tool refuses and no session/context attachment; tracked checkout survives.",
+      "prerequisites": "Create through trusted entrypoint, successful recovery lookup with exact metadata, then persist nonempty foreign-chat reference and assert it exists.",
+      "shipping_implementation": "Actual ToolWorktreeCreate, WorktreeService and existing queue resolver; schema-only retained file read test uses original handler.",
+      "determinism": "TempDir isolated Git repositories; no ambient checkout mutation, services, sleeps or credentials.",
+      "layer": "Existing engine library shipping-path fixture.",
+      "why_cheapest": "Extend existing lifecycle scenario and add only two distinct security refusals; no duplicate integration/E2E layer.",
+      "critical": true,
+      "criticality_reason": "Checkout identity/ownership, lifecycle and required durable attachment.",
+      "meaningful_cases": 1,
+      "occurrences": 1,
+      "removed_coverage": "None; existing lifecycle assertions retained.",
+      "author": "background_agent:bgagent-4d903db1-cc13-4a55-9bcc-fd6e4d789637",
+      "reviewer": "background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513",
+      "review_evidence": "Independent reviewer background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513 authenticated actual three intended composite-mutant assertion failures (exit 101), restored five-test pass (exit 0), corrected source hashes and formatting-only service hash change, and approved narrow semantic admission/support impacts. Second-model source review background_agent:bgagent-f0c13d5c-ed31-499d-94e0-762e467a155e accepted ownership/atomic registration design and distinct scenarios. No claim all eligibility disjuncts individually executed or full suite pass from these focused runs.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "ToolWorktreeCreate and recoverable_chat_record/create_worktree production decisions",
+        "before_fix": {
+          "reference": "refact-agent/engine/target/worktree-recovery-evidence/composite-mutant.patch (three simultaneous faults, not isolated mutations)",
+          "fingerprint": "06b3219fdf90a2bab46342814e3a56f6ed05e5b94fa4843090177a83e9a7300c"
+        },
+        "intended_diagnostic": "mutant.log:433 atomic registration unwrap_err received Ok with both own and foreign references",
+        "failing": {
+          "command": [
+            "cargo",
+            "test",
+            "--profile",
+            "ci-test",
+            "--lib",
+            "tools::tool_worktree_create::tests",
+            "--",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": "refact-agent/engine/target/worktree-recovery-evidence/mutant.log: 2 passed, 3 intended assertion failures. Composite skips reattach session update, disables foreign-reference predicate, stamps caller-supplied chat_id on generic create; these independent diagnostics are not claimed as isolated mutation runs. Durable authenticated excerpt: worktree_create_recovery_refuses_foreign_reference at tool_worktree_create.rs:433: Result::unwrap_err() on Ok WorktreeRecordView; references contain own worktree-create-root and foreign-chat."
+        },
+        "passing": {
+          "command": [
+            "cargo",
+            "test",
+            "--profile",
+            "ci-test",
+            "--lib",
+            "tools::tool_worktree_create::tests",
+            "--",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "evidence": "refact-agent/engine/target/worktree-recovery-evidence/restored.log: all 5 targeted tests passed, 0 failed; witness.json restored_exit=0. Service-only subsequent formatting is line wrapping and optional trailing argument commas, evidenced by format-only.patch and corrected-before-format-service.rs; final full-suite execution of formatted candidate is tracked separately, not asserted by this focused witness. Durable authenticated summary: test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 3650 filtered out. Final service SHA256 5800242151926cd7d199e5025cff6e95f3536258203ea3f5a0bbe63770782114 differs only formatting/trailing argument commas from reviewed 8df34eea5bdba9dbafe34ec7ccd23f8ad5f5f59ee89b6f5669313b93f86fb26e."
+        }
+      }
+    },
+    {
+      "fingerprint": "61ca638dc49ace507555582bb86579dad5f35ee9f903426a0b54759c38083f3f",
+      "failure_mode": "Public create request chat_id is mistaken for trusted creator provenance and retry automatically adopts the unverified checkout.",
+      "importance": "Checkout ownership and durable retry recovery must not select a foreign or unverified execution root.",
+      "nearest_retained": {
+        "fingerprint": "6fa237cb85be9565d9a7f7bbeb28bdfa57190abce87dc9da1bf98f6f2852f768",
+        "why_insufficient": "Retained privacy failure tests initial creation/unchanged attachment, not detached retry, foreign registry ownership, or request-supplied provenance."
+      },
+      "oracle": "Real tool returns stable engine branch-exists refusal, registry unchanged and session/context unattached; checkout survives.",
+      "prerequisites": "General create_worktree request supplies identical full chat id and default branch, persisted own reference asserted; no trusted creator API used.",
+      "shipping_implementation": "Actual ToolWorktreeCreate, WorktreeService and existing queue resolver; schema-only retained file read test uses original handler.",
+      "determinism": "TempDir isolated Git repositories; no ambient checkout mutation, services, sleeps or credentials.",
+      "layer": "Existing engine library shipping-path fixture.",
+      "why_cheapest": "Extend existing lifecycle scenario and add only two distinct security refusals; no duplicate integration/E2E layer.",
+      "critical": true,
+      "criticality_reason": "Checkout identity/ownership, lifecycle and required durable attachment.",
+      "meaningful_cases": 1,
+      "occurrences": 1,
+      "removed_coverage": "None; existing lifecycle assertions retained.",
+      "author": "background_agent:bgagent-4d903db1-cc13-4a55-9bcc-fd6e4d789637",
+      "reviewer": "background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513",
+      "review_evidence": "Independent reviewer background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513 authenticated actual three intended composite-mutant assertion failures (exit 101), restored five-test pass (exit 0), corrected source hashes and formatting-only service hash change, and approved narrow semantic admission/support impacts. Second-model source review background_agent:bgagent-f0c13d5c-ed31-499d-94e0-762e467a155e accepted ownership/atomic registration design and distinct scenarios. No claim all eligibility disjuncts individually executed or full suite pass from these focused runs.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "ToolWorktreeCreate and recoverable_chat_record/create_worktree production decisions",
+        "before_fix": {
+          "reference": "refact-agent/engine/target/worktree-recovery-evidence/composite-mutant.patch (three simultaneous faults, not isolated mutations)",
+          "fingerprint": "06b3219fdf90a2bab46342814e3a56f6ed05e5b94fa4843090177a83e9a7300c"
+        },
+        "intended_diagnostic": "mutant.log:471 tool unwrap_err received Ok status reattached",
+        "failing": {
+          "command": [
+            "cargo",
+            "test",
+            "--profile",
+            "ci-test",
+            "--lib",
+            "tools::tool_worktree_create::tests",
+            "--",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": "refact-agent/engine/target/worktree-recovery-evidence/mutant.log: 2 passed, 3 intended assertion failures. Composite skips reattach session update, disables foreign-reference predicate, stamps caller-supplied chat_id on generic create; these independent diagnostics are not claimed as isolated mutation runs. Durable authenticated excerpt: worktree_create_recovery_refuses_unverified_request_identity at tool_worktree_create.rs:471: Result::unwrap_err() on Ok tool result status reattached."
+        },
+        "passing": {
+          "command": [
+            "cargo",
+            "test",
+            "--profile",
+            "ci-test",
+            "--lib",
+            "tools::tool_worktree_create::tests",
+            "--",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "evidence": "refact-agent/engine/target/worktree-recovery-evidence/restored.log: all 5 targeted tests passed, 0 failed; witness.json restored_exit=0. Service-only subsequent formatting is line wrapping and optional trailing argument commas, evidenced by format-only.patch and corrected-before-format-service.rs; final full-suite execution of formatted candidate is tracked separately, not asserted by this focused witness. Durable authenticated summary: test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 3650 filtered out. Final service SHA256 5800242151926cd7d199e5025cff6e95f3536258203ea3f5a0bbe63770782114 differs only formatting/trailing argument commas from reviewed 8df34eea5bdba9dbafe34ec7ccd23f8ad5f5f59ee89b6f5669313b93f86fb26e."
+        }
+      }
+    },
+    {
+      "fingerprint": "51d996727d5ef95f0679c06137c94b2b40541f4f14036c69363ef4a7b5d6ad8d",
+      "occurrences": 1,
+      "failure_mode": "Successful destructive self merge strands caller in deleted checkout, or emits disabled instruction before tool results.",
+      "importance": "Destructive checkout lifecycle must preserve exact caller authority, user WIP and usable durable session scope without promoting task/child/foreign executions.",
+      "nearest_retained": {
+        "fingerprint": "d2fa987c43258fb78ff5d08e55012014dce0eb16108410c6ae85adcf9317992b",
+        "why_insufficient": "Nearest same-module retained parser test only checks bool coercion; retained service Git tests do not drive live session/context handoff through the pooled ToolRegistry consumer."
+      },
+      "oracle": "Real dirty checkout squash lands exact bytes while source WIP survives; pooled same-context pause changes goal Active to Paused, future context get_goal runs; only caller detaches, shared child retains missing scope and pooled get_goal refuses; required trajectory worktree absent/null, SSE worktree:null, disabled instruction after manually appended actual tool result.",
+      "prerequisites": "Isolated temporary initialized Git repository with committed tracked file, local Git identity, real registered ordinary-chat checkout, matching live ExecutingTools session and shared abort Arc. Scenario-specific dirty bytes, other checkout, task/child identity or dropped receiver are established before observing the oracle.",
+      "shipping_implementation": "Actual ToolWorktreeMerge, WorktreeService Git merge/removal and live session finalizer; registry-dispatched cases acquire a nonempty TurnToolPool and call execute_tool_with_catalog_and_pool, including ensure_active_root. Cancellation drives actual start_self_merge ownership helper with real service, no copied algorithm.",
+      "determinism": "Unique tempfile/cache/config and local Git only; mutex readiness barrier and actual owned JoinHandle shutdown join for cancellation; no sleeps, provider calls, credentials or ambient repository state.",
+      "layer": "Engine library real local Git + live session shipping tool registry boundary",
+      "why_cheapest": "Service-only tests miss ccx/session/cache/event/persistence wiring; no live engine/browser needed. One physical scenario, no tables/generators or duplicated E2E workload.",
+      "meaningful_cases": 1,
+      "critical": true,
+      "criticality_reason": "Destructive filesystem lifecycle, authority and durable scope integrity require executed sensitivity and restored pass.",
+      "removed_coverage": "None; existing bool parser test unchanged.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "refact-agent/engine/src/tools/tool_worktree_merge.rs::ToolWorktreeMerge / finish_self_merge / start_self_merge",
+        "before_fix": {
+          "reference": "target/worktree-merge-handoff-evidence/mutant-b-pooled.rs",
+          "fingerprint": "c29b5a2bbecc9fecbc6a5c5f9979046756143d1ef8a1a1b01a4bc0b3324d7c58"
+        },
+        "intended_diagnostic": "assertion failed: !session.messages.iter().any(|message| message.tool_call_id == \"worktree_disabled\"); B replaces queue_post_tool_side_effect with add_message and makes owned task return when sender.is_closed(); two intended scenario failures, seven controls pass.",
+        "failing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "REFACT_SKIP_GUI_BUILD=1",
+            "cargo",
+            "test",
+            "--profile",
+            "ci-test",
+            "--lib",
+            "tools::tool_worktree_merge::tests",
+            "--",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": "target/worktree-merge-handoff-evidence/mutant-b-pooled.log SHA256 215d56bacdef55dab388b1a43ed07ba414f338055e1455e9582cb0ca6398d271. Exact-current pooled fixture; assertion failed: !session.messages.iter().any(|message| message.tool_call_id == \"worktree_disabled\"). B replaces queue_post_tool_side_effect with add_message and makes owned task return when sender.is_closed(); two intended scenario failures, seven controls pass."
+        },
+        "passing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "REFACT_SKIP_GUI_BUILD=1",
+            "cargo",
+            "test",
+            "--profile",
+            "ci-test",
+            "--lib",
+            "tools::tool_worktree_merge::tests",
+            "--",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "evidence": "target/worktree-merge-handoff-evidence/restored-pooled-final.log SHA256 6c79773c0ef3edb371c41247a27f4b9c249703f4078584c7e9858d3d7de149e5: nine passed, zero failed, 3.79 seconds. Restored source SHA256 1c874b60be2c211433720cca09cee98d354c01cc9b3f341e152dd747f5f8e687 exactly matches restored-pooled.rs; both current-fixture mutants reverted."
+        }
+      },
+      "author": "background_agent:bgagent-e18f75e0-1a1e-4f1a-877f-2eb141aa235e",
+      "reviewer": "background_agent:bgagent-ea250750-96a7-48b9-9d12-9d960b22934f",
+      "review_evidence": "Independent Sonnet reviewer background_agent:bgagent-ea250750-96a7-48b9-9d12-9d960b22934f authenticated exact current pooled fixture A exit101/eight failures, B exit101/two failures, restored exit0/nine passes; hashes and restored-pooled.rs match current 1c874b60be2c211433720cca09cee98d354c01cc9b3f341e152dd747f5f8e687. Approved eight narrow admissions. Compound scenario sensitivity only, not isolated guard-hunk sensitivity. Cancellation is registered caller-drop before finalizer with joined completion, not exact post-delete timing; ordering manually appends actual registry result and drains shipping side effects, not whole batch executor. Task/admission/background/seal disjunct breadth is source-reviewed, not individually executed. Disabled notice queue is ephemeral; required persisted checkout scope reset is durable."
+    },
+    {
+      "fingerprint": "544938d1bce9ba98d2e161611b7e1bc560ef85400a1846666be7967e04e328e2",
+      "occurrences": 1,
+      "failure_mode": "Merge with delete_after_merge=false incorrectly promotes caller back to project.",
+      "importance": "Destructive checkout lifecycle must preserve exact caller authority, user WIP and usable durable session scope without promoting task/child/foreign executions.",
+      "nearest_retained": {
+        "fingerprint": "d2fa987c43258fb78ff5d08e55012014dce0eb16108410c6ae85adcf9317992b",
+        "why_insufficient": "Nearest same-module retained parser test only checks bool coercion; retained service Git tests do not drive live session/context handoff through the pooled ToolRegistry consumer."
+      },
+      "oracle": "Existing retained checkout root remains and both exact live session/context WorktreeMeta remain unchanged.",
+      "prerequisites": "Isolated temporary initialized Git repository with committed tracked file, local Git identity, real registered ordinary-chat checkout, matching live ExecutingTools session and shared abort Arc. Scenario-specific dirty bytes, other checkout, task/child identity or dropped receiver are established before observing the oracle.",
+      "shipping_implementation": "Actual ToolWorktreeMerge, WorktreeService Git merge/removal and live session finalizer; registry-dispatched cases acquire a nonempty TurnToolPool and call execute_tool_with_catalog_and_pool, including ensure_active_root. Cancellation drives actual start_self_merge ownership helper with real service, no copied algorithm.",
+      "determinism": "Unique tempfile/cache/config and local Git only; mutex readiness barrier and actual owned JoinHandle shutdown join for cancellation; no sleeps, provider calls, credentials or ambient repository state.",
+      "layer": "Engine library real local Git + live session shipping tool registry boundary",
+      "why_cheapest": "Service-only tests miss ccx/session/cache/event/persistence wiring; no live engine/browser needed. One physical scenario, no tables/generators or duplicated E2E workload.",
+      "meaningful_cases": 1,
+      "critical": true,
+      "criticality_reason": "Destructive filesystem lifecycle, authority and durable scope integrity require executed sensitivity and restored pass.",
+      "removed_coverage": "None; existing bool parser test unchanged.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "refact-agent/engine/src/tools/tool_worktree_merge.rs::ToolWorktreeMerge / finish_self_merge / start_self_merge",
+        "before_fix": {
+          "reference": "target/worktree-merge-handoff-evidence/mutant-a-pooled.rs",
+          "fingerprint": "5cb3d260239f4d4b3ad078c433d3c3c30ee5fd0f5eb383436fa89ac46a450811"
+        },
+        "intended_diagnostic": "assertion left None versus right Some(WorktreeMeta) at exact session attachment equality; A removes ordinary-root and registry own-reference gates, selects any active attachment for self merge and inverts finalizer removed eligibility; eight actual scenario failures, parser control passes.",
+        "failing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "REFACT_SKIP_GUI_BUILD=1",
+            "cargo",
+            "test",
+            "--profile",
+            "ci-test",
+            "--lib",
+            "tools::tool_worktree_merge::tests",
+            "--",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": "target/worktree-merge-handoff-evidence/mutant-a-pooled.log SHA256 a0867d7ded05ad86f1354616b2d8d4145b79ccfe68cc05d38c2621dbf41b12ac. Exact-current pooled fixture; assertion left None versus right Some(WorktreeMeta) at exact session attachment equality. A removes ordinary-root and registry own-reference gates, selects any active attachment for self merge and inverts finalizer removed eligibility; eight actual scenario failures, parser control passes."
+        },
+        "passing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "REFACT_SKIP_GUI_BUILD=1",
+            "cargo",
+            "test",
+            "--profile",
+            "ci-test",
+            "--lib",
+            "tools::tool_worktree_merge::tests",
+            "--",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "evidence": "target/worktree-merge-handoff-evidence/restored-pooled-final.log SHA256 6c79773c0ef3edb371c41247a27f4b9c249703f4078584c7e9858d3d7de149e5: nine passed, zero failed, 3.79 seconds. Restored source SHA256 1c874b60be2c211433720cca09cee98d354c01cc9b3f341e152dd747f5f8e687 exactly matches restored-pooled.rs; both current-fixture mutants reverted."
+        }
+      },
+      "author": "background_agent:bgagent-e18f75e0-1a1e-4f1a-877f-2eb141aa235e",
+      "reviewer": "background_agent:bgagent-ea250750-96a7-48b9-9d12-9d960b22934f",
+      "review_evidence": "Independent Sonnet reviewer background_agent:bgagent-ea250750-96a7-48b9-9d12-9d960b22934f authenticated exact current pooled fixture A exit101/eight failures, B exit101/two failures, restored exit0/nine passes; hashes and restored-pooled.rs match current 1c874b60be2c211433720cca09cee98d354c01cc9b3f341e152dd747f5f8e687. Approved eight narrow admissions. Compound scenario sensitivity only, not isolated guard-hunk sensitivity. Cancellation is registered caller-drop before finalizer with joined completion, not exact post-delete timing; ordering manually appends actual registry result and drains shipping side effects, not whole batch executor. Task/admission/background/seal disjunct breadth is source-reviewed, not individually executed. Disabled notice queue is ephemeral; required persisted checkout scope reset is durable."
+    },
+    {
+      "fingerprint": "8846aa6caa15857b6fff46d42236e5b53d277ca48ebba96ca41c51087b6570e2",
+      "occurrences": 1,
+      "failure_mode": "Dirty target refusal incorrectly detaches caller although no checkout was removed.",
+      "importance": "Destructive checkout lifecycle must preserve exact caller authority, user WIP and usable durable session scope without promoting task/child/foreign executions.",
+      "nearest_retained": {
+        "fingerprint": "d2fa987c43258fb78ff5d08e55012014dce0eb16108410c6ae85adcf9317992b",
+        "why_insufficient": "Nearest same-module retained parser test only checks bool coercion; retained service Git tests do not drive live session/context handoff through the pooled ToolRegistry consumer."
+      },
+      "oracle": "Shipping merge result identifies dirty target refusal; checkout exists and session/context exact WorktreeMeta stay attached.",
+      "prerequisites": "Isolated temporary initialized Git repository with committed tracked file, local Git identity, real registered ordinary-chat checkout, matching live ExecutingTools session and shared abort Arc. Scenario-specific dirty bytes, other checkout, task/child identity or dropped receiver are established before observing the oracle.",
+      "shipping_implementation": "Actual ToolWorktreeMerge, WorktreeService Git merge/removal and live session finalizer; registry-dispatched cases acquire a nonempty TurnToolPool and call execute_tool_with_catalog_and_pool, including ensure_active_root. Cancellation drives actual start_self_merge ownership helper with real service, no copied algorithm.",
+      "determinism": "Unique tempfile/cache/config and local Git only; mutex readiness barrier and actual owned JoinHandle shutdown join for cancellation; no sleeps, provider calls, credentials or ambient repository state.",
+      "layer": "Engine library real local Git + live session shipping tool registry boundary",
+      "why_cheapest": "Service-only tests miss ccx/session/cache/event/persistence wiring; no live engine/browser needed. One physical scenario, no tables/generators or duplicated E2E workload.",
+      "meaningful_cases": 1,
+      "critical": true,
+      "criticality_reason": "Destructive filesystem lifecycle, authority and durable scope integrity require executed sensitivity and restored pass.",
+      "removed_coverage": "None; existing bool parser test unchanged.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "refact-agent/engine/src/tools/tool_worktree_merge.rs::ToolWorktreeMerge / finish_self_merge / start_self_merge",
+        "before_fix": {
+          "reference": "target/worktree-merge-handoff-evidence/mutant-a-pooled.rs",
+          "fingerprint": "5cb3d260239f4d4b3ad078c433d3c3c30ee5fd0f5eb383436fa89ac46a450811"
+        },
+        "intended_diagnostic": "assertion left None versus right Some(WorktreeMeta) after real dirty-target refusal; A removes ordinary-root and registry own-reference gates, selects any active attachment for self merge and inverts finalizer removed eligibility; eight actual scenario failures, parser control passes.",
+        "failing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "REFACT_SKIP_GUI_BUILD=1",
+            "cargo",
+            "test",
+            "--profile",
+            "ci-test",
+            "--lib",
+            "tools::tool_worktree_merge::tests",
+            "--",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": "target/worktree-merge-handoff-evidence/mutant-a-pooled.log SHA256 a0867d7ded05ad86f1354616b2d8d4145b79ccfe68cc05d38c2621dbf41b12ac. Exact-current pooled fixture; assertion left None versus right Some(WorktreeMeta) after real dirty-target refusal. A removes ordinary-root and registry own-reference gates, selects any active attachment for self merge and inverts finalizer removed eligibility; eight actual scenario failures, parser control passes."
+        },
+        "passing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "REFACT_SKIP_GUI_BUILD=1",
+            "cargo",
+            "test",
+            "--profile",
+            "ci-test",
+            "--lib",
+            "tools::tool_worktree_merge::tests",
+            "--",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "evidence": "target/worktree-merge-handoff-evidence/restored-pooled-final.log SHA256 6c79773c0ef3edb371c41247a27f4b9c249703f4078584c7e9858d3d7de149e5: nine passed, zero failed, 3.79 seconds. Restored source SHA256 1c874b60be2c211433720cca09cee98d354c01cc9b3f341e152dd747f5f8e687 exactly matches restored-pooled.rs; both current-fixture mutants reverted."
+        }
+      },
+      "author": "background_agent:bgagent-e18f75e0-1a1e-4f1a-877f-2eb141aa235e",
+      "reviewer": "background_agent:bgagent-ea250750-96a7-48b9-9d12-9d960b22934f",
+      "review_evidence": "Independent Sonnet reviewer background_agent:bgagent-ea250750-96a7-48b9-9d12-9d960b22934f authenticated exact current pooled fixture A exit101/eight failures, B exit101/two failures, restored exit0/nine passes; hashes and restored-pooled.rs match current 1c874b60be2c211433720cca09cee98d354c01cc9b3f341e152dd747f5f8e687. Approved eight narrow admissions. Compound scenario sensitivity only, not isolated guard-hunk sensitivity. Cancellation is registered caller-drop before finalizer with joined completion, not exact post-delete timing; ordering manually appends actual registry result and drains shipping side effects, not whole batch executor. Task/admission/background/seal disjunct breadth is source-reviewed, not individually executed. Disabled notice queue is ephemeral; required persisted checkout scope reset is durable."
+    },
+    {
+      "fingerprint": "9cae045e309e22046cbdb865cca668ecfe59aafc1dbb24cfe0723999cae4afc8",
+      "occurrences": 1,
+      "failure_mode": "Merging another checkout clears the current caller attachment.",
+      "importance": "Destructive checkout lifecycle must preserve exact caller authority, user WIP and usable durable session scope without promoting task/child/foreign executions.",
+      "nearest_retained": {
+        "fingerprint": "d2fa987c43258fb78ff5d08e55012014dce0eb16108410c6ae85adcf9317992b",
+        "why_insufficient": "Nearest same-module retained parser test only checks bool coercion; retained service Git tests do not drive live session/context handoff through the pooled ToolRegistry consumer."
+      },
+      "oracle": "Other real registered checkout is removed, own root remains; own exact session/context metadata unchanged.",
+      "prerequisites": "Isolated temporary initialized Git repository with committed tracked file, local Git identity, real registered ordinary-chat checkout, matching live ExecutingTools session and shared abort Arc. Scenario-specific dirty bytes, other checkout, task/child identity or dropped receiver are established before observing the oracle.",
+      "shipping_implementation": "Actual ToolWorktreeMerge, WorktreeService Git merge/removal and live session finalizer; registry-dispatched cases acquire a nonempty TurnToolPool and call execute_tool_with_catalog_and_pool, including ensure_active_root. Cancellation drives actual start_self_merge ownership helper with real service, no copied algorithm.",
+      "determinism": "Unique tempfile/cache/config and local Git only; mutex readiness barrier and actual owned JoinHandle shutdown join for cancellation; no sleeps, provider calls, credentials or ambient repository state.",
+      "layer": "Engine library real local Git + live session shipping tool registry boundary",
+      "why_cheapest": "Service-only tests miss ccx/session/cache/event/persistence wiring; no live engine/browser needed. One physical scenario, no tables/generators or duplicated E2E workload.",
+      "meaningful_cases": 1,
+      "critical": true,
+      "criticality_reason": "Destructive filesystem lifecycle, authority and durable scope integrity require executed sensitivity and restored pass.",
+      "removed_coverage": "None; existing bool parser test unchanged.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "refact-agent/engine/src/tools/tool_worktree_merge.rs::ToolWorktreeMerge / finish_self_merge / start_self_merge",
+        "before_fix": {
+          "reference": "target/worktree-merge-handoff-evidence/mutant-a-pooled.rs",
+          "fingerprint": "5cb3d260239f4d4b3ad078c433d3c3c30ee5fd0f5eb383436fa89ac46a450811"
+        },
+        "intended_diagnostic": "assertion left None versus right Some(WorktreeMeta) after successful foreign cleanup; A removes ordinary-root and registry own-reference gates, selects any active attachment for self merge and inverts finalizer removed eligibility; eight actual scenario failures, parser control passes.",
+        "failing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "REFACT_SKIP_GUI_BUILD=1",
+            "cargo",
+            "test",
+            "--profile",
+            "ci-test",
+            "--lib",
+            "tools::tool_worktree_merge::tests",
+            "--",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": "target/worktree-merge-handoff-evidence/mutant-a-pooled.log SHA256 a0867d7ded05ad86f1354616b2d8d4145b79ccfe68cc05d38c2621dbf41b12ac. Exact-current pooled fixture; assertion left None versus right Some(WorktreeMeta) after successful foreign cleanup. A removes ordinary-root and registry own-reference gates, selects any active attachment for self merge and inverts finalizer removed eligibility; eight actual scenario failures, parser control passes."
+        },
+        "passing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "REFACT_SKIP_GUI_BUILD=1",
+            "cargo",
+            "test",
+            "--profile",
+            "ci-test",
+            "--lib",
+            "tools::tool_worktree_merge::tests",
+            "--",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "evidence": "target/worktree-merge-handoff-evidence/restored-pooled-final.log SHA256 6c79773c0ef3edb371c41247a27f4b9c249703f4078584c7e9858d3d7de149e5: nine passed, zero failed, 3.79 seconds. Restored source SHA256 1c874b60be2c211433720cca09cee98d354c01cc9b3f341e152dd747f5f8e687 exactly matches restored-pooled.rs; both current-fixture mutants reverted."
+        }
+      },
+      "author": "background_agent:bgagent-e18f75e0-1a1e-4f1a-877f-2eb141aa235e",
+      "reviewer": "background_agent:bgagent-ea250750-96a7-48b9-9d12-9d960b22934f",
+      "review_evidence": "Independent Sonnet reviewer background_agent:bgagent-ea250750-96a7-48b9-9d12-9d960b22934f authenticated exact current pooled fixture A exit101/eight failures, B exit101/two failures, restored exit0/nine passes; hashes and restored-pooled.rs match current 1c874b60be2c211433720cca09cee98d354c01cc9b3f341e152dd747f5f8e687. Approved eight narrow admissions. Compound scenario sensitivity only, not isolated guard-hunk sensitivity. Cancellation is registered caller-drop before finalizer with joined completion, not exact post-delete timing; ordering manually appends actual registry result and drains shipping side effects, not whole batch executor. Task/admission/background/seal disjunct breadth is source-reviewed, not individually executed. Disabled notice queue is ephemeral; required persisted checkout scope reset is durable."
+    },
+    {
+      "fingerprint": "bff6b7d382ebac7a0e224c5b723fdd2b54672ff6637b327263202a105a4dab71",
+      "occurrences": 1,
+      "failure_mode": "Child context self merge deletes checkout or promotes child to trusted project.",
+      "importance": "Destructive checkout lifecycle must preserve exact caller authority, user WIP and usable durable session scope without promoting task/child/foreign executions.",
+      "nearest_retained": {
+        "fingerprint": "d2fa987c43258fb78ff5d08e55012014dce0eb16108410c6ae85adcf9317992b",
+        "why_insufficient": "Nearest same-module retained parser test only checks bool coercion; retained service Git tests do not drive live session/context handoff through the pooled ToolRegistry consumer."
+      },
+      "oracle": "Different context root identity returns exact ordinary-root refusal before filesystem deletion; root and both attachments remain.",
+      "prerequisites": "Isolated temporary initialized Git repository with committed tracked file, local Git identity, real registered ordinary-chat checkout, matching live ExecutingTools session and shared abort Arc. Scenario-specific dirty bytes, other checkout, task/child identity or dropped receiver are established before observing the oracle.",
+      "shipping_implementation": "Actual ToolWorktreeMerge, WorktreeService Git merge/removal and live session finalizer; registry-dispatched cases acquire a nonempty TurnToolPool and call execute_tool_with_catalog_and_pool, including ensure_active_root. Cancellation drives actual start_self_merge ownership helper with real service, no copied algorithm.",
+      "determinism": "Unique tempfile/cache/config and local Git only; mutex readiness barrier and actual owned JoinHandle shutdown join for cancellation; no sleeps, provider calls, credentials or ambient repository state.",
+      "layer": "Engine library real local Git + live session shipping tool registry boundary",
+      "why_cheapest": "Service-only tests miss ccx/session/cache/event/persistence wiring; no live engine/browser needed. One physical scenario, no tables/generators or duplicated E2E workload.",
+      "meaningful_cases": 1,
+      "critical": true,
+      "criticality_reason": "Destructive filesystem lifecycle, authority and durable scope integrity require executed sensitivity and restored pass.",
+      "removed_coverage": "None; existing bool parser test unchanged.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "refact-agent/engine/src/tools/tool_worktree_merge.rs::ToolWorktreeMerge / finish_self_merge / start_self_merge",
+        "before_fix": {
+          "reference": "target/worktree-merge-handoff-evidence/mutant-a-pooled.rs",
+          "fingerprint": "5cb3d260239f4d4b3ad078c433d3c3c30ee5fd0f5eb383436fa89ac46a450811"
+        },
+        "intended_diagnostic": "child must be refused (tool unexpectedly succeeded); A removes ordinary-root and registry own-reference gates, selects any active attachment for self merge and inverts finalizer removed eligibility; eight actual scenario failures, parser control passes.",
+        "failing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "REFACT_SKIP_GUI_BUILD=1",
+            "cargo",
+            "test",
+            "--profile",
+            "ci-test",
+            "--lib",
+            "tools::tool_worktree_merge::tests",
+            "--",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": "target/worktree-merge-handoff-evidence/mutant-a-pooled.log SHA256 a0867d7ded05ad86f1354616b2d8d4145b79ccfe68cc05d38c2621dbf41b12ac. Exact-current pooled fixture; child must be refused (tool unexpectedly succeeded). A removes ordinary-root and registry own-reference gates, selects any active attachment for self merge and inverts finalizer removed eligibility; eight actual scenario failures, parser control passes."
+        },
+        "passing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "REFACT_SKIP_GUI_BUILD=1",
+            "cargo",
+            "test",
+            "--profile",
+            "ci-test",
+            "--lib",
+            "tools::tool_worktree_merge::tests",
+            "--",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "evidence": "target/worktree-merge-handoff-evidence/restored-pooled-final.log SHA256 6c79773c0ef3edb371c41247a27f4b9c249703f4078584c7e9858d3d7de149e5: nine passed, zero failed, 3.79 seconds. Restored source SHA256 1c874b60be2c211433720cca09cee98d354c01cc9b3f341e152dd747f5f8e687 exactly matches restored-pooled.rs; both current-fixture mutants reverted."
+        }
+      },
+      "author": "background_agent:bgagent-e18f75e0-1a1e-4f1a-877f-2eb141aa235e",
+      "reviewer": "background_agent:bgagent-ea250750-96a7-48b9-9d12-9d960b22934f",
+      "review_evidence": "Independent Sonnet reviewer background_agent:bgagent-ea250750-96a7-48b9-9d12-9d960b22934f authenticated exact current pooled fixture A exit101/eight failures, B exit101/two failures, restored exit0/nine passes; hashes and restored-pooled.rs match current 1c874b60be2c211433720cca09cee98d354c01cc9b3f341e152dd747f5f8e687. Approved eight narrow admissions. Compound scenario sensitivity only, not isolated guard-hunk sensitivity. Cancellation is registered caller-drop before finalizer with joined completion, not exact post-delete timing; ordering manually appends actual registry result and drains shipping side effects, not whole batch executor. Task/admission/background/seal disjunct breadth is source-reviewed, not individually executed. Disabled notice queue is ephemeral; required persisted checkout scope reset is durable."
+    },
+    {
+      "fingerprint": "936b91e1eaa64e077cfef92c2973ec42819d664df62aa8051d5ac1d582bfaf2c",
+      "occurrences": 1,
+      "failure_mode": "Successful nothing-to-merge cleanup leaves stale deleted attachment.",
+      "importance": "Destructive checkout lifecycle must preserve exact caller authority, user WIP and usable durable session scope without promoting task/child/foreign executions.",
+      "nearest_retained": {
+        "fingerprint": "d2fa987c43258fb78ff5d08e55012014dce0eb16108410c6ae85adcf9317992b",
+        "why_insufficient": "Nearest same-module retained parser test only checks bool coercion; retained service Git tests do not drive live session/context handoff through the pooled ToolRegistry consumer."
+      },
+      "oracle": "Real nothing-to-merge result removes checkout and clears both live session and execution scope.",
+      "prerequisites": "Isolated temporary initialized Git repository with committed tracked file, local Git identity, real registered ordinary-chat checkout, matching live ExecutingTools session and shared abort Arc. Scenario-specific dirty bytes, other checkout, task/child identity or dropped receiver are established before observing the oracle.",
+      "shipping_implementation": "Actual ToolWorktreeMerge, WorktreeService Git merge/removal and live session finalizer; registry-dispatched cases acquire a nonempty TurnToolPool and call execute_tool_with_catalog_and_pool, including ensure_active_root. Cancellation drives actual start_self_merge ownership helper with real service, no copied algorithm.",
+      "determinism": "Unique tempfile/cache/config and local Git only; mutex readiness barrier and actual owned JoinHandle shutdown join for cancellation; no sleeps, provider calls, credentials or ambient repository state.",
+      "layer": "Engine library real local Git + live session shipping tool registry boundary",
+      "why_cheapest": "Service-only tests miss ccx/session/cache/event/persistence wiring; no live engine/browser needed. One physical scenario, no tables/generators or duplicated E2E workload.",
+      "meaningful_cases": 1,
+      "critical": true,
+      "criticality_reason": "Destructive filesystem lifecycle, authority and durable scope integrity require executed sensitivity and restored pass.",
+      "removed_coverage": "None; existing bool parser test unchanged.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "refact-agent/engine/src/tools/tool_worktree_merge.rs::ToolWorktreeMerge / finish_self_merge / start_self_merge",
+        "before_fix": {
+          "reference": "target/worktree-merge-handoff-evidence/mutant-a-pooled.rs",
+          "fingerprint": "5cb3d260239f4d4b3ad078c433d3c3c30ee5fd0f5eb383436fa89ac46a450811"
+        },
+        "intended_diagnostic": "assertion failed: session.lock().await.thread.worktree.is_none() after genuine no-op removal; A removes ordinary-root and registry own-reference gates, selects any active attachment for self merge and inverts finalizer removed eligibility; eight actual scenario failures, parser control passes.",
+        "failing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "REFACT_SKIP_GUI_BUILD=1",
+            "cargo",
+            "test",
+            "--profile",
+            "ci-test",
+            "--lib",
+            "tools::tool_worktree_merge::tests",
+            "--",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": "target/worktree-merge-handoff-evidence/mutant-a-pooled.log SHA256 a0867d7ded05ad86f1354616b2d8d4145b79ccfe68cc05d38c2621dbf41b12ac. Exact-current pooled fixture; assertion failed: session.lock().await.thread.worktree.is_none() after genuine no-op removal. A removes ordinary-root and registry own-reference gates, selects any active attachment for self merge and inverts finalizer removed eligibility; eight actual scenario failures, parser control passes."
+        },
+        "passing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "REFACT_SKIP_GUI_BUILD=1",
+            "cargo",
+            "test",
+            "--profile",
+            "ci-test",
+            "--lib",
+            "tools::tool_worktree_merge::tests",
+            "--",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "evidence": "target/worktree-merge-handoff-evidence/restored-pooled-final.log SHA256 6c79773c0ef3edb371c41247a27f4b9c249703f4078584c7e9858d3d7de149e5: nine passed, zero failed, 3.79 seconds. Restored source SHA256 1c874b60be2c211433720cca09cee98d354c01cc9b3f341e152dd747f5f8e687 exactly matches restored-pooled.rs; both current-fixture mutants reverted."
+        }
+      },
+      "author": "background_agent:bgagent-e18f75e0-1a1e-4f1a-877f-2eb141aa235e",
+      "reviewer": "background_agent:bgagent-ea250750-96a7-48b9-9d12-9d960b22934f",
+      "review_evidence": "Independent Sonnet reviewer background_agent:bgagent-ea250750-96a7-48b9-9d12-9d960b22934f authenticated exact current pooled fixture A exit101/eight failures, B exit101/two failures, restored exit0/nine passes; hashes and restored-pooled.rs match current 1c874b60be2c211433720cca09cee98d354c01cc9b3f341e152dd747f5f8e687. Approved eight narrow admissions. Compound scenario sensitivity only, not isolated guard-hunk sensitivity. Cancellation is registered caller-drop before finalizer with joined completion, not exact post-delete timing; ordering manually appends actual registry result and drains shipping side effects, not whole batch executor. Task/admission/background/seal disjunct breadth is source-reviewed, not individually executed. Disabled notice queue is ephemeral; required persisted checkout scope reset is durable."
+    },
+    {
+      "fingerprint": "f16c91ad95024ba7132e45e317a727fc53e6564f577c5ee61ae6bba21b7d105a",
+      "occurrences": 1,
+      "failure_mode": "Task-owned session self merge bypasses root-only handoff authority.",
+      "importance": "Destructive checkout lifecycle must preserve exact caller authority, user WIP and usable durable session scope without promoting task/child/foreign executions.",
+      "nearest_retained": {
+        "fingerprint": "d2fa987c43258fb78ff5d08e55012014dce0eb16108410c6ae85adcf9317992b",
+        "why_insufficient": "Nearest same-module retained parser test only checks bool coercion; retained service Git tests do not drive live session/context handoff through the pooled ToolRegistry consumer."
+      },
+      "oracle": "Session task metadata produces exact ordinary-root refusal before checkout deletion; both attachments remain.",
+      "prerequisites": "Isolated temporary initialized Git repository with committed tracked file, local Git identity, real registered ordinary-chat checkout, matching live ExecutingTools session and shared abort Arc. Scenario-specific dirty bytes, other checkout, task/child identity or dropped receiver are established before observing the oracle.",
+      "shipping_implementation": "Actual ToolWorktreeMerge, WorktreeService Git merge/removal and live session finalizer; registry-dispatched cases acquire a nonempty TurnToolPool and call execute_tool_with_catalog_and_pool, including ensure_active_root. Cancellation drives actual start_self_merge ownership helper with real service, no copied algorithm.",
+      "determinism": "Unique tempfile/cache/config and local Git only; mutex readiness barrier and actual owned JoinHandle shutdown join for cancellation; no sleeps, provider calls, credentials or ambient repository state.",
+      "layer": "Engine library real local Git + live session shipping tool registry boundary",
+      "why_cheapest": "Service-only tests miss ccx/session/cache/event/persistence wiring; no live engine/browser needed. One physical scenario, no tables/generators or duplicated E2E workload.",
+      "meaningful_cases": 1,
+      "critical": true,
+      "criticality_reason": "Destructive filesystem lifecycle, authority and durable scope integrity require executed sensitivity and restored pass.",
+      "removed_coverage": "None; existing bool parser test unchanged.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "refact-agent/engine/src/tools/tool_worktree_merge.rs::ToolWorktreeMerge / finish_self_merge / start_self_merge",
+        "before_fix": {
+          "reference": "target/worktree-merge-handoff-evidence/mutant-a-pooled.rs",
+          "fingerprint": "5cb3d260239f4d4b3ad078c433d3c3c30ee5fd0f5eb383436fa89ac46a450811"
+        },
+        "intended_diagnostic": "task must be refused (tool unexpectedly succeeded); A removes ordinary-root and registry own-reference gates, selects any active attachment for self merge and inverts finalizer removed eligibility; eight actual scenario failures, parser control passes.",
+        "failing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "REFACT_SKIP_GUI_BUILD=1",
+            "cargo",
+            "test",
+            "--profile",
+            "ci-test",
+            "--lib",
+            "tools::tool_worktree_merge::tests",
+            "--",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": "target/worktree-merge-handoff-evidence/mutant-a-pooled.log SHA256 a0867d7ded05ad86f1354616b2d8d4145b79ccfe68cc05d38c2621dbf41b12ac. Exact-current pooled fixture; task must be refused (tool unexpectedly succeeded). A removes ordinary-root and registry own-reference gates, selects any active attachment for self merge and inverts finalizer removed eligibility; eight actual scenario failures, parser control passes."
+        },
+        "passing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "REFACT_SKIP_GUI_BUILD=1",
+            "cargo",
+            "test",
+            "--profile",
+            "ci-test",
+            "--lib",
+            "tools::tool_worktree_merge::tests",
+            "--",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "evidence": "target/worktree-merge-handoff-evidence/restored-pooled-final.log SHA256 6c79773c0ef3edb371c41247a27f4b9c249703f4078584c7e9858d3d7de149e5: nine passed, zero failed, 3.79 seconds. Restored source SHA256 1c874b60be2c211433720cca09cee98d354c01cc9b3f341e152dd747f5f8e687 exactly matches restored-pooled.rs; both current-fixture mutants reverted."
+        }
+      },
+      "author": "background_agent:bgagent-e18f75e0-1a1e-4f1a-877f-2eb141aa235e",
+      "reviewer": "background_agent:bgagent-ea250750-96a7-48b9-9d12-9d960b22934f",
+      "review_evidence": "Independent Sonnet reviewer background_agent:bgagent-ea250750-96a7-48b9-9d12-9d960b22934f authenticated exact current pooled fixture A exit101/eight failures, B exit101/two failures, restored exit0/nine passes; hashes and restored-pooled.rs match current 1c874b60be2c211433720cca09cee98d354c01cc9b3f341e152dd747f5f8e687. Approved eight narrow admissions. Compound scenario sensitivity only, not isolated guard-hunk sensitivity. Cancellation is registered caller-drop before finalizer with joined completion, not exact post-delete timing; ordering manually appends actual registry result and drains shipping side effects, not whole batch executor. Task/admission/background/seal disjunct breadth is source-reviewed, not individually executed. Disabled notice queue is ephemeral; required persisted checkout scope reset is durable."
+    },
+    {
+      "fingerprint": "fa9a14e8d2e556477918a3c242e07553ce5ec45866064633be33400b08c18752",
+      "occurrences": 1,
+      "failure_mode": "Dropping caller response cancels irreversible owned cleanup/finalization.",
+      "importance": "Destructive checkout lifecycle must preserve exact caller authority, user WIP and usable durable session scope without promoting task/child/foreign executions.",
+      "nearest_retained": {
+        "fingerprint": "d2fa987c43258fb78ff5d08e55012014dce0eb16108410c6ae85adcf9317992b",
+        "why_insufficient": "Nearest same-module retained parser test only checks bool coercion; retained service Git tests do not drive live session/context handoff through the pooled ToolRegistry consumer."
+      },
+      "oracle": "Actual registered owned task with transition lock survives dropped oneshot receiver, same-execution abort/Idle, and registry shutdown join; checkout removed, both scopes cleared, required trajectory null persisted.",
+      "prerequisites": "Isolated temporary initialized Git repository with committed tracked file, local Git identity, real registered ordinary-chat checkout, matching live ExecutingTools session and shared abort Arc. Scenario-specific dirty bytes, other checkout, task/child identity or dropped receiver are established before observing the oracle.",
+      "shipping_implementation": "Actual ToolWorktreeMerge, WorktreeService Git merge/removal and live session finalizer; registry-dispatched cases acquire a nonempty TurnToolPool and call execute_tool_with_catalog_and_pool, including ensure_active_root. Cancellation drives actual start_self_merge ownership helper with real service, no copied algorithm.",
+      "determinism": "Unique tempfile/cache/config and local Git only; mutex readiness barrier and actual owned JoinHandle shutdown join for cancellation; no sleeps, provider calls, credentials or ambient repository state.",
+      "layer": "Engine library real local Git + live session shipping tool registry boundary",
+      "why_cheapest": "Service-only tests miss ccx/session/cache/event/persistence wiring; no live engine/browser needed. One physical scenario, no tables/generators or duplicated E2E workload.",
+      "meaningful_cases": 1,
+      "critical": true,
+      "criticality_reason": "Destructive filesystem lifecycle, authority and durable scope integrity require executed sensitivity and restored pass.",
+      "removed_coverage": "None; existing bool parser test unchanged.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "refact-agent/engine/src/tools/tool_worktree_merge.rs::ToolWorktreeMerge / finish_self_merge / start_self_merge",
+        "before_fix": {
+          "reference": "target/worktree-merge-handoff-evidence/mutant-b-pooled.rs",
+          "fingerprint": "c29b5a2bbecc9fecbc6a5c5f9979046756143d1ef8a1a1b01a4bc0b3324d7c58"
+        },
+        "intended_diagnostic": "assertion failed: !worktree.root.exists() after dropped receiver and actual owned task join; B replaces queue_post_tool_side_effect with add_message and makes owned task return when sender.is_closed(); two intended scenario failures, seven controls pass.",
+        "failing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "REFACT_SKIP_GUI_BUILD=1",
+            "cargo",
+            "test",
+            "--profile",
+            "ci-test",
+            "--lib",
+            "tools::tool_worktree_merge::tests",
+            "--",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": "target/worktree-merge-handoff-evidence/mutant-b-pooled.log SHA256 215d56bacdef55dab388b1a43ed07ba414f338055e1455e9582cb0ca6398d271. Exact-current pooled fixture; assertion failed: !worktree.root.exists() after dropped receiver and actual owned task join. B replaces queue_post_tool_side_effect with add_message and makes owned task return when sender.is_closed(); two intended scenario failures, seven controls pass."
+        },
+        "passing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "REFACT_SKIP_GUI_BUILD=1",
+            "cargo",
+            "test",
+            "--profile",
+            "ci-test",
+            "--lib",
+            "tools::tool_worktree_merge::tests",
+            "--",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "evidence": "target/worktree-merge-handoff-evidence/restored-pooled-final.log SHA256 6c79773c0ef3edb371c41247a27f4b9c249703f4078584c7e9858d3d7de149e5: nine passed, zero failed, 3.79 seconds. Restored source SHA256 1c874b60be2c211433720cca09cee98d354c01cc9b3f341e152dd747f5f8e687 exactly matches restored-pooled.rs; both current-fixture mutants reverted."
+        }
+      },
+      "author": "background_agent:bgagent-e18f75e0-1a1e-4f1a-877f-2eb141aa235e",
+      "reviewer": "background_agent:bgagent-ea250750-96a7-48b9-9d12-9d960b22934f",
+      "review_evidence": "Independent Sonnet reviewer background_agent:bgagent-ea250750-96a7-48b9-9d12-9d960b22934f authenticated exact current pooled fixture A exit101/eight failures, B exit101/two failures, restored exit0/nine passes; hashes and restored-pooled.rs match current 1c874b60be2c211433720cca09cee98d354c01cc9b3f341e152dd747f5f8e687. Approved eight narrow admissions. Compound scenario sensitivity only, not isolated guard-hunk sensitivity. Cancellation is registered caller-drop before finalizer with joined completion, not exact post-delete timing; ordering manually appends actual registry result and drains shipping side effects, not whole batch executor. Task/admission/background/seal disjunct breadth is source-reviewed, not individually executed. Disabled notice queue is ephemeral; required persisted checkout scope reset is durable."
     }
   ],
   "classifications": [
@@ -6478,18 +7214,6 @@
       }
     },
     {
-      "path": "refact-agent/engine/crates/refact-worktrees/src/types.rs",
-      "before_sha256": "31e74c64025de0a66efcd205216f7d3a631dab3247c8beecee634ea930d01f7e",
-      "after_sha256": "0ef716ccc29825e939b8f50810ef9d409792dc8d77ccdab56ff013f63a3ac727",
-      "affected_tests": [],
-      "impact": "refact-agent/engine/crates/refact-worktrees/src/types.rs: canonical non-test residue changes remove 141 tokens and add 0 tokens. Cleanup evidence identifies sample_worktree_meta. 12787\u21926186 global lexical definitions includes intentional coverage loss from case deletions; this support record does not claim strict duplication.",
-      "execution_context": "Same physical Rust path; no retained fingerprint/context relocation relative pinned main. Test-only ownership: inline cfg(test) modules or explicitly cfg(test) helper items; tests/ and *_tests.rs are test harness/module support. Removed dead helper/import/module scaffolding has no surviving intended executing consumer; conservative affected mapping lists surviving same-file tests for dependency review, not a claim all call deleted helpers. See exact residue token hunks and cleanup evidence references.",
-      "author": "support-impact-author-bgagent-1fd43f09",
-      "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
-      "review_evidence": "Independent source/hash review: refact-agent/engine/crates/refact-worktrees/src/types.rs: reviewed removal of sample_worktree_meta, tests within explicit cfg(test) items/modules. No current same-path physical case remains. Removed all-CUT import/helper/module declarations have no retained executing consumer; preserved production APIs are not being declared unused.",
-      "no_tests_reason": "No current Rust test definitions remain at this path; actual diff removes all-CUT test-only scaffolding/dead helpers or imports, not a retained executable fixture. No production deletion is authorized by this record."
-    },
-    {
       "path": "refact-agent/engine/crates/refact-yaml-configs/src/customization_types.rs",
       "before_sha256": "5aacf6b2eeb398d5446e42402144ed3475769466f1c00db7a382e805e9925861",
       "after_sha256": "9c1e4c57f454d631b5225b43b512d4bc1569957a9fbd56a169d0e3af9725c9b5",
@@ -9771,19 +10495,6 @@
       "no_tests_reason": "No current Rust test definitions remain at this path; actual diff removes all-CUT test-only scaffolding/dead helpers or imports, not a retained executable fixture. No production deletion is authorized by this record."
     },
     {
-      "path": "refact-agent/engine/src/tools/tool_worktree_merge.rs",
-      "before_sha256": "a17c44a8d1b185f394b2ac42f7023bb90639da0c1ac4829feb6a196f05cbe90b",
-      "after_sha256": "148814459bc3bb6fce5acd472b9299515ec3d6a5781df164f0d792c1f46b615c",
-      "affected_tests": [
-        "d2fa987c43258fb78ff5d08e55012014dce0eb16108410c6ae85adcf9317992b"
-      ],
-      "impact": "refact-agent/engine/src/tools/tool_worktree_merge.rs: canonical non-test residue changes remove 270 tokens and add 0 tokens. Cleanup evidence identifies merged_response_with_warning; dirty_baseline_response; merged_response_with_cleanup_warning. 12787\u21926186 global lexical definitions includes intentional coverage loss from case deletions; this support record does not claim strict duplication.",
-      "execution_context": "Same physical Rust path; no retained fingerprint/context relocation relative pinned main. Test-only ownership: inline cfg(test) modules or explicitly cfg(test) helper items; tests/ and *_tests.rs are test harness/module support. Removed dead helper/import/module scaffolding has no surviving intended executing consumer; conservative affected mapping lists surviving same-file tests for dependency review, not a claim all call deleted helpers. See exact residue token hunks and cleanup evidence references.",
-      "author": "support-impact-author-bgagent-1fd43f09",
-      "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
-      "review_evidence": "Independent source/hash review: refact-agent/engine/src/tools/tool_worktree_merge.rs: reviewed removal of merged_response_with_warning, dirty_baseline_response, merged_response_with_cleanup_warning within explicit cfg(test) items/modules. 1 actual same-path retained cases keep complete attributed canonical body and enclosing-context hash against pinned MAIN. Conservative affected map contains exactly those current fingerprints."
-    },
-    {
       "path": "refact-agent/engine/src/tools/tools_description.rs",
       "before_sha256": "268a500746440c6f3200f1cb122e628ab9124ebbfa04ee0688c506ed959e031e",
       "after_sha256": "be105b804b08377ecca29c09fc66552fd34fa61af6aec2b5d9ad50f6287a57e0",
@@ -10264,36 +10975,6 @@
       "author": "chat:490caf4d-da9e-4d52-bc18-6f194a7da06c",
       "reviewer": "background_agent:bgagent-c33999e7-e460-4fb0-b263-0674a217858e",
       "review_evidence": "Independent final review subchat-4c715d09-85e2-49a5-9acd-3415f9ddc04a approved all six support mappings after source/body/evidence inspection and checking matching source manifests and recorded after hashes. Earlier source review subchat-7a144338-a6d2-423d-9639-0d25a3668a67. Stable-ID pause anchoring remains source-reviewed, not a new e2e resume guarantee."
-    },
-    {
-      "path": "refact-agent/engine/src/http/routers/v1/files.rs",
-      "before_sha256": "4e0e895be8bf5aff3fd6dde4f18be176fb11764b42d470e4876b6ff1fc0019b6",
-      "after_sha256": "a5f89c54f95472e245c1bb6df133096870dfc6e0ece62d6765ea1bf48920db3e",
-      "affected_tests": [
-        "06fcad04ee53453beda4311781c30bbbadd3c76233ccb683faf12aeabd88f979",
-        "2692c2eac8cba8b6043b2298227358aa9fb906ca0043374e3b114b2ce59c6167",
-        "2a1ab390621f6dfb128619779e2db95c7ea4b95ca87279f19946362324d3cf06",
-        "2f838a0ba58815671cd0f92d238436baa0d8b6b412152fd040c952f016e2fedd",
-        "403ab90f5cb5704e5f1790d009286bc2e772bf0e811ab514dffc5e69ec184d37",
-        "48e0fd4c552dd15ad4fd124e0be9d4d6cefd63e953a38ab1ece07f617693da2c",
-        "4a0e92fcd5952671156fb24af62700024d6f5188a1334431e47cc6c09afcf835",
-        "4dea238f3966c30b7bc135b30b2f415816d59745f3ee085765afee8ed0167198",
-        "62a61c91ab485c0b2eea8dac1ee9de0425fd4ea883b14f17272223b3383b47c1",
-        "6bc9a4ce5244d08e66439fe866eb567988c92e2793e1c15577a14c17afa2e3ef",
-        "81315c6bd2911146b84cf6a18aac672438e56cd42dd9adbe3bd400bc243c9208",
-        "9a2da9e778f056cc70fce5db29d3e0ed80a85fa7ebdd5fdc3d01c25bd2648ea6",
-        "9e3e50a01d14ac666d03a9d1a4cbf9a0b43b55f01077fc9c51becbd2a27db78d",
-        "a57005a1c4f3628bc019739111db149d1ce84617ad52020969efd49d1a24de1b",
-        "a658f1062d67e6fb29028b2b215cac729dadc3024f8f14026fe7d168cee077d3",
-        "b4089cb682155d2f458f95a242e0571912de0372238ebe4f2aeec89b49cd112a",
-        "c80e30c2fac4d66be12be0e8b43c9bcc2234fb5ee0b78cf7113e96dd818d336e",
-        "d450e5befc8d91616ec16be14a24bb9e20a0624a7bd4a9d7edd71ecb32e07c48"
-      ],
-      "impact": "read_file_core rewritten as bounded streaming reader used by /read and /open; /read sets can_edit true; slice_lines removed; new /open handler + origin gate.",
-      "execution_context": ".refact/evidence/files-open/restored-pass.log: 18/18 files::tests EXIT=0 on a5f89c54..., REFACT_SKIP_GUI_BUILD=1 RUST_MIN_STACK=16777216 dev profile own worktree target.",
-      "author": "background_agent:bgagent-67af796a-7c9a-4bfc-be7f-22e917e92a11",
-      "reviewer": "background_agent:bgagent-b56c0599-11eb-447c-98c3-30724ea18d7c",
-      "review_evidence": "Independent semantic approval subchat-4c507335-a609-4d1a-98c1-9082ef0796bf: verified current/baseline body fingerprints, nearest retained references, real nonvacuous router fixtures, cheapest layer, 8/4/3/3 current scenarios, all four compiled semantic mutant EXIT101 assertion failures and restored 18/18 EXIT0; verified final-files/current hashes and combined-mutant.patch ce39a52965572e5b2ccb8f3715d2256e65d74dee7e670d37ff1dff599ffc970e. Real requested-alias before-fix failure separately verified. Witness claims limited to reached assertions, not independent SVG/FIFO/can_edit/late-range mutations. Parent final cargo check exited0; full lib3677 pass2 unchanged verifier failures11ignored, failed tests rerun isolated pass. Router shared-layers test passed in full lib run."
     },
     {
       "path": "refact-agent/engine/src/http/routers/v1.rs",
@@ -11051,21 +11732,6 @@
       "review_evidence": "Read exact baseline diff, full test, predicate and postprocess selection caller. Ordinary removal-only maintenance."
     },
     {
-      "path": "refact-agent/engine/src/tools/tool_worktree_create.rs",
-      "before_sha256": null,
-      "after_sha256": "c44bba444d4c9bf9281970eddcd5dbf6cfff5295861ba843b28ec95ab37d5fed",
-      "affected_tests": [
-        "36f42119424520746f299cd88e4a8b4940df61714068fdc50e8fe9c0b38bcca3",
-        "3b14ca5b64d02b1797755cbd9ff9e44db9e783818ea174076b537e662999f41d",
-        "6fa237cb85be9565d9a7f7bbeb28bdfa57190abce87dc9da1bf98f6f2852f768"
-      ],
-      "impact": "New production tool and its three in-module tests (admitted separately).",
-      "execution_context": "Same module #[cfg(test)]; declared via tools/mod.rs.",
-      "author": "parent: worktree_create root-chat tool feature",
-      "reviewer": "background_agent: ledger-finalizer subagent of parent (independent of production author; own id not self-visible)",
-      "review_evidence": "Independent read of exact diff vs base 87e9902492eef2dad02005e069ca0b4131bff54e and affected test bodies; hashes computed from pinned base and current worktree files."
-    },
-    {
       "path": "refact-agent/engine/src/chat/worktree_lifecycle.rs",
       "before_sha256": "bbc022c09ae256db857827a87889f76af15e415e8ae0243208c1ded1a79843e9",
       "after_sha256": "ba61f0e0e51d327a6d9afbead76efc53b41f52a136dbe68da09c40130a7a7dd0",
@@ -11260,37 +11926,6 @@
       "reviewer": "background_agent: ledger-finalizer subagent of parent (independent of production author; own id not self-visible)",
       "review_evidence": "Independent read of exact diff vs base 87e9902492eef2dad02005e069ca0b4131bff54e and affected test bodies; hashes computed from pinned base and current worktree files.",
       "no_tests_reason": "grep finds no Rust reference to review_commands after removal; no retained test parses that section."
-    },
-    {
-      "path": "refact-agent/engine/src/chat/queue.rs",
-      "before_sha256": "8d18a9dcf2a4913ef75fc5158f11f1add442b1653f3a569bc3a936b7a10bc29a",
-      "after_sha256": "f30d9533839b246f06d679485a1de2799a4675f2625c10d861fc32657199e048",
-      "affected_tests": [
-        "e4c5ed8c3e9d19f351030ed992d1c9659e5dbb61271659ea36a4dff683cddba0",
-        "a292120e33406ffbfe5ed92925a9235b63f763d23a3ec0cfeb7af6a18a4b0d9a",
-        "3f5626bb342e0a780a4ff926bf150ff2477366b078b08fd470b9e14d075e7d73",
-        "6096f28d4843168d8234ae56e5c08d3432e0ab079d2331b7e295e1c09b9c93a8"
-      ],
-      "impact": "Authority rejects ambiguous id/object fields, task roles/kind, task ownership replacement and tracked task admission; ordinary caller cannot attach task_agent target. Existing retained registry fixtures extended with full Paused-state refusals, selected-reference detach and genuine canonical mode/model positive controls. Six cfg(test) constant qualifiers corrected; no shipping qualifier change.",
-      "execution_context": "Real registry/resolver and queued tests; shared HTTP authority consumer.",
-      "author": "task agent-WT-HOTFIX-FINAL-49f55167 data-only proposal for inherited hotfix impact",
-      "reviewer": "background_agent:bgagent-2cbaabd0-8198-4f47-9c66-821ae3e54a44",
-      "review_evidence": "Actual independent semantic source/mapping/nearest review reported and authorized by planner; WT-HOTFIX-FINAL card comment2031ebbb-a02f-4adc-ad40-1099c04d014a. Parent crosschecked raw Git base2b5/head a380 file hashes. Root library actual3642 passed0failed11ignored under admitted normal CA; three mutant/restored exact witnesses authenticated in artifact85e8f373. Witnesses narrowly cover current task-kind, queued resolver Idle reset and helper task_meta; shared HTTP helper/resolver coverage is indirect, no dedicated HTTP await-race failure witness. Historical tool combined-mutant provenance and rerun limitations remain unchanged. Reviewer did not execute tests."
-    },
-    {
-      "path": "refact-agent/engine/crates/refact-worktrees/src/service.rs",
-      "before_sha256": "8ce7a9d7690ac9a97f2e9e9d03d8ae0624e419fe2f1f9cf788459aa1b8e1fb02",
-      "after_sha256": "55a3c7b21b348345ce16f13e87669f90f216c37bc9af8df2364bc41779274f3b",
-      "affected_tests": [
-        "396c9cf5c9192fe40ab5168319457a298a446ef0763daca31c4f3ccf359660b1",
-        "3dedb1ee6a18b9e009156347f9a8062f322d8d947d5f7a514b3191575c7478e4",
-        "fd92c77a590115143a925684fcf46cf658ea7c7355ae3589beb0a4b7525cc512"
-      ],
-      "impact": "List path: git2 repository validation replaces 3 rev-parse subprocesses per record. Pruning is rate-limited (60 s, forced when a record path is missing) and takes the write lock only when it removes records. Per-record work runs with bounded parallelism (8). A per-registry single-flight cache (2 s TTL plus a generation bumped on save/create/delete/merge/cleanup) and list_worktrees_with_branches are added. Security semantics are unchanged; executed common-dir comparison mutant: .refact/evidence/w3/mutant_commondir.patch d39fe638... failed both unrelated-repo tests (EXIT 101), restored passes.",
-      "execution_context": "cargo test -p refact-worktrees (61 passed) and cargo test --lib with RUST_MIN_STACK=16777216 in the W3 worktree.",
-      "author": "background_agent:bgagent-w3-worktrees-list",
-      "reviewer": "background_agent:parent-w3-review-pending",
-      "review_evidence": "Self-checked by author; executed mutant witnesses stored under .refact/evidence/w3 (gitignored, local). Independent semantic review still required by repository protections; the review tool could not run (snapshot exceeded configured limits)."
     },
     {
       "path": "refact-agent/engine/src/tools/tool_background_agents.rs",
@@ -11855,6 +12490,329 @@
       "author": "background_agent:bgagent-61493284-67af-418b-908a-aa34fc854759 (ledger preparation)",
       "reviewer": "background_agent:bgagent-adaeddf1-8f7e-43c2-8222-00c7b5c1beba (source review only)",
       "review_evidence": "Source review subchat-b5ed3883-90be-441b-a9ee-4a950c547ebb accepted unchanged-default mechanical edits and production/test relevance contingent on actual critical red/green witness. This is not witness evidence or final ledger approval; parent independent ledger review remains pending."
+    },
+    {
+      "path": "refact-agent/engine/crates/refact-worktrees/src/service.rs",
+      "before_sha256": "55a3c7b21b348345ce16f13e87669f90f216c37bc9af8df2364bc41779274f3b",
+      "after_sha256": "5800242151926cd7d199e5025cff6e95f3536258203ea3f5a0bbe63770782114",
+      "affected_tests": [
+        "03525d0ea21af10482ca3b5429d5c3967ebdbd833a355e0c0b79b0b67fd37896",
+        "0385d4b37f2177bb3e07e52ffb5f244212e841b1d11ab1b2fb4daef67d6de1e5",
+        "05fff74d9c17f431e53e715b096e6d519702804728b635bf4bddc4d59cc995e5",
+        "1b91a1a68e47c75071b38be157deec3d022eccbf7363094aca1b99a6a3ba2923",
+        "241da8c1757f95a10b624ec17c5677e0c8f53462dac57d721234f90bdfca5e17",
+        "25426a5922706b15e86417b7aeb62a0dbab573eb42f2ab824fa7f2492c5144e0",
+        "2aa956aeab946eb02f548a2789c548f4e825304de39ceb06147ec22968aa2d94",
+        "2ae5a0d753144dce4e5bd2482643aa3b40b9930fdf0c9557adc515ce53aa9d6d",
+        "2d50d4edaa33a3fcfa3712c0b04e60f05b0ab8a0cf4176ee0a4a231d3a2747ef",
+        "396c9cf5c9192fe40ab5168319457a298a446ef0763daca31c4f3ccf359660b1",
+        "3b14ca5b64d02b1797755cbd9ff9e44db9e783818ea174076b537e662999f41d",
+        "3b219a494d1155ac3705906616f4e35fd35eeb4f4a5d36c21244e854cdde7232",
+        "3b28e08de4a013cb9b2ce475ebf39279d4602bc5f6de33b441d0286fb445a408",
+        "3dedb1ee6a18b9e009156347f9a8062f322d8d947d5f7a514b3191575c7478e4",
+        "3df24ad8e2cc56b938557e1c0871b9f4434feb08754042cc87b7bf971fd95256",
+        "44e491c51a802c2cccd28400a9203b068b5239f43fab8f236e15efeb9921af17",
+        "4c3047447758c324207e51162659aced53da2552f9a76ecdf66a6bf0cfba0b0d",
+        "4d01b64d22f96e7cd540f5d2193d7e805b2f404eb47b198d5dfa879e49f4136b",
+        "507b4ed30336997021b4db1acff0fd3fa3b6f79eea67435f66412d69ac4425f9",
+        "53efd9ddcad3faf642655ac9015f8658d97c19b2e315ed2c4aeadac1190e79cb",
+        "585e0dc10a7ce5eac7d8324cbc89b7197ff6b86df77c0ddce45f6d7f7997f81c",
+        "5e7b1e9e3bfd913405cc36155bf9906ef93af62856e232a9b4ca9e4152ee272d",
+        "61ca638dc49ace507555582bb86579dad5f35ee9f903426a0b54759c38083f3f",
+        "6b394b51aae5ee6cba192b306c230990745b05cf23201f364f402cf7249d6633",
+        "6f1a084e8fd9db36f05bdb4f5507528f90921ff9603fd50d4e997b22ba0a47f9",
+        "6fa237cb85be9565d9a7f7bbeb28bdfa57190abce87dc9da1bf98f6f2852f768",
+        "75ece6f87235cd8d8f7c4cd203b7ffa3dc4cdcd093369eb303ceab2665723e5a",
+        "7b619ee718e41e38de53acb9504a0e5ba5f6ebc1a584b22f1aa400dd71ccc7fd",
+        "7d3347981a6fcfe1fd7b4aecd28bacca470c438c42e09e43e24a9e35062a657f",
+        "7edb5cb8671b98128c73fead78b3edd249793f98f6efa4b9f6ed73d6cb640ba9",
+        "8945d32f4b57c783aaa64bbe1bcfbd0a91ae309cd013237d9d350e56c8988f7e",
+        "95b2ef753e044789604ec6588bfe8a5c90ed4320179df8cd824b8fbffa5b6e1b",
+        "964f0467413655f06a2c9550d1dc14e8bcfeeac463cc7ffdb51e85015a3568c8",
+        "99962b787256868828f7d6c937dc254f5e3d5c0dee06255184a26f38e969a836",
+        "a0eeffe3666059225a4e1db9e0246ebeaf4b90edf40f01e24581735b96a7a7a3",
+        "a7e483265c9f5ebc484285a96564e019c5c5164343ee51f2642520bf419a6157",
+        "a84ee1cf5932da83eb2c245b826510f48c9166f792637a7114a328c3b59a1b42",
+        "abf4b0526f5f290606c966bc2934fb496c17805bf9a7ad82b265a42db7c09b8a",
+        "ace9df15e87087fb2994fb714ee2022e9f61a24468557db9ef722455bf638acc",
+        "b295a677f12bb8d6e85c42f598175dd87e1d843d96cb880548a9ec809a55087b",
+        "b3162dc4aa8cc063d6a5fbba367d5fae4272525ce367928b2f8c0c36b729e38c",
+        "b363015e431407a8b625cf1110b4e36d344d27e22d7c94f01075983f673b5ccb",
+        "b550f48c445e6a9324eaf450a0b0b02db11ba62ee7922731499392e8b7e6ea60",
+        "c692c3eb8d35fb008df0f85e8d85a433a664961ce173831e870d6445f5c3e206",
+        "ce722d3958498ad06ba231c67f2f8cc384602bf938a3a654c4b67d21b3ac7e6c",
+        "da8e6ef6487fe70355714d4f1277c331bdf45121d5b88a6f7ec38f833daff4e3",
+        "e0a3470eb668c942f7030a5c15483b55f42a17a0bc320ec1cc6ebcfffa428045",
+        "e0b9dff1f2586f6ef348641d43fda20c81e375ee1093067cf231622144c738a1",
+        "e83f588c91fdd82498e08d60897bcd8f0bfb52df3ce10b87012a3be016459432",
+        "ed0320f1112e930a2b5923f654603f52f246a160e822d5676d9ae59201e2ab11",
+        "efcd0763ce9a45b1e33bcee2d2a04c65e900271f307e85d76e685eb015d9bef2",
+        "f240a47e1520b0e303f0fb1d3cbe61d1718569cba11c88665e01a8bc4b2afcc3",
+        "fa67fea35e0f59bde9f95506839d75f215a53fdfc2427cef0a5e5caa8e59f0ae",
+        "fb75b6abba2f3c4d7a527f30012effdc048634178fd14324a64028c4ed0ab3a4",
+        "fd534870558559e68eae47be825611627729a53484202a83fb2967df1514a327",
+        "fd92c77a590115143a925684fcf46cf658ea7c7355ae3589beb0a4b7525cc512"
+      ],
+      "impact": "Conservative same-file test mapping plus worktree tool tests for registry provenance/service and resolver wiring. None-only legacy fixture constructors retain absent provenance; no security oracle weakened.",
+      "execution_context": "Existing library cfg/annotations and tempfile Git fixtures preserved. Same-path mapping is not exhaustive transitive execution proof.",
+      "author": "background_agent:bgagent-4d903db1-cc13-4a55-9bcc-fd6e4d789637",
+      "reviewer": "background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513",
+      "review_evidence": "Independent reviewer background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513 authenticated actual three intended composite-mutant assertion failures (exit 101), restored five-test pass (exit 0), corrected source hashes and formatting-only service hash change, and approved narrow semantic admission/support impacts. Second-model source review background_agent:bgagent-f0c13d5c-ed31-499d-94e0-762e467a155e accepted ownership/atomic registration design and distinct scenarios. No claim all eligibility disjuncts individually executed or full suite pass from these focused runs."
+    },
+    {
+      "path": "refact-agent/engine/crates/refact-worktrees/src/types.rs",
+      "before_sha256": "0ef716ccc29825e939b8f50810ef9d409792dc8d77ccdab56ff013f63a3ac727",
+      "after_sha256": "3d747eb03dd21f6bc605be2524e0166a6c6951992b7b1477be04b179115c9f06",
+      "affected_tests": [
+        "3b14ca5b64d02b1797755cbd9ff9e44db9e783818ea174076b537e662999f41d",
+        "4d01b64d22f96e7cd540f5d2193d7e805b2f404eb47b198d5dfa879e49f4136b",
+        "61ca638dc49ace507555582bb86579dad5f35ee9f903426a0b54759c38083f3f",
+        "6f1a084e8fd9db36f05bdb4f5507528f90921ff9603fd50d4e997b22ba0a47f9",
+        "6fa237cb85be9565d9a7f7bbeb28bdfa57190abce87dc9da1bf98f6f2852f768"
+      ],
+      "impact": "Conservative same-file test mapping plus worktree tool tests for registry provenance/service and resolver wiring. None-only legacy fixture constructors retain absent provenance; no security oracle weakened.",
+      "execution_context": "Existing library cfg/annotations and tempfile Git fixtures preserved. Same-path mapping is not exhaustive transitive execution proof.",
+      "author": "background_agent:bgagent-4d903db1-cc13-4a55-9bcc-fd6e4d789637",
+      "reviewer": "background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513",
+      "review_evidence": "Independent reviewer background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513 authenticated actual three intended composite-mutant assertion failures (exit 101), restored five-test pass (exit 0), corrected source hashes and formatting-only service hash change, and approved narrow semantic admission/support impacts. Second-model source review background_agent:bgagent-f0c13d5c-ed31-499d-94e0-762e467a155e accepted ownership/atomic registration design and distinct scenarios. No claim all eligibility disjuncts individually executed or full suite pass from these focused runs."
+    },
+    {
+      "path": "refact-agent/engine/src/at_commands/at_file.rs",
+      "before_sha256": "f3de0465ab13f4121191c682c93dabc119ad6b6c5f2ff315f5060749d2b209c5",
+      "after_sha256": "638883a71e91384cc112991775f721cd6d71d8f619f9aecb1b537e711d7683d0",
+      "affected_tests": [
+        "e8f5009c9e7a523a47b9fc500eaa4a53e0860b8b0d69870602a7bf3ed5154bcb"
+      ],
+      "impact": "Conservative same-file test mapping plus worktree tool tests for registry provenance/service and resolver wiring. None-only legacy fixture constructors retain absent provenance; no security oracle weakened.",
+      "execution_context": "Existing library cfg/annotations and tempfile Git fixtures preserved. Same-path mapping is not exhaustive transitive execution proof.",
+      "author": "background_agent:bgagent-4d903db1-cc13-4a55-9bcc-fd6e4d789637",
+      "reviewer": "background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513",
+      "review_evidence": "Independent reviewer background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513 authenticated actual three intended composite-mutant assertion failures (exit 101), restored five-test pass (exit 0), corrected source hashes and formatting-only service hash change, and approved narrow semantic admission/support impacts. Second-model source review background_agent:bgagent-f0c13d5c-ed31-499d-94e0-762e467a155e accepted ownership/atomic registration design and distinct scenarios. No claim all eligibility disjuncts individually executed or full suite pass from these focused runs."
+    },
+    {
+      "path": "refact-agent/engine/src/chat/queue.rs",
+      "before_sha256": "f30d9533839b246f06d679485a1de2799a4675f2625c10d861fc32657199e048",
+      "after_sha256": "e742f670cc3cf53172372e00081501df50f8b4bb910ce198b8533b48b4574216",
+      "affected_tests": [
+        "01e1a7d05c79599fe18802f0a7f55ba4952fac8360c582abf5667563c4459329",
+        "15c081ba5775bf4cf42dc1e72ef85431a9508848b56531d9701e0108d09d3f18",
+        "1deeb4d404992a95f8ff1f507f942c47a421162e7902f16bc56d114d90fb1921",
+        "24162919ea96469e67663e716cca4d598d2f0c7ee7881592ee81de722a80ec8b",
+        "3b14ca5b64d02b1797755cbd9ff9e44db9e783818ea174076b537e662999f41d",
+        "3c71ab5c514f28a90cf27bb00e7d388b04c228faa810346a9232b3dc7cfb9625",
+        "3d48f7dd1e8d9b7184ee12fa3dd253c01855e2a726e1230d477a3dee99e13f2d",
+        "48e72f3eacee5cfe92778ff0203d5049bdd70cc437c4c15090904a929a30c40b",
+        "4c38a79340a6555b450f1ceff2591c1b1ae8a9b51aeab977db1315056b457dea",
+        "4d01b64d22f96e7cd540f5d2193d7e805b2f404eb47b198d5dfa879e49f4136b",
+        "4ea103b3c03939067acf1861104e611c73bb06cf670bf05a6651d722f08dda6f",
+        "52f02c294ec17b429dab6857a23700725e137d07e2e33377c33b9afe6bafb74f",
+        "537ca2464d14145832b8dc1f65d8492138bb7e90ab2a40fed594115d8edd63e2",
+        "61ca638dc49ace507555582bb86579dad5f35ee9f903426a0b54759c38083f3f",
+        "67a45eb76635406879e1576e4c90c2755e57bf6721cd6e2ba24b0614c0e5eeb1",
+        "68abd95bc21731a31356715ea0013b8de57e7c2126d8fe7a2c29ba32553f37cf",
+        "6e52416c85a6f08a1de9fc3c5086b41bff3d132d868fc6c5db368b150049380c",
+        "6e75fe306d78dbd5cc86aebf4f2d02fcaac81eb3132c5d8a8f72fe3fdd27d5d7",
+        "6f1a084e8fd9db36f05bdb4f5507528f90921ff9603fd50d4e997b22ba0a47f9",
+        "6fa237cb85be9565d9a7f7bbeb28bdfa57190abce87dc9da1bf98f6f2852f768",
+        "760339c2e7933ee11ac2fac7b8eab75ac742f881fb1836942015c33bbcbd1dda",
+        "82b1dadbe7aebc3fa1bf4ed401b263c01a749eaa698c37de4a147b8a8e3a6432",
+        "839e961143d35ee9fac995eab250c19d756cacb58133e2a45cd281e3d365a61b",
+        "88b673d396cb4d77b3ed89e1d8cc78dcba61a213f895357b2a51db2ef51ecfcd",
+        "926ed5ba949514f59babf148be6067b7749a5bd130b6c85e37c7705d278a87c9",
+        "9c57f4c45f562a1978f501c0cee4e5035e9181f04124f843e6cfb08fe6956b5d",
+        "a0e3a6b09526251fe1d27f6bdd3bdc7e6280a4dfcdd6d162e6ad9dfde55bdf61",
+        "a292120e33406ffbfe5ed92925a9235b63f763d23a3ec0cfeb7af6a18a4b0d9a",
+        "a318e10553d3d80669b012076472a581e9577e6250b7657d3530fd1331857f13",
+        "a63342205610dbdb69d7e34df71f249d9b54b8d244e8b4b773fb64143e393541",
+        "bb8686dde1a2df0d5af8528be52b8ec04dd8d7c5e2c613283734aeb5a3bf7ff4",
+        "c57db21a154cb3909f112b69d0b1faa6964fe032e681ec83a35edbb033f323b6",
+        "c6bace980d5e9800621e8f47509c3a05ee5797fcf82599b783f450f8b9e1040e",
+        "c7d07369b82caa64b264fdd3d690ae1137441bee5e1d3e4ee2e6f0534e3f0954",
+        "cbc97e2fb480da6c5244f8766a724e63822968c4dfde049ba9d3dee18eb7589b",
+        "e4c5ed8c3e9d19f351030ed992d1c9659e5dbb61271659ea36a4dff683cddba0",
+        "e6d5ad020a47d693ec88b651af3b24d43160a6b6eef4e7e0b75fce3e022cb065",
+        "e6de407307375521230c8da3f81a127d125da05c97a538d16128e89f5fa3ddfb",
+        "ea2a650e3d2747fcf29c38a050ce577d7e887102deceabe56b3c5314b037a05e",
+        "fb068c5a6629a9d7b53a2ae7200f543867c9c5c202cdf385d589de8abe003eff",
+        "fc84118368e12315c990af087a64a78673c80765551aed0752b7842eeae2ed02",
+        "fdb714a1949dae5e247c79b46c346280017499c40b6fa03c93ba1aa56b4a913f"
+      ],
+      "impact": "Conservative same-file test mapping plus worktree tool tests for registry provenance/service and resolver wiring. None-only legacy fixture constructors retain absent provenance; no security oracle weakened.",
+      "execution_context": "Existing library cfg/annotations and tempfile Git fixtures preserved. Same-path mapping is not exhaustive transitive execution proof.",
+      "author": "background_agent:bgagent-4d903db1-cc13-4a55-9bcc-fd6e4d789637",
+      "reviewer": "background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513",
+      "review_evidence": "Independent reviewer background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513 authenticated actual three intended composite-mutant assertion failures (exit 101), restored five-test pass (exit 0), corrected source hashes and formatting-only service hash change, and approved narrow semantic admission/support impacts. Second-model source review background_agent:bgagent-f0c13d5c-ed31-499d-94e0-762e467a155e accepted ownership/atomic registration design and distinct scenarios. No claim all eligibility disjuncts individually executed or full suite pass from these focused runs."
+    },
+    {
+      "path": "refact-agent/engine/src/coordination/service_tests.rs",
+      "before_sha256": "ed7d7be5895e9866e28a0f4266831e199a189ad7a74dbb39ccec859b09a484f2",
+      "after_sha256": "678d9f1ecda87e58ede310289432cf47112f1f36c570ec287c273de8310e7192",
+      "affected_tests": [
+        "1052ff053c5c431eca212922b590b0f12dc144f0eef0173fc55389fdd8176531",
+        "1246cf6cff87704a2be99b2622948c9b2ca5cc3775da2b52a3278d9658e519c0",
+        "2828830a8e9712a83648962439a6b75e398a542129de7717d583d5991a5d9cb4",
+        "33c57f5d06db6095fcb199532a9884e7fab8e1a544ac30be3f4b8761293b4eed",
+        "575cc7d124b851f4b8fbf6f555e1557b25a49efa84fcc344be8d07ae03c46a6c",
+        "6a721acc47d0269d7729c2a52f1c718de33c6b1846d52ef741716a949a6a242a",
+        "8d08c15c95714877b315213c398ddfe076fa96d8ff8fe5f82954e0beaf653b4c",
+        "a6d47ab4c2d42ccfdffe762843413fe62a6bc5d9e521085df88cc87ea50bd4ab",
+        "bc687367511d388299239675be4d59ca8d4bcd08fb3ee3808597d86be9f75a01",
+        "d30739eb663c1d47583bca91bd50e7c5908dc2dfc61d393728e22f3e02429d92"
+      ],
+      "impact": "Conservative same-file test mapping plus worktree tool tests for registry provenance/service and resolver wiring. None-only legacy fixture constructors retain absent provenance; no security oracle weakened.",
+      "execution_context": "Existing library cfg/annotations and tempfile Git fixtures preserved. Same-path mapping is not exhaustive transitive execution proof.",
+      "author": "background_agent:bgagent-4d903db1-cc13-4a55-9bcc-fd6e4d789637",
+      "reviewer": "background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513",
+      "review_evidence": "Independent reviewer background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513 authenticated actual three intended composite-mutant assertion failures (exit 101), restored five-test pass (exit 0), corrected source hashes and formatting-only service hash change, and approved narrow semantic admission/support impacts. Second-model source review background_agent:bgagent-f0c13d5c-ed31-499d-94e0-762e467a155e accepted ownership/atomic registration design and distinct scenarios. No claim all eligibility disjuncts individually executed or full suite pass from these focused runs."
+    },
+    {
+      "path": "refact-agent/engine/src/daemon/lock.rs",
+      "before_sha256": "25f5afbab800d3de9a16ce5cddb8d32d8dacd85b5b80877bd12cf44a3283b09e",
+      "after_sha256": "b5db3a93fb6eda74b87dd435e713a32780fe04e6195b0947804baab80ce52e50",
+      "affected_tests": [
+        "08e6a125f6f7d0e71b3b885b4321f5a34c6bf9165a204bb5105eea1757aa40fe",
+        "35950aa00cdde314899f086e8d79b8f396de0fc0cd8bb20c9843556d0ab93ae7",
+        "49df23cb1968c707204a705e8276079fc0e4ebb013e33fe538bab5c22907340b",
+        "73b3db9189acebac9bdb494a4ee25cc66ba6fe10dabb167ce3611eb19fed9f3e",
+        "7c26d3351ed43c204a212d86da5a9dbc839c6af51c7e2fdcd1dca88c29698a07",
+        "88fce1f00b301e1578f687a1e74713360b048433565161612edefacf5b7562e0",
+        "8b508d56437c884a5dca2e859896d8a29ed9539772020b5dcf630904cfb293bf",
+        "9e154bfb3dcbf1dc0336c7dba2f4195c6aaeb642d6b5325365b6d6b389e3c365",
+        "a4536bef417bd00f10e6fa7008e7fa576c3bbc75b12d0e4d24b716528d9a55d8",
+        "b92efbc43cc0a1836956addf1e21d41755fa14bef6c0797af87b4edaea5a12e7",
+        "bea21e1de9cca6dee73198dc8a0b4eabb42da242da4b7d656c70ae91cca5d314",
+        "c6d7024792fc2ac94e1543913e574c9091f663824cae2e3dc3088ddb0c613cac",
+        "c7f4be35ad9c56cb0f22d8216c0651a93eef10b4c99f508ebe0e704240c231a2",
+        "d4603a7cad7b8e561b728820dbbacdca0caf1d9508ecefd70b8436bba2f937b3"
+      ],
+      "impact": "Conservative same-file test mapping plus worktree tool tests for registry provenance/service and resolver wiring. None-only legacy fixture constructors retain absent provenance; no security oracle weakened.",
+      "execution_context": "Existing library cfg/annotations and tempfile Git fixtures preserved. Same-path mapping is not exhaustive transitive execution proof.",
+      "author": "background_agent:bgagent-4d903db1-cc13-4a55-9bcc-fd6e4d789637",
+      "reviewer": "background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513",
+      "review_evidence": "Independent reviewer background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513 authenticated actual three intended composite-mutant assertion failures (exit 101), restored five-test pass (exit 0), corrected source hashes and formatting-only service hash change, and approved narrow semantic admission/support impacts. Second-model source review background_agent:bgagent-f0c13d5c-ed31-499d-94e0-762e467a155e accepted ownership/atomic registration design and distinct scenarios. No claim all eligibility disjuncts individually executed or full suite pass from these focused runs."
+    },
+    {
+      "path": "refact-agent/engine/src/files_correction.rs",
+      "before_sha256": "d5aebec28c4a30ef02f9e42fa09fab658ef62da9d030018773165ee5b8951388",
+      "after_sha256": "b4e56db038b13564e4bf0f1d3f771a8c0b7de8b84ad751594fb184830994f956",
+      "affected_tests": [
+        "564794e66958f15333c8b2c090eb98884577d65e90e227278cea6c2a199e6a52"
+      ],
+      "impact": "Conservative same-file test mapping plus worktree tool tests for registry provenance/service and resolver wiring. None-only legacy fixture constructors retain absent provenance; no security oracle weakened.",
+      "execution_context": "Existing library cfg/annotations and tempfile Git fixtures preserved. Same-path mapping is not exhaustive transitive execution proof.",
+      "author": "background_agent:bgagent-4d903db1-cc13-4a55-9bcc-fd6e4d789637",
+      "reviewer": "background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513",
+      "review_evidence": "Independent reviewer background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513 authenticated actual three intended composite-mutant assertion failures (exit 101), restored five-test pass (exit 0), corrected source hashes and formatting-only service hash change, and approved narrow semantic admission/support impacts. Second-model source review background_agent:bgagent-f0c13d5c-ed31-499d-94e0-762e467a155e accepted ownership/atomic registration design and distinct scenarios. No claim all eligibility disjuncts individually executed or full suite pass from these focused runs."
+    },
+    {
+      "path": "refact-agent/engine/src/files_in_workspace.rs",
+      "before_sha256": "c419f6605debbd5a065b38a954fb1d0785ac0a69aa2ceb335bc2073611f0a15f",
+      "after_sha256": "329aae8fdd6910158470c207b990b7eba4fa9041aeb7cc6950225925bb4480c8",
+      "affected_tests": [
+        "00a3ebaecce571483b68c898a5b50cb67bad4051bd34e3786658622ff257e10a",
+        "048c6b2bd07a63013110d25d72493b80f05017d628177a5ed62774917ac0c5a6",
+        "073a3022969b75a3dc1d99af4949d9a7c8893ae4b3ba0c718268c5abd7df03e2",
+        "0819f8d9a86365e0f62c784c5f16d51e6afa67f1f83021cf30bb7775141cf859",
+        "14004e9e841b54de0875d569be9b087ad9840bbb1876983ccd7d10d63154da2b",
+        "207cc63b5701077e5f892f2c6945baa138ab6cbb57bfb61e47fc33b130f86c94",
+        "232e598918ad39c2e924d041f6ec200c6fb3f41bb9af557d00e20d7fd5248cb1",
+        "24a645438a4258b909ea791da680b1749f6ac968b3ba3db7f8044704108225d3",
+        "2706f0a3c541bc41118387164e7527541daa3cc1aaabde050f1f646f07f67565",
+        "2d49d7949ba6af7d4bf15219dc21cc2ee09ef28a575ccf8217932511e8ae3264",
+        "398f925ee16bd362b1e7baafc2878182f38209ae223d8acc1463d28b82fbc7b4",
+        "487ad9498712573fe5479f4ec7037d911ed47793f592dc8faf0ad909c9e15f82",
+        "4abd52f128f068ae4a62e4229a55279af2763e4dfe1ea86a7c77f60e4988ec55",
+        "4b8276c1f172bea567422e86b738e70575cf3e416ade0d65f13165833d346098",
+        "6762c1ecba4ce941a371632e3afc9c271894f6ef01094cd72ff952cdb0d967dd",
+        "6921eda7801930b329225406c5b12225453bd82a7f63253cd9ecaea843bd66ae",
+        "6bf7c4051ac4198fd2773d5bf9a4f4a64cb20d637418ab4a32569d4853caf83a",
+        "71cc90597b351ff3684213c403ee3f8490eac39df5546a5cc431ba602a79b4ef",
+        "7fc79688a518db6b2fc126f7c98bf8d50afbbc0679ecdcb2a564c5f4604c5380",
+        "84ceae20486989739bd3ae342baaafbad796d20b7883db67f315782b059a7f46",
+        "87dbd1c43aada6fa1dce2aa4c655e7e5491f9dda1f9bc9f0a4e4bfee95e5519d",
+        "950255f2953dfc2047c83e87fe3bf10611cc663c004f9e37454f657befa9ecfa",
+        "a451a0179245a24d5374c22af1e5960d9a0e7dc87a7648948275270fa422af8b",
+        "a910b43b81c9fe2c3075ed8db657a093152b776a5a63aca5cc05dfe503aa73fb",
+        "c0f472c936f42181bdbe422daa0dda2064801bfa0938db1f909cfb5d61dbac86",
+        "c41a333d79bf19d9f3d30638d8eeb0a31c650d6e1a5bec1eccd069e6ea192a8b",
+        "ca0c8024de3799b923bac3d5b9a21cdcb4cf0a6544b9d19e0d971b8bfdb0f5ae",
+        "d395fe556b0dec3984d39d608b71c05308458efc3357521d45fcd73669d578e3",
+        "daa17e075b25e6a536c08dc44fee8b2d390f2cfea146976fb7380aa4b84a93c6",
+        "faf0cc5eb7c84268f171687e3fbb28ca8cf0c33c7ceb94aa227f4dc6c2a1f82f"
+      ],
+      "impact": "Conservative same-file test mapping plus worktree tool tests for registry provenance/service and resolver wiring. None-only legacy fixture constructors retain absent provenance; no security oracle weakened.",
+      "execution_context": "Existing library cfg/annotations and tempfile Git fixtures preserved. Same-path mapping is not exhaustive transitive execution proof.",
+      "author": "background_agent:bgagent-4d903db1-cc13-4a55-9bcc-fd6e4d789637",
+      "reviewer": "background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513",
+      "review_evidence": "Independent reviewer background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513 authenticated actual three intended composite-mutant assertion failures (exit 101), restored five-test pass (exit 0), corrected source hashes and formatting-only service hash change, and approved narrow semantic admission/support impacts. Second-model source review background_agent:bgagent-f0c13d5c-ed31-499d-94e0-762e467a155e accepted ownership/atomic registration design and distinct scenarios. No claim all eligibility disjuncts individually executed or full suite pass from these focused runs."
+    },
+    {
+      "path": "refact-agent/engine/src/http/routers/v1/files.rs",
+      "before_sha256": "a5f89c54f95472e245c1bb6df133096870dfc6e0ece62d6765ea1bf48920db3e",
+      "after_sha256": "ae90d4c642efab0c82ac1b1d69ed3b7c651264b3cdc2dd67e0c5c0914346e9ed",
+      "affected_tests": [
+        "06fcad04ee53453beda4311781c30bbbadd3c76233ccb683faf12aeabd88f979",
+        "2692c2eac8cba8b6043b2298227358aa9fb906ca0043374e3b114b2ce59c6167",
+        "2a1ab390621f6dfb128619779e2db95c7ea4b95ca87279f19946362324d3cf06",
+        "2f838a0ba58815671cd0f92d238436baa0d8b6b412152fd040c952f016e2fedd",
+        "403ab90f5cb5704e5f1790d009286bc2e772bf0e811ab514dffc5e69ec184d37",
+        "48e0fd4c552dd15ad4fd124e0be9d4d6cefd63e953a38ab1ece07f617693da2c",
+        "4a0e92fcd5952671156fb24af62700024d6f5188a1334431e47cc6c09afcf835",
+        "4dea238f3966c30b7bc135b30b2f415816d59745f3ee085765afee8ed0167198",
+        "62a61c91ab485c0b2eea8dac1ee9de0425fd4ea883b14f17272223b3383b47c1",
+        "6bc9a4ce5244d08e66439fe866eb567988c92e2793e1c15577a14c17afa2e3ef",
+        "6d10ea967f92c5d84163b08efe8ac0533792f9e11a5879c296ce3d5a46d37a48",
+        "81315c6bd2911146b84cf6a18aac672438e56cd42dd9adbe3bd400bc243c9208",
+        "9a2da9e778f056cc70fce5db29d3e0ed80a85fa7ebdd5fdc3d01c25bd2648ea6",
+        "9e3e50a01d14ac666d03a9d1a4cbf9a0b43b55f01077fc9c51becbd2a27db78d",
+        "a57005a1c4f3628bc019739111db149d1ce84617ad52020969efd49d1a24de1b",
+        "a658f1062d67e6fb29028b2b215cac729dadc3024f8f14026fe7d168cee077d3",
+        "b4089cb682155d2f458f95a242e0571912de0372238ebe4f2aeec89b49cd112a",
+        "c80e30c2fac4d66be12be0e8b43c9bcc2234fb5ee0b78cf7113e96dd818d336e"
+      ],
+      "impact": "Conservative same-file test mapping plus worktree tool tests for registry provenance/service and resolver wiring. None-only legacy fixture constructors retain absent provenance; no security oracle weakened.",
+      "execution_context": "Existing library cfg/annotations and tempfile Git fixtures preserved. Same-path mapping is not exhaustive transitive execution proof.",
+      "author": "background_agent:bgagent-4d903db1-cc13-4a55-9bcc-fd6e4d789637",
+      "reviewer": "background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513",
+      "review_evidence": "Independent reviewer background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513 authenticated actual three intended composite-mutant assertion failures (exit 101), restored five-test pass (exit 0), corrected source hashes and formatting-only service hash change, and approved narrow semantic admission/support impacts. Second-model source review background_agent:bgagent-f0c13d5c-ed31-499d-94e0-762e467a155e accepted ownership/atomic registration design and distinct scenarios. No claim all eligibility disjuncts individually executed or full suite pass from these focused runs."
+    },
+    {
+      "path": "refact-agent/engine/src/tools/tool_worktree_create.rs",
+      "before_sha256": "c44bba444d4c9bf9281970eddcd5dbf6cfff5295861ba843b28ec95ab37d5fed",
+      "after_sha256": "6361f33f05f43637de22b88848d7724c17d3dff72f5eed4585a1e163ed77935e",
+      "affected_tests": [
+        "3b14ca5b64d02b1797755cbd9ff9e44db9e783818ea174076b537e662999f41d",
+        "4d01b64d22f96e7cd540f5d2193d7e805b2f404eb47b198d5dfa879e49f4136b",
+        "61ca638dc49ace507555582bb86579dad5f35ee9f903426a0b54759c38083f3f",
+        "6f1a084e8fd9db36f05bdb4f5507528f90921ff9603fd50d4e997b22ba0a47f9",
+        "6fa237cb85be9565d9a7f7bbeb28bdfa57190abce87dc9da1bf98f6f2852f768"
+      ],
+      "impact": "Conservative same-file test mapping plus worktree tool tests for registry provenance/service and resolver wiring. None-only legacy fixture constructors retain absent provenance; no security oracle weakened.",
+      "execution_context": "Existing library cfg/annotations and tempfile Git fixtures preserved. Same-path mapping is not exhaustive transitive execution proof.",
+      "author": "background_agent:bgagent-4d903db1-cc13-4a55-9bcc-fd6e4d789637",
+      "reviewer": "background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513",
+      "review_evidence": "Independent reviewer background_agent:bgagent-2ffaa1d8-2c2a-49b4-82e0-b353eb615513 authenticated actual three intended composite-mutant assertion failures (exit 101), restored five-test pass (exit 0), corrected source hashes and formatting-only service hash change, and approved narrow semantic admission/support impacts. Second-model source review background_agent:bgagent-f0c13d5c-ed31-499d-94e0-762e467a155e accepted ownership/atomic registration design and distinct scenarios. No claim all eligibility disjuncts individually executed or full suite pass from these focused runs."
+    },
+    {
+      "path": "refact-agent/engine/src/tools/tool_worktree_merge.rs",
+      "before_sha256": "148814459bc3bb6fce5acd472b9299515ec3d6a5781df164f0d792c1f46b615c",
+      "after_sha256": "1c874b60be2c211433720cca09cee98d354c01cc9b3f341e152dd747f5f8e687",
+      "affected_tests": [
+        "51d996727d5ef95f0679c06137c94b2b40541f4f14036c69363ef4a7b5d6ad8d",
+        "544938d1bce9ba98d2e161611b7e1bc560ef85400a1846666be7967e04e328e2",
+        "8846aa6caa15857b6fff46d42236e5b53d277ca48ebba96ca41c51087b6570e2",
+        "9cae045e309e22046cbdb865cca668ecfe59aafc1dbb24cfe0723999cae4afc8",
+        "bff6b7d382ebac7a0e224c5b723fdd2b54672ff6637b327263202a105a4dab71",
+        "936b91e1eaa64e077cfef92c2973ec42819d664df62aa8051d5ac1d582bfaf2c",
+        "f16c91ad95024ba7132e45e317a727fc53e6564f577c5ee61ae6bba21b7d105a",
+        "fa9a14e8d2e556477918a3c242e07553ce5ec45866064633be33400b08c18752",
+        "d2fa987c43258fb78ff5d08e55012014dce0eb16108410c6ae85adcf9317992b"
+      ],
+      "impact": "Eight new distinct scenarios share real Git fixture and pooled dispatch helper. Same-file retained bool coercion test unaffected. Earlier nonpooled/helper-lock evidence was superseded by exact-current pooled A/B/final reruns; no stale witness equivalence claimed.",
+      "execution_context": "Library cfg(test) module unchanged; exact current helper acquires catalog and nonempty turn pool, executes guarded pooled path; explicit session attachment clone avoids retaining session mutex into constructor await. No gating/ignores or hidden scenario packing.",
+      "author": "background_agent:bgagent-e18f75e0-1a1e-4f1a-877f-2eb141aa235e",
+      "reviewer": "background_agent:bgagent-ea250750-96a7-48b9-9d12-9d960b22934f",
+      "review_evidence": "Independent Sonnet reviewer background_agent:bgagent-ea250750-96a7-48b9-9d12-9d960b22934f authenticated exact current pooled fixture A exit101/eight failures, B exit101/two failures, restored exit0/nine passes; hashes and restored-pooled.rs match current 1c874b60be2c211433720cca09cee98d354c01cc9b3f341e152dd747f5f8e687. Approved eight narrow admissions. Compound scenario sensitivity only, not isolated guard-hunk sensitivity. Cancellation is registered caller-drop before finalizer with joined completion, not exact post-delete timing; ordering manually appends actual registry result and drains shipping side effects, not whole batch executor. Task/admission/background/seal disjunct breadth is source-reviewed, not individually executed. Disabled notice queue is ephemeral; required persisted checkout scope reset is durable."
     }
   ]
 }

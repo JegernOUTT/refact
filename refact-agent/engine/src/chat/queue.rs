@@ -1448,6 +1448,32 @@ pub async fn resolve_worktree_setparams_update(
     thread: &ThreadParams,
     patch: &serde_json::Value,
 ) -> Result<Option<WorktreeSetParamsUpdate>, String> {
+    resolve_worktree_setparams_update_inner(app, chat_id, thread, patch, None).await
+}
+
+pub async fn resolve_recovered_worktree_setparams_update(
+    app: AppState,
+    chat_id: &str,
+    thread: &ThreadParams,
+    expected: &crate::worktrees::types::WorktreeMeta,
+) -> Result<Option<WorktreeSetParamsUpdate>, String> {
+    resolve_worktree_setparams_update_inner(
+        app,
+        chat_id,
+        thread,
+        &serde_json::json!({"worktree_id": expected.id}),
+        Some(expected),
+    )
+    .await
+}
+
+async fn resolve_worktree_setparams_update_inner(
+    app: AppState,
+    chat_id: &str,
+    thread: &ThreadParams,
+    patch: &serde_json::Value,
+    recovered: Option<&crate::worktrees::types::WorktreeMeta>,
+) -> Result<Option<WorktreeSetParamsUpdate>, String> {
     check_worktree_setparams_authority(&app, chat_id, thread, patch).await?;
     if let Some(worktree_id) = patch.get("worktree_id") {
         let worktree_id = worktree_id
@@ -1468,7 +1494,13 @@ pub async fn resolve_worktree_setparams_update(
             return Err(super::worktree_lifecycle::TASK_SCOPE_REFUSAL.into());
         }
         let reference = reference_for_thread(chat_id, thread, &view.meta.kind);
-        let view = service.add_reference(worktree_id, reference).await?;
+        let view = if let Some(expected) = recovered {
+            service
+                .add_recovered_chat_reference(worktree_id, chat_id, expected, reference)
+                .await?
+        } else {
+            service.add_reference(worktree_id, reference).await?
+        };
         if let Some(old) = thread
             .worktree
             .as_ref()

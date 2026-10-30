@@ -1662,6 +1662,23 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
   }, []);
   const navigation = useInternalNavigation({
     scope: `${taskId}:${activeChat?.chatId ?? ""}:${selectedCardId ?? ""}`,
+    localTaskChatContext:
+      task &&
+      task.id === taskId &&
+      board &&
+      savedPlanners &&
+      currentTaskUI &&
+      !taskError &&
+      !boardError &&
+      !plannersError
+        ? {
+            task,
+            board,
+            plannerChats,
+            pendingPlannerIds: pendingCreatedPlannerIdsRef.current,
+            deletedPlannerIds: deletedPlannerIdsRef.current,
+          }
+        : undefined,
     onChatOpened: openChatTab,
     onCardOpened: openLinkedCard,
     onWorktreeOpened: openLinkedWorktree,
@@ -1793,7 +1810,7 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
 
   const handleSelectPlanner = useCallback(
     (chatId: string) => {
-      void navigation.navigate(`refact://chat/${chatId}`, { taskId });
+      void navigation.navigateLocalTaskChat(chatId, taskId);
     },
     [navigation, taskId],
   );
@@ -1805,7 +1822,7 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
         showNotification("This chat is not the current agent for this card.");
         return;
       }
-      void navigation.navigate(`refact://chat/${chatId}`, { taskId, cardId });
+      void navigation.navigateLocalTaskChat(chatId, taskId, cardId);
     },
     [board, taskId, navigation, showNotification],
   );
@@ -1814,10 +1831,7 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
     (card: BoardCard) => {
       if (!card.agent_chat_id) return;
       void navigation
-        .navigate(`refact://chat/${card.agent_chat_id}`, {
-          taskId,
-          cardId: card.id,
-        })
+        .navigateLocalTaskChat(card.agent_chat_id, taskId, card.id)
         .then((opened) => {
           if (opened) setSelectedCardId(null);
         });
@@ -2140,7 +2154,7 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
           </Button>
         </Flex>
       )}
-      {!selectedCard && navigation.pending && (
+      {!selectedCard && navigation.showProgress && (
         <Text role="status">Opening linked target...</Text>
       )}
       {!selectedCard && navigation.error && (
@@ -2403,7 +2417,7 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
               board={board}
               onOpenOwner={(chatId) => {
                 void navigation
-                  .navigate(`refact://chat/${chatId}`, { taskId })
+                  .navigateLocalTaskChat(chatId, taskId, undefined, true)
                   .then((opened) => {
                     if (opened) setSelectedCardId(null);
                   });
@@ -2411,7 +2425,7 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
               worktree={selectedCardWorktree}
               worktreeLabel={selectedCardWorktreeLabel}
               isWorktreeLoading={worktreesLoading}
-              navigationPending={navigation.pending}
+              navigationPending={navigation.showProgress}
               navigationError={navigation.error}
               onManageCard={handleManageCard}
               onViewDiff={handleViewCardDiff}

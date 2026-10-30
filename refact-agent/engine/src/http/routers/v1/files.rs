@@ -1125,6 +1125,7 @@ mod tests {
             source_workspace_root: source.to_path_buf(),
             project_hash: hash,
             records: vec![refact_worktrees::types::WorktreeRegistryRecord {
+                creator_chat_id: None,
                 meta: refact_worktrees::types::WorktreeMeta {
                     id: worktree_id.to_string(),
                     kind: "chat".to_string(),
@@ -1403,6 +1404,7 @@ mod tests {
             source_workspace_root: source.path().to_path_buf(),
             project_hash: hash,
             records: vec![refact_worktrees::types::WorktreeRegistryRecord {
+                creator_chat_id: None,
                 meta: refact_worktrees::types::WorktreeMeta {
                     id: relative_id,
                     kind: "chat".to_string(),

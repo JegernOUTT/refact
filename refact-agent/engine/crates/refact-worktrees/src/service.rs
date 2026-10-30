@@ -113,6 +113,42 @@ pub struct WorktreeService {
     merge_checkout: Option<Arc<git::MergeCheckout>>,
 }
 
+fn recoverable_chat_record<'a>(
+    registry: &'a WorktreeRegistry,
+    chat_id: &str,
+) -> Result<Option<&'a WorktreeRegistryRecord>, String> {
+    let mut candidates = registry
+        .records
+        .iter()
+        .filter(|record| record.creator_chat_id.as_deref() == Some(chat_id));
+    let Some(record) = candidates.next() else {
+        return Ok(None);
+    };
+    if candidates.next().is_some() {
+        return Err(
+            "Chat worktree recovery is ambiguous; retain checkouts for manual recovery".into(),
+        );
+    }
+    let meta = &record.meta;
+    if chat_id.is_empty()
+        || meta.kind != "chat"
+        || meta.branch.as_deref() != Some(default_branch_name("chat", Some(chat_id)).as_str())
+        || meta.task_id.is_some()
+        || meta.card_id.is_some()
+        || meta.agent_id.is_some()
+        || record.references.iter().any(|reference| {
+            reference.kind != "chat"
+                || reference.chat_id.as_deref() != Some(chat_id)
+                || reference.task_id.is_some()
+                || reference.card_id.is_some()
+                || reference.agent_id.is_some()
+        })
+    {
+        return Err("Chat worktree recovery refused: checkout ownership does not match".into());
+    }
+    Ok(Some(record))
+}
+
 impl WorktreeService {
     pub fn new(cache_dir: PathBuf, source_workspace_root: PathBuf) -> Result<Self, String> {
         let cache_dir = normalize_existing_or_parent(&cache_dir);
@@ -388,9 +424,95 @@ impl WorktreeService {
             .await
     }
 
+    pub async fn recover_chat_worktree(
+        &self,
+        chat_id: &str,
+    ) -> Result<Option<WorktreeMeta>, String> {
+        let _guard = registry_write_lock().lock().await;
+        let registry = self.load_registry_unlocked().await?;
+        let Some(record) = recoverable_chat_record(&registry, chat_id)? else {
+            return Ok(None);
+        };
+        let meta = &record.meta;
+        let source = self.source_workspace_root.clone();
+        let source_repo_root =
+            tokio::task::spawn_blocking(move || git::repo_root(&git::discover_repo(&source)?))
+                .await
+                .map_err(|error| format!("Chat worktree source validation failed: {error}"))??;
+        if normalized_path_key_async(&meta.repo_root).await?
+            != normalized_path_key_async(&source_repo_root).await?
+        {
+            return Err("Chat worktree recovery refused: repository root does not match".into());
+        }
+        self.validate_worktree_meta_strict(meta).await.map(Some)
+    }
+
+    pub async fn add_recovered_chat_reference(
+        &self,
+        id: &str,
+        chat_id: &str,
+        expected: &WorktreeMeta,
+        reference: WorktreeReference,
+    ) -> Result<WorktreeRecordView, String> {
+        let _guard = registry_write_lock().lock().await;
+        let mut registry = self.load_registry_unlocked().await?;
+        let record = recoverable_chat_record(&registry, chat_id)?
+            .ok_or("Chat worktree recovery provenance is unavailable")?;
+        if record.meta != *expected
+            || record.meta.id != id
+            || reference
+                != (WorktreeReference {
+                    kind: "chat".into(),
+                    chat_id: Some(chat_id.into()),
+                    ..Default::default()
+                })
+        {
+            return Err("Chat worktree recovery identity changed".into());
+        }
+        self.validate_worktree_meta_strict(expected).await?;
+        let record = registry
+            .records
+            .iter_mut()
+            .find(|record| record.meta.id == id)
+            .ok_or("Chat worktree recovery record disappeared")?;
+        if !record.references.contains(&reference) {
+            record.references.push(reference);
+            record.updated_at = Utc::now().to_rfc3339();
+        }
+        let record = record.clone();
+        self.save_registry_unlocked(&registry).await?;
+        self.record_view(&record).await
+    }
+
+    pub async fn create_chat_worktree(
+        &self,
+        chat_id: &str,
+    ) -> Result<CreateWorktreeResponse, String> {
+        if chat_id.is_empty() {
+            return Err("Chat identity cannot be empty".into());
+        }
+        self.create_worktree_inner(
+            CreateWorktreeRequest {
+                kind: Some("chat".into()),
+                chat_id: Some(chat_id.into()),
+                ..Default::default()
+            },
+            Some(chat_id.into()),
+        )
+        .await
+    }
+
     pub async fn create_worktree(
         &self,
         request: CreateWorktreeRequest,
+    ) -> Result<CreateWorktreeResponse, String> {
+        self.create_worktree_inner(request, None).await
+    }
+
+    async fn create_worktree_inner(
+        &self,
+        request: CreateWorktreeRequest,
+        creator_chat_id: Option<String>,
     ) -> Result<CreateWorktreeResponse, String> {
         let kind = validate_kind(request.kind.as_deref().unwrap_or("chat"))?;
         let branch = match request.branch.clone() {
@@ -463,6 +585,7 @@ impl WorktreeService {
             enforce: true,
         };
         let record = WorktreeRegistryRecord {
+            creator_chat_id,
             meta,
             created_at: now.clone(),
             updated_at: now,
@@ -2820,6 +2943,7 @@ mod worktree_registry_tests {
     fn sample_record(service: &WorktreeService, id: &str) -> WorktreeRegistryRecord {
         let now = Utc::now().to_rfc3339();
         WorktreeRegistryRecord {
+            creator_chat_id: None,
             meta: WorktreeMeta {
                 id: id.to_string(),
                 kind: "chat".to_string(),

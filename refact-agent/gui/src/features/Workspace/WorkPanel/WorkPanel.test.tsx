@@ -40,6 +40,33 @@ function settingsHandler() {
 }
 
 describe("Work panel", () => {
+  it("keeps project-work selections on the generic callback", async () => {
+    settingsHandler();
+    server.use(
+      http.get("*/v1/work", () =>
+        HttpResponse.json({
+          ...workFixture,
+          rows: [{ ...workFixture.rows[0], chat_id: "project-chat" }],
+        }),
+      ),
+    );
+    const onNavigate = vi.fn();
+    const onAgentNavigate = vi.fn();
+    const { user } = render(
+      <AgentWorkSection
+        chatId={null}
+        onNavigate={onNavigate}
+        onAgentNavigate={onAgentNavigate}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Project work" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Open trajectory" }),
+    );
+    expect(onNavigate).toHaveBeenCalledWith("project-chat");
+    expect(onAgentNavigate).not.toHaveBeenCalled();
+  });
+
   it("renders explicit unavailable state without empty success", async () => {
     settingsHandler();
     server.use(

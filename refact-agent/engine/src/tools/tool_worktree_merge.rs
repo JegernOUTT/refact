@@ -7,6 +7,8 @@ use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
+use crate::chat::types::{ChatEvent, ChatSession, SessionState, TrajectoryCommitIntent};
+use crate::chat::worktree_lifecycle::{check_unchanged_attachment, transition_lock};
 use crate::global_context::GlobalContext;
 use crate::tools::tools_description::{
     json_schema_from_params, Tool, ToolDesc, ToolSource, ToolSourceType,
@@ -36,6 +38,439 @@ fn strategy_arg(args: &HashMap<String, Value>) -> Result<WorktreeMergeStrategy, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn fixture() -> (
+        tempfile::TempDir,
+        Arc<AMutex<AtCommandsContext>>,
+        Arc<AMutex<ChatSession>>,
+        WorktreeService,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir(&source).unwrap();
+        let git = |args: &[&str]| crate::worktrees::git::run_git(&source, args).unwrap();
+        git(&["init"]);
+        git(&["checkout", "-b", "main"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "user.name", "Test"]);
+        std::fs::write(source.join("tracked"), "initial\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "initial"]);
+        let cache = temp.path().join("cache");
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            cache.clone(),
+            temp.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
+        let app = crate::app_state::AppState::from_gcx(gcx).await;
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let worktree = service
+            .create_chat_worktree("merge-root")
+            .await
+            .unwrap()
+            .worktree
+            .meta;
+        let mut session = ChatSession::new("merge-root".into());
+        session.work_project_root = Some(source);
+        session.thread.worktree = Some(worktree.clone());
+        session.set_runtime_state(SessionState::ExecutingTools, None);
+        let abort = session.abort_flag.clone();
+        let session = Arc::new(AMutex::new(session));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("merge-root".into(), session.clone());
+        let context = AtCommandsContext::new_with_abort(
+            app,
+            4096,
+            10,
+            false,
+            vec![],
+            "merge-root".into(),
+            None,
+            String::new(),
+            None,
+            Some(worktree),
+            Some(abort),
+        )
+        .await;
+        (temp, Arc::new(AMutex::new(context)), session, service)
+    }
+
+    async fn execute(
+        context: &Arc<AMutex<AtCommandsContext>>,
+        name: &str,
+        args: Value,
+    ) -> Result<refact_runtime_api::ToolExecutionResult, String> {
+        let registry = context.lock().await.app.tool_registry.clone();
+        let catalog = registry
+            .acquire_tool_catalog("agent", Some("test/model"), None)
+            .await;
+        let pool = registry
+            .acquire_turn_tool_pool("agent", Some("test/model"), None, &catalog)
+            .await;
+        let pool = pool.expect("shipping pooled execution must be available");
+        registry
+            .execute_tool_with_catalog_and_pool(
+                context,
+                &catalog,
+                Some(&pool),
+                "agent",
+                Some("test/model"),
+                name,
+                name,
+                args.as_object().unwrap().clone(),
+            )
+            .await?
+            .ok_or_else(|| format!("{name} not registered"))
+    }
+
+    fn merge_args() -> Value {
+        serde_json::json!({"commit_message":"land isolated changes", "acknowledge_dirty_baseline":true})
+    }
+
+    #[tokio::test]
+    async fn self_merge_handoff_allows_bookkeeping_and_persists_project_scope() {
+        let (_temp, context, session, service) = fixture().await;
+        let worktree = session.lock().await.thread.worktree.clone().unwrap();
+        std::fs::write(worktree.root.join("landed"), "isolated dirty change\n").unwrap();
+        std::fs::write(
+            service.source_workspace_root().join("source-wip"),
+            "preserve me\n",
+        )
+        .unwrap();
+        execute(
+            &context,
+            "set_goal",
+            serde_json::json!({"content":"Finish fixture bookkeeping"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            session.lock().await.runtime.goal_status,
+            Some(crate::chat::types::GoalStatus::Active)
+        );
+        let app = context.lock().await.app.clone();
+        let mut other = ChatSession::new("merge-child".into());
+        other.thread.worktree = Some(worktree.clone());
+        other.thread.parent_id = Some("merge-root".into());
+        let other = Arc::new(AMutex::new(other));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("merge-child".into(), other.clone());
+        service
+            .add_reference(
+                &worktree.id,
+                crate::worktrees::types::WorktreeReference {
+                    kind: "chat".into(),
+                    chat_id: Some("merge-child".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let mut events = session.lock().await.event_tx.subscribe();
+        let merge_result = execute(&context, "worktree_merge", merge_args())
+            .await
+            .unwrap();
+        {
+            let mut session = session.lock().await;
+            assert!(!session
+                .messages
+                .iter()
+                .any(|message| message.tool_call_id == "worktree_disabled"));
+            for message in merge_result.messages {
+                session.add_message(message);
+            }
+            session.drain_post_tool_side_effects();
+            let result_index = session
+                .messages
+                .iter()
+                .position(|message| {
+                    message.role == "tool" && message.tool_call_id == "worktree_merge"
+                })
+                .unwrap();
+            let disabled_index = session
+                .messages
+                .iter()
+                .position(|message| message.tool_call_id == "worktree_disabled")
+                .unwrap();
+            assert!(result_index < disabled_index);
+        }
+        assert!(
+            !worktree.root.exists(),
+            "successful self merge must actually remove checkout"
+        );
+        assert_eq!(
+            std::fs::read_to_string(service.source_workspace_root().join("landed")).unwrap(),
+            "isolated dirty change\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(service.source_workspace_root().join("source-wip")).unwrap(),
+            "preserve me\n"
+        );
+        execute(
+            &context,
+            "pause",
+            serde_json::json!({"target":{"kind":"goal"},"reason":"fixture finished"}),
+        )
+        .await
+        .expect("same-batch goal bookkeeping must run after self merge");
+        assert_eq!(
+            session.lock().await.runtime.goal_status,
+            Some(crate::chat::types::GoalStatus::Paused)
+        );
+        assert_eq!(other.lock().await.thread.worktree.as_ref(), Some(&worktree));
+        let other_worktree = other.lock().await.thread.worktree.clone();
+        let other_context = Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                app.clone(),
+                4096,
+                10,
+                false,
+                vec![],
+                "merge-child".into(),
+                Some("merge-root".into()),
+                String::new(),
+                None,
+                other_worktree,
+            )
+            .await,
+        ));
+        let other_error = execute(&other_context, "get_goal", serde_json::json!({}))
+            .await
+            .err()
+            .expect("other attached chat must remain fail closed");
+        assert!(
+            other_error.contains("Do not continue editing"),
+            "{other_error}"
+        );
+        assert!(context.lock().await.execution_scope.is_none());
+        let app = context.lock().await.app.clone();
+        let (abort, attachment) = {
+            let session = session.lock().await;
+            assert!(session.thread.worktree.is_none());
+            assert!(session
+                .messages
+                .iter()
+                .any(|message| message.tool_call_id == "worktree_disabled"));
+            (session.abort_flag.clone(), session.thread.worktree.clone())
+        };
+        let fresh = Arc::new(AMutex::new(
+            AtCommandsContext::new_with_abort(
+                app,
+                4096,
+                10,
+                false,
+                vec![],
+                "merge-root".into(),
+                None,
+                String::new(),
+                None,
+                attachment,
+                Some(abort),
+            )
+            .await,
+        ));
+        execute(&fresh, "get_goal", serde_json::json!({}))
+            .await
+            .expect("future turn must not inherit deleted scope");
+        let saved: Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                service
+                    .source_workspace_root()
+                    .join(".refact/trajectories/merge-root/merge-root.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(saved.get("worktree").is_none_or(Value::is_null));
+        let mut detached = false;
+        while let Ok(event) = events.try_recv() {
+            let event: Value = serde_json::from_str(&event).unwrap();
+            detached |=
+                event["type"] == "thread_updated" && event.get("worktree") == Some(&Value::Null);
+        }
+        assert!(detached, "worktree:null must reach SSE consumers");
+    }
+
+    #[tokio::test]
+    async fn self_merge_retained_checkout_keeps_attachment() {
+        let (_temp, context, session, _service) = fixture().await;
+        let before = session.lock().await.thread.worktree.clone().unwrap();
+        let mut args = merge_args();
+        args["delete_after_merge"] = Value::Bool(false);
+        execute(&context, "worktree_merge", args).await.unwrap();
+        assert!(before.root.exists());
+        assert_eq!(session.lock().await.thread.worktree.as_ref(), Some(&before));
+        assert_eq!(
+            context.lock().await.execution_scope_worktree().as_ref(),
+            Some(&before)
+        );
+    }
+
+    #[tokio::test]
+    async fn self_merge_dirty_target_refusal_keeps_attachment() {
+        let (_temp, context, session, service) = fixture().await;
+        let before = session.lock().await.thread.worktree.clone().unwrap();
+        std::fs::write(before.root.join("landed"), "isolated\n").unwrap();
+        std::fs::write(
+            service.source_workspace_root().join("source-wip"),
+            "dirty\n",
+        )
+        .unwrap();
+        let result = execute(
+            &context,
+            "worktree_merge",
+            serde_json::json!({"commit_message":"refused"}),
+        )
+        .await
+        .unwrap();
+        assert!(result.messages[0]
+            .content
+            .content_text_only()
+            .contains("Merge Refused: Dirty Target"));
+        assert!(before.root.exists());
+        assert_eq!(session.lock().await.thread.worktree.as_ref(), Some(&before));
+        assert_eq!(
+            context.lock().await.execution_scope_worktree().as_ref(),
+            Some(&before)
+        );
+    }
+
+    #[tokio::test]
+    async fn foreign_merge_does_not_detach_active_checkout() {
+        let (_temp, context, session, service) = fixture().await;
+        let before = session.lock().await.thread.worktree.clone().unwrap();
+        let foreign = service
+            .create_chat_worktree("foreign-root")
+            .await
+            .unwrap()
+            .worktree
+            .meta;
+        let mut args = merge_args();
+        args["worktree_id"] = Value::String(foreign.id);
+        execute(&context, "worktree_merge", args).await.unwrap();
+        assert!(!foreign.root.exists());
+        assert!(before.root.exists());
+        assert_eq!(session.lock().await.thread.worktree.as_ref(), Some(&before));
+        assert_eq!(
+            context.lock().await.execution_scope_worktree().as_ref(),
+            Some(&before)
+        );
+    }
+
+    #[tokio::test]
+    async fn child_self_merge_refuses_before_checkout_deletion() {
+        let (_temp, context, session, _service) = fixture().await;
+        let before = session.lock().await.thread.worktree.clone().unwrap();
+        context.lock().await.root_chat_id = "parent".into();
+        let error = execute(&context, "worktree_merge", merge_args())
+            .await
+            .err()
+            .expect("child must be refused");
+        assert_eq!(
+            error,
+            "Destructive self merge requires an ordinary root chat's own checkout"
+        );
+        assert!(before.root.exists());
+        assert_eq!(session.lock().await.thread.worktree.as_ref(), Some(&before));
+        assert_eq!(
+            context.lock().await.execution_scope_worktree().as_ref(),
+            Some(&before)
+        );
+    }
+
+    #[tokio::test]
+    async fn self_merge_noop_cleanup_returns_to_project() {
+        let (_temp, context, session, _service) = fixture().await;
+        let before = session.lock().await.thread.worktree.clone().unwrap();
+        let result = execute(&context, "worktree_merge", merge_args())
+            .await
+            .unwrap();
+        assert!(result.messages[0]
+            .content
+            .content_text_only()
+            .starts_with("# Nothing to Merge"));
+        assert!(!before.root.exists());
+        assert!(session.lock().await.thread.worktree.is_none());
+        assert!(context.lock().await.execution_scope.is_none());
+    }
+
+    #[tokio::test]
+    async fn task_self_merge_refuses_before_checkout_deletion() {
+        let (_temp, context, session, _service) = fixture().await;
+        let before = session.lock().await.thread.worktree.clone().unwrap();
+        session.lock().await.thread.task_meta = Some(crate::chat::types::TaskMeta {
+            task_id: "fixture-task".into(),
+            role: "planner".into(),
+            agent_id: None,
+            card_id: None,
+            planner_chat_id: None,
+        });
+        let error = execute(&context, "worktree_merge", merge_args())
+            .await
+            .err()
+            .expect("task must be refused");
+        assert_eq!(
+            error,
+            "Destructive self merge requires an ordinary root chat's own checkout"
+        );
+        assert!(before.root.exists());
+        assert_eq!(session.lock().await.thread.worktree.as_ref(), Some(&before));
+        assert_eq!(
+            context.lock().await.execution_scope_worktree().as_ref(),
+            Some(&before)
+        );
+    }
+
+    #[tokio::test]
+    async fn self_merge_finalizes_after_same_execution_cancellation() {
+        let (_temp, context, session, service) = fixture().await;
+        let transition = transition_lock(&session).await;
+        let before = session.lock().await.thread.clone();
+        let worktree = before.worktree.as_ref().unwrap().clone();
+        let app = context.lock().await.app.clone();
+        let mut barrier = session.lock().await;
+        let receiver = start_self_merge(
+            context.clone(),
+            session.clone(),
+            before,
+            service.clone(),
+            worktree.id.clone(),
+            MergeWorktreeRequest {
+                commit_message: Some("fixture cleanup".into()),
+                ..Default::default()
+            },
+            transition,
+            app.clone(),
+        )
+        .unwrap();
+        drop(receiver);
+        barrier
+            .abort_flag
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        barrier.set_runtime_state(SessionState::Idle, None);
+        drop(barrier);
+        app.agent_executions.shutdown().await;
+        assert!(!worktree.root.exists());
+        assert!(session.lock().await.thread.worktree.is_none());
+        assert!(context.lock().await.execution_scope.is_none());
+        let saved: Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                service
+                    .source_workspace_root()
+                    .join(".refact/trajectories/merge-root/merge-root.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(saved.get("worktree").is_none_or(Value::is_null));
+    }
 
     #[test]
     fn bool_arg_accepts_model_spellings_and_rejects_garbage() {
@@ -237,6 +672,152 @@ async fn service_from_gcx(
 
 pub struct ToolWorktreeMerge;
 
+fn check_self_merge_caller(
+    context: &AtCommandsContext,
+    session: &ChatSession,
+    require_live: bool,
+) -> Result<(), String> {
+    let worktree = context
+        .execution_scope_worktree()
+        .ok_or("Self merge scope is unavailable")?;
+    if context.chat_id != context.root_chat_id
+        || context.subchat_depth != 0
+        || context.background_agent_id.is_some()
+        || context.task_meta.is_some()
+        || session.thread.task_meta.is_some()
+        || session.thread.parent_id.is_some()
+        || session.thread.link_type.is_some()
+        || session
+            .thread
+            .root_chat_id
+            .as_deref()
+            .is_some_and(|root| root != context.chat_id)
+        || context.chat_id.starts_with("subchat-")
+        || crate::buddy::supervision_authority::native_edit_scope_for_chat(&context.chat_id)
+            .is_some()
+        || worktree.kind != "chat"
+        || worktree.task_id.is_some()
+        || worktree.card_id.is_some()
+        || worktree.agent_id.is_some()
+    {
+        return Err("Destructive self merge requires an ordinary root chat's own checkout".into());
+    }
+    if session.closed
+        || session.chat_id != context.chat_id
+        || (require_live && session.runtime.state != SessionState::ExecutingTools)
+        || !Arc::ptr_eq(&session.abort_flag, &context.abort_flag)
+        || (require_live
+            && context
+                .abort_flag
+                .load(std::sync::atomic::Ordering::Relaxed))
+        || session.thread.worktree.as_ref() != Some(&worktree)
+        || session.work_project_root.as_ref() != Some(&worktree.source_workspace_root)
+    {
+        return Err(
+            "Self merge requires the current live tool execution and unchanged chat scope".into(),
+        );
+    }
+    Ok(())
+}
+
+async fn check_self_merge_authority(
+    app: &crate::app_state::AppState,
+    chat_id: &str,
+) -> Result<(), String> {
+    if let Some(reason) = crate::agents::seal::seal_reason(app, chat_id).await {
+        return Err(reason.message());
+    }
+    if crate::tasks::admission::is_tracked(chat_id).await
+        || app
+            .agents
+            .find_agent_id_by_child_chat_id(chat_id)
+            .await
+            .is_some()
+    {
+        return Err("Task and background executions cannot hand off self merge scope".into());
+    }
+    Ok(())
+}
+
+async fn finish_self_merge(
+    ccx: &Arc<AMutex<AtCommandsContext>>,
+    session_arc: &Arc<AMutex<ChatSession>>,
+    before: &crate::chat::types::ThreadParams,
+    response: &MergeWorktreeResponse,
+) -> Result<(), String> {
+    let (app, chat_id) = {
+        let context = ccx.lock().await;
+        (context.app.clone(), context.chat_id.clone())
+    };
+    let worktree = before.worktree.as_ref().ok_or("Self merge scope changed")?;
+    let removed = response.id == worktree.id
+        && (response.merged || response.status == "nothing_to_merge")
+        && response.conflict.is_none()
+        && response.dirty_baseline.is_none()
+        && response
+            .cleanup
+            .as_ref()
+            .is_some_and(|cleanup| cleanup.worktree_deleted && cleanup.registry_deleted)
+        && matches!(tokio::fs::symlink_metadata(&worktree.root).await,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound);
+    if removed {
+        check_self_merge_authority(&app, &chat_id).await?;
+        {
+            let mut context = ccx.lock().await;
+            let mut session = session_arc.lock().await;
+            check_self_merge_caller(&context, &session, false)?;
+            check_unchanged_attachment(&session, before)?;
+            session.thread.worktree = None;
+            context.execution_scope = None;
+            session.release_turn_only_state();
+            session.emit(ChatEvent::ThreadUpdated {
+                params: serde_json::json!({"worktree": null}),
+            });
+            session.queue_post_tool_side_effect(crate::chat::queue::worktree_disabled_message(
+                Some(worktree),
+            ));
+            session.increment_version();
+            session.touch();
+        }
+        crate::chat::trajectories::try_save_trajectory_with_intent(
+                    app.clone(), session_arc.clone(), TrajectoryCommitIntent::Required,
+                ).await.map_err(|error| format!("Worktree removed and scope returned to project in memory, but persistence failed: {error}"))?;
+    }
+    Ok(())
+}
+
+fn start_self_merge(
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    session: Arc<AMutex<ChatSession>>,
+    before: crate::chat::types::ThreadParams,
+    service: WorktreeService,
+    worktree_id: String,
+    request: MergeWorktreeRequest,
+    transition: tokio::sync::OwnedMutexGuard<()>,
+    app: crate::app_state::AppState,
+) -> Result<tokio::sync::oneshot::Receiver<Result<MergeWorktreeResponse, String>>, String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.agent_executions.spawn_owned(
+        format!("self-merge:{}", uuid::Uuid::new_v4()),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(tokio::sync::Notify::new()),
+        async move {
+            let _transition = transition;
+            let result = async {
+                let response = service.merge_worktree(&worktree_id, request).await?;
+                finish_self_merge(&ccx, &session, &before, &response).await?;
+                Ok(response)
+            }
+            .await;
+            if let Err(error) = &result {
+                tracing::error!(%error, "Owned self merge failed");
+            }
+            let _ = sender.send(result);
+        },
+    )?;
+    Ok(receiver)
+}
+
 impl ToolWorktreeMerge {
     pub fn new() -> Self {
         Self
@@ -307,6 +888,58 @@ impl Tool for ToolWorktreeMerge {
 
         let parent_chat_id = ccx.lock().await.chat_id.clone();
         let service = service_from_gcx(gcx.clone(), source_workspace_root).await?;
+        let app = ccx.lock().await.app.clone();
+        let self_session = if delete_after_merge
+            && active_worktree
+                .as_ref()
+                .is_some_and(|worktree| worktree.id == worktree_id)
+        {
+            Some(
+                app.chat
+                    .sessions
+                    .read()
+                    .await
+                    .get(&parent_chat_id)
+                    .cloned()
+                    .ok_or("Current chat session is unavailable for self merge")?,
+            )
+        } else {
+            None
+        };
+        let _transition = match &self_session {
+            Some(session) => Some(transition_lock(session).await),
+            None => None,
+        };
+        let before = if let Some(session) = &self_session {
+            check_self_merge_authority(&app, &parent_chat_id).await?;
+            let context = ccx.lock().await;
+            let session = session.lock().await;
+            check_self_merge_caller(&context, &session, true)?;
+            let worktree = active_worktree.as_ref().ok_or("Self merge scope changed")?;
+            if context.execution_scope_worktree().as_ref() != Some(worktree)
+                || service.source_workspace_root() != worktree.source_workspace_root
+            {
+                return Err("Self merge source or checkout changed".into());
+            }
+            Some(session.thread.clone())
+        } else {
+            None
+        };
+        if let Some(before) = &before {
+            let worktree = before.worktree.as_ref().ok_or("Self merge scope changed")?;
+            let view = service.get_worktree(&worktree_id).await?;
+            if view.meta != *worktree
+                || !view.references.iter().any(|reference| {
+                    reference.kind == "chat"
+                        && reference.chat_id.as_deref() == Some(&parent_chat_id)
+                        && reference.task_id.is_none()
+                        && reference.card_id.is_none()
+                        && reference.agent_id.is_none()
+                })
+            {
+                return Err("Self merge registry checkout ownership does not match".into());
+            }
+        }
         let commit_message = match string_arg(args, "commit_message")? {
             Some(message) => Some(message),
             None => {
@@ -332,20 +965,40 @@ impl Tool for ToolWorktreeMerge {
             }
         };
 
-        let response = service
-            .merge_worktree(
-                &worktree_id,
-                MergeWorktreeRequest {
-                    strategy,
-                    delete_after_merge,
-                    include_uncommitted,
-                    target_branch,
-                    commit_message,
-                    generate_commit_message: false,
-                    acknowledge_dirty_baseline,
-                },
-            )
-            .await?;
+        if let (Some(session), Some(before)) = (&self_session, &before) {
+            check_self_merge_authority(&app, &parent_chat_id).await?;
+            let context = ccx.lock().await;
+            let session = session.lock().await;
+            check_self_merge_caller(&context, &session, true)?;
+            check_unchanged_attachment(&session, before)?;
+        }
+        let request = MergeWorktreeRequest {
+            strategy,
+            delete_after_merge,
+            include_uncommitted,
+            target_branch,
+            commit_message,
+            generate_commit_message: false,
+            acknowledge_dirty_baseline,
+        };
+        let response = if let (Some(session), Some(before), Some(transition)) =
+            (self_session, before, _transition)
+        {
+            start_self_merge(
+                ccx.clone(),
+                session,
+                before,
+                service,
+                worktree_id,
+                request,
+                transition,
+                app.clone(),
+            )?
+            .await
+            .map_err(|error| format!("Self merge completion task failed: {error}"))??
+        } else {
+            service.merge_worktree(&worktree_id, request).await?
+        };
 
         Ok((
             false,

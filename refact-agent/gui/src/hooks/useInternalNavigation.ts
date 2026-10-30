@@ -4,7 +4,11 @@ import type { AppStore } from "../app/store";
 import type { InternalLinkOrigin } from "../contexts/InternalLinkContext";
 import { parseRefactLink } from "../contexts/internalLinkUtils";
 import {
+  buildBackgroundAgentsTree,
   createChatWithId,
+  flattenBackgroundAgentTree,
+  reconcileBackgroundAgents,
+  selectBackgroundAgentPool,
   selectBackgroundAgentsByThread,
   selectRuntimeById,
   selectThreadById,
@@ -23,6 +27,7 @@ import {
   tasksApi,
   taskErrorMessage,
   type TaskMeta,
+  type TaskBoard,
 } from "../services/refact/tasks";
 import {
   worktreesApi,
@@ -36,8 +41,16 @@ import {
 
 const useAppStore = useStore.withTypes<AppStore>();
 export const INTERNAL_NAVIGATION_TIMEOUT_MS = 15_000;
+type LocalTaskChatContext = {
+  task: TaskMeta;
+  board: TaskBoard;
+  plannerChats: { id: string }[];
+  pendingPlannerIds?: ReadonlySet<string>;
+  deletedPlannerIds?: ReadonlySet<string>;
+};
 type NavigationOptions = {
   scope?: string;
+  localTaskChatContext?: LocalTaskChatContext;
   onChatOpened?: (chatId: string) => void;
   onCardOpened?: (taskId: string, cardId: string) => void;
   onWorktreeOpened?: (record: WorktreeRecordView) => void;
@@ -45,6 +58,7 @@ type NavigationOptions = {
 
 export function useInternalNavigation({
   scope = "",
+  localTaskChatContext,
   onChatOpened,
   onCardOpened,
   onWorktreeOpened,
@@ -53,9 +67,12 @@ export function useInternalNavigation({
   const mounted = useRef(false);
   const currentScope = useRef(scope);
   currentScope.current = scope;
+  const localContext = useRef(localTaskChatContext);
+  localContext.current = localTaskChatContext;
   const inFlight = useRef(false);
   const cancellation = useRef<AbortController | null>(null);
   const [pending, setPending] = useState(false);
+  const [localPending, setLocalPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     mounted.current = true;
@@ -66,8 +83,63 @@ export function useInternalNavigation({
   }, []);
   useEffect(() => () => cancellation.current?.abort(), [scope]);
 
-  const navigate = useCallback(
-    async (url: string, origin: InternalLinkOrigin = {}): Promise<boolean> => {
+  const getLocalContext = useCallback(() => {
+    const context = localContext.current;
+    if (!context) return undefined;
+    const state = store.getState();
+    const task = tasksApi.endpoints.getTask.select(context.task.id)(state);
+    const board = tasksApi.endpoints.getBoard.select(context.task.id)(state);
+    const planners = tasksApi.endpoints.listTaskTrajectories.select({
+      taskId: context.task.id,
+      role: "planner",
+    })(state);
+    if (task.isError || board.isError || planners.isError) return undefined;
+    const saved = planners.data ?? context.plannerChats;
+    const plannerChats = saved.filter(
+      (planner) => !context.deletedPlannerIds?.has(planner.id),
+    );
+    for (const planner of context.plannerChats) {
+      if (
+        context.pendingPlannerIds?.has(planner.id) &&
+        !context.deletedPlannerIds?.has(planner.id) &&
+        !plannerChats.some((savedPlanner) => savedPlanner.id === planner.id)
+      ) {
+        plannerChats.push(planner);
+      }
+    }
+    return {
+      ...context,
+      task: task.data ?? context.task,
+      board: board.data ?? context.board,
+      plannerChats,
+    };
+  }, [store]);
+
+  const knownAgent = useCallback(
+    (chatId: string, sourceId: string) => {
+      const state = store.getState();
+      return flattenBackgroundAgentTree(
+        buildBackgroundAgentsTree(
+          reconcileBackgroundAgents(
+            selectBackgroundAgentPool(state),
+            backgroundAgentsApi.endpoints.getBackgroundAgents.select(sourceId)(
+              state,
+            ).data,
+          ),
+          sourceId,
+        ),
+      ).find((agent) => agent.child_chat_id === chatId);
+    },
+    [store],
+  );
+
+  const runNavigation = useCallback(
+    async (
+      url: string,
+      origin: InternalLinkOrigin = {},
+      local?: { context: LocalTaskChatContext; owner: boolean },
+      directAgent?: NonNullable<ReturnType<typeof knownAgent>>,
+    ): Promise<boolean> => {
       const target = parseRefactLink(url);
       if (!target) {
         setError("Unsupported or invalid internal link.");
@@ -82,6 +154,7 @@ export function useInternalNavigation({
       if (inFlight.current) return false;
       inFlight.current = true;
       setPending(true);
+      setLocalPending(Boolean(local ?? directAgent));
       setError(null);
       const initial = store.getState();
       const endpoint = getEngineEndpointIdentity(initial.config);
@@ -96,10 +169,23 @@ export function useInternalNavigation({
         ? selectTaskActiveChat(initial, origin.taskId)?.chatId
         : undefined;
       let valid = true;
+      const agentValidity = { current: true };
       const controller = new AbortController();
       cancellation.current = controller;
       const checkSource = () => {
         const state = store.getState();
+        if (directAgent) {
+          const latest = origin.chatId && knownAgent(target.id, origin.chatId);
+          agentValidity.current =
+            agentValidity.current &&
+            Boolean(
+              latest &&
+                latest.agent_id === directAgent.agent_id &&
+                latest.parent_chat_id === directAgent.parent_chat_id &&
+                latest.child_chat_id === directAgent.child_chat_id &&
+                latest.kind === directAgent.kind,
+            );
+        }
         valid =
           valid &&
           mounted.current &&
@@ -216,6 +302,14 @@ export function useInternalNavigation({
         if (!checkSource()) return false;
         if (data.id !== target.id)
           throw new Error("Chat response did not match the requested target.");
+        if (
+          directAgent &&
+          data.parent_id &&
+          data.parent_id !== directAgent.parent_chat_id
+        )
+          throw new Error(
+            "This agent is no longer a current child of this chat.",
+          );
         const source = origin.chatId
           ? selectThreadById(initial, origin.chatId)
           : undefined;
@@ -229,9 +323,9 @@ export function useInternalNavigation({
               )(initial).data ?? []),
             ]
           : [];
-        const agent = agents.find(
-          (candidate) => candidate.child_chat_id === target.id,
-        );
+        const agent =
+          directAgent ??
+          agents.find((candidate) => candidate.child_chat_id === target.id);
         let taskMeta = data.task_meta;
         let activeChat:
           | { type: "planner"; chatId: string }
@@ -239,7 +333,48 @@ export function useInternalNavigation({
           | undefined;
         let validatedTask: TaskMeta | undefined;
         const taskId = taskMeta?.task_id ?? origin.taskId;
-        if (taskId) {
+        if (local) {
+          const latest = getLocalContext();
+          const original = resolveChatLink(
+            target.id,
+            local.context.plannerChats,
+            local.context.board,
+          );
+          const resolved =
+            latest &&
+            resolveChatLink(target.id, latest.plannerChats, latest.board);
+          if (
+            !latest ||
+            latest.task.id !== local.context.task.id ||
+            !resolved ||
+            resolved.kind === "unknown" ||
+            resolved.kind !== original.kind ||
+            (resolved.kind === "agent" &&
+              original.kind === "agent" &&
+              resolved.cardId !== original.cardId) ||
+            (local.owner && latest.board.owner_chat_id !== target.id) ||
+            (taskMeta &&
+              (taskMeta.task_id !== latest.task.id ||
+                taskMeta.role !==
+                  (resolved.kind === "planner" ? "planner" : "agents") ||
+                (resolved.kind === "agent" &&
+                  taskMeta.card_id !== resolved.cardId)))
+          )
+            throw new Error(
+              "This chat is not a current planner or agent for the referenced task card.",
+            );
+          validatedTask = latest.task;
+          activeChat =
+            resolved.kind === "planner"
+              ? { type: "planner", chatId: target.id }
+              : { type: "agent", chatId: target.id, cardId: resolved.cardId };
+          taskMeta = {
+            ...taskMeta,
+            task_id: latest.task.id,
+            role: resolved.kind === "planner" ? "planner" : "agents",
+            ...(resolved.kind === "agent" ? { card_id: resolved.cardId } : {}),
+          };
+        } else if (taskId) {
           if (!parseRefactLink(`refact://task/${taskId}`))
             throw new Error("Invalid task reference in chat response.");
           validatedTask = await read(
@@ -294,6 +429,10 @@ export function useInternalNavigation({
               "This chat is not a current planner or agent for the referenced task card.",
             );
         }
+        if (!agentValidity.current)
+          throw new Error(
+            "This agent is no longer a current child of this chat.",
+          );
         unsubscribe();
         if (!selectRuntimeById(store.getState(), target.id)) {
           store.dispatch(
@@ -353,11 +492,64 @@ export function useInternalNavigation({
         controller.signal.removeEventListener("abort", onAbort);
         if (cancellation.current === controller) cancellation.current = null;
         inFlight.current = false;
-        if (mounted.current) setPending(false);
+        if (mounted.current) {
+          setPending(false);
+          setLocalPending(false);
+        }
       }
     },
-    [onCardOpened, onChatOpened, onWorktreeOpened, store],
+    [
+      getLocalContext,
+      knownAgent,
+      onCardOpened,
+      onChatOpened,
+      onWorktreeOpened,
+      store,
+    ],
   );
 
-  return { navigate, pending, error };
+  const navigate = useCallback(
+    (url: string, origin: InternalLinkOrigin = {}) =>
+      runNavigation(url, origin),
+    [runNavigation],
+  );
+  const navigateLocalTaskChat = useCallback(
+    (chatId: string, taskId: string, cardId?: string, owner = false) => {
+      const context = getLocalContext();
+      const resolved =
+        context && resolveChatLink(chatId, context.plannerChats, context.board);
+      const trusted =
+        context &&
+        context.task.id === taskId &&
+        resolved &&
+        resolved.kind !== "unknown" &&
+        (!cardId ||
+          (resolved.kind === "agent" && resolved.cardId === cardId)) &&
+        (!owner || context.board.owner_chat_id === chatId);
+      return runNavigation(
+        `refact://chat/${chatId}`,
+        { taskId, cardId },
+        trusted ? { context, owner } : undefined,
+      );
+    },
+    [getLocalContext, runNavigation],
+  );
+  const navigateKnownAgent = useCallback(
+    (chatId: string, sourceId: string) =>
+      runNavigation(
+        `refact://chat/${chatId}`,
+        { chatId: sourceId },
+        undefined,
+        knownAgent(chatId, sourceId),
+      ),
+    [knownAgent, runNavigation],
+  );
+  return {
+    navigate,
+    navigateKnownAgent,
+    navigateLocalTaskChat,
+    pending,
+    showProgress: pending && !localPending,
+    error,
+  };
 }

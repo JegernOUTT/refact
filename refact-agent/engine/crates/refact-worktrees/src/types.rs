@@ -76,6 +76,8 @@ pub struct WorktreeStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorktreeRegistryRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_chat_id: Option<String>,
     pub meta: WorktreeMeta,
     pub created_at: String,
     pub updated_at: String,

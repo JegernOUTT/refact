@@ -98,6 +98,10 @@ describe("Dock", () => {
       change_seq: 1,
     };
     let reads = 0;
+    let releaseMetadata!: () => void;
+    const metadataResponse = new Promise<void>((resolve) => {
+      releaseMetadata = resolve;
+    });
     const commands = vi.fn();
     server.use(
       http.get("*/v1/background-agents", () =>
@@ -111,16 +115,17 @@ describe("Dock", () => {
           },
         ]),
       ),
-      http.get(`*/v1/trajectories/${childId}`, ({ request }) => {
+      http.get(`*/v1/trajectories/${childId}`, async ({ request }) => {
         reads += 1;
+        expect(new URL(request.url).search).toBe("?metadata_only=true");
         expect(request.headers.get("authorization")).toBe("Bearer scoped-key");
+        await metadataResponse;
         return HttpResponse.json({
           id: childId,
           title: "Stored child",
           model: "",
           mode: "AGENT",
           tool_use: "agent",
-          messages: [],
         });
       }),
       http.get(`*/v1/trajectories/${deniedId}`, () =>
@@ -154,6 +159,10 @@ describe("Dock", () => {
     await view.user.click(
       screen.getByRole("button", { name: "Unloaded child" }),
     );
+    await waitFor(() => expect(reads).toBe(1));
+    expect(screen.queryByText("Opening linked target...")).toBeNull();
+    expect(view.store.getState().chat.current_thread_id).toBe(parentId);
+    releaseMetadata();
     await waitFor(() =>
       expect(view.store.getState().chat.current_thread_id).toBe(childId),
     );
