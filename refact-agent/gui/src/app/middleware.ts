@@ -1222,7 +1222,13 @@ startListening({
     providersApi.endpoints.updateProvider.matchFulfilled,
     providersApi.endpoints.oauthExchange.matchFulfilled,
   ),
-  effect: (_action, listenerApi) => {
+  effect: (action, listenerApi) => {
+    if (
+      providersApi.endpoints.oauthExchange.matchFulfilled(action) &&
+      !action.payload.success
+    ) {
+      return;
+    }
     listenerApi.dispatch(clearError());
     listenerApi.dispatch(capsApi.util.resetApiState());
     listenerApi.dispatch(modelsApi.util.resetApiState());
