@@ -96,6 +96,9 @@ export function isReasoningEffort(v: unknown): v is ReasoningEffort {
 }
 
 export type ChatThread = {
+  recovery_policy?:
+    | import("../../../services/refact/chatSubscription").RecoveryPolicyOverrides
+    | null;
   id: string;
   messages: ChatMessages;
   model: string;
@@ -206,6 +209,9 @@ export type ThreadConfirmation = {
 };
 
 export type ChatThreadRuntime = {
+  recovery?:
+    | import("../../../services/refact/chatSubscription").RecoveryRecord
+    | null;
   thread: ChatThread;
   streaming: boolean;
   waiting_for_response: boolean;

@@ -549,6 +549,26 @@ pub fn apply_setparams_patch(
     patch: &serde_json::Value,
 ) -> (bool, serde_json::Value) {
     let mut changed = false;
+    if let Some(value) = patch.get("recovery_policy") {
+        let parsed = if value.is_null() {
+            Ok(None)
+        } else {
+            serde_json::from_value::<refact_core::recovery::RecoveryPolicyOverrides>(value.clone())
+                .map(Some)
+        };
+        if let Ok(policy) = parsed {
+            let policy = policy.filter(|p| !p.is_empty());
+            if policy
+                .as_ref()
+                .map(|p| p.resolve(Default::default()).is_ok())
+                .unwrap_or(true)
+                && thread.recovery_policy != policy
+            {
+                thread.recovery_policy = policy;
+                changed = true;
+            }
+        }
+    }
 
     if let Some(model) = patch.get("model").and_then(|v| v.as_str()) {
         if thread.model != model {
@@ -851,6 +871,14 @@ pub fn apply_setparams_patch(
     }
 
     let mut sanitized_patch = patch.clone();
+    if let Some(obj) = sanitized_patch.as_object_mut() {
+        if obj.contains_key("recovery_policy") {
+            obj.insert(
+                "recovery_policy".into(),
+                serde_json::json!(thread.recovery_policy),
+            );
+        }
+    }
     if let Some(obj) = sanitized_patch.as_object_mut() {
         obj.remove("type");
         obj.remove("chat_id");
@@ -1229,13 +1257,30 @@ fn handle_update_goal_command(
     Ok(update_goal_result(seq, truncation))
 }
 
+pub(super) fn validate_goal_control(session: &ChatSession, action: &str) -> Result<(), String> {
+    if session.goal.is_none() {
+        return Err("no goal to control; call set_goal first".into());
+    }
+    match action.trim().to_ascii_lowercase().as_str() {
+        "pause" | "stop" => Ok(()),
+        "resume"
+            if matches!(
+                session.goal_status,
+                Some(GoalStatus::Paused | GoalStatus::Stopped)
+            ) =>
+        {
+            Ok(())
+        }
+        "resume" => Err("goal_control resume requires a paused or stopped goal".into()),
+        _ => Err("goal_control action must be pause, resume, or stop".into()),
+    }
+}
+
 fn handle_goal_control_command(
     session: &mut ChatSession,
     action: String,
 ) -> Result<serde_json::Value, String> {
-    if session.goal.is_none() {
-        return Err("no goal to control; call set_goal first".to_string());
-    }
+    validate_goal_control(session, &action)?;
     let normalized = action.trim().to_ascii_lowercase();
     let status = match normalized.as_str() {
         "pause" => GoalStatus::Paused,
@@ -1616,7 +1661,14 @@ async fn select_next_command(session_arc: &Arc<AMutex<ChatSession>>) -> Option<S
                 .fetch_add(1, Ordering::Relaxed);
             (None, Some(waiter))
         }
-    } else if !session.delivery_wake_sources.is_empty() && session.command_queue.is_empty() {
+    } else if !session.delivery_wake_sources.is_empty()
+        && session.command_queue.is_empty()
+        && !session
+            .runtime
+            .recovery
+            .as_ref()
+            .is_some_and(|r| r.holds_goal())
+    {
         session.delivery_wake_sources.clear();
         session.abort_flag.store(false, Ordering::SeqCst);
         session.user_interrupt_flag.store(false, Ordering::SeqCst);
@@ -1796,6 +1848,11 @@ fn hidden_role_extra(msg: &ChatMessage) -> serde_json::Map<String, serde_json::V
         "plan" | "goal" | "event" | "compression_report"
     ) {
         msg.extra.clone()
+    } else if msg.role == "assistant" && super::diagnostics::is_ui_only_message(msg) {
+        serde_json::json!({"_ui_only": true})
+            .as_object()
+            .unwrap()
+            .clone()
     } else {
         serde_json::Map::new()
     }
@@ -2673,6 +2730,26 @@ async fn create_checkpoint_async(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn interrupted_assistant_stays_off_wire_after_branch_and_restore() {
+        let mut artifact = ChatMessage {
+            role: "assistant".into(),
+            content: crate::call_validation::ChatContent::SimpleText("INTERRUPTED_SENTINEL".into()),
+            ..Default::default()
+        };
+        artifact
+            .extra
+            .insert("_ui_only".into(), serde_json::json!(true));
+        let branch = sanitize_message_for_branch(&artifact);
+        let restored = sanitize_message_for_restore(&branch);
+        assert_eq!(restored.content.content_text_only(), "INTERRUPTED_SENTINEL");
+        let wire = crate::chat::linearize::apply_summarization_linearize(vec![restored]).unwrap();
+        assert!(
+            wire.is_empty(),
+            "inert recovery assistant leaked after copy"
+        );
+    }
+
     use super::*;
     use crate::exec::types::DEFAULT_EXEC_OUTPUT_LIMIT_BYTES;
     use crate::exec::{ExecMode, ExecOwnerMeta, ExecProcessId, ExecProcessMeta};
@@ -2813,7 +2890,7 @@ mod tests {
             role: "assistant".into(),
             tool_calls: Some(vec![crate::call_validation::ChatToolCall {
                 id: "restore-pending".into(),
-                index: None,
+                index: Some(0),
                 function: crate::call_validation::ChatToolFunction {
                     name: "pause_edge_tool".into(),
                     arguments: "{}".into(),
@@ -2833,6 +2910,104 @@ mod tests {
             .await
             .insert(chat_id, session.clone());
         (temp, app, session, calls, model_calls, server)
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn recovery_deadline_expires_while_initial_board_admission_waits_for_lock() {
+        use refact_core::recovery::{
+            RecoveryBudget, RecoveryError, RecoveryPolicy, RecoveryPolicySource, RecoveryRecord,
+            RecoveryState,
+        };
+        use std::future::Future;
+        use std::sync::atomic::Ordering;
+        use std::task::Poll;
+        use std::time::Duration;
+
+        tokio::time::resume();
+        let (_temp, app, session, calls, model_calls, server) = restore_gate_fixture().await;
+        let (chat_id, task_id) = {
+            let session = session.lock().await;
+            (
+                session.chat_id.clone(),
+                session.thread.task_meta.as_ref().unwrap().task_id.clone(),
+            )
+        };
+        crate::tasks::admission::reserve(&app, &chat_id, "restore-project", "restore-root", 0)
+            .await
+            .unwrap();
+        crate::tasks::admission::wait_for_permit(&chat_id)
+            .await
+            .unwrap();
+        assert!(app.agent_executions.get(&chat_id).is_some());
+        let (_, board_guard) = crate::tasks::storage::locked_task_dir(app.gcx.clone(), &task_id)
+            .await
+            .unwrap();
+        let policy = RecoveryPolicy {
+            total_timeout_ms: 60_000,
+            ..Default::default()
+        };
+        let budget = Arc::new(RecoveryBudget::new_manual(policy.clone()));
+        {
+            let mut session = session.lock().await;
+            session.recovery_budget = Some(budget);
+            session.runtime.recovery = Some(RecoveryRecord {
+                operation_id: "operation".into(),
+                run_id: "run".into(),
+                revision: 1,
+                state: RecoveryState::Attempting,
+                policy,
+                policy_source: RecoveryPolicySource::Thread,
+                manual: true,
+                retries_used: 0,
+                latest_error: RecoveryError {
+                    category: "network".into(),
+                    title: "Network error".into(),
+                    explanation: "Connection interrupted".into(),
+                    suggested_action: "Retry".into(),
+                    is_retryable: true,
+                    raw_error: "connection interrupted".into(),
+                },
+                next_retry_at_ms: None,
+                retry_not_before_ms: None,
+                deadline_at_ms: None,
+                terminal_reason: None,
+                attempts: vec![],
+            });
+        }
+        let contended = Arc::new(tokio::sync::Notify::new());
+        let generation = crate::tasks::board_lock::BOARD_LOCK_CONTENDED.scope(
+            contended.clone(),
+            start_generation(app.clone(), session.clone()),
+        );
+        tokio::pin!(generation);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::select! {
+                _ = contended.notified() => {},
+                _ = &mut generation => panic!("generation returned before contending for the board lock"),
+            }
+        }).await.expect("generation must reach the held board lock");
+        tokio::time::pause();
+        assert!(
+            std::future::poll_fn(|cx| Poll::Ready(generation.as_mut().poll(cx).is_pending())).await
+        );
+        tokio::time::advance(Duration::from_millis(60_001)).await;
+        tokio::time::resume();
+        tokio::time::timeout(Duration::from_secs(10), &mut generation)
+            .await
+            .expect("generation must finish while the board lock remains held");
+        let session = session.lock().await;
+        let record = session.runtime.recovery.as_ref().unwrap();
+        assert_eq!(record.state, RecoveryState::Exhausted);
+        assert_eq!(
+            record.terminal_reason.as_deref(),
+            Some("deadline_exhausted")
+        );
+        assert_eq!(session.runtime.state, SessionState::Error);
+        assert_eq!(model_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        drop(session);
+        drop(board_guard);
+        server.abort();
     }
 
     #[tokio::test]
@@ -4243,6 +4418,7 @@ mod tests {
         card.agent_worktree_name = Some(managed.id.clone());
         card.agent_branch = managed.branch.clone();
         crate::tasks::storage::update_board_atomic(gcx.clone(), &task.id, move |board| {
+            board.owner_chat_id = Some("scope-planner".into());
             board.cards.push(card);
             Ok(())
         })

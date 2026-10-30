@@ -3956,6 +3956,7 @@ pub(crate) async fn subchat_stream(
             reasoning_type: model_rec.reasoning_type_string(),
             supports_temperature: model_rec.supports_temperature,
             priority: refact_providers::pressure::RequestPriority::Background,
+            recovery_budget: None,
         };
 
         let mut collector = SubchatProgressCollector::new(

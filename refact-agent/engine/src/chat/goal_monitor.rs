@@ -432,6 +432,14 @@ fn expire_goal_wait(session: &mut ChatSession, now_ms: u64) -> GoalNudgeOutcome 
 }
 
 fn waiting_for_user_or_ide(session: &ChatSession) -> bool {
+    if session
+        .runtime
+        .recovery
+        .as_ref()
+        .is_some_and(|record| record.holds_goal())
+    {
+        return true;
+    }
     matches!(
         session.runtime.state,
         SessionState::Paused | SessionState::WaitingUserInput | SessionState::WaitingIde

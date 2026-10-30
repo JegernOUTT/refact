@@ -451,7 +451,7 @@ describe("backgroundAgentsApi", () => {
     );
     await expect(transport.unwrap()).rejects.toMatchObject({
       status: "FETCH_ERROR",
-      error: expect.stringContaining("[REDACTED]"),
+      error: expect.stringContaining("[REDACTED]") as unknown,
     });
     fetchMock.mockResolvedValueOnce(
       new Response(`Invalid JSON: ${token}`, { status: 409 }),

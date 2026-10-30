@@ -130,6 +130,7 @@ pub struct StreamRunParams {
     pub reasoning_type: Option<String>,
     pub supports_temperature: bool,
     pub priority: RequestPriority,
+    pub recovery_budget: Option<Arc<refact_core::recovery::RecoveryBudget>>,
 }
 
 #[derive(Clone, Debug)]
@@ -162,6 +163,11 @@ impl LlmStreamError {
             return false;
         }
         should_retry_llm_error(&self.message, attempt, abort)
+    }
+
+    pub fn retry_not_before_ms(&self) -> Option<u64> {
+        let (bucket, report) = self.pressure_failure.as_ref()?;
+        crate::llm::pressure::retry_not_before_ms(bucket, Some(report))
     }
 }
 
@@ -233,6 +239,20 @@ async fn wait_for_abort_signal(
     }
 }
 
+async fn wait_for_recovery_stop(
+    budget: Option<Arc<refact_core::recovery::RecoveryBudget>>,
+) -> String {
+    let Some(budget) = budget else {
+        return std::future::pending::<String>().await;
+    };
+    loop {
+        if let Err(error) = budget.check() {
+            return error;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 fn abort_requested(abort_flag: Option<&Arc<AtomicBool>>) -> bool {
     abort_flag.is_some_and(|flag| flag.load(Ordering::SeqCst))
 }
@@ -255,6 +275,23 @@ fn provider_pressure_bucket(model_rec: &BaseModelRecord) -> String {
     .map(String::as_str)
     .unwrap_or("");
     refact_providers::pressure::bucket_key(provider_id, credential)
+}
+
+fn reserve_model_send(
+    budget: Option<&Arc<refact_core::recovery::RecoveryBudget>>,
+) -> Result<(), String> {
+    match budget {
+        Some(budget) => budget.reserve_send().map(|_| ()),
+        None => Ok(()),
+    }
+}
+
+fn is_known_permanent_failure(message: &str) -> bool {
+    match classify_llm_error_for_retry(message) {
+        RetryDecision::ContextLimit { .. } => true,
+        RetryDecision::DoNotRetry { reason } => reason != "unknown_error",
+        RetryDecision::Retry { .. } | RetryDecision::UserCancelled { .. } => false,
+    }
 }
 
 fn is_abort_error(error: &str) -> bool {
@@ -1822,6 +1859,7 @@ async fn run_openai_codex_websocket_exchange<C: StreamCollector>(
     connect_timeout: Duration,
     session: &mut OpenAICodexWebSocketSession,
     prewarm: bool,
+    recovery_budget: Option<&Arc<refact_core::recovery::RecoveryBudget>>,
     collector: &mut C,
 ) -> Result<Vec<ChoiceFinal>, String> {
     ensure_openai_codex_websocket_connected(
@@ -1847,6 +1885,9 @@ async fn run_openai_codex_websocket_exchange<C: StreamCollector>(
         .and_then(|v| v.as_array())
         .map(|a| a.len())
         .unwrap_or(0);
+    if !prewarm {
+        reserve_model_send(recovery_budget)?;
+    }
     let mut websocket = session
         .connection
         .take()
@@ -1995,6 +2036,7 @@ async fn run_llm_websocket_request<C: StreamCollector>(
     abort_notify: Option<Arc<tokio::sync::Notify>>,
     connect_timeout: Duration,
     session: &mut OpenAICodexWebSocketSession,
+    recovery_budget: Option<&Arc<refact_core::recovery::RecoveryBudget>>,
     collector: &mut C,
 ) -> Result<Vec<ChoiceFinal>, String> {
     session.turn_state = None;
@@ -2020,6 +2062,7 @@ async fn run_llm_websocket_request<C: StreamCollector>(
             connect_timeout,
             session,
             true,
+            recovery_budget,
             &mut prewarm_collector,
         )
         .await?;
@@ -2035,11 +2078,21 @@ async fn run_llm_websocket_request<C: StreamCollector>(
         connect_timeout,
         session,
         false,
+        recovery_budget,
         collector,
     )
     .await;
 
     match result {
+        Err(error)
+            if recovery_budget.is_some()
+                && is_openai_codex_previous_response_missing_error(&error) =>
+        {
+            clear_openai_codex_websocket_incremental_state(session, true);
+            Err(format!(
+                "OpenAI Codex WebSocket stream ended unexpectedly; incremental state was reset: {error}"
+            ))
+        }
         Err(error) if is_openai_codex_previous_response_missing_error(&error) => {
             tracing::warn!(
                 "OpenAI Codex WebSocket previous_response_id was rejected; retrying this request without incremental state: {}",
@@ -2056,6 +2109,7 @@ async fn run_llm_websocket_request<C: StreamCollector>(
                 connect_timeout,
                 session,
                 false,
+                None,
                 collector,
             )
             .await
@@ -2095,6 +2149,7 @@ async fn run_llm_websocket_request_with_retry(
     connect_timeout: Duration,
     max_attempts: usize,
     session: OpenAICodexWebSocketSession,
+    recovery_budget: Option<Arc<refact_core::recovery::RecoveryBudget>>,
 ) -> OpenAICodexWebSocketThreadResult {
     let max_attempts = std::cmp::max(1, max_attempts);
     let mut session = session;
@@ -2114,6 +2169,7 @@ async fn run_llm_websocket_request_with_retry(
             abort_notify.clone(),
             connect_timeout,
             session,
+            recovery_budget.clone(),
         )
         .await;
 
@@ -2179,6 +2235,7 @@ async fn run_llm_websocket_request_on_large_stack(
     abort_notify: Option<Arc<tokio::sync::Notify>>,
     connect_timeout: Duration,
     mut session: OpenAICodexWebSocketSession,
+    recovery_budget: Option<Arc<refact_core::recovery::RecoveryBudget>>,
 ) -> OpenAICodexWebSocketThreadResult {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let spawn_result = std::thread::Builder::new()
@@ -2193,18 +2250,24 @@ async fn run_llm_websocket_request_on_large_stack(
                     let adapter = get_adapter(wire_format);
                     let mut replay_collector = ReplayCollector::default();
                     let outcome = runtime.block_on(async {
-                        let outcome = run_llm_websocket_request(
-                            &websocket_endpoint,
-                            &http_parts,
-                            adapter,
-                            &auth_token,
-                            abort_flag,
-                            abort_notify,
-                            connect_timeout,
-                            &mut session,
-                            &mut replay_collector,
-                        )
-                        .await;
+                        let outcome = {
+                            let request = run_llm_websocket_request(
+                                &websocket_endpoint,
+                                &http_parts,
+                                adapter,
+                                &auth_token,
+                                abort_flag,
+                                abort_notify,
+                                connect_timeout,
+                                &mut session,
+                                recovery_budget.as_ref(),
+                                &mut replay_collector,
+                            );
+                            tokio::select! {
+                                outcome = request => outcome,
+                                error = wait_for_recovery_stop(recovery_budget.clone()) => Err(error),
+                            }
+                        };
                         let close_reason = if outcome.is_ok() {
                             "websocket_thread_success"
                         } else {
@@ -2554,6 +2617,11 @@ async fn prepare_llm_stream_request(
         ));
     }
 
+    if let Some(budget) = &params.recovery_budget {
+        budget
+            .check()
+            .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
+    }
     *pressure_permit = crate::llm::pressure::acquire(
         provider_bucket,
         params.priority,
@@ -2586,7 +2654,14 @@ async fn prepare_llm_stream_request(
         );
     }
 
-    let header_retry_config = llm_http_header_retry_config(&params.model_rec);
+    let header_retry_config =
+        llm_http_header_retry_config(&params.model_rec).map(|(timeout, max_attempts)| {
+            if params.recovery_budget.is_some() {
+                (timeout, 1)
+            } else {
+                (timeout, max_attempts)
+            }
+        });
     Ok(Some(PreparedLlmStreamRequest {
         client,
         wire_format,
@@ -2639,6 +2714,7 @@ async fn try_openai_codex_websocket<C: StreamCollector>(
                     connect_timeout,
                     max_attempts,
                     websocket_session,
+                    params.recovery_budget.clone(),
                 )
                 .await
                 {
@@ -2649,6 +2725,11 @@ async fn try_openai_codex_websocket<C: StreamCollector>(
                             returned_session,
                         )
                         .await;
+                        if let Some(budget) = &params.recovery_budget {
+                            budget.check().map_err(|error| {
+                                LlmStreamError::new(error, partial_output_emitted)
+                            })?;
+                        }
                         commit_cache_guard_snapshot_if_needed(snapshot_for_commit.clone()).await;
                         replay_collector.replay(collector);
                         return Ok(Some(LlmStreamOutcome::Choices(results)));
@@ -2665,7 +2746,7 @@ async fn try_openai_codex_websocket<C: StreamCollector>(
                             )
                             .await
                             {
-                                Ok(Some(access_token)) => {
+                                Ok(Some(access_token)) if params.recovery_budget.is_none() => {
                                     let mut retry_session = returned_session;
                                     clear_openai_codex_websocket_incremental_state(
                                         &mut retry_session,
@@ -2693,7 +2774,7 @@ async fn try_openai_codex_websocket<C: StreamCollector>(
                                     );
                                     continue;
                                 }
-                                Ok(None) => {}
+                                Ok(_) => {}
                                 Err(refresh_error) => {
                                     store_openai_codex_websocket_session(
                                         &app,
@@ -2770,6 +2851,7 @@ async fn send_claude_cloud_request(
                 config,
             )
             .await?;
+            reserve_model_send(params.recovery_budget.as_ref())?;
             #[cfg(test)]
             if let Ok(response) = claude_cloud_tests::REQUEST_HOOK.try_with(|hook| {
                 let mut hook = hook.borrow_mut();
@@ -2854,8 +2936,11 @@ async fn send_http_stream_request(
                 })
         })
         .transpose()?;
+    let resend_allowed = params.recovery_budget.is_none();
     let mut response = if let Some(config) = cloud_config.as_ref() {
         send_claude_cloud_request(app, params, prepared, config).await
+    } else if let Err(error) = reserve_model_send(params.recovery_budget.as_ref()) {
+        Err(error)
     } else if let Some((response_header_timeout, max_attempts)) = header_retry_config {
         send_llm_http_request_with_header_timeout(
             &client,
@@ -2916,14 +3001,19 @@ async fn send_http_stream_request(
                     partial_output_emitted,
                 )
             })?;
+            rejected_command_credential = command_credential.replace(refreshed);
+        }
+        if let Some(retry_value) = command_credential
+            .as_deref()
+            .filter(|_| resend_allowed && rejected_command_credential.is_some())
+        {
             let mut retry_parts = HttpParts {
                 url: http_parts.url.clone(),
                 headers: http_parts.headers.clone(),
                 body: http_parts.body.clone(),
             };
-            set_bearer_authorization_header(&mut retry_parts.headers, &refreshed)
+            set_bearer_authorization_header(&mut retry_parts.headers, retry_value)
                 .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
-            rejected_command_credential = command_credential.replace(refreshed);
             response = if let Some((response_header_timeout, max_attempts)) = header_retry_config {
                 send_llm_http_request_with_header_timeout(
                     &client,
@@ -2965,6 +3055,7 @@ async fn send_http_stream_request(
             };
             if let Some(provider) = refresh_outcome
                 .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?
+                .filter(|_| resend_allowed)
             {
                 if cloud_config.as_ref().is_some_and(is_claude_console_oauth) {
                     if !provider.is_console_oauth() {
@@ -3052,7 +3143,7 @@ async fn send_http_stream_request(
             }
         };
         match refresh_outcome.map_err(|e| LlmStreamError::new(e, partial_output_emitted))? {
-            Some(new_access_token) => {
+            Some(new_access_token) if resend_allowed => {
                 let mut retry_parts = HttpParts {
                     url: http_parts.url.clone(),
                     headers: http_parts.headers.clone(),
@@ -3087,7 +3178,7 @@ async fn send_http_stream_request(
                     .await;
                 status = response.status();
             }
-            None => {}
+            _ => {}
         }
     }
 
@@ -3114,9 +3205,12 @@ async fn send_http_stream_request(
             format_llm_error_body(&format!("{}", status), &text, command_credential.as_deref()),
             partial_output_emitted,
         );
-        if let Some(report) =
+        if let Some(mut report) =
             FailureReport::from_http(status.as_u16(), retry_after.as_deref(), &text)
         {
+            if report.class.retryable() && is_known_permanent_failure(&error.message) {
+                report.class = refact_providers::pressure::PressureClass::ClientError;
+            }
             return Err(error.with_pressure_failure(provider_bucket, report));
         }
         return Err(error);
@@ -3855,6 +3949,7 @@ mod tests {
             reasoning_type: None,
             supports_temperature: true,
             priority: RequestPriority::Interactive,
+            recovery_budget: None,
         };
         let app = app_with_privacy_policy(privacy_policy(provider_id)).await;
         let mut collector = ReplayCollector::default();
@@ -3935,6 +4030,7 @@ mod tests {
             reasoning_type: None,
             supports_temperature: true,
             priority: RequestPriority::Interactive,
+            recovery_budget: None,
         };
         let app = app_with_privacy_policy(privacy_policy(provider_id)).await;
         let mut collector = ReplayCollector::default();
@@ -4070,6 +4166,7 @@ mod tests {
             reasoning_type: None,
             supports_temperature: true,
             priority: RequestPriority::Interactive,
+            recovery_budget: None,
         };
         let app = app_with_privacy_policy(privacy_policy("pressure-disabled")).await;
         let mut collector = ReplayCollector::default();
@@ -5595,6 +5692,369 @@ mod tests {
             acc.content_per_block.get(&4).map(|s| s.as_str()),
             Some("before <think>secret</think> after")
         );
+    }
+
+    fn controlled_budget(max_retries: u32) -> Arc<refact_core::recovery::RecoveryBudget> {
+        Arc::new(refact_core::recovery::RecoveryBudget::new(
+            refact_core::recovery::RecoveryPolicy {
+                mode: refact_core::recovery::RecoveryMode::Transient,
+                max_retries,
+                delay_ms: 0,
+                total_timeout_ms: 60_000,
+            },
+        ))
+    }
+
+    struct CountingServer {
+        endpoint: String,
+        hits: Arc<std::sync::atomic::AtomicUsize>,
+        received: Arc<tokio::sync::Notify>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for CountingServer {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn counting_server(status: Option<&'static str>) -> CountingServer {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let received = Arc::new(tokio::sync::Notify::new());
+        let server_hits = hits.clone();
+        let server_received = received.clone();
+        let task = tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    result = listener.accept() => {
+                        let Ok((mut socket, _)) = result else { return; };
+                        let server_hits = server_hits.clone();
+                        let server_received = server_received.clone();
+                        connections.spawn(async move {
+                            let mut request = Vec::new();
+                            let mut chunk = [0u8; 4096];
+                            loop {
+                                let count = socket.read(&mut chunk).await.unwrap_or(0);
+                                if count == 0 { return; }
+                                request.extend_from_slice(&chunk[..count]);
+                                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                                    break;
+                                }
+                            }
+                            server_hits.fetch_add(1, Ordering::SeqCst);
+                            server_received.notify_one();
+                            match status {
+                                Some(status) => {
+                                    let body = r#"{"error":{"message":"rejected"}}"#;
+                                    let response = format!(
+                                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                        body.len()
+                                    );
+                                    let _ = socket.write_all(response.as_bytes()).await;
+                                }
+                                None => std::future::pending::<()>().await,
+                            }
+                        });
+                    }
+                    _ = connections.join_next(), if !connections.is_empty() => {}
+                }
+            }
+        });
+        CountingServer {
+            endpoint: format!("http://{address}/v1/chat/completions"),
+            hits,
+            received,
+            task,
+        }
+    }
+
+    fn controlled_params(
+        model: &BaseModelRecord,
+        budget: Option<Arc<refact_core::recovery::RecoveryBudget>>,
+        abort: Option<(Arc<AtomicBool>, Arc<tokio::sync::Notify>)>,
+    ) -> StreamRunParams {
+        StreamRunParams {
+            llm_request: LlmRequest::new(
+                model.id.clone(),
+                vec![ChatMessage::new("user".to_string(), "hello".to_string())],
+            ),
+            model_rec: model.clone(),
+            chat_id: None,
+            allow_websocket: false,
+            abort_flag: abort.as_ref().map(|(flag, _)| flag.clone()),
+            abort_notify: abort.map(|(_, notify)| notify),
+            supports_tools: false,
+            supports_reasoning: false,
+            reasoning_type: None,
+            supports_temperature: true,
+            priority: RequestPriority::Interactive,
+            recovery_budget: budget,
+        }
+    }
+
+    fn header_retry_model(
+        provider_id: &str,
+        endpoint: String,
+        timeout_secs: u64,
+    ) -> BaseModelRecord {
+        let mut model = model_record(provider_id);
+        model.api_key = "controlled-test-key".to_string();
+        model.endpoint = endpoint;
+        crate::providers::llm_http_retry::insert_llm_http_header_retry_config(
+            &mut model.extra_headers,
+            true,
+            timeout_secs,
+            3,
+        );
+        model
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(provider_pressure, coordination_metrics, runtime_settings)]
+    async fn recovery_controlled_header_timeout_sends_once() {
+        refact_providers::pressure::uninstall_pressure_registry();
+        let provider_id = "controlled-timeout";
+        let server = counting_server(None).await;
+        let model = header_retry_model(provider_id, server.endpoint.clone(), 1);
+        let app = app_with_privacy_policy(privacy_policy(provider_id)).await;
+        let budget = controlled_budget(5);
+        let mut collector = ReplayCollector::default();
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_llm_stream(
+                app,
+                controlled_params(&model, Some(budget.clone()), None),
+                &mut collector,
+            ),
+        )
+        .await
+        .expect("header timeout must bound a silent provider")
+        .err()
+        .expect("silent provider must fail");
+        assert!(error.message.contains("response header timeout"), "{error}");
+        assert_eq!(server.hits.load(Ordering::SeqCst), 1);
+        assert_eq!(budget.sends_used(), 1);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(provider_pressure, coordination_metrics, runtime_settings)]
+    async fn uncontrolled_header_timeout_keeps_inner_retries() {
+        refact_providers::pressure::uninstall_pressure_registry();
+        let provider_id = "uncontrolled-timeout";
+        let server = counting_server(None).await;
+        let model = header_retry_model(provider_id, server.endpoint.clone(), 1);
+        let app = app_with_privacy_policy(privacy_policy(provider_id)).await;
+        let mut collector = ReplayCollector::default();
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_llm_stream(app, controlled_params(&model, None, None), &mut collector),
+        )
+        .await
+        .expect("header retries must terminate for a silent provider")
+        .err()
+        .expect("silent provider must fail");
+        assert!(error.message.contains("response header timeout"), "{error}");
+        assert_eq!(server.hits.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(provider_pressure, coordination_metrics, runtime_settings)]
+    async fn recovery_controlled_stop_during_send_releases_pressure_slot() {
+        crate::llm::pressure::install_provider_pressure(
+            &refact_work_core::CoordinationSettings::default(),
+        )
+        .unwrap();
+        let provider_id = "controlled-stop";
+        let server = counting_server(None).await;
+        let model = header_retry_model(provider_id, server.endpoint.clone(), 30);
+        let bucket = provider_pressure_bucket(&model);
+        let app = app_with_privacy_policy(privacy_policy(provider_id)).await;
+        let budget = controlled_budget(5);
+        let flag = Arc::new(AtomicBool::new(false));
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let mut collector = ReplayCollector::default();
+        let stream = run_llm_stream(
+            app,
+            controlled_params(
+                &model,
+                Some(budget.clone()),
+                Some((flag.clone(), notify.clone())),
+            ),
+            &mut collector,
+        );
+        tokio::pin!(stream);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::select! {
+                _ = server.received.notified() => {},
+                result = &mut stream => panic!("stream completed before request: {:?}", result.err()),
+            }
+        })
+        .await
+        .expect("request must reach the provider");
+        assert_eq!(
+            refact_providers::pressure::pressure_registry()
+                .unwrap()
+                .snapshot(&bucket)
+                .expect("the pending request must own its provider bucket")
+                .in_flight,
+            1,
+        );
+        flag.store(true, Ordering::SeqCst);
+        notify.notify_waiters();
+        let error = tokio::time::timeout(Duration::from_secs(10), &mut stream)
+            .await
+            .expect("stop must interrupt the send")
+            .err()
+            .expect("stopped request must fail");
+        assert_eq!(error.message, ABORT_ERROR_MESSAGE);
+        assert_eq!(server.hits.load(Ordering::SeqCst), 1);
+        assert_eq!(budget.sends_used(), 1);
+        let snapshot = refact_providers::pressure::pressure_registry()
+            .unwrap()
+            .snapshot(&bucket)
+            .unwrap();
+        assert_eq!(snapshot.in_flight, 0);
+        refact_providers::pressure::uninstall_pressure_registry();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(provider_pressure, coordination_metrics, runtime_settings)]
+    async fn recovery_budget_exhausted_or_cancelled_sends_nothing() {
+        refact_providers::pressure::uninstall_pressure_registry();
+        let provider_id = "controlled-exhausted";
+        let server = counting_server(Some("200 OK")).await;
+        let model = header_retry_model(provider_id, server.endpoint.clone(), 1);
+        let app = app_with_privacy_policy(privacy_policy(provider_id)).await;
+
+        let exhausted = controlled_budget(0);
+        exhausted.reserve_send().unwrap();
+        let mut collector = ReplayCollector::default();
+        let error = run_llm_stream(
+            app.clone(),
+            controlled_params(&model, Some(exhausted), None),
+            &mut collector,
+        )
+        .await
+        .err()
+        .expect("exhausted budget must refuse");
+        assert_eq!(error.message, "Recovery retries exhausted");
+
+        let cancelled = controlled_budget(5);
+        cancelled.cancel();
+        let error = run_llm_stream(
+            app,
+            controlled_params(&model, Some(cancelled.clone()), None),
+            &mut collector,
+        )
+        .await
+        .err()
+        .expect("cancelled budget must refuse");
+        assert_eq!(error.message, "Recovery cancelled");
+        assert_eq!(cancelled.sends_used(), 0);
+        assert_eq!(server.hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial(provider_pressure, coordination_metrics, runtime_settings)]
+    async fn recovery_controlled_credential_rejection_is_not_resent() {
+        refact_providers::pressure::uninstall_pressure_registry();
+        let provider_id = "controlled_helper";
+        crate::providers::credential::invalidate(provider_id);
+        let server = counting_server(Some("401 Unauthorized")).await;
+        let dir = tempfile::tempdir().unwrap();
+        let count = dir.path().join("token-count");
+        let helper = format!(
+            "n=$(cat '{}' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '{}'; echo $n",
+            count.display(),
+            count.display()
+        );
+        let mut model = model_record(provider_id);
+        model.endpoint = server.endpoint.clone();
+        model.credential = Some(CredentialSpec::Command {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), helper],
+            timeout_ms: DEFAULT_CREDENTIAL_TIMEOUT_MS,
+            refresh_interval_ms: DEFAULT_CREDENTIAL_REFRESH_INTERVAL_MS,
+            cwd: None,
+            env_passthrough: Vec::new(),
+        });
+        let app = app_with_privacy_policy(privacy_policy(provider_id)).await;
+        let budget = controlled_budget(5);
+        let mut collector = ReplayCollector::default();
+        let error = run_llm_stream(
+            app,
+            controlled_params(&model, Some(budget.clone()), None),
+            &mut collector,
+        )
+        .await
+        .err()
+        .expect("rejected credential must fail");
+        assert!(error.message.contains("401"), "{error}");
+        assert_eq!(server.hits.load(Ordering::SeqCst), 1);
+        assert_eq!(budget.sends_used(), 1);
+        crate::providers::credential::invalidate(provider_id);
+    }
+
+    #[test]
+    fn known_permanent_failures_do_not_count_as_transient_pressure() {
+        assert!(is_known_permanent_failure(
+            "LLM error (500 Internal Server Error): maximum context length exceeded"
+        ));
+        assert!(is_known_permanent_failure(
+            "LLM error (503 Service Unavailable): invalid api key"
+        ));
+        assert!(!is_known_permanent_failure(
+            "LLM error (503 Service Unavailable): upstream overloaded"
+        ));
+        assert!(!is_known_permanent_failure(
+            "LLM error (500 Internal Server Error): something odd"
+        ));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(provider_pressure, coordination_metrics, runtime_settings)]
+    async fn retry_not_before_reports_shared_bucket_cooldown() {
+        let mut settings = refact_work_core::CoordinationSettings::default();
+        settings.provider_breaker_failure_threshold = 100;
+        crate::llm::pressure::install_provider_pressure(&settings).unwrap();
+        let registry = refact_providers::pressure::pressure_registry().unwrap();
+        let bucket = "cooldown-test/bucket";
+        let report = FailureReport::from_http(429, Some("30"), "rate limit").unwrap();
+        registry
+            .try_admit(bucket, RequestPriority::Interactive)
+            .unwrap()
+            .complete(ProviderPressureOutcome::Failure(report.clone()));
+        let shared_report = FailureReport::from_http(429, None, "rate limit").unwrap();
+        let error = LlmStreamError::new("LLM error (429): rate limit", false)
+            .with_pressure_failure(bucket, shared_report);
+        let first = error
+            .retry_not_before_ms()
+            .expect("cooldown must be reported");
+        assert_eq!(
+            Some(first),
+            registry.snapshot(bucket).unwrap().retry_after_until_ms
+        );
+        assert_eq!(error.retry_not_before_ms(), Some(first));
+        refact_providers::pressure::uninstall_pressure_registry();
+        let error = LlmStreamError::new("LLM error (429): rate limit", false)
+            .with_pressure_failure(bucket, report);
+        let before_fallback = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let fallback = error
+            .retry_not_before_ms()
+            .expect("own Retry-After is used");
+        let after_fallback = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        assert!((before_fallback + 30_000..=after_fallback + 30_000).contains(&fallback));
     }
 }
 

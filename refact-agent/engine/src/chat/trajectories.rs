@@ -812,6 +812,7 @@ pub(crate) fn trajectory_list_data_is_displayable_chat(data: &TrajectoryListData
 
 #[derive(Clone)]
 pub struct LoadedTrajectory {
+    pub recovery: Option<refact_core::recovery::RecoveryRecord>,
     pub source_path: PathBuf,
     pub messages: Vec<ChatMessage>,
     pub thread: ThreadParams,
@@ -880,6 +881,7 @@ pub(crate) fn trajectory_snapshot_from_session(session: &ChatSession) -> Traject
         session.created_at.clone(),
         session.trajectory_version,
     );
+    snapshot.recovery = session.runtime.recovery.clone();
     snapshot.wake_up_at = session.wake_up_at;
     snapshot.waiting_for_card_ids = session.waiting_for_card_ids.clone();
     snapshot.goal = session.goal.clone();
@@ -3369,6 +3371,9 @@ async fn load_trajectory_candidate(
             .get("auto_compression_cap_pending")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        recovery_policy: t
+            .get("recovery_policy")
+            .and_then(|v| serde_json::from_value(v.clone()).ok()),
         auto_compression_cap: t
             .get("auto_compression_cap")
             .and_then(|v| v.as_u64())
@@ -3481,7 +3486,22 @@ async fn load_trajectory_candidate(
             pending_deliveries
         };
 
+    let mut recovery: Option<refact_core::recovery::RecoveryRecord> = t
+        .get("recovery")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+    if let Some(record) = &mut recovery {
+        record.interrupt_on_reload();
+        record.latest_error.raw_error =
+            super::diagnostics::safe_provider_error_diagnostic(&record.latest_error.raw_error);
+        for attempt in &mut record.attempts {
+            if let Some(error) = &mut attempt.error {
+                error.raw_error =
+                    super::diagnostics::safe_provider_error_diagnostic(&error.raw_error);
+            }
+        }
+    }
     Some(LoadedTrajectory {
+        recovery,
         pending_deliveries,
         dropped_deliveries,
         goal_ledger,
@@ -3766,6 +3786,8 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
     };
 
     let snapshot = TrajectorySnapshot {
+        recovery: None,
+        recovery_policy: None,
         goal: None,
         goal_ledger: Vec::new(),
         pending_deliveries: Vec::new(),
@@ -3868,6 +3890,8 @@ pub async fn save_trajectory_as_with_intent_checked(
             .unwrap_or_default()
     };
     let snapshot = TrajectorySnapshot {
+        recovery: None,
+        recovery_policy: None,
         goal: None,
         goal_ledger: Vec::new(),
         pending_deliveries: Vec::new(),
@@ -3884,6 +3908,7 @@ pub async fn save_trajectory_as_with_intent_checked(
         boost_reasoning: thread.boost_reasoning.unwrap_or(false),
         checkpoints_enabled: thread.checkpoints_enabled,
         context_tokens_cap: thread.context_tokens_cap,
+
         auto_compression_cap: thread.auto_compression_cap,
         auto_compression_cap_pending: thread.auto_compression_cap_pending,
         include_project_info: thread.include_project_info,
@@ -4661,6 +4686,12 @@ fn trajectory_value_from_snapshot(
     if let Some(ref claude_code_identity) = snapshot.claude_code_identity {
         trajectory["claude_code_identity"] =
             serde_json::to_value(claude_code_identity).unwrap_or_default();
+    }
+    if let Some(ref recovery) = snapshot.recovery {
+        trajectory["recovery"] = json!(recovery);
+    }
+    if let Some(ref recovery_policy) = snapshot.recovery_policy {
+        trajectory["recovery_policy"] = json!(recovery_policy);
     }
     if let Some(wake_up_at) = snapshot.wake_up_at {
         trajectory["wake_up_at"] = json!(wake_up_at);
@@ -5969,6 +6000,8 @@ fn apply_loaded_external_update_to_session(
     session.messages = loaded.messages;
     session.restore_pending_deliveries(loaded.pending_deliveries);
     session.merge_dropped_deliveries(loaded.dropped_deliveries);
+    session.runtime.recovery = loaded.recovery;
+    session.recovery_budget = None;
     session.thread = loaded.thread;
     session.reset_compaction_runtime_state();
     session.set_goal_ledger(loaded.goal_ledger);
@@ -12082,6 +12115,8 @@ mod tests {
 
     fn test_snapshot(chat_id: &str, title: &str, messages: Vec<ChatMessage>) -> TrajectorySnapshot {
         TrajectorySnapshot {
+            recovery: None,
+            recovery_policy: None,
             pending_questions: Vec::new(),
             goal: None,
             goal_ledger: Vec::new(),
@@ -16402,6 +16437,13 @@ mod tests {
             session.trajectory_dirty = false;
         }
 
+        AppState::from_gcx(gcx.clone())
+            .await
+            .chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
         check_external_reload_pending(gcx, session_arc.clone()).await;
 
         let session = session_arc.lock().await;
@@ -17113,6 +17155,9 @@ mod tests {
 
         let (tx, _rx) = broadcast::channel(16);
         let session = ChatSession {
+            recovery_budget: None,
+            recovery_notify: Arc::new(tokio::sync::Notify::new()),
+            recovery_policy_source: refact_core::recovery::RecoveryPolicySource::Global,
             task_goal_messages: None,
             task_goal_partial_write: None,
             planner_pause: None,
@@ -17128,6 +17173,7 @@ mod tests {
             wait_interrupt_flag: Arc::new(AtomicBool::new(false)),
             derived_privacy_zones: crate::privacy::records::new_derived_privacy_zones(),
             thread: ThreadParams {
+                recovery_policy: None,
                 id: "test-123".to_string(),
                 title: "Test Thread".to_string(),
                 model: "gpt-4".to_string(),
@@ -17284,6 +17330,9 @@ mod tests {
 
         let (tx, _rx) = broadcast::channel(16);
         let mut session = ChatSession {
+            recovery_budget: None,
+            recovery_notify: Arc::new(tokio::sync::Notify::new()),
+            recovery_policy_source: refact_core::recovery::RecoveryPolicySource::Global,
             task_goal_messages: None,
             task_goal_partial_write: None,
             planner_pause: None,
@@ -17299,6 +17348,7 @@ mod tests {
             wait_interrupt_flag: Arc::new(AtomicBool::new(false)),
             derived_privacy_zones: crate::privacy::records::new_derived_privacy_zones(),
             thread: ThreadParams {
+                recovery_policy: None,
                 id: "skill-test".to_string(),
                 active_skill: Some("my-skill".to_string()),
                 ..Default::default()
@@ -18151,6 +18201,8 @@ mod tests {
         let worktree = created.worktree.meta.clone();
         let chat_id = "wt-roundtrip".to_string();
         let snapshot = TrajectorySnapshot {
+            recovery: None,
+            recovery_policy: None,
             pending_questions: Vec::new(),
             goal: None,
             goal_ledger: Vec::new(),

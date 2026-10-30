@@ -161,11 +161,11 @@ function AgentsSectionContents({
         />
       </header>
       <div className={styles.panelBody}>
-        {(isError || failure || !ready || transportStale) && (
+        {(isError || Boolean(failure) || !ready || transportStale) && (
           <ErrorState
             title="Could not refresh agents"
             description={
-              failure || !ready
+              Boolean(failure) || !ready
                 ? "Agent data is hidden until access is revalidated for this connection and project."
                 : fetchedAgents !== undefined || roster.length > 0
                   ? "Showing last known agent data, which may be out of date."

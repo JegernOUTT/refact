@@ -3,6 +3,7 @@ import { useStore } from "react-redux";
 import type { AppStore } from "../app/store";
 import type { InternalLinkOrigin } from "../contexts/InternalLinkContext";
 import { parseRefactLink } from "../contexts/internalLinkUtils";
+import { selectAgentRosterSource } from "../features/AgentsPanel/agentsPanelSlice";
 import {
   createChatWithId,
   selectBackgroundAgentsByThread,
@@ -224,9 +225,10 @@ export function useInternalNavigation({
               ...Object.values(
                 selectBackgroundAgentsByThread(initial, origin.chatId),
               ),
-              ...(backgroundAgentsApi.endpoints.getBackgroundAgents.select(
-                origin.chatId,
-              )(initial).data ?? []),
+              ...(backgroundAgentsApi.endpoints.getBackgroundAgents.select({
+                chatId: origin.chatId,
+                source: selectAgentRosterSource(initial),
+              })(initial).data ?? []),
             ]
           : [];
         const agent = agents.find(

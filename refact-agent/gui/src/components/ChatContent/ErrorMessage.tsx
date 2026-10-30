@@ -192,12 +192,11 @@ const ErrorCallout: React.FC<{ error: ParsedError; showTitle: boolean }> = ({
     return <div className={styles.message}>{error.message}</div>;
   }
   const rawError = info.raw_error ?? error.message;
-  const retry = error.retry?.in_progress ? error.retry : undefined;
   return (
     <div className={styles.callout}>
       {showTitle && <strong>{info.title}</strong>}
       <div className={styles.message}>{info.explanation}</div>
-      <div className={styles.hint}>{retryHint(info, retry)}</div>
+      <div className={styles.hint}>{retryHint(info, undefined)}</div>
       {shouldShowRawError(rawError, error) && (
         <div className={styles.raw}>{rawError}</div>
       )}
@@ -211,15 +210,7 @@ export const ErrorMessageCard: React.FC<ErrorMessageCardProps> = ({
 }) => {
   const parsedErrors = errors.map(parseStructuredError);
   const firstClassified = parsedErrors.find((error) => error.info)?.info;
-  const latestRetry = parsedErrors
-    .map((error) => error.retry)
-    .filter((retry): retry is RetryStatus => Boolean(retry?.in_progress))
-    .pop();
-  const canRetry =
-    !latestRetry &&
-    firstClassified?.is_retryable === true &&
-    firstClassified.suggested_action === "retry" &&
-    typeof onRetryGeneration === "function";
+  const canRetry = !!firstClassified && typeof onRetryGeneration === "function";
   const suggestion =
     firstClassified && firstClassified.suggested_action !== "retry"
       ? errorActionLabel(firstClassified.suggested_action)
@@ -235,12 +226,7 @@ export const ErrorMessageCard: React.FC<ErrorMessageCardProps> = ({
       verb={firstClassified ? "Request failed" : "Error"}
       target={errorTarget(parsedErrors)}
       meta={errorMeta(parsedErrors)}
-      status={latestRetry ? "running" : "failed"}
-      statusLabel={
-        latestRetry
-          ? `Retrying ${latestRetry.delay_secs}s · ${latestRetry.attempt}/${latestRetry.max_attempts}`
-          : undefined
-      }
+      status="failed"
       defaultOpen
       summary={facts}
       error={

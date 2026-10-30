@@ -1452,6 +1452,8 @@ async fn create_investigation_chat(
     )
     .await;
     let snapshot = TrajectorySnapshot {
+        recovery: None,
+        recovery_policy: None,
         pending_browser_decision: None,
         pending_deliveries: Vec::new(),
         dropped_deliveries: Vec::new(),

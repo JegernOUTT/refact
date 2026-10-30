@@ -35,6 +35,14 @@ export type GoalBudgetCommand = {
 
 export type ChatCommandBase =
   | {
+      type: "recovery_retry";
+      run_id: string;
+      expected_revision: number;
+      options: import("./chatSubscription").RecoveryPolicy;
+      model?: string;
+    }
+  | { type: "recovery_retry_now"; run_id: string; expected_revision: number }
+  | {
       type: "user_message";
       content: MessageContent;
       attachments?: unknown[];

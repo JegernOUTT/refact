@@ -46,7 +46,120 @@ export type CompressionReason =
   | "source_changed"
   | "pre_compact_denied";
 
+export type RecoveryPolicy = {
+  mode: "off" | "transient";
+  max_retries: number;
+  delay_ms: number;
+  total_timeout_ms: number;
+};
+export type RecoveryPolicyOverrides = {
+  [K in keyof RecoveryPolicy]?: RecoveryPolicy[K] | null;
+};
+export type RecoveryError = {
+  category: string;
+  title: string;
+  explanation: string;
+  suggested_action: string;
+  is_retryable: boolean;
+  raw_error: string;
+};
+export type RecoveryRecord = {
+  operation_id: string;
+  run_id: string;
+  revision: number;
+  state:
+    | "waiting"
+    | "attempting"
+    | "needs_action"
+    | "exhausted"
+    | "cancelled"
+    | "succeeded";
+  policy: RecoveryPolicy;
+  policy_source: "global" | "project" | "thread";
+  manual: boolean;
+  retries_used: number;
+  latest_error: RecoveryError;
+  next_retry_at_ms?: number | null;
+  retry_not_before_ms?: number | null;
+  deadline_at_ms?: number | null;
+  terminal_reason?: string | null;
+  attempts: {
+    at_ms: number;
+    retry_number: number;
+    error?: RecoveryError | null;
+    outcome: string;
+  }[];
+};
+
+export function isRecoveryRecord(value: unknown): value is RecoveryRecord {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  const p = v.policy;
+  const e = v.latest_error;
+  if (!p || typeof p !== "object" || !e || typeof e !== "object") return false;
+  const policy = p as Record<string, unknown>;
+  const error = e as Record<string, unknown>;
+  const nonnegative = (x: unknown) =>
+    typeof x === "number" && Number.isSafeInteger(x) && x >= 0;
+  const validError = (x: unknown) => {
+    if (!x || typeof x !== "object") return false;
+    const e = x as Record<string, unknown>;
+    return (
+      typeof e.category === "string" &&
+      typeof e.title === "string" &&
+      typeof e.explanation === "string" &&
+      typeof e.suggested_action === "string" &&
+      typeof e.is_retryable === "boolean" &&
+      typeof e.raw_error === "string"
+    );
+  };
+  const optionalTime = (x: unknown) =>
+    x == null || (typeof x === "number" && Number.isFinite(x));
+  return (
+    typeof v.operation_id === "string" &&
+    typeof v.run_id === "string" &&
+    nonnegative(v.revision) &&
+    [
+      "waiting",
+      "attempting",
+      "needs_action",
+      "exhausted",
+      "cancelled",
+      "succeeded",
+    ].includes(String(v.state)) &&
+    ["global", "project", "thread"].includes(String(v.policy_source)) &&
+    typeof v.manual === "boolean" &&
+    nonnegative(v.retries_used) &&
+    (policy.mode === "off" || policy.mode === "transient") &&
+    nonnegative(policy.max_retries) &&
+    nonnegative(policy.delay_ms) &&
+    nonnegative(policy.total_timeout_ms) &&
+    typeof error.category === "string" &&
+    typeof error.title === "string" &&
+    typeof error.explanation === "string" &&
+    typeof error.suggested_action === "string" &&
+    typeof error.is_retryable === "boolean" &&
+    typeof error.raw_error === "string" &&
+    optionalTime(v.next_retry_at_ms) &&
+    optionalTime(v.retry_not_before_ms) &&
+    optionalTime(v.deadline_at_ms) &&
+    (v.terminal_reason == null || typeof v.terminal_reason === "string") &&
+    Array.isArray(v.attempts) &&
+    v.attempts.every(
+      (attempt: unknown) =>
+        !!attempt &&
+        typeof attempt === "object" &&
+        nonnegative((attempt as Record<string, unknown>).at_ms) &&
+        nonnegative((attempt as Record<string, unknown>).retry_number) &&
+        typeof (attempt as Record<string, unknown>).outcome === "string" &&
+        ((attempt as Record<string, unknown>).error == null ||
+          validError((attempt as Record<string, unknown>).error)),
+    )
+  );
+}
+
 export type ThreadParams = {
+  recovery_policy?: RecoveryPolicyOverrides | null;
   id: string;
   title: string;
   model: string;
@@ -119,6 +232,7 @@ export function isPushMode(value: unknown): value is PushMode {
 }
 
 export type RuntimeState = {
+  recovery?: RecoveryRecord | null;
   waiting_interruptible?: boolean;
   state: SessionState;
   paused: boolean;
@@ -239,6 +353,12 @@ export type ExecProcessSpawn = {
 };
 
 export type EventEnvelope =
+  | {
+      chat_id: string;
+      seq: string;
+      type: "recovery_updated";
+      recovery: RecoveryRecord | null;
+    }
   | {
       chat_id: string;
       seq: string;
@@ -642,6 +762,20 @@ export function subscribeToChatEvents(
               }
               continue;
             }
+            if (
+              parsed.type === "recovery_updated" &&
+              parsed.recovery !== null &&
+              !isRecoveryRecord(parsed.recovery)
+            )
+              continue;
+            if (
+              parsed.type === "snapshot" &&
+              // Older snapshots may omit runtime.
+              // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+              parsed.runtime?.recovery != null &&
+              !isRecoveryRecord(parsed.runtime.recovery)
+            )
+              continue;
             normalizeSeq(parsed);
             if (parsed.chat_id !== chatId) {
               continue;
@@ -826,10 +960,11 @@ function normalizeBackgroundAgentFields(obj: EventEnvelope): boolean {
     return true;
   }
   if (obj.type === "snapshot") {
-    if (obj.background_agents === undefined) obj.background_agents = [];
+    const agents: unknown = obj.background_agents;
+    if (agents === undefined) obj.background_agents = [];
     if (
-      !Array.isArray(obj.background_agents) ||
-      !obj.background_agents.every(isValidBackgroundAgent)
+      agents !== undefined &&
+      (!Array.isArray(agents) || !agents.every(isValidBackgroundAgent))
     ) {
       obj.background_agents = [];
       return false;

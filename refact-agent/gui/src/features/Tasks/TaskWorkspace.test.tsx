@@ -605,7 +605,11 @@ describe("TaskWorkspace owner workflow requests", () => {
         ...preloaded,
         chat: {
           ...preloaded.chat,
-          threads: { ...preloaded.chat.threads, [ownerId]: ownerRuntime },
+          threads: {
+            ...preloaded.chat.threads,
+            [PLANNER_ID]: makeRuntime(),
+            [ownerId]: ownerRuntime,
+          },
         },
       },
       setBoard: (next: TaskBoard) => {
@@ -868,8 +872,8 @@ describe("TaskWorkspace owner workflow requests", () => {
     await user.click(submit);
     await screen.findByText(/Owner request delivery is unconfirmed/);
     const firstId = String(fixture.commands[0].body.client_request_id);
-    const draft = (screen.getByLabelText("Request text") as HTMLTextAreaElement)
-      .value;
+    const draft =
+      screen.getByLabelText<HTMLTextAreaElement>("Request text").value;
     expect(
       screen.getByText(/This request may already be queued or executed/),
     ).toBeVisible();

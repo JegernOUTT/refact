@@ -105,6 +105,11 @@ pub fn board_lock_settings() -> BoardLockSettings {
 }
 static PROCESS_LOCKS: OnceLock<AMutex<HashMap<String, Arc<AMutex<()>>>>> = OnceLock::new();
 
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static BOARD_LOCK_CONTENDED: Arc<tokio::sync::Notify>;
+}
+
 fn process_locks() -> &'static AMutex<HashMap<String, Arc<AMutex<()>>>> {
     PROCESS_LOCKS.get_or_init(|| AMutex::new(HashMap::new()))
 }
@@ -264,12 +269,20 @@ pub async fn acquire(dir: &Path, lock_file: &str) -> Result<BoardLockGuard, Stri
     let key = lock_key(&canonical, lock_file);
 
     let process_lock = process_lock_for(&key).await;
-    let process_guard = tokio::time::timeout_at(
-        tokio::time::Instant::from_std(deadline),
-        process_lock.lock_owned(),
-    )
-    .await
-    .map_err(|_| format!("Timed out waiting for in-process lock {}", key))?;
+    let acquisition = process_lock.lock_owned();
+    tokio::pin!(acquisition);
+    #[cfg(test)]
+    let acquisition = futures::future::poll_fn(|cx| {
+        let result = std::future::Future::poll(acquisition.as_mut(), cx);
+        if result.is_pending() {
+            let _ = BOARD_LOCK_CONTENDED.try_with(|notify| notify.notify_one());
+        }
+        result
+    });
+    let process_guard =
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), acquisition)
+            .await
+            .map_err(|_| format!("Timed out waiting for in-process lock {}", key))?;
 
     let release = acquire_os_lock(lock_path(&canonical, lock_file)?, deadline, poll).await?;
     if !canonical.is_dir() {

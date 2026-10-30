@@ -512,6 +512,8 @@ mod tests {
 
     fn notification_test_snapshot(chat_id: &str) -> TrajectorySnapshot {
         TrajectorySnapshot {
+            recovery: None,
+            recovery_policy: None,
             pending_browser_decision: None,
             goal: None,
             goal_ledger: Vec::new(),

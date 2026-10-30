@@ -288,10 +288,10 @@ const WorktreeControlInstance: React.FC<
       )
         return "blocked";
       if (
-        scopeChangeBlockedReason ||
+        Boolean(scopeChangeBlockedReason) ||
         taskMeta?.role === "agent" ||
         taskMeta?.role === "agents" ||
-        before?.thread.worktree?.kind === "task_agent" ||
+        before.thread.worktree?.kind === "task_agent" ||
         worktree?.kind === "task_agent"
       ) {
         setFeedback(
@@ -320,7 +320,7 @@ const WorktreeControlInstance: React.FC<
         if (
           !after ||
           JSON.stringify(after.task_meta) !== JSON.stringify(taskMeta) ||
-          (after.worktree?.id !== before?.thread.worktree?.id &&
+          (after.worktree?.id !== before.thread.worktree?.id &&
             after.worktree?.id !== worktree?.id)
         ) {
           setFeedback(
@@ -576,7 +576,7 @@ const WorktreeControlInstance: React.FC<
             canCopyPath={Boolean(copyPath)}
             onCreate={() => {
               if (
-                scopeChangeBlockedReason ||
+                Boolean(scopeChangeBlockedReason) ||
                 isAttaching ||
                 isCreatingTransaction
               )

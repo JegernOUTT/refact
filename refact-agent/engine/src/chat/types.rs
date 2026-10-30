@@ -292,6 +292,9 @@ pub(crate) struct PlannerPause {
 }
 
 pub struct ChatSession {
+    pub recovery_policy_source: refact_core::recovery::RecoveryPolicySource,
+    pub recovery_notify: Arc<Notify>,
+    pub recovery_budget: Option<Arc<refact_core::recovery::RecoveryBudget>>,
     pub chat_id: String,
     pub derived_privacy_zones: crate::privacy::records::DerivedPrivacyZones,
     pub thread: ThreadParams,

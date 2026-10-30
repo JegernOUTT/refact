@@ -398,7 +398,7 @@ tempfile.workspace = true
 libc.workspace = true
 tokio.workspace = true
 tokio-rusqlite.workspace = true
-tokio-util = { version = "0.7.12", features = ["compat"] }
+tokio-util = { version = "0.7.12", features = ["compat", "rt"] }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 webpki-roots = "0.26"

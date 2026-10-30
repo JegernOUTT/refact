@@ -1,3 +1,4 @@
+import { selectRuntimeById } from "../features/Chat/Thread/selectors";
 import { createElement, type ReactElement, type ReactNode } from "react";
 import { Provider } from "react-redux";
 import { renderHook, act as rtlAct } from "@testing-library/react";
@@ -191,6 +192,7 @@ describe("pickDesiredChatSubscriptions", () => {
         streams[index].enqueue(
           new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`),
         );
+        await Promise.resolve();
       });
     };
     const queue = (seq: string) => ({
@@ -208,9 +210,12 @@ describe("pickDesiredChatSubscriptions", () => {
     });
     expect(store.getState().agentsPanel.denied).toBe(true);
     await send(0, queue("2"));
-    expect(store.getState().chat.threads["chat-a"].last_applied_seq).toBe("2");
+    expect(
+      selectRuntimeById(store.getState(), "chat-a")?.last_applied_seq,
+    ).toBe("2");
     await asyncAct(async () => {
       streams[0].close();
+      await Promise.resolve();
     });
     await asyncAct(async () => {
       await vi.advanceTimersByTimeAsync(2500);
@@ -235,9 +240,9 @@ describe("pickDesiredChatSubscriptions", () => {
     await send(1, { ...privateEvent, seq: "3" });
     expect(store.getState().agentsPanel.liveAgents).toEqual({});
     expect(store.getState().agentsPanel.authorized).toBe(false);
-    expect(store.getState().chat.threads["chat-a"].background_agents).toEqual(
-      {},
-    );
+    expect(
+      selectRuntimeById(store.getState(), "chat-a")?.background_agents,
+    ).toEqual({});
     await send(1, queue("5"));
     await asyncAct(async () => {
       await vi.advanceTimersByTimeAsync(100);
@@ -245,11 +250,13 @@ describe("pickDesiredChatSubscriptions", () => {
     expect(mockFetch).toHaveBeenCalledTimes(3);
     await send(2, { ...snapshot, background_agents: [privateEvent.agent] });
     await send(2, queue("1"));
-    expect(store.getState().chat.threads["chat-a"].last_applied_seq).toBe("1");
+    expect(
+      selectRuntimeById(store.getState(), "chat-a")?.last_applied_seq,
+    ).toBe("1");
     expect(store.getState().agentsPanel.liveAgents).toEqual({});
-    expect(store.getState().chat.threads["chat-a"].background_agents).toEqual(
-      {},
-    );
+    expect(
+      selectRuntimeById(store.getState(), "chat-a")?.background_agents,
+    ).toEqual({});
     unmount();
   });
 
@@ -289,6 +296,7 @@ describe("pickDesiredChatSubscriptions", () => {
     await asyncAct(async () => {
       if (!stream) throw new Error("Chat stream did not connect");
       stream.close();
+      await Promise.resolve();
     });
     await asyncAct(async () => {
       await vi.advanceTimersByTimeAsync(5000);

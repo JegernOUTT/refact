@@ -19,6 +19,62 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
   });
 
   describe("applyChatEvent - snapshot", () => {
+    test("recovery events track server state and reject stale updates", () => {
+      const recovery = {
+        operation_id: "op",
+        run_id: "run",
+        revision: 1,
+        state: "waiting" as const,
+        policy: {
+          mode: "transient" as const,
+          max_retries: 2,
+          delay_ms: 10000,
+          total_timeout_ms: 600000,
+        },
+        policy_source: "global" as const,
+        manual: false,
+        retries_used: 0,
+        latest_error: {
+          category: "NetworkFailure",
+          title: "Network",
+          explanation: "Disconnected",
+          suggested_action: "retry",
+          is_retryable: true,
+          raw_error: "offline",
+        },
+        attempts: [],
+      };
+      const updated = chatReducer(
+        initialState,
+        applyChatEvent({
+          chat_id: chatId,
+          seq: "4",
+          type: "recovery_updated",
+          recovery,
+        }),
+      );
+      expect(updated.threads[chatId]?.recovery).toEqual(recovery);
+      const stale = chatReducer(
+        updated,
+        applyChatEvent({
+          chat_id: chatId,
+          seq: "3",
+          type: "recovery_updated",
+          recovery: null,
+        }),
+      );
+      expect(stale.threads[chatId]?.recovery).toEqual(recovery);
+      const cleared = chatReducer(
+        stale,
+        applyChatEvent({
+          chat_id: chatId,
+          seq: "5",
+          type: "recovery_updated",
+          recovery: null,
+        }),
+      );
+      expect(cleared.threads[chatId]?.recovery).toBeNull();
+    });
     test("should initialize thread from snapshot event", () => {
       const event: ChatEventEnvelope = {
         chat_id: chatId,

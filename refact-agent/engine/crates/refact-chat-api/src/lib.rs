@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+pub use refact_core::recovery::{RecoveryPolicy, RecoveryPolicyOverrides, RecoveryRecord};
 
 pub mod chat_local_types;
 pub mod code_lens;
@@ -606,6 +607,8 @@ pub struct ClaudeCodeIdentity {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadParams {
+    #[serde(default)]
+    pub recovery_policy: Option<RecoveryPolicyOverrides>,
     pub id: String,
     pub title: String,
     pub model: String,
@@ -730,6 +733,7 @@ impl ThreadParams {
 impl Default for ThreadParams {
     fn default() -> Self {
         Self {
+            recovery_policy: None,
             id: Uuid::new_v4().to_string(),
             title: "New Chat".to_string(),
             model: String::new(),
@@ -839,6 +843,8 @@ fn delivery_event_descriptor(delivery: &PendingDelivery) -> Option<serde_json::V
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeState {
     #[serde(default)]
+    pub recovery: Option<RecoveryRecord>,
+    #[serde(default)]
     pub waiting_interruptible: bool,
     pub state: SessionState,
     pub paused: bool,
@@ -875,6 +881,7 @@ pub struct RuntimeState {
 impl Default for RuntimeState {
     fn default() -> Self {
         Self {
+            recovery: None,
             state: SessionState::Idle,
             paused: false,
             error: None,
@@ -983,6 +990,9 @@ pub struct BackgroundAgentSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatEvent {
+    RecoveryUpdated {
+        recovery: Option<RecoveryRecord>,
+    },
     Snapshot {
         thread: ThreadParams,
         runtime: RuntimeState,
@@ -1206,6 +1216,17 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatCommand {
+    RecoveryRetry {
+        run_id: String,
+        expected_revision: u64,
+        options: RecoveryPolicy,
+        #[serde(default)]
+        model: Option<String>,
+    },
+    RecoveryRetryNow {
+        run_id: String,
+        expected_revision: u64,
+    },
     UserMessage {
         content: serde_json::Value,
         #[serde(default)]
@@ -1540,6 +1561,12 @@ pub struct CommandRequest {
 impl CommandRequest {
     pub fn to_queued_item(&self) -> QueuedItem {
         let (command_type, preview, content) = match &self.command {
+            ChatCommand::RecoveryRetry { .. } => {
+                ("recovery_retry".into(), String::new(), String::new())
+            }
+            ChatCommand::RecoveryRetryNow { .. } => {
+                ("recovery_retry_now".into(), String::new(), String::new())
+            }
             ChatCommand::UserMessage {
                 content,
                 context_files,

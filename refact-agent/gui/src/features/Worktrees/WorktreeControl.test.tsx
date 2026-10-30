@@ -1238,7 +1238,7 @@ describe("WorktreeControl", () => {
       await user.click(detach);
       expect(commandCalls).toHaveLength(1);
     } finally {
-      await act(async () => {
+      act(() => {
         releaseDetach();
       });
     }

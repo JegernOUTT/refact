@@ -269,6 +269,11 @@ pub struct CoordinationSettings {
     /// for longer than this.
     pub provider_max_retry_after_ms: u64,
     pub provider_pressure_max_buckets: usize,
+    /// Automatically retry eligible transient thread failures.
+    pub recovery_auto_retry_enabled: bool,
+    pub recovery_max_retries: u32,
+    pub recovery_delay_ms: u64,
+    pub recovery_total_timeout_ms: u64,
     /// Identical completed tool calls, or identical text-only replies, that
     /// must recur inside the examined window before a run is reported as
     /// repeating itself. Elapsed silence never substitutes for this evidence.
@@ -449,6 +454,10 @@ impl Default for CoordinationSettings {
             provider_breaker_cooldown_ms: 30_000,
             provider_max_retry_after_ms: 300_000,
             provider_pressure_max_buckets: 4_096,
+            recovery_auto_retry_enabled: true,
+            recovery_max_retries: 2,
+            recovery_delay_ms: 10_000,
+            recovery_total_timeout_ms: 600_000,
             no_progress_repeat_threshold: 3,
             no_progress_unchanged_turns: 12,
             no_progress_window_turns: 24,
@@ -522,6 +531,33 @@ fn not_greater(
 impl CoordinationSettings {
     pub fn validate(&self) -> Result<(), SettingsError> {
         let mut v = Vec::new();
+        not_greater(
+            &mut v,
+            "recovery_max_retries",
+            self.recovery_max_retries as u64,
+            "recovery retry limit",
+            100,
+        );
+        not_greater(
+            &mut v,
+            "recovery_delay_ms",
+            self.recovery_delay_ms,
+            "recovery delay limit",
+            3_600_000,
+        );
+        at_least(
+            &mut v,
+            "recovery_total_timeout_ms",
+            self.recovery_total_timeout_ms,
+            1_000,
+        );
+        not_greater(
+            &mut v,
+            "recovery_total_timeout_ms",
+            self.recovery_total_timeout_ms,
+            "recovery timeout limit",
+            86_400_000,
+        );
         at_least(
             &mut v,
             "agent_terminal_retained_max",
@@ -1255,6 +1291,35 @@ impl CoordinationSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_settings_defaults_and_bounds() {
+        let legacy: CoordinationSettings = serde_json::from_str("{}").unwrap();
+        assert!(legacy.recovery_auto_retry_enabled);
+        assert_eq!(
+            (
+                legacy.recovery_max_retries,
+                legacy.recovery_delay_ms,
+                legacy.recovery_total_timeout_ms
+            ),
+            (2, 10_000, 600_000)
+        );
+        let mut settings = legacy;
+        settings.recovery_max_retries = 0;
+        settings.recovery_delay_ms = 0;
+        settings.recovery_total_timeout_ms = 1_000;
+        assert!(settings.validate().is_ok());
+        for mutate in [
+            |s: &mut CoordinationSettings| s.recovery_max_retries = 101,
+            |s: &mut CoordinationSettings| s.recovery_delay_ms = 3_600_001,
+            |s: &mut CoordinationSettings| s.recovery_total_timeout_ms = 999,
+            |s: &mut CoordinationSettings| s.recovery_total_timeout_ms = 86_400_001,
+        ] {
+            let mut invalid = settings.clone();
+            mutate(&mut invalid);
+            assert!(invalid.validate().is_err());
+        }
+    }
 
     #[test]
     fn delivery_and_wait_bounds_reject_zero_and_inverted_values() {

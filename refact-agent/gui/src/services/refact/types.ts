@@ -1240,6 +1240,7 @@ export type GoalSnapshot = {
   version: number;
   active: boolean;
   status: GoalStatus;
+  stop_reason?: string | null;
   budget: GoalBudget;
   progress: GoalProgress;
   attempts: GoalAttempt[];

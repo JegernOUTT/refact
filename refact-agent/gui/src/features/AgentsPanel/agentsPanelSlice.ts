@@ -66,7 +66,7 @@ function matchesGeneration(state: AgentsPanelState, source: AgentRosterSource) {
 }
 
 function mergeAgent(
-  agents: Record<string, BackgroundAgentSummary>,
+  agents: Partial<Record<string, BackgroundAgentSummary>>,
   incoming: BackgroundAgentSummary,
 ) {
   const existing = agents[incoming.agent_id];

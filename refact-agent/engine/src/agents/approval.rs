@@ -1047,8 +1047,9 @@ pub(crate) mod tests {
             .insert(child_id.clone(), Arc::new(Mutex::new(child)));
         std::fs::create_dir_all(fixture.dir.path().join(".refact/tasks").join(task_id)).unwrap();
         let mut board = crate::tasks::types::TaskBoard::default();
+        board.owner_chat_id = Some("parent".into());
         let card: crate::tasks::types::BoardCard = serde_json::from_value(serde_json::json!({
-            "id":"card", "title":"Approval card", "column":"doing", "created_at":"2026-01-01T00:00:00Z", "agent_chat_id":child_id
+            "id":"card", "title":"Approval card", "column":"doing", "created_at":"2026-01-01T00:00:00Z", "agent_chat_id":child_id, "assignee":"worker"
         })).unwrap();
         board.cards.push(card);
         crate::tasks::storage::save_board(fixture.app.gcx.clone(), task_id, &board)

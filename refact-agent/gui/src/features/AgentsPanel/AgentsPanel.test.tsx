@@ -308,12 +308,17 @@ describe("AgentsSection", () => {
       cost_usd: 7,
     });
     let withheld = false;
+    const requests: { url: string; authorization: string | null }[] = [];
     server.use(
-      http.get("*/v1/background-agents", () =>
-        withheld
+      http.get("*/v1/background-agents", ({ request }) => {
+        requests.push({
+          url: request.url,
+          authorization: request.headers.get("authorization"),
+        });
+        return withheld
           ? HttpResponse.json({ code: "scope_denied" }, { status: 403 })
-          : HttpResponse.json([worker]),
-      ),
+          : HttpResponse.json([worker]);
+      }),
     );
     const onNavigate = vi.fn();
     const { user, store } = render(
@@ -381,8 +386,16 @@ describe("AgentsSection", () => {
     expect(JSON.stringify(store.getState().backgroundAgentsApi)).not.toContain(
       "new-secret-principal",
     );
-    expect(store.getState().chat.threads[chatId]).toBeDefined();
+    expect(store.getState().chat.threads[chatId]).toBeUndefined();
+    await user.click(oldTitle);
+    await user.click(oldCancel);
+    expect(onNavigate).not.toHaveBeenCalled();
+    expect(screen.queryByText("Cancel subtree")).not.toBeInTheDocument();
     await screen.findByRole("alert");
+    expect(requests.at(-1)?.authorization).toBe("Bearer new-secret-principal");
+    expect(
+      new URL(requests.at(-1)?.url ?? "").searchParams.get("chat_id"),
+    ).toBe(chatId);
   });
 
   test("denial clears REST and live rows and old receipts cannot restore them before or after fresh recovery", async () => {

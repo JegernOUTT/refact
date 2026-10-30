@@ -146,6 +146,8 @@ impl Tool for ToolBuddyLaunchInvestigation {
         );
 
         let snapshot = TrajectorySnapshot {
+            recovery: None,
+            recovery_policy: None,
             pending_browser_decision: None,
             goal: None,
             goal_ledger: Vec::new(),

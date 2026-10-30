@@ -1210,6 +1210,7 @@ pub(crate) fn build_agent_thread_params(
     worktree: WorktreeMeta,
 ) -> ThreadParams {
     ThreadParams {
+        recovery_policy: None,
         id: agent_chat_id.to_string(),
         title: format!("Agent: {}", card_title),
         model: model.to_string(),

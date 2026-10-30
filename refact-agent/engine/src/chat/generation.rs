@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use serde_json::json;
 use tokio::sync::{Mutex as AMutex};
 use tracing::{info, warn};
@@ -47,9 +47,7 @@ use super::stream_core::{
 use super::config::tokens;
 use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{HookPayload, get_project_dir_string, run_observation_hooks};
-use crate::chat::diagnostics::{
-    make_ui_only_error_message, make_ui_only_retry_status_message, safe_provider_error_diagnostic,
-};
+use crate::chat::diagnostics::{make_ui_only_error_message, safe_provider_error_diagnostic};
 use crate::chat::history_limit::ContextPressure;
 use refact_core::llm_types::BaseModelRecord;
 use refact_core::provider_types::{ModelTypeDefaults, ProviderDefaults};
@@ -387,58 +385,6 @@ fn make_runtime_event(
         chat_id: None,
         dismissed: false,
     }
-}
-
-async fn announce_generation_retry(
-    app: &AppState,
-    session_arc: &Arc<AMutex<ChatSession>>,
-    chat_id: &str,
-    chat_label: &str,
-    error_message: &str,
-    attempt: usize,
-    max_attempts: usize,
-    delay: Duration,
-    reason: &str,
-) {
-    {
-        let mut session = session_arc.lock().await;
-        if !session.abort_flag.load(Ordering::SeqCst) {
-            session.clear_stream_for_retry();
-            let retry_msg = make_ui_only_retry_status_message(
-                error_message,
-                attempt,
-                max_attempts,
-                delay.as_secs(),
-            );
-            session.add_message(retry_msg);
-        }
-    }
-    {
-        let mut ev = make_runtime_event(
-            "chat_retrying",
-            &format!(
-                "Retrying '{}' in {}s (attempt {}/{})",
-                chat_label,
-                delay.as_secs(),
-                attempt,
-                max_attempts,
-            ),
-            "chat",
-            &format!("chat_{}", chat_id),
-            "retrying",
-            None,
-        );
-        ev.chat_id = Some(chat_id.to_string());
-        ev.persistent = true;
-        app.buddy_event_sink.enqueue_event(ev).await;
-    }
-    warn!(
-        "Retrying chat generation after retryable LLM error in {}s (attempt {}/{}, reason={})",
-        delay.as_secs(),
-        attempt,
-        max_attempts,
-        reason,
-    );
 }
 
 fn build_mcp_lazy_hint(total: usize) -> String {
@@ -1877,213 +1823,45 @@ async fn handle_generation_error(
     session_arc: &Arc<AMutex<ChatSession>>,
     gcx: &Arc<crate::global_context::GlobalContext>,
     context: &GenerationAttemptContext,
-    mut error: LlmStreamError,
-    network_retry_attempt: &mut usize,
+    error: LlmStreamError,
 ) -> GenerationLoopControl {
-    let Ok(_operation) = super::session_runtime::begin_board_operation(app, session_arc).await
+    let _ = gcx;
+    let retry = super::recovery::handle_failure(app, session_arc, &error).await;
+    if retry {
+        return GenerationLoopControl::Continue;
+    }
+    let Some(Ok(_operation)) = super::recovery::within_budget(
+        session_arc,
+        super::session_runtime::begin_board_operation(app, session_arc),
+    )
+    .await
     else {
         return GenerationLoopControl::Stop;
     };
-    let GenerationAttemptContext {
-        thread,
-        chat_id,
-        chat_label,
-        abort_flag,
-    } = context;
-
-    let retry_decision = error.retry_decision();
-    let is_context_limit = retry_decision.is_context_limit() && !abort_flag.load(Ordering::SeqCst);
-    let pressure_retry = if !retry_decision.is_user_cancelled()
-        && !is_context_limit
-        && !abort_flag.load(Ordering::SeqCst)
-    {
-        crate::llm::pressure::pressure_retry(
-            &error,
-            u32::try_from(*network_retry_attempt).unwrap_or(u32::MAX),
-        )
-    } else {
-        None
-    };
-    let should_retry_network = error.should_retry(*network_retry_attempt, abort_flag)
-        && pressure_retry.is_none()
-        && !is_context_limit;
-    let retry_reason = retry_decision.reason();
-    if should_retry_network {
-        let delay = super::retry_policy::retry_delay_for_attempt(*network_retry_attempt);
-        *network_retry_attempt += 1;
-        announce_generation_retry(
-            app,
-            session_arc,
-            chat_id,
-            chat_label,
-            &error.message,
-            *network_retry_attempt,
-            super::retry_policy::MAX_LLM_RETRY_ATTEMPTS,
-            delay,
-            retry_reason,
-        )
-        .await;
-        if super::retry_policy::sleep_or_abort(delay, abort_flag.clone()).await {
-            return GenerationLoopControl::Stop;
-        }
-        return GenerationLoopControl::Continue;
-    }
-
-    if is_context_limit {
-        let original_error = error.message.clone();
-        let round = {
-            let mut session = session_arc.lock().await;
-            session.finish_stream_for_rebuild();
-            let round = session
-                .thread
-                .reactive_compact_attempts
-                .unwrap_or(0)
-                .saturating_add(1);
-            session.thread.reactive_compact_attempts = Some(round);
-            session.increment_version();
-            session.touch();
-            round
-        };
-        if round == 1
-            && thread.auto_compact_enabled_effective()
-            && crate::chat::context_rebuild::apply_context_rebuild_with_reason(
-                gcx.clone(),
-                &session_arc,
-                &thread,
-                true,
-                Some(CompressionReason::ContextLengthStop),
-            )
-            .await
-            .applied()
-        {
-            return GenerationLoopControl::Continue;
-        }
-        error.message = context_limit_final_error_message(&original_error);
-        if crate::tasks::goal::hydrate_session_task_goal(gcx.clone(), session_arc)
-            .await
-            .is_ok()
-        {
-            {
-                let mut session = session_arc.lock().await;
-                crate::chat::goal_monitor::mark_goal_blocked_on_context_limit(&mut session);
-            }
-            if let Err(error) =
-                crate::tasks::goal::commit_session_task_goal(gcx.clone(), session_arc).await
-            {
-                tracing::warn!(%error, "context limit goal commit rejected");
-            }
-        }
-    }
-
-    if let Some(crate::llm::pressure::PressureRetry::Retry {
-        delay_ms,
-        honoured_retry_after,
-        attempt,
-        max_attempts,
-        ..
-    }) = pressure_retry.as_ref()
-    {
-        *network_retry_attempt += 1;
-        let delay = Duration::from_millis(*delay_ms);
-        let reason = if *honoured_retry_after {
-            "provider_pressure.honoured_retry_after"
-        } else {
-            "provider_pressure.retryable_class_backoff"
-        };
-        announce_generation_retry(
-            app,
-            session_arc,
-            chat_id,
-            chat_label,
-            &error.message,
-            *attempt as usize,
-            *max_attempts as usize,
-            delay,
-            reason,
-        )
-        .await;
-        if super::retry_policy::sleep_or_abort(delay, abort_flag.clone()).await {
-            return GenerationLoopControl::Stop;
-        }
-        return GenerationLoopControl::Continue;
-    }
-    if let Some(crate::llm::pressure::PressureRetry::GiveUp { cause }) = pressure_retry {
-        error.message = format!("{} (not retried: {})", error.message, cause);
-    }
-
-    if error.partial_output_emitted && !abort_flag.load(Ordering::SeqCst) {
-        let original = error.message.clone();
-        let safe_error = partial_output_stream_error_message(&original);
-        warn!("{}", safe_error);
-        error.message = safe_error;
-    }
-
-    let error_message = error.message;
-
-    let task_meta_opt = {
+    let task_meta = {
         let mut session = session_arc.lock().await;
-        if !session.abort_flag.load(Ordering::SeqCst) {
-            let app2 = app.clone();
-            let err_clone = error_message.clone();
-            let chat_id2 = chat_id.clone();
-            let chat_label2 = chat_label.clone();
-            let model2 = session.thread.model.clone();
-            tokio::spawn(async move {
-                let model_ref = Some(model2.as_str()).filter(|m| !m.is_empty());
-                app2.buddy_event_sink
-                    .report_error_with_model(
-                        "llm_error",
-                        &err_clone,
-                        Some("chat/generation.rs"),
-                        Some(&chat_id2),
-                        model_ref,
-                    )
-                    .await;
-                let short_err: String = err_clone.chars().take(60).collect();
-                let priority =
-                    refact_buddy_core::diagnostics::diagnostic_priority_label(&err_clone);
-                let mut ev = make_runtime_event(
-                    "chat_error",
-                    &format!("Error in '{}': {}", chat_label2, short_err),
-                    "chat",
-                    &format!("chat_{}", chat_id2),
-                    "failed",
-                    Some(priority),
-                );
-                ev.chat_id = Some(chat_id2.to_string());
-                app2.buddy_event_sink.mark_chat_error(ev).await;
-            });
-            session.finish_stream_with_error(error_message);
+        if session.abort_flag.load(Ordering::SeqCst) {
+            return GenerationLoopControl::Stop;
         }
+        session.task_agent_error = Some(safe_provider_error_diagnostic(&error.message));
         session.thread.task_meta.clone()
     };
-
-    maybe_save_trajectory_with_intent(
-        app.clone(),
-        session_arc.clone(),
-        TrajectoryCommitIntent::Checkpoint,
-    )
-    .await;
-
-    if let Some(task_meta) = task_meta_opt {
-        let error_msg = {
-            let session = session_arc.lock().await;
-            session.task_agent_error.clone()
-        };
-        if let Some(error) = error_msg {
-            super::task_agent_monitor::handle_agent_streaming_error(
-                app.clone(),
-                &task_meta,
-                &error,
-            )
-            .await;
-        }
-    }
-    {
-        let mut session = session_arc.lock().await;
-        if session.user_interrupt_flag.load(Ordering::SeqCst) {
-            session.clear_stream_for_retry();
-        }
+    app.buddy_event_sink
+        .report_error_with_model(
+            "llm_error",
+            &safe_provider_error_diagnostic(&error.message),
+            Some("chat/generation.rs"),
+            Some(&context.chat_id),
+            Some(&context.thread.model),
+        )
+        .await;
+    if let Some(task_meta) = task_meta {
+        super::task_agent_monitor::handle_agent_streaming_error(
+            app.clone(),
+            &task_meta,
+            &safe_provider_error_diagnostic(&error.message),
+        )
+        .await;
     }
     GenerationLoopControl::Stop
 }
@@ -2384,52 +2162,76 @@ pub fn start_generation(
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     Box::pin(async move {
-        let board_execution =
-            match super::session_runtime::board_execution(&app, &session_arc).await {
+        let gcx = app.gcx.clone();
+        let preparation = async {
+            let board_execution = super::session_runtime::board_execution(&app, &session_arc).await;
+            let board_execution = match board_execution {
                 Ok(execution) => execution,
                 Err(reason) => {
                     super::session_runtime::interrupt_board_execution(
                         &mut *session_arc.lock().await,
                         reason,
                     );
-                    return;
+                    return None;
                 }
             };
-        if board_execution.is_some() {
-            let session = session_arc.lock().await;
-            if session.planner_paused()
-                || session.runtime.paused
-                || !session.runtime.pause_reasons.is_empty()
-            {
-                return;
-            }
-        }
-        let gcx = app.gcx.clone();
-        let mut turn_guard = {
-            let _scope_transition = super::worktree_lifecycle::transition_lock(&session_arc).await;
-            let (chat_id, thread) = {
+            if board_execution.is_some() {
                 let session = session_arc.lock().await;
-                (session.chat_id.clone(), session.thread.clone())
-            };
-            if let Err(error) =
-                super::worktree_lifecycle::check_managed_attachment(&app, &chat_id, &thread).await
-            {
-                let mut session = session_arc.lock().await;
-                session.append_error_message_deduped(&error);
-                if !session.planner_paused()
-                    && !session.runtime.paused
-                    && session.runtime.pause_reasons.is_empty()
+                if session.planner_paused()
+                    || session.runtime.paused
+                    || !session.runtime.pause_reasons.is_empty()
                 {
-                    session.set_runtime_state(SessionState::Error, Some(error));
+                    return None;
                 }
-                return;
             }
-            TurnDepthGuard::enter(app.clone(), session_arc.clone()).await
+            let turn_guard = {
+                let _scope_transition =
+                    super::worktree_lifecycle::transition_lock(&session_arc).await;
+                let (chat_id, thread) = {
+                    let session = session_arc.lock().await;
+                    (session.chat_id.clone(), session.thread.clone())
+                };
+                if let Err(error) =
+                    super::worktree_lifecycle::check_managed_attachment(&app, &chat_id, &thread)
+                        .await
+                {
+                    let mut session = session_arc.lock().await;
+                    session.append_error_message_deduped(&error);
+                    if !session.planner_paused()
+                        && !session.runtime.paused
+                        && session.runtime.pause_reasons.is_empty()
+                    {
+                        session.set_runtime_state(SessionState::Error, Some(error));
+                    }
+                    return None;
+                }
+                if let Err(error) = super::recovery::install_budget(&session_arc).await {
+                    session_arc
+                        .lock()
+                        .await
+                        .set_runtime_state(SessionState::Error, Some(error));
+                    return None;
+                }
+                TurnDepthGuard::enter(app.clone(), session_arc.clone()).await
+            };
+            Some(turn_guard)
         };
-        let mut network_retry_attempt = 0usize;
+        let Some(Some(mut turn_guard)) =
+            super::recovery::within_budget(&session_arc, preparation).await
+        else {
+            maybe_save_trajectory_background_with_intent(
+                app.clone(),
+                session_arc.clone(),
+                TrajectoryCommitIntent::Checkpoint,
+            );
+            return;
+        };
         loop {
-            let Ok(operation) =
-                super::session_runtime::begin_board_operation(&app, &session_arc).await
+            let Some(Ok(operation)) = super::recovery::within_budget(
+                &session_arc,
+                super::session_runtime::begin_board_operation(&app, &session_arc),
+            )
+            .await
             else {
                 break;
             };
@@ -2485,12 +2287,26 @@ pub fn start_generation(
             } else {
                 drop(operation);
             }
-            let (context, generation_result) =
-                match start_generation_iteration(&app, &session_arc, &gcx).await {
-                    GenerationAttemptStart::Continue => continue,
-                    GenerationAttemptStart::Stop => break,
-                    GenerationAttemptStart::Generated { context, result } => (context, result),
-                };
+            if let Err(error) = super::recovery::install_budget(&session_arc).await {
+                session_arc
+                    .lock()
+                    .await
+                    .set_runtime_state(SessionState::Error, Some(error));
+                break;
+            }
+            let Some(attempt) = super::recovery::within_budget(
+                &session_arc,
+                start_generation_iteration(&app, &session_arc, &gcx),
+            )
+            .await
+            else {
+                break;
+            };
+            let (context, generation_result) = match attempt {
+                GenerationAttemptStart::Continue => continue,
+                GenerationAttemptStart::Stop => break,
+                GenerationAttemptStart::Generated { context, result } => (context, result),
+            };
 
             if let Ok(GenerationResult::PausedForUserDecision) = &generation_result {
                 maybe_save_trajectory_with_intent(
@@ -2503,28 +2319,35 @@ pub fn start_generation(
             }
 
             if let Err(error) = generation_result {
-                match handle_generation_error(
-                    &app,
-                    &session_arc,
-                    &gcx,
-                    &context,
-                    error,
-                    &mut network_retry_attempt,
-                )
-                .await
-                {
+                match handle_generation_error(&app, &session_arc, &gcx, &context, error).await {
                     GenerationLoopControl::Continue => continue,
                     GenerationLoopControl::Stop => break,
                 }
             }
 
-            network_retry_attempt = 0;
+            {
+                let mut session = session_arc.lock().await;
+                if session.abort_flag.load(Ordering::SeqCst) {
+                    break;
+                }
+                super::recovery::succeeded(&mut session);
+            }
             match process_successful_generation(&app, &session_arc, &gcx, &context).await {
                 GenerationLoopControl::Continue => continue,
                 GenerationLoopControl::Stop => break,
             }
         }
 
+        {
+            let mut session = session_arc.lock().await;
+            session.recovery_budget = None;
+        }
+        maybe_save_trajectory_with_intent(
+            app.clone(),
+            session_arc.clone(),
+            TrajectoryCommitIntent::Checkpoint,
+        )
+        .await;
         check_external_reload_pending(gcx.clone(), session_arc.clone()).await;
 
         {
@@ -2995,6 +2818,7 @@ fn spawn_stream_delta_emitter(
     session_arc_emitter: Arc<AMutex<ChatSession>>,
     first_content_started_at: Option<Instant>,
     emitter_chat_id: String,
+    expected_message_id: Option<String>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         fn merge_events(
@@ -3069,6 +2893,16 @@ fn spawn_stream_delta_emitter(
             let batched_ops = batch_stream_delta_ops(batched_ops);
 
             let mut session = session_arc_emitter.lock().await;
+            if session.abort_flag.load(Ordering::SeqCst)
+                || session
+                    .recovery_budget
+                    .as_ref()
+                    .is_some_and(|budget| budget.check().is_err())
+                || session.draft_message.as_ref().map(|m| &m.message_id)
+                    != expected_message_id.as_ref()
+            {
+                return;
+            }
             if !batched_ops.is_empty() {
                 for ops in batched_ops {
                     let carries_content = delta_ops_contain_assistant_content(&ops);
@@ -3116,6 +2950,16 @@ fn spawn_stream_delta_emitter(
             let final_ops = batch_stream_delta_ops(final_ops);
 
             let mut session = session_arc_emitter.lock().await;
+            if session.abort_flag.load(Ordering::SeqCst)
+                || session
+                    .recovery_budget
+                    .as_ref()
+                    .is_some_and(|budget| budget.check().is_err())
+                || session.draft_message.as_ref().map(|m| &m.message_id)
+                    != expected_message_id.as_ref()
+            {
+                return;
+            }
             if !final_ops.is_empty() {
                 for ops in final_ops {
                     let carries_content = delta_ops_contain_assistant_content(&ops);
@@ -3196,6 +3040,7 @@ async fn run_stream_attempt(
         return StreamAttemptOutcome::Paused;
     }
     let params = StreamRunParams {
+        recovery_budget: session_arc.lock().await.recovery_budget.clone(),
         llm_request: llm_request.clone(),
         model_rec: model_rec.base.clone(),
         chat_id: Some(chat_id.to_string()),
@@ -3219,7 +3064,8 @@ async fn run_stream_attempt(
         &llm_request,
         &model_rec.base,
         Some(chat_id.to_string()),
-    );
+    )
+    .map(tokio_util::task::AbortOnDropHandle::new);
 
     const EMITTER_QUEUE_CAPACITY: usize = 256;
     let (tx, rx) =
@@ -3243,6 +3089,12 @@ async fn run_stream_attempt(
         session_arc_emitter,
         first_content_started_at,
         emitter_chat_id,
+        session_arc
+            .lock()
+            .await
+            .draft_message
+            .as_ref()
+            .map(|m| m.message_id.clone()),
     );
 
     let call_ts_start = chrono::Utc::now().to_rfc3339();
@@ -3446,6 +3298,14 @@ async fn complete_stream_generation(
     }
 
     let mut session = session_arc.lock().await;
+    if session.abort_flag.load(Ordering::SeqCst)
+        || session
+            .recovery_budget
+            .as_ref()
+            .is_some_and(|budget| budget.check().is_err())
+    {
+        return;
+    }
     if let Some(ref mut draft) = session.draft_message {
         draft.content = ChatContent::SimpleText(result.content);
 
@@ -3776,7 +3636,9 @@ async fn run_streaming_generation(
     const MAX_RETRY_TEMPERATURE: f32 = 0.5;
     let user_specified_temp = llm_request.params.temperature;
     let model_supports_temperature = model_rec.supports_temperature;
-    let can_retry_with_temp_bump = user_specified_temp.is_none() && model_supports_temperature;
+    let recovery_controlled = session_arc.lock().await.recovery_budget.is_some();
+    let can_retry_with_temp_bump =
+        !recovery_controlled && user_specified_temp.is_none() && model_supports_temperature;
     let max_attempts = if can_retry_with_temp_bump {
         (MAX_RETRY_TEMPERATURE / TEMPERATURE_BUMP).floor() as usize + 2
     } else {

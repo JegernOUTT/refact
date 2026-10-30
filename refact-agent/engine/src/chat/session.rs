@@ -782,6 +782,9 @@ impl ChatSession {
         Self {
             chat_id: chat_id.clone(),
             derived_privacy_zones: crate::privacy::records::new_derived_privacy_zones(),
+            recovery_budget: None,
+            recovery_policy_source: refact_core::recovery::RecoveryPolicySource::Global,
+            recovery_notify: Arc::new(Notify::new()),
             thread: ThreadParams {
                 id: chat_id,
                 ..Default::default()
@@ -929,6 +932,9 @@ impl ChatSession {
         Self {
             chat_id,
             derived_privacy_zones: crate::privacy::records::new_derived_privacy_zones(),
+            recovery_budget: None,
+            recovery_policy_source: refact_core::recovery::RecoveryPolicySource::Global,
+            recovery_notify: Arc::new(Notify::new()),
             thread,
             messages,
             runtime,
@@ -1262,7 +1268,11 @@ impl ChatSession {
         let Some(goal) = self.goal.as_mut() else {
             return false;
         };
-        if goal.status == status {
+        if goal.status == status
+            && !(status == GoalStatus::Stopped
+                && !reason.is_empty()
+                && goal.stop_reason.as_deref() != Some(reason))
+        {
             self.emit_goal_status();
             return true;
         }
@@ -1621,7 +1631,12 @@ impl ChatSession {
     }
 
     pub fn reactivate_goal_stopped_by_manual_abort(&mut self) -> bool {
-        if !self.goal_stopped_by_abort {
+        if !self.goal_stopped_by_abort
+            && !self
+                .goal
+                .as_ref()
+                .is_some_and(|goal| goal.stop_reason.as_deref() == Some("manual_abort"))
+        {
             return false;
         }
         self.goal_stopped_by_abort = false;
@@ -1644,6 +1659,12 @@ impl ChatSession {
 
     pub fn clear_goal_stopped_by_abort_marker(&mut self) {
         self.goal_stopped_by_abort = false;
+        if self.goal.as_ref().is_some_and(|goal| {
+            goal.status == GoalStatus::Stopped
+                && goal.stop_reason.as_deref() == Some("manual_abort")
+        }) {
+            self.goal_set_status_reason(GoalStatus::Stopped, "goal_control");
+        }
     }
 
     pub fn goal_push_attempt(&mut self, attempt: GoalAttempt) -> bool {
@@ -4025,6 +4046,56 @@ impl ChatSession {
         self.set_runtime_state(SessionState::Idle, None);
     }
 
+    pub fn archive_recovery(&mut self) {
+        let Some(record) = self.runtime.recovery.clone() else {
+            return;
+        };
+        if self.messages.iter().any(|m| {
+            m.extra.get("recovery_run_id").and_then(|v| v.as_str()) == Some(record.run_id.as_str())
+        }) {
+            return;
+        }
+        let mut message = make_ui_only_error_message(&record.latest_error.title);
+        message.extra.insert(
+            "recovery_record".into(),
+            serde_json::to_value(&record).unwrap_or_default(),
+        );
+        message.extra.insert(
+            "recovery_operation_id".into(),
+            serde_json::json!(record.operation_id),
+        );
+        message
+            .extra
+            .insert("recovery_run_id".into(), serde_json::json!(record.run_id));
+        self.add_message(message);
+    }
+
+    pub fn update_recovery(&mut self, recovery: Option<refact_core::recovery::RecoveryRecord>) {
+        self.runtime.recovery = recovery.clone();
+        self.emit(ChatEvent::RecoveryUpdated { recovery });
+        self.mark_persisted_runtime_changed();
+        self.touch();
+    }
+
+    pub fn preserve_interrupted_recovery_output(&mut self) {
+        if let Some(mut draft) = self.draft_message.take() {
+            self.emit(ChatEvent::StreamFinished {
+                message_id: draft.message_id.clone(),
+                finish_reason: Some("interrupted".into()),
+            });
+            draft.tool_calls = None;
+            draft.finish_reason = Some("interrupted".into());
+            draft
+                .extra
+                .insert("_ui_only".into(), serde_json::Value::Bool(true));
+            if !draft.content.content_text_only().is_empty() {
+                self.add_message(draft);
+            }
+        }
+        self.draft_usage = None;
+        self.stream_started_at = None;
+    }
+
     pub fn clear_stream_for_retry(&mut self) {
         if let Some(draft) = self.draft_message.take() {
             self.emit(ChatEvent::MessageRemoved {
@@ -4116,6 +4187,23 @@ impl ChatSession {
     }
 
     pub(crate) fn apply_priority_abort(&mut self) {
+        if let Some(budget) = &self.recovery_budget {
+            budget.cancel();
+        }
+        if let Some(mut record) = self.runtime.recovery.clone().filter(|r| {
+            matches!(
+                r.state,
+                refact_core::recovery::RecoveryState::Waiting
+                    | refact_core::recovery::RecoveryState::Attempting
+            )
+        }) {
+            self.preserve_interrupted_recovery_output();
+            record.state = refact_core::recovery::RecoveryState::Cancelled;
+            record.revision += 1;
+            record.next_retry_at_ms = None;
+            record.terminal_reason = Some("cancelled".into());
+            self.update_recovery(Some(record));
+        }
         self.planner_pause_pending_tools = false;
         self.suppress_delivery_wakes();
         self.abort_stream();

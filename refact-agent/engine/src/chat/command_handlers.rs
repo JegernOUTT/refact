@@ -43,6 +43,7 @@ pub(super) async fn handle_queue_command(
             | ChatCommand::UserMessage { .. }
             | ChatCommand::RetryFromIndex { .. }
             | ChatCommand::Regenerate {}
+            | ChatCommand::RecoveryRetry { .. }
             | ChatCommand::AnswerQuestions { .. }
             | ChatCommand::SubmitQuestionResponse { .. }
             | ChatCommand::IdeToolResult { .. }
@@ -100,6 +101,190 @@ pub(super) async fn handle_queue_command(
         }
     }
     match request.command {
+        ChatCommand::RecoveryRetry {
+            run_id,
+            expected_revision,
+            options,
+            model,
+        } => {
+            if let Some(model) = &model {
+                let resolution = match crate::global_context::try_load_caps_quickly_if_not_present(
+                    context.app.gcx.clone(),
+                    0,
+                )
+                .await
+                {
+                    Ok(caps) => crate::caps::resolve_chat_model(caps, model).map(|_| ()),
+                    Err(error) => Err(error.message),
+                };
+                if let Err(error) = resolution {
+                    reject_guard(
+                        &mut *context.session_arc.lock().await,
+                        &context.request_id,
+                        error,
+                    );
+                    return QueueCommandOutcome::Continue;
+                }
+            }
+            let chat_id = context.session_arc.lock().await.chat_id.clone();
+            if let Some(reason) = crate::agents::seal::seal_reason(&context.app, &chat_id).await {
+                reject_guard(
+                    &mut *context.session_arc.lock().await,
+                    &context.request_id,
+                    reason.message(),
+                );
+                return QueueCommandOutcome::Continue;
+            }
+            let mut session = context.session_arc.lock().await;
+            let valid = options.validate().is_ok()
+                && options.max_retries > 0
+                && session.runtime.recovery.as_ref().is_some_and(|r| {
+                    r.run_id == run_id
+                        && r.revision == expected_revision
+                        && matches!(
+                            r.state,
+                            refact_core::recovery::RecoveryState::NeedsAction
+                                | refact_core::recovery::RecoveryState::Exhausted
+                                | refact_core::recovery::RecoveryState::Cancelled
+                        )
+                });
+            if !valid {
+                reject_guard(
+                    &mut session,
+                    &context.request_id,
+                    "Stale recovery revision or invalid retry options".into(),
+                );
+                return QueueCommandOutcome::Continue;
+            }
+            if session.planner_paused()
+                || session.goal_status.as_ref().is_some_and(|status| {
+                    matches!(status, refact_chat_api::GoalStatus::Paused)
+                        || (*status == refact_chat_api::GoalStatus::Stopped
+                            && !session.goal_stopped_by_abort
+                            && !session
+                                .goal
+                                .as_ref()
+                                .is_some_and(|g| g.stop_reason.as_deref() == Some("manual_abort")))
+                })
+            {
+                reject_guard(
+                    &mut session,
+                    &context.request_id,
+                    "Resume the paused or stopped goal before retrying".into(),
+                );
+                return QueueCommandOutcome::Continue;
+            }
+            session.reactivate_goal_stopped_by_manual_abort();
+            session.archive_recovery();
+            let mut record = session.runtime.recovery.clone().unwrap();
+            record.run_id = uuid::Uuid::new_v4().to_string();
+            record.revision += 1;
+            record.policy = options.clone();
+            record.policy_source = refact_core::recovery::RecoveryPolicySource::Thread;
+            record.attempts.clear();
+            record.manual = true;
+            record.retries_used = 0;
+            record.state = refact_core::recovery::RecoveryState::Attempting;
+            record.terminal_reason = None;
+            record.deadline_at_ms =
+                Some(crate::chat::recovery::now_ms().saturating_add(options.total_timeout_ms));
+            record.next_retry_at_ms = None;
+            if let Some(model) = model {
+                let old_provider =
+                    crate::stats::event::split_model_provider(&session.thread.model).0;
+                let new_provider = crate::stats::event::split_model_provider(&model).0;
+                crate::chat::recovery::apply_model_patch(&mut session, &model);
+                if old_provider != new_provider {
+                    record.retry_not_before_ms = None;
+                }
+            }
+            session.recovery_budget = Some(std::sync::Arc::new(
+                refact_core::recovery::RecoveryBudget::new_manual(options),
+            ));
+            session.abort_flag.store(false, Ordering::SeqCst);
+            session.user_interrupt_flag.store(false, Ordering::SeqCst);
+            let next_at = record.retry_not_before_ms.unwrap_or(0);
+            let should_wait = next_at > crate::chat::recovery::now_ms();
+            if should_wait {
+                record.state = refact_core::recovery::RecoveryState::Waiting;
+                record.next_retry_at_ms = Some(next_at);
+            }
+            let run = record.run_id.clone();
+            let budget = session.recovery_budget.clone().unwrap();
+            let notify = session.abort_notify.clone();
+            let retry_notify = session.recovery_notify.clone();
+            session.update_recovery(Some(record));
+            session.set_runtime_state(
+                if should_wait {
+                    SessionState::Generating
+                } else {
+                    SessionState::Idle
+                },
+                None,
+            );
+            let owned_run = run.clone();
+            drop(session);
+            maybe_save_trajectory_with_intent(
+                context.app.clone(),
+                context.session_arc.clone(),
+                TrajectoryCommitIntent::Required,
+            )
+            .await;
+            let stopped_before_wait = {
+                let session = context.session_arc.lock().await;
+                session.abort_flag.load(Ordering::SeqCst)
+                    || !session.runtime.recovery.as_ref().is_some_and(|r| {
+                        r.run_id == owned_run
+                            && matches!(
+                                r.state,
+                                refact_core::recovery::RecoveryState::Waiting
+                                    | refact_core::recovery::RecoveryState::Attempting
+                            )
+                    })
+            };
+            context.release_board_operation().await;
+            let ready = !stopped_before_wait
+                && (!should_wait
+                    || crate::chat::recovery::wait_for_retry(
+                        &context.session_arc,
+                        budget.clone(),
+                        notify,
+                        retry_notify,
+                        next_at,
+                        run,
+                    )
+                    .await);
+            if !ready {
+                {
+                    let mut session = context.session_arc.lock().await;
+                    if session
+                        .runtime
+                        .recovery
+                        .as_ref()
+                        .is_some_and(|r| r.run_id == owned_run)
+                        && session
+                            .recovery_budget
+                            .as_ref()
+                            .is_some_and(|current| Arc::ptr_eq(current, &budget))
+                    {
+                        session.recovery_budget = None;
+                        session.abort_flag.store(false, Ordering::SeqCst);
+                        session.user_interrupt_flag.store(false, Ordering::SeqCst);
+                        session.queue_notify.notify_one();
+                    }
+                }
+                maybe_save_trajectory_with_intent(
+                    context.app.clone(),
+                    context.session_arc.clone(),
+                    TrajectoryCommitIntent::Required,
+                )
+                .await;
+                return QueueCommandOutcome::Finished;
+            }
+            start_generation(context.app.clone(), context.session_arc.clone()).await;
+            QueueCommandOutcome::Finished
+        }
+        ChatCommand::RecoveryRetryNow { .. } => QueueCommandOutcome::Continue,
         ChatCommand::SetGoal {
             content,
             budget,
@@ -500,6 +685,14 @@ async fn handle_retry_from_index(
         session_arc.clone(),
         TrajectoryCommitIntent::Checkpoint,
     );
+    {
+        let mut session = session_arc.lock().await;
+        if session.runtime.recovery.is_some() {
+            session.archive_recovery();
+            session.update_recovery(None);
+        }
+        session.recovery_budget = None;
+    }
     context.release_board_operation().await;
     prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
     if aborted_before_start_generation(&session_arc).await {
@@ -517,6 +710,10 @@ async fn handle_set_params(
     let session_arc = context.session_arc.clone();
     if !patch.is_object() {
         warn!("SetParams patch must be an object, ignoring");
+        return QueueCommandOutcome::Continue;
+    }
+    if let Err(error) = crate::chat::recovery::validate_policy_patch(&patch) {
+        reject_guard(&mut *session_arc.lock().await, &context.request_id, error);
         return QueueCommandOutcome::Continue;
     }
     let mode_switch_reason = patch
@@ -637,6 +834,9 @@ async fn handle_set_params(
             "chat.session",
         )
         .await;
+    }
+    if session.thread.model != old_model {
+        crate::chat::trajectory_ops::sanitize_messages_for_model_switch(&mut session.messages);
     }
     if mode_changed || session.thread.model != old_model {
         session.release_turn_only_state();
@@ -1081,6 +1281,16 @@ async fn handle_regenerate(context: &QueueCommandContext) -> QueueCommandOutcome
     let session_arc = context.session_arc.clone();
     {
         let mut session = session_arc.lock().await;
+        if context.request_id.starts_with("delivery-wake-")
+            && session
+                .runtime
+                .recovery
+                .as_ref()
+                .is_some_and(|r| r.holds_goal())
+        {
+            session.suppress_delivery_wakes();
+            return QueueCommandOutcome::Continue;
+        }
         session.reactivate_goal_stopped_by_manual_abort();
     }
     maybe_save_trajectory_background_with_intent(
@@ -1088,6 +1298,14 @@ async fn handle_regenerate(context: &QueueCommandContext) -> QueueCommandOutcome
         session_arc.clone(),
         TrajectoryCommitIntent::Checkpoint,
     );
+    {
+        let mut session = session_arc.lock().await;
+        if session.runtime.recovery.is_some() {
+            session.archive_recovery();
+            session.update_recovery(None);
+        }
+        session.recovery_budget = None;
+    }
     context.release_board_operation().await;
     prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
     if aborted_before_start_generation(&session_arc).await {
@@ -1494,6 +1712,14 @@ async fn handle_browser_context_decision(
         session_arc.clone(),
         TrajectoryCommitIntent::Checkpoint,
     );
+    {
+        let mut session = session_arc.lock().await;
+        if session.runtime.recovery.is_some() {
+            session.archive_recovery();
+            session.update_recovery(None);
+        }
+        session.recovery_budget = None;
+    }
     context.release_board_operation().await;
     prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
     if aborted_before_start_generation(&session_arc).await {
@@ -1622,6 +1848,14 @@ async fn handle_user_message(
     }
     let app = context.app.clone();
     let session_arc = context.session_arc.clone();
+    {
+        let mut session = session_arc.lock().await;
+        if session.runtime.recovery.is_some() {
+            session.archive_recovery();
+            session.update_recovery(None);
+        }
+        session.recovery_budget = None;
+    }
     context.release_board_operation().await;
     prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
     if aborted_before_start_generation(&session_arc).await {

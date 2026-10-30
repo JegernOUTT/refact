@@ -521,6 +521,7 @@ pub async fn get_or_create_session_with_trajectory(
             session.restore_pending_deliveries(loaded.pending_deliveries);
         }
         session.merge_dropped_deliveries(dropped_deliveries);
+        session.runtime.recovery = loaded.recovery;
         session.set_goal_ledger(loaded.goal_ledger);
         session.pending_questions = loaded.pending_questions;
         if let Some(pending) = loaded.pending_browser_decision {

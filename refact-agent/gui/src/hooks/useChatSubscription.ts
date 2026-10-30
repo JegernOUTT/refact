@@ -574,8 +574,6 @@ export function useChatSubscription(
     );
   }, [
     chatId,
-    config.apiKey,
-    agentIdentity,
     hasEndpoint,
     enabled,
     subscriptionConfig,
@@ -617,7 +615,15 @@ export function useChatSubscription(
     }
 
     return cleanup;
-  }, [chatId, enabled, connect, disconnect, cleanup]);
+  }, [
+    chatId,
+    enabled,
+    connect,
+    disconnect,
+    cleanup,
+    config.apiKey,
+    agentIdentity,
+  ]);
 
   useEffect(() => {
     if (status === "connected" && chatId && enabled) {

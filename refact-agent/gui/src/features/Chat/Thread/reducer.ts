@@ -1514,6 +1514,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
           (snapshotTitleGenerated && !existingTitleGenerated);
 
         const thread: ChatThread = {
+          recovery_policy: event.thread.recovery_policy ?? null,
           id: event.thread.id,
           messages: snapshotMessages,
           model: backendModel || (existing?.model ?? ""),
@@ -1622,6 +1623,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
 
         const newRt: ChatThreadRuntime = {
           thread,
+          recovery: event.runtime.recovery ?? null,
           session_state: snapshotState,
           waiting_interruptible: event.runtime.waiting_interruptible === true,
           streaming: snapshotStreaming,
@@ -1715,6 +1717,14 @@ export const chatReducer = createReducer(initialState, (builder) => {
           break;
         }
         const { type: _, ...params } = event;
+        if (
+          "recovery_policy" in params &&
+          (params.recovery_policy === null ||
+            typeof params.recovery_policy === "object")
+        ) {
+          rt.thread.recovery_policy =
+            params.recovery_policy as ChatThread["recovery_policy"];
+        }
         if ("model" in params && typeof params.model === "string")
           rt.thread.model = params.model;
         if ("mode" in params && typeof params.mode === "string") {
@@ -2159,6 +2169,19 @@ export const chatReducer = createReducer(initialState, (builder) => {
           break;
         }
         rt.queued_items = event.queued_items;
+        rt.last_applied_seq = event.seq;
+        break;
+      }
+
+      case "recovery_updated": {
+        if (!rt) break;
+        const seq = parseEventSeq(event.seq);
+        const lastSeq =
+          rt.last_applied_seq != null
+            ? parseEventSeq(rt.last_applied_seq)
+            : null;
+        if (seq != null && lastSeq != null && seq <= lastSeq) break;
+        rt.recovery = event.recovery;
         rt.last_applied_seq = event.seq;
         break;
       }

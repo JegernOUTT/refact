@@ -776,6 +776,8 @@ pub async fn handle_mode_transition_apply(
         .or_else(|| Some(chat_id.clone()));
 
     let mut snapshot = TrajectorySnapshot {
+        recovery: None,
+        recovery_policy: None,
         pending_browser_decision: None,
         pending_deliveries: Vec::new(),
         dropped_deliveries: Vec::new(),
@@ -990,6 +992,8 @@ pub async fn handle_planner_from_transition(
     let root_chat_id = Some(new_chat_id.clone());
 
     let mut snapshot = TrajectorySnapshot {
+        recovery: None,
+        recovery_policy: None,
         pending_browser_decision: None,
         pending_deliveries: Vec::new(),
         dropped_deliveries: Vec::new(),
@@ -1439,6 +1443,8 @@ mod tests {
 
     fn transition_identity_snapshot(link_type: &str) -> TrajectorySnapshot {
         let mut snapshot = TrajectorySnapshot {
+            recovery: None,
+            recovery_policy: None,
             pending_browser_decision: None,
             pending_deliveries: Vec::new(),
             dropped_deliveries: Vec::new(),
@@ -1824,6 +1830,8 @@ mod tests {
             *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
         }
         let snapshot = TrajectorySnapshot {
+            recovery: None,
+            recovery_policy: None,
             pending_browser_decision: None,
             pending_deliveries: Vec::new(),
             dropped_deliveries: Vec::new(),

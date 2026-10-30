@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { act as rtlAct, renderHook, waitFor } from "@testing-library/react";
 import { Provider } from "react-redux";
+import { backgroundAgentsApi } from "../services/refact/backgroundAgents";
 import { configureStore } from "@reduxjs/toolkit";
 import { useChatSubscription } from "../hooks/useChatSubscription";
 import { chatReducer } from "../features/Chat/Thread/reducer";
@@ -17,6 +18,11 @@ import {
   updateConfig,
 } from "../features/Config/configSlice";
 
+const syncAct = rtlAct as unknown as (callback: () => void) => void;
+const asyncAct = rtlAct as unknown as (
+  callback: () => Promise<void>,
+) => Promise<void>;
+
 const createTestStore = () => {
   return configureStore({
     reducer: {
@@ -24,6 +30,7 @@ const createTestStore = () => {
       config: configReducer,
       current_project: (state = { name: "" }) => state,
       agentsPanel: agentsPanelSlice.reducer,
+      [backgroundAgentsApi.reducerPath]: backgroundAgentsApi.reducer,
     },
   });
 };
@@ -162,10 +169,11 @@ describe("useChatSubscription", () => {
       },
     );
     const send = async (index: number, event: object) => {
-      await act(async () => {
+      await asyncAct(async () => {
         streams[index].enqueue(
           new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`),
         );
+        await Promise.resolve();
       });
     };
     const queue = (seq: string) => ({
@@ -183,13 +191,14 @@ describe("useChatSubscription", () => {
     });
     expect(store.getState().agentsPanel.denied).toBe(true);
     await send(0, queue("2"));
-    expect(store.getState().chat.threads["test-chat"].last_applied_seq).toBe(
+    expect(store.getState().chat.threads["test-chat"]?.last_applied_seq).toBe(
       "2",
     );
-    await act(async () => {
+    await asyncAct(async () => {
       streams[0].close();
+      await Promise.resolve();
     });
-    await act(async () => {
+    await asyncAct(async () => {
       await vi.advanceTimersByTimeAsync(10);
     });
     expect(mockFetch).toHaveBeenCalledTimes(2);
@@ -206,20 +215,20 @@ describe("useChatSubscription", () => {
     };
     await send(1, privateEvent);
     await send(1, queue("2"));
-    act(() => {
+    syncAct(() => {
       store.dispatch(agentRecoveryRequested());
     });
     await send(1, { ...privateEvent, seq: "3" });
     expect(store.getState().agentsPanel.liveAgents).toEqual({});
     expect(store.getState().agentsPanel.authorized).toBe(false);
     expect(
-      store.getState().chat.threads["test-chat"].background_agents,
+      store.getState().chat.threads["test-chat"]?.background_agents,
     ).toEqual({});
     expect(onEvent).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: "background_agent_updated" }),
     );
     await send(1, queue("5"));
-    await act(async () => {
+    await asyncAct(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(mockFetch).toHaveBeenCalledTimes(3);
@@ -245,12 +254,12 @@ describe("useChatSubscription", () => {
     });
     await send(2, queue("1"));
     expect(result.current.status).toBe("connected");
-    expect(store.getState().chat.threads["test-chat"].last_applied_seq).toBe(
+    expect(store.getState().chat.threads["test-chat"]?.last_applied_seq).toBe(
       "1",
     );
     expect(store.getState().agentsPanel.liveAgents).toEqual({});
     expect(
-      store.getState().chat.threads["test-chat"].background_agents,
+      store.getState().chat.threads["test-chat"]?.background_agents,
     ).toEqual({});
     expect(onEvent).toHaveBeenCalledWith(
       expect.objectContaining({ type: "snapshot", background_agents: [] }),
@@ -289,18 +298,20 @@ describe("useChatSubscription", () => {
         ),
       },
     );
-    await act(async () => {
+    await asyncAct(async () => {
       await Promise.resolve();
     });
     expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(result.current.status).toBe("connected");
     expect(store.getState().agentsPanel.denied).toBe(true);
-    await act(async () => {
+    await asyncAct(async () => {
       if (!stream) throw new Error("Chat stream did not connect");
       stream.close();
+      await Promise.resolve();
     });
-    await act(async () => {
+    await asyncAct(async () => {
       await vi.advanceTimersByTimeAsync(100);
+      await Promise.resolve();
     });
     expect(mockFetch).toHaveBeenCalledTimes(2);
     expect(result.current.error?.message).toBe("SSE connection failed: 403");
