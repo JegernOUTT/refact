@@ -1,0 +1,6 @@
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+  flex-shrink: 0;
+}

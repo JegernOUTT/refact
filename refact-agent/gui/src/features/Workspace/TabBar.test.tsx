@@ -243,7 +243,7 @@ describe("TabBar", () => {
     );
     expect(
       within(screen.getByRole("tab", { name: /Chat Beta/ })).getByLabelText(
-        "In progress...",
+        "Working",
       ),
     ).toBeInTheDocument();
     expect(

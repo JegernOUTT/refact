@@ -333,6 +333,7 @@ export const updateChatRuntimeFromSessionState = createAction<{
     | "completed"
     | "error";
   error?: string;
+  source?: "sidebar";
 }>("chatThread/updateChatRuntimeFromSessionState");
 
 export const switchToThread = createAction<

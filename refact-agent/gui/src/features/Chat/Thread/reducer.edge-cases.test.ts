@@ -10,10 +10,12 @@ import {
   applyChatEvent,
   markThreadSseError,
   restoreChat,
+  updateChatRuntimeFromSessionState,
 } from "./actions";
 import { subscribeToChatEvents } from "../../../services/refact/chatSubscription";
 import type { ChatEventEnvelope } from "../../../services/refact/chatSubscription";
 import type { ChatMessage } from "../../../services/refact/types";
+import { getChatActivity } from "../../../utils/chatActivity";
 
 type SnapshotEnvelope = Extract<ChatEventEnvelope, { type: "snapshot" }>;
 
@@ -53,6 +55,73 @@ describe("Chat Thread Reducer - Edge Cases", () => {
     },
     background_agents: [],
     messages,
+  });
+
+  test("live chat activity survives delayed sidebar states and terminal updates clear waits", () => {
+    const snapshot = createSnapshot([
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "wait-agents",
+            index: 0,
+            function: {
+              name: "wait",
+              arguments: JSON.stringify({
+                target: { kind: "agents", agent_ids: ["child"] },
+              }),
+            },
+          },
+        ],
+      },
+    ]);
+    snapshot.runtime.state = "executing_tools";
+    let state = chatReducer(initialState, applyChatEvent(snapshot));
+    for (const session_state of ["idle", "generating", "error"] as const) {
+      state = chatReducer(
+        state,
+        updateChatRuntimeFromSessionState({
+          id: chatId,
+          session_state,
+          source: "sidebar",
+        }),
+      );
+      expect(getChatActivity(state.threads[chatId])).toBe("waiting_agents");
+      expect(state.threads[chatId]?.error).toBeNull();
+    }
+    state = chatReducer(
+      state,
+      applyChatEvent({
+        chat_id: chatId,
+        seq: "2",
+        type: "runtime_updated",
+        state: "completed",
+      }),
+    );
+    state = chatReducer(
+      state,
+      updateChatRuntimeFromSessionState({
+        id: chatId,
+        session_state: "executing_tools",
+        source: "sidebar",
+      }),
+    );
+    expect(getChatActivity(state.threads[chatId])).toBe("completed");
+  });
+
+  test("local request failures still report errors after a live snapshot", () => {
+    let state = chatReducer(initialState, applyChatEvent(createSnapshot()));
+    state = chatReducer(
+      state,
+      updateChatRuntimeFromSessionState({
+        id: chatId,
+        session_state: "error",
+        error: "Regenerate request failed",
+      }),
+    );
+    expect(getChatActivity(state.threads[chatId])).toBe("error");
+    expect(state.threads[chatId]?.error).toBe("Regenerate request failed");
   });
 
   test("parses interruptible waiting snapshots and runtime updates with false legacy default", () => {

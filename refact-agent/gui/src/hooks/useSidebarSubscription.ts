@@ -427,6 +427,7 @@ export function useSidebarSubscription() {
               id: event.id,
               session_state: event.session_state,
               error: event.error,
+              source: "sidebar",
             }),
           );
         }
@@ -488,6 +489,7 @@ export function useSidebarSubscription() {
               id: event.id,
               session_state: event.session_state,
               error: event.error,
+              source: "sidebar",
             }),
           );
         }

@@ -6,6 +6,7 @@ import {
   screen,
   fireEvent,
   waitFor,
+  within,
 } from "../../../../utils/test-utils";
 import { StreamSection } from "./StreamSection";
 import type { ChatHistoryItem } from "../../../History/historySlice";
@@ -67,6 +68,39 @@ function trajectoryMeta(id: string, title: string) {
 const ALL_FILTER = { kind: "all" as const, query: "" };
 
 describe("StreamSection", () => {
+  it("shows truthful coarse chat activity separately from family aggregate status", () => {
+    render(
+      <StreamSection
+        filter={ALL_FILTER}
+        onOpenChat={vi.fn()}
+        onOpenTask={vi.fn()}
+      />,
+      {
+        preloadedState: preloadedStateWith([
+          makeChat({ id: "root", title: "Root", session_state: "completed" }),
+          makeChat({
+            id: "child",
+            title: "Child",
+            parent_id: "root",
+            session_state: "executing_tools",
+          }),
+        ]),
+      },
+    );
+    expect(
+      within(screen.getByTestId("stream-row-root")).getByLabelText("Completed"),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Toggle thread family for Root" }),
+    );
+    expect(
+      within(screen.getByTestId("stream-rail-row-child")).getByLabelText(
+        "Running tools",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Waiting for subagents")).not.toBeInTheDocument();
+  });
+
   it("renders group headers and rows from the stream selectors", () => {
     render(
       <StreamSection

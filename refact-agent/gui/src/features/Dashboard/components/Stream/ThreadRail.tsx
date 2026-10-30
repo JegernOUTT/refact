@@ -1,3 +1,5 @@
+import { ChatActivityStatus } from "../../../../components/ChatActivity/ChatActivityStatus";
+import { selectChatActivityById } from "../../../Chat/Thread/selectors";
 import React from "react";
 import classNames from "classnames";
 import { useAppSelector } from "../../../../hooks/useAppSelector";
@@ -5,6 +7,11 @@ import type { FamilyChild } from "../../streamSelectors";
 import { selectFamilyChildren } from "../../streamSelectors";
 import { formatRelativeTime } from "./streamRowUtils";
 import styles from "./Stream.module.css";
+
+function ChildActivity({ id }: { id: string }) {
+  const activity = useAppSelector((state) => selectChatActivityById(state, id));
+  return <ChatActivityStatus activity={activity} />;
+}
 
 const INDENT_CLASSES = [styles.i0, styles.i1, styles.i2, styles.i3, styles.i4];
 
@@ -31,8 +38,6 @@ function dotClass(status: FamilyChild["status"]): string {
 function metaLabel(child: FamilyChild): string | null {
   const parts: string[] = [];
   if (child.messageCount != null) parts.push(`${child.messageCount} msgs`);
-  if (child.status === "streaming") parts.push("streaming");
-  else if (child.status === "working") parts.push("working");
   return parts.length > 0 ? parts.join(" · ") : null;
 }
 
@@ -94,7 +99,10 @@ export const ThreadRail: React.FC<ThreadRailProps> = ({
               >
                 {child.title}
               </span>
-              {meta !== null && <span className={styles.railMeta}>{meta}</span>}
+              <span className={styles.railMeta}>
+                <ChildActivity id={child.id} />
+                {meta !== null && <> · {meta}</>}
+              </span>
             </span>
             <span className={styles.railLinkType}>
               {child.linkType === "branch" ? "Branch" : "Subchat"}

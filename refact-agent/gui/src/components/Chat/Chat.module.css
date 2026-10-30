@@ -92,3 +92,9 @@
     backdrop-filter: none;
   }
 }
+
+.activity {
+  padding: var(--rf-space-1) var(--rf-space-2);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+}

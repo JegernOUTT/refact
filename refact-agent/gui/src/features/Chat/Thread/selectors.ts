@@ -35,6 +35,10 @@ import {
   TodoItem,
   TodoStatus,
 } from "./types";
+import {
+  getChatActivity,
+  type ChatActivity,
+} from "../../../utils/chatActivity";
 import type { SessionState } from "../../../utils/sessionStatus";
 import type { WorktreeMeta } from "../../../services/refact/worktrees";
 import type {
@@ -149,6 +153,7 @@ export type TabDisplayData = {
   id: string;
   title: string;
   session_state?: string;
+  activity: ChatActivity;
   mode?: string;
   is_buddy_chat?: boolean;
   is_task_chat?: boolean;
@@ -183,6 +188,7 @@ export const selectTabsDisplayData = createSelector(
           id,
           title: runtime?.thread.title ?? historyItem?.title ?? "New Chat",
           session_state: liveSessionState ?? historyItem?.session_state,
+          activity: getChatActivity(runtime, historyItem?.session_state),
           mode: runtime?.thread.mode ?? historyItem?.mode,
           is_buddy_chat: Boolean(runtime?.thread.buddy_meta?.is_buddy_chat),
           is_task_chat: Boolean(runtime?.thread.is_task_chat),
@@ -1816,3 +1822,16 @@ export const selectWaitingInterruptibleById = (
   state: RootState,
   chatId: string,
 ): boolean => state.chat.threads[chatId]?.waiting_interruptible ?? false;
+
+export const selectChatActivityById = (
+  state: RootState,
+  chatId: string,
+): ChatActivity =>
+  getChatActivity(
+    state.chat.threads[chatId],
+    (
+      state.history.chats[chatId] as
+        | (typeof state.history.chats)[string]
+        | undefined
+    )?.session_state,
+  );

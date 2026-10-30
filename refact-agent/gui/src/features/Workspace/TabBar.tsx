@@ -9,7 +9,6 @@ import {
   X,
 } from "lucide-react";
 import {
-  ComponentProps,
   DragEvent,
   MouseEvent,
   PointerEvent,
@@ -22,7 +21,7 @@ import {
   useState,
 } from "react";
 
-import { Badge, Icon, IconButton, StatusDot } from "../../components/ui";
+import { Badge, Icon, IconButton } from "../../components/ui";
 import { useAppDispatch, useAppSelector, useReducedMotion } from "../../hooks";
 import { selectCapabilities, selectHost } from "../Config/configSlice";
 import {
@@ -85,7 +84,12 @@ import {
   gitDiffTooltip,
 } from "./GitPanel/diff/gitDiffDescriptor";
 import { resolveWorkspaceDockAvailability } from "./workspaceAvailability";
-import { getStatusFromSessionState } from "../../utils/sessionStatus";
+import {
+  activityFromSessionState,
+  getChatActivity,
+  type ChatActivity,
+} from "../../utils/chatActivity";
+import { ChatActivityStatus } from "../../components/ChatActivity/ChatActivityStatus";
 import styles from "./TabBar.module.css";
 
 const BUDDY_SURFACE_KEY = makeSurfaceKey("buddy", "home");
@@ -113,32 +117,11 @@ type DisplayInfo = {
   tooltip?: string;
   kind: TabSurfaceKind;
   session_state?: string;
+  activity?: ChatActivity;
   is_buddy_chat?: boolean;
   is_task_chat?: boolean;
   unreadNotificationCount: number;
 };
-
-function statusLabel(
-  status: ComponentProps<typeof StatusDot>["status"],
-): string {
-  if (status === "in_progress" || status === "running") {
-    return "In progress...";
-  }
-
-  if (status === "needs_attention" || status === "paused") {
-    return "Needs your attention";
-  }
-
-  if (status === "error") {
-    return "An error occurred";
-  }
-
-  if (status === "completed") {
-    return "Completed";
-  }
-
-  return "Idle";
-}
 
 function fallbackSurfaceTitle(surfaceKey: SurfaceKey): string {
   try {
@@ -288,6 +271,7 @@ function displayInfoForSurface(
     title: runtime?.thread.title ?? fallbackSurfaceTitle(surfaceKey),
     kind: "chat",
     session_state: runtime?.session_state,
+    activity: getChatActivity(runtime),
     is_buddy_chat: Boolean(runtime?.thread.buddy_meta?.is_buddy_chat),
     is_task_chat: Boolean(runtime?.thread.is_task_chat),
     unreadNotificationCount: 0,
@@ -408,7 +392,8 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
           title: display.title,
           tooltip: display.tooltip,
           kind: display.kind,
-          status: getStatusFromSessionState(display.session_state),
+          activity:
+            display.activity ?? activityFromSessionState(display.session_state),
           unreadNotificationCount,
           is_buddy_chat: display.is_buddy_chat,
           is_task_chat: display.is_task_chat,
@@ -893,11 +878,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
                     ) : tab.kind === "design" ? (
                       <Icon icon={Palette} size="sm" tone="muted" />
                     ) : (
-                      <StatusDot
-                        aria-label={statusLabel(tab.status)}
-                        status={tab.status}
-                        size="small"
-                      />
+                      <ChatActivityStatus activity={tab.activity} compact />
                     )}
                   </span>
                   {tab.isGroup && (

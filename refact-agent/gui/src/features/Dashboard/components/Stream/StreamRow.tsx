@@ -1,3 +1,6 @@
+import { useAppSelector } from "../../../../hooks/useAppSelector";
+import { ChatActivityStatus } from "../../../../components/ChatActivity/ChatActivityStatus";
+import { selectChatActivityById } from "../../../Chat/Thread/selectors";
 import React, { useCallback } from "react";
 import classNames from "classnames";
 import {
@@ -37,6 +40,9 @@ export const StreamRow: React.FC<StreamRowProps> = ({
   onToggleFamily,
 }) => {
   const isChat = item.kind === "chat";
+  const activity = useAppSelector((state) =>
+    selectChatActivityById(state, item.id),
+  );
 
   const handleClick = useCallback(() => {
     onOpen(item);
@@ -147,7 +153,11 @@ export const StreamRow: React.FC<StreamRowProps> = ({
 
       <span className={styles.slot}>
         <span className={classNames(styles.stateChip, TONE_CLASS[tone])}>
-          {humanizeIdentifier(item.status)}
+          {isChat ? (
+            <ChatActivityStatus activity={activity} />
+          ) : (
+            humanizeIdentifier(item.status)
+          )}
         </span>
       </span>
 

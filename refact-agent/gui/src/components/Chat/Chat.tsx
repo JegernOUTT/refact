@@ -39,6 +39,8 @@ import {
   selectPanelsForced,
   selectWorkspaceDock,
 } from "../../features/Workspace/workspaceSlice";
+import { selectChatActivityById } from "../../features/Chat/Thread/selectors";
+import { ChatActivityStatus } from "../ChatActivity/ChatActivityStatus";
 import { useBottomDockClearance } from "./useBottomDockClearance";
 
 export type ChatProps = {
@@ -59,6 +61,9 @@ export const Chat: React.FC<ChatProps> = ({
 
   const [isViewingRawJSON, setIsViewingRawJSON] = useState(false);
   const chatId = useThreadId();
+  const activity = useAppSelector((state) =>
+    selectChatActivityById(state, chatId),
+  );
   const isStreaming = useAppSelector((state) =>
     selectIsStreamingById(state, chatId),
   );
@@ -175,6 +180,9 @@ export const Chat: React.FC<ChatProps> = ({
             className={styles.bottomDock}
           >
             <Container>
+              <div className={styles.activity} role="status" aria-live="polite">
+                <ChatActivityStatus activity={activity} />
+              </div>
               <SkillsIndicator chatId={chatId} />
             </Container>
 
