@@ -1332,13 +1332,13 @@ fn worktree_reference_for_thread(
 async fn register_stateful_subchat_worktree(
     gcx: Arc<GlobalContext>,
     chat_id: &str,
-    thread: &mut ThreadParams,
-) {
+    thread: &ThreadParams,
+) -> Result<(), String> {
     let Some(worktree) = thread.worktree.clone() else {
-        return;
+        return Ok(());
     };
     let Some(reference) = worktree_reference_for_thread(chat_id, thread) else {
-        return;
+        return Ok(());
     };
 
     let cache_dir = { gcx.cache_dir.clone() };
@@ -1350,16 +1350,17 @@ async fn register_stateful_subchat_worktree(
                     "Failed to resolve worktree service while registering subchat '{}': {}",
                     chat_id, e
                 );
-                return;
+                return Err(e);
             }
         };
 
+    if service.validate_worktree_meta_strict(&worktree).await? != worktree {
+        return Err("Runner checkout identity changed; retain current scope".into());
+    }
     match service.add_reference(&worktree.id, reference).await {
-        Ok(view) => thread.worktree = Some(view.meta),
-        Err(e) => warn!(
-            "Failed to add worktree reference '{}' for subchat '{}': {}",
-            worktree.id, chat_id, e
-        ),
+        Ok(view) if view.meta == worktree => Ok(()),
+        Ok(_) => Err("Runner checkout identity changed while registering reference".into()),
+        Err(e) => Err(e),
     }
 }
 
@@ -1789,11 +1790,94 @@ async fn save_through_runner_session(
     messages: &[ChatMessage],
     intent: TrajectoryCommitIntent,
 ) -> Option<Result<(), String>> {
-    let session = runner_owned_session(app, config, &thread.id).await?;
+    if !config.stateful {
+        return None;
+    }
+    let session = app.chat.sessions.read().await.get(&thread.id).cloned();
+    let Some(session) = session else {
+        return Some(Err(
+            "Runner session is unavailable; refusing to save a stale checkout".into(),
+        ));
+    };
+    let _transition = match crate::chat::worktree_lifecycle::try_transition_lock(&session) {
+        Ok(transition) => transition,
+        Err(error) => return Some(Err(error)),
+    };
+    let (version, source, requests, aborted, interrupted) = {
+        let guarded = session.lock().await;
+        (
+            guarded.trajectory_version,
+            guarded.work_project_root.clone(),
+            guarded.recent_request_ids.clone(),
+            guarded.abort_flag.load(Ordering::Acquire),
+            guarded.user_interrupt_flag.load(Ordering::Acquire),
+        )
+    };
     {
-        let mut session = session.lock().await;
-        if thread.worktree.is_some() {
-            session.thread.worktree = thread.worktree.clone();
+        let guarded = session.lock().await;
+        let sessions = app.chat.sessions.try_read();
+        if !sessions.as_ref().is_ok_and(|sessions| {
+            sessions
+                .get(&thread.id)
+                .is_some_and(|current| Arc::ptr_eq(current, &session))
+        }) {
+            return Some(Err(
+                "Runner session changed before reference authorization".into()
+            ));
+        }
+        if let Err(error) =
+            crate::chat::worktree_lifecycle::check_unchanged_attachment(&guarded, thread)
+        {
+            return Some(Err(error));
+        }
+    }
+    if let Err(error) =
+        register_stateful_subchat_worktree(app.gcx.clone(), &thread.id, thread).await
+    {
+        return Some(Err(error));
+    }
+    {
+        let sessions = match app.chat.sessions.try_read() {
+            Ok(sessions) => sessions,
+            Err(_) => return Some(Err("Runner session registry busy; retain progress".into())),
+        };
+        if !sessions
+            .get(&thread.id)
+            .is_some_and(|current| Arc::ptr_eq(current, &session))
+        {
+            return Some(Err("Runner session changed; refusing stale progress".into()));
+        }
+        let mut session = match session.try_lock() {
+            Ok(session) => session,
+            Err(_) => return Some(Err("Runner session busy; retain progress".into())),
+        };
+        if let Err(error) =
+            crate::chat::worktree_lifecycle::check_unchanged_attachment(&session, thread)
+        {
+            return Some(Err(error));
+        }
+        let retains_current_history =
+            messages
+                .get(..session.messages.len())
+                .is_some_and(|prefix| {
+                    serde_json::to_value(prefix)
+                        .ok()
+                        .zip(serde_json::to_value(&session.messages).ok())
+                        .is_some_and(|(proposed, current)| proposed == current)
+                });
+        if (!session.is_runner_owned_subagent_view()
+            && session.trajectory_dirty
+            && !retains_current_history)
+            || session.trajectory_version != version
+            || session.work_project_root != source
+            || session.recent_request_ids != requests
+            || session.abort_flag.load(Ordering::Acquire) != aborted
+            || session.user_interrupt_flag.load(Ordering::Acquire) != interrupted
+            || !session.command_queue.is_empty()
+        {
+            return Some(Err(
+                "Runner no longer owns the current session; retain its history and checkout".into(),
+            ));
         }
         session.mirror_runner_messages(messages.to_vec());
         session.increment_version();
@@ -1913,12 +1997,9 @@ async fn persist_subchat_progress(
         }
         Err(error) => warn!(%error, "Failed to save runner progress; retaining delivery payloads"),
     }
-    if config.stateful {
-        let app = AppState::from_gcx(gcx).await;
-        mirror_subchat_messages_into_session(&app, &chat_id, messages).await;
-    }
 }
 
+#[cfg(test)]
 pub(crate) async fn mirror_subchat_messages_into_session(
     app: &AppState,
     chat_id: &str,
@@ -1971,10 +2052,7 @@ async fn save_failed_subchat_trajectory(
         format!("Subchat run failed: {error}"),
     ));
 
-    let mut thread = trace_thread_from_config(chat_id, config);
-    if config.stateful {
-        register_stateful_subchat_worktree(gcx.clone(), chat_id, &mut thread).await;
-    }
+    let thread = trace_thread_from_config(chat_id, config);
     let app = AppState::from_gcx(gcx).await;
     if let Err(error) = save_subchat_trajectory(
         &app,
@@ -1986,9 +2064,6 @@ async fn save_failed_subchat_trajectory(
     .await
     {
         warn!("Failed to save trajectory: {}", error);
-    }
-    if config.stateful {
-        mirror_subchat_messages_into_session(&app, chat_id, &messages).await;
     }
 }
 
@@ -2123,7 +2198,7 @@ pub async fn run_subchat(
         prepare_child_history(&messages, &config)
     };
     let messages = prepare_subchat_messages(&gcx, messages, &config.model)?;
-    if should_persist_subchat_trajectory(&config) && !resuming {
+    if should_persist_subchat_trajectory(&config) && !resuming && !config.stateful {
         let thread = trace_thread_from_config(&chat_id, &config);
         save_trajectory_as_with_intent(
             gcx.clone(),
@@ -2141,6 +2216,17 @@ pub async fn run_subchat(
             .and_then(|agent_id| app.agent_executions.saved_scope(agent_id));
         install_stateful_subchat_session(&app, &chat_id, &config, &messages, source.as_deref())
             .await?;
+        if !resuming {
+            let thread = trace_thread_from_config(&chat_id, &config);
+            save_subchat_trajectory(
+                &app,
+                &config,
+                &thread,
+                &messages,
+                subchat_trajectory_commit_intent(SubchatTrajectoryCommitPhase::Seed),
+            )
+            .await?;
+        }
     }
     let ccx = Arc::new(AMutex::new(
         AtCommandsContext::new_with_abort(
@@ -2249,8 +2335,7 @@ pub async fn run_subchat(
     }
 
     if config.stateful {
-        let mut thread = stateful_thread_from_config(&chat_id, &config);
-        register_stateful_subchat_worktree(gcx.clone(), &chat_id, &mut thread).await;
+        let thread = stateful_thread_from_config(&chat_id, &config);
         if let Err(error) = save_subchat_trajectory(
             &app,
             &config,
@@ -2260,9 +2345,10 @@ pub async fn run_subchat(
         )
         .await
         {
-            warn!("Failed to save trajectory: {}", error);
+            finish_stateful_subchat_session(&app, &chat_id, &config).await;
+            clear_unbound_openai_codex_websocket_session(&chat_id).await;
+            return Err(error);
         }
-        mirror_subchat_messages_into_session(&app, &chat_id, &current_messages).await;
     } else if should_persist_subchat_trajectory(&config) {
         let thread = trace_thread_from_config(&chat_id, &config);
         save_trajectory_as_with_intent(
@@ -2309,12 +2395,11 @@ pub(crate) async fn install_stateful_subchat_session(
         }
     }
     let thread = stateful_thread_from_config(chat_id, config);
-    let session_arc = {
-        let mut sessions = app.chat.sessions.write().await;
-        if let Some(session) = sessions.get(chat_id) {
-            session.clone()
-        } else {
-            let session = crate::chat::types::ChatSession::new_with_trajectory(
+    let existing = app.chat.sessions.read().await.get(chat_id).cloned();
+    let session_arc = match existing {
+        Some(session) => session,
+        None => {
+            let mut session = crate::chat::types::ChatSession::new_with_trajectory(
                 chat_id.to_string(),
                 messages.to_vec(),
                 thread.clone(),
@@ -2323,18 +2408,46 @@ pub(crate) async fn install_stateful_subchat_session(
                 Vec::new(),
                 None,
             );
+            session.work_project_root = source.clone();
             let session = Arc::new(AMutex::new(session));
+            let _transition = crate::chat::worktree_lifecycle::try_transition_lock(&session)?;
+            let mut sessions = app.chat.sessions.write().await;
+            if sessions.contains_key(chat_id) {
+                return Err("Child session appeared during setup; retain its current scope".into());
+            }
             sessions.insert(chat_id.to_string(), session.clone());
             session
         }
     };
-    let mut session = session_arc.lock().await;
-    if let Some(source) = source {
-        if crate::coordination::scope::session_source_root(&session)
-            .is_some_and(|saved| saved.canonicalize().ok().as_ref() != Some(&source))
-        {
+    let _transition = crate::chat::worktree_lifecycle::try_transition_lock(&session_arc)?;
+    let saved_source = {
+        let session = session_arc.lock().await;
+        crate::coordination::scope::session_source_root(&session)
+    };
+    if let (Some(saved), Some(source)) = (&saved_source, &source) {
+        if saved.canonicalize().ok().as_ref() != Some(source) {
             return Err("saved child session does not match accepted project scope".into());
         }
+    }
+    let sessions = app
+        .chat
+        .sessions
+        .try_read()
+        .map_err(|_| "Child session registry busy; retry setup")?;
+    if !sessions
+        .get(chat_id)
+        .is_some_and(|current| Arc::ptr_eq(current, &session_arc))
+    {
+        return Err("Child session changed during setup".into());
+    }
+    let mut session = session_arc
+        .try_lock()
+        .map_err(|_| "Child session busy; retry setup")?;
+    crate::chat::worktree_lifecycle::check_unchanged_attachment(&session, &thread)?;
+    if crate::coordination::scope::session_source_root(&session) != saved_source {
+        return Err("Child source scope changed during setup".into());
+    }
+    if let Some(source) = source {
         session.work_project_root = Some(source);
     }
     if config.background_agent_id.is_some() {
@@ -2353,10 +2466,31 @@ pub(crate) async fn finish_stateful_subchat_session(
     }
     let session = app.chat.sessions.read().await.get(chat_id).cloned();
     if let Some(session) = session {
-        session
-            .lock()
-            .await
-            .set_runtime_state(crate::chat::types::SessionState::Idle, None);
+        let Ok(_transition) = crate::chat::worktree_lifecycle::try_transition_lock(&session) else {
+            warn!("Runner completion deferred during checkout transition");
+            return;
+        };
+        let Ok(sessions) = app.chat.sessions.try_read() else {
+            return;
+        };
+        if !sessions
+            .get(chat_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &session))
+        {
+            return;
+        }
+        let Ok(mut session) = session.try_lock() else {
+            return;
+        };
+        let thread = stateful_thread_from_config(chat_id, config);
+        if crate::chat::worktree_lifecycle::check_unchanged_attachment(&session, &thread).is_err()
+            || !session.is_runner_owned_subagent_view()
+            || session.runtime.paused
+            || !session.runtime.pause_reasons.is_empty()
+        {
+            return;
+        }
+        session.set_runtime_state(crate::chat::types::SessionState::Idle, None);
     }
 }
 
@@ -3822,6 +3956,7 @@ pub(crate) async fn subchat_stream(
             reasoning_type: model_rec.reasoning_type_string(),
             supports_temperature: model_rec.supports_temperature,
             priority: refact_providers::pressure::RequestPriority::Background,
+            recovery_budget: None,
         };
 
         let mut collector = SubchatProgressCollector::new(
@@ -4209,15 +4344,14 @@ mod subchat_tests {
         emit_parent_compaction_diagnostics, gate_subchat_boundary,
         parent_compaction_diagnostic_status, parent_thread_worktree, parse_subchat_cache_control,
         partial_output_stream_error_message, prepare_subchat_messages,
-        register_stateful_subchat_worktree, resolve_subchat_config_with_parent,
-        resolve_subagent_confirmation_defaults, resolve_subchat_model, resolve_subchat_params,
-        resolve_subchat_worktree, safe_context_limit_error_for_log, stable_stream_chat_id,
-        stable_subchat_chat_id, should_compact_context_limit_error,
-        should_persist_subchat_trajectory, stateful_thread_from_config, subchat_retries_allowed,
-        subchat_trajectory_commit_intent, trace_thread_from_config, save_failed_subchat_trajectory,
-        SubchatConfig, SubchatProgress, SubchatProgressCollector, SubchatTrajectoryCommitPhase,
-        ToolsPolicy, TraceParent, GUARDED_REPORT_INSTRUCTION,
-        PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
+        resolve_subchat_config_with_parent, resolve_subagent_confirmation_defaults,
+        resolve_subchat_model, resolve_subchat_params, resolve_subchat_worktree,
+        safe_context_limit_error_for_log, stable_stream_chat_id, stable_subchat_chat_id,
+        should_compact_context_limit_error, should_persist_subchat_trajectory,
+        stateful_thread_from_config, subchat_retries_allowed, subchat_trajectory_commit_intent,
+        trace_thread_from_config, save_failed_subchat_trajectory, SubchatConfig, SubchatProgress,
+        SubchatProgressCollector, SubchatTrajectoryCommitPhase, ToolsPolicy, TraceParent,
+        GUARDED_REPORT_INSTRUCTION, PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_REDACTION_LOOKAHEAD_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED, PARTIAL_OUTPUT_STREAM_ERROR,
     };
@@ -6114,6 +6248,7 @@ mod subchat_tests {
             crate::test_tmp::scratch_dir("cfg"),
         )
         .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         let service = crate::worktrees::service::WorktreeService::new(cache, source).unwrap();
         let created = service
             .create_worktree(crate::worktrees::types::CreateWorktreeRequest {
@@ -6162,9 +6297,144 @@ mod subchat_tests {
             step_progress: None,
             trace_parent: TraceParent::unattributed(),
         };
-        let mut thread = stateful_thread_from_config("child-ref-chat", &config);
+        let thread = stateful_thread_from_config("child-ref-chat", &config);
 
-        register_stateful_subchat_worktree(gcx, "child-ref-chat", &mut thread).await;
+        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let messages = vec![ChatMessage::new(
+            "user".into(),
+            "retained runner history".into(),
+        )];
+        super::install_stateful_subchat_session(&app, "child-ref-chat", &config, &messages, None)
+            .await
+            .unwrap();
+        let session = app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get("child-ref-chat")
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            session.lock().await.runtime.state,
+            crate::chat::types::SessionState::Idle
+        );
+        let before = serde_json::to_value(&session.lock().await.thread).unwrap();
+        assert!(!before["worktree"]["id"].as_str().unwrap().is_empty());
+        let registry_before = serde_json::to_value(service.load_registry().await.unwrap()).unwrap();
+        let transition = crate::chat::worktree_lifecycle::try_transition_lock(&session).unwrap();
+        let error = super::save_subchat_trajectory(
+            &app,
+            &config,
+            &thread,
+            &messages,
+            TrajectoryCommitIntent::Required,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("transition in progress"));
+        assert_eq!(
+            serde_json::to_value(&session.lock().await.thread).unwrap(),
+            before
+        );
+        assert_eq!(
+            serde_json::to_value(service.load_registry().await.unwrap()).unwrap(),
+            registry_before
+        );
+        drop(transition);
+        super::save_subchat_trajectory(
+            &app,
+            &config,
+            &thread,
+            &messages,
+            TrajectoryCommitIntent::Required,
+        )
+        .await
+        .unwrap();
+        let loaded = crate::chat::trajectories::load_trajectory_for_chat(gcx, "child-ref-chat")
+            .await
+            .unwrap();
+        let mut appended = messages.clone();
+        appended.push(ChatMessage::new(
+            "assistant".into(),
+            "checkpoint output".into(),
+        ));
+        super::save_subchat_trajectory(
+            &app,
+            &config,
+            &thread,
+            &appended,
+            TrajectoryCommitIntent::Checkpoint,
+        )
+        .await
+        .unwrap();
+        session.lock().await.trajectory_dirty = true;
+        assert_eq!(
+            session.lock().await.runtime.state,
+            crate::chat::types::SessionState::Idle
+        );
+        let mut final_messages = appended.clone();
+        final_messages.push(ChatMessage::new("assistant".into(), "final output".into()));
+        super::save_subchat_trajectory(
+            &app,
+            &config,
+            &thread,
+            &final_messages,
+            TrajectoryCommitIntent::Required,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&session.lock().await.messages).unwrap(),
+            serde_json::to_value(&final_messages).unwrap()
+        );
+        let bytes = std::fs::read(&loaded.source_path).unwrap();
+        session
+            .lock()
+            .await
+            .add_message(ChatMessage::new("user".into(), "foreign live edit".into()));
+        let error = super::save_subchat_trajectory(
+            &app,
+            &config,
+            &thread,
+            &final_messages,
+            TrajectoryCommitIntent::Required,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("no longer owns"));
+        assert_eq!(
+            session
+                .lock()
+                .await
+                .messages
+                .last()
+                .unwrap()
+                .content
+                .content_text_only(),
+            "foreign live edit"
+        );
+        assert_eq!(std::fs::read(&loaded.source_path).unwrap(), bytes);
+        session.lock().await.thread.worktree = None;
+        let error = super::save_subchat_trajectory(
+            &app,
+            &config,
+            &thread,
+            &[ChatMessage::new(
+                "user".into(),
+                "stale runner replacement".into(),
+            )],
+            TrajectoryCommitIntent::Required,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("scope or ownership changed"));
+        assert!(session.lock().await.thread.worktree.is_none());
+        assert_eq!(
+            session.lock().await.messages[0].content.content_text_only(),
+            "retained runner history"
+        );
+        assert_eq!(std::fs::read(&loaded.source_path).unwrap(), bytes);
         assert_eq!(thread.worktree, Some(created.worktree.meta.clone()));
 
         let view = service

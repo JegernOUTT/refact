@@ -49,6 +49,7 @@ import {
 } from "../ui";
 import type { ModelOption, ModelSelectorBadge } from "../ui";
 import styles from "./ChatSettingsDropdown.module.css";
+import { RecoveryPolicySettings } from "./RecoveryPolicySettings";
 
 const MIN_OUTPUT_TOKENS = 1024;
 const MIN_COMPRESSION_TOKENS = 1024;
@@ -847,6 +848,7 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
             )}
           </div>
         </div>
+        <RecoveryPolicySettings chatId={chatId} />
       </KitPopover.Content>
     </KitPopover>
   );

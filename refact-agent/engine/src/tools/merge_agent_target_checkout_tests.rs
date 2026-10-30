@@ -346,7 +346,7 @@ async fn merge_service_serialization_uses_selected_checkout_without_changing_reg
         &merge_lock_for(selected.merge_checkout_root()),
         &merge_lock_for(&fixture.planner)
     ));
-    assert!(!Arc::ptr_eq(
+    assert!(Arc::ptr_eq(
         &merge_lock_for(selected.merge_checkout_root()),
         &merge_lock_for(&fixture.source)
     ));

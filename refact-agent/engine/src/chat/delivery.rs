@@ -31,6 +31,11 @@ use crate::chat::types::{
 };
 use crate::coordination::outbox;
 
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static BEFORE_REPLY_ACCEPT: (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
+}
+
 /// Deliver a batch of messages to `chat_id`.
 ///
 /// Restores the target session from its trajectory when needed and rejects
@@ -57,7 +62,8 @@ pub async fn deliver_to_chat(
         }
     }
 
-    if !delivery.wake || !crate::agents::seal::is_sealed(&app, chat_id).await {
+    let planner_reply = crate::tools::tool_agent_planner_qna::is_planner_reply_delivery(&delivery);
+    if !planner_reply && (!delivery.wake || !crate::agents::seal::is_sealed(&app, chat_id).await) {
         if let Some(result) =
             crate::agents::delivery::route_to_runner(&app, chat_id, delivery.clone()).await
         {
@@ -98,8 +104,7 @@ pub async fn deliver_to_chat(
     };
 
     let sealed = delivery.wake && crate::agents::seal::is_sealed(&app, chat_id).await;
-    let (accepted, status, wake, should_start_processor, processor_running, queue_notify) = {
-        let mut session = session_arc.lock().await;
+    let enqueue = |session: &mut ChatSession, delivery: PendingDelivery| {
         let wake = delivery.wake && !sealed;
         let accepted = if session.closed {
             Err(format!("chat '{chat_id}' is closed"))
@@ -129,6 +134,49 @@ pub async fn deliver_to_chat(
             session.queue_notify.clone(),
         )
     };
+
+    let accepted_reply = if planner_reply {
+        #[cfg(test)]
+        if let Ok(barrier) = BEFORE_REPLY_ACCEPT.try_with(Clone::clone) {
+            barrier.0.notify_one();
+            barrier.1.notified().await;
+        }
+        let guarded_delivery = delivery.clone();
+        crate::tools::tool_agent_planner_qna::accept_reply_delivery(
+            app.gcx.clone(),
+            chat_id,
+            &guarded_delivery,
+            |attempt, planner_chat_id| {
+                let mut session = session_arc
+                    .try_lock()
+                    .map_err(|_| "Reply recipient is busy; retry this known miss")?;
+                crate::tools::tool_agent_planner_qna::validate_reply_session(
+                    &app.gcx,
+                    &session,
+                    attempt,
+                    planner_chat_id,
+                    &delivery,
+                )?;
+                let result = enqueue(&mut session, delivery);
+                if let Err(error) = &result.0 {
+                    return Err(error.clone());
+                }
+                Ok(result)
+            },
+        )
+        .await
+    } else {
+        let mut session = session_arc.lock().await;
+        Ok(enqueue(&mut session, delivery))
+    };
+    let (accepted, status, wake, should_start_processor, processor_running, queue_notify) =
+        match accepted_reply {
+            Ok(result) => result,
+            Err(error) => {
+                record_outbox_status(outbox.as_ref(), &delivery_id, DeliveryStatus::Failed).await;
+                return Err(error);
+            }
+        };
 
     // A refused delivery has a known outcome: it failed. Leaving it dispatched
     // would report it forever as a message whose effect nobody knows.

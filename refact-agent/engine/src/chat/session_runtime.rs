@@ -214,6 +214,237 @@ async fn reconcile_loaded_card_pause(app: &AppState, session_arc: &Arc<AMutex<Ch
     }
 }
 
+pub(crate) async fn board_execution(
+    app: &AppState,
+    session_arc: &Arc<AMutex<ChatSession>>,
+) -> Result<
+    Option<Arc<crate::agents::execution::RunExecution>>,
+    crate::tasks::admission::ExecutionUnavailable,
+> {
+    use crate::tasks::admission::{current_execution, ExecutionUnavailable};
+
+    let (chat_id, thread, source, closed, restored_pending_tools) = {
+        let session = session_arc.lock().await;
+        (
+            session.chat_id.clone(),
+            session.thread.clone(),
+            crate::coordination::scope::session_source_root(&session),
+            session.closed,
+            session.board_restored_pending_tools,
+        )
+    };
+    let Some(meta) = thread
+        .task_meta
+        .clone()
+        .filter(|meta| matches!(meta.role.as_str(), "agent" | "agents"))
+    else {
+        return Ok(None);
+    };
+    if let Some(agent_id) = app.agents.find_agent_id_by_child_chat_id(&chat_id).await {
+        if app
+            .agent_executions
+            .saved_config(&agent_id)
+            .is_some_and(|config| {
+                config.stateful
+                    && config.chat_id.as_deref() == Some(chat_id.as_str())
+                    && config.parent_id == thread.parent_id
+                    && config.root_chat_id == thread.root_chat_id
+                    && config.task_meta == thread.task_meta
+            })
+        {
+            return Ok(None);
+        }
+        return Err(ExecutionUnavailable::StaleBinding);
+    }
+    let execution = current_execution(app, &chat_id)?;
+    if restored_pending_tools {
+        return Err(ExecutionUnavailable::PendingToolReconciliation);
+    }
+    let validate = async {
+        if closed || meta.task_id.is_empty() {
+            return Err(ExecutionUnavailable::StaleBinding);
+        }
+        let source = source.as_ref().ok_or(ExecutionUnavailable::StaleBinding)?;
+        let source = crate::coordination::roots::resolve_source_workspace_root(
+            app.gcx.clone(),
+            source.to_str(),
+        )
+        .await
+        .map_err(|_| ExecutionUnavailable::StaleBinding)?;
+        let (dir, guard) = crate::tasks::storage::locked_task_dir(app.gcx.clone(), &meta.task_id)
+            .await
+            .map_err(|_| ExecutionUnavailable::StaleBinding)?;
+        let belongs = [
+            source.join(".refact/tasks").join(&meta.task_id),
+            app.gcx.config_dir.join("tasks").join(&meta.task_id),
+        ]
+        .iter()
+        .any(|path| dunce::canonicalize(path).ok().as_ref() == Some(&dir));
+        if !belongs {
+            return Err(ExecutionUnavailable::StaleBinding);
+        }
+        let board =
+            crate::tasks::storage::load_board_locked(app.gcx.clone(), &meta.task_id, &guard)
+                .await
+                .map_err(|_| ExecutionUnavailable::StaleBinding)?;
+        let planner = meta
+            .planner_chat_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .ok_or(ExecutionUnavailable::StaleBinding)?;
+        if board.owner_chat_id.as_deref() != Some(planner) {
+            return Err(ExecutionUnavailable::StaleBinding);
+        }
+        let card = meta
+            .card_id
+            .as_deref()
+            .and_then(|id| board.get_card(id))
+            .filter(|card| card.column == "doing")
+            .ok_or(ExecutionUnavailable::StaleBinding)?;
+        let agent = meta
+            .agent_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .ok_or(ExecutionUnavailable::StaleBinding)?;
+        let bound = if let Some(variants) = &card.ab_variants {
+            variants.winner.is_none()
+                && [&variants.a, &variants.b].iter().any(|variant| {
+                    variant.chat_id == chat_id
+                        && variant.agent_id == agent
+                        && variant.finish.is_none()
+                })
+        } else if !card.team_members.is_empty() {
+            card.team_members
+                .iter()
+                .any(|member| member.agent_chat_id.as_deref() == Some(chat_id.as_str()))
+        } else {
+            card.agent_chat_id.as_deref() == Some(chat_id.as_str())
+                && card.assignee.as_deref() == Some(agent)
+        };
+        if !bound
+            || (card.ab_variants.is_none()
+                && card.team_members.is_empty()
+                && board
+                    .card_claim(&card.id)
+                    .is_some_and(|claim| claim.claimant_chat_id != chat_id))
+        {
+            return Err(ExecutionUnavailable::StaleBinding);
+        }
+        drop(guard);
+        Ok(())
+    }
+    .await;
+    validate?;
+    let registered = app.chat.sessions.read().await.get(&chat_id).cloned();
+    if !registered
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, session_arc))
+    {
+        return Err(ExecutionUnavailable::StaleBinding);
+    }
+    let session = session_arc.lock().await;
+    if session.closed
+        || session.chat_id != chat_id
+        || session.thread.task_meta.as_ref() != Some(&meta)
+        || crate::coordination::scope::session_source_root(&session) != source
+    {
+        return Err(ExecutionUnavailable::StaleBinding);
+    }
+    let current = current_execution(app, &chat_id)?;
+    if !Arc::ptr_eq(&execution, &current) {
+        return Err(ExecutionUnavailable::StaleBinding);
+    }
+    Ok(Some(execution))
+}
+
+pub(crate) fn interrupt_board_execution(
+    session: &mut ChatSession,
+    reason: crate::tasks::admission::ExecutionUnavailable,
+) {
+    if reason == crate::tasks::admission::ExecutionUnavailable::Held {
+        return;
+    }
+    let state = if session.runtime.paused || !session.runtime.pause_reasons.is_empty() {
+        SessionState::Paused
+    } else {
+        SessionState::WaitingUserInput
+    };
+    session.stream_started_at = None;
+    session.set_runtime_state(state, Some(reason.recovery_message()));
+}
+
+pub(crate) fn board_execution_interrupted(session: &ChatSession) -> bool {
+    matches!(
+        session.runtime.state,
+        SessionState::Paused | SessionState::WaitingUserInput
+    ) && session
+        .runtime
+        .error
+        .as_deref()
+        .is_some_and(|error| error.starts_with("Interrupted: "))
+}
+
+pub(crate) struct BoardOperation {
+    pub(crate) execution: Arc<crate::agents::execution::RunExecution>,
+    _operation: crate::agents::execution::OperationGuard,
+}
+
+pub(crate) async fn begin_board_operation(
+    app: &AppState,
+    session_arc: &Arc<AMutex<ChatSession>>,
+) -> Result<Option<BoardOperation>, crate::tasks::admission::ExecutionUnavailable> {
+    begin_board_operation_inner(app, session_arc, false).await
+}
+
+pub(crate) async fn begin_board_decision_operation(
+    app: &AppState,
+    session_arc: &Arc<AMutex<ChatSession>>,
+) -> Result<Option<BoardOperation>, crate::tasks::admission::ExecutionUnavailable> {
+    begin_board_operation_inner(app, session_arc, true).await
+}
+
+async fn begin_board_operation_inner(
+    app: &AppState,
+    session_arc: &Arc<AMutex<ChatSession>>,
+    confirmation: bool,
+) -> Result<Option<BoardOperation>, crate::tasks::admission::ExecutionUnavailable> {
+    use crate::tasks::admission::ExecutionUnavailable;
+
+    let result = async {
+        let Some(execution) = board_execution(app, session_arc).await? else {
+            return Ok(None);
+        };
+        let abort = {
+            let session = session_arc.lock().await;
+            if session.planner_paused() || (!confirmation && (session.runtime.paused || !session.runtime.pause_reasons.is_empty())) {
+                return Err(ExecutionUnavailable::Held);
+            }
+            session.abort_flag.clone()
+        };
+        let acquisition = execution.begin_operation();
+        tokio::pin!(acquisition);
+        let operation = loop {
+            if abort.load(Ordering::SeqCst) || app.runtime.shutdown_flag.load(Ordering::Relaxed) {
+                return Err(ExecutionUnavailable::Cancelled);
+            }
+            tokio::select! {
+                result = &mut acquisition => break result.map_err(|_| ExecutionUnavailable::Cancelled)?,
+                _ = tokio::time::sleep(refact_work_core::coordination_settings().lock_poll_interval()) => {}
+            }
+        };
+        let current = board_execution(app, session_arc).await?
+            .ok_or(ExecutionUnavailable::StaleBinding)?;
+        if !Arc::ptr_eq(&execution, &current) {
+            return Err(ExecutionUnavailable::StaleBinding);
+        }
+        Ok(Some(BoardOperation { execution: execution.clone(), _operation: operation }))
+    }.await;
+    if let Err(reason) = result.as_ref() {
+        interrupt_board_execution(&mut *session_arc.lock().await, *reason);
+    }
+    result
+}
+
 pub async fn get_or_create_session_with_trajectory(
     app: AppState,
     sessions: &SessionsMap,
@@ -290,12 +521,27 @@ pub async fn get_or_create_session_with_trajectory(
             session.restore_pending_deliveries(loaded.pending_deliveries);
         }
         session.merge_dropped_deliveries(dropped_deliveries);
+        session.runtime.recovery = loaded.recovery;
         session.set_goal_ledger(loaded.goal_ledger);
         session.pending_questions = loaded.pending_questions;
         if let Some(pending) = loaded.pending_browser_decision {
             super::browser_decisions::expire_restored_browser_decision(&mut session, pending);
         }
         session.goal_verification_blocked_until_ms = loaded.goal_verification_blocked_until_ms;
+        if session
+            .thread
+            .task_meta
+            .as_ref()
+            .is_some_and(|meta| matches!(meta.role.as_str(), "agent" | "agents"))
+            && app
+                .agents
+                .find_agent_id_by_child_chat_id(chat_id)
+                .await
+                .is_none()
+            && crate::tasks::admission::current_execution(&app, chat_id).is_err()
+        {
+            session.board_restored_pending_tools = session.has_pending_tool_result_window();
+        }
         if transition_identity_repaired {
             session.increment_version();
         }
@@ -385,6 +631,12 @@ pub async fn get_or_create_session_with_trajectory(
 
     if inserted {
         reconcile_loaded_card_pause(&app, &session_arc).await;
+        if !is_new {
+            if let Err(reason) = board_execution(&app, &session_arc).await {
+                interrupt_board_execution(&mut *session_arc.lock().await, reason);
+                return session_arc;
+            }
+        }
     }
 
     if inserted && is_new {

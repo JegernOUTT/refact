@@ -390,12 +390,18 @@ class RepoTests(unittest.TestCase):
     def test_hard_budget_and_meaningful_workload(self):
         head = gate.inventory({'x.rs': b'#[test] fn a() {} #[test] fn b() {}'}, EMPTY)
         row = self.admission(head['tests'][0]['fingerprint'], head['tests'][1]['fingerprint'])
-        row['meaningful_cases'] = 6400
+        row['meaningful_cases'] = gate.LIMIT - 1
         errors, meaningful = gate.check(head, {}, dict(EMPTY, tests=[row]))
-        self.assertEqual(meaningful, 6401)
+        self.assertEqual(meaningful, gate.LIMIT)
+        self.assertEqual(errors, [])
+        row['meaningful_cases'] = gate.LIMIT
+        errors, meaningful = gate.check(head, {}, dict(EMPTY, tests=[row]))
+        self.assertEqual(meaningful, gate.LIMIT + 1)
         self.assertTrue(any('hard budget' in x for x in errors))
-        head['physical_count'] = 6401
-        self.assertTrue(gate.check(head, {}, EMPTY)[0])
+        head['physical_count'] = gate.LIMIT
+        self.assertEqual(gate.check(head, {}, EMPTY)[0], [])
+        head['physical_count'] = gate.LIMIT + 1
+        self.assertTrue(any('hard budget' in x for x in gate.check(head, {}, EMPTY)[0]))
 
     def test_base_symlink_is_rejected(self):
         (self.root / 'link.rs').symlink_to('a.rs')
@@ -417,7 +423,7 @@ class RepoTests(unittest.TestCase):
     def test_base_workload_record_cannot_be_deleted_or_reduced(self):
         inv = gate.inventory(gate.snapshot(self.root), EMPTY)
         row = self.admission(inv['tests'][0]['fingerprint'], inv['tests'][1]['fingerprint'])
-        row['meaningful_cases'] = 6401
+        row['meaningful_cases'] = gate.LIMIT + 1
         self.write(gate.ADMISSIONS, json.dumps(dict(EMPTY, tests=[row])))
         self.git('add', gate.ADMISSIONS)
         self.git('commit', '-qm', 'known aggregate workload')
@@ -426,7 +432,7 @@ class RepoTests(unittest.TestCase):
             self.write(gate.ADMISSIONS, json.dumps(dict(EMPTY, tests=records)))
             code, out = self.run_gate()
             self.assertEqual(code, 1)
-            self.assertGreater(out['meaningful_count'], 6400)
+            self.assertGreater(out['meaningful_count'], gate.LIMIT)
             self.assertTrue(any('accounting removed/reduced' in x for x in out['violations']))
 
     def test_duplicate_json_keys_fail(self):

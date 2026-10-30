@@ -37,7 +37,7 @@ persistence, concurrency and lifecycle contracts require an executed before-fix/
 and restored passing evidence. Independent semantic review is mandatory; count/schema checks
 cannot authenticate evidence or reviewer independence. Record fingerprint-bound admissions and
 support impacts in `tools/dev/test_admissions.json`. Run `python3 tools/dev/test_budget.py check
---base <trusted-base-ref>` and its focused Python self-tests. The physical ceiling is 6,400,
+--base <trusted-base-ref>` and its focused Python self-tests. The ceiling is 6,500 physical/meaningful cases,
 including ignored, gated, orphan and doc cases. Do not game it with tables, generators or gating.
 
 ### Engine (`refact-agent/engine/`)

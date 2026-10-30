@@ -56,6 +56,7 @@ async fn registered_worktree(
     .await
     .unwrap();
     let mut registry = service.load_registry().await.unwrap();
+    let expected_registry = registry.clone();
     let id = "wt-removed";
     let root = service.worktree_path_for_id(id).unwrap();
     tokio::fs::create_dir_all(&root).await.unwrap();
@@ -84,7 +85,10 @@ async fn registered_worktree(
             references: Vec::new(),
             last_known_status: None,
         });
-    service.save_registry(&registry).await.unwrap();
+    service
+        .compare_and_save_registry(&expected_registry, &registry)
+        .await
+        .unwrap();
 
     let mut session = ChatSession::new(chat_id.to_string());
     session.work_project_root = Some(source.to_path_buf());
@@ -243,6 +247,7 @@ async fn ordinary_activity_preserves_immutable_page_rows_and_fresh_view_advances
 }
 
 #[serial(coordination_work_overview)]
+#[serial(runtime_settings)]
 #[tokio::test]
 async fn denied_titles_paths_counts_and_changes_do_not_affect_visible_pages() {
     use refact_privacy::{PrivacyPolicy, Zone, ShellBehavior, Attribution, FileRecord};
@@ -338,6 +343,93 @@ async fn denied_titles_paths_counts_and_changes_do_not_affect_visible_pages() {
     .unwrap_err();
     assert_eq!(files.code, absent.code);
     assert!(!serde_json::to_string(&files).unwrap().contains("secret"));
+
+    for id in ["a", "c"] {
+        app.chat.sessions.write().await.remove(id);
+        let id = format!("discovery-cap-visible-{id}");
+        let mut session = ChatSession::new(id.clone());
+        session.work_project_root = Some(dir.path().into());
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(id, Arc::new(Mutex::new(session)));
+    }
+    let _settings = crate::tools::settings_guard::SettingsGuard::install(|settings| {
+        settings.coordination.max_work_history_rows = 3;
+    });
+    let request = WorkOverviewRequest {
+        rows: Some(1),
+        ..Default::default()
+    };
+    let error = overview(&app, &caller, request.clone()).await.unwrap_err();
+    assert_eq!(error.code, "unavailable");
+    assert_eq!(
+        error.cause,
+        Some(super::error::WorkFailureCause::SnapshotRowCapacity)
+    );
+    let public = serde_json::to_value(&error).unwrap();
+    assert_eq!(public["cause"], "snapshot_row_capacity");
+    assert!(public["retryable"].as_bool().unwrap());
+    assert!(uuid::Uuid::parse_str(public["request_id"].as_str().unwrap()).is_ok());
+    assert_eq!(public.as_object().unwrap().len(), 5);
+    assert!(error
+        .message
+        .contains("root scope, states or an authorized path"));
+    let c = app
+        .chat
+        .sessions
+        .read()
+        .await
+        .get("discovery-cap-visible-c")
+        .cloned()
+        .unwrap();
+    c.lock().await.thread.root_chat_id = Some("caller".into());
+    private.lock().await.thread.root_chat_id = Some("caller".into());
+    let filtered_request = WorkOverviewRequest {
+        scope: OverviewScope::Root,
+        ..request.clone()
+    };
+    let filtered = overview(&app, &caller, filtered_request.clone())
+        .await
+        .unwrap();
+    assert_eq!(filtered.total, 1);
+    assert_eq!(
+        filtered.rows[0].chat_id.as_deref(),
+        Some("discovery-cap-visible-c")
+    );
+    let operator = super::scope::operator_caller(&app).await.unwrap();
+    let operator_error = overview(&app, &operator, request.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(operator_error.cause, error.cause);
+    assert_eq!(operator_error.message, error.message);
+    app.chat.sessions.write().await.remove("b");
+    let without_denied = overview(&app, &caller, request.clone()).await.unwrap_err();
+    let mut before = serde_json::to_value(&error).unwrap();
+    let mut after = serde_json::to_value(&without_denied).unwrap();
+    before.as_object_mut().unwrap().remove("request_id");
+    after.as_object_mut().unwrap().remove("request_id");
+    assert_eq!(before, after);
+    for private in [
+        "title b",
+        "another private title",
+        "secret",
+        dir.path().to_str().unwrap(),
+    ] {
+        assert!(!before.to_string().contains(private));
+        assert!(!operator_error.to_string().contains(private));
+    }
+    assert_eq!(
+        overview(&app, &operator, request.clone())
+            .await
+            .unwrap()
+            .total,
+        2
+    );
+    let filtered_without_denied = overview(&app, &caller, filtered_request).await.unwrap();
+    assert_eq!(filtered_without_denied.total, filtered.total);
+    assert_eq!(filtered_without_denied.rows, filtered.rows);
 }
 
 #[cfg(unix)]
@@ -433,6 +525,13 @@ async fn changed_destination_invalidates_cursor_and_policy_failure_is_not_empty_
         .await
         .unwrap_err();
     assert_eq!(error.code, "policy_unavailable");
+    assert_eq!(
+        error.cause,
+        Some(super::error::WorkFailureCause::PolicyUnavailable)
+    );
+    assert!(error
+        .message
+        .contains("restore a valid policy and model selection"));
     assert!(!error.to_string().contains("private config"));
 }
 
@@ -707,12 +806,50 @@ async fn inspection_keeps_operator_degradation_but_models_cannot_probe_hidden_so
     let hidden = inspect(&app, &caller, request.clone()).await.unwrap();
     assert!(hidden.page.degraded.is_empty());
     caller.model = None;
-    let operator = inspect(&app, &caller, request).await.unwrap();
+    let operator = inspect(&app, &caller, request.clone()).await.unwrap();
     assert!(operator
         .page
         .degraded
         .iter()
         .any(|source| source == "board index unavailable"));
+    app.gcx
+        .documents_state
+        .workspace_folders
+        .lock()
+        .unwrap()
+        .clear();
+    let operator_error = inspect(&app, &caller, request.clone()).await.unwrap_err();
+    caller.model = Some(crate::caps::BaseModelRecord {
+        id: "trusted/model".into(),
+        ..Default::default()
+    });
+    let model_error = inspect(&app, &caller, request.clone()).await.unwrap_err();
+    assert_eq!(
+        operator_error.cause,
+        Some(super::error::WorkFailureCause::ScopedSourceUnavailable)
+    );
+    assert_eq!(
+        model_error.cause,
+        Some(super::error::WorkFailureCause::ProjectionUnavailable)
+    );
+    assert!(operator_error
+        .message
+        .contains("project is still open and accessible"));
+    assert!(model_error.message.contains("narrow scope or filters"));
+    let public = serde_json::to_value(&model_error).unwrap();
+    assert_eq!(public["cause"], "projection_unavailable");
+    assert_eq!(public.as_object().unwrap().len(), 5);
+    for private in ["task-corrupt", "board.yaml", dir.path().to_str().unwrap()] {
+        assert!(!operator_error.to_string().contains(private));
+        assert!(!model_error.to_string().contains(private));
+    }
+    tokio::fs::remove_file(task_dir.join("board.yaml"))
+        .await
+        .unwrap();
+    let absent = inspect(&app, &caller, request).await.unwrap_err();
+    assert_eq!(absent.cause, model_error.cause);
+    assert_eq!(absent.code, model_error.code);
+    assert_eq!(absent.message, model_error.message);
 }
 
 #[serial(coordination_work_overview)]

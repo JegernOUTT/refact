@@ -1,149 +1,163 @@
+#[path = "build_support/gui_artifact.rs"]
+mod gui_artifact;
+
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
-    println!("cargo:rerun-if-env-changed=REFACT_SKIP_GUI_BUILD");
-    println!("cargo:rerun-if-env-changed=REFACT_USE_PREBUILT_GUI");
-    println!("cargo:rerun-if-env-changed=REFACT_GUI_DIR");
-    println!("cargo:rerun-if-changed=assets/chat/index.html");
-    println!("cargo:rerun-if-changed=src/daemon/web_picker.html");
-
+    for name in [
+        "REFACT_SKIP_GUI_BUILD",
+        "REFACT_USE_PREBUILT_GUI",
+        "REFACT_GUI_DIR",
+        "REFACT_OFFLINE_NETNS",
+        "CARGO_NET_OFFLINE",
+        "npm_config_offline",
+        "NPM_CONFIG_OFFLINE",
+        "NODE_OPTIONS",
+        "DEBUG",
+        "REFACT_LSP_PORT",
+        "GITHUB_SHA",
+        "CI_COMMIT_SHA",
+        "VERCEL_GIT_COMMIT_SHA",
+        "BUILD_VCS_NUMBER",
+        "NODE_ENV",
+        "PATH",
+    ] {
+        println!("cargo:rerun-if-env-changed={name}");
+    }
+    for path in [
+        "build_support",
+        "assets/chat/index.html",
+        "src/daemon/web_picker.html",
+        gui_artifact::CONTROLLER,
+    ] {
+        println!("cargo:rerun-if-changed={path}");
+    }
     let skip_gui_build = env::var("REFACT_SKIP_GUI_BUILD").ok().as_deref() == Some("1");
     println!(
         "cargo:rustc-env=REFACT_SKIP_GUI_BUILD={}",
         if skip_gui_build { "1" } else { "0" }
     );
-    if !skip_gui_build {
-        let gui_dir = gui_dir();
+    if skip_gui_build {
         println!(
-            "cargo:rerun-if-changed={}",
-            gui_dir.join("package.json").display()
+            "cargo:warning=GUI refresh skipped for API-only build; existing assets NOT validated"
         );
-        println!(
-            "cargo:rerun-if-changed={}",
-            gui_dir.join("package-lock.json").display()
-        );
-        println!("cargo:rerun-if-changed={}", gui_dir.join("src").display());
-        build_gui_assets(&gui_dir);
+    } else if let Err(error) = build_gui_assets(&gui_dir()) {
+        panic!("GUI artifact refusal: {error}. Prior assets retained; no install/download/build fallback. See build_support/GUI_ARTIFACT.md");
     }
-
     shadow_rs::ShadowBuilder::builder().build().unwrap();
 }
 
 fn gui_dir() -> PathBuf {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    env::var_os("REFACT_GUI_DIR")
+    let path = env::var_os("REFACT_GUI_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| manifest_dir.parent().unwrap().join("gui"))
-}
-
-fn build_gui_assets(gui_dir: &Path) {
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let dist_dir = gui_dir.join("dist").join("chat");
-    let asset_dist_dir = manifest_dir.join("assets").join("chat").join("dist");
-    let target_chat_dir = asset_dist_dir.join("chat");
-
-    if !gui_dir.join("package.json").exists() {
-        panic!("GUI package.json not found at {}", gui_dir.display());
-    }
-
-    if env::var("REFACT_USE_PREBUILT_GUI").ok().as_deref() != Some("1") {
-        if !gui_dir.join("node_modules").exists() {
-            run_command(&gui_dir, npm_program(), &["ci"]);
-        }
-
-        run_command_with_env(
-            &gui_dir,
-            npx_program(),
-            &["tsc"],
-            &[("NODE_OPTIONS", "--max-old-space-size=8192")],
-        );
-        run_command_with_env(
-            &gui_dir,
-            npx_program(),
-            &["vite", "build"],
-            &[("NODE_OPTIONS", "--max-old-space-size=8192")],
-        );
-        run_command_with_env(
-            &gui_dir,
-            npx_program(),
-            &["vite", "build", "-c", "vite.node.config.ts"],
-            &[("NODE_OPTIONS", "--max-old-space-size=8192")],
-        );
-    }
-
-    if target_chat_dir.exists() {
-        std::fs::remove_dir_all(&target_chat_dir).unwrap_or_else(|error| {
-            panic!(
-                "failed to remove old GUI assets at {}: {error}",
-                target_chat_dir.display()
-            )
-        });
-    }
-    std::fs::create_dir_all(&asset_dist_dir).unwrap_or_else(|error| {
-        panic!(
-            "failed to create GUI asset directory {}: {error}",
-            asset_dist_dir.display()
-        )
-    });
-    copy_dir_all(&dist_dir, &target_chat_dir).unwrap_or_else(|error| {
-        panic!(
-            "failed to copy GUI assets from {} to {}: {error}",
-            dist_dir.display(),
-            target_chat_dir.display()
-        )
-    });
-}
-
-fn run_command(cwd: &Path, program: &str, args: &[&str]) {
-    run_command_with_env(cwd, program, args, &[]);
-}
-
-fn run_command_with_env(cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &str)]) {
-    let status = Command::new(program)
-        .args(args)
-        .envs(envs.iter().copied())
-        .current_dir(cwd)
-        .status()
-        .unwrap_or_else(|error| panic!("failed to run {program} in {}: {error}", cwd.display()));
-    if !status.success() {
-        panic!(
-            "command failed in {}: {} {}",
-            cwd.display(),
-            program,
-            args.join(" ")
-        );
-    }
-}
-
-fn npm_program() -> &'static str {
-    if cfg!(windows) {
-        "npm.cmd"
+        .unwrap_or_else(|| manifest_dir.parent().unwrap().join("gui"));
+    if path.is_absolute() {
+        path
     } else {
-        "npm"
+        manifest_dir.join(path)
     }
 }
 
-fn npx_program() -> &'static str {
-    if cfg!(windows) {
-        "npx.cmd"
+fn build_gui_assets(gui: &Path) -> gui_artifact::Result<()> {
+    let engine = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
+    gui_artifact::real_directory(gui)?;
+    let gui_identity = gui_artifact::directory_identity(gui)?;
+    let engine_identity = gui_artifact::directory_identity(&engine)?;
+    let prebuilt = env::var("REFACT_USE_PREBUILT_GUI").ok().as_deref() == Some("1");
+    let manifest = if prebuilt {
+        println!("cargo:rerun-if-changed={}", gui.display());
+        println!("cargo:warning=GUI prebuilt requested; validating independent producer pin and exact inputs");
+        gui_artifact::trusted_prebuilt(gui, &engine)?
     } else {
-        "npx"
-    }
-}
-
-fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let target = dst.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_dir_all(&entry.path(), &target)?;
-        } else {
-            std::fs::copy(entry.path(), target)?;
+        let options = gui_artifact::merged_node_options(env::var_os("NODE_OPTIONS"));
+        let node = gui_artifact::resolve_program(if cfg!(windows) { "node.exe" } else { "node" })?;
+        for tool in [
+            "node_modules/typescript/bin/tsc",
+            "node_modules/vite/bin/vite.js",
+        ] {
+            if !gui.join(tool).is_file() {
+                return Err(format!("Missing local GUI tool {tool}; explicitly prepare matching dependencies before cargo build (offline policy: {}). No npm ci or npx is invoked", gui_artifact::offline()).into());
+            }
         }
-    }
+        gui_artifact::check_build_outputs(gui, &engine)?;
+        let toolchain = gui_artifact::producer_toolchain(gui, &node, &options)?;
+        let before = gui_artifact::inputs(gui, &engine, toolchain.clone())?;
+        watch_inputs(gui, &before);
+        for args in [
+            vec!["node_modules/typescript/bin/tsc"],
+            vec!["node_modules/vite/bin/vite.js", "build"],
+            vec![
+                "node_modules/vite/bin/vite.js",
+                "build",
+                "-c",
+                "vite.node.config.ts",
+            ],
+        ] {
+            gui_artifact::check_directory(gui, &gui_identity)?;
+            gui_artifact::check_directory(&engine, &engine_identity)?;
+            gui_artifact::check_build_outputs(gui, &engine)?;
+            let status = Command::new(&node)
+                .args(&args)
+                .env("NODE_OPTIONS", &options)
+                .env("npm_package_version", &before.version)
+                .current_dir(gui)
+                .status()?;
+            if !status.success() {
+                return Err(format!("Local GUI build failed: {}", args.join(" ")).into());
+            }
+        }
+        if gui_artifact::producer_toolchain(gui, &node, &options)? != toolchain
+            || gui_artifact::inputs(gui, &engine, toolchain)? != before
+        {
+            return Err("GUI source/config/environment changed during authorized build".into());
+        }
+        println!("cargo:warning=GUI built with local tools; writing producer candidate (not controller authorization)");
+        gui_artifact::produce(gui, before)?
+    };
+    watch_inputs(gui, &manifest.inputs);
+    gui_artifact::publish(gui, &engine, &manifest, !prebuilt, || {
+        gui_artifact::check_directory(gui, &gui_identity)?;
+        gui_artifact::check_directory(&engine, &engine_identity)?;
+        if prebuilt && gui_artifact::trusted_prebuilt(gui, &engine)? != manifest {
+            return Err("GUI pinned producer changed before publication".into());
+        }
+        Ok(())
+    })?;
+    println!("cargo:warning=GUI {} staged and published with verified content; runtime qualification not implied", if prebuilt { "pinned prebuilt" } else { "local build" });
     Ok(())
+}
+
+fn watch_inputs(gui: &Path, inputs: &gui_artifact::Inputs) {
+    let watched =
+        PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("gui-revalidate-every-invocation");
+    println!("cargo:rerun-if-changed={}", watched.display());
+    println!("cargo:rerun-if-changed={}", gui.display());
+    for key in inputs
+        .environment
+        .keys()
+        .filter(|key| key.starts_with("VITE_"))
+    {
+        println!("cargo:rerun-if-env-changed={key}");
+    }
+    for entry in &inputs.inventory {
+        let path = match entry {
+            gui_artifact::Entry::Directory { path } | gui_artifact::Entry::File { path, .. } => {
+                path
+            }
+        };
+        println!("cargo:rerun-if-changed={}", gui.join(path).display());
+    }
+    for name in [
+        ".env",
+        ".env.local",
+        ".env.production",
+        ".env.production.local",
+        "patches",
+        ".npmrc",
+    ] {
+        println!("cargo:rerun-if-changed={}", gui.join(name).display());
+    }
 }

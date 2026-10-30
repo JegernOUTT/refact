@@ -137,6 +137,9 @@ async fn aborted_before_start_generation(
     session_arc: &Arc<AMutex<super::types::ChatSession>>,
 ) -> bool {
     let mut session = session_arc.lock().await;
+    if session.yield_to_queued_commands_at_boundary() {
+        return true;
+    }
     if !session.user_interrupt_flag.load(Ordering::SeqCst) {
         return false;
     }
@@ -546,6 +549,26 @@ pub fn apply_setparams_patch(
     patch: &serde_json::Value,
 ) -> (bool, serde_json::Value) {
     let mut changed = false;
+    if let Some(value) = patch.get("recovery_policy") {
+        let parsed = if value.is_null() {
+            Ok(None)
+        } else {
+            serde_json::from_value::<refact_core::recovery::RecoveryPolicyOverrides>(value.clone())
+                .map(Some)
+        };
+        if let Ok(policy) = parsed {
+            let policy = policy.filter(|p| !p.is_empty());
+            if policy
+                .as_ref()
+                .map(|p| p.resolve(Default::default()).is_ok())
+                .unwrap_or(true)
+                && thread.recovery_policy != policy
+            {
+                thread.recovery_policy = policy;
+                changed = true;
+            }
+        }
+    }
 
     if let Some(model) = patch.get("model").and_then(|v| v.as_str()) {
         if thread.model != model {
@@ -848,6 +871,14 @@ pub fn apply_setparams_patch(
     }
 
     let mut sanitized_patch = patch.clone();
+    if let Some(obj) = sanitized_patch.as_object_mut() {
+        if obj.contains_key("recovery_policy") {
+            obj.insert(
+                "recovery_policy".into(),
+                serde_json::json!(thread.recovery_policy),
+            );
+        }
+    }
     if let Some(obj) = sanitized_patch.as_object_mut() {
         obj.remove("type");
         obj.remove("chat_id");
@@ -1226,13 +1257,30 @@ fn handle_update_goal_command(
     Ok(update_goal_result(seq, truncation))
 }
 
+pub(super) fn validate_goal_control(session: &ChatSession, action: &str) -> Result<(), String> {
+    if session.goal.is_none() {
+        return Err("no goal to control; call set_goal first".into());
+    }
+    match action.trim().to_ascii_lowercase().as_str() {
+        "pause" | "stop" => Ok(()),
+        "resume"
+            if matches!(
+                session.goal_status,
+                Some(GoalStatus::Paused | GoalStatus::Stopped)
+            ) =>
+        {
+            Ok(())
+        }
+        "resume" => Err("goal_control resume requires a paused or stopped goal".into()),
+        _ => Err("goal_control action must be pause, resume, or stop".into()),
+    }
+}
+
 fn handle_goal_control_command(
     session: &mut ChatSession,
     action: String,
 ) -> Result<serde_json::Value, String> {
-    if session.goal.is_none() {
-        return Err("no goal to control; call set_goal first".to_string());
-    }
+    validate_goal_control(session, &action)?;
     let normalized = action.trim().to_ascii_lowercase();
     let status = match normalized.as_str() {
         "pause" => GoalStatus::Paused,
@@ -1382,8 +1430,22 @@ async fn add_thread_worktree_reference(
         }
     };
     let reference = reference_for_thread(chat_id, thread, &worktree.kind);
+    match service.validate_worktree_meta_strict(worktree).await {
+        Ok(validated) if &validated == worktree => {}
+        _ => {
+            warn!(
+                "Branch checkout identity changed for chat '{}'; retain current scope",
+                chat_id
+            );
+            return None;
+        }
+    }
     match service.add_reference(&worktree.id, reference).await {
-        Ok(view) => Some(view.meta),
+        Ok(view) if &view.meta == worktree => Some(view.meta),
+        Ok(_) => {
+            warn!("Branch checkout identity changed while adding reference; retain current scope");
+            None
+        }
         Err(e) => {
             warn!(
                 "Failed to add worktree reference '{}' for chat '{}': {}",
@@ -1404,16 +1466,9 @@ pub(crate) async fn check_worktree_setparams_authority(
         return Err("ambiguous_worktree_scope: SetParams cannot contain both worktree_id and worktree; attachment unchanged".into());
     }
     let rebinds_worktree = super::worktree_lifecycle::changes_attachment(thread, patch);
-    let changes_ownership = super::worktree_lifecycle::changes_ownership(thread, patch);
+    let changes_ownership = super::worktree_lifecycle::changes_scope_identity(thread, patch);
     if rebinds_worktree || changes_ownership {
-        let task_agent = thread
-            .task_meta
-            .as_ref()
-            .is_some_and(|meta| matches!(meta.role.as_str(), "agent" | "agents"))
-            || thread
-                .worktree
-                .as_ref()
-                .is_some_and(|worktree| worktree.kind == "task_agent")
+        let task_agent = super::worktree_lifecycle::has_managed_task_binding(thread)
             || patch
                 .get("task_meta")
                 .and_then(|meta| meta.get("role"))
@@ -1427,7 +1482,7 @@ pub(crate) async fn check_worktree_setparams_authority(
         }
     }
     if rebinds_worktree {
-        if let Some(reason) = crate::agents::seal::seal_reason(&app, chat_id).await {
+        if let Some(reason) = crate::agents::seal::seal_reason(app, chat_id).await {
             return Err(reason.message());
         }
         if app
@@ -1638,7 +1693,14 @@ async fn select_next_command(session_arc: &Arc<AMutex<ChatSession>>) -> Option<S
                 .fetch_add(1, Ordering::Relaxed);
             (None, Some(waiter))
         }
-    } else if !session.delivery_wake_sources.is_empty() {
+    } else if !session.delivery_wake_sources.is_empty()
+        && session.command_queue.is_empty()
+        && !session
+            .runtime
+            .recovery
+            .as_ref()
+            .is_some_and(|r| r.holds_goal())
+    {
         session.delivery_wake_sources.clear();
         session.abort_flag.store(false, Ordering::SeqCst);
         session.user_interrupt_flag.store(false, Ordering::SeqCst);
@@ -1818,6 +1880,11 @@ fn hidden_role_extra(msg: &ChatMessage) -> serde_json::Map<String, serde_json::V
         "plan" | "goal" | "event" | "compression_report"
     ) {
         msg.extra.clone()
+    } else if msg.role == "assistant" && super::diagnostics::is_ui_only_message(msg) {
+        serde_json::json!({"_ui_only": true})
+            .as_object()
+            .unwrap()
+            .clone()
     } else {
         serde_json::Map::new()
     }
@@ -1899,6 +1966,21 @@ pub(crate) async fn handle_tool_decisions_guarded(
     native_guard: Option<&refact_chat_api::NativeApprovalGuard>,
     request_id: &str,
 ) {
+    let operation = if decisions.iter().any(|decision| decision.accepted) {
+        match super::session_runtime::begin_board_decision_operation(&app, &session_arc).await {
+            Ok(operation) => operation,
+            Err(reason) => {
+                reject_guard(
+                    &mut *session_arc.lock().await,
+                    request_id,
+                    reason.recovery_message(),
+                );
+                return;
+            }
+        }
+    } else {
+        None
+    };
     let hooked = crate::chat::permission_decision_hooks::apply_confirmation_permission_hooks(
         &app,
         &session_arc,
@@ -1925,6 +2007,7 @@ pub(crate) async fn handle_tool_decisions_guarded(
             native_guard,
             request_id,
             root.as_deref(),
+            operation,
         )
         .await;
         return;
@@ -1948,6 +2031,7 @@ pub(crate) async fn handle_tool_decisions_guarded(
             native_guard,
             request_id,
             root.as_deref(),
+            operation,
         )
         .await;
         return;
@@ -1961,6 +2045,7 @@ pub(crate) async fn handle_tool_decisions_guarded(
         native_guard,
         request_id,
         root.as_deref(),
+        operation,
     )
     .await;
 }
@@ -1973,6 +2058,7 @@ async fn handle_shell_privacy_tool_decisions(
     native_guard: Option<&refact_chat_api::NativeApprovalGuard>,
     request_id: &str,
     root: Option<&str>,
+    operation: Option<crate::chat::session_runtime::BoardOperation>,
 ) {
     let should_continue = {
         let mut session = session_arc.lock().await;
@@ -2047,6 +2133,7 @@ async fn handle_shell_privacy_tool_decisions(
             false
         }
     };
+    drop(operation);
     if should_continue && !aborted_before_start_generation(&session_arc).await {
         start_generation(app, session_arc).await;
     }
@@ -2060,6 +2147,7 @@ async fn handle_cache_guard_tool_decisions(
     native_guard: Option<&refact_chat_api::NativeApprovalGuard>,
     request_id: &str,
     root: Option<&str>,
+    operation: Option<crate::chat::session_runtime::BoardOperation>,
 ) {
     let accepted_any = decisions.iter().any(|d| d.accepted);
 
@@ -2098,6 +2186,7 @@ async fn handle_cache_guard_tool_decisions(
         }
     }
 
+    drop(operation);
     if accepted_any {
         if !aborted_before_start_generation(&session_arc).await {
             start_generation(app.clone(), session_arc.clone()).await;
@@ -2120,6 +2209,7 @@ async fn handle_regular_tool_decisions(
     native_guard: Option<&refact_chat_api::NativeApprovalGuard>,
     request_id: &str,
     root: Option<&str>,
+    operation: Option<crate::chat::session_runtime::BoardOperation>,
 ) {
     let (
         auto_approved_ids,
@@ -2375,6 +2465,7 @@ async fn handle_regular_tool_decisions(
         session.drain_post_tool_side_effects();
     }
 
+    drop(operation);
     execute_regular_tool_calls(
         app,
         session_arc,
@@ -2394,6 +2485,11 @@ async fn execute_regular_tool_calls(
     thread: ThreadParams,
     any_rejected: bool,
 ) {
+    let Ok(operation) =
+        super::session_runtime::begin_board_decision_operation(&app, &session_arc).await
+    else {
+        return;
+    };
     let had_tool_calls = !tool_calls_to_execute.is_empty();
     if had_tool_calls {
         let session_catalog = {
@@ -2433,6 +2529,7 @@ async fn execute_regular_tool_calls(
             session.set_runtime_state(SessionState::ExecutingTools, None);
         }
 
+        drop(operation);
         let (tool_results, _) = execute_tools_with_session(
             app.clone(),
             session_arc.clone(),
@@ -2449,6 +2546,13 @@ async fn execute_regular_tool_calls(
         )
         .await;
 
+        if super::session_runtime::board_execution_interrupted(&*session_arc.lock().await) {
+            let mut session = session_arc.lock().await;
+            for message in tool_results {
+                session.add_message(message);
+            }
+            return;
+        }
         let privacy_approvals =
             super::tools::shell_privacy_approval_reasons(&tool_calls_to_execute, &tool_results);
         if !privacy_approvals.is_empty() {
@@ -2589,6 +2693,8 @@ async fn execute_regular_tool_calls(
         if was_aborted || tool_initiated_stop {
             return;
         }
+    } else {
+        drop(operation);
     }
 
     if any_rejected {
@@ -2656,6 +2762,26 @@ async fn create_checkpoint_async(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn interrupted_assistant_stays_off_wire_after_branch_and_restore() {
+        let mut artifact = ChatMessage {
+            role: "assistant".into(),
+            content: crate::call_validation::ChatContent::SimpleText("INTERRUPTED_SENTINEL".into()),
+            ..Default::default()
+        };
+        artifact
+            .extra
+            .insert("_ui_only".into(), serde_json::json!(true));
+        let branch = sanitize_message_for_branch(&artifact);
+        let restored = sanitize_message_for_restore(&branch);
+        assert_eq!(restored.content.content_text_only(), "INTERRUPTED_SENTINEL");
+        let wire = crate::chat::linearize::apply_summarization_linearize(vec![restored]).unwrap();
+        assert!(
+            wire.is_empty(),
+            "inert recovery assistant leaked after copy"
+        );
+    }
+
     use super::*;
     use crate::exec::types::DEFAULT_EXEC_OUTPUT_LIMIT_BYTES;
     use crate::exec::{ExecMode, ExecOwnerMeta, ExecProcessId, ExecProcessMeta};
@@ -2664,6 +2790,605 @@ mod tests {
     use std::collections::HashMap;
     use std::path::Path;
     use std::process::Command;
+
+    async fn restore_gate_fixture() -> (
+        tempfile::TempDir,
+        AppState,
+        Arc<AMutex<ChatSession>>,
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            temp.path().join("cache"),
+            temp.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
+        let mut app = AppState::from_gcx(gcx.clone()).await;
+        let task = crate::tasks::storage::create_task(gcx.clone(), "Restore gate")
+            .await
+            .unwrap();
+        let chat_id = format!("unprefixed-{}", Uuid::new_v4());
+        let planner = format!("planner-{}", Uuid::new_v4());
+        let service = WorktreeService::new(temp.path().join("cache"), source.clone()).unwrap();
+        let managed = service
+            .create_worktree(crate::worktrees::types::CreateWorktreeRequest {
+                kind: Some("task_agent".into()),
+                task_id: Some(task.id.clone()),
+                card_id: Some("T-1".into()),
+                agent_id: Some("restore-agent".into()),
+                chat_id: Some(chat_id.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .worktree
+            .meta;
+        let mut card = crate::tools::tool_spawn_ab::tests::test_card();
+        card.column = "doing".into();
+        card.assignee = Some("restore-agent".into());
+        card.agent_chat_id = Some(chat_id.clone());
+        card.agent_worktree = Some(managed.root.to_string_lossy().into_owned());
+        card.agent_worktree_name = Some(managed.id.clone());
+        crate::tasks::storage::update_board_atomic(gcx.clone(), &task.id, |board| {
+            board.cards.push(card);
+            board.owner_chat_id = Some(planner.clone());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let (board, _) = crate::tasks::storage::claim_card(
+            gcx.clone(),
+            &task.id,
+            "T-1",
+            &chat_id,
+            "restore-claim",
+        )
+        .await
+        .unwrap();
+        assert_eq!(board.card_claim("T-1").unwrap().claimant_chat_id, chat_id);
+        assert_eq!(board.owner_chat_id.as_deref(), Some(planner.as_str()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (model_calls, server) = super::super::generation_pressure_retry_tests::serve_statuses(listener, vec![(200, None,
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+        )]).await;
+        let mut caps = crate::caps::CodeAssistantCaps::default();
+        caps.chat_models.insert(
+            "test/restore-gate".into(),
+            Arc::new(crate::caps::ChatModelRecord {
+                base: crate::caps::BaseModelRecord {
+                    id: "test/restore-gate".into(),
+                    name: "restore-gate".into(),
+                    endpoint: format!("http://{address}/v1/chat/completions"),
+                    tokenizer: "fake".into(),
+                    n_ctx: 8192,
+                    ..Default::default()
+                },
+                supports_temperature: false,
+                supports_tools: true,
+                supports_agent: true,
+                ..Default::default()
+            }),
+        );
+        caps.defaults.chat_default_model = "test/restore-gate".into();
+        {
+            let mut state = app.model.caps.write().await;
+            state.caps = Some(Arc::new(caps));
+            state.loaded_project_root = Some(Some(source.clone()));
+            state.last_attempted_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+        }
+        *app.gcx.privacy_policy_load.write().unwrap() = refact_privacy::PolicyLoad::default();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = calls.clone();
+        app.tool_registry = Arc::new(
+            crate::app_state::AppToolRegistry::with_fixture_tool_factory(
+                gcx,
+                Arc::new(move || {
+                    vec![Box::new(
+                        super::super::planner_pause_edge_tests::CountingTool {
+                            calls: seen.clone(),
+                            needs_confirmation: false,
+                        },
+                    )]
+                }),
+            ),
+        );
+        let mut session = ChatSession::new(chat_id.clone());
+        session.thread = crate::tools::tool_task_spawn_agent::build_agent_thread_params(
+            &chat_id,
+            "Restore gate",
+            "test/restore-gate",
+            &task.id,
+            "restore-agent",
+            "T-1",
+            &planner,
+            managed,
+        );
+        session.thread.mode = "agent".into();
+        session.thread.include_project_info = false;
+        session.work_project_root = Some(source);
+        session.add_message(ChatMessage::new("system".into(), "Fixture system".into()));
+        session.add_message(ChatMessage::new("user".into(), "Work".into()));
+        session.add_message(ChatMessage {
+            role: "assistant".into(),
+            tool_calls: Some(vec![crate::call_validation::ChatToolCall {
+                id: "restore-pending".into(),
+                index: Some(0),
+                function: crate::call_validation::ChatToolFunction {
+                    name: "pause_edge_tool".into(),
+                    arguments: "{}".into(),
+                },
+                tool_type: "function".into(),
+                extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
+            }]),
+            ..Default::default()
+        });
+        assert!(session.has_pending_tool_result_window());
+        let session = Arc::new(AMutex::new(session));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id, session.clone());
+        (temp, app, session, calls, model_calls, server)
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn recovery_deadline_expires_while_initial_board_admission_waits_for_lock() {
+        use refact_core::recovery::{
+            RecoveryBudget, RecoveryError, RecoveryPolicy, RecoveryPolicySource, RecoveryRecord,
+            RecoveryState,
+        };
+        use std::future::Future;
+        use std::sync::atomic::Ordering;
+        use std::task::Poll;
+        use std::time::Duration;
+
+        tokio::time::resume();
+        let (_temp, app, session, calls, model_calls, server) = restore_gate_fixture().await;
+        let (chat_id, task_id) = {
+            let session = session.lock().await;
+            (
+                session.chat_id.clone(),
+                session.thread.task_meta.as_ref().unwrap().task_id.clone(),
+            )
+        };
+        crate::tasks::admission::reserve(&app, &chat_id, "restore-project", "restore-root", 0)
+            .await
+            .unwrap();
+        crate::tasks::admission::wait_for_permit(&chat_id)
+            .await
+            .unwrap();
+        assert!(app.agent_executions.get(&chat_id).is_some());
+        let (_, board_guard) = crate::tasks::storage::locked_task_dir(app.gcx.clone(), &task_id)
+            .await
+            .unwrap();
+        let policy = RecoveryPolicy {
+            total_timeout_ms: 60_000,
+            ..Default::default()
+        };
+        let budget = Arc::new(RecoveryBudget::new_manual(policy.clone()));
+        {
+            let mut session = session.lock().await;
+            session.recovery_budget = Some(budget);
+            session.runtime.recovery = Some(RecoveryRecord {
+                operation_id: "operation".into(),
+                run_id: "run".into(),
+                revision: 1,
+                state: RecoveryState::Attempting,
+                policy,
+                policy_source: RecoveryPolicySource::Thread,
+                manual: true,
+                retries_used: 0,
+                latest_error: RecoveryError {
+                    category: "network".into(),
+                    title: "Network error".into(),
+                    explanation: "Connection interrupted".into(),
+                    suggested_action: "Retry".into(),
+                    is_retryable: true,
+                    raw_error: "connection interrupted".into(),
+                },
+                next_retry_at_ms: None,
+                retry_not_before_ms: None,
+                deadline_at_ms: None,
+                terminal_reason: None,
+                attempts: vec![],
+            });
+        }
+        let contended = Arc::new(tokio::sync::Notify::new());
+        let generation = crate::tasks::board_lock::BOARD_LOCK_CONTENDED.scope(
+            contended.clone(),
+            start_generation(app.clone(), session.clone()),
+        );
+        tokio::pin!(generation);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::select! {
+                _ = contended.notified() => {},
+                _ = &mut generation => panic!("generation returned before contending for the board lock"),
+            }
+        }).await.expect("generation must reach the held board lock");
+        tokio::time::pause();
+        assert!(
+            std::future::poll_fn(|cx| Poll::Ready(generation.as_mut().poll(cx).is_pending())).await
+        );
+        tokio::time::advance(Duration::from_millis(60_001)).await;
+        tokio::time::resume();
+        tokio::time::timeout(Duration::from_secs(10), &mut generation)
+            .await
+            .expect("generation must finish while the board lock remains held");
+        let session = session.lock().await;
+        let record = session.runtime.recovery.as_ref().unwrap();
+        assert_eq!(record.state, RecoveryState::Exhausted);
+        assert_eq!(
+            record.terminal_reason.as_deref(),
+            Some("deadline_exhausted")
+        );
+        assert_eq!(session.runtime.state, SessionState::Error);
+        assert_eq!(model_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        drop(session);
+        drop(board_guard);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn restored_board_missing_admission_refuses_wakes_tools_and_stale_decisions() {
+        let (_temp, app, original, calls, model_calls, server) = restore_gate_fixture().await;
+        let (chat_id, thread, history) = {
+            let session = original.lock().await;
+            (
+                session.chat_id.clone(),
+                session.thread.clone(),
+                serde_json::to_value(&session.messages).unwrap(),
+            )
+        };
+        let meta = thread.task_meta.as_ref().unwrap();
+        assert!(!meta.task_id.is_empty() && !thread.model.is_empty());
+        let caps = app.model.caps.read().await.caps.clone().unwrap();
+        assert!(crate::caps::resolve_chat_model(caps, &thread.model)
+            .unwrap()
+            .base
+            .endpoint
+            .starts_with("http://127.0.0.1:"));
+        assert!(!crate::tasks::admission::is_tracked(&chat_id).await);
+        assert!(app.agent_executions.get(&chat_id).is_none());
+        super::super::trajectories::try_save_trajectory_with_intent(
+            app.clone(),
+            original.clone(),
+            TrajectoryCommitIntent::Required,
+        )
+        .await
+        .unwrap();
+        let board_before = serde_json::to_value(
+            crate::tasks::storage::load_board(app.gcx.clone(), &meta.task_id)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        app.chat.sessions.write().await.remove(&chat_id);
+        let restored = super::super::session_runtime::get_or_create_session_with_trajectory(
+            app.clone(),
+            &app.chat.sessions,
+            &chat_id,
+        )
+        .await;
+        {
+            let session = restored.lock().await;
+            assert_eq!(session.runtime.state, SessionState::WaitingUserInput);
+            assert!(session
+                .runtime
+                .error
+                .as_deref()
+                .unwrap()
+                .starts_with("Interrupted: needs_fresh_admission."));
+            assert!(session.board_restored_pending_tools);
+            assert!(session.command_queue.is_empty());
+            assert_eq!(serde_json::to_value(&session.messages).unwrap(), history);
+        }
+        assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
+        assert_eq!(model_calls.load(Ordering::SeqCst), 0);
+        for command in [
+            ChatCommand::Regenerate {},
+            ChatCommand::UserMessage {
+                content: json!("Wake"),
+                attachments: Vec::new(),
+                context_files: Vec::new(),
+                suppress_auto_enrichment: false,
+                client_message_id: None,
+            },
+        ] {
+            command_handlers::handle_queue_command(
+                app.clone(),
+                restored.clone(),
+                CommandRequest {
+                    client_request_id: Uuid::new_v4().to_string(),
+                    priority: false,
+                    command,
+                    native_approval_guard: None,
+                    supervision_guard: None,
+                },
+            )
+            .await;
+            assert_eq!(model_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                serde_json::to_value(&restored.lock().await.messages).unwrap(),
+                history
+            );
+        }
+        restored.lock().await.planner_pause_pending_tools = true;
+        start_generation(app.clone(), restored.clone()).await;
+        assert!(restored.lock().await.planner_pause_pending_tools);
+        assert!(matches!(
+            super::super::tools::process_tool_calls_once(
+                app.clone(),
+                restored.clone(),
+                "agent",
+                None
+            )
+            .await,
+            super::super::tools::ToolStepOutcome::Stop
+        ));
+        let result = super::super::generation::run_llm_generation(
+            app.clone(),
+            restored.clone(),
+            thread.clone(),
+            chat_id.clone(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(tokio::sync::Notify::new()),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            result,
+            super::super::generation::GenerationResult::PausedForUserDecision
+        ));
+        let tool_calls = original
+            .lock()
+            .await
+            .messages
+            .last()
+            .unwrap()
+            .tool_calls
+            .clone()
+            .unwrap();
+        assert!(execute_tools_with_session(
+            app.clone(),
+            restored.clone(),
+            &tool_calls,
+            &[],
+            &thread,
+            "agent",
+            None,
+            Default::default()
+        )
+        .await
+        .0
+        .is_empty());
+        crate::tasks::admission::reserve(
+            &app,
+            &chat_id,
+            "restore-project",
+            meta.planner_chat_id.as_deref().unwrap(),
+            0,
+        )
+        .await
+        .unwrap();
+        crate::tasks::admission::wait_for_permit(&chat_id)
+            .await
+            .unwrap();
+        {
+            let mut session = restored.lock().await;
+            session.set_paused_with_reasons_and_auto_approved(
+                vec![PauseReason {
+                    reason_type: "confirmation".into(),
+                    tool_name: "pause_edge_tool".into(),
+                    command: "pause_edge_tool".into(),
+                    rule: "ask".into(),
+                    tool_call_id: "restore-pending".into(),
+                    integr_config_path: None,
+                }],
+                Vec::new(),
+                Some(2),
+            );
+        }
+        handle_tool_decisions_guarded(
+            app.clone(),
+            restored.clone(),
+            &[ToolDecisionItem {
+                tool_call_id: "restore-pending".into(),
+                accepted: true,
+            }],
+            None,
+            "old-confirmation",
+        )
+        .await;
+        let session = restored.lock().await;
+        assert_eq!(session.runtime.state, SessionState::Paused);
+        assert_eq!(session.runtime.pause_reasons.len(), 1);
+        assert!(session.runtime.accepted_tool_ids.is_empty());
+        assert!(session
+            .runtime
+            .error
+            .as_deref()
+            .unwrap()
+            .starts_with("Interrupted: needs_explicit_tool_reconciliation."));
+        assert_eq!(serde_json::to_value(&session.messages).unwrap(), history);
+        assert!(session.draft_message.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(model_calls.load(Ordering::SeqCst), 0);
+        drop(session);
+        assert_eq!(
+            serde_json::to_value(
+                crate::tasks::storage::load_board(app.gcx.clone(), &meta.task_id)
+                    .await
+                    .unwrap()
+            )
+            .unwrap(),
+            board_before
+        );
+        crate::tasks::admission::end(&chat_id).await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn admitted_parked_board_reacquires_and_ordinary_chat_reaches_fake_model() {
+        let (_temp, app, session, calls, model_calls, server) = restore_gate_fixture().await;
+        let (chat_id, meta) = {
+            let session = session.lock().await;
+            (
+                session.chat_id.clone(),
+                session.thread.task_meta.clone().unwrap(),
+            )
+        };
+        crate::tasks::storage::release_card_claim(app.gcx.clone(), &meta.task_id, "T-1", &chat_id)
+            .await
+            .unwrap();
+        let board = crate::tasks::storage::load_board(app.gcx.clone(), &meta.task_id)
+            .await
+            .unwrap();
+        assert!(board.card_claim("T-1").is_none());
+        assert_eq!(
+            board.get_card("T-1").unwrap().agent_chat_id.as_deref(),
+            Some(chat_id.as_str())
+        );
+        assert_eq!(board.get_card("T-1").unwrap().assignee, meta.agent_id);
+        assert_eq!(board.owner_chat_id, meta.planner_chat_id);
+        crate::tasks::admission::reserve(&app, &chat_id, "restore-project", "restore-root", 0)
+            .await
+            .unwrap();
+        crate::tasks::admission::wait_for_permit(&chat_id)
+            .await
+            .unwrap();
+        let execution = app.agent_executions.get(&chat_id).unwrap();
+        execution.park().await.unwrap();
+        assert_eq!(
+            execution.state(),
+            crate::agents::execution::ExecutionState::Parked
+        );
+        {
+            let mut held = session.lock().await;
+            let meta = held.thread.task_meta.clone().unwrap();
+            held.update_card_planner_pause(
+                &meta.task_id,
+                "T-1",
+                Some((chrono::Utc::now().to_rfc3339(), meta.planner_chat_id)),
+            );
+        }
+        start_generation(app.clone(), session.clone()).await;
+        assert_eq!(
+            execution.state(),
+            crate::agents::execution::ExecutionState::Parked
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(session.lock().await.planner_paused());
+        session.lock().await.clear_planner_pause();
+        assert!(matches!(
+            super::super::tools::process_tool_calls_once(
+                app.clone(),
+                session.clone(),
+                "agent",
+                None
+            )
+            .await,
+            super::super::tools::ToolStepOutcome::Stop
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(execution.holds_permit());
+        assert_eq!(execution.active_operations(), 0);
+        crate::tasks::admission::end(&chat_id).await;
+
+        let (mut internal_thread, pending_calls) = {
+            let session = session.lock().await;
+            (
+                session.thread.clone(),
+                session
+                    .messages
+                    .iter()
+                    .find_map(|message| message.tool_calls.clone())
+                    .unwrap(),
+            )
+        };
+        internal_thread.id = format!("internal-fixture-{}", Uuid::new_v4());
+        let mut internal_context =
+            crate::at_commands::at_commands::AtCommandsContext::new_from_app(
+                app.clone(),
+                8192,
+                20,
+                false,
+                Vec::new(),
+                internal_thread.id.clone(),
+                internal_thread.root_chat_id.clone(),
+                internal_thread.model.clone(),
+                internal_thread.task_meta.clone(),
+                internal_thread.worktree.clone(),
+            )
+            .await;
+        internal_context.subchat_depth = 1;
+        let internal_context = Arc::new(AMutex::new(internal_context));
+        let internal_results = super::super::tools::execute_tools(
+            app.clone(),
+            &pending_calls,
+            &[],
+            &internal_thread,
+            "agent",
+            None,
+            super::super::tools::ExecuteToolsOptions {
+                execution_context: Some(internal_context),
+                ..Default::default()
+            },
+        )
+        .await
+        .0;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(internal_results
+            .iter()
+            .any(|message| message.tool_call_id == "restore-pending"
+                && message.content.content_text_only() == "executed"));
+        let model_id = "test/restore-gate";
+        let mut ordinary = ChatSession::new(format!("ordinary-{}", Uuid::new_v4()));
+        ordinary.thread.model = model_id.into();
+        ordinary.thread.mode = "ask".into();
+        ordinary.thread.include_project_info = false;
+        ordinary.add_message(ChatMessage::new("system".into(), "Fixture system".into()));
+        ordinary.add_message(ChatMessage::new("user".into(), "Hello".into()));
+        let ordinary = Arc::new(AMutex::new(ordinary));
+        let ordinary_id = ordinary.lock().await.chat_id.clone();
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(ordinary_id, ordinary.clone());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            start_generation(app.clone(), ordinary.clone()),
+        )
+        .await
+        .unwrap();
+        server.abort();
+        let _ = server.await;
+        assert_eq!(model_calls.load(Ordering::SeqCst), 1);
+        assert!(ordinary
+            .lock()
+            .await
+            .messages
+            .iter()
+            .any(|message| message.role == "assistant"
+                && message.content.content_text_only() == "done"));
+    }
 
     #[tokio::test]
     async fn guarded_tool_decision_rechecks_source_after_waiting_for_session_lock() {
@@ -2862,6 +3587,33 @@ mod tests {
             match_models: None,
             override_config: None,
         }
+    }
+
+    #[tokio::test]
+    async fn approval_continuation_yields_to_queue_before_delivery_wake() {
+        let session = Arc::new(AMutex::new(ChatSession::new("approval-boundary".into())));
+        {
+            let mut locked = session.lock().await;
+            locked.set_runtime_state(SessionState::ExecutingTools, None);
+            assert_eq!(
+                locked.enqueue_command(make_request(ChatCommand::Regenerate {})),
+                EnqueueCommandOutcome::Accepted
+            );
+            locked.begin_interruptible_wait();
+            locked.end_interruptible_wait();
+            locked.drain_pending_deliveries();
+            locked.delivery_wake_sources.insert("delivery".into());
+        }
+        assert!(aborted_before_start_generation(&session).await);
+        let selected = select_next_command(&session)
+            .await
+            .unwrap()
+            .command
+            .unwrap();
+        assert_eq!(selected.client_request_id, "req-1");
+        let locked = session.lock().await;
+        assert!(locked.delivery_wake_sources.contains("delivery"));
+        assert!(!locked.abort_flag.load(Ordering::SeqCst));
     }
 
     fn make_request(cmd: ChatCommand) -> CommandRequest {
@@ -3207,7 +3959,7 @@ mod tests {
             ..Default::default()
         };
         let refused = resolve_worktree_setparams_update(
-            app,
+            app.clone(),
             "task-owner",
             &task_thread,
             &json!({"worktree": null}),
@@ -3218,7 +3970,105 @@ mod tests {
             Some(crate::chat::worktree_lifecycle::TASK_SCOPE_REFUSAL)
         );
         assert_eq!(service.load_registry().await.unwrap(), registry_before);
-        assert_eq!(thread.worktree, Some(created.worktree.meta));
+        assert_eq!(thread.worktree, Some(created.worktree.meta.clone()));
+
+        let mut source_session = ChatSession::new("branch-source".into());
+        source_session.thread.worktree = Some(created.worktree.meta.clone());
+        let mut copied = ChatMessage::new("user".into(), "copied source".into());
+        copied.message_id = Uuid::new_v4().to_string();
+        let message_id = copied.message_id.clone();
+        source_session.add_message(copied);
+        let mut target = ChatSession::new("branch-target".into());
+        target.thread.worktree = Some(created.worktree.meta.clone());
+        target.add_message(ChatMessage::new("user".into(), "retained target".into()));
+        let target = Arc::new(AMutex::new(target));
+        {
+            let mut sessions = app.chat.sessions.write().await;
+            sessions.insert(
+                "branch-source".into(),
+                Arc::new(AMutex::new(source_session)),
+            );
+            sessions.insert("branch-target".into(), target.clone());
+        }
+        let before = serde_json::to_value(&target.lock().await.thread).unwrap();
+        assert!(!before["worktree"]["id"].as_str().unwrap().is_empty());
+        let registry_before = serde_json::to_value(service.load_registry().await.unwrap()).unwrap();
+        let transition = super::super::worktree_lifecycle::try_transition_lock(&target).unwrap();
+        let request: CommandRequest = serde_json::from_value(json!({
+            "client_request_id":"branch-fenced", "type":"branch_from_chat",
+            "source_chat_id":"branch-source", "up_to_message_id":message_id,
+        }))
+        .unwrap();
+        let mut events = target.lock().await.subscribe();
+        assert!(
+            command_handlers::handle_queue_command(app.clone(), target.clone(), request.clone())
+                .await
+                == command_handlers::QueueCommandOutcome::Continue
+        );
+        assert_eq!(
+            serde_json::to_value(&target.lock().await.thread).unwrap(),
+            before
+        );
+        assert_eq!(target.lock().await.messages.len(), 1);
+        assert_eq!(
+            serde_json::to_value(service.load_registry().await.unwrap()).unwrap(),
+            registry_before
+        );
+        assert!(drain_events(&mut events).iter().any(|event| matches!(event,
+            ChatEvent::Ack { accepted:false, result:Some(result), .. }
+            if result["error"].as_str().unwrap().contains("transition in progress"))));
+        assert!(app
+            .chat
+            .facade
+            .create_session(refact_runtime_api::CreateSessionRequest {
+                chat_id: "branch-target".into(),
+                thread: ThreadParams {
+                    id: "branch-target".into(),
+                    ..Default::default()
+                },
+                messages: vec![],
+            })
+            .await
+            .is_err());
+        drop(transition);
+        assert!(
+            command_handlers::handle_queue_command(app.clone(), target.clone(), request).await
+                == command_handlers::QueueCommandOutcome::Finished
+        );
+        let session = target.lock().await;
+        assert_eq!(session.thread.worktree, Some(created.worktree.meta.clone()));
+        assert_eq!(session.thread.parent_id.as_deref(), Some("branch-source"));
+        assert_eq!(
+            session.thread.root_chat_id.as_deref(),
+            Some("branch-source")
+        );
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "retained target"
+        );
+        assert_eq!(
+            session.messages[1].content.content_text_only(),
+            "copied source"
+        );
+        drop(session);
+        assert!(app
+            .chat
+            .facade
+            .create_session(refact_runtime_api::CreateSessionRequest {
+                chat_id: "branch-target".into(),
+                thread: ThreadParams {
+                    id: "branch-target".into(),
+                    ..Default::default()
+                },
+                messages: vec![],
+            })
+            .await
+            .unwrap_err()
+            .contains("already exists"));
+        assert_eq!(
+            target.lock().await.thread.worktree,
+            Some(created.worktree.meta.clone())
+        );
     }
 
     #[tokio::test]
@@ -3233,9 +4083,7 @@ mod tests {
             crate::test_tmp::scratch_dir("cfg"),
         )
         .await;
-        {
-            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
-        }
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         let app = AppState::from_gcx(gcx.clone()).await;
         let service = WorktreeService::new(cache, source.clone()).unwrap();
         let created = service
@@ -3248,6 +4096,7 @@ mod tests {
             .await
             .unwrap();
         let mut thread = ThreadParams::default();
+        thread.id = "chat-detach".into();
         thread.worktree = Some(created.worktree.meta.clone());
         let registry_before = service.load_registry().await.unwrap();
         assert!(!registry_before.records[0].references.is_empty());
@@ -3405,12 +4254,13 @@ mod tests {
                 before_messages
             );
         }
-        assert_eq!(refused.len(), 1);
+        assert_eq!(refused.len(), 2);
         assert!(matches!(
             &refused[0],
             ChatEvent::Ack { accepted: false, result: Some(result), .. }
-                if result["error"] == crate::chat::worktree_lifecycle::TASK_SCOPE_REFUSAL
+                if result["error"] == "Worktree scope cannot change while this chat is running; retry when idle"
         ));
+        assert!(matches!(&refused[1], ChatEvent::Snapshot { .. }));
         assert_eq!(service.load_registry().await.unwrap(), registry_with_target);
         session.lock().await.thread.task_meta = thread.task_meta.clone();
         let same_binding = make_request(ChatCommand::SetParams {
@@ -3501,7 +4351,7 @@ mod tests {
         );
         assert_eq!(service.load_registry().await.unwrap(), registry_with_target);
         let update = resolve_worktree_setparams_update(
-            app,
+            app.clone(),
             "chat-detach",
             &thread,
             &json!({"worktree": null}),
@@ -3529,6 +4379,260 @@ mod tests {
             .unwrap();
         assert!(!task_target_before.references.is_empty());
         assert_eq!(task_target.references, task_target_before.references);
+
+        let update = resolve_worktree_setparams_update(
+            app.clone(),
+            "chat-detach",
+            &ThreadParams {
+                id: "chat-detach".into(),
+                ..Default::default()
+            },
+            &json!({"worktree_id": created.worktree.meta.id}),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(update.worktree, Some(created.worktree.meta.clone()));
+        let mut interactive = ChatSession::new("chat-detach".into());
+        interactive.thread.worktree = Some(created.worktree.meta.clone());
+        let interactive = Arc::new(AMutex::new(interactive));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("chat-detach".into(), interactive.clone());
+        let response = crate::chat::handle_v1_chat_command(
+            axum::extract::State(app.clone()),
+            axum::extract::Path("chat-detach".into()),
+            serde_json::to_vec(&json!({
+                "client_request_id":"interactive-detach", "type":"set_params", "patch":{"worktree":null}
+            }))
+            .unwrap()
+            .into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), hyper::StatusCode::OK);
+        assert!(interactive.lock().await.thread.worktree.is_none());
+        assert!(service
+            .load_registry()
+            .await
+            .unwrap()
+            .records
+            .iter()
+            .find(|record| record.meta.id == created.worktree.meta.id)
+            .unwrap()
+            .references
+            .is_empty());
+
+        let task = crate::tasks::storage::create_task(gcx.clone(), "Managed scope")
+            .await
+            .unwrap();
+        let chat_id = format!("agent-scope-{}", Uuid::new_v4());
+        let managed = service
+            .create_worktree(crate::worktrees::types::CreateWorktreeRequest {
+                kind: Some("task_agent".into()),
+                task_id: Some(task.id.clone()),
+                card_id: Some("T-1".into()),
+                agent_id: Some("scope-agent".into()),
+                chat_id: Some(chat_id.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .worktree
+            .meta;
+        let mut card = crate::tools::tool_spawn_ab::tests::test_card();
+        card.column = "doing".into();
+        card.assignee = Some("scope-agent".into());
+        card.agent_chat_id = Some(chat_id.clone());
+        card.agent_worktree = Some(managed.root.to_string_lossy().into_owned());
+        card.agent_worktree_name = Some(managed.id.clone());
+        card.agent_branch = managed.branch.clone();
+        crate::tasks::storage::update_board_atomic(gcx.clone(), &task.id, move |board| {
+            board.owner_chat_id = Some("scope-planner".into());
+            board.cards.push(card);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let (board, _) = crate::tasks::storage::claim_card(
+            gcx.clone(),
+            &task.id,
+            "T-1",
+            &chat_id,
+            "scope-claim",
+        )
+        .await
+        .unwrap();
+        assert_eq!(board.card_claim("T-1").unwrap().claimant_chat_id, chat_id);
+        assert_eq!(
+            board
+                .get_card("T-1")
+                .unwrap()
+                .agent_worktree_name
+                .as_deref(),
+            Some(managed.id.as_str())
+        );
+        crate::tasks::admission::reserve(
+            &app,
+            &chat_id,
+            &crate::coordination::roots::project_identity(&source),
+            "scope-planner",
+            0,
+        )
+        .await
+        .unwrap();
+        crate::tasks::admission::wait_for_permit(&chat_id)
+            .await
+            .unwrap();
+        let thread = crate::tools::tool_task_spawn_agent::build_agent_thread_params(
+            &chat_id,
+            "Managed scope",
+            "test/model",
+            &task.id,
+            "scope-agent",
+            "T-1",
+            "scope-planner",
+            managed.clone(),
+        );
+        let mut session = ChatSession::new(chat_id.clone());
+        session.thread = thread.clone();
+        session.work_project_root = Some(source.clone());
+        session.add_message(ChatMessage::new("user".into(), "retained history".into()));
+        let session_arc = Arc::new(AMutex::new(session));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.clone(), session_arc.clone());
+        std::fs::write(managed.root.join("wip.txt"), "mutable WIP\n").unwrap();
+        assert_eq!(
+            super::super::worktree_lifecycle::check_managed_attachment(&app, &chat_id, &thread)
+                .await,
+            Ok(())
+        );
+        let registry_before = serde_json::to_value(service.load_registry().await.unwrap()).unwrap();
+        let (thread_before, runtime_before, history_before, version_before, mut events) = {
+            let session = session_arc.lock().await;
+            (
+                serde_json::to_value(&session.thread).unwrap(),
+                serde_json::to_value(&session.runtime).unwrap(),
+                serde_json::to_value(&session.messages).unwrap(),
+                session.trajectory_version,
+                session.subscribe(),
+            )
+        };
+        let mut changed_meta = thread.task_meta.clone().unwrap();
+        changed_meta.role = "planner".into();
+        for (queued, patch) in [
+            (false, json!({"worktree": null, "temperature": 0.7})),
+            (
+                true,
+                json!({"worktree_id": created.worktree.meta.id, "temperature": 0.7}),
+            ),
+            (true, json!({"task_meta": changed_meta})),
+            (false, json!({"root_chat_id": "", "link_type": "branch"})),
+        ] {
+            assert_eq!(session_arc.lock().await.runtime.state, SessionState::Idle);
+            let request_id = Uuid::new_v4().to_string();
+            let request =
+                json!({"client_request_id": request_id, "type":"set_params", "patch":patch});
+            if queued {
+                let request: CommandRequest = serde_json::from_value(request).unwrap();
+                assert_eq!(
+                    session_arc.lock().await.enqueue_command(request),
+                    EnqueueCommandOutcome::Accepted
+                );
+                let selected = select_next_command(&session_arc).await.unwrap();
+                let outcome = command_handlers::handle_queue_command(
+                    app.clone(),
+                    session_arc.clone(),
+                    selected.command.unwrap(),
+                )
+                .await;
+                assert!(outcome == command_handlers::QueueCommandOutcome::Continue);
+            } else {
+                let response = crate::chat::handle_v1_chat_command(
+                    axum::extract::State(app.clone()),
+                    axum::extract::Path(chat_id.clone()),
+                    serde_json::to_vec(&request).unwrap().into(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(response.status(), hyper::StatusCode::BAD_REQUEST);
+            }
+            let emitted = drain_events(&mut events);
+            assert!(emitted.iter().any(|event| matches!(event,
+                ChatEvent::Ack { client_request_id, accepted: false, result: Some(result) }
+                    if client_request_id == &request_id && result["error"] == crate::chat::worktree_lifecycle::TASK_SCOPE_REFUSAL
+            )));
+            assert!(!emitted.iter().any(|event| matches!(
+                event,
+                ChatEvent::MessageAdded { .. }
+                    | ChatEvent::ThreadUpdated { .. }
+                    | ChatEvent::RuntimeUpdated { .. }
+            )));
+            let session = session_arc.lock().await;
+            assert_eq!(
+                serde_json::to_value(&session.thread).unwrap(),
+                thread_before
+            );
+            assert_eq!(
+                serde_json::to_value(&session.runtime).unwrap(),
+                runtime_before
+            );
+            assert_eq!(
+                serde_json::to_value(&session.messages).unwrap(),
+                history_before
+            );
+            assert_eq!(session.trajectory_version, version_before);
+            drop(session);
+            assert_eq!(
+                serde_json::to_value(service.load_registry().await.unwrap()).unwrap(),
+                registry_before
+            );
+            assert_eq!(
+                std::fs::read_to_string(managed.root.join("wip.txt")).unwrap(),
+                "mutable WIP\n"
+            );
+        }
+        let mut ordinary = ThreadParams::default();
+        ordinary.id = "ordinary-no-grant".into();
+        assert!(resolve_worktree_setparams_update(
+            app.clone(),
+            &ordinary.id,
+            &ordinary,
+            &json!({"worktree_id":managed.id})
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            serde_json::to_value(service.load_registry().await.unwrap()).unwrap(),
+            registry_before
+        );
+        session_arc.lock().await.thread.worktree = None;
+        start_generation(app.clone(), session_arc.clone()).await;
+        assert_eq!(
+            serde_json::to_value(service.load_registry().await.unwrap()).unwrap(),
+            registry_before
+        );
+        assert_eq!(
+            std::fs::read_to_string(managed.root.join("wip.txt")).unwrap(),
+            "mutable WIP\n"
+        );
+        let session = session_arc.lock().await;
+        assert_eq!(session.runtime.state, SessionState::Error);
+        assert!(session
+            .runtime
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("accepted checkout is missing"));
+        assert_eq!(session.turn_depth, 0);
+        assert!(session.command_queue.is_empty());
+        drop(session);
+        crate::tasks::admission::end(&chat_id).await;
     }
 
     #[tokio::test]

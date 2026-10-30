@@ -20,7 +20,9 @@ use crate::tasks::waves::{
 #[cfg(test)]
 use crate::tasks::waves::plan_schedule;
 use crate::tools::tool_task_board::ToolTaskBoardCreateCard;
-use crate::tools::tool_task_mark_card::{ToolTaskMarkCardDone, ToolTaskMarkCardFailed};
+use crate::tools::tool_task_mark_card::{
+    completion_context, ToolTaskMarkCardDone, ToolTaskMarkCardFailed,
+};
 use crate::tools::tool_task_merge_agent::ToolTaskMergeAgent;
 use crate::tools::tool_task_spawn_agent::ToolTaskSpawnAgent;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
@@ -498,8 +500,11 @@ fn reconcile_schedule_with_cards(
 }
 
 fn parse_mark_item(value: &Value, text_key: &str) -> Result<(String, String), String> {
-    if !value.is_object() {
-        return Err("item must be an object".to_string());
+    let item = value
+        .as_object()
+        .ok_or_else(|| "item must be an object".to_string())?;
+    if item.keys().any(|key| key != "card_id" && key != text_key) {
+        return Err("manual completion item contains an unsupported field".to_string());
     }
     Ok((
         required_string(value, "card_id")?,
@@ -1264,7 +1269,7 @@ impl Tool for ToolMarkDoneBatch {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (_, task_id) = planner_context(&ccx, args, "mark_done_batch").await?;
+        let task_id = completion_context(&ccx, args).await?.task_id;
         let raw_items = array_arg(args, "items")?;
         let mut results = Vec::new();
 
@@ -1342,7 +1347,7 @@ impl Tool for ToolMarkFailedBatch {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (_, task_id) = planner_context(&ccx, args, "mark_failed_batch").await?;
+        let task_id = completion_context(&ccx, args).await?.task_id;
         let raw_items = array_arg(args, "items")?;
         let mut results = Vec::new();
 
@@ -1586,6 +1591,26 @@ mod tests {
     }
 
     async fn planner_ccx(gcx: Arc<GlobalContext>) -> Arc<AMutex<AtCommandsContext>> {
+        let mut session = crate::chat::types::ChatSession::new("planner-chat".to_string());
+        session.work_project_root = gcx
+            .documents_state
+            .workspace_folders
+            .lock()
+            .unwrap()
+            .first()
+            .cloned();
+        session.thread.model = "model".into();
+        session.thread.task_meta = Some(ThreadTaskMeta {
+            task_id: "task-1".to_string(),
+            role: "planner".to_string(),
+            agent_id: None,
+            card_id: None,
+            planner_chat_id: Some("planner-chat".to_string()),
+        });
+        gcx.chat_sessions
+            .write()
+            .await
+            .insert("planner-chat".to_string(), Arc::new(AMutex::new(session)));
         Arc::new(AMutex::new(
             AtCommandsContext::new_from_app(
                 AppState::from_gcx(gcx).await,
@@ -1752,7 +1777,10 @@ The agent's work has been successfully merged back to the target branch.
     #[tokio::test]
     async fn mark_done_batch_mixed_success_failure() {
         let board = TaskBoard {
-            cards: vec![card("T-1", "planned", vec![])],
+            cards: vec![
+                card("T-1", "planned", vec![]),
+                card("T-2", "planned", vec![]),
+            ],
             ..Default::default()
         };
         let (gcx, _temp) = setup_task(board).await;
@@ -1761,7 +1789,8 @@ The agent's work has been successfully merged back to the target branch.
             "items".to_string(),
             json!([
                 { "card_id": "T-1", "report": "done cleanly" },
-                { "card_id": "missing", "report": "not found" }
+                { "card_id": "missing", "report": "not found" },
+                { "card_id": "T-2", "report": "not authorized", "task_id": "foreign-task" }
             ]),
         )]);
         let mut tool = ToolMarkDoneBatch::new();
@@ -1776,9 +1805,45 @@ The agent's work has been successfully merged back to the target branch.
         assert_eq!(output[0]["success"], json!(true));
         assert_eq!(output[1]["success"], json!(false));
         assert!(output[1]["error"].as_str().unwrap().contains("not found"));
+        assert_eq!(output[2]["success"], json!(false));
+        assert_eq!(
+            output[2]["error"],
+            json!("manual completion item contains an unsupported field")
+        );
+        assert_eq!(board.get_card("T-2").unwrap().column, "planned");
+        assert_eq!(board.owner_chat_id, None);
         let card = board.get_card("T-1").unwrap();
         assert_eq!(card.column, "done");
         assert_eq!(card.final_report.as_deref(), Some("done cleanly"));
+    }
+
+    #[tokio::test]
+    async fn mark_failed_batch_refuses_empty_task_binding_before_mutation() {
+        let (gcx, temp) = setup_task(TaskBoard {
+            cards: vec![card("T-1", "planned", vec![])],
+            ..Default::default()
+        })
+        .await;
+        let ccx = planner_ccx(gcx.clone()).await;
+        ccx.lock().await.task_meta.as_mut().unwrap().task_id.clear();
+        let path = temp.path().join(".refact/tasks/task-1/board.yaml");
+        let before = tokio::fs::read(&path).await.unwrap();
+        let error = ToolMarkFailedBatch::new()
+            .tool_execute(
+                ccx,
+                &"unbound".to_string(),
+                &HashMap::from([
+                    ("task_id".to_string(), json!("task-1")),
+                    (
+                        "items".to_string(),
+                        json!([{"card_id": "T-1", "reason": "foreign completion"}]),
+                    ),
+                ]),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("with a bound task context"));
+        assert_eq!(tokio::fs::read(path).await.unwrap(), before);
     }
 
     #[test]

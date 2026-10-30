@@ -1,4 +1,4 @@
-use crate::agents::types::{BackgroundAgent, BgAgentStatus};
+use crate::agents::types::BackgroundAgent;
 use crate::app_state::AppState;
 
 /// Close a direct child: stop its runner, release its execution slot and any
@@ -11,33 +11,30 @@ pub async fn close_agent(
     expected_run_generation: Option<u64>,
     reason: Option<String>,
 ) -> Result<(BackgroundAgent, bool), String> {
-    let record = app.agents.get(parent_chat_id, agent_id).await?;
-    if let Some(generation) = expected_run_generation {
-        if generation != record.run_generation {
-            return Err(
-                "agent moved to another generation; inspect its current state before closing"
-                    .into(),
-            );
-        }
-    }
-    if record.status == BgAgentStatus::Closed {
-        return Ok((record, true));
-    }
     let (closed, already_closed) = app
         .agents
-        .close(parent_chat_id, agent_id, expected_run_generation, reason)
+        .close_with(
+            parent_chat_id,
+            agent_id,
+            expected_run_generation,
+            reason,
+            |closed| {
+                if let Some(child_chat_id) = closed.child_chat_id.as_deref() {
+                    app.agent_executions.release(child_chat_id);
+                }
+            },
+        )
         .await?;
-    if let Some(child_chat_id) = closed.child_chat_id.as_deref() {
-        app.agent_executions.release(child_chat_id);
+    if !already_closed {
+        crate::agents::spawn::emit_background_agent_update(app.clone(), &closed).await;
     }
-    crate::agents::spawn::emit_background_agent_update(app.clone(), &closed).await;
     Ok((closed, already_closed))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::types::{BgAgentKind, CreateAgentRequest};
+    use crate::agents::types::{BgAgentKind, BgAgentStatus, CreateAgentRequest};
     use std::sync::Arc;
     use tokio::sync::Mutex as AMutex;
 
@@ -154,6 +151,30 @@ mod tests {
     async fn closing_refuses_a_stale_generation_a_foreign_parent_and_a_finished_child() {
         let (_cache, _config, app) = fixture().await;
         let record = running_agent(&app, "child-stale").await;
+        let abort = app.agents.abort_flag(&record.agent_id).await.unwrap();
+        let pause = app.agents.pause_gate(&record.agent_id).await.unwrap();
+        let session = Arc::new(AMutex::new(crate::chat::types::ChatSession::new(
+            "child-stale".into(),
+        )));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("child-stale".into(), session.clone());
+        let permit = app
+            .work_scheduler
+            .reserve(refact_work_core::AdmissionRequest::new(
+                refact_work_core::WorkKey::background_agent(&record.agent_id)
+                    .run(record.run_generation),
+                refact_work_core::WorkScope::single("project"),
+            ))
+            .unwrap()
+            .acquire()
+            .await
+            .unwrap();
+        let execution = app.agent_executions.install("child-stale", permit).unwrap();
+        assert!(execution.holds_permit());
+        assert_eq!(app.work_scheduler.snapshot().active, 1);
 
         let stale = close_agent(
             app.clone(),
@@ -165,15 +186,43 @@ mod tests {
         .await
         .unwrap_err();
         assert!(stale.contains("another generation"), "{stale}");
-        assert_eq!(
-            app.agents.get_any(&record.agent_id).await.unwrap().status,
-            BgAgentStatus::Running
-        );
+        assert_eq!(app.agents.get_any(&record.agent_id).await.unwrap(), record);
+        assert!(!abort.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(Arc::ptr_eq(
+            &abort,
+            &app.agents.abort_flag(&record.agent_id).await.unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &pause,
+            &app.agents.pause_gate(&record.agent_id).await.unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &execution,
+            &app.agent_executions.get("child-stale").unwrap()
+        ));
+        assert!(execution.holds_permit());
+        assert!(!execution.is_cancelled());
 
         let foreign = close_agent(app.clone(), "other-parent", &record.agent_id, None, None)
             .await
             .unwrap_err();
         assert_eq!(foreign, "agent not found");
+        assert_eq!(app.agents.get_any(&record.agent_id).await.unwrap(), record);
+        assert!(!abort.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(app.agents.has_runtime(&record.agent_id).await);
+        assert!(Arc::ptr_eq(
+            &session,
+            app.chat.sessions.read().await.get("child-stale").unwrap()
+        ));
+        assert_eq!(session.lock().await.thread.id, "child-stale");
+        assert_eq!(app.work_scheduler.snapshot().active, 1);
+        assert_eq!(app.work_scheduler.snapshot().outstanding, 1);
+        assert!(Arc::ptr_eq(
+            &execution,
+            &app.agent_executions.get("child-stale").unwrap()
+        ));
+        assert!(execution.holds_permit());
+        assert!(!execution.is_cancelled());
 
         let done = running_agent(&app, "child-done").await;
         app.agents
@@ -204,6 +253,7 @@ mod tests {
             unchanged.result_summary.as_deref(),
             Some("already answered")
         );
+        app.agent_executions.release("child-stale");
     }
 
     #[tokio::test]

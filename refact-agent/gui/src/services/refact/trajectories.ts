@@ -238,7 +238,10 @@ export const trajectoriesApi = createApi({
     getTrajectory: builder.query<TrajectoryData, string>({
       queryFn: async (id, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const url = buildApiUrlFromState(state, `/v1/trajectories/${id}`);
+        const url = buildApiUrlFromState(
+          state,
+          `/v1/trajectories/${encodeURIComponent(id)}`,
+        );
         const result = await baseQuery({ url });
         if (result.error) return { error: result.error };
         return { data: result.data as TrajectoryData };
@@ -248,7 +251,10 @@ export const trajectoriesApi = createApi({
     getTrajectoryPath: builder.query<{ path: string }, string>({
       queryFn: async (id, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const url = buildApiUrlFromState(state, `/v1/trajectories/${id}/path`);
+        const url = buildApiUrlFromState(
+          state,
+          `/v1/trajectories/${encodeURIComponent(id)}/path`,
+        );
         const result = await baseQuery({ url });
         if (result.error) return { error: result.error };
         return { data: result.data as { path: string } };
@@ -258,7 +264,10 @@ export const trajectoriesApi = createApi({
     saveTrajectory: builder.mutation<undefined, TrajectoryData>({
       queryFn: async (data, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const url = buildApiUrlFromState(state, `/v1/trajectories/${data.id}`);
+        const url = buildApiUrlFromState(
+          state,
+          `/v1/trajectories/${encodeURIComponent(data.id)}`,
+        );
         const result = await baseQuery({
           url,
           method: "PUT",
@@ -275,7 +284,10 @@ export const trajectoriesApi = createApi({
     deleteTrajectory: builder.mutation<undefined, string>({
       queryFn: async (id, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const url = buildApiUrlFromState(state, `/v1/trajectories/${id}`);
+        const url = buildApiUrlFromState(
+          state,
+          `/v1/trajectories/${encodeURIComponent(id)}`,
+        );
         const result = await baseQuery({
           url,
           method: "DELETE",

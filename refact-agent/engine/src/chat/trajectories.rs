@@ -812,6 +812,7 @@ pub(crate) fn trajectory_list_data_is_displayable_chat(data: &TrajectoryListData
 
 #[derive(Clone)]
 pub struct LoadedTrajectory {
+    pub recovery: Option<refact_core::recovery::RecoveryRecord>,
     pub source_path: PathBuf,
     pub messages: Vec<ChatMessage>,
     pub thread: ThreadParams,
@@ -856,6 +857,10 @@ impl LoadedTrajectory {
 
 pub use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
 
+pub(super) fn retain_in_snapshot(message: &ChatMessage) -> bool {
+    message.role != "assistant" || has_displayable_assistant_content(message)
+}
+
 pub(crate) fn trajectory_snapshot_from_session(session: &ChatSession) -> TrajectorySnapshot {
     let span = perf_diagnostics::span(
         PerfComponent::TrajectorySnapshot,
@@ -865,7 +870,7 @@ pub(crate) fn trajectory_snapshot_from_session(session: &ChatSession) -> Traject
     let messages = session
         .messages
         .iter()
-        .filter(|message| message.role != "assistant" || has_displayable_assistant_content(message))
+        .filter(|message| retain_in_snapshot(message))
         .cloned()
         .collect();
 
@@ -876,6 +881,7 @@ pub(crate) fn trajectory_snapshot_from_session(session: &ChatSession) -> Traject
         session.created_at.clone(),
         session.trajectory_version,
     );
+    snapshot.recovery = session.runtime.recovery.clone();
     snapshot.wake_up_at = session.wake_up_at;
     snapshot.waiting_for_card_ids = session.waiting_for_card_ids.clone();
     snapshot.goal = session.goal.clone();
@@ -2640,6 +2646,13 @@ fn validate_task_agent_id(agent_id: Option<&str>) -> Result<(), String> {
 
 async fn safe_task_dir(gcx: Arc<GlobalContext>, task_id: &str) -> Result<PathBuf, String> {
     crate::tasks::storage::validate_task_id(task_id)?;
+    if crate::tasks::storage::bound_task_active() {
+        let (task_dir, _guard) = crate::tasks::storage::locked_task_dir(gcx, task_id).await?;
+        if !is_real_dir(&task_dir).await {
+            return Err("Accepted task directory is not a real directory".into());
+        }
+        return Ok(task_dir);
+    }
     for tasks_dir in get_all_task_roots(gcx).await {
         let candidate = tasks_dir.join(task_id);
         if is_real_dir(&candidate).await {
@@ -3358,6 +3371,9 @@ async fn load_trajectory_candidate(
             .get("auto_compression_cap_pending")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        recovery_policy: t
+            .get("recovery_policy")
+            .and_then(|v| serde_json::from_value(v.clone()).ok()),
         auto_compression_cap: t
             .get("auto_compression_cap")
             .and_then(|v| v.as_u64())
@@ -3470,7 +3486,22 @@ async fn load_trajectory_candidate(
             pending_deliveries
         };
 
+    let mut recovery: Option<refact_core::recovery::RecoveryRecord> = t
+        .get("recovery")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+    if let Some(record) = &mut recovery {
+        record.interrupt_on_reload();
+        record.latest_error.raw_error =
+            super::diagnostics::safe_provider_error_diagnostic(&record.latest_error.raw_error);
+        for attempt in &mut record.attempts {
+            if let Some(error) = &mut attempt.error {
+                error.raw_error =
+                    super::diagnostics::safe_provider_error_diagnostic(&error.raw_error);
+            }
+        }
+    }
     Some(LoadedTrajectory {
+        recovery,
         pending_deliveries,
         dropped_deliveries,
         goal_ledger,
@@ -3755,6 +3786,8 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
     };
 
     let snapshot = TrajectorySnapshot {
+        recovery: None,
+        recovery_policy: None,
         goal: None,
         goal_ledger: Vec::new(),
         pending_deliveries: Vec::new(),
@@ -3857,6 +3890,8 @@ pub async fn save_trajectory_as_with_intent_checked(
             .unwrap_or_default()
     };
     let snapshot = TrajectorySnapshot {
+        recovery: None,
+        recovery_policy: None,
         goal: None,
         goal_ledger: Vec::new(),
         pending_deliveries: Vec::new(),
@@ -3873,6 +3908,7 @@ pub async fn save_trajectory_as_with_intent_checked(
         boost_reasoning: thread.boost_reasoning.unwrap_or(false),
         checkpoints_enabled: thread.checkpoints_enabled,
         context_tokens_cap: thread.context_tokens_cap,
+
         auto_compression_cap: thread.auto_compression_cap,
         auto_compression_cap_pending: thread.auto_compression_cap_pending,
         include_project_info: thread.include_project_info,
@@ -4339,6 +4375,14 @@ async fn persist_trajectory_snapshot_awaiting(
     intent: TrajectoryCommitIntent,
     await_commit: bool,
 ) -> Result<(), String> {
+    if crate::tasks::storage::bound_task_matches(
+        snapshot
+            .task_meta
+            .as_ref()
+            .map(|meta| meta.task_id.as_str()),
+    )? {
+        return save_trajectory_snapshot_inner(gcx, snapshot, None).await;
+    }
     if trajectory_writer_rollout_enabled() {
         schedule_detached_trajectory_writer(gcx, snapshot, intent, await_commit).await
     } else {
@@ -4643,6 +4687,12 @@ fn trajectory_value_from_snapshot(
         trajectory["claude_code_identity"] =
             serde_json::to_value(claude_code_identity).unwrap_or_default();
     }
+    if let Some(ref recovery) = snapshot.recovery {
+        trajectory["recovery"] = json!(recovery);
+    }
+    if let Some(ref recovery_policy) = snapshot.recovery_policy {
+        trajectory["recovery_policy"] = json!(recovery_policy);
+    }
     if let Some(wake_up_at) = snapshot.wake_up_at {
         trajectory["wake_up_at"] = json!(wake_up_at);
     }
@@ -4818,7 +4868,15 @@ async fn persist_trajectory_snapshot_file(
     message_count: usize,
     mut serialize_span: perf_diagnostics::PerfSpan,
 ) -> Result<(PathBuf, String, serde_json::Value), String> {
-    let cached_entry = if let Some(write_cache) = write_cache {
+    let bound_task = crate::tasks::storage::bound_task_matches(
+        snapshot
+            .task_meta
+            .as_ref()
+            .map(|meta| meta.task_id.as_str()),
+    )?;
+    let cached_entry = if bound_task {
+        None
+    } else if let Some(write_cache) = write_cache {
         let write_cache = write_cache.lock().await;
         if write_cache.source.as_ref() == Some(&source) {
             match (
@@ -4943,9 +5001,35 @@ async fn persist_trajectory_snapshot_file(
         Some(&snapshot.chat_id),
         Some(&file_path),
     );
-    let atomic_write_result =
+    let atomic_write_result = if bound_task {
+        let task_meta = snapshot
+            .task_meta
+            .as_ref()
+            .ok_or("Accepted task snapshot missing identity")?;
+        let (_, guard) =
+            crate::tasks::storage::locked_task_dir(gcx.clone(), &task_meta.task_id).await?;
+        super::trajectory_archive::with_trajectory_mutation_lock(async {
+            crate::tasks::storage::validate_task_trajectory_publication(
+                gcx.clone(),
+                &guard,
+                task_meta,
+                &snapshot.chat_id,
+                &file_path,
+            )
+            .await?;
+            atomic_finish_trajectory_write(
+                &file_path,
+                &tmp_path,
+                write_result,
+                Some(source.clone()),
+            )
+            .await
+        })
+        .await
+    } else {
         atomic_finish_trajectory_write(&file_path, &tmp_path, write_result, Some(source.clone()))
-            .await;
+            .await
+    };
     atomic_write_span.finish(
         if atomic_write_result.is_ok() {
             PerfOutcome::Success
@@ -5258,7 +5342,16 @@ pub async fn try_save_trajectory_with_intent(
     if owns_task {
         crate::tasks::goal::commit_session_task_goal(app.gcx.clone(), &session_arc).await?;
     }
-    if !trajectory_writer_rollout_enabled() {
+    let task_id = session_arc
+        .lock()
+        .await
+        .thread
+        .task_meta
+        .as_ref()
+        .map(|meta| meta.task_id.clone());
+    if crate::tasks::storage::bound_task_matches(task_id.as_deref())?
+        || !trajectory_writer_rollout_enabled()
+    {
         return try_save_trajectory_legacy_with_intent(app, session_arc, intent).await;
     }
     let dirty = session_arc.lock().await.trajectory_dirty;
@@ -5772,6 +5865,89 @@ fn can_apply_external_reload(session: &ChatSession) -> bool {
         && !session.trajectory_dirty
         && session.pending_deliveries.is_empty()
         && session.runner_pending_deliveries.is_empty()
+        && !session.runtime.paused
+        && session.runtime.pause_reasons.is_empty()
+        && session.confirmation_paused_at.is_none()
+        && !session.planner_pause_pending_tools
+        && !session.has_pending_tool_result_window()
+        && !session.planner_paused()
+        && session.command_queue.is_empty()
+        && !session.goal.as_ref().is_some_and(|goal| {
+            matches!(
+                goal.status,
+                GoalStatus::Paused
+                    | GoalStatus::Stopped
+                    | GoalStatus::BudgetExhausted
+                    | GoalStatus::NoProgress
+            )
+        })
+}
+
+async fn external_reload_transition(
+    session_arc: &Arc<AMutex<ChatSession>>,
+    expected_pending: Option<&ExternalReloadPending>,
+    pending: Option<ExternalReloadPending>,
+) -> Option<(
+    super::worktree_lifecycle::AttachmentTransitionGuard,
+    ThreadParams,
+    u64,
+)> {
+    let transition = super::worktree_lifecycle::try_transition_lock(session_arc);
+    let mut session = session_arc.lock().await;
+    if expected_pending
+        .is_some_and(|expected| session.external_reload_pending.as_ref() != Some(expected))
+    {
+        return None;
+    }
+    match transition {
+        Ok(transition) => Some((
+            transition,
+            session.thread.clone(),
+            session.trajectory_version,
+        )),
+        Err(error) => {
+            if let Some(pending) =
+                pending.filter(|pending| pending_reload_source_matches_session(pending, &session))
+            {
+                session.external_reload_pending = Some(pending);
+            }
+            tracing::debug!(chat_id = %session.chat_id, %error, "External reload deferred");
+            None
+        }
+    }
+}
+
+fn external_reload_preserves_attachment(
+    gcx: &GlobalContext,
+    session_arc: &Arc<AMutex<ChatSession>>,
+    session: &ChatSession,
+    thread: &ThreadParams,
+) -> bool {
+    let established = !session.messages.is_empty()
+        || session.thread.worktree.is_some()
+        || session.thread.task_meta.is_some()
+        || session.thread.buddy_meta.is_some()
+        || session.thread.parent_id.is_some()
+        || session.thread.root_chat_id.is_some();
+    let current = gcx.chat_sessions.try_read().is_ok_and(|sessions| {
+        sessions
+            .get(&session.chat_id)
+            .is_some_and(|current| Arc::ptr_eq(current, session_arc))
+    });
+    if !current
+        || session.closed
+        || thread.id != session.thread.id
+        || (established
+            && (session.thread.worktree != thread.worktree
+                || session.thread.task_meta != thread.task_meta
+                || session.thread.root_chat_id != thread.root_chat_id
+                || session.thread.parent_id != thread.parent_id
+                || session.thread.link_type != thread.link_type))
+    {
+        warn!(chat_id = %session.chat_id, "External reload cannot change an established checkout or ownership; retain WIP and use authorized attachment or lifecycle recovery");
+        return false;
+    }
+    true
 }
 
 fn pending_reload_source_matches_session(
@@ -5789,7 +5965,11 @@ fn is_active_buddy_session(session: &ChatSession) -> bool {
     session.thread.buddy_meta.is_some()
 }
 
-fn apply_external_delete_to_session(session: &mut ChatSession, chat_id: &str) {
+fn apply_external_delete_to_session(
+    _transition: &super::worktree_lifecycle::AttachmentTransitionGuard,
+    session: &mut ChatSession,
+    chat_id: &str,
+) {
     session.release_turn_only_state();
     session.messages.clear();
     session.thread = ThreadParams {
@@ -5811,6 +5991,7 @@ fn apply_external_delete_to_session(session: &mut ChatSession, chat_id: &str) {
 }
 
 fn apply_loaded_external_update_to_session(
+    _transition: &super::worktree_lifecycle::AttachmentTransitionGuard,
     session: &mut ChatSession,
     loaded: LoadedTrajectory,
     transition_identity_repaired: bool,
@@ -5819,6 +6000,8 @@ fn apply_loaded_external_update_to_session(
     session.messages = loaded.messages;
     session.restore_pending_deliveries(loaded.pending_deliveries);
     session.merge_dropped_deliveries(loaded.dropped_deliveries);
+    session.runtime.recovery = loaded.recovery;
+    session.recovery_budget = None;
     session.thread = loaded.thread;
     session.reset_compaction_runtime_state();
     session.set_goal_ledger(loaded.goal_ledger);
@@ -5888,6 +6071,19 @@ pub async fn refresh_session_from_trajectory_if_stale(
     let Some(session_arc) = session_arc else {
         return false;
     };
+    let pending_source = {
+        let session = session_arc.lock().await;
+        TrajectorySourceIdentity::from_session(&session)
+    };
+    let Some((transition, before, version)) = external_reload_transition(
+        &session_arc,
+        None,
+        Some(ExternalReloadPending::update(pending_source)),
+    )
+    .await
+    else {
+        return false;
+    };
     {
         let session = session_arc.lock().await;
         if !session_is_stale_refresh_candidate(&session, allow_replacing_messages) {
@@ -5912,6 +6108,15 @@ pub async fn refresh_session_from_trajectory_if_stale(
     if !session_is_stale_refresh_candidate(&session, allow_replacing_messages) {
         return false;
     }
+    if super::worktree_lifecycle::check_unchanged_attachment(&session, &before).is_err()
+        || session.trajectory_version != version
+        || !external_reload_preserves_attachment(&app.gcx, &session_arc, &session, &loaded.thread)
+    {
+        session.external_reload_pending = Some(ExternalReloadPending::update(
+            TrajectorySourceIdentity::from_session(&session),
+        ));
+        return false;
+    }
     let session_has_identity = !session.messages.is_empty()
         || session.thread.task_meta.is_some()
         || session.thread.buddy_meta.is_some();
@@ -5926,7 +6131,12 @@ pub async fn refresh_session_from_trajectory_if_stale(
         chat_id,
         loaded.messages.len()
     );
-    apply_loaded_external_update_to_session(&mut session, loaded, transition_identity_repaired);
+    apply_loaded_external_update_to_session(
+        &transition,
+        &mut session,
+        loaded,
+        transition_identity_repaired,
+    );
     session.task_goal_messages = None;
     drop(session);
     if let Err(error) =
@@ -5948,6 +6158,17 @@ async fn apply_loaded_external_update_with_repair(
     log_message: &str,
 ) -> bool {
     let loaded_source = TrajectorySourceIdentity::from_session_parts(&loaded.thread);
+    let Some((transition, before, version)) = external_reload_transition(
+        &session_arc,
+        expected_pending.as_ref(),
+        pending_if_not_reloadable
+            .clone()
+            .or_else(|| expected_pending.clone()),
+    )
+    .await
+    else {
+        return false;
+    };
     let transition_identity_repaired = loaded.transition_identity_repaired;
     apply_mode_defaults_to_thread(
         gcx.clone(),
@@ -5972,14 +6193,21 @@ async fn apply_loaded_external_update_with_repair(
         } else if is_active_buddy_session(&session) {
             skipped_active_buddy = true;
             None
-        } else if !can_apply_external_reload(&session) {
-            if let Some(pending) = pending_if_not_reloadable {
+        } else if !can_apply_external_reload(&session)
+            || super::worktree_lifecycle::check_unchanged_attachment(&session, &before).is_err()
+            || session.trajectory_version != version
+            || !external_reload_preserves_attachment(&gcx, &session_arc, &session, &loaded.thread)
+        {
+            if let Some(pending) =
+                pending_if_not_reloadable.or_else(|| session.external_reload_pending.clone())
+            {
                 session.external_reload_pending = Some(pending);
             }
             return false;
         } else {
             info!("{}", log_message);
             apply_loaded_external_update_to_session(
+                &transition,
                 &mut session,
                 loaded,
                 transition_identity_repaired,
@@ -6020,6 +6248,7 @@ enum ExternalDeleteRevalidationOutcome {
         applied_to_session: bool,
     },
     NoopStalePending,
+    Deferred,
 }
 
 async fn apply_loaded_external_delete_with_revalidation(
@@ -6029,6 +6258,9 @@ async fn apply_loaded_external_delete_with_revalidation(
     expected_pending: Option<ExternalReloadPending>,
     deleted_source: Option<TrajectorySourceIdentity>,
     mut loaded: LoadedTrajectory,
+    transition: &super::worktree_lifecycle::AttachmentTransitionGuard,
+    before: &ThreadParams,
+    version: u64,
 ) -> ExternalDeleteRevalidationOutcome {
     let task_roots = get_all_task_roots(gcx.clone()).await;
     let loaded_source = loaded_trajectory_source(&loaded, &task_roots);
@@ -6093,6 +6325,29 @@ async fn apply_loaded_external_delete_with_revalidation(
                 applied_to_session: false,
             };
         }
+        let replacement = if deleted_matches_session && !fallback_matches_session {
+            same_source_loaded
+                .as_ref()
+                .map(|loaded| loaded.thread.clone())
+        } else {
+            Some(loaded.thread.clone())
+        }
+        .unwrap_or_else(|| ThreadParams {
+            id: chat_id.into(),
+            ..Default::default()
+        });
+        if super::worktree_lifecycle::check_unchanged_attachment(&session, before).is_err()
+            || session.trajectory_version != version
+            || !external_reload_preserves_attachment(&gcx, &session_arc, &session, &replacement)
+        {
+            session.external_reload_pending = Some(ExternalReloadPending::delete(
+                TrajectorySourceIdentity::from_session(&session),
+            ));
+            return ExternalDeleteRevalidationOutcome::Updated {
+                loaded: outcome_loaded,
+                applied_to_session: false,
+            };
+        }
         if deleted_matches_session && !fallback_matches_session {
             if let Some(same_source_loaded) = same_source_loaded {
                 if !can_apply_external_reload(&session) {
@@ -6109,6 +6364,7 @@ async fn apply_loaded_external_delete_with_revalidation(
                     chat_id
                 );
                 let repaired_version = apply_loaded_external_update_to_session(
+                    transition,
                     &mut session,
                     same_source_loaded,
                     same_source_transition_identity_repaired,
@@ -6128,7 +6384,7 @@ async fn apply_loaded_external_delete_with_revalidation(
                     "Clearing trajectory for {} after same-source delete with fallback mismatch",
                     chat_id
                 );
-                apply_external_delete_to_session(&mut session, chat_id);
+                apply_external_delete_to_session(transition, &mut session, chat_id);
                 (None, true)
             }
         } else if !can_apply_external_reload(&session) {
@@ -6144,6 +6400,7 @@ async fn apply_loaded_external_delete_with_revalidation(
                 chat_id
             );
             let repaired_version = apply_loaded_external_update_to_session(
+                transition,
                 &mut session,
                 loaded,
                 transition_identity_repaired,
@@ -6196,6 +6453,23 @@ async fn apply_external_delete_with_revalidation(
     expected_pending: Option<ExternalReloadPending>,
     deleted_source: Option<TrajectorySourceIdentity>,
 ) -> ExternalDeleteRevalidationOutcome {
+    if let Some(expected) = expected_pending.as_ref() {
+        if session_arc.lock().await.external_reload_pending.as_ref() != Some(expected) {
+            return ExternalDeleteRevalidationOutcome::NoopStalePending;
+        }
+    }
+    let pending_source = deleted_source
+        .clone()
+        .unwrap_or(TrajectorySourceIdentity::Normal);
+    let Some((transition, before, version)) = external_reload_transition(
+        &session_arc,
+        expected_pending.as_ref(),
+        Some(ExternalReloadPending::delete(pending_source)),
+    )
+    .await
+    else {
+        return ExternalDeleteRevalidationOutcome::Deferred;
+    };
     let loaded = load_generic_trajectory_for_chat(gcx.clone(), chat_id).await;
     if let Some(loaded) = loaded {
         return apply_loaded_external_delete_with_revalidation(
@@ -6205,6 +6479,9 @@ async fn apply_external_delete_with_revalidation(
             expected_pending,
             deleted_source,
             loaded,
+            &transition,
+            &before,
+            version,
         )
         .await;
     }
@@ -6220,7 +6497,19 @@ async fn apply_external_delete_with_revalidation(
             applied_to_session: false,
         };
     }
-    if !can_apply_external_reload(&session) {
+    if !can_apply_external_reload(&session)
+        || super::worktree_lifecycle::check_unchanged_attachment(&session, &before).is_err()
+        || session.trajectory_version != version
+        || !external_reload_preserves_attachment(
+            &gcx,
+            &session_arc,
+            &session,
+            &ThreadParams {
+                id: chat_id.into(),
+                ..Default::default()
+            },
+        )
+    {
         let pending_source = TrajectorySourceIdentity::from_session(&session);
         session.external_reload_pending = Some(ExternalReloadPending::delete(pending_source));
         return ExternalDeleteRevalidationOutcome::Deleted {
@@ -6228,7 +6517,7 @@ async fn apply_external_delete_with_revalidation(
         };
     }
     info!("Trajectory file removed externally for {}", chat_id);
-    apply_external_delete_to_session(&mut session, chat_id);
+    apply_external_delete_to_session(&transition, &mut session, chat_id);
     ExternalDeleteRevalidationOutcome::Deleted {
         applied_to_session: true,
     }
@@ -6466,7 +6755,8 @@ async fn process_trajectory_change_for_source(
                 );
                 deleted_trajectory_event(chat_id.to_string())
             }
-            ExternalDeleteRevalidationOutcome::NoopStalePending => return,
+            ExternalDeleteRevalidationOutcome::NoopStalePending
+            | ExternalDeleteRevalidationOutcome::Deferred => return,
         };
         let _ = app.chat.trajectory_events_tx.send(event);
         return;
@@ -11825,6 +12115,8 @@ mod tests {
 
     fn test_snapshot(chat_id: &str, title: &str, messages: Vec<ChatMessage>) -> TrajectorySnapshot {
         TrajectorySnapshot {
+            recovery: None,
+            recovery_policy: None,
             pending_questions: Vec::new(),
             goal: None,
             goal_ledger: Vec::new(),
@@ -15103,7 +15395,32 @@ mod tests {
             .await
             .insert(chat_id.to_string(), session_arc.clone());
 
-        process_trajectory_change(gcx, chat_id, true).await;
+        let before = serde_json::to_value(&session_arc.lock().await.thread).unwrap();
+        assert_eq!(before["id"], chat_id);
+        let bytes = std::fs::read(&path).unwrap();
+        let transition =
+            super::super::worktree_lifecycle::try_transition_lock(&session_arc).unwrap();
+        process_trajectory_change(gcx.clone(), chat_id, true).await;
+        assert_eq!(
+            serde_json::to_value(&session_arc.lock().await.thread).unwrap(),
+            before
+        );
+        assert_eq!(
+            session_arc.lock().await.messages[0]
+                .content
+                .content_text_only(),
+            "old in-memory message"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(
+            session_arc.lock().await.external_reload_pending,
+            Some(ExternalReloadPending::delete(
+                TrajectorySourceIdentity::Normal
+            ))
+        );
+        assert!(chat_rx.try_recv().is_err());
+        drop(transition);
+        process_trajectory_change(gcx.clone(), chat_id, true).await;
 
         let event = wait_for_trajectory_event(&mut rx, chat_id).await;
         assert_eq!(event.event_type, "updated");
@@ -15130,6 +15447,59 @@ mod tests {
             }
             other => panic!("expected Snapshot, got {other:?}"),
         }
+
+        let mut foreign = load_trajectory_for_chat(gcx.clone(), chat_id)
+            .await
+            .unwrap();
+        foreign.thread.worktree = Some(trajectory_worktree_sample_with_id("foreign-checkout"));
+        let before = serde_json::to_value(&session_arc.lock().await.thread).unwrap();
+        assert!(!foreign.thread.worktree.as_ref().unwrap().id.is_empty());
+        assert!(
+            !apply_loaded_external_update_with_repair(
+                gcx.clone(),
+                session_arc.clone(),
+                chat_id,
+                foreign,
+                None,
+                Some(ExternalReloadPending::update(
+                    TrajectorySourceIdentity::Normal
+                )),
+                "foreign reload",
+            )
+            .await
+        );
+        assert_eq!(
+            serde_json::to_value(&session_arc.lock().await.thread).unwrap(),
+            before
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let mut current = load_trajectory_for_chat(gcx.clone(), chat_id)
+            .await
+            .unwrap();
+        current.thread.title = "Current attachment reload".into();
+        let transition =
+            super::super::worktree_lifecycle::try_transition_lock(&session_arc).unwrap();
+        assert!(
+            !apply_loaded_external_update_with_repair(
+                gcx.clone(),
+                session_arc.clone(),
+                chat_id,
+                current,
+                None,
+                Some(ExternalReloadPending::update(
+                    TrajectorySourceIdentity::Normal
+                )),
+                "current blocked reload",
+            )
+            .await
+        );
+        assert_eq!(
+            serde_json::to_value(&session_arc.lock().await.thread).unwrap(),
+            before
+        );
+        drop(transition);
+        check_external_reload_pending(gcx, session_arc.clone()).await;
+        assert_eq!(session_arc.lock().await.external_reload_pending, None);
     }
 
     #[tokio::test]
@@ -16067,6 +16437,13 @@ mod tests {
             session.trajectory_dirty = false;
         }
 
+        AppState::from_gcx(gcx.clone())
+            .await
+            .chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
         check_external_reload_pending(gcx, session_arc.clone()).await;
 
         let session = session_arc.lock().await;
@@ -16355,25 +16732,23 @@ mod tests {
         assert!(tokio::fs::try_exists(&normal_path).await.unwrap());
 
         let session = session_arc.lock().await;
-        assert_eq!(session.external_reload_pending, None);
-        assert!(session.messages.is_empty());
+        assert_eq!(
+            session.external_reload_pending,
+            Some(ExternalReloadPending::delete(
+                TrajectorySourceIdentity::from_task_meta(&task_meta)
+            ))
+        );
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "keep active task after task delete"
+        );
         assert_eq!(session.thread.id, chat_id);
-        assert!(session.thread.task_meta.is_none());
-        assert_eq!(session.thread.title, ThreadParams::default().title);
+        assert_eq!(session.thread.task_meta, Some(task_meta.clone()));
+        assert_eq!(session.thread.title, "Active Task Before Delete");
         drop(session);
 
-        let json = chat_rx.recv().await.unwrap();
-        let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
-        match envelope.event {
-            ChatEvent::Snapshot {
-                thread, messages, ..
-            } => {
-                assert_eq!(thread.id, chat_id);
-                assert!(thread.task_meta.is_none());
-                assert!(messages.is_empty());
-            }
-            other => panic!("expected Snapshot, got {other:?}"),
-        }
+        assert!(chat_rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -16455,25 +16830,23 @@ mod tests {
         check_external_reload_pending(gcx, session_arc.clone()).await;
 
         let session = session_arc.lock().await;
-        assert_eq!(session.external_reload_pending, None);
-        assert!(session.messages.is_empty());
+        assert_eq!(
+            session.external_reload_pending,
+            Some(ExternalReloadPending::delete(
+                TrajectorySourceIdentity::from_task_meta(&task_meta)
+            ))
+        );
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "keep busy task after delete"
+        );
         assert_eq!(session.thread.id, chat_id);
-        assert!(session.thread.task_meta.is_none());
-        assert_eq!(session.thread.title, ThreadParams::default().title);
+        assert_eq!(session.thread.task_meta, Some(task_meta.clone()));
+        assert_eq!(session.thread.title, "Busy Task Before Delete");
         drop(session);
 
-        let json = chat_rx.recv().await.unwrap();
-        let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
-        match envelope.event {
-            ChatEvent::Snapshot {
-                thread, messages, ..
-            } => {
-                assert_eq!(thread.id, chat_id);
-                assert!(thread.task_meta.is_none());
-                assert!(messages.is_empty());
-            }
-            other => panic!("expected Snapshot, got {other:?}"),
-        }
+        assert!(chat_rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -16782,18 +17155,25 @@ mod tests {
 
         let (tx, _rx) = broadcast::channel(16);
         let session = ChatSession {
+            recovery_budget: None,
+            recovery_notify: Arc::new(tokio::sync::Notify::new()),
+            recovery_policy_source: refact_core::recovery::RecoveryPolicySource::Global,
             task_goal_messages: None,
+            task_goal_partial_write: None,
             planner_pause: None,
             planner_pause_revision: 0,
             planner_pause_pending_tools: false,
+            board_restored_pending_tools: false,
             pending_questions: Vec::new(),
             chat_id: "test-123".to_string(),
             work_provenance: Default::default(),
             interruptible_waits: 0,
             wait_delivery_boundary: false,
+            wait_tool_window_active: false,
             wait_interrupt_flag: Arc::new(AtomicBool::new(false)),
             derived_privacy_zones: crate::privacy::records::new_derived_privacy_zones(),
             thread: ThreadParams {
+                recovery_policy: None,
                 id: "test-123".to_string(),
                 title: "Test Thread".to_string(),
                 model: "gpt-4".to_string(),
@@ -16950,18 +17330,25 @@ mod tests {
 
         let (tx, _rx) = broadcast::channel(16);
         let mut session = ChatSession {
+            recovery_budget: None,
+            recovery_notify: Arc::new(tokio::sync::Notify::new()),
+            recovery_policy_source: refact_core::recovery::RecoveryPolicySource::Global,
             task_goal_messages: None,
+            task_goal_partial_write: None,
             planner_pause: None,
             planner_pause_revision: 0,
             planner_pause_pending_tools: false,
+            board_restored_pending_tools: false,
             pending_questions: Vec::new(),
             chat_id: "skill-test".to_string(),
             work_provenance: Default::default(),
             interruptible_waits: 0,
             wait_delivery_boundary: false,
+            wait_tool_window_active: false,
             wait_interrupt_flag: Arc::new(AtomicBool::new(false)),
             derived_privacy_zones: crate::privacy::records::new_derived_privacy_zones(),
             thread: ThreadParams {
+                recovery_policy: None,
                 id: "skill-test".to_string(),
                 active_skill: Some("my-skill".to_string()),
                 ..Default::default()
@@ -17814,6 +18201,8 @@ mod tests {
         let worktree = created.worktree.meta.clone();
         let chat_id = "wt-roundtrip".to_string();
         let snapshot = TrajectorySnapshot {
+            recovery: None,
+            recovery_policy: None,
             pending_questions: Vec::new(),
             goal: None,
             goal_ledger: Vec::new(),
@@ -18744,6 +19133,146 @@ mod tests {
                 .map(|path| normalized_test_path(&path)),
             Some(normalized_test_path(&buddy_path))
         );
+    }
+
+    #[tokio::test]
+    async fn bound_task_snapshot_persists_to_original_project_after_workspace_reorder() {
+        let (gcx, _temp, source) = crate::tools::tool_spawn_ab::tests::setup_repo_task().await;
+        let (foreign_gcx, _foreign_temp, foreign_source) =
+            crate::tools::tool_spawn_ab::tests::setup_repo_task().await;
+        let chat_id = format!("bound-queued-trajectory-{}", Uuid::new_v4());
+        let relative = Path::new(".refact/tasks/task-1/trajectories/agents/accepted-agent")
+            .join(format!("{chat_id}.json"));
+        let foreign_path = foreign_source.join(&relative);
+        let meta = task_meta(
+            "task-1",
+            "agents",
+            Some("accepted-agent"),
+            Some("T-1"),
+            Some("planner"),
+        );
+        write_task_trajectory_file_with_user_message(
+            &foreign_path,
+            &chat_id,
+            "Foreign sentinel",
+            "foreign message remains",
+            &meta,
+        )
+        .await;
+        let foreign_before = tokio::fs::read(&foreign_path).await.unwrap();
+        assert!(!foreign_before.is_empty());
+        drop(foreign_gcx);
+        let binding =
+            crate::tasks::storage::TaskDirectoryBinding::capture(gcx.clone(), &source, "task-1")
+                .await
+                .unwrap();
+        let app = AppState::from_gcx(gcx.clone()).await;
+        crate::tasks::admission::reserve(&app, &chat_id, "original", "planner", 0)
+            .await
+            .unwrap();
+        let attempt = crate::tasks::admission::current_attempt(&chat_id).unwrap();
+        binding
+            .scope(crate::tasks::storage::update_board_atomic(
+                gcx.clone(),
+                "task-1",
+                |board| {
+                    let card = board.get_card_mut("T-1").unwrap();
+                    card.column = "doing".into();
+                    card.assignee = Some("accepted-agent".into());
+                    card.agent_chat_id = Some(chat_id.clone());
+                    Ok(())
+                },
+            ))
+            .await
+            .unwrap();
+        let agent_binding = binding.with_attempt(&attempt, "T-1", "accepted-agent", None);
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![foreign_source, source.clone()];
+        let mut snapshot = test_snapshot(
+            &chat_id,
+            "Accepted queued agent",
+            vec![ChatMessage::new(
+                "user".into(),
+                "accepted original message".into(),
+            )],
+        );
+        snapshot.task_meta = Some(meta);
+        agent_binding
+            .scope(save_trajectory_snapshot(gcx.clone(), snapshot.clone()))
+            .await
+            .unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(source.join(&relative)).await.unwrap())
+                .unwrap();
+        assert_eq!(saved["title"], "Accepted queued agent");
+        assert_eq!(saved["task_meta"]["agent_id"], "accepted-agent");
+        assert_eq!(saved["messages"][0]["content"], "accepted original message");
+        assert_eq!(
+            tokio::fs::read(&foreign_path).await.unwrap(),
+            foreign_before
+        );
+        let accepted_before = tokio::fs::read(source.join(&relative)).await.unwrap();
+        binding
+            .scope(crate::tasks::storage::update_board_atomic(
+                gcx.clone(),
+                "task-1",
+                |board| {
+                    let card = board.get_card_mut("T-1").unwrap();
+                    card.assignee = Some("replacement-agent".into());
+                    card.agent_chat_id = Some("replacement-chat".into());
+                    Ok(())
+                },
+            ))
+            .await
+            .unwrap();
+        snapshot.title = "Late replaced agent must not publish".into();
+        let failure = agent_binding
+            .scope(save_trajectory_snapshot(gcx.clone(), snapshot))
+            .await
+            .unwrap_err();
+        assert_eq!(failure, "Accepted task publication claim was replaced");
+        assert_eq!(
+            tokio::fs::read(source.join(&relative)).await.unwrap(),
+            accepted_before
+        );
+        assert_eq!(
+            tokio::fs::read(&foreign_path).await.unwrap(),
+            foreign_before
+        );
+        let mut session = ChatSession::new(chat_id.clone());
+        session.thread.task_meta = Some(task_meta(
+            "task-1",
+            "agents",
+            Some("accepted-agent"),
+            Some("T-1"),
+            Some("planner"),
+        ));
+        session.add_message(ChatMessage::new(
+            "user".into(),
+            "must not reach foreign project".into(),
+        ));
+        gcx.chat_sessions
+            .write()
+            .await
+            .insert(chat_id.clone(), Arc::new(AMutex::new(session)));
+        let original_task = source.join(".refact/tasks/task-1");
+        tokio::fs::rename(&original_task, source.join("retained-task"))
+            .await
+            .unwrap();
+        let failure = agent_binding
+            .scope(app.chat.facade.maybe_save_session(&chat_id))
+            .await
+            .unwrap_err();
+        assert!(
+            failure.contains("Accepted") || failure.contains("accepted"),
+            "{failure}"
+        );
+        assert_eq!(
+            tokio::fs::read(&foreign_path).await.unwrap(),
+            foreign_before
+        );
+        attempt.end();
+        gcx.shutdown_flag.store(true, Ordering::Relaxed);
     }
 
     #[tokio::test]

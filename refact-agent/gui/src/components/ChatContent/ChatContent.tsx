@@ -64,6 +64,9 @@ import {
 import { ChatThreadProvider, useThreadId } from "../../features/Chat/Thread";
 import { selectConfig, selectApiKey } from "../../features/Config/configSlice";
 import { VirtualizedChatList } from "./VirtualizedChatList";
+import { RecoveryCard } from "./RecoveryCard";
+import { isRecoveryRecord } from "../../services/refact/chatSubscription";
+import { selectRecoveryById } from "../../features/Chat/Thread/selectors";
 import { useCollapsibleState } from "./useCollapsibleState";
 import { useCollapsibleStoreProvider } from "./useCollapsibleStoreProvider";
 import { CollapsibleStoreProvider } from "./useStoredOpen";
@@ -162,6 +165,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
 }) => {
   const dispatch = useAppDispatch();
   const chatId = useThreadId();
+  const recovery = useAppSelector((state) => selectRecoveryById(state, chatId));
   const [renderChatId, setRenderChatId] = useState(chatId);
 
   useEffect(() => {
@@ -409,6 +413,13 @@ export const ChatContent: React.FC<ChatContentProps> = ({
       <>
         <Container>
           <UncommittedChangesWarning />
+          {recovery && (
+            <RecoveryCard
+              key={recovery.run_id}
+              chatId={chatId}
+              recovery={recovery}
+            />
+          )}
         </Container>
         <Flex
           justify="center"
@@ -442,6 +453,8 @@ export const ChatContent: React.FC<ChatContentProps> = ({
       </>
     ),
     [
+      recovery,
+      chatId,
       compressionStatusText,
       isStreaming,
       isWaiting,
@@ -456,33 +469,81 @@ export const ChatContent: React.FC<ChatContentProps> = ({
         case "plain_text":
           return <PlainText>{item.content}</PlainText>;
 
-        case "error":
-          return (
-            <ErrorMessageCard
-              errors={item.errors}
-              onRetryGeneration={onRetryGeneration}
-            />
+        case "error": {
+          const archives = item.errors.filter(
+            (error) => error.extra?.recovery_record != null,
           );
+          const ordinary = item.errors.filter(
+            (error) => error.extra?.recovery_record == null,
+          );
+          return (
+            <>
+              {archives
+                .filter(
+                  (error) => error.extra?.recovery_run_id !== recovery?.run_id,
+                )
+                .map((error, index) => (
+                  <details key={error.message_id ?? index}>
+                    <summary>Previous recovery</summary>
+                    {isRecoveryRecord(error.extra?.recovery_record) ? (
+                      <>
+                        <div>
+                          {error.extra.recovery_record.latest_error.title}:{" "}
+                          {error.extra.recovery_record.latest_error.explanation}
+                        </div>
+                        <div>
+                          {error.extra.recovery_record.latest_error.raw_error}
+                        </div>
+                        {error.extra.recovery_record.attempts.map(
+                          (attempt, i) => (
+                            <div key={`${attempt.at_ms}-${i}`}>
+                              Retry {attempt.retry_number}: {attempt.outcome}
+                            </div>
+                          ),
+                        )}
+                      </>
+                    ) : (
+                      <ErrorMessageCard errors={[error]} />
+                    )}
+                  </details>
+                ))}
+              {ordinary.length > 0 && (
+                <ErrorMessageCard
+                  errors={ordinary}
+                  onRetryGeneration={onRetryGeneration}
+                />
+              )}
+            </>
+          );
+        }
 
         case "assistant":
           return (
-            <AssistantInput
-              message={item.message.content}
-              reasoningContent={item.message.reasoning_content}
-              thinkingBlocks={item.message.thinking_blocks}
-              toolCalls={item.message.tool_calls}
-              serverExecutedTools={item.message.server_executed_tools}
-              serverContentBlocks={item.message.server_content_blocks}
-              citations={item.message.citations}
-              messageId={item.message.message_id}
-              onBranch={handleBranch}
-              onDelete={handleDelete}
-              contextFilesByToolId={item.contextFilesByToolId}
-              diffsByToolId={item.diffsByToolId}
-              usage={item.message.usage}
-              isStreaming={item.isStreaming}
-              threadId={renderChatId}
-            />
+            <>
+              {(item.message.extra?.interrupted === true ||
+                item.message.extra?._ui_only === true) && (
+                <Text size="1">
+                  Interrupted output — not included in the next request
+                </Text>
+              )}
+              <AssistantInput
+                message={item.message.content}
+                reasoningContent={item.message.reasoning_content}
+                thinkingBlocks={item.message.thinking_blocks}
+                toolCalls={item.message.tool_calls}
+                serverExecutedTools={item.message.server_executed_tools}
+                serverContentBlocks={item.message.server_content_blocks}
+                citations={item.message.citations}
+                messageId={item.message.message_id}
+                onBranch={handleBranch}
+                onDelete={handleDelete}
+                contextFilesByToolId={item.contextFilesByToolId}
+                diffsByToolId={item.diffsByToolId}
+                usage={item.message.usage}
+                isStreaming={item.isStreaming}
+                threadId={renderChatId}
+              />
+            </>
           );
 
         case "user":
@@ -579,6 +640,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
       collapsibleState,
       renderChatId,
       onRetryGeneration,
+      recovery,
     ],
   );
 

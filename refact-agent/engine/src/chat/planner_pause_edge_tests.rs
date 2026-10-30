@@ -70,9 +70,9 @@ impl BuddyEventSink for EventSink {
     }
 }
 
-struct CountingTool {
-    calls: Arc<AtomicUsize>,
-    needs_confirmation: bool,
+pub(super) struct CountingTool {
+    pub(super) calls: Arc<AtomicUsize>,
+    pub(super) needs_confirmation: bool,
 }
 
 #[async_trait]

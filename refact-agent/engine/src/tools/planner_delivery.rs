@@ -128,6 +128,9 @@ pub(crate) enum DeliveryReport {
     Failed {
         error: String,
     },
+    Unknown {
+        error: String,
+    },
 }
 
 impl DeliveryReport {
@@ -163,6 +166,7 @@ impl DeliveryReport {
             DeliveryReport::NoLiveSession => ("no_live_session", None, None),
             DeliveryReport::Skipped { reason } => ("skipped", Some(reason.clone()), None),
             DeliveryReport::Failed { error } => ("failed", Some(error.clone()), None),
+            DeliveryReport::Unknown { error } => ("unknown", Some(error.clone()), None),
         };
         serde_json::json!({
             "outcome": outcome,
@@ -191,6 +195,7 @@ impl DeliveryReport {
             DeliveryReport::NoLiveSession => "not delivered (no live agent session)".to_string(),
             DeliveryReport::Skipped { reason } => format!("not delivered ({})", reason),
             DeliveryReport::Failed { error } => format!("not delivered (failed: {})", error),
+            DeliveryReport::Unknown { error } => format!("acceptance unknown: {}", error),
         }
     }
 
@@ -237,6 +242,9 @@ impl DeliveryReport {
                     action, error
                 )
             }
+            DeliveryReport::Unknown { error } => format!(
+                "{action} message acceptance is unknown: {error}. Do not blindly replay it."
+            ),
         }
     }
 }
@@ -291,6 +299,21 @@ pub(crate) async fn deliver_to_card(
     guard: CardGuard,
     pending: PendingDelivery,
 ) -> DeliveryReport {
+    deliver_to_card_checked(gcx, facade, task_id, target, guard, pending, async {
+        Ok(())
+    })
+    .await
+}
+
+pub(crate) async fn deliver_to_card_checked(
+    gcx: Arc<GlobalContext>,
+    facade: Arc<dyn ChatSessionFacade>,
+    task_id: &str,
+    target: &CardTarget,
+    guard: CardGuard,
+    pending: PendingDelivery,
+    before_send: impl std::future::Future<Output = Result<(), String>>,
+) -> DeliveryReport {
     match card_is_stale(gcx.clone(), task_id, target, guard.require_doing).await {
         Ok(Some(reason)) => return DeliveryReport::Skipped { reason },
         Ok(None) => {}
@@ -313,7 +336,7 @@ pub(crate) async fn deliver_to_card(
             }
         }
 
-        match card_is_stale(gcx, task_id, target, guard.require_doing).await {
+        match card_is_stale(gcx.clone(), task_id, target, guard.require_doing).await {
             Ok(Some(reason)) => return DeliveryReport::Skipped { reason },
             Ok(None) => {}
             Err(error) => {
@@ -326,12 +349,27 @@ pub(crate) async fn deliver_to_card(
         prior_state = state;
     }
 
+    if let Err(reason) = before_send.await {
+        return DeliveryReport::Skipped { reason };
+    }
+    match card_is_stale(gcx, task_id, target, guard.require_doing).await {
+        Ok(Some(reason)) => return DeliveryReport::Skipped { reason },
+        Ok(None) => {}
+        Err(error) => {
+            return DeliveryReport::Failed {
+                error: format!("could not re-read the board before enqueue: {error}"),
+            }
+        }
+    }
     match facade.deliver_messages(&target.chat_id, pending).await {
         Ok(outcome) => DeliveryReport::Delivered {
             outcome,
             prior_state,
         },
-        Err(error) => DeliveryReport::Failed { error },
+        Err(error) => match crate::tools::tool_agent_planner_qna::reply_dispatch_refusal() {
+            Some(reason) => DeliveryReport::Skipped { reason },
+            None => DeliveryReport::Unknown { error },
+        },
     }
 }
 
@@ -428,6 +466,7 @@ mod tests {
         state: Result<Option<SessionState>, String>,
         probes: Mutex<Vec<String>>,
         queued: Mutex<Vec<(String, ChatCommand)>>,
+        transport_error: bool,
     }
 
     impl StateFacade {
@@ -436,12 +475,27 @@ mod tests {
                 state,
                 probes: Mutex::new(vec![]),
                 queued: Mutex::new(vec![]),
+                transport_error: false,
             }
         }
     }
 
     #[async_trait]
     impl ChatSessionFacade for StateFacade {
+        async fn deliver_messages(
+            &self,
+            chat_id: &str,
+            delivery: PendingDelivery,
+        ) -> Result<DeliveryOutcome, String> {
+            self.push_command(chat_id, ChatCommand::DeliverMessages { delivery })
+                .await?;
+            if self.transport_error {
+                Err("transport failed after handoff".into())
+            } else {
+                Ok(DeliveryOutcome::Queued)
+            }
+        }
+
         async fn session_snapshot(&self, _chat_id: &str) -> Result<ChatSessionSnapshot, String> {
             unreachable!()
         }
@@ -511,7 +565,7 @@ mod tests {
         let (_temp, gcx, task_id, target) = delivery_fixture().await;
         let facade = Arc::new(StateFacade::new(Ok(None)));
         let report = deliver_to_card(
-            gcx,
+            gcx.clone(),
             facade.clone(),
             &task_id,
             &target,
@@ -521,8 +575,27 @@ mod tests {
         .await;
 
         assert!(matches!(report, DeliveryReport::NoLiveSession));
-        assert_eq!(*facade.probes.lock().unwrap(), vec![target.chat_id]);
+        assert_eq!(*facade.probes.lock().unwrap(), vec![target.chat_id.clone()]);
         assert!(facade.queued.lock().unwrap().is_empty());
+        let mut transport = StateFacade::new(Ok(Some(SessionState::Idle)));
+        transport.transport_error = true;
+        let transport = Arc::new(transport);
+        let report = deliver_to_card(
+            gcx,
+            transport.clone(),
+            &task_id,
+            &target,
+            CardGuard::doing_with_live_session(),
+            single_message_delivery("Reply".into(), PushMode::Append, "planner_reply", true),
+        )
+        .await;
+        assert_eq!(transport.queued.lock().unwrap().len(), 1);
+        assert!(
+            matches!(&report, DeliveryReport::Unknown { error } if error == "transport failed after handoff")
+        );
+        assert_eq!(report.receipt()["outcome"], "unknown");
+        assert!(!report.reached_agent());
+        assert!(report.describe("Reply").contains("Do not blindly replay"));
     }
 
     fn args(items: &[(&str, Value)]) -> HashMap<String, Value> {

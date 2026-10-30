@@ -18,6 +18,7 @@ pub mod net_utils;
 pub mod path_classifier;
 pub mod privacy_types;
 pub mod provider_types;
+pub mod recovery;
 pub mod retry_policy;
 pub mod scheduler_config;
 pub mod semver;

@@ -16,6 +16,10 @@ pub struct PendingBrowserDecisionSnapshot {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TrajectorySnapshot {
+    #[serde(default)]
+    pub recovery: Option<refact_core::recovery::RecoveryRecord>,
+    #[serde(default)]
+    pub recovery_policy: Option<refact_core::recovery::RecoveryPolicyOverrides>,
     pub chat_id: String,
     pub title: String,
     pub model: String,
@@ -108,6 +112,8 @@ impl TrajectorySnapshot {
             boost_reasoning: thread.boost_reasoning.unwrap_or(false),
             checkpoints_enabled: thread.checkpoints_enabled,
             context_tokens_cap: thread.context_tokens_cap,
+            recovery: None,
+            recovery_policy: thread.recovery_policy.clone(),
             auto_compression_cap: thread.auto_compression_cap,
             auto_compression_cap_pending: thread.auto_compression_cap_pending,
             include_project_info: thread.include_project_info,

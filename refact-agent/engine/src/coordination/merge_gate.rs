@@ -319,62 +319,116 @@ where
     F: FnOnce(PathBuf, Option<String>) -> Fut,
     Fut: Future<Output = Option<MergeVerification>>,
 {
+    let service = service
+        .acquire_merge_permit()
+        .await
+        .map_err(MergeGateError::Merge)?;
+    let target = match request.target_branch.clone() {
+        Some(target) => target,
+        None => service
+            .get_worktree(worktree_id)
+            .await
+            .map_err(MergeGateError::Merge)?
+            .meta
+            .base_branch
+            .ok_or_else(|| MergeGateError::Merge("Merge target branch missing".into()))?,
+    };
+    let service = service
+        .for_merge_target(&target)
+        .await
+        .map_err(MergeGateError::Merge)?;
     let checkout = checkout_key(service.merge_checkout_root());
     let slot = gate.acquire(&checkout).await?;
+    let service = service.with_merge_authority(slot.leases.phase_validator(slot.holder.clone()));
     let renewal = LeaseRenewal::spawn(slot.leases.clone(), slot.holder.clone());
     let waited_for_lease_ms = slot.waited_ms();
-    let delete_requested = request.delete_after_merge;
-    let response = service
-        .merge_worktree(
-            worktree_id,
-            MergeWorktreeRequest {
-                delete_after_merge: false,
-                ..request
-            },
-        )
-        .await;
-    let response = match response {
-        Ok(response) => response,
-        Err(error) => {
-            shutdown_renewal(renewal).await;
-            return Err(MergeGateError::Merge(error));
-        }
-    };
-    let post_merge = match response.merged {
-        true => {
-            verify_merged_tree(
-                service.merge_checkout_root().to_path_buf(),
-                response.merge_commit.clone(),
-            )
+    let operation = async {
+        service
+            .checkpoint_merge_phase()
             .await
-        }
-        false => None,
-    };
-    let cleanup = match delete_requested
-        && source_cleanup_allowed(post_merge.as_ref())
-        && (response.merged || response.status == "nothing_to_merge")
-    {
-        true => match service.delete_worktree(worktree_id, true, true).await {
-            Ok(cleanup) => Some(cleanup),
+            .map_err(MergeGateError::Merge)?;
+        let delete_requested = request.delete_after_merge;
+        let response = service
+            .merge_worktree(
+                worktree_id,
+                MergeWorktreeRequest {
+                    delete_after_merge: false,
+                    ..request
+                },
+            )
+            .await;
+        let response = match response {
+            Ok(response) => response,
             Err(error) => {
-                tracing::warn!(
-                    worktree_id,
-                    "merged worktree could not be cleaned up, it stays on disk: {error}"
-                );
-                None
+                return Err(MergeGateError::Merge(error));
             }
-        },
-        false => None,
-    };
+        };
+        service
+            .checkpoint_merge_phase()
+            .await
+            .map_err(MergeGateError::Merge)?;
+        let post_merge = match response.merged {
+            true => {
+                MERGE_PHASE_SCOPE
+                    .scope(
+                        service.clone(),
+                        verify_merged_tree(
+                            service.merge_checkout_root().to_path_buf(),
+                            response.merge_commit.clone(),
+                        ),
+                    )
+                    .await
+            }
+            false => None,
+        };
+        service
+            .checkpoint_merge_phase()
+            .await
+            .map_err(MergeGateError::Merge)?;
+        let cleanup = match delete_requested
+            && source_cleanup_allowed(post_merge.as_ref())
+            && (response.merged || response.status == "nothing_to_merge")
+        {
+            true => match service.delete_worktree(worktree_id, true, true).await {
+                Ok(cleanup) => Some(cleanup),
+                Err(error) => {
+                    tracing::warn!(
+                        worktree_id,
+                        "merged worktree could not be cleaned up, it stays on disk: {error}"
+                    );
+                    None
+                }
+            },
+            false => None,
+        };
+        service
+            .checkpoint_merge_phase()
+            .await
+            .map_err(MergeGateError::Merge)?;
+        service
+            .cleanup_merge_target()
+            .await
+            .map_err(MergeGateError::Merge)?;
+        Ok(GuardedMerge {
+            checkout: checkout.as_str().to_string(),
+            waited_for_lease_ms,
+            response,
+            pre_merge,
+            post_merge,
+            cleanup,
+        })
+    }
+    .await;
     shutdown_renewal(renewal).await;
-    Ok(GuardedMerge {
-        checkout: checkout.as_str().to_string(),
-        waited_for_lease_ms,
-        response,
-        pre_merge,
-        post_merge,
-        cleanup,
-    })
+    operation
+}
+
+tokio::task_local! {
+    pub(crate) static MERGE_PHASE_SCOPE: WorktreeService;
+}
+
+pub(crate) fn verification_service() -> Option<WorktreeService> {
+    MERGE_PHASE_SCOPE.try_with(Clone::clone).ok()
 }
 
 async fn shutdown_renewal(mut renewal: LeaseRenewal) {

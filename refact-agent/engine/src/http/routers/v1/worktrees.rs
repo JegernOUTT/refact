@@ -327,37 +327,29 @@ pub async fn handle_v1_worktrees_merge(
             }
         }
     }
-    let result = if let Some(leases) = crate::coordination::leases::leases_for(&app).await {
-        let settings = crate::file_activity::settings();
-        let gate = crate::coordination::merge_gate::MergeGate::new(leases, &settings);
-        crate::coordination::merge_gate::merge_under_lease(
-            &gate,
-            &service,
-            &id,
-            request,
-            None,
-            |_checkout, _merge_commit| async { None },
-        )
-        .await
-        .map(|outcome| outcome.response)
-        .map_err(|error| match error {
-            crate::coordination::merge_gate::MergeGateError::Busy(busy) => (
+    let result = crate::tools::tool_task_merge_agent::merge_under_available_lease(
+        &app,
+        &service,
+        &id,
+        request,
+        None,
+        |_, _| async { Err("No post-merge check requested".into()) },
+    )
+    .await
+    .map(|(response, _, _)| response)
+    .map_err(|error| {
+        if error.contains("merge_busy") || error.contains("Timed out waiting") {
+            (
                 StatusCode::CONFLICT,
                 Json(json!({
-                    "code": "merge_busy",
-                    "error": format!("checkout `{}` is busy; retry after {}ms", busy.checkout, busy.waited_ms),
-                    "retryable": true,
+                    "code": "merge_busy", "error": error, "retryable": true,
                     "request_id": uuid::Uuid::new_v4().to_string(),
                 })),
-            ),
-            other => map_service_error(other.to_string()),
-        })
-    } else {
-        service
-            .merge_worktree(&id, request)
-            .await
-            .map_err(map_service_error)
-    };
+            )
+        } else {
+            map_service_error(error)
+        }
+    });
     result.map(Json)
 }
 

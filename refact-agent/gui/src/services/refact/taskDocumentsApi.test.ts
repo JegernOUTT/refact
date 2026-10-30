@@ -1,6 +1,8 @@
 import { configureStore } from "@reduxjs/toolkit";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EngineApiConfig } from "./apiUrl";
+import { tasksApi } from "./tasks";
+import { trajectoriesApi } from "./trajectories";
 import {
   isTaskDocumentDetail,
   isTaskDocumentSummary,
@@ -143,6 +145,85 @@ describe("isTaskDocumentHistoryResponse", () => {
 });
 
 describe("taskDocumentsApi URLs", () => {
+  it("encodes task, planner and trajectory path segments without changing opaque body IDs", async () => {
+    const config = {
+      host: "web" as const,
+      lspUrl: "https://engine.example/root",
+      apiKey: null,
+    };
+    const store = configureStore({
+      reducer: {
+        config: () => config,
+        [tasksApi.reducerPath]: tasksApi.reducer,
+        [trajectoriesApi.reducerPath]: trajectoriesApi.reducer,
+      },
+      middleware: (getDefaultMiddleware) =>
+        getDefaultMiddleware().concat(
+          tasksApi.middleware,
+          trajectoriesApi.middleware,
+        ),
+    });
+    const fetchMock = vi.fn<FetchLike>();
+    vi.stubGlobal("fetch", fetchMock);
+    const taskId = "task ?#%2F";
+    const chatId = "planner/old ?#%2F";
+    fetchMock.mockResolvedValueOnce(jsonResponse({ deleted: true }));
+    await store
+      .dispatch(
+        tasksApi.endpoints.deletePlannerChat.initiate({ taskId, chatId }),
+      )
+      .unwrap();
+    expect(firstRequest(fetchMock).method).toBe("DELETE");
+    expect(firstRequest(fetchMock).url).toBe(
+      "https://engine.example/root/v1/tasks/task%20%3F%23%252F/planner-chats/planner%2Fold%20%3F%23%252F",
+    );
+    fetchMock.mockClear();
+    fetchMock.mockResolvedValueOnce(jsonResponse([]));
+    const planners = store.dispatch(
+      tasksApi.endpoints.listTaskTrajectories.initiate({
+        taskId,
+        role: "planner",
+      }),
+    );
+    await planners.unwrap();
+    planners.unsubscribe();
+    expect(firstRequest(fetchMock).url).toBe(
+      "https://engine.example/root/v1/tasks/task%20%3F%23%252F/trajectories/planner",
+    );
+    fetchMock.mockClear();
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ new_chat_id: "new", messages_count: 0 }),
+    );
+    await store
+      .dispatch(
+        tasksApi.endpoints.createPlannerChatFromTransition.initiate({
+          taskId,
+          sourceChatId: chatId,
+        }),
+      )
+      .unwrap();
+    expect(firstRequest(fetchMock).url).toBe(
+      "https://engine.example/root/v1/tasks/task%20%3F%23%252F/planner-chats/from-transition",
+    );
+    expect(await firstRequest(fetchMock).json()).toMatchObject({
+      source_chat_id: chatId,
+    });
+    fetchMock.mockClear();
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ path: "/stored/planner.json" }),
+    );
+    const trajectory = store.dispatch(
+      trajectoriesApi.endpoints.getTrajectoryPath.initiate(chatId),
+    );
+    expect(await trajectory.unwrap()).toEqual({ path: "/stored/planner.json" });
+    trajectory.unsubscribe();
+    expect(firstRequest(fetchMock).url).toBe(
+      "https://engine.example/root/v1/trajectories/planner%2Fold%20%3F%23%252F/path",
+    );
+    store.dispatch(tasksApi.util.resetApiState());
+    store.dispatch(trajectoriesApi.util.resetApiState());
+  });
+
   it("listTaskDocuments uses relative URL in Vite dev web mode", async () => {
     const fetchMock = vi.fn<FetchLike>();
     vi.stubGlobal("fetch", fetchMock);
@@ -187,7 +268,7 @@ describe("taskDocumentsApi URLs", () => {
     const request = store.dispatch(
       taskDocumentsApi.endpoints.getTaskDocument.initiate({
         taskId: "task/1",
-        slug: "main plan",
+        slug: "main plan?#%2F",
         version: 2,
       }),
     );
@@ -196,7 +277,7 @@ describe("taskDocumentsApi URLs", () => {
 
     const url = firstRequestUrl(fetchMock);
     expect(url).toBe(
-      "https://remote.example.com/root/v1/task/task%2F1/documents/main%20plan?version=2",
+      "https://remote.example.com/root/v1/task/task%2F1/documents/main%20plan%3F%23%252F?version=2",
     );
   });
 

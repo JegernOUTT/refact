@@ -48,6 +48,7 @@ async fn custom_bearer_full_request_omits_internal_config_and_subscription_mutat
     model.endpoint = runtime.chat_endpoint;
     model.extra_headers = runtime.extra_headers;
     let params = StreamRunParams {
+        recovery_budget: None,
         llm_request: LlmRequest::new(
             model.id.clone(),
             vec![crate::call_validation::ChatMessage::new(
@@ -81,6 +82,7 @@ async fn cloud_retry_rechecks_sealed_privacy_before_preparation() {
     let mut model = tests::model_record("untrusted");
     model.wire_format = WireFormat::AnthropicMessages;
     let params = StreamRunParams {
+        recovery_budget: None,
         llm_request: tests::request_with_secret(),
         model_rec: model.clone(),
         chat_id: None,
@@ -361,6 +363,7 @@ fn retry_params(config: Option<ClaudeTransportConfig>) -> StreamRunParams {
         model.auth_token = "subscription-rejected".into();
     }
     StreamRunParams {
+        recovery_budget: None,
         llm_request: LlmRequest::new(
             model.id.clone(),
             vec![crate::call_validation::ChatMessage::new(

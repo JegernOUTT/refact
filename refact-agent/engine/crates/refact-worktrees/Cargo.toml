@@ -12,7 +12,9 @@ serde_json.workspace = true
 sha2.workspace = true
 git2.workspace = true
 dunce.workspace = true
+fd-lock.workspace = true
 tempfile.workspace = true
 uuid.workspace = true
+libc.workspace = true
 
 [dev-dependencies]

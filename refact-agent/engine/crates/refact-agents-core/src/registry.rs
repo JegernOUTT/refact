@@ -190,6 +190,32 @@ pub struct AgentRuntime {
     delivery_state: Arc<Mutex<RunnerDeliveryState>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ParentRun {
+    agent_id: String,
+    generation: u64,
+    abort_flag: Arc<AtomicBool>,
+}
+
+pub struct CheckoutSetup {
+    record: BackgroundAgent,
+    abort: Arc<AtomicBool>,
+    parent: Option<ParentRun>,
+    operation: uuid::Uuid,
+}
+
+impl CheckoutSetup {
+    pub fn operation(&self) -> uuid::Uuid {
+        self.operation
+    }
+}
+
+#[derive(Debug)]
+pub struct CheckoutSetupError {
+    pub message: String,
+    pub retain_checkout: bool,
+}
+
 #[derive(Default)]
 struct RunnerDeliveryState {
     claimed: HashSet<String>,
@@ -212,6 +238,7 @@ pub struct BackgroundAgentRegistry {
 struct AgentRecords {
     by_id: HashMap<String, BackgroundAgent>,
     by_child: HashMap<String, String>,
+    cancelled_subtrees: HashMap<String, u64>,
 }
 
 impl std::ops::Deref for AgentRecords {
@@ -331,8 +358,58 @@ impl BackgroundAgentRegistry {
         req: CreateAgentRequest,
         agent_id: impl Into<String>,
     ) -> Result<(BackgroundAgent, Arc<AtomicBool>, Arc<Notify>), String> {
+        let parent = self.parent_run(&req.parent_chat_id).await?;
+        self.create_with_id_for_parent_run(req, agent_id.into(), parent.as_ref())
+            .await
+    }
+
+    pub async fn parent_run(&self, chat_id: &str) -> Result<Option<ParentRun>, String> {
+        let records = self.records.read().await;
+        let Some(agent_id) = records.by_child.get(chat_id) else {
+            return Ok(None);
+        };
+        let record = &records.by_id[agent_id];
+        if record.status.is_terminal() {
+            return Err("parent agent run has stopped".into());
+        }
+        let runtime = self.runtime.read().await;
+        let runtime = runtime
+            .get(agent_id)
+            .ok_or("parent agent run unavailable")?;
+        let parent = ParentRun {
+            agent_id: agent_id.clone(),
+            generation: record.run_generation,
+            abort_flag: runtime.abort_flag.clone(),
+        };
+        validate_parent_run(&records, chat_id, Some(&parent))?;
+        Ok(Some(parent))
+    }
+
+    pub async fn validate_parent_run(
+        &self,
+        chat_id: &str,
+        parent: Option<&ParentRun>,
+    ) -> Result<(), String> {
+        let records = self.records.read().await;
+        validate_parent_run(&records, chat_id, parent)
+    }
+
+    pub async fn create_for_parent_run(
+        &self,
+        req: CreateAgentRequest,
+        parent: Option<&ParentRun>,
+    ) -> Result<(BackgroundAgent, Arc<AtomicBool>, Arc<Notify>), String> {
+        self.create_with_id_for_parent_run(req, format!("bgagent-{}", Uuid::new_v4()), parent)
+            .await
+    }
+
+    async fn create_with_id_for_parent_run(
+        &self,
+        req: CreateAgentRequest,
+        agent_id: String,
+        parent: Option<&ParentRun>,
+    ) -> Result<(BackgroundAgent, Arc<AtomicBool>, Arc<Notify>), String> {
         let now = Utc::now();
-        let agent_id = agent_id.into();
         let record = BackgroundAgent {
             schema_version: storage::SCHEMA_VERSION,
             run_generation: 1,
@@ -400,15 +477,11 @@ impl BackgroundAgentRegistry {
             if records.contains_key(&agent_id) {
                 return Err("agent id already exists".to_string());
             }
-            records.insert(agent_id.clone(), record.clone());
-            let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
-            drop(records);
-            self.flush_records(snapshot).await?;
-        }
-        {
+            validate_parent_run(&records, &record.parent_chat_id, parent)?;
             let mut runtime = self.runtime.write().await;
+            records.insert(agent_id.clone(), record.clone());
             runtime.insert(
-                agent_id,
+                agent_id.clone(),
                 AgentRuntime {
                     abort_flag: abort_flag.clone(),
                     interrupt_notify: Arc::new(Notify::new()),
@@ -419,6 +492,31 @@ impl BackgroundAgentRegistry {
                     delivery_state: Arc::new(Mutex::new(RunnerDeliveryState::default())),
                 },
             );
+        }
+        if let Err(error) = self.flush_records(Vec::new()).await {
+            let mut records = self.records.write().await;
+            let mut runtime = self.runtime.write().await;
+            abort_flag.store(true, Ordering::SeqCst);
+            if runtime
+                .get(&agent_id)
+                .is_some_and(|entry| Arc::ptr_eq(&entry.abort_flag, &abort_flag))
+            {
+                runtime.remove(&agent_id);
+            }
+            if let Some(record) = records.get_mut(&agent_id) {
+                if record.run_generation == 1 && !record.status.is_terminal() {
+                    record.status = BgAgentStatus::Failed;
+                    record.error = Some(error.clone());
+                    record.finished_at = Some(Utc::now());
+                    self.settle_terminal(record, Utc::now());
+                    touch_record(record, Utc::now());
+                }
+            }
+            notify.notify_waiters();
+            return Err(error);
+        }
+        if abort_flag.load(Ordering::SeqCst) {
+            return Err("launch cancelled during registry insertion".into());
         }
         Ok((record, abort_flag, notify))
     }
@@ -525,6 +623,239 @@ impl BackgroundAgentRegistry {
         storage::load_run_config(&self.storage_root, agent_id, generation, max_bytes).await
     }
 
+    pub async fn recovery_run_config(
+        &self,
+        parent_chat_id: &str,
+        agent_id: &str,
+        current_generation: u64,
+        generation: u64,
+        max_bytes: usize,
+    ) -> Result<
+        (
+            storage::AcceptedLaunchPayload,
+            Option<storage::AcceptedLaunchPayload>,
+        ),
+        String,
+    > {
+        let record = self.get(parent_chat_id, agent_id).await?;
+        if record.run_generation != current_generation
+            || generation == 0
+            || generation > current_generation
+        {
+            return Err("recovery configuration generation does not match".into());
+        }
+        let config =
+            storage::load_run_config(&self.storage_root, agent_id, generation, max_bytes).await?;
+        let setup =
+            storage::load_checkout_setup(&self.storage_root, agent_id, generation, max_bytes)
+                .await?;
+        Ok((config, setup))
+    }
+
+    pub async fn begin_checkout_setup(
+        &self,
+        parent_chat_id: &str,
+        agent_id: &str,
+        generation: u64,
+        change_seq: u64,
+        abort: &Arc<AtomicBool>,
+        parent: Option<&ParentRun>,
+        operation: uuid::Uuid,
+    ) -> Result<CheckoutSetup, String> {
+        let setup = CheckoutSetup {
+            record: self.get(parent_chat_id, agent_id).await?,
+            abort: abort.clone(),
+            parent: parent.cloned(),
+            operation,
+        };
+        if setup.record.run_generation != generation || setup.record.change_seq != change_seq {
+            return Err("child changed before checkout setup".into());
+        }
+        let records = self.records.read().await;
+        self.validate_checkout_setup(&records, &setup).await?;
+        Ok(setup)
+    }
+
+    pub async fn with_checkout_setup<T>(
+        &self,
+        setup: &CheckoutSetup,
+        operation: impl FnOnce(&BackgroundAgent) -> T,
+    ) -> Result<T, String> {
+        let records = self.records.read().await;
+        self.validate_checkout_setup(&records, setup).await?;
+        Ok(operation(&setup.record))
+    }
+
+    pub async fn finish_queued_resume(
+        &self,
+        agent_id: &str,
+        generation: u64,
+        abort: &Arc<AtomicBool>,
+        error: String,
+        cancelled: bool,
+    ) -> Result<BackgroundAgent, String> {
+        let mut records = self.records.write().await;
+        let mut runtime = self.runtime.write().await;
+        let current = records.get(agent_id).ok_or("child unavailable")?;
+        if current.run_generation != generation {
+            return Err("child moved to another generation".into());
+        }
+        if current.status.is_terminal() {
+            return Ok(current.clone());
+        }
+        if current.status != BgAgentStatus::Queued
+            || !runtime
+                .get(agent_id)
+                .is_some_and(|run| Arc::ptr_eq(&run.abort_flag, abort))
+        {
+            return Err("queued child attempt identity changed".into());
+        }
+        let mut updated = current.clone();
+        let now = Utc::now();
+        updated.status = if cancelled || abort.load(Ordering::Acquire) {
+            BgAgentStatus::Cancelled
+        } else {
+            BgAgentStatus::Failed
+        };
+        updated.error = Some(error);
+        updated.finished_at = Some(now);
+        updated.result_payload_path = None;
+        self.settle_terminal(&mut updated, now);
+        touch_record(&mut updated, now);
+        records.insert(agent_id.to_string(), updated.clone());
+        if let Some(run) = runtime.remove(agent_id) {
+            run.notify.notify_waiters();
+        }
+        drop(runtime);
+        drop(records);
+        self.flush_records(Vec::new()).await?;
+        Ok(updated)
+    }
+
+    pub async fn rollback_unaccepted_resume(
+        &self,
+        previous: &BackgroundAgent,
+        queued: &BackgroundAgent,
+        abort: &Arc<AtomicBool>,
+    ) -> Result<bool, String> {
+        if !storage::run_config_absent(&self.storage_root, &queued.agent_id, queued.run_generation)
+            .await
+        {
+            return Ok(false);
+        }
+        let mut records = self.records.write().await;
+        let mut runtime = self.runtime.write().await;
+        if previous.run_generation.checked_add(1) != Some(queued.run_generation)
+            || previous.agent_id != queued.agent_id
+            || previous.parent_chat_id != queued.parent_chat_id
+            || !previous.status.is_terminal()
+            || records.get(&queued.agent_id).is_none_or(|current| {
+                current.run_generation != queued.run_generation
+                    || current.change_seq != queued.change_seq
+                    || current.status != BgAgentStatus::Queued
+            })
+            || !runtime
+                .get(&queued.agent_id)
+                .is_some_and(|run| Arc::ptr_eq(&run.abort_flag, abort))
+            || abort.load(Ordering::Acquire)
+        {
+            return Ok(false);
+        }
+        abort.store(true, Ordering::Release);
+        if let Some(run) = runtime.remove(&queued.agent_id) {
+            run.notify.notify_waiters();
+        }
+        let mut restored = previous.clone();
+        restored.change_seq = queued.change_seq;
+        touch_record(&mut restored, Utc::now());
+        records.insert(restored.agent_id.clone(), restored);
+        drop(runtime);
+        drop(records);
+        self.flush_records(Vec::new()).await?;
+        Ok(true)
+    }
+
+    async fn validate_checkout_setup(
+        &self,
+        records: &AgentRecords,
+        setup: &CheckoutSetup,
+    ) -> Result<(), String> {
+        validate_parent_run(records, &setup.record.parent_chat_id, setup.parent.as_ref())?;
+        let current = records
+            .get(&setup.record.agent_id)
+            .ok_or("child unavailable")?;
+        let runtime = self.runtime.read().await;
+        if current.run_generation != setup.record.run_generation
+            || current.change_seq != setup.record.change_seq
+            || current.status != BgAgentStatus::Queued
+            || current.worktree_id != setup.record.worktree_id
+            || current.worktree_branch != setup.record.worktree_branch
+            || setup.abort.load(Ordering::Acquire)
+            || !runtime
+                .get(&current.agent_id)
+                .is_some_and(|run| Arc::ptr_eq(&run.abort_flag, &setup.abort))
+        {
+            return Err("child changed or cancelled during checkout setup".into());
+        }
+        Ok(())
+    }
+
+    pub async fn commit_checkout_setup(
+        &self,
+        setup: &CheckoutSetup,
+        worktree_id: String,
+        worktree_branch: Option<String>,
+        payload: &storage::AcceptedLaunchPayload,
+        remember: impl FnOnce(&BackgroundAgent),
+    ) -> Result<BackgroundAgent, CheckoutSetupError> {
+        let failure = |message, retain_checkout| CheckoutSetupError {
+            message,
+            retain_checkout,
+        };
+        {
+            let records = self.records.read().await;
+            self.validate_checkout_setup(&records, setup)
+                .await
+                .map_err(|error| failure(error, false))?;
+        }
+        storage::save_checkout_setup(
+            &self.storage_root,
+            &setup.record.agent_id,
+            setup.record.run_generation,
+            payload,
+        )
+        .await
+        .map_err(|error| {
+            failure(
+                format!("{error}; checkout publication outcome unknown; inspect before recovery"),
+                true,
+            )
+        })?;
+        let mut records = self.records.write().await;
+        self.validate_checkout_setup(&records, setup)
+            .await
+            .map_err(|error| {
+                failure(
+                    format!("{error}; published checkout setup retained; inspect before recovery"),
+                    true,
+                )
+            })?;
+        let mut updated = setup.record.clone();
+        updated.worktree_id = Some(worktree_id);
+        updated.worktree_branch = worktree_branch;
+        touch_record(&mut updated, Utc::now());
+        records.insert(updated.agent_id.clone(), updated.clone());
+        remember(&updated);
+        drop(records);
+        self.flush_records(Vec::new()).await.map_err(|error| {
+            failure(
+                format!("{error}; checkout committed in memory; retained for recovery"),
+                true,
+            )
+        })?;
+        Ok(updated)
+    }
+
     pub async fn update_progress(
         self: &Arc<Self>,
         agent_id: &str,
@@ -610,12 +941,32 @@ impl BackgroundAgentRegistry {
         expected_change_seq: u64,
         require_cap: bool,
     ) -> Result<(BackgroundAgent, Arc<AtomicBool>, Arc<Notify>), String> {
+        let parent = self.parent_run(parent_chat_id).await?;
+        self.reopen_for_parent_run(
+            agent_id,
+            parent_chat_id,
+            expected_change_seq,
+            require_cap,
+            parent.as_ref(),
+        )
+        .await
+    }
+
+    pub async fn reopen_for_parent_run(
+        self: &Arc<Self>,
+        agent_id: &str,
+        parent_chat_id: &str,
+        expected_change_seq: u64,
+        require_cap: bool,
+        parent: Option<&ParentRun>,
+    ) -> Result<(BackgroundAgent, Arc<AtomicBool>, Arc<Notify>), String> {
         let abort_flag = Arc::new(AtomicBool::new(false));
         let notify = Arc::new(Notify::new());
         let (previous, updated) = {
             // Keep the records -> runtime order used by terminal retirement. Publish
             // the claim and its cancellation handle together, before awaiting disk IO.
             let mut records = self.records.write().await;
+            validate_parent_run(&records, parent_chat_id, parent)?;
             let previous = records
                 .get(agent_id)
                 .cloned()
@@ -945,7 +1296,7 @@ impl BackgroundAgentRegistry {
         if let Some(notify) = self.notify_for(agent_id).await {
             notify.notify_waiters();
         }
-        self.retire_runtime(agent_id).await;
+        self.retire_runtime(agent_id, updated.run_generation).await;
         Ok(updated)
     }
 
@@ -994,7 +1345,7 @@ impl BackgroundAgentRegistry {
         if let Some(notify) = self.notify_for(agent_id).await {
             notify.notify_waiters();
         }
-        self.retire_runtime(agent_id).await;
+        self.retire_runtime(agent_id, updated.run_generation).await;
         Ok(updated)
     }
 
@@ -1036,7 +1387,7 @@ impl BackgroundAgentRegistry {
         if let Some(notify) = self.notify_for(agent_id).await {
             notify.notify_waiters();
         }
-        self.retire_runtime(agent_id).await;
+        self.retire_runtime(agent_id, updated.run_generation).await;
         Ok(updated)
     }
 
@@ -1071,7 +1422,7 @@ impl BackgroundAgentRegistry {
         if let Some(notify) = self.notify_for(agent_id).await {
             notify.notify_waiters();
         }
-        self.retire_runtime(agent_id).await;
+        self.retire_runtime(agent_id, updated.run_generation).await;
         Ok(updated)
     }
 
@@ -1083,10 +1434,25 @@ impl BackgroundAgentRegistry {
         expected_run_generation: Option<u64>,
         reason: Option<String>,
     ) -> Result<(BackgroundAgent, bool), String> {
+        self.mark_closed_inner(agent_id, None, expected_run_generation, reason, |_| {})
+            .await
+    }
+
+    async fn mark_closed_inner(
+        &self,
+        agent_id: &str,
+        parent_chat_id: Option<&str>,
+        expected_run_generation: Option<u64>,
+        reason: Option<String>,
+        on_closed: impl FnOnce(&BackgroundAgent),
+    ) -> Result<(BackgroundAgent, bool), String> {
         let updated = {
             let mut records = self.records.write().await;
             let current = records
                 .get(agent_id)
+                .filter(|record| {
+                    parent_chat_id.is_none_or(|parent| record.parent_chat_id == parent)
+                })
                 .cloned()
                 .ok_or_else(|| "agent not found".to_string())?;
             if expected_run_generation
@@ -1106,6 +1472,7 @@ impl BackgroundAgentRegistry {
                     current.status.as_str()
                 ));
             }
+            let runtime = self.runtime.read().await;
             let mut updated = current;
             let now = Utc::now();
             updated.status = BgAgentStatus::Closed;
@@ -1115,15 +1482,18 @@ impl BackgroundAgentRegistry {
             self.settle_terminal(&mut updated, now);
             touch_record(&mut updated, now);
             records.insert(agent_id.to_string(), updated.clone());
-            let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
-            drop(records);
-            self.flush_records(snapshot).await?;
+            if let Some(runtime) = runtime.get(agent_id) {
+                runtime.abort_flag.store(true, Ordering::SeqCst);
+                runtime.pause.wake_for_abort();
+                runtime.notify.notify_waiters();
+                runtime.interrupt_notify.notify_waiters();
+            }
+            on_closed(&updated);
             updated
         };
-        if let Some(notify) = self.notify_for(agent_id).await {
-            notify.notify_waiters();
-        }
-        self.retire_runtime(agent_id).await;
+        let persisted = self.flush_records(Vec::new()).await;
+        self.retire_runtime(agent_id, updated.run_generation).await;
+        persisted?;
         Ok((updated, false))
     }
 
@@ -1135,17 +1505,32 @@ impl BackgroundAgentRegistry {
         expected_run_generation: Option<u64>,
         reason: Option<String>,
     ) -> Result<(BackgroundAgent, bool), String> {
-        let record = self.get(parent_chat_id, agent_id).await?;
-        if record.status == BgAgentStatus::Closed
-            && expected_run_generation.is_none_or(|generation| generation == record.run_generation)
-        {
-            return Ok((record, true));
-        }
-        if let Some(abort_flag) = self.abort_flag(agent_id).await {
-            abort_flag.store(true, Ordering::SeqCst);
-        }
-        self.mark_closed(agent_id, expected_run_generation, reason)
-            .await
+        self.close_with(
+            parent_chat_id,
+            agent_id,
+            expected_run_generation,
+            reason,
+            |_| {},
+        )
+        .await
+    }
+
+    pub async fn close_with(
+        &self,
+        parent_chat_id: &str,
+        agent_id: &str,
+        expected_run_generation: Option<u64>,
+        reason: Option<String>,
+        on_closed: impl FnOnce(&BackgroundAgent),
+    ) -> Result<(BackgroundAgent, bool), String> {
+        self.mark_closed_inner(
+            agent_id,
+            Some(parent_chat_id),
+            expected_run_generation,
+            reason,
+            on_closed,
+        )
+        .await
     }
 
     pub async fn mark_waiting_for_approval(
@@ -1492,17 +1877,11 @@ impl BackgroundAgentRegistry {
         agent_id: &str,
         reason: Option<String>,
     ) -> Result<BackgroundAgent, String> {
-        let record = self.get(parent_chat_id, agent_id).await?;
-        if record.status.is_terminal() {
-            return Ok(record);
-        }
-        if let Some(runtime) = self.runtime.read().await.get(agent_id).cloned() {
-            runtime.abort_flag.store(true, Ordering::SeqCst);
-            // Cancellation always unblocks a parked pause; the loop then sees
-            // the abort flag and exits without another dispatch.
-            runtime.pause.wake_for_abort();
-        }
-        self.mark_cancelled(agent_id, reason).await
+        self.cancel_subtree(parent_chat_id, agent_id, false, reason)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "agent not found".into())
     }
 
     pub async fn cancel_subtree(
@@ -1512,23 +1891,114 @@ impl BackgroundAgentRegistry {
         subtree: bool,
         reason: Option<String>,
     ) -> Result<Vec<BackgroundAgent>, String> {
-        let root = self.get(parent_chat_id, agent_id).await?;
-        let mut records = vec![root];
-        if subtree {
-            records.extend(self.list_descendants(agent_id).await);
-        }
-        let mut updated = Vec::with_capacity(records.len());
-        for record in records {
-            if record.status.is_terminal() {
-                updated.push(record);
+        self.cancel_subtree_with_outcome(parent_chat_id, agent_id, subtree, reason)
+            .await
+            .map(|(records, _)| records)
+    }
+
+    pub async fn cancel_subtree_with_outcome(
+        &self,
+        parent_chat_id: &str,
+        agent_id: &str,
+        subtree: bool,
+        reason: Option<String>,
+    ) -> Result<(Vec<BackgroundAgent>, HashSet<String>), String> {
+        let (mut updated, cancelled) = {
+            let mut records = self.records.write().await;
+            let root = scoped_record(&records, parent_chat_id, agent_id)?;
+            let mut selected = vec![root];
+            let mut seen = HashSet::from([agent_id.to_string()]);
+            let mut index = 0;
+            while subtree && index < selected.len() {
+                if let Some(chat_id) = selected[index].child_chat_id.as_deref() {
+                    let mut children: Vec<_> = records
+                        .values()
+                        .filter(|record| record.parent_chat_id == chat_id)
+                        .filter(|record| seen.insert(record.agent_id.clone()))
+                        .cloned()
+                        .collect();
+                    children.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+                    selected.extend(children);
+                }
+                index += 1;
+            }
+            let runtime = self.runtime.read().await;
+            let mut cancelled = HashSet::new();
+            for record in &mut selected {
+                if subtree {
+                    records
+                        .cancelled_subtrees
+                        .insert(record.agent_id.clone(), record.run_generation);
+                }
+                if record.status.is_terminal() {
+                    continue;
+                }
+                if let Some(runtime) = runtime.get(&record.agent_id) {
+                    runtime.abort_flag.store(true, Ordering::SeqCst);
+                    runtime.pause.wake_for_abort();
+                    runtime.notify.notify_waiters();
+                    runtime.interrupt_notify.notify_waiters();
+                }
+                let now = Utc::now();
+                record.status = BgAgentStatus::Cancelled;
+                record.error = reason.clone();
+                record.current_tool = None;
+                record.finished_at = Some(now);
+                self.settle_terminal(record, now);
+                touch_record(record, now);
+                records.insert(record.agent_id.clone(), record.clone());
+                cancelled.insert(record.agent_id.clone());
+            }
+            (selected, cancelled)
+        };
+        let mut persistence_error = None;
+        for record in &mut updated {
+            if !cancelled.contains(&record.agent_id) {
                 continue;
             }
-            updated.push(
-                self.cancel(&record.parent_chat_id, &record.agent_id, reason.clone())
-                    .await?,
-            );
+            let error = reason.as_deref().unwrap_or("Agent was cancelled.");
+            let payload = terminal_result_payload("cancelled", error, record);
+            let path =
+                match storage::save_result_payload(&self.storage_root, &record.agent_id, &payload)
+                    .await
+                {
+                    Ok(path) => path,
+                    Err(error) => {
+                        persistence_error.get_or_insert(error);
+                        continue;
+                    }
+                };
+            let mut records = self.records.write().await;
+            if let Some(current) = records.get_mut(&record.agent_id) {
+                if current.run_generation == record.run_generation
+                    && current.status == BgAgentStatus::Cancelled
+                {
+                    current.result_payload_path = Some(path.clone());
+                    record.result_payload_path = Some(path);
+                }
+            }
         }
-        Ok(updated)
+        if let Err(error) = self.flush_records(Vec::new()).await {
+            persistence_error.get_or_insert(error);
+        }
+        {
+            let records = self.records.read().await;
+            let mut runtime = self.runtime.write().await;
+            for record in &updated {
+                if cancelled.contains(&record.agent_id)
+                    && records.get(&record.agent_id).is_some_and(|current| {
+                        current.run_generation == record.run_generation
+                            && current.status == BgAgentStatus::Cancelled
+                    })
+                {
+                    runtime.remove(&record.agent_id);
+                }
+            }
+        }
+        match persistence_error {
+            Some(error) => Err(error),
+            None => Ok((updated, cancelled)),
+        }
     }
 
     pub async fn abort_flag(&self, agent_id: &str) -> Option<Arc<AtomicBool>> {
@@ -2273,7 +2743,13 @@ impl BackgroundAgentRegistry {
             .map(|runtime| runtime.notify.clone())
     }
 
-    async fn retire_runtime(&self, agent_id: &str) {
+    async fn retire_runtime(&self, agent_id: &str, generation: u64) {
+        let records = self.records.read().await;
+        if records.get(agent_id).is_none_or(|record| {
+            record.run_generation != generation || !record.status.is_terminal()
+        }) {
+            return;
+        }
         if let Some(runtime) = self.runtime.write().await.remove(agent_id) {
             if runtime.pause.is_requested() {
                 runtime.abort_flag.store(true, Ordering::SeqCst);
@@ -2583,6 +3059,29 @@ fn scoped_record(
         .ok_or_else(|| "agent not found".to_string())
 }
 
+fn validate_parent_run(
+    records: &AgentRecords,
+    chat_id: &str,
+    parent: Option<&ParentRun>,
+) -> Result<(), String> {
+    match (records.by_child.get(chat_id), parent) {
+        (None, None) => Ok(()),
+        (Some(agent_id), Some(parent)) if agent_id == &parent.agent_id => {
+            let record = &records.by_id[agent_id];
+            if record.run_generation != parent.generation
+                || (record.status.is_terminal() && record.status != BgAgentStatus::Completed)
+                || parent.abort_flag.load(Ordering::SeqCst)
+                || records.cancelled_subtrees.get(agent_id) == Some(&parent.generation)
+            {
+                Err("parent agent run changed or was cancelled".into())
+            } else {
+                Ok(())
+            }
+        }
+        _ => Err("parent agent run identity changed".into()),
+    }
+}
+
 fn terminal_cutoff(hours: i64) -> Option<DateTime<Utc>> {
     if hours < 0 {
         return None;
@@ -2852,6 +3351,84 @@ mod tests {
         assert!(resumed.is_err());
         assert_eq!(cancelled.unwrap().status, BgAgentStatus::Cancelled);
         assert!(!registry.has_runtime(&record.agent_id).await);
+    }
+
+    #[tokio::test]
+    async fn subtree_cancel_fences_insertion_before_flush_and_old_parent_generations() {
+        let (_temp, registry) = registry().await;
+        let (root, _, _) = registry.create(request("root-owner")).await.unwrap();
+        registry
+            .mark_running(&root.agent_id, "root-child".into())
+            .await
+            .unwrap();
+        let parent = registry.parent_run("root-child").await.unwrap().unwrap();
+        assert_eq!(parent.agent_id, root.agent_id);
+        assert_eq!(parent.generation, 1);
+        let disk = registry.storage_write.lock().await;
+        let create = registry.create_with_id_for_parent_run(
+            request("root-child"),
+            "inserting-child".into(),
+            Some(&parent),
+        );
+        tokio::pin!(create);
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(create.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        let inserted = registry.get_any("inserting-child").await.unwrap();
+        assert_eq!(inserted.parent_chat_id, "root-child");
+        assert_eq!(inserted.status, BgAgentStatus::Queued);
+        let abort = registry.abort_flag(&inserted.agent_id).await.unwrap();
+        let cancel = registry.cancel_subtree("root-owner", &root.agent_id, true, None);
+        tokio::pin!(cancel);
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(cancel.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert!(abort.load(Ordering::SeqCst));
+        assert_eq!(
+            registry.get_any(&inserted.agent_id).await.unwrap().status,
+            BgAgentStatus::Cancelled
+        );
+        assert!(registry
+            .create_for_parent_run(request("root-child"), Some(&parent))
+            .await
+            .is_err());
+        drop(disk);
+        let (created, cancelled) = tokio::join!(create, cancel);
+        assert!(created.is_err());
+        let cancelled = cancelled.unwrap();
+        assert_eq!(
+            cancelled
+                .iter()
+                .map(|record| record.agent_id.as_str())
+                .collect::<HashSet<_>>(),
+            HashSet::from([root.agent_id.as_str(), "inserting-child"])
+        );
+        assert!(!registry.has_runtime(&inserted.agent_id).await);
+        let stopped = registry.get_any(&root.agent_id).await.unwrap();
+        let (_, next_abort, _) = registry
+            .reopen(&root.agent_id, "root-owner", stopped.change_seq, false)
+            .await
+            .unwrap();
+        let next = registry.parent_run("root-child").await.unwrap().unwrap();
+        assert_eq!(next.generation, 2);
+        assert!(!next_abort.load(Ordering::SeqCst));
+        assert!(registry
+            .create_for_parent_run(request("root-child"), Some(&parent))
+            .await
+            .is_err());
+        let (fresh, _, _) = registry
+            .create_for_parent_run(request("root-child"), Some(&next))
+            .await
+            .unwrap();
+        assert_eq!(fresh.status, BgAgentStatus::Queued);
+        assert_eq!(
+            registry.get_any(&inserted.agent_id).await.unwrap().status,
+            BgAgentStatus::Cancelled
+        );
     }
 
     #[tokio::test]
@@ -3622,10 +4199,39 @@ mod tests {
     async fn closing_is_terminal_resumable_idempotent_and_refuses_a_stale_generation() {
         let (_temp, registry) = registry().await;
         let (record, abort, _) = registry.create(request("parent")).await.unwrap();
-        registry
+        let record = registry
             .mark_running(&record.agent_id, "child-chat".into())
             .await
             .unwrap();
+        let runtime = registry.runtime.read().await[&record.agent_id].clone();
+        runtime.pause.request();
+        let held = runtime.pause.hold(Some(&abort));
+        tokio::pin!(held);
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(held.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert!(runtime.pause.is_quiescent());
+        let pause_woken = runtime.pause.wake.notified();
+        let notified = runtime.notify.notified();
+        let interrupted = runtime.interrupt_notify.notified();
+        tokio::pin!(pause_woken, notified, interrupted);
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(pause_woken.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(notified.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(interrupted.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
 
         assert!(registry
             .mark_closed(&record.agent_id, Some(7), None)
@@ -3633,16 +4239,92 @@ mod tests {
             .unwrap_err()
             .contains("another generation"));
         assert!(!abort.load(Ordering::SeqCst));
-
-        let (closed, already) = registry
-            .close(
-                "parent",
-                &record.agent_id,
-                Some(record.run_generation),
-                Some("held for later".into()),
-            )
+        assert!(registry
+            .close("parent", &record.agent_id, Some(7), None)
             .await
-            .unwrap();
+            .unwrap_err()
+            .contains("another generation"));
+        assert!(registry
+            .close_with("other-parent", &record.agent_id, None, None, |_| {
+                panic!("foreign close released an execution")
+            })
+            .await
+            .is_err());
+        assert!(!abort.load(Ordering::SeqCst));
+        assert_eq!(registry.get_any(&record.agent_id).await.unwrap(), record);
+        assert!(Arc::ptr_eq(
+            &registry.abort_flag(&record.agent_id).await.unwrap(),
+            &abort
+        ));
+        assert!(Arc::ptr_eq(
+            &registry.pause_gate(&record.agent_id).await.unwrap(),
+            &runtime.pause
+        ));
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(held.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(pause_woken.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(notified.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(interrupted.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+
+        let released = AtomicBool::new(false);
+        let disk = registry.storage_write.lock().await;
+        let close = registry.close_with(
+            "parent",
+            &record.agent_id,
+            Some(record.run_generation),
+            Some("held for later".into()),
+            |closed| {
+                assert_eq!(closed.run_generation, record.run_generation);
+                assert_eq!(closed.child_chat_id, record.child_chat_id);
+                assert!(abort.load(Ordering::SeqCst));
+                released.store(true, Ordering::SeqCst);
+            },
+        );
+        tokio::pin!(close);
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(close.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert!(released.load(Ordering::SeqCst));
+        assert!(abort.load(Ordering::SeqCst));
+        assert!(matches!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(held.as_mut().poll(cx))).await,
+            std::task::Poll::Ready(true)
+        ));
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(pause_woken.as_mut().poll(cx)))
+                .await
+                .is_ready()
+        );
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(notified.as_mut().poll(cx)))
+                .await
+                .is_ready()
+        );
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(interrupted.as_mut().poll(cx)))
+                .await
+                .is_ready()
+        );
+        assert!(registry.has_runtime(&record.agent_id).await);
+        drop(disk);
+        let (closed, already) = close.await.unwrap();
         assert!(!already);
         assert_eq!(closed.status, BgAgentStatus::Closed);
         assert!(closed.status.is_terminal());
@@ -3653,7 +4335,13 @@ mod tests {
         assert!(!registry.has_runtime(&record.agent_id).await);
 
         let (again, already) = registry
-            .close("parent", &record.agent_id, None, Some("second".into()))
+            .close_with(
+                "parent",
+                &record.agent_id,
+                None,
+                Some("second".into()),
+                |_| panic!("idempotent close released an execution"),
+            )
             .await
             .unwrap();
         assert!(already);
@@ -3682,6 +4370,30 @@ mod tests {
             .close("other-parent", &record.agent_id, None, None)
             .await
             .is_err());
+
+        let (reopened, fresh_abort, _) = registry
+            .reopen(&record.agent_id, "parent", closed.change_seq, false)
+            .await
+            .unwrap();
+        assert_eq!(reopened.run_generation, record.run_generation + 1);
+        assert!(!Arc::ptr_eq(&abort, &fresh_abort));
+        assert!(registry
+            .close_with(
+                "parent",
+                &record.agent_id,
+                Some(record.run_generation),
+                None,
+                |_| panic!("stale close released a reopened execution"),
+            )
+            .await
+            .unwrap_err()
+            .contains("another generation"));
+        assert!(!fresh_abort.load(Ordering::SeqCst));
+        assert_eq!(registry.get_any(&record.agent_id).await.unwrap(), reopened);
+        assert!(Arc::ptr_eq(
+            &registry.abort_flag(&record.agent_id).await.unwrap(),
+            &fresh_abort
+        ));
     }
 
     #[tokio::test]
@@ -3773,6 +4485,161 @@ mod tests {
         assert!(legacy.worktree_id.is_none());
         assert!(legacy.worktree_branch.is_none());
         assert!(legacy.merge_status.is_none());
+        let abort = registry.abort_flag(&record.agent_id).await.unwrap();
+        let operation = uuid::Uuid::new_v4();
+        assert!(registry
+            .begin_checkout_setup(
+                "other-parent",
+                &record.agent_id,
+                2,
+                continued.change_seq,
+                &abort,
+                None,
+                operation
+            )
+            .await
+            .is_err());
+        let setup = registry
+            .begin_checkout_setup(
+                "parent",
+                &record.agent_id,
+                2,
+                continued.change_seq,
+                &abort,
+                None,
+                operation,
+            )
+            .await
+            .unwrap();
+        let payload = storage::AcceptedLaunchPayload::serialize(
+            &serde_json::json!({"operation": operation}),
+            256,
+        )
+        .unwrap();
+        let changed = registry
+            .update_progress(&record.agent_id, "concurrent edit".into(), 3)
+            .await
+            .unwrap();
+        let refused = registry
+            .commit_checkout_setup(&setup, "wt-stale".into(), None, &payload, |_| {})
+            .await
+            .unwrap_err();
+        assert!(!refused.retain_checkout);
+        assert_eq!(registry.get_any(&record.agent_id).await.unwrap(), changed);
+        assert!(
+            storage::load_checkout_setup(&registry.storage_root, &record.agent_id, 2, 256)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let setup = registry
+            .begin_checkout_setup(
+                "parent",
+                &record.agent_id,
+                2,
+                changed.change_seq,
+                &abort,
+                None,
+                operation,
+            )
+            .await
+            .unwrap();
+        let remembered = std::sync::atomic::AtomicBool::new(false);
+        let disk = registry.storage_write.lock().await;
+        let publication = registry.commit_checkout_setup(
+            &setup,
+            "wt-fresh".into(),
+            Some("child-fresh".into()),
+            &payload,
+            |record| {
+                assert_eq!(record.worktree_id.as_deref(), Some("wt-fresh"));
+                remembered.store(true, Ordering::Release);
+            },
+        );
+        tokio::pin!(publication);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                assert!(std::future::poll_fn(|cx| std::task::Poll::Ready(
+                    std::future::Future::poll(publication.as_mut(), cx)
+                ))
+                .await
+                .is_pending());
+                if remembered.load(Ordering::Acquire) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            registry
+                .get_any(&record.agent_id)
+                .await
+                .unwrap()
+                .worktree_id
+                .as_deref(),
+            Some("wt-fresh")
+        );
+        assert_eq!(
+            storage::load_checkout_setup(&registry.storage_root, &record.agent_id, 2, 256)
+                .await
+                .unwrap()
+                .unwrap()
+                .as_bytes(),
+            payload.as_bytes()
+        );
+        assert!(registry
+            .commit_checkout_setup(&setup, "duplicate".into(), None, &payload, |_| panic!(
+                "duplicate publication remembered configuration"
+            ))
+            .await
+            .is_err());
+        drop(disk);
+        let published = publication.await.unwrap();
+        assert_eq!(published.worktree_id.as_deref(), Some("wt-fresh"));
+        assert_eq!(published.previous_runs, continued.previous_runs);
+        let result_path = completed.result_payload_path.as_ref().unwrap();
+        let result = std::fs::read(result_path).unwrap();
+        let failed = registry
+            .finish_queued_resume(
+                &record.agent_id,
+                2,
+                &abort,
+                "setup interrupted".into(),
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(failed.status, BgAgentStatus::Failed);
+        assert!(failed.result_payload_path.is_none());
+        assert_eq!(std::fs::read(result_path).unwrap(), result);
+        let (newer, newer_abort, _) = registry
+            .reopen(&record.agent_id, "parent", failed.change_seq, false)
+            .await
+            .unwrap();
+        assert!(registry
+            .finish_queued_resume(&record.agent_id, 2, &abort, "stale failure".into(), true)
+            .await
+            .is_err());
+        assert!(!registry
+            .rollback_unaccepted_resume(&completed, &continued, &abort)
+            .await
+            .unwrap());
+        assert!(registry
+            .commit_checkout_setup(&setup, "wt-stale".into(), None, &payload, |_| {})
+            .await
+            .is_err());
+        assert_eq!(registry.get_any(&record.agent_id).await.unwrap(), newer);
+        assert!(!newer_abort.load(Ordering::Acquire));
+        assert_eq!(
+            storage::load_checkout_setup(&registry.storage_root, &record.agent_id, 2, 256)
+                .await
+                .unwrap()
+                .unwrap()
+                .as_bytes(),
+            payload.as_bytes()
+        );
     }
 
     #[test]

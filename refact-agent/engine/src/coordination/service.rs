@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::app_state::AppState;
 use super::catalog::{build_catalog, WorkCatalog};
-use super::error::WorkError;
+use super::error::{WorkError, WorkFailureCause};
 use super::paging::ViewBinding;
 use super::privacy_guard;
 use super::scope::{canonical_candidate, resolve_path, WorkCaller};
@@ -81,9 +81,13 @@ pub async fn visible_projection(
         .source_root
         .to_str()
         .ok_or_else(WorkError::scope_denied)?;
-    let mut catalog = build_catalog(app, Some(source))
-        .await
-        .map_err(|_| WorkError::unavailable())?;
+    let mut catalog = build_catalog(app, Some(source)).await.map_err(|_| {
+        if caller.model.is_some() {
+            WorkError::unavailable()
+        } else {
+            WorkError::projection_failure(WorkFailureCause::ScopedSourceUnavailable)
+        }
+    })?;
     if let Some(model) = &caller.model {
         catalog.retain_visible(privacy_guard::clear_rows(
             &app.gcx,
@@ -253,8 +257,9 @@ impl WorkSnapshot {
             bytes: 0,
             hash: Sha256::new(),
         };
-        serde_json::to_writer(&mut output, &(binding, self))
-            .map_err(|_| WorkError::unavailable())?;
+        serde_json::to_writer(&mut output, &(binding, self)).map_err(|_| {
+            WorkError::projection_failure(WorkFailureCause::SnapshotEncodingUnavailable)
+        })?;
         for row in self
             .rows
             .iter()
@@ -269,7 +274,9 @@ impl WorkSnapshot {
                     row.metadata.source_revision,
                 ),
             )
-            .map_err(|_| WorkError::unavailable())?;
+            .map_err(|_| {
+                WorkError::projection_failure(WorkFailureCause::SnapshotEncodingUnavailable)
+            })?;
         }
         Ok((hex::encode(output.hash.finalize()), output.bytes))
     }

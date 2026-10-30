@@ -265,6 +265,10 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_integer("provider_breaker_cooldown_ms", 1, 86_400_000),
     coordination_integer("provider_max_retry_after_ms", 1, 86_400_000),
     coordination_integer("provider_pressure_max_buckets", 1, 1_000_000),
+    coordination_bool("recovery_auto_retry_enabled"),
+    coordination_integer("recovery_max_retries", 0, 100),
+    coordination_integer("recovery_delay_ms", 0, 3_600_000),
+    coordination_integer("recovery_total_timeout_ms", 1_000, 86_400_000),
     coordination_integer("no_progress_repeat_threshold", 2, 100_000),
     coordination_integer("no_progress_unchanged_turns", 2, 100_000),
     coordination_integer("no_progress_window_turns", 2, 100_000),
@@ -1044,6 +1048,50 @@ pub fn project_coordination_path(project_root: &Path) -> PathBuf {
     project_root.join(".refact").join("coordination.yaml")
 }
 
+/// Resolve live global settings and the selected project's sparse overrides.
+pub async fn effective_recovery_policy(
+    project_root: Option<&Path>,
+) -> Result<
+    (
+        refact_core::recovery::RecoveryPolicy,
+        refact_core::recovery::RecoveryPolicySource,
+    ),
+    String,
+> {
+    use refact_core::recovery::{RecoveryMode, RecoveryPolicy, RecoveryPolicySource};
+    let global = current().coordination;
+    let overrides = match project_root {
+        Some(root) => load_project_coordination_override(&project_coordination_path(root)).await?,
+        None => CoordinationOverride::new(),
+    };
+    let project_policy = [
+        "recovery_auto_retry_enabled",
+        "recovery_max_retries",
+        "recovery_delay_ms",
+        "recovery_total_timeout_ms",
+    ]
+    .iter()
+    .any(|key| overrides.contains_key(*key));
+    let settings = resolve_coordination(&global, &overrides)?;
+    Ok((
+        RecoveryPolicy {
+            mode: if settings.recovery_auto_retry_enabled {
+                RecoveryMode::Transient
+            } else {
+                RecoveryMode::Off
+            },
+            max_retries: settings.recovery_max_retries,
+            delay_ms: settings.recovery_delay_ms,
+            total_timeout_ms: settings.recovery_total_timeout_ms,
+        },
+        if project_policy {
+            RecoveryPolicySource::Project
+        } else {
+            RecoveryPolicySource::Global
+        },
+    ))
+}
+
 pub async fn coordination_for_project(project_root: &Path) -> Result<CoordinationSettings, String> {
     let overrides = load_project_coordination_override(&project_coordination_path(project_root))
         .await
@@ -1210,6 +1258,40 @@ fn validate_u64(name: &str, value: u64, minimum: u64, maximum: u64) -> Result<()
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[tokio::test]
+    #[serial(runtime_settings)]
+    async fn recovery_policy_uses_sparse_project_and_live_global_settings() {
+        use refact_core::recovery::{RecoveryMode, RecoveryPolicySource};
+        reset_for_test();
+        let mut global = TrajectoryRuntimeSettings::default();
+        global.coordination.recovery_delay_ms = 123;
+        install_live(&global);
+        let dir = tempfile::tempdir().unwrap();
+        let path = project_coordination_path(dir.path());
+        let (policy, source) = effective_recovery_policy(Some(dir.path())).await.unwrap();
+        assert_eq!(source, RecoveryPolicySource::Global);
+        assert_eq!(policy.delay_ms, 123);
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &path,
+            "recovery_auto_retry_enabled: false\nrecovery_max_retries: 0\n",
+        )
+        .await
+        .unwrap();
+        let (policy, source) = effective_recovery_policy(Some(dir.path())).await.unwrap();
+        assert_eq!(source, RecoveryPolicySource::Project);
+        assert_eq!(policy.mode, RecoveryMode::Off);
+        assert_eq!(policy.max_retries, 0);
+        assert_eq!(policy.delay_ms, 123);
+        tokio::fs::write(&path, "recovery_max_retries: 101\n")
+            .await
+            .unwrap();
+        assert!(effective_recovery_policy(Some(dir.path())).await.is_err());
+        reset_for_test();
+    }
 
     /// Every crate-backed limit, tweaked away from its default so a stale
     /// installer cannot pass by accident.

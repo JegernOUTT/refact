@@ -106,6 +106,40 @@ pub fn pressure_retry(
     }
 }
 
+pub fn retry_not_before_ms(bucket: &str, report: Option<&FailureReport>) -> Option<u64> {
+    let registry = pressure_registry();
+    let now_ms = registry
+        .as_ref()
+        .map(|registry| registry.now_ms())
+        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis().max(0) as u64);
+    let own = report
+        .and_then(|report| report.retry_after.as_deref())
+        .and_then(|raw| refact_providers::pressure::retry_after_delay_ms(raw, now_ms))
+        .map(|delay_ms| {
+            let cap_ms = registry
+                .as_ref()
+                .map(|registry| registry.config().max_retry_after_ms)
+                .unwrap_or(PressureConfig::default().max_retry_after_ms);
+            now_ms.saturating_add(delay_ms.min(cap_ms))
+        });
+    let shared = registry
+        .as_ref()
+        .and_then(|registry| registry.snapshot(bucket))
+        .and_then(|snapshot| {
+            let breaker = snapshot.breaker.map(|breaker| breaker.until_ms);
+            match (snapshot.retry_after_until_ms, breaker) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            }
+        });
+    let until_ms = match (registry.is_some(), shared, own) {
+        (true, Some(shared), _) => Some(shared),
+        (true, None, _) => None,
+        (false, _, own) => own,
+    }?;
+    (until_ms > now_ms).then_some(until_ms)
+}
+
 fn counter(field: &str, value: usize) -> Result<u32, String> {
     u32::try_from(value)
         .map_err(|_| format!("coordination.{field} does not fit a 32-bit counter: {value}"))

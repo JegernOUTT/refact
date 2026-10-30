@@ -210,6 +210,9 @@ export const selectCurrentRuntime = (
 export const selectThreadById = (state: RootState, chatId: string) =>
   state.chat.threads[chatId]?.thread ?? null;
 
+export const selectRecoveryById = (state: RootState, chatId: string) =>
+  selectRuntimeById(state, chatId)?.recovery ?? null;
+
 const EMPTY_PENDING_QUESTION_SETS: PendingQuestionSet[] = [];
 
 export const selectPendingQuestionSetsById = (

@@ -153,6 +153,7 @@ pub async fn is_tracked(agent_chat_id: &str) -> bool {
 
 /// Capture before an external wait. Delayed terminalization must not affect a
 /// later reservation that happens to use the same legacy chat identifier.
+#[derive(Clone, Debug)]
 pub struct Attempt {
     chat_id: String,
     token: Arc<()>,
@@ -166,6 +167,126 @@ pub fn current_attempt(chat_id: &str) -> Option<Attempt> {
 }
 
 impl Attempt {
+    pub(crate) fn capture_for_app(app: &AppState, chat_id: &str) -> Result<Option<Self>, String> {
+        let holders = global().holders();
+        let tasks = global().tasks();
+        let task = tasks
+            .get(chat_id)
+            .filter(|task| !task.finished.load(Ordering::Acquire));
+        if holders.get(chat_id).is_some_and(|entry| {
+            !Arc::ptr_eq(&entry.executions, &app.agent_executions)
+                || !Arc::ptr_eq(&entry.scheduler, &app.work_scheduler)
+        }) || task.is_some_and(|task| !Arc::ptr_eq(&task.executions, &app.agent_executions))
+        {
+            return Err("Board attempt belongs to another runtime".into());
+        }
+        let token = holders
+            .get(chat_id)
+            .map(|entry| entry.attempt.clone())
+            .or_else(|| task.map(|task| task.attempt.clone()));
+        if let Some(token) = &token {
+            if task.is_some_and(|task| !Arc::ptr_eq(&task.attempt, token)) {
+                return Err("Board setup and admission attempts disagree".into());
+            }
+        }
+        Ok(token.map(|token| Self {
+            chat_id: chat_id.into(),
+            token,
+        }))
+    }
+
+    pub(crate) fn same_attempt(&self, other: &Self) -> bool {
+        self.chat_id == other.chat_id && Arc::ptr_eq(&self.token, &other.token)
+    }
+
+    pub(crate) fn is_current(&self) -> bool {
+        global()
+            .holders()
+            .get(&self.chat_id)
+            .is_some_and(|entry| Arc::ptr_eq(&entry.attempt, &self.token))
+    }
+
+    pub(crate) fn belongs_to(&self, app: &AppState) -> bool {
+        let holders = global().holders();
+        if let Some(entry) = holders.get(&self.chat_id) {
+            return Arc::ptr_eq(&entry.attempt, &self.token)
+                && Arc::ptr_eq(&entry.executions, &app.agent_executions)
+                && Arc::ptr_eq(&entry.scheduler, &app.work_scheduler);
+        }
+        global().tasks().get(&self.chat_id).is_some_and(|task| {
+            Arc::ptr_eq(&task.attempt, &self.token)
+                && Arc::ptr_eq(&task.executions, &app.agent_executions)
+        })
+    }
+
+    pub(crate) async fn cancel_setup_and_wait(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<(), String> {
+        let task = {
+            let mut holders = global().holders();
+            if holders
+                .get(&self.chat_id)
+                .is_some_and(|entry| !Arc::ptr_eq(&entry.attempt, &self.token))
+            {
+                return Err("Board admission attempt changed; workspace retained".into());
+            }
+            let task = global().tasks().get(&self.chat_id).cloned();
+            if task
+                .as_ref()
+                .is_some_and(|task| !Arc::ptr_eq(&task.attempt, &self.token))
+            {
+                return Err("Board setup attempt changed; workspace retained".into());
+            }
+            request_setup_cancel_locked(&mut holders, &self.chat_id);
+            task
+        };
+        if let Some(task) = task {
+            let wait = async {
+                let mut handle = task.handle.lock().await;
+                if !task.finished.load(Ordering::Acquire) {
+                    let _ = (&mut *handle).await;
+                }
+            };
+            if tokio::time::timeout(timeout, wait).await.is_err() {
+                return Err(
+                    "Timed out waiting for accepted board setup; workspace retained".into(),
+                );
+            }
+            let mut tasks = global().tasks();
+            if tasks
+                .get(&self.chat_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &task))
+            {
+                tasks.remove(&self.chat_id);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn owns_setup(&self) -> bool {
+        let holders = global().holders();
+        if holders
+            .get(&self.chat_id)
+            .is_some_and(|entry| !Arc::ptr_eq(&entry.attempt, &self.token))
+        {
+            return false;
+        }
+        if holders
+            .get(&self.chat_id)
+            .is_some_and(|entry| Arc::ptr_eq(&entry.attempt, &self.token))
+        {
+            return true;
+        }
+        global().tasks().get(&self.chat_id).is_some_and(|task| {
+            Arc::ptr_eq(&task.attempt, &self.token) && !task.finished.load(Ordering::Acquire)
+        })
+    }
+
+    pub(crate) fn chat_id(&self) -> &str {
+        &self.chat_id
+    }
+
     pub fn end(&self) {
         end_attempt(&self.chat_id, Some(&self.token));
     }
@@ -367,6 +488,63 @@ pub fn execution_state(agent_chat_id: &str) -> Option<crate::agents::execution::
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExecutionUnavailable {
+    Missing,
+    Queued,
+    Acquiring,
+    Cancelled,
+    StaleBinding,
+    PendingToolReconciliation,
+    Held,
+}
+
+impl ExecutionUnavailable {
+    pub(crate) fn recovery_message(self) -> String {
+        let condition = match self {
+            Self::Missing => "needs_fresh_admission",
+            Self::Queued => "admission_queued",
+            Self::Acquiring => "admission_acquiring",
+            Self::Cancelled => "admission_cancelled",
+            Self::StaleBinding => "stale_board_attempt",
+            Self::PendingToolReconciliation => "needs_explicit_tool_reconciliation",
+            Self::Held => "execution_held",
+        };
+        format!("Interrupted: {condition}. No model or tool operation was started. In the owning task planner, inspect check_agents(format=\"detail\") and the current card, then explicitly call restart_agent(card_id=\"<current card id>\", mode=\"resume\"). This creates a NEW agent/chat on the SAME card and retained checkout through scheduler admission; it does not continue this chat. Use force=true only to stop an actually live owned attempt. Pauses, denied approvals and unknown tool outcomes must be resolved by their authorized controls first; restart does not clear them or replay pending tools. Opening this chat or approving an old request does not resume it. Retain the checkout and WIP.")
+    }
+}
+
+pub(crate) fn current_execution(
+    app: &AppState,
+    chat_id: &str,
+) -> Result<Arc<crate::agents::execution::RunExecution>, ExecutionUnavailable> {
+    let holders = global().holders();
+    let entry = holders.get(chat_id).ok_or(ExecutionUnavailable::Missing)?;
+    if !Arc::ptr_eq(&entry.executions, &app.agent_executions)
+        || !Arc::ptr_eq(&entry.scheduler, &app.work_scheduler)
+    {
+        return Err(ExecutionUnavailable::Missing);
+    }
+    let execution = match &entry.phase {
+        Phase::Queued(_) => return Err(ExecutionUnavailable::Queued),
+        Phase::Acquiring => return Err(ExecutionUnavailable::Acquiring),
+        Phase::Active(execution) => execution,
+    };
+    if execution.is_cancelled()
+        || execution.state() == crate::agents::execution::ExecutionState::Gone
+    {
+        return Err(ExecutionUnavailable::Cancelled);
+    }
+    let registered = app
+        .agent_executions
+        .get(chat_id)
+        .ok_or(ExecutionUnavailable::Missing)?;
+    if !Arc::ptr_eq(execution, &registered) {
+        return Err(ExecutionUnavailable::StaleBinding);
+    }
+    Ok(execution.clone())
+}
+
 pub async fn synchronize(app: &AppState, agent_chat_id: &str) {
     let attempt = {
         let holders = global().holders();
@@ -525,6 +703,10 @@ pub async fn cancel_setup_and_wait(
 
 fn request_setup_cancel(agent_chat_id: &str) {
     let mut holders = global().holders();
+    request_setup_cancel_locked(&mut holders, agent_chat_id);
+}
+
+fn request_setup_cancel_locked(holders: &mut HashMap<String, Entry>, agent_chat_id: &str) {
     if let Some(entry) = holders.get(agent_chat_id) {
         match &entry.phase {
             Phase::Active(execution) => execution.cancel(),
@@ -631,6 +813,18 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, AdmissionError::QueueFull { .. }), "{err:?}");
         assert!(!is_tracked(&refused).await);
+        assert!(matches!(
+            current_execution(&app, &refused),
+            Err(ExecutionUnavailable::Missing)
+        ));
+        assert!(matches!(
+            current_execution(&app, &queued),
+            Err(ExecutionUnavailable::Queued)
+        ));
+        assert!(Arc::ptr_eq(
+            &current_execution(&app, &owner).unwrap(),
+            &app.agent_executions.get(&owner).unwrap()
+        ));
         assert!(matches!(
             spawn_tracked(&refused, async {}).await,
             Err(AdmissionError::Gone)
@@ -883,6 +1077,10 @@ mod tests {
         let execution = app.agent_executions.get(&child).unwrap();
         let operation = execution.begin_operation().await.unwrap();
         end(&child).await;
+        assert!(matches!(
+            current_execution(&app, &child),
+            Err(ExecutionUnavailable::Missing)
+        ));
         assert!(execution.is_cancelled());
         assert!(execution.begin_operation().await.is_err());
         drop(execution);

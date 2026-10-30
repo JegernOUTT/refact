@@ -675,6 +675,75 @@ pub async fn handle_v1_chat_command(
             .unwrap());
     }
 
+    if let ChatCommand::RecoveryRetryNow {
+        ref run_id,
+        expected_revision,
+    } = request.command
+    {
+        let accepted = session.runtime.recovery.as_ref().is_some_and(|r| {
+            r.run_id == *run_id
+                && r.revision == expected_revision
+                && r.state == refact_core::recovery::RecoveryState::Waiting
+                && r.retry_not_before_ms.unwrap_or(0) <= super::recovery::now_ms()
+        });
+        if accepted {
+            if let Some(mut record) = session.runtime.recovery.clone() {
+                record.revision = record.revision.saturating_add(1);
+                record.next_retry_at_ms = Some(super::recovery::now_ms());
+                session.update_recovery(Some(record));
+            }
+            session.remember_accepted_request(&request.client_request_id);
+            session.recovery_notify.notify_one();
+        }
+        session.emit(ChatEvent::Ack {
+            client_request_id: request.client_request_id,
+            accepted,
+            result: None,
+        });
+        return Ok(Response::builder()
+            .status(if accepted {
+                StatusCode::OK
+            } else {
+                StatusCode::CONFLICT
+            })
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"accepted": accepted}).to_string(),
+            ))
+            .unwrap());
+    }
+
+    if let ChatCommand::GoalControl { action } = &request.command {
+        if let Err(error) = super::queue::validate_goal_control(&session, action) {
+            super::queue::reject_guard(&mut session, &request.client_request_id, error.clone());
+            return Err(ScratchError::new(StatusCode::BAD_REQUEST, error));
+        }
+    }
+
+    if matches!(&request.command, ChatCommand::GoalControl { action } if matches!(action.trim().to_ascii_lowercase().as_str(), "pause" | "stop"))
+        && session.runtime.recovery.as_ref().is_some_and(|r| {
+            matches!(
+                r.state,
+                refact_core::recovery::RecoveryState::Waiting
+                    | refact_core::recovery::RecoveryState::Attempting
+            )
+        })
+        && session.goal.is_some()
+    {
+        if let Some(budget) = &session.recovery_budget {
+            budget.cancel();
+        }
+        session.preserve_interrupted_recovery_output();
+        if let Some(mut record) = session.runtime.recovery.clone() {
+            record.state = refact_core::recovery::RecoveryState::Cancelled;
+            record.revision = record.revision.saturating_add(1);
+            record.next_retry_at_ms = None;
+            record.terminal_reason = Some("goal_control".into());
+            session.update_recovery(Some(record));
+        }
+        session.abort_stream();
+    }
+
     if matches!(request.command, ChatCommand::Abort {}) {
         session.apply_priority_abort();
         let should_save_trajectory = session.trajectory_dirty;
@@ -701,6 +770,18 @@ pub async fn handle_v1_chat_command(
     }
 
     if let ChatCommand::SetParams { ref patch } = request.command {
+        if let Err(error) = super::recovery::validate_policy_patch(patch) {
+            session.emit(ChatEvent::Ack {
+                client_request_id: request.client_request_id,
+                accepted: false,
+                result: Some(serde_json::json!({"error": error})),
+            });
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::json!({"error": error}).to_string()))
+                .unwrap());
+        }
         if !patch.is_object() {
             let error = "SetParams patch must be an object".to_string();
             session.emit(ChatEvent::Ack {
@@ -719,7 +800,7 @@ pub async fn handle_v1_chat_command(
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        let scope_patch = super::worktree_lifecycle::is_worktree_patch(patch);
+        let scope_patch = super::worktree_lifecycle::is_scope_patch(patch);
         drop(session);
         let _scope_transition = if scope_patch {
             Some(super::worktree_lifecycle::transition_lock(&session_arc).await)
@@ -743,9 +824,10 @@ pub async fn handle_v1_chat_command(
                 error,
             ));
         }
-        let session = session_arc.lock().await;
+        let mut session = session_arc.lock().await;
         if super::worktree_lifecycle::changes_attachment(&session.thread, patch) {
             if let Err(error) = super::worktree_lifecycle::check_idle_attachment(&session) {
+                super::queue::reject_guard(&mut session, &request.client_request_id, error.clone());
                 return Ok(command_error_response(StatusCode::CONFLICT, "busy", error));
             }
         }
@@ -775,6 +857,7 @@ pub async fn handle_v1_chat_command(
             if let Err(error) =
                 super::worktree_lifecycle::check_unchanged_attachment(&session, &thread_before)
             {
+                super::queue::reject_guard(&mut session, &request.client_request_id, error.clone());
                 return Ok(command_error_response(
                     StatusCode::CONFLICT,
                     "scope_changed",
@@ -784,6 +867,7 @@ pub async fn handle_v1_chat_command(
         }
         if super::worktree_lifecycle::changes_attachment(&session.thread, patch) {
             if let Err(error) = super::worktree_lifecycle::check_idle_attachment(&session) {
+                super::queue::reject_guard(&mut session, &request.client_request_id, error.clone());
                 return Ok(command_error_response(
                     StatusCode::CONFLICT,
                     "scope_changed",

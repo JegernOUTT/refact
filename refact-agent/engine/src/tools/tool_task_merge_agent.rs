@@ -18,17 +18,13 @@ use crate::tasks::types::VerificationOutcome;
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tools::task_tool_helpers::{require_bound_planner_task, stop_live_card_sessions};
-use crate::worktrees::service::{merge_lock_for, WorktreeService};
+use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::{
     MergeWorktreeRequest, MergeWorktreeResponse, WorktreeMergeStrategy, WorktreeRecordView,
     WorktreeReference,
 };
 
-fn git_merge_lock(workspace_root: &std::path::Path) -> Arc<AMutex<()>> {
-    merge_lock_for(workspace_root)
-}
-
-pub(super) async fn merge_under_available_lease<F, Fut>(
+pub(crate) async fn merge_under_available_lease<F, Fut>(
     app: &crate::app_state::AppState,
     service: &WorktreeService,
     worktree_id: &str,
@@ -49,12 +45,25 @@ where
         Output = Result<crate::chat::post_merge_check::PostMergeCheckResult, String>,
     >,
 {
-    let target = request
-        .target_branch
-        .clone()
-        .ok_or("Merge target branch is required")?;
+    let target = match request.target_branch.clone() {
+        Some(target) => target,
+        None => service
+            .get_worktree(worktree_id)
+            .await?
+            .meta
+            .base_branch
+            .ok_or("Merge target branch is required")?,
+    };
+    let request = MergeWorktreeRequest {
+        target_branch: Some(target.clone()),
+        ..request
+    };
+    let service = service.acquire_merge_permit().await?;
     let service = service.for_merge_target(&target).await?;
-    let Some(leases) = crate::coordination::leases::leases_for(app).await else {
+    let Some(leases) =
+        crate::coordination::leases::merge_leases_for(app, service.source_workspace_root()).await?
+    else {
+        service.checkpoint_merge_phase().await?;
         let delete_requested = request.delete_after_merge;
         let mut response = service
             .merge_worktree(
@@ -66,17 +75,22 @@ where
             )
             .await?;
         let verification = if response.merged {
-            verify_merged_checkout(
-                app.gcx.clone(),
-                check,
-                post_merge_check,
-                service.merge_checkout_root().to_path_buf(),
-                response.merge_commit.clone(),
-            )
-            .await
+            crate::coordination::merge_gate::MERGE_PHASE_SCOPE
+                .scope(
+                    service.clone(),
+                    verify_merged_checkout(
+                        app.gcx.clone(),
+                        check,
+                        post_merge_check,
+                        service.merge_checkout_root().to_path_buf(),
+                        response.merge_commit.clone(),
+                    ),
+                )
+                .await
         } else {
             None
         };
+        service.checkpoint_merge_phase().await?;
         if delete_requested
             && (response.merged || response.status == "nothing_to_merge")
             && verification
@@ -92,6 +106,7 @@ where
                 warnings: cleanup.warnings,
             });
         }
+        service.cleanup_merge_target().await?;
         return Ok((response, verification, false));
     };
     let settings = crate::file_activity::settings();
@@ -1216,6 +1231,7 @@ struct MergeState {
     completion_warning: Option<String>,
     expected_assignee: Option<String>,
     expected_agent_chat_id: Option<String>,
+    merge_service: Option<WorktreeService>,
 }
 
 async fn resolve_merge_request(
@@ -1326,6 +1342,7 @@ where
         completion_warning,
         expected_assignee,
         expected_agent_chat_id,
+        merge_service: None,
     })
 }
 
@@ -1378,13 +1395,20 @@ impl ToolTaskMergeAgent {
 }
 
 async fn run_git_in(cwd: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    if let Some(service) = crate::coordination::merge_gate::verification_service() {
+        service.checkpoint_merge_phase().await?;
+    }
     let output = tokio::process::Command::new("git")
+        .kill_on_drop(true)
         .args(args)
         .current_dir(cwd)
         .output()
         .await
         .map_err(|e| format!("Failed to run git: {}", e))?;
 
+    if let Some(service) = crate::coordination::merge_gate::verification_service() {
+        service.checkpoint_merge_phase().await?;
+    }
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
@@ -1478,42 +1502,53 @@ async fn merge_legacy_task_worktree(
             .as_deref()
             .ok_or("Card has no agent branch")?,
     )?;
-    let source = state.workspace_root.clone();
-    let target = state.base_branch.clone();
-    let checkout = tokio::task::spawn_blocking(move || {
-        crate::worktrees::git::prepare_merge_checkout(&source, &target)
-    })
-    .await
-    .map_err(|error| format!("Merge target resolution failed: {error}"))??;
-    state.workspace_root = checkout.root.clone();
     let app = crate::app_state::AppState::from_gcx(state.request.gcx.clone()).await;
-    let renewal = if let Some(leases) = crate::coordination::leases::leases_for(&app).await {
+    let service =
+        WorktreeService::new_async(app.paths.cache_dir.clone(), state.workspace_root.clone())
+            .await?
+            .acquire_merge_permit()
+            .await?
+            .for_merge_target(&state.base_branch)
+            .await?;
+    state.workspace_root = service.merge_checkout_root().to_path_buf();
+    let (service, renewal) = if let Some(leases) =
+        crate::coordination::leases::merge_leases_for(&app, service.source_workspace_root()).await?
+    {
         let gate = crate::coordination::merge_gate::MergeGate::new(
             leases.clone(),
             &crate::file_activity::settings(),
         );
         let key = crate::coordination::merge_gate::checkout_key(&state.workspace_root);
-        let slot = gate
-            .acquire(&key)
-            .await
-            .map_err(|error| error.to_string())?;
-        Some(crate::coordination::leases::LeaseRenewal::spawn(
-            leases,
-            slot.holder().clone(),
-        ))
+        let slot = gate.acquire(&key).await.map_err(|e| e.to_string())?;
+        let service = service.with_merge_authority(leases.phase_validator(slot.holder().clone()));
+        (
+            service,
+            Some(crate::coordination::leases::LeaseRenewal::spawn(
+                leases,
+                slot.holder().clone(),
+            )),
+        )
     } else {
-        None
+        (service, None)
     };
-    let result = async {
-        let preparation = match prepare_legacy_merge(state).await? {
-            LegacyPreparationOutcome::Complete(result) => return Ok(result),
-            LegacyPreparationOutcome::Ready(preparation) => preparation,
-        };
-        let commit = prepare_legacy_merge_commit(preparation).await?;
-        let git_result = run_legacy_git_merge(commit).await?;
-        finish_legacy_merge(git_result).await
-    }
-    .await;
+    state.merge_service = Some(service.clone());
+    let result = crate::coordination::merge_gate::MERGE_PHASE_SCOPE
+        .scope(service.clone(), async {
+            service.materialize_merge_target().await?;
+            let preparation = match prepare_legacy_merge(state).await? {
+                LegacyPreparationOutcome::Complete(result) => return Ok(result),
+                LegacyPreparationOutcome::Ready(preparation) => preparation,
+            };
+            let commit = prepare_legacy_merge_commit(preparation).await?;
+            let git_result = run_legacy_git_merge(commit).await?;
+            let result = finish_legacy_merge(git_result).await;
+            service.checkpoint_merge_phase().await?;
+            if result.is_ok() {
+                service.cleanup_merge_target().await?;
+            }
+            result
+        })
+        .await;
     if let Some(mut renewal) = renewal {
         renewal
             .shutdown()
@@ -1591,19 +1626,30 @@ Then call `merge_agent` again."#,
         )));
     }
 
-    let main_status = run_git_in(&state.workspace_root, &["status", "--porcelain"])
-        .await
-        .unwrap_or_default();
+    crate::worktrees::git::validate_merge_checkout(&state.workspace_root, &state.base_branch)?;
+    let main_status = run_git_in(&state.workspace_root, &["status", "--porcelain"]).await?;
     if !main_status.trim().is_empty() {
         return Err(
             "Main workspace has uncommitted changes. Please commit or stash before merging."
                 .to_string(),
         );
     }
-    crate::worktrees::git::commit_all(
-        std::path::Path::new(&agent_worktree),
-        &format!("Card {}: {}", state.request.card_id, state.card.title),
-    )?;
+    state
+        .merge_service
+        .as_ref()
+        .ok_or("Legacy merge permit missing")?
+        .checkpoint_merge_phase()
+        .await?;
+    let commit_root = std::path::PathBuf::from(&agent_worktree);
+    let commit_message = format!("Card {}: {}", state.request.card_id, state.card.title);
+    state
+        .merge_service
+        .as_ref()
+        .ok_or("Legacy merge permit missing")?
+        .run_merge_git_phase(move || {
+            crate::worktrees::git::commit_all(&commit_root, &commit_message)
+        })
+        .await?;
     let changed_files = crate::chat::task_agent_monitor::git_diff_name_only(
         std::path::Path::new(&agent_worktree),
         &state.comparison_base,
@@ -1660,6 +1706,12 @@ async fn finish_legacy_nothing_to_merge(
     agent_worktree: &str,
 ) -> Result<(bool, Vec<ContextEnum>), String> {
     let request = &state.request;
+    state
+        .merge_service
+        .as_ref()
+        .ok_or("Legacy merge permit missing")?
+        .checkpoint_merge_phase()
+        .await?;
     let worktree_status = tokio::process::Command::new("git")
         .args(["status", "--porcelain"])
         .current_dir(agent_worktree)
@@ -1688,18 +1740,21 @@ async fn finish_legacy_nothing_to_merge(
             "cleanup skipped; dirty agent worktree preserved for inspection or restart_agent(mode=resume)",
         );
     } else if agent_branch != state.base_branch {
-        let merge_lock = git_merge_lock(&state.workspace_root);
-        let _guard = merge_lock.lock().await;
         worktree_removed = run_git_in(
             &state.workspace_root,
             &["worktree", "remove", agent_worktree, "--force"],
         )
         .await
         .is_ok();
+        state
+            .merge_service
+            .as_ref()
+            .ok_or("Legacy merge permit missing")?
+            .checkpoint_merge_phase()
+            .await?;
         branch_deleted = run_git_in(&state.workspace_root, &["branch", "-D", agent_branch])
             .await
             .is_ok();
-        drop(_guard);
         if worktree_removed {
             cleanup_status.push("worktree removed");
         }
@@ -1819,29 +1874,33 @@ async fn prepare_legacy_merge_commit(
 async fn run_legacy_git_merge(commit: LegacyMergeCommit) -> Result<LegacyMergeGitResult, String> {
     let state = &commit.preparation.state;
     let agent_branch = &commit.preparation.agent_branch;
-    let agent_worktree = &commit.preparation.agent_worktree;
-    let merge_lock = git_merge_lock(&state.workspace_root);
-    let _guard = merge_lock.lock().await;
+    let service = state
+        .merge_service
+        .as_ref()
+        .ok_or("Legacy merge permit missing")?;
+    service.checkpoint_merge_phase().await?;
     crate::worktrees::git::validate_merge_checkout(&state.workspace_root, &state.base_branch)?;
     crate::worktrees::git::ensure_clean_worktree(&state.workspace_root, "Merge target")?;
     run_git_in(&state.workspace_root, &["checkout", &state.base_branch])
         .await
         .map_err(|error| format!("Failed to checkout base branch: {}", error))?;
+    service.checkpoint_merge_phase().await?;
     let merge_result = if state.request.strategy == "squash" {
         run_git_in(&state.workspace_root, &["merge", "--squash", agent_branch]).await
     } else {
-        crate::worktrees::git::run_git_with_refact_author(
-            &state.workspace_root,
-            &[
-                "merge",
-                "--no-ff",
-                "--no-gpg-sign",
-                agent_branch,
-                "-m",
-                &commit.commit_msg,
-            ],
-        )
+        let root = state.workspace_root.clone();
+        let branch = agent_branch.clone();
+        let message = commit.commit_msg.clone();
+        service
+            .run_merge_git_phase(move || {
+                crate::worktrees::git::run_git_with_refact_author(
+                    &root,
+                    &["merge", "--no-ff", "--no-gpg-sign", &branch, "-m", &message],
+                )
+            })
+            .await
     };
+    service.checkpoint_merge_phase().await?;
     if let Err(error) = merge_result {
         let conflict_files = crate::worktrees::git::conflict_files_for_path(&state.workspace_root);
         if !conflict_files.is_empty() {
@@ -1902,22 +1961,38 @@ async fn run_legacy_git_merge(commit: LegacyMergeCommit) -> Result<LegacyMergeGi
                 branch_deleted: false,
             });
         }
-        return Err(format!("Merge failed: {}", error));
+        return Err(format!(
+            "Merge failed: {}; integration state retained at '{}' with source worktree '{}' intact; inspect before retrying",
+            error, state.workspace_root.display(), commit.preparation.agent_worktree
+        ));
     }
 
     let mut squash_nothing_to_commit = false;
     if state.request.strategy == "squash" {
-        let commit_result = crate::worktrees::git::run_git_with_refact_author(
-            &state.workspace_root,
-            &["commit", "--no-gpg-sign", "-m", &commit.commit_msg],
-        );
+        service.checkpoint_merge_phase().await?;
+        let root = state.workspace_root.clone();
+        let message = commit.commit_msg.clone();
+        let commit_result = service
+            .run_merge_git_phase(move || {
+                crate::worktrees::git::run_git_with_refact_author(
+                    &root,
+                    &["commit", "--no-gpg-sign", "-m", &message],
+                )
+            })
+            .await;
         if let Err(error) = commit_result {
             if !error.contains("nothing to commit") {
-                return Err(format!("Failed to commit squash merge: {}", error));
+                return Err(format!(
+                    "Failed to commit squash merge: {}; integration state retained at '{}' with source worktree '{}' intact; inspect the target index and worktree before retrying",
+                    error,
+                    state.workspace_root.display(),
+                    commit.preparation.agent_worktree
+                ));
             }
             squash_nothing_to_commit = true;
         }
     }
+    service.checkpoint_merge_phase().await?;
     let merge_commit = if squash_nothing_to_commit {
         None
     } else {
@@ -1927,7 +2002,22 @@ async fn run_legacy_git_merge(commit: LegacyMergeCommit) -> Result<LegacyMergeGi
             .ok()
             .filter(|head| !head.is_empty())
     };
-    let agent_worktree_dirty = if agent_branch != &state.base_branch {
+    Ok(LegacyMergeGitResult {
+        commit,
+        squash_nothing_to_commit,
+        merge_commit,
+        conflict_response: None,
+        agent_worktree_dirty: false,
+        worktree_removed: false,
+        branch_deleted: false,
+    })
+}
+
+async fn cleanup_legacy_merge(result: &mut LegacyMergeGitResult) -> Result<(), String> {
+    let state = &result.commit.preparation.state;
+    let agent_branch = &result.commit.preparation.agent_branch;
+    let agent_worktree = &result.commit.preparation.agent_worktree;
+    result.agent_worktree_dirty = if agent_branch != &state.base_branch {
         match tokio::process::Command::new("git")
             .args(["status", "--porcelain"])
             .current_dir(agent_worktree)
@@ -1942,35 +2032,36 @@ async fn run_legacy_git_merge(commit: LegacyMergeCommit) -> Result<LegacyMergeGi
     } else {
         false
     };
-    let (worktree_removed, branch_deleted) =
-        if agent_branch != &state.base_branch && !agent_worktree_dirty {
-            let worktree_removed = run_git_in(
-                &state.workspace_root,
-                &["worktree", "remove", agent_worktree, "--force"],
-            )
+    if agent_branch != &state.base_branch && !result.agent_worktree_dirty {
+        state
+            .merge_service
+            .as_ref()
+            .ok_or("Legacy merge permit missing")?
+            .checkpoint_merge_phase()
+            .await?;
+        let worktree_removed = run_git_in(
+            &state.workspace_root,
+            &["worktree", "remove", agent_worktree, "--force"],
+        )
+        .await
+        .is_ok();
+        state
+            .merge_service
+            .as_ref()
+            .ok_or("Legacy merge permit missing")?
+            .checkpoint_merge_phase()
+            .await?;
+        let branch_deleted = run_git_in(&state.workspace_root, &["branch", "-D", agent_branch])
             .await
             .is_ok();
-            let branch_deleted = run_git_in(&state.workspace_root, &["branch", "-D", agent_branch])
-                .await
-                .is_ok();
-            (worktree_removed, branch_deleted)
-        } else {
-            (false, false)
-        };
-    drop(_guard);
-    Ok(LegacyMergeGitResult {
-        commit,
-        squash_nothing_to_commit,
-        merge_commit,
-        conflict_response: None,
-        agent_worktree_dirty,
-        worktree_removed,
-        branch_deleted,
-    })
+        result.worktree_removed = worktree_removed;
+        result.branch_deleted = branch_deleted;
+    }
+    Ok(())
 }
 
 async fn finish_legacy_merge(
-    result: LegacyMergeGitResult,
+    mut result: LegacyMergeGitResult,
 ) -> Result<(bool, Vec<ContextEnum>), String> {
     if let Some(conflict_msg) = result.conflict_response.as_deref() {
         return Ok((
@@ -1986,6 +2077,12 @@ async fn finish_legacy_merge(
     }
     let state = &result.commit.preparation.state;
     let request = &state.request;
+    state
+        .merge_service
+        .as_ref()
+        .ok_or("Legacy merge permit missing")?
+        .checkpoint_merge_phase()
+        .await?;
     let post_merge_check_result = if request.auto_revert {
         match result.merge_commit.clone() {
             Some(merge_commit) => {
@@ -2009,7 +2106,11 @@ async fn finish_legacy_merge(
                 .await
                 .map(Some)
             }
-            None => Ok(None),
+            None if result.squash_nothing_to_commit => Ok(None),
+            None => Err(
+                "Post-merge verification could not run: merge commit unavailable; source retained"
+                    .to_string(),
+            ),
         }
     } else {
         Ok(None)
@@ -2020,6 +2121,11 @@ async fn finish_legacy_merge(
         .and_then(|result| result.as_ref())
         .map(|result| result.auto_reverted)
         .unwrap_or(false);
+    if force_merge_post_check_passed_or_absent(&post_merge_check_result) || merge_auto_reverted {
+        cleanup_legacy_merge(&mut result).await?;
+    }
+    let state = &result.commit.preparation.state;
+    let request = &state.request;
     let post_merge_check_error = post_merge_check_result.as_ref().err().cloned();
     let retained_verification_failure =
         retained_post_merge_verification_failure(&post_merge_check_result);
@@ -2149,7 +2255,9 @@ fn legacy_merge_cleanup_message(
         (true, true) => "Worktree and branch cleaned up.".to_string(),
         (true, false) => "Worktree removed, branch deletion failed.".to_string(),
         (false, true) => "Worktree removal failed, branch deleted.".to_string(),
-        (false, false) => "Cleanup failed (worktree and branch still exist).".to_string(),
+        (false, false) => {
+            "Worktree and branch retained; cleanup was deferred or could not complete.".to_string()
+        }
     }
 }
 

@@ -257,6 +257,10 @@ test = true
 name = "daemon_supervisor"
 path = "tests/it/daemon_supervisor.rs"
 
+[[test]]
+name = "gui_artifact"
+path = "build_support/gui_artifact_tests.rs"
+
 [features]
 default = ["voice"]
 voice = ["refact-voice/voice"]
@@ -266,6 +270,11 @@ perf-tests = []
 
 [build-dependencies]
 shadow-rs = { version = "1.1.0", default-features = false, features = ["build"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+libc.workspace = true
+tempfile.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55.0"
@@ -389,7 +398,7 @@ tempfile.workspace = true
 libc.workspace = true
 tokio.workspace = true
 tokio-rusqlite.workspace = true
-tokio-util = { version = "0.7.12", features = ["compat"] }
+tokio-util = { version = "0.7.12", features = ["compat", "rt"] }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 webpki-roots = "0.26"
@@ -424,6 +433,7 @@ ignored = ["aws-lc-sys", "tokio-util", "proptest", "astral-tokio-tar"]
 
 [dev-dependencies]
 refact-agents-core = { path = "crates/refact-agents-core", features = ["test-support"] }
+refact-exec = { path = "crates/refact-exec", features = ["test-support"] }
 refact-privacy = { path = "crates/refact-privacy", features = ["test-util"] }
 # Same pinned rev as the main dependency; integration tests drive the MCP
 # client stack directly (tests/mcp_stdio_e2e.rs).

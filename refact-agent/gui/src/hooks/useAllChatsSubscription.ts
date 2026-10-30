@@ -31,6 +31,16 @@ import { calculateBackoff } from "../utils/backoff";
 import type { ChatEventEnvelope } from "../services/refact/chatSubscription";
 import { processCompleted } from "../features/Notifications";
 import {
+  captureAgentRosterConnection,
+  isChatAuthorizationDenial,
+  receiveAgentRosterEvent,
+  rejectAgentRosterStream,
+} from "../services/refact/backgroundAgents";
+import {
+  selectAgentRosterSource,
+  type AgentRosterSource,
+} from "../features/AgentsPanel/agentsPanelSlice";
+import {
   MAX_BUFFERED_STREAM_TEXT_UNITS,
   MAX_MERGED_DELTA_OPS,
   streamDeltaFlushDelayMs,
@@ -96,6 +106,15 @@ export function pickDesiredChatSubscriptions({
 export function useAllChatsSubscription() {
   const dispatch = useAppDispatch();
   const config = useAppSelector(selectConfig);
+  const agentSource = useAppSelector(selectAgentRosterSource);
+  const acceptedDisclosure = useAppSelector(
+    (state) => state.agentsPanel.acceptedDisclosure,
+  );
+  const agentIdentity = JSON.stringify([
+    agentSource.identity,
+    agentSource.generation,
+    acceptedDisclosure,
+  ]);
   const endpointIdentity = getEngineEndpointIdentity(config);
   const hasEndpoint = hasUsableEngineEndpoint(config);
   const subscriptionConfig = useMemo(
@@ -146,7 +165,13 @@ export function useAllChatsSubscription() {
       string,
       Map<
         string,
-        Extract<ChatEventEnvelope, { type: "background_agent_updated" }>
+        {
+          source: AgentRosterSource;
+          envelope: Extract<
+            ChatEventEnvelope,
+            { type: "background_agent_updated" }
+          >;
+        }
       >
     >
   >(new Map());
@@ -157,6 +182,7 @@ export function useAllChatsSubscription() {
   const pendingBytesRef = useRef<Map<string, number>>(new Map());
   const configRef = useRef<EngineApiConfig>(subscriptionConfig);
   const endpointIdentityRef = useRef(endpointIdentity);
+  const agentIdentityRef = useRef(agentIdentity);
   const hasEndpointRef = useRef(hasEndpoint);
   const apiKeyRef = useRef(config.apiKey);
   const subscribeRef = useRef<((chatId: string) => void) | null>(null);
@@ -240,7 +266,8 @@ export function useAllChatsSubscription() {
       const pending = pendingBackgroundAgentUpdatesRef.current.get(chatId);
       if (!pending) return;
       pendingBackgroundAgentUpdatesRef.current.delete(chatId);
-      for (const envelope of pending.values()) {
+      for (const { source, envelope } of pending.values()) {
+        if (!dispatch(receiveAgentRosterEvent(source, envelope))) continue;
         dispatch(applyChatEvent(envelope));
       }
     },
@@ -347,14 +374,21 @@ export function useAllChatsSubscription() {
         ChatEventEnvelope,
         { type: "background_agent_updated" }
       >,
+      source: AgentRosterSource,
     ) => {
       const pending =
         pendingBackgroundAgentUpdatesRef.current.get(chatId) ??
         new Map<
           string,
-          Extract<ChatEventEnvelope, { type: "background_agent_updated" }>
+          {
+            source: AgentRosterSource;
+            envelope: Extract<
+              ChatEventEnvelope,
+              { type: "background_agent_updated" }
+            >;
+          }
         >();
-      pending.set(envelope.agent.agent_id, envelope);
+      pending.set(envelope.agent.agent_id, { source, envelope });
       pendingBackgroundAgentUpdatesRef.current.set(chatId, pending);
       if (isImmediateBackgroundAgentUpdate(envelope.agent)) {
         clearBackgroundAgentFlushForChat(chatId);
@@ -487,9 +521,12 @@ export function useAllChatsSubscription() {
 
       dispatch(setSseStatus({ chatId, status: "connecting" }));
 
+      const connection = dispatch(captureAgentRosterConnection());
+      const rosterSource = connection.source;
+      let chatDenied = false;
       const unsubscribe = subscribeToChatEvents(
         chatId,
-        configRef.current,
+        connection.config,
         {
           onEvent: (envelope) => {
             const seq = BigInt(envelope.seq);
@@ -517,6 +554,13 @@ export function useAllChatsSubscription() {
               }
               seqMapRef.current.set(chatId, seq);
             }
+            const rosterAllowed =
+              connection.rosterAllowed &&
+              dispatch(receiveAgentRosterEvent(rosterSource, envelope));
+            if (envelope.type === "background_agent_updated" && !rosterAllowed)
+              return;
+            if (envelope.type === "snapshot" && !rosterAllowed)
+              envelope = { ...envelope, background_agents: [] };
             if (envelope.type === "stream_delta") {
               enqueueStreamDeltaRef.current?.(chatId, envelope);
             } else if (envelope.type === "subchat_update") {
@@ -524,7 +568,7 @@ export function useAllChatsSubscription() {
               enqueueSubchatUpdate(chatId, envelope);
             } else if (envelope.type === "background_agent_updated") {
               flushPendingStreamDeltaForChatRef.current?.(chatId);
-              enqueueBackgroundAgentUpdate(chatId, envelope);
+              enqueueBackgroundAgentUpdate(chatId, envelope, rosterSource);
             } else {
               clearBackgroundAgentFlushForChat(chatId);
               flushPendingBackgroundAgentUpdatesForChat(chatId);
@@ -544,7 +588,22 @@ export function useAllChatsSubscription() {
           onConnected: () => {
             dispatch(setSseStatus({ chatId, status: "connected" }));
           },
+          onAgentRosterDenied: (event) => {
+            if (
+              event.type === "background_agent_updated" &&
+              BigInt(event.seq) === (seqMapRef.current.get(chatId) ?? 0n) + 1n
+            )
+              seqMapRef.current.set(chatId, BigInt(event.seq));
+            dispatch(
+              rejectAgentRosterStream(
+                rosterSource,
+                new Error("Invalid agent roster schema"),
+              ),
+            );
+          },
           onError: (error) => {
+            chatDenied = isChatAuthorizationDenial(error);
+            dispatch(rejectAgentRosterStream(rosterSource, error));
             invalidateChatParamsSyncState(chatId, configRef.current);
             clearStreamDeltaFlushForChatRef.current?.(chatId);
             flushPendingStreamDeltaForChatRef.current?.(chatId);
@@ -564,11 +623,17 @@ export function useAllChatsSubscription() {
                 error: error.message,
               }),
             );
-            if (!manualCloseRef.current.has(chatId)) {
+            if (!chatDenied && !manualCloseRef.current.has(chatId)) {
               scheduleResubscribe(chatId, true);
             }
           },
           onDisconnected: () => {
+            dispatch(
+              rejectAgentRosterStream(
+                rosterSource,
+                new Error("Agent stream disconnected"),
+              ),
+            );
             invalidateChatParamsSyncState(chatId, configRef.current);
             clearStreamDeltaFlushForChatRef.current?.(chatId);
             flushPendingStreamDeltaForChatRef.current?.(chatId);
@@ -581,7 +646,7 @@ export function useAllChatsSubscription() {
             const count = (retryCountRef.current.get(chatId) ?? 0) + 1;
             retryCountRef.current.set(chatId, count);
             dispatch(setSseStatus({ chatId, status: "disconnected" }));
-            if (!manualCloseRef.current.has(chatId)) {
+            if (!chatDenied && !manualCloseRef.current.has(chatId)) {
               scheduleResubscribe(chatId, true);
             }
           },
@@ -596,7 +661,7 @@ export function useAllChatsSubscription() {
             }
           },
         },
-        apiKeyRef.current ?? undefined,
+        connection.config.apiKey ?? undefined,
       );
 
       subscriptionsRef.current.set(chatId, unsubscribe);
@@ -689,10 +754,12 @@ export function useAllChatsSubscription() {
   useEffect(() => {
     if (
       endpointIdentity !== endpointIdentityRef.current ||
-      config.apiKey !== apiKeyRef.current
+      config.apiKey !== apiKeyRef.current ||
+      agentIdentity !== agentIdentityRef.current
     ) {
       unsubscribeAll();
       endpointIdentityRef.current = endpointIdentity;
+      agentIdentityRef.current = agentIdentity;
       apiKeyRef.current = config.apiKey;
     }
     configRef.current = subscriptionConfig;
@@ -735,6 +802,7 @@ export function useAllChatsSubscription() {
     hasEndpoint,
     config.lspPort,
     endpointIdentity,
+    agentIdentity,
     clearRetryStateForUndesiredChats,
     subscribe,
     subscriptionConfig,

@@ -234,7 +234,9 @@ fn build_completion_delivery(record: &BackgroundAgent) -> PendingDelivery {
 }
 
 pub async fn push_notice_to_chat(app: AppState, chat_id: &str, text: String) -> Result<(), String> {
-    push_notice_to_chat_with_mode(app, chat_id, text, PushMode::Append).await
+    push_notice_to_chat_with_mode(app, chat_id, text, PushMode::Append, None)
+        .await
+        .map(|_| ())
 }
 
 pub async fn push_notice_to_chat_with_mode(
@@ -242,24 +244,25 @@ pub async fn push_notice_to_chat_with_mode(
     chat_id: &str,
     text: String,
     push: PushMode,
-) -> Result<(), String> {
-    crate::chat::delivery::deliver_to_chat(
-        app,
-        chat_id,
-        PendingDelivery::new(
-            vec![event(
-                EventSubkind::SystemNotice,
-                "agents.notice",
-                serde_json::json!({}),
-                text,
-            )],
-            push,
-            "agents.notice".to_string(),
-            true,
-        ),
-    )
-    .await?;
-    Ok(())
+    ttl_secs: Option<u64>,
+) -> Result<(String, DeliveryOutcome), String> {
+    let mut delivery = PendingDelivery::new(
+        vec![event(
+            EventSubkind::SystemNotice,
+            "agents.notice",
+            serde_json::json!({}),
+            text,
+        )],
+        push,
+        "agents.notice".to_string(),
+        true,
+    );
+    if let Some(ttl_secs) = ttl_secs {
+        delivery.set_ttl_secs(ttl_secs);
+    }
+    let id = delivery.id.clone();
+    let outcome = crate::chat::delivery::deliver_to_chat(app, chat_id, delivery).await?;
+    Ok((id, outcome))
 }
 
 pub async fn flush_pending_pushes_for_parent(

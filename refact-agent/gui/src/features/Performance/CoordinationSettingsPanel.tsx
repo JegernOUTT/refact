@@ -32,6 +32,25 @@ function errorText(error: unknown): string {
   return "Could not save coordination settings.";
 }
 
+const recoveryLabels: Partial<Record<string, [string, string]>> = {
+  recovery_auto_retry_enabled: [
+    "Automatic model recovery",
+    "Retry transient model errors automatically.",
+  ],
+  recovery_max_retries: [
+    "Maximum new model requests",
+    "Maximum actual model requests after a failure.",
+  ],
+  recovery_delay_ms: [
+    "Recovery delay (milliseconds)",
+    "Delay between automatic attempts.",
+  ],
+  recovery_total_timeout_ms: [
+    "Recovery total time limit (milliseconds)",
+    "Strict total time from the first failure; in-flight attempts are cancelled at the deadline.",
+  ],
+};
+
 export function CoordinationSettingsPanel() {
   const [scope, setScope] = useState<CoordinationSettingsScope>("global");
   const {
@@ -157,7 +176,8 @@ export function CoordinationSettingsPanel() {
             const value = inherited
               ? data.global[field.name]
               : draft[field.name];
-            const title = formatComponentName(field.name);
+            const recovery = recoveryLabels[field.name];
+            const title = recovery?.[0] ?? formatComponentName(field.name);
             return (
               <SettingItem
                 key={field.name}
@@ -167,7 +187,11 @@ export function CoordinationSettingsPanel() {
                     {inherited ? <Badge size="xs">Inherited</Badge> : null}
                   </span>
                 }
-                description={`Default: ${
+                description={`${
+                  recovery
+                    ? `${recovery[1]} Changes apply to the next run. `
+                    : ""
+                }Default: ${
                   field.value_type === "integer_map"
                     ? "equal root weights"
                     : String(data.defaults[field.name])

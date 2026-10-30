@@ -119,7 +119,7 @@ describe("ErrorMessageCard", () => {
     ).not.toBeInTheDocument();
   });
 
-  test("does not render Retry when the error is not retryable", () => {
+  test("offers manual Retry for permanent model errors", () => {
     const onRetryGeneration = vi.fn();
     const error: ErrorMessage = {
       role: "error",
@@ -140,13 +140,11 @@ describe("ErrorMessageCard", () => {
       />,
     );
 
-    expect(
-      screen.queryByRole("button", { name: "Retry" }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeInTheDocument();
     expect(onRetryGeneration).not.toHaveBeenCalled();
   });
 
-  test("does not render a clickable Retry while auto-retry is in progress", () => {
+  test("historical retry status does not suppress Retry", () => {
     const onRetryGeneration = vi.fn();
     const error: ErrorMessage = {
       role: "error",
@@ -174,13 +172,11 @@ describe("ErrorMessageCard", () => {
       />,
     );
 
-    expect(
-      screen.queryByRole("button", { name: "Retry" }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeInTheDocument();
     expect(onRetryGeneration).not.toHaveBeenCalled();
   });
 
-  test("suppresses Retry for every grouped error while auto-retry is active", () => {
+  test("grouped historical retry status is not live state", () => {
     const onRetryGeneration = vi.fn();
     const retryingError: ErrorMessage = {
       role: "error",
@@ -218,11 +214,9 @@ describe("ErrorMessageCard", () => {
       />,
     );
 
-    expect(
-      screen.queryByRole("button", { name: "Retry" }),
-    ).not.toBeInTheDocument();
-    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
-      "Retrying 15s · 2/5",
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.getByTestId("transcript-status-pill")).not.toHaveTextContent(
+      "Retrying",
     );
     expect(onRetryGeneration).not.toHaveBeenCalled();
   });

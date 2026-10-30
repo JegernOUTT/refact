@@ -891,6 +891,8 @@ async fn finalize_handoff_inner(
 
     let snapshot_task_meta = task_meta.clone();
     let snapshot = TrajectorySnapshot {
+        recovery: None,
+        recovery_policy: None,
         pending_browser_decision: None,
         pending_questions: Vec::new(),
         goal_verification_blocked_until_ms: None,

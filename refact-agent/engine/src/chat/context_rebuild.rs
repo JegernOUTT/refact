@@ -925,7 +925,11 @@ where
     let mut snapshot = crate::chat::trajectories::trajectory_snapshot_from_session(session);
     let live_ids = live_tool_call_ids(session);
     let at = place_report_before_live_suffix(&session.messages, &live_ids, &mut report)?;
-    snapshot.messages.insert(at, report.clone());
+    let snapshot_at = session.messages[..at]
+        .iter()
+        .filter(|message| crate::chat::trajectories::retain_in_snapshot(message))
+        .count();
+    snapshot.messages.insert(snapshot_at, report.clone());
     active_context(&snapshot.messages).map_err(|e| e.to_string())?;
     snapshot.version = version;
     snapshot.previous_response_id = None;
@@ -1763,6 +1767,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filtered_snapshot_commit_precedes_live_tool_suffix() {
+        let (mut session, _, _, report) = fixture();
+        let mut empty = ChatMessage::new("assistant".into(), "".into());
+        empty.message_id = "filtered-prefix".into();
+        session.messages.push(empty);
+        let mut call = ChatMessage::new("assistant".into(), "pending batch".into());
+        call.message_id = "live-batch".into();
+        call.tool_calls = Some(vec![serde_json::from_value(serde_json::json!({
+            "id": "pending", "type": "function",
+            "function": {"name": "ask_questions", "arguments": "{}"}
+        }))
+        .unwrap()]);
+        session.messages.push(call);
+        session.runtime.state = SessionState::Paused;
+        session.runtime.paused_message_index = Some(2);
+        let archive = serde_json::to_value(&session.messages[..2]).unwrap();
+        let suffix = serde_json::to_value(&session.messages[2..]).unwrap();
+        let retained =
+            crate::chat::trajectories::trajectory_snapshot_from_session(&session).messages;
+        assert_eq!(retained.len(), 2);
+        assert!(live_tool_call_ids(&session).contains("pending"));
+        let source = RebuildSource::capture(&session).unwrap();
+        let report_value = serde_json::to_value(&report).unwrap();
+        let mut persisted = None;
+        commit_report(
+            &mut session,
+            report,
+            &source,
+            1,
+            &AtomicBool::new(false),
+            |snapshot| {
+                persisted = Some(snapshot.messages);
+                async { Ok(()) }
+            },
+        )
+        .await
+        .unwrap();
+        let persisted = persisted.unwrap();
+        assert_eq!(persisted.len(), 3);
+        assert_eq!(serde_json::to_value(&persisted[0]).unwrap(), archive[0]);
+        assert_eq!(serde_json::to_value(&persisted[1]).unwrap(), report_value);
+        assert_eq!(serde_json::to_value(&persisted[2..]).unwrap(), suffix);
+        assert_eq!(
+            serde_json::to_value(&session.messages[..2]).unwrap(),
+            archive
+        );
+        assert_eq!(
+            serde_json::to_value(&session.messages[2]).unwrap(),
+            report_value
+        );
+        assert_eq!(
+            serde_json::to_value(&session.messages[3..]).unwrap(),
+            suffix
+        );
+        assert_eq!(session.runtime.paused_message_index, Some(3));
+        let live_active = active_context(&session.messages).unwrap().messages;
+        assert_eq!(live_active.last().unwrap().message_id, "live-batch");
+        assert_eq!(
+            serde_json::to_value(active_context(&persisted).unwrap().messages).unwrap(),
+            serde_json::to_value(live_active).unwrap(),
+        );
+    }
+
+    #[tokio::test]
     async fn live_batch_commit_keeps_raw_suffix_executable_and_rebases_pause() {
         use crate::call_validation::{ChatToolCall, ChatToolFunction};
         for (state, embedded) in [
@@ -2019,25 +2087,54 @@ mod tests {
 
     #[tokio::test]
     async fn success_appends_report_after_persist_and_repeat_uses_active_only() {
-        let (mut s, source, version, report) = fixture();
+        let (mut s, _, version, report) = fixture();
+        let mut empty = ChatMessage::new("assistant".into(), " ".into());
+        empty.message_id = "filtered-archive".into();
+        s.messages.push(empty);
+        let source = RebuildSource::capture(&s).unwrap();
         let archived = serde_json::to_value(&s.messages).unwrap();
+        let retained = crate::chat::trajectories::trajectory_snapshot_from_session(&s).messages;
+        assert_eq!(retained.len(), 1);
+        let raw_at = s.messages.len();
+        let report_value = serde_json::to_value(&report).unwrap();
+        let mut persisted = None;
         commit_report(
             &mut s,
             report,
             &source,
             1,
             &AtomicBool::new(false),
-            |snapshot| async move {
+            |snapshot| {
                 assert_eq!(snapshot.version, version + 1);
                 assert_eq!(snapshot.messages.len(), 2);
+                assert_eq!(
+                    serde_json::to_value(&snapshot.messages[..1]).unwrap(),
+                    serde_json::to_value(&retained).unwrap()
+                );
+                assert_eq!(
+                    serde_json::to_value(&snapshot.messages[1]).unwrap(),
+                    report_value
+                );
                 assert!(snapshot.previous_response_id.is_none());
                 assert!(snapshot.frozen_request_prefix.is_none());
-                Ok(())
+                persisted = Some(snapshot.messages);
+                async { Ok(()) }
             },
         )
         .await
         .unwrap();
-        assert_eq!(serde_json::to_value(&s.messages[..1]).unwrap(), archived);
+        assert_eq!(
+            serde_json::to_value(&s.messages[..raw_at]).unwrap(),
+            archived
+        );
+        assert_eq!(
+            serde_json::to_value(&s.messages[raw_at]).unwrap(),
+            report_value
+        );
+        assert_eq!(
+            serde_json::to_value(active_context(&persisted.unwrap()).unwrap().messages).unwrap(),
+            serde_json::to_value(active_context(&s.messages).unwrap().messages).unwrap()
+        );
         assert_eq!(s.trajectory_version, version + 1);
         assert_eq!(s.trajectory_committed_version, s.trajectory_version);
         assert!(!s.trajectory_dirty);
@@ -2063,7 +2160,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(s.messages.len(), 4);
+        assert_eq!(s.messages.len(), raw_at + 3);
         assert_eq!(active_context(&s.messages).unwrap().messages.len(), 2);
     }
 

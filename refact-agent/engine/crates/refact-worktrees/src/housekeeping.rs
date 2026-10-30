@@ -102,10 +102,9 @@ impl WorktreeService {
         identity: WorktreeArchiveIdentity,
     ) -> Result<(), String> {
         let service = self.clone();
-        tokio::spawn(async move {
-            let merge_lock = merge_lock_for(service.source_workspace_root());
-            let _merge = merge_lock.lock().await;
-            let _registry = registry_write_lock().lock().await;
+        async move {
+            let service = service.acquire_merge_permit().await?;
+            let _registry = service.registry_write_lock().await?;
             if service
                 .preview_worktree_archive(&identity.record.meta.id)
                 .await?
@@ -116,7 +115,11 @@ impl WorktreeService {
             let directory = service.archive_directory(&identity)?;
             let mut registry = service.load_registry_unlocked().await?;
             let blocking_identity = identity.clone();
+            let registry_guard = _registry.clone();
+            let merge_service = service.clone();
             tokio::task::spawn_blocking(move || {
+                let _registry_guard = registry_guard;
+                merge_service.validate_merge_phase()?;
                 reject_symlink_ancestors(&directory)?;
                 if directory.try_exists().map_err(|e| e.to_string())? {
                     return Err(
@@ -145,10 +148,9 @@ impl WorktreeService {
             registry
                 .records
                 .retain(|r| r.meta.id != identity.record.meta.id);
-            service.save_registry_unlocked(&registry).await
-        })
+            service.save_registry_unlocked(&registry, &_registry).await
+        }
         .await
-        .map_err(|e| e.to_string())?
     }
 
     pub async fn verify_worktree_archive(
@@ -191,10 +193,9 @@ impl WorktreeService {
         identity: WorktreeArchiveIdentity,
     ) -> Result<(), String> {
         let service = self.clone();
-        tokio::spawn(async move {
-            let merge_lock = merge_lock_for(service.source_workspace_root());
-            let _merge = merge_lock.lock().await;
-            let _registry = registry_write_lock().lock().await;
+        async move {
+            let service = service.acquire_merge_permit().await?;
+            let _registry = service.registry_write_lock().await?;
             if !service.verify_worktree_archive(&identity).await? {
                 return Err("Archive changed or destination occupied".into());
             }
@@ -208,7 +209,11 @@ impl WorktreeService {
             }
             let directory = service.archive_directory(&identity)?;
             let record = identity.record.clone();
+            let registry_guard = _registry.clone();
+            let merge_service = service.clone();
             tokio::task::spawn_blocking(move || {
+                let _registry_guard = registry_guard;
+                merge_service.validate_merge_phase()?;
                 move_checkout(
                     &record.meta.source_workspace_root,
                     &directory.join("checkout"),
@@ -224,10 +229,9 @@ impl WorktreeService {
             {
                 registry.records.push(identity.record);
             }
-            service.save_registry_unlocked(&registry).await
-        })
+            service.save_registry_unlocked(&registry, &_registry).await
+        }
         .await
-        .map_err(|e| e.to_string())?
     }
 }
 

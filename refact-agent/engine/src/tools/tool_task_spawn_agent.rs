@@ -92,6 +92,7 @@ pub(crate) async fn resolve_agent_model(
 #[derive(Debug)]
 pub(crate) struct PreparedWorktree {
     meta: WorktreeMeta,
+    source: AcceptedAgentSource,
     branch_was_created: bool,
     pub(crate) spawned_with_dirty_tree: bool,
     pub(crate) base_branch_mismatch_warning: Option<String>,
@@ -119,34 +120,28 @@ impl PreparedWorktree {
     }
 
     pub(crate) async fn cleanup_unlinked(self, gcx: Arc<GlobalContext>) {
+        if let Err(error) = self.source.validate(gcx.clone()).await {
+            tracing::warn!(%error, "Unlinked task-agent checkout retained; reconciliation required");
+            return;
+        }
         let cache_dir = gcx.cache_dir.clone();
         if let Ok(service) =
             WorktreeService::new_async(cache_dir, self.meta.source_workspace_root.clone()).await
         {
-            if service
-                .delete_worktree(&self.meta.id, self.branch_was_created, true)
-                .await
-                .is_ok()
-            {
-                return;
-            }
-        }
-        if self.meta.root.exists() {
-            let _ = std::fs::remove_dir_all(&self.meta.root);
-        }
-        if self.branch_was_created {
-            if let Some(branch) = self.meta.branch.as_deref() {
-                if let Err(e) =
-                    crate::worktrees::git::delete_branch(&self.meta.source_workspace_root, branch)
-                {
-                    tracing::warn!(
-                        "Failed to delete leaked agent branch '{}' during cleanup_unlinked: {}",
-                        branch,
-                        e
-                    );
+            match service.validate_worktree_meta_strict(&self.meta).await {
+                Ok(meta) if meta == self.meta => {
+                    if service
+                        .delete_worktree(&self.meta.id, self.branch_was_created, true)
+                        .await
+                        .is_ok()
+                    {
+                        return;
+                    }
                 }
+                _ => {}
             }
         }
+        tracing::warn!(worktree = %self.meta.id, "Unlinked task-agent checkout retained; cleanup identity could not be verified");
     }
 
     pub(crate) async fn retain(self, _gcx: Arc<GlobalContext>) {
@@ -183,6 +178,155 @@ fn optional_nonempty_string_arg(
 fn git_base_at(path: &Path) -> Result<(Option<String>, String), String> {
     let repo = git::discover_repo(path)?;
     Ok((git::current_branch(&repo), git::head_commit(&repo)?))
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AcceptedAgentSource {
+    root: PathBuf,
+    project: String,
+    git_dir: PathBuf,
+    common_dir: PathBuf,
+    common_identity: std::fs::Metadata,
+    root_identity: std::fs::Metadata,
+    git_identity: std::fs::Metadata,
+    planner_worktree: Option<WorktreeMeta>,
+    task_dir: Option<storage::TaskDirectoryBinding>,
+    attempt: Option<storage::AcceptedTaskAttempt>,
+}
+
+impl AcceptedAgentSource {
+    pub(crate) async fn capture(
+        gcx: Arc<GlobalContext>,
+        root: &Path,
+        planner_worktree: Option<&WorktreeMeta>,
+    ) -> Result<Self, String> {
+        let root = dunce::canonicalize(root)
+            .map_err(|e| format!("Accepted task-agent source is unavailable: {e}"))?;
+        let repo = git::discover_repo(&root)?;
+        let git_dir = dunce::canonicalize(repo.path()).map_err(|e| e.to_string())?;
+        let common_dir = dunce::canonicalize(repo.commondir()).map_err(|e| e.to_string())?;
+        drop(repo);
+        let source = Self {
+            project: crate::coordination::roots::project_identity(&root),
+            root_identity: std::fs::metadata(&root).map_err(|e| e.to_string())?,
+            git_identity: std::fs::metadata(&git_dir).map_err(|e| e.to_string())?,
+            common_identity: std::fs::metadata(&common_dir).map_err(|e| e.to_string())?,
+            common_dir,
+            root,
+            git_dir,
+            planner_worktree: planner_worktree.cloned(),
+            task_dir: None,
+            attempt: None,
+        };
+        source.validate(gcx).await?;
+        Ok(source)
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub(crate) fn project(&self) -> &str {
+        &self.project
+    }
+
+    pub(crate) async fn bind_task(
+        mut self,
+        gcx: Arc<GlobalContext>,
+        task_id: &str,
+    ) -> Result<Self, String> {
+        self.task_dir =
+            Some(storage::TaskDirectoryBinding::capture(gcx, &self.root, task_id).await?);
+        Ok(self)
+    }
+
+    pub(crate) fn task_binding(
+        &self,
+        task_id: &str,
+    ) -> Result<&storage::TaskDirectoryBinding, String> {
+        let binding = self
+            .task_dir
+            .as_ref()
+            .ok_or("Accepted task directory is not bound")?;
+        binding.validate_task(task_id)?;
+        Ok(binding)
+    }
+
+    pub(crate) fn with_attempt(
+        mut self,
+        task_id: &str,
+        original: &BoardCard,
+        agent_id: &str,
+        chat_id: &str,
+        variant: Option<&'static str>,
+    ) -> Result<Self, String> {
+        let attempt = crate::tasks::admission::current_attempt(chat_id)
+            .ok_or("Accepted task admission attempt unavailable")?;
+        let binding = self
+            .task_dir
+            .as_ref()
+            .filter(|binding| binding.task_id() == task_id)
+            .ok_or("Accepted task directory is not bound")?;
+        let binding = binding.with_attempt(&attempt, &original.id, agent_id, variant);
+        self.attempt = Some(storage::AcceptedTaskAttempt::new(
+            &binding, original, agent_id, attempt, variant,
+        ));
+        self.task_dir = Some(binding);
+        Ok(self)
+    }
+
+    pub(crate) async fn reconcile(&self, gcx: Arc<GlobalContext>, restore: bool, error: &str) {
+        let result = match &self.attempt {
+            Some(attempt) => attempt.reconcile(gcx, restore, error).await,
+            None => Err("Accepted task attempt unavailable".into()),
+        };
+        if let Err(binding_error) = result {
+            tracing::warn!(%binding_error, "Task claim retained; reconciliation required");
+        }
+    }
+
+    pub(crate) async fn validate_task(
+        &self,
+        gcx: Arc<GlobalContext>,
+        task_id: &str,
+    ) -> Result<(), String> {
+        self.validate(gcx).await?;
+        self.task_binding(task_id).map(|_| ())
+    }
+
+    pub(crate) async fn validate(&self, gcx: Arc<GlobalContext>) -> Result<(), String> {
+        let current = crate::coordination::roots::resolve_source_workspace_root(
+            gcx.clone(),
+            Some(&self.root.to_string_lossy()),
+        )
+        .await
+        .map_err(|e| format!("Accepted task-agent source is no longer authorized: {e}"))?;
+        let repo = git::discover_repo(&current)?;
+        let git_dir = dunce::canonicalize(repo.path()).map_err(|e| e.to_string())?;
+        let common_dir = dunce::canonicalize(repo.commondir()).map_err(|e| e.to_string())?;
+        drop(repo);
+        if current != self.root
+            || crate::coordination::roots::project_identity(&current) != self.project
+            || git_dir != self.git_dir
+            || common_dir != self.common_dir
+            || !storage::same_directory_identity(&self.common_identity, &common_dir)?
+            || !storage::same_directory_identity(&self.root_identity, &current)?
+            || !storage::same_directory_identity(&self.git_identity, &git_dir)?
+        {
+            return Err("Accepted task-agent source repository changed; retry the launch".into());
+        }
+        if let Some(planner) = &self.planner_worktree {
+            let service =
+                WorktreeService::new_async(gcx.cache_dir.clone(), self.root.clone()).await?;
+            let registered = service.validate_worktree_meta_strict(planner).await?;
+            if &registered != planner {
+                return Err(
+                    "Accepted planner worktree registration changed; retry the launch".into(),
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 fn resolve_spawn_base(
@@ -242,6 +386,81 @@ fn retained_worktree_cards(board: &crate::tasks::types::TaskBoard) -> Vec<&Board
 }
 
 const SPAWN_GATE_MAX_CHANGED_FILES: usize = 4096;
+
+fn launch_base_commit(
+    root: &Path,
+    base_branch: Option<&str>,
+    base_commit: Option<&str>,
+) -> Result<String, String> {
+    let repo = git::discover_repo(root)?;
+    match (base_commit, base_branch) {
+        (Some(commit), _) => git::commit_for_ref(&repo, commit),
+        (None, Some(branch)) => git::commit_for_branch(&repo, branch),
+        (None, None) => git::head_commit(&repo),
+    }
+}
+
+fn retained_checkout_changes(
+    root: &Path,
+    card: &BoardCard,
+    branch: &str,
+) -> Result<(String, Vec<PathBuf>), String> {
+    let source = git::discover_repo(root)?;
+    let worktree = dunce::canonicalize(card.agent_worktree.as_deref().ok_or("Missing worktree")?)
+        .map_err(|error| error.to_string())?;
+    let repo = git2::Repository::open(&worktree).map_err(|error| error.to_string())?;
+    if dunce::canonicalize(git::repo_root(&repo)?).map_err(|error| error.to_string())? != worktree
+        || git::canonical_common_dir(&repo)? != git::canonical_common_dir(&source)?
+    {
+        return Err("Retained checkout repository identity changed".into());
+    }
+    let head = repo.head().map_err(|error| error.to_string())?;
+    let commit = head.peel_to_commit().map_err(|error| error.to_string())?;
+    if !head.is_branch()
+        || head.name() != Some(format!("refs/heads/{branch}").as_str())
+        || git::commit_for_branch(&source, branch)? != commit.id().to_string()
+        || repo.state() != git2::RepositoryState::Clean
+    {
+        return Err("Retained checkout branch or HEAD changed".into());
+    }
+    let mut options = git2::StatusOptions::new();
+    options
+        .include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .include_ignored(false)
+        .exclude_submodules(false);
+    let statuses = repo
+        .statuses(Some(&mut options))
+        .map_err(|error| error.to_string())?;
+    let mut paths = std::collections::BTreeSet::new();
+    for status in statuses.iter() {
+        if status.status() == git2::Status::CURRENT {
+            continue;
+        }
+        let mut found = false;
+        for delta in [status.head_to_index(), status.index_to_workdir()]
+            .into_iter()
+            .flatten()
+        {
+            for path in [delta.old_file().path(), delta.new_file().path()]
+                .into_iter()
+                .flatten()
+            {
+                paths.insert(path.to_path_buf());
+                found = true;
+            }
+        }
+        if !found || paths.len() > SPAWN_GATE_MAX_CHANGED_FILES {
+            return Err("Retained checkout dirty inventory is unavailable or too large".into());
+        }
+    }
+    if git::head_commit(&repo)? != commit.id().to_string()
+        || git::current_branch(&repo).as_deref() != Some(branch)
+    {
+        return Err("Retained checkout HEAD changed during inspection".into());
+    }
+    Ok((commit.id().to_string(), paths.into_iter().collect()))
+}
 
 fn branch_changes(
     root: &Path,
@@ -319,6 +538,7 @@ fn find_abandoned_worktrees(
     card_id: &str,
     root: &Path,
     base: &str,
+    launch_base: &str,
     action: &str,
 ) -> Result<Option<String>, String> {
     let card = board
@@ -341,18 +561,34 @@ fn find_abandoned_worktrees(
         .collect();
     let mut blockers = Vec::new();
     let mut unmerged = Vec::new();
+    let mut included = Vec::new();
     for other in retained_worktree_cards(board) {
         if other.id == card_id {
             continue;
         }
         let branch = other.agent_branch.as_deref().unwrap_or("<unknown branch>");
-        let changes = branch_changes(root, branch, base);
-        if changes.as_ref().is_ok_and(|(merged, _)| *merged) {
+        let checkout = retained_checkout_changes(root, other, branch);
+        let clean = checkout.as_ref().is_ok_and(|(_, paths)| paths.is_empty());
+        let head = checkout
+            .as_ref()
+            .map(|(head, _)| head.as_str())
+            .unwrap_or(branch);
+        let changes = branch_changes(root, head, base);
+        if clean && changes.as_ref().is_ok_and(|(merged, _)| *merged) {
             continue;
         }
-        let paths = changes
+        let label = format!("{} (`{branch}`)", other.id);
+        if clean && branch_changes(root, head, launch_base).is_ok_and(|(merged, _)| merged) {
+            included.push(label);
+            continue;
+        }
+        let mut paths = changes
             .map(|(_, paths)| paths)
             .unwrap_or_else(|_| other.target_files.iter().map(PathBuf::from).collect());
+        match checkout {
+            Ok((_, dirty_paths)) => paths.extend(dirty_paths),
+            Err(_) => paths.extend(other.target_files.iter().map(PathBuf::from)),
+        }
         let overlap = paths.iter().find(|path| {
             let path = spawn_gate_path(root, other.agent_worktree.as_deref(), path);
             targets
@@ -366,7 +602,6 @@ fn find_abandoned_worktrees(
         if let Some(path) = overlap {
             reasons.push(format!("file overlap: {}", path.display()));
         }
-        let label = format!("{} (`{branch}`)", other.id);
         if !reasons.is_empty() {
             blockers.push(format!("- {label}: {}", reasons.join("; ")));
         }
@@ -375,12 +610,20 @@ fn find_abandoned_worktrees(
     if !blockers.is_empty() {
         return Err(abandoned_worktrees_error(action, &blockers));
     }
-    Ok((!unmerged.is_empty()).then(|| {
-        format!(
-        "Warning: unmerged task work remains: {}. Merge these cards when verification is complete.",
-        unmerged.join(", ")
-    )
-    }))
+    let mut warnings = Vec::new();
+    if !unmerged.is_empty() {
+        warnings.push(format!(
+            "Warning: unmerged task work remains: {}. Merge these cards when verification is complete.",
+            unmerged.join(", ")
+        ));
+    }
+    if !included.is_empty() {
+        warnings.push(format!(
+            "Advisory: retained task source {} is included in requested launch base `{launch_base}`, not merged into target `{base}`. Checkouts and branches are retained; inclusion is not verification or main landing.",
+            included.join(", ")
+        ));
+    }
+    Ok((!warnings.is_empty()).then(|| warnings.join(" ")))
 }
 
 pub(crate) async fn scoped_worktree_gate(
@@ -404,6 +647,10 @@ pub(crate) async fn scoped_worktree_gate(
                 .is_ok()
         });
         let base = resolved_branch.or(base_commit.as_deref()).unwrap_or("HEAD");
+        let launch_base = launch_base_commit(&root, base_branch.as_deref(), base_commit.as_deref())
+            .map_err(|error| {
+                format!("Cannot {action}: requested launch base is unavailable: {error}")
+            })?;
         let note = resolved_branch.is_none().then(|| {
             let kind = if base_commit.is_some() {
                 "pinned base commit"
@@ -415,7 +662,7 @@ pub(crate) async fn scoped_worktree_gate(
                 base_branch.as_deref().unwrap_or("not recorded")
             )
         });
-        match find_abandoned_worktrees(&board, &card_id, &root, base, &action) {
+        match find_abandoned_worktrees(&board, &card_id, &root, base, &launch_base, &action) {
             Ok(Some(warning)) => Ok(Some(match note {
                 Some(note) => format!("{warning} {note}"),
                 None => warning,
@@ -440,6 +687,7 @@ fn abandoned_worktrees_error(action: &str, blockers: &[String]) -> String {
 
 pub(crate) async fn prepare_agent_worktree(
     gcx: Arc<GlobalContext>,
+    source: &AcceptedAgentSource,
     task_meta: &StoredTaskMeta,
     task_id: &str,
     agent_id: &str,
@@ -448,6 +696,7 @@ pub(crate) async fn prepare_agent_worktree(
 ) -> Result<PreparedWorktree, String> {
     prepare_agent_worktree_with_suffix(
         gcx,
+        source,
         task_meta,
         task_id,
         agent_id,
@@ -460,6 +709,7 @@ pub(crate) async fn prepare_agent_worktree(
 
 pub(crate) async fn prepare_agent_worktree_with_suffix(
     gcx: Arc<GlobalContext>,
+    source: &AcceptedAgentSource,
     task_meta: &StoredTaskMeta,
     task_id: &str,
     agent_id: &str,
@@ -469,6 +719,7 @@ pub(crate) async fn prepare_agent_worktree_with_suffix(
 ) -> Result<PreparedWorktree, String> {
     prepare_agent_worktree_with_base_and_suffix(
         gcx,
+        source,
         task_meta,
         task_id,
         agent_id,
@@ -483,6 +734,7 @@ pub(crate) async fn prepare_agent_worktree_with_suffix(
 
 async fn prepare_agent_worktree_with_base_and_suffix(
     gcx: Arc<GlobalContext>,
+    source: &AcceptedAgentSource,
     task_meta: &StoredTaskMeta,
     task_id: &str,
     agent_id: &str,
@@ -492,11 +744,8 @@ async fn prepare_agent_worktree_with_base_and_suffix(
     base_commit: Option<String>,
     branch_suffix: Option<&str>,
 ) -> Result<PreparedWorktree, String> {
-    let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
-    let workspace_root = project_dirs.first().cloned().ok_or_else(|| {
-        "No workspace folder found; task agents require an isolated git worktree".to_string()
-    })?;
-
+    source.validate(gcx.clone()).await?;
+    let workspace_root = source.root().to_path_buf();
     let agent_id_short = &agent_id[..agent_id.len().min(8)];
     let branch_name = format!(
         "refact/task/{}/card/{}/{}{}",
@@ -534,6 +783,7 @@ async fn prepare_agent_worktree_with_base_and_suffix(
         )),
         _ => None,
     };
+    source.validate(gcx.clone()).await?;
     let created = service
         .create_worktree(CreateWorktreeRequest {
             source_workspace_root: Some(workspace_root.to_string_lossy().to_string()),
@@ -560,6 +810,7 @@ async fn prepare_agent_worktree_with_base_and_suffix(
 
     Ok(PreparedWorktree {
         meta: created.worktree.meta,
+        source: source.clone(),
         branch_was_created: created.branch_was_created,
         spawned_with_dirty_tree: created.dirty_source_warning,
         base_branch_mismatch_warning,
@@ -625,10 +876,9 @@ async fn run_queued_board_agent(
     agent_chat_id: String,
     planner_chat_id: String,
     task_meta: StoredTaskMeta,
-    planner_worktree: Option<WorktreeMeta>,
-    workspace_root: PathBuf,
-    explicit_base_branch: Option<String>,
-    explicit_base_commit: Option<String>,
+    source: AcceptedAgentSource,
+    base_branch: Option<String>,
+    base_commit: Option<String>,
     files_to_open: Vec<String>,
     suggested_steps: usize,
     model: String,
@@ -645,21 +895,29 @@ async fn run_queued_board_agent(
         .begin_operation()
         .await
         .map_err(|e| e.to_string())?;
+    source.validate(gcx.clone()).await?;
+    source.validate_task(gcx.clone(), &task_id).await?;
     let board = storage::load_board(gcx.clone(), &task_id).await?;
     if !board.get_card(&card_id).is_some_and(|card| {
-        card.column == "doing" && card.agent_chat_id.as_deref() == Some(&agent_chat_id)
+        !execution.is_cancelled()
+            && card.column == "doing"
+            && card.assignee.as_deref() == Some(&agent_id)
+            && card.agent_chat_id.as_deref() == Some(&agent_chat_id)
     }) {
         return Err("queued board claim was cancelled or replaced".into());
     }
-    let (base_branch, base_commit) = resolve_spawn_base(
-        explicit_base_branch,
-        explicit_base_commit,
-        planner_worktree.as_ref(),
-        &workspace_root,
-        &task_meta,
-    );
+    scoped_worktree_gate(
+        &board,
+        &card_id,
+        source.root(),
+        base_branch.as_deref(),
+        base_commit.as_deref(),
+        "spawn a new task agent",
+    )
+    .await?;
     let prepared_worktree = match prepare_agent_worktree_with_base_and_suffix(
         gcx.clone(),
+        &source,
         &task_meta,
         &task_id,
         &agent_id,
@@ -729,6 +987,10 @@ async fn run_queued_board_agent(
     let base_branch_from_prep = prepared_worktree.meta.base_branch.clone();
     let base_commit_from_prep = prepared_worktree.meta.base_commit.clone();
 
+    if let Err(error) = source.validate_task(gcx.clone(), &task_id).await {
+        prepared_worktree.cleanup_unlinked(gcx.clone()).await;
+        return Err(error);
+    }
     let link_execution = execution.clone();
     let board_result = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
             let card = board.get_card_mut(&card_id_owned).ok_or("queued card removed")?;
@@ -755,7 +1017,7 @@ async fn run_queued_board_agent(
         }
     };
     if let Err(e) = storage::update_task_stats(gcx.clone(), &task_id).await {
-        rollback_retain(gcx.clone(), &task_id, &card_id, &agent_chat_id, &e).await;
+        rollback_retain(gcx.clone(), &source, &task_id, &card_id, &agent_chat_id, &e).await;
         crate::tasks::admission::end(&agent_chat_id).await;
         prepared_worktree.retain(gcx.clone()).await;
         return Err(e);
@@ -764,7 +1026,7 @@ async fn run_queued_board_agent(
     let mut meta = match storage::load_task_meta(gcx.clone(), &task_id).await {
         Ok(m) => m,
         Err(e) => {
-            rollback_retain(gcx.clone(), &task_id, &card_id, &agent_chat_id, &e).await;
+            rollback_retain(gcx.clone(), &source, &task_id, &card_id, &agent_chat_id, &e).await;
             crate::tasks::admission::end(&agent_chat_id).await;
             prepared_worktree.retain(gcx.clone()).await;
             return Err(e);
@@ -782,8 +1044,9 @@ async fn run_queued_board_agent(
             .min();
         meta.last_agents_summary_at = Some(earliest.unwrap_or_else(Utc::now).to_rfc3339());
     }
+    source.validate_task(gcx.clone(), &task_id).await?;
     if let Err(e) = storage::save_task_meta(gcx.clone(), &task_id, &meta).await {
-        rollback_retain(gcx.clone(), &task_id, &card_id, &agent_chat_id, &e).await;
+        rollback_retain(gcx.clone(), &source, &task_id, &card_id, &agent_chat_id, &e).await;
         prepared_worktree.retain(gcx.clone()).await;
         return Err(e);
     }
@@ -804,6 +1067,7 @@ async fn run_queued_board_agent(
         .unwrap_or_else(|| Assignment::new(&card_id, &card_title, String::new()))
         .with_dependency_context(dependency_context)
         .with_suggested_steps(suggested_steps);
+    source.validate_task(gcx.clone(), &task_id).await?;
     assignment::record_assignment(gcx.clone(), &task_id, &assignment).await;
 
     let mut thread = build_agent_thread_params(
@@ -845,6 +1109,8 @@ async fn run_queued_board_agent(
     }
 
     let session_result = async {
+        source.validate(gcx.clone()).await?;
+        source.validate_task(gcx.clone(), &task_id).await?;
         if execution.is_cancelled() {
             return Err("board setup cancelled".to_string());
         }
@@ -867,7 +1133,7 @@ async fn run_queued_board_agent(
     }
     .await;
     if let Err(e) = session_result {
-        rollback_retain(gcx.clone(), &task_id, &card_id, &agent_chat_id, &e).await;
+        rollback_retain(gcx.clone(), &source, &task_id, &card_id, &agent_chat_id, &e).await;
         crate::tasks::admission::end(&agent_chat_id).await;
         prepared_worktree.retain(gcx.clone()).await;
         return Err(e);
@@ -923,32 +1189,14 @@ pub(crate) fn restore_original_card_if_current_agent(
 
 pub(crate) async fn rollback_retain(
     gcx: Arc<GlobalContext>,
+    source: &AcceptedAgentSource,
     task_id: &str,
     card_id: &str,
     guard_chat_id: &str,
     error_msg: &str,
 ) {
-    let card_id = card_id.to_string();
-    let guard_chat_id = guard_chat_id.to_string();
-    let truncated: String = error_msg.chars().take(300).collect();
-    let msg = format!(
-        "Spawn rolled back: {}. Worktree retained for inspection.",
-        truncated
-    );
-    let _ = storage::update_board_atomic(gcx.clone(), task_id, move |board| {
-        if let Some(card) = board.get_card_mut(&card_id) {
-            if card.agent_chat_id.as_deref() == Some(&guard_chat_id) {
-                card.column = "failed".to_string();
-                card.status_updates.push(StatusUpdate {
-                    timestamp: Utc::now().to_rfc3339(),
-                    message: msg,
-                });
-            }
-        }
-        Ok(Some(()))
-    })
-    .await;
-    let _ = storage::update_task_stats(gcx, task_id).await;
+    let _ = (task_id, card_id, guard_chat_id);
+    source.reconcile(gcx, false, error_msg).await;
 }
 
 pub(crate) fn build_agent_thread_params(
@@ -962,6 +1210,7 @@ pub(crate) fn build_agent_thread_params(
     worktree: WorktreeMeta,
 ) -> ThreadParams {
     ThreadParams {
+        recovery_policy: None,
         id: agent_chat_id.to_string(),
         title: format!("Agent: {}", card_title),
         model: model.to_string(),
@@ -1178,12 +1427,12 @@ struct SpawnRequest {
 struct PreparedSpawn {
     request: SpawnRequest,
     task_meta: StoredTaskMeta,
-    explicit_base_branch: Option<String>,
-    explicit_base_commit: Option<String>,
+    base_branch: Option<String>,
+    base_commit: Option<String>,
     model: String,
     agent_id: String,
     agent_chat_id: String,
-    workspace_root: PathBuf,
+    source: AcceptedAgentSource,
     app: crate::app_state::AppState,
     original_card: BoardCard,
     worktree_warning: Option<String>,
@@ -1293,6 +1542,25 @@ async fn prepare_spawn(
     request: SpawnRequest,
     args: &HashMap<String, Value>,
 ) -> Result<PreparedSpawn, String> {
+    let project_dirs = crate::files_correction::get_project_dirs(request.gcx.clone()).await;
+    let workspace_root = project_dirs.first().ok_or_else(|| {
+        "No workspace folder found; task agents require an isolated git worktree".to_string()
+    })?;
+    let workspace_root = request
+        .planner_worktree
+        .as_ref()
+        .map(|worktree| worktree.source_workspace_root.clone())
+        .unwrap_or_else(|| workspace_root.clone());
+    let source = AcceptedAgentSource::capture(
+        request.gcx.clone(),
+        &workspace_root,
+        request.planner_worktree.as_ref(),
+    )
+    .await?
+    .bind_task(request.gcx.clone(), &request.task_id)
+    .await?;
+    let binding = source.task_binding(&request.task_id)?.clone();
+    binding.scope(async {
     let task_meta = storage::load_task_meta(request.gcx.clone(), &request.task_id).await?;
     let explicit_base_branch = optional_nonempty_string_arg(args, "base_branch")?;
     let explicit_base_commit = optional_nonempty_string_arg(args, "base_commit")?;
@@ -1334,26 +1602,20 @@ async fn prepare_spawn(
 
     let agent_id = Uuid::new_v4().to_string();
     let agent_chat_id = format!("agent-{}-{}", request.card_id, &agent_id[..8]);
-    let project_dirs = crate::files_correction::get_project_dirs(request.gcx.clone()).await;
-    let workspace_root = project_dirs.first().ok_or_else(|| {
-        "No workspace folder found; task agents require an isolated git worktree".to_string()
-    })?;
-    let workspace_root = request
-        .planner_worktree
-        .as_ref()
-        .map(|worktree| worktree.source_workspace_root.clone())
-        .unwrap_or_else(|| workspace_root.clone());
     let (base_branch, base_commit) = resolve_spawn_base(
         explicit_base_branch.clone(),
         explicit_base_commit.clone(),
         request.planner_worktree.as_ref(),
-        &workspace_root,
+        source.root(),
         &task_meta,
     );
+    let base_commit = Some(launch_base_commit(
+        source.root(), base_branch.as_deref(), base_commit.as_deref(),
+    )?);
     let worktree_warning = scoped_worktree_gate(
         &board,
         &request.card_id,
-        &workspace_root,
+        source.root(),
         base_branch.as_deref(),
         base_commit.as_deref(),
         "spawn a new task agent",
@@ -1364,29 +1626,29 @@ async fn prepare_spawn(
         (ccx.app.clone(), ccx.subchat_depth)
     };
     let original_card = card.clone();
-    let project_identity = crate::coordination::roots::project_identity(&workspace_root);
     let root = if request.root_chat_id.is_empty() {
         request.planner_chat_id.as_str()
     } else {
         request.root_chat_id.as_str()
     };
-    crate::tasks::admission::reserve(&app, &agent_chat_id, &project_identity, root, depth)
+    crate::tasks::admission::reserve(&app, &agent_chat_id, source.project(), root, depth)
         .await
         .map_err(|error| error.to_string())?;
 
     Ok(PreparedSpawn {
         request,
         task_meta,
-        explicit_base_branch,
-        explicit_base_commit,
+        base_branch,
+        base_commit,
         model,
         agent_id,
         agent_chat_id,
-        workspace_root,
+        source,
         app,
         original_card,
         worktree_warning,
     })
+    }).await
 }
 
 async fn persist_spawn(prepared: PreparedSpawn) -> Result<PersistedSpawn, String> {
@@ -1398,10 +1660,9 @@ async fn persist_spawn(prepared: PreparedSpawn) -> Result<PersistedSpawn, String
     let agent_chat_id = prepared.agent_chat_id;
     let planner_chat_id = request.planner_chat_id;
     let task_meta = prepared.task_meta;
-    let planner_worktree = request.planner_worktree;
-    let workspace_root = prepared.workspace_root;
-    let explicit_base_branch = prepared.explicit_base_branch;
-    let explicit_base_commit = prepared.explicit_base_commit;
+    let source = prepared.source;
+    let base_branch = prepared.base_branch;
+    let base_commit = prepared.base_commit;
     let files_to_open = request.files_to_open;
     let suggested_steps = request.suggested_steps;
     let model = prepared.model;
@@ -1418,107 +1679,108 @@ async fn persist_spawn(prepared: PreparedSpawn) -> Result<PersistedSpawn, String
         "model": model,
         "execution_state": "queued",
         "worktree": null,
+        "base_branch": base_branch,
+        "base_commit": base_commit,
     });
     if let Some(warning) = prepared.worktree_warning {
         response["warning"] = json!(warning);
     }
+    let source = source.with_attempt(&task_id, &original, &agent_id, &agent_chat_id, None)?;
+    let binding = source
+        .task_dir
+        .as_ref()
+        .ok_or("Accepted task directory is not bound")?
+        .clone();
     let tracked_chat = agent_chat_id.clone();
     let (accepted, acceptance) = tokio::sync::oneshot::channel();
     let registered = crate::tasks::admission::spawn_tracked(&tracked_chat, async move {
-        use futures::FutureExt;
-        let mut accepted = Some(accepted);
-        let setup = async {
-            if accepted.as_ref().is_none_or(|tx| tx.is_closed()) {
-                return Err("spawn caller cancelled before claim".to_string());
-            }
-            let (_, starting_new_run) =
-                storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
-                    let starting = storage::active_agent_count(&board.cards) == 0;
-                    board
-                        .dependency_gate(&claim_card)
-                        .map_err(storage::violation_error)?;
-                    let card = board
-                        .get_card_mut(&claim_card)
-                        .ok_or("card removed before claim")?;
-                    if !matches!(card.column.as_str(), "planned" | "doing")
-                        || card.agent_chat_id.is_some()
-                    {
-                        return Err("card already claimed or no longer spawnable".into());
+        binding
+            .scope(async move {
+                use futures::FutureExt;
+                let mut accepted = Some(accepted);
+                let cleanup_source = source.clone();
+                let setup = async {
+                    if accepted.as_ref().is_none_or(|tx| tx.is_closed()) {
+                        return Err("spawn caller cancelled before claim".to_string());
                     }
-                    card.assignee = Some(claim_agent);
-                    card.agent_chat_id = Some(claim_chat);
-                    card.column = "doing".into();
-                    card.started_at = None;
-                    card.agent_worktree = None;
-                    card.agent_worktree_name = None;
-                    card.agent_branch = None;
-                    card.status_updates.push(StatusUpdate {
-                        timestamp: Utc::now().to_rfc3339(),
-                        message: "Agent queued for execution capacity".into(),
-                    });
-                    Ok(starting)
-                })
-                .await?;
-            if accepted
-                .take()
-                .ok_or("spawn acceptance lost")?
-                .send(Ok(()))
-                .is_err()
-            {
-                return Err("spawn caller cancelled during claim".into());
-            }
-            run_queued_board_agent(
-                gcx.clone(),
-                app.clone(),
-                task_id.clone(),
-                card_id.clone(),
-                agent_id,
-                agent_chat_id.clone(),
-                planner_chat_id,
-                task_meta,
-                planner_worktree,
-                workspace_root,
-                explicit_base_branch,
-                explicit_base_commit,
-                files_to_open,
-                suggested_steps,
-                model,
-                starting_new_run,
-            )
-            .await
-        };
-        let result = std::panic::AssertUnwindSafe(setup)
-            .catch_unwind()
-            .await
-            .unwrap_or_else(|_| Err("board agent setup panicked".into()));
-        if let Err(error) = result {
-            if let Some(accepted) = accepted.take() {
-                let _ = accepted.send(Err(error.clone()));
-            }
-            let guard_chat = agent_chat_id.clone();
-            let reason = error.clone();
-            let _ = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
-                if let Some(card) = board.get_card_mut(&original.id) {
-                    if card.column == "doing" && card.agent_chat_id.as_deref() == Some(&guard_chat)
+                    source.validate(gcx.clone()).await?;
+                    source.validate_task(gcx.clone(), &task_id).await?;
+                    let (_, starting_new_run) =
+                        storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
+                            let starting = storage::active_agent_count(&board.cards) == 0;
+                            board
+                                .dependency_gate(&claim_card)
+                                .map_err(storage::violation_error)?;
+                            let card = board
+                                .get_card_mut(&claim_card)
+                                .ok_or("card removed before claim")?;
+                            if !matches!(card.column.as_str(), "planned" | "doing")
+                                || card.agent_chat_id.is_some()
+                            {
+                                return Err("card already claimed or no longer spawnable".into());
+                            }
+                            card.assignee = Some(claim_agent);
+                            card.agent_chat_id = Some(claim_chat);
+                            card.column = "doing".into();
+                            card.started_at = None;
+                            card.agent_worktree = None;
+                            card.agent_worktree_name = None;
+                            card.agent_branch = None;
+                            card.status_updates.push(StatusUpdate {
+                                timestamp: Utc::now().to_rfc3339(),
+                                message: "Agent queued for execution capacity".into(),
+                            });
+                            Ok(starting)
+                        })
+                        .await?;
+                    if accepted
+                        .take()
+                        .ok_or("spawn acceptance lost")?
+                        .send(Ok(()))
+                        .is_err()
                     {
-                        if card.agent_worktree.is_none() {
-                            *card = original;
-                        } else {
-                            card.column = "failed".into();
-                        }
-                        card.status_updates.push(StatusUpdate {
-                            timestamp: Utc::now().to_rfc3339(),
-                            message: format!("Agent setup failed: {reason}"),
-                        });
+                        return Err("spawn caller cancelled during claim".into());
                     }
+                    run_queued_board_agent(
+                        gcx.clone(),
+                        app.clone(),
+                        task_id.clone(),
+                        card_id.clone(),
+                        agent_id,
+                        agent_chat_id.clone(),
+                        planner_chat_id,
+                        task_meta,
+                        source,
+                        base_branch,
+                        base_commit,
+                        files_to_open,
+                        suggested_steps,
+                        model,
+                        starting_new_run,
+                    )
+                    .await
+                };
+                let result = std::panic::AssertUnwindSafe(setup)
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|_| Err("board agent setup panicked".into()));
+                if let Err(error) = result {
+                    if let Some(accepted) = accepted.take() {
+                        let _ = accepted.send(Err(error.clone()));
+                    }
+                    cleanup_source.reconcile(gcx.clone(), false, &error).await;
+                    crate::tasks::admission::end(&agent_chat_id).await;
+                    tracing::warn!("Board agent setup failed: {error}");
                 }
-                Ok(())
+                if cleanup_source
+                    .validate_task(gcx.clone(), &task_id)
+                    .await
+                    .is_ok()
+                {
+                    let _ = storage::update_task_stats(gcx, &task_id).await;
+                }
             })
-            .await;
-            crate::tasks::admission::end(&agent_chat_id).await;
-            tracing::warn!("Board agent setup failed: {error}");
-        }
-        let _ = storage::update_task_stats(gcx, &task_id).await;
+            .await
     })
     .await;
     if let Err(error) = registered {
@@ -1820,18 +2082,38 @@ mod tests {
         let source = temp.path().join("repo");
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
+        let accepted_head = commit_file(&source, "project.txt", "accepted project\n", "accepted");
+        let other = temp.path().join("other-repo");
+        std::fs::create_dir_all(&other).unwrap();
+        init_repo(&other);
+        let other_head = commit_file(&other, "project.txt", "foreign project\n", "foreign");
+        assert_ne!(accepted_head, other_head);
         let gcx = crate::global_context::tests::make_test_gcx().await;
         set_workspace(gcx.clone(), &source).await;
-        let before = crate::files_correction::get_project_dirs(gcx.clone()).await;
 
         let task_meta = sample_task_meta(None);
-        let prepared = prepare_agent_worktree(
+        let accepted_source = AcceptedAgentSource::capture(gcx.clone(), &source, None)
+            .await
+            .unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![
+            other.canonicalize().unwrap(),
+            source.canonicalize().unwrap(),
+        ];
+        let before = crate::files_correction::get_project_dirs(gcx.clone()).await;
+        assert_eq!(before[0], other.canonicalize().unwrap());
+        let (branch, commit) =
+            resolve_spawn_base(None, None, None, accepted_source.root(), &task_meta);
+        let prepared = prepare_agent_worktree_with_base_and_suffix(
             gcx.clone(),
+            &accepted_source,
             &task_meta,
             "task-1",
             "agent-12345678",
             "T-1",
             "agent-T-1-12345678",
+            branch,
+            commit,
+            None,
         )
         .await
         .unwrap();
@@ -1845,8 +2127,75 @@ mod tests {
         assert_eq!(prepared.meta.card_id.as_deref(), Some("T-1"));
         assert_eq!(prepared.meta.agent_id.as_deref(), Some("agent-12345678"));
         assert!(prepared.meta.root.is_dir());
+        assert_eq!(
+            prepared.meta.source_workspace_root,
+            source.canonicalize().unwrap()
+        );
+        assert_eq!(
+            prepared.meta.base_commit.as_deref(),
+            Some(accepted_head.as_str())
+        );
+        assert_eq!(
+            run_git(&prepared.meta.root, &["rev-parse", "HEAD"]).trim(),
+            accepted_head
+        );
+        assert_eq!(
+            std::fs::read_to_string(prepared.meta.root.join("project.txt")).unwrap(),
+            "accepted project\n"
+        );
+        let service =
+            WorktreeService::new(gcx.cache_dir.clone(), source.canonicalize().unwrap()).unwrap();
+        assert_eq!(service.project_hash(), accepted_source.project());
+        assert_eq!(
+            service.get_worktree(&prepared.meta.id).await.unwrap().meta,
+            prepared.meta
+        );
+        assert!(run_git(
+            &other,
+            &["branch", "--list", prepared.meta.branch.as_deref().unwrap()]
+        )
+        .trim()
+        .is_empty());
 
         prepared.cleanup_unlinked(gcx).await;
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_removed_source_refuses_without_creating_foreign_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let other = temp.path().join("other-repo");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        init_repo(&source);
+        init_repo(&other);
+        let other_head = commit_file(&other, "project.txt", "foreign project\n", "foreign");
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_workspace(gcx.clone(), &source).await;
+        let accepted = AcceptedAgentSource::capture(gcx.clone(), &source, None)
+            .await
+            .unwrap();
+        set_workspace(gcx.clone(), &other).await;
+        let before = run_git(&other, &["branch", "--list"]);
+        let error = prepare_agent_worktree(
+            gcx.clone(),
+            &accepted,
+            &sample_task_meta(None),
+            "task-1",
+            "agent-refused",
+            "T-1",
+            "refused-chat",
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("no longer authorized"), "{error}");
+        assert_eq!(run_git(&other, &["branch", "--list"]), before);
+        assert_eq!(run_git(&other, &["rev-parse", "HEAD"]).trim(), other_head);
+        assert!(!gcx.cache_dir.join("worktrees").exists());
+        assert_eq!(
+            crate::files_correction::get_project_dirs(gcx).await,
+            vec![other.canonicalize().unwrap()]
+        );
     }
 
     #[tokio::test]
@@ -1858,8 +2207,12 @@ mod tests {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         set_workspace(gcx.clone(), &source).await;
         let task_meta = sample_task_meta(None);
+        let accepted_source = AcceptedAgentSource::capture(gcx.clone(), &source, None)
+            .await
+            .unwrap();
         let prepared = prepare_agent_worktree(
             gcx.clone(),
+            &accepted_source,
             &task_meta,
             "task-1",
             "agent-abcdef12",
@@ -1896,8 +2249,12 @@ mod tests {
         set_workspace(gcx.clone(), &source).await;
         let task_meta = sample_task_meta(Some("main"));
 
+        let accepted_source = AcceptedAgentSource::capture(gcx.clone(), &source, None)
+            .await
+            .unwrap();
         let prepared = prepare_agent_worktree(
             gcx.clone(),
+            &accepted_source,
             &task_meta,
             "task-1",
             "agent-11111111",
@@ -1931,8 +2288,12 @@ mod tests {
         set_workspace(gcx.clone(), &source).await;
         let task_meta = sample_task_meta(Some("task-base"));
 
+        let accepted_source = AcceptedAgentSource::capture(gcx.clone(), &source, None)
+            .await
+            .unwrap();
         let err = prepare_agent_worktree(
             gcx,
+            &accepted_source,
             &task_meta,
             "task-1",
             "agent-33333333",
@@ -2201,8 +2562,12 @@ mod tests {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         set_workspace(gcx.clone(), &source).await;
         let task_meta = sample_task_meta(None);
+        let accepted_source = AcceptedAgentSource::capture(gcx.clone(), &source, None)
+            .await
+            .unwrap();
         let prepared = prepare_agent_worktree(
             gcx.clone(),
+            &accepted_source,
             &task_meta,
             "task-1",
             "agent-abcdef12",
@@ -2230,8 +2595,12 @@ mod tests {
 
         let task_id = "task-retain-test";
         let task_meta = sample_task_meta(None);
+        let accepted_source = AcceptedAgentSource::capture(gcx.clone(), &source, None)
+            .await
+            .unwrap();
         let prepared = prepare_agent_worktree(
             gcx.clone(),
+            &accepted_source,
             &task_meta,
             task_id,
             "agent-abcdef12",
@@ -2244,17 +2613,49 @@ mod tests {
         let branch = prepared.meta.branch.clone().unwrap();
 
         let mut card = test_card("T-1", "doing", Some(root.to_string_lossy().to_string()));
+        card.assignee = Some("agent-abcdef12".into());
         card.agent_chat_id = Some("agent-T-1-abcdef12".to_string());
         setup_task_storage(gcx.clone(), &source, task_id, card).await;
 
+        let accepted_source = accepted_source
+            .bind_task(gcx.clone(), task_id)
+            .await
+            .unwrap();
+        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        crate::tasks::admission::reserve(
+            &app,
+            "agent-T-1-abcdef12",
+            accepted_source.project(),
+            "planner",
+            0,
+        )
+        .await
+        .unwrap();
+        let original = storage::load_board(gcx.clone(), task_id)
+            .await
+            .unwrap()
+            .get_card("T-1")
+            .unwrap()
+            .clone();
+        let accepted_source = accepted_source
+            .with_attempt(
+                task_id,
+                &original,
+                "agent-abcdef12",
+                "agent-T-1-abcdef12",
+                None,
+            )
+            .unwrap();
         rollback_retain(
             gcx.clone(),
+            &accepted_source,
             task_id,
             "T-1",
             "agent-T-1-abcdef12",
             "model unavailable",
         )
         .await;
+        crate::tasks::admission::end("agent-T-1-abcdef12").await;
         prepared.retain(gcx.clone()).await;
 
         assert!(

@@ -5,7 +5,7 @@ use refact_work_core::CoordinationSettings;
 use serde::Serialize;
 use uuid::Uuid;
 
-use super::error::WorkError;
+use super::error::{WorkError, WorkFailureCause};
 use super::service::WorkSnapshot;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -74,7 +74,9 @@ impl WorkViews {
         now_ms: u64,
     ) -> Result<String, WorkError> {
         let settings = crate::file_activity::settings();
-        settings.validate().map_err(|_| WorkError::unavailable())?;
+        settings
+            .validate()
+            .map_err(|_| WorkError::projection_failure(WorkFailureCause::SettingsUnavailable))?;
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         state.prune_snapshots(&settings, now_ms);
         let view = state
@@ -141,7 +143,9 @@ impl WorkViews {
         settings: &CoordinationSettings,
         now_ms: u64,
     ) -> Result<PageWindow, WorkError> {
-        settings.validate().map_err(|_| WorkError::unavailable())?;
+        settings
+            .validate()
+            .map_err(|_| WorkError::projection_failure(WorkFailureCause::SettingsUnavailable))?;
         if limit == 0 || limit > settings.overview_max_rows {
             return Err(WorkError::invalid(
                 "limit is outside the configured page range",
@@ -281,7 +285,9 @@ impl WorkViews {
         now_ms: u64,
         revalidate: impl FnOnce(&WorkSnapshot) -> Result<(), WorkError>,
     ) -> Result<FrozenPage, WorkError> {
-        settings.validate().map_err(|_| WorkError::unavailable())?;
+        settings
+            .validate()
+            .map_err(|_| WorkError::projection_failure(WorkFailureCause::SettingsUnavailable))?;
         if limit == 0 || limit > settings.overview_max_rows {
             return Err(WorkError::invalid(
                 "limit is outside the configured page range",
@@ -309,9 +315,15 @@ impl WorkViews {
                 (saved.view_id.clone(), saved.generation, saved.offset)
             }
             None => {
-                if units > settings.max_work_history_rows || bytes > settings.max_work_history_bytes
-                {
-                    return Err(WorkError::unavailable());
+                if units > settings.max_work_history_rows {
+                    return Err(WorkError::projection_failure(
+                        WorkFailureCause::SnapshotRowCapacity,
+                    ));
+                }
+                if bytes > settings.max_work_history_bytes {
+                    return Err(WorkError::projection_failure(
+                        WorkFailureCause::SnapshotByteCapacity,
+                    ));
                 }
                 let existing = state
                     .views
@@ -511,8 +523,15 @@ impl State {
         bytes: usize,
         view_id: &str,
     ) -> Result<(), WorkError> {
-        if units > settings.max_work_history_rows || bytes > settings.max_work_history_bytes {
-            return Err(WorkError::unavailable());
+        if units > settings.max_work_history_rows {
+            return Err(WorkError::projection_failure(
+                WorkFailureCause::SnapshotRowCapacity,
+            ));
+        }
+        if bytes > settings.max_work_history_bytes {
+            return Err(WorkError::projection_failure(
+                WorkFailureCause::SnapshotByteCapacity,
+            ));
         }
         while {
             let (count, used_units, used_bytes) = self.snapshot_usage();
@@ -787,15 +806,33 @@ mod tests {
             },
         ] {
             let views = WorkViews::default();
+            let whole = snapshot("a");
+            let selected = whole.slice(0, 1);
+            assert!(selected.units() <= settings.max_work_history_rows);
+            assert!(selected.signature(&binding()).unwrap().1 <= settings.max_work_history_bytes);
+            let error = views
+                .frozen_page(binding(), whole, 1, None, &settings, 0, |_| Ok(()))
+                .err()
+                .unwrap();
+            assert_eq!(error.code, "unavailable");
             assert_eq!(
-                views
-                    .frozen_page(binding(), snapshot("a"), 1, None, &settings, 0, |_| Ok(()))
-                    .err()
-                    .unwrap()
-                    .code,
-                "unavailable"
+                error.cause,
+                Some(if settings.max_work_history_rows == 2 {
+                    WorkFailureCause::SnapshotRowCapacity
+                } else {
+                    WorkFailureCause::SnapshotByteCapacity
+                })
             );
+            assert!(error
+                .message
+                .contains("Reducing limit only changes page size"));
+            assert!(uuid::Uuid::parse_str(&error.request_id).is_ok());
             assert!(views.0.lock().unwrap().views.is_empty());
+            let control = views
+                .frozen_page(binding(), selected, 1, None, &settings, 1, |_| Ok(()))
+                .unwrap();
+            assert_eq!(control.total, 1);
+            assert_eq!(control.snapshot.roots[0].id, "a-0");
         }
     }
 

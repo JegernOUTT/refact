@@ -27,6 +27,7 @@ const REMOVE_KILL_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_COMPLETION_CHANNEL_CAPACITY: usize = 256;
 const PROCESS_OUTPUT_CHANNEL_CAPACITY: usize = 4096;
 const STDIN_OUTPUT_QUIET_PERIOD: Duration = Duration::from_millis(100);
+const MAX_CHAT_CLEANUP_TARGETS: usize = 256;
 #[cfg(not(test))]
 const STDIN_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(test)]
@@ -65,6 +66,112 @@ pub struct ProcessSpawnEvent {
     pub tty: bool,
     pub status: ExecStatus,
     pub started_at_ms: u64,
+}
+
+pub struct ExecProcessCleanupTarget {
+    snapshot: ExecProcessSnapshot,
+    control_tx: mpsc::Sender<ExecProcessCommand>,
+}
+
+impl ExecProcessCleanupTarget {
+    pub fn process_id(&self) -> &ExecProcessId {
+        &self.snapshot.meta.process_id
+    }
+}
+
+pub struct ExecProcessCleanupCapture {
+    pub targets: Vec<ExecProcessCleanupTarget>,
+    pub unavailable: usize,
+    pub omitted: usize,
+    pub pending: usize,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub struct TestProcessRuntime {
+    registry: ExecRegistry,
+    process_id: ExecProcessId,
+    control_tx: mpsc::Sender<ExecProcessCommand>,
+    control_rx: mpsc::Receiver<ExecProcessCommand>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl TestProcessRuntime {
+    pub fn process_id(&self) -> &ExecProcessId {
+        &self.process_id
+    }
+
+    pub fn assert_no_command(&mut self) {
+        assert!(matches!(
+            self.control_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    pub fn fill_control_channel(&self) -> usize {
+        let count = self.control_tx.max_capacity();
+        assert_eq!(self.control_tx.capacity(), count);
+        for _ in 0..count {
+            let (response, _) = oneshot::channel();
+            assert!(self
+                .control_tx
+                .try_send(ExecProcessCommand::Resize {
+                    rows: 1,
+                    cols: 1,
+                    response,
+                })
+                .is_ok());
+        }
+        let (response, _) = oneshot::channel();
+        assert!(matches!(
+            self.control_tx.try_send(ExecProcessCommand::Resize {
+                rows: 1,
+                cols: 1,
+                response,
+            }),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+        count
+    }
+
+    pub fn drain_control_fillers(&mut self, count: usize) {
+        for _ in 0..count {
+            assert!(matches!(
+                self.control_rx.try_recv(),
+                Ok(ExecProcessCommand::Resize {
+                    rows: 1,
+                    cols: 1,
+                    ..
+                })
+            ));
+        }
+        self.assert_no_command();
+    }
+
+    pub async fn acknowledge_kill(&mut self) {
+        let Some(ExecProcessCommand::Kill { response }) = self.control_rx.recv().await else {
+            panic!("expected process kill command");
+        };
+        let result = self.publish_terminal().await;
+        let _ = response.send(result);
+    }
+
+    pub async fn lose_kill_acknowledgement(&mut self) {
+        let Some(ExecProcessCommand::Kill { response }) = self.control_rx.recv().await else {
+            panic!("expected process kill command");
+        };
+        drop(response);
+    }
+
+    pub async fn publish_terminal(&self) -> Result<ExecProcessSnapshot, String> {
+        self.registry
+            .complete_status(&self.process_id, &self.control_tx, ExecStatus::Killed)
+            .await
+    }
+
+    pub async fn retire(&self) {
+        self.publish_terminal().await.unwrap();
+        self.registry.remove_record(&self.process_id).await.unwrap();
+    }
 }
 
 pub(crate) enum ExecProcessCommand {
@@ -106,6 +213,7 @@ struct ExecProcessRecord {
     runtime: Option<ExecProcessRuntime>,
     observation: Option<ObservationReader>,
     process_group_isolated: bool,
+    cleanup_requested: bool,
 }
 
 async fn remove_spill_file(path: Option<std::path::PathBuf>) {
@@ -145,6 +253,7 @@ impl ExecProcessRecord {
             runtime: None,
             observation: None,
             process_group_isolated: false,
+            cleanup_requested: false,
         }
     }
 
@@ -498,6 +607,31 @@ impl ExecRegistry {
         Self::default()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn register_test_process(&self, meta: ExecProcessMeta) -> TestProcessRuntime {
+        let process_id = meta.process_id.clone();
+        let (control_tx, control_rx) = mpsc::channel(8);
+        self.register_new_with_runtime(
+            meta,
+            crate::transcript::DEFAULT_MAX_BYTES,
+            ExecProcessRuntime {
+                control_tx: control_tx.clone(),
+                terminal: Arc::new(Notify::new()),
+                stdin_writer: None,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        self.mark_started(&process_id).await.unwrap();
+        TestProcessRuntime {
+            registry: self.clone(),
+            process_id,
+            control_tx,
+            control_rx,
+        }
+    }
+
     pub fn subscribe_completion(&self) -> broadcast::Receiver<ProcessCompletionEvent> {
         self.completion_tx.subscribe()
     }
@@ -538,6 +672,22 @@ impl ExecRegistry {
             }
         }
         tasks.spawn(task);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn join_monitors_for_test(&self) -> usize {
+        let mut tasks = self.monitor_tasks.lock().await;
+        let mut joined = 0;
+        while let Some(result) = tasks.join_next().await {
+            result.unwrap();
+            joined += 1;
+        }
+        joined
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn remove_record_for_test(&self, process_id: &ExecProcessId) {
+        self.remove_record(process_id).await.unwrap();
     }
 
     pub async fn register(
@@ -1025,10 +1175,29 @@ impl ExecRegistry {
         process_id: &ExecProcessId,
         status: ExecStatus,
     ) -> Result<ExecProcessSnapshot, String> {
+        self.set_status_for_runtime(process_id, status, None).await
+    }
+
+    async fn set_status_for_runtime(
+        &self,
+        process_id: &ExecProcessId,
+        status: ExecStatus,
+        expected: Option<&mpsc::Sender<ExecProcessCommand>>,
+    ) -> Result<ExecProcessSnapshot, String> {
         let mut records = self.records.lock().await;
         let record = records
             .get_mut(process_id)
             .ok_or_else(|| format!("process not found: {process_id}"))?;
+        if expected.is_some_and(|expected| {
+            !record
+                .runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.control_tx.same_channel(expected))
+        }) {
+            return Err(format!(
+                "process runtime changed; status not applied: {process_id}"
+            ));
+        }
         let was_terminal = record.snapshot.status.is_terminal();
         record.set_status(status);
         let snapshot = record.snapshot.clone();
@@ -1060,9 +1229,11 @@ impl ExecRegistry {
     pub(crate) async fn complete_status(
         &self,
         process_id: &ExecProcessId,
+        control_tx: &mpsc::Sender<ExecProcessCommand>,
         status: ExecStatus,
     ) -> Result<ExecProcessSnapshot, String> {
-        self.set_status(process_id, status).await
+        self.set_status_for_runtime(process_id, status, Some(control_tx))
+            .await
     }
 
     pub async fn mark_started(
@@ -1106,6 +1277,83 @@ impl ExecRegistry {
 
     pub async fn kill(&self, process_id: &ExecProcessId) -> Result<ExecProcessSnapshot, String> {
         self.finish_process(process_id, None).await
+    }
+
+    pub async fn capture_chat_cleanup_targets(&self, chat_id: &str) -> ExecProcessCleanupCapture {
+        let records = self.records.lock().await;
+        let mut capture = ExecProcessCleanupCapture {
+            targets: Vec::new(),
+            unavailable: 0,
+            omitted: 0,
+            pending: 0,
+        };
+        for record in records.values().filter(|record| {
+            record.snapshot.meta.owner.chat_id.as_deref() == Some(chat_id)
+                && record.snapshot.meta.mode != ExecMode::Foreground
+                && !record.snapshot.status.is_terminal()
+        }) {
+            if record.cleanup_requested {
+                capture.pending += 1;
+                continue;
+            }
+            let Some(runtime) = record.runtime.as_ref() else {
+                capture.unavailable += 1;
+                continue;
+            };
+            if capture.targets.len() == MAX_CHAT_CLEANUP_TARGETS {
+                capture.omitted += 1;
+                continue;
+            }
+            capture.targets.push(ExecProcessCleanupTarget {
+                snapshot: record.snapshot.clone(),
+                control_tx: runtime.control_tx.clone(),
+            });
+        }
+        capture
+    }
+
+    pub async fn kill_cleanup_target(
+        &self,
+        target: &ExecProcessCleanupTarget,
+    ) -> Result<ExecProcessSnapshot, String> {
+        let process_id = target.process_id();
+        let permit =
+            target.control_tx.reserve().await.map_err(|_| {
+                format!("cleanup runtime unavailable; command not sent: {process_id}")
+            })?;
+        let (response, rx) = oneshot::channel();
+        {
+            let mut records = self.records.lock().await;
+            let record = records
+                .get_mut(process_id)
+                .ok_or_else(|| format!("cleanup process no longer registered: {process_id}"))?;
+            record
+                .runtime
+                .as_ref()
+                .filter(|runtime| runtime.control_tx.same_channel(&target.control_tx))
+                .filter(|_| {
+                    record.snapshot.meta.owner == target.snapshot.meta.owner
+                        && record.snapshot.meta.mode == target.snapshot.meta.mode
+                })
+                .ok_or_else(|| format!("cleanup process incarnation changed: {process_id}"))?;
+            if record.snapshot.status.is_terminal() {
+                return Ok(record.snapshot.clone());
+            }
+            if record.cleanup_requested {
+                return Err(format!(
+                    "cleanup already requested; outcome not inferred: {process_id}"
+                ));
+            }
+            if target.control_tx.is_closed() {
+                return Err(format!(
+                    "cleanup runtime unavailable; command not sent: {process_id}"
+                ));
+            }
+            record.cleanup_requested = true;
+            permit.send(ExecProcessCommand::Kill { response });
+        }
+        rx.await
+            .map_err(|_| format!("cleanup acknowledgement lost; outcome unknown: {process_id}"))?
     }
 
     pub(crate) async fn finish_with_status(

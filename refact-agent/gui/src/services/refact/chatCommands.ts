@@ -35,6 +35,14 @@ export type GoalBudgetCommand = {
 
 export type ChatCommandBase =
   | {
+      type: "recovery_retry";
+      run_id: string;
+      expected_revision: number;
+      options: import("./chatSubscription").RecoveryPolicy;
+      model?: string;
+    }
+  | { type: "recovery_retry_now"; run_id: string; expected_revision: number }
+  | {
       type: "user_message";
       content: MessageContent;
       attachments?: unknown[];
@@ -546,12 +554,18 @@ export async function answerQuestions(
   apiKey?: string,
   askedAtMs?: number,
 ): Promise<string> {
-  const clientRequestId = await sendChatCommand(chatId, connection, apiKey, {
-    type: "answer_questions",
-    tool_call_id: toolCallId,
-    answers,
-    ...(askedAtMs === undefined ? {} : { asked_at_ms: askedAtMs }),
-  });
+  const clientRequestId = await sendChatCommand(
+    chatId,
+    connection,
+    apiKey,
+    {
+      type: "answer_questions",
+      tool_call_id: toolCallId,
+      answers,
+      ...(askedAtMs === undefined ? {} : { asked_at_ms: askedAtMs }),
+    },
+    true,
+  );
   if (!clientRequestId) {
     throw new Error("Answer command was not sent");
   }
@@ -577,7 +591,7 @@ export async function submitQuestionResponse(
       asked_at_ms: askedAtMs,
       response,
     },
-    undefined,
+    true,
     clientRequestId,
   );
 }

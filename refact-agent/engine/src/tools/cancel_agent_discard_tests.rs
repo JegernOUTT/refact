@@ -332,8 +332,13 @@ async fn discard_refuses_cards_without_worktrees_and_nonterminal_cards() {
 async fn discard_refuses_unregistered_worktree_without_raw_git_cleanup() {
     let fixture = Fixture::new("done").await;
     let mut registry = fixture.service.load_registry().await.unwrap();
+    let expected_registry = registry.clone();
     registry.records.clear();
-    fixture.service.save_registry(&registry).await.unwrap();
+    fixture
+        .service
+        .compare_and_save_registry(&expected_registry, &registry)
+        .await
+        .unwrap();
     let error = fixture.discard(&[]).await.unwrap_err();
     assert!(
         error.contains("not registered with the worktree registry"),

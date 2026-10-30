@@ -1847,6 +1847,10 @@ pub async fn process_tool_calls_once(
     if session_arc.lock().await.planner_pause_at_boundary() {
         return ToolStepOutcome::Stop;
     }
+    let Ok(mut operation) = super::session_runtime::begin_board_operation(&app, &session_arc).await
+    else {
+        return ToolStepOutcome::Stop;
+    };
     let session_extraction_span =
         perf_diagnostics::span(PerfComponent::ToolSessionExtraction, None, None);
     let (
@@ -1996,6 +2000,7 @@ pub async fn process_tool_calls_once(
         .await
         {
             Ok(context) => {
+                drop(operation.take());
                 for confirmation in confirmations.drain(..) {
                     if let Some(call) = tool_calls
                         .iter()
@@ -2020,6 +2025,11 @@ pub async fn process_tool_calls_once(
                     }
                 }
                 approval_context = Some(context);
+                operation =
+                    match super::session_runtime::begin_board_operation(&app, &session_arc).await {
+                        Ok(operation) => operation,
+                        Err(_) => return ToolStepOutcome::Stop,
+                    };
             }
             // The approval round-trip needs a real execution context. When it
             // cannot be built we fail closed: every pending confirmation turns
@@ -2255,6 +2265,7 @@ pub async fn process_tool_calls_once(
         session.user_interrupt_flag.clone()
     };
     let execution_wait_span = perf_diagnostics::span(PerfComponent::ToolExecutionWait, None, None);
+    drop(operation);
     let tool_execution = execute_tools_with_session(
         app.clone(),
         session_arc.clone(),
@@ -2275,6 +2286,13 @@ pub async fn process_tool_calls_once(
         result = tool_execution => result,
         _ = wait_for_tool_abort(session_arc.clone(), tool_interrupt_flag) => (Vec::new(), false),
     };
+    if super::session_runtime::board_execution_interrupted(&*session_arc.lock().await) {
+        let mut session = session_arc.lock().await;
+        for message in tool_results {
+            session.add_message(message);
+        }
+        return ToolStepOutcome::Stop;
+    }
     execution_wait_span.finish_tool(PerfOutcome::Success, 1, tools_to_execute.len() as u64, None);
 
     let privacy_approvals = shell_privacy_approval_reasons(&tools_to_execute, &tool_results);
@@ -2788,6 +2806,10 @@ pub async fn execute_tools_with_session(
         return (vec![], false);
     }
 
+    let Ok(operation) = super::session_runtime::begin_board_operation(&app, &session_arc).await
+    else {
+        return (Vec::new(), false);
+    };
     let (
         prompt_messages,
         session_abort_flag,
@@ -2879,6 +2901,7 @@ pub async fn execute_tools_with_session(
     let subchat_bridge = spawn_subchat_bridge(ccx.clone(), session_arc.clone());
 
     let turn_tool_pool = options.turn_tool_pool.clone();
+    drop(operation);
     let result = execute_tools_inner(
         app.clone(),
         ccx,
@@ -2972,6 +2995,7 @@ async fn execute_single_tool(
     model_id: Option<&str>,
     native_pause: Option<Arc<refact_agents_core::registry::PauseGate>>,
     native_abort: Option<Arc<AtomicBool>>,
+    expected_execution: Option<Arc<crate::agents::execution::RunExecution>>,
 ) -> (usize, bool, Vec<ChatMessage>, Vec<ContextFile>) {
     let context_abort_flag = {
         let cgcx = ccx.lock().await;
@@ -3086,6 +3110,17 @@ async fn execute_single_tool(
     } else {
         None
     };
+    let current = match current_runner_execution(&app, &ccx).await {
+        Ok(current) => current,
+        Err(_) => return (idx, false, Vec::new(), Vec::new()),
+    };
+    if !match (expected_execution.as_ref(), current.as_ref()) {
+        (Some(expected), Some(current)) => Arc::ptr_eq(expected, current),
+        (None, None) => true,
+        _ => false,
+    } {
+        return (idx, false, Vec::new(), Vec::new());
+    }
     let started = std::time::Instant::now();
     let execution_future = crate::file_activity::TOOL_ACTOR.scope(
         session_id.clone(),
@@ -3282,6 +3317,40 @@ async fn runner_capacity_wait<T>(
     }
 }
 
+async fn current_runner_execution(
+    app: &AppState,
+    ccx: &Arc<AMutex<AtCommandsContext>>,
+) -> Result<Option<Arc<crate::agents::execution::RunExecution>>, String> {
+    let (chat_id, board_context, internal) = {
+        let context = ccx.lock().await;
+        (
+            context.chat_id.clone(),
+            context
+                .task_meta
+                .as_ref()
+                .is_some_and(|meta| matches!(meta.role.as_str(), "agent" | "agents")),
+            context.subchat_depth > 0 && context.background_agent_id.is_none(),
+        )
+    };
+    let session = app.chat.sessions.read().await.get(&chat_id).cloned();
+    if let Some(session) = session {
+        match super::session_runtime::board_execution(app, &session).await {
+            Ok(Some(execution)) => return Ok(Some(execution)),
+            Ok(None) => {}
+            Err(reason) => {
+                super::session_runtime::interrupt_board_execution(
+                    &mut *session.lock().await,
+                    reason,
+                );
+                return Err(reason.recovery_message());
+            }
+        }
+    } else if board_context && !internal {
+        return Err(crate::tasks::admission::ExecutionUnavailable::Missing.recovery_message());
+    }
+    Ok(app.agent_executions.get(&chat_id))
+}
+
 /// Tools whose whole job is to block: the runner parks its execution permit for
 /// the duration instead of occupying a slot while idle.
 pub(crate) fn is_recognized_runner_wait_name(name: &str) -> bool {
@@ -3456,8 +3525,10 @@ async fn execute_tools_inner(
                 current_parallel_batch.clear();
             }
 
-            let chat_id = ccx.lock().await.chat_id.clone();
-            let execution = app.agent_executions.get(&chat_id);
+            let execution = match current_runner_execution(&app, &ccx).await {
+                Ok(execution) => execution,
+                Err(_) => break,
+            };
             let is_wait = recognized_runner_wait(&catalog, tool_call);
             let _operation_guards = if let Some(execution) = execution.as_ref() {
                 match runner_capacity_wait(
@@ -3502,6 +3573,7 @@ async fn execute_tools_inner(
                 model_id,
                 options.native_pause.clone(),
                 options.native_abort.clone(),
+                execution.clone(),
             )
             .await;
             all_results.push(result);
@@ -3601,6 +3673,9 @@ async fn execute_parallel_batch(
     native_pause: Option<Arc<refact_agents_core::registry::PauseGate>>,
     native_abort: Option<Arc<AtomicBool>>,
 ) -> Vec<(usize, bool, Vec<ChatMessage>, Vec<ContextFile>)> {
+    if current_runner_execution(&app, &ccx).await.is_err() {
+        return Vec::new();
+    }
     if let Some(pool) = turn_tool_pool.as_ref() {
         let mut required_slots: std::collections::HashMap<
             String,
@@ -3669,8 +3744,10 @@ async fn execute_parallel_batch(
         }
     }
     let batch_size = batch.len();
-    let chat_id = ccx.lock().await.chat_id.clone();
-    let execution = app.agent_executions.get(&chat_id);
+    let execution = match current_runner_execution(&app, &ccx).await {
+        Ok(execution) => execution,
+        Err(_) => return Vec::new(),
+    };
     let waits: Vec<_> = batch
         .iter()
         .map(|(_, call)| recognized_runner_wait(&catalog, call))
@@ -3739,6 +3816,7 @@ async fn execute_parallel_batch(
                     model_id.as_deref(),
                     native_pause.clone(),
                     native_abort,
+                    execution.clone(),
                 )
                 .await
             }
@@ -3799,6 +3877,37 @@ fn runtime_event_lines_with_fallback(
     (title, speech)
 }
 
+async fn begin_thread_board_preparation(
+    app: &AppState,
+    thread: &ThreadParams,
+    context: Option<&Arc<AMutex<AtCommandsContext>>>,
+) -> Result<Option<crate::chat::session_runtime::BoardOperation>, String> {
+    let session = app.chat.sessions.read().await.get(&thread.id).cloned();
+    if let Some(session) = session {
+        return super::session_runtime::begin_board_operation(app, &session)
+            .await
+            .map_err(|reason| reason.recovery_message());
+    }
+    if thread
+        .task_meta
+        .as_ref()
+        .is_some_and(|meta| matches!(meta.role.as_str(), "agent" | "agents"))
+    {
+        if let Some(context) = context {
+            let context = context.lock().await;
+            if context.chat_id == thread.id
+                && context.subchat_depth > 0
+                && context.background_agent_id.is_none()
+                && context.task_meta == thread.task_meta
+            {
+                return Ok(None);
+            }
+        }
+        return Err(crate::tasks::admission::ExecutionUnavailable::Missing.recovery_message());
+    }
+    Ok(None)
+}
+
 pub async fn execute_tools(
     app: AppState,
     tool_calls: &[ChatToolCall],
@@ -3811,6 +3920,16 @@ pub async fn execute_tools(
     if tool_calls.is_empty() {
         return (vec![], false);
     }
+    let operation = match begin_thread_board_preparation(
+        &app,
+        thread,
+        options.execution_context.as_ref(),
+    )
+    .await
+    {
+        Ok(operation) => operation,
+        Err(error) => return context_error_results(tool_calls, error),
+    };
     let catalog = match options.catalog.clone() {
         Some(catalog) => catalog,
         None => {
@@ -3909,6 +4028,7 @@ pub async fn execute_tools(
         app.buddy_event_sink.enqueue_event(ev).await;
     }
 
+    drop(operation);
     let (result_msgs, had_corrections) = execute_tools_inner(
         app,
         ccx,
@@ -3949,7 +4069,7 @@ mod interruptible_wait_tests {
     async fn live_sleep_execution_yields_to_append_and_when_idle() {
         use crate::tools::tools_description::Tool;
         use refact_core::chat_types::{PendingDelivery, PushMode};
-        for push in [PushMode::Append, PushMode::WhenIdle] {
+        for push in [Some(PushMode::Append), Some(PushMode::WhenIdle), None] {
             let gcx = crate::global_context::tests::make_test_gcx().await;
             let base_app = AppState::from_gcx(gcx).await;
             let app = AppState {
@@ -4038,6 +4158,7 @@ mod interruptible_wait_tests {
                     None,
                     None,
                     None,
+                    None,
                 )
                 .await
             });
@@ -4053,19 +4174,34 @@ mod interruptible_wait_tests {
             .expect("sleep did not enter wait wrapper");
             {
                 let mut locked = session.lock().await;
-                locked
-                    .enqueue_delivery(PendingDelivery::with_id(
-                        "incoming",
-                        vec![ChatMessage {
-                            role: "user".into(),
-                            content: ChatContent::SimpleText("wake up".into()),
-                            ..Default::default()
-                        }],
-                        push,
-                        "test",
-                        true,
-                    ))
-                    .unwrap();
+                if let Some(push) = push {
+                    locked
+                        .enqueue_delivery(PendingDelivery::with_id(
+                            "incoming",
+                            vec![ChatMessage {
+                                role: "user".into(),
+                                content: ChatContent::SimpleText("wake up".into()),
+                                ..Default::default()
+                            }],
+                            push,
+                            "test",
+                            true,
+                        ))
+                        .unwrap();
+                } else {
+                    assert_eq!(
+                        locked.enqueue_command(crate::chat::types::CommandRequest {
+                            native_approval_guard: None,
+                            supervision_guard: None,
+                            client_request_id: "command".into(),
+                            priority: false,
+                            command: crate::chat::types::ChatCommand::SetParams {
+                                patch: serde_json::json!({})
+                            },
+                        }),
+                        crate::chat::types::EnqueueCommandOutcome::Accepted
+                    );
+                }
             }
             let (_, corrected, messages, _) =
                 tokio::time::timeout(std::time::Duration::from_secs(10), run)
@@ -4084,18 +4220,25 @@ mod interruptible_wait_tests {
             for message in messages {
                 locked.add_message(message);
             }
-            assert_eq!(
-                locked.drain_pending_deliveries(),
-                (vec!["incoming".into()], true)
-            );
+            if push.is_some() {
+                assert_eq!(
+                    locked.drain_pending_deliveries(),
+                    (vec!["incoming".into()], true)
+                );
+            } else {
+                assert!(locked.yield_to_queued_commands_at_boundary());
+                assert_eq!(locked.command_queue[0].client_request_id, "command");
+            }
             assert_eq!(locked.drain_pending_deliveries(), (vec![], false));
             assert_eq!(locked.messages[0].role, "assistant");
             assert_eq!(locked.messages[1].role, "tool");
-            assert!(locked
-                .messages
-                .iter()
-                .skip(2)
-                .any(|message| message.content.content_text_only().contains("wake up")));
+            if push.is_some() {
+                assert!(locked
+                    .messages
+                    .iter()
+                    .skip(2)
+                    .any(|message| message.content.content_text_only().contains("wake up")));
+            }
         }
     }
 

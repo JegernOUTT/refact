@@ -19,10 +19,7 @@ use crate::exec::{
     ExecOutputChunk, ExecOutputStream, ExecOwnerMeta, ExecProcessFilter, ExecProcessId,
     ExecProcessSnapshot, ExecRawRead, ExecSpawnRequest, ExecStatus,
 };
-use crate::files_correction::{
-    canonicalize_normalized_path, check_if_its_inside_a_workspace_or_config,
-    get_active_workspace_folder,
-};
+use crate::files_correction::{canonicalize_normalized_path, get_active_workspace_folder};
 
 const DEFAULT_ROWS: u16 = 24;
 const DEFAULT_COLS: u16 = 80;
@@ -103,6 +100,7 @@ pub struct ExecOutputHttpChunk {
 
 #[derive(Debug, Serialize)]
 pub struct ExecReadHttpResponse {
+    pub command: String,
     pub chunks: Vec<ExecOutputHttpChunk>,
     pub next_seq: u64,
     pub status: &'static str,
@@ -170,6 +168,70 @@ async fn active_workspace(app: &AppState) -> Result<PathBuf, ScratchError> {
         })
 }
 
+async fn chat_worktree_workspace(
+    app: &AppState,
+    workspace: &FsPath,
+    chat_id: Option<&str>,
+) -> Result<Option<PathBuf>, ScratchError> {
+    let Some(chat_id) = chat_id.filter(|id| !id.is_empty()) else {
+        return Ok(None);
+    };
+    if !crate::chat::session_runtime::try_restore_session_if_trajectory_exists(
+        app.clone(),
+        &app.chat.sessions,
+        chat_id,
+    )
+    .await
+    {
+        return Ok(None);
+    }
+    let session = app.chat.sessions.read().await.get(chat_id).cloned();
+    let Some(session) = session else {
+        return Ok(None);
+    };
+    let meta = {
+        let session = session.lock().await;
+        if session.closed {
+            return Ok(None);
+        }
+        session.thread.worktree.clone()
+    };
+    let Some(meta) = meta.filter(|meta| meta.enforce) else {
+        return Ok(None);
+    };
+    let unavailable = || {
+        ScratchError::new(
+            StatusCode::FORBIDDEN,
+            "chat worktree is unavailable".to_string(),
+        )
+    };
+    if canonicalize_normalized_path(meta.source_workspace_root.clone()) != workspace {
+        return Err(unavailable());
+    }
+    let service = crate::worktrees::service::WorktreeService::new_async(
+        app.paths.cache_dir.clone(),
+        workspace.to_path_buf(),
+    )
+    .await
+    .map_err(|_| unavailable())?;
+    let validated = service
+        .validate_worktree_meta_strict(&meta)
+        .await
+        .map_err(|_| unavailable())?;
+    let sessions = app.chat.sessions.read().await;
+    if !sessions
+        .get(chat_id)
+        .is_some_and(|current| std::sync::Arc::ptr_eq(current, &session))
+    {
+        return Err(unavailable());
+    }
+    let session = session.lock().await;
+    if session.closed || session.thread.worktree.as_ref() != Some(&meta) {
+        return Err(unavailable());
+    }
+    Ok(Some(canonicalize_normalized_path(validated.root)))
+}
+
 async fn authorize_process(
     app: &AppState,
     process_id: &ExecProcessId,
@@ -179,9 +241,9 @@ async fn authorize_process(
     let snapshot = app
         .runtime
         .exec_registry
-        .authorize_process_access(process_id, "", Some(&workspace))
+        .get(process_id)
         .await
-        .map_err(process_access_error)?;
+        .ok_or_else(|| process_access_error(format!("process not found: {process_id}")))?;
     if snapshot.meta.owner.chat_id.is_some() {
         app.runtime
             .exec_registry
@@ -189,7 +251,32 @@ async fn authorize_process(
             .await
             .map_err(process_access_error)?;
     }
-    Ok((snapshot, workspace))
+    match app
+        .runtime
+        .exec_registry
+        .authorize_process_access(process_id, "", Some(&workspace))
+        .await
+    {
+        Ok(snapshot) => Ok((snapshot, workspace)),
+        Err(error) => {
+            if snapshot.meta.owner.chat_id.is_some() {
+                if let Some(root) = chat_worktree_workspace(app, &workspace, chat_id)
+                    .await
+                    .ok()
+                    .flatten()
+                {
+                    let snapshot = app
+                        .runtime
+                        .exec_registry
+                        .authorize_process_access(process_id, "", Some(&root))
+                        .await
+                        .map_err(process_access_error)?;
+                    return Ok((snapshot, root));
+                }
+            }
+            Err(process_access_error(error))
+        }
+    }
 }
 
 fn process_access_error(message: String) -> ScratchError {
@@ -269,11 +356,7 @@ fn powershell_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-async fn resolve_cwd(
-    app: &AppState,
-    workspace: &FsPath,
-    cwd: Option<&str>,
-) -> Result<PathBuf, ScratchError> {
+fn resolve_cwd(workspace: &FsPath, cwd: Option<&str>) -> Result<PathBuf, ScratchError> {
     let requested = cwd
         .map(PathBuf::from)
         .map(|path| {
@@ -285,9 +368,6 @@ async fn resolve_cwd(
         })
         .unwrap_or_else(|| workspace.to_path_buf());
     let cwd = canonicalize_normalized_path(requested);
-    check_if_its_inside_a_workspace_or_config(app.gcx.clone(), &cwd)
-        .await
-        .map_err(|message| ScratchError::new(StatusCode::BAD_REQUEST, message))?;
     if !cwd.starts_with(workspace) {
         return Err(ScratchError::new(
             StatusCode::BAD_REQUEST,
@@ -321,7 +401,10 @@ pub async fn handle_v1_exec_spawn(
     }
     let command = command_from_request(&request)?;
     let workspace = active_workspace(&app).await?;
-    let cwd = resolve_cwd(&app, &workspace, request.cwd.as_deref()).await?;
+    let workspace = chat_worktree_workspace(&app, &workspace, request.chat_id.as_deref())
+        .await?
+        .unwrap_or(workspace);
+    let cwd = resolve_cwd(&workspace, request.cwd.as_deref())?;
     let owner = ExecOwnerMeta {
         chat_id: request.chat_id,
         tool_call_id: None,
@@ -356,15 +439,43 @@ pub async fn handle_v1_exec_list(
     Query(query): Query<ExecAccessQuery>,
 ) -> Result<Json<ExecListHttpResponse>, ScratchError> {
     let workspace = active_workspace(&app).await?;
-    let snapshots = app
+    let mut snapshots = app
         .runtime
         .exec_registry
         .list(ExecProcessFilter {
-            chat_id: query.chat_id,
-            workspace: Some(workspace),
+            chat_id: query.chat_id.clone(),
+            workspace: Some(workspace.clone()),
             ..ExecProcessFilter::default()
         })
         .await;
+    if let Some(root) = chat_worktree_workspace(&app, &workspace, query.chat_id.as_deref())
+        .await
+        .ok()
+        .flatten()
+        .filter(|root| root != &workspace)
+    {
+        snapshots.extend(
+            app.runtime
+                .exec_registry
+                .list(ExecProcessFilter {
+                    chat_id: query.chat_id,
+                    workspace: Some(root),
+                    ..ExecProcessFilter::default()
+                })
+                .await,
+        );
+        snapshots.sort_by(|left, right| {
+            left.meta
+                .created_at_ms
+                .cmp(&right.meta.created_at_ms)
+                .then_with(|| {
+                    left.meta
+                        .process_id
+                        .as_str()
+                        .cmp(right.meta.process_id.as_str())
+                })
+        });
+    }
     Ok(Json(ExecListHttpResponse {
         processes: snapshots.iter().map(http_snapshot).collect(),
     }))
@@ -392,6 +503,7 @@ pub async fn handle_v1_exec_read(
             None => (Vec::new(), query.since_seq),
         };
         return Ok(Json(ExecReadHttpResponse {
+            command: snapshot.meta.command.clone(),
             chunks,
             next_seq,
             status: status_label(&snapshot.status),
@@ -409,6 +521,7 @@ pub async fn handle_v1_exec_read(
         .read(&process_id, query.since_seq, Some(limit))
         .await;
     Ok(Json(ExecReadHttpResponse {
+        command: snapshot.meta.command.clone(),
         chunks: read.chunks.iter().map(http_chunk).collect(),
         next_seq: read.next_seq,
         status: status_label(&snapshot.status),
@@ -506,6 +619,7 @@ pub async fn handle_v1_exec_subscribe(
 
     let stream = async_stream::stream! {
         let snapshot = json!({
+            "command": initial_snapshot.meta.command,
             "status": status_label(&initial_snapshot.status),
             "chunks": initial_read.chunks.iter().map(http_chunk).collect::<Vec<_>>(),
             "next_seq": initial_read.next_seq,
@@ -616,6 +730,7 @@ fn subscribe_raw_tty_stream(
             _ => Vec::new(),
         };
         let snapshot = json!({
+            "command": initial_snapshot.meta.command,
             "status": status_label(&initial_snapshot.status),
             "chunks": chunks,
             "next_seq": offset,
@@ -1038,6 +1153,257 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::OK);
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::parallel(exec_http_env)]
+    async fn registered_chat_worktree_process_access_requires_trusted_attachment() {
+        use crate::exec::{ExecMode, ExecProcessMeta};
+        use crate::worktrees::service::WorktreeService;
+        use crate::worktrees::types::CreateWorktreeRequest;
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let repo = git2::Repository::init(&source).unwrap();
+        let tree = repo.index().unwrap().write_tree().unwrap();
+        let signature = git2::Signature::now("Test", "test@example.com").unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "initial",
+            &repo.find_tree(tree).unwrap(),
+            &[],
+        )
+        .unwrap();
+        let cache = temp.path().join("cache");
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            cache.clone(),
+            temp.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
+        let app = AppState::from_gcx(gcx).await;
+        let service = WorktreeService::new(cache, source).unwrap();
+        let worktree = service
+            .create_worktree(CreateWorktreeRequest {
+                chat_id: Some("chat-a".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .worktree
+            .meta;
+        service
+            .validate_worktree_meta_strict(&worktree)
+            .await
+            .unwrap();
+        let mut session = crate::chat::types::ChatSession::new("chat-a".into());
+        session.thread.worktree = Some(worktree.clone());
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("chat-a".into(), session.clone());
+        let owned = app
+            .runtime
+            .exec_registry
+            .register(
+                ExecProcessMeta::new(ExecMode::Background, "printf original-command".into())
+                    .with_short_description("Friendly task title".into())
+                    .with_chat_id("chat-a")
+                    .with_workspace(worktree.root.clone()),
+                1024,
+            )
+            .await;
+        let foreign = tempfile::tempdir().unwrap();
+        let forbidden = app
+            .runtime
+            .exec_registry
+            .register(
+                ExecProcessMeta::new(ExecMode::Background, "foreign".into())
+                    .with_chat_id("chat-a")
+                    .with_workspace(foreign.path().to_path_buf()),
+                1024,
+            )
+            .await;
+        let router = make_refact_http_server(app.clone());
+        let process_id = owned.meta.process_id.as_str();
+        let read_uri = format!("/v1/exec/{process_id}/read?chat_id=chat-a");
+        let (status, read) = json_response(
+            router.clone(),
+            Request::builder()
+                .uri(&read_uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "owning chat must read its registered worktree process"
+        );
+        assert_eq!(read["command"], "printf original-command");
+
+        let (status, listed) = json_response(
+            router.clone(),
+            Request::builder()
+                .uri("/v1/exec/list?chat_id=chat-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            listed["processes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p["process_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![process_id]
+        );
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/exec/{process_id}/subscribe?chat_id=chat-a"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let first = tokio::time::timeout(Duration::from_secs(5), response.into_body().data())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let event = String::from_utf8(first.to_vec()).unwrap();
+        let data = event
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap();
+        let snapshot: Value = serde_json::from_str(data).unwrap();
+        assert_eq!(snapshot["command"], "printf original-command");
+        for uri in [
+            format!("/v1/exec/{process_id}/read"),
+            format!("/v1/exec/{process_id}/read?chat_id=chat-b"),
+            format!(
+                "/v1/exec/{}/read?chat_id=chat-a",
+                forbidden.meta.process_id.as_str()
+            ),
+        ] {
+            let (status, _) = json_response(
+                router.clone(),
+                Request::builder().uri(uri).body(Body::empty()).unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+        }
+        session.lock().await.thread.worktree = None;
+        let (status, _) = json_response(
+            router.clone(),
+            Request::builder()
+                .uri(&read_uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "chat id alone grants no worktree access"
+        );
+        session.lock().await.thread.worktree = Some(crate::worktrees::types::WorktreeMeta {
+            root: foreign.path().to_path_buf(),
+            ..worktree.clone()
+        });
+        let (status, _) = json_response(
+            router.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/v1/exec/{}/read?chat_id=chat-a",
+                    forbidden.meta.process_id.as_str()
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "forged session root grants no access"
+        );
+        session.lock().await.thread.worktree = Some(worktree.clone());
+        let (status, _) = json_response(
+            router.clone(),
+            Request::builder()
+                .uri(&read_uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "restoring the trusted attachment restores access"
+        );
+
+        let saved = {
+            let session = session.lock().await;
+            crate::chat::trajectories::trajectory_snapshot_from_session(&session)
+        };
+        crate::chat::trajectories::save_trajectory_snapshot(app.gcx.clone(), saved)
+            .await
+            .unwrap();
+        assert!(app.chat.sessions.write().await.remove("chat-a").is_some());
+        let (status, restored) = json_response(
+            router.clone(),
+            Request::builder()
+                .uri(&read_uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "persisted owning chat can reconnect after eviction"
+        );
+        assert_eq!(restored["command"], "printf original-command");
+
+        let expected_registry = service.load_registry().await.unwrap();
+        let mut registry = expected_registry.clone();
+        registry.records.clear();
+        service
+            .compare_and_save_registry(&expected_registry, &registry)
+            .await
+            .unwrap();
+        let (status, _) = json_response(
+            router.clone(),
+            Request::builder()
+                .uri(&read_uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "unregistered attachment grants no access"
+        );
+        let (_, listed) = json_response(
+            router,
+            Request::builder()
+                .uri("/v1/exec/list?chat_id=chat-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(listed["processes"], json!([]));
     }
 
     #[tokio::test]

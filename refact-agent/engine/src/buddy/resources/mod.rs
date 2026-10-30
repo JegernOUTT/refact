@@ -95,6 +95,11 @@ pub enum ResourceError {
     DraftDoesNotMatchResource,
     VersionMismatch,
     ValidationFailed(String),
+    KnownPartial {
+        receipt: ResourceApplyReceipt,
+        reason: String,
+    },
+    NotApplied(String),
     MaterialUnavailable,
     ResourceMissing,
     Io(String),

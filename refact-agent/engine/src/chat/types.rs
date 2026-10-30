@@ -292,6 +292,9 @@ pub(crate) struct PlannerPause {
 }
 
 pub struct ChatSession {
+    pub recovery_policy_source: refact_core::recovery::RecoveryPolicySource,
+    pub recovery_notify: Arc<Notify>,
+    pub recovery_budget: Option<Arc<refact_core::recovery::RecoveryBudget>>,
     pub chat_id: String,
     pub derived_privacy_zones: crate::privacy::records::DerivedPrivacyZones,
     pub thread: ThreadParams,
@@ -300,7 +303,9 @@ pub struct ChatSession {
     pub(crate) planner_pause: Option<PlannerPause>,
     pub(crate) planner_pause_revision: u64,
     pub(crate) planner_pause_pending_tools: bool,
+    pub(crate) board_restored_pending_tools: bool,
     pub(crate) task_goal_messages: Option<Vec<ChatMessage>>,
+    pub(crate) task_goal_partial_write: Option<Arc<crate::tasks::goal::TaskGoalPartialWrite>>,
     pub goal: Option<GoalSnapshot>,
     pub goal_active: bool,
     pub goal_status: Option<GoalStatus>,
@@ -329,6 +334,7 @@ pub struct ChatSession {
     pub abort_notify: Arc<Notify>,
     pub interruptible_waits: usize,
     pub wait_delivery_boundary: bool,
+    pub(crate) wait_tool_window_active: bool,
     pub wait_interrupt_flag: Arc<AtomicBool>,
     pub user_interrupt_flag: Arc<AtomicBool>,
     pub queue_processor_running: Arc<AtomicBool>,

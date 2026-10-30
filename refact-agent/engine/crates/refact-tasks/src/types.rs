@@ -80,6 +80,50 @@ pub struct TaskBoard {
     pub dependency_overrides: std::collections::BTreeMap<String, DependencyOverride>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub card_outcomes: std::collections::BTreeMap<String, CardOutcome>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub planner_replies:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, PlannerReply>>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub card_attempt_generations: std::collections::BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannerReplyAttempt {
+    pub assignee: Option<String>,
+    pub chat_id: Option<String>,
+    pub started_at: Option<String>,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlannerReplyState {
+    Recorded,
+    Accepted,
+    Delivered,
+    Unknown,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannerReply {
+    pub version: u32,
+    pub task_id: String,
+    pub card_id: String,
+    pub question_id: String,
+    pub planner_chat_id: String,
+    pub action_id: String,
+    pub answered_at: String,
+    pub answer: String,
+    pub answer_input_hash: String,
+    pub attempt: PlannerReplyAttempt,
+    pub envelope: serde_json::Value,
+    pub envelope_hash: String,
+    pub push: String,
+    pub ttl_secs: u64,
+    pub state: PlannerReplyState,
+    pub outcome: String,
+    pub reservation: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -627,6 +671,8 @@ impl Default for TaskBoard {
             card_claims: std::collections::BTreeMap::new(),
             dependency_overrides: std::collections::BTreeMap::new(),
             card_outcomes: std::collections::BTreeMap::new(),
+            planner_replies: std::collections::BTreeMap::new(),
+            card_attempt_generations: std::collections::BTreeMap::new(),
         }
     }
 }

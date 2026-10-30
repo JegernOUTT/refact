@@ -197,6 +197,7 @@ function renderToolContent(
 
 async function parseSnapshot(
   backgroundAgents: unknown[],
+  onAgentRosterDenied = vi.fn(),
 ): Promise<ChatEventEnvelope> {
   const onEvent = vi.fn<(event: ChatEventEnvelope) => void>();
   const event = makeSnapshot(chatId, backgroundAgents);
@@ -219,6 +220,7 @@ async function parseSnapshot(
     {
       onEvent,
       onError: vi.fn(),
+      onAgentRosterDenied,
     },
   );
 
@@ -610,16 +612,20 @@ describe("background agents", () => {
     expect(state.threads[chatId]?.background_agents).toEqual({});
   });
 
-  test("snapshot with valid, null, valid agents keeps the valid entries", async () => {
+  test("snapshot with valid, null, valid agents denies the entire roster", async () => {
     const first = makeAgent({ agent_id: "valid-1" });
     const second = makeAgent({ agent_id: "valid-2" });
+    const onAgentRosterDenied = vi.fn();
 
-    const state = await reduceParsedSnapshot([first, null, second]);
+    const event = await parseSnapshot(
+      [first, null, second],
+      onAgentRosterDenied,
+    );
+    const state = chatReducer(makeState(), applyChatEvent(event));
 
-    expect(state.threads[chatId]?.background_agents).toEqual({
-      [first.agent_id]: first,
-      [second.agent_id]: second,
-    });
+    expect(onAgentRosterDenied).toHaveBeenCalledTimes(1);
+    expect(onAgentRosterDenied).toHaveBeenCalledWith(event);
+    expect(state.threads[chatId]?.background_agents).toEqual({});
   });
 
   test("empty snapshot background agent list preserves prior state map", async () => {

@@ -68,6 +68,7 @@ fn stream_params(
         .map(|(flag, notify)| (Some(flag), Some(notify)))
         .unwrap_or((None, None));
     StreamRunParams {
+        recovery_budget: None,
         llm_request: LlmRequest::new(
             model.id.clone(),
             vec![crate::call_validation::ChatMessage::new(

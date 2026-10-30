@@ -122,6 +122,7 @@ import {
   selectContextRebuildRequiredById,
   selectHasMessagesById,
   selectIsStreamingById,
+  selectRecoveryById,
   selectIsWaitingById,
   selectQueuedItemsById,
   selectThreadImagesById,
@@ -173,6 +174,10 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const isWaiting = useAppSelector((state) =>
     selectIsWaitingById(state, chatId),
   );
+  const recoveryActive = useAppSelector((state) => {
+    const recovery = selectRecoveryById(state, chatId);
+    return recovery?.state === "waiting" || recovery?.state === "attempting";
+  });
   const caps = useCapsForToolUse();
   const { isMultimodalitySupportedForCurrentModel } = caps;
   const config = useConfig();
@@ -945,7 +950,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                     allDisabled ||
                     contextRebuildRequired
                   }
-                  isStreaming={isStreaming || isWaiting}
+                  isStreaming={isStreaming || isWaiting || recoveryActive}
                   hasText={
                     value.trim().length > 0 ||
                     attachedImages.length > 0 ||

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 
 import type { EngineApiConnection } from "../../../services/refact/chatCommands";
 import {
+  ExecHttpError,
   execSubscribeUrl,
   readExec,
   resizeExec,
@@ -57,6 +58,17 @@ function isTerminalStatus(status: ExecStatus): boolean {
   return !["starting", "running"].includes(status);
 }
 
+function commandHeader(command: string): string {
+  const text = Array.from(command.replace(/\r\n?|\n/g, "\n"), (char) => {
+    const code = char.charCodeAt(0);
+    // Metadata is display-only: escape terminal controls, including ESC and C1.
+    return (code < 32 && char !== "\n") || (code >= 127 && code <= 159)
+      ? `\\x${code.toString(16).padStart(2, "0")}`
+      : char;
+  }).join("");
+  return `${DIM}$ ${text.replace(/\n/g, "\r\n")}${DIM_OFF}\r\n`;
+}
+
 export function exitNoticeText(
   status: ExecStatus,
   exitCode?: number | null,
@@ -89,12 +101,22 @@ export function useExecSession({
   const [reconnecting, setReconnecting] = useState(false);
   const statusRef = useRef<ExecStatus>("running");
   const nextSequenceRef = useRef(0);
+  const historyRef = useRef<{ terminal: Terminal; started: boolean } | null>(
+    null,
+  );
 
   useEffect(() => {
     if (!runtime) return;
 
+    setError(null);
+    setReconnecting(false);
     const { container, fitAddon, terminal } = runtime;
+    if (historyRef.current?.terminal !== terminal) {
+      historyRef.current = { terminal, started: false };
+    }
+    const history = historyRef.current;
     let stopped = false;
+    const isStopped = () => stopped;
     let eventSource: EventSource | null = null;
     let inputTimer: ReturnType<typeof setTimeout> | null = null;
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -104,9 +126,27 @@ export function useExecSession({
     let exitNoticeWritten = false;
     let syncedSize: { rows: number; cols: number } | null = null;
 
+    const clearTimers = () => {
+      if (inputTimer !== null) clearTimeout(inputTimer);
+      if (resizeTimer !== null) clearTimeout(resizeTimer);
+      if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+      inputTimer = resizeTimer = reconnectTimer = null;
+    };
+
     const reportError = (cause: unknown) => {
-      if (stopped) return;
+      if (isStopped()) return;
       setError(cause instanceof Error ? cause.message : String(cause));
+      if (
+        cause instanceof ExecHttpError &&
+        [401, 403, 404].includes(cause.status)
+      ) {
+        stopped = true;
+        clearTimers();
+        inputBuffer = "";
+        eventSource?.close();
+        eventSource = null;
+        setReconnecting(false);
+      }
     };
 
     const updateStatus = (
@@ -122,9 +162,16 @@ export function useExecSession({
       );
     };
 
+    const writeCommand = (command?: string) => {
+      if (history.started || typeof command !== "string") return;
+      history.started = true;
+      terminal.write(commandHeader(command));
+    };
+
     const writeChunks = (chunks: ExecOutputChunk[]) => {
       for (const chunk of chunks) {
         if (chunk.seq < nextSequenceRef.current) continue;
+        history.started = true;
         terminal.write(chunk.text);
         nextSequenceRef.current = chunk.offset ?? chunk.seq + 1;
       }
@@ -133,6 +180,7 @@ export function useExecSession({
     const writeExitNotice = (status: ExecStatus, exitCode?: number | null) => {
       if (exitNoticeWritten) return;
       exitNoticeWritten = true;
+      history.started = true;
       terminal.write(
         `\r\n${DIM}[${exitNoticeText(status, exitCode)}]${DIM_OFF}\r\n`,
       );
@@ -142,7 +190,7 @@ export function useExecSession({
       inputTimer = null;
       const chars = inputBuffer;
       inputBuffer = "";
-      if (!chars || stopped) return;
+      if (!chars || isStopped()) return;
       try {
         await writeProcessStdin(processId, chars, connection, chatId, apiKey);
       } catch (cause) {
@@ -152,6 +200,7 @@ export function useExecSession({
 
     const dataDisposable = interactive
       ? terminal.onData((chars) => {
+          if (isStopped()) return;
           inputBuffer += chars;
           if (inputTimer === null) {
             inputTimer = setTimeout(() => void flushInput(), INPUT_DEBOUNCE_MS);
@@ -160,7 +209,7 @@ export function useExecSession({
       : null;
 
     const syncSize = async () => {
-      if (stopped) return;
+      if (isStopped()) return;
       try {
         fitAddon.fit();
       } catch {
@@ -175,6 +224,7 @@ export function useExecSession({
       }
       try {
         await resizeExec(processId, rows, cols, connection, chatId, apiKey);
+        if (isStopped()) return;
         syncedSize = { rows, cols };
       } catch (cause) {
         reportError(cause);
@@ -182,7 +232,7 @@ export function useExecSession({
     };
 
     const scheduleResize = () => {
-      if (stopped) return;
+      if (isStopped()) return;
       if (resizeTimer !== null) clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
         resizeTimer = null;
@@ -198,7 +248,7 @@ export function useExecSession({
       eventSource?.close();
       eventSource = null;
       if (
-        stopped ||
+        isStopped() ||
         reconnectTimer !== null ||
         isTerminalStatus(statusRef.current)
       ) {
@@ -214,8 +264,8 @@ export function useExecSession({
     };
 
     const connect = () => {
-      if (stopped || isTerminalStatus(statusRef.current)) return;
-      eventSource = new EventSource(
+      if (isStopped() || isTerminalStatus(statusRef.current)) return;
+      const source = new EventSource(
         execSubscribeUrl(
           processId,
           connection,
@@ -223,14 +273,19 @@ export function useExecSession({
           nextSequenceRef.current,
         ),
       );
-      eventSource.onopen = () => {
+      eventSource = source;
+      const isCurrent = () => !isStopped() && eventSource === source;
+      source.onopen = () => {
+        if (!isCurrent()) return;
         reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
         setReconnecting(false);
         setError(null);
       };
-      eventSource.addEventListener("snapshot", (event) => {
+      source.addEventListener("snapshot", (event) => {
+        if (!isCurrent()) return;
         const snapshot = parseEvent<ExecSnapshotEvent>(event);
         if (!snapshot) return;
+        writeCommand(snapshot.command);
         writeChunks(snapshot.chunks);
         nextSequenceRef.current = Math.max(
           nextSequenceRef.current,
@@ -238,11 +293,13 @@ export function useExecSession({
         );
         updateStatus(snapshot.status, snapshot.exit_code);
       });
-      eventSource.addEventListener("output", (event) => {
+      source.addEventListener("output", (event) => {
+        if (!isCurrent()) return;
         const chunk = parseEvent<ExecOutputChunk>(event);
         if (chunk) writeChunks([chunk]);
       });
-      eventSource.addEventListener("exit", (event) => {
+      source.addEventListener("exit", (event) => {
+        if (!isCurrent()) return;
         const exit = parseEvent<ExecExitEvent>(event);
         if (!exit) return;
         updateStatus(exit.status, exit.exit_code, exit.ended_at_ms);
@@ -251,11 +308,15 @@ export function useExecSession({
         eventSource = null;
         setReconnecting(false);
       });
-      eventSource.onerror = scheduleReconnect;
+      source.onerror = () => {
+        if (isCurrent()) scheduleReconnect();
+      };
     };
 
     async function backfillAndConnect() {
+      if (isStopped()) return;
       await syncSize();
+      if (isStopped()) return;
       try {
         const read = await readExec(
           processId,
@@ -265,7 +326,8 @@ export function useExecSession({
           apiKey,
           interactive,
         );
-        if (stopped) return;
+        if (isStopped()) return;
+        writeCommand(read.command);
         writeChunks(read.chunks);
         nextSequenceRef.current = Math.max(
           nextSequenceRef.current,
@@ -279,8 +341,8 @@ export function useExecSession({
         }
         connect();
       } catch (cause) {
-        if (stopped) return;
-        setError(cause instanceof Error ? cause.message : String(cause));
+        if (isStopped()) return;
+        reportError(cause);
         scheduleReconnect();
       }
     }
@@ -292,9 +354,7 @@ export function useExecSession({
       dataDisposable?.dispose();
       resizeObserver.disconnect();
       eventSource?.close();
-      if (inputTimer !== null) clearTimeout(inputTimer);
-      if (resizeTimer !== null) clearTimeout(resizeTimer);
-      if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+      clearTimers();
     };
   }, [
     apiKey,

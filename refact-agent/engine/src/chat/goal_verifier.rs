@@ -775,6 +775,7 @@ pub async fn run_goal_verifier(
     };
     let verifier_abort_flag = Arc::new(AtomicBool::new(false));
     let params = StreamRunParams {
+        recovery_budget: None,
         llm_request: prepared.llm_request,
         model_rec: model_rec.base.clone(),
         chat_id: None,

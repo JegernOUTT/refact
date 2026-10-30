@@ -15,7 +15,9 @@ use crate::global_context::GlobalContext;
 use crate::tasks::{admission, storage};
 use crate::tools::tool_spawn_ab::tests::{await_started, setup_repo_task, RecordingFacade};
 use crate::tools::tool_task_restart_agent::ToolTaskRestartAgent;
-use crate::tools::tool_task_spawn_agent::{prepare_agent_worktree, PreparedWorktree};
+use crate::tools::tool_task_spawn_agent::{
+    prepare_agent_worktree, AcceptedAgentSource, PreparedWorktree,
+};
 use crate::tools::tools_description::Tool;
 
 pub(crate) fn git(root: &Path, args: &[&str]) -> String {
@@ -48,12 +50,23 @@ impl Fixture {
         let meta = storage::load_task_meta(gcx.clone(), "task-1")
             .await
             .unwrap();
-        let old =
-            prepare_agent_worktree(gcx.clone(), &meta, "task-1", "old-agent", "T-1", "old-chat")
-                .await
-                .unwrap();
+        let accepted_source = AcceptedAgentSource::capture(gcx.clone(), &source, None)
+            .await
+            .unwrap();
+        let old = prepare_agent_worktree(
+            gcx.clone(),
+            &accepted_source,
+            &meta,
+            "task-1",
+            "old-agent",
+            "T-1",
+            "old-chat",
+        )
+        .await
+        .unwrap();
         let worktree = old.worktree_meta();
         storage::update_board_atomic(gcx.clone(), "task-1", move |board| {
+            board.owner_chat_id = Some("planner".into());
             let card = board.get_card_mut("T-1").unwrap();
             card.column = "failed".into();
             card.assignee = Some("old-agent".into());
@@ -92,6 +105,33 @@ impl Fixture {
         ));
         let facade = Arc::new(RecordingFacade::default());
         app.chat.facade = facade.clone();
+        let mut planner = crate::chat::types::ChatSession::new("planner".into());
+        planner.thread.model = "test/model".into();
+        planner.thread.task_meta = Some(refact_chat_api::TaskMeta {
+            task_id: "task-1".into(),
+            role: "planner".into(),
+            planner_chat_id: Some("planner".into()),
+            ..Default::default()
+        });
+        planner.work_project_root = Some(source.clone());
+        let mut previous = crate::chat::types::ChatSession::new("old-chat".into());
+        previous.thread = crate::tools::tool_task_spawn_agent::build_agent_thread_params(
+            "old-chat",
+            "Previous",
+            "test/model",
+            "task-1",
+            "old-agent",
+            "T-1",
+            "planner",
+            old.worktree_meta(),
+        );
+        previous.work_project_root = Some(source.clone());
+        previous.set_runtime_state(refact_runtime_api::SessionState::Completed, None);
+        {
+            let mut sessions = app.chat.sessions.write().await;
+            sessions.insert("planner".into(), Arc::new(Mutex::new(planner)));
+            sessions.insert("old-chat".into(), Arc::new(Mutex::new(previous)));
+        }
         let ccx = Arc::new(Mutex::new(
             AtCommandsContext::new_from_app(
                 app.clone(),

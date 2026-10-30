@@ -546,16 +546,7 @@ pub async fn parent_command_policy(
         .await,
     ));
     super::tool_authority::ensure_context_tool(&child_context, &pending.tool_name).await?;
-    let binding = super::command_approval::prepare(
-        &child_context,
-        &call,
-        pending
-            .execution
-            .as_ref()
-            .map(|execution| execution.reason.as_str())
-            .unwrap_or(""),
-    )
-    .await?;
+    let binding = super::command_approval::validate_pending(&child_context, &call, pending).await?;
     if binding != pending.execution {
         return Err("child approval execution binding changed".into());
     }
@@ -1056,8 +1047,9 @@ pub(crate) mod tests {
             .insert(child_id.clone(), Arc::new(Mutex::new(child)));
         std::fs::create_dir_all(fixture.dir.path().join(".refact/tasks").join(task_id)).unwrap();
         let mut board = crate::tasks::types::TaskBoard::default();
+        board.owner_chat_id = Some("parent".into());
         let card: crate::tasks::types::BoardCard = serde_json::from_value(serde_json::json!({
-            "id":"card", "title":"Approval card", "column":"doing", "created_at":"2026-01-01T00:00:00Z", "agent_chat_id":child_id
+            "id":"card", "title":"Approval card", "column":"doing", "created_at":"2026-01-01T00:00:00Z", "agent_chat_id":child_id, "assignee":"worker"
         })).unwrap();
         board.cards.push(card);
         crate::tasks::storage::save_board(fixture.app.gcx.clone(), task_id, &board)

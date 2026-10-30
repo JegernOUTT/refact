@@ -87,6 +87,8 @@ mod tool_shell;
 pub mod tool_team;
 pub(crate) use tool_shell::approval_request as shell_approval_request;
 pub(crate) use tool_process::approval_request as process_approval_request;
+pub(crate) use tool_shell::approval_request_without_cache as shell_approval_request_without_cache;
+pub(crate) use tool_process::approval_request_without_cache as process_approval_request_without_cache;
 #[cfg(test)]
 mod plan_history_archive_tests;
 pub(crate) mod tool_sleep;

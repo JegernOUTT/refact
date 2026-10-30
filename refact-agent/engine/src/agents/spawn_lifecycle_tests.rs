@@ -535,6 +535,58 @@ async fn nested_isolated_auto_merge_runs_inside_parent_worktree() {
     request.worktree_mode = SpawnWorktreeMode::Isolated { auto_merge: true };
     fixture.install_parent(&request).await;
 
+    std::fs::write(parent_worktree.root.join("base.txt"), "staged parent\n").unwrap();
+    run_git(&parent_worktree.root, &["add", "base.txt"]);
+    std::fs::write(parent_worktree.root.join("base.txt"), "unstaged parent\n").unwrap();
+    std::fs::write(parent_worktree.root.join("notes.txt"), "untracked parent\n").unwrap();
+    let parent_head = run_git(&parent_worktree.root, &["rev-parse", "HEAD"]);
+    let parent_index = run_git(&parent_worktree.root, &["diff", "--cached", "--binary"]);
+    let parent_status = run_git(&parent_worktree.root, &["status", "--porcelain"]);
+    let refused = await_completion(
+        crate::agents::spawn::spawn_background_agent(fixture.app.clone(), request.clone())
+            .await
+            .expect("spawn nested agent against dirty parent"),
+    )
+    .await;
+    assert_eq!(refused.merge_status.as_deref(), Some("failed"));
+    assert!(refused.error.as_deref().unwrap().contains("dirty_baseline"));
+    assert_eq!(
+        run_git(&parent_worktree.root, &["rev-parse", "HEAD"]),
+        parent_head
+    );
+    assert_eq!(
+        run_git(&parent_worktree.root, &["diff", "--cached", "--binary"]),
+        parent_index
+    );
+    assert_eq!(
+        run_git(&parent_worktree.root, &["status", "--porcelain"]),
+        parent_status
+    );
+    assert_eq!(
+        std::fs::read_to_string(parent_worktree.root.join("base.txt")).unwrap(),
+        "unstaged parent\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(parent_worktree.root.join("notes.txt")).unwrap(),
+        "untracked parent\n"
+    );
+    let child = service
+        .get_worktree(refused.worktree_id.as_deref().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        run_git(&child.meta.root, &["rev-parse", "HEAD"]),
+        parent_head
+    );
+    assert!(
+        run_git(&child.meta.root, &["status", "--porcelain"]).contains("nested-agent-change.txt")
+    );
+    run_git(&parent_worktree.root, &["add", "-A"]);
+    run_git(
+        &parent_worktree.root,
+        &["commit", "-m", "preserve parent edits"],
+    );
+
     let completed = await_completion(
         crate::agents::spawn::spawn_background_agent(fixture.app.clone(), request)
             .await
@@ -548,6 +600,251 @@ async fn nested_isolated_auto_merge_runs_inside_parent_worktree() {
         "merged\n"
     );
     assert!(!fixture.source.join("nested-agent-change.txt").exists());
+    assert_eq!(
+        run_git(&parent_worktree.root, &["branch", "--show-current"]).trim(),
+        "refact/subagent/parent"
+    );
+    assert_eq!(
+        std::fs::read_to_string(parent_worktree.root.join("base.txt")).unwrap(),
+        "unstaged parent\n"
+    );
+    assert!(run_git(&parent_worktree.root, &["status", "--porcelain"]).is_empty());
+    assert!(service
+        .get_worktree(completed.worktree_id.as_deref().unwrap())
+        .await
+        .is_err());
+}
+
+#[serial(test_runner)]
+#[tokio::test]
+async fn nested_isolated_auto_merge_refuses_changed_parent_checkout() {
+    let fixture = repo_fixture().await;
+    let parent_root = fixture.source.clone();
+    let changed_root = parent_root.clone();
+    let _runner =
+        crate::agents::spawn::install_test_runner(Arc::new(move |_gcx, messages, config| {
+            let parent = changed_root.clone();
+            Box::pin(async move {
+                let child = config.worktree.as_ref().unwrap();
+                std::fs::write(child.root.join("child.txt"), "uncommitted child\n").unwrap();
+                run_git(&parent, &["checkout", "-b", "changed-parent"]);
+                std::fs::write(parent.join("base.txt"), "staged parent\n").unwrap();
+                run_git(&parent, &["add", "base.txt"]);
+                std::fs::write(parent.join("base.txt"), "unstaged parent\n").unwrap();
+                Ok(completed_result(messages, config))
+            })
+        }));
+    let mut request = spawn_request("parent-checkout-changed", BgAgentKind::Subagent);
+    request.parent_worktree = Some(fixture.parent_worktree.clone());
+    request.worktree_mode = SpawnWorktreeMode::Isolated { auto_merge: true };
+    fixture.install_parent(&request).await;
+    let head = run_git(&parent_root, &["rev-parse", "HEAD"]);
+
+    let completed = await_completion(
+        crate::agents::spawn::spawn_background_agent(fixture.app.clone(), request)
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(completed.merge_status.as_deref(), Some("failed"));
+    assert!(completed
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("identity changed"));
+    assert_eq!(run_git(&parent_root, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        run_git(&parent_root, &["branch", "--show-current"]).trim(),
+        "changed-parent"
+    );
+    assert_eq!(
+        run_git(&parent_root, &["show", ":base.txt"]),
+        "staged parent\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(parent_root.join("base.txt")).unwrap(),
+        "unstaged parent\n"
+    );
+    let service = WorktreeService::new(fixture.cache.clone(), fixture.source.clone()).unwrap();
+    let child = service
+        .get_worktree(completed.worktree_id.as_deref().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(run_git(&child.meta.root, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        std::fs::read_to_string(child.meta.root.join("child.txt")).unwrap(),
+        "uncommitted child\n"
+    );
+
+    run_git(&parent_root, &["add", "base.txt"]);
+    run_git(&parent_root, &["commit", "-m", "preserve parent edits"]);
+    run_git(&parent_root, &["checkout", "work"]);
+    assert!(run_git(&parent_root, &["status", "--porcelain"]).is_empty());
+    let merge_service = crate::agents::spawn::prepare_spawn_merge_service(
+        &fixture.app,
+        &completed.agent_id,
+        fixture.source.clone(),
+        child.meta.clone(),
+        Some(fixture.parent_worktree.clone()),
+        None,
+    )
+    .await
+    .unwrap();
+    let parent_session = fixture
+        .app
+        .chat
+        .sessions
+        .read()
+        .await
+        .get("parent-checkout-changed")
+        .cloned()
+        .unwrap();
+    let parent_refs = run_git(&parent_root, &["show-ref"]);
+    let parent_index = run_git(&parent_root, &["diff", "--cached", "--binary"]);
+    let child_status = run_git(&child.meta.root, &["status", "--porcelain"]);
+    let child_index = run_git(&child.meta.root, &["diff", "--cached", "--binary"]);
+    assert!(child_status.contains("child.txt"));
+    let merge_gate = crate::worktrees::service::merge_lock_for(&parent_root);
+    let held = merge_gate.lock().await;
+    let mut merging = Box::pin(
+        crate::tools::tool_task_merge_agent::merge_under_available_lease(
+            &fixture.app,
+            &merge_service,
+            &child.meta.id,
+            crate::worktrees::types::MergeWorktreeRequest {
+                strategy: crate::worktrees::types::WorktreeMergeStrategy::Squash,
+                delete_after_merge: true,
+                include_uncommitted: true,
+                target_branch: Some("work".into()),
+                commit_message: Some("nested merge must be refused".into()),
+                ..Default::default()
+            },
+            None,
+            |_gcx, _request| async { Err("No post-merge check requested".into()) },
+        ),
+    );
+    assert!(futures::poll!(merging.as_mut()).is_pending());
+    {
+        let _transition = crate::chat::worktree_lifecycle::try_transition_lock(&parent_session)
+            .expect("merge coordination must not own the parent attachment transition");
+        let mut parent = parent_session
+            .try_lock()
+            .expect("parent session mutex must remain available while the merge gate is pending");
+        assert_eq!(
+            parent.thread.worktree,
+            Some(fixture.parent_worktree.clone())
+        );
+        parent.thread.worktree = None;
+    }
+    drop(held);
+    let error = tokio::time::timeout(Duration::from_secs(30), merging)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(error.contains("Worktree attachment canceled"), "{error}");
+    assert_eq!(run_git(&parent_root, &["show-ref"]), parent_refs);
+    assert_eq!(run_git(&parent_root, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        run_git(&parent_root, &["branch", "--show-current"]).trim(),
+        "work"
+    );
+    assert_eq!(
+        run_git(&parent_root, &["diff", "--cached", "--binary"]),
+        parent_index
+    );
+    assert!(run_git(&parent_root, &["status", "--porcelain"]).is_empty());
+    assert!(!parent_root.join("child.txt").exists());
+    assert_eq!(run_git(&child.meta.root, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        run_git(&child.meta.root, &["status", "--porcelain"]),
+        child_status
+    );
+    assert_eq!(
+        run_git(&child.meta.root, &["diff", "--cached", "--binary"]),
+        child_index
+    );
+    assert_eq!(
+        std::fs::read_to_string(child.meta.root.join("child.txt")).unwrap(),
+        "uncommitted child\n"
+    );
+    assert_eq!(
+        service.get_worktree(&child.meta.id).await.unwrap().meta,
+        child.meta
+    );
+}
+
+#[cfg(unix)]
+#[serial(test_runner)]
+#[tokio::test]
+async fn nested_isolated_auto_merge_child_commit_failure_preserves_parent_edits() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = repo_fixture().await;
+    let parent_root = fixture.source.clone();
+    let hooks = fixture._temp.path().join("hooks");
+    std::fs::create_dir(&hooks).unwrap();
+    std::fs::write(hooks.join("pre-commit"), format!("#!/bin/sh\nunset GIT_INDEX_FILE GIT_DIR GIT_WORK_TREE\nprintf 'staged parent\\n' > '{0}/base.txt'\ngit -C '{0}' add base.txt || exit 2\nprintf 'unstaged parent\\n' > '{0}/base.txt'\nprintf 'untracked parent\\n' > '{0}/notes.txt'\nexit 1\n", parent_root.display())).unwrap();
+    std::fs::set_permissions(
+        hooks.join("pre-commit"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    run_git(
+        &parent_root,
+        &["config", "core.hooksPath", hooks.to_str().unwrap()],
+    );
+    let _runner =
+        crate::agents::spawn::install_test_runner(Arc::new(move |_gcx, messages, config| {
+            Box::pin(async move {
+                let child = config.worktree.as_ref().unwrap();
+                std::fs::write(child.root.join("child.txt"), "uncommitted child\n").unwrap();
+                Ok(completed_result(messages, config))
+            })
+        }));
+    let mut request = spawn_request("parent-child-commit-failure", BgAgentKind::Subagent);
+    request.parent_worktree = Some(fixture.parent_worktree.clone());
+    request.worktree_mode = SpawnWorktreeMode::Isolated { auto_merge: true };
+    fixture.install_parent(&request).await;
+    let head = run_git(&parent_root, &["rev-parse", "HEAD"]);
+
+    let completed = await_completion(
+        crate::agents::spawn::spawn_background_agent(fixture.app.clone(), request)
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(completed.merge_status.as_deref(), Some("failed"));
+    assert!(completed
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("Failed to auto-commit source"));
+    assert_eq!(run_git(&parent_root, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        run_git(&parent_root, &["show", ":base.txt"]),
+        "staged parent\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(parent_root.join("base.txt")).unwrap(),
+        "unstaged parent\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(parent_root.join("notes.txt")).unwrap(),
+        "untracked parent\n"
+    );
+    let service = WorktreeService::new(fixture.cache.clone(), fixture.source.clone()).unwrap();
+    let child = service
+        .get_worktree(completed.worktree_id.as_deref().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(run_git(&child.meta.root, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        std::fs::read_to_string(child.meta.root.join("child.txt")).unwrap(),
+        "uncommitted child\n"
+    );
+    assert!(run_git(&child.meta.root, &["diff", "--cached"]).is_empty());
 }
 
 #[serial(test_runner)]
@@ -816,6 +1113,82 @@ async fn capped_child_resumes_once_with_full_history_and_remaining_lifetime_budg
             .count(),
         10
     );
+    let live = fixture
+        .app
+        .chat
+        .sessions
+        .read()
+        .await
+        .get(child_chat_id)
+        .cloned()
+        .unwrap();
+    let revision = crate::agents::spawn::resume_session_revision(&*live.lock().await).unwrap();
+    let recovered =
+        crate::agents::spawn::recover_run_config(&fixture.app, PARENT, &stopped.agent_id)
+            .await
+            .unwrap();
+    let source = recovered.root.canonicalize().unwrap();
+    let before = serde_json::to_value(&live.lock().await.thread).unwrap();
+    assert!(!before["worktree"]["id"].as_str().unwrap().is_empty());
+    let bytes = std::fs::read(saved.source_path.clone()).unwrap();
+    let transition = crate::chat::worktree_lifecycle::try_transition_lock(&live).unwrap();
+    let error = crate::agents::spawn::install_resumed_session(
+        &fixture.app,
+        &saved,
+        &saved.messages,
+        &recovered.config,
+        &source,
+        Some(&live),
+        Some(&revision),
+        false,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("transition in progress"));
+    assert_eq!(
+        serde_json::to_value(&live.lock().await.thread).unwrap(),
+        before
+    );
+    assert_eq!(std::fs::read(&saved.source_path).unwrap(), bytes);
+    assert_eq!(
+        std::fs::read_to_string(
+            recovered
+                .config
+                .worktree
+                .as_ref()
+                .unwrap()
+                .root
+                .join("before-cap.txt")
+        )
+        .unwrap(),
+        "first edit\n"
+    );
+    let foreign = Arc::new(Mutex::new(crate::chat::types::ChatSession::new(
+        "foreign".into(),
+    )));
+    let foreign_transition =
+        crate::chat::worktree_lifecycle::try_transition_lock(&foreign).unwrap();
+    let error = crate::agents::spawn::install_resumed_session(
+        &fixture.app,
+        &saved,
+        &saved.messages,
+        &recovered.config,
+        &source,
+        Some(&live),
+        Some(&revision),
+        false,
+        Some(&foreign_transition),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("guard does not match"));
+    assert_eq!(
+        serde_json::to_value(&live.lock().await.thread).unwrap(),
+        before
+    );
+    drop(foreign_transition);
+    drop(transition);
     let resumed = crate::agents::spawn::resume_capped_agent(
         fixture.app.clone(),
         PARENT,
@@ -1097,7 +1470,16 @@ async fn twelve_runs_across_both_runtimes_admit_four_queue_eight_and_rotate_root
     wait_chat_started(4).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(chat_started.load(Ordering::SeqCst), 4);
-    let project = crate::coordination::roots::project_identity(&fixture.source);
+    let accepted_source = crate::tools::tool_task_spawn_agent::AcceptedAgentSource::capture(
+        fixture.app.gcx.clone(),
+        &fixture.source,
+        None,
+    )
+    .await
+    .unwrap()
+    .bind_task(fixture.app.gcx.clone(), "task-1")
+    .await
+    .unwrap();
     let mut variants = Vec::new();
     for id in ["T-1", "T-2", "T-3"] {
         let mut card = test_card();
@@ -1114,7 +1496,7 @@ async fn twelve_runs_across_both_runtimes_admit_four_queue_eight_and_rotate_root
                 task_meta("task-1"),
                 "planner".into(),
                 "planner",
-                &project,
+                accepted_source.clone(),
                 card,
                 String::new(),
                 QueuedAbVariant::new(id, "a", "model-a".into(), spec.clone()),

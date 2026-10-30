@@ -5120,7 +5120,9 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "dunce",
+ "fd-lock",
  "git2",
+ "libc",
  "refact-core",
  "serde",
  "serde_json",
@@ -6718,6 +6720,7 @@ dependencies = [
  "futures-core",
  "futures-io",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]
