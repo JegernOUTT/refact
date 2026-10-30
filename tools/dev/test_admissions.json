@@ -12796,7 +12796,7 @@
     {
       "path": "refact-agent/engine/src/tools/tool_worktree_merge.rs",
       "before_sha256": "148814459bc3bb6fce5acd472b9299515ec3d6a5781df164f0d792c1f46b615c",
-      "after_sha256": "1c874b60be2c211433720cca09cee98d354c01cc9b3f341e152dd747f5f8e687",
+      "after_sha256": "2f8d9f70f01862685c89feaaa2ac952eba6fc6cac91f52074ade58e5f54db817",
       "affected_tests": [
         "51d996727d5ef95f0679c06137c94b2b40541f4f14036c69363ef4a7b5d6ad8d",
         "544938d1bce9ba98d2e161611b7e1bc560ef85400a1846666be7967e04e328e2",
@@ -12808,11 +12808,11 @@
         "fa9a14e8d2e556477918a3c242e07553ce5ec45866064633be33400b08c18752",
         "d2fa987c43258fb78ff5d08e55012014dce0eb16108410c6ae85adcf9317992b"
       ],
-      "impact": "Eight new distinct scenarios share real Git fixture and pooled dispatch helper. Same-file retained bool coercion test unaffected. Earlier nonpooled/helper-lock evidence was superseded by exact-current pooled A/B/final reruns; no stale witness equivalence claimed.",
+      "impact": "Eight distinct scenarios retain byte-identical real Git fixture, pooled dispatch helper and test bodies. Conflict reconciliation routes self merge inside its owned job and ordinary merge through the shipping lease helper; missing target uses authoritative registry base_branch as on main. Root identity, transition ownership and finish scope checks remain unchanged. Earlier pooled A/B mutants were executed on source 1c874b60 and were not rerun after the lease wrapper change; transfer requires independent semantic review.",
       "execution_context": "Library cfg(test) module unchanged; exact current helper acquires catalog and nonempty turn pool, executes guarded pooled path; explicit session attachment clone avoids retaining session mutex into constructor await. No gating/ignores or hidden scenario packing.",
       "author": "background_agent:bgagent-e18f75e0-1a1e-4f1a-877f-2eb141aa235e",
-      "reviewer": "background_agent:bgagent-ea250750-96a7-48b9-9d12-9d960b22934f",
-      "review_evidence": "Independent Sonnet reviewer background_agent:bgagent-ea250750-96a7-48b9-9d12-9d960b22934f authenticated exact current pooled fixture A exit101/eight failures, B exit101/two failures, restored exit0/nine passes; hashes and restored-pooled.rs match current 1c874b60be2c211433720cca09cee98d354c01cc9b3f341e152dd747f5f8e687. Approved eight narrow admissions. Compound scenario sensitivity only, not isolated guard-hunk sensitivity. Cancellation is registered caller-drop before finalizer with joined completion, not exact post-delete timing; ordering manually appends actual registry result and drains shipping side effects, not whole batch executor. Task/admission/background/seal disjunct breadth is source-reviewed, not individually executed. Disabled notice queue is ephemeral; required persisted checkout scope reset is durable."
+      "reviewer": "background_agent:bgagent-b2929c74-90da-4253-909a-a0355c3e86a3",
+      "review_evidence": "Parent-reported independent Sonnet b2929c74 final source-only APPROVED for 2f8d9f70f01862685c89feaaa2ac952eba6fc6cac91f52074ade58e5f54db817 after identifying and verifying the prompt-input preservation fix: registry target normalization now occurs after commit-message generation. Independent Terra a7c8bee1 source-approved lease routing, owned-job/transition/finalizer preservation on preceding source. Parent directly adjudicated final prompt fix. These are source-only reviews, not fresh execution or mutant authentication. Prior independent Sonnet ea250750 authenticated pooled A exit101/eight failures, B exit101/two failures and restored exit0/nine passes on historical source 1c874b60; test bodies/fixture and guarded handoff algorithms remain byte-identical, but lease-wrapper mutants were not rerun. No fresh wrapper mutation sensitivity claimed. Cancellation covers caller-drop before finalizer, not exact post-delete timing; result ordering uses registry result and shipping side effects, not whole batch executor; disabled notice ephemeral, scope reset durable."
     }
   ]
 }

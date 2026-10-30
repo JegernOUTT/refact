@@ -797,14 +797,34 @@ fn start_self_merge(
     app: crate::app_state::AppState,
 ) -> Result<tokio::sync::oneshot::Receiver<Result<MergeWorktreeResponse, String>>, String> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
-    app.agent_executions.spawn_owned(
+    app.agent_executions.clone().spawn_owned(
         format!("self-merge:{}", uuid::Uuid::new_v4()),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(tokio::sync::Notify::new()),
         async move {
             let _transition = transition;
             let result = async {
-                let response = service.merge_worktree(&worktree_id, request).await?;
+                let mut request = request;
+                if request.target_branch.is_none() {
+                    request.target_branch = Some(
+                        service
+                            .get_worktree(&worktree_id)
+                            .await?
+                            .meta
+                            .base_branch
+                            .ok_or("Merge target branch is required")?,
+                    );
+                }
+                let (response, _, _) =
+                    crate::tools::tool_task_merge_agent::merge_under_available_lease(
+                        &app,
+                        &service,
+                        &worktree_id,
+                        request,
+                        None,
+                        |_, _| async { Err("No post-merge check requested".into()) },
+                    )
+                    .await?;
                 finish_self_merge(&ccx, &session, &before, &response).await?;
                 Ok(response)
             }
@@ -965,6 +985,16 @@ impl Tool for ToolWorktreeMerge {
             }
         };
 
+        let target_branch = Some(match target_branch {
+            Some(target) => target,
+            None => service
+                .get_worktree(&worktree_id)
+                .await?
+                .meta
+                .base_branch
+                .ok_or("Merge target branch is required")?,
+        });
+
         if let (Some(session), Some(before)) = (&self_session, &before) {
             check_self_merge_authority(&app, &parent_chat_id).await?;
             let context = ccx.lock().await;
@@ -972,19 +1002,18 @@ impl Tool for ToolWorktreeMerge {
             check_self_merge_caller(&context, &session, true)?;
             check_unchanged_attachment(&session, before)?;
         }
-        let request = MergeWorktreeRequest {
-            strategy,
-            delete_after_merge,
-            include_uncommitted,
-            target_branch,
-            commit_message,
-            generate_commit_message: false,
-            acknowledge_dirty_baseline,
-        };
-        let response = if let (Some(session), Some(before), Some(transition)) =
-            (self_session, before, _transition)
+        if let (Some(session), Some(before), Some(transition)) = (self_session, before, _transition)
         {
-            start_self_merge(
+            let request = MergeWorktreeRequest {
+                strategy,
+                delete_after_merge,
+                include_uncommitted,
+                target_branch,
+                commit_message,
+                generate_commit_message: false,
+                acknowledge_dirty_baseline,
+            };
+            let response = start_self_merge(
                 ccx.clone(),
                 session,
                 before,
@@ -995,10 +1024,37 @@ impl Tool for ToolWorktreeMerge {
                 app.clone(),
             )?
             .await
-            .map_err(|error| format!("Self merge completion task failed: {error}"))??
-        } else {
-            service.merge_worktree(&worktree_id, request).await?
-        };
+            .map_err(|error| format!("Self merge completion task failed: {error}"))??;
+            return Ok((
+                false,
+                vec![ContextEnum::ChatMessage(ChatMessage {
+                    role: "tool".to_string(),
+                    content: ChatContent::SimpleText(merge_response_message(&response)),
+                    tool_calls: None,
+                    tool_call_id: tool_call_id.clone(),
+                    ..Default::default()
+                })],
+            ));
+        }
+
+        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let (response, _, _) = crate::tools::tool_task_merge_agent::merge_under_available_lease(
+            &app,
+            &service,
+            &worktree_id,
+            MergeWorktreeRequest {
+                strategy,
+                delete_after_merge,
+                include_uncommitted,
+                target_branch,
+                commit_message,
+                generate_commit_message: false,
+                acknowledge_dirty_baseline,
+            },
+            None,
+            |_, _| async { Err("No post-merge check requested".into()) },
+        )
+        .await?;
 
         Ok((
             false,
