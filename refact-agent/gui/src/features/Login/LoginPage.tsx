@@ -33,7 +33,10 @@ export const LoginPage: React.FC = () => {
 
   const hasAnyActiveProvider = providerBootstrap.hasAnyActiveProvider;
   const canShowProviderSetup = providerBootstrap.canShowProviderSetup;
-  const visibleCurrentProvider = canShowProviderSetup ? currentProvider : null;
+  const visibleCurrentProvider =
+    canShowProviderSetup || providerBootstrap.status === "provider_loading"
+      ? currentProvider
+      : null;
 
   const showProviderError =
     providerBootstrap.status === "provider_error" ||

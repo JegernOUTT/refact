@@ -37,6 +37,8 @@ pub struct ClaudeTransportConfig {
     pub aws_session_token: Option<String>,
     pub aws_profile: Option<String>,
     pub aws_region: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bedrock_context_1m_models: Vec<String>,
     pub gcp_project: Option<String>,
     pub gcp_region: Option<String>,
     pub azure_resource: Option<String>,

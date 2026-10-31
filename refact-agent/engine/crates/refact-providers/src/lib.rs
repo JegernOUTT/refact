@@ -1,5 +1,6 @@
 mod claude_backend;
 pub use claude_backend::SECRET_FIELDS as CLAUDE_SECRET_FIELDS;
+pub mod bedrock_setup;
 #[cfg(test)]
 mod claude_backend_tests;
 pub mod config;

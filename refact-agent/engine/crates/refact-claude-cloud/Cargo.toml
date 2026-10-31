@@ -19,3 +19,4 @@ azure_identity = { version = "0.33.0", default-features = false }
 azure_core = { version = "0.33.0", default-features = false, features = ["reqwest"] }
 percent-encoding.workspace = true
 crc32fast = "1"
+roxmltree = "0.20"

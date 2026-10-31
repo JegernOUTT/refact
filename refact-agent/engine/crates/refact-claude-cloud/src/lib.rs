@@ -1,3 +1,4 @@
+pub mod bedrock_setup;
 mod eventstream;
 pub use eventstream::BedrockEventStreamDecoder;
 
@@ -257,6 +258,28 @@ pub async fn prepare_attempt(
             )?;
             transform(&mut body, "bedrock-2023-05-31")?;
             normalize_bedrock_cache_control(&mut body);
+            if config
+                .bedrock_context_1m_models
+                .iter()
+                .any(|id| id == model)
+                && bedrock_setup::requires_1m_beta(model)
+            {
+                let mut betas = headers
+                    .get("anthropic-beta")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string)
+                    .unwrap_or_default();
+                if !betas
+                    .split(',')
+                    .any(|v| v.trim() == "context-1m-2025-08-07")
+                {
+                    if !betas.is_empty() {
+                        betas.push(',');
+                    }
+                    betas.push_str("context-1m-2025-08-07");
+                }
+                header(&mut headers, "anthropic-beta", &betas)?;
+            }
             if let Some(beta) = headers.remove("anthropic-beta") {
                 let betas = beta
                     .to_str()
@@ -600,18 +623,41 @@ fn sign_request(
     credentials: Credentials,
     time: SystemTime,
 ) -> Result<(), String> {
+    sign_service_request(
+        "POST",
+        "bedrock",
+        url,
+        headers,
+        body,
+        region,
+        credentials,
+        time,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sign_service_request(
+    method: &str,
+    service: &str,
+    url: &str,
+    headers: &mut HeaderMap,
+    body: &[u8],
+    region: &str,
+    credentials: Credentials,
+    time: SystemTime,
+) -> Result<(), String> {
     let identity = credentials.into();
     let params = v4::SigningParams::builder()
         .identity(&identity)
         .region(region)
-        .name("bedrock")
+        .name(service)
         .time(time)
         .settings(SigningSettings::default())
         .build()
         .map_err(|_| "AWS signing parameters invalid")?
         .into();
     let request = SignableRequest::new(
-        "POST",
+        method,
         url,
         headers
             .iter()

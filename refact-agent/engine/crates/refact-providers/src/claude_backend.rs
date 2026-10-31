@@ -125,6 +125,7 @@ impl ClaudeCodeProvider {
                 result.aws_access_key_id = resolve(&t.aws_access_key_id, &[]);
                 result.aws_secret_access_key = resolve(&t.aws_secret_access_key, &[]);
                 result.aws_session_token = resolve(&t.aws_session_token, &[]);
+                result.bedrock_context_1m_models = t.bedrock_context_1m_models.clone();
             }
             ClaudeBackend::Vertex => {
                 result.gcp_project = resolve(

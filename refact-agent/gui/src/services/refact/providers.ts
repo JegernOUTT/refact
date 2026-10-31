@@ -93,6 +93,40 @@ export type ProviderDetailResponse = {
   runtime: ProviderRuntime | null;
 };
 
+export type BedrockProfilesResponse = {
+  profiles: { name: string; region?: string; sso_configured: boolean }[];
+  suggested_profile?: string;
+  suggested_region?: string;
+};
+
+export type BedrockVerifyResponse = {
+  setup_id: string;
+  config_revision: string;
+  profile: string;
+  region: string;
+  identity: { account: string; arn: string; user_id: string };
+  inference_profiles: {
+    id: string;
+    arn: string;
+    name: string;
+    status: string;
+    model_ids: string[];
+  }[];
+  candidates: { model_id: string; family?: string; supports_1m?: boolean }[];
+  warnings: string[];
+};
+
+export type BedrockProbeResponse = {
+  setup_id: string;
+  results: {
+    model_id: string;
+    status: "working" | "denied" | "unavailable" | "error";
+    error_code?: string;
+    message?: string;
+  }[];
+  warnings: string[];
+};
+
 export type ProviderSchemaResponse = {
   name: string;
   schema: string;
@@ -681,6 +715,130 @@ export const providersApi = createApi({
     },
   }),
   endpoints: (builder) => ({
+    getBedrockProfiles: builder.query<
+      BedrockProfilesResponse,
+      { providerName: string }
+    >({
+      queryFn: async ({ providerName }, api, extraOptions, baseQuery) => {
+        const result = await baseQuery({
+          ...extraOptions,
+          url: buildApiUrlFromState(
+            api.getState() as RootState,
+            `${PROVIDERS_URL}/${encodeURIComponent(
+              providerName,
+            )}/bedrock/profiles`,
+          ),
+          method: "GET",
+          credentials: "same-origin",
+        });
+        return result.error
+          ? { error: result.error }
+          : { data: result.data as BedrockProfilesResponse };
+      },
+    }),
+    verifyBedrock: builder.mutation<
+      BedrockVerifyResponse,
+      { providerName: string; profile: string; region: string }
+    >({
+      queryFn: async (
+        { providerName, ...body },
+        api,
+        extraOptions,
+        baseQuery,
+      ) => {
+        const result = await baseQuery({
+          ...extraOptions,
+          url: buildApiUrlFromState(
+            api.getState() as RootState,
+            `${PROVIDERS_URL}/${encodeURIComponent(
+              providerName,
+            )}/bedrock/verify`,
+          ),
+          method: "POST",
+          body,
+          credentials: "same-origin",
+        });
+        return result.error
+          ? { error: result.error }
+          : { data: result.data as BedrockVerifyResponse };
+      },
+    }),
+    probeBedrock: builder.mutation<
+      BedrockProbeResponse,
+      {
+        providerName: string;
+        setup_id: string;
+        model_ids: string[];
+        context_1m: boolean;
+      }
+    >({
+      queryFn: async (
+        { providerName, ...body },
+        api,
+        extraOptions,
+        baseQuery,
+      ) => {
+        const result = await baseQuery({
+          ...extraOptions,
+          url: buildApiUrlFromState(
+            api.getState() as RootState,
+            `${PROVIDERS_URL}/${encodeURIComponent(
+              providerName,
+            )}/bedrock/probe`,
+          ),
+          method: "POST",
+          body,
+          credentials: "same-origin",
+        });
+        return result.error
+          ? { error: result.error }
+          : { data: result.data as BedrockProbeResponse };
+      },
+    }),
+    applyBedrock: builder.mutation<
+      { success: boolean; model_ids: string[] },
+      {
+        providerName: string;
+        setup_id: string;
+        config_revision: string;
+        model_ids: string[];
+        context_1m: boolean;
+      }
+    >({
+      invalidatesTags: (result, _error, { providerName }) =>
+        result?.success
+          ? [
+              { type: "PROVIDER", id: providerName },
+              { type: "AVAILABLE_MODELS", id: providerName },
+              { type: "PROVIDER_MODELS", id: providerName },
+              { type: "PROVIDERS", id: "LIST" },
+            ]
+          : [],
+      queryFn: async (
+        { providerName, ...body },
+        api,
+        extraOptions,
+        baseQuery,
+      ) => {
+        const result = await baseQuery({
+          ...extraOptions,
+          url: buildApiUrlFromState(
+            api.getState() as RootState,
+            `${PROVIDERS_URL}/${encodeURIComponent(
+              providerName,
+            )}/bedrock/apply`,
+          ),
+          method: "POST",
+          body,
+          credentials: "same-origin",
+        });
+        if (result.error) return { error: result.error };
+        api.dispatch(capsApi.util.resetApiState());
+        return {
+          data: result.data as { success: boolean; model_ids: string[] },
+        };
+      },
+    }),
     getConfiguredProviders: builder.query<
       ConfiguredProvidersResponse,
       undefined
@@ -2306,7 +2464,8 @@ function isProjectModelDefaultsResponse(
   return true;
 }
 
-export const providersEndpoints = providersApi.endpoints;
+export const providersEndpoints: typeof providersApi.endpoints =
+  providersApi.endpoints;
 
 export const {
   useGetConfiguredProvidersQuery,

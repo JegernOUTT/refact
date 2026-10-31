@@ -1,3 +1,4 @@
+pub mod bedrock_setup;
 pub mod http;
 pub mod native_auth;
 pub mod oauth_refresh;

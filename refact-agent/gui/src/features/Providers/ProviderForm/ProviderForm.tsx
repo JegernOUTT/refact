@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from "uuid";
 
 import { SchemaField } from "./SchemaField";
 import { ProviderOAuth } from "./ProviderOAuth";
+import { BedrockSetup } from "./BedrockSetup";
 import { Spinner } from "../../../components/Spinner";
 
 import { useProviderForm } from "./useProviderForm";
@@ -559,6 +560,7 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
     isProviderLoadedSuccessfully,
     setAreShowingExtraFields,
     handleFieldSave,
+    handleSettingsSave,
     detailedProvider,
   } = useProviderForm({ providerName: currentProvider.name });
   const claudeBackend = formValues
@@ -616,7 +618,7 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
             </Badge>
           ) : null}
           {parsedSchema.description ? (
-            <div className={styles.providerDescription}>
+            <div className={styles.statusDescription}>
               {parsedSchema.description.trim().split("\n")[0]}
             </div>
           ) : null}
@@ -655,12 +657,66 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
         ) : null}
 
         <div className={styles.formSection}>
-          {claudeBackend && claudeBackend !== "oauth" ? (
-            <div className={styles.providerDescription}>
+          {claudeBackend &&
+          claudeBackend !== "oauth" &&
+          claudeBackend !== "bedrock" ? (
+            <div className={styles.credentialDescription}>
               {describeClaudeCredentialSources(loginKind, claudeBackend)}
             </div>
           ) : null}
-          {hasOAuth ? (
+          {claudeBackend === "bedrock" ? (
+            <BedrockSetup
+              key={currentProvider.name}
+              providerName={currentProvider.name}
+              readonly={isReadonly}
+              settingsRevision={JSON.stringify(detailedProvider?.settings)}
+              recoverySettingsRevision={JSON.stringify(
+                Object.entries({
+                  base_provider: detailedProvider?.base_provider,
+                  display_name: detailedProvider?.display_name,
+                  ...detailedProvider?.settings,
+                })
+                  .filter(
+                    ([key]) => key !== "aws_profile" && key !== "aws_region",
+                  )
+                  .sort(([a], [b]) => a.localeCompare(b)),
+              )}
+              onSaveRecovery={async (profile, region) => {
+                await handleSettingsSave({
+                  aws_profile: profile,
+                  aws_region: region,
+                });
+              }}
+              savedProfile={
+                typeof formValues.aws_profile === "string"
+                  ? formValues.aws_profile
+                  : undefined
+              }
+              savedRegion={
+                typeof formValues.aws_region === "string"
+                  ? formValues.aws_region
+                  : undefined
+              }
+              recovery={
+                hasOAuth ? (
+                  <ProviderOAuth
+                    providerName={currentProvider.name}
+                    baseProvider={baseProvider}
+                    loginKind={loginKind}
+                    backend={claudeBackend}
+                    readonly={isReadonly}
+                    oauthConnected={Boolean(formValues.oauth_connected)}
+                    authStatus={
+                      typeof formValues.auth_status === "string"
+                        ? formValues.auth_status
+                        : ""
+                    }
+                  />
+                ) : undefined
+              }
+            />
+          ) : null}
+          {hasOAuth && claudeBackend !== "bedrock" ? (
             <>
               {parsedSchema.oauth?.warning ? (
                 <div className={styles.oauthWarning} role="alert">

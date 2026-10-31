@@ -621,6 +621,22 @@ fn providers_routes() -> Router<AppState> {
                 .post(handle_v1_provider_update)
                 .delete(handle_v1_provider_delete),
         )
+        .route(
+            "/providers/:name/bedrock/profiles",
+            get(crate::providers::bedrock_setup::profiles),
+        )
+        .route(
+            "/providers/:name/bedrock/verify",
+            post(crate::providers::bedrock_setup::verify),
+        )
+        .route(
+            "/providers/:name/bedrock/probe",
+            post(crate::providers::bedrock_setup::probe),
+        )
+        .route(
+            "/providers/:name/bedrock/apply",
+            post(crate::providers::bedrock_setup::apply),
+        )
         .route("/providers/:name/schema", get(handle_v1_provider_schema))
         .route("/providers/:name/models", get(handle_v1_provider_models))
         .route(

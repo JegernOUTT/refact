@@ -36,6 +36,7 @@ oauth:
 `;
 
 function mockSetup() {
+  const settings: Record<string, unknown> = { backend: "bedrock" };
   server.use(
     http.get("*/v1/ping", () => HttpResponse.text("pong")),
     http.get("*/v1/caps", () => HttpResponse.json(STUB_CAPS_RESPONSE)),
@@ -45,8 +46,20 @@ function mockSetup() {
     http.get("*/v1/providers/claude_code", () =>
       HttpResponse.json({
         ...provider,
-        settings: { backend: "bedrock" },
+        settings,
         runtime: null,
+      }),
+    ),
+    http.post("*/v1/providers/claude_code", async ({ request }) => {
+      const update: unknown = await request.json();
+      if (update && typeof update === "object") Object.assign(settings, update);
+      return HttpResponse.json({ success: true });
+    }),
+    http.get("*/v1/providers/claude_code/bedrock/profiles", () =>
+      HttpResponse.json({
+        profiles: [{ name: "work", region: "eu-west-1", sso_configured: true }],
+        suggested_profile: "work",
+        suggested_region: "eu-west-1",
       }),
     ),
     http.get("*/v1/providers/claude_code/schema", () =>
@@ -81,6 +94,20 @@ async function startLogin() {
   const view = render(<LoginPage />, { store });
   await view.user.click(
     await screen.findByRole("button", { name: /Claude Code/ }),
+  );
+  await view.user.click(await screen.findByText("Optional AWS SSO recovery"));
+  await screen.findByDisplayValue("work");
+  await view.user.click(
+    screen.getByRole("button", {
+      name: "Save selected profile for SSO recovery",
+    }),
+  );
+  await waitFor(() =>
+    expect(
+      providersApi.endpoints.getProvider.select({
+        providerName: "claude_code",
+      })(store.getState()).data?.settings,
+    ).toMatchObject({ aws_profile: "work", aws_region: "eu-west-1" }),
   );
   await view.user.click(await screen.findByRole("button", { name: "Login" }));
   await screen.findByText("Finish AWS sign-in on the engine host");

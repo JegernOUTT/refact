@@ -156,14 +156,14 @@ export function useProviderForm({ providerName }: { providerName: string }) {
 
   const [updateProvider] = providersApi.useUpdateProviderMutation();
 
-  const handleFieldSave = useCallback(
-    async (key: string, value: unknown) => {
-      if (!providerDetail) return;
+  const handleSettingsSave = useCallback(
+    async (settings: Record<string, unknown>) => {
+      if (!providerDetail) throw new Error("Provider not loaded");
       const response = await updateProvider({
         providerName,
         settings: {
           ...providerIdentitySettings(providerDetail),
-          [key]: value,
+          ...settings,
         },
       });
       if (response.error) {
@@ -182,6 +182,11 @@ export function useProviderForm({ providerName }: { providerName: string }) {
 
   const detailedProvider: ProviderDetailResponse | undefined = providerDetail;
 
+  const handleFieldSave = useCallback(
+    (key: string, value: unknown) => handleSettingsSave({ [key]: value }),
+    [handleSettingsSave],
+  );
+
   return {
     formValues,
     parsedSchema,
@@ -190,6 +195,7 @@ export function useProviderForm({ providerName }: { providerName: string }) {
     areShowingExtraFields,
     setAreShowingExtraFields,
     handleFieldSave,
+    handleSettingsSave,
     configuredProviders,
     detailedProvider,
     isProviderLoadedSuccessfully,

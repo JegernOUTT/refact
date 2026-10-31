@@ -107,6 +107,13 @@ function useProviderHandlers(...extra: Parameters<typeof server.use>) {
     http.get("*/v1/providers/claude_code/available-models", () =>
       HttpResponse.json({ models: [], source: "model_caps" }),
     ),
+    http.get("*/v1/providers/claude_code/bedrock/profiles", () =>
+      HttpResponse.json({
+        profiles: [],
+        suggested_profile: "work",
+        suggested_region: "eu-west-1",
+      }),
+    ),
   );
   server.use(...extra);
 }
@@ -135,7 +142,11 @@ describe("Claude Code usage resets", () => {
       );
       render(<ProviderForm currentProvider={provider} />, { preloadedState });
       expect(
-        await screen.findByText(/Credentials are resolved by the engine/),
+        await screen.findByText(
+          backend === "bedrock"
+            ? /Use AWS profiles on the engine host/
+            : /Credentials are resolved by the engine/,
+        ),
       ).toBeInTheDocument();
       expect(
         screen.queryByTestId("claude-code-resets"),
@@ -346,7 +357,6 @@ describe("Claude Code sign-in actions", () => {
       { backend: "anthropic", auth_type: "oauth" },
       "Login with Anthropic Console",
     ],
-    [{ backend: "bedrock" }, "Login with AWS SSO"],
     [{ backend: "vertex" }, "Login with Google Cloud"],
     [{ backend: "foundry" }, "Login with Microsoft Azure"],
   ])(
@@ -387,17 +397,18 @@ describe("Claude Code sign-in actions", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("explains Bedrock credential precedence and optional SSO login", async () => {
+  it("offers Bedrock SSO only as explicit optional recovery", async () => {
     useBackendHandlers({ backend: "bedrock" });
     render(<ProviderForm currentProvider={provider} />, { preloadedState });
     expect(
-      await screen.findByText(
-        /AWS_BEARER_TOKEN_BEDROCK takes precedence over AWS credentials/,
-      ),
+      await screen.findByText(/Use AWS profiles on the engine host/),
     ).toBeInTheDocument();
-    expect(screen.getByText(/AWS SSO Login is optional/)).toBeInTheDocument();
+    expect(screen.getByText(/Optional AWS SSO recovery/)).toBeInTheDocument();
     expect(
-      screen.getByText(/aws configure sso --profile your-profile/),
+      screen.queryByRole("button", { name: "Login" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/aws configure sso on the engine host/),
     ).toBeInTheDocument();
   });
 
@@ -462,6 +473,7 @@ describe("Claude Code sign-in actions", () => {
   it("resets an in-flight native session when the saved backend changes", async () => {
     const settings: Record<string, unknown> = { backend: "bedrock" };
     const logouts: unknown[] = [];
+    const updates: unknown[] = [];
     useBackendHandlers(settings);
     server.use(
       http.get("*/v1/providers/claude_code", () =>
@@ -484,14 +496,28 @@ describe("Claude Code sign-in actions", () => {
         },
       ),
       http.post("*/v1/providers/claude_code", async ({ request }) => {
-        Object.assign(settings, await request.json());
+        const update: unknown = await request.json();
+        updates.push(update);
+        Object.assign(settings, update);
         return HttpResponse.json({ success: true });
       }),
     );
     const { user } = render(<ProviderForm currentProvider={provider} />, {
       preloadedState,
     });
+    await user.click(await screen.findByText("Optional AWS SSO recovery"));
+    await user.click(
+      screen.getByRole("button", {
+        name: "Save selected profile for SSO recovery",
+      }),
+    );
     await user.click(await screen.findByRole("button", { name: "Login" }));
+    expect(updates).toContainEqual({
+      base_provider: "claude_code",
+      display_name: "Claude Code",
+      aws_profile: "work",
+      aws_region: "eu-west-1",
+    });
     expect(
       await screen.findByText("Run the AWS sign-in on the engine host."),
     ).toBeInTheDocument();
