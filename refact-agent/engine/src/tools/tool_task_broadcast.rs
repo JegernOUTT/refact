@@ -926,7 +926,7 @@ mod tests {
         );
         let failed_status = &board.get_card("T-29").unwrap().status_updates[1].message;
         assert!(
-            failed_status.starts_with("Broadcast not delivered")
+            failed_status.starts_with("Broadcast acceptance unknown")
                 && failed_status.contains("queue unavailable"),
             "failed broadcast must not read as delivered, got: {failed_status}"
         );

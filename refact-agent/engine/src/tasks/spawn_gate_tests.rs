@@ -140,6 +140,7 @@ impl Fixture {
         }
         let mut app = crate::app_state::AppState::from_gcx(self.gcx.clone()).await;
         app.chat.facade = Arc::new(RecordingFacade::default());
+        app.agent_executions = Arc::new(crate::agents::execution::ExecutionRegistry::default());
         app.work_scheduler = Arc::new(refact_work_core::AdmissionScheduler::new(
             refact_work_core::CoordinationSettings {
                 max_active_engine: 1,

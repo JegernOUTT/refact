@@ -698,8 +698,16 @@ impl AsyncResourceAdapter for LandingAdapter {
         tokio::task::spawn_blocking(move || {
             let repo = git2::Repository::open(root).map_err(store_error)?;
             let head = repo.head().map_err(store_error)?;
+            let mut options = git2::StatusOptions::new();
+            options
+                .include_ignored(false)
+                .include_untracked(true)
+                .recurse_untracked_dirs(true);
             if head.shorthand() != Some(draft.exact.target_branch.as_str())
-                || !repo.statuses(None).map_err(store_error)?.is_empty()
+                || !repo
+                    .statuses(Some(&mut options))
+                    .map_err(store_error)?
+                    .is_empty()
             {
                 return Ok(false);
             }

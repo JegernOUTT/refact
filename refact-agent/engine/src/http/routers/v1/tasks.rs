@@ -1939,6 +1939,7 @@ mod tests {
             .await
             .unwrap();
         let mut foreign_board = board.clone();
+        foreign_board.card_attempt_generations.clear();
         foreign_board.get_card_mut("control").unwrap().id = "foreign-only".into();
         storage::save_board_checked(gcx.clone(), &foreign.id, 0, &foreign_board)
             .await
@@ -1970,7 +1971,10 @@ mod tests {
             assert_eq!(returned.owner_chat_id.as_deref(), Some("planner-opaque"));
             let target = returned.get_card(card_id).unwrap();
             assert_eq!(target.comments.len(), 1);
-            assert_eq!(target.comments[0].body, format!("Comment on {card_id}"));
+            assert_eq!(
+                target.comments[0].body,
+                format!("Comment on {card_id}").trim()
+            );
             assert_eq!(
                 serde_json::to_value(returned.get_card("control").unwrap()).unwrap(),
                 control

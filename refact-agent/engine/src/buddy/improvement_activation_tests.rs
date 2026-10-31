@@ -314,6 +314,7 @@ async fn landing_fixture() -> LandingFixture {
     }
 }
 
+#[serial_test::serial(runtime_settings)]
 #[tokio::test]
 async fn registered_reviewed_landing_revalidates_owner_grant_lease_and_recovery() {
     use crate::http::routers::v1::buddy_operator::{
@@ -591,6 +592,7 @@ async fn registered_reviewed_landing_revalidates_owner_grant_lease_and_recovery(
     runtime.shutdown().await;
 }
 
+#[serial_test::serial(runtime_settings)]
 #[tokio::test]
 async fn known_landing_survives_post_commit_revocation_and_release() {
     use crate::http::routers::v1::buddy_operator::{

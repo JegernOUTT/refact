@@ -149,6 +149,15 @@ async fn setup_task(
         )
         .await
         .unwrap();
+        let path = crate::chat::trajectories::find_trajectory_path(gcx.clone(), chat_id)
+            .await
+            .unwrap();
+        let mut value: Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        value["model"] = json!("model");
+        tokio::fs::write(path, serde_json::to_vec(&value).unwrap())
+            .await
+            .unwrap();
     }
     (gcx, temp)
 }

@@ -509,7 +509,6 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    #[cfg(unix)]
     use tempfile::tempdir;
 
     struct EnvGuard {

@@ -343,7 +343,14 @@ async fn queued_child_cancellation_settles_without_acknowledging() {
         )
         .await
         .unwrap();
-    assert!(fixture.app.work_scheduler.cancel(&run));
+    fixture.app.work_scheduler.cancel(&run);
+    assert!(!fixture
+        .app
+        .work_scheduler
+        .snapshot()
+        .tickets
+        .iter()
+        .any(|ticket| ticket.run == run));
     let cancelled = tokio::time::timeout(Duration::from_secs(10), handle.completion_rx)
         .await
         .expect("cancellation completion timeout")

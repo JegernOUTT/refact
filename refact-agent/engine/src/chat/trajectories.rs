@@ -20101,10 +20101,11 @@ mod tests {
     #[tokio::test]
     async fn frozen_legacy_task_session_migration_does_not_create_generic_copy() {
         let dir = tempfile::tempdir().unwrap();
-        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
         let task_id = "task-legacy-freeze";
         let agent_id = "agent-1";
         let chat_id = "legacy-task-freeze";
+        let planner_id = "legacy-freeze-planner";
         let task_path = dir
             .path()
             .join(".refact")
@@ -20137,7 +20138,8 @@ mod tests {
                     "task_id": task_id,
                     "role": "agents",
                     "agent_id": agent_id,
-                    "card_id": "T-1"
+                    "card_id": "T-1",
+                    "planner_chat_id": planner_id
                 }
             }))
             .unwrap(),
@@ -20147,12 +20149,52 @@ mod tests {
         tokio::fs::create_dir_all(dir.path().join(".refact").join("tasks").join(task_id))
             .await
             .unwrap();
+        let meta = serde_json::from_value(json!({
+            "id": task_id, "name": "Legacy freeze", "status": "active",
+            "created_at": "2024-01-01T00:00:00Z", "updated_at": "2024-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        crate::tasks::storage::save_task_meta(gcx.clone(), task_id, &meta)
+            .await
+            .unwrap();
+        let board = serde_json::from_value(json!({
+            "owner_chat_id": planner_id,
+            "cards": [{"id": "T-1", "title": "Legacy freeze", "column": "doing",
+                "assignee": agent_id, "agent_chat_id": chat_id,
+                "created_at": "2024-01-01T00:00:00Z"}]
+        }))
+        .unwrap();
+        crate::tasks::storage::save_board(gcx, task_id, &board)
+            .await
+            .unwrap();
+        crate::tasks::admission::reserve(
+            &app,
+            chat_id,
+            &crate::coordination::roots::project_identity(dir.path()),
+            planner_id,
+            0,
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            crate::tasks::admission::wait_for_permit(chat_id),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let session_arc = crate::chat::get_or_create_session_with_trajectory(
             app.clone(),
             &app.chat.sessions,
             chat_id,
         )
         .await;
+        assert!(
+            crate::chat::session_runtime::board_execution(&app, &session_arc)
+                .await
+                .unwrap()
+                .is_some()
+        );
         {
             let session = session_arc.lock().await;
             let prefix = session.thread.frozen_request_prefix.as_ref().unwrap();
@@ -20170,6 +20212,7 @@ mod tests {
         assert!(!tokio::fs::try_exists(generic_path).await.unwrap());
         assert_eq!(raw["frozen_request_prefix"]["system_prompt"], "task system");
         assert!(raw["frozen_request_prefix"]["tools_canonical"].is_null());
+        crate::tasks::admission::end(chat_id).await;
     }
 
     #[tokio::test]

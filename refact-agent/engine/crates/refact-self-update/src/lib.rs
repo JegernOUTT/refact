@@ -1087,6 +1087,7 @@ fn restart_hint() -> &'static str {
 #[cfg(target_os = "linux")]
 pub mod candidate_install {
     use super::*;
+    use libc::{O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK};
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
@@ -1094,9 +1095,6 @@ pub mod candidate_install {
     // Keep the original marker name so interrupted candidate transactions also
     // block ordinary self-update after upgrading. Never auto-delete stale claims.
     const INSTALL_LOCK: &str = ".refact-candidate-install-lock";
-    const O_NOFOLLOW: i32 = 0x20000;
-    const O_DIRECTORY: i32 = 0x10000;
-    const O_NONBLOCK: i32 = 0x800;
     pub struct Installer {
         directory: std::fs::File,
         executable: PathBuf,

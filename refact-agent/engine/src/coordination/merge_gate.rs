@@ -148,6 +148,8 @@ pub struct MergeGate {
     leases: Arc<LeaseManager>,
     wait: Duration,
     poll: Duration,
+    #[cfg(test)]
+    held_observed: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl MergeGate {
@@ -156,6 +158,8 @@ impl MergeGate {
             leases,
             wait: Duration::from_millis(settings.merge_lease_wait_ms),
             poll: Duration::from_millis(settings.merge_lease_poll_interval_ms),
+            #[cfg(test)]
+            held_observed: None,
         }
     }
 
@@ -179,6 +183,10 @@ impl MergeGate {
                     });
                 }
                 Err(LeaseError::Held(stale)) => {
+                    #[cfg(test)]
+                    if let Some(observed) = &self.held_observed {
+                        observed.notify_one();
+                    }
                     let waited_ms = now_ms().saturating_sub(started_at_ms).max(0);
                     if waited_ms >= deadline_ms {
                         super::metrics::record_queue_latency("merge_lease_refused", waited_ms);
@@ -625,28 +633,42 @@ mod tests {
         let source = temp.path().join("repo");
         init_repo(&source);
         let service = WorktreeService::new(temp.path().join("cache"), source.clone()).unwrap();
-        let (gate, _leases) = shared_gate(&Uuid::new_v4().to_string()).await;
+        let (mut gate, _leases) = shared_gate(&Uuid::new_v4().to_string()).await;
+        let held_observed = Arc::new(tokio::sync::Notify::new());
+        gate.held_observed = Some(held_observed.clone());
         let (first_id, _) = worktree_with_commit(&service, "refact/chat/a", "a.txt", "a\n").await;
         let (second_id, _) = worktree_with_commit(&service, "refact/chat/b", "b.txt", "b\n").await;
 
-        let (first, second) = tokio::join!(
-            merge_under_lease(
-                &gate,
-                &service,
-                &first_id,
-                merge_request(),
-                None,
-                nothing_verified
-            ),
-            merge_under_lease(
-                &gate,
-                &service,
-                &second_id,
-                merge_request(),
-                None,
-                nothing_verified
-            )
-        );
+        let held = gate.acquire(&checkout_key(&source)).await.unwrap();
+        let mut first = Box::pin(merge_under_lease(
+            &gate,
+            &service,
+            &first_id,
+            merge_request(),
+            None,
+            nothing_verified,
+        ));
+        let mut second = Box::pin(merge_under_lease(
+            &gate,
+            &service,
+            &second_id,
+            merge_request(),
+            None,
+            nothing_verified,
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                result = first.as_mut() => panic!("merge bypassed held lease: {result:?}"),
+                _ = held_observed.notified() => {}
+            }
+        })
+        .await
+        .unwrap();
+        assert!(futures::poll!(second.as_mut()).is_pending());
+        assert!(!source.join("a.txt").exists());
+        assert!(!source.join("b.txt").exists());
+        assert!(held.release().await.unwrap());
+        let (first, second) = tokio::join!(first, second);
 
         let first = first.unwrap();
         let second = second.unwrap();
@@ -654,10 +676,6 @@ mod tests {
         assert!(second.response.merged, "{:?}", second.response.status);
         assert!(source.join("a.txt").exists(), "first merge was lost");
         assert!(source.join("b.txt").exists(), "second merge was lost");
-        assert!(
-            first.waited_for_lease_ms > 0 || second.waited_for_lease_ms > 0,
-            "one merge must have queued behind the other"
-        );
     }
 
     #[tokio::test]

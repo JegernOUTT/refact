@@ -1394,8 +1394,13 @@ pub fn preflight_merge_conflicts(
     let temp = tempfile::Builder::new()
         .prefix("refact-merge-preflight-")
         .tempdir()
-        .map_err(|e| format!("Failed to create merge preflight directory: {}", e))?
-        .keep();
+        .map_err(|e| format!("Failed to create merge preflight directory: {}", e))?;
+    let canonical_temp = temp
+        .path()
+        .canonicalize()
+        .map_err(|e| format!("Failed to canonicalize merge preflight directory: {}", e))?;
+    let _ = temp.keep();
+    let temp = canonical_temp;
     let preflight_path = temp.join("worktree");
     let retained = |reason: String| {
         format!(

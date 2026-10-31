@@ -2,11 +2,11 @@
 [target.x86_64-unknown-linux-gnu]
 image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:main@sha256:52fe95895e48d434c349959ca52c7bb93d7cf5ab8ea2b7d5d9f7e0e655c2e579"
 pre-build = [
-    "apt-get update && apt-get install --assume-yes libssl-dev libclang-dev curl unzip",
+    "apt-get update && apt-get install --assume-yes libssl-dev libclang-dev ca-certificates curl unzip xz-utils",
+    "curl --proto '=https' --tlsv1.2 -fsSLo /tmp/refact-node.tar.xz https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-x64.tar.xz && echo '1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce  /tmp/refact-node.tar.xz' | sha256sum -c - && tar -xJf /tmp/refact-node.tar.xz -C /usr/local --strip-components=1 && rm /tmp/refact-node.tar.xz",
 ]
 [target.x86_64-unknown-linux-gnu.env]
 passthrough = [
-    "REFACT_USE_PREBUILT_GUI=1",
     "REFACT_GUI_DIR=/gui",
     "OPENSSL_STATIC=1",
     "OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu",

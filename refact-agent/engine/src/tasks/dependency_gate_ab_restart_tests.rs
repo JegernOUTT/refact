@@ -27,6 +27,7 @@ fn cards(dependency_column: &str, dependent_column: &str) -> Vec<BoardCard> {
 
 async fn set_cards(gcx: Arc<crate::global_context::GlobalContext>, cards: Vec<BoardCard>) {
     storage::update_board_atomic(gcx, "task-1", move |board| {
+        board.owner_chat_id = Some("planner-chat".into());
         board.cards = cards;
         Ok(())
     })
@@ -53,6 +54,27 @@ async fn set_caps(gcx: &Arc<crate::global_context::GlobalContext>) {
 async fn planner_context(
     app: crate::app_state::AppState,
 ) -> Arc<tokio::sync::Mutex<crate::at_commands::at_commands::AtCommandsContext>> {
+    let mut planner = crate::chat::types::ChatSession::new("planner-chat".into());
+    planner.thread.model = "provider/test-model".into();
+    planner.thread.task_meta = Some(refact_chat_api::TaskMeta {
+        task_id: "task-1".into(),
+        role: "planner".into(),
+        agent_id: None,
+        card_id: None,
+        planner_chat_id: Some("planner-chat".into()),
+    });
+    planner.work_project_root = app
+        .gcx
+        .documents_state
+        .workspace_folders
+        .lock()
+        .unwrap()
+        .first()
+        .cloned();
+    app.chat.sessions.write().await.insert(
+        "planner-chat".into(),
+        Arc::new(tokio::sync::Mutex::new(planner)),
+    );
     Arc::new(tokio::sync::Mutex::new(
         crate::at_commands::at_commands::AtCommandsContext::new_from_app(
             app,

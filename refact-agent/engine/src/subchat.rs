@@ -4525,6 +4525,13 @@ mod subchat_tests {
         let workspace = tempfile::tempdir().unwrap();
         *gcx.documents_state.workspace_folders.lock().unwrap() =
             vec![workspace.path().to_path_buf()];
+        let chat_id = ccx.lock().await.chat_id.clone();
+        app.chat.sessions.write().await.insert(
+            chat_id.clone(),
+            Arc::new(tokio::sync::Mutex::new(
+                crate::chat::types::ChatSession::new(chat_id),
+            )),
+        );
         super::persist_subchat_progress(&ccx, &config, &progress, &messages).await;
         let pending = app.agents.pending_deliveries(&agent.agent_id).await;
         assert_eq!(
@@ -4694,12 +4701,14 @@ mod subchat_tests {
         let (agent, _, _) = app.agents.create(request).await.unwrap();
         ccx.lock().await.background_agent_id = Some(agent.agent_id.clone());
         let chat_id = ccx.lock().await.chat_id.clone();
-        let assistant: ChatMessage = serde_json::from_value(serde_json::json!({
+        let mut assistant: ChatMessage = serde_json::from_value(serde_json::json!({
             "role": "assistant", "content": "", "tool_calls": [
                 {"id":"sleep", "type":"function", "function":{"name":"wait", "arguments":"{\"target\":{\"kind\":\"duration\",\"duration_ms\":30000},\"description\":\"Wait briefly\"}"}}
             ]
         }))
         .unwrap();
+        assistant.message_id = "runner-sleep-message-0".into();
+        assistant.tool_calls.as_mut().unwrap()[0].index = Some(0);
         let mut messages = vec![assistant.clone()];
         let mut session = crate::chat::types::ChatSession::new(chat_id.clone());
         session.messages = messages.clone();
@@ -4786,6 +4795,16 @@ mod subchat_tests {
         *gcx.documents_state.workspace_folders.lock().unwrap() =
             vec![workspace.path().to_path_buf()];
         let progress = Arc::new(StdMutex::new(Vec::new()));
+        for (index, message) in messages.iter_mut().enumerate() {
+            if message.message_id.is_empty() {
+                message.message_id = format!("runner-sleep-message-{index}");
+            }
+            if let Some(calls) = message.tool_calls.as_mut() {
+                for (call_index, call) in calls.iter_mut().enumerate() {
+                    call.index = Some(call_index);
+                }
+            }
+        }
         super::persist_subchat_progress(&ccx, &config, &progress, &messages).await;
         assert_eq!(
             app.agents.pending_deliveries(&agent.agent_id).await.len(),

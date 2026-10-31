@@ -797,7 +797,7 @@ mod tests {
             ContextEnum::ChatMessage(message) => message.extra["delivery_receipt"].clone(),
             _ => panic!("expected chat message"),
         };
-        assert_eq!(receipt["outcome"], "failed");
+        assert_eq!(receipt["outcome"], "unknown");
         assert_eq!(receipt["reached"], false);
         assert!(receipt["reason"]
             .as_str()

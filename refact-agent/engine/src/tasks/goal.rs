@@ -1529,6 +1529,7 @@ mod tests {
         for status in [GoalStatus::Active, GoalStatus::Verifying] {
             {
                 let mut session = restored.lock().await;
+                session.ensure_goal_ledger_installed();
                 assert!(session.goal_set_status_reason(status, "accepted pursuit transition"));
             }
             crate::file_activity::TOOL_ACTOR

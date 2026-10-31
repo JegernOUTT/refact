@@ -1726,6 +1726,11 @@ mod tests {
         agent.thread.model = "provider/model".into();
         agent.thread.task_meta = agent_ccx.lock().await.task_meta.clone();
         agent.work_project_root = Some(temp.path().into());
+        agent.turn_depth = 1;
+        agent.draft_message = Some(crate::call_validation::ChatMessage::new(
+            "assistant".into(),
+            "In progress".into(),
+        ));
         agent.runtime.state = refact_runtime_api::SessionState::Generating;
         agent
             .queue_processor_running

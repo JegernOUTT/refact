@@ -40,6 +40,16 @@ pub(crate) async fn fixture() -> Fixture {
         vec![],
     )
     .await;
+    {
+        let mut session = planner.lock().await;
+        session.thread.model = "provider/model".into();
+        session.work_project_root = Some(_temp.path().to_path_buf());
+    }
+    {
+        let mut session = agent.lock().await;
+        session.thread.model = "provider/model".into();
+        session.work_project_root = Some(_temp.path().to_path_buf());
+    }
     Fixture {
         _temp,
         app,
@@ -162,12 +172,37 @@ async fn agent_finish_withdraws_open_questions() {
             &f.agent_id,
         );
         let answered = "aaaaaaaa";
+        let mut legacy = storage::load_board(f.app.gcx.clone(), &f.task_id)
+            .await
+            .unwrap();
+        legacy
+            .get_card_mut("T-1")
+            .unwrap()
+            .status_updates
+            .extend([update(&format!("[ASK:{answered}] Already answered"))]);
+        storage::save_board(f.app.gcx.clone(), &f.task_id, &legacy)
+            .await
+            .unwrap();
+        ToolPlannerReply::new()
+            .tool_execute(
+                context(&f, true).await,
+                &"answer".into(),
+                &args(&[
+                    ("card_id", json!("T-1")),
+                    ("question_id", json!(answered)),
+                    ("answer", json!("Proceed")),
+                ]),
+            )
+            .await
+            .unwrap();
         storage::update_board_atomic(f.app.gcx.clone(), &f.task_id, |board| {
-            board.get_card_mut("T-1").unwrap().status_updates.extend([
-                update(&format!("[ASK:{answered}] Already answered")),
-                update(&format!("[REPLY:{answered}] Proceed")),
-                update("[ASK:bbbbbbbb] Durable question from before process restart"),
-            ]);
+            board
+                .get_card_mut("T-1")
+                .unwrap()
+                .status_updates
+                .extend([update(
+                    "[ASK:bbbbbbbb] Durable question from before process restart",
+                )]);
             Ok(())
         })
         .await
@@ -209,10 +244,19 @@ async fn agent_finish_withdraws_open_questions() {
             .filter(|u| u.message.starts_with("[WITHDRAWN:"))
             .collect();
         assert_eq!(withdrawals.len(), 1);
+        let ids: Vec<_> = withdrawals[0]
+            .message
+            .strip_prefix("[WITHDRAWN:")
+            .unwrap()
+            .split_once(']')
+            .unwrap()
+            .0
+            .split(',')
+            .collect();
         for id in [&open, &tracked, "bbbbbbbb"] {
-            assert!(withdrawals[0].message.contains(id));
+            assert!(ids.contains(&id));
         }
-        assert!(!withdrawals[0].message.contains(answered));
+        assert!(!ids.contains(&answered));
     }
 }
 
@@ -463,7 +507,7 @@ async fn questions_list_hides_withdrawn_and_done_card_history() {
                 QuestionKind::BoardPlanner,
                 board_card_asker(&f.task_id, "T-1"),
                 board_planner_answerer(&f.task_id),
-                "expired-info",
+                format!("{}:T-1:dddddddd", f.task_id),
                 "Expired info question",
             )
             .with_id("dddddddd")
@@ -492,6 +536,18 @@ async fn questions_list_hides_withdrawn_and_done_card_history() {
     })
     .await
     .unwrap();
+    ToolPlannerReply::new()
+        .tool_execute(
+            context(&f, true).await,
+            &"answer".into(),
+            &args(&[
+                ("card_id", json!("T-1")),
+                ("question_id", json!("bbbbbbbb")),
+                ("answer", json!("Answer")),
+            ]),
+        )
+        .await
+        .unwrap();
     let before = storage::load_board(f.app.gcx.clone(), &f.task_id)
         .await
         .unwrap();
@@ -501,10 +557,10 @@ async fn questions_list_hides_withdrawn_and_done_card_history() {
             .await
             .unwrap(),
     );
-    assert!(output.contains(&open));
-    assert!(!output.contains("dddddddd"));
+    assert!(output.contains(&format!("| `{open}` |")));
+    assert!(!output.contains("| `dddddddd` |"));
     for hidden in ["aaaaaaaa", "bbbbbbbb", "cccccccc"] {
-        assert!(!output.contains(hidden));
+        assert!(!output.contains(&format!("| `{hidden}` |")));
     }
     let after = storage::load_board(f.app.gcx.clone(), &f.task_id)
         .await
@@ -513,21 +569,22 @@ async fn questions_list_hides_withdrawn_and_done_card_history() {
         serde_json::to_value(before).unwrap(),
         serde_json::to_value(after).unwrap()
     );
-    let settled = text(
-        ToolPlannerReply::new()
-            .tool_execute(
-                context(&f, true).await,
-                &"settled-reply".into(),
-                &args(&[
-                    ("card_id", json!("T-1")),
-                    ("question_id", json!("dddddddd")),
-                    ("answer", json!("Too late")),
-                ]),
-            )
-            .await
-            .unwrap(),
+    let settled = ToolPlannerReply::new()
+        .tool_execute(
+            context(&f, true).await,
+            &"settled-reply".into(),
+            &args(&[
+                ("card_id", json!("T-1")),
+                ("question_id", json!("dddddddd")),
+                ("answer", json!("Too late")),
+            ]),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        settled,
+        "Question already settled differently; nothing was delivered"
     );
-    assert!(settled.contains("question state: `already_settled`"));
     let listed = text(
         ToolTaskQuestionsList::new()
             .tool_execute(

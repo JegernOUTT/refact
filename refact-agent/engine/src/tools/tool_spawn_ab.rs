@@ -1375,7 +1375,17 @@ pub(crate) mod tests {
         pub(crate) confirmation_flags: std::sync::Mutex<Vec<bool>>,
         pub(crate) threads: std::sync::Mutex<Vec<crate::chat::types::ThreadParams>>,
         pub(crate) started: std::sync::Mutex<Vec<String>>,
+        pub(crate) sessions: Option<crate::chat::SessionsMap>,
         notify: tokio::sync::Notify,
+    }
+
+    impl RecordingFacade {
+        pub(crate) fn with_sessions(sessions: crate::chat::SessionsMap) -> Self {
+            Self {
+                sessions: Some(sessions),
+                ..Default::default()
+            }
+        }
     }
 
     #[async_trait]
@@ -1399,6 +1409,22 @@ pub(crate) mod tests {
                 .lock()
                 .unwrap()
                 .push(request.thread.auto_approve_dangerous_commands);
+            if let Some(sessions) = &self.sessions {
+                let mut session = crate::chat::types::ChatSession::new(request.chat_id.clone());
+                session.work_project_root = request
+                    .thread
+                    .worktree
+                    .as_ref()
+                    .map(|wt| wt.source_workspace_root.clone());
+                session.thread = request.thread.clone();
+                for message in request.messages.iter().cloned() {
+                    session.add_message(message);
+                }
+                sessions.write().await.insert(
+                    request.chat_id.clone(),
+                    Arc::new(tokio::sync::Mutex::new(session)),
+                );
+            }
             self.threads.lock().unwrap().push(request.thread);
             self.created.lock().unwrap().push(request.chat_id);
             Ok(())

@@ -103,7 +103,7 @@ impl Fixture {
                 ..Default::default()
             },
         ));
-        let facade = Arc::new(RecordingFacade::default());
+        let facade = Arc::new(RecordingFacade::with_sessions(app.chat.sessions.clone()));
         app.chat.facade = facade.clone();
         let mut planner = crate::chat::types::ChatSession::new("planner".into());
         planner.thread.model = "test/model".into();

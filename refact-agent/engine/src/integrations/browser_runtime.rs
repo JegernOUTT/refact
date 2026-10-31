@@ -1814,27 +1814,46 @@ mod tests {
 
         #[cfg(target_os = "linux")]
         {
+            struct Holder(std::process::Child);
+            impl Drop for Holder {
+                fn drop(&mut self) {
+                    let _ = self.0.kill();
+                    let _ = self.0.wait();
+                }
+            }
             let profile = dir.path().join("abc");
             std::fs::create_dir(&profile).unwrap();
-            let holder = |user_data_dir: String| {
-                std::process::Command::new("sh")
-                    .args(["-c", "sleep 30; true", "sh"])
-                    .arg(format!("--user-data-dir={user_data_dir}"))
-                    .spawn()
-                    .unwrap()
+            let holder = |user_data_dir: String, ready: &Path| {
+                Holder(
+                    std::process::Command::new("sh")
+                        .args(["-c", "printf ready > \"$1\"; read reply", "sh"])
+                        .arg(ready)
+                        .arg(format!("--user-data-dir={user_data_dir}"))
+                        .stdin(std::process::Stdio::piped())
+                        .spawn()
+                        .unwrap(),
+                )
             };
             let lock = profile.join("SingletonLock");
             for (user_data_dir, owns) in [
                 (format!("{}-sub", profile.display()), false),
                 (profile.display().to_string(), true),
             ] {
-                let mut child = holder(user_data_dir.clone());
-                let pid = child.id();
+                let ready = dir.path().join(format!("holder-ready-{owns}"));
+                let mut child = holder(user_data_dir.clone(), &ready);
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while std::fs::read_to_string(&ready).ok().as_deref() != Some("ready") {
+                    assert!(child.0.try_wait().unwrap().is_none());
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "profile holder not ready"
+                    );
+                    std::thread::yield_now();
+                }
+                let pid = child.0.id();
                 let _ = std::fs::remove_file(&lock);
                 std::os::unix::fs::symlink(format!("{}-{pid}", local_hostname()), &lock).unwrap();
                 let live = profile_lock_is_live(&profile);
-                let _ = child.kill();
-                let _ = child.wait();
                 assert_eq!(live, owns.then_some(pid), "--user-data-dir={user_data_dir}");
             }
         }

@@ -679,6 +679,17 @@ async fn nested_isolated_auto_merge_refuses_changed_parent_checkout() {
 
     run_git(&parent_root, &["add", "base.txt"]);
     run_git(&parent_root, &["commit", "-m", "preserve parent edits"]);
+    let retained = crate::worktrees::git::list_git_worktrees(&parent_root)
+        .into_iter()
+        .find(|entry| entry.branch.as_deref() == Some("work"))
+        .unwrap();
+    assert_ne!(retained.root, parent_root);
+    assert_eq!(run_git(&retained.root, &["rev-parse", "HEAD"]), head);
+    assert!(run_git(&retained.root, &["status", "--porcelain"]).is_empty());
+    run_git(
+        &parent_root,
+        &["worktree", "remove", retained.root.to_str().unwrap()],
+    );
     run_git(&parent_root, &["checkout", "work"]);
     assert!(run_git(&parent_root, &["status", "--porcelain"]).is_empty());
     let merge_service = crate::agents::spawn::prepare_spawn_merge_service(

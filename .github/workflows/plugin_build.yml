@@ -2,6 +2,12 @@ name: Refact Plugin CI build
 
 on:
   workflow_dispatch:
+    inputs:
+      build_only:
+        description: Build and package artifacts without publishing
+        type: boolean
+        required: true
+        default: true
   push:
     tags:
       - "*"
@@ -49,7 +55,7 @@ jobs:
 
   engine-prerelease:
     name: Engine prerelease
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.build_only == 'false'
     needs: [build_version, engine]
     runs-on: ubuntu-latest
     permissions:

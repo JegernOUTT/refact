@@ -27,6 +27,7 @@ env:
   CARGO_INCREMENTAL: 0
   CARGO_NET_RETRY: 10
   RUSTUP_MAX_RETRIES: 10
+  WHISPER_DONT_GENERATE_BINDINGS: "1"
 
 jobs:
   engine-perf:
@@ -50,8 +51,8 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: refact-agent/engine -> target
-          key: ubuntu-engine-perf-cargo
-          shared-key: ubuntu-engine-perf-cargo
+          key: ubuntu-engine-perf-cargo-bundled-whisper-v1
+          shared-key: ubuntu-engine-perf-cargo-bundled-whisper-v1
           cache-bin: false
 
       - name: Run engine performance benchmarks

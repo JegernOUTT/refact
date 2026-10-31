@@ -1407,7 +1407,7 @@ impl ToolTaskRestartAgent {
                     original_card,
                     agent_chat_id.to_string(),
                     Some(format!(
-                        "Fresh restart refused after it was queued: {error}; retry with force=true to restart without the capture"
+                        "Fresh restart refused after it was queued; retry with force=true to restart without the capture: {error}"
                     )),
                 )
                 .await;
@@ -2426,6 +2426,20 @@ mod tests {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         *gcx.documents_state.workspace_folders.lock().unwrap() =
             vec![temp.path().canonicalize().unwrap()];
+        let mut planner = crate::chat::types::ChatSession::new("planner".into());
+        planner.thread.model = "provider/model".into();
+        planner.work_project_root = Some(temp.path().canonicalize().unwrap());
+        planner.thread.task_meta = Some(refact_chat_api::TaskMeta {
+            task_id: "restart-claim".into(),
+            role: "planner".into(),
+            agent_id: None,
+            card_id: None,
+            planner_chat_id: Some("planner".into()),
+        });
+        gcx.chat_sessions
+            .write()
+            .await
+            .insert("planner".into(), Arc::new(tokio::sync::Mutex::new(planner)));
         let task_dir = temp.path().join(".refact/tasks/restart-claim");
         tokio::fs::create_dir_all(&task_dir).await.unwrap();
         let mut original = failed_card(
@@ -2435,6 +2449,7 @@ mod tests {
         );
         original.agent_worktree_name = Some("retained-id".into());
         let board = TaskBoard {
+            owner_chat_id: Some("planner".into()),
             cards: vec![original.clone()],
             ..Default::default()
         };
@@ -2443,26 +2458,26 @@ mod tests {
             .unwrap();
         let mut held = original.clone();
         held.paused_at = Some("pause-before-claim".into());
-        storage::update_board_atomic(gcx.clone(), "restart-claim", {
-            let held = held.clone();
-            move |board| {
-                *board.get_card_mut("T-1").unwrap() = held;
-                Ok(())
-            }
-        })
-        .await
-        .unwrap();
+        let mut paused_board = board.clone();
+        *paused_board.get_card_mut("T-1").unwrap() = held.clone();
+        storage::save_board(gcx.clone(), "restart-claim", &paused_board)
+            .await
+            .unwrap();
         let paused_bytes = std::fs::read(task_dir.join("board.yaml")).unwrap();
-        let error = claim_restart(
-            gcx.clone(),
-            "restart-claim",
-            &held,
-            "new-agent",
-            "new-chat",
-            "resume",
-        )
-        .await
-        .unwrap_err();
+        let error = crate::file_activity::TOOL_ACTOR
+            .scope(
+                "planner".into(),
+                claim_restart(
+                    gcx.clone(),
+                    "restart-claim",
+                    &held,
+                    "new-agent",
+                    "new-chat",
+                    "resume",
+                ),
+            )
+            .await
+            .unwrap_err();
         assert!(error.contains("paused"));
         assert_eq!(
             std::fs::read(task_dir.join("board.yaml")).unwrap(),
@@ -2477,31 +2492,39 @@ mod tests {
         })
         .await
         .unwrap();
-        let queued = claim_restart(
-            gcx.clone(),
-            "restart-claim",
-            &original,
-            "new-agent",
-            "new-chat",
-            "fresh",
-        )
-        .await
-        .unwrap();
+        let queued = crate::file_activity::TOOL_ACTOR
+            .scope(
+                "planner".into(),
+                claim_restart(
+                    gcx.clone(),
+                    "restart-claim",
+                    &original,
+                    "new-agent",
+                    "new-chat",
+                    "fresh",
+                ),
+            )
+            .await
+            .unwrap();
         assert_eq!(queued.column, "doing");
         assert_eq!(queued.agent_chat_id.as_deref(), Some("new-chat"));
         assert!(queued.started_at.is_none());
         assert_eq!(queued.agent_worktree, original.agent_worktree);
         assert_eq!(queued.final_report, original.final_report);
-        let error = claim_restart(
-            gcx.clone(),
-            "restart-claim",
-            &original,
-            "duplicate",
-            "duplicate-chat",
-            "fresh",
-        )
-        .await
-        .unwrap_err();
+        let error = crate::file_activity::TOOL_ACTOR
+            .scope(
+                "planner".into(),
+                claim_restart(
+                    gcx.clone(),
+                    "restart-claim",
+                    &original,
+                    "duplicate",
+                    "duplicate-chat",
+                    "fresh",
+                ),
+            )
+            .await
+            .unwrap_err();
         assert!(error.contains("changed while restart"));
         let current = storage::load_board(gcx, "restart-claim").await.unwrap();
         assert_eq!(

@@ -95,6 +95,11 @@ jobs:
           cache: "npm"
           cache-dependency-path: refact-agent/gui/package-lock.json
 
+      - name: Install native GUI build dependencies
+        if: startsWith(matrix.os, 'windows') || startsWith(matrix.os, 'macos')
+        working-directory: refact-agent/gui
+        run: npm ci --include=dev
+
       - name: Install LLVM (Windows)
         if: startsWith(matrix.os, 'windows')
         run: choco install llvm -y
@@ -140,12 +145,24 @@ jobs:
           tool: cross
           fallback: none
 
-      - name: Build GUI for linux-like artifact
-        if: matrix.cross || matrix.target == 'aarch64-unknown-linux-gnu'
-        working-directory: refact-agent/gui
+      - name: Prepare cross-container GUI dependencies
+        if: matrix.cross
         run: |
-          npm ci
-          npm run build
+          docker run --rm --entrypoint bash \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace/refact-agent/engine \
+            ghcr.io/cross-rs/x86_64-unknown-linux-gnu:main@sha256:52fe95895e48d434c349959ca52c7bb93d7cf5ab8ea2b7d5d9f7e0e655c2e579 \
+            -euo pipefail -c '
+              restore_host_ownership() {
+                status=$?
+                chown -R "$(stat -c %u /workspace)":"$(stat -c %g /workspace)" /workspace/refact-agent/gui || status=$?
+                exit "$status"
+              }
+              trap restore_host_ownership EXIT
+              apt-get update
+              apt-get install -y ca-certificates curl xz-utils
+              bash /workspace/tools/dev/prepare_ci_gui.sh /workspace/refact-agent/gui
+            '
 
       - name: Build artifact
         if: matrix.cross == null && startsWith(matrix.os, 'windows')
@@ -153,12 +170,12 @@ jobs:
           REFACT_GUI_DIR: ${{ github.workspace }}\refact-agent\gui
         shell: bash
         run: |
-          cargo build --workspace --profile ci-release
-          cp ./target/ci-release/refact-lsp${{ matrix.ext }} ../..
-          cp ./target/ci-release/refact${{ matrix.ext }} ../..
+          cargo build --workspace --profile ci-release --target ${{ matrix.target }}
+          cp ./target/${{ matrix.target }}/ci-release/refact-lsp${{ matrix.ext }} ../..
+          cp ./target/${{ matrix.target }}/ci-release/refact${{ matrix.ext }} ../..
 
       - name: Build artifact
-        if: matrix.cross == null && !startsWith(matrix.os, 'windows')
+        if: startsWith(matrix.os, 'macos')
         env:
           CARGO_PROFILE_CI_RELEASE_LTO: ${{ endsWith(matrix.target, 'apple-darwin') && 'thin' || 'true' }}
         run: |
@@ -170,7 +187,7 @@ jobs:
         if: matrix.cross
         env:
           CARGO_BUILD_JOBS: "2"
-          CROSS_CONTAINER_OPTS: --volume "${{ github.workspace }}/refact-agent/gui:/gui:ro"
+          CROSS_CONTAINER_OPTS: --volume "${{ github.workspace }}/refact-agent/gui:/gui:rw"
         run: |
           CROSS_NO_WARNINGS=0 cross build --workspace --profile ci-release --target ${{ matrix.target }}
           cp ./target/${{ matrix.target }}/ci-release/refact-lsp${{ matrix.ext }} ../..
@@ -190,7 +207,6 @@ jobs:
             -e RUSTUP_HOME=/rustup \
             -e CARGO_PROFILE_CI_RELEASE_LTO \
             -e OPENSSL_STATIC \
-            -e REFACT_USE_PREBUILT_GUI=1 \
             -e REFACT_GUI_DIR=/workspace/refact-agent/gui \
             -v "$GITHUB_WORKSPACE:/workspace" \
             -v "$HOME/.cargo/registry:/cargo/registry" \
@@ -199,7 +215,7 @@ jobs:
             ubuntu:20.04 bash -euo pipefail -c '
               restore_host_ownership() {
                 status=$?
-                for path in /workspace/refact-agent/engine/target /cargo/registry /cargo/git /workspace/refact-lsp /workspace/refact; do
+                for path in /workspace/refact-agent/gui /workspace/refact-agent/engine/target /cargo/registry /cargo/git /workspace/refact-lsp /workspace/refact; do
                   if [ -e "$path" ]; then
                     chown -R "$HOST_UID:$HOST_GID" "$path" || status=$?
                   fi
@@ -209,7 +225,9 @@ jobs:
               trap restore_host_ownership EXIT
               mkdir -p target "$CARGO_HOME/registry" "$CARGO_HOME/git"
               apt-get update
-              DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential ca-certificates clang cmake curl git libclang-dev libssl-dev lld pkg-config unzip
+              DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential ca-certificates clang cmake curl git libclang-dev libssl-dev lld pkg-config unzip xz-utils
+              bash /workspace/tools/dev/prepare_ci_gui.sh /workspace/refact-agent/gui
+              export PATH="/opt/refact-ci-node/bin:$PATH"
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain stable
               export PATH="$CARGO_HOME/bin:$PATH"
               rustup target add aarch64-unknown-linux-gnu
