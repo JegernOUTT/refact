@@ -8976,6 +8976,146 @@
       "author": "background_agent:bgagent-8e780ef5-3342-4940-8260-2e575f6de297 (bookkeeping only)",
       "reviewer": "background_agent:bgagent-02d59e01 / bgagent-37663fcf",
       "review_evidence": "Parent-forwarded independent whole-body review bgagent-02d59e01 / actual child1879a4cb approved 2/2/8/4 meaningful cases. Independent source adversarial review bgagent-37663fcf / actual child395a2f84 approved exact five-file diff git-blob hash9583d467, guards unchanged. Source review only: no fresh production-mutant evidence, runtime pass or Windows restored-pass claim."
+    },
+    {
+      "fingerprint": "8ca84b4fd67aad353fe5f122262363d9d58882cdbcfdf10ac3c245ce4d00ea9f",
+      "occurrences": 1,
+      "failure_mode": "Opaque child failure obscures the real shell/tool error; diagnostics reveal it without changing the failure condition.",
+      "importance": "Preserve retained diagnostics and fixture/display prerequisites without weakening approval, ownership or durability checks.",
+      "nearest_retained": {
+        "fingerprint": "e222d2cf45bc18cff9ee363c8ff5fc3784dc01970558744e2b80d9a641ec2ef4",
+        "why_insufficient": "Changed-argument/tool refusal never demonstrates a parked request with no file effect, approved execution and consumed-command replay refusal."
+      },
+      "oracle": "Three cases: parked/no side effect; approved exact command succeeds; consumed execution/repeated request refuse without changing bytes.",
+      "prerequisites": "Only add failed child message text to the unchanged failed-child assertion.",
+      "shipping_implementation": "refact-agent/engine/src/agents/approval.rs::child_command_approval_parks_without_side_effects_then_resumes_with_exact_binding invokes unchanged shipping seams; no copied algorithm.",
+      "determinism": "Existing isolated temporary state, explicit cleanup and virtual-time controls unchanged. No new waits, external providers, credentials, ignores or selection changes.",
+      "layer": "Existing engine library test; ordinary diagnostic/prerequisite representation maintenance.",
+      "why_cheapest": "Repair existing body in place with no new physical test or scenario; charge whole reviewed body at 3 meaningful cases.",
+      "meaningful_cases": 3,
+      "critical": false,
+      "criticality_reason": "Ordinary applies only to diagnostic/prerequisite representation delta. Underlying critical security/durability coverage remains unchanged; no new security-mutant certification.",
+      "removed_coverage": "None. Scenarios, predicates, negative controls and production guards retained. All203 historical admission rows exact; no blanket retained-body recount.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Opaque child failure obscures the real shell/tool error; diagnostics reveal it without changing the failure condition. Source reasoning only, not an executed production mutation.",
+        "evidence": "m.scan HEAD0319 4577bf665850d67736accf82dfcbf20df0909763851d708452c4e3cb90711d89 -> current 8ca84b4fd67aad353fe5f122262363d9d58882cdbcfdf10ac3c245ce4d00ea9f. Only add failed child message text to the unchanged failed-child assertion. Independent a7cb/951 whole-body counts and b949 adversarial source review support the first four maintained bodies (3/4/5/4) and earlier five-file patch. ffbb reviewed the one-case literal-source display proposal; parent verified ToolCat header tool_cat.rs:225 from ContextFile.file_name at chat_types.rs:1006 and normalization at tool_cat.rs:865/972. b949 review preceded this final display expectation. Final source-plus-ledger auditor bgagent-4a91cbba pending; no final approval, runtime pass, executed mutant or restored Windows pass claimed."
+      },
+      "author": "background_agent:bgagent-d47f4e91 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-a7cb3c64 / bgagent-951c7650 / bgagent-b949b8e9 / bgagent-ffbb55c7; final auditor pending",
+      "review_evidence": "Independent a7cb/951 whole-body counts and b949 adversarial source review support the first four maintained bodies (3/4/5/4) and earlier five-file patch. ffbb reviewed the one-case literal-source display proposal; parent verified ToolCat header tool_cat.rs:225 from ContextFile.file_name at chat_types.rs:1006 and normalization at tool_cat.rs:865/972. b949 review preceded this final display expectation. Final source-plus-ledger auditor bgagent-4a91cbba pending; no final approval, runtime pass, executed mutant or restored Windows pass claimed."
+    },
+    {
+      "fingerprint": "1480c92df59111012f31a4a19e011c66f403d9c8a7fbb2d62dad7a96c0124c1b",
+      "occurrences": 1,
+      "failure_mode": "Missing approval.txt otherwise yields only a file error rather than actual child tool failure; diagnostic extraction changes no pass predicate.",
+      "importance": "Preserve retained diagnostics and fixture/display prerequisites without weakening approval, ownership or durability checks.",
+      "nearest_retained": {
+        "fingerprint": "1f0f67a4e597143fa393f18aed4d68237699256a813b585fcedb35b0f7c4f73f",
+        "why_insufficient": "Queue grant does not exercise board confirmation policy, parked tool-loop side-effect denial, public parent approval and consumed authority after execution."
+      },
+      "oracle": "Four cases: parent auto-consent suppresses confirmation; revoked consent requires confirmation and parks without effect; explicit public approval resumes real loop with one output line; consumed approval refuses reuse.",
+      "prerequisites": "Collect matching child tool messages and include them in the existing file-read failure panic; assertions and original tool-loop remain unchanged.",
+      "shipping_implementation": "refact-agent/engine/src/agents/approval.rs::board_tool_loop_relays_exact_command_and_executes_only_after_parent_decision invokes unchanged shipping seams; no copied algorithm.",
+      "determinism": "Existing isolated temporary state, explicit cleanup and virtual-time controls unchanged. No new waits, external providers, credentials, ignores or selection changes.",
+      "layer": "Existing engine library test; ordinary diagnostic/prerequisite representation maintenance.",
+      "why_cheapest": "Repair existing body in place with no new physical test or scenario; charge whole reviewed body at 4 meaningful cases.",
+      "meaningful_cases": 4,
+      "critical": false,
+      "criticality_reason": "Ordinary applies only to diagnostic/prerequisite representation delta. Underlying critical security/durability coverage remains unchanged; no new security-mutant certification.",
+      "removed_coverage": "None. Scenarios, predicates, negative controls and production guards retained. All203 historical admission rows exact; no blanket retained-body recount.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Missing approval.txt otherwise yields only a file error rather than actual child tool failure; diagnostic extraction changes no pass predicate. Source reasoning only, not an executed production mutation.",
+        "evidence": "m.scan HEAD0319 7da08386ad8abebcafdf9c4b14b578a8b8a0dc5e0d9900645d1ef6be5fc79b3f -> current 1480c92df59111012f31a4a19e011c66f403d9c8a7fbb2d62dad7a96c0124c1b. Collect matching child tool messages and include them in the existing file-read failure panic; assertions and original tool-loop remain unchanged. Independent a7cb/951 whole-body counts and b949 adversarial source review support the first four maintained bodies (3/4/5/4) and earlier five-file patch. ffbb reviewed the one-case literal-source display proposal; parent verified ToolCat header tool_cat.rs:225 from ContextFile.file_name at chat_types.rs:1006 and normalization at tool_cat.rs:865/972. b949 review preceded this final display expectation. Final source-plus-ledger auditor bgagent-4a91cbba pending; no final approval, runtime pass, executed mutant or restored Windows pass claimed."
+      },
+      "author": "background_agent:bgagent-d47f4e91 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-a7cb3c64 / bgagent-951c7650 / bgagent-b949b8e9 / bgagent-ffbb55c7; final auditor pending",
+      "review_evidence": "Independent a7cb/951 whole-body counts and b949 adversarial source review support the first four maintained bodies (3/4/5/4) and earlier five-file patch. ffbb reviewed the one-case literal-source display proposal; parent verified ToolCat header tool_cat.rs:225 from ContextFile.file_name at chat_types.rs:1006 and normalization at tool_cat.rs:865/972. b949 review preceded this final display expectation. Final source-plus-ledger auditor bgagent-4a91cbba pending; no final approval, runtime pass, executed mutant or restored Windows pass claimed."
+    },
+    {
+      "fingerprint": "1d47fc5d31e7cb7d7f8fa9b3fa7e1406fe58a4f588763172f3229dc748d0fe88",
+      "occurrences": 1,
+      "failure_mode": "Noncanonical temporary-parent spelling may miss shipping canonical identity prerequisite before migration checks; canonical parent fixes representation without changing owner guards.",
+      "importance": "Preserve retained diagnostics and fixture/display prerequisites without weakening approval, ownership or durability checks.",
+      "nearest_retained": {
+        "fingerprint": "83a24c63161a0b2a49ddb0d5834d37a66fcb67fb775a8985dcb372df16500550",
+        "why_insufficient": "Blocked admission/stale commit publication does not exercise migration chunk cursors, invalid history recovery, restart deduplication or stale owner preserving committed cursor."
+      },
+      "oracle": "Five cases: missing runtime refuses at cursor zero; invalid history fails after committed 128-item chunk; repaired history completes remaining chunks without falsely seeding history; restart preserves exactly 260 items; changed owner refuses with cursor260 unchanged.",
+      "prerequisites": "Construct the isolated temporary directory under dunce::canonicalize(std::env::temp_dir()); project identity, runtime and service still derive from that same directory.",
+      "shipping_implementation": "refact-agent/engine/src/buddy/actor.rs::stale_owner_failed_history_and_restart_preserve_committed_cursor invokes unchanged shipping seams; no copied algorithm.",
+      "determinism": "Existing isolated temporary state, explicit cleanup and virtual-time controls unchanged. No new waits, external providers, credentials, ignores or selection changes.",
+      "layer": "Existing engine library test; ordinary diagnostic/prerequisite representation maintenance.",
+      "why_cheapest": "Repair existing body in place with no new physical test or scenario; charge whole reviewed body at 5 meaningful cases.",
+      "meaningful_cases": 5,
+      "critical": false,
+      "criticality_reason": "Ordinary applies only to diagnostic/prerequisite representation delta. Underlying critical security/durability coverage remains unchanged; no new security-mutant certification.",
+      "removed_coverage": "None. Scenarios, predicates, negative controls and production guards retained. All203 historical admission rows exact; no blanket retained-body recount.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Noncanonical temporary-parent spelling may miss shipping canonical identity prerequisite before migration checks; canonical parent fixes representation without changing owner guards. Source reasoning only, not an executed production mutation.",
+        "evidence": "m.scan HEAD0319 5ac7a74f2c3625a06de1bf9d2604ffece32b6ae8a9ecf5d7a2f5b817de2118df -> current 1d47fc5d31e7cb7d7f8fa9b3fa7e1406fe58a4f588763172f3229dc748d0fe88. Construct the isolated temporary directory under dunce::canonicalize(std::env::temp_dir()); project identity, runtime and service still derive from that same directory. Independent a7cb/951 whole-body counts and b949 adversarial source review support the first four maintained bodies (3/4/5/4) and earlier five-file patch. ffbb reviewed the one-case literal-source display proposal; parent verified ToolCat header tool_cat.rs:225 from ContextFile.file_name at chat_types.rs:1006 and normalization at tool_cat.rs:865/972. b949 review preceded this final display expectation. Final source-plus-ledger auditor bgagent-4a91cbba pending; no final approval, runtime pass, executed mutant or restored Windows pass claimed."
+      },
+      "author": "background_agent:bgagent-d47f4e91 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-a7cb3c64 / bgagent-951c7650 / bgagent-b949b8e9 / bgagent-ffbb55c7; final auditor pending",
+      "review_evidence": "Independent a7cb/951 whole-body counts and b949 adversarial source review support the first four maintained bodies (3/4/5/4) and earlier five-file patch. ffbb reviewed the one-case literal-source display proposal; parent verified ToolCat header tool_cat.rs:225 from ContextFile.file_name at chat_types.rs:1006 and normalization at tool_cat.rs:865/972. b949 review preceded this final display expectation. Final source-plus-ledger auditor bgagent-4a91cbba pending; no final approval, runtime pass, executed mutant or restored Windows pass claimed."
+    },
+    {
+      "fingerprint": "1613ecdb3623dd0213d68590fc61b55c10c1539460fea54a759d4dee4883bf7a",
+      "occurrences": 1,
+      "failure_mode": "Platform canonical spelling can differ from shared-service identity before real lock contention; dunce supplies the same physical root in shipping representation.",
+      "importance": "Preserve retained diagnostics and fixture/display prerequisites without weakening approval, ownership or durability checks.",
+      "nearest_retained": {
+        "fingerprint": "0e364ed3c4a0e61c7b8c539c3786401becf71ea17051b2d7d731606c7a1cc897",
+        "why_insufficient": "Due-time arithmetic never opens a genuinely contended runtime, releases its holder or proves successful actor reopen and cleared failure."
+      },
+      "oracle": "Four cases: held lock refuses initial open with AlreadyOwned; due held retry records attempt two; before next deadline no reopen task; after release/deadline tracked reopen succeeds and clears failure.",
+      "prerequisites": "Replace Path::canonicalize with dunce::canonicalize for the same temporary root passed identically to holder and service.",
+      "shipping_implementation": "refact-agent/engine/src/buddy/actor_operator_tests.rs::reopen_succeeds_once_the_lock_is_released invokes unchanged shipping seams; no copied algorithm.",
+      "determinism": "Existing isolated temporary state, explicit cleanup and virtual-time controls unchanged. No new waits, external providers, credentials, ignores or selection changes.",
+      "layer": "Existing engine library test; ordinary diagnostic/prerequisite representation maintenance.",
+      "why_cheapest": "Repair existing body in place with no new physical test or scenario; charge whole reviewed body at 4 meaningful cases.",
+      "meaningful_cases": 4,
+      "critical": false,
+      "criticality_reason": "Ordinary applies only to diagnostic/prerequisite representation delta. Underlying critical security/durability coverage remains unchanged; no new security-mutant certification.",
+      "removed_coverage": "None. Scenarios, predicates, negative controls and production guards retained. All203 historical admission rows exact; no blanket retained-body recount.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Platform canonical spelling can differ from shared-service identity before real lock contention; dunce supplies the same physical root in shipping representation. Source reasoning only, not an executed production mutation.",
+        "evidence": "m.scan HEAD0319 e61f4287b5981a24b7bde0e16db2c0aa7598e440ebc1de1a189c82e3534faf78 -> current 1613ecdb3623dd0213d68590fc61b55c10c1539460fea54a759d4dee4883bf7a. Replace Path::canonicalize with dunce::canonicalize for the same temporary root passed identically to holder and service. Independent a7cb/951 whole-body counts and b949 adversarial source review support the first four maintained bodies (3/4/5/4) and earlier five-file patch. ffbb reviewed the one-case literal-source display proposal; parent verified ToolCat header tool_cat.rs:225 from ContextFile.file_name at chat_types.rs:1006 and normalization at tool_cat.rs:865/972. b949 review preceded this final display expectation. Final source-plus-ledger auditor bgagent-4a91cbba pending; no final approval, runtime pass, executed mutant or restored Windows pass claimed."
+      },
+      "author": "background_agent:bgagent-d47f4e91 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-a7cb3c64 / bgagent-951c7650 / bgagent-b949b8e9 / bgagent-ffbb55c7; final auditor pending",
+      "review_evidence": "Independent a7cb/951 whole-body counts and b949 adversarial source review support the first four maintained bodies (3/4/5/4) and earlier five-file patch. ffbb reviewed the one-case literal-source display proposal; parent verified ToolCat header tool_cat.rs:225 from ContextFile.file_name at chat_types.rs:1006 and normalization at tool_cat.rs:865/972. b949 review preceded this final display expectation. Final source-plus-ledger auditor bgagent-4a91cbba pending; no final approval, runtime pass, executed mutant or restored Windows pass claimed."
+    },
+    {
+      "fingerprint": "51184df82241abcd437a7734ef125ca9756897b7b5faab57534a33b4896aebdc",
+      "occurrences": 1,
+      "failure_mode": "ToolCat header displays normalized ContextFile.file_name, not native-separator Path display; normalize exact full expected source path rather than weakening to basename.",
+      "importance": "Preserve retained diagnostics and fixture/display prerequisites without weakening approval, ownership or durability checks.",
+      "nearest_retained": {
+        "fingerprint": "d2e75b354cef794616d5fba1aaa203841e756acc4aca67073a4c36c927e6bafa",
+        "why_insufficient": "Source create routing does not verify ToolCat returns the normalized full literal-source path, the exact ContextFile filename vector and no active-worktree mapping notice."
+      },
+      "oracle": "One literal-source read case: normalized full source path in the text header, exact ContextFile filename vector, and absence of the active-worktree mapping notice. The fixture writes sentinel content but this test does not assert that content.",
+      "prerequisites": "Normalize the full expected display with refact_core::chat_types::normalize_file_name, matching ContextFile identity; retain the exact filename-vector and not-mapped assertions. Shared fixture canonicalizes both source and root using dunce.",
+      "shipping_implementation": "refact-agent/engine/src/worktrees/scope_missing_root_tests.rs::refact_state_paths_are_read_from_the_literal_source_path invokes unchanged shipping seams; no copied algorithm.",
+      "determinism": "Existing isolated temporary state, explicit cleanup and virtual-time controls unchanged. No new waits, external providers, credentials, ignores or selection changes.",
+      "layer": "Existing engine library test; ordinary diagnostic/prerequisite representation maintenance.",
+      "why_cheapest": "Repair existing body in place with no new physical test or scenario; charge whole reviewed body at 1 meaningful cases.",
+      "meaningful_cases": 1,
+      "critical": false,
+      "criticality_reason": "Ordinary applies only to diagnostic/prerequisite representation delta. Underlying critical security/durability coverage remains unchanged; no new security-mutant certification.",
+      "removed_coverage": "None. Scenarios, predicates, negative controls and production guards retained. All203 historical admission rows exact; no blanket retained-body recount.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "ToolCat header displays normalized ContextFile.file_name, not native-separator Path display; normalize exact full expected source path rather than weakening to basename. Source reasoning only, not an executed production mutation.",
+        "evidence": "m.scan HEAD0319 e3cda3fbcd6ea0f85b2561305cbdc20fa061c756770990fb8f43c970f07828a3 -> current 51184df82241abcd437a7734ef125ca9756897b7b5faab57534a33b4896aebdc. Normalize the full expected display with refact_core::chat_types::normalize_file_name, matching ContextFile identity; retain the exact filename-vector and not-mapped assertions. Shared fixture canonicalizes both source and root using dunce. Independent a7cb/951 whole-body counts and b949 adversarial source review support the first four maintained bodies (3/4/5/4) and earlier five-file patch. ffbb reviewed the one-case literal-source display proposal; parent verified ToolCat header tool_cat.rs:225 from ContextFile.file_name at tool_cat.rs:1006 and normalization at tool_cat.rs:865/972. b949 review preceded this final display expectation. Final source-plus-ledger auditor bgagent-4a91cbba pending; no final approval, runtime pass, executed mutant or restored Windows pass claimed."
+      },
+      "author": "background_agent:bgagent-d47f4e91 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-a7cb3c64 / bgagent-951c7650 / bgagent-b949b8e9 / bgagent-ffbb55c7; final auditor pending",
+      "review_evidence": "Independent a7cb/951 whole-body counts and b949 adversarial source review support the first four maintained bodies (3/4/5/4) and earlier five-file patch. ffbb reviewed the one-case literal-source display proposal; parent verified ToolCat header tool_cat.rs:225 from ContextFile.file_name at tool_cat.rs:1006 and normalization at tool_cat.rs:865/972. b949 review preceded this final display expectation. Final source-plus-ledger auditor bgagent-4a91cbba pending; no final approval, runtime pass, executed mutant or restored Windows pass claimed."
     }
   ],
   "classifications": [
@@ -13343,16 +13483,16 @@
     },
     {
       "path": "refact-agent/engine/src/buddy/actor.rs",
-      "before_sha256": "322168d640d829a2c8cc6dc787ffb04384f2b51c0629ab9750cc338643e026ef",
-      "after_sha256": "271ea3ac23a96acb21c5c27493d3deb8d55bfba82590559c26bfe0d562c4c040",
+      "before_sha256": "271ea3ac23a96acb21c5c27493d3deb8d55bfba82590559c26bfe0d562c4c040",
+      "after_sha256": "b4e54dc655638440a6c8ed122e222c8f01c771b03d8f63207e94d2bb9a9558d5",
       "affected_tests": [
-        "5ac7a74f2c3625a06de1bf9d2604ffece32b6ae8a9ecf5d7a2f5b817de2118df"
+        "1d47fc5d31e7cb7d7f8fa9b3fa7e1406fe58a4f588763172f3229dc748d0fe88"
       ],
-      "impact": "refact-agent/engine/src/buddy/actor.rs: canonical non-test residue changes remove 16 tokens and add 0 tokens. Cleanup evidence identifies unused import: `super::*`; tests (empty cfg(test) module). 12787\u21926186 global lexical definitions includes intentional coverage loss from case deletions; this support record does not claim strict duplication.",
-      "execution_context": "Same physical Rust path; no retained fingerprint/context relocation relative pinned main. Test-only ownership: inline cfg(test) modules or explicitly cfg(test) helper items; tests/ and *_tests.rs are test harness/module support. Removed dead helper/import/module scaffolding has no surviving intended executing consumer; conservative affected mapping lists surviving same-file tests for dependency review, not a claim all call deleted helpers. See exact residue token hunks and cleanup evidence references.",
-      "author": "support-impact-author-bgagent-1fd43f09",
-      "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
-      "review_evidence": "Independent source/hash review: refact-agent/engine/src/buddy/actor.rs: reviewed removal of {'names': ['unused import: `super::*`'], 'diagnostic_indices': [22], 'before_byte_span': [146800, 146813], 'removed_text': 'use super::*;', 'evidence': 'rustc unused_imports MachineApplicable deletion; import in cfg(test) scope or test-only file'}, {'names': ['tests (empty cfg(test) module)'], 'before_cleanup_char_span': [146753, 146784], 'removed_text': '#[cfg(test)]\\nmod tests {\\n    \\n}', 'evidence': 'After compiler-evidenced import deletion, lexer proves empty braces: no tests/shared helper items; no qualified module references in engine Rust sources.'} within explicit cfg(test) items/modules. 1 actual same-path retained cases keep complete attributed canonical body and enclosing-context hash against pinned MAIN. Conservative affected map contains exactly those current fingerprints."
+      "impact": "One migration fixture uses canonical temporary parent; migration, restart cursor and stale owner guards unchanged. Map local migration body; included modules and macro conclusions unchanged.",
+      "execution_context": "Physical definitions and selection unchanged. Conservative helper/local exposure mapping is not per-consumer execution evidence. Existing discovery classifications, lead-source hash pins and macro conclusions preserved. No production change, mutant or runtime/Windows pass claim.",
+      "author": "background_agent:bgagent-d47f4e91 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-a7cb3c64 / bgagent-951c7650 / bgagent-b949b8e9 / bgagent-ffbb55c7; final auditor pending",
+      "review_evidence": "Independent a7cb/951 whole-body counts and b949 adversarial source review support the first four maintained bodies (3/4/5/4) and earlier five-file patch. ffbb reviewed the one-case literal-source display proposal; parent verified ToolCat header tool_cat.rs:225 from ContextFile.file_name at chat_types.rs:1006 and normalization at tool_cat.rs:865/972. b949 review preceded this final display expectation. Final source-plus-ledger auditor bgagent-4a91cbba pending; no final approval, runtime pass, executed mutant or restored Windows pass claimed."
     },
     {
       "path": "refact-agent/engine/src/buddy/briefing.rs",
@@ -18899,16 +19039,16 @@
     },
     {
       "path": "refact-agent/engine/src/agents/approval.rs",
-      "before_sha256": "aa1a95702075782fb64ddcc96167c77c7b90de384558170c693fac2101347681",
-      "after_sha256": "52b09ea7fc9e21543514f41844a6edda2f47c795f59a2a1af33aefd6b49ba3f5",
+      "before_sha256": "52b09ea7fc9e21543514f41844a6edda2f47c795f59a2a1af33aefd6b49ba3f5",
+      "after_sha256": "a716811e4b7594cbf0082b0a922286dc55c511534315403f216905d58f099d39",
       "affected_tests": [
         "8c0cf973aec44c88ba1c2b63df7f6b6090875580453239b3568fc558ed54cac7",
         "cf70bfb02df3d70be74cca36ca425001dfb403be45b9d118e3cea030075da5df",
         "2a66b6d646ca4c12c10647922cc54f8776c80b81042eb18f70e96970f80ab3b9",
-        "4577bf665850d67736accf82dfcbf20df0909763851d708452c4e3cb90711d89",
+        "8ca84b4fd67aad353fe5f122262363d9d58882cdbcfdf10ac3c245ce4d00ea9f",
         "cb45d62b964295b46bfc6b4ebe7ea15397685efed8bdea996d12a250798ceb73",
         "e222d2cf45bc18cff9ee363c8ff5fc3784dc01970558744e2b80d9a641ec2ef4",
-        "7da08386ad8abebcafdf9c4b14b578a8b8a0dc5e0d9900645d1ef6be5fc79b3f",
+        "1480c92df59111012f31a4a19e011c66f403d9c8a7fbb2d62dad7a96c0124c1b",
         "1f0f67a4e597143fa393f18aed4d68237699256a813b585fcedb35b0f7c4f73f",
         "4fd4046393b24500c46f3be6638415ee2005bdd95158641ae2c26202b121917b",
         "ad215b151205fb536a88ccdad942a6784e784998c0ab19eb6cd1b53c40703fe2",
@@ -18918,52 +19058,13 @@
         "14f19349d6a953ab878da2948aaefd302c6ee6c4dffd572b49e21ea78eea0a50",
         "f80300dc3393c761288b00f0dfc4f63802257b9e9cd0eb5f13980e11e82eaec5",
         "86ab105435982176d4c4bdd9977a27e883c8d05c484726f32e7276335ffc21cd",
-        "f5ac882a1444e608d59a5abc546924d1a8f3b30810a80aafecd09f1225da9fed",
-        "f0c995e02f50a5361be933486e269b900aaa940ae021c795a167907e4dad82ab",
-        "71b410f764fb90ee80a64bd9afeba6dfc10b4c629396eeca78047316210e8d32",
-        "ad1a8c372f8bfcb44d6656c0c11a8926a89223c77d2a947b2f90dc585cb9af06",
-        "876c199a7bf07e0290af0d7101c8730a05ccea5ed3f2600af6bc524af86467be",
-        "a62bd4e05347f23937b625cc4d91c5b7f7a62c8c0a1be1211bad593ed2f018c5",
-        "e8313b229e32f907cb3a84018b8c98de689216a16e265a615ae7ccfe2fd7fb5e",
-        "6723c06b072ee2b0cdebbf84d817b5c1bf3a0ba12e8c75bb31ce6312457c9275",
-        "0ac9b9cbfe705de0b5937964c119c674399b952ae2ed0ce4483d3e04a84d362b",
-        "b80551bb14b526c71300a76aee5512abef190fe3628623703c357d0c3930cab4",
-        "6437f8b4811af00701ffd7fe0890939bfd33c2e7e41eede70da0e0b8eb0ec98a",
-        "f30bf7651b3b0df214ed1b4e5955293a875587b9eda72588077dd98fddd1f162",
-        "14a55ad981985b30328cccc0e395862705c21812ecc402d87e00072b4ebcbce6",
-        "22233fbb1a0de24c350f6dc857301ac4e2cd1a664fd623dae2f2244d383c0c5a",
-        "9474f58804731c22e0ede64f6236a1beb332789ad7607d34d78264362b39d138",
-        "988e851a2284604102f3d36c9d351b9829a6313d91e22027fa14ebde60005ee5",
-        "66c40463e3f22beb03e646d4a5447f2a1f32b9fb60e9928f911cbcf08396a41a",
-        "592510f8c5967c67086ce1502348ab9f1286e4d9ecdbaa1f5db6f7a363bd36c3",
-        "a97ab1a16c7131cf36cbaab9448bfe8ea7f69f0a0f9bbfb762d30bc0c8270390",
-        "eba5deeccc2a3264ed2df9c9a5418c87a225a588cbe8a302e195d0aa2d33344c",
-        "a66c1f3b2d1eee795236da8da67b11c9292c2f9947aafecf3e7f444090e4d4e7",
-        "540a070a0f73c73e31b64f20fe6a22a1c447576b8c10a7c609fc80c899c13327",
-        "054d8da02e7960604db50f589a09028a48624277686139137c1f5af1a1554c98",
-        "b7a8548058e7558bd40ebd097f61b02add92baed0551b1e906470a414fd5a8fa",
-        "654f231cdd2b603eaa5992f9719e30be9ec6b18eb606beabb17bb7d18f811f5e",
-        "6827776500c06c85420c372bbfc7a9fc2741775ac4292156c34ebd725ad1cf8a",
-        "1d171551183feee4e7d408c8d7fa04dd92d3bdeeae4492a2f3bef24f0c21a783",
-        "57ccad69b391e496eb8cbd5180de0ac45db63469890330bbf28227a890873a3d",
-        "74e1aa207f24941c18a434490b5a8c89c52acc27b5f9efeb2565efc67d1fe0de",
-        "fd342c2faeacd09f9aeeb73c12db6d5ac0f93c78aaba332cf466a7dc1efc1f7a",
-        "870c4cdfd1874aed829e39dfcbf8b2b6090580c1d643f973b7ea21f2c0a3f147",
-        "1b012e7e26d0d47a1b36b3a5159754729ab6a6b339095c30442c9fd8c11b20e8",
-        "f88ab8362cd779f444492ca3c0498a3339425278b7fec97e15ffdad7cd1e8625",
-        "2e3c92c1df22a3434fc220f3c25f0d68eba3f97d51d16affa86431e7cf48fcd4",
-        "7bc7732b05400aa0a473c44ad27338bc309a62a939d0f65a6bc84d0c93d1853b",
-        "a73eb8d7e96828ab0f2c6ec3cfee1998b63f85958e422e5fb7e124d83d742893",
-        "42684e82dbc6793d619f1e953df0055f630e79367693ae8118df4bcf670e7292",
-        "7057169c47d382d90f48e6251fe9683328f71d078b85b32ea8fe53a7338d10c7",
-        "4123109b81175d7f2e6a21a45035f94d0c37cb4b151fbd0b43995362c963a46e",
-        "5948793dcdda630c1af33cd1dea25184048d361f161c0e6e7b8b8538f3b5406c"
+        "f5ac882a1444e608d59a5abc546924d1a8f3b30810a80aafecd09f1225da9fed"
       ],
-      "impact": "Shared cfg(test) Fixture::call uses Windows PowerShell ASCII AppendAllText for the same approval.txt approved-line side effect; POSIX command unchanged. Conservative local/tests/routing/tool-hook consumer IDs, not claims each executes this helper or has fresh guard-mutant evidence. Underlying approval guard criticality unchanged.",
-      "execution_context": "Same existing test selection and physical definitions. Conservative current fingerprint mapping identifies local/helper consumers, not per-consumer executed mutant witnesses. Unchanged test fingerprints require no invented admission. No Windows restored-pass claim.",
-      "author": "background_agent:bgagent-9569b63a-1955-40b1-bec3-a6ec0fd9e700",
-      "reviewer": "background_agent:bgagent-3cc80852-13fc-4833-b5cf-7c24c5f00963",
-      "review_evidence": "Independent bounded source review background_agent:bgagent-3cc80852-13fc-4833-b5cf-7c24c5f00963 / childsubchat-70ce85f5-4579-4ef9-973a-87bc74585551, relayed by parent: no safety/lifecycle blocker in subchat physical canonicalization/fail-closed behavior, preflight unchanged keep/checkpoint/retained errors/removal cleanup, Windows-only approval ASCII output, or six constructor edits across five coordination files; roots.rs equals HEAD. This is scoped source review, not whole-tree frozen-receipt approval. Post-review formatting changes are whitespace/token-equivalent. Windows restored execution remains unverified; approval failure cause is not proven and no fresh guard mutant evidence is claimed.",
+      "impact": "Two body-only diagnostic enhancements; parent decision, exact binding, failed-child assertion and replay controls unchanged. Map all local scanned bodies.",
+      "execution_context": "Physical definitions and selection unchanged. Conservative helper/local exposure mapping is not per-consumer execution evidence. Existing discovery classifications, lead-source hash pins and macro conclusions preserved. No production change, mutant or runtime/Windows pass claim.",
+      "author": "background_agent:bgagent-d47f4e91 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-a7cb3c64 / bgagent-951c7650 / bgagent-b949b8e9 / bgagent-ffbb55c7; final auditor pending",
+      "review_evidence": "Independent a7cb/951 whole-body counts and b949 adversarial source review support the first four maintained bodies (3/4/5/4) and earlier five-file patch. ffbb reviewed the one-case literal-source display proposal; parent verified ToolCat header tool_cat.rs:225 from ContextFile.file_name at chat_types.rs:1006 and normalization at tool_cat.rs:865/972. b949 review preceded this final display expectation. Final source-plus-ledger auditor bgagent-4a91cbba pending; no final approval, runtime pass, executed mutant or restored Windows pass claimed.",
       "historical_records_round7": {
         "path": "refact-agent/engine/src/agents/approval.rs",
         "before_sha256": "796825434fb5055a79353aad957eed69362268aea2b3e99bc57444235e9ccbc4",
@@ -21948,10 +22049,10 @@
     },
     {
       "path": "refact-agent/engine/src/buddy/actor_operator_tests.rs",
-      "before_sha256": "9db6d49cc565c56ed53803bee63fbfc090d4746cb8e5c1722351213bd35e50c4",
-      "after_sha256": "cdce9108efe33d4d1812c2e9560448845f55a84c135d7c64535b5ed61ea84fe8",
+      "before_sha256": "cdce9108efe33d4d1812c2e9560448845f55a84c135d7c64535b5ed61ea84fe8",
+      "after_sha256": "50fed2b8901f4a75d41086a8b6b5f2cf250932c57290e0db1ed4b4c9ef2a39f9",
       "affected_tests": [
-        "e61f4287b5981a24b7bde0e16db2c0aa7598e440ebc1de1a189c82e3534faf78",
+        "1613ecdb3623dd0213d68590fc61b55c10c1539460fea54a759d4dee4883bf7a",
         "0e364ed3c4a0e61c7b8c539c3786401becf71ea17051b2d7d731606c7a1cc897",
         "647ebab9476b3523117fee8c1c8220922a88d72bfd5f3928727caff811cbc284",
         "8167d8d3b78f7b364d55518c57bff6dac7513d1debd69a9712000e59dbb021c4",
@@ -21963,11 +22064,46 @@
         "9353e7e0b454ee6c2ccb274f268af8403a1ad65b6398a05550ac698469e7eb0d",
         "c23dbb0c24162f292c20691bf8e0844d5407d85bdbb564204a8149aefc694db6"
       ],
-      "impact": "Shared service and runtime fixtures canonicalize the same physical root for service opening, runtime opening and project identity; all eleven local tests conservatively mapped, including eight runtime consumers. Final service alignment followed independent 016dd review.",
-      "execution_context": "Conservative local-module fingerprint mapping, not proof every listed test executes this path. Existing test bodies, assertions, selection and negative guards unchanged. Windows 83f pre-fix log had 145 real failures; restored Windows execution has not been performed. No mutant or fresh passing claim.",
-      "author": "background_agent:bgagent-3db3596f (bookkeeping only)",
-      "reviewer": "background_agent:bgagent-0424f65a / bgagent-bbf3f85a (production source review); final independent review pending",
-      "review_evidence": "Independent 0424 and bbf source reviews approved the two production fixes. Independent final source review bgagent-016ddf09 identified an actor service/runtime root alignment gap; parent patched the shared service helper afterward, and review of that final patch remains pending. Source review is not execution, mutation evidence, or restored Windows pass."
+      "impact": "One reopen root producer uses dunce for identical physical root. Holder/service alignment, lock refusal, retry deadlines and reopen checks unchanged. Conservatively map all eleven local bodies.",
+      "execution_context": "Physical definitions and selection unchanged. Conservative helper/local exposure mapping is not per-consumer execution evidence. Existing discovery classifications, lead-source hash pins and macro conclusions preserved. No production change, mutant or runtime/Windows pass claim.",
+      "author": "background_agent:bgagent-d47f4e91 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-a7cb3c64 / bgagent-951c7650 / bgagent-b949b8e9 / bgagent-ffbb55c7; final auditor pending",
+      "review_evidence": "Independent a7cb/951 whole-body counts and b949 adversarial source review support the first four maintained bodies (3/4/5/4) and earlier five-file patch. ffbb reviewed the one-case literal-source display proposal; parent verified ToolCat header tool_cat.rs:225 from ContextFile.file_name at chat_types.rs:1006 and normalization at tool_cat.rs:865/972. b949 review preceded this final display expectation. Final source-plus-ledger auditor bgagent-4a91cbba pending; no final approval, runtime pass, executed mutant or restored Windows pass claimed."
+    },
+    {
+      "path": "refact-agent/engine/src/worktrees/scope_missing_root_tests.rs",
+      "before_sha256": "f89714db43e521ec50806228704209e3d4943504bf7ed0a49dd80e5049afa335",
+      "after_sha256": "1cce7962a7328e3b15f32a3dd7706f08a8071830d1abea7a858d0bc2ae140ca5",
+      "affected_tests": [
+        "66f505f38995de223b059f690a6ab9530c0b6b646ad2e7901eefa5055814cb9c",
+        "0e6f7d0d8f5aafecf5eb102c34a9d661e7615662a3604f26d1dcd031b0641aff",
+        "d2e75b354cef794616d5fba1aaa203841e756acc4aca67073a4c36c927e6bafa",
+        "51184df82241abcd437a7734ef125ca9756897b7b5faab57534a33b4896aebdc",
+        "3010d8d364e50b3d6f6d2d788c6dbe767bde708f9b65fc1eeca58500006301e7"
+      ],
+      "impact": "Shared helper canonicalizes BOTH source and root with dunce; map all five consumers. One body normalizes expected FULL source display; exact ContextFile identity and source/wrong-worktree sentinels unchanged.",
+      "execution_context": "Physical definitions and selection unchanged. Conservative helper/local exposure mapping is not per-consumer execution evidence. Existing discovery classifications, lead-source hash pins and macro conclusions preserved. No production change, mutant or runtime/Windows pass claim.",
+      "author": "background_agent:bgagent-d47f4e91 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-a7cb3c64 / bgagent-951c7650 / bgagent-b949b8e9 / bgagent-ffbb55c7; final auditor pending",
+      "review_evidence": "Independent a7cb/951 whole-body counts and b949 adversarial source review support the first four maintained bodies (3/4/5/4) and earlier five-file patch. ffbb reviewed the one-case literal-source display proposal; parent verified ToolCat header tool_cat.rs:225 from ContextFile.file_name at chat_types.rs:1006 and normalization at tool_cat.rs:865/972. b949 review preceded this final display expectation. Final source-plus-ledger auditor bgagent-4a91cbba pending; no final approval, runtime pass, executed mutant or restored Windows pass claimed."
+    },
+    {
+      "path": "refact-agent/engine/src/tools/merge_agent_target_checkout_tests.rs",
+      "before_sha256": "19d2492ac3ec377086f122d1e5e0ecd601ba4af065cac80dedcbe4910b690868",
+      "after_sha256": "ffc9c5faec8951a8f3173a1edfb68e740dd2abb308a84819725648ccce721339",
+      "affected_tests": [
+        "1b3a30e35eec9ebead4093d05a572a5542f776b0ac995874d7747efd89a2654b",
+        "bd4fcc6503968339b604dece2e77e14d0bf3cd7b9d352a58f46fea1a85bb9fc2",
+        "3f4cf35342d4c160f035f2d9d57727f42b83c5b41359cb4e4a9636657abd7c95",
+        "f75705cec3f65d9829c48de5d9276023b61842cd87316f96c53ef0c49d9337d1",
+        "2e211cd8f8908c4890afcc7f6049fd9bb8406abcb641b84bbf81fd5c0cdd8455",
+        "13b4096ef27fe278bdbb207834be7f0d66b2ce59ac6096711c427a0d67343c47"
+      ],
+      "impact": "Shared isolated merge fixture sets core.autocrlf=false after init; map six unchanged local bodies. Dirty-target refusal, selected checkout authority, lease/revert and shared/macro conclusions preserved.",
+      "execution_context": "Physical definitions and selection unchanged. Conservative helper/local exposure mapping is not per-consumer execution evidence. Existing discovery classifications, lead-source hash pins and macro conclusions preserved. No production change, mutant or runtime/Windows pass claim.",
+      "author": "background_agent:bgagent-d47f4e91 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-a7cb3c64 / bgagent-951c7650 / bgagent-b949b8e9 / bgagent-ffbb55c7; final auditor pending",
+      "review_evidence": "Independent a7cb/951 whole-body counts and b949 adversarial source review support the first four maintained bodies (3/4/5/4) and earlier five-file patch. ffbb reviewed the one-case literal-source display proposal; parent verified ToolCat header tool_cat.rs:225 from ContextFile.file_name at chat_types.rs:1006 and normalization at tool_cat.rs:865/972. b949 review preceded this final display expectation. Final source-plus-ledger auditor bgagent-4a91cbba pending; no final approval, runtime pass, executed mutant or restored Windows pass claimed."
     }
   ]
 }

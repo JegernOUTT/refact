@@ -39,6 +39,7 @@ impl Fixture {
         let source = temp.path().join("repo");
         std::fs::create_dir(&source).unwrap();
         git(&source, &["init"]);
+        git(&source, &["config", "core.autocrlf", "false"]);
         git(&source, &["checkout", "-b", "main"]);
         git(&source, &["config", "user.name", "Test User"]);
         git(&source, &["config", "user.email", "test@example.com"]);

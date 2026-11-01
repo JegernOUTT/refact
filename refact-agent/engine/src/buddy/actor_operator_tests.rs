@@ -49,7 +49,7 @@ fn speech() -> BuddySpeechItem {
 #[tokio::test(start_paused = true)]
 async fn reopen_succeeds_once_the_lock_is_released() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let root = dunce::canonicalize(temp.path()).unwrap();
     let holder = super::super::operator_runtime::open_project_runtime(&root).unwrap();
     let mut service = service(&root);
     service.enable_operator_from_settings();

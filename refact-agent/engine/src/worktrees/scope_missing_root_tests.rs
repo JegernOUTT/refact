@@ -54,8 +54,8 @@ fn fixture() -> Fixture {
         ],
     );
     fs::create_dir_all(source.join(".refact/tasks/task/memories")).unwrap();
-    let source = fs::canonicalize(source).unwrap();
-    let root = fs::canonicalize(root).unwrap();
+    let source = dunce::canonicalize(source).unwrap();
+    let root = dunce::canonicalize(root).unwrap();
     Fixture {
         _temp: temp,
         source: source.clone(),
@@ -250,7 +250,11 @@ async fn refact_state_paths_are_read_from_the_literal_source_path() {
     let messages = execute_tool(ccx, "cat", "cat", args(vec![("paths", path_value(&path))]))
         .await
         .unwrap();
-    assert!(text(&messages).contains(&path.to_string_lossy().to_string()));
+    assert!(
+        text(&messages).contains(&refact_core::chat_types::normalize_file_name(
+            path.to_string_lossy().to_string()
+        ))
+    );
     assert_eq!(
         context_file_names(&messages),
         vec![refact_core::chat_types::normalize_file_name(

@@ -930,10 +930,19 @@ pub(crate) mod tests {
             .approved_executions
             .contains_key("command"));
         let output = fixture.execute(&call).await.unwrap();
-        assert!(output
-            .messages
-            .iter()
-            .all(|message| message.tool_failed != Some(true)));
+        assert!(
+            output
+                .messages
+                .iter()
+                .all(|message| message.tool_failed != Some(true)),
+            "child command failed: {:?}",
+            output
+                .messages
+                .iter()
+                .filter(|message| message.tool_failed == Some(true))
+                .map(|message| message.content.content_text_only())
+                .collect::<Vec<_>>()
+        );
         let bytes = std::fs::read(fixture.dir.path().join("approval.txt")).unwrap();
         assert!(!bytes.is_empty());
         assert!(fixture
@@ -1233,9 +1242,21 @@ pub(crate) mod tests {
                 .unwrap(),
             crate::chat::tools::ToolStepOutcome::Continue
         ));
+        let child_tool_results = session
+            .lock()
+            .await
+            .messages
+            .iter()
+            .filter(|message| message.role == "tool" && message.tool_call_id == call.id)
+            .map(|message| (message.tool_failed, message.content.content_text_only()))
+            .collect::<Vec<_>>();
         assert_eq!(
             std::fs::read_to_string(fixture.dir.path().join("approval.txt"))
-                .unwrap()
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "reading approval.txt after child tool step failed: {error}; child tool results: {child_tool_results:?}"
+                    )
+                })
                 .lines()
                 .count(),
             1

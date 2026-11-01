@@ -4050,7 +4050,8 @@ mod migration_restart_regressions {
 
     #[tokio::test]
     async fn stale_owner_failed_history_and_restart_preserve_committed_cursor() {
-        let root = tempfile::tempdir().unwrap();
+        let root =
+            tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
         let project = refact_buddy_core::operator_types::ProjectIdentity {
             project_id: "migration-restart".into(),
             canonical_root: root.path().to_string_lossy().into_owned(),
