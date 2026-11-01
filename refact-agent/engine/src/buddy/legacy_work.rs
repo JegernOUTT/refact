@@ -1152,7 +1152,10 @@ mod migration_regressions {
     fn identity(root: &std::path::Path) -> ProjectIdentity {
         ProjectIdentity {
             project_id: "migration-fixture".into(),
-            canonical_root: root.to_string_lossy().into_owned(),
+            canonical_root: dunce::canonicalize(root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
         }
     }
     fn worker() -> WorkerIdentity {
@@ -1422,7 +1425,10 @@ mod legacy_copy_regressions {
     fn identity(root: &std::path::Path) -> ProjectIdentity {
         ProjectIdentity {
             project_id: "legacy-copy-fixture".into(),
-            canonical_root: root.to_string_lossy().into_owned(),
+            canonical_root: dunce::canonicalize(root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
         }
     }
 

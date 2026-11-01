@@ -39,7 +39,7 @@ where
         drafts: Arc<D>,
         materials: Arc<M>,
     ) -> Result<Self, ResourceError> {
-        let root = fs::canonicalize(&project.canonical_root)?;
+        let root = dunce::canonicalize(&project.canonical_root)?;
         if !root.is_dir() || root.to_string_lossy() != project.canonical_root {
             return Err(ResourceError::ProjectScopeMismatch);
         }

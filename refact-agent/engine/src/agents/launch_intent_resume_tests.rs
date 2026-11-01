@@ -50,6 +50,7 @@ async fn fixture(parent_id: &str, coordination: CoordinationSettings) -> Fixture
     let cache = temp.path().join("cache");
     let config = temp.path().join("config");
     std::fs::create_dir_all(&root).expect("workspace");
+    let root = dunce::canonicalize(&root).expect("canonical workspace");
     let gcx = crate::global_context::tests::make_test_gcx_with_dirs(cache.clone(), config).await;
     *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.clone()];
     let (project_root, _) = crate::caps::project_model_defaults_state(gcx.clone()).await;

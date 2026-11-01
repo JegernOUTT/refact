@@ -13211,19 +13211,19 @@
     },
     {
       "path": "refact-agent/engine/src/agents/launch_intent_spawn_tests.rs",
-      "before_sha256": "22040bd5641349b911647d27228f9aa0f2926fda8bfd7b02ef33413415657a53",
-      "after_sha256": "fbae28c2317431c9bbee7a6af34c07175172e999af4dfa9e3dacf59aa373bef7",
+      "before_sha256": "6266dec387dbd35dcae3554c1504fdbc54a47aef167ab2ee5328f98a73c93d0d",
+      "after_sha256": "53bc8095faa9d771c53d045f8da8893f4d5f6d6f016171bd6df87b4c2cc0d45f",
       "affected_tests": [
         "77f3e0b7e7a69377d2ddd05b34662f4f816d0fbc843f14ae4fa9746d7c8c7391",
         "67153f8739dd365abe7b6b99d2541942f68a66dfae7f5e54f06d9028fa011382",
-        "d7034bce17fc024c5cfb0619cd31950bf84d63b98e4ed75474d174e9ab55c7d7",
+        "56f6dfa21c830bcd5a1c9b7ed4f91ff51779f2f8fe30a723c855faf9eb77472a",
         "c51917288e0aa984044c7af1a0d217be13a70b41f7fb41835f70e4a4d8f650fa"
       ],
-      "impact": "Only absent context_tokens_cap or false implicit_context_window compatibility literal added to existing production/test-support constructor. Existing fixture algorithm and assertions unchanged. Maps every current same-file test conservatively.",
-      "execution_context": "Existing engine lib/module context, cfg, annotations and dependencies retained. Conservative same-path mapping, not a complete transitive impact graph or execution claim.",
-      "author": "background_agent:bgagent-61493284-67af-418b-908a-aa34fc854759 (ledger preparation)",
-      "reviewer": "background_agent:bgagent-adaeddf1-8f7e-43c2-8222-00c7b5c1beba (source review only)",
-      "review_evidence": "Source review subchat-b5ed3883-90be-441b-a9ee-4a950c547ebb accepted unchanged-default mechanical edits and production/test relevance contingent on actual critical red/green witness. This is not witness evidence or final ledger approval; parent independent ledger review remains pending."
+      "impact": "Shared spawn fixture canonicalizes the created workspace root before registration; all four local tests conservatively mapped.",
+      "execution_context": "Conservative local-module fingerprint mapping, not proof every listed test executes this path. Existing test bodies, assertions, selection and negative guards unchanged. Windows 83f pre-fix log had 145 real failures; restored Windows execution has not been performed. No mutant or fresh passing claim.",
+      "author": "background_agent:bgagent-3db3596f (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-0424f65a / bgagent-bbf3f85a (production source review); final independent review pending",
+      "review_evidence": "Independent 0424 and bbf source reviews approved the two production fixes; independent final source review bgagent-016ddf09 remains pending. Source review is not execution, mutation evidence, or restored Windows pass."
     },
     {
       "path": "refact-agent/engine/src/agents/progress_monitor.rs",
@@ -13694,22 +13694,22 @@
     },
     {
       "path": "refact-agent/engine/src/buddy/legacy_work.rs",
-      "before_sha256": "d5d56acc4b4e09f5a1eb156e3435cc40bc36a366ebbb7e736d14b09b40512e50",
-      "after_sha256": "9d5963fc76127ba5cea0c34296e94598bef85f04cf1aa593efe2e4b93791bd2a",
+      "before_sha256": "9d5963fc76127ba5cea0c34296e94598bef85f04cf1aa593efe2e4b93791bd2a",
+      "after_sha256": "1938f327d4e38edaecbe871646684f168d361e3f5a2bfdeee6db0180a01317e1",
       "affected_tests": [
-        "02311997f80fef14df29a0a40304e6dc90f33b6fcca25182b9f762df73fcc1e6",
-        "2181af0410a2514daf3b18795b227f9003d0a4043558c0105755d76a3ffc9250",
-        "231b05f0934ecc6fa8d65bf3c360f316d7d44d97d81dd17f841d8e95b8c8667f",
         "46334a1604a9b801483721a80b2d9f791ebe566030cbc8196fa20c9754245450",
+        "02311997f80fef14df29a0a40304e6dc90f33b6fcca25182b9f762df73fcc1e6",
         "a0778d7ce69f2abe8ffe70c32d6fa50afcb9cab7b191adacee7f7673439e0860",
+        "dbf87feaf0ca6bf16a62b308d5db4143f6e5c69e8f9fa1a7708bf3f638eb9423",
+        "2181af0410a2514daf3b18795b227f9003d0a4043558c0105755d76a3ffc9250",
         "accd94a9e45eee1ec8db8872d2f39249e889109f08e89bd2ac6d47de87873919",
-        "dbf87feaf0ca6bf16a62b308d5db4143f6e5c69e8f9fa1a7708bf3f638eb9423"
+        "231b05f0934ecc6fa8d65bf3c360f316d7d44d97d81dd17f841d8e95b8c8667f"
       ],
-      "impact": "refact-agent/engine/src/buddy/legacy_work.rs: canonical non-test residue changes remove 271 tokens and add 0 tokens. Cleanup evidence identifies current_opportunity_copy_reports_the_finding_and_only_useful_next_steps_with_conclusion. 12787\u21926186 global lexical definitions includes intentional coverage loss from case deletions; this support record does not claim strict duplication.",
-      "execution_context": "Same physical Rust path; no retained fingerprint/context relocation relative pinned main. Test-only ownership: inline cfg(test) modules or explicitly cfg(test) helper items; tests/ and *_tests.rs are test harness/module support. Removed dead helper/import/module scaffolding has no surviving intended executing consumer; conservative affected mapping lists surviving same-file tests for dependency review, not a claim all call deleted helpers. See exact residue token hunks and cleanup evidence references.",
-      "author": "support-impact-author-bgagent-1fd43f09",
-      "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
-      "review_evidence": "Independent source/hash review: refact-agent/engine/src/buddy/legacy_work.rs: reviewed removal of current_opportunity_copy_reports_the_finding_and_only_useful_next_steps_with_conclusion within explicit cfg(test) items/modules. 7 actual same-path retained cases keep complete attributed canonical body and enclosing-context hash against pinned MAIN. Conservative affected map contains exactly those current fingerprints."
+      "impact": "Two identity helpers canonicalize the existing physical root; all seven local migration and legacy-copy tests mapped.",
+      "execution_context": "Conservative local-module fingerprint mapping, not proof every listed test executes this path. Existing test bodies, assertions, selection and negative guards unchanged. Windows 83f pre-fix log had 145 real failures; restored Windows execution has not been performed. No mutant or fresh passing claim.",
+      "author": "background_agent:bgagent-3db3596f (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-0424f65a / bgagent-bbf3f85a (production source review); final independent review pending",
+      "review_evidence": "Independent 0424 and bbf source reviews approved the two production fixes; independent final source review bgagent-016ddf09 remains pending. Source review is not execution, mutation evidence, or restored Windows pass."
     },
     {
       "path": "refact-agent/engine/src/buddy/observers/diagnostic_cluster.rs",
@@ -18996,8 +18996,8 @@
     },
     {
       "path": "refact-agent/engine/src/agents/launch_intent_resume_tests.rs",
-      "before_sha256": "b007c1cf008a7b39dc90b9d7546fb753d1559b3ec39d1716afe73e1092d76323",
-      "after_sha256": "4373d3580457220598088b699e3881b71fa10b59d7c1a5a589bb7f4abea19053",
+      "before_sha256": "4373d3580457220598088b699e3881b71fa10b59d7c1a5a589bb7f4abea19053",
+      "after_sha256": "038cb39b05f6d3be362d38ea05d3391786f12dadacb8a2932264322fa611a5d4",
       "affected_tests": [
         "d9c3e0685707e68e21c9fc69ed6033dab776718adff490f933a8f9cb2fd4a76b",
         "b38206adaf231bc606f97da8c1688875dbf20305fc88b3a81e706fdaac4515c8",
@@ -19005,11 +19005,11 @@
         "7b878fb39cbbbca9b19e0faabc6edfe02a840761463260ca2a80811d36df0918",
         "9a563a622cd0ce86e19c0defcb0802523724040b7edd8582d325fb4edbc457bf"
       ],
-      "impact": "Only absent context_tokens_cap or false implicit_context_window compatibility literal added to existing production/test-support constructor. Existing fixture algorithm and assertions unchanged. Maps every current same-file test conservatively.",
-      "execution_context": "Existing engine lib/module context, cfg, annotations and dependencies retained. Conservative same-path mapping, not a complete transitive impact graph or execution claim.",
-      "author": "background_agent:bgagent-61493284-67af-418b-908a-aa34fc854759 (ledger preparation)",
-      "reviewer": "background_agent:bgagent-adaeddf1-8f7e-43c2-8222-00c7b5c1beba (source review only)",
-      "review_evidence": "Source review subchat-b5ed3883-90be-441b-a9ee-4a950c547ebb accepted unchanged-default mechanical edits and production/test relevance contingent on actual critical red/green witness. This is not witness evidence or final ledger approval; parent independent ledger review remains pending."
+      "impact": "Shared resume fixture canonicalizes the created workspace root before registration; all five local tests conservatively mapped.",
+      "execution_context": "Conservative local-module fingerprint mapping, not proof every listed test executes this path. Existing test bodies, assertions, selection and negative guards unchanged. Windows 83f pre-fix log had 145 real failures; restored Windows execution has not been performed. No mutant or fresh passing claim.",
+      "author": "background_agent:bgagent-3db3596f (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-0424f65a / bgagent-bbf3f85a (production source review); final independent review pending",
+      "review_evidence": "Independent 0424 and bbf source reviews approved the two production fixes; independent final source review bgagent-016ddf09 remains pending. Source review is not execution, mutation evidence, or restored Windows pass."
     },
     {
       "path": "refact-agent/engine/src/agents/pause_tests.rs",
@@ -21622,19 +21622,19 @@
     },
     {
       "path": "refact-agent/engine/src/buddy/resources/customization.rs",
-      "before_sha256": "aadcc0d3f1569879f0caba4b1fa61235112e6332ef97b84f1096a70ad0227e04",
-      "after_sha256": "86f0ddc4582df8378687d547b91b9fd7c6bc21aaceaed2809847a30a713757cf",
+      "before_sha256": "86f0ddc4582df8378687d547b91b9fd7c6bc21aaceaed2809847a30a713757cf",
+      "after_sha256": "f2d63f2eb3a065027844f7435bcbb0c3b561cfbe046f97fe88f6eb322bf045a6",
       "affected_tests": [
         "ec7ba259548d158b8313eb8b52496d44a059381db1a8e4d065f1ff54543d7001",
         "92d8fd11207f61fa1b2d78a6db4e21d222d4d7ecc1fa17f6a69258a029082616",
         "5c54c010fedb002e4b27dd95f37f39dc854e78bd39525963bc102613c39a3666",
         "4af467cded55031ad49a272bb7ea7ca36410f35032b250284a57823cdd77a625"
       ],
-      "impact": "Canonical-root fixture producer representation only: same physical temporary root now uses dunce::canonicalize rather than std/Path canonicalize. Original scenario bodies, guards and execution selection otherwise unchanged.",
-      "execution_context": "Bounded module-local direct tests and shared-helper consumers listed conservatively; unchanged body fingerprints remain retained tests, not new admissions. No production behavior or Windows passing result inferred.",
-      "author": "background_agent:bgagent-1e85d981-c90f-439b-bdf4-01808dfed4c5",
-      "reviewer": "background_agent:bgagent-c353a160 / bgagent-02d03136",
-      "review_evidence": "Bounded mechanical fixture patch reviewed by implementation f3ebc49b and scenario accounting c353a160/02d03136; parent-approved 6644 existing-case correction. Source support scope inspected against c17e13cc5; raw full-file hashes bind exact current source. Production subchat guards independently reviewed by 66eadce8; roots durable hash normalization reverted. No runtime pass or fresh production-mutant proof claimed."
+      "impact": "Production customization consumer uses dunce canonicalization for root comparison; exact root equality and existing traversal, symlink, stale, malformed, recovery and material negative guards remain. All four local tests conservatively mapped.",
+      "execution_context": "Conservative local-module fingerprint mapping, not proof every listed test executes this path. Existing test bodies, assertions, selection and negative guards unchanged. Windows 83f pre-fix log had 145 real failures; restored Windows execution has not been performed. No mutant or fresh passing claim.",
+      "author": "background_agent:bgagent-3db3596f (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-0424f65a / bgagent-bbf3f85a (production source review); final independent review pending",
+      "review_evidence": "Independent 0424 and bbf source reviews approved the two production fixes; independent final source review bgagent-016ddf09 remains pending. Source review is not execution, mutation evidence, or restored Windows pass."
     },
     {
       "path": "refact-agent/engine/src/buddy/resources/extensions.rs",
@@ -21691,8 +21691,8 @@
     },
     {
       "path": "refact-agent/engine/src/buddy/workflows.rs",
-      "before_sha256": "c7b7844da8760347a21524857a7c520ac0543f412d579c13c5c02d3249e9e1f5",
-      "after_sha256": "d38a928330dbd0f3f2d824efae08a05f959a241c09b09aa353bb6959c26bceea",
+      "before_sha256": "d38a928330dbd0f3f2d824efae08a05f959a241c09b09aa353bb6959c26bceea",
+      "after_sha256": "bab437438bc44aea1cc38a5de3eec358f68983e09d08d469d2bfc717e52546aa",
       "affected_tests": [
         "16a0386f4b7cab1d1e8b86046152220d19cb87cd65c25b4b8e40ccbbfc4d4a02",
         "dbcfb4037c320ac412870030ef16e0680b226d542643a87680841462c9b2d07c",
@@ -21707,27 +21707,27 @@
         "728d4c9ca7d68b455dd4192665f96d3cf724301afae5e0566195247c399790f4",
         "c4b589ec81bfff7c500d2a159a9c333f3bf46330d57d056434d393252097e4f4"
       ],
-      "impact": "Canonical-root fixture producer representation only: same physical temporary root now uses dunce::canonicalize rather than std/Path canonicalize. Original scenario bodies, guards and execution selection otherwise unchanged.",
-      "execution_context": "Bounded module-local direct tests and shared-helper consumers listed conservatively; unchanged body fingerprints remain retained tests, not new admissions. No production behavior or Windows passing result inferred.",
-      "author": "background_agent:bgagent-1e85d981-c90f-439b-bdf4-01808dfed4c5",
-      "reviewer": "background_agent:bgagent-c353a160 / bgagent-02d03136",
-      "review_evidence": "Bounded mechanical fixture patch reviewed by implementation f3ebc49b and scenario accounting c353a160/02d03136; parent-approved 6644 existing-case correction. Source support scope inspected against c17e13cc5; raw full-file hashes bind exact current source. Production subchat guards independently reviewed by 66eadce8; roots durable hash normalization reverted. No runtime pass or fresh production-mutant proof claimed."
+      "impact": "Shared workflow fixture creates the temp directory under a canonical parent; all twelve local tests conservatively mapped, including nine consumers.",
+      "execution_context": "Conservative local-module fingerprint mapping, not proof every listed test executes this path. Existing test bodies, assertions, selection and negative guards unchanged. Windows 83f pre-fix log had 145 real failures; restored Windows execution has not been performed. No mutant or fresh passing claim.",
+      "author": "background_agent:bgagent-3db3596f (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-0424f65a / bgagent-bbf3f85a (production source review); final independent review pending",
+      "review_evidence": "Independent 0424 and bbf source reviews approved the two production fixes; independent final source review bgagent-016ddf09 remains pending. Source review is not execution, mutation evidence, or restored Windows pass."
     },
     {
       "path": "refact-agent/engine/src/ext/operator_service.rs",
-      "before_sha256": "af532389ad61af9d827a72fb4caa4363ce340bac57a72d8f3258ac8c37d12d81",
-      "after_sha256": "990f62b23d439184342e082abbbc6ba8e77be201c7c7a9afeb77f8e32a1314ff",
+      "before_sha256": "990f62b23d439184342e082abbbc6ba8e77be201c7c7a9afeb77f8e32a1314ff",
+      "after_sha256": "5e7133766edac8d0d4715d36de936382fed26c9193b4aa3d214d60fa91bc1ead",
       "affected_tests": [
         "9008916fdcaa11f2878157fed48a4043844c725bbace55ce644593e45ab20b1a",
         "dbe357abd086a75785ef88de6598730715efda97e0834958eec1de42e6a88180",
         "f5bc45e93415231e26426ec92566326bac094506918ca7126501203386358d94",
         "15ec2d5cb5d62a94f49e50b59e2bc6b7e73a8e2d10192786fb69b188b0185b4d"
       ],
-      "impact": "Canonical-root fixture producer representation only: same physical temporary root now uses dunce::canonicalize rather than std/Path canonicalize. Original scenario bodies, guards and execution selection otherwise unchanged.",
-      "execution_context": "Bounded module-local direct tests and shared-helper consumers listed conservatively; unchanged body fingerprints remain retained tests, not new admissions. No production behavior or Windows passing result inferred.",
-      "author": "background_agent:bgagent-1e85d981-c90f-439b-bdf4-01808dfed4c5",
-      "reviewer": "background_agent:bgagent-c353a160 / bgagent-02d03136",
-      "review_evidence": "Bounded mechanical fixture patch reviewed by implementation f3ebc49b and scenario accounting c353a160/02d03136; parent-approved 6644 existing-case correction. Source support scope inspected against c17e13cc5; raw full-file hashes bind exact current source. Production subchat guards independently reviewed by 66eadce8; roots durable hash normalization reverted. No runtime pass or fresh production-mutant proof claimed."
+      "impact": "Production checked_path consumer uses dunce canonicalization for root comparison; exact root equality and existing relative-path and downstream guards remain. All four local tests conservatively mapped.",
+      "execution_context": "Conservative local-module fingerprint mapping, not proof every listed test executes this path. Existing test bodies, assertions, selection and negative guards unchanged. Windows 83f pre-fix log had 145 real failures; restored Windows execution has not been performed. No mutant or fresh passing claim.",
+      "author": "background_agent:bgagent-3db3596f (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-0424f65a / bgagent-bbf3f85a (production source review); final independent review pending",
+      "review_evidence": "Independent 0424 and bbf source reviews approved the two production fixes; independent final source review bgagent-016ddf09 remains pending. Source review is not execution, mutation evidence, or restored Windows pass."
     },
     {
       "path": "refact-agent/engine/src/http/routers/v1/buddy_observability.rs",
@@ -21945,6 +21945,29 @@
       "author": "background_agent:bgagent-8e780ef5-3342-4940-8260-2e575f6de297 (bookkeeping only)",
       "reviewer": "background_agent:bgagent-37663fcf (independent adversarial source review)",
       "review_evidence": "Parent-forwarded independent whole-body review bgagent-02d59e01 / actual child1879a4cb approved 2/2/8/4 meaningful cases. Independent source adversarial review bgagent-37663fcf / actual child395a2f84 approved exact five-file diff git-blob hash9583d467, guards unchanged. Source review only: no fresh production-mutant evidence, runtime pass or Windows restored-pass claim."
+    },
+    {
+      "path": "refact-agent/engine/src/buddy/actor_operator_tests.rs",
+      "before_sha256": "9db6d49cc565c56ed53803bee63fbfc090d4746cb8e5c1722351213bd35e50c4",
+      "after_sha256": "cdce9108efe33d4d1812c2e9560448845f55a84c135d7c64535b5ed61ea84fe8",
+      "affected_tests": [
+        "e61f4287b5981a24b7bde0e16db2c0aa7598e440ebc1de1a189c82e3534faf78",
+        "0e364ed3c4a0e61c7b8c539c3786401becf71ea17051b2d7d731606c7a1cc897",
+        "647ebab9476b3523117fee8c1c8220922a88d72bfd5f3928727caff811cbc284",
+        "8167d8d3b78f7b364d55518c57bff6dac7513d1debd69a9712000e59dbb021c4",
+        "178689f3d727854c303474be9a3216e1fc92d1b24074eb3d8a501c1d5a2835fb",
+        "1b88a263b3cfe6ffb82729396890904f357dba4b82220dbe3760da9fdb7f03b2",
+        "c3424ab3626f3494a8a54be1894a1ee000f492f0dfae6a68239d9cfc3b138a7d",
+        "83a24c63161a0b2a49ddb0d5834d37a66fcb67fb775a8985dcb372df16500550",
+        "2586f79397b0716c97c15d35a9e650bdc0dd3733f3154f303ea298f84823f2de",
+        "9353e7e0b454ee6c2ccb274f268af8403a1ad65b6398a05550ac698469e7eb0d",
+        "c23dbb0c24162f292c20691bf8e0844d5407d85bdbb564204a8149aefc694db6"
+      ],
+      "impact": "Shared service and runtime fixtures canonicalize the same physical root for service opening, runtime opening and project identity; all eleven local tests conservatively mapped, including eight runtime consumers. Final service alignment followed independent 016dd review.",
+      "execution_context": "Conservative local-module fingerprint mapping, not proof every listed test executes this path. Existing test bodies, assertions, selection and negative guards unchanged. Windows 83f pre-fix log had 145 real failures; restored Windows execution has not been performed. No mutant or fresh passing claim.",
+      "author": "background_agent:bgagent-3db3596f (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-0424f65a / bgagent-bbf3f85a (production source review); final independent review pending",
+      "review_evidence": "Independent 0424 and bbf source reviews approved the two production fixes. Independent final source review bgagent-016ddf09 identified an actor service/runtime root alignment gap; parent patched the shared service helper afterward, and review of that final patch remains pending. Source review is not execution, mutation evidence, or restored Windows pass."
     }
   ]
 }

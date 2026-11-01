@@ -377,7 +377,8 @@ mod tests {
         super::super::outcome_runtime::OutcomeRuntime,
     ) {
         use refact_buddy_core::operator_types::{ProjectIdentity, WorkerIdentity};
-        let dir = tempfile::tempdir().unwrap();
+        let parent = dunce::canonicalize(std::env::temp_dir()).unwrap();
+        let dir = tempfile::tempdir_in(parent).unwrap();
         let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
             dir.path().join("cache"),
             dir.path().join("config"),

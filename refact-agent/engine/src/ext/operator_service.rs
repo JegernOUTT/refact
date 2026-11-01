@@ -14,7 +14,7 @@ pub fn version(bytes: &Option<Vec<u8>>) -> String {
 
 pub fn checked_path(project: &ProjectIdentity, relative: &str) -> Result<PathBuf, ResourceError> {
     let root = Path::new(&project.canonical_root);
-    if std::fs::canonicalize(root)?.to_string_lossy() != project.canonical_root {
+    if dunce::canonicalize(root)?.to_string_lossy() != project.canonical_root {
         return Err(ResourceError::ProjectScopeMismatch);
     }
     let relative = Path::new(relative);

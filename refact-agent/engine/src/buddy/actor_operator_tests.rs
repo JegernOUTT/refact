@@ -4,7 +4,7 @@ use refact_buddy_core::operator_types::{ProjectIdentity, WorkerIdentity};
 
 fn service(root: &Path) -> BuddyService {
     BuddyService::new(
-        root.to_path_buf(),
+        dunce::canonicalize(root).unwrap(),
         super::super::state::default_buddy_state(),
         BuddySettings::default(),
         vec![],
@@ -15,8 +15,9 @@ fn service(root: &Path) -> BuddyService {
 }
 
 fn runtime(root: &Path) -> OutcomeRuntime {
+    let root = dunce::canonicalize(root).unwrap();
     OutcomeRuntime::open(
-        root,
+        &root,
         ProjectIdentity {
             project_id: "actor-fixture".into(),
             canonical_root: root.to_string_lossy().into_owned(),
