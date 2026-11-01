@@ -535,7 +535,12 @@ mod tests {
         .await;
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.path().to_path_buf()];
         let app = AppState::from_gcx(gcx).await;
-        let root = root.path().to_string_lossy().into_owned();
+        let root = root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         let mut paused = paused();
         paused.work_project_root = Some(std::path::PathBuf::from(&root));
         let session = std::sync::Arc::new(tokio::sync::Mutex::new(paused));

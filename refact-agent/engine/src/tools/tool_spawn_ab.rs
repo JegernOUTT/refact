@@ -1280,7 +1280,7 @@ pub(crate) mod tests {
     }
 
     async fn set_workspace(gcx: Arc<GlobalContext>, root: &Path) {
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(root).unwrap();
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root];
     }
 
@@ -1347,6 +1347,7 @@ pub(crate) mod tests {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         std::fs::create_dir_all(&source).unwrap();
+        let source = dunce::canonicalize(&source).unwrap();
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
         set_workspace(gcx.clone(), &source).await;

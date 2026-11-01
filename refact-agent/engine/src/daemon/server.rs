@@ -1852,6 +1852,7 @@ mod tests {
         state.load_projects(dir.path().join("projects.json")).await;
         let root = dir.path().join("project");
         std::fs::create_dir(&root).unwrap();
+        let root = dunce::canonicalize(root).unwrap();
         let entry = state.projects.write().await.open(root).await.unwrap();
         let project = refact_buddy_core::operator_types::ProjectIdentity {
             project_id: entry.id,

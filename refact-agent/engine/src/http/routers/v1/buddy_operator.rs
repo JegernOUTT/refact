@@ -945,7 +945,7 @@ mod resource_http_tests {
     #[tokio::test]
     async fn unavailable_status_reports_the_owner_and_manual_reopen_recovers() {
         let root = tempfile::tempdir().unwrap();
-        let root = root.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(root.path()).unwrap();
         let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
             root.join("cache"),
             root.join("config"),
@@ -1043,7 +1043,7 @@ mod resource_http_tests {
     #[tokio::test]
     async fn default_settings_enable_the_operator_and_store_failure_reports_unavailable() {
         let root = tempfile::tempdir().unwrap();
-        let canonical = root.path().canonicalize().unwrap();
+        let canonical = dunce::canonicalize(root.path()).unwrap();
         let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
             canonical.join("cache"),
             canonical.join("config"),
@@ -1077,7 +1077,7 @@ mod resource_http_tests {
         // A second holder cannot take the same store; the degraded path reports
         // unavailable, never enabled, and never rewrites the existing database.
         let contended = tempfile::tempdir().unwrap();
-        let contended = contended.path().canonicalize().unwrap();
+        let contended = dunce::canonicalize(contended.path()).unwrap();
         let holder = crate::buddy::operator_runtime::open_project_runtime(&contended).unwrap();
         let database = contended.join(".refact/buddy/operator.sqlite");
         let before = std::fs::read(&database).unwrap();
@@ -1160,7 +1160,7 @@ mod resource_http_tests {
         use crate::buddy::{actor::BuddyService, action_execution::ActionRejection};
         use refact_buddy_core::operator_types::*;
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
         let project = ProjectIdentity {
             project_id: "fixture".into(),
             canonical_root: root.to_string_lossy().into_owned(),
