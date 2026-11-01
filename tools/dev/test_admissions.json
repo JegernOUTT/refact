@@ -7856,6 +7856,174 @@
       "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
       "reviewer": "background_agent:bgagent-3c9ea76e-f548-4b53-be89-83d0db622368",
       "review_evidence": "Independent attributes-only source review approved ordinary execution-context repair; whole-body case mapping independently inspected by background_agent:bgagent-ad799a9e-6f81-4214-845b-bfc571458938 (interim source-backed report, run later cap-stopped, not a final ledger approval). Parent confirmed launch-intent disabling writer also has serial(test_runner,runtime_settings). Seven/five count distinct input/outcome executions, not assertion lines; valid-landing duplicate is a dependent control. This bounded correction is not exhaustive whole-repository semantic certification."
+    },
+    {
+      "fingerprint": "6c086d5419ff339b239428c8459ac0012d7a054f6b2a4246b3f74bb4f915bb5b",
+      "occurrences": 1,
+      "failure_mode": "capped_child_resumes_once_with_full_history_and_remaining_lifetime_budget fails before intended oracle when Windows fixture identity differs from shipping resolved path.",
+      "importance": "Preserve original important lifecycle, project-isolation and persistence checks without adding or deleting scenarios.",
+      "nearest_retained": {
+        "fingerprint": "fd89821984018bc2e2b52897f56553062e4dbf83636e012c55d80facec48d7ee",
+        "why_insufficient": "Interrupted-child recovery does not cover a typed step-cap lifetime continuation and both attachment-guard refusals."
+      },
+      "oracle": "Capped child persists typed stop; rejects missing transition guard; rejects foreign guard; authorized continuation preserves history/edits/lifetime budget; stale duplicate continuation refuses. Seeded ten tools and final invariants are controls, not extra cases.",
+      "prerequisites": "Normalize the already recovered source path for the existing install_resumed_session fixture.",
+      "shipping_implementation": "refact-agent/engine/src/agents/spawn_lifecycle_tests.rs::capped_child_resumes_once_with_full_history_and_remaining_lifetime_budget exercising existing shipping decisions and assertions.",
+      "determinism": "Existing isolated local fixtures; physical canonicalization and resolved identity before comparisons. Git fixture explicitly owns line-ending policy; durable fault is keyed to actual plan.",
+      "layer": "Existing engine library test, prerequisite-only repair.",
+      "why_cheapest": "Repair existing fixture representation rather than add duplicate tests or weaken assertions.",
+      "meaningful_cases": 5,
+      "critical": false,
+      "criticality_reason": "Ordinary classification applies only to unchanged-oracle prerequisite/representation delta, not a downgrade of underlying critical guards. Preserve all historical critical admissions and witnesses unchanged. No new production-guard sensitivity proof claimed.",
+      "removed_coverage": "None. Existing scenarios and assertions retained; packed existing workloads charged explicitly. Git prior6 retained; capped5 and undo-empty3 correct implicit-one accounting, not new scenarios.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Normalize the already recovered source path for the existing install_resumed_session fixture. The old Windows run stopped at representation mismatches; historical critical mutation evidence is not rebound as a fresh execution for this fingerprint.",
+        "evidence": "Actual before-fix Windows job124741216936 run41270166198 full log target/ci-round2/windows-crt-fixed-full.log; source diff against f83184d57b98818c7ca4497b58fe4a2bde74d7b2. Source-reviewed prerequisite repair; local restored tests and Windows execution tracked separately, not yet certified here."
+      },
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b",
+      "review_evidence": "Independent source/oracle reviews background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b and background_agent:bgagent-88d8e57b-e68d-467a-9332-5f96a7c684b7 preserve guards. Six-body semantic accounting background_agent:bgagent-342e1832-7aef-489a-9f0b-f56a76356875 maps5/6/1/1/3/1, not assertion counts; historical-record preservation parent-verified separately. No Windows restored runtime pass or new critical mutant proof claimed before CI."
+    },
+    {
+      "fingerprint": "9c5530942b372d5c5595f3b00378d68b05e9cf9b85ff01ed27a1db6529bb04f5",
+      "occurrences": 1,
+      "failure_mode": "Git fetch/pull/push fixture inherits platform checkout CRLF conversion and fails the exact LF-content assertion before later remote-ref safety assertions.",
+      "importance": "Preserve original important lifecycle, project-isolation and persistence checks without adding or deleting scenarios.",
+      "nearest_retained": {
+        "fingerprint": "f7f068e882425881ec82652b61ba5165c2d085f29062df567533f92e5f29c628",
+        "why_insufficient": "Retained local commit/hook route does not drive real fetch/pull/push peer history."
+      },
+      "oracle": "Fetch tracking update; fast-forward pull; diverged pull refusal; divergent push refusal; no-upstream refusal; explicit set-upstream push. Original ref/content assertions unchanged.",
+      "prerequisites": "Configure core.autocrlf=false before initial clone checkout; preserve exact LF-content oracle and all remote mutation guards.",
+      "shipping_implementation": "refact-agent/engine/src/http/routers/v1/git_branches.rs::git_fetch_pull_push_against_local_bare_remote exercising existing shipping decisions and assertions.",
+      "determinism": "Existing isolated local fixtures; physical canonicalization and resolved identity before comparisons. Git fixture explicitly owns line-ending policy; durable fault is keyed to actual plan.",
+      "layer": "Existing engine library test, prerequisite-only repair.",
+      "why_cheapest": "Repair existing fixture representation rather than add duplicate tests or weaken assertions.",
+      "meaningful_cases": 6,
+      "critical": false,
+      "criticality_reason": "Ordinary classification applies only to unchanged-oracle prerequisite/representation delta, not a downgrade of underlying critical guards. Preserve all historical critical admissions and witnesses unchanged. No new production-guard sensitivity proof claimed.",
+      "removed_coverage": "None. Existing scenarios and assertions retained; packed existing workloads charged explicitly. Git prior6 retained; capped5 and undo-empty3 correct implicit-one accounting, not new scenarios.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Configure core.autocrlf=false before initial clone checkout; preserve exact LF-content oracle and all remote mutation guards. The old Windows run stopped at representation mismatches; historical critical mutation evidence is not rebound as a fresh execution for this fingerprint.",
+        "evidence": "Actual before-fix Windows job124741216936 run41270166198 full log target/ci-round2/windows-crt-fixed-full.log; source diff against f83184d57b98818c7ca4497b58fe4a2bde74d7b2. Source-reviewed prerequisite repair; local restored tests and Windows execution tracked separately, not yet certified here."
+      },
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b",
+      "review_evidence": "Independent source/oracle reviews background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b and background_agent:bgagent-88d8e57b-e68d-467a-9332-5f96a7c684b7 preserve guards. Six-body semantic accounting background_agent:bgagent-342e1832-7aef-489a-9f0b-f56a76356875 maps5/6/1/1/3/1, not assertion counts; historical-record preservation parent-verified separately. No Windows restored runtime pass or new critical mutant proof claimed before CI. Historical critical Git record790f69de66e8bdcd028f9713ee8a98ee96176f0846ce9c0a65c903fff2dc9de8 remains byte-for-byte JSON unchanged; its old mutation receipts are historical only."
+    },
+    {
+      "fingerprint": "47d0137003ecb5f7eea9e821a7fe9a3725c9b18086f39209ffd82eb8acd6d0ba",
+      "occurrences": 1,
+      "failure_mode": "local_dedup_never_touches_other_project_memory fails before intended oracle when Windows fixture identity differs from shipping resolved path.",
+      "importance": "Preserve original important lifecycle, project-isolation and persistence checks without adding or deleting scenarios.",
+      "nearest_retained": {
+        "fingerprint": "d707f90b71d6ccafc7d9694d355731f523ef833e2b08273a76cc57dc2e399806",
+        "why_insufficient": "Stale-index recovery does not establish refusal to touch a live foreign-project duplicate."
+      },
+      "oracle": "Matching foreign indexed duplicate creates a local memory and preserves foreign file bytes; these assertions establish one isolation outcome.",
+      "prerequisites": "Normalize local_root fixture to the shipping canonical representation, keeping the local-containment and foreign-bytes assertions.",
+      "shipping_implementation": "refact-agent/engine/src/memories.rs::local_dedup_never_touches_other_project_memory exercising existing shipping decisions and assertions.",
+      "determinism": "Existing isolated local fixtures; physical canonicalization and resolved identity before comparisons. Git fixture explicitly owns line-ending policy; durable fault is keyed to actual plan.",
+      "layer": "Existing engine library test, prerequisite-only repair.",
+      "why_cheapest": "Repair existing fixture representation rather than add duplicate tests or weaken assertions.",
+      "meaningful_cases": 1,
+      "critical": false,
+      "criticality_reason": "Ordinary classification applies only to unchanged-oracle prerequisite/representation delta, not a downgrade of underlying critical guards. Preserve all historical critical admissions and witnesses unchanged. No new production-guard sensitivity proof claimed.",
+      "removed_coverage": "None. Existing scenarios and assertions retained; packed existing workloads charged explicitly. Git prior6 retained; capped5 and undo-empty3 correct implicit-one accounting, not new scenarios.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Normalize local_root fixture to the shipping canonical representation, keeping the local-containment and foreign-bytes assertions. The old Windows run stopped at representation mismatches; historical critical mutation evidence is not rebound as a fresh execution for this fingerprint.",
+        "evidence": "Actual before-fix Windows job124741216936 run41270166198 full log target/ci-round2/windows-crt-fixed-full.log; source diff against f83184d57b98818c7ca4497b58fe4a2bde74d7b2. Source-reviewed prerequisite repair; local restored tests and Windows execution tracked separately, not yet certified here."
+      },
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b",
+      "review_evidence": "Independent source/oracle reviews background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b and background_agent:bgagent-88d8e57b-e68d-467a-9332-5f96a7c684b7 preserve guards. Six-body semantic accounting background_agent:bgagent-342e1832-7aef-489a-9f0b-f56a76356875 maps5/6/1/1/3/1, not assertion counts; historical-record preservation parent-verified separately. No Windows restored runtime pass or new critical mutant proof claimed before CI."
+    },
+    {
+      "fingerprint": "8b4942b2ec3ed488bd2a27aa55d3946e8ac39cb8b65be6cd65751f40b36d58d1",
+      "occurrences": 1,
+      "failure_mode": "a_multi_file_patch_failing_midway_reports_exactly_which_files_changed fails before intended oracle when Windows fixture identity differs from shipping resolved path.",
+      "importance": "Preserve original important lifecycle, project-isolation and persistence checks without adding or deleting scenarios.",
+      "nearest_retained": {
+        "fingerprint": "1424e44321d48d4c3696f27098380617a8e10fe1735373072b565e749a95a02c",
+        "why_insufficient": "Preimage-lock recheck rejects before commit and cannot establish partial commit reporting after an actual later durable failure."
+      },
+      "oracle": "One two-file transaction fails after second temporary write; exact changed/unchanged lists, first new bytes, second old bytes and no temp leftovers describe the one partial-commit failure.",
+      "prerequisites": "Arm existing AFTER_TEMP_WRITE fault using the actual planned second file path, not an unmatched raw Windows spelling.",
+      "shipping_implementation": "refact-agent/engine/src/tools/file_edit/tool_apply_patch.rs::a_multi_file_patch_failing_midway_reports_exactly_which_files_changed exercising existing shipping decisions and assertions.",
+      "determinism": "Existing isolated local fixtures; physical canonicalization and resolved identity before comparisons. Git fixture explicitly owns line-ending policy; durable fault is keyed to actual plan.",
+      "layer": "Existing engine library test, prerequisite-only repair.",
+      "why_cheapest": "Repair existing fixture representation rather than add duplicate tests or weaken assertions.",
+      "meaningful_cases": 1,
+      "critical": false,
+      "criticality_reason": "Ordinary classification applies only to unchanged-oracle prerequisite/representation delta, not a downgrade of underlying critical guards. Preserve all historical critical admissions and witnesses unchanged. No new production-guard sensitivity proof claimed.",
+      "removed_coverage": "None. Existing scenarios and assertions retained; packed existing workloads charged explicitly. Git prior6 retained; capped5 and undo-empty3 correct implicit-one accounting, not new scenarios.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Arm existing AFTER_TEMP_WRITE fault using the actual planned second file path, not an unmatched raw Windows spelling. The old Windows run stopped at representation mismatches; historical critical mutation evidence is not rebound as a fresh execution for this fingerprint.",
+        "evidence": "Actual before-fix Windows job124741216936 run41270166198 full log target/ci-round2/windows-crt-fixed-full.log; source diff against f83184d57b98818c7ca4497b58fe4a2bde74d7b2. Source-reviewed prerequisite repair; local restored tests and Windows execution tracked separately, not yet certified here."
+      },
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b",
+      "review_evidence": "Independent source/oracle reviews background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b and background_agent:bgagent-88d8e57b-e68d-467a-9332-5f96a7c684b7 preserve guards. Six-body semantic accounting background_agent:bgagent-342e1832-7aef-489a-9f0b-f56a76356875 maps5/6/1/1/3/1, not assertion counts; historical-record preservation parent-verified separately. No Windows restored runtime pass or new critical mutant proof claimed before CI."
+    },
+    {
+      "fingerprint": "20b1faae78e35a4c8b94cf5f36b4c03597bd05909a9da690ff57c72d1eeaa8db",
+      "occurrences": 1,
+      "failure_mode": "undo_empty_file_is_not_delete_and_successive_undo_consumes_history fails before intended oracle when Windows fixture identity differs from shipping resolved path.",
+      "importance": "Preserve original important lifecycle, project-isolation and persistence checks without adding or deleting scenarios.",
+      "nearest_retained": {
+        "fingerprint": "e461bafe989e72aa746f59a0151690769b4cc83681ab86e384894ba92e1c20fa",
+        "why_insufficient": "Buddy receipt undo is a separate adapter and does not exercise file-edit history consumption or preserve original empty-file existence."
+      },
+      "oracle": "Three existing undo executions: preceding nonempty version restored; original empty file restored without deletion; exhausted history refuses. Writes are setup.",
+      "prerequisites": "Normalize fixture path before seeding write/history so parsed undo lookup sees identical shipping path identity.",
+      "shipping_implementation": "refact-agent/engine/src/tools/file_edit/tool_undo_textdoc.rs::undo_empty_file_is_not_delete_and_successive_undo_consumes_history exercising existing shipping decisions and assertions.",
+      "determinism": "Existing isolated local fixtures; physical canonicalization and resolved identity before comparisons. Git fixture explicitly owns line-ending policy; durable fault is keyed to actual plan.",
+      "layer": "Existing engine library test, prerequisite-only repair.",
+      "why_cheapest": "Repair existing fixture representation rather than add duplicate tests or weaken assertions.",
+      "meaningful_cases": 3,
+      "critical": false,
+      "criticality_reason": "Ordinary classification applies only to unchanged-oracle prerequisite/representation delta, not a downgrade of underlying critical guards. Preserve all historical critical admissions and witnesses unchanged. No new production-guard sensitivity proof claimed.",
+      "removed_coverage": "None. Existing scenarios and assertions retained; packed existing workloads charged explicitly. Git prior6 retained; capped5 and undo-empty3 correct implicit-one accounting, not new scenarios.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Normalize fixture path before seeding write/history so parsed undo lookup sees identical shipping path identity. The old Windows run stopped at representation mismatches; historical critical mutation evidence is not rebound as a fresh execution for this fingerprint.",
+        "evidence": "Actual before-fix Windows job124741216936 run41270166198 full log target/ci-round2/windows-crt-fixed-full.log; source diff against f83184d57b98818c7ca4497b58fe4a2bde74d7b2. Source-reviewed prerequisite repair; local restored tests and Windows execution tracked separately, not yet certified here."
+      },
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b",
+      "review_evidence": "Independent source/oracle reviews background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b and background_agent:bgagent-88d8e57b-e68d-467a-9332-5f96a7c684b7 preserve guards. Six-body semantic accounting background_agent:bgagent-342e1832-7aef-489a-9f0b-f56a76356875 maps5/6/1/1/3/1, not assertion counts; historical-record preservation parent-verified separately. No Windows restored runtime pass or new critical mutant proof claimed before CI."
+    },
+    {
+      "fingerprint": "8706ea3ccade4d3ee6044b8876ccc565ff5695bb8505b5eccd3729a15f3ffc0f",
+      "occurrences": 1,
+      "failure_mode": "external_edit_cannot_be_overwritten_by_undo_even_without_read_stamp fails before intended oracle when Windows fixture identity differs from shipping resolved path.",
+      "importance": "Preserve original important lifecycle, project-isolation and persistence checks without adding or deleting scenarios.",
+      "nearest_retained": {
+        "fingerprint": "466f47b9a1f346f7779597dc3c83794a900c2c0592702d82c18cc9dda782a0bf",
+        "why_insufficient": "Symlink escape refusal is not stale-history content protection against an ordinary external editor write."
+      },
+      "oracle": "Undo after an external edit refuses with changed-since error and retains external bytes. Prior write is setup.",
+      "prerequisites": "Normalize fixture history seed path; retain exact changed-since and external-byte preservation assertions.",
+      "shipping_implementation": "refact-agent/engine/src/tools/file_edit/tool_undo_textdoc.rs::external_edit_cannot_be_overwritten_by_undo_even_without_read_stamp exercising existing shipping decisions and assertions.",
+      "determinism": "Existing isolated local fixtures; physical canonicalization and resolved identity before comparisons. Git fixture explicitly owns line-ending policy; durable fault is keyed to actual plan.",
+      "layer": "Existing engine library test, prerequisite-only repair.",
+      "why_cheapest": "Repair existing fixture representation rather than add duplicate tests or weaken assertions.",
+      "meaningful_cases": 1,
+      "critical": false,
+      "criticality_reason": "Ordinary classification applies only to unchanged-oracle prerequisite/representation delta, not a downgrade of underlying critical guards. Preserve all historical critical admissions and witnesses unchanged. No new production-guard sensitivity proof claimed.",
+      "removed_coverage": "None. Existing scenarios and assertions retained; packed existing workloads charged explicitly. Git prior6 retained; capped5 and undo-empty3 correct implicit-one accounting, not new scenarios.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Normalize fixture history seed path; retain exact changed-since and external-byte preservation assertions. The old Windows run stopped at representation mismatches; historical critical mutation evidence is not rebound as a fresh execution for this fingerprint.",
+        "evidence": "Actual before-fix Windows job124741216936 run41270166198 full log target/ci-round2/windows-crt-fixed-full.log; source diff against f83184d57b98818c7ca4497b58fe4a2bde74d7b2. Source-reviewed prerequisite repair; local restored tests and Windows execution tracked separately, not yet certified here."
+      },
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b",
+      "review_evidence": "Independent source/oracle reviews background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b and background_agent:bgagent-88d8e57b-e68d-467a-9332-5f96a7c684b7 preserve guards. Six-body semantic accounting background_agent:bgagent-342e1832-7aef-489a-9f0b-f56a76356875 maps5/6/1/1/3/1, not assertion counts; historical-record preservation parent-verified separately. No Windows restored runtime pass or new critical mutant proof claimed before CI."
     }
   ],
   "classifications": [
@@ -8610,13 +8778,13 @@
     {
       "path": "refact-agent/engine/src/memories.rs",
       "kind": "item_macro",
-      "source_sha256": "a30fdaa6dba9f70399ba7152f99572fcd46fc7a99d6da7e64236f74237787b96",
+      "source_sha256": "f8ba17fd058e3922b22fb8b90f3076815f9eb1b8d32efca7b54b5c9b5566e54e",
       "lead_sha256": "d82d3056423332da716521a1c9808fe0d77e09174bfce193deda07de50fa061d",
       "conclusion": "non_test",
       "rationale": "tokio::task_local! declares MEMORY_MUTATION_HELD. Locked1.54.1 task_local delegates only to __task_local_inner, emitting static LocalKey<T> with an internal std thread-local RefCell<Option<T>>. These inputs supply only types/visibility, no tests or documentation; support/task context is not an extra case.",
       "author": "background_agent:bgagent-63087e16-d20a-463e-94c7-f1f68f4b6fa8",
       "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
-      "review_evidence": "Independent current source/dependency review: tokio::task_local! declares MEMORY_MUTATION_HELD. Locked1.54.1 task_local delegates only to __task_local_inner, emitting static LocalKey<T> with an internal std thread-local RefCell<Option<T>>. These inputs supply only types/visibility, no tests or documentation; support/task context is not an extra case."
+      "review_evidence": "Independent current source/dependency review: tokio::task_local! declares MEMORY_MUTATION_HELD. Locked1.54.1 task_local delegates only to __task_local_inner, emitting static LocalKey<T> with an internal std thread-local RefCell<Option<T>>. These inputs supply only types/visibility, no tests or documentation; support/task context is not an extra case. Source hash rebound for unrelated canonicalization changes; task_local lead bytes and declaration unchanged against f83184d57."
     },
     {
       "path": "refact-agent/engine/src/postprocessing/gcx_pp_context.rs",
@@ -12555,45 +12723,45 @@
     },
     {
       "path": "refact-agent/engine/src/buddy/operator_store.rs",
-      "before_sha256": "db257a5840869c61de453a05a621cdbf8eb6526f738d05e163f6b866a2d678be",
-      "after_sha256": "7155db5424a1c89f8d2e8b2d9ce73b67b25f9e15453b489a074433de71b12a96",
+      "before_sha256": "7155db5424a1c89f8d2e8b2d9ce73b67b25f9e15453b489a074433de71b12a96",
+      "after_sha256": "cb42e2a82842c45fa1e228b3e648d34e15f63e50479f5e5bdf0eac7ac9a802e3",
       "affected_tests": [
-        "0e52087cda9a0595935ab774105237bb06ed3e64b40ba6e84c8bce6e90d14b6c",
-        "211be726f66df9b5afa08976c240aa75fa2f6dbdefd8fd06d049421949d6689b",
-        "279d3f7c2308790d0a3baaab9d12938a7cc0c8ae70bcfbf8785bb28b9e9d239d",
-        "3b58f98978199f81a53f52ab1357c03ca44cc10e43ad99f81c96496898465e74",
-        "4061f7e0d66efbcf90694f24f2fa537b3967f260f13c7c464fc4b875987ddbf5",
-        "468604669e5d9bdbe17ace2b9e7bac1692653d16670809d7d49c9c413aa4189a",
-        "55d6abd8334dc621a89e34366b9f46c6de6ad47ee0338104251396f89e6d4b22",
-        "62f92cde9d56859ba584f771f8dcb30a0bd63c8bb3430b648e339c89b8f90b97",
-        "63ee7b1f3a387a1ef62a41b28450a061762ba4f7b92f9391d38010cc4a1a7fbf",
-        "67d62db7699fd2705dc6f6bf3b2d941d8be737a34de3ec7fabbaf9664f26896e",
-        "7543fe2f7dc4d278fce7d9636a6d4ed9291e7339988945fc993c5d938d407262",
-        "7afd483835a8490fbc07e689f8176f91a1bf8e1b52dcb1fffd94f76cb81e9420",
-        "81a069d8e40d7442dcaf1d7c7cc9e9e85bd541f7dbdbcdda23dc5f3a2dc1b1bb",
-        "81e86a1d6d276c388f7b2796d3a36ee429ce89f2d9595d91cc220e6eeec6d196",
-        "829433a4951785b84cf9c464140af285ba3dfacf3612f7f740815e6905c19d88",
         "8300c3bc5d0aff87845829edfb357abfa4bb4d3065fef2a88a81c2049196354c",
-        "9231cf86e338daace1eb9f032e7c228109ec267d866526ae76650408b043c14e",
-        "941d92f420c4d338542458630f1ca210a38971613f7ab4bfdb5f567252e90cf6",
-        "a5d20b7f1f5d2fe1919691d2815c023e89f973b8abcc26099f41bf66a704a57b",
-        "a74ee2cd480014828fc678aae0a11233c658f66c80ec3dda42ae2194e59b58fa",
-        "abf4ef970e9a1be36d4af78b8fae979925c7dda4015d2db82ae1b6ca9f79560e",
-        "ae9c8c05f915c39e80bf99a928deee61b7618acbe0f874a9bebc05fb067b2faf",
-        "be72774894d2dc65e29d3c51099f20f4213e12e1a72aab36a1d859c45fde810c",
-        "bf04e403308c3e8a9b89fcd19cdb4e2a120891a03f3bccec7cce4b42a389faf5",
-        "c563513db02e14e1ead6486f5d14fbe0ac9b6f5ca4ea9da8a4d255b6afae2b74",
+        "0e52087cda9a0595935ab774105237bb06ed3e64b40ba6e84c8bce6e90d14b6c",
         "f1b3a016f10f676d1870c6a2cd3bb8a78e571ea0846a8ed64dde85d3f50515f3",
-        "f55d0fcc58d454a398d8e618e27c5accd4bd2419450ec350c101b27d9049ee59",
-        "f80c91fe767f71c5bfea33340a03c29d05ae700d086761fb0cbc2534c8b07920",
+        "7afd483835a8490fbc07e689f8176f91a1bf8e1b52dcb1fffd94f76cb81e9420",
+        "211be726f66df9b5afa08976c240aa75fa2f6dbdefd8fd06d049421949d6689b",
         "f939fa198b5f93afe2f47b4ea87aa257be5ed18d1ae5f86b4705e2acb53f0231",
-        "f9a3ae30f7f150536a108f72035fc659f531743593bbcb7392385888ed59f4aa"
+        "7543fe2f7dc4d278fce7d9636a6d4ed9291e7339988945fc993c5d938d407262",
+        "279d3f7c2308790d0a3baaab9d12938a7cc0c8ae70bcfbf8785bb28b9e9d239d",
+        "f9a3ae30f7f150536a108f72035fc659f531743593bbcb7392385888ed59f4aa",
+        "f55d0fcc58d454a398d8e618e27c5accd4bd2419450ec350c101b27d9049ee59",
+        "63ee7b1f3a387a1ef62a41b28450a061762ba4f7b92f9391d38010cc4a1a7fbf",
+        "81a069d8e40d7442dcaf1d7c7cc9e9e85bd541f7dbdbcdda23dc5f3a2dc1b1bb",
+        "a74ee2cd480014828fc678aae0a11233c658f66c80ec3dda42ae2194e59b58fa",
+        "468604669e5d9bdbe17ace2b9e7bac1692653d16670809d7d49c9c413aa4189a",
+        "829433a4951785b84cf9c464140af285ba3dfacf3612f7f740815e6905c19d88",
+        "be72774894d2dc65e29d3c51099f20f4213e12e1a72aab36a1d859c45fde810c",
+        "c563513db02e14e1ead6486f5d14fbe0ac9b6f5ca4ea9da8a4d255b6afae2b74",
+        "81e86a1d6d276c388f7b2796d3a36ee429ce89f2d9595d91cc220e6eeec6d196",
+        "ae9c8c05f915c39e80bf99a928deee61b7618acbe0f874a9bebc05fb067b2faf",
+        "3b58f98978199f81a53f52ab1357c03ca44cc10e43ad99f81c96496898465e74",
+        "62f92cde9d56859ba584f771f8dcb30a0bd63c8bb3430b648e339c89b8f90b97",
+        "a5d20b7f1f5d2fe1919691d2815c023e89f973b8abcc26099f41bf66a704a57b",
+        "941d92f420c4d338542458630f1ca210a38971613f7ab4bfdb5f567252e90cf6",
+        "67d62db7699fd2705dc6f6bf3b2d941d8be737a34de3ec7fabbaf9664f26896e",
+        "9231cf86e338daace1eb9f032e7c228109ec267d866526ae76650408b043c14e",
+        "f80c91fe767f71c5bfea33340a03c29d05ae700d086761fb0cbc2534c8b07920",
+        "bf04e403308c3e8a9b89fcd19cdb4e2a120891a03f3bccec7cce4b42a389faf5",
+        "4061f7e0d66efbcf90694f24f2fa537b3967f260f13c7c464fc4b875987ddbf5",
+        "55d6abd8334dc621a89e34366b9f46c6de6ad47ee0338104251396f89e6d4b22",
+        "abf4ef970e9a1be36d4af78b8fae979925c7dda4015d2db82ae1b6ca9f79560e"
       ],
-      "impact": "refact-agent/engine/src/buddy/operator_store.rs: canonical non-test residue changes remove 47 tokens and add 0 tokens. Cleanup evidence identifies unused import: `super::super::operator_observability::evaluate_growth_warnings_with_latch as evaluate_growth_warnings`; sorted_user_tables. 12787\u21926186 global lexical definitions includes intentional coverage loss from case deletions; this support record does not claim strict duplication.",
-      "execution_context": "Same physical Rust path; no retained fingerprint/context relocation relative pinned main. Test-only ownership: inline cfg(test) modules or explicitly cfg(test) helper items; tests/ and *_tests.rs are test harness/module support. Removed dead helper/import/module scaffolding has no surviving intended executing consumer; conservative affected mapping lists surviving same-file tests for dependency review, not a claim all call deleted helpers. See exact residue token hunks and cleanup evidence references.",
-      "author": "support-impact-author-bgagent-1fd43f09",
-      "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
-      "review_evidence": "Independent source/hash review: refact-agent/engine/src/buddy/operator_store.rs: reviewed removal of {'names': ['unused import: `super::super::operator_observability::evaluate_growth_warnings_with_latch as evaluate_growth_warnings`'], 'diagnostic_indices': [58], 'before_byte_span': [181918, 182024], 'removed_text': 'use super::super::operator_observability::evaluate_growth_warnings_with_latch as evaluate_growth_warnings;', 'evidence': 'rustc unused_imports MachineApplicable deletion; import in cfg(test) scope or test-only file'}, sorted_user_tables within explicit cfg(test) items/modules. 30 actual same-path retained cases keep complete attributed canonical body and enclosing-context hash against pinned MAIN. Conservative affected map contains exactly those current fingerprints."
+      "impact": "Use the same physically canonical simplified representation as operator runtime identity in store open, read snapshot and private-child containment. Normalize shared test identity producer; preserve exact foreign-project binding, directory type/symlink and canonical containment checks.",
+      "execution_context": "Shipping identity consistency plus shared fixture producer; no removal of negative guard assertions. Windows junction/runtime qualification remains separate from Linux symlink coverage.",
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b",
+      "review_evidence": "Independent source/oracle reviews background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b and background_agent:bgagent-88d8e57b-e68d-467a-9332-5f96a7c684b7 preserve guards. Six-body semantic accounting background_agent:bgagent-342e1832-7aef-489a-9f0b-f56a76356875 maps5/6/1/1/3/1, not assertion counts; historical-record preservation parent-verified separately. No Windows restored runtime pass or new critical mutant proof claimed before CI. Astra initial review f969 identified private-directory/fixture producers; those corrected and fresh review88d8e57b found no remaining changed-boundary blocker. Existing enriched-memory direct duplicate touch is separately recorded, not introduced or claimed fixed."
     },
     {
       "path": "refact-agent/engine/src/buddy/opportunity_copy.rs",
@@ -12891,20 +13059,20 @@
     },
     {
       "path": "refact-agent/engine/src/buddy/work_order_tests.rs",
-      "before_sha256": "f3d4815b5f032f23b9fa361b840d16e8887d50e6246561a43ed2e85c3f4f58c0",
-      "after_sha256": "2c405c0fdc477c5ce56c7c59b2fd704e0fdc55021ef585d98bb79cdf223c519c",
+      "before_sha256": "2c405c0fdc477c5ce56c7c59b2fd704e0fdc55021ef585d98bb79cdf223c519c",
+      "after_sha256": "e3d8d8ccd964b2b676852721f8fe5a3b129c429315412439a5e03f4dae11455a",
       "affected_tests": [
         "0cf98ace3bc35a453b047d4be5c4d0577765637cd427e45635b0df5319d968c9",
-        "3369062c3f34c7b3df7cbd497b88a9646e4ed84d459091a31bc1ed8b0d476b06",
         "719e4ead9b98ee681708e807a25a7f7a7431a4ab28301dea94cee370911218cc",
-        "c8a84354c967d6c6282fa8e8979e0986b722b1a4ce5de997a883a9427752909c",
-        "c9027bc374820673dc9b5917bcec9969085aed3158730761a098aebdd5a2e3d3"
+        "3369062c3f34c7b3df7cbd497b88a9646e4ed84d459091a31bc1ed8b0d476b06",
+        "c9027bc374820673dc9b5917bcec9969085aed3158730761a098aebdd5a2e3d3",
+        "c8a84354c967d6c6282fa8e8979e0986b722b1a4ce5de997a883a9427752909c"
       ],
-      "impact": "refact-agent/engine/src/buddy/work_order_tests.rs: canonical non-test residue changes remove 9 tokens and add 0 tokens. Cleanup evidence identifies unused import: `crate::buddy::operator_store::OperatorStoreError`. 12787\u21926186 global lexical definitions includes intentional coverage loss from case deletions; this support record does not claim strict duplication.",
-      "execution_context": "Same physical Rust path; no retained fingerprint/context relocation relative pinned main. Test-only ownership: inline cfg(test) modules or explicitly cfg(test) helper items; tests/ and *_tests.rs are test harness/module support. Removed dead helper/import/module scaffolding has no surviving intended executing consumer; conservative affected mapping lists surviving same-file tests for dependency review, not a claim all call deleted helpers. See exact residue token hunks and cleanup evidence references.",
-      "author": "support-impact-author-bgagent-1fd43f09",
-      "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
-      "review_evidence": "Independent source/hash review: refact-agent/engine/src/buddy/work_order_tests.rs: reviewed removal of {'names': ['unused import: `crate::buddy::operator_store::OperatorStoreError`'], 'diagnostic_indices': [57], 'before_byte_span': [36, 90], 'removed_text': 'use crate::buddy::operator_store::OperatorStoreError;\\n', 'evidence': 'rustc unused_imports MachineApplicable deletion; import in cfg(test) scope or test-only file'} within test harness/module support. 5 actual same-path retained cases keep complete attributed canonical body and enclosing-context hash against pinned MAIN. Conservative affected map contains exactly those current fingerprints."
+      "impact": "Normalize the shared ProjectIdentity fixture producer with dunce filesystem canonicalization to match shipping operator identity. No work-order behavior, assertions or test bodies changed.",
+      "execution_context": "Test fixture identity representation only; existing consumer case counts preserved.",
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b",
+      "review_evidence": "Independent source/oracle reviews background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b and background_agent:bgagent-88d8e57b-e68d-467a-9332-5f96a7c684b7 preserve guards. Six-body semantic accounting background_agent:bgagent-342e1832-7aef-489a-9f0b-f56a76356875 maps5/6/1/1/3/1, not assertion counts; historical-record preservation parent-verified separately. No Windows restored runtime pass or new critical mutant proof claimed before CI. Astra initial review f969 identified private-directory/fixture producers; those corrected and fresh review88d8e57b found no remaining changed-boundary blocker. Existing enriched-memory direct duplicate touch is separately recorded, not introduced or claimed fixed."
     },
     {
       "path": "refact-agent/engine/src/buddy/workflow_display.rs",
@@ -14628,19 +14796,19 @@
     },
     {
       "path": "refact-agent/engine/src/tools/file_edit/tool_apply_patch.rs",
-      "before_sha256": "b262d792b0119d4bf64eb6a4bd83c944def0c2c40062b4094d755cdb0b97d565",
-      "after_sha256": "e12b392206fc42304540254071c189b9158f0b7dc723ea16292325d08d9796e8",
+      "before_sha256": "e12b392206fc42304540254071c189b9158f0b7dc723ea16292325d08d9796e8",
+      "after_sha256": "0a07b2d79cb17adf3f8155214f67d652179635eb2cc7c83165aa3f4e06c496f0",
       "affected_tests": [
-        "1424e44321d48d4c3696f27098380617a8e10fe1735373072b565e749a95a02c",
         "33cda35e8cd593ccfcf09114515c4ec371069ba9366fe35349ca311aaaa8a90c",
-        "71acab9e7c9a9bc904baade7256bf57d6831610def1b0d454ca65fa9ccff956d",
-        "f3394622b7f8410367acc1f89206d894d26aa7d52af1f7cf36ebfe8b185deb12"
+        "1424e44321d48d4c3696f27098380617a8e10fe1735373072b565e749a95a02c",
+        "8b4942b2ec3ed488bd2a27aa55d3946e8ac39cb8b65be6cd65751f40b36d58d1",
+        "71acab9e7c9a9bc904baade7256bf57d6831610def1b0d454ca65fa9ccff956d"
       ],
-      "impact": "refact-agent/engine/src/tools/file_edit/tool_apply_patch.rs: canonical non-test residue changes remove 7 tokens and add 0 tokens. Cleanup evidence identifies unused import: `std::path::PathBuf`. 12787\u21926186 global lexical definitions includes intentional coverage loss from case deletions; this support record does not claim strict duplication.",
-      "execution_context": "Same physical Rust path; no retained fingerprint/context relocation relative pinned main. Test-only ownership: inline cfg(test) modules or explicitly cfg(test) helper items; tests/ and *_tests.rs are test harness/module support. Removed dead helper/import/module scaffolding has no surviving intended executing consumer; conservative affected mapping lists surviving same-file tests for dependency review, not a claim all call deleted helpers. See exact residue token hunks and cleanup evidence references.",
-      "author": "support-impact-author-bgagent-1fd43f09",
-      "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
-      "review_evidence": "Independent source/hash review: refact-agent/engine/src/tools/file_edit/tool_apply_patch.rs: reviewed removal of {'names': ['unused import: `std::path::PathBuf`'], 'diagnostic_indices': [189], 'before_byte_span': [21490, 21513], 'removed_text': 'use std::path::PathBuf;', 'evidence': 'rustc unused_imports MachineApplicable deletion; import in cfg(test) scope or test-only file'} within explicit cfg(test) items/modules. 4 actual same-path retained cases keep complete attributed canonical body and enclosing-context hash against pinned MAIN. Conservative affected map contains exactly those current fingerprints."
+      "impact": "Arm the existing AFTER_TEMP_WRITE injection against the actual planned second file path rather than raw temporary-directory spelling. Preserve reached partial-commit failure, exact changed/unchanged lists, old/new bytes and temporary cleanup assertions.",
+      "execution_context": "One existing transaction-failure fixture repaired; no production durable fault behavior or patch commit semantics changed.",
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b",
+      "review_evidence": "Independent source/oracle reviews background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b and background_agent:bgagent-88d8e57b-e68d-467a-9332-5f96a7c684b7 preserve guards. Six-body semantic accounting background_agent:bgagent-342e1832-7aef-489a-9f0b-f56a76356875 maps5/6/1/1/3/1, not assertion counts; historical-record preservation parent-verified separately. No Windows restored runtime pass or new critical mutant proof claimed before CI. Astra initial review f969 identified private-directory/fixture producers; those corrected and fresh review88d8e57b found no remaining changed-boundary blocker. Existing enriched-memory direct duplicate touch is separately recorded, not introduced or claimed fixed."
     },
     {
       "path": "refact-agent/engine/src/tools/file_edit/undo_history.rs",
@@ -15827,18 +15995,18 @@
     },
     {
       "path": "refact-agent/engine/src/http/routers/v1/git_branches.rs",
-      "before_sha256": "95ec7a5223ca99a1acf67308d5ec9cf0ea69abfc8ceb8b11205a3f5f19a33067",
-      "after_sha256": "e623788b493f7f70802e92a45028618199755922c67996b40cad8ce63abf6956",
+      "before_sha256": "e623788b493f7f70802e92a45028618199755922c67996b40cad8ce63abf6956",
+      "after_sha256": "fa6620eea1f6589e2a8f729c767d6aa891364cd8b26e6522d9d03c8c392e7981",
       "affected_tests": [
         "03d5c0755fba184afc5e40a2ee1b891c6c757bf916a45d35db59efeddcaa5ffe",
         "56686003974c20c4dff062be60cba50ba0fe7419e166c9b1a29100df3f3e4e87",
-        "790f69de66e8bdcd028f9713ee8a98ee96176f0846ce9c0a65c903fff2dc9de8"
+        "9c5530942b372d5c5595f3b00378d68b05e9cf9b85ff01ed27a1db6529bb04f5"
       ],
-      "impact": "Production: upstream remote validated (\".\"/invalid => 409 no_upstream); push.default=simple upstream_mismatch 409; missing remote ref => no_upstream, [remote rejected] => rejected, auth_failed now 502; checkout/create-with-checkout refuse non-clean repo state; rename via `git branch -m` (updates linked worktree HEADs). Test module unchanged; the three existing tests pass.",
-      "execution_context": "Default engine library test context (cargo test --lib); RUST_MIN_STACK=16777216; no features, ignores or shared-fixture rewrites. Focused git_branches::tests git_write::tests git_read::tests routers::v1: 195 passed 0 failed.",
-      "author": "bgagent-fe-engine-git (author subagent, wave F-E)",
-      "reviewer": "bgagent-fd720f32-3ebc-4060-b064-50e88a69a1f9",
-      "review_evidence": "Independent claude_code/claude-sonnet-5-5 review bgagent-fd720f32-3ebc-4060-b064-50e88a69a1f9 (subchat-d7393a5b-d03a-46c9-9818-ea1b368f08ca): VERDICT APPROVE for both changed tests (rollback directory-replacement case, status INDEX_NEW|WT_DELETED case). Verified the mutA/mutA2/mutH diff sha256 values, the exit-101 logs and the restored final sources by cmp, reproduced in a scratch repo that git restore deletes a directory replacing a HEAD file (ignored contents included), and accepted case accounting 3->4 / 1. Requested wording changes (mutA2 described as fault injection, not pre-fix; mutH line-number provenance) are applied in these rows."
+      "impact": "Set core.autocrlf=false in shared repository fixture configuration and clone options before initial checkout. Exact original LF-content and remote-ref safety assertions remain unchanged.",
+      "execution_context": "Portable test repository checkout line-ending setup; no shipping Git behavior or forced push/pull policy changed. Six existing fetch/pull/push cases retained.",
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b",
+      "review_evidence": "Independent source/oracle reviews background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b and background_agent:bgagent-88d8e57b-e68d-467a-9332-5f96a7c684b7 preserve guards. Six-body semantic accounting background_agent:bgagent-342e1832-7aef-489a-9f0b-f56a76356875 maps5/6/1/1/3/1, not assertion counts; historical-record preservation parent-verified separately. No Windows restored runtime pass or new critical mutant proof claimed before CI. Astra initial review f969 identified private-directory/fixture producers; those corrected and fresh review88d8e57b found no remaining changed-boundary blocker. Existing enriched-memory direct duplicate touch is separately recorded, not introduced or claimed fixed."
     },
     {
       "path": "refact-agent/engine/src/chat/context_rebuild.rs",
@@ -17856,11 +18024,12 @@
     },
     {
       "path": "refact-agent/engine/src/agents/spawn.rs",
-      "before_sha256": "616eaa06b9d682879d00abc09700b353b30d4c4d0c4ea959ab2be1bcafab0061",
-      "after_sha256": "847eefe746a9922af058f55a7a3790fa95ca7e2dfc2bdc097b1ac8179ad0b0e2",
+      "before_sha256": "e7f2347d184afff45f4347fdad007a593c137208bb205925373dcf475175a5c7",
+      "after_sha256": "3130279d826dd3744f027f17c7ce9285c19e4fce8d784a0ec1d9949d63fd1686",
       "affected_tests": [
         "5c72ae75ac7d508c984f668f97bb8609f324ef8a04bf8ad0031489a4f189ff0b",
         "2856ec86e2e49cdd367cb952af252f1c11bd5e58ba9dd0d419177a5d95a20b04",
+        "bee72d1b33ce79f77340aef6f4da9aa4e5c9bdade15959118c3cf02201b53183",
         "1c8c1018b4f18ed171535654f40565fe362bf2529b88b00c9ae24d7fbd7ff58e",
         "9cc5d68a62a427fe54488aa4fc4e1a9261d87c4512b5b168e3d4a55281a4784f",
         "dc31cd53acc45ab394e585ec4646e9f7b51d52682cfc4eec7a0b2f844497d0ef",
@@ -17870,25 +18039,27 @@
         "b9e84a6fe6ace3c64c4a0c5c821c36b73e6ae70240830f17201cc44673d34e96",
         "fee7ba9c41f0b3e48538321ff6c006ed83efee2c353d8ba393665d6d3e8ee011"
       ],
-      "impact": "Optional request cap, model-window launch validation/application, effective preview cap/window and recovery cap comparison. Maps every current same-file test; does not claim end-to-end caller coverage.",
-      "execution_context": "Existing engine lib/module context, cfg, annotations and dependencies retained. Conservative same-path mapping, not a complete transitive impact graph or execution claim.",
-      "author": "background_agent:bgagent-61493284-67af-418b-908a-aa34fc854759 (ledger preparation)",
-      "reviewer": "background_agent:bgagent-adaeddf1-8f7e-43c2-8222-00c7b5c1beba (source review only)",
-      "review_evidence": "Source review subchat-b5ed3883-90be-441b-a9ee-4a950c547ebb accepted unchanged-default mechanical edits and production/test relevance contingent on actual critical red/green witness. This is not witness evidence or final ledger approval; parent independent ledger review remains pending."
+      "impact": "Use physically canonical simplified paths when comparing accepted project roots during launch, recovery, queued revalidation and resumed-session installation. Keep all exact ownership, registry, revision, cancellation and trusted-project checks.",
+      "execution_context": "Production root producers already use trusted resolver representation. prepare_launch input normalization is a test preparation seam, not claimed new production authorization.",
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b",
+      "review_evidence": "Independent source/oracle reviews background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b and background_agent:bgagent-88d8e57b-e68d-467a-9332-5f96a7c684b7 preserve guards. Six-body semantic accounting background_agent:bgagent-342e1832-7aef-489a-9f0b-f56a76356875 maps5/6/1/1/3/1, not assertion counts; historical-record preservation parent-verified separately. No Windows restored runtime pass or new critical mutant proof claimed before CI. Astra initial review f969 identified private-directory/fixture producers; those corrected and fresh review88d8e57b found no remaining changed-boundary blocker. Existing enriched-memory direct duplicate touch is separately recorded, not introduced or claimed fixed. After source review, rustfmt only wrapped two existing physical-canonical comparison expressions; no token or behavioral change."
     },
     {
       "path": "refact-agent/engine/src/agents/spawn_lifecycle_tests.rs",
-      "before_sha256": "c0f4d651ebff2a7849dfa5064b9e4e91a4c8a9a30ed1774f7ad33a0ab7b26810",
-      "after_sha256": "c0a81c55d00182140e6ba385470bbca41fbee0d4b57caf9a954c8195fdd2adf7",
+      "before_sha256": "da2590a0c4a1f89f334904f48a5e7df6af4122ae78e8535c5ac5c2eb70b2b63f",
+      "after_sha256": "506ab8ddd26bda6d62eb1a8363b17a92bd4ff2c996e20f1f623cb00dcbdabb75",
       "affected_tests": [
         "44efc32a53cc7e3c097d197c1cb018038c80073a3afe76e4043bc824ec4c3cf9",
         "27f905072d3dfb311da9b6977f106fe9bd63e045878a36924323f37bb052181c",
         "d937790d7e83c298341c261a563015180ade4b42751214fa861f163b6e96a8f8",
-        "8bf846f5b761307bf85a4b4bb1faf2638895cfc24840b2ac7ce8080c9f121976",
+        "8482c7abc6f50c5c3b7a5cf3dea914f11ff005e381c2dbba56cc5fee8c194858",
+        "ae83264b976820fb1e740b01bd5126afc859889148cf51a482c8ece5964b65e2",
+        "2b5aef1353c0b079159c4aa53adfbe643c34fbf65435744d6ca9f8879bdfd2e3",
         "e6ebb7889c41b610634785c344bde61c4d353f5b56e4c6e92a8fbcd5ca91ba36",
-        "0049fe4826501a66e230dd19742f29dbb4718de45591b8be538eb3fb844f128d",
+        "6c086d5419ff339b239428c8459ac0012d7a054f6b2a4246b3f74bb4f915bb5b",
         "fd89821984018bc2e2b52897f56553062e4dbf83636e012c55d80facec48d7ee",
-        "eace5d3a7131378c27a86fd6d3d4fbb1dd0cb104616bf047f84e5fb7e793478f",
+        "7a22e1bdd07a1e830b6f2b3034bfbce44e931ca8a61d4a238b843ef2904e5f67",
         "349a3ee9120b0ff4587a2cb55cb748c29f245f65960ea2981fe7387bbce0455f",
         "38ec918527ad2bc06b76396cf1d5889645907a4904c89ac478b9a1c3e0bddeb6",
         "10d8bf11bfad3f9b776081320ec1d9709e3b0ab3c7467a5aa3eade5e9a653f32",
@@ -17901,11 +18072,11 @@
         "ed76b927a28c34f14d6bf0db19d6d70d27230a374423f88c38a36b27f76d2b18",
         "47aaf792a78f0756c87c25356874fa8c9c4884bf88c1ca4baacd8aa60d8d9648"
       ],
-      "impact": "Only absent context_tokens_cap or false implicit_context_window compatibility literal added to existing production/test-support constructor. Existing fixture algorithm and assertions unchanged. Maps every current same-file test conservatively.",
-      "execution_context": "Existing engine lib/module context, cfg, annotations and dependencies retained. Conservative same-path mapping, not a complete transitive impact graph or execution claim.",
-      "author": "background_agent:bgagent-61493284-67af-418b-908a-aa34fc854759 (ledger preparation)",
-      "reviewer": "background_agent:bgagent-adaeddf1-8f7e-43c2-8222-00c7b5c1beba (source review only)",
-      "review_evidence": "Source review subchat-b5ed3883-90be-441b-a9ee-4a950c547ebb accepted unchanged-default mechanical edits and production/test relevance contingent on actual critical red/green witness. This is not witness evidence or final ledger approval; parent independent ledger review remains pending."
+      "impact": "Normalize shared RepoFixture.source and the existing capped-resume fixture source to shipping physical canonical representation. Test assertions and runner behavior are unchanged.",
+      "execution_context": "Shared fixture repair plus one directly changed prerequisite body. Capped-resume five existing scenarios accounted separately; no new scenario added.",
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b",
+      "review_evidence": "Independent source/oracle reviews background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b and background_agent:bgagent-88d8e57b-e68d-467a-9332-5f96a7c684b7 preserve guards. Six-body semantic accounting background_agent:bgagent-342e1832-7aef-489a-9f0b-f56a76356875 maps5/6/1/1/3/1, not assertion counts; historical-record preservation parent-verified separately. No Windows restored runtime pass or new critical mutant proof claimed before CI. Astra initial review f969 identified private-directory/fixture producers; those corrected and fresh review88d8e57b found no remaining changed-boundary blocker. Existing enriched-memory direct duplicate touch is separately recorded, not introduced or claimed fixed."
     },
     {
       "path": "refact-agent/engine/src/agents/subagent_hook_tests.rs",
@@ -19891,6 +20062,96 @@
       "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
       "reviewer": "background_agent:bgagent-cda8b183-bfb4-4f98-9eee-915615fb8ebd",
       "review_evidence": "Independent terra bgagent-cda8b183 and astra bgagent-b8f06483 reviewed the round2 native/workflow/privacy diff and retained hosted MSVC qualification limits. Later fixed Git call label reviewed by astra; Cross passthrough independently source-approved by background_agent:bgagent-4fdc1aba-7a98-4075-935e-abd77107f062: commit label remains metadata, all source/environment/controller/publication checks remain intact; actual restored Cross execution parent-verified, not hosted build qualification. Local evidence under target/ci-round2; only executed results count as passes. No new or materially changed Rust test bodies and no added scenario credit."
+    },
+    {
+      "path": "refact-agent/engine/src/agents/approval_target.rs",
+      "before_sha256": "e316dc45b5d9f01fc2079f7fcdfe8a8ccf37554c8352a6313accf3906179d07d",
+      "after_sha256": "4bac3850442a5bdfc9164398794a3c06eae4b9deff70a2627a9ce99fedadada3",
+      "affected_tests": [
+        "8c0cf973aec44c88ba1c2b63df7f6b6090875580453239b3568fc558ed54cac7",
+        "cf70bfb02df3d70be74cca36ca425001dfb403be45b9d118e3cea030075da5df",
+        "2a66b6d646ca4c12c10647922cc54f8776c80b81042eb18f70e96970f80ab3b9",
+        "4577bf665850d67736accf82dfcbf20df0909763851d708452c4e3cb90711d89",
+        "cb45d62b964295b46bfc6b4ebe7ea15397685efed8bdea996d12a250798ceb73",
+        "e222d2cf45bc18cff9ee363c8ff5fc3784dc01970558744e2b80d9a641ec2ef4",
+        "7da08386ad8abebcafdf9c4b14b578a8b8a0dc5e0d9900645d1ef6be5fc79b3f",
+        "1f0f67a4e597143fa393f18aed4d68237699256a813b585fcedb35b0f7c4f73f",
+        "4fd4046393b24500c46f3be6638415ee2005bdd95158641ae2c26202b121917b",
+        "ad215b151205fb536a88ccdad942a6784e784998c0ab19eb6cd1b53c40703fe2",
+        "8f8941581737e84d2a5be8e5e023e1b34d2891be69e1efe87b98cd734c569b76",
+        "29bc1b6c8e5de7bf07e6c6aab13d1b4c5ee700b61b9026f1cc26e47f52def805",
+        "5a9159705906a29e07f405bb4ef0ed064e165f9bb57dad3d980b965138214115",
+        "14f19349d6a953ab878da2948aaefd302c6ee6c4dffd572b49e21ea78eea0a50",
+        "f80300dc3393c761288b00f0dfc4f63802257b9e9cd0eb5f13980e11e82eaec5",
+        "86ab105435982176d4c4bdd9977a27e883c8d05c484726f32e7276335ffc21cd",
+        "f5ac882a1444e608d59a5abc546924d1a8f3b30810a80aafecd09f1225da9fed"
+      ],
+      "impact": "Simplify the physically canonicalized task directory before component containment against the already simplified trusted project root. Retain authorized project/task ownership and rejection on canonicalization error or outside containment.",
+      "execution_context": "Production path-representation consistency only; approval state/generation/card-owner guards and original negative tests remain unchanged.",
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b",
+      "review_evidence": "Independent source/oracle reviews background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b and background_agent:bgagent-88d8e57b-e68d-467a-9332-5f96a7c684b7 preserve guards. Six-body semantic accounting background_agent:bgagent-342e1832-7aef-489a-9f0b-f56a76356875 maps5/6/1/1/3/1, not assertion counts; historical-record preservation parent-verified separately. No Windows restored runtime pass or new critical mutant proof claimed before CI. Astra initial review f969 identified private-directory/fixture producers; those corrected and fresh review88d8e57b found no remaining changed-boundary blocker. Existing enriched-memory direct duplicate touch is separately recorded, not introduced or claimed fixed."
+    },
+    {
+      "path": "refact-agent/engine/src/memories.rs",
+      "before_sha256": "a30fdaa6dba9f70399ba7152f99572fcd46fc7a99d6da7e64236f74237787b96",
+      "after_sha256": "f8ba17fd058e3922b22fb8b90f3076815f9eb1b8d32efca7b54b5c9b5566e54e",
+      "affected_tests": [
+        "1e44c658363f8b355c352b24401d75d2455615a656f5de52748f13f715c0c21f",
+        "47d0137003ecb5f7eea9e821a7fe9a3725c9b18086f39209ffd82eb8acd6d0ba",
+        "2bd16550f6e0bbe054ba7b0edb62f004d0988c34895be73fdf0248f46fafc38a",
+        "94532433bdd1fc32fac61a890b7d67823e10988c9231a389411e396640671302",
+        "389c72f15f9afb518bcf610feca16e918448934bc1d148ec51af77b33cfb7317",
+        "7d5ef414fc6ca111ff277f42b3aff7bca9bcfc988ab29b5610f993ca0eb6de8c",
+        "59e01a21e8b21483300dd6bffcd43cd00ae1218ed309f290732b7373a809cb1c",
+        "8a85a81d7cefa16902689665a69bd8f24b3abf5e1c36ba57954a5335abb0204b",
+        "1e7aeb70b3230ee08f8e8dc5a57493e76da2e07832d5aea999fb455daa907850",
+        "d707f90b71d6ccafc7d9694d355731f523ef833e2b08273a76cc57dc2e399806",
+        "59b040966bd2b4ed104d2c43f487551feb22d34606901091edbd64ce85e0731f",
+        "5fcde324770db56eb95e3c849c7426a38fe3ff00cdba3abf1d00329c194b7464",
+        "bd990cdfb0d2079d6e6713e19be181d8781d9fa7ee837cce7decaa6dbf86a46f",
+        "d46850c0645a55e377ffd759a8428fee5f4b922d4eedc1b72f6e0409b9811ed0",
+        "b1cc415980007941609733cc9ccb35cfaa26b032a4bcec67824e92835f6a4adb",
+        "4b2eba1506d716b9bb0d45d43406065b142ffbf9b199bb3fcee6b243fcfe06e6",
+        "a46129612aef636ea69c343206fc619bf643f30ec5d85ed22396eff3ab245701"
+      ],
+      "impact": "Simplify physically canonicalized memory root and indexed candidate consistently before strict identity and component-containment checks; normalize the local-project fixture root. Retain lexical local-root restriction, canonical equality and physical containment, so foreign and symlink-escape candidates remain refused.",
+      "execution_context": "Shipping duplicate candidate identity consistency plus one fixture representation change. Other enriched-memory entry-point bypass remains separately recorded, not introduced or claimed fixed.",
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b",
+      "review_evidence": "Independent source/oracle reviews background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b and background_agent:bgagent-88d8e57b-e68d-467a-9332-5f96a7c684b7 preserve guards. Six-body semantic accounting background_agent:bgagent-342e1832-7aef-489a-9f0b-f56a76356875 maps5/6/1/1/3/1, not assertion counts; historical-record preservation parent-verified separately. No Windows restored runtime pass or new critical mutant proof claimed before CI. Astra initial review f969 identified private-directory/fixture producers; those corrected and fresh review88d8e57b found no remaining changed-boundary blocker. Existing enriched-memory direct duplicate touch is separately recorded, not introduced or claimed fixed."
+    },
+    {
+      "path": "refact-agent/engine/src/tools/file_edit/stale_read_dedup_tests.rs",
+      "before_sha256": "3f9dfc89fe070b598df5476a0a0180cb633e88c03e5e5ed1def8da022455b6f9",
+      "after_sha256": "b260699058b392faae0f29725c8df42b7ee9e3585011032c2d1903c52dd6e050",
+      "affected_tests": [
+        "8f60c7a2d0b1a503919a791944624eed7b75b22bb219647f0aa6da585d66c562",
+        "7af39c322f8248600620a040a7d29ca8cf14bd05f813397d94338df029d36091",
+        "0153b63edf36bc4fd9b99618fa5a440ee7974f91b2892c7c98aefe5452729527",
+        "b87e0c9486f2b2a78212b09f13abd31c5ee422e458371185c0e918bfe91c96e8",
+        "13901c0ca64afe956ca6a4f87abd5fe56f6ac3d0f14d86adcc049b0a91bbb34f",
+        "078de8b1c977b2a406025eb9a6e3f88cdce23403ab1ea1fab0ec715a124f8414"
+      ],
+      "impact": "Find the existing fixture read observation by stable resolved FileKey plus actor instead of raw caller path spelling. All digest, whole-read and stale-read assertions remain unchanged.",
+      "execution_context": "Shared read-observation lookup prerequisite only; does not modify shipping read stamps or authorize stale bytes. Six test consumers and inherited meaningful counts retained.",
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b",
+      "review_evidence": "Independent source/oracle reviews background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b and background_agent:bgagent-88d8e57b-e68d-467a-9332-5f96a7c684b7 preserve guards. Six-body semantic accounting background_agent:bgagent-342e1832-7aef-489a-9f0b-f56a76356875 maps5/6/1/1/3/1, not assertion counts; historical-record preservation parent-verified separately. No Windows restored runtime pass or new critical mutant proof claimed before CI. Astra initial review f969 identified private-directory/fixture producers; those corrected and fresh review88d8e57b found no remaining changed-boundary blocker. Existing enriched-memory direct duplicate touch is separately recorded, not introduced or claimed fixed."
+    },
+    {
+      "path": "refact-agent/engine/src/tools/file_edit/tool_undo_textdoc.rs",
+      "before_sha256": "c85b1e2c9d6b53fc897867ca2f3f9fd23b8cc87c7acf93ee14b5abf0e3cc3b00",
+      "after_sha256": "038436b3b75830b5dac75cec46f28a16c8acec152086e1675eb4daaf1c1b3abe",
+      "affected_tests": [
+        "20b1faae78e35a4c8b94cf5f36b4c03597bd05909a9da690ff57c72d1eeaa8db",
+        "8706ea3ccade4d3ee6044b8876ccc565ff5695bb8505b5eccd3729a15f3ffc0f"
+      ],
+      "impact": "Normalize both existing test paths before creating edit-history entries so shipping parsed undo lookup uses the identical path spelling. Keep empty-file existence, successive history consumption, exhausted refusal and external-edit preservation assertions.",
+      "execution_context": "Only two fixture seeds changed; no global undo-map or shipping stale-content guard changes. Three undo-state executions and one external-edit refusal charged separately.",
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b",
+      "review_evidence": "Independent source/oracle reviews background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b and background_agent:bgagent-88d8e57b-e68d-467a-9332-5f96a7c684b7 preserve guards. Six-body semantic accounting background_agent:bgagent-342e1832-7aef-489a-9f0b-f56a76356875 maps5/6/1/1/3/1, not assertion counts; historical-record preservation parent-verified separately. No Windows restored runtime pass or new critical mutant proof claimed before CI. Astra initial review f969 identified private-directory/fixture producers; those corrected and fresh review88d8e57b found no remaining changed-boundary blocker. Existing enriched-memory direct duplicate touch is separately recorded, not introduced or claimed fixed."
     }
   ]
 }

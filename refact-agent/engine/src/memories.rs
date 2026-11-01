@@ -830,12 +830,14 @@ async fn find_duplicate_memory(
         // A local create must never touch a matching global/other-project memory.
         let root = get_first_knowledge_dir(gcx.clone()).await.ok()?;
         let canonical_root = tokio::fs::canonicalize(&root).await.ok()?;
+        let canonical_root = dunce::simplified(&canonical_root);
         if !path.starts_with(&root) {
             return None;
         }
         if tokio::fs::try_exists(&path).await.unwrap_or(false) {
             let canonical = tokio::fs::canonicalize(&path).await.ok()?;
-            if canonical != path || !canonical.starts_with(&canonical_root) {
+            let canonical = dunce::simplified(&canonical);
+            if canonical != dunce::simplified(&path) || !canonical.starts_with(canonical_root) {
                 return None;
             }
             return Some(path);
@@ -2545,7 +2547,7 @@ mod tests {
         let local = tempfile::tempdir().unwrap();
         let foreign = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let local_root = std::fs::canonicalize(local.path()).unwrap();
+        let local_root = crate::files_correction::canonicalize_normalized_path(local.path().into());
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![local_root.clone()];
         let foreign_path = foreign.path().join("foreign.md");
         let fm = create_frontmatter(Some("Foreign"), &[], &[], &[], "domain");

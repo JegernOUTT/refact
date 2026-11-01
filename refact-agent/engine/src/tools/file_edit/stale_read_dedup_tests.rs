@@ -124,11 +124,12 @@ impl Fixture {
     }
 
     fn stamp(&self) -> ReadObservation {
+        let (key, _) = file_activity::resolve_key(&self.path);
         file_activity::observations(None)
             .reads
             .into_iter()
             .rev()
-            .find(|read| read.actor == self.actor && read.path == self.path.to_string_lossy())
+            .find(|read| read.actor == self.actor && read.key == key)
             .unwrap()
     }
 

@@ -967,6 +967,7 @@ mod tests {
             ("user.email", "alice@example.com"),
             ("commit.gpgsign", "false"),
             ("core.hooksPath", ".git/no-hooks"),
+            ("core.autocrlf", "false"),
             ("pull.rebase", "false"),
             ("push.default", "simple"),
         ] {
@@ -1373,6 +1374,8 @@ mod tests {
                 &[
                     "clone",
                     "-q",
+                    "-c",
+                    "core.autocrlf=false",
                     bare.to_str().unwrap(),
                     clone.to_str().unwrap(),
                 ],

@@ -548,7 +548,11 @@ pub(crate) async fn recover_run_config(
             record.merge_status.as_deref() == Some("merged") || !worktree.root.is_dir()
         });
     if let Some(worktree) = &config.worktree {
-        if worktree.source_workspace_root.canonicalize().ok().as_ref() != Some(&root) {
+        if dunce::canonicalize(&worktree.source_workspace_root)
+            .ok()
+            .as_ref()
+            != Some(&root)
+        {
             return Err("original child checkout is unavailable".into());
         }
         if replace_worktree {
@@ -837,7 +841,10 @@ async fn validate_launch_request(app: &AppState, req: &SpawnRequest) -> Result<P
     let source = crate::coordination::scope::session_source_root(&*parent.lock().await);
     let root = trusted_project_root(app, source).await?;
     if req.parent_worktree.as_ref().is_some_and(|worktree| {
-        worktree.source_workspace_root.canonicalize().ok().as_ref() != Some(&root)
+        dunce::canonicalize(&worktree.source_workspace_root)
+            .ok()
+            .as_ref()
+            != Some(&root)
     }) {
         return Err("requested parent checkout does not match trusted project scope".into());
     }
@@ -850,7 +857,7 @@ async fn validate_launch_request(app: &AppState, req: &SpawnRequest) -> Result<P
 async fn validate_unscoped_project(app: &AppState, root: &Path) -> Result<(), String> {
     if crate::files_correction::get_active_project_path(app.gcx.clone())
         .await
-        .and_then(|path| path.canonicalize().ok())
+        .and_then(|path| dunce::canonicalize(path).ok())
         .as_deref()
         != Some(root)
     {
@@ -1471,6 +1478,8 @@ async fn prepare_launch(
     ),
     String,
 > {
+    let project_root = dunce::canonicalize(project_root)
+        .map_err(|_| "parent project scope is not available or authorized".to_string())?;
     let parent_state = launch_parent_state(app, &req.parent_chat_id).await?;
     prepare_launch_for_parent_run(app, req, child_chat_id, project_root, parent_state).await
 }
@@ -2389,7 +2398,7 @@ async fn revalidate_prepared_launch(
             return Err("parent launch was cancelled or closed".into());
         }
         if crate::coordination::scope::session_source_root(&parent)
-            .and_then(|root| root.canonicalize().ok())
+            .and_then(|root| dunce::canonicalize(root).ok())
             .as_ref()
             != Some(&prepared.project_root)
             || parent.thread.worktree.as_ref().map(|w| (&w.id, &w.root))
@@ -2657,8 +2666,7 @@ async fn resume_agent_for_parent_run(
         .map(|w| w.source_workspace_root.clone())
         .or_else(|| Some(accepted_root.clone()))
         .ok_or("original child project scope unavailable; refusing to resume in a possibly different project")?;
-    let project_root = project_root
-        .canonicalize()
+    let project_root = dunce::canonicalize(project_root)
         .map_err(|error| format!("original child project unavailable: {error}"))?;
     let parent = app
         .chat
@@ -3531,7 +3539,7 @@ pub(super) async fn install_resumed_session(
         };
         if saved_source
             .as_ref()
-            .is_some_and(|saved| saved.canonicalize().ok().as_deref() != Some(source))
+            .is_some_and(|saved| dunce::canonicalize(saved).ok().as_deref() != Some(source))
         {
             return Err("saved child session does not match accepted project scope".into());
         }

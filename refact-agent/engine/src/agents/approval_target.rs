@@ -128,7 +128,7 @@ impl ApprovalTarget {
         let task_dir = tokio::fs::canonicalize(task_dir)
             .await
             .map_err(|_| "board task scope unavailable")?;
-        if !task_dir.starts_with(source.join(".refact").join("tasks")) {
+        if !dunce::simplified(&task_dir).starts_with(source.join(".refact").join("tasks")) {
             return Err("board task is outside the authorized project".into());
         }
         let board = crate::tasks::storage::load_board(app.gcx.clone(), &meta.task_id).await?;

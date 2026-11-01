@@ -159,7 +159,7 @@ impl OperatorStore {
         root: &Path,
         identity: &ProjectIdentity,
     ) -> Result<(super::operator_observability::PolicySnapshot, usize), OperatorStoreError> {
-        let root = fs::canonicalize(root)?;
+        let root = dunce::canonicalize(root)?;
         if identity.canonical_root != root.to_string_lossy() {
             return Err(OperatorStoreError::ProjectMismatch);
         }
@@ -1077,7 +1077,7 @@ impl OperatorStore {
         identity: &ProjectIdentity,
     ) -> Result<Self, OperatorStoreError> {
         validate_identity(identity)?;
-        let canonical_root = fs::canonicalize(project_root)?;
+        let canonical_root = dunce::canonicalize(project_root)?;
         if identity.canonical_root != canonical_root.to_string_lossy() {
             return Err(OperatorStoreError::ProjectMismatch);
         }
@@ -4190,7 +4190,7 @@ fn private_child_directory(parent: &Path, child: &str) -> Result<PathBuf, Operat
         }
         Err(error) => return Err(error.into()),
     }
-    let canonical = fs::canonicalize(&path)?;
+    let canonical = dunce::canonicalize(&path)?;
     if !canonical.starts_with(parent) {
         return Err(OperatorStoreError::InvalidInput(
             "operator store directory escapes project root",
@@ -4409,7 +4409,7 @@ mod tests {
     fn project(root: &Path) -> ProjectIdentity {
         ProjectIdentity {
             project_id: "p".into(),
-            canonical_root: fs::canonicalize(root)
+            canonical_root: dunce::canonicalize(root)
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),

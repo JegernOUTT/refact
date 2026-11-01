@@ -649,7 +649,7 @@ mod tests {
         let plan = plan_patch(gcx.clone(), &args, None, None).await.unwrap();
         let armed = crate::file_activity::durable_fault::arm_for(
             crate::file_activity::durable_fault::AFTER_TEMP_WRITE,
-            dir.path().join("b").to_string_lossy().to_string(),
+            plan.file_results[1].path.to_string_lossy().to_string(),
         );
 
         let error = super::super::patch_transaction::apply(gcx, &plan)

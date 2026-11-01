@@ -316,6 +316,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("empty.txt");
         std::fs::write(&path, "").unwrap();
+        let path = crate::files_correction::canonicalize_normalized_path(path);
         let gcx = crate::global_context::tests::make_test_gcx().await;
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().into()];
         write_file(gcx.clone(), &path, &"one".into(), false, Some(""))
@@ -342,6 +343,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("file.txt");
         std::fs::write(&path, "before").unwrap();
+        let path = crate::files_correction::canonicalize_normalized_path(path);
         let gcx = crate::global_context::tests::make_test_gcx().await;
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().into()];
         write_file(gcx.clone(), &path, &"after".into(), false, Some("before"))

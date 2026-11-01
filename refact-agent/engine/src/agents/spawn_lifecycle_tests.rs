@@ -93,7 +93,7 @@ pub(crate) async fn repo_fixture() -> RepoFixture {
     let config = temp.path().join("config");
     std::fs::create_dir_all(&source).expect("create source repo");
     init_repo(&source);
-    let source = std::fs::canonicalize(source).expect("canonical source");
+    let source = dunce::canonicalize(source).expect("canonical source");
     let gcx = crate::global_context::tests::make_test_gcx_with_dirs(cache.clone(), config).await;
     *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
     let (project_root, _) = crate::caps::project_model_defaults_state(gcx.clone()).await;
@@ -1138,7 +1138,7 @@ async fn capped_child_resumes_once_with_full_history_and_remaining_lifetime_budg
         crate::agents::spawn::recover_run_config(&fixture.app, PARENT, &stopped.agent_id)
             .await
             .unwrap();
-    let source = recovered.root.canonicalize().unwrap();
+    let source = dunce::canonicalize(&recovered.root).unwrap();
     let before = serde_json::to_value(&live.lock().await.thread).unwrap();
     assert!(!before["worktree"]["id"].as_str().unwrap().is_empty());
     let bytes = std::fs::read(saved.source_path.clone()).unwrap();
