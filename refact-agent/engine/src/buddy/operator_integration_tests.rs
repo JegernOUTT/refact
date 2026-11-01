@@ -72,7 +72,7 @@ impl BuddyOperatorHarness {
     pub fn project_identity(&self) -> ProjectIdentity {
         ProjectIdentity {
             project_id: "buddy-operator-scratch".to_string(),
-            canonical_root: std::fs::canonicalize(self.project_root())
+            canonical_root: dunce::canonicalize(self.project_root())
                 .expect("canonical scratch root")
                 .to_string_lossy()
                 .into_owned(),

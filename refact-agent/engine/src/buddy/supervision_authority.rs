@@ -1569,10 +1569,19 @@ mod tests {
                 })
             },
         ));
-        let handle = crate::agents::spawn::spawn_background_agent(app, request)
+        let mut handle = crate::agents::spawn::spawn_background_agent(app, request)
             .await
             .unwrap();
-        entered.notified().await;
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            tokio::select! {
+                _ = entered.notified() => {}
+                result = &mut handle.completion_rx => {
+                    panic!("supervised child stopped before provider entry: {result:?}");
+                }
+            }
+        })
+        .await
+        .expect("supervised child did not reach provider entry");
         invalidate(&guard.authority.mandate_id).unwrap();
         release.notify_one();
         let record = tokio::time::timeout(std::time::Duration::from_secs(5), handle.completion_rx)

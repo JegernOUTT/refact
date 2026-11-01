@@ -144,13 +144,14 @@ jobs:
 
       - name: Run workspace library tests (Windows)
         if: startsWith(matrix.os, 'windows')
+        timeout-minutes: 90
         env:
           RUST_MIN_STACK: "16777216"
           REFACT_GUI_DIR: ${{ github.workspace }}\refact-agent\gui
           CMAKE_POLICY_DEFAULT_CMP0091: NEW
           CMAKE_MSVC_RUNTIME_LIBRARY: MultiThreaded
         shell: bash
-        run: cargo test --workspace --exclude refact-tui --profile ci-test --lib --target ${{ matrix.target }}
+        run: cargo test --workspace --exclude refact-tui --profile ci-test --lib --target ${{ matrix.target }} -- --nocapture --test-threads=1
 
       - name: Run workspace library tests (macOS)
         if: startsWith(matrix.os, 'macos')
@@ -168,13 +169,14 @@ jobs:
 
       - name: Run workspace integration tests (Windows)
         if: startsWith(matrix.os, 'windows')
+        timeout-minutes: 60
         env:
           RUST_MIN_STACK: "16777216"
           REFACT_GUI_DIR: ${{ github.workspace }}\refact-agent\gui
           CMAKE_POLICY_DEFAULT_CMP0091: NEW
           CMAKE_MSVC_RUNTIME_LIBRARY: MultiThreaded
         shell: bash
-        run: cargo test --workspace --exclude refact-tui --profile ci-test --test '*' --target ${{ matrix.target }}
+        run: cargo test --workspace --exclude refact-tui --profile ci-test --test '*' --target ${{ matrix.target }} -- --nocapture --test-threads=1
 
       - name: Run workspace integration tests (macOS)
         if: startsWith(matrix.os, 'macos')

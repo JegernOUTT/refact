@@ -13,7 +13,7 @@ use super::{
 fn identity(root: &Path) -> ProjectIdentity {
     ProjectIdentity {
         project_id: "supersede-fixture".into(),
-        canonical_root: std::fs::canonicalize(root)
+        canonical_root: dunce::canonicalize(root)
             .unwrap()
             .to_string_lossy()
             .into_owned(),

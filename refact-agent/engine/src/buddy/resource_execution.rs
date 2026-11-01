@@ -1339,7 +1339,7 @@ impl super::resources::RecoveryMaterialStore for LazyRecoveryMaterials {
 }
 impl PrivateRecoveryMaterials {
     pub fn open(project: &ProjectIdentity) -> Result<Self, ResourceError> {
-        let project_root = std::fs::canonicalize(&project.canonical_root)?;
+        let project_root = dunce::canonicalize(&project.canonical_root)?;
         if project_root.to_string_lossy() != project.canonical_root {
             return Err(ResourceError::ProjectScopeMismatch);
         }

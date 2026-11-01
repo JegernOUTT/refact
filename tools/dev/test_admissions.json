@@ -8024,6 +8024,34 @@
       "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
       "reviewer": "background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b",
       "review_evidence": "Independent source/oracle reviews background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b and background_agent:bgagent-88d8e57b-e68d-467a-9332-5f96a7c684b7 preserve guards. Six-body semantic accounting background_agent:bgagent-342e1832-7aef-489a-9f0b-f56a76356875 maps5/6/1/1/3/1, not assertion counts; historical-record preservation parent-verified separately. No Windows restored runtime pass or new critical mutant proof claimed before CI."
+    },
+    {
+      "fingerprint": "c7bab5758129db328de5b4bb4afe8654cd982bbcad21879a2d582c4f6e31f506",
+      "occurrences": 1,
+      "failure_mode": "The supervised fake-provider test waits forever when asynchronous child startup terminates or panics before the entry notification, holding the shared test-runner serialization lock and hiding subsequent Windows failures.",
+      "importance": "Make prerequisite failure terminate with an actionable diagnostic without changing the retained goal-installation and revocation safety oracle.",
+      "nearest_retained": {
+        "fingerprint": "16548850e74c1af8b83677b5d7fd8a6a8776cd6581f858aba7165fc426b5ada6",
+        "why_insufficient": "Native edit-scope revocation covers actual writes and cancellation but not pre-provider goal installation, restricted tool policy and asynchronous startup notification."
+      },
+      "oracle": "One existing integrated critical contract: exact goal/version/criteria/budget/model and constrained tool/approval policy are visible before provider work; revocation cancels before useful work. All original assertions remain. Diagnostic select adds early terminal-child failure and bounded entry timeout, not new behavioral scenarios.",
+      "prerequisites": "Await provider-entry notification against the same child completion receiver and a 30-second timeout, so setup failure cannot indefinitely hold the serial test-runner lock.",
+      "shipping_implementation": "refact-agent/engine/src/buddy/supervision_authority.rs::guarded_native_goal_is_installed_before_fake_provider_and_revoke_stops_it with unchanged actual supervised spawn, goal installation and revocation consumers.",
+      "determinism": "Existing fake runner and explicit release notification; finite provider-entry safety deadline, not wall-clock performance assertion. Completion receiver remains available after entry wins.",
+      "layer": "Existing Rust library test; diagnostic/prerequisite synchronization maintenance.",
+      "why_cheapest": "Bound the existing setup wait rather than skip the test, add a duplicate guard test or suppress failures.",
+      "meaningful_cases": 1,
+      "critical": false,
+      "criticality_reason": "Only the diagnostic/prerequisite-synchronization delta is ordinary. Underlying integrated authorization/revocation/concurrency contract remains critical; no new guard sensitivity, mutant kill or Windows restored pass claimed.",
+      "removed_coverage": "None. Original provider-entry, exact goal/tool/budget and post-revocation cancellation/no-useful-work assertions are unchanged.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "An early asynchronous child failure or runner panic before entered.notify_one leaves the old unbounded Notify await pending forever although completion can already be terminal. New select reports terminal failure; timeout reports missing entry. This is a precise source counterfactual about the test prerequisite, not a production security mutant.",
+        "evidence": "Cancelled Windows job124761335999 log target/ci-round2/windows-identity-cancelled.log reports this test running over60s before later serial-lock waiters; exact lock chain/cause not independently proven. Independent policy review bgagent-71a639b4 and source review bgagent-94cdd5e8 approve scoped classification; local compile/test and Windows diagnostics recorded separately, not claimed passed here."
+      },
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-71a639b4-15d5-4b93-a216-3b2bbbe3f909",
+      "review_evidence": "Independent Astra source/oracle review94cdd5e8 preserves all original critical assertions and counts one integrated scenario; independent Terra policy challenge71a639b4 approves ordinary diagnostic delta only, preserving underlying critical status. No runtime or production-mutant proof inferred."
     }
   ],
   "classifications": [
@@ -8041,13 +8069,13 @@
     {
       "path": "refact-agent/engine/src/buddy/resource_execution.rs",
       "kind": "item_macro",
-      "source_sha256": "28c14b3c4a05a8c4025d9a5fe9ef694db93fa1b73970812299abd3ecb0b02668",
+      "source_sha256": "c80de83eab5759fb406b846db154e9922b84dbe3ca856a1143c96d66fe33c9a1",
       "lead_sha256": "4ed7e7de0baebd05149b6c4504480bbf29ae03d5aebd512c63b0f01815767bf6",
       "conclusion": "non_test",
       "rationale": "tokio::task_local bounded invocation declares a static LocalKey and storage/access methods only, no test declarations, Rustdoc examples or includes. cfg(test), where present, gates support storage/hooks, not a generated test.",
       "author": "background_agent:bgagent-1c1ac627",
       "reviewer": "background_agent:bgagent-b38d7a33",
-      "review_evidence": "Independent source-only review subchat-b3ccfe84-10c0-4216-ae03-2b9d0428864d approved eleven bounded non-test leads; reviewer did not compute hashes. Admission author recomputed exact current source/lead SHA256 using shipping inventory. No runtime review claimed."
+      "review_evidence": "Independent source-only review subchat-b3ccfe84-10c0-4216-ae03-2b9d0428864d approved eleven bounded non-test leads; reviewer did not compute hashes. Admission author recomputed exact current source/lead SHA256 using shipping inventory. No runtime review claimed. Rebound file hash for unrelated fixture/physical-canonical changes; macro input and original non-test conclusion unchanged against721f5c4e."
     },
     {
       "path": "refact-agent/engine/src/chat/delivery.rs",
@@ -8569,13 +8597,13 @@
     {
       "path": "refact-agent/engine/src/buddy/jobs/autonomous_chats.rs",
       "kind": "item_macro",
-      "source_sha256": "2c759cd11ef935909755c1cb1d17db2c0f34414b4bb525cfc385be36a4d430bb",
+      "source_sha256": "9b70e88c9f81e0419e0be50a9e2f76944855b534c3f653976345666245561775",
       "lead_sha256": "39465246ce7a3d88964366fc895aab9d66aefe9b8eb44cdb5fa1ecdb65c87b4c",
       "conclusion": "non_test",
       "rationale": "This is include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/buddy/tests/workflow_migration.rs\")) inside tests::workflow_migration. It DOES insert three test definitions, but each is already charged by its tracked physical .rs source in this same inventory: legacy_migration_survives_expired_editor_restart_and_preserves_attention [043cb8f2eb45672fad76b2282d83c109ef2dd91ede2bbbac4ff9e24aa0031b68], linked_legacy_card_and_expired_editor_share_one_durable_proposal [efd92eb175d84a960213552d3062ac5cdd4af0f8d6c22e21c4468515fc2a6d29], oversized_migration_batch_rejects_before_any_write [d73ceffa4439fab7f0b9abf839b69d6e92edd8cd9427b4b614ae468e93906f69]. There is no additional macro-generated case or external unseen test body; this certificate resolves only redundant include discovery, not those tests, and assigns/subtracts no count.",
       "author": "background_agent:bgagent-63087e16-d20a-463e-94c7-f1f68f4b6fa8",
       "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
-      "review_evidence": "Independent current source/dependency review: This is include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/buddy/tests/workflow_migration.rs\")) inside tests::workflow_migration. It DOES insert three test definitions, but each is already charged by its tracked physical .rs source in this same inventory: legacy_migration_survives_expired_editor_restart_and_preserves_attention [043cb8f2eb45672fad76b2282d83c109ef2dd91ede2bbbac4ff9e24aa0031b68], linked_legacy_card_and_expired_editor_share_one_durable_proposal [efd92eb175d84a960213552d3062ac5cdd4af0f8d6c22e21c4468515fc2a6d29], oversized_migration_batch_rejects_before_any_write [d73ceffa4439fab7f0b9abf839b69d6e92edd8cd9427b4b614ae468e93906f69]. There is no additional macro-generated case or external unseen test body; this certificate resolves only redundant include discovery, not those tests, and assigns/subtracts no count."
+      "review_evidence": "Independent current source/dependency review: This is include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/buddy/tests/workflow_migration.rs\")) inside tests::workflow_migration. It DOES insert three test definitions, but each is already charged by its tracked physical .rs source in this same inventory: legacy_migration_survives_expired_editor_restart_and_preserves_attention [043cb8f2eb45672fad76b2282d83c109ef2dd91ede2bbbac4ff9e24aa0031b68], linked_legacy_card_and_expired_editor_share_one_durable_proposal [efd92eb175d84a960213552d3062ac5cdd4af0f8d6c22e21c4468515fc2a6d29], oversized_migration_batch_rejects_before_any_write [d73ceffa4439fab7f0b9abf839b69d6e92edd8cd9427b4b614ae468e93906f69]. There is no additional macro-generated case or external unseen test body; this certificate resolves only redundant include discovery, not those tests, and assigns/subtracts no count. Rebound file hash for unrelated fixture/physical-canonical changes; macro input and original non-test conclusion unchanged against721f5c4e."
     },
     {
       "path": "refact-agent/engine/src/buddy/memory_lifecycle.rs",
@@ -9354,15 +9382,15 @@
     },
     {
       "path": ".github/workflows/agent_engine_check.yml",
-      "before_sha256": "ef091a2ff031e78e70f437a014c16ce3967a7b35a367cb702834615b99332275",
-      "after_sha256": "360051ff73a587baea4f8b7afc5f09809342e0c0ba23b93d162cce4873246998",
+      "before_sha256": "360051ff73a587baea4f8b7afc5f09809342e0c0ba23b93d162cce4873246998",
+      "after_sha256": "ba376becfaa9c3fd6020d5da4a10a32d39ab15d57c139f1b9c727129ebfe9784",
       "affected_tests": [],
-      "impact": "Windows correctness native CMake dependencies now select the same static MSVC CRT as Rust for both library and integration test builds. Retain voice, full existing commands, all target entries and assertions.",
-      "execution_context": "Only Windows test steps receive CMAKE_POLICY_DEFAULT_CMP0091=NEW and CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded. Fresh platform cache namespace prevents reusing mixed-CRT Whisper artifacts. No /NODEFAULTLIB suppression or feature exclusions added.",
-      "no_tests_reason": "External native test-binary toolchain preparation only; all Rust test bodies, supports and scenario counts unchanged. This records no new coverage and does not claim actual Windows linking/execution before hosted results.",
+      "impact": "Retain the complete existing Windows test selection and existing refact-tui exclusion; emit immediate panic diagnostics and run test bodies serially, with explicit library90/integration60-minute process-step limits.",
+      "execution_context": "Diagnostic scheduling change only; in-test concurrency remains intact. No ignored test, new exclusion or assertion weakened. Step timeout is a failure, never a pass.",
       "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
-      "reviewer": "background_agent:bgagent-ae254875-abe7-4751-9004-ba3511527bf0",
-      "review_evidence": "Independent terra bgagent-79865d4d diagnosed pinned whisper-rs-sys0.10 CMAKE_BUILD_TYPE=RelWithDebInfo versus Release multiconfig selection with Rust crt-static. Astra bgagent-ae254875 independently checked dependency sources/CMP0091 and approved scope. Parent CMake Windows-target configure with actual Clang/llvm-rc selected MultiThreaded; this is not MSVC final-link proof. Hosted Windows library/integration pass remains required."
+      "reviewer": "background_agent:bgagent-94cdd5e8-2f7c-46a6-a1c1-5afba9bc837e",
+      "review_evidence": "Source review94cdd5e8 against721f5c4e preserves exact bindings/security guards and unchanged test selection; diagnosis42c94ea0 and implementationabe1d7c3 verified exact approved substitutions only. Diagnostic classification independently challenged71a639b4. No Windows restored passing result or fresh mutant proof claimed.",
+      "no_tests_reason": "External workflow scheduling or helper-only source has no direct test declarations; no new cases or executing scenarios inferred. Actual full Windows suite remains enabled and must run."
     },
     {
       "path": ".github/workflows/rust_test_budget.yml",
@@ -12287,15 +12315,15 @@
     },
     {
       "path": "refact-agent/engine/src/buddy/desk_actions_batch_tests.rs",
-      "before_sha256": "25b11e3385cea418d68d7ba0ffa751a2878bee5e6bb8b1e408ede3305e4ecebb",
-      "after_sha256": "2a5b940030237308b3e463939d40d6e761e37abdf22a32b3e5562f89c98f580b",
+      "before_sha256": "2a5b940030237308b3e463939d40d6e761e37abdf22a32b3e5562f89c98f580b",
+      "after_sha256": "750e2311b5875f58644684eb8bd82dbeb630154fc80790538e54ece55b4f4b8d",
       "affected_tests": [],
-      "impact": "refact-agent/engine/src/buddy/desk_actions_batch_tests.rs: canonical non-test residue changes remove 34 tokens and add 0 tokens. Cleanup evidence identifies unused import: `std::time::Instant`; unused imports: `ArtifactRevision`, `RunOutcome`, and `WorkItem`; unused import: `super::*`, unused imports: `operator_store::OperatorStore` and `outcome_runtime::OutcomeRuntime`. 12787\u21926186 global lexical definitions includes intentional coverage loss from case deletions; this support record does not claim strict duplication.",
-      "execution_context": "Same physical Rust path; no retained fingerprint/context relocation relative pinned main. Test-only ownership: inline cfg(test) modules or explicitly cfg(test) helper items; tests/ and *_tests.rs are test harness/module support. Removed dead helper/import/module scaffolding has no surviving intended executing consumer; conservative affected mapping lists surviving same-file tests for dependency review, not a claim all call deleted helpers. See exact residue token hunks and cleanup evidence references.",
-      "author": "support-impact-author-bgagent-1fd43f09",
-      "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
-      "review_evidence": "Independent source/hash review: refact-agent/engine/src/buddy/desk_actions_batch_tests.rs: reviewed removal of {'names': ['unused import: `std::time::Instant`'], 'diagnostic_indices': [24], 'before_byte_span': [0, 24], 'removed_text': 'use std::time::Instant;\\n', 'evidence': 'rustc unused_imports MachineApplicable deletion; import in cfg(test) scope or test-only file'}, {'names': ['unused imports: `ArtifactRevision`, `RunOutcome`, and `WorkItem`'], 'diagnostic_indices': [25], 'before_byte_span': [70, 88], 'removed_text': 'ArtifactRevision, ', 'evidence': 'rustc unused_imports MachineApplicable deletion; import in cfg(test) scope or test-only file'}, {'names': ['unused imports: `ArtifactRevision`, `RunOutcome`, and `WorkItem`'], 'diagnostic_indices': [25], 'before_byte_span': [103, 125], 'removed_text': ', RunOutcome, WorkItem', 'evidence': 'rustc unused_imports MachineApplicable deletion; import in cfg(test) scope or test-only file'}, {'names': ['unused import: `super::*`', 'unused imports: `operator_store::OperatorStore` and `outcome_runtime::OutcomeRuntime`'], 'diagnostic_indices': [26, 27], 'before_byte_span': [147, 245], 'removed_text': 'use super::*;\\nuse crate::buddy::{outcome_runtime::OutcomeRuntime, operator_store::OperatorStore};\\n', 'evidence': 'rustc unused_imports MachineApplicable deletion; import in cfg(test) scope or test-only file'} within test harness/module support. No current same-path physical case remains. Removed all-CUT import/helper/module declarations have no retained executing consumer; preserved production APIs are not being declared unused.",
-      "no_tests_reason": "No current Rust test definitions remain at this path; actual diff removes all-CUT test-only scaffolding/dead helpers or imports, not a retained executable fixture. No production deletion is authorized by this record."
+      "impact": "Shared test ProjectIdentity producer now uses dunce filesystem canonicalization to match production ordinary canonical_root representation. Preserve exact custom project_id, identity clones and existing records/spec hashes; no automatic persisted identity normalization.",
+      "execution_context": "Only shared fixture producer changes; tests/assertions/scenario counts unchanged. desk_actions_batch_tests, outcome_open_backlog_tests and outcome_workflow_display_tests currently contain helpers only, so no executing scenarios are claimed for those helper files.",
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-94cdd5e8-2f7c-46a6-a1c1-5afba9bc837e",
+      "review_evidence": "Source review94cdd5e8 against721f5c4e preserves exact bindings/security guards and unchanged test selection; diagnosis42c94ea0 and implementationabe1d7c3 verified exact approved substitutions only. Diagnostic classification independently challenged71a639b4. No Windows restored passing result or fresh mutant proof claimed.",
+      "no_tests_reason": "External workflow scheduling or helper-only source has no direct test declarations; no new cases or executing scenarios inferred. Actual full Windows suite remains enabled and must run."
     },
     {
       "path": "refact-agent/engine/src/buddy/editorial_evaluation.rs",
@@ -12349,39 +12377,38 @@
     },
     {
       "path": "refact-agent/engine/src/buddy/jobs/autonomous_chats.rs",
-      "before_sha256": "2c759cd11ef935909755c1cb1d17db2c0f34414b4bb525cfc385be36a4d430bb",
-      "after_sha256": "a86350f6bc925242a742fc017890eb48cbdcba95ae587e4e1713f636b78f89eb",
+      "before_sha256": "a86350f6bc925242a742fc017890eb48cbdcba95ae587e4e1713f636b78f89eb",
+      "after_sha256": "9b70e88c9f81e0419e0be50a9e2f76944855b534c3f653976345666245561775",
       "affected_tests": [
-        "02abd4d03c906e8c707c3fd147fa21b776519dc9a5a2aa608384484c46c04af9",
-        "04653cfaf5f40e0ac94089b198036967817cd6b4886697fd1df94d5551c49f6e",
-        "09c923ee6e11e75d00fba763f51a0bf1fbbfcabe44333b9748972d5bab1bb6f7",
-        "0f7a6dacb0141f70f81b9edee6b46a9bb87e44bb33cb05eb695f6eb97a444561",
-        "259aa2b1705a8bfe3c07bc532925fc8b59ac46d33f13c41100bd27a3786da33d",
-        "2dda1137352daa268e085fbf0ea1c536d9cc3c9033d96eb3cfdacdafce8fcdf8",
-        "340498cb9d56238e0030296452a5e3611388fa91fd31fd9351bb3f3b5d13cf2d",
-        "39a2b1c239783efd7b8eb0822f165e701cb76129bc068f7deba5d3fb26abb2c3",
-        "4204efe7d4376228782b719ca9519a405b85c824312775ed5d10b18af3cf92c3",
-        "55c0f9f8be2988e0123515edb3c71293ed9e060f99c4b83c0b8c27c9f43b3a47",
-        "590ea8e23eef694848e330f82d50c5d5bf050d5d041e7add93d5f7c1d46445e6",
         "77593b68d356ad6e54eab4b12ad1c3896c7bb0e17226ec1da44b7e8cb927a586",
-        "89a53f394e6cc3760718c469b944bf69e91a80cb13ca1aa0c134dd7cf9827275",
-        "8ccb2602ab06cd2391dcd211f3c7907f256152c857de8fa8c789feb2c778b9f4",
-        "93bcd731f6c535f2c9557c460490992b90a9ee1a96f2e03801dd4f2e4404a64e",
-        "a70ce2bd0a2203ffd44c98c41d074e4970596fe01094e391f5aca1b0e7f16c68",
+        "f9d2ba8e8fbfcac64f436f1c49d2e66b2c9ce94b2f991b4d7d6ceea195b97958",
+        "590ea8e23eef694848e330f82d50c5d5bf050d5d041e7add93d5f7c1d46445e6",
+        "55c0f9f8be2988e0123515edb3c71293ed9e060f99c4b83c0b8c27c9f43b3a47",
+        "ee036cdbd3663a55d863ea5ab34006a817298bcc59253177aaf5334336dbb863",
+        "02abd4d03c906e8c707c3fd147fa21b776519dc9a5a2aa608384484c46c04af9",
+        "340498cb9d56238e0030296452a5e3611388fa91fd31fd9351bb3f3b5d13cf2d",
+        "259aa2b1705a8bfe3c07bc532925fc8b59ac46d33f13c41100bd27a3786da33d",
+        "f573ba35b62f02e8ecd2c204e514d46c32abec25073ccbc7d170a109089fc928",
         "a87999583fb51ece8991cd5d61c895010a285f33a6557bac0d70f6440ba514ba",
+        "89a53f394e6cc3760718c469b944bf69e91a80cb13ca1aa0c134dd7cf9827275",
+        "39a2b1c239783efd7b8eb0822f165e701cb76129bc068f7deba5d3fb26abb2c3",
+        "93bcd731f6c535f2c9557c460490992b90a9ee1a96f2e03801dd4f2e4404a64e",
+        "e7241599eb6cb89b9bd5bda35ee30aece396b185ced06a0d9d1290d142fe2752",
+        "4204efe7d4376228782b719ca9519a405b85c824312775ed5d10b18af3cf92c3",
+        "04653cfaf5f40e0ac94089b198036967817cd6b4886697fd1df94d5551c49f6e",
         "ce6f67ac7e0a64ae18bbcf7c1bbff81f7ad1f1a2d73c347002e44bb31e02b73a",
         "dec3a6e5deb65608a6818ddf34d767e1ac7c4ca5663f660d7ed035c3695f0dd0",
-        "e7241599eb6cb89b9bd5bda35ee30aece396b185ced06a0d9d1290d142fe2752",
-        "ee036cdbd3663a55d863ea5ab34006a817298bcc59253177aaf5334336dbb863",
-        "f573ba35b62f02e8ecd2c204e514d46c32abec25073ccbc7d170a109089fc928",
-        "f9d2ba8e8fbfcac64f436f1c49d2e66b2c9ce94b2f991b4d7d6ceea195b97958"
+        "8ccb2602ab06cd2391dcd211f3c7907f256152c857de8fa8c789feb2c778b9f4",
+        "2dda1137352daa268e085fbf0ea1c536d9cc3c9033d96eb3cfdacdafce8fcdf8",
+        "a70ce2bd0a2203ffd44c98c41d074e4970596fe01094e391f5aca1b0e7f16c68",
+        "0f7a6dacb0141f70f81b9edee6b46a9bb87e44bb33cb05eb695f6eb97a444561",
+        "09c923ee6e11e75d00fba763f51a0bf1fbbfcabe44333b9748972d5bab1bb6f7"
       ],
-      "no_tests_reason": "",
-      "impact": "Additive source-binding/receipt schema setup or current Buddy production integration; original assertions remain unchanged unless separately admitted. Impact set includes every test physically in the changed file plus conservatively related candidate regressions when the module has no tests; this is not proof every transitive caller is covered. Affected fingerprints are a conservative review/compilation inventory, not proof each listed test executes this source or that every changed branch is witnessed.",
-      "execution_context": "Registered worktree; same Rust engine library test harness; production/test module wiring retained. Default feature/platform requirements unchanged. Focused actual red9fail/green9pass and final11pass recorded; full-library failed27 on earlier source and24 of other25 reproduced serially. No full-suite success claim. Final late HTTP acknowledgement ordering and replay-scope corrections are source-reviewed but have no dedicated injected-save-failure witness.",
-      "author": "chat:a569df0f-895b-428c-8349-424fb5d1ddf8",
-      "reviewer": "background_agent:bgagent-e6b24b53-6d63-4292-bee2-1128707c5007",
-      "review_evidence": "Independent semantic/source/evidence review subchat-04121a39-0dc0-40ed-8116-3369422eff29 generations1-4 approved scopes/case counts, exact red9fail/green9pass witness files, current fingerprint mappings, ordinary unchanged-scenario setup, 33 conservative support hashes and final2fixes11pass. Full-library run failed and is not certified by these admissions; no end-to-end provider/lifecycle claim."
+      "impact": "Shared test ProjectIdentity producer now uses dunce filesystem canonicalization to match production ordinary canonical_root representation. Preserve exact custom project_id, identity clones and existing records/spec hashes; no automatic persisted identity normalization.",
+      "execution_context": "Only shared fixture producer changes; tests/assertions/scenario counts unchanged. desk_actions_batch_tests, outcome_open_backlog_tests and outcome_workflow_display_tests currently contain helpers only, so no executing scenarios are claimed for those helper files.",
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-94cdd5e8-2f7c-46a6-a1c1-5afba9bc837e",
+      "review_evidence": "Source review94cdd5e8 against721f5c4e preserves exact bindings/security guards and unchanged test selection; diagnosis42c94ea0 and implementationabe1d7c3 verified exact approved substitutions only. Diagnostic classification independently challenged71a639b4. No Windows restored passing result or fresh mutant proof claimed."
     },
     {
       "path": "refact-agent/engine/src/buddy/jobs/buddy_briefing.rs",
@@ -12693,21 +12720,21 @@
     },
     {
       "path": "refact-agent/engine/src/buddy/operator_integration_tests.rs",
-      "before_sha256": "dc244372f1000b48d3926cf2ef1b2d1492ccdc164d0a934175ffdfdedb2de4e7",
-      "after_sha256": "4772655c760762afeebeec2f905399d575d849eebfde384171c92ace2c4eef49",
+      "before_sha256": "4772655c760762afeebeec2f905399d575d849eebfde384171c92ace2c4eef49",
+      "after_sha256": "a8785179079c0ff4bd2e4282b9fc6409d8e5542b293164439e6fe80b61f3cd48",
       "affected_tests": [
-        "46b544ea79c3e08d222eac6990cafebefb03cab409af145f09437ee83176fffc",
         "6c2c33a206c5635b5aaf55ef6c839e93323b4dbd1ab882ae508835d6ccb6baea",
-        "715db41981faea44d734efb6e806e0a6bbb5c72307efe5c8a71505d8ce1fe855",
         "8faa347addf9d35c745a13c62ebd36130cc3550906f25d21c88770547b1b22cb",
+        "bc6aecddaa3d822d90a1da2891450211acecc7a08052e7d6e33ff034bcf8fcb8",
         "9b897d11314414008ede60d6c4242609d05c565e449331d041e721150de0b6dd",
-        "bc6aecddaa3d822d90a1da2891450211acecc7a08052e7d6e33ff034bcf8fcb8"
+        "46b544ea79c3e08d222eac6990cafebefb03cab409af145f09437ee83176fffc",
+        "715db41981faea44d734efb6e806e0a6bbb5c72307efe5c8a71505d8ce1fe855"
       ],
-      "impact": "refact-agent/engine/src/buddy/operator_integration_tests.rs: canonical non-test residue changes remove 62 tokens and add 5 tokens. Cleanup evidence identifies restored_service; is_shutdown; ServiceExt. 12787\u21926186 global lexical definitions includes intentional coverage loss from case deletions; this support record does not claim strict duplication. tower::ServiceExt import is restored/moved within this test-only integration module for oneshot dispatch after main integration; fixture restored_service/is_shutdown methods are removed only where unused.",
-      "execution_context": "Same physical Rust path; no retained fingerprint/context relocation relative pinned main. Test-only ownership: inline cfg(test) modules or explicitly cfg(test) helper items; tests/ and *_tests.rs are test harness/module support. Removed dead helper/import/module scaffolding has no surviving intended executing consumer; conservative affected mapping lists surviving same-file tests for dependency review, not a claim all call deleted helpers. See exact residue token hunks and cleanup evidence references.",
-      "author": "support-impact-author-bgagent-1fd43f09",
-      "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
-      "review_evidence": "Independent source/hash review: refact-agent/engine/src/buddy/operator_integration_tests.rs: reviewed removal of restored_service, is_shutdown, ServiceExt within test harness/module support. 6 actual same-path retained cases keep complete attributed canonical body and enclosing-context hash against pinned MAIN. Conservative affected map contains exactly those current fingerprints. Compiler-proven repair reviewed: use tower::ServiceExt; restores trait resolution only, not retained assertions."
+      "impact": "Shared test ProjectIdentity producer now uses dunce filesystem canonicalization to match production ordinary canonical_root representation. Preserve exact custom project_id, identity clones and existing records/spec hashes; no automatic persisted identity normalization.",
+      "execution_context": "Only shared fixture producer changes; tests/assertions/scenario counts unchanged. desk_actions_batch_tests, outcome_open_backlog_tests and outcome_workflow_display_tests currently contain helpers only, so no executing scenarios are claimed for those helper files.",
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-94cdd5e8-2f7c-46a6-a1c1-5afba9bc837e",
+      "review_evidence": "Source review94cdd5e8 against721f5c4e preserves exact bindings/security guards and unchanged test selection; diagnosis42c94ea0 and implementationabe1d7c3 verified exact approved substitutions only. Diagnostic classification independently challenged71a639b4. No Windows restored passing result or fresh mutant proof claimed."
     },
     {
       "path": "refact-agent/engine/src/buddy/operator_observability.rs",
@@ -12789,41 +12816,41 @@
     },
     {
       "path": "refact-agent/engine/src/buddy/outcome_open_backlog_tests.rs",
-      "before_sha256": "6ce4db01b9287becabd47a41b533d581cc019a872dcb8f448bd331e8385c0e9c",
-      "after_sha256": "14b38a9322dfbb7d2f4ba4fad0efbcd197f3acca67c7707a1d66f630687f31c0",
+      "before_sha256": "14b38a9322dfbb7d2f4ba4fad0efbcd197f3acca67c7707a1d66f630687f31c0",
+      "after_sha256": "b75bf3d16d0cea22506dd1e66cf4345446a7c9b7ded211163e32841dc57619d3",
       "affected_tests": [],
-      "impact": "refact-agent/engine/src/buddy/outcome_open_backlog_tests.rs: canonical non-test residue changes remove 422 tokens and add 0 tokens. Cleanup evidence identifies unused import: `std::time::Instant`; unused import: `RunStatus`; seed_backlog; open_count; sequence; TempDir. 12787\u21926186 global lexical definitions includes intentional coverage loss from case deletions; this support record does not claim strict duplication.",
-      "execution_context": "Same physical Rust path; no retained fingerprint/context relocation relative pinned main. Test-only ownership: inline cfg(test) modules or explicitly cfg(test) helper items; tests/ and *_tests.rs are test harness/module support. Removed dead helper/import/module scaffolding has no surviving intended executing consumer; conservative affected mapping lists surviving same-file tests for dependency review, not a claim all call deleted helpers. See exact residue token hunks and cleanup evidence references.",
-      "author": "support-impact-author-bgagent-1fd43f09",
-      "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
-      "review_evidence": "Independent source/hash review: refact-agent/engine/src/buddy/outcome_open_backlog_tests.rs: reviewed removal of {'names': ['unused import: `std::time::Instant`'], 'diagnostic_indices': [61], 'before_byte_span': [21, 45], 'removed_text': 'use std::time::Instant;\\n', 'evidence': 'rustc unused_imports MachineApplicable deletion; import in cfg(test) scope or test-only file'}, {'names': ['unused import: `RunStatus`'], 'diagnostic_indices': [62], 'before_byte_span': [106, 117], 'removed_text': ', RunStatus', 'evidence': 'rustc unused_imports MachineApplicable deletion; import in cfg(test) scope or test-only file'}, seed_backlog, open_count, sequence, TempDir within test harness/module support. No current same-path physical case remains. Removed all-CUT import/helper/module declarations have no retained executing consumer; preserved production APIs are not being declared unused.",
-      "no_tests_reason": "No current Rust test definitions remain at this path; actual diff removes all-CUT test-only scaffolding/dead helpers or imports, not a retained executable fixture. No production deletion is authorized by this record."
+      "impact": "Shared test ProjectIdentity producer now uses dunce filesystem canonicalization to match production ordinary canonical_root representation. Preserve exact custom project_id, identity clones and existing records/spec hashes; no automatic persisted identity normalization.",
+      "execution_context": "Only shared fixture producer changes; tests/assertions/scenario counts unchanged. desk_actions_batch_tests, outcome_open_backlog_tests and outcome_workflow_display_tests currently contain helpers only, so no executing scenarios are claimed for those helper files.",
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-94cdd5e8-2f7c-46a6-a1c1-5afba9bc837e",
+      "review_evidence": "Source review94cdd5e8 against721f5c4e preserves exact bindings/security guards and unchanged test selection; diagnosis42c94ea0 and implementationabe1d7c3 verified exact approved substitutions only. Diagnostic classification independently challenged71a639b4. No Windows restored passing result or fresh mutant proof claimed.",
+      "no_tests_reason": "External workflow scheduling or helper-only source has no direct test declarations; no new cases or executing scenarios inferred. Actual full Windows suite remains enabled and must run."
     },
     {
       "path": "refact-agent/engine/src/buddy/outcome_supersede_tests.rs",
-      "before_sha256": "69dfdd90c1138a50c7d4b9226bb89d02cf000bc44f5ef934f674c6f5c92ef878",
-      "after_sha256": "00d6e3085e484903462b766fd5ff968cd6fe51ec496b7608148eb1a5ea870190",
+      "before_sha256": "00d6e3085e484903462b766fd5ff968cd6fe51ec496b7608148eb1a5ea870190",
+      "after_sha256": "0f8cb1118f975ca4a08efa14c8311cec319f4b597bec26c82061f42ac3e89e75",
       "affected_tests": [
         "74e6fbb784549221bb9b848ecbaba368a55216af6449cc33aa04b5ba5d2b2b69",
         "c0c3ddfc3516ff45607526005737d6cd192c3242dca836418f4259e18663579b"
       ],
-      "impact": "refact-agent/engine/src/buddy/outcome_supersede_tests.rs: canonical non-test residue changes remove 132 tokens and add 0 tokens. Cleanup evidence identifies set_state; force_all_open. 12787\u21926186 global lexical definitions includes intentional coverage loss from case deletions; this support record does not claim strict duplication.",
-      "execution_context": "Same physical Rust path; no retained fingerprint/context relocation relative pinned main. Test-only ownership: inline cfg(test) modules or explicitly cfg(test) helper items; tests/ and *_tests.rs are test harness/module support. Removed dead helper/import/module scaffolding has no surviving intended executing consumer; conservative affected mapping lists surviving same-file tests for dependency review, not a claim all call deleted helpers. See exact residue token hunks and cleanup evidence references.",
-      "author": "support-impact-author-bgagent-1fd43f09",
-      "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
-      "review_evidence": "Independent source/hash review: refact-agent/engine/src/buddy/outcome_supersede_tests.rs: reviewed removal of set_state, force_all_open within test harness/module support. 2 actual same-path retained cases keep complete attributed canonical body and enclosing-context hash against pinned MAIN. Conservative affected map contains exactly those current fingerprints."
+      "impact": "Shared test ProjectIdentity producer now uses dunce filesystem canonicalization to match production ordinary canonical_root representation. Preserve exact custom project_id, identity clones and existing records/spec hashes; no automatic persisted identity normalization.",
+      "execution_context": "Only shared fixture producer changes; tests/assertions/scenario counts unchanged. desk_actions_batch_tests, outcome_open_backlog_tests and outcome_workflow_display_tests currently contain helpers only, so no executing scenarios are claimed for those helper files.",
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-94cdd5e8-2f7c-46a6-a1c1-5afba9bc837e",
+      "review_evidence": "Source review94cdd5e8 against721f5c4e preserves exact bindings/security guards and unchanged test selection; diagnosis42c94ea0 and implementationabe1d7c3 verified exact approved substitutions only. Diagnostic classification independently challenged71a639b4. No Windows restored passing result or fresh mutant proof claimed."
     },
     {
       "path": "refact-agent/engine/src/buddy/outcome_workflow_display_tests.rs",
-      "before_sha256": "f592dd2036fe0d6c33b480ebdb309c484fabcaf174e7c3ca755ab4aeaf5c66ce",
-      "after_sha256": "d1ec00f60ea0e6a52c0b2dcb7bacf2ab523cd3ae72d611835c2202c4e008cd85",
+      "before_sha256": "d1ec00f60ea0e6a52c0b2dcb7bacf2ab523cd3ae72d611835c2202c4e008cd85",
+      "after_sha256": "b576595e9371f9a32975cb8870e4da21cee2e05b85593d7e54df9b57c3d97c0e",
       "affected_tests": [],
-      "impact": "refact-agent/engine/src/buddy/outcome_workflow_display_tests.rs: canonical non-test residue changes remove 451 tokens and add 0 tokens. Cleanup evidence identifies unused import: `RunStatus`; unused import: `tempfile::TempDir`; unused import: `OutcomeRuntime`; publish_seed; mark_legacy_scope; set_work_fields; build_workflow_outcome,publish_report_in_store,WorkflowOutcomeCheckpoint,SubjectKey,WorkflowOutcomeStart,WorkflowTerminal. 12787\u21926186 global lexical definitions includes intentional coverage loss from case deletions; this support record does not claim strict duplication.",
-      "execution_context": "Same physical Rust path; no retained fingerprint/context relocation relative pinned main. Test-only ownership: inline cfg(test) modules or explicitly cfg(test) helper items; tests/ and *_tests.rs are test harness/module support. Removed dead helper/import/module scaffolding has no surviving intended executing consumer; conservative affected mapping lists surviving same-file tests for dependency review, not a claim all call deleted helpers. See exact residue token hunks and cleanup evidence references.",
-      "author": "support-impact-author-bgagent-1fd43f09",
-      "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
-      "review_evidence": "Independent source/hash review: refact-agent/engine/src/buddy/outcome_workflow_display_tests.rs: reviewed removal of {'names': ['unused import: `RunStatus`'], 'diagnostic_indices': [63], 'before_byte_span': [82, 93], 'removed_text': ', RunStatus', 'evidence': 'rustc unused_imports MachineApplicable deletion; import in cfg(test) scope or test-only file'}, {'names': ['unused import: `tempfile::TempDir`'], 'diagnostic_indices': [64], 'before_byte_span': [139, 162], 'removed_text': 'use tempfile::TempDir;\\n', 'evidence': 'rustc unused_imports MachineApplicable deletion; import in cfg(test) scope or test-only file'}, {'names': ['unused import: `OutcomeRuntime`'], 'diagnostic_indices': [65], 'before_byte_span': [227, 243], 'removed_text': ', OutcomeRuntime', 'evidence': 'rustc unused_imports MachineApplicable deletion; import in cfg(test) scope or test-only file'}, publish_seed, mark_legacy_scope, set_work_fields, build_workflow_outcome,publish_report_in_store,WorkflowOutcomeCheckpoint,SubjectKey,WorkflowOutcomeStart,WorkflowTerminal within test harness/module support. No current same-path physical case remains. Removed all-CUT import/helper/module declarations have no retained executing consumer; preserved production APIs are not being declared unused.",
-      "no_tests_reason": "No current Rust test definitions remain at this path; actual diff removes all-CUT test-only scaffolding/dead helpers or imports, not a retained executable fixture. No production deletion is authorized by this record."
+      "impact": "Shared test ProjectIdentity producer now uses dunce filesystem canonicalization to match production ordinary canonical_root representation. Preserve exact custom project_id, identity clones and existing records/spec hashes; no automatic persisted identity normalization.",
+      "execution_context": "Only shared fixture producer changes; tests/assertions/scenario counts unchanged. desk_actions_batch_tests, outcome_open_backlog_tests and outcome_workflow_display_tests currently contain helpers only, so no executing scenarios are claimed for those helper files.",
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-94cdd5e8-2f7c-46a6-a1c1-5afba9bc837e",
+      "review_evidence": "Source review94cdd5e8 against721f5c4e preserves exact bindings/security guards and unchanged test selection; diagnosis42c94ea0 and implementationabe1d7c3 verified exact approved substitutions only. Diagnostic classification independently challenged71a639b4. No Windows restored passing result or fresh mutant proof claimed.",
+      "no_tests_reason": "External workflow scheduling or helper-only source has no direct test declarations; no new cases or executing scenarios inferred. Actual full Windows suite remains enabled and must run."
     },
     {
       "path": "refact-agent/engine/src/buddy/pulse.rs",
@@ -18170,25 +18197,25 @@
     },
     {
       "path": "refact-agent/engine/src/buddy/supervision_authority.rs",
-      "before_sha256": "e568364e43c1bdb5da6dcebf0f039930485869045ec8b3933a2b761cc107942a",
-      "after_sha256": "097c2034b36b2720b89badd81f52d0b35243192bdcde8629ba2a5905e9760a8e",
+      "before_sha256": "097c2034b36b2720b89badd81f52d0b35243192bdcde8629ba2a5905e9760a8e",
+      "after_sha256": "5607c08bac131bab0ca23872846e2f44bbcd39aa85038034187cfc028725a1de",
       "affected_tests": [
         "16548850e74c1af8b83677b5d7fd8a6a8776cd6581f858aba7165fc426b5ada6",
         "30f66ce23e77052f679316dd76cb5e53d36e2569bd67f6e05b40ed163eef53de",
         "9e1eaf5213eb4269ddb2366184359a8a4fe2111dc0df3d116984bba5ab27f850",
         "1a19246306a58c7ab3eb84ac7628599d21d9cdb480520c476fbea57d6ffd4806",
-        "540f20c9c27870b8d3911e1caac6870fccaa1d0b2991030aafa2374896ee80ad",
+        "c7bab5758129db328de5b4bb4afe8654cd982bbcad21879a2d582c4f6e31f506",
         "5a8530fba60617b322e838b8ae428d3fb796e170ff42657379a319668527b874",
         "cfc797f34ca29701deded5efc15008765945f8e83216e97cd9267c560b9484ba",
         "d1219206f3cfe3294d3cd32f44e75329e3157d831248b6cb31506f6aadfe2f62",
         "547d6897e07043d5c25a3975c10f5c474ec57ecf5b2cb54b96ce95d34787ffe6",
         "93de2c04868b6c9b3809a2633b33401a7f53ae810b15166501b01f1a974fe297"
       ],
-      "impact": "Only absent context_tokens_cap or false implicit_context_window compatibility literal added to existing production/test-support constructor. Existing fixture algorithm and assertions unchanged. Maps every current same-file test conservatively.",
-      "execution_context": "Existing engine lib/module context, cfg, annotations and dependencies retained. Conservative same-path mapping, not a complete transitive impact graph or execution claim.",
-      "author": "background_agent:bgagent-61493284-67af-418b-908a-aa34fc854759 (ledger preparation)",
-      "reviewer": "background_agent:bgagent-adaeddf1-8f7e-43c2-8222-00c7b5c1beba (source review only)",
-      "review_evidence": "Source review subchat-b5ed3883-90be-441b-a9ee-4a950c547ebb accepted unchanged-default mechanical edits and production/test relevance contingent on actual critical red/green witness. This is not witness evidence or final ledger approval; parent independent ledger review remains pending."
+      "impact": "Bound one existing provider-entry prerequisite wait with30-second timeout and early-completion select; all original critical goal/tool/budget/revocation assertions unchanged.",
+      "execution_context": "One ordinary diagnostic-delta admission counts existing integrated contract1. Captured Windows stall is not a restored pass or evidence of a specific production defect.",
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-94cdd5e8-2f7c-46a6-a1c1-5afba9bc837e",
+      "review_evidence": "Source review94cdd5e8 against721f5c4e preserves exact bindings/security guards and unchanged test selection; diagnosis42c94ea0 and implementationabe1d7c3 verified exact approved substitutions only. Diagnostic classification independently challenged71a639b4. No Windows restored passing result or fresh mutant proof claimed."
     },
     {
       "path": "refact-agent/engine/src/chat/prompts.rs",
@@ -20152,6 +20179,37 @@
       "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
       "reviewer": "background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b",
       "review_evidence": "Independent source/oracle reviews background_agent:bgagent-3da0d2b4-9ec6-40dd-8bac-2a392188431b and background_agent:bgagent-88d8e57b-e68d-467a-9332-5f96a7c684b7 preserve guards. Six-body semantic accounting background_agent:bgagent-342e1832-7aef-489a-9f0b-f56a76356875 maps5/6/1/1/3/1, not assertion counts; historical-record preservation parent-verified separately. No Windows restored runtime pass or new critical mutant proof claimed before CI. Astra initial review f969 identified private-directory/fixture producers; those corrected and fresh review88d8e57b found no remaining changed-boundary blocker. Existing enriched-memory direct duplicate touch is separately recorded, not introduced or claimed fixed."
+    },
+    {
+      "path": "refact-agent/engine/src/buddy/outcome_runtime.rs",
+      "before_sha256": "3d538c8d79830c3ec6a047c960deebdfbc0e54014741c9b6ecd62976b5514676",
+      "after_sha256": "673e5684e0b47210eaebfbbb24f9c8493b8f38b39af148c256c6afcbf824c9ef",
+      "affected_tests": [
+        "d93727c090f422965c369eb59c75a38dfbd5df20f113390a9b8d7794153c91fd",
+        "b4b87238e659eba90f38213bffa49dcaba17c1023d93c5349b146673589dcb8a",
+        "90cc8d59a90c18c7b74f1f05d1842d095d8e8e4f59b7eec97098d4c027e041b9"
+      ],
+      "impact": "Shared test ProjectIdentity producer now uses dunce filesystem canonicalization to match production ordinary canonical_root representation. Preserve exact custom project_id, identity clones and existing records/spec hashes; no automatic persisted identity normalization.",
+      "execution_context": "Only shared fixture producer changes; tests/assertions/scenario counts unchanged. desk_actions_batch_tests, outcome_open_backlog_tests and outcome_workflow_display_tests currently contain helpers only, so no executing scenarios are claimed for those helper files.",
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-94cdd5e8-2f7c-46a6-a1c1-5afba9bc837e",
+      "review_evidence": "Source review94cdd5e8 against721f5c4e preserves exact bindings/security guards and unchanged test selection; diagnosis42c94ea0 and implementationabe1d7c3 verified exact approved substitutions only. Diagnostic classification independently challenged71a639b4. No Windows restored passing result or fresh mutant proof claimed."
+    },
+    {
+      "path": "refact-agent/engine/src/buddy/resource_execution.rs",
+      "before_sha256": "28c14b3c4a05a8c4025d9a5fe9ef694db93fa1b73970812299abd3ecb0b02668",
+      "after_sha256": "c80de83eab5759fb406b846db154e9922b84dbe3ca856a1143c96d66fe33c9a1",
+      "affected_tests": [
+        "05b80338218bffbae2d69a8b5f7b273abc65201666c0e88779ee0f0483a1b604",
+        "049d39626c875789a23ef698356ce22c7299951e6f6d83ca6dad6fc54af2ac19",
+        "16b949afcbfea4cbebf03362b276b63b6edd790d2088541e13aeea0adf16104a",
+        "341eb611cb475fc7b1d13aa9240f4c097a48610d515615f5e6b67d41252aa762"
+      ],
+      "impact": "Use physically canonical simplified project path for PrivateRecoveryMaterials::open, matching ordinary canonical_root producer while retaining exact project-scope comparison, private directory/symlink checks and reference validation.",
+      "execution_context": "Production physical path representation consistency only. Four direct test-body raw identity producers remain outside this repair; no claim all Windows identity fixtures are resolved.",
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-94cdd5e8-2f7c-46a6-a1c1-5afba9bc837e",
+      "review_evidence": "Source review94cdd5e8 against721f5c4e preserves exact bindings/security guards and unchanged test selection; diagnosis42c94ea0 and implementationabe1d7c3 verified exact approved substitutions only. Diagnostic classification independently challenged71a639b4. No Windows restored passing result or fresh mutant proof claimed."
     }
   ]
 }

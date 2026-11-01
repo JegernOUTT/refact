@@ -18,6 +18,9 @@ fn worker() -> WorkerIdentity {
 fn project(root: &std::path::Path, id: &str) -> ProjectIdentity {
     ProjectIdentity {
         project_id: id.into(),
-        canonical_root: root.canonicalize().unwrap().to_string_lossy().into_owned(),
+        canonical_root: dunce::canonicalize(root)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
     }
 }
