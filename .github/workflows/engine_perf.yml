@@ -39,6 +39,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Install Node.js for engine-served GUI bundle
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: refact-agent/gui/package-lock.json
+
+      - name: Install GUI build dependencies
+        working-directory: refact-agent/gui
+        run: npm ci --include=dev
+
       - name: Install Rust toolchain
         run: rustup update --no-self-update stable
 

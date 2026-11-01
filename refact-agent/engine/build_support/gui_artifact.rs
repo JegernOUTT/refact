@@ -476,10 +476,14 @@ fn is_digest(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-fn output(command: &mut Command) -> Result<String> {
+fn output(command: &mut Command, label: &str) -> Result<String> {
     let output = command.output()?;
     if !output.status.success() || output.stdout.len() > 4096 {
-        return refuse("GUI local tool identity command failed");
+        return refuse(&format!(
+            "GUI local tool identity command failed ({label}, status={}, stdout_exceeds_limit={})",
+            output.status,
+            output.stdout.len() > 4096
+        ));
     }
     Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
@@ -503,6 +507,7 @@ pub fn producer_toolchain(gui: &Path, node: &Path, options: &OsString) -> Result
             .args(["-e", script])
             .env("NODE_OPTIONS", options)
             .current_dir(gui),
+        "node-identity",
     )?;
     let value: serde_json::Value = serde_json::from_str(&data)?;
     let field = |name: &str| -> Result<String> {
@@ -517,6 +522,7 @@ pub fn producer_toolchain(gui: &Path, node: &Path, options: &OsString) -> Result
             .arg("--version")
             .env("NODE_OPTIONS", options)
             .current_dir(gui),
+        "npm-version",
     )?;
     let (platform, arch, libc) = host();
     let toolchain = Toolchain {
@@ -622,6 +628,7 @@ pub fn inputs(gui: &Path, engine: &Path, toolchain: Toolchain) -> Result<Inputs>
             Command::new("git")
                 .args(["rev-parse", "--short", "HEAD"])
                 .current_dir(gui),
+            "git-version-identity",
         )?,
     };
     let mut producer_files = BTreeMap::new();

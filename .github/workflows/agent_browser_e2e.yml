@@ -22,6 +22,7 @@ env:
   CARGO_INCREMENTAL: 0
   CARGO_NET_RETRY: 10
   RUSTUP_MAX_RETRIES: 10
+  WHISPER_DONT_GENERATE_BINDINGS: "1"
 
 jobs:
   injected-bundle-freshness:
@@ -83,8 +84,8 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: refact-agent/engine -> target
-          key: ubuntu-browser-e2e-cargo
-          shared-key: ubuntu-browser-e2e-cargo
+          key: ubuntu-browser-e2e-cargo-bundled-whisper-v1
+          shared-key: ubuntu-browser-e2e-cargo-bundled-whisper-v1
           cache-bin: false
 
       # V-15: headless_chrome 1.0.20 drops Input.dragIntercepted on its non-flattened target transport.
