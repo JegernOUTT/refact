@@ -73,7 +73,7 @@ async fn install_test_caps(gcx: Arc<crate::global_context::GlobalContext>) {
 async fn fixture() -> (AppState, tempfile::TempDir, Arc<AMutex<AtCommandsContext>>) {
     let gcx = crate::global_context::tests::make_test_gcx().await;
     let workspace = tempfile::tempdir().unwrap();
-    let project = workspace.path().canonicalize().unwrap();
+    let project = dunce::canonicalize(workspace.path()).unwrap();
     *gcx.documents_state.workspace_folders.lock().unwrap() = vec![project.clone()];
     install_test_caps(gcx.clone()).await;
     let registry = ProjectRegistry {

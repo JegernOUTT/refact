@@ -480,9 +480,7 @@ mod resource_origin_tests {
         let dir = tempfile::tempdir().unwrap();
         let project = refact_buddy_core::operator_types::ProjectIdentity {
             project_id: "origin-test".into(),
-            canonical_root: dir
-                .path()
-                .canonicalize()
+            canonical_root: dunce::canonicalize(dir.path())
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),
@@ -554,9 +552,7 @@ mod resource_origin_tests {
         let dir = tempfile::tempdir().unwrap();
         let project = refact_buddy_core::operator_types::ProjectIdentity {
             project_id: "dismissal".into(),
-            canonical_root: dir
-                .path()
-                .canonicalize()
+            canonical_root: dunce::canonicalize(dir.path())
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),
@@ -627,9 +623,7 @@ mod resource_origin_tests {
         let dir = tempfile::tempdir().unwrap();
         let project = refact_buddy_core::operator_types::ProjectIdentity {
             project_id: "dismiss-terminal-states".into(),
-            canonical_root: dir
-                .path()
-                .canonicalize()
+            canonical_root: dunce::canonicalize(dir.path())
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),

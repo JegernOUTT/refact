@@ -907,7 +907,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let project = refact_buddy_core::operator_types::ProjectIdentity {
             project_id: "collapsed-row".into(),
-            canonical_root: dir.path().canonicalize().unwrap().to_string_lossy().into(),
+            canonical_root: dunce::canonicalize(dir.path())
+                .unwrap()
+                .to_string_lossy()
+                .into(),
         };
         let worker = refact_buddy_core::operator_types::WorkerIdentity {
             worker_id: "worker".into(),

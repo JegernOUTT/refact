@@ -615,7 +615,12 @@ mod tests {
         ProjectIdentity {
             project_id: "p".into(),
             canonical_root: root
-                .map(|r| fs::canonicalize(r).unwrap().to_string_lossy().into_owned())
+                .map(|r| {
+                    dunce::canonicalize(r)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned()
+                })
                 .unwrap_or_else(|| "/p".into()),
         }
     }

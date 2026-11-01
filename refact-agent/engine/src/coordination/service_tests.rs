@@ -8,7 +8,7 @@ use serial_test::serial;
 use tokio::sync::Mutex;
 
 async fn fixture() -> (AppState, tempfile::TempDir, WorkCaller) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
     let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
         dir.path().join("cache"),
         dir.path().join("config"),

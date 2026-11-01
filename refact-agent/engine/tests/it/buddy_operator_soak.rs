@@ -7,7 +7,10 @@ use refact_buddy_core::operator_types::{ProjectIdentity, WorkerIdentity, RunStat
 fn identity(root: &std::path::Path) -> ProjectIdentity {
     ProjectIdentity {
         project_id: "soak".into(),
-        canonical_root: root.canonicalize().unwrap().to_string_lossy().into_owned(),
+        canonical_root: dunce::canonicalize(root)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
     }
 }
 fn worker() -> WorkerIdentity {

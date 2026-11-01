@@ -211,9 +211,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let project = ProjectIdentity {
             project_id: "fixture".into(),
-            canonical_root: temp
-                .path()
-                .canonicalize()
+            canonical_root: dunce::canonicalize(temp.path())
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),

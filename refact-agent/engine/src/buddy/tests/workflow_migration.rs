@@ -1,18 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 fn legacy_fixture_draft() -> crate::buddy::types::BuddyDraft {
     let now = chrono::Utc::now();
     crate::buddy::types::BuddyDraft {
@@ -37,9 +22,7 @@ fn legacy_migration_survives_expired_editor_restart_and_preserves_attention() {
     std::fs::write(&old_file, &old_bytes).unwrap();
     let project = ProjectIdentity {
         project_id: "migration".into(),
-        canonical_root: root
-            .path()
-            .canonicalize()
+        canonical_root: dunce::canonicalize(root.path())
             .unwrap()
             .to_string_lossy()
             .into_owned(),
@@ -140,9 +123,7 @@ fn linked_legacy_card_and_expired_editor_share_one_durable_proposal() {
     let root = tempfile::tempdir().unwrap();
     let project = ProjectIdentity {
         project_id: "linked".into(),
-        canonical_root: root
-            .path()
-            .canonicalize()
+        canonical_root: dunce::canonicalize(root.path())
             .unwrap()
             .to_string_lossy()
             .into_owned(),
@@ -208,9 +189,7 @@ fn oversized_migration_batch_rejects_before_any_write() {
     let root = tempfile::tempdir().unwrap();
     let project = ProjectIdentity {
         project_id: "bounded".into(),
-        canonical_root: root
-            .path()
-            .canonicalize()
+        canonical_root: dunce::canonicalize(root.path())
             .unwrap()
             .to_string_lossy()
             .into_owned(),

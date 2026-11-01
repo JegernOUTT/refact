@@ -555,7 +555,8 @@ mod tests {
     #[tokio::test]
     async fn repaired_bootstrap_retries_with_backoff_or_source_change_and_stops_scanning_when_healthy(
     ) {
-        let root = tempfile::tempdir().unwrap();
+        let root =
+            tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
         let path = root.path().join(".refact/tasks/task-a");
         tokio::fs::create_dir_all(&path).await.unwrap();
         tokio::fs::write(path.join("board.yaml"), "cards: [")

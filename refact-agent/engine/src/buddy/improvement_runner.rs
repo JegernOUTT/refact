@@ -291,7 +291,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let project = refact_buddy_core::operator_types::ProjectIdentity {
             project_id: "saturated-fixed-evaluation".into(),
-            canonical_root: std::fs::canonicalize(root.path())
+            canonical_root: dunce::canonicalize(root.path())
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),
@@ -317,7 +317,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let project = refact_buddy_core::operator_types::ProjectIdentity {
             project_id: "unknown-fixed-evaluation".into(),
-            canonical_root: std::fs::canonicalize(root.path())
+            canonical_root: dunce::canonicalize(root.path())
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),
@@ -360,7 +360,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let project = refact_buddy_core::operator_types::ProjectIdentity {
             project_id: "terminal-fixed-evaluation".into(),
-            canonical_root: std::fs::canonicalize(root.path())
+            canonical_root: dunce::canonicalize(root.path())
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),
@@ -451,7 +451,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let project = refact_buddy_core::operator_types::ProjectIdentity {
             project_id: "legacy-fixed-evaluation".into(),
-            canonical_root: std::fs::canonicalize(root.path())
+            canonical_root: dunce::canonicalize(root.path())
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),

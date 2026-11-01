@@ -188,7 +188,7 @@ async fn privacy_fixture() -> (
 ) {
     let gcx = crate::global_context::tests::make_test_gcx().await;
     let workspace = tempfile::tempdir().unwrap();
-    let project_path = workspace.path().canonicalize().unwrap();
+    let project_path = dunce::canonicalize(workspace.path()).unwrap();
     *gcx.documents_state.workspace_folders.lock().unwrap() = vec![project_path.clone()];
     let mut caps = crate::caps::CodeAssistantCaps::default();
     caps.chat_models.insert(

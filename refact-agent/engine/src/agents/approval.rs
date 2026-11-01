@@ -812,8 +812,13 @@ pub(crate) mod tests {
 
     impl Fixture {
         pub(crate) fn call(&self, tool: &str) -> ChatToolCall {
+            let command = if cfg!(windows) {
+                r#"[System.IO.File]::AppendAllText((Join-Path (Get-Location) 'approval.txt'), "approved`n", [System.Text.Encoding]::ASCII)"#
+            } else {
+                "echo approved >> approval.txt"
+            };
             serde_json::from_value(serde_json::json!({"id":"command","type":"function","function":{
-                "name":tool, "arguments":serde_json::json!({"command":"echo approved >> approval.txt", "description":"Record approval", "workdir":self.dir.path(), "tty":false, "needs_confirmation":true}).to_string()
+                "name":tool, "arguments":serde_json::json!({"command":command, "description":"Record approval", "workdir":self.dir.path(), "tty":false, "needs_confirmation":true}).to_string()
             }})).unwrap()
         }
 

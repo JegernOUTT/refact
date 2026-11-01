@@ -291,7 +291,8 @@ mod tests {
 
     #[tokio::test]
     async fn missing_index_falls_back_once_with_explicit_scan_and_byte_bounds() {
-        let root = tempfile::tempdir().unwrap();
+        let root =
+            tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
         let tasks = root.path().join(".refact/tasks");
         tokio::fs::create_dir_all(tasks.join("task-one"))
             .await

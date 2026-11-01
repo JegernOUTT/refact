@@ -1395,9 +1395,7 @@ pub fn preflight_merge_conflicts(
         .prefix("refact-merge-preflight-")
         .tempdir()
         .map_err(|e| format!("Failed to create merge preflight directory: {}", e))?;
-    let canonical_temp = temp
-        .path()
-        .canonicalize()
+    let canonical_temp = dunce::canonicalize(temp.path())
         .map_err(|e| format!("Failed to canonicalize merge preflight directory: {}", e))?;
     let _ = temp.keep();
     let temp = canonical_temp;

@@ -769,9 +769,7 @@ for l in sys.stdin:
         let temp = tempfile::tempdir().unwrap();
         let project = refact_buddy_core::operator_types::ProjectIdentity {
             project_id: "fixture".into(),
-            canonical_root: temp
-                .path()
-                .canonicalize()
+            canonical_root: dunce::canonicalize(temp.path())
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),
@@ -1157,9 +1155,7 @@ for line in sys.stdin:
         let temp = tempfile::tempdir().unwrap();
         let project = refact_buddy_core::operator_types::ProjectIdentity {
             project_id: "fixture".into(),
-            canonical_root: temp
-                .path()
-                .canonicalize()
+            canonical_root: dunce::canonicalize(temp.path())
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),
@@ -1212,9 +1208,7 @@ for line in sys.stdin:
         let temp = tempfile::tempdir().unwrap();
         let project = refact_buddy_core::operator_types::ProjectIdentity {
             project_id: "fixture".into(),
-            canonical_root: temp
-                .path()
-                .canonicalize()
+            canonical_root: dunce::canonicalize(temp.path())
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),

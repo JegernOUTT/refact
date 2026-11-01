@@ -371,7 +371,7 @@ mod tests {
             adapter: ADAPTER_ID.into(),
             project: ProjectIdentity {
                 project_id: "p".into(),
-                canonical_root: fs::canonicalize(root)
+                canonical_root: dunce::canonicalize(root)
                     .unwrap()
                     .to_string_lossy()
                     .into_owned(),

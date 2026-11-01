@@ -2783,7 +2783,10 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             let project = ProjectIdentity {
                 project_id: format!("native-control-{}", uuid::Uuid::new_v4()),
-                canonical_root: root.path().canonicalize().unwrap().to_string_lossy().into(),
+                canonical_root: dunce::canonicalize(root.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .into(),
             };
             let worker = WorkerIdentity {
                 worker_id: "native-control-worker".into(),

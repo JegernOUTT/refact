@@ -235,7 +235,10 @@ mod tests {
         git(&root, &["commit", "-m", "initial"]);
         let project = ProjectIdentity {
             project_id: "scratch-archive".into(),
-            canonical_root: root.canonicalize().unwrap().to_string_lossy().into_owned(),
+            canonical_root: dunce::canonicalize(&root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
         };
         let owner = WorktreeService::new(scratch.path().join("cache"), root.clone()).unwrap();
         let created = owner

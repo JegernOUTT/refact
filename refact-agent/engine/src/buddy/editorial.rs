@@ -434,9 +434,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let project = ProjectIdentity {
             project_id: "p".into(),
-            canonical_root: dir
-                .path()
-                .canonicalize()
+            canonical_root: dunce::canonicalize(dir.path())
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),

@@ -263,7 +263,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let project = ProjectIdentity {
             project_id: "evaluation-proof".into(),
-            canonical_root: std::fs::canonicalize(dir.path())
+            canonical_root: dunce::canonicalize(dir.path())
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),

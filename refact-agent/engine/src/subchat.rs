@@ -2415,7 +2415,11 @@ pub(crate) async fn install_stateful_subchat_session(
         None => None,
     };
     if let (Some(source), Some(worktree)) = (&source, &config.worktree) {
-        if worktree.source_workspace_root.canonicalize().ok().as_ref() != Some(source) {
+        if dunce::canonicalize(&worktree.source_workspace_root)
+            .ok()
+            .as_ref()
+            != Some(source)
+        {
             return Err("child worktree does not match accepted project scope".into());
         }
     }
@@ -2450,7 +2454,7 @@ pub(crate) async fn install_stateful_subchat_session(
         crate::coordination::scope::session_source_root(&session)
     };
     if let (Some(saved), Some(source)) = (&saved_source, &source) {
-        if saved.canonicalize().ok().as_ref() != Some(source) {
+        if dunce::canonicalize(saved).ok().as_ref() != Some(source) {
             return Err("saved child session does not match accepted project scope".into());
         }
     }

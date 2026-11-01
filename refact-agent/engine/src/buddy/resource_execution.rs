@@ -1727,7 +1727,7 @@ mod tests {
         let app = crate::app_state::AppState::from_gcx(gcx).await;
         let project = ProjectIdentity {
             project_id: "fixture".into(),
-            canonical_root: std::fs::canonicalize(&project_root)
+            canonical_root: dunce::canonicalize(&project_root)
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),
@@ -1782,7 +1782,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let project = ProjectIdentity {
             project_id: "project".into(),
-            canonical_root: std::fs::canonicalize(temp.path())
+            canonical_root: dunce::canonicalize(temp.path())
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),
@@ -2267,7 +2267,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let project = ProjectIdentity {
             project_id: "project".into(),
-            canonical_root: std::fs::canonicalize(temp.path())
+            canonical_root: dunce::canonicalize(temp.path())
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),

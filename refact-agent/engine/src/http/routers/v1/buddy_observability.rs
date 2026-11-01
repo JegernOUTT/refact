@@ -203,9 +203,7 @@ mod policy_tests {
         let temp = tempfile::tempdir().unwrap();
         let project = ProjectIdentity {
             project_id: "scratch".into(),
-            canonical_root: temp
-                .path()
-                .canonicalize()
+            canonical_root: dunce::canonicalize(temp.path())
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),
@@ -341,9 +339,7 @@ mod policy_tests {
         let temp = tempfile::tempdir().unwrap();
         let project = ProjectIdentity {
             project_id: "scratch".into(),
-            canonical_root: temp
-                .path()
-                .canonicalize()
+            canonical_root: dunce::canonicalize(temp.path())
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),

@@ -47,7 +47,7 @@ import re
 import subprocess
 import sys
 
-LIMIT = 6600
+LIMIT = 7000
 ADMISSIONS = 'tools/dev/test_admissions.json'
 ATTRIBUTE_GENERATORS = {'rstest', 'test_case', 'test_matrix', 'quickcheck', 'proptest', 'parameterized', 'wasm_bindgen_test'}
 MACRO_GENERATORS = {'proptest', 'quickcheck', 'test_case', 'test_cases', 'parameterized', 'test_suite'}

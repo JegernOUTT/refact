@@ -667,7 +667,7 @@ mod tests {
     fn store_project(root: &std::path::Path) -> ProjectIdentity {
         ProjectIdentity {
             project_id: "project".into(),
-            canonical_root: fs::canonicalize(root)
+            canonical_root: dunce::canonicalize(root)
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),

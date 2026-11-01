@@ -553,7 +553,8 @@ mod tests {
 
     #[tokio::test]
     async fn unbound_and_foreign_sessions_are_not_adopted_by_selected_project() {
-        let project = tempfile::tempdir().unwrap();
+        let project =
+            tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
         let foreign = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![project.path().into()];
@@ -580,7 +581,8 @@ mod tests {
 
     #[tokio::test]
     async fn message_events_maintain_provenance_without_a_subscriber_or_catalog_body_scan() {
-        let project = tempfile::tempdir().unwrap();
+        let project =
+            tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![project.path().into()];
         let app = AppState::from_gcx(gcx).await;

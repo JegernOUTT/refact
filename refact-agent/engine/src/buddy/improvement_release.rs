@@ -1068,7 +1068,7 @@ pub(crate) mod tests {
     fn scratch_store(dir: &tempfile::TempDir) -> OperatorStore {
         let project = ProjectIdentity {
             project_id: "release-fixture".into(),
-            canonical_root: std::fs::canonicalize(dir.path())
+            canonical_root: dunce::canonicalize(dir.path())
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),
