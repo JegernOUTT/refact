@@ -4,7 +4,6 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.intellij.credentialStore.CredentialAttributes
 import com.intellij.ide.passwordSafe.PasswordSafe
-import com.intellij.ide.plugins.loadDescriptorFromArtifact
 import com.intellij.ide.plugins.PluginInstaller
 import com.intellij.ide.plugins.IdeaPluginDescriptor
 import com.intellij.openapi.actionSystem.AnAction
@@ -13,6 +12,7 @@ import com.intellij.openapi.application.ApplicationInfo
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.ui.Messages
+import com.intellij.openapi.util.BuildNumber
 import com.smallcloud.refactai.getThisPlugin
 import java.net.HttpURLConnection
 import java.net.URI
@@ -95,7 +95,10 @@ internal class JetBrainsReleaseHost(private val confirmOnEdt: (ReleaseRequest) -
         return ReleaseIdentity(manifestHash(directoryManifest(requireNotNull(plugin.pluginPath))), plugin.version)
     }
     override fun inspectAndVerifySignature(path: Path): String {
-        val descriptor = requireNotNull(loadDescriptorFromArtifact(path, ApplicationInfo.getInstance().build))
+        val descriptor = Class.forName("com.intellij.ide.plugins.PluginDescriptorLoader")
+            .getMethod("loadDescriptorFromArtifact", Path::class.java, BuildNumber::class.java)
+            .invoke(null, path, ApplicationInfo.getInstance().build) as? IdeaPluginDescriptor
+            ?: error("SDK package descriptor is unavailable")
         require(descriptor.pluginId == requireNotNull(getThisPlugin()).pluginId) { "Foreign plugin ID" }
         require(PluginInstaller.rootEntryName(path) == requireNotNull(requireNotNull(getThisPlugin()).pluginPath).fileName.toString()) {
             "ZIP root must match installed plugin directory; refuse deleting another plugin's directory"
