@@ -9186,16 +9186,15 @@
     },
     {
       "path": ".github/workflows/agent_engine_check.yml",
-      "before_sha256": "c70f2017cdc264c3ffb9c1bb5abbdc327c0311a402958f5f584afbd88b1a5b35",
-      "after_sha256": "ef091a2ff031e78e70f437a014c16ce3967a7b35a367cb702834615b99332275",
-      "affected_tests": [
-        "d9c3e0685707e68e21c9fc69ed6033dab776718adff490f933a8f9cb2fd4a76b"
-      ],
-      "impact": "Adds current inventory check and Python checker self-tests before expensive engine build steps; ordinary CI, no explicit-base admission here. Test-only command environment sets RUST_MIN_STACK=16777216; test/build subprocess trees inherit it, case selection and assertions unchanged.",
-      "execution_context": "Test command process trees only; explicit finite stack-resource budget, no global Cargo/production environment.",
-      "author": "support-impact-author-bgagent-1fd43f09",
-      "reviewer": "background_agent:bgagent-5808bd05-85ae-4460-a50d-4296fcb38c9f",
-      "review_evidence": "Independent external include/doc-source fail-closed regressions with7000hidden cases, 45 self-tests, scanned CargoManifest includes and ordinary candidate-checker CI path triggers; include-fix-independent.json exact hashes. Prior complete and stack-scope file reviews retained."
+      "before_sha256": "ef091a2ff031e78e70f437a014c16ce3967a7b35a367cb702834615b99332275",
+      "after_sha256": "360051ff73a587baea4f8b7afc5f09809342e0c0ba23b93d162cce4873246998",
+      "affected_tests": [],
+      "impact": "Windows correctness native CMake dependencies now select the same static MSVC CRT as Rust for both library and integration test builds. Retain voice, full existing commands, all target entries and assertions.",
+      "execution_context": "Only Windows test steps receive CMAKE_POLICY_DEFAULT_CMP0091=NEW and CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded. Fresh platform cache namespace prevents reusing mixed-CRT Whisper artifacts. No /NODEFAULTLIB suppression or feature exclusions added.",
+      "no_tests_reason": "External native test-binary toolchain preparation only; all Rust test bodies, supports and scenario counts unchanged. This records no new coverage and does not claim actual Windows linking/execution before hosted results.",
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-ae254875-abe7-4751-9004-ba3511527bf0",
+      "review_evidence": "Independent terra bgagent-79865d4d diagnosed pinned whisper-rs-sys0.10 CMAKE_BUILD_TYPE=RelWithDebInfo versus Release multiconfig selection with Rust crt-static. Astra bgagent-ae254875 independently checked dependency sources/CMP0091 and approved scope. Parent CMake Windows-target configure with actual Clang/llvm-rc selected MultiThreaded; this is not MSVC final-link proof. Hosted Windows library/integration pass remains required."
     },
     {
       "path": ".github/workflows/rust_test_budget.yml",

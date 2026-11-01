@@ -138,8 +138,8 @@ jobs:
         with:
           workspaces: |
             refact-agent/engine -> target
-          key: ci-test-${{ matrix.target }}
-          shared-key: ci-test-${{ matrix.target }}
+          key: ci-test-${{ matrix.target }}-consistent-msvc-crt-v1
+          shared-key: ci-test-${{ matrix.target }}-consistent-msvc-crt-v1
           cache-bin: false
 
       - name: Run workspace library tests (Windows)
@@ -147,6 +147,8 @@ jobs:
         env:
           RUST_MIN_STACK: "16777216"
           REFACT_GUI_DIR: ${{ github.workspace }}\refact-agent\gui
+          CMAKE_POLICY_DEFAULT_CMP0091: NEW
+          CMAKE_MSVC_RUNTIME_LIBRARY: MultiThreaded
         shell: bash
         run: cargo test --workspace --exclude refact-tui --profile ci-test --lib --target ${{ matrix.target }}
 
@@ -169,6 +171,8 @@ jobs:
         env:
           RUST_MIN_STACK: "16777216"
           REFACT_GUI_DIR: ${{ github.workspace }}\refact-agent\gui
+          CMAKE_POLICY_DEFAULT_CMP0091: NEW
+          CMAKE_MSVC_RUNTIME_LIBRARY: MultiThreaded
         shell: bash
         run: cargo test --workspace --exclude refact-tui --profile ci-test --test '*' --target ${{ matrix.target }}
 
