@@ -65,8 +65,9 @@ impl MemoryAdapter {
         }
         let roots = crate::files_correction::get_project_dirs(self.app.gcx.clone()).await;
         let root = tokio::fs::canonicalize(&self.project.canonical_root).await?;
+        let root = dunce::simplified(&root).to_path_buf();
         if roots.len() != 1
-            || tokio::fs::canonicalize(&roots[0]).await? != root
+            || dunce::simplified(&tokio::fs::canonicalize(&roots[0]).await?) != root
             || root.to_string_lossy() != self.project.canonical_root
         {
             return Err(ResourceError::ProjectScopeMismatch);
@@ -125,6 +126,7 @@ impl MemoryAdapter {
                 return Err(ResourceError::PathEscapesProject);
             }
             let canonical = tokio::fs::canonicalize(path).await?;
+            let canonical = dunce::simplified(&canonical);
             if canonical != path || !canonical.starts_with(&root) {
                 return Err(ResourceError::SymlinkNotAllowed);
             }
@@ -404,7 +406,7 @@ mod tests {
         };
         use crate::buddy::memory_lifecycle::MemorySource;
         let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
         let knowledge = root.join(crate::file_filter::KNOWLEDGE_FOLDER_NAME);
         tokio::fs::create_dir_all(&knowledge).await.unwrap();
         let path = knowledge.join("memory.md");

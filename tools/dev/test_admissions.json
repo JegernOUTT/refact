@@ -8283,7 +8283,7 @@
       "failure_mode": "The existing changed_post_version_retry_and_recovery_reopen_retain_full_receipts fixture supplies a raw std canonical Windows verbatim root to the strict ordinary project-identity prerequisite, failing before its intended behavioral oracle.",
       "importance": "Reach the existing changed_post_version_retry_and_recovery_reopen_retain_full_receipts contract without changing project authority or weakening its assertions.",
       "nearest_retained": {
-        "fingerprint": "16b949afcbfea4cbebf03362b276b63b6edd790d2088541e13aeea0adf16104a",
+        "fingerprint": "332fe3dfb81a010292534d10b45c655fdf9bcbeccc05ffa4a4d4f95ab9c75a31",
         "why_insufficient": "registered_worktree_archive_runs_through_real_action_service_without_self_blocking: Successful worktree archival does not check resource post-version refusal, receipt completeness or duplicate/reopen replay."
       },
       "oracle": "Initial execution; duplicate no-effect replay; post-version mismatch recovery denied; successful recovery receipt; duplicate replay after reopen. These are existing reviewed contracts, not newly added coverage.",
@@ -8303,7 +8303,37 @@
       },
       "author": "background_agent:bgagent-1e85d981-c90f-439b-bdf4-01808dfed4c5",
       "reviewer": "background_agent:bgagent-02d03136",
-      "review_evidence": "Independent whole-body scenario accounting bgagent-02d03136 relayed by parent: 5 existing meaningful cases; user approved the exact existing-case accounting correction 6591+(31-10)+(47-15)=6644. Nearest retained fingerprint independently confirmed present in c17e13cc5 and current scanner inventories. Ordinary status covers prerequisite representation only; no critical guard downgrade or fresh mutant claim."
+      "review_evidence": "Independent whole-body scenario accounting bgagent-02d03136 relayed by parent: 5 existing meaningful cases; user approved the exact existing-case accounting correction 6591+(31-10)+(47-15)=6644. Nearest retained fingerprint independently confirmed present in c17e13cc5 and current scanner inventories. Ordinary status covers prerequisite representation only; no critical guard downgrade or fresh mutant claim.",
+      "historical_records": [
+        {
+          "fingerprint": "39cc4166a1ef80d7ea718c87bec2afe60dc27c093903afab7fd0b61471a860e2",
+          "occurrences": 1,
+          "failure_mode": "The existing changed_post_version_retry_and_recovery_reopen_retain_full_receipts fixture supplies a raw std canonical Windows verbatim root to the strict ordinary project-identity prerequisite, failing before its intended behavioral oracle.",
+          "importance": "Reach the existing changed_post_version_retry_and_recovery_reopen_retain_full_receipts contract without changing project authority or weakening its assertions.",
+          "nearest_retained": {
+            "fingerprint": "16b949afcbfea4cbebf03362b276b63b6edd790d2088541e13aeea0adf16104a",
+            "why_insufficient": "registered_worktree_archive_runs_through_real_action_service_without_self_blocking: Successful worktree archival does not check resource post-version refusal, receipt completeness or duplicate/reopen replay."
+          },
+          "oracle": "Initial execution; duplicate no-effect replay; post-version mismatch recovery denied; successful recovery receipt; duplicate replay after reopen. These are existing reviewed contracts, not newly added coverage.",
+          "prerequisites": "Replace only the fixture canonical_root producer with dunce::canonicalize of the same physical temporary project root; retain fallible canonicalization, project ID, assertions, inputs and command order.",
+          "shipping_implementation": "refact-agent/engine/src/buddy/resource_execution.rs::changed_post_version_retry_and_recovery_reopen_retain_full_receipts",
+          "determinism": "Existing isolated temporary filesystem, explicit inputs and original test scheduling; no added timing threshold, environment branch, ignored test or execution multiplier.",
+          "layer": "Existing Rust test-body fixture prerequisite representation maintenance.",
+          "why_cheapest": "Repair the existing fixture root representation at its producer rather than duplicate tests, bypass identity validation or weaken assertions.",
+          "meaningful_cases": 5,
+          "critical": false,
+          "criticality_reason": "Only this mechanical fixture prerequisite representation delta is ordinary. Underlying authorization, replay, lifecycle and recovery guards retain their original criticality; all historical critical admissions remain unchanged. No fresh guard mutant or restored Windows pass is claimed.",
+          "removed_coverage": "None: only the canonical-root producer changes; all original behavioral calls and assertions remain. Historical fingerprint 049d39626c875789a23ef698356ce22c7299951e6f6d83ca6dad6fc54af2ac19 remains in historical ledger rows if previously admitted.",
+          "witness": {
+            "kind": "counterfactual",
+            "explanation": "On Windows std::fs::canonicalize/Path::canonicalize can produce a verbatim-prefixed physical path while strict ordinary ProjectIdentity validation expects the simplified canonical spelling. Retaining that raw producer makes this existing fixture fail its store/owner project-identity prerequisite before reaching: Initial execution; duplicate no-effect replay; post-version mismatch recovery denied; successful recovery receipt; duplicate replay after reopen.",
+            "evidence": "Source-bound old/new body fingerprints 049d39626c875789a23ef698356ce22c7299951e6f6d83ca6dad6fc54af2ac19 -> 39cc4166a1ef80d7ea718c87bec2afe60dc27c093903afab7fd0b61471a860e2; mechanical patch /tmp/buddy-direct25.patch and fingerprints /tmp/buddy-direct25-fingerprints.json. Prior Windows job124797885545 refact-agent/engine/target/ci-round2/windows-diagnostic-full.log SHA256 c01aa668c0e473daea5cc0cc34bef46e1a2a9bdaeb0c80d862ed18ce2b261487 reports 3311 passed, 246 failed, 14 ignored; this aggregate prior failure is not a new passing run or per-guard sensitivity proof."
+          },
+          "author": "background_agent:bgagent-1e85d981-c90f-439b-bdf4-01808dfed4c5",
+          "reviewer": "background_agent:bgagent-02d03136",
+          "review_evidence": "Independent whole-body scenario accounting bgagent-02d03136 relayed by parent: 5 existing meaningful cases; user approved the exact existing-case accounting correction 6591+(31-10)+(47-15)=6644. Nearest retained fingerprint independently confirmed present in c17e13cc5 and current scanner inventories. Ordinary status covers prerequisite representation only; no critical guard downgrade or fresh mutant claim."
+        }
+      ]
     },
     {
       "fingerprint": "c3f402f756ef5df4eb6e8364e246dd7ee2086a6c0b4b7037d1ef1a4a9113c9b3",
@@ -8311,7 +8341,7 @@
       "failure_mode": "The existing real_catalog_preview_has_no_writes_and_draft_revision_cannot_inherit_preparation fixture supplies a raw std canonical Windows verbatim root to the strict ordinary project-identity prerequisite, failing before its intended behavioral oracle.",
       "importance": "Reach the existing real_catalog_preview_has_no_writes_and_draft_revision_cannot_inherit_preparation contract without changing project authority or weakening its assertions.",
       "nearest_retained": {
-        "fingerprint": "16b949afcbfea4cbebf03362b276b63b6edd790d2088541e13aeea0adf16104a",
+        "fingerprint": "332fe3dfb81a010292534d10b45c655fdf9bcbeccc05ffa4a4d4f95ab9c75a31",
         "why_insufficient": "registered_worktree_archive_runs_through_real_action_service_without_self_blocking: Worktree action execution does not check catalog preview nonmutation or preparation invalidation after a draft revision."
       },
       "oracle": "Real catalog preview writes nothing; changed draft revision cannot inherit prior preparation. These are existing reviewed contracts, not newly added coverage.",
@@ -8331,7 +8361,37 @@
       },
       "author": "background_agent:bgagent-1e85d981-c90f-439b-bdf4-01808dfed4c5",
       "reviewer": "background_agent:bgagent-02d03136",
-      "review_evidence": "Independent whole-body scenario accounting bgagent-02d03136 relayed by parent: 2 existing meaningful cases; user approved the exact existing-case accounting correction 6591+(31-10)+(47-15)=6644. Nearest retained fingerprint independently confirmed present in c17e13cc5 and current scanner inventories. Ordinary status covers prerequisite representation only; no critical guard downgrade or fresh mutant claim."
+      "review_evidence": "Independent whole-body scenario accounting bgagent-02d03136 relayed by parent: 2 existing meaningful cases; user approved the exact existing-case accounting correction 6591+(31-10)+(47-15)=6644. Nearest retained fingerprint independently confirmed present in c17e13cc5 and current scanner inventories. Ordinary status covers prerequisite representation only; no critical guard downgrade or fresh mutant claim.",
+      "historical_records": [
+        {
+          "fingerprint": "c3f402f756ef5df4eb6e8364e246dd7ee2086a6c0b4b7037d1ef1a4a9113c9b3",
+          "occurrences": 1,
+          "failure_mode": "The existing real_catalog_preview_has_no_writes_and_draft_revision_cannot_inherit_preparation fixture supplies a raw std canonical Windows verbatim root to the strict ordinary project-identity prerequisite, failing before its intended behavioral oracle.",
+          "importance": "Reach the existing real_catalog_preview_has_no_writes_and_draft_revision_cannot_inherit_preparation contract without changing project authority or weakening its assertions.",
+          "nearest_retained": {
+            "fingerprint": "16b949afcbfea4cbebf03362b276b63b6edd790d2088541e13aeea0adf16104a",
+            "why_insufficient": "registered_worktree_archive_runs_through_real_action_service_without_self_blocking: Worktree action execution does not check catalog preview nonmutation or preparation invalidation after a draft revision."
+          },
+          "oracle": "Real catalog preview writes nothing; changed draft revision cannot inherit prior preparation. These are existing reviewed contracts, not newly added coverage.",
+          "prerequisites": "Replace only the fixture canonical_root producer with dunce::canonicalize of the same physical temporary project root; retain fallible canonicalization, project ID, assertions, inputs and command order.",
+          "shipping_implementation": "refact-agent/engine/src/buddy/resource_execution.rs::real_catalog_preview_has_no_writes_and_draft_revision_cannot_inherit_preparation",
+          "determinism": "Existing isolated temporary filesystem, explicit inputs and original test scheduling; no added timing threshold, environment branch, ignored test or execution multiplier.",
+          "layer": "Existing Rust test-body fixture prerequisite representation maintenance.",
+          "why_cheapest": "Repair the existing fixture root representation at its producer rather than duplicate tests, bypass identity validation or weaken assertions.",
+          "meaningful_cases": 2,
+          "critical": false,
+          "criticality_reason": "Only this mechanical fixture prerequisite representation delta is ordinary. Underlying authorization, replay, lifecycle and recovery guards retain their original criticality; all historical critical admissions remain unchanged. No fresh guard mutant or restored Windows pass is claimed.",
+          "removed_coverage": "None: only the canonical-root producer changes; all original behavioral calls and assertions remain. Historical fingerprint 05b80338218bffbae2d69a8b5f7b273abc65201666c0e88779ee0f0483a1b604 remains in historical ledger rows if previously admitted.",
+          "witness": {
+            "kind": "counterfactual",
+            "explanation": "On Windows std::fs::canonicalize/Path::canonicalize can produce a verbatim-prefixed physical path while strict ordinary ProjectIdentity validation expects the simplified canonical spelling. Retaining that raw producer makes this existing fixture fail its store/owner project-identity prerequisite before reaching: Real catalog preview writes nothing; changed draft revision cannot inherit prior preparation.",
+            "evidence": "Source-bound old/new body fingerprints 05b80338218bffbae2d69a8b5f7b273abc65201666c0e88779ee0f0483a1b604 -> c3f402f756ef5df4eb6e8364e246dd7ee2086a6c0b4b7037d1ef1a4a9113c9b3; mechanical patch /tmp/buddy-direct25.patch and fingerprints /tmp/buddy-direct25-fingerprints.json. Prior Windows job124797885545 refact-agent/engine/target/ci-round2/windows-diagnostic-full.log SHA256 c01aa668c0e473daea5cc0cc34bef46e1a2a9bdaeb0c80d862ed18ce2b261487 reports 3311 passed, 246 failed, 14 ignored; this aggregate prior failure is not a new passing run or per-guard sensitivity proof."
+          },
+          "author": "background_agent:bgagent-1e85d981-c90f-439b-bdf4-01808dfed4c5",
+          "reviewer": "background_agent:bgagent-02d03136",
+          "review_evidence": "Independent whole-body scenario accounting bgagent-02d03136 relayed by parent: 2 existing meaningful cases; user approved the exact existing-case accounting correction 6591+(31-10)+(47-15)=6644. Nearest retained fingerprint independently confirmed present in c17e13cc5 and current scanner inventories. Ordinary status covers prerequisite representation only; no critical guard downgrade or fresh mutant claim."
+        }
+      ]
     },
     {
       "fingerprint": "34f674da63c26d3c6ecb9628bf24e5ee2a4b25731d2c99a63ac291916ec48ff5",
@@ -8339,7 +8399,7 @@
       "failure_mode": "The existing separately_authorized_same_spec_owns_distinct_execution_receipts fixture supplies a raw std canonical Windows verbatim root to the strict ordinary project-identity prerequisite, failing before its intended behavioral oracle.",
       "importance": "Reach the existing separately_authorized_same_spec_owns_distinct_execution_receipts contract without changing project authority or weakening its assertions.",
       "nearest_retained": {
-        "fingerprint": "16b949afcbfea4cbebf03362b276b63b6edd790d2088541e13aeea0adf16104a",
+        "fingerprint": "332fe3dfb81a010292534d10b45c655fdf9bcbeccc05ffa4a4d4f95ab9c75a31",
         "why_insufficient": "registered_worktree_archive_runs_through_real_action_service_without_self_blocking: A single worktree action does not distinguish separate authorizations for the same resource spec or replay of the second execution."
       },
       "oracle": "Separately authorized same-spec executions own distinct receipts; duplicate second execution has no effect. These are existing reviewed contracts, not newly added coverage.",
@@ -8359,7 +8419,37 @@
       },
       "author": "background_agent:bgagent-1e85d981-c90f-439b-bdf4-01808dfed4c5",
       "reviewer": "background_agent:bgagent-02d03136",
-      "review_evidence": "Independent whole-body scenario accounting bgagent-02d03136 relayed by parent: 2 existing meaningful cases; user approved the exact existing-case accounting correction 6591+(31-10)+(47-15)=6644. Nearest retained fingerprint independently confirmed present in c17e13cc5 and current scanner inventories. Ordinary status covers prerequisite representation only; no critical guard downgrade or fresh mutant claim."
+      "review_evidence": "Independent whole-body scenario accounting bgagent-02d03136 relayed by parent: 2 existing meaningful cases; user approved the exact existing-case accounting correction 6591+(31-10)+(47-15)=6644. Nearest retained fingerprint independently confirmed present in c17e13cc5 and current scanner inventories. Ordinary status covers prerequisite representation only; no critical guard downgrade or fresh mutant claim.",
+      "historical_records": [
+        {
+          "fingerprint": "34f674da63c26d3c6ecb9628bf24e5ee2a4b25731d2c99a63ac291916ec48ff5",
+          "occurrences": 1,
+          "failure_mode": "The existing separately_authorized_same_spec_owns_distinct_execution_receipts fixture supplies a raw std canonical Windows verbatim root to the strict ordinary project-identity prerequisite, failing before its intended behavioral oracle.",
+          "importance": "Reach the existing separately_authorized_same_spec_owns_distinct_execution_receipts contract without changing project authority or weakening its assertions.",
+          "nearest_retained": {
+            "fingerprint": "16b949afcbfea4cbebf03362b276b63b6edd790d2088541e13aeea0adf16104a",
+            "why_insufficient": "registered_worktree_archive_runs_through_real_action_service_without_self_blocking: A single worktree action does not distinguish separate authorizations for the same resource spec or replay of the second execution."
+          },
+          "oracle": "Separately authorized same-spec executions own distinct receipts; duplicate second execution has no effect. These are existing reviewed contracts, not newly added coverage.",
+          "prerequisites": "Replace only the fixture canonical_root producer with dunce::canonicalize of the same physical temporary project root; retain fallible canonicalization, project ID, assertions, inputs and command order.",
+          "shipping_implementation": "refact-agent/engine/src/buddy/resource_execution.rs::separately_authorized_same_spec_owns_distinct_execution_receipts",
+          "determinism": "Existing isolated temporary filesystem, explicit inputs and original test scheduling; no added timing threshold, environment branch, ignored test or execution multiplier.",
+          "layer": "Existing Rust test-body fixture prerequisite representation maintenance.",
+          "why_cheapest": "Repair the existing fixture root representation at its producer rather than duplicate tests, bypass identity validation or weaken assertions.",
+          "meaningful_cases": 2,
+          "critical": false,
+          "criticality_reason": "Only this mechanical fixture prerequisite representation delta is ordinary. Underlying authorization, replay, lifecycle and recovery guards retain their original criticality; all historical critical admissions remain unchanged. No fresh guard mutant or restored Windows pass is claimed.",
+          "removed_coverage": "None: only the canonical-root producer changes; all original behavioral calls and assertions remain. Historical fingerprint 341eb611cb475fc7b1d13aa9240f4c097a48610d515615f5e6b67d41252aa762 remains in historical ledger rows if previously admitted.",
+          "witness": {
+            "kind": "counterfactual",
+            "explanation": "On Windows std::fs::canonicalize/Path::canonicalize can produce a verbatim-prefixed physical path while strict ordinary ProjectIdentity validation expects the simplified canonical spelling. Retaining that raw producer makes this existing fixture fail its store/owner project-identity prerequisite before reaching: Separately authorized same-spec executions own distinct receipts; duplicate second execution has no effect.",
+            "evidence": "Source-bound old/new body fingerprints 341eb611cb475fc7b1d13aa9240f4c097a48610d515615f5e6b67d41252aa762 -> 34f674da63c26d3c6ecb9628bf24e5ee2a4b25731d2c99a63ac291916ec48ff5; mechanical patch /tmp/buddy-direct25.patch and fingerprints /tmp/buddy-direct25-fingerprints.json. Prior Windows job124797885545 refact-agent/engine/target/ci-round2/windows-diagnostic-full.log SHA256 c01aa668c0e473daea5cc0cc34bef46e1a2a9bdaeb0c80d862ed18ce2b261487 reports 3311 passed, 246 failed, 14 ignored; this aggregate prior failure is not a new passing run or per-guard sensitivity proof."
+          },
+          "author": "background_agent:bgagent-1e85d981-c90f-439b-bdf4-01808dfed4c5",
+          "reviewer": "background_agent:bgagent-02d03136",
+          "review_evidence": "Independent whole-body scenario accounting bgagent-02d03136 relayed by parent: 2 existing meaningful cases; user approved the exact existing-case accounting correction 6591+(31-10)+(47-15)=6644. Nearest retained fingerprint independently confirmed present in c17e13cc5 and current scanner inventories. Ordinary status covers prerequisite representation only; no critical guard downgrade or fresh mutant claim."
+        }
+      ]
     },
     {
       "fingerprint": "0cb06e77113d1f67f957d9f1b8c3d2200ff27bbf8a7b58899f701a833f348f8d",
@@ -9116,6 +9206,202 @@
       "author": "background_agent:bgagent-d47f4e91 (bookkeeping only)",
       "reviewer": "background_agent:bgagent-a7cb3c64 / bgagent-951c7650 / bgagent-b949b8e9 / bgagent-ffbb55c7; final auditor pending",
       "review_evidence": "Independent a7cb/951 whole-body counts and b949 adversarial source review support the first four maintained bodies (3/4/5/4) and earlier five-file patch. ffbb reviewed the one-case literal-source display proposal; parent verified ToolCat header tool_cat.rs:225 from ContextFile.file_name at tool_cat.rs:1006 and normalization at tool_cat.rs:865/972. b949 review preceded this final display expectation. Final source-plus-ledger auditor bgagent-4a91cbba pending; no final approval, runtime pass, executed mutant or restored Windows pass claimed."
+    },
+    {
+      "fingerprint": "0ab27389d45929ea5fc35be715efd1fbdd0e794df4c94404270c8da1bc5fd131",
+      "occurrences": 1,
+      "failure_mode": "Raw Windows canonical fixture spelling can differ from the ordinary canonical identity expected by shipping consumers; fixture prerequisites fail before retained behavioral assertions.",
+      "importance": "Reach retained identity, authorization and durability oracles without weakening their contracts.",
+      "nearest_retained": {
+        "fingerprint": "0d343f2c0989c3abedef1d81136ed2fd9eb77f8302dc3115e66cf9d0784b6b1e",
+        "why_insufficient": "Same-file retained context/privacy projection does not exercise persisted creation deduplication, source binding or recreated-source refusal."
+      },
+      "oracle": "Concurrent creation returns one persisted companion with original source creation time and no copied messages; wrong project binding and companion-as-source refuse; reload reuses identity; recreated source ID refuses. Preserve historical five-case charge although independent current-body review grouped four cases.",
+      "prerequisites": "Replace only std/Path canonical fixture-root producers with dunce::canonicalize of the same physical directory; retain fallibility and exact authority checks.",
+      "shipping_implementation": "refact-agent/engine/src/buddy/companion.rs::companion_creation_is_single_persisted_and_source_bound invokes real retained shipping seams; no copied algorithm.",
+      "determinism": "Existing isolated temporary state and exact calls/assertions unchanged; no added waits, provider/network dependencies, ignored tests or selection changes.",
+      "layer": "Existing engine library test-body fixture prerequisite maintenance only.",
+      "why_cheapest": "Repair prerequisite representation or repository-local line-ending configuration in place, without a new physical definition or scenario; charge the whole maintained body at 5 cases.",
+      "meaningful_cases": 5,
+      "critical": false,
+      "criticality_reason": "Ordinary admission applies ONLY to fixture maintenance, not underlying critical authorization, identity, containment, symlink or durable recovery behavior. The two production canonical-consumer changes require actual full verification, including Windows baseline63 failures versus frozen current source; source reasoning is not an executed critical witness.",
+      "removed_coverage": "None. Original behavioral calls, assertions, negative controls, physical definitions and ignored-test status remain unchanged. All208 original admission objects recoverable exactly:205 unchanged top-level,3 archived whole with only live nearest-reference refresh. Creation5 and adapter10 historical charges preserved.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Raw Windows canonical fixture spelling can differ from the ordinary canonical identity expected by shipping consumers; fixture prerequisites fail before retained behavioral assertions. Source-bound fixture prerequisite reasoning only, not an executed production mutation.",
+        "evidence": "m.scan base c6dd6afcfd89ff57acb75132295f82e938ad3bea fd9f3720ecff3b032f150b24f7a3c55b7ff86c7e12805c2e79e8cd093b8c85d6 -> current 0ab27389d45929ea5fc35be715efd1fbdd0e794df4c94404270c8da1bc5fd131. Replace only std/Path canonical fixture-root producers with dunce::canonicalize of the same physical directory; retain fallibility and exact authority checks. Independent source/case reviews bgagent-347f89a3 and bgagent-5805344a (retention/regression/registered also inventoried by bgagent-c9066752), relayed by parent. Final adversarial source audit bgagent-c84fd050 completed; final ledger authentication remains parent-owned and pending. Historical case charges take precedence over a lower recount: creation5 and adapter10 retained. No executed mutant, new critical-test certification, full-suite pass or restored Windows pass claimed."
+      },
+      "author": "background_agent:bgagent-3ce0d06e-c675-40cd-babd-bc817b694544 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-347f89a3 / bgagent-5805344a; final source auditor bgagent-c84fd050; ledger audit pending",
+      "review_evidence": "Independent source/case reviews bgagent-347f89a3 and bgagent-5805344a (retention/regression/registered also inventoried by bgagent-c9066752), relayed by parent. Final adversarial source audit bgagent-c84fd050 completed; final ledger authentication remains parent-owned and pending. Historical case charges take precedence over a lower recount: creation5 and adapter10 retained. No executed mutant, new critical-test certification, full-suite pass or restored Windows pass claimed."
+    },
+    {
+      "fingerprint": "b0c5181cb40b050215ab97648c1ea8bc7fc0e1caf3e483dd3c76dd2dc8044a76",
+      "occurrences": 1,
+      "failure_mode": "Raw Windows canonical fixture spelling can differ from the ordinary canonical identity expected by shipping consumers; fixture prerequisites fail before retained behavioral assertions.",
+      "importance": "Reach retained identity, authorization and durability oracles without weakening their contracts.",
+      "nearest_retained": {
+        "fingerprint": "0d343f2c0989c3abedef1d81136ed2fd9eb77f8302dc3115e66cf9d0784b6b1e",
+        "why_insufficient": "Same-file context/privacy projection does not exercise live-source project identity acceptance and foreign-project refusal."
+      },
+      "oracle": "Same-project live source returns the exact known message; changing its live project to a foreign canonical root refuses.",
+      "prerequisites": "Replace only std/Path canonical fixture-root producers with dunce::canonicalize of the same physical directory; retain fallibility and exact authority checks.",
+      "shipping_implementation": "refact-agent/engine/src/buddy/companion.rs::companion_source_rejects_foreign_live_project invokes real retained shipping seams; no copied algorithm.",
+      "determinism": "Existing isolated temporary state and exact calls/assertions unchanged; no added waits, provider/network dependencies, ignored tests or selection changes.",
+      "layer": "Existing engine library test-body fixture prerequisite maintenance only.",
+      "why_cheapest": "Repair prerequisite representation or repository-local line-ending configuration in place, without a new physical definition or scenario; charge the whole maintained body at 2 cases.",
+      "meaningful_cases": 2,
+      "critical": false,
+      "criticality_reason": "Ordinary admission applies ONLY to fixture maintenance, not underlying critical authorization, identity, containment, symlink or durable recovery behavior. The two production canonical-consumer changes require actual full verification, including Windows baseline63 failures versus frozen current source; source reasoning is not an executed critical witness.",
+      "removed_coverage": "None. Original behavioral calls, assertions, negative controls, physical definitions and ignored-test status remain unchanged. All208 original admission objects recoverable exactly:205 unchanged top-level,3 archived whole with only live nearest-reference refresh. Creation5 and adapter10 historical charges preserved.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Raw Windows canonical fixture spelling can differ from the ordinary canonical identity expected by shipping consumers; fixture prerequisites fail before retained behavioral assertions. Source-bound fixture prerequisite reasoning only, not an executed production mutation.",
+        "evidence": "m.scan base c6dd6afcfd89ff57acb75132295f82e938ad3bea 208bffd75fd22fe6ab1cb1449a6fa79a4e6550ae93f8b2cbcf7ce1c2772d719a -> current b0c5181cb40b050215ab97648c1ea8bc7fc0e1caf3e483dd3c76dd2dc8044a76. Replace only std/Path canonical fixture-root producers with dunce::canonicalize of the same physical directory; retain fallibility and exact authority checks. Independent source/case reviews bgagent-347f89a3 and bgagent-5805344a (retention/regression/registered also inventoried by bgagent-c9066752), relayed by parent. Final adversarial source audit bgagent-c84fd050 completed; final ledger authentication remains parent-owned and pending. Historical case charges take precedence over a lower recount: creation5 and adapter10 retained. No executed mutant, new critical-test certification, full-suite pass or restored Windows pass claimed."
+      },
+      "author": "background_agent:bgagent-3ce0d06e-c675-40cd-babd-bc817b694544 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-347f89a3 / bgagent-5805344a; final source auditor bgagent-c84fd050; ledger audit pending",
+      "review_evidence": "Independent source/case reviews bgagent-347f89a3 and bgagent-5805344a (retention/regression/registered also inventoried by bgagent-c9066752), relayed by parent. Final adversarial source audit bgagent-c84fd050 completed; final ledger authentication remains parent-owned and pending. Historical case charges take precedence over a lower recount: creation5 and adapter10 retained. No executed mutant, new critical-test certification, full-suite pass or restored Windows pass claimed."
+    },
+    {
+      "fingerprint": "332fe3dfb81a010292534d10b45c655fdf9bcbeccc05ffa4a4d4f95ab9c75a31",
+      "occurrences": 1,
+      "failure_mode": "Inherited Git autocrlf can change isolated fixture checkout bytes and clean-state prerequisites; use explicit repository-local false without relaxing exact content or dirty guards.",
+      "importance": "Reach retained identity, authorization and durability oracles without weakening their contracts.",
+      "nearest_retained": {
+        "fingerprint": "39cc4166a1ef80d7ea718c87bec2afe60dc27c093903afab7fd0b61471a860e2",
+        "why_insufficient": "Same-file retained changed-post-version recovery checks generic receipts/replay, not real registered worktree archive, own draft/prepared/receipt exemption and exact checkout restore."
+      },
+      "oracle": "Eight existing cases: unsupported operation; unsupported cancel with unchanged sequence; wrong resource kind; exact nonmutating preview; revoked apply grant leaves checkout/registry; authorized archive completes with durable receipt and no own-row self-reference; original apply grant refuses restore; distinct restore grant completes with durable recovery receipt, original version/evidence and exact tracked content. Comment that restore grant cannot reapply is not asserted here.",
+      "prerequisites": "Set core.autocrlf=false only in the isolated fixture repository immediately after git init, before retained writes/commit. Replace only std/Path canonical fixture-root producers with dunce::canonicalize of the same physical directory; retain fallibility and exact authority checks.",
+      "shipping_implementation": "refact-agent/engine/src/buddy/resource_execution.rs::registered_worktree_archive_runs_through_real_action_service_without_self_blocking invokes real retained shipping seams; no copied algorithm.",
+      "determinism": "Existing isolated temporary state and exact calls/assertions unchanged; no added waits, provider/network dependencies, ignored tests or selection changes.",
+      "layer": "Existing engine library test-body fixture prerequisite maintenance only.",
+      "why_cheapest": "Repair prerequisite representation or repository-local line-ending configuration in place, without a new physical definition or scenario; charge the whole maintained body at 8 cases.",
+      "meaningful_cases": 8,
+      "critical": false,
+      "criticality_reason": "Ordinary admission applies ONLY to fixture maintenance, not underlying critical authorization, identity, containment, symlink or durable recovery behavior. The two production canonical-consumer changes require actual full verification, including Windows baseline63 failures versus frozen current source; source reasoning is not an executed critical witness.",
+      "removed_coverage": "None. Original behavioral calls, assertions, negative controls, physical definitions and ignored-test status remain unchanged. All208 original admission objects recoverable exactly:205 unchanged top-level,3 archived whole with only live nearest-reference refresh. Creation5 and adapter10 historical charges preserved.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Inherited Git autocrlf can change isolated fixture checkout bytes and clean-state prerequisites; use explicit repository-local false without relaxing exact content or dirty guards. Source-bound fixture prerequisite reasoning only, not an executed production mutation.",
+        "evidence": "m.scan base c6dd6afcfd89ff57acb75132295f82e938ad3bea 16b949afcbfea4cbebf03362b276b63b6edd790d2088541e13aeea0adf16104a -> current 332fe3dfb81a010292534d10b45c655fdf9bcbeccc05ffa4a4d4f95ab9c75a31. Set core.autocrlf=false only in the isolated fixture repository immediately after git init, before retained writes/commit. Replace only std/Path canonical fixture-root producers with dunce::canonicalize of the same physical directory; retain fallibility and exact authority checks. Independent source/case reviews bgagent-347f89a3 and bgagent-5805344a (retention/regression/registered also inventoried by bgagent-c9066752), relayed by parent. Final adversarial source audit bgagent-c84fd050 completed; final ledger authentication remains parent-owned and pending. Historical case charges take precedence over a lower recount: creation5 and adapter10 retained. No executed mutant, new critical-test certification, full-suite pass or restored Windows pass claimed."
+      },
+      "author": "background_agent:bgagent-3ce0d06e-c675-40cd-babd-bc817b694544 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-347f89a3 / bgagent-5805344a; final source auditor bgagent-c84fd050; ledger audit pending",
+      "review_evidence": "Independent source/case reviews bgagent-347f89a3 and bgagent-5805344a (retention/regression/registered also inventoried by bgagent-c9066752), relayed by parent. Final adversarial source audit bgagent-c84fd050 completed; final ledger authentication remains parent-owned and pending. Historical case charges take precedence over a lower recount: creation5 and adapter10 retained. No executed mutant, new critical-test certification, full-suite pass or restored Windows pass claimed."
+    },
+    {
+      "fingerprint": "803e0ec85bfce647e93e4a6b3953f291c7c1316261a0c2dac59bd477998e2dc6",
+      "occurrences": 1,
+      "failure_mode": "Raw Windows canonical fixture spelling can differ from the ordinary canonical identity expected by shipping consumers; fixture prerequisites fail before retained behavioral assertions.",
+      "importance": "Reach retained identity, authorization and durability oracles without weakening their contracts.",
+      "nearest_retained": {
+        "fingerprint": "7f7e67f9ec50b0f5259033b7a4a1c62f307bc11c6569836985458996fbc4a5a5",
+        "why_insufficient": "Same-file retained merge safety checks anchors/source references, not archive receipt verification, retained metadata and stale archive retry."
+      },
+      "oracle": "Archive preview/apply succeeds and verifies; resulting text contains unknown future_key metadata, stable anchor and provenance reference; stale original-version retry returns VersionMismatch. No whole-file byte equality or complete body-preservation assertion claimed.",
+      "prerequisites": "Replace only std/Path canonical fixture-root producers with dunce::canonicalize of the same physical directory; retain fallibility and exact authority checks.",
+      "shipping_implementation": "refact-agent/engine/src/buddy/resources/memory.rs::canonical_archive_preserves_unknown_metadata_and_body_and_rejects_stale_retry invokes real retained shipping seams; no copied algorithm.",
+      "determinism": "Existing isolated temporary state and exact calls/assertions unchanged; no added waits, provider/network dependencies, ignored tests or selection changes.",
+      "layer": "Existing engine library test-body fixture prerequisite maintenance only.",
+      "why_cheapest": "Repair prerequisite representation or repository-local line-ending configuration in place, without a new physical definition or scenario; charge the whole maintained body at 2 cases.",
+      "meaningful_cases": 2,
+      "critical": false,
+      "criticality_reason": "Ordinary admission applies ONLY to fixture maintenance, not underlying critical authorization, identity, containment, symlink or durable recovery behavior. The two production canonical-consumer changes require actual full verification, including Windows baseline63 failures versus frozen current source; source reasoning is not an executed critical witness.",
+      "removed_coverage": "None. Original behavioral calls, assertions, negative controls, physical definitions and ignored-test status remain unchanged. All208 original admission objects recoverable exactly:205 unchanged top-level,3 archived whole with only live nearest-reference refresh. Creation5 and adapter10 historical charges preserved.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Raw Windows canonical fixture spelling can differ from the ordinary canonical identity expected by shipping consumers; fixture prerequisites fail before retained behavioral assertions. Source-bound fixture prerequisite reasoning only, not an executed production mutation.",
+        "evidence": "m.scan base c6dd6afcfd89ff57acb75132295f82e938ad3bea a77c4384e0dd266abc8a3af3a2b6997a9c3a2a4acf3c09b907f6fa5d8f92a067 -> current 803e0ec85bfce647e93e4a6b3953f291c7c1316261a0c2dac59bd477998e2dc6. Replace only std/Path canonical fixture-root producers with dunce::canonicalize of the same physical directory; retain fallibility and exact authority checks. Independent source/case reviews bgagent-347f89a3 and bgagent-5805344a (retention/regression/registered also inventoried by bgagent-c9066752), relayed by parent. Final adversarial source audit bgagent-c84fd050 completed; final ledger authentication remains parent-owned and pending. Historical case charges take precedence over a lower recount: creation5 and adapter10 retained. No executed mutant, new critical-test certification, full-suite pass or restored Windows pass claimed."
+      },
+      "author": "background_agent:bgagent-3ce0d06e-c675-40cd-babd-bc817b694544 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-347f89a3 / bgagent-5805344a; final source auditor bgagent-c84fd050; ledger audit pending",
+      "review_evidence": "Independent source/case reviews bgagent-347f89a3 and bgagent-5805344a (retention/regression/registered also inventoried by bgagent-c9066752), relayed by parent. Final adversarial source audit bgagent-c84fd050 completed; final ledger authentication remains parent-owned and pending. Historical case charges take precedence over a lower recount: creation5 and adapter10 retained. No executed mutant, new critical-test certification, full-suite pass or restored Windows pass claimed."
+    },
+    {
+      "fingerprint": "e6165793fe4c8d170dfcb573dd2996408e4ba07ffca8b8f630f61ea1aab8f660",
+      "occurrences": 1,
+      "failure_mode": "Raw Windows canonical fixture spelling can differ from the ordinary canonical identity expected by shipping consumers; fixture prerequisites fail before retained behavioral assertions.",
+      "importance": "Reach retained identity, authorization and durability oracles without weakening their contracts.",
+      "nearest_retained": {
+        "fingerprint": "39cc4166a1ef80d7ea718c87bec2afe60dc27c093903afab7fd0b61471a860e2",
+        "why_insufficient": "No unchanged same-file test remains. Retained resource-execution receipt/reopen test covers generic resource recovery but not durable inactive policy epochs0/1/2 or recovery-specific policy grant."
+      },
+      "oracle": "Denied apply leaves epoch0; authorized apply completes at epoch1 and survives reopen; separately granted recovery completes with inactive policy at epoch2. Second recovery uses Deny authorization and leaves epoch2: this is not native replay protection evidence.",
+      "prerequisites": "Replace only std/Path canonical fixture-root producers with dunce::canonicalize of the same physical directory; retain fallibility and exact authority checks.",
+      "shipping_implementation": "refact-agent/engine/src/buddy/resources/retention.rs::inactive_policy_requires_grant_and_recovery_advances_epoch_after_reopen invokes real retained shipping seams; no copied algorithm.",
+      "determinism": "Existing isolated temporary state and exact calls/assertions unchanged; no added waits, provider/network dependencies, ignored tests or selection changes.",
+      "layer": "Existing engine library test-body fixture prerequisite maintenance only.",
+      "why_cheapest": "Repair prerequisite representation or repository-local line-ending configuration in place, without a new physical definition or scenario; charge the whole maintained body at 3 cases.",
+      "meaningful_cases": 3,
+      "critical": false,
+      "criticality_reason": "Ordinary admission applies ONLY to fixture maintenance, not underlying critical authorization, identity, containment, symlink or durable recovery behavior. The two production canonical-consumer changes require actual full verification, including Windows baseline63 failures versus frozen current source; source reasoning is not an executed critical witness.",
+      "removed_coverage": "None. Original behavioral calls, assertions, negative controls, physical definitions and ignored-test status remain unchanged. All208 original admission objects recoverable exactly:205 unchanged top-level,3 archived whole with only live nearest-reference refresh. Creation5 and adapter10 historical charges preserved.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Raw Windows canonical fixture spelling can differ from the ordinary canonical identity expected by shipping consumers; fixture prerequisites fail before retained behavioral assertions. Source-bound fixture prerequisite reasoning only, not an executed production mutation.",
+        "evidence": "m.scan base c6dd6afcfd89ff57acb75132295f82e938ad3bea 6ca4d37a8fe3ed8a99931dc1318813043c4481ea1946d3404bbf08b50922536c -> current e6165793fe4c8d170dfcb573dd2996408e4ba07ffca8b8f630f61ea1aab8f660. Replace only std/Path canonical fixture-root producers with dunce::canonicalize of the same physical directory; retain fallibility and exact authority checks. Independent source/case reviews bgagent-347f89a3 and bgagent-5805344a (retention/regression/registered also inventoried by bgagent-c9066752), relayed by parent. Final adversarial source audit bgagent-c84fd050 completed; final ledger authentication remains parent-owned and pending. Historical case charges take precedence over a lower recount: creation5 and adapter10 retained. No executed mutant, new critical-test certification, full-suite pass or restored Windows pass claimed."
+      },
+      "author": "background_agent:bgagent-3ce0d06e-c675-40cd-babd-bc817b694544 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-347f89a3 / bgagent-5805344a; final source auditor bgagent-c84fd050; ledger audit pending",
+      "review_evidence": "Independent source/case reviews bgagent-347f89a3 and bgagent-5805344a (retention/regression/registered also inventoried by bgagent-c9066752), relayed by parent. Final adversarial source audit bgagent-c84fd050 completed; final ledger authentication remains parent-owned and pending. Historical case charges take precedence over a lower recount: creation5 and adapter10 retained. No executed mutant, new critical-test certification, full-suite pass or restored Windows pass claimed."
+    },
+    {
+      "fingerprint": "73e57d61437241223bac90f8466fe74b57506defe03828ff63a375bcb867a04c",
+      "occurrences": 1,
+      "failure_mode": "Inherited Git autocrlf can change isolated fixture checkout bytes and clean-state prerequisites; use explicit repository-local false without relaxing exact content or dirty guards.",
+      "importance": "Reach retained identity, authorization and durability oracles without weakening their contracts.",
+      "nearest_retained": {
+        "fingerprint": "39cc4166a1ef80d7ea718c87bec2afe60dc27c093903afab7fd0b61471a860e2",
+        "why_insufficient": "Both same-file bodies changed, so no unchanged same-file anchor exists. Retained resource-execution recovery/receipts do not cover real Git quarantine, owner/native references or occupied checkout no-overwrite."
+      },
+      "oracle": "Preserve historical ten cases: nonmutating preview; stale, dirty, owner-reference, native-pinned and active-session refusals; actual archive/verify/recovery with branch retained; repeated apply refusal; occupied destination refuses without overwrite; repeated recovery refuses and identity artifact remains.",
+      "prerequisites": "Set core.autocrlf=false only in the isolated fixture repository immediately after git init, before retained writes/commit. Existing dunce project identity producer is unchanged; no further root or behavioral edits.",
+      "shipping_implementation": "refact-agent/engine/src/buddy/resources/worktree_housekeeping.rs::adapter_scratch_archive_verify_recover_protects_and_never_overwrites invokes real retained shipping seams; no copied algorithm.",
+      "determinism": "Existing isolated temporary state and exact calls/assertions unchanged; no added waits, provider/network dependencies, ignored tests or selection changes.",
+      "layer": "Existing engine library test-body fixture prerequisite maintenance only.",
+      "why_cheapest": "Repair prerequisite representation or repository-local line-ending configuration in place, without a new physical definition or scenario; charge the whole maintained body at 10 cases.",
+      "meaningful_cases": 10,
+      "critical": false,
+      "criticality_reason": "Ordinary admission applies ONLY to fixture maintenance, not underlying critical authorization, identity, containment, symlink or durable recovery behavior. The two production canonical-consumer changes require actual full verification, including Windows baseline63 failures versus frozen current source; source reasoning is not an executed critical witness.",
+      "removed_coverage": "None. Original behavioral calls, assertions, negative controls, physical definitions and ignored-test status remain unchanged. All208 original admission objects recoverable exactly:205 unchanged top-level,3 archived whole with only live nearest-reference refresh. Creation5 and adapter10 historical charges preserved.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Inherited Git autocrlf can change isolated fixture checkout bytes and clean-state prerequisites; use explicit repository-local false without relaxing exact content or dirty guards. Source-bound fixture prerequisite reasoning only, not an executed production mutation.",
+        "evidence": "m.scan base c6dd6afcfd89ff57acb75132295f82e938ad3bea de6b049c6c17bf446142244472d1fde500b0a9efc652cb192d9364d418129b81 -> current 73e57d61437241223bac90f8466fe74b57506defe03828ff63a375bcb867a04c. Set core.autocrlf=false only in the isolated fixture repository immediately after git init, before retained writes/commit. Existing dunce project identity producer is unchanged; no further root or behavioral edits. Independent source/case reviews bgagent-347f89a3 and bgagent-5805344a (retention/regression/registered also inventoried by bgagent-c9066752), relayed by parent. Final adversarial source audit bgagent-c84fd050 completed; final ledger authentication remains parent-owned and pending. Historical case charges take precedence over a lower recount: creation5 and adapter10 retained. No executed mutant, new critical-test certification, full-suite pass or restored Windows pass claimed."
+      },
+      "author": "background_agent:bgagent-3ce0d06e-c675-40cd-babd-bc817b694544 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-347f89a3 / bgagent-5805344a; final source auditor bgagent-c84fd050; ledger audit pending",
+      "review_evidence": "Independent source/case reviews bgagent-347f89a3 and bgagent-5805344a (retention/regression/registered also inventoried by bgagent-c9066752), relayed by parent. Final adversarial source audit bgagent-c84fd050 completed; final ledger authentication remains parent-owned and pending. Historical case charges take precedence over a lower recount: creation5 and adapter10 retained. No executed mutant, new critical-test certification, full-suite pass or restored Windows pass claimed."
+    },
+    {
+      "fingerprint": "f2ae60844840bba25c139a6cc87d8d8f93a1cb16c54e6cf5d3575ff12d5785cb",
+      "occurrences": 1,
+      "failure_mode": "Raw Windows canonical fixture spelling can differ from the ordinary canonical identity expected by shipping consumers; fixture prerequisites fail before retained behavioral assertions.",
+      "importance": "Reach retained identity, authorization and durability oracles without weakening their contracts.",
+      "nearest_retained": {
+        "fingerprint": "39cc4166a1ef80d7ea718c87bec2afe60dc27c093903afab7fd0b61471a860e2",
+        "why_insufficient": "Both same-file bodies changed, so no unchanged same-file anchor exists. Generic retained resource receipt/reopen coverage does not exercise three path-evidence locator forms, sibling containment or real quarantine owner recovery."
+      },
+      "oracle": "Fourteen existing cases: nonmutating preview; stale apply refusal; native pin refusal; three distinct retained evidence locators refuse (raw path, file URL, prose inline path); sibling-prefix negative control allows preview; active-session refusal; dirty apply refusal; actual archive/verify/recover retains tracked evidence and branch; repeated apply refusal; occupied recovery preserves file; repeated recovery refusal; durable candidate reference protects restored checkout.",
+      "prerequisites": "Replace only std/Path canonical fixture-root producers with dunce::canonicalize of the same physical directory; retain fallibility and exact authority checks.",
+      "shipping_implementation": "refact-agent/engine/src/buddy/resources/worktree_housekeeping.rs::actual_adapter_quarantine_apply_verify_recover_scratch invokes real retained shipping seams; no copied algorithm.",
+      "determinism": "Existing isolated temporary state and exact calls/assertions unchanged; no added waits, provider/network dependencies, ignored tests or selection changes.",
+      "layer": "Existing engine library test-body fixture prerequisite maintenance only.",
+      "why_cheapest": "Repair prerequisite representation or repository-local line-ending configuration in place, without a new physical definition or scenario; charge the whole maintained body at 14 cases.",
+      "meaningful_cases": 14,
+      "critical": false,
+      "criticality_reason": "Ordinary admission applies ONLY to fixture maintenance, not underlying critical authorization, identity, containment, symlink or durable recovery behavior. The two production canonical-consumer changes require actual full verification, including Windows baseline63 failures versus frozen current source; source reasoning is not an executed critical witness.",
+      "removed_coverage": "None. Original behavioral calls, assertions, negative controls, physical definitions and ignored-test status remain unchanged. All208 original admission objects recoverable exactly:205 unchanged top-level,3 archived whole with only live nearest-reference refresh. Creation5 and adapter10 historical charges preserved.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Raw Windows canonical fixture spelling can differ from the ordinary canonical identity expected by shipping consumers; fixture prerequisites fail before retained behavioral assertions. Source-bound fixture prerequisite reasoning only, not an executed production mutation.",
+        "evidence": "m.scan base c6dd6afcfd89ff57acb75132295f82e938ad3bea f94fd142ae75521ddd8be820ecf762da52ee72c891773e93cd68eddbd014d4f7 -> current f2ae60844840bba25c139a6cc87d8d8f93a1cb16c54e6cf5d3575ff12d5785cb. Replace only std/Path canonical fixture-root producers with dunce::canonicalize of the same physical directory; retain fallibility and exact authority checks. Independent source/case reviews bgagent-347f89a3 and bgagent-5805344a (retention/regression/registered also inventoried by bgagent-c9066752), relayed by parent. Final adversarial source audit bgagent-c84fd050 completed; final ledger authentication remains parent-owned and pending. Historical case charges take precedence over a lower recount: creation5 and adapter10 retained. No executed mutant, new critical-test certification, full-suite pass or restored Windows pass claimed."
+      },
+      "author": "background_agent:bgagent-3ce0d06e-c675-40cd-babd-bc817b694544 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-347f89a3 / bgagent-5805344a; final source auditor bgagent-c84fd050; ledger audit pending",
+      "review_evidence": "Independent source/case reviews bgagent-347f89a3 and bgagent-5805344a (retention/regression/registered also inventoried by bgagent-c9066752), relayed by parent. Final adversarial source audit bgagent-c84fd050 completed; final ledger authentication remains parent-owned and pending. Historical case charges take precedence over a lower recount: creation5 and adapter10 retained. No executed mutant, new critical-test certification, full-suite pass or restored Windows pass claimed."
     }
   ],
   "classifications": [
@@ -9133,13 +9419,26 @@
     {
       "path": "refact-agent/engine/src/buddy/resource_execution.rs",
       "kind": "item_macro",
-      "source_sha256": "a0187478d63767453ed7be5ea06c4955a50b98f8327275dfd479845a20b50ec8",
+      "source_sha256": "f57d22e8f5efdf51d99823e67838a7b612c86582946cdb1e318a984ad976c9e3",
       "lead_sha256": "4ed7e7de0baebd05149b6c4504480bbf29ae03d5aebd512c63b0f01815767bf6",
       "conclusion": "non_test",
       "rationale": "tokio::task_local bounded invocation declares a static LocalKey and storage/access methods only, no test declarations, Rustdoc examples or includes. cfg(test), where present, gates support storage/hooks, not a generated test.",
       "author": "background_agent:bgagent-1c1ac627",
       "reviewer": "background_agent:bgagent-b38d7a33",
-      "review_evidence": "Independent source-only review subchat-b3ccfe84-10c0-4216-ae03-2b9d0428864d approved eleven bounded non-test leads; reviewer did not compute hashes. Admission author recomputed exact current source/lead SHA256 using shipping inventory. No runtime review claimed. Rebound file hash for unrelated fixture/physical-canonical changes; macro input and original non-test conclusion unchanged against721f5c4e. Round7: scanner confirms identical bounded lead_sha256 in base/current; rebind raw source hash only for canonical-root fixture edits. Existing non-test lead semantics/rationale unchanged."
+      "review_evidence": "Independent source-only review subchat-b3ccfe84-10c0-4216-ae03-2b9d0428864d approved eleven bounded non-test leads; reviewer did not compute hashes. Admission author recomputed exact current source/lead SHA256 using shipping inventory. No runtime review claimed. Rebound file hash for unrelated fixture/physical-canonical changes; macro input and original non-test conclusion unchanged against721f5c4e. Round7: scanner confirms identical bounded lead_sha256 in base/current; rebind raw source hash only for canonical-root fixture edits. Existing non-test lead semantics/rationale unchanged. Round13: rebind full-file hash only; actual scanner confirms identical bounded lead/kind in base/current. Original certificate preserved whole in historical_records; no changed macro or test-generation conclusion.",
+      "historical_records": [
+        {
+          "path": "refact-agent/engine/src/buddy/resource_execution.rs",
+          "kind": "item_macro",
+          "source_sha256": "a0187478d63767453ed7be5ea06c4955a50b98f8327275dfd479845a20b50ec8",
+          "lead_sha256": "4ed7e7de0baebd05149b6c4504480bbf29ae03d5aebd512c63b0f01815767bf6",
+          "conclusion": "non_test",
+          "rationale": "tokio::task_local bounded invocation declares a static LocalKey and storage/access methods only, no test declarations, Rustdoc examples or includes. cfg(test), where present, gates support storage/hooks, not a generated test.",
+          "author": "background_agent:bgagent-1c1ac627",
+          "reviewer": "background_agent:bgagent-b38d7a33",
+          "review_evidence": "Independent source-only review subchat-b3ccfe84-10c0-4216-ae03-2b9d0428864d approved eleven bounded non-test leads; reviewer did not compute hashes. Admission author recomputed exact current source/lead SHA256 using shipping inventory. No runtime review claimed. Rebound file hash for unrelated fixture/physical-canonical changes; macro input and original non-test conclusion unchanged against721f5c4e. Round7: scanner confirms identical bounded lead_sha256 in base/current; rebind raw source hash only for canonical-root fixture edits. Existing non-test lead semantics/rationale unchanged."
+        }
+      ]
     },
     {
       "path": "refact-agent/engine/src/chat/delivery.rs",
@@ -20447,19 +20746,36 @@
     },
     {
       "path": "refact-agent/engine/src/buddy/companion.rs",
-      "before_sha256": null,
-      "after_sha256": "eb43e3f014e259726d8d66fa356b394aa71a22b7f4f01f97eacccbfb178980e4",
+      "before_sha256": "eb43e3f014e259726d8d66fa356b394aa71a22b7f4f01f97eacccbfb178980e4",
+      "after_sha256": "7d37742cb5cc9702ab07e5a9a96f5e70b0edcee4f2cfa868d27528aa0916154f",
       "affected_tests": [
-        "0d343f2c0989c3abedef1d81136ed2fd9eb77f8302dc3115e66cf9d0784b6b1e",
-        "208bffd75fd22fe6ab1cb1449a6fa79a4e6550ae93f8b2cbcf7ce1c2772d719a",
-        "fd9f3720ecff3b032f150b24f7a3c55b7ff86c7e12805c2e79e8cd093b8c85d6"
+        "0ab27389d45929ea5fc35be715efd1fbdd0e794df4c94404270c8da1bc5fd131",
+        "b0c5181cb40b050215ab97648c1ea8bc7fc0e1caf3e483dd3c76dd2dc8044a76",
+        "0d343f2c0989c3abedef1d81136ed2fd9eb77f8302dc3115e66cf9d0784b6b1e"
       ],
-      "no_tests_reason": "",
-      "impact": "Additive source-binding/receipt schema setup or current Buddy production integration; original assertions remain unchanged unless separately admitted. Impact set includes every test physically in the changed file plus conservatively related candidate regressions when the module has no tests; this is not proof every transitive caller is covered. Affected fingerprints are a conservative review/compilation inventory, not proof each listed test executes this source or that every changed branch is witnessed.",
-      "execution_context": "Registered worktree; same Rust engine library test harness; production/test module wiring retained. Default feature/platform requirements unchanged. Focused actual red9fail/green9pass and final11pass recorded; full-library failed27 on earlier source and24 of other25 reproduced serially. No full-suite success claim. Final late HTTP acknowledgement ordering and replay-scope corrections are source-reviewed but have no dedicated injected-save-failure witness.",
-      "author": "chat:a569df0f-895b-428c-8349-424fb5d1ddf8",
-      "reviewer": "background_agent:bgagent-e6b24b53-6d63-4292-bee2-1128707c5007",
-      "review_evidence": "Independent semantic/source/evidence review subchat-04121a39-0dc0-40ed-8116-3369422eff29 generations1-4 approved scopes/case counts, exact red9fail/green9pass witness files, current fingerprint mappings, ordinary unchanged-scenario setup, 33 conservative support hashes and final2fixes11pass. Full-library run failed and is not certified by these admissions; no end-to-end provider/lifecycle claim."
+      "impact": "Round13: Persisted source path still physically canonicalized asynchronously, then dunce::simplified before unchanged exact project containment checks; live-project identity/binding and recursion guards unchanged. Two fixture bodies use dunce canonical roots.",
+      "execution_context": "Conservative all-local-module m.scan exposure map, not exhaustive cross-file call graph or per-test execution evidence. No physical tests added/deleted, ignored or selected away. Parent froze source manifest at target/round13-evidence/rust-before.json; compilation/execution parent-owned and pending. Full actual Windows comparison against prior63 failures is required for production consumer changes; no new critical-test/mutant or restored-platform pass claimed.",
+      "author": "background_agent:bgagent-3ce0d06e-c675-40cd-babd-bc817b694544 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-347f89a3 / bgagent-5805344a; final source auditor bgagent-c84fd050; ledger audit pending",
+      "review_evidence": "Independent source/case reviews bgagent-347f89a3 and bgagent-5805344a (retention/regression/registered also inventoried by bgagent-c9066752), relayed by parent. Final adversarial source audit bgagent-c84fd050 completed; final ledger authentication remains parent-owned and pending. Historical case charges take precedence over a lower recount: creation5 and adapter10 retained. No executed mutant, new critical-test certification, full-suite pass or restored Windows pass claimed.",
+      "historical_records": [
+        {
+          "path": "refact-agent/engine/src/buddy/companion.rs",
+          "before_sha256": null,
+          "after_sha256": "eb43e3f014e259726d8d66fa356b394aa71a22b7f4f01f97eacccbfb178980e4",
+          "affected_tests": [
+            "0d343f2c0989c3abedef1d81136ed2fd9eb77f8302dc3115e66cf9d0784b6b1e",
+            "208bffd75fd22fe6ab1cb1449a6fa79a4e6550ae93f8b2cbcf7ce1c2772d719a",
+            "fd9f3720ecff3b032f150b24f7a3c55b7ff86c7e12805c2e79e8cd093b8c85d6"
+          ],
+          "no_tests_reason": "",
+          "impact": "Additive source-binding/receipt schema setup or current Buddy production integration; original assertions remain unchanged unless separately admitted. Impact set includes every test physically in the changed file plus conservatively related candidate regressions when the module has no tests; this is not proof every transitive caller is covered. Affected fingerprints are a conservative review/compilation inventory, not proof each listed test executes this source or that every changed branch is witnessed.",
+          "execution_context": "Registered worktree; same Rust engine library test harness; production/test module wiring retained. Default feature/platform requirements unchanged. Focused actual red9fail/green9pass and final11pass recorded; full-library failed27 on earlier source and24 of other25 reproduced serially. No full-suite success claim. Final late HTTP acknowledgement ordering and replay-scope corrections are source-reviewed but have no dedicated injected-save-failure witness.",
+          "author": "chat:a569df0f-895b-428c-8349-424fb5d1ddf8",
+          "reviewer": "background_agent:bgagent-e6b24b53-6d63-4292-bee2-1128707c5007",
+          "review_evidence": "Independent semantic/source/evidence review subchat-04121a39-0dc0-40ed-8116-3369422eff29 generations1-4 approved scopes/case counts, exact red9fail/green9pass witness files, current fingerprint mappings, ordinary unchanged-scenario setup, 33 conservative support hashes and final2fixes11pass. Full-library run failed and is not certified by these admissions; no end-to-end provider/lifecycle claim."
+        }
+      ]
     },
     {
       "path": "refact-agent/engine/src/buddy/decision_receipts.rs",
@@ -21588,19 +21904,37 @@
     },
     {
       "path": "refact-agent/engine/src/buddy/resource_execution.rs",
-      "before_sha256": "c80de83eab5759fb406b846db154e9922b84dbe3ca856a1143c96d66fe33c9a1",
-      "after_sha256": "a0187478d63767453ed7be5ea06c4955a50b98f8327275dfd479845a20b50ec8",
+      "before_sha256": "a0187478d63767453ed7be5ea06c4955a50b98f8327275dfd479845a20b50ec8",
+      "after_sha256": "f57d22e8f5efdf51d99823e67838a7b612c86582946cdb1e318a984ad976c9e3",
       "affected_tests": [
         "c3f402f756ef5df4eb6e8364e246dd7ee2086a6c0b4b7037d1ef1a4a9113c9b3",
         "39cc4166a1ef80d7ea718c87bec2afe60dc27c093903afab7fd0b61471a860e2",
-        "16b949afcbfea4cbebf03362b276b63b6edd790d2088541e13aeea0adf16104a",
+        "332fe3dfb81a010292534d10b45c655fdf9bcbeccc05ffa4a4d4f95ab9c75a31",
         "34f674da63c26d3c6ecb9628bf24e5ee2a4b25731d2c99a63ac291916ec48ff5"
       ],
-      "impact": "Canonical-root fixture producer representation only: same physical temporary root now uses dunce::canonicalize rather than std/Path canonicalize. Original scenario bodies, guards and execution selection otherwise unchanged.",
-      "execution_context": "Bounded module-local direct tests and shared-helper consumers listed conservatively; unchanged body fingerprints remain retained tests, not new admissions. No production behavior or Windows passing result inferred.",
-      "author": "background_agent:bgagent-1e85d981-c90f-439b-bdf4-01808dfed4c5",
-      "reviewer": "background_agent:bgagent-c353a160 / bgagent-02d03136",
-      "review_evidence": "Bounded mechanical fixture patch reviewed by implementation f3ebc49b and scenario accounting c353a160/02d03136; parent-approved 6644 existing-case correction. Source support scope inspected against c17e13cc5; raw full-file hashes bind exact current source. Production subchat guards independently reviewed by 66eadce8; roots durable hash normalization reverted. No runtime pass or fresh production-mutant proof claimed."
+      "impact": "Round13: Only registered-worktree action-service fixture root uses dunce canonicalization and explicit repository-local core.autocrlf=false. Existing production action/recovery guards and assertions unchanged.",
+      "execution_context": "Conservative all-local-module m.scan exposure map, not exhaustive cross-file call graph or per-test execution evidence. No physical tests added/deleted, ignored or selected away. Parent froze source manifest at target/round13-evidence/rust-before.json; compilation/execution parent-owned and pending. Full actual Windows comparison against prior63 failures is required for production consumer changes; no new critical-test/mutant or restored-platform pass claimed.",
+      "author": "background_agent:bgagent-3ce0d06e-c675-40cd-babd-bc817b694544 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-347f89a3 / bgagent-5805344a; final source auditor bgagent-c84fd050; ledger audit pending",
+      "review_evidence": "Independent source/case reviews bgagent-347f89a3 and bgagent-5805344a (retention/regression/registered also inventoried by bgagent-c9066752), relayed by parent. Final adversarial source audit bgagent-c84fd050 completed; final ledger authentication remains parent-owned and pending. Historical case charges take precedence over a lower recount: creation5 and adapter10 retained. No executed mutant, new critical-test certification, full-suite pass or restored Windows pass claimed.",
+      "historical_records": [
+        {
+          "path": "refact-agent/engine/src/buddy/resource_execution.rs",
+          "before_sha256": "c80de83eab5759fb406b846db154e9922b84dbe3ca856a1143c96d66fe33c9a1",
+          "after_sha256": "a0187478d63767453ed7be5ea06c4955a50b98f8327275dfd479845a20b50ec8",
+          "affected_tests": [
+            "c3f402f756ef5df4eb6e8364e246dd7ee2086a6c0b4b7037d1ef1a4a9113c9b3",
+            "39cc4166a1ef80d7ea718c87bec2afe60dc27c093903afab7fd0b61471a860e2",
+            "16b949afcbfea4cbebf03362b276b63b6edd790d2088541e13aeea0adf16104a",
+            "34f674da63c26d3c6ecb9628bf24e5ee2a4b25731d2c99a63ac291916ec48ff5"
+          ],
+          "impact": "Canonical-root fixture producer representation only: same physical temporary root now uses dunce::canonicalize rather than std/Path canonicalize. Original scenario bodies, guards and execution selection otherwise unchanged.",
+          "execution_context": "Bounded module-local direct tests and shared-helper consumers listed conservatively; unchanged body fingerprints remain retained tests, not new admissions. No production behavior or Windows passing result inferred.",
+          "author": "background_agent:bgagent-1e85d981-c90f-439b-bdf4-01808dfed4c5",
+          "reviewer": "background_agent:bgagent-c353a160 / bgagent-02d03136",
+          "review_evidence": "Bounded mechanical fixture patch reviewed by implementation f3ebc49b and scenario accounting c353a160/02d03136; parent-approved 6644 existing-case correction. Source support scope inspected against c17e13cc5; raw full-file hashes bind exact current source. Production subchat guards independently reviewed by 66eadce8; roots durable hash normalization reverted. No runtime pass or fresh production-mutant proof claimed."
+        }
+      ]
     },
     {
       "path": "refact-agent/engine/src/buddy/action_execution.rs",
@@ -21768,17 +22102,33 @@
     },
     {
       "path": "refact-agent/engine/src/buddy/resources/worktree_housekeeping.rs",
-      "before_sha256": "f149ff5ebe46f0d958e0f12c87bcc458695942e8efdf878382b75665a3ad13dc",
-      "after_sha256": "e08fa0b488157ce15c01af90b8d6441b06ab849b7e58763164d33dc88d2de9b1",
+      "before_sha256": "e08fa0b488157ce15c01af90b8d6441b06ab849b7e58763164d33dc88d2de9b1",
+      "after_sha256": "6bcc023773a5a7301e68a67c11dd7d71d1a3cbf94037dfb8c591c9b83500919b",
       "affected_tests": [
-        "de6b049c6c17bf446142244472d1fde500b0a9efc652cb192d9364d418129b81",
-        "f94fd142ae75521ddd8be820ecf762da52ee72c891773e93cd68eddbd014d4f7"
+        "73e57d61437241223bac90f8466fe74b57506defe03828ff63a375bcb867a04c",
+        "f2ae60844840bba25c139a6cc87d8d8f93a1cb16c54e6cf5d3575ff12d5785cb"
       ],
-      "impact": "Canonical-root fixture producer representation only: same physical temporary root now uses dunce::canonicalize rather than std/Path canonicalize. Original scenario bodies, guards and execution selection otherwise unchanged.",
-      "execution_context": "Bounded module-local direct tests and shared-helper consumers listed conservatively; unchanged body fingerprints remain retained tests, not new admissions. No production behavior or Windows passing result inferred.",
-      "author": "background_agent:bgagent-1e85d981-c90f-439b-bdf4-01808dfed4c5",
-      "reviewer": "background_agent:bgagent-c353a160 / bgagent-02d03136",
-      "review_evidence": "Bounded mechanical fixture patch reviewed by implementation f3ebc49b and scenario accounting c353a160/02d03136; parent-approved 6644 existing-case correction. Source support scope inspected against c17e13cc5; raw full-file hashes bind exact current source. Production subchat guards independently reviewed by 66eadce8; roots durable hash normalization reverted. No runtime pass or fresh production-mutant proof claimed."
+      "impact": "Round13: Only two retained fixture prerequisites: repository-local core.autocrlf=false in existing ten-case adapter fixture, and dunce canonical root in existing fourteen-case regression fixture.",
+      "execution_context": "Conservative all-local-module m.scan exposure map, not exhaustive cross-file call graph or per-test execution evidence. No physical tests added/deleted, ignored or selected away. Parent froze source manifest at target/round13-evidence/rust-before.json; compilation/execution parent-owned and pending. Full actual Windows comparison against prior63 failures is required for production consumer changes; no new critical-test/mutant or restored-platform pass claimed.",
+      "author": "background_agent:bgagent-3ce0d06e-c675-40cd-babd-bc817b694544 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-347f89a3 / bgagent-5805344a; final source auditor bgagent-c84fd050; ledger audit pending",
+      "review_evidence": "Independent source/case reviews bgagent-347f89a3 and bgagent-5805344a (retention/regression/registered also inventoried by bgagent-c9066752), relayed by parent. Final adversarial source audit bgagent-c84fd050 completed; final ledger authentication remains parent-owned and pending. Historical case charges take precedence over a lower recount: creation5 and adapter10 retained. No executed mutant, new critical-test certification, full-suite pass or restored Windows pass claimed.",
+      "historical_records": [
+        {
+          "path": "refact-agent/engine/src/buddy/resources/worktree_housekeeping.rs",
+          "before_sha256": "f149ff5ebe46f0d958e0f12c87bcc458695942e8efdf878382b75665a3ad13dc",
+          "after_sha256": "e08fa0b488157ce15c01af90b8d6441b06ab849b7e58763164d33dc88d2de9b1",
+          "affected_tests": [
+            "de6b049c6c17bf446142244472d1fde500b0a9efc652cb192d9364d418129b81",
+            "f94fd142ae75521ddd8be820ecf762da52ee72c891773e93cd68eddbd014d4f7"
+          ],
+          "impact": "Canonical-root fixture producer representation only: same physical temporary root now uses dunce::canonicalize rather than std/Path canonicalize. Original scenario bodies, guards and execution selection otherwise unchanged.",
+          "execution_context": "Bounded module-local direct tests and shared-helper consumers listed conservatively; unchanged body fingerprints remain retained tests, not new admissions. No production behavior or Windows passing result inferred.",
+          "author": "background_agent:bgagent-1e85d981-c90f-439b-bdf4-01808dfed4c5",
+          "reviewer": "background_agent:bgagent-c353a160 / bgagent-02d03136",
+          "review_evidence": "Bounded mechanical fixture patch reviewed by implementation f3ebc49b and scenario accounting c353a160/02d03136; parent-approved 6644 existing-case correction. Source support scope inspected against c17e13cc5; raw full-file hashes bind exact current source. Production subchat guards independently reviewed by 66eadce8; roots durable hash normalization reverted. No runtime pass or fresh production-mutant proof claimed."
+        }
+      ]
     },
     {
       "path": "refact-agent/engine/src/buddy/workflow_deliverables.rs",
@@ -22140,6 +22490,33 @@
       "author": "background_agent:bgagent-b63ffe6c-cc38-45c2-8b01-a40c691d4531 (bookkeeping only)",
       "reviewer": "background_agent:bgagent-60e2 (prior proposal) / bgagent-d9fced8a (prior timeout proposal); bgagent-966d4349 final source review pending",
       "review_evidence": "Prior source-helper proposal review bgagent-60e2 and approval timeout-20 proposal review bgagent-d9fced8a are source-only, not runtime evidence. Final four-file post-source adversarial review bgagent-966d4349 remains pending in this ledger; no completed final-source or final-ledger approval asserted. Exact hashes and bounded scanner fingerprint maps computed by bookkeeping author; cross-file approval fixture consumers located by source search. Final conditional shell-only argument branch requires final source review."
+    },
+    {
+      "path": "refact-agent/engine/src/buddy/resources/memory.rs",
+      "before_sha256": "c198e3b4c27fd7a2a8870076b645af74c6d871288f594085c801a7f53a9f797d",
+      "after_sha256": "8b9e1958f8a00b874efc1d9365b18abd01bddaa1b5c47d1b3b810daf022d768b",
+      "affected_tests": [
+        "803e0ec85bfce647e93e4a6b3953f291c7c1316261a0c2dac59bd477998e2dc6",
+        "7f7e67f9ec50b0f5259033b7a4a1c62f307bc11c6569836985458996fbc4a5a5"
+      ],
+      "impact": "Round13: Preserve awaited physical canonicalization of project, workspace and memory paths, then simplify to ordinary canonical spelling before unchanged exact equality, containment and symlink guards. One fixture canonical producer repaired.",
+      "execution_context": "Conservative all-local-module m.scan exposure map, not exhaustive cross-file call graph or per-test execution evidence. No physical tests added/deleted, ignored or selected away. Parent froze source manifest at target/round13-evidence/rust-before.json; compilation/execution parent-owned and pending. Full actual Windows comparison against prior63 failures is required for production consumer changes; no new critical-test/mutant or restored-platform pass claimed.",
+      "author": "background_agent:bgagent-3ce0d06e-c675-40cd-babd-bc817b694544 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-347f89a3 / bgagent-5805344a; final source auditor bgagent-c84fd050; ledger audit pending",
+      "review_evidence": "Independent source/case reviews bgagent-347f89a3 and bgagent-5805344a (retention/regression/registered also inventoried by bgagent-c9066752), relayed by parent. Final adversarial source audit bgagent-c84fd050 completed; final ledger authentication remains parent-owned and pending. Historical case charges take precedence over a lower recount: creation5 and adapter10 retained. No executed mutant, new critical-test certification, full-suite pass or restored Windows pass claimed."
+    },
+    {
+      "path": "refact-agent/engine/src/buddy/resources/retention.rs",
+      "before_sha256": "850870db629a06266f486b668a113e3caf0bcde17061280b11dc17a6c9d34c55",
+      "after_sha256": "d68778044e633c273f0c7af8f2e447e1e6414eaad47e690205df527d7fe9afd0",
+      "affected_tests": [
+        "e6165793fe4c8d170dfcb573dd2996408e4ba07ffca8b8f630f61ea1aab8f660"
+      ],
+      "impact": "Round13: Only retained policy test fixture root canonical producer changes from std to dunce; no production algorithm or behavioral assertions changed.",
+      "execution_context": "Conservative all-local-module m.scan exposure map, not exhaustive cross-file call graph or per-test execution evidence. No physical tests added/deleted, ignored or selected away. Parent froze source manifest at target/round13-evidence/rust-before.json; compilation/execution parent-owned and pending. Full actual Windows comparison against prior63 failures is required for production consumer changes; no new critical-test/mutant or restored-platform pass claimed.",
+      "author": "background_agent:bgagent-3ce0d06e-c675-40cd-babd-bc817b694544 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-347f89a3 / bgagent-5805344a; final source auditor bgagent-c84fd050; ledger audit pending",
+      "review_evidence": "Independent source/case reviews bgagent-347f89a3 and bgagent-5805344a (retention/regression/registered also inventoried by bgagent-c9066752), relayed by parent. Final adversarial source audit bgagent-c84fd050 completed; final ledger authentication remains parent-owned and pending. Historical case charges take precedence over a lower recount: creation5 and adapter10 retained. No executed mutant, new critical-test certification, full-suite pass or restored Windows pass claimed."
     }
   ]
 }

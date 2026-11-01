@@ -117,6 +117,7 @@ async fn source(gcx: Arc<GlobalContext>, root: &PathBuf, id: &str) -> Result<Sou
             .ok_or("Source chat is deleted or unavailable")?;
         let path = tokio::fs::canonicalize(&loaded.source_path)
             .await
+            .map(|path| dunce::simplified(&path).to_path_buf())
             .map_err(|_| "Source chat is deleted or unavailable")?;
         if !path.starts_with(root.join(".refact")) {
             return Err("Source is outside current project".into());
@@ -380,7 +381,7 @@ mod tests {
     #[tokio::test]
     async fn companion_creation_is_single_persisted_and_source_bound() {
         let root = tempfile::tempdir().unwrap();
-        let root_path = root.path().canonicalize().unwrap();
+        let root_path = dunce::canonicalize(root.path()).unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root_path.clone()];
         let app = AppState::from_gcx(gcx.clone()).await;
@@ -449,7 +450,7 @@ mod tests {
         let foreign = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let mut session = crate::chat::types::ChatSession::new("live-source".into());
-        session.work_project_root = Some(root.path().canonicalize().unwrap());
+        session.work_project_root = Some(dunce::canonicalize(root.path()).unwrap());
         session
             .messages
             .push(ChatMessage::new("user".into(), "known source text".into()));
@@ -460,7 +461,7 @@ mod tests {
             .insert("live-source".into(), session.clone());
         let allowed = source(
             gcx.clone(),
-            &root.path().canonicalize().unwrap(),
+            &dunce::canonicalize(root.path()).unwrap(),
             "live-source",
         )
         .await
@@ -469,12 +470,14 @@ mod tests {
             allowed.messages[0].content.content_text_only(),
             "known source text"
         );
-        session.lock().await.work_project_root = Some(foreign.path().canonicalize().unwrap());
-        assert!(
-            source(gcx, &root.path().canonicalize().unwrap(), "live-source")
-                .await
-                .is_err()
-        );
+        session.lock().await.work_project_root = Some(dunce::canonicalize(foreign.path()).unwrap());
+        assert!(source(
+            gcx,
+            &dunce::canonicalize(root.path()).unwrap(),
+            "live-source"
+        )
+        .await
+        .is_err());
     }
 
     #[test]

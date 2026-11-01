@@ -323,7 +323,7 @@ mod tests {
     #[tokio::test]
     async fn inactive_policy_requires_grant_and_recovery_advances_epoch_after_reopen() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
         let project = ProjectIdentity {
             project_id: "project".into(),
             canonical_root: root.to_string_lossy().into_owned(),

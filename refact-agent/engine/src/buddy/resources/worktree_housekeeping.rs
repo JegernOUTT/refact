@@ -228,6 +228,7 @@ mod tests {
         let root = scratch.path().join("repo");
         std::fs::create_dir(&root).unwrap();
         git(&root, &["init", "-b", "main"]);
+        git(&root, &["config", "core.autocrlf", "false"]);
         git(&root, &["config", "user.name", "Scratch"]);
         git(&root, &["config", "user.email", "scratch@example.invalid"]);
         std::fs::write(root.join("tracked"), "retained\n").unwrap();
@@ -550,7 +551,7 @@ mod adapter_regression_tests {
         std::fs::write(root.join("tracked"), "evidence").unwrap();
         git(&root, &["add", "tracked"]);
         git(&root, &["commit", "-m", "initial"]);
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         let owner = WorktreeService::new(temp.path().join("cache"), root.clone()).unwrap();
         let created = owner
             .create_worktree(crate::worktrees::types::CreateWorktreeRequest {

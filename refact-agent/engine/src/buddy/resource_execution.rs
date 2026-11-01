@@ -1947,12 +1947,13 @@ mod tests {
         let root = scratch.path().join("repo");
         std::fs::create_dir(&root).unwrap();
         git(&root, &["init", "-b", "main"]);
+        git(&root, &["config", "core.autocrlf", "false"]);
         git(&root, &["config", "user.name", "Scratch"]);
         git(&root, &["config", "user.email", "scratch@example.invalid"]);
         std::fs::write(root.join("tracked"), "retained\n").unwrap();
         git(&root, &["add", "tracked"]);
         git(&root, &["commit", "-m", "initial"]);
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         let project = ProjectIdentity {
             project_id: "scratch-registered-archive".into(),
             canonical_root: root.to_string_lossy().into_owned(),
