@@ -187,7 +187,8 @@ async fn privacy_fixture() -> (
     Arc<AMutex<AtCommandsContext>>,
 ) {
     let gcx = crate::global_context::tests::make_test_gcx().await;
-    let workspace = tempfile::tempdir().unwrap();
+    let workspace =
+        tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
     let project_path = dunce::canonicalize(workspace.path()).unwrap();
     *gcx.documents_state.workspace_folders.lock().unwrap() = vec![project_path.clone()];
     let mut caps = crate::caps::CodeAssistantCaps::default();

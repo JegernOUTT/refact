@@ -43,7 +43,8 @@ async fn app_for(root: &Path, cache_dir: &Path) -> AppState {
         config_dir.path().to_path_buf(),
     )
     .await;
-    *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.to_path_buf()];
+    *gcx.documents_state.workspace_folders.lock().unwrap() =
+        vec![dunce::canonicalize(root).unwrap()];
     AppState::from_gcx(gcx).await
 }
 

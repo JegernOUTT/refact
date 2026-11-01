@@ -3178,7 +3178,10 @@ mod tests {
         use super::super::operator_observability::DocumentGrowthPolicy;
         let root = tempfile::TempDir::new().unwrap();
         let mut value = link();
-        value.project.canonical_root = root.path().canonicalize().unwrap().to_string_lossy().into();
+        value.project.canonical_root = dunce::canonicalize(root.path())
+            .unwrap()
+            .to_string_lossy()
+            .into();
         let mut store = OperatorStore::open(root.path(), &value.project).unwrap();
         let owner = NativeSourceIdentity {
             source_kind: NativeSourceKind::Chat,

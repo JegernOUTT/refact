@@ -352,7 +352,7 @@ mod tests {
         Arc<Drafts>,
     ) {
         let temp = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(temp.path()).unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
         let project = ProjectIdentity {
             project_id: "p".into(),
             canonical_root: root.to_string_lossy().into_owned(),

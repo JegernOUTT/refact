@@ -16,7 +16,7 @@ use refact_privacy::{PrivacyPolicy, ShellBehavior, Zone};
 use refact_work_core::{CausalCause, CausalEventRecord, CausalKind, ProjectKey, WorkKey};
 
 async fn fixture() -> (AppState, Arc<AMutex<AtCommandsContext>>, tempfile::TempDir) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
     let project = dir.path().to_path_buf();
     let cache = dir.path().join("cache");
     let config = dir.path().join("config");
