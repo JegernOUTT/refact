@@ -19039,8 +19039,8 @@
     },
     {
       "path": "refact-agent/engine/src/agents/approval.rs",
-      "before_sha256": "52b09ea7fc9e21543514f41844a6edda2f47c795f59a2a1af33aefd6b49ba3f5",
-      "after_sha256": "a716811e4b7594cbf0082b0a922286dc55c511534315403f216905d58f099d39",
+      "before_sha256": "a716811e4b7594cbf0082b0a922286dc55c511534315403f216905d58f099d39",
+      "after_sha256": "4594fe5cd46c20c9950831fea3e74ddf86d8d42dd046b34f1da57e6d78ab0fcf",
       "affected_tests": [
         "8c0cf973aec44c88ba1c2b63df7f6b6090875580453239b3568fc558ed54cac7",
         "cf70bfb02df3d70be74cca36ca425001dfb403be45b9d118e3cea030075da5df",
@@ -19058,13 +19058,29 @@
         "14f19349d6a953ab878da2948aaefd302c6ee6c4dffd572b49e21ea78eea0a50",
         "f80300dc3393c761288b00f0dfc4f63802257b9e9cd0eb5f13980e11e82eaec5",
         "86ab105435982176d4c4bdd9977a27e883c8d05c484726f32e7276335ffc21cd",
-        "f5ac882a1444e608d59a5abc546924d1a8f3b30810a80aafecd09f1225da9fed"
+        "f5ac882a1444e608d59a5abc546924d1a8f3b30810a80aafecd09f1225da9fed",
+        "654f231cdd2b603eaa5992f9719e30be9ec6b18eb606beabb17bb7d18f811f5e",
+        "6827776500c06c85420c372bbfc7a9fc2741775ac4292156c34ebd725ad1cf8a",
+        "1d171551183feee4e7d408c8d7fa04dd92d3bdeeae4492a2f3bef24f0c21a783",
+        "57ccad69b391e496eb8cbd5180de0ac45db63469890330bbf28227a890873a3d",
+        "74e1aa207f24941c18a434490b5a8c89c52acc27b5f9efeb2565efc67d1fe0de",
+        "fd342c2faeacd09f9aeeb73c12db6d5ac0f93c78aaba332cf466a7dc1efc1f7a",
+        "870c4cdfd1874aed829e39dfcbf8b2b6090580c1d643f973b7ea21f2c0a3f147",
+        "1b012e7e26d0d47a1b36b3a5159754729ab6a6b339095c30442c9fd8c11b20e8",
+        "f88ab8362cd779f444492ca3c0498a3339425278b7fec97e15ffdad7cd1e8625",
+        "2e3c92c1df22a3434fc220f3c25f0d68eba3f97d51d16affa86431e7cf48fcd4",
+        "7bc7732b05400aa0a473c44ad27338bc309a62a939d0f65a6bc84d0c93d1853b",
+        "a73eb8d7e96828ab0f2c6ec3cfee1998b63f85958e422e5fb7e124d83d742893",
+        "42684e82dbc6793d619f1e953df0055f630e79367693ae8118df4bcf670e7292",
+        "7057169c47d382d90f48e6251fe9683328f71d078b85b32ea8fe53a7338d10c7",
+        "4123109b81175d7f2e6a21a45035f94d0c37cb4b151fbd0b43995362c963a46e",
+        "5948793dcdda630c1af33cd1dea25184048d361f161c0e6e7b8b8538f3b5406c"
       ],
-      "impact": "Two body-only diagnostic enhancements; parent decision, exact binding, failed-child assertion and replay controls unchanged. Map all local scanned bodies.",
-      "execution_context": "Physical definitions and selection unchanged. Conservative helper/local exposure mapping is not per-consumer execution evidence. Existing discovery classifications, lead-source hash pins and macro conclusions preserved. No production change, mutant or runtime/Windows pass claim.",
-      "author": "background_agent:bgagent-d47f4e91 (bookkeeping only)",
-      "reviewer": "background_agent:bgagent-a7cb3c64 / bgagent-951c7650 / bgagent-b949b8e9 / bgagent-ffbb55c7; final auditor pending",
-      "review_evidence": "Independent a7cb/951 whole-body counts and b949 adversarial source review support the first four maintained bodies (3/4/5/4) and earlier five-file patch. ffbb reviewed the one-case literal-source display proposal; parent verified ToolCat header tool_cat.rs:225 from ContextFile.file_name at chat_types.rs:1006 and normalization at tool_cat.rs:865/972. b949 review preceded this final display expectation. Final source-plus-ledger auditor bgagent-4a91cbba pending; no final approval, runtime pass, executed mutant or restored Windows pass claimed.",
+      "impact": "Round12 shared fixture support-only repair: Fixture::call restores the exact base request arguments, with no timeout key. fixture_with_hooks saves a ShellGatePolicy default with foreground_timeout_secs=20 in its isolated temporary project. Production default timeout 10 and board timeout 30 remain unchanged. Exact approval binding, test-body oracles and test selection are unchanged; no new fingerprints or cases. Conservative whole-local-module map plus approval_routing_tests and tool_agent_approval_hook_tests fixture consumers; previous/current affected fingerprint union retained.",
+      "execution_context": "Source-bound helper impact only, against aca6bff03787c4c7730f42d8cf393d6e90a2d757. Existing 208 admission records, physical test definitions, meaningful-case accounting and classifications are preserved. The initial local library run refact-agent/engine/target/round12-evidence/lib.log failed changed_command_arguments_or_tool_cannot_reuse_approved_binding: the explicit timeout argument combined with mutated run_in_background=true caused argument rejection before the expected exact-binding guard. This revision removes that argument and instead sets the isolated fixture project policy allowance. Actual prior Windows f50 /tmp/windows-f50-full.log SHA256 30f99fdf13ae4af6886064e372c27cea647aa469b0e4b6038807ebe8a27f7efa recorded two approval failures at timeout 10; it is not a passing candidate run. No timeout-20 success, restored-Windows or executed-mutant claim. Parent fresh final batch remains pending.",
+      "author": "background_agent:bgagent-b63ffe6c-cc38-45c2-8b01-a40c691d4531 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-50a870f2 (independent final fixture-policy source/failure review pending)",
+      "review_evidence": "Earlier proposal/source reviews covered superseded explicit-argument revisions and do not approve this final fixture-policy source. Independent source and executed-failure analysis bgagent-50a870f2 is running; approval is not asserted. Bookkeeping author binds the exact current source SHA256 and preserves the prior conservative affected-test map. Final source-plus-ledger review and parent fresh candidate execution remain pending.",
       "historical_records_round7": {
         "path": "refact-agent/engine/src/agents/approval.rs",
         "before_sha256": "796825434fb5055a79353aad957eed69362268aea2b3e99bc57444235e9ccbc4",
@@ -21378,18 +21394,18 @@
     },
     {
       "path": "refact-agent/engine/src/buddy/improvement_activation_tests.rs",
-      "before_sha256": "4a650e664fb88003c746dca861ece99512a77e95a6096f4e1fc17e685065adac",
-      "after_sha256": "0c2841ac0f06c98d6080afc6da7c7860e0f885d0e8e578a5a2a565b511ac0141",
+      "before_sha256": "0c2841ac0f06c98d6080afc6da7c7860e0f885d0e8e578a5a2a565b511ac0141",
+      "after_sha256": "f2b19d036059ca1bea1a6079776bc4ba7cc45f44160906c2e5c86751a45fd6a2",
       "affected_tests": [
-        "6bc47bab326ec2f13b1413734d5ac593cb0fe2e17687cbad88321e8ae632071e",
-        "367933bebba0b05f9637906a1e27e3dc7131dc2502ed9a44c8b5a78b15105684"
+        "0f9675b95696b9c119d644ebae3a18138aa41add60cb1323b7ed03e592b09df8",
+        "ccddb6fc2764727280723c1757beb83f929fd94c87e51409e39c869186bd1868"
       ],
       "no_tests_reason": "",
-      "impact": "Add only the existing runtime_settings serialization group to two activation tests whose unchanged assertions require global coordination enabled. Test bodies and production guards are unchanged; no scenarios added or removed.",
-      "execution_context": "Ordinary test-execution context repair. Both tests now exclude concurrent global-settings writers using the same runtime_settings group (presence disabling test and launch-intent coordination-disabled test). Prior full run 3703 passed/2 failed at optional lease unwraps is retained; synchronized full rerun is pending and not claimed passing. Actual synchronized restored combined workspace library run release-candidate-lib now exited 0, SHA256 877b21c73d79ac496a6067133af505859031580dc77d5600be70568e57c4d65e.",
-      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
-      "reviewer": "background_agent:bgagent-3c9ea76e-f548-4b53-be89-83d0db622368",
-      "review_evidence": "Independent read-only source review approved the two-attribute-only execution-context repair, preserving all guard assertions; parent additionally verified launch_intent_spawn_tests::coordination_disabled_spawn_keeps_lifecycle_and_creates_no_intent has serial(test_runner, runtime_settings). Review did not claim runtime success."
+      "impact": "Round12 landing_fixture support-only canonical-root representation repair: replace Path/std canonicalize with dunce::canonicalize for the same physical temporary root. Conservatively map every locally scanned test and retain previous/current affected fingerprint union. Test bodies and scenarios unchanged.",
+      "execution_context": "Source-bound helper impact only, against aca6bff03787c4c7730f42d8cf393d6e90a2d757. Existing 208 admission records, physical test definitions, meaningful-case accounting and classifications are preserved. Actual prior Windows f50 run /tmp/windows-f50-full.log SHA256 30f99fdf13ae4af6886064e372c27cea647aa469b0e4b6038807ebe8a27f7efa recorded two approval failures at timeout 10; it is not a passing candidate run. No claim that timeout 20 passes, Windows is restored, or any mutant was executed. Final candidate compilation/execution remains parent-owned and pending.",
+      "author": "background_agent:bgagent-b63ffe6c-cc38-45c2-8b01-a40c691d4531 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-60e2 (prior proposal) / bgagent-d9fced8a (prior timeout proposal); bgagent-966d4349 final source review pending",
+      "review_evidence": "Prior source-helper proposal review bgagent-60e2 and approval timeout-20 proposal review bgagent-d9fced8a are source-only, not runtime evidence. Final four-file post-source adversarial review bgagent-966d4349 remains pending in this ledger; no completed final-source or final-ledger approval asserted. Exact hashes and bounded scanner fingerprint maps computed by bookkeeping author; cross-file approval fixture consumers located by source search. Final conditional shell-only argument branch requires final source review."
     },
     {
       "path": ".github/workflows/engine_perf.yml",
@@ -21766,8 +21782,8 @@
     },
     {
       "path": "refact-agent/engine/src/buddy/workflow_deliverables.rs",
-      "before_sha256": "5ddf574bf58e9a8f78095a005848d325f32c354a066024d1b7821712fb0cede1",
-      "after_sha256": "4e223f570c61bd309c52bb49ecfefba1df8a7c49fbef7f63b38011679f178304",
+      "before_sha256": "4e223f570c61bd309c52bb49ecfefba1df8a7c49fbef7f63b38011679f178304",
+      "after_sha256": "23c05a4183fa17ba8536b8c16b67e44f47257ffba2324e8f0379c755b53337b1",
       "affected_tests": [
         "bb0ac56b4ebeeb90f883490012efac07f017901b289d61b1e8c7cf24c70de94d",
         "1ff33f6cddb6f70af7a67fe3edfc5a5b276d21980ce74786bd46ea0b19658c00",
@@ -21784,11 +21800,11 @@
         "db6bc2ae9b66398a2bd239e1cebba7bb94d475b60d6e8c25999be5884526c2a8",
         "933ea857cafc97dc9ffd9077792366d25d8390c32334f5af3d1390eb44f3cc96"
       ],
-      "impact": "Canonical-root fixture producer representation only: same physical temporary root now uses dunce::canonicalize rather than std/Path canonicalize. Original scenario bodies, guards and execution selection otherwise unchanged.",
-      "execution_context": "Bounded module-local direct tests and shared-helper consumers listed conservatively; unchanged body fingerprints remain retained tests, not new admissions. No production behavior or Windows passing result inferred.",
-      "author": "background_agent:bgagent-1e85d981-c90f-439b-bdf4-01808dfed4c5",
-      "reviewer": "background_agent:bgagent-c353a160 / bgagent-02d03136",
-      "review_evidence": "Bounded mechanical fixture patch reviewed by implementation f3ebc49b and scenario accounting c353a160/02d03136; parent-approved 6644 existing-case correction. Source support scope inspected against c17e13cc5; raw full-file hashes bind exact current source. Production subchat guards independently reviewed by 66eadce8; roots durable hash normalization reverted. No runtime pass or fresh production-mutant proof claimed."
+      "impact": "Round12 ProposalFixture::new support-only canonical-root representation repair: replace std::fs::canonicalize with dunce::canonicalize for the same physical project root. Conservatively map every locally scanned test and retain previous/current affected fingerprint union. Test bodies and scenarios unchanged.",
+      "execution_context": "Source-bound helper impact only, against aca6bff03787c4c7730f42d8cf393d6e90a2d757. Existing 208 admission records, physical test definitions, meaningful-case accounting and classifications are preserved. Actual prior Windows f50 run /tmp/windows-f50-full.log SHA256 30f99fdf13ae4af6886064e372c27cea647aa469b0e4b6038807ebe8a27f7efa recorded two approval failures at timeout 10; it is not a passing candidate run. No claim that timeout 20 passes, Windows is restored, or any mutant was executed. Final candidate compilation/execution remains parent-owned and pending.",
+      "author": "background_agent:bgagent-b63ffe6c-cc38-45c2-8b01-a40c691d4531 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-60e2 (prior proposal) / bgagent-d9fced8a (prior timeout proposal); bgagent-966d4349 final source review pending",
+      "review_evidence": "Prior source-helper proposal review bgagent-60e2 and approval timeout-20 proposal review bgagent-d9fced8a are source-only, not runtime evidence. Final four-file post-source adversarial review bgagent-966d4349 remains pending in this ledger; no completed final-source or final-ledger approval asserted. Exact hashes and bounded scanner fingerprint maps computed by bookkeeping author; cross-file approval fixture consumers located by source search. Final conditional shell-only argument branch requires final source review."
     },
     {
       "path": "refact-agent/engine/src/buddy/workflows.rs",
@@ -22104,6 +22120,26 @@
       "author": "background_agent:bgagent-d47f4e91 (bookkeeping only)",
       "reviewer": "background_agent:bgagent-a7cb3c64 / bgagent-951c7650 / bgagent-b949b8e9 / bgagent-ffbb55c7; final auditor pending",
       "review_evidence": "Independent a7cb/951 whole-body counts and b949 adversarial source review support the first four maintained bodies (3/4/5/4) and earlier five-file patch. ffbb reviewed the one-case literal-source display proposal; parent verified ToolCat header tool_cat.rs:225 from ContextFile.file_name at chat_types.rs:1006 and normalization at tool_cat.rs:865/972. b949 review preceded this final display expectation. Final source-plus-ledger auditor bgagent-4a91cbba pending; no final approval, runtime pass, executed mutant or restored Windows pass claimed."
+    },
+    {
+      "path": "refact-agent/engine/src/http/routers/v1/buddy_improvement.rs",
+      "before_sha256": "f5d2860159e341265639ebc1ff745523756aa265eb909ece6fde55e2fa9b2d2f",
+      "after_sha256": "73811841085c12d8e8b2840af2ee18e28daa5117eb7b8f9c841aae0235ae4cbf",
+      "affected_tests": [
+        "382d5ff6e2e0243b5958ee1e7cdefa0410bd83433802a3f9c2c7d3fbb415c98e",
+        "c9a7b202ee3419d2b66b9a9cee28fb047daa85e1898505f459d84fbcf8531b33",
+        "75254b1470f24cb9bd4ced69584e329f70c3bc8b8304a690d8e064299fe6e6ce",
+        "6c57ad8e1c78a0ec09e24dca9d494f190d2c026a128c8fafc99cff8f1de4958e",
+        "7fbb1ea548c0f66434f5be46308a4ce54a498ddb4490f2c20e1a231851a9aab2",
+        "3151c233b77bf357c2d5c2e4cb5c866399547496028f95000854abbbbfd9aa77",
+        "598bd64d28292d3ee86451116d1263950d538612f75d21848acaeee683ab2117",
+        "c0f55ebb609019db9906e83593b4f55c341361d296c8a0feeefda5f44462094e"
+      ],
+      "impact": "Round12 evaluation_tests::fixture support-only temporary-root representation repair: canonicalize the parent temporary directory with dunce before creating the retained TempDir. Service, runtime, project identity and gcx still use the same root.path(); TempDir ownership/lifetime is retained. Conservatively map all locally scanned tests, including other local modules; no test-body or scenario changes.",
+      "execution_context": "Source-bound helper impact only, against aca6bff03787c4c7730f42d8cf393d6e90a2d757. Existing 208 admission records, physical test definitions, meaningful-case accounting and classifications are preserved. Actual prior Windows f50 run /tmp/windows-f50-full.log SHA256 30f99fdf13ae4af6886064e372c27cea647aa469b0e4b6038807ebe8a27f7efa recorded two approval failures at timeout 10; it is not a passing candidate run. No claim that timeout 20 passes, Windows is restored, or any mutant was executed. Final candidate compilation/execution remains parent-owned and pending.",
+      "author": "background_agent:bgagent-b63ffe6c-cc38-45c2-8b01-a40c691d4531 (bookkeeping only)",
+      "reviewer": "background_agent:bgagent-60e2 (prior proposal) / bgagent-d9fced8a (prior timeout proposal); bgagent-966d4349 final source review pending",
+      "review_evidence": "Prior source-helper proposal review bgagent-60e2 and approval timeout-20 proposal review bgagent-d9fced8a are source-only, not runtime evidence. Final four-file post-source adversarial review bgagent-966d4349 remains pending in this ledger; no completed final-source or final-ledger approval asserted. Exact hashes and bounded scanner fingerprint maps computed by bookkeeping author; cross-file approval fixture consumers located by source search. Final conditional shell-only argument branch requires final source review."
     }
   ]
 }

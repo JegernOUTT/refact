@@ -51,7 +51,7 @@ async fn landing_fixture() -> LandingFixture {
     std::fs::write(root.join("file.txt"), "known-good\n").unwrap();
     git(&root, &["add", "."]);
     git(&root, &["commit", "-m", "known good"]);
-    let root = root.canonicalize().unwrap();
+    let root = dunce::canonicalize(&root).unwrap();
     let project = crate::buddy::operator_runtime::project_identity(&root).unwrap();
     let worker = crate::buddy::operator_runtime::engine_worker_identity();
     let runtime = OutcomeRuntime::open(&root, project.clone(), worker.clone()).unwrap();

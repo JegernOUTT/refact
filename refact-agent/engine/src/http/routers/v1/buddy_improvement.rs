@@ -1291,7 +1291,8 @@ mod evaluation_tests {
     }
 
     async fn fixture() -> (tempfile::TempDir, AppState, OutcomeRuntime) {
-        let root = tempfile::tempdir().unwrap();
+        let root =
+            tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
         let mut gcx = crate::global_context::tests::make_test_gcx_with_dirs(
             root.path().join("cache"),
             root.path().join("config"),

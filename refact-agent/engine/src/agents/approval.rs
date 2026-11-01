@@ -668,6 +668,11 @@ pub(crate) mod tests {
         .await;
         Arc::get_mut(&mut gcx).unwrap().hooks_config.enabled = enabled;
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().into()];
+        let mut shell_policy = crate::tools::shell_gate::ShellGatePolicy::default();
+        shell_policy.execution.foreground_timeout_secs = 20;
+        crate::tools::shell_gate::save_policy(gcx.clone(), &shell_policy)
+            .await
+            .unwrap();
         let (root, _) = crate::caps::project_model_defaults_state(gcx.clone()).await;
         let mut caps = crate::caps::CodeAssistantCaps::default();
         caps.chat_models.insert(

@@ -1451,7 +1451,7 @@ mod tests {
             let temp = tempfile::tempdir().unwrap();
             let root = temp.path().join("project");
             std::fs::create_dir(&root).unwrap();
-            let root = std::fs::canonicalize(root).unwrap();
+            let root = dunce::canonicalize(root).unwrap();
             let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
                 temp.path().join("cache"),
                 temp.path().join("config"),
