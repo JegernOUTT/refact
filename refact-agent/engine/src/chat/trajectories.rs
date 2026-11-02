@@ -7151,15 +7151,41 @@ pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
             return;
         }
     }
+    let handle = spawn_trajectory_watcher(
+        gcx,
+        None,
+        #[cfg(test)]
+        None,
+    );
+    let mut guard = watcher_task
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some(handle);
+}
+
+#[cfg(test)]
+struct TrajectoryWatcherRegistrationGate {
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
+fn spawn_trajectory_watcher(
+    gcx: Arc<GlobalContext>,
+    mut ready: Option<tokio::sync::oneshot::Sender<Result<Vec<PathBuf>, String>>>,
+    #[cfg(test)] registration_gate: Option<TrajectoryWatcherRegistrationGate>,
+) -> tokio::task::JoinHandle<()> {
     let gcx_weak = Arc::downgrade(&gcx);
     let (tx, mut rx) = tokio::sync::mpsc::channel::<TrajectoryWatcherMessage>(2048);
     let dropped_events = Arc::new(AtomicUsize::new(0));
 
-    let handle = tokio::spawn(async move {
+    tokio::spawn(async move {
         let trajectories_dirs = get_all_trajectories_dirs_from_weak(&gcx_weak).await;
         let task_roots = get_all_task_roots_from_weak(&gcx_weak).await;
         if trajectories_dirs.is_empty() && task_roots.is_empty() {
             warn!("No trajectories directories found, trajectory watcher not started");
+            if let Some(ready) = ready.take() {
+                let _ = ready.send(Err("No trajectories directories found".to_string()));
+            }
             return;
         }
 
@@ -7228,23 +7254,48 @@ pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
             Ok(w) => w,
             Err(e) => {
                 warn!("Failed to create trajectory watcher: {}", e);
+                if let Some(ready) = ready.take() {
+                    let _ = ready.send(Err(format!("Failed to create trajectory watcher: {e}")));
+                }
                 return;
             }
         };
 
         let _watcher = Arc::new(std::sync::Mutex::new(watcher));
+        #[cfg(test)]
+        if let Some(gate) = registration_gate {
+            let _ = gate.entered.send(());
+            let _ = gate.release.await;
+        }
+        let mut registered_roots = Vec::new();
+        let mut registration_errors = Vec::new();
         {
             let mut w = _watcher.lock().unwrap();
             for dir in &trajectories_dirs {
                 if let Err(e) = w.watch(dir, RecursiveMode::Recursive) {
                     warn!("Failed to watch trajectories dir {:?}: {}", dir, e);
+                    registration_errors
+                        .push(format!("Failed to watch trajectories dir {dir:?}: {e}"));
+                } else {
+                    registered_roots.push(dir.clone());
                 }
             }
             for dir in &task_roots {
                 if let Err(e) = w.watch(dir, RecursiveMode::Recursive) {
                     warn!("Failed to watch tasks dir {:?}: {}", dir, e);
+                    registration_errors.push(format!("Failed to watch tasks dir {dir:?}: {e}"));
+                } else {
+                    registered_roots.push(dir.clone());
                 }
             }
+        }
+        if let Some(ready) = ready.take() {
+            let result = if registration_errors.is_empty() {
+                Ok(registered_roots)
+            } else {
+                Err(registration_errors.join("; "))
+            };
+            let _ = ready.send(result);
         }
         info!(
             "Trajectory watcher started for {} trajectory directories and {} task roots",
@@ -7338,11 +7389,7 @@ pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
                 }
             }
         }
-    });
-    let mut guard = watcher_task
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *guard = Some(handle);
+    })
 }
 
 pub fn validate_trajectory_id(id: &str) -> Result<(), ScratchError> {
@@ -11077,8 +11124,40 @@ mod tests {
         }
     }
 
-    async fn wait_for_watcher_start() {
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    struct TestTrajectoryWatcher(Option<tokio::task::JoinHandle<()>>);
+
+    impl TestTrajectoryWatcher {
+        async fn stop(mut self) {
+            let handle = self.0.take().unwrap();
+            handle.abort();
+            assert!(handle.await.unwrap_err().is_cancelled());
+        }
+    }
+
+    impl Drop for TestTrajectoryWatcher {
+        fn drop(&mut self) {
+            if let Some(handle) = &self.0 {
+                handle.abort();
+            }
+        }
+    }
+
+    async fn wait_for_watcher_start(
+        ready: tokio::sync::oneshot::Receiver<Result<Vec<PathBuf>, String>>,
+        expected_task_root: &Path,
+    ) {
+        let registered_roots = tokio::time::timeout(Duration::from_secs(60), ready)
+            .await
+            .expect("trajectory watcher registration timed out")
+            .expect("trajectory watcher exited before registration")
+            .expect("trajectory watcher root registration failed");
+        let expected_task_root = normalized_test_path(expected_task_root);
+        assert!(
+            registered_roots
+                .iter()
+                .any(|root| normalized_test_path(root) == expected_task_root),
+            "trajectory watcher did not register expected tasks root {expected_task_root:?}: {registered_roots:?}"
+        );
     }
 
     fn nested_trajectory_path(
@@ -12330,8 +12409,13 @@ mod tests {
         let (gcx, app) = make_app_with_workspace(dir.path()).await;
         let mut rx = app.chat.trajectory_events_tx.subscribe();
 
-        start_trajectory_watcher(gcx.clone());
-        wait_for_watcher_start().await;
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let watcher = TestTrajectoryWatcher(Some(spawn_trajectory_watcher(
+            gcx.clone(),
+            Some(ready_tx),
+            None,
+        )));
+        wait_for_watcher_start(ready_rx, &dir.path().join(".refact").join("tasks")).await;
         drain_trajectory_events(&mut rx).await;
 
         let chat_id = "planner-watch-chat";
@@ -12360,6 +12444,7 @@ mod tests {
         let event = wait_for_trajectory_event(&mut rx, chat_id).await;
         assert_eq!(event.event_type, "updated");
         assert_eq!(event.title.as_deref(), Some("Planner Watch"));
+        watcher.stop().await;
     }
 
     #[test]
@@ -12398,8 +12483,29 @@ mod tests {
         let (gcx, app) = make_app_with_workspace(dir.path()).await;
         let mut rx = app.chat.trajectory_events_tx.subscribe();
 
-        start_trajectory_watcher(gcx.clone());
-        wait_for_watcher_start().await;
+        let (ready_tx, mut ready_rx) = tokio::sync::oneshot::channel();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let watcher = TestTrajectoryWatcher(Some(spawn_trajectory_watcher(
+            gcx.clone(),
+            Some(ready_tx),
+            Some(TrajectoryWatcherRegistrationGate {
+                entered: entered_tx,
+                release: release_rx,
+            }),
+        )));
+        tokio::time::timeout(Duration::from_secs(60), entered_rx)
+            .await
+            .expect("trajectory watcher did not enter registration gate")
+            .expect("trajectory watcher exited before registration gate");
+        assert!(
+            futures::poll!(&mut ready_rx).is_pending(),
+            "registration readiness must remain pending until watch registration completes"
+        );
+        release_tx.send(()).unwrap();
+        let task_root = dir.path().join(".refact").join("tasks");
+        wait_for_watcher_start(ready_rx, &task_root).await;
+        assert!(!task_root.join("task-created-later").exists());
         drain_trajectory_events(&mut rx).await;
 
         let chat_id = "new-task-agent-chat";
@@ -12429,6 +12535,7 @@ mod tests {
         let event = wait_for_trajectory_event(&mut rx, chat_id).await;
         assert_eq!(event.event_type, "updated");
         assert_eq!(event.title.as_deref(), Some("New Task Agent"));
+        watcher.stop().await;
     }
 
     #[tokio::test]
