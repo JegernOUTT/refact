@@ -245,10 +245,9 @@ mod tests {
         };
         let rows = clear_rows(&gcx, vec![source.clone()], &model).unwrap();
         assert_eq!(rows.len(), 1);
-        assert!(rows[0]
-            .source_records
-            .iter()
-            .any(|r| r.path == path.to_string_lossy() && r.zone == "guarded"));
+        assert!(rows[0].source_records.iter().any(|r| r.path
+            == refact_core::chat_types::normalize_file_name(path.to_string_lossy().into_owned())
+            && r.zone == "guarded"));
         let other = BaseModelRecord {
             id: "other/model".into(),
             ..Default::default()

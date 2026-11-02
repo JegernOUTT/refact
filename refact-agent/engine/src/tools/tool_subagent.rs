@@ -1645,7 +1645,10 @@ mod tests {
         assert!(crate::privacy::records::records_to_carry(&preview.messages)
             .unwrap()
             .iter()
-            .any(|record| record.path == file.to_string_lossy()));
+            .any(|record| record.path
+                == refact_core::chat_types::normalize_file_name(
+                    file.to_string_lossy().into_owned()
+                )));
         assert!(app.agents.list_all().await.is_empty());
         let effective = &message.extra["effective_launch"];
         assert!(message.extra.get("launch_blocked").is_none());

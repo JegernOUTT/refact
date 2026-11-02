@@ -9484,6 +9484,202 @@
           "evidence": "Executed receipts: /home/svakhreev/projects/smc/refact/refact-agent/engine/target/round14-evidence/manifest.json; manifest SHA256 2b3d4e16918ea9f4cf1c0548a9e8778d7a79444036c72bbde9fdc308d5f0316f. Source before/after compile and run is phase-pinned. Producer background_agent:bgagent-5f9814eb-31c5-439c-a6ab-fee51f253090. Phase 03-restored-corrected-late; source SHA256 a7aa63aa5826156215c752c7b9256063fb98e5c72c677fc8d3ac2397226c6386; binary SHA256 a59f6a7e3b303e05b26f761534fc714c0ae0a97c0d994227f4786f270bf6439c; log /home/svakhreev/projects/smc/refact/refact-agent/engine/target/round14-evidence/03-restored-corrected-late.focused.log SHA256 7aa33fcb6d8de87166da2a4fc48dd5f224fd1f969ee0f9fef2ff2f47bac0d4d8; compile command/exit0 and compile log SHA256 are in manifest (planner reuses phase03 artifact)."
         }
       }
+    },
+    {
+      "fingerprint": "19dee2b09db98a3eae581af8e22e677d7dc529032533e54121de36b5772f5e99",
+      "occurrences": 1,
+      "failure_mode": "Round15 representation-only repair of exact_task_document_carries_revision_and_never_substitutes_board_summary: raw fixture/expected path representation can disagree with the existing canonical wire root/provenance on Windows.",
+      "importance": "Preserve the existing consumer oracle across platform path representations without changing shipping behavior or relaxing guards.",
+      "nearest_retained": {
+        "fingerprint": "115b2b12140c0d3020febc0c1c6d84dd44c85fbd23882aa62c6c6922a144efee",
+        "why_insufficient": "Uncleared-provenance launch denial does not assert exact document/revision identity or prohibit board-summary substitution."
+      },
+      "oracle": "Three existing consumer invocations: first exact task-document load, changed document/revision load, and missing document rejection without summary fallback. Existing content, revision and failure assertions remain.",
+      "prerequisites": "Existing engine lib test runtime, temporary filesystem fixtures and original per-test annotations/configuration; no added dependency, scenario, or platform skip.",
+      "shipping_implementation": "Existing shipping consumer at refact-agent/engine/src/agents/launch_spec.rs; production residue unchanged relative to 8de1b515b38386df1deb205fe2b84754558ecd52. Normalize the expected provenance path with the existing producer normalizer, not raw platform separators.",
+      "determinism": "Existing isolated fixture lifecycle and assertions retained. No sleeps, timing thresholds or production fallback added. Shared normalizer regression/literal-backslash collision is not independently detected by same-normalizer expected values.",
+      "layer": "Existing engine lib consumer test; ordinary test representation delta.",
+      "why_cheapest": "Repair the existing expected/setup representation in place; retain all existing invocations rather than adding a duplicate test or broadening production path semantics.",
+      "meaningful_cases": 3,
+      "critical": false,
+      "criticality_reason": "Only this representation/setup delta is ordinary. Underlying privacy, scope, authority, execution-root, durable-state and delivery invariants remain critical where applicable and are NOT downgraded; no new critical capability or executed critical-regression witness is asserted.",
+      "removed_coverage": "No existing invocation/assertion removed; old body 1ff3bbc4dfeccc0ab4ecbbe48fd3193d922fc0afd705a3c07e18ce47dc290579 replaced one-for-one by current body. Normalize the expected provenance path with the existing producer normalizer, not raw platform separators. Workload is conservatively charged by actual consumer invocations/boundaries, not a claim of 3 independent critical properties.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Reviewed source counterfactual only: retaining the old raw expected/setup representation can disagree with the already-normalized producer/runtime path on Windows before the existing semantic oracle is reached. Normalize the expected provenance path with the existing producer normalizer, not raw platform separators. This is not an executed mutant/red-green witness or proof of a current Windows restored pass.",
+        "evidence": "Frozen refact-agent/engine/target/round15-evidence/rust-before.json contains seven current raw source pins; five-file expected-path-map.json SHA256 1034a1dee2ad9f0a40d1209dbe91a1d801fd3ea60e475ceb5c36f26fdfe9601d records exact inverse expressions and old/current fingerprints. Two HTTP mappings independently recomputed by bounded m.scan against git base 8de1b515b38386df1deb205fe2b84754558ecd52. Historical /tmp/windows-cbc8-48.log job125000363811 is CBC8, NOT this base/current revision; no current restored Windows pass or executed counterfactual witness is claimed. Path old/raw 3ca1f6d15da075625a192b2dfc88a23fd0ed03e98ad88f2d7ad002cecd6e6639; current/raw d6055ff7ba0841648bf502e28db5fc6a78001777d85d884a079aa80306c3fcb6."
+      },
+      "author": "background_agent:bgagent-f2d15796-67a0-4fa1-a28f-939b3db3e110",
+      "reviewer": "background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c",
+      "review_evidence": "Round15 independent bounded full-body/source review by background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c and adversarial scope/guard review background_agent:bgagent-1ee45d4a-f4a7-458d-b6ad-d1f4fd13f114 approved seven source repairs and conservative invocation workload 3/3/8/10/3/7/4. HTTP source additionally reviewed by background_agent:bgagent-8f76e734-6580-41d1-a88c-9a6ffb23b9d6. These are source reviews, not authentication of this final ledger or runtime/witness results."
+    },
+    {
+      "fingerprint": "c211fea08bdad6f641073b0e9500f64861b1a7fcdc77744e5b3a39a7bde171ef",
+      "occurrences": 1,
+      "failure_mode": "Round15 representation-only repair of relative_paths_carry_the_same_absolute_provenance_that_was_cleared: raw fixture/expected path representation can disagree with the existing canonical wire root/provenance on Windows.",
+      "importance": "Preserve the existing consumer oracle across platform path representations without changing shipping behavior or relaxing guards.",
+      "nearest_retained": {
+        "fingerprint": "144770ae0f11d730d3db82f560b3c3b3923d21b6ce81ee2f1ce0aa0082175de3",
+        "why_insufficient": "Unavailable provenance/destination fail-closed coverage does not cover relative-to-absolute provenance, carried privacy zone, and re-clear of other row/audit provenance."
+      },
+      "oracle": "Three existing clearance invocations: trusted relative-path row cleared with absolute provenance and zone; other row provenance denied; other audit provenance denied. Existing privacy assertions remain.",
+      "prerequisites": "Existing engine lib test runtime, temporary filesystem fixtures and original per-test annotations/configuration; no added dependency, scenario, or platform skip.",
+      "shipping_implementation": "Existing shipping consumer at refact-agent/engine/src/coordination/privacy_guard.rs; production residue unchanged relative to 8de1b515b38386df1deb205fe2b84754558ecd52. Normalize only the expected carried absolute provenance path using the same existing wire representation as the producer.",
+      "determinism": "Existing isolated fixture lifecycle and assertions retained. No sleeps, timing thresholds or production fallback added. Shared normalizer regression/literal-backslash collision is not independently detected by same-normalizer expected values.",
+      "layer": "Existing engine lib consumer test; ordinary test representation delta.",
+      "why_cheapest": "Repair the existing expected/setup representation in place; retain all existing invocations rather than adding a duplicate test or broadening production path semantics.",
+      "meaningful_cases": 3,
+      "critical": false,
+      "criticality_reason": "Only this representation/setup delta is ordinary. Underlying privacy, scope, authority, execution-root, durable-state and delivery invariants remain critical where applicable and are NOT downgraded; no new critical capability or executed critical-regression witness is asserted.",
+      "removed_coverage": "No existing invocation/assertion removed; old body 2140c0437163218c1b557a5b417074df618babbfd2ea0a4208ed0b606ac29806 replaced one-for-one by current body. Normalize only the expected carried absolute provenance path using the same existing wire representation as the producer. Workload is conservatively charged by actual consumer invocations/boundaries, not a claim of 3 independent critical properties.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Reviewed source counterfactual only: retaining the old raw expected/setup representation can disagree with the already-normalized producer/runtime path on Windows before the existing semantic oracle is reached. Normalize only the expected carried absolute provenance path using the same existing wire representation as the producer. This is not an executed mutant/red-green witness or proof of a current Windows restored pass.",
+        "evidence": "Frozen refact-agent/engine/target/round15-evidence/rust-before.json contains seven current raw source pins; five-file expected-path-map.json SHA256 1034a1dee2ad9f0a40d1209dbe91a1d801fd3ea60e475ceb5c36f26fdfe9601d records exact inverse expressions and old/current fingerprints. Two HTTP mappings independently recomputed by bounded m.scan against git base 8de1b515b38386df1deb205fe2b84754558ecd52. Historical /tmp/windows-cbc8-48.log job125000363811 is CBC8, NOT this base/current revision; no current restored Windows pass or executed counterfactual witness is claimed. Path old/raw 4398e40d924e7a8bb2fc4746881723166e2b8952b9ec8fceec4d9b31a8f5f5d3; current/raw 73abc61799b729663b97118559831d6f4c2b7cb5a3fb33a1aa263d396b6dd817."
+      },
+      "author": "background_agent:bgagent-f2d15796-67a0-4fa1-a28f-939b3db3e110",
+      "reviewer": "background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c",
+      "review_evidence": "Round15 independent bounded full-body/source review by background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c and adversarial scope/guard review background_agent:bgagent-1ee45d4a-f4a7-458d-b6ad-d1f4fd13f114 approved seven source repairs and conservative invocation workload 3/3/8/10/3/7/4. HTTP source additionally reviewed by background_agent:bgagent-8f76e734-6580-41d1-a88c-9a6ffb23b9d6. These are source reviews, not authentication of this final ledger or runtime/witness results."
+    },
+    {
+      "fingerprint": "56d427d97a7a301b13ff886b942cee21ba0187f66b7a6f02d978a6fbfced4626",
+      "occurrences": 1,
+      "failure_mode": "Round15 representation-only repair of public_launch_preview_enforces_scope_destination_and_preserves_source_records: raw fixture/expected path representation can disagree with the existing canonical wire root/provenance on Windows.",
+      "importance": "Preserve the existing consumer oracle across platform path representations without changing shipping behavior or relaxing guards.",
+      "nearest_retained": {
+        "fingerprint": "a1af7b2c49fba316d354d1914b94819aacd2eae747d5c21365f2e0b3f90164a5",
+        "why_insufficient": "Queued-runner scope/privacy rechecks do not cover public preview configuration, limits or preservation of source records."
+      },
+      "oracle": "Eight existing public consumer invocations: preview, depth rejection, byte limit1, restored limit4096, invalid zero, privacy-denied preview, privacy-denied run, missing-model rejection. Existing source-record identity and guard assertions remain.",
+      "prerequisites": "Existing engine lib test runtime, temporary filesystem fixtures and original per-test annotations/configuration; no added dependency, scenario, or platform skip.",
+      "shipping_implementation": "Existing shipping consumer at refact-agent/engine/src/tools/tool_subagent.rs; production residue unchanged relative to 8de1b515b38386df1deb205fe2b84754558ecd52. Normalize only the expected source provenance path to the existing producer representation.",
+      "determinism": "Existing isolated fixture lifecycle and assertions retained. No sleeps, timing thresholds or production fallback added. Shared normalizer regression/literal-backslash collision is not independently detected by same-normalizer expected values.",
+      "layer": "Existing engine lib consumer test; ordinary test representation delta.",
+      "why_cheapest": "Repair the existing expected/setup representation in place; retain all existing invocations rather than adding a duplicate test or broadening production path semantics.",
+      "meaningful_cases": 8,
+      "critical": false,
+      "criticality_reason": "Only this representation/setup delta is ordinary. Underlying privacy, scope, authority, execution-root, durable-state and delivery invariants remain critical where applicable and are NOT downgraded; no new critical capability or executed critical-regression witness is asserted.",
+      "removed_coverage": "No existing invocation/assertion removed; old body 3ce7d1aa031bee3c7a32d7cb87900aefbb0c1bbf3fc35993e2c1ca950370a7a1 replaced one-for-one by current body. Normalize only the expected source provenance path to the existing producer representation. Workload is conservatively charged by actual consumer invocations/boundaries, not a claim of 8 independent critical properties.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Reviewed source counterfactual only: retaining the old raw expected/setup representation can disagree with the already-normalized producer/runtime path on Windows before the existing semantic oracle is reached. Normalize only the expected source provenance path to the existing producer representation. This is not an executed mutant/red-green witness or proof of a current Windows restored pass.",
+        "evidence": "Frozen refact-agent/engine/target/round15-evidence/rust-before.json contains seven current raw source pins; five-file expected-path-map.json SHA256 1034a1dee2ad9f0a40d1209dbe91a1d801fd3ea60e475ceb5c36f26fdfe9601d records exact inverse expressions and old/current fingerprints. Two HTTP mappings independently recomputed by bounded m.scan against git base 8de1b515b38386df1deb205fe2b84754558ecd52. Historical /tmp/windows-cbc8-48.log job125000363811 is CBC8, NOT this base/current revision; no current restored Windows pass or executed counterfactual witness is claimed. Path old/raw 206d75d9ec2e1d5bced3587e3cf965d5110936debe79b459e29aedc5214543f0; current/raw 4a98c070bf6d7775d5767f5fdce9d5515b13a79e94fbc1d058d1d89a709ca2bd."
+      },
+      "author": "background_agent:bgagent-f2d15796-67a0-4fa1-a28f-939b3db3e110",
+      "reviewer": "background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c",
+      "review_evidence": "Round15 independent bounded full-body/source review by background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c and adversarial scope/guard review background_agent:bgagent-1ee45d4a-f4a7-458d-b6ad-d1f4fd13f114 approved seven source repairs and conservative invocation workload 3/3/8/10/3/7/4. HTTP source additionally reviewed by background_agent:bgagent-8f76e734-6580-41d1-a88c-9a6ffb23b9d6. These are source reviews, not authentication of this final ledger or runtime/witness results."
+    },
+    {
+      "fingerprint": "e4a8a7f30d3158c8251cf35f2782e2cfe649bcfac719ba2f628bf56b68f91fbd",
+      "occurrences": 1,
+      "failure_mode": "Round15 representation-only repair of board_discover_reports_state_without_conferring_control: raw fixture/expected path representation can disagree with the existing canonical wire root/provenance on Windows.",
+      "importance": "Preserve the existing consumer oracle across platform path representations without changing shipping behavior or relaxing guards.",
+      "nearest_retained": {
+        "fingerprint": "42e7cedd50b63eb1faa689204d8205e907a55a976e33625554b5d93d185d2d8c",
+        "why_insufficient": "Single-holder/idempotent board claim does not cover privacy-filtered discovery or ensure discovery confers no scoped authority."
+      },
+      "oracle": "Conservative invocation cost10: initial successful claim setup plus nine post-setup calls: specific discovery, visible list, hidden list, hidden explicit discovery with store-retained control, unknown model, no scope, foreign scope, policy error, observer claim denial. Not ten independent critical properties; initial claim is setup. Existing filtering/non-authority assertions remain.",
+      "prerequisites": "Existing engine lib test runtime, temporary filesystem fixtures and original per-test annotations/configuration; no added dependency, scenario, or platform skip.",
+      "shipping_implementation": "Existing shipping consumer at refact-agent/engine/src/tools/tool_task_board.rs; production residue unchanged relative to 8de1b515b38386df1deb205fe2b84754558ecd52. Normalize only the expected discovery source path to the existing producer representation.",
+      "determinism": "Existing isolated fixture lifecycle and assertions retained. No sleeps, timing thresholds or production fallback added. Shared normalizer regression/literal-backslash collision is not independently detected by same-normalizer expected values.",
+      "layer": "Existing engine lib consumer test; ordinary test representation delta.",
+      "why_cheapest": "Repair the existing expected/setup representation in place; retain all existing invocations rather than adding a duplicate test or broadening production path semantics.",
+      "meaningful_cases": 10,
+      "critical": false,
+      "criticality_reason": "Only this representation/setup delta is ordinary. Underlying privacy, scope, authority, execution-root, durable-state and delivery invariants remain critical where applicable and are NOT downgraded; no new critical capability or executed critical-regression witness is asserted.",
+      "removed_coverage": "No existing invocation/assertion removed; old body dc5542c9aef1fd58aaf5175e4d33fdeb3fe031759e985d121ea481f07bdd3ae7 replaced one-for-one by current body. Normalize only the expected discovery source path to the existing producer representation. Workload is conservatively charged by actual consumer invocations/boundaries, not a claim of 10 independent critical properties.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Reviewed source counterfactual only: retaining the old raw expected/setup representation can disagree with the already-normalized producer/runtime path on Windows before the existing semantic oracle is reached. Normalize only the expected discovery source path to the existing producer representation. This is not an executed mutant/red-green witness or proof of a current Windows restored pass.",
+        "evidence": "Frozen refact-agent/engine/target/round15-evidence/rust-before.json contains seven current raw source pins; five-file expected-path-map.json SHA256 1034a1dee2ad9f0a40d1209dbe91a1d801fd3ea60e475ceb5c36f26fdfe9601d records exact inverse expressions and old/current fingerprints. Two HTTP mappings independently recomputed by bounded m.scan against git base 8de1b515b38386df1deb205fe2b84754558ecd52. Historical /tmp/windows-cbc8-48.log job125000363811 is CBC8, NOT this base/current revision; no current restored Windows pass or executed counterfactual witness is claimed. Path old/raw f10720d53d116a1998adfa7ae02bf85dbdb40b1c5b07d1761d5b83a4e2fa1c87; current/raw 3cb0acaddfe4894aebd06a86f6aa61e3cea7ae21ffead22befe53116f09e22d8."
+      },
+      "author": "background_agent:bgagent-f2d15796-67a0-4fa1-a28f-939b3db3e110",
+      "reviewer": "background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c",
+      "review_evidence": "Round15 independent bounded full-body/source review by background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c and adversarial scope/guard review background_agent:bgagent-1ee45d4a-f4a7-458d-b6ad-d1f4fd13f114 approved seven source repairs and conservative invocation workload 3/3/8/10/3/7/4. HTTP source additionally reviewed by background_agent:bgagent-8f76e734-6580-41d1-a88c-9a6ffb23b9d6. These are source reviews, not authentication of this final ledger or runtime/witness results."
+    },
+    {
+      "fingerprint": "174ad33fbcb5a83b2dd75cc4043da1c7cb22622cb38fbf483f4e9e4d7e31c80b",
+      "occurrences": 1,
+      "failure_mode": "Round15 representation-only repair of command_checkout_shell_confirmation_and_execution_use_same_root: raw fixture/expected path representation can disagree with the existing canonical wire root/provenance on Windows.",
+      "importance": "Preserve the existing consumer oracle across platform path representations without changing shipping behavior or relaxing guards.",
+      "nearest_retained": {
+        "fingerprint": "df4764edf25b850a096eb25a877b757ecb6fafb5d389852b84a13c479046d565",
+        "why_insufficient": "Process confirmation/approval/spawn preserving child cwd does not cover shell plus inspector receipt/provenance and verifier policy root boundaries."
+      },
+      "oracle": "Three related consumer boundaries: inspector checkout receipt and provenance, verifier policy cwd, shell approval and actual execution cwd. Not three independent shell executions; existing execution/output and root/provenance assertions remain.",
+      "prerequisites": "Existing engine lib test runtime, temporary filesystem fixtures and original per-test annotations/configuration; no added dependency, scenario, or platform skip.",
+      "shipping_implementation": "Existing shipping consumer at refact-agent/engine/src/tools/tool_process.rs; production residue unchanged relative to 8de1b515b38386df1deb205fe2b84754558ecd52. Normalize only the expected inspector checkout-root and source-board strings; shell/verifier expectations and production root resolution are unchanged.",
+      "determinism": "Existing isolated fixture lifecycle and assertions retained. No sleeps, timing thresholds or production fallback added. Shared normalizer regression/literal-backslash collision is not independently detected by same-normalizer expected values.",
+      "layer": "Existing engine lib consumer test; ordinary test representation delta.",
+      "why_cheapest": "Repair the existing expected/setup representation in place; retain all existing invocations rather than adding a duplicate test or broadening production path semantics.",
+      "meaningful_cases": 3,
+      "critical": false,
+      "criticality_reason": "Only this representation/setup delta is ordinary. Underlying privacy, scope, authority, execution-root, durable-state and delivery invariants remain critical where applicable and are NOT downgraded; no new critical capability or executed critical-regression witness is asserted.",
+      "removed_coverage": "No existing invocation/assertion removed; old body 3fdb80302f5cec59fcbf7a3dcd1987f2eb2415d003396a3081777213a20bad2b replaced one-for-one by current body. Normalize only the expected inspector checkout-root and source-board strings; shell/verifier expectations and production root resolution are unchanged. Workload is conservatively charged by actual consumer invocations/boundaries, not a claim of 3 independent critical properties.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Reviewed source counterfactual only: retaining the old raw expected/setup representation can disagree with the already-normalized producer/runtime path on Windows before the existing semantic oracle is reached. Normalize only the expected inspector checkout-root and source-board strings; shell/verifier expectations and production root resolution are unchanged. This is not an executed mutant/red-green witness or proof of a current Windows restored pass.",
+        "evidence": "Frozen refact-agent/engine/target/round15-evidence/rust-before.json contains seven current raw source pins; five-file expected-path-map.json SHA256 1034a1dee2ad9f0a40d1209dbe91a1d801fd3ea60e475ceb5c36f26fdfe9601d records exact inverse expressions and old/current fingerprints. Two HTTP mappings independently recomputed by bounded m.scan against git base 8de1b515b38386df1deb205fe2b84754558ecd52. Historical /tmp/windows-cbc8-48.log job125000363811 is CBC8, NOT this base/current revision; no current restored Windows pass or executed counterfactual witness is claimed. Path old/raw fb3492a577845de4741172d188fdb79b7879e52a0706e690db63ad349b57a169; current/raw 619c86eaac47eb1eda318929caa6a16e48182df7c0580479cbcaed7e293aeb77."
+      },
+      "author": "background_agent:bgagent-f2d15796-67a0-4fa1-a28f-939b3db3e110",
+      "reviewer": "background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c",
+      "review_evidence": "Round15 independent bounded full-body/source review by background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c and adversarial scope/guard review background_agent:bgagent-1ee45d4a-f4a7-458d-b6ad-d1f4fd13f114 approved seven source repairs and conservative invocation workload 3/3/8/10/3/7/4. HTTP source additionally reviewed by background_agent:bgagent-8f76e734-6580-41d1-a88c-9a6ffb23b9d6. These are source reviews, not authentication of this final ledger or runtime/witness results."
+    },
+    {
+      "fingerprint": "c635313cf9ca93b1d0f7e242ec7e971d1017e5fcc84a2e45728720cd09be4c95",
+      "occurrences": 1,
+      "failure_mode": "Round15 representation-only repair of native_projection_preserves_identity_and_waits_for_durable_resolution: raw fixture/expected path representation can disagree with the existing canonical wire root/provenance on Windows.",
+      "importance": "Preserve the existing consumer oracle across platform path representations without changing shipping behavior or relaxing guards.",
+      "nearest_retained": {
+        "fingerprint": "be73ee1f69c14b06c85be1612f457ba9e77ad41050c3930020cff5e965dfa1ef",
+        "why_insufficient": "Actual durable trajectory-writer question roundtrip does not cover native HTTP projection identity, foreign-root refusal or queued answer semantics."
+      },
+      "oracle": "Seven consumer invocations: initial pending projection; foreign-root answer refused with empty queue; valid answer accepted/enqueued while still pending; foreign tool-state error; answered DIRTY state error; clean answered resolution request; final empty projection. Final projection is a separate answered-state consumer but lifecycle-dependent, not an independent root-correctness property.",
+      "prerequisites": "Existing engine lib test runtime, temporary filesystem fixtures and original per-test annotations/configuration; no added dependency, scenario, or platform skip.",
+      "shipping_implementation": "Existing shipping consumer at refact-agent/engine/src/http/routers/v1/buddy_decisions.rs; production residue unchanged relative to 8de1b515b38386df1deb205fe2b84754558ecd52. Echo projection.project_root in four valid-root request fields as a realistic canonical-root protocol client; foreign-root negative, session std canonicalization and production code stay unchanged. Does not independently prove root computation correctness.",
+      "determinism": "Existing isolated fixture lifecycle and assertions retained. No sleeps, timing thresholds or production fallback added. Shared normalizer regression/literal-backslash collision is not independently detected by same-normalizer expected values.",
+      "layer": "Existing engine lib consumer test; ordinary test representation delta.",
+      "why_cheapest": "Repair the existing expected/setup representation in place; retain all existing invocations rather than adding a duplicate test or broadening production path semantics.",
+      "meaningful_cases": 7,
+      "critical": false,
+      "criticality_reason": "Only this representation/setup delta is ordinary. Underlying privacy, scope, authority, execution-root, durable-state and delivery invariants remain critical where applicable and are NOT downgraded; no new critical capability or executed critical-regression witness is asserted.",
+      "removed_coverage": "No existing invocation/assertion removed; old body eb41197055c165852d8e894a95f785ccdef608ec454e6355adbabba1f92e1bee replaced one-for-one by current body. Echo projection.project_root in four valid-root request fields as a realistic canonical-root protocol client; foreign-root negative, session std canonicalization and production code stay unchanged. Does not independently prove root computation correctness. Workload is conservatively charged by actual consumer invocations/boundaries, not a claim of 7 independent critical properties.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Reviewed source counterfactual only: retaining the old raw expected/setup representation can disagree with the already-normalized producer/runtime path on Windows before the existing semantic oracle is reached. Echo projection.project_root in four valid-root request fields as a realistic canonical-root protocol client; foreign-root negative, session std canonicalization and production code stay unchanged. Does not independently prove root computation correctness. This is not an executed mutant/red-green witness or proof of a current Windows restored pass.",
+        "evidence": "Frozen refact-agent/engine/target/round15-evidence/rust-before.json contains seven current raw source pins; five-file expected-path-map.json SHA256 1034a1dee2ad9f0a40d1209dbe91a1d801fd3ea60e475ceb5c36f26fdfe9601d records exact inverse expressions and old/current fingerprints. Two HTTP mappings independently recomputed by bounded m.scan against git base 8de1b515b38386df1deb205fe2b84754558ecd52. Historical /tmp/windows-cbc8-48.log job125000363811 is CBC8, NOT this base/current revision; no current restored Windows pass or executed counterfactual witness is claimed. Path old/raw 6e00cc1633a93b9832ec0cf7ce0c91f94d55370d93dc23e05401d9760e0dc947; current/raw 2cde0864b4904179533eb2dc7e206e809154fefec1b95b86cdec196275eb731c."
+      },
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c",
+      "review_evidence": "Round15 independent bounded full-body/source review by background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c and adversarial scope/guard review background_agent:bgagent-1ee45d4a-f4a7-458d-b6ad-d1f4fd13f114 approved seven source repairs and conservative invocation workload 3/3/8/10/3/7/4. HTTP source additionally reviewed by background_agent:bgagent-8f76e734-6580-41d1-a88c-9a6ffb23b9d6. These are source reviews, not authentication of this final ledger or runtime/witness results."
+    },
+    {
+      "fingerprint": "0da30d59603371efd2034e0ab2b421a24b79d260ea4f5476c4b5f36f5ee1439f",
+      "occurrences": 1,
+      "failure_mode": "Round15 representation-only repair of authenticated_claim_rejects_stale_binding_without_consuming_delivery: raw fixture/expected path representation can disagree with the existing canonical wire root/provenance on Windows.",
+      "importance": "Preserve the existing consumer oracle across platform path representations without changing shipping behavior or relaxing guards.",
+      "nearest_retained": {
+        "fingerprint": "5cee7cddf753c7756235ddc428065e1bc6daf8b036147bb3110d9baef3b00898",
+        "why_insufficient": "Binding helper rejection for other root/epoch does not cover authenticated runtime claim non-consumption or duplicate delivery."
+      },
+      "oracle": "Four authenticated claim invocations: wrong project ID rejected; wrong engine epoch rejected; valid Panel claimed=true with permission=false; duplicate Notification claimed=false. Existing assertions preserve stale-binding non-consumption and duplicate suppression.",
+      "prerequisites": "Existing engine lib test runtime, temporary filesystem fixtures and original per-test annotations/configuration; no added dependency, scenario, or platform skip.",
+      "shipping_implementation": "Existing shipping consumer at refact-agent/engine/src/http/routers/v1/buddy_editorial.rs; production residue unchanged relative to 8de1b515b38386df1deb205fe2b84754558ecd52. Use dunce::canonicalize only in fixture setup, matching runtime root representation instead of Windows verbatim-prefix std output; authenticated claim implementation remains unchanged.",
+      "determinism": "Existing isolated fixture lifecycle and assertions retained. No sleeps, timing thresholds or production fallback added. Shared normalizer regression/literal-backslash collision is not independently detected by same-normalizer expected values.",
+      "layer": "Existing engine lib consumer test; ordinary test representation delta.",
+      "why_cheapest": "Repair the existing expected/setup representation in place; retain all existing invocations rather than adding a duplicate test or broadening production path semantics.",
+      "meaningful_cases": 4,
+      "critical": false,
+      "criticality_reason": "Only this representation/setup delta is ordinary. Underlying privacy, scope, authority, execution-root, durable-state and delivery invariants remain critical where applicable and are NOT downgraded; no new critical capability or executed critical-regression witness is asserted.",
+      "removed_coverage": "No existing invocation/assertion removed; old body 1b1d89042fc0c2637ad9c5dfd48d5e7aa10909d8f4dfcea948f530b68c018cba replaced one-for-one by current body. Use dunce::canonicalize only in fixture setup, matching runtime root representation instead of Windows verbatim-prefix std output; authenticated claim implementation remains unchanged. Workload is conservatively charged by actual consumer invocations/boundaries, not a claim of 4 independent critical properties.",
+      "witness": {
+        "kind": "counterfactual",
+        "explanation": "Reviewed source counterfactual only: retaining the old raw expected/setup representation can disagree with the already-normalized producer/runtime path on Windows before the existing semantic oracle is reached. Use dunce::canonicalize only in fixture setup, matching runtime root representation instead of Windows verbatim-prefix std output; authenticated claim implementation remains unchanged. This is not an executed mutant/red-green witness or proof of a current Windows restored pass.",
+        "evidence": "Frozen refact-agent/engine/target/round15-evidence/rust-before.json contains seven current raw source pins; five-file expected-path-map.json SHA256 1034a1dee2ad9f0a40d1209dbe91a1d801fd3ea60e475ceb5c36f26fdfe9601d records exact inverse expressions and old/current fingerprints. Two HTTP mappings independently recomputed by bounded m.scan against git base 8de1b515b38386df1deb205fe2b84754558ecd52. Historical /tmp/windows-cbc8-48.log job125000363811 is CBC8, NOT this base/current revision; no current restored Windows pass or executed counterfactual witness is claimed. Path old/raw bf31d837c5e9286b06fe79665650470e795f025f0b6139a45315ff067b597bbb; current/raw c0e12da6b01f850f90e03b64198c678f83e5acca957da4c2fb40c54c11004479."
+      },
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c",
+      "review_evidence": "Round15 independent bounded full-body/source review by background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c and adversarial scope/guard review background_agent:bgagent-1ee45d4a-f4a7-458d-b6ad-d1f4fd13f114 approved seven source repairs and conservative invocation workload 3/3/8/10/3/7/4. HTTP source additionally reviewed by background_agent:bgagent-8f76e734-6580-41d1-a88c-9a6ffb23b9d6. These are source reviews, not authentication of this final ledger or runtime/witness results."
     }
   ],
   "classifications": [
@@ -10744,6 +10940,17 @@
       "author": "chat:a569df0f-895b-428c-8349-424fb5d1ddf8",
       "reviewer": "background_agent:bgagent-e6b24b53-6d63-4292-bee2-1128707c5007",
       "review_evidence": "Independent semantic/source/evidence review subchat-04121a39-0dc0-40ed-8116-3369422eff29 generations1-4 approved scopes/case counts, exact red9fail/green9pass witness files, current fingerprint mappings, ordinary unchanged-scenario setup, 33 conservative support hashes and final2fixes11pass. Full-library run failed and is not certified by these admissions; no end-to-end provider/lifecycle claim. Macro body unchanged; only added absent binding fields elsewhere; existing expansion/non-test rationale retained."
+    },
+    {
+      "path": "refact-agent/engine/src/tools/tool_process.rs",
+      "kind": "item_macro",
+      "source_sha256": "619c86eaac47eb1eda318929caa6a16e48182df7c0580479cbcaed7e293aeb77",
+      "lead_sha256": "1472548ba0f9b501d4b239939adc18551f3c9c1a23f25bda3d11f6eb42e1bbe7",
+      "conclusion": "non_test",
+      "rationale": "tokio::task_local bounded invocation declares a static LocalKey and storage/access methods only, no test declarations, Rustdoc examples or includes. cfg(test), where present, gates support storage/hooks, not a generated test.",
+      "author": "background_agent:bgagent-1c1ac627",
+      "reviewer": "background_agent:bgagent-b38d7a33",
+      "review_evidence": "Independent source-only review subchat-b3ccfe84-10c0-4216-ae03-2b9d0428864d approved eleven bounded non-test leads; reviewer did not compute hashes. Admission author recomputed exact current source/lead SHA256 using shipping inventory. No runtime review claimed. Round15: exact unchanged bounded lead SHA verified against base/current by m.scan; current raw source pin rebound only for representation-only test expressions, production residue unchanged. Historical certificate preserved verbatim as a separate object. Round15 independent bounded full-body/source review by background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c and adversarial scope/guard review background_agent:bgagent-1ee45d4a-f4a7-458d-b6ad-d1f4fd13f114 approved seven source repairs and conservative invocation workload 3/3/8/10/3/7/4. HTTP source additionally reviewed by background_agent:bgagent-8f76e734-6580-41d1-a88c-9a6ffb23b9d6. These are source reviews, not authentication of this final ledger or runtime/witness results."
     }
   ],
   "impacts": [
@@ -16845,19 +17052,19 @@
     },
     {
       "path": "refact-agent/engine/src/tools/tool_task_board.rs",
-      "before_sha256": "0ddc758e13d9a6956b81c767ab05b54a1524e3b40598add870d0150f009e61f0",
-      "after_sha256": "62ea447c76085fb91c267aef0c3c8fd68e420a539be412dbe0d1f1366921843e",
+      "before_sha256": "f10720d53d116a1998adfa7ae02bf85dbdb40b1c5b07d1761d5b83a4e2fa1c87",
+      "after_sha256": "3cb0acaddfe4894aebd06a86f6aa61e3cea7ae21ffead22befe53116f09e22d8",
       "affected_tests": [
-        "1818fba2647bfc4e960578621a2eb13db6f08af8da4b930defaed3da41c017df",
-        "44d99d4716ddad2c0a438dbd763e5187277973c868f1d4361eccedcac5fad4c7",
-        "7164249a243269a46052143286f5138cbb72d698278f61d536bd3e277d49806a",
-        "93d8277d0064d43f330f850ed6c97a8be833277245cd09d70a991b2f225d4f57"
+        "8c8f4623006718cde72c25ae3e34d97e8a3823eccb84195ea184c05a50a6984a",
+        "be15a30de6fda7ac3be4122db1b650949aa1d6103d826a3872dfcdb0ca017f61",
+        "42e7cedd50b63eb1faa689204d8205e907a55a976e33625554b5d93d185d2d8c",
+        "e4a8a7f30d3158c8251cf35f2782e2cfe649bcfac719ba2f628bf56b68f91fbd"
       ],
-      "impact": "refact-agent/engine/src/tools/tool_task_board.rs: canonical non-test residue changes remove 191 tokens and add 0 tokens. Cleanup evidence identifies sample_board. 12787→6186 global lexical definitions includes intentional coverage loss from case deletions; this support record does not claim strict duplication.",
-      "execution_context": "Same physical Rust path; no retained fingerprint/context relocation relative pinned main. Test-only ownership: inline cfg(test) modules or explicitly cfg(test) helper items; tests/ and *_tests.rs are test harness/module support. Removed dead helper/import/module scaffolding has no surviving intended executing consumer; conservative affected mapping lists surviving same-file tests for dependency review, not a claim all call deleted helpers. See exact residue token hunks and cleanup evidence references.",
-      "author": "support-impact-author-bgagent-1fd43f09",
-      "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
-      "review_evidence": "Independent source/hash review: refact-agent/engine/src/tools/tool_task_board.rs: reviewed removal of sample_board within explicit cfg(test) items/modules. 4 actual same-path retained cases keep complete attributed canonical body and enclosing-context hash against pinned MAIN. Conservative affected map contains exactly those current fingerprints."
+      "impact": "Round15 raw base/current support map: Normalize only the expected discovery source path to the existing producer representation. All current LOCAL test fingerprints are conservatively mapped; no whole-repository or complete transitive coverage claimed. Test bodies changed only at the admitted representation/setup expressions; other local fingerprints and production residue are unchanged.",
+      "execution_context": "Original engine lib module, cfg/test annotations, runtime, dependencies and consumer boundaries retained. Conservative invocation cost10: initial successful claim setup plus nine post-setup calls: specific discovery, visible list, hidden list, hidden explicit discovery with store-retained control, unknown model, no scope, foreign scope, policy error, observer claim denial. Not ten independent critical properties; initial claim is setup. Existing filtering/non-authority assertions remain. No builds or runtime outcomes are certified by this map.",
+      "author": "background_agent:bgagent-f2d15796-67a0-4fa1-a28f-939b3db3e110",
+      "reviewer": "background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c",
+      "review_evidence": "Round15 independent bounded full-body/source review by background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c and adversarial scope/guard review background_agent:bgagent-1ee45d4a-f4a7-458d-b6ad-d1f4fd13f114 approved seven source repairs and conservative invocation workload 3/3/8/10/3/7/4. HTTP source additionally reviewed by background_agent:bgagent-8f76e734-6580-41d1-a88c-9a6ffb23b9d6. These are source reviews, not authentication of this final ledger or runtime/witness results."
     },
     {
       "path": "refact-agent/engine/src/tools/tool_task_broadcast.rs",
@@ -19993,11 +20200,11 @@
     },
     {
       "path": "refact-agent/engine/src/tools/tool_subagent.rs",
-      "before_sha256": "7d7fb1d7177116a06c13adb3aef6612d99407d1d2e3f74da828a170519cf5c78",
-      "after_sha256": "206d75d9ec2e1d5bced3587e3cf965d5110936debe79b459e29aedc5214543f0",
+      "before_sha256": "206d75d9ec2e1d5bced3587e3cf965d5110936debe79b459e29aedc5214543f0",
+      "after_sha256": "4a98c070bf6d7775d5767f5fdce9d5515b13a79e94fbc1d058d1d89a709ca2bd",
       "affected_tests": [
         "34fa65e6922322e3ff95d147317f1e3db6d3c1a86b9b1a3bf3d7fc76dff5d55d",
-        "3ce7d1aa031bee3c7a32d7cb87900aefbb0c1bbf3fc35993e2c1ca950370a7a1",
+        "56d427d97a7a301b13ff886b942cee21ba0187f66b7a6f02d978a6fbfced4626",
         "2534232849cdb3502eced829b4d6bb0ec8a0342e8ed59df72d2d2ee86c1ada02",
         "dae60c5e4905bda033223eeebecb9970ad1e9b24212948332771b16d4839f835",
         "90bd7a31b3925649e95f9b6188c0755d151ede56c5dfd585dab8413a92b4aeab",
@@ -20011,11 +20218,11 @@
         "e146c0d8a1e101048a2a11659a7e807bba5a1c41a71e61e37d20f2c68ae20509",
         "5c7011d43b29c5d5113d69b049759582bbcc85b733f9d46b7aa117ed09b5fd96"
       ],
-      "impact": "Optional cap schema/parsing, forwarding and preview fields. Maps every current same-file test; subchat aggregate is not claimed to prove parser/preview wiring.",
-      "execution_context": "Existing engine lib/module context, cfg, annotations and dependencies retained. Conservative same-path mapping, not a complete transitive impact graph or execution claim.",
-      "author": "background_agent:bgagent-61493284-67af-418b-908a-aa34fc854759 (ledger preparation)",
-      "reviewer": "background_agent:bgagent-adaeddf1-8f7e-43c2-8222-00c7b5c1beba (source review only)",
-      "review_evidence": "Source review subchat-b5ed3883-90be-441b-a9ee-4a950c547ebb accepted unchanged-default mechanical edits and production/test relevance contingent on actual critical red/green witness. This is not witness evidence or final ledger approval; parent independent ledger review remains pending."
+      "impact": "Round15 raw base/current support map: Normalize only the expected source provenance path to the existing producer representation. All current LOCAL test fingerprints are conservatively mapped; no whole-repository or complete transitive coverage claimed. Test bodies changed only at the admitted representation/setup expressions; other local fingerprints and production residue are unchanged.",
+      "execution_context": "Original engine lib module, cfg/test annotations, runtime, dependencies and consumer boundaries retained. Eight existing public consumer invocations: preview, depth rejection, byte limit1, restored limit4096, invalid zero, privacy-denied preview, privacy-denied run, missing-model rejection. Existing source-record identity and guard assertions remain. No builds or runtime outcomes are certified by this map.",
+      "author": "background_agent:bgagent-f2d15796-67a0-4fa1-a28f-939b3db3e110",
+      "reviewer": "background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c",
+      "review_evidence": "Round15 independent bounded full-body/source review by background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c and adversarial scope/guard review background_agent:bgagent-1ee45d4a-f4a7-458d-b6ad-d1f4fd13f114 approved seven source repairs and conservative invocation workload 3/3/8/10/3/7/4. HTTP source additionally reviewed by background_agent:bgagent-8f76e734-6580-41d1-a88c-9a6ffb23b9d6. These are source reviews, not authentication of this final ledger or runtime/witness results."
     },
     {
       "path": "refact-agent/engine/Cargo.toml",
@@ -21176,17 +21383,16 @@
     },
     {
       "path": "refact-agent/engine/src/http/routers/v1/buddy_decisions.rs",
-      "before_sha256": "14142b4afbd5cf4d8a1ab28ac4793406cf3b47f48eb2070609a8d2c49671fce7",
-      "after_sha256": "6e00cc1633a93b9832ec0cf7ce0c91f94d55370d93dc23e05401d9760e0dc947",
+      "before_sha256": "6e00cc1633a93b9832ec0cf7ce0c91f94d55370d93dc23e05401d9760e0dc947",
+      "after_sha256": "2cde0864b4904179533eb2dc7e206e809154fefec1b95b86cdec196275eb731c",
       "affected_tests": [
-        "eb41197055c165852d8e894a95f785ccdef608ec454e6355adbabba1f92e1bee"
+        "c635313cf9ca93b1d0f7e242ec7e971d1017e5fcc84a2e45728720cd09be4c95"
       ],
-      "no_tests_reason": "",
-      "impact": "Additive source-binding/receipt schema setup or current Buddy production integration; original assertions remain unchanged unless separately admitted. Impact set includes every test physically in the changed file plus conservatively related candidate regressions when the module has no tests; this is not proof every transitive caller is covered. Affected fingerprints are a conservative review/compilation inventory, not proof each listed test executes this source or that every changed branch is witnessed.",
-      "execution_context": "Registered worktree; same Rust engine library test harness; production/test module wiring retained. Default feature/platform requirements unchanged. Focused actual red9fail/green9pass and final11pass recorded; full-library failed27 on earlier source and24 of other25 reproduced serially. No full-suite success claim. Final late HTTP acknowledgement ordering and replay-scope corrections are source-reviewed but have no dedicated injected-save-failure witness.",
-      "author": "chat:a569df0f-895b-428c-8349-424fb5d1ddf8",
-      "reviewer": "background_agent:bgagent-e6b24b53-6d63-4292-bee2-1128707c5007",
-      "review_evidence": "Independent semantic/source/evidence review subchat-04121a39-0dc0-40ed-8116-3369422eff29 generations1-4 approved scopes/case counts, exact red9fail/green9pass witness files, current fingerprint mappings, ordinary unchanged-scenario setup, 33 conservative support hashes and final2fixes11pass. Full-library run failed and is not certified by these admissions; no end-to-end provider/lifecycle claim."
+      "impact": "Round15 raw base/current support map: Echo projection.project_root in four valid-root request fields as a realistic canonical-root protocol client; foreign-root negative, session std canonicalization and production code stay unchanged. Does not independently prove root computation correctness. All current LOCAL test fingerprints are conservatively mapped; no whole-repository or complete transitive coverage claimed. Test bodies changed only at the admitted representation/setup expressions; other local fingerprints and production residue are unchanged.",
+      "execution_context": "Original engine lib module, cfg/test annotations, runtime, dependencies and consumer boundaries retained. Seven consumer invocations: initial pending projection; foreign-root answer refused with empty queue; valid answer accepted/enqueued while still pending; foreign tool-state error; answered DIRTY state error; clean answered resolution request; final empty projection. Final projection is a separate answered-state consumer but lifecycle-dependent, not an independent root-correctness property. No builds or runtime outcomes are certified by this map.",
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c",
+      "review_evidence": "Round15 independent bounded full-body/source review by background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c and adversarial scope/guard review background_agent:bgagent-1ee45d4a-f4a7-458d-b6ad-d1f4fd13f114 approved seven source repairs and conservative invocation workload 3/3/8/10/3/7/4. HTTP source additionally reviewed by background_agent:bgagent-8f76e734-6580-41d1-a88c-9a6ffb23b9d6. These are source reviews, not authentication of this final ledger or runtime/witness results."
     },
     {
       "path": "refact-agent/engine/src/http/routers/v1/buddy_native_approvals.rs",
@@ -22832,6 +23038,122 @@
       "author": "background_agent:bgagent-3ce0d06e-c675-40cd-babd-bc817b694544 (bookkeeping only)",
       "reviewer": "background_agent:bgagent-347f89a3 / bgagent-5805344a; final source auditor bgagent-c84fd050; ledger audit pending",
       "review_evidence": "Independent source/case reviews bgagent-347f89a3 and bgagent-5805344a (retention/regression/registered also inventoried by bgagent-c9066752), relayed by parent. Final adversarial source audit bgagent-c84fd050 completed; final ledger authentication remains parent-owned and pending. Historical case charges take precedence over a lower recount: creation5 and adapter10 retained. No executed mutant, new critical-test certification, full-suite pass or restored Windows pass claimed."
+    },
+    {
+      "path": "refact-agent/engine/src/agents/launch_spec.rs",
+      "before_sha256": "3ca1f6d15da075625a192b2dfc88a23fd0ed03e98ad88f2d7ad002cecd6e6639",
+      "after_sha256": "d6055ff7ba0841648bf502e28db5fc6a78001777d85d884a079aa80306c3fcb6",
+      "affected_tests": [
+        "453aa51f4751fffbf82e056c6ac84524051e6e4a9c05f3dcb24b9f6cd08bc817",
+        "08e9e3f35c98033b9cad458e5f1f93ac53bcad1c858850709e3241891ea979e1",
+        "1530f223dc15e9c1a3aa6666decd75ff71932f74dc34e4fb9bb6bc3ec5c68d0b",
+        "115b2b12140c0d3020febc0c1c6d84dd44c85fbd23882aa62c6c6922a144efee",
+        "d66c8f97bc8575bcf21abaf1846a699915757f86c308f422b18f70a52acd81ab",
+        "859e5413e8056127217f6db567cce905aa837da34a6b2793884eddae5def3352",
+        "d55027f6417c9ba33b5db971003cc7f98693b53f63ea499b91a9fe11e30bcb76",
+        "5a87c23ff0bf0d334b4e9b164fc64dab09de0026b7a442514cf564adb76ed40e",
+        "d212f2d78bf2eda34cad2c597aea329c5206a430b674b0bc23cbf0a1356db72a",
+        "e03daa15790db844e04287cb3c10f8deda920436fbb63a0ea2cad9958e6cd1ec",
+        "355f9e3959e8fd8ce75116647435e6aa2c85b9f2e2a1defbb5238235a7e9a0f3",
+        "eca866942200110914c0a0083b815d6e0bba0fb7a50ecb757423ba7f463be648",
+        "19dee2b09db98a3eae581af8e22e677d7dc529032533e54121de36b5772f5e99",
+        "0afcaf32805979952007452c973a61b78331797dc830916f6176a400d6dd8d8c",
+        "468b48c14ac765cf0fc1bf3fae623b98748879f72b54e25d09f6e3f23df54019",
+        "a75c51a8b596f2bb9d81bec3aa6d89998aafec6ee3125f76a16ca9d706c997a8",
+        "bf0090e096235f3d26831633ad200d27763406436ef84265c8b00d3667d11e32",
+        "6ae044991c717ecc845e0255bc6aa8290896d2fea49f17e8eb7073b563142dc4",
+        "0336ac4534252ba67e6a4699fbf667652bc3129d4e391ab3be3065d43456c5c7",
+        "412f773ff7dfc916a64a7576d136d88759d27def3693195c8dd03779df0c42a1",
+        "5ab3c546cef6e77b2f6484369d918b726b255dca6282f80fb2d469e2d5c46077"
+      ],
+      "impact": "Round15 raw base/current support map: Normalize the expected provenance path with the existing producer normalizer, not raw platform separators. All current LOCAL test fingerprints are conservatively mapped; no whole-repository or complete transitive coverage claimed. Test bodies changed only at the admitted representation/setup expressions; other local fingerprints and production residue are unchanged.",
+      "execution_context": "Original engine lib module, cfg/test annotations, runtime, dependencies and consumer boundaries retained. Three existing consumer invocations: first exact task-document load, changed document/revision load, and missing document rejection without summary fallback. Existing content, revision and failure assertions remain. No builds or runtime outcomes are certified by this map.",
+      "author": "background_agent:bgagent-f2d15796-67a0-4fa1-a28f-939b3db3e110",
+      "reviewer": "background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c",
+      "review_evidence": "Round15 independent bounded full-body/source review by background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c and adversarial scope/guard review background_agent:bgagent-1ee45d4a-f4a7-458d-b6ad-d1f4fd13f114 approved seven source repairs and conservative invocation workload 3/3/8/10/3/7/4. HTTP source additionally reviewed by background_agent:bgagent-8f76e734-6580-41d1-a88c-9a6ffb23b9d6. These are source reviews, not authentication of this final ledger or runtime/witness results."
+    },
+    {
+      "path": "refact-agent/engine/src/coordination/privacy_guard.rs",
+      "before_sha256": "4398e40d924e7a8bb2fc4746881723166e2b8952b9ec8fceec4d9b31a8f5f5d3",
+      "after_sha256": "73abc61799b729663b97118559831d6f4c2b7cb5a3fb33a1aa263d396b6dd817",
+      "affected_tests": [
+        "144770ae0f11d730d3db82f560b3c3b3923d21b6ce81ee2f1ce0aa0082175de3",
+        "431bd6546d66df17b24f890c1318823b0ddc9694cbc613b3c50309a4d950b0b8",
+        "0353d4fb80b7a182984eeeb6ec35b074dd9df8107044a0a6dced9eb3b0a35a78",
+        "c211fea08bdad6f641073b0e9500f64861b1a7fcdc77744e5b3a39a7bde171ef"
+      ],
+      "impact": "Round15 raw base/current support map: Normalize only the expected carried absolute provenance path using the same existing wire representation as the producer. All current LOCAL test fingerprints are conservatively mapped; no whole-repository or complete transitive coverage claimed. Test bodies changed only at the admitted representation/setup expressions; other local fingerprints and production residue are unchanged.",
+      "execution_context": "Original engine lib module, cfg/test annotations, runtime, dependencies and consumer boundaries retained. Three existing clearance invocations: trusted relative-path row cleared with absolute provenance and zone; other row provenance denied; other audit provenance denied. Existing privacy assertions remain. No builds or runtime outcomes are certified by this map.",
+      "author": "background_agent:bgagent-f2d15796-67a0-4fa1-a28f-939b3db3e110",
+      "reviewer": "background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c",
+      "review_evidence": "Round15 independent bounded full-body/source review by background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c and adversarial scope/guard review background_agent:bgagent-1ee45d4a-f4a7-458d-b6ad-d1f4fd13f114 approved seven source repairs and conservative invocation workload 3/3/8/10/3/7/4. HTTP source additionally reviewed by background_agent:bgagent-8f76e734-6580-41d1-a88c-9a6ffb23b9d6. These are source reviews, not authentication of this final ledger or runtime/witness results."
+    },
+    {
+      "path": "refact-agent/engine/src/tools/tool_process.rs",
+      "before_sha256": "fb3492a577845de4741172d188fdb79b7879e52a0706e690db63ad349b57a169",
+      "after_sha256": "619c86eaac47eb1eda318929caa6a16e48182df7c0580479cbcaed7e293aeb77",
+      "affected_tests": [
+        "c3d9d2eaefdbb5641173d801c5cc1868598ce58f8c749ca8b6a70c182119f0fc",
+        "7b27d8047a595e7ca5f981d9a1d45f15c542bbdc7b40dd94f98273c2db71c41f",
+        "c8eee0dc511ba00158095dc1389727940cf5d95c25cd84cff063eb35de58a9f6",
+        "6dcf6a2183770d6476ccddcc5230fdd64bb2a8cb37499f6cc69c48dd69c601e3",
+        "b83d6fa90e68c72025e3e980ecc0d435c9cb847e8e2c03a2312449c6d571463c",
+        "64cafbbd7bd3ab2d62e37a9d2c201998fee7fb03ae822521514f11d9a582d860",
+        "bb42f3452b73dc9d74c4e36005d9d7b285f5156c854e80c1d7cc5daaf7907823",
+        "198a91bae7d542b7bf5085c3b72acd1990db2914fd2f51d7dfd988510b99889c",
+        "ca3bd8464d1af994ace1379aa32ec10e1a74ff726d4124358598ae30f6572db1",
+        "d1cda4a2be3be40c5e79738e306efff8f7961bdb2ba43e1e73ddfa356e55bdde",
+        "4ee7afafd0958c57d2e427b9f63035f0111deea66d2c3ead52227cb9905620cd",
+        "ca720e36a02595ae7838f303b2bdcfa91f06c4507a70231c681513ba6092069a",
+        "a4b9006a350709b0853bca0fed6f58d6904e7db394a5e381712342252290e23d",
+        "46684fbeff7e0e74d4a5dbb8ec4feac0be9c470cc2fb7003c8ed17ba136a321c",
+        "0eba6a84a34098554de8a2623c10a3af8efa3839f6194a55e95d7120fc0b5493",
+        "e2db4c4d4492e0e10cec0a6be4682d08eef7b81f5481795100c9a046e38104a2",
+        "df4764edf25b850a096eb25a877b757ecb6fafb5d389852b84a13c479046d565",
+        "174ad33fbcb5a83b2dd75cc4043da1c7cb22622cb38fbf483f4e9e4d7e31c80b",
+        "a43314087f264c622ac60220544359797afec9c693f393b928d34706ef2a784c",
+        "bfdc368c27c3de8ccf385cf1a28f942a1bf09697d795ef85d906abdaa1c7dd56",
+        "9c98493b0ff6fa10ca014a0238b1a373911f5a18864fa7fb393d1e072a0edfc6",
+        "96da2a36f26e0785388a88c3a715f6148ad14996eed0cac38337cacf84c26ecb",
+        "de6033dba2d0782516d8213dd0f27851080709e8187db4defe800ac808b59976",
+        "5211fb59d44a966d1dd91e683b2f8f609abd76b4bb9ab9f333b399a290197389",
+        "fd4410850e8e5de3c966ae43ceba30e40eb7f014795663476552df6a6b8d75e5",
+        "3fbabc96c6774019bd3e6cb0f2ef7aa93543faaad81c68e29d524991551c4f7f",
+        "7a3ab3c7037404e84eb7679c4cd3469674d83004870220019d565021222adf64",
+        "86b0be5ad0f33be1d8d48157a43fabb0125b8fb4a519a81b6bdd126a91e61584",
+        "f82bf0528cb4150faec33d802c6a854cb2f9777a1c3c494b727630442071b791",
+        "154c51644a07408eb525a2782088c7652a54f78e62a96de2b149b2c77f2fef11",
+        "6eedfffd3dac43eaad90f8d7f66f283d6af8d6a2cbf413e866c951bd8b490c94",
+        "26fd9e301ad650ad2cfc8b3aa7b5b15e1fecc626cf59c9eb8f60e0785acc9664",
+        "23ac5611880d989a91a144fc6714e64eaa40e98857e34567e56153f7324ef355",
+        "aa63d5e85c6f3c09bc96fe5edcf0c2fb3c345e0a98c1a9d4a0f9353a6d03a941",
+        "90b84ebd2e311e9ff5538c3f7e06b48f0dd668c2200925fe5a187012877da20f",
+        "1a7eb36ac96d55bf45431d09544e963c54a07076d8f31916503041c128888ed0",
+        "305b1236c74e1245368edd09ff21151bd477c794a0c6f1e702c4a05f0ea1f3a5",
+        "0b50e4401cf150ef608b85b396aecbd1044e0b15c859d28a153b445f3c10cc91",
+        "edda36c966d45a01ca6e00ff7b81a00005e8c679c37a7f3b9fc9af4277c87043",
+        "0dff74019fe36f969b5940c17d565c0d35c3d131ade0db676915a178754bce39"
+      ],
+      "impact": "Round15 raw base/current support map: Normalize only the expected inspector checkout-root and source-board strings; shell/verifier expectations and production root resolution are unchanged. All current LOCAL test fingerprints are conservatively mapped; no whole-repository or complete transitive coverage claimed. Test bodies changed only at the admitted representation/setup expressions; other local fingerprints and production residue are unchanged.",
+      "execution_context": "Original engine lib module, cfg/test annotations, runtime, dependencies and consumer boundaries retained. Three related consumer boundaries: inspector checkout receipt and provenance, verifier policy cwd, shell approval and actual execution cwd. Not three independent shell executions; existing execution/output and root/provenance assertions remain. No builds or runtime outcomes are certified by this map.",
+      "author": "background_agent:bgagent-f2d15796-67a0-4fa1-a28f-939b3db3e110",
+      "reviewer": "background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c",
+      "review_evidence": "Round15 independent bounded full-body/source review by background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c and adversarial scope/guard review background_agent:bgagent-1ee45d4a-f4a7-458d-b6ad-d1f4fd13f114 approved seven source repairs and conservative invocation workload 3/3/8/10/3/7/4. HTTP source additionally reviewed by background_agent:bgagent-8f76e734-6580-41d1-a88c-9a6ffb23b9d6. These are source reviews, not authentication of this final ledger or runtime/witness results."
+    },
+    {
+      "path": "refact-agent/engine/src/http/routers/v1/buddy_editorial.rs",
+      "before_sha256": "bf31d837c5e9286b06fe79665650470e795f025f0b6139a45315ff067b597bbb",
+      "after_sha256": "c0e12da6b01f850f90e03b64198c678f83e5acca957da4c2fb40c54c11004479",
+      "affected_tests": [
+        "5cee7cddf753c7756235ddc428065e1bc6daf8b036147bb3110d9baef3b00898",
+        "0090a73753ea5287a0247701544d21e702363300cc6cf559d975440680bceabf",
+        "0da30d59603371efd2034e0ab2b421a24b79d260ea4f5476c4b5f36f5ee1439f"
+      ],
+      "impact": "Round15 raw base/current support map: Use dunce::canonicalize only in fixture setup, matching runtime root representation instead of Windows verbatim-prefix std output; authenticated claim implementation remains unchanged. All current LOCAL test fingerprints are conservatively mapped; no whole-repository or complete transitive coverage claimed. Test bodies changed only at the admitted representation/setup expressions; other local fingerprints and production residue are unchanged.",
+      "execution_context": "Original engine lib module, cfg/test annotations, runtime, dependencies and consumer boundaries retained. Four authenticated claim invocations: wrong project ID rejected; wrong engine epoch rejected; valid Panel claimed=true with permission=false; duplicate Notification claimed=false. Existing assertions preserve stale-binding non-consumption and duplicate suppression. No builds or runtime outcomes are certified by this map.",
+      "author": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
+      "reviewer": "background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c",
+      "review_evidence": "Round15 independent bounded full-body/source review by background_agent:bgagent-b8077d9d-ee33-450b-b80e-11f3dc100f6c and adversarial scope/guard review background_agent:bgagent-1ee45d4a-f4a7-458d-b6ad-d1f4fd13f114 approved seven source repairs and conservative invocation workload 3/3/8/10/3/7/4. HTTP source additionally reviewed by background_agent:bgagent-8f76e734-6580-41d1-a88c-9a6ffb23b9d6. These are source reviews, not authentication of this final ledger or runtime/witness results."
     }
   ]
 }

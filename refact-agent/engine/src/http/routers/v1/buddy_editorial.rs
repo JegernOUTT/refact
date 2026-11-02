@@ -250,7 +250,7 @@ mod tests {
     async fn authenticated_claim_rejects_stale_binding_without_consuming_delivery() {
         use crate::buddy::{actor::BuddyService, outcome_runtime::OutcomeRuntime};
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
         let project = ProjectIdentity {
             project_id: "fixture".into(),
             canonical_root: root.to_string_lossy().into_owned(),

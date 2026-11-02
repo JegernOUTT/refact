@@ -3956,10 +3956,21 @@ mod tests {
         assert_eq!(response["command_checkout"], fixture.selector);
         let records = receipt.extra["privacy"]["files"].as_array().unwrap();
         assert!(records.iter().any(|record| {
-            record["path"] == json!(fixture.root) && record["attribution"] == "declared"
+            record["path"]
+                == json!(refact_core::chat_types::normalize_file_name(
+                    fixture.root.to_string_lossy().into_owned()
+                ))
+                && record["attribution"] == "declared"
         }));
         assert!(records.iter().any(|record| {
-            record["path"] == json!(fixture.source.join(".refact/tasks/task/board.yaml"))
+            record["path"]
+                == json!(refact_core::chat_types::normalize_file_name(
+                    fixture
+                        .source
+                        .join(".refact/tasks/task/board.yaml")
+                        .to_string_lossy()
+                        .into_owned()
+                ))
                 && record["attribution"] == "declared"
         }));
         let candidate =

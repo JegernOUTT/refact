@@ -1769,7 +1769,10 @@ mod tests {
             crate::privacy::records::records_to_carry(&first.prepended_messages)
                 .unwrap()
                 .iter()
-                .any(|record| record.path == path.to_string_lossy())
+                .any(|record| record.path
+                    == refact_core::chat_types::normalize_file_name(
+                        path.to_string_lossy().into_owned()
+                    ))
         );
         let source = &message.extra["launch_context_source"];
         assert_eq!(source["slug"], "accepted");

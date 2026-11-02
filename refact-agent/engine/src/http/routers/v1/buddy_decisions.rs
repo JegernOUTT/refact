@@ -391,7 +391,7 @@ mod tests {
             State(app.clone()),
             Path(("native-chat".into(), "native-question".into())),
             axum::Json(DecisionAnswerRequest {
-                project_root: root.path().to_string_lossy().into_owned(),
+                project_root: projection.project_root.clone(),
                 asked_at_ms: 7,
                 client_request_id: "native-forwarded".into(),
                 answers: vec![QuestionAnswer {
@@ -424,7 +424,7 @@ mod tests {
             State(app.clone()),
             Path(("native-chat".into(), "foreign".into())),
             Query(DecisionProjectQuery {
-                project_root: root.path().to_string_lossy().into_owned()
+                project_root: projection.project_root.clone()
             })
         )
         .await
@@ -445,7 +445,7 @@ mod tests {
             State(app.clone()),
             Path(("native-chat".into(), "native-question".into())),
             Query(DecisionProjectQuery {
-                project_root: root.path().to_string_lossy().into_owned()
+                project_root: projection.project_root.clone()
             })
         )
         .await
@@ -455,7 +455,7 @@ mod tests {
             State(app.clone()),
             Path(("native-chat".into(), "native-question".into())),
             Query(DecisionProjectQuery {
-                project_root: root.path().to_string_lossy().into_owned(),
+                project_root: projection.project_root.clone(),
             }),
         )
         .await

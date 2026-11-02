@@ -2031,7 +2031,10 @@ mod tests {
             refact_privacy::records_from_messages(std::slice::from_ref(message))
                 .unwrap()
                 .iter()
-                .any(|(_, record)| record.path == source_path.to_string_lossy())
+                .any(|(_, record)| record.path
+                    == refact_core::chat_types::normalize_file_name(
+                        source_path.to_string_lossy().into_owned()
+                    ))
         );
         let discovered = tool_text(contexts);
 
