@@ -12153,6 +12153,186 @@
       "author": "background_agent:bgagent-d8fd26c8-03bb-4200-874f-b235447fdfb9",
       "reviewer": "background_agent:bgagent-be5 (independent Round17 source review, parent-forwarded)",
       "review_evidence": "Parent-forwarded independent Round17 source approval bgagent-be5; refact-agent/engine/target/round17-evidence/identity-proof.json proves 97 assertion macros identical and 75 other fingerprints unchanged across four files, exact reversal restores files, counts3/8/10/3. Current ledger authored here; independent final ledger review pending, not claimed. Manifest /home/svakhreev/projects/smc/refact/refact-agent/engine/target/round18b-evidence/witness/final-manifest.json SHA256 3a1f6b69e8a0c1c9b96e458197b736b2972fcef76dbdbca8186fbe4bdde7de68."
+    },
+    {
+      "fingerprint": "8fbcd6e81312621ca3c6868cf971db1d195b6076076bf4da92bbd72bfc899dfe",
+      "occurrences": 1,
+      "failure_mode": "Ordinary task-goal mutex contention becomes terminal local persistence failure; accepting a fresh epoch after waiting could discard intervening input.",
+      "importance": "Prevent task planner dead ends without weakening durable ownership, revision and session-state fences.",
+      "nearest_retained": {
+        "fingerprint": "68c820cd080cf94746351a7e9cb58b1b440871bd9e1b9fcf314c24870b08c5e7",
+        "why_insufficient": "Existing replay fixture tests waits on board/durable writes, not transient session contention/retry against the original captured epoch."
+      },
+      "oracle": "Board-contention and busy-notification handshakes; registry writer and board reacquisition complete before session release; unchanged revision/status on successful hydrate; exact stale-session error and unchanged state after accepted input mutation.",
+      "prerequisites": "Capture public hydrate before session contention; second phase has independent Notify handles and nonempty new user message.",
+      "shipping_implementation": "refact-agent/engine/src/tasks/goal.rs::task_goal_epoch_waits_for_session_and_revalidates",
+      "determinism": "Isolated temp source/config/cache/task; Notify readiness barriers and whole-test60s timeout; no external provider/service/live data; bounded command completion wait.",
+      "layer": "Engine library test at actual task-goal persistence/HTTP command boundary",
+      "why_cheapest": "Lowest shipping seam with real task record, locks and epoch validation; no copied recovery algorithm. 2 meaningful scenario(s).",
+      "meaningful_cases": 2,
+      "critical": true,
+      "criticality_reason": "Persistence/concurrency/session epoch and write-outcome fencing are critical.",
+      "removed_coverage": "None; existing two replay tests unchanged.",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "env",
+            "REFACT_SKIP_GUI_BUILD=1",
+            "RUST_MIN_STACK=16777216",
+            "cargo",
+            "test",
+            "-p",
+            "refact-lsp",
+            "--profile",
+            "ci-test",
+            "--lib",
+            "tasks::goal::tests::",
+            "--no-fail-fast"
+          ],
+          "exit_code": 101,
+          "evidence": "refact-agent/engine/target/task-goal-evidence/task-goal-mutant.log; compiled mutant99540036d65663334f471d5f5e92958e37233daac0cc6bee241435d6db95fce0: three new tests fail at intended busy-return/held-hydration diagnostics; two retained tests pass."
+        },
+        "passing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "/tmp/task-goal-fixed-tests",
+            "tasks::goal::tests::"
+          ],
+          "exit_code": 0,
+          "evidence": "refact-agent/engine/target/task-goal-evidence/task-goal-restored-pass.log; restored exact source SHA1b79e5d2d8d224c896b444228b781f289372bc61b6b00d3759f22e75accf7394; saved fixed binary built in task-goal-green.log passes5/5. Saved binary execution, not rebuilt after mutant."
+        },
+        "intended_diagnostic": "Busy return must not end hydration/commit; legacy same-revision busy hold must hydrate and persist Paused. Mutant disables both busy waits and the legacy recovery call. First packed branch fails before stale/competing branches; no independent mutation sensitivity claimed for those second branches.",
+        "production_target": "refact-agent/engine/src/tasks/goal.rs::{hydrate_session_task_goal,commit_session_task_goal,recover_contention_hold}",
+        "before_fix": {
+          "reference": "deliberate production mutant: wrappers return busy instead of waiting and recover_contention_hold call replaced by None; rest of shipping logic unchanged",
+          "fingerprint": "99540036d65663334f471d5f5e92958e37233daac0cc6bee241435d6db95fce0"
+        }
+      },
+      "author": "chat:8253eb6d-a475-4724-a113-50393429c506",
+      "reviewer": "background_agent:bgagent-6c25e107-def1-4376-85c0-66eeb020b1f6",
+      "review_evidence": "Independent source and semantic admission review subchat-f0ed3885-9cb4-4edd-8c9a-8e571d4922f2 approved final source SHA1b79e5d2d8d224c896b444228b781f289372bc61b6b00d3759f22e75accf7394; earlier independent sol/luna discovery and adversarial exchange subchat-08d9b00a-092a-4a09-b200-d5135aca1417 and subchat-f6fbb242-2a52-4ae8-9f2d-dd63fe5c8cd0. Reviewer checked source only; parent executed witnesses."
+    },
+    {
+      "fingerprint": "6e3d96b229369291eae876d727be599d4fcb1f9a4e3d8181aedbed69a7666ea8",
+      "occurrences": 1,
+      "failure_mode": "A successful durable task-goal write followed by mutex contention is treated as failed or replay overwrites competing canonical content.",
+      "importance": "Prevent task planner dead ends without weakening durable ownership, revision and session-state fences.",
+      "nearest_retained": {
+        "fingerprint": "68c820cd080cf94746351a7e9cb58b1b440871bd9e1b9fcf314c24870b08c5e7",
+        "why_insufficient": "Retained partial-write tests exercise session mutation during write and later recaptured recovery, not the same original operation busy retry after an acknowledged write."
+      },
+      "oracle": "Assert acknowledged successful write, disk revision advanced and live revision old; exact canonical replay completes without rewrite; competing canonical update is refused with partial evidence/session unchanged; full canonical record equality after both.",
+      "prerequisites": "Two fresh fixtures, actual pending durable future barrier, session mutex held through acknowledged disk write; competing case really commits another revision.",
+      "shipping_implementation": "refact-agent/engine/src/tasks/goal.rs::post_write_contention_rechecks_acknowledged_canonical_record",
+      "determinism": "Isolated temp source/config/cache/task; Notify readiness barriers and whole-test60s timeout; no external provider/service/live data; bounded command completion wait.",
+      "layer": "Engine library test at actual task-goal persistence/HTTP command boundary",
+      "why_cheapest": "Lowest shipping seam with real task record, locks and epoch validation; no copied recovery algorithm. 2 meaningful scenario(s).",
+      "meaningful_cases": 2,
+      "critical": true,
+      "criticality_reason": "Persistence/concurrency/session epoch and write-outcome fencing are critical.",
+      "removed_coverage": "None; existing two replay tests unchanged.",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "env",
+            "REFACT_SKIP_GUI_BUILD=1",
+            "RUST_MIN_STACK=16777216",
+            "cargo",
+            "test",
+            "-p",
+            "refact-lsp",
+            "--profile",
+            "ci-test",
+            "--lib",
+            "tasks::goal::tests::",
+            "--no-fail-fast"
+          ],
+          "exit_code": 101,
+          "evidence": "refact-agent/engine/target/task-goal-evidence/task-goal-mutant.log; compiled mutant99540036d65663334f471d5f5e92958e37233daac0cc6bee241435d6db95fce0: three new tests fail at intended busy-return/held-hydration diagnostics; two retained tests pass."
+        },
+        "passing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "/tmp/task-goal-fixed-tests",
+            "tasks::goal::tests::"
+          ],
+          "exit_code": 0,
+          "evidence": "refact-agent/engine/target/task-goal-evidence/task-goal-restored-pass.log; restored exact source SHA1b79e5d2d8d224c896b444228b781f289372bc61b6b00d3759f22e75accf7394; saved fixed binary built in task-goal-green.log passes5/5. Saved binary execution, not rebuilt after mutant."
+        },
+        "intended_diagnostic": "Busy return must not end hydration/commit; legacy same-revision busy hold must hydrate and persist Paused. Mutant disables both busy waits and the legacy recovery call. First packed branch fails before stale/competing branches; no independent mutation sensitivity claimed for those second branches.",
+        "production_target": "refact-agent/engine/src/tasks/goal.rs::{hydrate_session_task_goal,commit_session_task_goal,recover_contention_hold}",
+        "before_fix": {
+          "reference": "deliberate production mutant: wrappers return busy instead of waiting and recover_contention_hold call replaced by None; rest of shipping logic unchanged",
+          "fingerprint": "99540036d65663334f471d5f5e92958e37233daac0cc6bee241435d6db95fce0"
+        }
+      },
+      "author": "chat:8253eb6d-a475-4724-a113-50393429c506",
+      "reviewer": "background_agent:bgagent-6c25e107-def1-4376-85c0-66eeb020b1f6",
+      "review_evidence": "Independent source and semantic admission review subchat-f0ed3885-9cb4-4edd-8c9a-8e571d4922f2 approved final source SHA1b79e5d2d8d224c896b444228b781f289372bc61b6b00d3759f22e75accf7394; earlier independent sol/luna discovery and adversarial exchange subchat-08d9b00a-092a-4a09-b200-d5135aca1417 and subchat-f6fbb242-2a52-4ae8-9f2d-dd63fe5c8cd0. Reviewer checked source only; parent executed witnesses."
+    },
+    {
+      "fingerprint": "fe3c1c913c4285dad76efbfd2f6afe168999babda9f27c00423429805d9d7fce",
+      "occurrences": 1,
+      "failure_mode": "Legacy rollback-imposed inactive Paused busy hold blocks canonical hydration and explicit Resume forever.",
+      "importance": "Prevent task planner dead ends without weakening durable ownership, revision and session-state fences.",
+      "nearest_retained": {
+        "fingerprint": "68c820cd080cf94746351a7e9cb58b1b440871bd9e1b9fcf314c24870b08c5e7",
+        "why_insufficient": "Retained held-goal scenario intentionally refuses mismatched local user Stop then explicitly commits; it cannot detect the narrowly recognized historical busy-rollback hold recovery and user Resume integration."
+      },
+      "oracle": "Same canonical revision/ledger+controls synthetic busy hold hydrates to exactly revision+1 Paused owned snapshot with messages unchanged and prior ledger prefix; actual HTTP Resume completes and canonical status Active/owned.",
+      "prerequisites": "Install and durably commit a real goal then construct exact legacy rollback-held signature; synthetic held fixture, not execution of original rollback; wait native command completion before disk assertion.",
+      "shipping_implementation": "refact-agent/engine/src/tasks/goal.rs::contention_rollback_hold_is_persisted_without_resuming",
+      "determinism": "Isolated temp source/config/cache/task; Notify readiness barriers and whole-test60s timeout; no external provider/service/live data; bounded command completion wait.",
+      "layer": "Engine library test at actual task-goal persistence/HTTP command boundary",
+      "why_cheapest": "Lowest shipping seam with real task record, locks and epoch validation; no copied recovery algorithm. 1 meaningful scenario(s).",
+      "meaningful_cases": 1,
+      "critical": true,
+      "criticality_reason": "Persistence/concurrency/session epoch and write-outcome fencing are critical.",
+      "removed_coverage": "None; existing two replay tests unchanged.",
+      "witness": {
+        "kind": "executed",
+        "failing": {
+          "command": [
+            "env",
+            "REFACT_SKIP_GUI_BUILD=1",
+            "RUST_MIN_STACK=16777216",
+            "cargo",
+            "test",
+            "-p",
+            "refact-lsp",
+            "--profile",
+            "ci-test",
+            "--lib",
+            "tasks::goal::tests::",
+            "--no-fail-fast"
+          ],
+          "exit_code": 101,
+          "evidence": "refact-agent/engine/target/task-goal-evidence/task-goal-mutant.log; compiled mutant99540036d65663334f471d5f5e92958e37233daac0cc6bee241435d6db95fce0: three new tests fail at intended busy-return/held-hydration diagnostics; two retained tests pass."
+        },
+        "passing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "/tmp/task-goal-fixed-tests",
+            "tasks::goal::tests::"
+          ],
+          "exit_code": 0,
+          "evidence": "refact-agent/engine/target/task-goal-evidence/task-goal-restored-pass.log; restored exact source SHA1b79e5d2d8d224c896b444228b781f289372bc61b6b00d3759f22e75accf7394; saved fixed binary built in task-goal-green.log passes5/5. Saved binary execution, not rebuilt after mutant."
+        },
+        "intended_diagnostic": "Busy return must not end hydration/commit; legacy same-revision busy hold must hydrate and persist Paused. Mutant disables both busy waits and the legacy recovery call. First packed branch fails before stale/competing branches; no independent mutation sensitivity claimed for those second branches.",
+        "production_target": "refact-agent/engine/src/tasks/goal.rs::{hydrate_session_task_goal,commit_session_task_goal,recover_contention_hold}",
+        "before_fix": {
+          "reference": "deliberate production mutant: wrappers return busy instead of waiting and recover_contention_hold call replaced by None; rest of shipping logic unchanged",
+          "fingerprint": "99540036d65663334f471d5f5e92958e37233daac0cc6bee241435d6db95fce0"
+        }
+      },
+      "author": "chat:8253eb6d-a475-4724-a113-50393429c506",
+      "reviewer": "background_agent:bgagent-6c25e107-def1-4376-85c0-66eeb020b1f6",
+      "review_evidence": "Independent source and semantic admission review subchat-f0ed3885-9cb4-4edd-8c9a-8e571d4922f2 approved final source SHA1b79e5d2d8d224c896b444228b781f289372bc61b6b00d3759f22e75accf7394; earlier independent sol/luna discovery and adversarial exchange subchat-08d9b00a-092a-4a09-b200-d5135aca1417 and subchat-f6fbb242-2a52-4ae8-9f2d-dd63fe5c8cd0. Reviewer checked source only; parent executed witnesses."
     }
   ],
   "impacts": [
@@ -18847,20 +19027,6 @@
       "author": "chat:2f94f8e0-9e9c-408c-a1d8-41d7858da746",
       "reviewer": "background_agent:bgagent-8c2d7d13-a8d7-4a36-91bf-74495ed6c6e3",
       "review_evidence": "Independent semantic review subchat-6f8421d2-1dbb-424c-901c-b9aff86faef0 final report; inspected final Rust diff and executed negative/restored logs. Earlier independent reviews ca819700-ac2c-4173-a402-7cfc2e4d0b9c and eaa44de5-2937-453d-a880-c8f290ea5726; discovered persistence race fixed before final approval."
-    },
-    {
-      "path": "refact-agent/engine/src/tasks/goal.rs",
-      "before_sha256": "69769a3903408ac36503f945d1ad73242a3051b6b93be041fef89787a18c2cc0",
-      "after_sha256": "69769a3903408ac36503f945d1ad73242a3051b6b93be041fef89787a18c2cc0",
-      "affected_tests": [
-        "dbb15087539037284be6b1e0003a79c44b79f677ca9dbf5d0c865abb859a6f3f",
-        "0cca3984c360604cafd4cd7d9fe3821fc89cea67dc11e8a43ed49baebef52692"
-      ],
-      "impact": "No delta remains against trusted main after unverified ensure-goal-ledger repair rollback. Prior test-only explicit dereference fixes already present on target main.",
-      "execution_context": "Existing task-goal ownership/replay fixtures unchanged. Parent observed prior-binary opening-test failure; repaired-source execution pending. Historical witnesses remain historical, not fresh integrated passes.",
-      "author": "background_agent:bgagent-105c73a6-fa01-48c5-a119-8fbe4970557c (parent-attested metadata draft)",
-      "reviewer": "background_agent:bgagent-6ea7eb62-0158-485b-913b-8f9adb2ca9ce",
-      "review_evidence": "Parent verified rollback restored exact target file. Proposed ensureInstalled repair changed retained revision assertion and was not accepted; no passing persistence-fix claim."
     },
     {
       "path": "refact-agent/engine/crates/refact-core/src/image_policy.rs",
@@ -25916,6 +26082,23 @@
       "author": "chat:0fc98ff7-281e-4851-8356-00d1b7eb03e5",
       "reviewer": "background_agent:bgagent-e216de79-7cbc-4253-8496-8ee590ff1ae5",
       "review_evidence": "Independent source reviews bgagent-a28ec3c0 (ownership), bgagent-3594d047 (retry), bgagent-9479f070 (admission/discovery), bgagent-e216de79 (resume handoff/history digest), and d2c245d5 evidence note inspecting12 actual failure logs and final2fixtures. Source verdicts are not runtime execution. d2c245d5 stopped while saving after delivered note; do not claim a complete final ledger approval. Parent independently inspected each failing log and exact mutant-source hashes. Restored final complete library evidence is recorded separately below."
+    },
+    {
+      "path": "refact-agent/engine/src/tasks/goal.rs",
+      "before_sha256": "2a68fdbd1e5b0b9132288b6429f0d67b7fce8be98cc83508b1dd4d10159da0d5",
+      "after_sha256": "1b79e5d2d8d224c896b444228b781f289372bc61b6b00d3759f22e75accf7394",
+      "affected_tests": [
+        "8fbcd6e81312621ca3c6868cf971db1d195b6076076bf4da92bbd72bfc899dfe",
+        "6e3d96b229369291eae876d727be599d4fcb1f9a4e3d8181aedbed69a7666ea8",
+        "fe3c1c913c4285dad76efbfd2f6afe168999babda9f27c00423429805d9d7fce",
+        "68c820cd080cf94746351a7e9cb58b1b440871bd9e1b9fcf314c24870b08c5e7",
+        "0cca3984c360604cafd4cd7d9fe3821fc89cea67dc11e8a43ed49baebef52692"
+      ],
+      "impact": "Public hydration/commit retry phase now releases board/registry before waiting on busy session, retaining original epoch; own acknowledged-operation replay has exact canonical fence; narrow legacy contention hold becomes owned Paused and CAS committed. Added busy Notify seam, five meaningful scenarios across three new tests; two retained tests unchanged.",
+      "execution_context": "Actual local temp task records and public shipping paths; focused5pass; fixed full binary3716pass11ignored both serial and normal parallel recheck. Initial parallel unrelated verifier failed then isolated+recheck passed. Macro declares Notify handles only.",
+      "author": "chat:8253eb6d-a475-4724-a113-50393429c506",
+      "reviewer": "background_agent:bgagent-6c25e107-def1-4376-85c0-66eeb020b1f6",
+      "review_evidence": "Independent source and semantic admission review subchat-f0ed3885-9cb4-4edd-8c9a-8e571d4922f2 approved final source SHA1b79e5d2d8d224c896b444228b781f289372bc61b6b00d3759f22e75accf7394; earlier independent sol/luna discovery and adversarial exchange subchat-08d9b00a-092a-4a09-b200-d5135aca1417 and subchat-f6fbb242-2a52-4ae8-9f2d-dd63fe5c8cd0. Reviewer checked source only; parent executed witnesses."
     }
   ],
   "classifications": [
@@ -25997,17 +26180,6 @@
       "author": "background_agent:bgagent-63087e16-d20a-463e-94c7-f1f68f4b6fa8",
       "reviewer": "background_agent:bgagent-46b6b8a3-1f8d-49a4-8e2e-2d2aa0fe1b31",
       "review_evidence": "Independent current source/dependency review: typed: only a block deserializing/normalizing request.draft, rejecting mismatched schema, and awaiting persist_draft. Its complete matcher/transcriber contains no test item or generated Rust documentation example. Round7: scanner confirms identical bounded lead_sha256 in base/current; rebind raw source hash only for canonical-root fixture edits. Existing non-test lead semantics/rationale unchanged."
-    },
-    {
-      "path": "refact-agent/engine/src/tasks/goal.rs",
-      "kind": "item_macro",
-      "source_sha256": "2a68fdbd1e5b0b9132288b6429f0d67b7fce8be98cc83508b1dd4d10159da0d5",
-      "lead_sha256": "d180ac61878884b21e6591374f8ea067ee6145793e54c34a42cad651817a0a18",
-      "conclusion": "non_test",
-      "rationale": "Exact unchanged tokio::task_local! lead declares TASK_GOAL_WRITE_PAUSE holds two Notify handles for controlled write synchronization; no test function, test attribute, table or generated test cases. Full source hash refreshed after the reviewed edit; no count waiver.",
-      "author": "background_agent:bgagent-905f85e0-74de-4051-8f68-4e231ff928b6",
-      "reviewer": "background_agent:bgagent-55db7f30-2aa2-4615-8cb4-4d85f519e912",
-      "review_evidence": "Parent-forwarded independent source reviews bgagent-55db7f30 generations1/2, bgagent-19965e79 generation2 (landing/canonical reply), bgagent-9be04868 (final fixtures), bgagent-6ebd0295 (final three concurrency corrections); count review background_agent:bgagent-5a5d68dd-c5ba-47d3-85b9-9bce180b5f50. Mutation/classification review bgagent-1bebbbf4 covers four semantic mutants, lease and ordinary cancellation scope, not a new review of this record. Final ledger review pending; restored full-suite run pending."
     },
     {
       "path": "refact-agent/engine/src/tasks/storage.rs",
@@ -27242,6 +27414,39 @@
       "author": "background_agent:bgagent-d8fd26c8-03bb-4200-874f-b235447fdfb9",
       "reviewer": "chat:47b9dd67-46e5-48fe-968e-78842db07e38",
       "review_evidence": "Parent actual source read/approval message a58dfcc3 explicitly binds current source c11508340f794861e6230dcb25af5e1b9b4b66dfdf146ce481ff7711dac8799c and lead1472548ba0f9b501d4b239939adc18551f3c9c1a23f25bda3d11f6eb42e1bbe7; existing bounded LocalKey certificate preserved as history. Independent final ledger/source macro review pending; no full-ledger approval asserted."
+    },
+    {
+      "path": "refact-agent/engine/src/tasks/goal.rs",
+      "kind": "item_macro",
+      "source_sha256": "1b79e5d2d8d224c896b444228b781f289372bc61b6b00d3759f22e75accf7394",
+      "lead_sha256": "602ddecc9c54a7507210dcd16888584d75deb91fbcf5e775a8814b8a68c8d0b9",
+      "conclusion": "non_test",
+      "rationale": "tokio::task_local declares TASK_GOAL_WRITE_PAUSE tuple of Notify and TASK_GOAL_BUSY_WAIT Notify; no test functions, attributes, tables or generated cases.",
+      "author": "chat:8253eb6d-a475-4724-a113-50393429c506",
+      "reviewer": "background_agent:bgagent-6c25e107-def1-4376-85c0-66eeb020b1f6",
+      "review_evidence": "Independent source and semantic admission review subchat-f0ed3885-9cb4-4edd-8c9a-8e571d4922f2 approved final source SHA1b79e5d2d8d224c896b444228b781f289372bc61b6b00d3759f22e75accf7394; earlier independent sol/luna discovery and adversarial exchange subchat-08d9b00a-092a-4a09-b200-d5135aca1417 and subchat-f6fbb242-2a52-4ae8-9f2d-dd63fe5c8cd0. Reviewer checked source only; parent executed witnesses."
+    },
+    {
+      "path": "refact-agent/engine/src/file_activity.rs",
+      "kind": "item_macro",
+      "source_sha256": "53d3dc381540f593138ca437db6ccb36d0cf919aadc1efbffe1410a1dace1ac7",
+      "lead_sha256": "93445dac51fb8a22294227fd87ea861bf333bf01c9b09b40887430e9f5ba6058",
+      "conclusion": "non_test",
+      "rationale": "Exact tokio::task_local invocation declares only TOOL_ACTOR: String or cfg(test) BEFORE_DURABLE_RENAME: DurableRenameBarrier. These provide task-local storage, not test functions, tables or generated cases. Lead body fingerprints unchanged; refresh certificate for inherited current-main full-file hash only.",
+      "author": "chat:8253eb6d-a475-4724-a113-50393429c506",
+      "reviewer": "background_agent:bgagent-46b2583f-903d-4175-aaa0-8b2ba9b1ce13",
+      "review_evidence": "Independent exact-source macro review subchat-806eee7b-ac25-41b2-8d82-acb142716758 generation2 approved both bounded invocations at12-14 and475-478 as non_test. Parent independently hashed source and confirmed byte identity to pinned main dece7c4eab888a0a7d483e2504ec11d304572b70; no helper behavioral review or new coverage claimed. Existing classification records preserved verbatim."
+    },
+    {
+      "path": "refact-agent/engine/src/file_activity.rs",
+      "kind": "item_macro",
+      "source_sha256": "53d3dc381540f593138ca437db6ccb36d0cf919aadc1efbffe1410a1dace1ac7",
+      "lead_sha256": "b929bc8c07b18b15b6d3a6dbb9bab232d5b691be8c6a3f08a4040508ee0fa7f1",
+      "conclusion": "non_test",
+      "rationale": "Exact tokio::task_local invocation declares only TOOL_ACTOR: String or cfg(test) BEFORE_DURABLE_RENAME: DurableRenameBarrier. These provide task-local storage, not test functions, tables or generated cases. Lead body fingerprints unchanged; refresh certificate for inherited current-main full-file hash only.",
+      "author": "chat:8253eb6d-a475-4724-a113-50393429c506",
+      "reviewer": "background_agent:bgagent-46b2583f-903d-4175-aaa0-8b2ba9b1ce13",
+      "review_evidence": "Independent exact-source macro review subchat-806eee7b-ac25-41b2-8d82-acb142716758 generation2 approved both bounded invocations at12-14 and475-478 as non_test. Parent independently hashed source and confirmed byte identity to pinned main dece7c4eab888a0a7d483e2504ec11d304572b70; no helper behavioral review or new coverage claimed. Existing classification records preserved verbatim."
     }
   ]
 }
