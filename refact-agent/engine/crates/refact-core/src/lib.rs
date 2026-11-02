@@ -7,6 +7,7 @@ pub mod chat_types;
 pub mod chunk_utils;
 pub mod claude_backend;
 pub mod custom_error;
+pub mod edit_results;
 pub mod image_policy;
 pub mod knowledge_frontmatter;
 pub mod knowledge_index;

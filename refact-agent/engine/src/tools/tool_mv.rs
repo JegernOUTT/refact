@@ -245,7 +245,7 @@ impl Tool for ToolMv {
             )
         };
 
-        let _src_metadata = fs::symlink_metadata(&src_true_path).await.map_err(|e| {
+        let src_metadata = fs::symlink_metadata(&src_true_path).await.map_err(|e| {
             format!(
                 "⚠️ Cannot access '{}': {}. 💡 Check file exists and permissions",
                 src_str, e
@@ -407,6 +407,29 @@ impl Tool for ToolMv {
             }
         }
 
+        if !src_is_dir && src_file_content.is_empty() {
+            messages.push(ContextEnum::ChatMessage(ChatMessage {
+                role: "tool".into(),
+                content: ChatContent::SimpleText(format!(
+                    "Moved '{}' to '{}'; empty or binary snapshot, text excerpt unavailable",
+                    src_corrected_path, dst_corrected_path
+                )),
+                tool_call_id: tool_call_id.clone(),
+                ..Default::default()
+            }));
+        }
+        let content = crate::tools::file_edit::edit_output::edit_model_content(
+            &dst_corrected_path,
+            &format!("rename from {}", src_corrected_path),
+            (!dst_file_content.is_empty()).then_some(dst_file_content.as_str()),
+            if src_is_dir || (src_file_content.is_empty() && src_metadata.len() > 0) {
+                None
+            } else {
+                Some(src_file_content.as_str())
+            },
+            &[],
+        );
+        crate::tools::file_edit::edit_output::finish_edit_output(&mut messages, content);
         Ok((corrections, messages))
     }
 

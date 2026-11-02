@@ -63,6 +63,7 @@ fn provider_visible_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
     filter_ui_only_messages(view.messages)
         .into_iter()
         .filter(|message| message.role != COMPRESSION_REPORT_ROLE)
+        .map(|message| refact_core::edit_results::project_edit_result(&message).into_owned())
         .collect()
 }
 

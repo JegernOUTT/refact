@@ -331,7 +331,9 @@ async fn plan_patch(
 
                 let has_crlf = file_content.contains("\r\n");
                 let normalized = normalize_line_endings(&file_content);
-                let new_content = apply_update_chunks(&normalized, &chunks)?;
+                let new_content = apply_update_chunks(&normalized, &chunks).map_err(|error| {
+                    format!("Failed to update '{}': {}", full_path.display(), error)
+                })?;
                 let new_file_content = restore_line_endings(&new_content, has_crlf);
 
                 if let Some(move_path) = move_to {
@@ -455,6 +457,61 @@ impl Tool for ToolApplyPatch {
             format_related_memories_section(&cards, &memory_reader)
         };
 
+        let mut snapshots: std::collections::BTreeMap<
+            String,
+            (Option<String>, Option<String>, String),
+        > = std::collections::BTreeMap::new();
+        for file in &result.file_results {
+            if file.action == "rename" {
+                if let Some(source) = file.chunks.first().map(|chunk| chunk.file_name.clone()) {
+                    let entry = snapshots
+                        .entry(source)
+                        .or_insert_with(|| (Some(file.before.clone()), None, "moved from".into()));
+                    entry.1 = None;
+                    entry.2 = format!("moved to {}", file.path.display());
+                }
+            }
+            let path = file.path.to_string_lossy().to_string();
+            let entry = snapshots.entry(path).or_insert_with(|| {
+                (
+                    if file.action == "add" || file.action == "rename" {
+                        None
+                    } else {
+                        Some(file.before.clone())
+                    },
+                    None,
+                    file.action.into(),
+                )
+            });
+            entry.1 = if file.action == "delete" {
+                None
+            } else {
+                Some(file.after.clone())
+            };
+        }
+        let mut model_content = String::new();
+        for (path, (before, after, action)) in snapshots {
+            if before.is_none() && after.is_none() {
+                model_content.push_str(&format!(
+                    "{action}: {path}\nTransient path; absent before and after this patch.\n\n"
+                ));
+                continue;
+            }
+            let net_chunks = convert_edit_to_diffchunks(
+                PathBuf::from(&path),
+                &before.clone().unwrap_or_default(),
+                &after.clone().unwrap_or_default(),
+            )?;
+            model_content.push_str(&super::edit_output::edit_model_content(
+                &path,
+                &action,
+                before.as_deref(),
+                after.as_deref(),
+                &net_chunks,
+            ));
+            model_content.push('\n');
+        }
+
         let mut out = vec![ContextEnum::ChatMessage(ChatMessage {
             role: "diff".to_string(),
             content: ChatContent::SimpleText(json!(result.all_chunks).to_string()),
@@ -487,6 +544,7 @@ impl Tool for ToolApplyPatch {
             }));
         }
 
+        super::edit_output::finish_edit_output(&mut out, model_content);
         Ok((false, out))
     }
 
@@ -575,11 +633,16 @@ Rules:
 - Use @@ to narrow scope when needed for uniqueness
 - Multiple @@ can be chained for precision
 - Use *** End of File for appending at end
+- Hunks may be out of source order: each matches the original file snapshot
+- Each hunk's target must be unique after its ordered anchors, including normalized matches; ambiguous or overlapping targets are rejected
+- Pure insertions without @@ use the previous hunk's original end (or the file start); consecutive insertions retain patch order
+- *** End of File on a replacement requires the expected lines to be a file suffix
 
 Multiple file sections are applied one file at a time and are NOT atomic: there
 is no journal, so a failure part-way leaves the earlier files already changed.
-The error names exactly which files changed and which did not. Each individual
-file is replaced durably, so no file is ever left truncated."#;
+Planning failures change no files. Apply-time errors report observed changed,
+unchanged, and unknown paths; a failed operation may already have changed disk.
+Hard-linked files are written in place and do not have atomic-replacement guarantees."#;
 
 const APPLY_PATCH_PARAM_DESCRIPTION: &str = r#"The patch content in envelope format:
 *** Begin Patch
@@ -681,6 +744,36 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains(".durable-tmp"))
             .count();
         assert_eq!(leftovers, 0, "temp files were left behind");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(durable_fault)]
+    async fn failed_post_rename_patch_reports_the_failed_file_as_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().into()];
+        let path = dir.path().join("file");
+        std::fs::write(&path, "before\n").unwrap();
+        let args = HashMap::from([(
+            "patch".into(),
+            json!("*** Begin Patch\n*** Update File: file\n@@\n-before\n+after\n*** End Patch"),
+        )]);
+        let plan = plan_patch(gcx.clone(), &args, None, None).await.unwrap();
+        let armed = crate::file_activity::durable_fault::arm_for(
+            crate::file_activity::durable_fault::AFTER_RENAME,
+            path.to_string_lossy().to_string(),
+        );
+        let error = super::super::patch_transaction::apply(gcx, &plan)
+            .await
+            .unwrap_err();
+        drop(armed);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "after\n");
+        assert!(
+            error.contains(&format!("Changed: [{}]", path.display())),
+            "{error}"
+        );
+        assert!(error.contains("Unchanged: []"), "{error}");
+        assert!(error.contains("durability is unconfirmed"), "{error}");
     }
 
     #[tokio::test]

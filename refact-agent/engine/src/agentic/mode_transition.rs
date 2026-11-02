@@ -200,7 +200,9 @@ fn analysis_entries(metadata: &ConversationMetadata) -> Vec<AnalysisEntry<'_>> {
                         .unwrap_or_default()
                 )
             } else {
-                message.content.content_text_only()
+                refact_core::edit_results::project_edit_result(message)
+                    .content
+                    .content_text_only()
             },
             mandatory: Some(index) == latest_user
                 || is_control_message(message)
@@ -881,6 +883,34 @@ mod tests {
         assert!(rendered.contains("[MSG_ID:7] [assistant]\nthird answer\n"));
         assert!(!rendered.contains("first request"));
         assert!(!rendered.contains("tool: t_cat"));
+    }
+
+    #[test]
+    fn reconstruction_analysis_renders_edit_excerpt_not_raw_diff() {
+        let mut diff = text_message("diff", "RAW_RECONSTRUCTION_DIFF_SENTINEL");
+        diff.extra.insert(
+            "edit_result".into(),
+            serde_json::json!({
+                "version": 1, "model_content": "FINAL excerpt: safe replacement"
+            }),
+        );
+        let messages = vec![text_message("user", "request"), diff];
+        let metadata = extract_conversation_metadata(&messages);
+        let entries = analysis_entries(&metadata);
+        let rendered = render_annotated_messages(
+            &entries,
+            AnalysisRenderStep {
+                preview_cap: ANALYSIS_PREVIEW_CAP,
+                keep_recent: entries.len(),
+                control_cap: None,
+            },
+        );
+        assert!(rendered.contains("FINAL excerpt: safe replacement"));
+        assert!(!rendered.contains("RAW_RECONSTRUCTION_DIFF_SENTINEL"));
+        assert_eq!(
+            messages[1].content.content_text_only(),
+            "RAW_RECONSTRUCTION_DIFF_SENTINEL"
+        );
     }
 
     #[test]

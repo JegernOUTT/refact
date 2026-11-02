@@ -378,6 +378,18 @@ impl Tool for ToolRm {
             }
         }
 
+        let content = crate::tools::file_edit::edit_output::edit_model_content(
+            &corrected_path,
+            "delete",
+            if is_dir || (file_content.is_empty() && file_size != Some(0)) {
+                None
+            } else {
+                Some(file_content.as_str())
+            },
+            None,
+            &[],
+        );
+        crate::tools::file_edit::edit_output::finish_edit_output(&mut messages, content);
         Ok((corrections, messages))
     }
 

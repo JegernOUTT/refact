@@ -291,127 +291,61 @@ pub fn convert_edit_to_diffchunks(
 ) -> Result<Vec<DiffChunk>, String> {
     let before_lines: Vec<&str> = before.lines().collect();
     let after_lines: Vec<&str> = after.lines().collect();
-    let diffs = diff::lines(before, after);
-    let mut line_num = 0;
-    let mut old_line_num = 0;
-    let mut new_line_num = 0;
-    let mut current_chunk_lines_remove = Vec::new();
-    let mut current_chunk_lines_add = Vec::new();
-    let mut current_chunk_line_nums = Vec::new();
-    let mut current_chunk_old_line_nums = Vec::new();
-    let mut current_chunk_new_line_nums = Vec::new();
-    let mut current_chunk_is_plus = Vec::new();
-    let mut diff_chunks = Vec::new();
+    let mut old_line = 0usize;
+    let mut new_line = 0usize;
+    let mut start = None;
+    let mut removed = Vec::new();
+    let mut added = Vec::new();
+    let mut chunks = Vec::new();
 
-    let context_line = |lines: &[&str], index: usize| -> Option<String> {
-        lines.get(index).map(|line| format!("{}\n", line))
-    };
-
-    let flush_changes = |lines_remove: &Vec<String>,
-                         lines_add: &Vec<String>,
-                         line_nums: &Vec<usize>,
-                         old_line_nums: &Vec<usize>,
-                         new_line_nums: &Vec<usize>,
-                         is_plus: &Vec<bool>|
-     -> Option<DiffChunk> {
-        if lines_remove.is_empty() && lines_add.is_empty() {
-            return None;
-        }
-
-        let lines_remove = lines_remove.join("");
-        let lines_add = lines_add.join("");
-
-        let min_line_index = line_nums.iter().min().copied().unwrap_or(0);
-        let line1 = min_line_index + 1;
-
-        let max_old_line_index = old_line_nums.iter().max().copied();
-        let max_new_line_index = new_line_nums.iter().max().copied();
-
-        let line2 = line_nums
-            .iter()
-            .zip(is_plus.iter())
-            .map(|(&num, &is_plus)| if is_plus { num + 1 } else { num + 2 })
-            .max()
-            .unwrap_or(1);
-
-        let lines_before = old_line_nums
-            .iter()
-            .min()
-            .or_else(|| new_line_nums.iter().min())
-            .and_then(|index| index.checked_sub(1))
-            .and_then(|index| context_line(&before_lines, index));
-        let after_context_index = max_new_line_index
-            .map(|index| index + 1)
-            .or_else(|| max_old_line_index.map(|index| index));
-        let lines_after = after_context_index.and_then(|index| context_line(&after_lines, index));
-
-        Some(DiffChunk {
+    let flush = |start: &mut Option<(usize, usize)>,
+                 removed: &mut Vec<String>,
+                 added: &mut Vec<String>,
+                 chunks: &mut Vec<DiffChunk>| {
+        let Some((old_start, new_start)) = start.take() else {
+            return;
+        };
+        chunks.push(DiffChunk {
             file_name: path.to_string_lossy().to_string(),
-            file_name_rename: None,
             file_action: "edit".to_string(),
-            line1,
-            line2,
-            lines_remove,
-            lines_add,
-            lines_before,
-            lines_after,
+            line1: old_start + 1,
+            line2: old_start + removed.len() + 1,
+            lines_remove: removed.concat(),
+            lines_add: added.concat(),
+            lines_before: old_start
+                .checked_sub(1)
+                .and_then(|index| before_lines.get(index))
+                .map(|line| format!("{line}\n")),
+            lines_after: after_lines
+                .get(new_start + added.len())
+                .map(|line| format!("{line}\n")),
             ..Default::default()
-        })
+        });
+        removed.clear();
+        added.clear();
     };
 
-    for diff in diffs {
-        match diff {
-            diff::Result::Left(l) => {
-                current_chunk_lines_remove.push(format!("{}\n", l));
-                current_chunk_line_nums.push(line_num);
-                current_chunk_old_line_nums.push(old_line_num);
-                current_chunk_is_plus.push(false);
-                old_line_num += 1;
-                line_num += 1;
+    for change in diff::lines(before, after) {
+        match change {
+            diff::Result::Left(line) => {
+                start.get_or_insert((old_line, new_line));
+                removed.push(format!("{line}\n"));
+                old_line += 1;
             }
-            diff::Result::Right(r) => {
-                current_chunk_lines_add.push(format!("{}\n", r));
-                current_chunk_line_nums.push(line_num);
-                current_chunk_new_line_nums.push(new_line_num);
-                current_chunk_is_plus.push(true);
-                new_line_num += 1;
+            diff::Result::Right(line) => {
+                start.get_or_insert((old_line, new_line));
+                added.push(format!("{line}\n"));
+                new_line += 1;
             }
             diff::Result::Both(_, _) => {
-                if let Some(chunk) = flush_changes(
-                    &current_chunk_lines_remove,
-                    &current_chunk_lines_add,
-                    &current_chunk_line_nums,
-                    &current_chunk_old_line_nums,
-                    &current_chunk_new_line_nums,
-                    &current_chunk_is_plus,
-                ) {
-                    diff_chunks.push(chunk);
-                }
-                current_chunk_lines_remove.clear();
-                current_chunk_lines_add.clear();
-                current_chunk_line_nums.clear();
-                current_chunk_old_line_nums.clear();
-                current_chunk_new_line_nums.clear();
-                current_chunk_is_plus.clear();
-                old_line_num += 1;
-                new_line_num += 1;
-                line_num += 1;
+                flush(&mut start, &mut removed, &mut added, &mut chunks);
+                old_line += 1;
+                new_line += 1;
             }
         }
     }
-
-    if let Some(chunk) = flush_changes(
-        &current_chunk_lines_remove,
-        &current_chunk_lines_add,
-        &current_chunk_line_nums,
-        &current_chunk_old_line_nums,
-        &current_chunk_new_line_nums,
-        &current_chunk_is_plus,
-    ) {
-        diff_chunks.push(chunk);
-    }
-
-    Ok(diff_chunks)
+    flush(&mut start, &mut removed, &mut added, &mut chunks);
+    Ok(chunks)
 }
 
 pub async fn fast_enqueue_for_edit(
@@ -823,6 +757,19 @@ pub async fn str_replace_regex(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn later_insertions_keep_original_coordinates_and_adjacent_context() {
+        let before = "head\nfirst\nmiddle\nsecond\ntail\n".to_string();
+        let after = "head\nadded-a\nadded-b\nfirst\nmiddle\nadded-c\nsecond\ntail\n".to_string();
+        let chunks = convert_edit_to_diffchunks("file".into(), &before, &after).unwrap();
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[1].line1, 4);
+        assert_eq!(chunks[1].line2, 4);
+        assert_eq!(chunks[1].lines_before.as_deref(), Some("middle\n"));
+        assert_eq!(chunks[1].lines_after.as_deref(), Some("second\n"));
+        assert_eq!(chunks[1].lines_add, "added-c\n");
+    }
 
     #[test]
     fn subprocess_stale_edit() {
@@ -1540,7 +1487,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn every_text_mutation_family_rejects_a_stale_model_visible_read() {
+        async fn every_text_mutation_family_uses_current_content_not_historical_reads() {
             let f = fixture().await;
             let path = f.root.join("src/stale.txt");
             let actor = format!("mutation-{}", uuid::Uuid::new_v4());
@@ -1577,6 +1524,7 @@ mod tests {
                 ]),
             ];
             for (kind, request) in requests.into_iter().enumerate() {
+                fs::write(&path, new).unwrap();
                 let result = crate::file_activity::TOOL_ACTOR
                     .scope(actor.clone(), async {
                         match kind {
@@ -1633,51 +1581,65 @@ mod tests {
                         }
                     })
                     .await;
-                assert!(result.is_err(), "mutation kind {kind} accepted stale read");
-                assert_eq!(fs::read_to_string(&path).unwrap(), new);
+                result.unwrap_or_else(|error| panic!("mutation kind {kind}: {error}"));
+                let expected = match kind {
+                    0 => "replacement\n",
+                    3 => "head\nanchorreplacement\nbody\nexternal\n",
+                    _ => "head\nanchor\nreplacement\nexternal\n",
+                };
+                assert_eq!(fs::read_to_string(&path).unwrap(), expected);
             }
+            fs::write(&path, new).unwrap();
             let patch = args(vec![("patch", json!("*** Begin Patch\n*** Update File: src/stale.txt\n@@\n-body\n+replacement\n*** End Patch"))]);
-            assert!(crate::file_activity::TOOL_ACTOR
+            crate::file_activity::TOOL_ACTOR
                 .scope(
                     actor.clone(),
-                    tool_apply_patch_exec(f.gcx.clone(), &patch, false, Some(&f.scope), None)
+                    tool_apply_patch_exec(f.gcx.clone(), &patch, false, Some(&f.scope), None),
                 )
                 .await
-                .is_err());
+                .unwrap();
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                "head\nanchor\nreplacement\nexternal\n"
+            );
             let context = ccx(&f).await;
             context.lock().await.chat_id = actor;
             let mut remove = ToolRm {
                 config_path: String::new(),
             };
-            assert!(remove
+            remove
                 .tool_execute(
                     context.clone(),
                     &"rm".into(),
-                    &args(vec![("path", json!("src/stale.txt"))])
+                    &args(vec![("path", json!("src/stale.txt"))]),
                 )
                 .await
-                .is_err());
+                .unwrap();
+            assert!(!path.exists());
+            fs::write(&path, new).unwrap();
             let mut mover = ToolMv {
                 config_path: String::new(),
             };
-            assert!(mover
+            mover
                 .tool_execute(
                     context,
                     &"mv".into(),
                     &args(vec![
                         ("source", json!("src/stale.txt")),
-                        ("destination", json!("src/destination.txt"))
-                    ])
+                        ("destination", json!("src/destination.txt")),
+                    ]),
                 )
                 .await
-                .is_err());
-            assert_eq!(fs::read_to_string(&path).unwrap(), new);
-            assert!(!f.root.join("src/destination.txt").exists());
+                .unwrap();
+            assert!(!path.exists());
+            assert_eq!(
+                fs::read_to_string(f.root.join("src/destination.txt")).unwrap(),
+                new
+            );
         }
 
         #[tokio::test]
-        async fn whole_replacement_requires_a_complete_visible_read_and_new_file_race_has_one_winner(
-        ) {
+        async fn whole_replacement_allows_partial_reads_and_new_file_race_has_one_winner() {
             let f = fixture().await;
             let path = f.root.join("src/whole.txt");
             fs::write(&path, "one\ntwo\n").unwrap();
@@ -1695,21 +1657,14 @@ mod tests {
                 ("path", json!("src/whole.txt")),
                 ("content", json!("new")),
             ]);
-            assert!(crate::file_activity::TOOL_ACTOR
-                .scope(
-                    actor.clone(),
-                    tool_create_text_doc_exec(f.gcx.clone(), &request, false, Some(&f.scope), None)
-                )
-                .await
-                .is_err());
-            crate::file_activity::record_read(Some(&actor), &path, "one\ntwo\n", 1, 2, 2, None);
             crate::file_activity::TOOL_ACTOR
                 .scope(
-                    actor,
+                    actor.clone(),
                     tool_create_text_doc_exec(f.gcx.clone(), &request, false, Some(&f.scope), None),
                 )
                 .await
                 .unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), "new\n");
             let path = f.root.join("src/race.txt");
             let barrier = Arc::new(tokio::sync::Barrier::new(2));
             let write = |text: &'static str| {

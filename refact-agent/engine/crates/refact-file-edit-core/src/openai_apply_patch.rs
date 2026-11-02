@@ -336,15 +336,24 @@ fn compute_replacements(
     chunks: &[UpdateChunk],
 ) -> Result<Vec<(usize, usize, Vec<String>)>, String> {
     let mut replacements: Vec<(usize, usize, Vec<String>, usize)> = Vec::new();
-    let mut line_index: usize = 0;
+    let mut insertion_cursor = 0;
 
     for (seq, chunk) in chunks.iter().enumerate() {
-        for ctx in &chunk.change_context {
-            if let Some(idx) = seek_sequence(original_lines, &[ctx.clone()], line_index, false) {
-                line_index = idx + 1;
-            } else {
-                return Err(format!("Failed to find context '{}' in file", ctx));
-            }
+        let hunk_error = |error: String| format!("Hunk {}: {}", seq + 1, error);
+        let mut line_index = 0;
+        for (anchor_index, ctx) in chunk.change_context.iter().enumerate() {
+            let idx =
+                if chunk.old_lines.is_empty() && anchor_index + 1 == chunk.change_context.len() {
+                    seek_sequence(original_lines, std::slice::from_ref(ctx), line_index, false)
+                        .map_err(|error| {
+                            hunk_error(format!("Ambiguous context '{}': {}", ctx, error))
+                        })?
+                } else {
+                    (line_index..original_lines.len())
+                        .find(|&idx| lines_match_normalized(&original_lines[idx], ctx))
+                }
+                .ok_or_else(|| hunk_error(format!("Failed to find context '{}' in file", ctx)))?;
+            line_index = idx + 1;
         }
 
         if chunk.old_lines.is_empty() {
@@ -354,18 +363,21 @@ fn compute_replacements(
                 } else {
                     original_lines.len()
                 }
+            } else if chunk.change_context.is_empty() {
+                insertion_cursor
             } else {
                 line_index
             };
             if !chunk.new_lines.is_empty() {
                 replacements.push((insertion_idx, 0, chunk.new_lines.clone(), seq));
-                line_index = insertion_idx + chunk.new_lines.len();
+                insertion_cursor = insertion_idx;
             }
             continue;
         }
 
         let pattern = &chunk.old_lines;
-        let found = seek_sequence(original_lines, pattern, line_index, chunk.is_end_of_file);
+        let found = seek_sequence(original_lines, pattern, line_index, chunk.is_end_of_file)
+            .map_err(&hunk_error)?;
 
         let (found, pattern_len, new_slice) = match found {
             Some(idx) => (Some(idx), pattern.len(), chunk.new_lines.as_slice()),
@@ -381,7 +393,8 @@ fn compute_replacements(
                     trimmed_pattern,
                     line_index,
                     chunk.is_end_of_file,
-                );
+                )
+                .map_err(&hunk_error)?;
                 (retry, trimmed_pattern.len(), trimmed_new)
             }
             None => (None, pattern.len(), chunk.new_lines.as_slice()),
@@ -389,10 +402,15 @@ fn compute_replacements(
 
         if let Some(start_idx) = found {
             replacements.push((start_idx, pattern_len, new_slice.to_vec(), seq));
-            line_index = start_idx + pattern_len;
+            insertion_cursor = start_idx + pattern_len;
         } else {
-            return Err(format!(
-                "Failed to find expected lines in file:\n{}",
+            return Err(hunk_error(format!(
+                "Failed to find expected lines in original file{}:\n{}",
+                if chunk.is_end_of_file {
+                    " at end of file"
+                } else {
+                    ""
+                },
                 chunk
                     .old_lines
                     .iter()
@@ -400,11 +418,21 @@ fn compute_replacements(
                     .cloned()
                     .collect::<Vec<_>>()
                     .join("\n")
-            ));
+            )));
         }
     }
 
-    replacements.sort_by(|a, b| a.0.cmp(&b.0).then(a.3.cmp(&b.3)));
+    replacements.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.3.cmp(&b.3)));
+    for (index, current) in replacements.iter().enumerate() {
+        for previous in &replacements[..index] {
+            if current.0 < previous.0 + previous.1 {
+                return Err(format!(
+                    "Hunk {} overlaps hunk {} in original file at line {}; combine the changes into one hunk",
+                    current.3 + 1, previous.3 + 1, current.0 + 1
+                ));
+            }
+        }
+    }
 
     Ok(replacements
         .into_iter()
@@ -417,38 +445,30 @@ fn seek_sequence(
     needle: &[String],
     start_from: usize,
     is_end_of_file: bool,
-) -> Option<usize> {
-    if needle.is_empty() {
-        return None;
+) -> Result<Option<usize>, String> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return Ok(None);
     }
 
-    let max_idx = haystack.len().saturating_sub(needle.len());
-
-    if is_end_of_file {
-        for i in (start_from..=max_idx).rev() {
-            if matches_sequence(&haystack[i..], needle) {
-                return Some(i);
-            }
+    let max_idx = haystack.len() - needle.len();
+    let mut found = None;
+    for i in start_from..=max_idx {
+        if is_end_of_file && i != max_idx {
+            continue;
         }
-        for i in (start_from..=max_idx).rev() {
-            if matches_sequence_normalized(&haystack[i..], needle) {
-                return Some(i);
+        if matches_sequence(&haystack[i..], needle)
+            || matches_sequence_normalized(&haystack[i..], needle)
+        {
+            if let Some(first) = found {
+                return Err(format!(
+                    "Ambiguous match at original lines {} and {}; add context or @@ anchors for uniqueness",
+                    first + 1, i + 1
+                ));
             }
-        }
-    } else {
-        for i in start_from..=max_idx {
-            if matches_sequence(&haystack[i..], needle) {
-                return Some(i);
-            }
-        }
-        for i in start_from..=max_idx {
-            if matches_sequence_normalized(&haystack[i..], needle) {
-                return Some(i);
-            }
+            found = Some(i);
         }
     }
-
-    None
+    Ok(found)
 }
 
 fn matches_sequence(haystack: &[String], needle: &[String]) -> bool {
@@ -692,6 +712,115 @@ mod tests {
     }
 
     #[test]
+    fn unordered_hunks_use_original_snapshot() {
+        let patch = wrap_patch("*** Update File: f\n@@ later\n-old_later\n+new_later\n+extra\n@@ class Early\n@@ method\n-old_early\n+new_early");
+        let parsed = parse_patch(&patch).unwrap();
+        let FileOperation::Update { chunks, .. } = &parsed.operations[0] else {
+            panic!("expected update");
+        };
+        assert_eq!(
+            apply_update_chunks(
+                "class Early\r\nmethod\r\nold_early\r\nlater\r\nold_later\r\n",
+                chunks
+            )
+            .unwrap(),
+            "class Early\nmethod\nnew_early\nlater\nnew_later\nextra\n"
+        );
+    }
+
+    #[test]
+    fn duplicate_anchor_unique_body() {
+        let chunk = UpdateChunk {
+            change_context: vec!["anchor".into()],
+            old_lines: vec!["old".into()],
+            new_lines: vec!["new".into()],
+            is_end_of_file: false,
+        };
+        assert_eq!(
+            apply_update_chunks("anchor\nanchor\nold\n", &[chunk]).unwrap(),
+            "anchor\nanchor\nnew\n"
+        );
+    }
+
+    #[test]
+    fn chained_anchors_unique_body() {
+        let patch = wrap_patch("*** Update File: f\n@@ class A\n@@ method\n-x\n+X");
+        let parsed = parse_patch(&patch).unwrap();
+        let FileOperation::Update { chunks, .. } = &parsed.operations[0] else {
+            panic!("expected update");
+        };
+        assert_eq!(
+            apply_update_chunks("class A\nmethod\nx\nclass B\nmethod\ny\n", chunks).unwrap(),
+            "class A\nmethod\nX\nclass B\nmethod\ny\n"
+        );
+    }
+
+    #[test]
+    fn ambiguous_hunk_is_rejected() {
+        let chunk = UpdateChunk {
+            change_context: vec![],
+            old_lines: vec!["same".into()],
+            new_lines: vec!["changed".into()],
+            is_end_of_file: false,
+        };
+        let error = apply_update_chunks("same\nsame\n", &[chunk]).unwrap_err();
+        assert!(
+            error.contains("Hunk 1") && error.contains("Ambiguous"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn overlapping_hunks_are_rejected() {
+        let chunks = [
+            UpdateChunk {
+                change_context: vec![],
+                old_lines: vec!["b".into(), "c".into()],
+                new_lines: vec!["B".into()],
+                is_end_of_file: false,
+            },
+            UpdateChunk {
+                change_context: vec![],
+                old_lines: vec!["c".into(), "d".into()],
+                new_lines: vec!["D".into()],
+                is_end_of_file: false,
+            },
+        ];
+        let error = apply_update_chunks("a\nb\nc\nd\n", &chunks).unwrap_err();
+        assert!(error.contains("Hunk 2 overlaps hunk 1"), "{error}");
+    }
+
+    #[test]
+    fn ambiguous_anchor_is_rejected() {
+        let chunk = UpdateChunk {
+            change_context: vec!["anchor".into()],
+            old_lines: vec![],
+            new_lines: vec!["inserted".into()],
+            is_end_of_file: false,
+        };
+        let error = apply_update_chunks("anchor\nanchor\n", &[chunk]).unwrap_err();
+        assert!(
+            error.contains("Hunk 1") && error.contains("Ambiguous context"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn eof_hunk_rejects_non_suffix_match() {
+        let chunk = UpdateChunk {
+            change_context: vec![],
+            old_lines: vec!["old".into()],
+            new_lines: vec!["new".into()],
+            is_end_of_file: true,
+        };
+        let error = apply_update_chunks("old\ntail\n", &[chunk]).unwrap_err();
+        assert!(
+            error.contains("Hunk 1") && error.contains("expected lines"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn test_apply_eof_insertion() {
         let original = "foo\nbar\n";
         let chunks = vec![UpdateChunk {
@@ -841,10 +970,6 @@ mod tests {
             },
         ];
         let result = apply_update_chunks(original, &chunks).unwrap();
-        assert!(result.contains("insert1"));
-        assert!(result.contains("insert2"));
-        let pos1 = result.find("insert1").unwrap();
-        let pos2 = result.find("insert2").unwrap();
-        assert!(pos1 < pos2);
+        assert_eq!(result, "header\ninsert1\ninsert2\n\nfooter\n");
     }
 }

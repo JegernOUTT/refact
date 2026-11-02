@@ -61,9 +61,54 @@ pub async fn postprocess_tool_results(
         .unwrap_or_default();
     let existing_messages = visible_history.as_slice();
 
-    let (diff_messages, other_messages): (Vec<_>, Vec<_>) =
-        tool_messages.into_iter().partition(|m| m.role == "diff");
+    let (mut diff_messages, other_messages): (Vec<_>, Vec<_>) =
+        tool_messages.into_iter().partition(|m| {
+            m.role == "diff"
+                || m.extra.get("_ui_only").and_then(serde_json::Value::as_bool) == Some(true)
+                || m.extra.contains_key("edit_result")
+        });
 
+    let mut edit_indices = Vec::new();
+    let mut edit_messages = Vec::new();
+    for (index, message) in diff_messages.iter().enumerate() {
+        if message
+            .extra
+            .get("_ui_only")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        {
+            continue;
+        }
+        if let Some(text) = message
+            .extra
+            .get("edit_result")
+            .filter(|value| value.get("version").and_then(serde_json::Value::as_u64) == Some(1))
+            .and_then(|value| value.get("model_content"))
+            .and_then(serde_json::Value::as_str)
+        {
+            let mut projection = message.clone();
+            projection.role = "tool".to_string();
+            projection.content = ChatContent::SimpleText(truncate_tool_text_lines(text));
+            projection.output_filter = None;
+            edit_indices.push(index);
+            edit_messages.push(projection);
+        }
+    }
+    let has_other_output = !other_messages.is_empty() || !context_files.is_empty();
+    let edit_budget = if has_other_output {
+        budget.tokens_for_code / 2
+    } else {
+        budget.tokens_for_code
+    };
+    let (edit_messages, edit_remaining) =
+        postprocess_plain_text(edit_messages, tokenizer.clone(), edit_budget, &None).await;
+    let edit_used = edit_budget.saturating_sub(edit_remaining);
+    for (index, projection) in edit_indices.into_iter().zip(edit_messages) {
+        if let Some(metadata) = diff_messages[index].extra.get_mut("edit_result") {
+            metadata["model_content"] =
+                serde_json::Value::String(projection.content.content_text_only());
+        }
+    }
     result.extend(diff_messages);
 
     let mut exempt_indexed: Vec<(usize, ChatMessage)> = Vec::new();
@@ -78,13 +123,13 @@ pub async fn postprocess_tool_results(
         }
     }
 
-    let total_budget = budget.tokens_for_code;
+    let total_budget = budget.tokens_for_code.saturating_sub(edit_used);
     let text_budget = if context_files.is_empty() {
         total_budget
     } else if budgeted_indexed.is_empty() {
         0
     } else {
-        budget.tokens_for_text
+        budget.tokens_for_text.min(total_budget)
     };
 
     let budgeted_indices: Vec<usize> = budgeted_indexed.iter().map(|(idx, _)| *idx).collect();
@@ -1414,6 +1459,56 @@ mod tests {
             tokens_for_code: 200,
             tokens_for_text: 60,
         }
+    }
+
+    #[tokio::test]
+    async fn edit_excerpts_share_budget_without_mutating_ui_diffs() {
+        let messages: Vec<_> = (0..4)
+            .map(|index| {
+                let mut message = make_tool_message(
+                    &format!(r#"[{{"raw_diff":{index}}}]"#),
+                    &format!("call_{index}"),
+                );
+                message.role = "diff".into();
+                message.extra.insert(
+                    "edit_result".into(),
+                    serde_json::json!({
+                        "version": 1,
+                        "model_content": format!("excerpt-{index}: {}", "payload ".repeat(1000))
+                    }),
+                );
+                message
+            })
+            .collect();
+        let originals: Vec<_> = messages
+            .iter()
+            .map(|m| m.content.content_text_only())
+            .collect();
+        let result = postprocess_tool_results(
+            Arc::new(NoopPPContext),
+            None,
+            messages,
+            vec![],
+            small_budget(),
+            PostprocessSettings::default(),
+            &[],
+            &HashSet::new(),
+        )
+        .await;
+        assert_eq!(result.len(), 4);
+        let mut total = 0;
+        for (index, message) in result.iter().enumerate() {
+            assert_eq!(message.content.content_text_only(), originals[index]);
+            let text = message.extra["edit_result"]["model_content"]
+                .as_str()
+                .unwrap();
+            assert!(
+                text.contains("truncated") || text.contains("Truncated"),
+                "{text}"
+            );
+            total += count_text_tokens_with_fallback(None, text);
+        }
+        assert!(total <= 200, "aggregate model tokens: {total}");
     }
 
     #[tokio::test]

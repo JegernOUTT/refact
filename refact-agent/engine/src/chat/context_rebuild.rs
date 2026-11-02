@@ -414,7 +414,9 @@ fn message_text_for_units(message: &ChatMessage) -> String {
     let mut text = if message.role == "event" {
         refact_llm::adapters::render_extra::render_event_message(message)
     } else {
-        message.content.content_text_only()
+        refact_core::edit_results::project_edit_result(message)
+            .content
+            .content_text_only()
     };
     if let Some(reasoning) = &message.reasoning_content {
         text.push_str(reasoning);

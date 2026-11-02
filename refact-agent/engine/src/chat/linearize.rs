@@ -49,6 +49,7 @@ pub fn apply_summarization_linearize(
                 && !(message.role == "cd_instruction"
                     && message.tool_call_id == "token_budget_info")
         })
+        .map(|message| refact_core::edit_results::project_edit_result(&message).into_owned())
         .collect();
     detach_orphaned_context_files(&mut result);
     Ok(result)

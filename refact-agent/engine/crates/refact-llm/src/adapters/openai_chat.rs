@@ -465,6 +465,11 @@ fn convert_messages_to_openai(
     let mut pending_user_content: Vec<Value> = Vec::new();
 
     for msg in messages {
+        if msg.extra.get("_ui_only").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let projected = refact_core::edit_results::project_edit_result(msg);
+        let msg = projected.as_ref();
         if is_goal_role(&msg.role) || is_plan_role(&msg.role) {
             if !pending_user_content.is_empty() {
                 result.push(json!({
@@ -1691,5 +1696,46 @@ mod tests {
             .get("cache_control")
             .is_some());
         assert!(http.body.get("cache_control").is_none());
+    }
+}
+
+#[cfg(test)]
+mod edit_projection_wire_tests {
+    use super::*;
+    #[test]
+    fn diff_wire_projection_and_legacy_fallback() {
+        use refact_core::chat_types::ChatMessage;
+        let call: ChatMessage = serde_json::from_value(serde_json::json!({"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"edit","arguments":"{}"}}]})).unwrap();
+        for metadata in [
+            Some(serde_json::json!({"version":1,"model_content":"SAFE_EXCERPT"})),
+            None,
+            Some(serde_json::json!({"version":2,"model_content":"BAD"})),
+        ] {
+            let mut diff: ChatMessage = serde_json::from_value(serde_json::json!({"role":"diff","content":"{\"lines_remove\":\"REMOVED_SENTINEL\"}","tool_call_id":"call_1","tool_failed":true})).unwrap();
+            if let Some(value) = metadata {
+                diff.extra.insert("edit_result".into(), value);
+            }
+            let expected = if diff
+                .extra
+                .get("edit_result")
+                .and_then(|v| v.get("version"))
+                .and_then(|v| v.as_u64())
+                == Some(1)
+            {
+                "SAFE_EXCERPT"
+            } else {
+                "excerpt unavailable"
+            };
+            let before = serde_json::to_vec(&diff).unwrap();
+            let messages = vec![call.clone(), diff];
+            let wire = serde_json::to_value(convert_messages_to_openai(&messages, false))
+                .unwrap()
+                .to_string();
+            assert!(wire.contains(expected), "{wire}");
+            assert!(!wire.contains("REMOVED_SENTINEL"), "{wire}");
+            assert!(!wire.contains("lines_remove"), "{wire}");
+            assert!(wire.contains("call_1"), "{wire}");
+            assert_eq!(serde_json::to_vec(&messages[1]).unwrap(), before);
+        }
     }
 }

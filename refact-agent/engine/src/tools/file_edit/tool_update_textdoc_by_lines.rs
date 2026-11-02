@@ -98,7 +98,7 @@ impl Tool for ToolUpdateTextDocByLines {
                 ),
             )
         };
-        let (_, _, chunks, summary) = tool_update_text_doc_by_lines_exec(
+        let (before, after, chunks, summary) = tool_update_text_doc_by_lines_exec(
             gcx.clone(),
             args,
             false,
@@ -156,6 +156,22 @@ impl Tool for ToolUpdateTextDocByLines {
             }));
         }
 
+        let path = chunks
+            .first()
+            .map(|chunk| chunk.file_name.as_str())
+            .unwrap_or_else(|| {
+                args.get("path")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+            });
+        let model_content = super::edit_output::edit_model_content(
+            path,
+            "update_textdoc_by_lines",
+            Some(&before),
+            Some(after.as_str()),
+            &chunks,
+        );
+        super::edit_output::finish_edit_output(&mut out, model_content);
         Ok((false, out))
     }
 

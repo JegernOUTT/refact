@@ -167,12 +167,6 @@ async fn restored_bytes_seen_earlier_are_readable_again_after_a_dedup_cat() {
     let fixture = Fixture::new().await;
     let history = fixture.modified_history().await;
     std::fs::write(&fixture.path, A).unwrap();
-    let error = fixture.edit("original", "recovered").await.unwrap_err();
-    assert!(
-        error.contains("changed on disk since this chat last read it"),
-        "{error}"
-    );
-
     let reread = fixture.cat(&history, "").await;
     assert!(was_deduplicated(&reread));
     assert!(files(&reread).is_empty());
@@ -237,7 +231,7 @@ async fn compressed_earlier_read_is_not_used_for_dedup() {
 }
 
 #[tokio::test]
-async fn partial_dedup_does_not_authorize_whole_file_replacement() {
+async fn partial_dedup_records_range_without_blocking_overwrite() {
     let fixture = Fixture::new().await;
     let history = fixture.modified_history().await;
     std::fs::write(&fixture.path, A).unwrap();
@@ -246,16 +240,15 @@ async fn partial_dedup_does_not_authorize_whole_file_replacement() {
     assert!(was_deduplicated(&reread));
     assert!(!fixture.stamp().whole);
     assert_eq!((fixture.stamp().line1, fixture.stamp().line2), (2, 2));
-    let error = file_activity::begin_write(
+    let guard = file_activity::begin_write(
         Some(&fixture.actor),
         &fixture.path,
         file_activity::WriteIntent::Overwrite { authorized: false },
         "create_textdoc",
     )
     .await
-    .err()
     .unwrap();
-    assert!(error.contains("only read partially"), "{error}");
+    drop(guard);
     fixture.edit("original", "contextual").await.unwrap();
 }
 
@@ -322,8 +315,6 @@ async fn rejected_prefilled_dedup_never_stamps_unseen_current_bytes() {
         .await;
     assert!(!was_deduplicated(&reread));
     assert_eq!(fixture.stamp().digest, file_activity::digest_of(B));
-    let error = fixture.edit("unseen", "not authorized").await.unwrap_err();
-    assert!(error.contains("changed on disk"), "{error}");
     let reread = fixture.cat(&history, "").await;
     assert!(files(&reread)[0].file_content.contains("unseen"));
     assert_eq!(fixture.stamp().digest, file_activity::digest_of(C));

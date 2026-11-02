@@ -185,7 +185,7 @@ impl Tool for ToolUndoTextDoc {
         };
         let resolved = parse_args(gcx.clone(), args, execution_scope.as_ref()).await?;
         crate::tools::file_edit::auxiliary::check_scope_guard(&ccx, &resolved.path).await?;
-        let (_, _, chunks, summary) =
+        let (before, after, chunks, summary) =
             tool_undo_text_doc_exec(gcx.clone(), args, execution_scope.as_ref()).await?;
 
         let related_section = {
@@ -237,6 +237,26 @@ impl Tool for ToolUndoTextDoc {
             }));
         }
 
+        let path = chunks
+            .first()
+            .map(|chunk| chunk.file_name.as_str())
+            .unwrap_or_else(|| {
+                args.get("path")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+            });
+        let model_content = super::edit_output::edit_model_content(
+            path,
+            if summary.contains(", deleted ") { "delete (undo_textdoc)" } else { "undo_textdoc" },
+            Some(&before),
+            if summary.contains(", deleted ") {
+                None
+            } else {
+                Some(after.as_str())
+            },
+            &chunks,
+        );
+        super::edit_output::finish_edit_output(&mut out, model_content);
         Ok((false, out))
     }
 

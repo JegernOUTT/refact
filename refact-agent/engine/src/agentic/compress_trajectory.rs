@@ -46,7 +46,14 @@ pub async fn compress_trajectory(
     let text = outcome
         .messages
         .iter()
-        .map(|m| format!("[{}]\n{}", m.role, m.content.content_text_only()))
+        .map(|m| {
+            let projected = refact_core::edit_results::project_edit_result(m);
+            format!(
+                "[{}]\n{}",
+                projected.role,
+                projected.content.content_text_only()
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n\n");
     Ok(CompressedTrajectory {

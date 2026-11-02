@@ -1,4 +1,5 @@
 pub mod auxiliary;
+pub mod edit_output;
 pub mod move_file;
 pub mod openai_apply_patch;
 mod patch_transaction;

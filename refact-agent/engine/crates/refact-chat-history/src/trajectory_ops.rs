@@ -109,6 +109,7 @@ fn preserve_hidden_role_extra(msg: &ChatMessage) -> serde_json::Map<String, serd
         "plan" => preserve_extra_key(&msg.extra, "plan"),
         "goal" => preserve_extra_key(&msg.extra, "goal"),
         "event" => preserve_extra_key(&msg.extra, "event"),
+        "diff" | "tool" => preserve_extra_key(&msg.extra, "edit_result"),
         COMPRESSION_REPORT_ROLE => preserve_extra_key(&msg.extra, "compression_report"),
         "assistant" => preserve_assistant_compression_extra(msg),
         _ => serde_json::Map::new(),

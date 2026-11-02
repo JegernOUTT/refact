@@ -87,11 +87,8 @@ pub(super) async fn apply(gcx: Arc<GlobalContext>, plan: &ApplyPatchResult) -> R
             }
         }
     }
-    // Applying several files is deliberately NOT atomic: there is no journal,
-    // so a failure part-way leaves the earlier files replaced. Each individual
-    // file is still replaced durably, so no file is ever left truncated.
     let mut applied = 0usize;
-    for (index, result) in plan.file_results.iter().enumerate() {
+    for result in &plan.file_results {
         let operation: Result<(), String> = async {
             let source = if result.action == "rename" {
                 Some(PathBuf::from(
@@ -172,19 +169,31 @@ pub(super) async fn apply(gcx: Arc<GlobalContext>, plan: &ApplyPatchResult) -> R
         }
         .await;
         if let Err(error) = operation {
-            let names = |results: &[super::tool_apply_patch::SingleFileResult]| {
-                results
-                    .iter()
-                    .map(|result| result.path.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
+            let mut changed = Vec::new();
+            let mut unchanged = Vec::new();
+            let mut unknown = Vec::new();
+            for (path, before) in &initial {
+                let current = match tokio::fs::read(path).await {
+                    Ok(bytes) => Some(bytes),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(_) => {
+                        unknown.push(path.display().to_string());
+                        continue;
+                    }
+                };
+                if current.as_deref() == before.as_deref().map(str::as_bytes) {
+                    unchanged.push(path.display().to_string());
+                } else {
+                    changed.push(path.display().to_string());
+                }
+            }
             return Err(format!(
-                "patch is not atomic and stopped at {} after {applied} of {} files: {error}. Changed: [{}]. Unchanged: [{}]. Each listed file is fully old or fully new, never truncated.",
+                "patch is not atomic and stopped at {} after {applied} of {} operations: {error}. Changed: [{}]. Unchanged: [{}]. Unknown: [{}]. Lists reflect observed disk content, not successful completion. The failed operation may have changed a file before reporting an error; durability is unconfirmed. Inspect changed and unknown paths before retrying.",
                 result.path.display(),
                 plan.file_results.len(),
-                names(&plan.file_results[..index]),
-                names(&plan.file_results[index..]),
+                changed.join(", "),
+                unchanged.join(", "),
+                unknown.join(", "),
             ));
         }
         applied += 1;

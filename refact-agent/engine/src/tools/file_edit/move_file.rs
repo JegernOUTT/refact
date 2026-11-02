@@ -97,7 +97,7 @@ mod tests {
     use crate::file_activity::{record_read, observations};
 
     #[tokio::test]
-    async fn stale_source_and_destination_refuse_without_modifying_either_file() {
+    async fn historical_reads_do_not_block_moves() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("source");
@@ -105,7 +105,7 @@ mod tests {
         std::fs::write(&source, "old").unwrap();
         record_read(Some("stale-mover"), &source, "old", 1, 1, 1, None);
         std::fs::write(&source, "new").unwrap();
-        assert!(move_file(
+        move_file(
             gcx.clone(),
             Some("stale-mover"),
             &source,
@@ -113,19 +113,18 @@ mod tests {
             false,
         )
         .await
-        .is_err());
-        assert!(!destination.exists());
-        assert_eq!(std::fs::read_to_string(&source).unwrap(), "new");
+        .unwrap();
+        assert!(!source.exists());
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), "new");
+        std::fs::write(&source, "new").unwrap();
         std::fs::write(&destination, "other").unwrap();
         record_read(Some("dest-mover"), &destination, "other", 1, 1, 1, None);
         std::fs::write(&destination, "external").unwrap();
-        assert!(
-            move_file(gcx, Some("dest-mover"), &source, &destination, true)
-                .await
-                .is_err()
-        );
-        assert_eq!(std::fs::read_to_string(&destination).unwrap(), "external");
-        assert!(source.exists());
+        move_file(gcx, Some("dest-mover"), &source, &destination, true)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), "new");
+        assert!(!source.exists());
     }
 
     #[tokio::test]

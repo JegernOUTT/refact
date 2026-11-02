@@ -115,6 +115,9 @@ pub fn remove_invalid_tool_calls_and_tool_calls_results(messages: &mut Vec<ChatM
 
     let mut last_occurrence: HashMap<String, usize> = HashMap::new();
     for (i, m) in messages.iter().enumerate() {
+        if crate::trajectory_ops::is_ui_only_message(m) {
+            continue;
+        }
         let is_tool_result = m.role == "tool" || m.role == "diff";
         if is_tool_result && !m.tool_call_id.is_empty() {
             last_occurrence.insert(m.tool_call_id.clone(), i);
@@ -126,7 +129,10 @@ pub fn remove_invalid_tool_calls_and_tool_calls_results(messages: &mut Vec<ChatM
         let idx = current_idx;
         current_idx += 1;
         let is_tool_result = m.role == "tool" || m.role == "diff";
-        if m.tool_call_id.is_empty() || !is_tool_result {
+        if m.tool_call_id.is_empty()
+            || !is_tool_result
+            || crate::trajectory_ops::is_ui_only_message(m)
+        {
             true
         } else if indices_to_keep.contains(&idx) {
             true
