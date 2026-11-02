@@ -6,6 +6,7 @@ import { http, HttpResponse } from "msw";
 import { fireEvent, screen } from "@testing-library/react";
 
 import { render, waitFor } from "../../utils/test-utils";
+import * as voiceInput from "../../hooks/useVoiceInput";
 import { ChatForm, ChatFormProps } from "./ChatForm";
 import { createDefaultChatState } from "../../utils/test-utils";
 import { applyChatEvent } from "../../features/Chat/Thread";
@@ -218,6 +219,79 @@ const App: React.FC<Partial<ChatFormProps>> = ({ ...props }) => {
 };
 
 describe("ChatForm", () => {
+  test("locked composers reject the voice shortcut while unlocked composers retain it", async () => {
+    const toggleRecording = vi
+      .fn<() => Promise<string | null>>()
+      .mockResolvedValue(null);
+    const idleVoice: ReturnType<typeof voiceInput.useVoiceInput> = {
+      isRecording: false,
+      isFinishing: false,
+      isVoiceActive: false,
+      isDownloading: false,
+      downloadProgress: 0,
+      error: null,
+      voiceEnabled: true,
+      modelLoaded: true,
+      liveTranscript: "",
+      toggleRecording,
+      cancelRecording: vi.fn(),
+    };
+    const voice = vi
+      .spyOn(voiceInput, "useVoiceInput")
+      .mockReturnValue(idleVoice);
+    const app = render(<App />, {
+      preloadedState: {
+        chat: chatStateWithThread({ model: "openai/gpt-4o" }),
+        ...engineConfigState,
+      },
+    });
+    try {
+      await waitFor(() =>
+        expect(screen.getByLabelText("Send message")).toBeEnabled(),
+      );
+      const textarea = screen.getByTestId("chat-form-textarea");
+      textarea.focus();
+      fireEvent.keyDown(textarea, {
+        code: "Space",
+        ctrlKey: true,
+        shiftKey: true,
+      });
+      expect(toggleRecording).toHaveBeenCalledTimes(1);
+      app.rerender(<App settingsLocked />);
+      textarea.focus();
+      expect(screen.getByLabelText("Voice input")).toBeDisabled();
+      fireEvent.keyDown(textarea, {
+        code: "Space",
+        ctrlKey: true,
+        shiftKey: true,
+      });
+      expect(toggleRecording).toHaveBeenCalledTimes(1);
+      voice.mockReturnValue({
+        ...idleVoice,
+        isRecording: true,
+        isVoiceActive: true,
+      });
+      app.rerender(<App settingsLocked />);
+      await waitFor(() =>
+        expect(screen.getByLabelText("Voice input")).toBeEnabled(),
+      );
+      expect(
+        screen
+          .getByLabelText("Voice input")
+          .closest('[data-composer-control="mic"]'),
+      ).toHaveAttribute("data-hidden", "false");
+      fireEvent.keyDown(textarea, {
+        code: "Space",
+        ctrlKey: true,
+        shiftKey: true,
+      });
+      expect(toggleRecording).toHaveBeenCalledTimes(2);
+    } finally {
+      app.unmount();
+      voice.mockRestore();
+    }
+  });
+
   test.each([undefined, true])(
     "only clears images explicitly accepted by a synchronous submitter (%s)",
     async (accepted) => {

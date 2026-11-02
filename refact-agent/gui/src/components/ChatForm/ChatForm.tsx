@@ -558,7 +558,11 @@ export const ChatForm: React.FC<ChatFormProps> = ({
         return;
       if (event.ctrlKey && event.shiftKey && event.code === "Space") {
         event.preventDefault();
-        if (!disableMicrophone && microphoneRef.current) {
+        if (
+          (!settingsLocked || isVoiceActive) &&
+          !disableMicrophone &&
+          microphoneRef.current
+        ) {
           void microphoneRef.current.toggleRecording();
         }
       }
@@ -581,7 +585,13 @@ export const ChatForm: React.FC<ChatFormProps> = ({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [disableMicrophone, focusComposerInput, draft]);
+  }, [
+    disableMicrophone,
+    focusComposerInput,
+    draft,
+    settingsLocked,
+    isVoiceActive,
+  ]);
 
   return (
     <div ref={composerRef} className={styles.composerRoot}>
@@ -909,8 +919,8 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                       priority: 5,
                       pinned: isVoiceActive,
                       hidden:
-                        (!isComposerExpanded && !isVoiceActive) ||
-                        settingsLocked,
+                        !isVoiceActive &&
+                        (!isComposerExpanded || settingsLocked),
                       content: (
                         <MicrophoneButton
                           ref={microphoneRef}
