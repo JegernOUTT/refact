@@ -1941,6 +1941,7 @@ mod tests {
             ..Default::default()
         };
         let (gcx, temp) = setup_task(board).await;
+        let workspace_root = dunce::canonicalize(temp.path()).unwrap();
         let holder = chat_ccx(gcx.clone(), "agent-one").await;
         let observer = chat_ccx(gcx.clone(), "agent-two").await;
         ToolTaskBoardClaimCard::new()
@@ -1952,7 +1953,9 @@ mod tests {
             .await
             .unwrap();
 
-        let source_path = temp.path().join("source.rs");
+        let source_path =
+            crate::coordination::scope::canonical_candidate(&workspace_root.join("source.rs"))
+                .unwrap();
         let mut board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
         board.owner_chat_id = Some("owner-chat".into());
         board.reviewer_chat_ids = vec!["reviewer-chat".into()];
@@ -1974,13 +1977,13 @@ mod tests {
             serde_yaml::to_value(&provenance).unwrap(),
         );
         tokio::fs::write(
-            temp.path().join(".refact/tasks/task-1/board.yaml"),
+            workspace_root.join(".refact/tasks/task-1/board.yaml"),
             serde_yaml::to_string(&value).unwrap(),
         )
         .await
         .unwrap();
         gcx.work_boards.publish(
-            &temp.path().join(".refact/tasks/task-1"),
+            &workspace_root.join(".refact/tasks/task-1"),
             Some((&board, &provenance)),
         );
         let (root, _) = crate::caps::project_model_defaults_state(gcx.clone()).await;
@@ -2006,7 +2009,7 @@ mod tests {
         }
         let mut session = crate::chat::types::ChatSession::new("agent-two".into());
         session.thread.model = "test/model".into();
-        session.work_project_root = Some(temp.path().into());
+        session.work_project_root = Some(workspace_root.clone());
         let session = Arc::new(AMutex::new(session));
         gcx.chat_sessions
             .write()
@@ -2111,7 +2114,7 @@ mod tests {
             .tool_execute(observer.clone(), &"foreign".into(), &authority_args)
             .await
             .is_err());
-        session.lock().await.work_project_root = Some(temp.path().into());
+        session.lock().await.work_project_root = Some(workspace_root.clone());
         gcx.privacy_policy_load.write().unwrap().error = Some("unavailable".into());
         assert!(ToolTaskBoardDiscover::new()
             .tool_execute(observer.clone(), &"policy".into(), &HashMap::new())

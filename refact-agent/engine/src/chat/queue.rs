@@ -3613,7 +3613,15 @@ mod tests {
             .unwrap();
         let session_arc = Arc::new(AMutex::new(ChatSession::new("guard-toctou".into())));
         let mut session = session_arc.lock().await;
-        session.work_project_root = Some(workspace.path().canonicalize().unwrap());
+        let mut alias = std::ffi::OsString::from(&root);
+        alias.push(format!("{}.", std::path::MAIN_SEPARATOR));
+        let alias = std::path::PathBuf::from(alias);
+        assert_ne!(alias.as_os_str(), std::path::Path::new(&root).as_os_str());
+        assert_eq!(
+            alias.canonicalize().unwrap(),
+            std::path::PathBuf::from(&root)
+        );
+        session.work_project_root = Some(alias);
         session.runtime.state = SessionState::Paused;
         session.runtime.pause_reasons.push(PauseReason {
             reason_type: "confirmation".into(),

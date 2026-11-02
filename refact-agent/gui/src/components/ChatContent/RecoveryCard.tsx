@@ -163,7 +163,12 @@ export function RecoveryCard({
         {recovery.latest_error.explanation}
       </div>
       {recovery.latest_error.raw_error && (
-        <div className={styles.raw}>
+        <div
+          className={`${styles.raw} ${styles.cause} scrollbarThin`}
+          role="region"
+          aria-label="Recovery cause"
+          tabIndex={0}
+        >
           Cause: {recovery.latest_error.raw_error.slice(0, 300)}
         </div>
       )}

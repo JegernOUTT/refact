@@ -3931,7 +3931,8 @@ mod tests {
 
     #[tokio::test]
     async fn command_checkout_shell_confirmation_and_execution_use_same_root() {
-        let fixture = CheckoutFixture::new().await;
+        let mut fixture = CheckoutFixture::new().await;
+        fixture.source = dunce::canonicalize(&fixture.source).unwrap();
         let mut args = fixture.command_args();
         if cfg!(target_os = "linux") {
             args.insert(

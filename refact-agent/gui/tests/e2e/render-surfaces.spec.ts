@@ -116,6 +116,49 @@ for (const theme of themes) {
       ).toBeInViewport();
       await fitsPage(page);
       await record(page, "bounded-recovery");
+      if (width === 240) {
+        await test.info().attach("recovery-stop-geometry", {
+          body: JSON.stringify({
+            theme,
+            viewport: page.viewportSize(),
+            stop: await page
+              .getByRole("button", { name: "Stop", exact: true })
+              .boundingBox(),
+          }),
+          contentType: "application/json",
+        });
+      }
+      if (width === 240 && theme === "light") {
+        const raw = `Connection reset\nhttps://provider.example.com/${"unbroken_provider_segment_".repeat(
+          40,
+        )}\nLast diagnostic line`;
+        const cause = page.getByRole("region", {
+          name: "Recovery cause",
+          exact: true,
+        });
+        await expect(cause).toHaveText(`Cause: ${raw.slice(0, 300)}`);
+        await expect(history.getByText(raw, { exact: true })).toBeAttached();
+        await page
+          .getByText("Details and attempt history (100)", { exact: true })
+          .focus();
+        await page.keyboard.press("Shift+Tab");
+        await expect(cause).toBeFocused();
+        expect(await cause.evaluate((element) => element.clientHeight)).toBe(
+          80,
+        );
+        await page.keyboard.press("End");
+        await expect
+          .poll(() => cause.evaluate((element) => element.scrollTop))
+          .toBeGreaterThan(0);
+        await expect
+          .poll(() =>
+            cause.evaluate(
+              (element) =>
+                element.scrollHeight - element.clientHeight - element.scrollTop,
+            ),
+          )
+          .toBeLessThanOrEqual(1);
+      }
     });
 
     test(`goals ${width}px ${theme}: compact status and large detail remain usable`, async ({
@@ -308,7 +351,7 @@ test("recovered and failed recovery states preserve labels and original model ch
     "/tests/e2e/render-surfaces.html?view=recovery&state=succeeded",
   );
   await page
-    .getByText("Recovered after 1 new request", { exact: true })
+    .getByText("Recovered after 1 automatic retry", { exact: true })
     .click();
   await expect(
     page.getByText("Original request: Failed", { exact: true }),

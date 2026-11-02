@@ -1588,10 +1588,11 @@ mod tests {
     #[tokio::test]
     async fn public_launch_preview_enforces_scope_destination_and_preserves_source_records() {
         let (ccx, workspace) = test_context("launch-parent").await;
+        let workspace_root = dunce::canonicalize(workspace.path()).unwrap();
         let app = ccx.lock().await.app.clone();
         let mut parent = crate::chat::types::ChatSession::new("launch-parent".into());
         parent.thread.model = "test/default".into();
-        parent.work_project_root = Some(workspace.path().into());
+        parent.work_project_root = Some(workspace_root.clone());
         app.chat
             .sessions
             .write()
@@ -1599,7 +1600,7 @@ mod tests {
             .insert("launch-parent".into(), Arc::new(AMutex::new(parent)));
         let (root, _) = crate::caps::project_model_defaults_state(app.gcx.clone()).await;
         app.gcx.caps_state.write().await.loaded_project_root = Some(root);
-        let file = workspace.path().join("private.rs");
+        let file = workspace_root.join("private.rs");
         std::fs::write(&file, "launch-source-body").unwrap();
         let mut request = args();
         request.insert("action".into(), json!("preview"));
@@ -1705,7 +1706,7 @@ mod tests {
         ccx.lock().await.subchat_depth = saved_depth;
         assert!(app.agents.list_all().await.is_empty());
         assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
-        let settings_path = crate::runtime_settings::project_coordination_path(workspace.path());
+        let settings_path = crate::runtime_settings::project_coordination_path(&workspace_root);
         std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
         std::fs::write(&settings_path, "launch_source_bytes: 1\n").unwrap();
         let bounded = execute(request.clone()).await.unwrap().unwrap();

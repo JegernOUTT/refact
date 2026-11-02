@@ -1743,7 +1743,8 @@ mod tests {
     #[tokio::test]
     async fn exact_task_document_carries_revision_and_never_substitutes_board_summary() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let root = tempfile::tempdir().unwrap();
+        let root =
+            tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
         authorize_workspace(&gcx, root.path());
         let docs = root.path().join(".refact/tasks/task-one/documents");
         std::fs::create_dir_all(&docs).unwrap();

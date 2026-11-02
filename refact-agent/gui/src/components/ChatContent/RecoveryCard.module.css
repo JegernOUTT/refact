@@ -37,6 +37,11 @@
   overflow-y: auto;
 }
 
+.cause {
+  max-block-size: calc(var(--rf-line-2) * 4);
+  overflow-y: auto;
+}
+
 .details {
   min-width: 0;
 }

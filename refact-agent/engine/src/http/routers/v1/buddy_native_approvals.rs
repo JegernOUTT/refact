@@ -58,8 +58,7 @@ pub(crate) fn validate_native_approval(
     version: &str,
 ) -> Result<(), String> {
     if crate::coordination::scope::session_source_root(session).is_none_or(|source| {
-        crate::coordination::roots::project_identity(&source)
-            != crate::coordination::roots::project_identity(std::path::Path::new(root))
+        !super::buddy_decisions::same_native_project_root(&source, std::path::Path::new(root))
     }) || session.closed
         || engine_identity != native_engine_identity()
         || version != source_version(session, root)
@@ -322,8 +321,7 @@ pub async fn handle_approval_response(
     let command = {
         let mut locked = session.lock().await;
         if crate::coordination::scope::session_source_root(&locked).is_none_or(|source| {
-            crate::coordination::roots::project_identity(&source)
-                != crate::coordination::roots::project_identity(std::path::Path::new(&root))
+            !super::buddy_decisions::same_native_project_root(&source, std::path::Path::new(&root))
         }) {
             return Err(ScratchError::new(
                 StatusCode::CONFLICT,
@@ -491,23 +489,25 @@ mod tests {
     #[test]
     fn stale_root_engine_version_and_cross_client_state_never_consume() {
         let mut session = paused();
-        let version = source_version(&session, "/project");
+        let workspace = tempfile::tempdir().unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        let root = workspace.path().canonicalize().unwrap();
+        let root = root.to_str().unwrap();
+        let foreign = foreign.path().to_str().unwrap();
+        session.work_project_root = Some(root.into());
+        let version = source_version(&session, root);
         assert!(
-            validate_native_approval(&session, "/project", native_engine_identity(), &version)
-                .is_ok()
+            validate_native_approval(&session, root, native_engine_identity(), &version).is_ok()
         );
         assert!(
-            validate_native_approval(&session, "/other", native_engine_identity(), &version)
+            validate_native_approval(&session, foreign, native_engine_identity(), &version)
                 .is_err()
         );
-        assert!(validate_native_approval(&session, "/project", "old-engine", &version).is_err());
-        assert!(validate_native_approval(
-            &session,
-            "/project",
-            native_engine_identity(),
-            "old-version"
-        )
-        .is_err());
+        assert!(validate_native_approval(&session, root, "old-engine", &version).is_err());
+        assert!(
+            validate_native_approval(&session, root, native_engine_identity(), "old-version")
+                .is_err()
+        );
         assert!(response_command(
             &session,
             ApprovalResponse::Tool {
@@ -519,8 +519,7 @@ mod tests {
         assert_eq!(session.runtime.pause_reasons.len(), 1);
         session.runtime.accepted_tool_ids.push("tool".into());
         assert!(
-            validate_native_approval(&session, "/project", native_engine_identity(), &version)
-                .is_err()
+            validate_native_approval(&session, root, native_engine_identity(), &version).is_err()
         );
         assert_eq!(session.runtime.pause_reasons.len(), 1);
     }
@@ -542,7 +541,15 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let mut paused = paused();
-        paused.work_project_root = Some(std::path::PathBuf::from(&root));
+        let mut alias = std::ffi::OsString::from(&root);
+        alias.push(format!("{}.", std::path::MAIN_SEPARATOR));
+        let alias = std::path::PathBuf::from(alias);
+        assert_ne!(alias.as_os_str(), std::path::Path::new(&root).as_os_str());
+        assert_eq!(
+            alias.canonicalize().unwrap(),
+            std::path::PathBuf::from(&root)
+        );
+        paused.work_project_root = Some(alias.clone());
         let session = std::sync::Arc::new(tokio::sync::Mutex::new(paused));
         session
             .lock()
@@ -592,12 +599,65 @@ mod tests {
             .is_err());
         }
         assert!(session.lock().await.command_queue.is_empty());
+        let foreign = tempfile::tempdir().unwrap();
+        let deleted = tempfile::tempdir().unwrap();
+        let unavailable = deleted.path().to_path_buf();
+        deleted.close().unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        for source in [
+            Some(foreign.path().to_path_buf()),
+            Some(unavailable),
+            Some(file.path().to_path_buf()),
+            None,
+        ] {
+            session.lock().await.work_project_root = source;
+            let error = handle_approval_response(
+                State(app.clone()),
+                Path("chat".into()),
+                axum::Json(NativeApprovalRequest {
+                    project_root: root.clone(),
+                    engine_identity: snapshot.engine_identity.clone(),
+                    source_version: snapshot.sessions[0].source_version.clone(),
+                    client_request_id: "unavailable-source".into(),
+                    refusal_followup: false,
+                    response: ApprovalResponse::Tool {
+                        tool_call_id: "tool".into(),
+                        accepted: false,
+                    },
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.status_code, StatusCode::CONFLICT);
+            assert_eq!(error.message, "Native approval source project unavailable");
+            let locked = session.lock().await;
+            assert!(locked.command_queue.is_empty());
+            assert_eq!(locked.runtime.pause_reasons.len(), 1);
+            assert_eq!(locked.runtime.pause_reasons[0].tool_call_id, "tool");
+            assert!(locked.runtime.accepted_tool_ids.is_empty());
+            assert!(locked.native_decision_receipts.is_empty());
+        }
+        session.lock().await.work_project_root = Some(alias);
+        let request = serde_json::to_value(NativeApprovalRequest {
+            project_root: root.clone(),
+            engine_identity: snapshot.engine_identity.clone(),
+            source_version: snapshot.sessions[0].source_version.clone(),
+            client_request_id: "queued".into(),
+            refusal_followup: false,
+            response: ApprovalResponse::Tool {
+                tool_call_id: "tool".into(),
+                accepted: false,
+            },
+        })
+        .unwrap();
+        let payload_hash = crate::buddy::decision_receipts::digest(&request);
+        let target_identity = request_identity(&*session.lock().await, "tool");
         let result = handle_approval_response(
-            State(app),
+            State(app.clone()),
             Path("chat".into()),
             axum::Json(NativeApprovalRequest {
                 project_root: root.clone(),
-                engine_identity: snapshot.engine_identity,
+                engine_identity: snapshot.engine_identity.clone(),
                 source_version: snapshot.sessions[0].source_version.clone(),
                 client_request_id: "queued".into(),
                 refusal_followup: false,
@@ -610,11 +670,65 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(result.status(), StatusCode::ACCEPTED);
+        let replay = handle_approval_response(
+            State(app.clone()),
+            Path("chat".into()),
+            axum::Json(serde_json::from_value(request).unwrap()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay: serde_json::Value =
+            serde_json::from_slice(&hyper::body::to_bytes(replay.into_body()).await.unwrap())
+                .unwrap();
+        let outcome = handle_approval_outcome(
+            State(app.clone()),
+            Path(("chat".into(), "queued".into())),
+            axum::extract::Query(OutcomeQuery {
+                project_root: root.clone(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(outcome.project_root, root);
+        assert_eq!(outcome.engine_identity, snapshot.engine_identity);
+        assert_eq!(outcome.source_version, snapshot.sessions[0].source_version);
+        assert_eq!(outcome.payload_hash, payload_hash);
+        assert_eq!(outcome.request_identity, target_identity);
+        assert_eq!(outcome.client_request_id, "queued");
+        assert_eq!(outcome.target_id, "tool");
+        assert_eq!(outcome.accepted, Some(false));
+        assert_eq!(outcome.status, "queued");
+        assert_eq!(replay, serde_json::to_value(&outcome).unwrap());
         let mut session = session.lock().await;
         assert_eq!(session.runtime.pause_reasons.len(), 1);
+        assert_eq!(session.command_queue.len(), 1);
+        assert_eq!(session.native_decision_receipts.len(), 1);
+        let receipt = crate::buddy::decision_receipts::find(&session, "queued")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(receipt).unwrap(),
+            serde_json::to_value(outcome).unwrap()
+        );
         let queued = session.command_queue.pop_front().unwrap();
         let wire = serde_json::to_value(&queued).unwrap();
         assert_eq!(wire["native_approval_guard"]["project_root"], root);
+        assert_eq!(
+            wire["native_approval_guard"]["engine_identity"],
+            snapshot.engine_identity
+        );
+        assert_eq!(
+            wire["native_approval_guard"]["source_version"],
+            snapshot.sessions[0].source_version
+        );
+        assert_eq!(queued.client_request_id, "queued");
+        assert!(matches!(
+            &queued.command,
+            refact_chat_api::ChatCommand::ToolDecision { tool_call_id, accepted: false }
+                if tool_call_id == "tool"
+        ));
         assert!(matches!(
             queued.command,
             refact_chat_api::ChatCommand::ToolDecision {
@@ -630,6 +744,10 @@ mod tests {
     #[test]
     fn browser_selection_is_typed_and_stale_responses_leave_request_available() {
         let mut session = paused();
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path().canonicalize().unwrap();
+        let root = root.to_str().unwrap();
+        session.work_project_root = Some(root.into());
         session.pending_browser_message = Some(crate::chat::types::PendingBrowserMessage {
             pending_message_id: "current".into(),
             content: serde_json::json!("message"),
@@ -678,11 +796,13 @@ mod tests {
                 .pending_message_id,
             "current"
         );
-        let version = source_version(&session, "/project");
+        let version = source_version(&session, root);
+        assert!(
+            validate_native_approval(&session, root, native_engine_identity(), &version).is_ok()
+        );
         session.pending_browser_message = None;
         assert!(
-            validate_native_approval(&session, "/project", native_engine_identity(), &version)
-                .is_err()
+            validate_native_approval(&session, root, native_engine_identity(), &version).is_err()
         );
         assert!(
             serde_json::from_value::<ApprovalResponse>(serde_json::json!({
@@ -740,8 +860,7 @@ pub async fn handle_approval_outcome(
     if let Some(session) = loaded {
         let session = session.lock().await;
         if crate::coordination::scope::session_source_root(&session).is_none_or(|source| {
-            crate::coordination::roots::project_identity(&source)
-                != crate::coordination::roots::project_identity(std::path::Path::new(&root))
+            !super::buddy_decisions::same_native_project_root(&source, std::path::Path::new(&root))
         }) {
             return Err(ScratchError::new(
                 StatusCode::CONFLICT,

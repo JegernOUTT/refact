@@ -5,6 +5,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::{app_state::AppState, custom_error::ScratchError};
 
+pub(crate) fn same_native_project_root(source: &std::path::Path, root: &std::path::Path) -> bool {
+    let (Ok(source), Ok(root)) = (std::fs::canonicalize(source), std::fs::canonicalize(root))
+    else {
+        return false;
+    };
+    if !std::fs::metadata(&source).is_ok_and(|metadata| metadata.is_dir())
+        || !std::fs::metadata(&root).is_ok_and(|metadata| metadata.is_dir())
+    {
+        return false;
+    }
+    dunce::simplified(&source) == dunce::simplified(&root)
+}
+
 #[derive(Serialize)]
 pub struct NativeQuestionView {
     project_root: String,
@@ -144,10 +157,7 @@ pub async fn handle_question_answer(
     {
         let mut session = session.lock().await;
         if crate::coordination::scope::session_source_root(&session).is_none_or(|source| {
-            crate::coordination::roots::project_identity(&source)
-                != crate::coordination::roots::project_identity(std::path::Path::new(
-                    &request.project_root,
-                ))
+            !same_native_project_root(&source, std::path::Path::new(&request.project_root))
         }) {
             return Err(ScratchError::new(
                 StatusCode::CONFLICT,
@@ -333,7 +343,13 @@ mod tests {
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.path().to_path_buf()];
         let app = AppState::from_gcx(gcx).await;
         let mut session = ChatSession::new("native-chat".into());
-        session.work_project_root = Some(root.path().canonicalize().unwrap());
+        let canonical_root = root.path().canonicalize().unwrap();
+        let mut alias = canonical_root.as_os_str().to_os_string();
+        alias.push(format!("{}.", std::path::MAIN_SEPARATOR));
+        let alias = std::path::PathBuf::from(alias);
+        assert_ne!(alias.as_os_str(), canonical_root.as_os_str());
+        assert_eq!(alias.canonicalize().unwrap(), canonical_root);
+        session.work_project_root = Some(alias);
         session
             .register_pending_questions(PendingQuestionSet {
                 tool_call_id: "native-question".into(),
@@ -382,6 +398,47 @@ mod tests {
         .await;
         assert!(invalid.is_err());
         assert!(session.lock().await.command_queue.is_empty());
+        let source = session.lock().await.work_project_root.clone();
+        let foreign = tempfile::tempdir().unwrap();
+        let deleted = tempfile::tempdir().unwrap();
+        let unavailable = deleted.path().to_path_buf();
+        deleted.close().unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        for source in [
+            Some(foreign.path().to_path_buf()),
+            Some(unavailable),
+            Some(file.path().to_path_buf()),
+            None,
+        ] {
+            session.lock().await.work_project_root = source;
+            let error = handle_question_answer(
+                State(app.clone()),
+                Path(("native-chat".into(), "native-question".into())),
+                axum::Json(DecisionAnswerRequest {
+                    project_root: projection.project_root.clone(),
+                    asked_at_ms: 7,
+                    client_request_id: "unavailable-source".into(),
+                    answers: vec![QuestionAnswer {
+                        id: "ok".into(),
+                        answer: serde_json::json!(true),
+                    }],
+                    response: None,
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.status_code, StatusCode::CONFLICT);
+            assert_eq!(error.message, "Question source belongs to another project");
+            let locked = session.lock().await;
+            assert!(locked.command_queue.is_empty());
+            assert!(locked.native_decision_receipts.is_empty());
+            assert_eq!(locked.pending_questions.len(), 1);
+            assert_eq!(
+                locked.pending_questions[0].status,
+                PendingQuestionStatus::Pending
+            );
+        }
+        session.lock().await.work_project_root = source;
         session
             .lock()
             .await
