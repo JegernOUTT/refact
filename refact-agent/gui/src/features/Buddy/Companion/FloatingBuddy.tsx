@@ -1,7 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Button, Sheet } from "../../../components/ui";
+import { Minus } from "lucide-react";
+import {
+  Badge,
+  Button,
+  IconButton,
+  Sheet,
+  Tabs,
+  Tooltip,
+} from "../../../components/ui";
 import { useMediaQuery } from "../../../components/ui/useMediaQuery";
 import { useAppDispatch, useAppSelector } from "../../../hooks";
+import { BuddyCanvas } from "../BuddyCanvas";
+import { useBuddyState } from "../hooks/useBuddyState";
 import { selectConfig } from "../../Config/configSlice";
 import {
   createChatWithId,
@@ -43,6 +53,7 @@ const emptyMemory: ConversationMemory = { draft: "" };
 export function FloatingBuddy() {
   const dispatch = useAppDispatch();
   const config = useAppSelector(selectConfig);
+  const buddyState = useBuddyState();
   const workspaceFocused = useAppSelector(selectFocusedWorkspaceChatId);
   const current = useAppSelector(selectCurrentThreadId);
   const page = useAppSelector((state) => state.pages.at(-1)?.name);
@@ -308,6 +319,7 @@ export function FloatingBuddy() {
   }, [geometry, storageKey]);
   const minimize = () => {
     setOpen(false);
+    setCompactDismissed(true);
     launcher.current?.focus();
   };
   const go = (id: string) => {
@@ -340,6 +352,8 @@ export function FloatingBuddy() {
 
   const composingElsewhere = () => {
     const active = document.activeElement;
+    if (active instanceof Element && active.closest("[data-buddy-surface]"))
+      return false;
     return (
       active instanceof HTMLTextAreaElement ||
       active instanceof HTMLInputElement ||
@@ -381,64 +395,77 @@ export function FloatingBuddy() {
         }}
       >
         <Sheet.Title>Buddy</Sheet.Title>
-        <Button onClick={minimize}>Minimize Buddy</Button>
+        <Tooltip content="Minimize Buddy">
+          <IconButton
+            icon={Minus}
+            aria-label="Minimize Buddy"
+            onClick={minimize}
+          />
+        </Tooltip>
       </header>
-      <Sheet.Description>
-        {requestScope
-          ? "Request-scoped conversation"
-          : "Ask about the focused source chat"}
-        . Buddy uses privacy-checked source evidence, not a copied transcript.
+      <Sheet.Description className={styles.description}>
+        {scope
+          ? requestScope
+            ? "Request-scoped conversation"
+            : title?.trim()
+              ? title
+              : "Current source chat"
+          : "Focus a source chat to ask Buddy"}
       </Sheet.Description>
       <div className={styles.body}>
-        <div className={styles.actions} role="tablist" aria-label="Buddy view">
-          <button
-            role="tab"
-            aria-selected={tab === "ask"}
-            onClick={() => setTab("ask")}
+        <Tabs
+          value={tab}
+          onValueChange={(value) =>
+            setTab(value === "attention" ? "attention" : "ask")
+          }
+        >
+          <Tabs.List
+            aria-label="Buddy view"
+            activeIndex={tab === "ask" ? 0 : 1}
           >
-            Ask Buddy
-          </button>
-          <button
-            role="tab"
-            aria-selected={tab === "attention"}
-            onClick={() => setTab("attention")}
-          >
-            Needs attention ({count})
-          </button>
-        </div>
-        {tab === "attention" && snapshot && selected && (
-          <AttentionCard
-            key={`${sessionNamespace}:${selected.id}`}
-            onPersist={(intent) =>
-              persistPendingDecision(
-                namespace,
-                snapshot.project_root,
-                selected,
-                intent,
-              )
-            }
-            memory={getAttentionMemory(selected.id)}
-            onMemory={(patch) => changeAttentionMemory(selected.id, patch)}
-            row={selected}
-            snapshot={snapshot}
-            fresh={fresh}
-            onNavigate={go}
-            onAsk={ask}
-            onNext={next}
-          />
+            <Tabs.Trigger value="ask">Ask Buddy</Tabs.Trigger>
+            <Tabs.Trigger value="attention">
+              Needs attention ({count})
+            </Tabs.Trigger>
+          </Tabs.List>
+        </Tabs>
+        {tab === "attention" && (
+          <div className={styles.attentionPanel}>
+            {snapshot && selected && (
+              <AttentionCard
+                key={`${sessionNamespace}:${selected.id}`}
+                onPersist={(intent) =>
+                  persistPendingDecision(
+                    namespace,
+                    snapshot.project_root,
+                    selected,
+                    intent,
+                  )
+                }
+                memory={getAttentionMemory(selected.id)}
+                onMemory={(patch) => changeAttentionMemory(selected.id, patch)}
+                row={selected}
+                snapshot={snapshot}
+                fresh={fresh}
+                onNavigate={go}
+                onAsk={ask}
+                onNext={next}
+              />
+            )}
+            <p role="status">
+              {fresh ? "Attention checked" : "Attention unavailable / stale"}
+              {lastChecked
+                ? ` at ${new Date(lastChecked).toLocaleTimeString()}`
+                : ""}
+              .{" "}
+              {snapshot &&
+                `${humanizeIdentifier(snapshot.coverage)}${
+                  snapshot.partial ? " — partial coverage" : ""
+                }. ${snapshot.busy_chat_ids.length} busy chats not inspected.`}
+            </p>
+            {feedError && <p role="status">{feedError}</p>}
+          </div>
         )}
-        <p role="status">
-          {fresh ? "Attention checked" : "Attention unavailable / stale"}
-          {lastChecked
-            ? ` at ${new Date(lastChecked).toLocaleTimeString()}`
-            : ""}
-          .{" "}
-          {snapshot &&
-            `${humanizeIdentifier(snapshot.coverage)}${
-              snapshot.partial ? " — partial coverage" : ""
-            }. ${snapshot.busy_chat_ids.length} busy chats not inspected.`}
-        </p>
-        {feedError && <p role="status">{feedError}</p>}
         {navigation.error && <p role="alert">{navigation.error}</p>}
         <div className={styles.actions}>
           {scope && <Button onClick={() => go(scope)}>Open source chat</Button>}
@@ -453,39 +480,35 @@ export function FloatingBuddy() {
             </Button>
           )}
         </div>
-        {tab === "ask" && (
+        <details className={styles.sourceDetails}>
+          <summary>Source context</summary>
           <p role="status">
             Source status: {humanizeIdentifier(sourceStatus)}. Evidence: current
-            chat snapshot; attention checks are separate.
+            chat snapshot; attention checks are separate. Buddy uses
+            privacy-checked source evidence, not a copied transcript.
           </p>
-        )}
-        <strong>
-          {scope
-            ? requestScope
-              ? `Request source: ${requestScope}`
-              : title
-                ? title
-                : "Current source chat"
-            : "No chat selected"}
-        </strong>
+          {requestScope && <p>Request source: {requestScope}</p>}
+        </details>
         {!scope && (
           <p>
             Focus a source chat to ask Buddy. Buddy chats cannot have another
             companion.
           </p>
         )}
-        {tab === "ask" && scope && (
-          <CompanionConversation
-            key={memoryKey}
-            memory={memory}
-            sourceId={scope}
-            requestEvidence={requestScope ? requestEvidence : undefined}
-            ensure={() => createForSource(scope, memoryKey)}
-            onChange={(patch) => updateMemory(memoryKey, patch)}
-          />
+        {scope && (
+          <div className={styles.conversation}>
+            <CompanionConversation
+              key={memoryKey}
+              memory={memory}
+              sourceId={scope}
+              requestEvidence={requestScope ? requestEvidence : undefined}
+              ensure={() => createForSource(scope, memoryKey)}
+              onChange={(patch) => updateMemory(memoryKey, patch)}
+            />
+          </div>
         )}
         {!narrow && (
-          <details>
+          <details className={styles.sourceDetails}>
             <summary>Window position and size</summary>
             <div className={styles.actions}>
               {(
@@ -576,7 +599,11 @@ export function FloatingBuddy() {
           ),
       )}
       {unread.length > 0 && (
-        <aside className={styles.unread} aria-label="Unread Buddy replies">
+        <aside
+          className={styles.unread}
+          aria-label="Unread Buddy replies"
+          data-buddy-surface
+        >
           <span>
             {unread.length} unread Buddy{" "}
             {unread.length === 1 ? "reply" : "replies"}
@@ -597,7 +624,11 @@ export function FloatingBuddy() {
         </aside>
       )}
       {!open && count > 0 && selected && !compactDismissed && (
-        <aside className={styles.compact} aria-label="Buddy attention">
+        <aside
+          className={styles.compact}
+          aria-label="Buddy attention"
+          data-buddy-surface
+        >
           <span>
             {composing ? "New attention — your draft is unchanged. " : ""}
             {count} requests need attention. {humanizeIdentifier(selected.kind)}
@@ -637,25 +668,51 @@ export function FloatingBuddy() {
           )}
         </aside>
       )}
-      <Sheet modal={narrow} open={open} onOpenChange={setOpen}>
-        <Sheet.Trigger asChild>
-          <button
-            ref={launcher}
-            className={styles.launcher}
-            aria-label={`Ask Buddy${
-              count ? `, ${count} attention requests` : ""
-            }`}
-          >
-            Buddy {count > 0 && <span>{count}</span>}{" "}
-            {unread.length > 0 && <span>· {unread.length} unread</span>}
-          </button>
-        </Sheet.Trigger>
+      <Sheet
+        modal={false}
+        open={open}
+        onOpenChange={(nextOpen) => {
+          if (nextOpen) setOpen(true);
+          else minimize();
+        }}
+      >
+        <div className={styles.launcherDock}>
+          <Tooltip content={open ? "Minimize Buddy" : "Ask Buddy"}>
+            <Sheet.Trigger asChild>
+              <Button
+                ref={launcher}
+                className={styles.launcher}
+                aria-label={`Ask Buddy${
+                  count ? `, ${count} attention requests` : ""
+                }`}
+              >
+                <span className={styles.launcherAvatar} aria-hidden="true">
+                  <BuddyCanvas
+                    state={buddyState.state}
+                    displaySize={96}
+                    showSpeech={false}
+                  />
+                </span>
+                {(count > 0 || unread.length > 0) && (
+                  <Badge
+                    size="xs"
+                    tone={count > 0 ? "warning" : "accent"}
+                    className={styles.launcherBadge}
+                  >
+                    {count + unread.length}
+                  </Badge>
+                )}
+              </Button>
+            </Sheet.Trigger>
+          </Tooltip>
+        </div>
         <Sheet.Content
           ref={panel}
           className={narrow ? styles.sheet : styles.window}
           maxWidth={narrow ? "100%" : "none"}
           maxHeight="calc(100dvh - 24px)"
           scrollable={false}
+          onInteractOutside={(event) => event.preventDefault()}
           style={
             narrow
               ? undefined
@@ -669,7 +726,9 @@ export function FloatingBuddy() {
                 }
           }
         >
-          {content}
+          <div className={styles.windowContent} data-buddy-surface>
+            {content}
+          </div>
         </Sheet.Content>
       </Sheet>
     </>

@@ -8,6 +8,7 @@ import { registerVisibleChatMount } from "../../src/features/Connection";
 import { push } from "../../src/features/Pages/pagesSlice";
 import type { AttentionSnapshot } from "../../src/services/refact/buddyCompanion";
 import "../../src/lib/render/web.css";
+import styles from "./buddy-companion.module.css";
 
 const root = document.getElementById("refact-chat");
 if (!root) throw new Error("Buddy fixture root missing");
@@ -44,7 +45,31 @@ const snapshot: AttentionSnapshot = {
     },
   ],
 };
-// The real connected component and service run against an explicitly isolated fixture transport.
+const questionMode = params.get("question") === "1";
+const question = {
+  tool_call_id: "ask-fixture",
+  asked_at_ms: 42,
+  status: "pending" as const,
+  response_protocol_version: 2,
+  questions: [{ id: "scope", type: "free_text" as const, text: "What scope?" }],
+};
+if (questionMode) {
+  snapshot.rows = [
+    {
+      ...snapshot.rows[0],
+      id: "question-fixture",
+      kind: "question",
+      effect: "answer_question",
+      tool_call_id: question.tool_call_id,
+      question,
+      literal_command: null,
+      display_command: null,
+      tool_arguments: null,
+    },
+  ];
+}
+const posts: string[] = [];
+Object.assign(window, { fixturePosts: posts });
 window.fetch = async (input, init) => {
   const url = new URL(
     typeof input === "string"
@@ -54,6 +79,11 @@ window.fetch = async (input, init) => {
         : input.url,
     location.origin,
   );
+  if (
+    (init?.method ?? (input instanceof Request ? input.method : "GET")) ===
+    "POST"
+  )
+    posts.push(url.pathname);
   if (url.pathname === "/v1/buddy/attention") return Response.json(snapshot);
   if (url.pathname === "/v1/buddy/approvals/source-b/response")
     return Response.json({ queued: true }, { status: 202 });
@@ -70,6 +100,14 @@ window.fetch = async (input, init) => {
       accepted: true,
       status: "queued",
       followup: "pending",
+    });
+  if (questionMode && url.pathname.startsWith("/v1/buddy/companion/"))
+    return Response.json({
+      chat_id: "buddy-fixture",
+      source_chat_id: "source-a",
+      title: "Buddy fixture",
+      kind: "companion",
+      created_at: "now",
     });
   if (url.pathname.startsWith("/v1/buddy/companion/"))
     return Response.json(
@@ -111,12 +149,37 @@ store.dispatch(
     openTab: false,
   }),
 );
+store.dispatch(
+  createChatWithId({
+    id: "buddy-fixture",
+    title: "Buddy fixture",
+    activate: false,
+    openTab: false,
+  }),
+);
+const fixtureChat = structuredClone(store.getState().chat);
+fixtureChat.threads["buddy-fixture"].thread.messages = [
+  {
+    role: "assistant",
+    content: "Buddy shared response",
+    tool_calls: [
+      {
+        id: question.tool_call_id,
+        index: 0,
+        function: { name: "ask_questions", arguments: "{}" },
+      },
+    ],
+  },
+];
+fixtureChat.threads["buddy-fixture"].thread.pending_questions = [question];
+
 store.dispatch(registerVisibleChatMount({ chatId: "source-a" }));
 store.dispatch(push({ name: "chat" }));
+const fixtureStore = setUpStore({ ...store.getState(), chat: fixtureChat });
 createRoot(root).render(
-  <Provider store={store}>
+  <Provider store={questionMode ? fixtureStore : store}>
     <Theme>
-      <main>
+      <main className={styles.main}>
         <h1>Connected Buddy companion fixture</h1>
         <p>
           Source A is visible. Attention is from source B. No live backend or

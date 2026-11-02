@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { waitFor } from "@testing-library/react";
+import { http, HttpResponse } from "msw";
 import { act } from "react-dom/test-utils";
 import { handOffQueuedMessageEdit } from "../../utils/queuedMessageEdit";
 import {
@@ -10,13 +11,101 @@ import {
 import { ChatThreadProvider } from "../../features/Chat/Thread";
 import { setInputValue } from "./actions";
 import { useInputValue } from "./useInputValue";
+import { useAttachedFiles, useCheckboxes } from "./useCheckBoxes";
+import { ideAttachFileToChat } from "../../hooks/useEventBusForApp";
+import { server } from "../../utils/mockServer";
 
-function InputProbe({ label }: { label: string }) {
-  const [value] = useInputValue(() => undefined);
-  return <div data-testid={label}>{value}</div>;
+function InputProbe({
+  label,
+  enabled = true,
+}: {
+  label: string;
+  enabled?: boolean;
+}) {
+  const [value, , immediate] = useInputValue(() => undefined, enabled);
+  const files = useAttachedFiles(enabled);
+  const { checkboxes } = useCheckboxes(enabled);
+  return (
+    <div data-testid={label} data-send={String(immediate)}>
+      {JSON.stringify({
+        value,
+        files: files.files.map((file) => file.path),
+        snippet: checkboxes.selected_lines.checked,
+      })}
+    </div>
+  );
 }
 
 describe("useInputValue", () => {
+  it("isolates controlled Buddy input from IDE sends, attachments and selected context", async () => {
+    const chat = createDefaultChatState();
+    const currentId = chat.current_thread_id;
+    const runtime = chat.threads[currentId];
+    chat.threads.buddy = {
+      ...runtime,
+      thread: { ...runtime.thread, id: "buddy", model: "openai/gpt-4o" },
+    };
+    const command = vi.fn();
+    server.use(
+      http.post("*/v1/chats/:id/commands", async ({ params, request }) => {
+        command(String(params.id), await request.json());
+        return HttpResponse.json({ status: "queued" });
+      }),
+    );
+    const view = render(
+      <>
+        <ChatThreadProvider chatId={currentId}>
+          <InputProbe label="source" />
+        </ChatThreadProvider>
+        <ChatThreadProvider chatId="buddy">
+          <InputProbe label="buddy" enabled={false} />
+        </ChatThreadProvider>
+      </>,
+      {
+        preloadedState: {
+          chat,
+          config: { host: "vscode", lspPort: 8001, themeProps: {} },
+          selected_snippet: {
+            language: "text",
+            code: "source context",
+            path: "/source.txt",
+            basename: "source.txt",
+          },
+          active_file: {
+            name: "source.txt",
+            path: "/source.txt",
+            line1: 1,
+            line2: 1,
+            cursor: 0,
+            can_paste: true,
+          },
+        },
+      },
+    );
+    postMessage(
+      setInputValue({
+        messages: [{ role: "user", content: "IDE question" }],
+        send_immediately: true,
+      }),
+    );
+    await waitFor(() =>
+      expect(command).toHaveBeenCalledWith(
+        currentId,
+        expect.objectContaining({ type: "user_message" }),
+      ),
+    );
+    postMessage(setInputValue({ value: "IDE draft", send_immediately: true }));
+    postMessage(ideAttachFileToChat("/intended-for-source.txt"));
+    await waitFor(() =>
+      expect(view.getByTestId("source")).toHaveTextContent("IDE draft"),
+    );
+    expect(view.getByTestId("buddy")).toHaveTextContent(
+      JSON.stringify({ value: "", files: [], snippet: false }),
+    );
+    expect(view.getByTestId("buddy")).toHaveAttribute("data-send", "false");
+    expect(command.mock.calls.every(([id]) => id === currentId)).toBe(true);
+  });
+
   it("ignores thread-targeted input events for other panes", async () => {
     const chat = createDefaultChatState();
     const currentId = chat.current_thread_id;
@@ -53,7 +142,7 @@ describe("useInputValue", () => {
       );
     });
     expect(document.querySelector('[data-testid="current"]')).toHaveTextContent(
-      "",
+      JSON.stringify({ value: "", files: [], snippet: false }),
     );
   });
 

@@ -1,4 +1,11 @@
 import React, { useCallback, useEffect, useMemo } from "react";
+import { useStore } from "react-redux";
+import type { AppStore } from "../../app/store";
+import {
+  captureSubmittedAttachments,
+  clearSubmittedAttachments,
+} from "./chatSubmission";
+import { useDebounceCallback } from "usehooks-ts";
 
 import { Flex, Text } from "@radix-ui/themes";
 import styles from "./ChatForm.module.css";
@@ -153,7 +160,15 @@ const ComposerHelp: React.FC<ComposerHelpProps> = ({ children }) => (
 export type SendPolicy = "immediate" | "after_flow";
 
 export type ChatFormProps = {
-  onSubmit: (str: string, sendPolicy?: SendPolicy) => void;
+  onSubmit:
+    | ((str: string, sendPolicy?: SendPolicy) => void)
+    | ((
+        str: string,
+        sendPolicy?: SendPolicy,
+      ) => boolean | Promise<boolean | undefined>);
+  draft?: { value: string; onChange: (value: string) => void };
+  submissionDisabled?: boolean;
+  settingsLocked?: boolean;
   onClose?: () => void;
   className?: string;
   embedded?: boolean;
@@ -166,8 +181,13 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   className,
   embedded = false,
   onExpandedChange,
+  draft,
+  submissionDisabled = false,
+  settingsLocked = false,
 }) => {
   const dispatch = useAppDispatch();
+  const store = useStore.withTypes<AppStore>()();
+  const submitting = React.useRef(false);
   const chatId = useThreadId();
   const isStreaming = useAppSelector((state) =>
     selectIsStreamingById(state, chatId),
@@ -194,9 +214,9 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const contextRebuildMessage = useAppSelector((state) =>
     selectContextRebuildMessageById(state, chatId),
   );
-  const isBuddyChat = useAppSelector((state) =>
-    selectIsBuddyChat(state, chatId),
-  );
+  const isBuddyChat =
+    useAppSelector((state) => selectIsBuddyChat(state, chatId)) ||
+    settingsLocked;
   const information = useAppSelector(getInformationMessage);
   const pauseReasonsWithPause = useAppSelector((state) =>
     selectThreadConfirmationById(state, chatId),
@@ -247,7 +267,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   );
 
   const isModeDisabled = useMemo(() => isStreaming, [isStreaming]);
-  const attachedFiles = useAttachedFiles();
+  const attachedFiles = useAttachedFiles(!draft);
   const attachedImages = useAppSelector((state) =>
     selectThreadImagesById(state, chatId),
   );
@@ -286,10 +306,10 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     processAndInsertTextFiles,
     setError,
     textFiles,
-    resetAllTextFiles,
   } = useAttachedImages();
   const handlePastingFile = useCallback(
     (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      if (settingsLocked) return;
       const imageFiles: File[] = [];
       const textFilesList: File[] = [];
       const items = event.clipboardData.items;
@@ -327,6 +347,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       }
     },
     [
+      settingsLocked,
       processAndInsertImages,
       processAndInsertTextFiles,
       isMultimodalitySupportedForCurrentModel,
@@ -348,10 +369,19 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     onToggleCheckbox,
     unCheckAll,
     setLineSelectionInteracted,
-  } = useCheckboxes();
+  } = useCheckboxes(!draft);
 
-  const [value, setValue, isSendImmediately, setIsSendImmediately] =
-    useInputValue(() => unCheckAll());
+  const [storedValue, setStoredValue, isSendImmediately, setIsSendImmediately] =
+    useInputValue(() => unCheckAll(), !draft);
+  const value = draft?.value ?? storedValue;
+  const setValue = useCallback(
+    (next: React.SetStateAction<string>) => {
+      if (draft)
+        draft.onChange(typeof next === "function" ? next(draft.value) : next);
+      else setStoredValue(next);
+    },
+    [draft, setStoredValue],
+  );
 
   const displayedInputValue =
     isVoiceActive && liveTranscript
@@ -366,6 +396,8 @@ export const ChatForm: React.FC<ChatFormProps> = ({
 
   const valueRef = React.useRef(value);
   valueRef.current = value;
+  const draftRef = React.useRef(draft);
+  draftRef.current = draft;
 
   const argumentPlaceholdersRef = React.useRef<string[]>([]);
 
@@ -380,6 +412,8 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       attachedFiles.addFilesToInput,
     );
 
+  const ignoreCompletion = useDebounceCallback(() => undefined, 500);
+
   const handleSubmit = useCallback(
     (sendPolicy: SendPolicy = "after_flow", inputValue = value) => {
       const trimmedValue = stripUnfilledPlaceholders(
@@ -391,8 +425,11 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       const canSubmit =
         (trimmedValue.length > 0 || hasImages || hasTextFiles) &&
         isOnline &&
-        !allDisabled &&
-        !contextRebuildRequired;
+        (settingsLocked || !allDisabled) &&
+        !contextRebuildRequired &&
+        !submissionDisabled &&
+        !submitting.current &&
+        !pauseReasonsWithPause.pause;
 
       if (canSubmit) {
         const valueWithFiles = attachedFiles.addFilesToInput(trimmedValue);
@@ -405,19 +442,39 @@ export const ChatForm: React.FC<ChatFormProps> = ({
           checkboxes,
         );
         setLineSelectionInteracted(false);
-        onSubmit(valueIncludingChecks, sendPolicy);
-        argumentPlaceholdersRef.current = [];
-        setValue("");
-        setInputResetKey((k) => k + 1);
-        unCheckAll();
-        attachedFiles.removeAll();
-        resetAllTextFiles();
-        setIsComposerExpanded(false);
+        const submitted = captureSubmittedAttachments(store, chatId);
+        const cleanup = (accepted: boolean | undefined) => {
+          if (accepted === false) return;
+          clearSubmittedAttachments(store, chatId, {
+            ...submitted,
+            images: accepted === true ? submitted.images : [],
+          });
+          attachedFiles.files.forEach(attachedFiles.removeFile);
+          if (valueRef.current !== inputValue) return;
+          argumentPlaceholdersRef.current = [];
+          if (draftRef.current) draftRef.current.onChange("");
+          else setStoredValue("");
+          setInputResetKey((k) => k + 1);
+          unCheckAll();
+          setIsComposerExpanded(false);
+        };
+        const result = onSubmit(valueIncludingChecks, sendPolicy);
+        if (result instanceof Promise) {
+          submitting.current = true;
+          void result
+            .then(cleanup, () => undefined)
+            .finally(() => {
+              submitting.current = false;
+            });
+        } else cleanup(typeof result === "boolean" ? result : undefined);
       }
     },
     [
       value,
       contextRebuildRequired,
+      submissionDisabled,
+      settingsLocked,
+      pauseReasonsWithPause.pause,
       allDisabled,
       isOnline,
       attachedImages,
@@ -425,9 +482,10 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       attachedFiles,
       checkboxes,
       setLineSelectionInteracted,
-      resetAllTextFiles,
+      store,
+      chatId,
       onSubmit,
-      setValue,
+      setStoredValue,
       unCheckAll,
     ],
   );
@@ -639,6 +697,15 @@ export const ChatForm: React.FC<ChatFormProps> = ({
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      const active = document.activeElement;
+      const root = composerRef.current;
+      if (draft && !root?.contains(active)) return;
+      if (
+        !root?.contains(active) &&
+        active instanceof Element &&
+        active.closest('[role="dialog"], form')
+      )
+        return;
       if (event.ctrlKey && event.shiftKey && event.code === "Space") {
         event.preventDefault();
         if (!disableMicrophone && microphoneRef.current) {
@@ -664,13 +731,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [disableMicrophone, focusComposerInput]);
-
-  if (pauseReasonsWithPause.pause) {
-    return (
-      <ToolConfirmation pauseReasons={pauseReasonsWithPause.pause_reasons} />
-    );
-  }
+  }, [disableMicrophone, focusComposerInput, draft]);
 
   return (
     <div
@@ -679,6 +740,9 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       onBlur={handleComposerBlur}
       onFocusCapture={handleComposerFocusCapture}
     >
+      {pauseReasonsWithPause.pause && (
+        <ToolConfirmation pauseReasons={pauseReasonsWithPause.pause_reasons} />
+      )}
       {visibleError && (
         <ErrorCallout timeout={3000} onClick={clearVisibleError} preventRetry>
           {visibleError}
@@ -766,7 +830,9 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                   key={inputResetKey}
                   onHelpClick={handleHelpCommand}
                   commands={commands}
-                  requestCommandsCompletion={requestCompletion}
+                  requestCommandsCompletion={
+                    settingsLocked ? ignoreCompletion : requestCompletion
+                  }
                   value={displayedInputValue}
                   onChange={handleChange}
                   onSubmit={(event) => {
@@ -849,14 +915,17 @@ export const ChatForm: React.FC<ChatFormProps> = ({
               {
                 id: "actions",
                 width: 340,
-                content: (
+                content: settingsLocked ? null : (
                   <div className={styles.toolbarActions}>
                     <TrajectoryButton
                       disabled={isBuddyChat}
                       onOpenChange={handleComposerMenuOpenChange}
                     />{" "}
                     <span>
-                      <BrowserToggleButton chatId={chatId} />
+                      <BrowserToggleButton
+                        chatId={chatId}
+                        disabled={isBuddyChat}
+                      />
                     </span>
                     <span>
                       <AutoEnrichmentToggleButton
@@ -901,7 +970,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                         }}
                         onLiveTranscript={handleLiveTranscript}
                         onRecordingChange={handleRecordingChange}
-                        disabled={disableMicrophone}
+                        disabled={disableMicrophone || settingsLocked}
                       />
                     </span>
                     <span>
@@ -934,9 +1003,11 @@ export const ChatForm: React.FC<ChatFormProps> = ({
             send={
               <UnifiedSendButton
                 disabled={
+                  submissionDisabled ||
+                  pauseReasonsWithPause.pause ||
                   isVoiceActive ||
                   !isOnline ||
-                  allDisabled ||
+                  (!settingsLocked && allDisabled) ||
                   contextRebuildRequired
                 }
                 isStreaming={isStreaming || isWaiting || recoveryActive}
@@ -950,7 +1021,10 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                 onSend={() => handleSubmit("after_flow")}
                 onSendImmediately={handleSendImmediately}
                 onStop={() => void abort()}
-                onResend={() => void regenerate()}
+                onResend={() => {
+                  if (!submissionDisabled && !pauseReasonsWithPause.pause)
+                    void regenerate();
+                }}
               />
             }
           />

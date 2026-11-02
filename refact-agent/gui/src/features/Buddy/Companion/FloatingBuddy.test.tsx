@@ -137,12 +137,10 @@ describe("App-root floating Buddy", () => {
       preloadedState: source.preloadedState,
     });
     await user.click(screen.getByRole("button", { name: "Ask Buddy" }));
-    const input = await screen.findByRole("textbox", {
-      name: "Ask Buddy about the selected source chat",
-    });
+    const input = await screen.findByTestId("chat-form-textarea");
     expect(creates).not.toHaveBeenCalled();
     await user.type(input, "What is happening?");
-    await user.click(screen.getByRole("button", { name: "Send to Buddy" }));
+    await user.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(creates).toHaveBeenCalledTimes(1));
     expect(input).toHaveValue("What is happening?");
   });
@@ -174,12 +172,10 @@ describe("App-root floating Buddy", () => {
     });
     await user.click(screen.getByRole("button", { name: "Ask Buddy" }));
     await user.type(
-      await screen.findByRole("textbox", {
-        name: "Ask Buddy about the selected source chat",
-      }),
+      await screen.findByTestId("chat-form-textarea"),
       "A private draft",
     );
-    await user.click(screen.getByRole("button", { name: "Send to Buddy" }));
+    await user.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(requested).toBe(source.id));
     act(() => {
       store.dispatch(
@@ -193,11 +189,7 @@ describe("App-root floating Buddy", () => {
       store.dispatch(registerVisibleChatMount({ chatId: "source-b" }));
       store.dispatch(switchToThread({ id: "source-b", openTab: false }));
     });
-    expect(
-      screen.getByRole("textbox", {
-        name: "Ask Buddy about the selected source chat",
-      }),
-    ).toHaveValue("");
+    expect(screen.getByTestId("chat-form-textarea")).toHaveValue("");
     act(() => {
       store.dispatch(updateConfig({ apiKey: "different-user" }));
     });

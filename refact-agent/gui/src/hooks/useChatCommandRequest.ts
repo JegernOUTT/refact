@@ -196,10 +196,11 @@ export function useChatCommandRequest(
     async (
       command: ChatCommandBase,
       applied: (state: RootState) => boolean,
+      clientRequestId?: string,
     ): Promise<boolean> => {
       if (!isCurrent() || active.current) return false;
       const request: Request = {
-        id: uuidv4(),
+        id: clientRequestId ?? uuidv4(),
         scope,
         sent: false,
         observing: false,
@@ -283,6 +284,7 @@ export function useChatCommandRequest(
   return {
     run,
     isCurrent,
+    hasUnresolvedRequest: () => active.current !== null,
     pending,
     blocked: pending || uncertain,
     uncertain,

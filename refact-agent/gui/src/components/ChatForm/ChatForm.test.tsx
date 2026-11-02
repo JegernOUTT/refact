@@ -210,7 +210,7 @@ server.use(...handlers);
 
 const App: React.FC<Partial<ChatFormProps>> = ({ ...props }) => {
   const defaultProps: ChatFormProps = {
-    onSubmit: (_str: string) => ({}),
+    onSubmit: (_str: string) => undefined,
     ...props,
   };
 
@@ -218,8 +218,111 @@ const App: React.FC<Partial<ChatFormProps>> = ({ ...props }) => {
 };
 
 describe("ChatForm", () => {
+  test.each([undefined, true])(
+    "only clears images explicitly accepted by a synchronous submitter (%s)",
+    async (accepted) => {
+      const chat = chatStateWithThread({ model: "openai/gpt-4o" });
+      const id = chat.current_thread_id;
+      const image = {
+        name: "retry.png",
+        type: "image/png",
+        content: "data:image/png;base64,aGVsbG8=",
+      };
+      chat.threads[id].attached_images = [image];
+      const onSubmit = vi.fn(() => accepted);
+      const { user, store } = render(<App onSubmit={onSubmit} />, {
+        preloadedState: { chat, ...engineConfigState },
+      });
+      await waitFor(() =>
+        expect(screen.getByLabelText("Send message")).toBeEnabled(),
+      );
+      await user.click(screen.getByLabelText("Send message"));
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+      expect(store.getState().chat.threads[id]?.attached_images).toEqual(
+        accepted ? [] : [image],
+      );
+    },
+  );
+
+  test("confirmed async sends remove submitted text attachments before the second send", async () => {
+    let confirm: (value: boolean) => void = () => undefined;
+    const onSubmit = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          confirm = resolve;
+        }),
+    );
+    const { user, store } = render(<App onSubmit={onSubmit} />, {
+      preloadedState: {
+        chat: chatStateWithThread({ model: "openai/gpt-4o" }),
+        ...engineConfigState,
+      },
+    });
+    const textarea =
+      screen.getByTestId<HTMLTextAreaElement>("chat-form-textarea");
+    pasteFile(
+      textarea,
+      new File(["secret attachment"], "notes.md", { type: "text/markdown" }),
+    );
+    await waitFor(() =>
+      expect(
+        store.getState().chat.threads[store.getState().chat.current_thread_id]
+          ?.attached_text_files,
+      ).toHaveLength(1),
+    );
+    await user.type(textarea, "first{Enter}");
+    await user.clear(textarea);
+    await user.type(textarea, "newer draft");
+    confirm(true);
+    await waitFor(() =>
+      expect(
+        store.getState().chat.threads[store.getState().chat.current_thread_id]
+          ?.attached_text_files,
+      ).toHaveLength(0),
+    );
+    expect(textarea).toHaveValue("newer draft");
+    await user.keyboard("{Enter}");
+    expect(onSubmit).toHaveBeenLastCalledWith("newer draft\n", "after_flow");
+  });
+
   beforeEach(() => {
     server.use(...handlers);
+  });
+
+  test("confirmation keeps the composer editable without approving or submitting", async () => {
+    const onSubmit = vi.fn();
+    const command = vi.fn();
+    server.use(
+      http.post("*/v1/chats/:id/commands", async ({ request }) => {
+        command(await request.json());
+        return HttpResponse.json({ status: "queued" });
+      }),
+    );
+    const chat = chatStateWithThread({ model: "openai/gpt-4o" });
+    chat.threads[chat.current_thread_id].confirmation = {
+      pause: true,
+      pause_reasons: [
+        {
+          tool_call_id: "shell-1",
+          tool_name: "shell",
+          type: "confirmation",
+          command: "echo hello",
+          rule: "confirm",
+          integr_config_path: null,
+        },
+      ],
+      status: { wasInteracted: false, confirmationStatus: true },
+    };
+    const { user } = render(<App onSubmit={onSubmit} />, {
+      preloadedState: { chat, ...engineConfigState },
+    });
+    expect(screen.getByRole("button", { name: "Confirm" })).toBeEnabled();
+    const textarea = screen.getByTestId("chat-form-textarea");
+    await user.type(textarea, "draft while paused{Enter}");
+    expect(textarea).toHaveValue("draft while paused");
+    expect(screen.getByLabelText("Send message")).toBeDisabled();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(command).not.toHaveBeenCalled();
   });
 
   test("when I push enter it should call onSubmit", async () => {

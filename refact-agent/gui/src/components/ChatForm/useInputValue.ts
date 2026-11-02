@@ -11,6 +11,7 @@ import { isHostMessage } from "../../utils/isHostMessage";
 
 export function useInputValue(
   uncheckCheckboxes: () => void,
+  enabled = true,
 ): [
   string,
   React.Dispatch<React.SetStateAction<string>>,
@@ -40,7 +41,7 @@ export function useInputValue(
     [setUpIfNotReady, uncheckCheckboxes],
   );
 
-  const { value, setValue } = useDraftMessage(handleQueuedMessageEdit);
+  const { value, setValue } = useDraftMessage(handleQueuedMessageEdit, enabled);
 
   const handleEvent = useCallback(
     (event: MessageEvent) => {
@@ -104,10 +105,11 @@ export function useInputValue(
   );
 
   useEffect(() => {
+    if (!enabled) return;
     window.addEventListener("message", handleEvent);
 
     return () => window.removeEventListener("message", handleEvent);
-  }, [handleEvent]);
+  }, [handleEvent, enabled]);
 
   return [value, setValue, isSendImmediately, setIsSendImmediately];
 }

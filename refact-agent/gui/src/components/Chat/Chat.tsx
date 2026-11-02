@@ -43,6 +43,11 @@ import { ChatActivityStatus } from "../ChatActivity/ChatActivityStatus";
 import { useBottomDockClearance } from "./useBottomDockClearance";
 
 export type ChatProps = {
+  embedded?: boolean;
+  composer?: Pick<
+    ChatFormProps,
+    "draft" | "submissionDisabled" | "settingsLocked" | "onSubmit"
+  >;
   host: Config["host"];
   tabbed: Config["tabbed"];
   backFromChat: () => void;
@@ -55,6 +60,8 @@ export const Chat: React.FC<ChatProps> = ({
   style,
   unCalledTools,
   maybeSendToSidebar,
+  embedded = false,
+  composer,
 }) => {
   const dispatch = useAppDispatch();
 
@@ -88,6 +95,7 @@ export const Chat: React.FC<ChatProps> = ({
     panelsForced,
   );
   const showTerminalWorkbench =
+    !embedded &&
     workspaceAvailability.terminal &&
     (!workspaceAvailability.dock || workspaceDock.open);
 
@@ -225,6 +233,7 @@ export const Chat: React.FC<ChatProps> = ({
                     key={chatId}
                     embedded
                     onSubmit={handleSubmit}
+                    {...composer}
                     onClose={maybeSendToSidebar}
                   />
                 </div>

@@ -35,7 +35,7 @@ const messageLengthSelector = createSelector(
 
 // TODO: add ide event here.
 
-export function useAttachedFiles() {
+export function useAttachedFiles(enabled = true) {
   const [files, setFiles] = useState<FileInfo[]>([]);
   const [interacted, setInteracted] = useState<boolean>(false);
   const activeFile = useAppSelector(selectActiveFile);
@@ -80,6 +80,7 @@ export function useAttachedFiles() {
   }, []);
 
   useEffect(() => {
+    if (!enabled) return;
     if (interacted) return;
     if (!activeFile.name) return;
     if (attached) return;
@@ -88,9 +89,10 @@ export function useAttachedFiles() {
       return [activeFile];
     });
     setInteracted(true);
-  }, [activeFile, attached, interacted, snippet.code]);
+  }, [activeFile, attached, interacted, snippet.code, enabled]);
 
   useEffect(() => {
+    if (!enabled) return;
     const handleIdeAttachFile = (filePath: string) => {
       const fileInfo: FileInfo = {
         name: filename(filePath),
@@ -118,7 +120,7 @@ export function useAttachedFiles() {
     return () => {
       window.removeEventListener("message", listener);
     };
-  }, []);
+  }, [enabled]);
 
   return {
     files,
@@ -134,6 +136,7 @@ export function useAttachedFiles() {
 
 const useAttachSelectedSnippet = (
   interacted: boolean,
+  enabled: boolean,
 ): [Checkbox, () => void] => {
   const { host } = useConfig();
   const chatId = useThreadId();
@@ -157,11 +160,11 @@ const useAttachSelectedSnippet = (
   const [attachedSelectedSnippet, setAttachedSelectedSnippet] =
     useState<Checkbox>({
       name: "selected_lines",
-      checked: !!snippet.code && messageLength === 0,
+      checked: enabled && !!snippet.code && messageLength === 0,
       label: label,
       value: markdown,
-      disabled: !snippet.code,
-      hide: host === "web" || codeLineCount === 0,
+      disabled: !enabled || !snippet.code,
+      hide: !enabled || host === "web" || codeLineCount === 0,
       info: {
         text: "Adds the currently selected lines as a snippet for analysis or modification. Equivalent to code in triple backticks ``` in the text.",
       },
@@ -175,9 +178,9 @@ const useAttachSelectedSnippet = (
           ...prev,
           label: label,
           value: markdown,
-          disabled: !snippet.code,
-          hide: host === "web" || codeLineCount === 0,
-          checked: !!snippet.code && !interacted,
+          disabled: !enabled || !snippet.code,
+          hide: !enabled || host === "web" || codeLineCount === 0,
+          checked: enabled && !!snippet.code && !interacted,
           locked: interacted ? prev.locked : false,
         };
       });
@@ -190,6 +193,7 @@ const useAttachSelectedSnippet = (
     interacted,
     attachedSelectedSnippet.checked,
     codeLineCount,
+    enabled,
   ]);
 
   const onToggleAttachedSelectedSnippet = useCallback(() => {
@@ -222,12 +226,12 @@ export type Checkboxes = {
   selected_lines: Checkbox;
 };
 
-export const useCheckboxes = () => {
+export const useCheckboxes = (enabled = true) => {
   // creating different states instead of only one being used for checkboxes
   const [lineSelectionInteracted, setLineSelectionInteracted] = useState(false);
 
   const [attachedSelectedSnippet, onToggleAttachedSelectedSnippet] =
-    useAttachSelectedSnippet(lineSelectionInteracted);
+    useAttachSelectedSnippet(lineSelectionInteracted, enabled);
 
   const checkboxes = useMemo(
     () => ({
