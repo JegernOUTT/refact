@@ -21,6 +21,7 @@ import {
 } from "../workspaceSlice";
 import { makeSurfaceKey } from "../surfaceKey";
 import { ActivityRail } from "./ActivityRail";
+import styles from "./ActivityRail.module.css";
 
 const chatId = "chat-a";
 
@@ -352,7 +353,46 @@ describe("ActivityRail", () => {
     });
   });
 
-  it("keeps rail badges out of the accessibility tree", async () => {
+  it("caps huge git badges while exposing the exact count accessibly and in the tooltip", async () => {
+    server.use(
+      http.get("*/v1/git/status", () =>
+        HttpResponse.json({
+          roots: [
+            {
+              root: "/repo",
+              branch: "main",
+              head_detached: false,
+              ahead: 0,
+              behind: 0,
+              staged: [],
+              unstaged: [],
+              untracked_included: true,
+              changes: [],
+              untracked: Array.from({ length: 10_000 }, (_, index) => ({
+                relative_path: `file-${index}`,
+                absolute_path: `/repo/file-${index}`,
+              })),
+            },
+          ],
+        }),
+      ),
+    );
+    const store = createRailStore();
+    store.dispatch(setPanelsForced(true));
+    const view = renderRail(store);
+    const button = screen.getByRole("button", { name: "Git" });
+    await waitFor(() =>
+      expect(button).toHaveAccessibleDescription("10000 changed files"),
+    );
+    const slot = button.closest("div");
+    expect(slot?.querySelector(`.${styles.badge}`)).toHaveTextContent("99+");
+    await view.user.hover(button);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "10000 changed files",
+    );
+  });
+
+  it("keeps visual badges hidden but describes the exact count on the button", async () => {
     const store = createRailStore([agent("agent-1")]);
     renderRail(store);
 
@@ -367,5 +407,8 @@ describe("ActivityRail", () => {
     expect(screen.getByRole("button", { name: "Agents" })).toHaveAccessibleName(
       "Agents",
     );
+    expect(
+      screen.getByRole("button", { name: "Agents" }),
+    ).toHaveAccessibleDescription("1 active agent");
   });
 });

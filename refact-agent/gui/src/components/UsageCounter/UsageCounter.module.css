@@ -36,7 +36,10 @@
 }
 
 .providerIndicatorTrigger {
-  cursor: default;
+  display: inline-flex;
+  flex: 0 0 auto;
+  max-width: 88px;
+  cursor: pointer;
   padding: 0;
   color: var(--rf-color-muted);
   background: transparent;
@@ -97,4 +100,18 @@
   --base-card-surface-box-shadow: 0 0 0 1px var(--rf-color-danger);
   --base-card-surface-hover-box-shadow: 0 0 0 1px var(--rf-color-danger);
   --base-card-surface-active-box-shadow: 0 0 0 1px var(--rf-color-danger);
+}
+
+.providerCompactLabel {
+  white-space: nowrap;
+  font-size: var(--rf-text-1);
+}
+
+.providerIndicatorTrigger:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
+.providerDetailsName {
+  overflow-wrap: anywhere;
 }

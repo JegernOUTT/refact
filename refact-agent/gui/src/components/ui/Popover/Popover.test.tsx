@@ -65,4 +65,20 @@ describe("Popover", () => {
       screen.getByText("Popover content"),
     );
   });
+
+  it("restores the original trigger after closing the responsive sheet", async () => {
+    const { user } = render(
+      <Popover forceSheet>
+        <Popover.Trigger>Choose scope</Popover.Trigger>
+        <Popover.Content>
+          <button type="button">Sheet option</button>
+        </Popover.Content>
+      </Popover>,
+    );
+    const trigger = screen.getByRole("button", { name: "Choose scope" });
+    await user.click(trigger);
+    await user.click(screen.getByRole("button", { name: "Sheet option" }));
+    await user.keyboard("{Escape}");
+    expect(trigger).toHaveFocus();
+  });
 });

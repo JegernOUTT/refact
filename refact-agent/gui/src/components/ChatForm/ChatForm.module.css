@@ -137,48 +137,6 @@
   mask-image: linear-gradient(to bottom, black 70%, transparent 100%);
 }
 
-.actionControlsSwap {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  min-width: 0;
-}
-
-.controlsSwapItem {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: var(--rf-space-2);
-  min-width: 0;
-  max-width: 340px;
-  overflow: hidden;
-  /* At max-width: 0 the hidden set's text would wrap char-by-char into a
-     tall vertical stack and stretch the controls row; keep it one line. */
-  white-space: nowrap;
-  transition:
-    max-width var(--rf-dur-med) var(--rf-ease-standard),
-    opacity var(--rf-dur-med) var(--rf-ease-standard),
-    visibility 0s linear;
-}
-
-:where(.controlsSwapItem > span) {
-  display: inline-flex;
-  min-width: 0;
-  flex-shrink: 0;
-}
-
-.chatFormCollapsed .expandedActionsSet,
-.chatFormExpanded .collapsedStatusSet {
-  max-width: 0;
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-  transition:
-    max-width var(--rf-dur-med) var(--rf-ease-standard),
-    opacity var(--rf-dur-fast) var(--rf-ease-standard),
-    visibility 0s linear var(--rf-dur-med);
-}
-
 .inputHeader {
   display: flex;
   flex-direction: column;
@@ -267,60 +225,23 @@
   justify-content: end;
 }
 
-.topControlsRow,
-.bottomControlsRow {
-  container-type: inline-size;
-}
-
-.topStatusControls,
-.bottomActionControls {
+.topControlsRow {
   min-width: 0;
-}
-
-.bottomActionControls {
-  flex: 0 1 auto;
   flex-wrap: wrap;
-  max-width: max-content;
-  margin-left: auto;
 }
 
-:where(
-    .topStatusControls > span,
-    .bottomActionControls > span,
-    .bottomModelControl,
-    .bottomModeControl,
-    .bottomWorkspaceControl
-  ) {
-  display: inline-flex;
+.toolbarActions {
+  display: flex;
   min-width: 0;
-}
-
-:where(.topStatusControls > span, .bottomActionControls > span) {
-  flex-shrink: 0;
-}
-
-.bottomControlsRow {
-  overflow: hidden;
-  transition: padding var(--rf-dur-fast) var(--rf-ease-standard);
-}
-
-.chatFormCollapsed .bottomControlsRow {
-  padding-top: var(--rf-space-1);
-  padding-bottom: var(--rf-space-1);
-}
-
-.bottomModelControl,
-.bottomModeControl,
-.bottomWorkspaceControl {
-  flex: 0 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-2);
 }
 
 @media (prefers-reduced-motion: reduce) {
   .chatFormMain,
   .chatForm__form,
-  .expandedComposerContentInner,
-  .bottomControlsRow,
-  .controlsSwapItem {
+  .expandedComposerContentInner {
     transition: none;
   }
 
@@ -329,68 +250,7 @@
   }
 }
 
-@container (max-width: 520px) {
-  .hideTopTokensFirst,
-  .hideActionFirst {
-    display: none;
-  }
-}
-
-@container (max-width: 480px) {
-  .hideActionSecond {
-    display: none;
-  }
-}
-
-@container (max-width: 440px) {
-  .hideActionThird {
-    display: none;
-  }
-}
-
-@container (max-width: 400px) {
-  .hideActionFourth {
-    display: none;
-  }
-}
-
-@container (max-width: 360px) {
-  .bottomModelControl,
-  .hideActionFifth {
-    display: none;
-  }
-}
-
-@container (max-width: 320px) {
-  .bottomWorkspaceControl,
-  .hideActionSixth,
-  .hideActionSeventh {
-    display: none;
-  }
-}
-
-@container (max-width: 260px) {
-  .hideTopCompressLast {
-    display: none;
-  }
-}
-
-@container (max-width: 500px) {
-  .chatFormCollapsed .bottomModelControl {
-    display: none;
-  }
-}
-
-@container (max-width: 440px) {
-  .chatFormCollapsed .bottomWorkspaceControl,
-  .hideCollapsedStatusFirst {
-    display: none;
-  }
-}
-
-@container (max-width: 380px) {
-  .chatFormCollapsed .bottomModeControl,
-  .hideCollapsedStatusSecond {
-    display: none;
-  }
+.toolbarActions > span {
+  display: inline-flex;
+  flex: 0 0 auto;
 }

@@ -49,6 +49,20 @@
   top: 0;
   right: 0;
   pointer-events: none;
+  padding-inline: var(--rf-space-2xs);
+  white-space: nowrap;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 @media (prefers-reduced-motion: no-preference) {

@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 
 import type {
   ProviderListItem,
@@ -94,6 +94,26 @@ function renderIndicator(
 }
 
 describe("ProviderUsageIndicator", () => {
+  it("keeps a long provider name out of the compact trigger while exposing keyboard details", async () => {
+    const name = "Enterprise provider ".repeat(20);
+    render(
+      <ProviderUsageIndicatorContent
+        displayName={name}
+        providerName="enterprise"
+        quotaQuery={{ isError: false, isLoading: false }}
+      />,
+    );
+    const trigger = screen.getByRole("button", {
+      name: `${name}: Quota unavailable`,
+    });
+    expect(trigger).toHaveTextContent("Quota");
+    expect(trigger).not.toHaveTextContent(name);
+    trigger.focus();
+    fireEvent.click(trigger);
+    expect(await screen.findByText(name.trim())).toBeInTheDocument();
+    expect(screen.getByText("Provider instance")).toBeInTheDocument();
+  });
+
   it("resolves the selected model to its exact configured provider", () => {
     expect(resolveSelectedProvider("account-b/model-x", providers)).toEqual(
       providers[1],

@@ -87,7 +87,7 @@ const CircularProgress: React.FC<CircularProgressProps> = ({
   );
 };
 
-type UsageCounterProps =
+type UsageCounterProps = { onOpenChange?: (open: boolean) => void } & (
   | {
       isInline?: boolean;
       isMessageEmpty?: boolean;
@@ -95,7 +95,8 @@ type UsageCounterProps =
   | {
       isInline: true;
       isMessageEmpty: boolean;
-    };
+    }
+);
 
 const TokenDisplay: React.FC<{ label: string; value: number }> = ({
   label,
@@ -266,6 +267,7 @@ const DefaultHoverTriggerContent: React.FC<{
   usdCacheRead?: number;
   usdCacheCreation?: number;
   tokenMap?: import("../../services/refact/chat").TokenMap | null;
+  onOpenChange?: (open: boolean) => void;
 }> = ({
   currentSessionTokens,
   maxContextTokens,
@@ -279,6 +281,7 @@ const DefaultHoverTriggerContent: React.FC<{
   usdCacheRead,
   usdCacheCreation,
   tokenMap,
+  onOpenChange,
 }) => {
   const hasUsd = totalUsd !== undefined && totalUsd > 0;
   const showUsd = hasUsd;
@@ -305,19 +308,25 @@ const DefaultHoverTriggerContent: React.FC<{
           </HoverCard.Content>
         </HoverCard.Root>
       )}
-      <Popover.Root>
+      <Popover.Root onOpenChange={onOpenChange}>
         <Popover.Trigger asChild>
-          <Flex align="center" gap="1" style={{ cursor: "pointer" }}>
-            <CircularProgress
-              value={maxContextTokens > 0 ? currentSessionTokens : 0}
-              max={maxContextTokens > 0 ? maxContextTokens : 1}
-              size={18}
-              strokeWidth={2.5}
-            />
-            <Text size="1" color="gray">
-              {formatNumberToFixed(currentSessionTokens)}
-            </Text>
-          </Flex>
+          <button
+            type="button"
+            className={styles.providerIndicatorTrigger}
+            aria-label="Context usage details"
+          >
+            <Flex align="center" gap="1">
+              <CircularProgress
+                value={maxContextTokens > 0 ? currentSessionTokens : 0}
+                max={maxContextTokens > 0 ? maxContextTokens : 1}
+                size={18}
+                strokeWidth={2.5}
+              />
+              <Text size="1" color="gray">
+                {formatNumberToFixed(currentSessionTokens)}
+              </Text>
+            </Flex>
+          </button>
         </Popover.Trigger>
         <Popover.Content
           size="1"
@@ -359,6 +368,7 @@ const DefaultHoverTriggerContent: React.FC<{
 export const UsageCounter: React.FC<UsageCounterProps> = ({
   isInline = false,
   isMessageEmpty,
+  onOpenChange,
 }) => {
   const [open, setOpen] = useState(false);
   const chatId = useThreadId();
@@ -485,6 +495,7 @@ export const UsageCounter: React.FC<UsageCounterProps> = ({
           usdCacheRead={usdCost?.cache_read_usd}
           usdCacheCreation={usdCost?.cache_creation_usd}
           tokenMap={tokenMap}
+          onOpenChange={onOpenChange}
         />
       </Flex>
     );

@@ -20,6 +20,7 @@ export interface SheetContentProps extends ModalOverlayContentProps {
   side?: SheetSide;
   scrollable?: boolean;
   style?: React.CSSProperties;
+  onCloseAutoFocus?: DialogPrimitive.DialogContentProps["onCloseAutoFocus"];
 }
 export type SheetTitleProps = DialogPrimitive.DialogTitleProps;
 export type SheetDescriptionProps = DialogPrimitive.DialogDescriptionProps;
@@ -40,6 +41,7 @@ const SheetContent = React.forwardRef<HTMLDivElement, SheetContentProps>(
       scrollable = true,
       side = "bottom",
       style,
+      onCloseAutoFocus,
       children,
     },
     ref,
@@ -60,6 +62,7 @@ const SheetContent = React.forwardRef<HTMLDivElement, SheetContentProps>(
               className,
             )}
             style={{ ...overlayStyle(maxWidth, maxHeight), ...style }}
+            onCloseAutoFocus={onCloseAutoFocus}
           >
             <ModalOverlayProvider value>
               <div

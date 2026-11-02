@@ -1,6 +1,6 @@
 import React, { useMemo } from "react";
-import { Flex, HoverCard, ScrollArea, Text } from "../LongTailPrimitives";
-import { ProviderQuota, type ProviderQuotaTone } from "../ui";
+import { Flex, Text } from "../LongTailPrimitives";
+import { Popover, ProviderQuota, type ProviderQuotaTone } from "../ui";
 import {
   type ProviderQuotaFact,
   type ProviderQuotaSnapshot,
@@ -197,7 +197,8 @@ export const ProviderUsageIndicatorContent: React.FC<{
   displayName: string;
   providerName: string;
   quotaQuery: ProviderQuotaIndicatorQuery;
-}> = ({ displayName, providerName, quotaQuery }) => {
+  onOpenChange?: (open: boolean) => void;
+}> = ({ displayName, providerName, quotaQuery, onOpenChange }) => {
   const snapshot = quotaQuery.data?.quota;
   const percent = snapshotPercent(snapshot);
   const stateLabel = quotaQuery.isLoading
@@ -215,8 +216,8 @@ export const ProviderUsageIndicatorContent: React.FC<{
               : "Quota unavailable";
 
   return (
-    <HoverCard.Root openDelay={100}>
-      <HoverCard.Trigger asChild>
+    <Popover responsive={false} onOpenChange={onOpenChange}>
+      <Popover.Trigger asChild>
         <button
           aria-label={`${displayName}: ${stateLabel}`}
           className={styles.providerIndicatorTrigger}
@@ -224,59 +225,50 @@ export const ProviderUsageIndicatorContent: React.FC<{
         >
           <Flex align="center" gap="1">
             <CircularUsage pct={percent} />
-            <Text color="gray" size="1">
-              {displayName}
-            </Text>
+            <span className={styles.providerCompactLabel}>
+              {percent == null ? "Quota" : `${Math.round(percent)}%`}
+            </span>
           </Flex>
         </button>
-      </HoverCard.Trigger>
-      <ScrollArea scrollbars="vertical" asChild>
-        <HoverCard.Content
-          align="end"
-          maxHeight="50vh"
-          maxWidth="280px"
-          side="top"
-        >
-          <Flex direction="column" gap="2">
-            <Text size="1" weight="bold">
-              {displayName}
-            </Text>
-            {quotaQuery.isLoading ? (
-              <ProviderQuota
-                label="Quota status"
-                tone="muted"
-                value="Loading…"
-              />
-            ) : quotaQuery.isError ? (
-              <ProviderQuota
-                label="Quota status"
-                meta="Could not load provider quota"
-                tone="danger"
-                value="Error"
-              />
-            ) : snapshot ? (
-              <SnapshotRows snapshot={snapshot} />
-            ) : (
-              <ProviderQuota
-                label="Quota status"
-                meta="The provider returned no snapshot"
-                tone="muted"
-                value="Unavailable"
-              />
-            )}
+      </Popover.Trigger>
+      <Popover.Content align="end" maxHeight="50vh" maxWidth="280px" side="top">
+        <Flex direction="column" gap="2">
+          <Text size="1" weight="bold" className={styles.providerDetailsName}>
+            {displayName}
+          </Text>
+          {quotaQuery.isLoading ? (
+            <ProviderQuota label="Quota status" tone="muted" value="Loading…" />
+          ) : quotaQuery.isError ? (
             <ProviderQuota
-              label="Provider instance"
-              tone="muted"
-              value={providerName}
+              label="Quota status"
+              meta="Could not load provider quota"
+              tone="danger"
+              value="Error"
             />
-          </Flex>
-        </HoverCard.Content>
-      </ScrollArea>
-    </HoverCard.Root>
+          ) : snapshot ? (
+            <SnapshotRows snapshot={snapshot} />
+          ) : (
+            <ProviderQuota
+              label="Quota status"
+              meta="The provider returned no snapshot"
+              tone="muted"
+              value="Unavailable"
+            />
+          )}
+          <ProviderQuota
+            label="Provider instance"
+            tone="muted"
+            value={providerName}
+          />
+        </Flex>
+      </Popover.Content>
+    </Popover>
   );
 };
 
-export const ProviderUsageIndicator: React.FC = () => {
+export const ProviderUsageIndicator: React.FC<{
+  onOpenChange?: (open: boolean) => void;
+}> = ({ onOpenChange }) => {
   const { currentModel } = useCapsForToolUse();
   const { data: providersData } = useGetConfiguredProvidersQuery();
   const selectedProvider = useMemo(
@@ -295,6 +287,7 @@ export const ProviderUsageIndicator: React.FC = () => {
       displayName={selectedProvider.display_name}
       providerName={selectedProvider.name}
       quotaQuery={quotaQuery}
+      onOpenChange={onOpenChange}
     />
   );
 };

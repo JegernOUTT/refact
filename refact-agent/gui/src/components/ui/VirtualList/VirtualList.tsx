@@ -14,6 +14,7 @@ export interface VirtualListProps<T>
   footer?: React.ReactNode;
   emptyMessage?: React.ReactNode;
   height?: string | number;
+  density?: "default" | "compact";
   listRef?: React.Ref<VirtuosoHandle>;
   onListScroll?: React.UIEventHandler<HTMLDivElement>;
   onListWheel?: React.WheelEventHandler<HTMLDivElement>;
@@ -23,6 +24,7 @@ export type VirtualListHandle = VirtuosoHandle;
 
 export function VirtualList<T>({
   className,
+  density = "default",
   emptyMessage = "No items yet",
   footer,
   getItemKey,
@@ -56,7 +58,13 @@ export function VirtualList<T>({
           components={components}
           data={items}
           itemContent={(index, item) => (
-            <div className={classNames(styles.item, index < 12 && "rf-enter")}>
+            <div
+              className={classNames(
+                styles.item,
+                density === "compact" && styles.compactItem,
+                index < 12 && "rf-enter",
+              )}
+            >
               {renderItem(item, index)}
             </div>
           )}

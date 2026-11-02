@@ -31,7 +31,28 @@ vi.mock("../../hooks/useChatCommandRequest", () => ({
     uncertain: false,
   }),
 }));
-vi.mock("../Chat/ModelSelector", () => ({ ModelSelector: () => null }));
+vi.mock("../Chat/ModelSelector", () => ({
+  ModelSelector: ({
+    value,
+    onValueChange,
+    allowUnset,
+    unsetLabel,
+  }: {
+    value: string;
+    onValueChange: (value: string) => void;
+    allowUnset?: boolean;
+    unsetLabel?: string;
+  }) => (
+    <select
+      aria-label="Retry model"
+      value={value}
+      onChange={(event) => onValueChange(event.target.value)}
+    >
+      {allowUnset && <option value="">{unsetLabel}</option>}
+      <option value="other-model">Other model</option>
+    </select>
+  ),
+}));
 const recovery: RecoveryRecord = {
   operation_id: "op",
   run_id: "run",
@@ -57,6 +78,82 @@ const recovery: RecoveryRecord = {
   attempts: [],
 };
 describe("RecoveryCard", () => {
+  it("keeps the original model until an explicit model choice is made", () => {
+    mocks.goal = null;
+    mocks.run.mockReset();
+    render(
+      <RecoveryCard
+        chatId="chat"
+        recovery={{ ...recovery, state: "needs_action" }}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Retry options" }));
+    expect(screen.getByRole("combobox", { name: "Retry model" })).toHaveValue(
+      "",
+    );
+    expect(
+      screen.getByRole("option", { name: "Keep original model" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(mocks.run.mock.lastCall?.[0] as unknown).not.toHaveProperty("model");
+    fireEvent.change(screen.getByRole("combobox", { name: "Retry model" }), {
+      target: { value: "other-model" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Retry with other-model" }),
+    );
+    expect(mocks.run).toHaveBeenLastCalledWith(
+      expect.objectContaining({ model: "other-model" }),
+      expect.any(Function),
+    );
+  });
+
+  it("retains diagnostic text and original-request history after success with correct plural labels", () => {
+    mocks.goal = null;
+    const raw = `https://provider.invalid/${"x".repeat(
+      497,
+    )}\nsecond diagnostic line`;
+    const view = render(
+      <RecoveryCard
+        chatId="chat"
+        recovery={{
+          ...recovery,
+          state: "succeeded",
+          retries_used: 1,
+          latest_error: { ...recovery.latest_error, raw_error: raw },
+          attempts: [
+            {
+              at_ms: 1,
+              retry_number: 0,
+              outcome: "network_failure",
+              error: recovery.latest_error,
+            },
+            { at_ms: 2, retry_number: 1, outcome: "succeeded" },
+          ],
+        }}
+      />,
+    );
+    const summary = screen.getByText("Recovered after 1 new request");
+    fireEvent.click(summary);
+    expect(
+      screen.getByText("Original request: Network failure"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Retry 1: Succeeded")).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Recovery diagnostics" }).textContent,
+    ).toContain(raw);
+    expect(screen.queryByText(/Retry 0/)).not.toBeInTheDocument();
+    view.rerender(
+      <RecoveryCard
+        chatId="chat"
+        recovery={{ ...recovery, state: "succeeded", retries_used: 2 }}
+      />,
+    );
+    expect(
+      screen.getByText("Recovered after 2 new requests"),
+    ).toBeInTheDocument();
+  });
+
   it("keeps Stop available during waiting and respects mandatory cooldown", () => {
     mocks.goal = null;
     mocks.abort.mockResolvedValue(undefined);

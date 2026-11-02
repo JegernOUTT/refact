@@ -1,0 +1,29 @@
+.page {
+  min-width: 0;
+  min-height: 100dvh;
+  padding: var(--rf-space-3);
+}
+
+.git {
+  display: flex;
+  min-width: 0;
+  height: 100dvh;
+}
+
+.gitPanel {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+}
+
+.dock {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+}
+
+.outside {
+  margin-top: var(--rf-space-6);
+}

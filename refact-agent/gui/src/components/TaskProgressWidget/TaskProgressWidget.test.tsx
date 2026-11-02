@@ -306,6 +306,86 @@ describe("TaskProgressWidget goal projection", () => {
     expect(screen.getByText("Asked for progress")).toBeInTheDocument();
   });
 
+  test("large goals keep one control set before content and expose full reading", async () => {
+    const content = "Long goal body ".repeat(200);
+    const { user, container } = renderWidget(
+      makeRuntime({
+        goal: makeGoal({ content }),
+        expanded: true,
+        goalExpanded: true,
+      }),
+    );
+    const pause = screen.getByRole("button", { name: "Pause" });
+    expect(screen.getAllByRole("button", { name: "Pause" })).toHaveLength(1);
+    expect(container.querySelector("button button")).toBeNull();
+    const reading = container.querySelector('[class*="readingRegion"]');
+    if (!reading) throw new Error("Missing bounded goal reading region");
+    expect(
+      pause.compareDocumentPosition(reading) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    await user.click(
+      screen.getByRole("button", { name: "Open full goal and plan" }),
+    );
+    expect(
+      screen.getByRole("dialog", { name: "Full goal and plan" }),
+    ).toHaveTextContent("Long goal body");
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
+  });
+
+  test("expanded editor moves the same draft without duplicate inputs or replacement commands", async () => {
+    const commands = captureCommands();
+    const { user } = renderWidget(
+      makeRuntime({ goal: makeGoal(), expanded: true, goalExpanded: true }),
+    );
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.clear(screen.getByLabelText("Goal text"));
+    await user.type(
+      screen.getByLabelText("Goal text"),
+      "Append this direction",
+    );
+    await user.click(screen.getByRole("button", { name: "Expand editor" }));
+    expect(screen.getAllByLabelText("Goal text")).toHaveLength(1);
+    expect(screen.getByLabelText("Goal text")).toHaveValue(
+      "Append this direction",
+    );
+    await user.type(screen.getByLabelText("Goal text"), " with evidence");
+    await user.click(screen.getByRole("button", { name: "Return to goal" }));
+    expect(screen.getByLabelText("Goal text")).toHaveValue(
+      "Append this direction with evidence",
+    );
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(commands).toHaveLength(1));
+    expect(commands[0]).toMatchObject({
+      type: "update_goal",
+      note: "Append this direction with evidence",
+    });
+    expect(commands[0]).not.toHaveProperty("content");
+  });
+
+  test("many tasks use a compact count and retain every full task in the expanded list", async () => {
+    const tasks = Array.from(
+      { length: 40 },
+      (_, index): TodoItem => ({
+        id: String(index),
+        content: `Full task ${index} with lengthy explanatory text`,
+        status: index === 0 ? "in_progress" : "pending",
+      }),
+    );
+    const { user, container } = renderWidget(
+      makeRuntime({ goal: makeGoal(), messages: taskMessages(tasks) }),
+    );
+    expect(
+      screen.getByLabelText("0 of 40 tasks completed"),
+    ).toBeInTheDocument();
+    expect(
+      container.querySelector('[class*="taskDots"]')?.childElementCount,
+    ).toBe(0);
+    await user.click(screen.getByRole("button", { name: /Goal set/ }));
+    for (const task of tasks)
+      expect(screen.getByText(task.content)).toBeInTheDocument();
+  });
+
   test("emphasizes only saturated budget segments", () => {
     renderWidget(
       makeRuntime({

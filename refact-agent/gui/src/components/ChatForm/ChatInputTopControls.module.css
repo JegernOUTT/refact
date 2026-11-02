@@ -32,9 +32,3 @@
   gap: var(--rf-space-1);
   height: var(--rf-control-h-sm);
 }
-
-@container (max-width: 340px) {
-  .projectInfoControl {
-    display: none;
-  }
-}

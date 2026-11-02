@@ -164,7 +164,11 @@ function ChangesRow({
             if (event.detail > 1) event.preventDefault();
           }}
           role="treeitem"
-          title={renamedHint ?? nodePathLabel(node)}
+          title={
+            renamedHint
+              ? `${nodePathLabel(node)} (${renamedHint})`
+              : nodePathLabel(node)
+          }
         >
           <span aria-hidden="true" className={styles.indentation}>
             {Array.from({ length: depth }, (_, index) => (
@@ -419,6 +423,7 @@ export function ChangesTree({
       {virtualized ? (
         <VirtualList
           className={styles.virtualTree}
+          density="compact"
           getItemKey={(row) => row.node.id}
           height="100%"
           items={rows}

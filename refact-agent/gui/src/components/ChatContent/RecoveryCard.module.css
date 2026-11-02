@@ -1,0 +1,95 @@
+.card {
+  display: block;
+  min-width: 0;
+  padding-block: var(--rf-space-2);
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line-2);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.card > * + * {
+  margin-block-start: var(--rf-space-1);
+}
+
+.header,
+.metadata,
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  min-width: 0;
+  gap: var(--rf-space-1) var(--rf-space-3);
+}
+
+.header > * {
+  min-width: 0;
+}
+
+.status,
+.metadata,
+.raw {
+  color: var(--rf-color-muted);
+}
+
+.explanation {
+  max-height: calc(var(--rf-line-2) * 4);
+  overflow-y: auto;
+}
+
+.details {
+  min-width: 0;
+}
+
+.card > summary,
+.details > summary {
+  cursor: pointer;
+}
+
+.history {
+  min-width: 0;
+  max-height: min(40dvh, calc(var(--rf-space-6) * 10));
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.history > * + * {
+  margin-block-start: var(--rf-space-2);
+}
+
+.attempt {
+  min-width: 0;
+}
+
+.actions {
+  align-items: flex-start;
+  gap: var(--rf-space-2);
+}
+
+.actions > button {
+  flex: 0 1 auto;
+  max-width: 100%;
+  min-width: 0;
+  align-self: flex-start;
+}
+
+.actions > button {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.options {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  flex-basis: 100%;
+  min-width: 0;
+  gap: var(--rf-space-2);
+}
+
+.options label {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  gap: var(--rf-space-1);
+}

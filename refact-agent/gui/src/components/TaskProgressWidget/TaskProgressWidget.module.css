@@ -1,10 +1,10 @@
 .widget {
+  container-type: inline-size;
   background: transparent;
-  /* Scroll bounds for the widget subtrees live here, so the numbers have one
-     named home instead of being repeated as magic values below. */
   --tpw-content-max: min(400px, 50vh);
   --tpw-attempts-max: 200px;
   --tpw-events-max: 180px;
+  --tpw-editor-max: min(50dvh, calc(var(--rf-control-h-lg) * 10));
 }
 
 .header {
@@ -17,8 +17,10 @@
   font: inherit;
   cursor: pointer;
   opacity: var(--rf-motion-opacity-soft);
-  height: var(--rf-control-h-lg);
-  padding: 0 var(--rf-space-3);
+  height: auto;
+  min-height: var(--rf-control-h-lg);
+  align-self: center;
+  padding: var(--rf-space-1) var(--rf-space-3);
   text-align: left;
   transition: opacity var(--rf-dur-fast) var(--rf-ease-standard);
 }
@@ -62,18 +64,44 @@
 
 .headerMain {
   flex: 1;
+  flex-wrap: wrap;
+  row-gap: var(--rf-space-1);
 }
 
 .goalIndicatorText,
 .goalAffordanceText,
 .goalTitle,
-.taskText,
-.activeHint,
-.eventText {
+.activeHint {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.goalIndicator,
+.taskDots,
+.taskSummary,
+.statusBadge,
+.headerInner > svg,
+.goalHeader > svg,
+.taskRow > :first-child {
+  flex-shrink: 0;
+}
+
+.taskSummary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+}
+
+.activeHint {
+  flex: 1 1 0;
+}
+
+.eventText {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .goalAffordance {
@@ -90,6 +118,8 @@
 }
 
 .goalBlock {
+  flex-shrink: 0;
+  min-width: 0;
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
   background: var(--rf-surface-1);
@@ -107,12 +137,19 @@
   background: transparent;
   color: inherit;
   cursor: pointer;
-  height: var(--rf-control-h-lg);
-  padding: 0 var(--rf-space-3);
+  height: auto;
+  min-height: var(--rf-control-h-lg);
+  align-self: center;
+  padding: var(--rf-space-1) var(--rf-space-3);
   text-align: left;
 }
 
+.goalHeaderContent {
+  flex-wrap: wrap;
+}
+
 .goalBody {
+  min-width: 0;
   padding: var(--rf-space-2);
 }
 
@@ -123,9 +160,13 @@
 }
 
 .goalInput {
+  composes: scrollbarThin from "../shared/scrollbar.module.css";
   width: 100%;
   min-width: 0;
-  min-height: calc(var(--rf-control-h-lg) * 2);
+  height: calc(var(--rf-line-2) * 7);
+  min-height: calc(var(--rf-control-h-lg) * 3);
+  max-height: min(calc(var(--rf-line-2) * 12), 40dvh);
+  overflow-y: auto;
   resize: vertical;
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-ctl);
@@ -134,6 +175,38 @@
   font: inherit;
   line-height: var(--rf-line);
   padding: var(--rf-space-2);
+}
+
+.goalInputExpanded {
+  height: var(--tpw-editor-max);
+  max-height: var(--tpw-editor-max);
+}
+
+.detailDialog {
+  --tpw-editor-max: min(50dvh, calc(var(--rf-control-h-lg) * 10));
+  --rf-overlay-ideal-width: var(--rf-content-max);
+  overflow-wrap: anywhere;
+}
+
+.disclosure {
+  min-width: 0;
+}
+
+.disclosure > summary {
+  min-height: var(--rf-control-h-icon-sm);
+  padding-block: var(--rf-space-1);
+  cursor: pointer;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+}
+
+.readingRegion {
+  composes: scrollbarThin from "../shared/scrollbar.module.css";
+  min-width: 0;
+  max-height: min(calc(var(--rf-line-2) * 8), 25dvh);
+  overflow-y: auto;
+  overflow-wrap: anywhere;
 }
 
 .goalInput::placeholder {
@@ -181,7 +254,7 @@
 .goalBudgetInput {
   width: 100%;
   min-width: 0;
-  min-height: var(--rf-control-h);
+  height: var(--rf-control-h);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-ctl);
   background: var(--rf-surface-3);
@@ -216,6 +289,7 @@
 
 .goalControls {
   min-width: 0;
+  flex-shrink: 0;
 }
 
 .attemptList {
@@ -266,8 +340,13 @@
 .eventRow {
   display: flex;
   min-width: 0;
-  align-items: center;
+  align-items: flex-start;
+  flex-wrap: wrap;
   gap: var(--rf-space-2);
+}
+
+.eventText {
+  flex: 1 1 min(100%, calc(var(--rf-control-h-lg) * 4));
 }
 
 .taskList {
@@ -278,6 +357,7 @@
 }
 
 .taskRow {
+  align-items: flex-start;
   padding: var(--rf-space-1) var(--rf-space-2);
   border-left: calc(var(--rf-hairline) * 2) solid transparent;
   border-radius: var(--rf-radius-ctl);
@@ -300,6 +380,26 @@
 
 .taskRowEnter {
   animation: taskFadeIn var(--rf-dur-med) var(--rf-ease-entrance) forwards;
+}
+
+@container (max-width: 480px) {
+  .taskDots {
+    display: none;
+  }
+
+  .goalIndicatorText {
+    position: absolute;
+    width: var(--rf-hairline);
+    height: var(--rf-hairline);
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+}
+
+@container (max-width: 360px) {
+  .taskSummary > svg {
+    display: none;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -328,5 +428,33 @@
   to {
     opacity: var(--rf-motion-opacity-soft);
     transform: translateX(0);
+  }
+}
+
+.headerInner > :last-child,
+.goalHeader > :last-child,
+.goalIndicator > :first-child,
+.goalHeaderContent > :first-child,
+.goalIndicator > :last-child,
+.goalHeaderContent > :last-child,
+.eventRow > :first-child {
+  flex-shrink: 0;
+}
+
+.taskDots:empty {
+  display: none;
+}
+
+.taskText,
+.gapList {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@container (max-width: 400px) {
+  .headerInner,
+  .headerMain {
+    gap: var(--rf-space-1);
   }
 }

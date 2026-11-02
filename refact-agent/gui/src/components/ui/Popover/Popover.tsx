@@ -20,6 +20,7 @@ type PopoverContextValue = {
   forceSheet: boolean;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  triggerRef: React.MutableRefObject<HTMLButtonElement | null>;
 };
 
 const PopoverContext = React.createContext<PopoverContextValue | null>(null);
@@ -33,6 +34,9 @@ export type PopoverTriggerProps = PopoverPrimitive.PopoverTriggerProps;
 export interface PopoverContentProps extends AnchoredOverlayContentProps {
   scrollable?: boolean;
   style?: React.CSSProperties;
+  onInteractOutside?: PopoverPrimitive.PopoverContentProps["onInteractOutside"];
+  onEscapeKeyDown?: PopoverPrimitive.PopoverContentProps["onEscapeKeyDown"];
+  forceMount?: true;
 }
 export type PopoverCloseProps = PopoverPrimitive.PopoverCloseProps;
 
@@ -71,6 +75,7 @@ const PopoverRoot: React.FC<PopoverProps> = ({
     defaultOpen,
     onOpenChange,
   });
+  const triggerRef = React.useRef<HTMLButtonElement | null>(null);
 
   return (
     <PopoverContext.Provider
@@ -79,6 +84,7 @@ const PopoverRoot: React.FC<PopoverProps> = ({
         forceSheet,
         open: actualOpen,
         onOpenChange: setActualOpen,
+        triggerRef,
       }}
     >
       <PopoverPrimitive.Root
@@ -92,7 +98,22 @@ const PopoverRoot: React.FC<PopoverProps> = ({
   );
 };
 
-const PopoverTrigger = PopoverPrimitive.Trigger;
+const PopoverTrigger = React.forwardRef<HTMLButtonElement, PopoverTriggerProps>(
+  (props, ref) => {
+    const context = React.useContext(PopoverContext);
+    return (
+      <PopoverPrimitive.Trigger
+        {...props}
+        ref={(node) => {
+          if (context) context.triggerRef.current = node;
+          if (typeof ref === "function") ref(node);
+          else if (ref) ref.current = node;
+        }}
+      />
+    );
+  },
+);
+PopoverTrigger.displayName = "Popover.Trigger";
 const PopoverClose = PopoverPrimitive.Close;
 
 const PopoverContent = React.forwardRef<HTMLDivElement, PopoverContentProps>(
@@ -107,6 +128,9 @@ const PopoverContent = React.forwardRef<HTMLDivElement, PopoverContentProps>(
       collisionPadding = 12,
       scrollable = true,
       style,
+      onInteractOutside,
+      onEscapeKeyDown,
+      forceMount,
       children,
     },
     ref,
@@ -128,6 +152,10 @@ const PopoverContent = React.forwardRef<HTMLDivElement, PopoverContentProps>(
             maxHeight={maxHeight}
             scrollable={scrollable}
             style={style}
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              context.triggerRef.current?.focus();
+            }}
           >
             {children}
           </Sheet.Content>
@@ -136,9 +164,13 @@ const PopoverContent = React.forwardRef<HTMLDivElement, PopoverContentProps>(
     }
 
     return (
-      <PopoverPrimitive.Portal container={document.body}>
+      <PopoverPrimitive.Portal
+        container={document.body}
+        forceMount={forceMount}
+      >
         <Portal>
           <PopoverPrimitive.Content
+            forceMount={forceMount}
             ref={ref}
             side={side}
             align={align}
@@ -152,6 +184,11 @@ const PopoverContent = React.forwardRef<HTMLDivElement, PopoverContentProps>(
               className,
             )}
             style={{ ...overlayStyle(maxWidth, maxHeight), ...style }}
+            onInteractOutside={onInteractOutside}
+            onEscapeKeyDown={onEscapeKeyDown}
+            onOpenAutoFocus={(event) => {
+              if (forceMount) event.preventDefault();
+            }}
           >
             <div
               className={classNames(

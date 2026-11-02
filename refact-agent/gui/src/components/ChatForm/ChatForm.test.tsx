@@ -278,7 +278,10 @@ describe("ChatForm", () => {
       },
     });
 
-    const label = app.queryByText(/Selected \d* lines/);
+    await user.click(
+      screen.getByRole("button", { name: "More composer controls" }),
+    );
+    const label = screen.queryByText(/Selected \d* lines/);
     expect(label).not.toBeNull();
     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
     const textarea = app.container.querySelector("textarea")!;
@@ -607,7 +610,7 @@ describe("ChatForm", () => {
   });
 
   test("pasting WebP and GIF images uses the image attachment path", async () => {
-    const { ...app } = render(<App />, {
+    const { user, ...app } = render(<App />, {
       preloadedState: {
         chat: chatStateWithThread({ model: "openai/gpt-4o" }),
         ...engineConfigState,
@@ -616,6 +619,9 @@ describe("ChatForm", () => {
     const textarea = app.container.querySelector("textarea");
     expect(textarea).not.toBeNull();
     if (!textarea) return;
+    await user.click(
+      screen.getByRole("button", { name: "More composer controls" }),
+    );
     await screen.findByRole("button", { name: "Attach images" });
 
     expect(
@@ -690,11 +696,13 @@ describe("ChatForm", () => {
     await user.click(textarea);
     expect(form.className).toContain("chatFormExpanded");
 
-    const settingsButton = app.container.querySelector(
-      'button[class*="trigger"]',
+    await user.click(
+      screen.getByRole("button", { name: "More composer controls" }),
     );
+    const settingsButton = await screen.findByRole("button", {
+      name: /openai\/gpt-4o/,
+    });
     expect(settingsButton).not.toBeNull();
-    if (!settingsButton) return;
 
     await user.click(settingsButton);
     await waitFor(() =>
@@ -723,28 +731,7 @@ describe("ChatForm", () => {
     });
   });
 
-  test("collapsed composer renders status widgets next to the send control", () => {
-    render(<App />, {
-      preloadedState: {
-        chat: chatStateWithThread({ model: "openai/gpt-4o" }),
-        ...engineConfigState,
-      },
-    });
-
-    const textarea = screen.getByTestId("chat-form-textarea");
-    const form = textarea.closest("form");
-    expect(form).not.toBeNull();
-    if (!form) return;
-
-    expect(form.className).toContain("chatFormCollapsed");
-    const collapsedStatus = screen.getByTestId("composer-collapsed-status");
-    expect(form.contains(collapsedStatus)).toBe(true);
-    expect(
-      collapsedStatus.querySelector('[class*="usageCounterContainer"]'),
-    ).not.toBeNull();
-  });
-
-  test("clicking the context usage widget does not expand the composer", async () => {
+  test("narrow composer exposes status widgets through More", async () => {
     const { user } = render(<App />, {
       preloadedState: {
         chat: chatStateWithThread({ model: "openai/gpt-4o" }),
@@ -758,8 +745,37 @@ describe("ChatForm", () => {
     if (!form) return;
 
     expect(form.className).toContain("chatFormCollapsed");
+    await user.click(
+      screen.getByRole("button", { name: "More composer controls" }),
+    );
     const collapsedStatus = screen.getByTestId("composer-collapsed-status");
-    const usageWidget = collapsedStatus.querySelector("[aria-haspopup]");
+    expect(document.body.contains(collapsedStatus)).toBe(true);
+    expect(
+      collapsedStatus.querySelector('[class*="usageCounterContainer"]'),
+    ).not.toBeNull();
+  });
+
+  test("context usage remains reachable through More", async () => {
+    const { user } = render(<App />, {
+      preloadedState: {
+        chat: chatStateWithThread({ model: "openai/gpt-4o" }),
+        ...engineConfigState,
+      },
+    });
+
+    const textarea = screen.getByTestId("chat-form-textarea");
+    const form = textarea.closest("form");
+    expect(form).not.toBeNull();
+    if (!form) return;
+
+    expect(form.className).toContain("chatFormCollapsed");
+    await user.click(
+      screen.getByRole("button", { name: "More composer controls" }),
+    );
+    const collapsedStatus = screen.getByTestId("composer-collapsed-status");
+    const usageWidget = collapsedStatus.querySelector(
+      '[class*="usageCounterContainer"] [aria-haspopup]',
+    );
     expect(usageWidget).not.toBeNull();
     if (!usageWidget) return;
 
@@ -767,7 +783,7 @@ describe("ChatForm", () => {
     await waitFor(() => {
       expect(screen.getByText("Context usage")).toBeInTheDocument();
     });
-    expect(form.className).toContain("chatFormCollapsed");
+    expect(form.className).toContain("chatFormExpanded");
   });
 
   test("clicking stop while collapsed aborts without expanding the composer", async () => {
@@ -899,25 +915,38 @@ describe("ChatForm", () => {
     expect(screen.queryByText("Click to retry")).not.toBeInTheDocument();
   });
 
-  test("control display rules stay zero-specificity so container-query hiding wins", async () => {
+  test("responsive toolbar keeps one row without clipping control groups", async () => {
     const css = await readFile(
-      resolve(process.cwd(), "src", "components/ChatForm/ChatForm.module.css"),
+      resolve(
+        process.cwd(),
+        "src/components/ChatForm/ComposerToolbar.module.css",
+      ),
       "utf8",
     );
+    expect(css).not.toContain("overflow: hidden");
+    expect(css).toContain("flex-wrap: nowrap");
+    expect(css).toMatch(
+      /\.popover\[data-state="closed"\]\s*\{\s*display: none;/,
+    );
+    expect(css).not.toContain("@container");
+    expect(css).toContain("flex: 0 0 auto");
+  });
 
-    // Plain `.x > span { display: inline-flex }` (0,1,1) outranks the
-    // `@container ... .hideActionFirst { display: none }` (0,1,0) hide rules,
-    // which silently disables responsive hiding and crushes/overlaps the
-    // bottom controls on narrow hosts. The display rules must stay wrapped
-    // in :where() to keep zero specificity.
-    expect(css).toMatch(
-      /:where\(\s*\.topStatusControls > span,\s*\.bottomActionControls > span,\s*\.bottomModelControl,\s*\.bottomModeControl,\s*\.bottomWorkspaceControl\s*\)\s*\{\s*display: inline-flex;/,
+  test("a multiline draft remains expanded after focus leaves", async () => {
+    const { user } = render(<App />, { preloadedState: engineConfigState });
+    const textarea = screen.getByTestId("chat-form-textarea");
+    const draft = "first line\nsecond line\nthird line";
+    fireEvent.change(textarea, { target: { value: draft } });
+    await waitFor(() =>
+      expect(textarea.closest("form")?.className).toContain("chatFormExpanded"),
     );
-    expect(css).toMatch(
-      /:where\(\.controlsSwapItem > span\)\s*\{\s*display: inline-flex;/,
+    await user.click(textarea);
+    fireEvent.blur(textarea, { relatedTarget: null });
+    fireEvent.pointerDown(document.body);
+    await waitFor(() =>
+      expect(textarea.closest("form")?.className).toContain("chatFormExpanded"),
     );
-    expect(css).not.toMatch(/^\s*\.controlsSwapItem > span\s*\{/m);
-    expect(css).not.toMatch(/^\.topStatusControls > span,/m);
+    expect(textarea).toHaveValue(draft);
   });
 
   test("context rebuild gate disables send, explains why, keeps the draft and wires the rebuild action", async () => {
@@ -1030,6 +1059,9 @@ describe("ChatForm", () => {
       preloadedState: { chat, ...engineConfigState },
     });
 
+    await user.click(
+      screen.getByRole("button", { name: "More composer controls" }),
+    );
     store.dispatch(
       applyChatEvent({
         chat_id: threadId,

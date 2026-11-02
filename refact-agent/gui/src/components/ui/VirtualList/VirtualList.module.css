@@ -16,6 +16,10 @@
   padding: var(--rf-space-2) 0;
 }
 
+.compactItem {
+  padding: 0;
+}
+
 .header,
 .footer {
   min-width: 0;

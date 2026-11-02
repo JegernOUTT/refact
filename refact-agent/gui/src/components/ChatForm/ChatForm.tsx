@@ -141,6 +141,7 @@ import { useUsageCounter } from "../UsageCounter/useUsageCounter";
 import { ChatInputTopControls } from "./ChatInputTopControls";
 
 import classNames from "classnames";
+import { ComposerToolbar } from "./ComposerToolbar";
 type ComposerHelpProps = {
   children: React.ReactNode;
 };
@@ -359,6 +360,10 @@ export const ChatForm: React.FC<ChatFormProps> = ({
         : liveTranscript
       : value;
 
+  useEffect(() => {
+    if (value.trim().length > 0) setIsComposerExpanded(true);
+  }, [value]);
+
   const valueRef = React.useRef(value);
   valueRef.current = value;
 
@@ -570,7 +575,9 @@ export const ChatForm: React.FC<ChatFormProps> = ({
 
         const activeElement = document.activeElement;
         if (isInsideComposerSurface(activeElement, root)) return;
-        setIsComposerExpanded(openComposerMenus > 0);
+        setIsComposerExpanded(
+          openComposerMenus > 0 || valueRef.current.trim().length > 0,
+        );
       }, 0);
     },
     [openComposerMenus],
@@ -621,7 +628,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       }
 
       if (openComposerMenus <= 0) {
-        setIsComposerExpanded(false);
+        setIsComposerExpanded(valueRef.current.trim().length > 0);
       }
     };
 
@@ -753,41 +760,6 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                     }
                     onOpenFile={queryPathThenOpenFile}
                   />
-                  <Flex
-                    align="center"
-                    gap="2"
-                    justify="between"
-                    wrap="wrap"
-                    className={styles.topControlsRow}
-                  >
-                    <ChatInputTopControls
-                      checkboxes={checkboxes}
-                      onCheckedChange={onToggleCheckbox}
-                      attachedFiles={attachedFiles}
-                      disabled={isBuddyChat}
-                    />
-                    <Flex
-                      align="center"
-                      gap="2"
-                      className={styles.topStatusControls}
-                    >
-                      <span className={styles.hideTopTokensFirst}>
-                        <StreamingTokenCounter />
-                      </span>
-                      <span className={styles.hideTopTokensFirst}>
-                        <ProviderUsageIndicator />
-                      </span>
-                      <span className={styles.hideTopTokensFirst}>
-                        <UsageCounter />
-                      </span>
-                      <span className={styles.hideTopCompressLast}>
-                        <TrajectoryButton
-                          disabled={isBuddyChat}
-                          onOpenChange={handleComposerMenuOpenChange}
-                        />
-                      </span>
-                    </Flex>
-                  </Flex>
                 </div>
 
                 <ComboBox
@@ -826,146 +798,162 @@ export const ChatForm: React.FC<ChatFormProps> = ({
               </div>
             </div>
           </div>
-          <Flex
-            gap="2"
-            wrap="nowrap"
-            py="2"
-            px="3"
-            align="center"
-            className={styles.bottomControlsRow}
-          >
-            <span className={styles.bottomModelControl}>
-              <ChatSettingsDropdown
-                disabled={isBuddyChat}
-                onOpenChange={handleComposerMenuOpenChange}
-              />
-            </span>
-            <span className={styles.bottomModeControl}>
-              <ModeSelect
-                selectedMode={threadMode ?? DEFAULT_MODE}
-                onModeChange={onSetMode}
-                disabled={isBuddyChat || isModeDisabled}
-                onOpenChange={handleComposerMenuOpenChange}
-              />
-            </span>
-            <span className={styles.bottomWorkspaceControl}>
-              <WorktreeControl
-                disabled={isBuddyChat}
-                onOpenChange={handleComposerMenuOpenChange}
-              />
-            </span>
-
-            <Flex
-              justify="end"
-              wrap="nowrap"
-              gap="2"
-              align="center"
-              className={styles.bottomActionControls}
-            >
-              <div className={styles.actionControlsSwap}>
-                <div
-                  className={classNames(
-                    styles.controlsSwapItem,
-                    styles.expandedActionsSet,
-                  )}
-                >
-                  <span className={styles.hideActionFirst}>
-                    <BrowserToggleButton chatId={chatId} />
-                  </span>
-                  <span className={styles.hideActionSecond}>
-                    <AutoEnrichmentToggleButton
-                      disabled={isStreaming || isWaiting}
-                    />
-                  </span>
-                  <span className={styles.hideActionThird}>
-                    <AutoCompactToggleButton disabled={isStreaming} />
-                  </span>
-                  <span className={styles.hideActionFourth}>
-                    <WandButton
-                      currentText={value}
-                      disabled={isStreaming || isWaiting}
-                      onUpdateText={handleChange}
-                    />
-                  </span>
-                  {onClose && (
-                    <span className={styles.hideActionFifth}>
-                      <BackToSideBarButton
-                        disabled={isStreaming}
-                        title="Return to sidebar"
-                        onClick={onClose}
+          <ComposerToolbar
+            menuCount={openComposerMenus}
+            onOpenChange={handleComposerMenuOpenChange}
+            items={[
+              {
+                id: "model",
+                width: 208,
+                content: (
+                  <ChatSettingsDropdown
+                    disabled={isBuddyChat}
+                    onOpenChange={handleComposerMenuOpenChange}
+                  />
+                ),
+              },
+              {
+                id: "mode",
+                width: 220,
+                content: (
+                  <ModeSelect
+                    selectedMode={threadMode ?? DEFAULT_MODE}
+                    onModeChange={onSetMode}
+                    disabled={isBuddyChat || isModeDisabled}
+                    onOpenChange={handleComposerMenuOpenChange}
+                  />
+                ),
+              },
+              {
+                id: "worktree",
+                width: 260,
+                content: (
+                  <WorktreeControl
+                    disabled={isBuddyChat}
+                    onOpenChange={handleComposerMenuOpenChange}
+                  />
+                ),
+              },
+              {
+                id: "permissions",
+                width: 200,
+                content: (
+                  <ChatInputTopControls
+                    checkboxes={checkboxes}
+                    onCheckedChange={onToggleCheckbox}
+                    attachedFiles={attachedFiles}
+                    disabled={isBuddyChat}
+                  />
+                ),
+              },
+              {
+                id: "actions",
+                width: 340,
+                content: (
+                  <div className={styles.toolbarActions}>
+                    <TrajectoryButton
+                      disabled={isBuddyChat}
+                      onOpenChange={handleComposerMenuOpenChange}
+                    />{" "}
+                    <span>
+                      <BrowserToggleButton chatId={chatId} />
+                    </span>
+                    <span>
+                      <AutoEnrichmentToggleButton
+                        disabled={isStreaming || isWaiting}
                       />
                     </span>
-                  )}
-                  {config.features?.images !== false &&
-                    isMultimodalitySupportedForCurrentModel && (
-                      <span className={styles.hideActionSixth}>
-                        <AttachImagesButton />
+                    <span>
+                      <AutoCompactToggleButton disabled={isStreaming} />
+                    </span>
+                    <span>
+                      <WandButton
+                        currentText={value}
+                        disabled={isStreaming || isWaiting}
+                        onUpdateText={handleChange}
+                      />
+                    </span>
+                    {onClose && (
+                      <span>
+                        <BackToSideBarButton
+                          disabled={isStreaming}
+                          title="Return to sidebar"
+                          onClick={onClose}
+                        />
                       </span>
                     )}
-                  <span className={styles.hideActionSeventh}>
-                    <MicrophoneButton
-                      ref={microphoneRef}
-                      onTranscript={(text) => {
-                        setValue((prev) => {
-                          if (prev.trim()) {
-                            return `${prev}\n${text}`;
-                          }
-                          return text;
-                        });
-                      }}
-                      onLiveTranscript={handleLiveTranscript}
-                      onRecordingChange={handleRecordingChange}
-                      disabled={disableMicrophone}
-                    />
-                  </span>
-                  <span className={styles.hideActionSeventh}>
-                    <ThreadInfoButton
-                      chatId={chatId}
+                    {config.features?.images !== false &&
+                      isMultimodalitySupportedForCurrentModel && (
+                        <span>
+                          <AttachImagesButton />
+                        </span>
+                      )}
+                    <span>
+                      <MicrophoneButton
+                        ref={microphoneRef}
+                        onTranscript={(text) => {
+                          setValue((prev) => {
+                            if (prev.trim()) {
+                              return `${prev}\n${text}`;
+                            }
+                            return text;
+                          });
+                        }}
+                        onLiveTranscript={handleLiveTranscript}
+                        onRecordingChange={handleRecordingChange}
+                        disabled={disableMicrophone}
+                      />
+                    </span>
+                    <span>
+                      <ThreadInfoButton
+                        chatId={chatId}
+                        onOpenChange={handleComposerMenuOpenChange}
+                      />
+                    </span>
+                  </div>
+                ),
+              },
+              {
+                id: "usage",
+                width: 160,
+                content: (
+                  <div
+                    className={styles.toolbarActions}
+                    data-composer-no-expand="true"
+                    data-testid="composer-collapsed-status"
+                  >
+                    <StreamingTokenCounter />
+                    <ProviderUsageIndicator
                       onOpenChange={handleComposerMenuOpenChange}
                     />
-                  </span>
-                </div>
-                <div
-                  className={classNames(
-                    styles.controlsSwapItem,
-                    styles.collapsedStatusSet,
-                  )}
-                  data-composer-no-expand="true"
-                  data-testid="composer-collapsed-status"
-                >
-                  <span className={styles.hideCollapsedStatusFirst}>
-                    <StreamingTokenCounter />
-                  </span>
-                  <span className={styles.hideCollapsedStatusSecond}>
-                    <ProviderUsageIndicator />
-                  </span>
-                  <UsageCounter />
-                </div>
-              </div>
-              <span data-composer-no-expand="true">
-                <UnifiedSendButton
-                  disabled={
-                    isVoiceActive ||
-                    !isOnline ||
-                    allDisabled ||
-                    contextRebuildRequired
-                  }
-                  isStreaming={isStreaming || isWaiting || recoveryActive}
-                  hasText={
-                    value.trim().length > 0 ||
-                    attachedImages.length > 0 ||
-                    textFiles.length > 0
-                  }
-                  hasMessages={hasMessages}
-                  queuedCount={queuedItems.length}
-                  onSend={() => handleSubmit("after_flow")}
-                  onSendImmediately={handleSendImmediately}
-                  onStop={() => void abort()}
-                  onResend={() => void regenerate()}
-                />
-              </span>
-            </Flex>
-          </Flex>
+                    <UsageCounter onOpenChange={handleComposerMenuOpenChange} />
+                  </div>
+                ),
+              },
+            ]}
+            send={
+              <UnifiedSendButton
+                disabled={
+                  isVoiceActive ||
+                  !isOnline ||
+                  allDisabled ||
+                  contextRebuildRequired
+                }
+                isStreaming={isStreaming || isWaiting || recoveryActive}
+                hasText={
+                  value.trim().length > 0 ||
+                  attachedImages.length > 0 ||
+                  textFiles.length > 0
+                }
+                hasMessages={hasMessages}
+                queuedCount={queuedItems.length}
+                onSend={() => handleSubmit("after_flow")}
+                onSendImmediately={handleSendImmediately}
+                onStop={() => void abort()}
+                onResend={() => void regenerate()}
+              />
+            }
+          />
         </Form>
       </div>
     </div>

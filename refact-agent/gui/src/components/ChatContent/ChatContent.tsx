@@ -64,7 +64,8 @@ import {
 import { ChatThreadProvider, useThreadId } from "../../features/Chat/Thread";
 import { selectConfig, selectApiKey } from "../../features/Config/configSlice";
 import { VirtualizedChatList } from "./VirtualizedChatList";
-import { RecoveryCard } from "./RecoveryCard";
+import { RecoveryCard, RecoveryDetails } from "./RecoveryCard";
+import recoveryStyles from "./RecoveryCard.module.css";
 import { isRecoveryRecord } from "../../services/refact/chatSubscription";
 import { selectRecoveryById } from "../../features/Chat/Thread/selectors";
 import { useCollapsibleState } from "./useCollapsibleState";
@@ -483,25 +484,13 @@ export const ChatContent: React.FC<ChatContentProps> = ({
                   (error) => error.extra?.recovery_run_id !== recovery?.run_id,
                 )
                 .map((error, index) => (
-                  <details key={error.message_id ?? index}>
+                  <details
+                    className={recoveryStyles.card}
+                    key={error.message_id ?? index}
+                  >
                     <summary>Previous recovery</summary>
                     {isRecoveryRecord(error.extra?.recovery_record) ? (
-                      <>
-                        <div>
-                          {error.extra.recovery_record.latest_error.title}:{" "}
-                          {error.extra.recovery_record.latest_error.explanation}
-                        </div>
-                        <div>
-                          {error.extra.recovery_record.latest_error.raw_error}
-                        </div>
-                        {error.extra.recovery_record.attempts.map(
-                          (attempt, i) => (
-                            <div key={`${attempt.at_ms}-${i}`}>
-                              Retry {attempt.retry_number}: {attempt.outcome}
-                            </div>
-                          ),
-                        )}
-                      </>
+                      <RecoveryDetails recovery={error.extra.recovery_record} />
                     ) : (
                       <ErrorMessageCard errors={[error]} />
                     )}

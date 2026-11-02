@@ -7,7 +7,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { skipToken } from "@reduxjs/toolkit/query";
-import { useCallback } from "react";
+import { useCallback, useId } from "react";
 
 import { Badge, IconButton, Tooltip } from "../../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../../hooks";
@@ -61,6 +61,7 @@ const RAIL_ITEMS: RailItem[] = [
 ];
 
 export function ActivityRail() {
+  const railId = useId();
   const dispatch = useAppDispatch();
   const host = useAppSelector(selectHost);
   const capabilities = useAppSelector(selectCapabilities);
@@ -124,10 +125,20 @@ export function ActivityRail() {
             : item.id === "git"
               ? changedCount
               : 0;
+        const countDescription =
+          item.id === "git"
+            ? `${badgeCount} changed ${badgeCount === 1 ? "file" : "files"}`
+            : `${badgeCount} active ${badgeCount === 1 ? "agent" : "agents"}`;
+        const descriptionId = `${railId}-${item.id}-count`;
         return (
           <div className={styles.slot} key={item.id}>
-            <Tooltip content={`${item.label} ${item.shortcut}`}>
+            <Tooltip
+              content={`${item.label} ${item.shortcut}${
+                badgeCount > 0 ? ` — ${countDescription}` : ""
+              }`}
+            >
               <IconButton
+                aria-describedby={badgeCount > 0 ? descriptionId : undefined}
                 aria-label={item.label}
                 aria-pressed={isShowing(item.id)}
                 className={styles.button}
@@ -145,8 +156,13 @@ export function ActivityRail() {
                 size="xs"
                 tone="accent"
               >
-                {badgeCount}
+                {badgeCount > 99 ? "99+" : badgeCount}
               </Badge>
+            ) : null}
+            {badgeCount > 0 ? (
+              <span className={styles.srOnly} id={descriptionId}>
+                {countDescription}
+              </span>
             ) : null}
           </div>
         );

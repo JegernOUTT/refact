@@ -39,7 +39,7 @@ import type {
 } from "../../services/refact/types";
 import type { GoalBudgetCommand } from "../../services/refact/chatCommands";
 import { Box, Flex, Separator, Text } from "../LongTailPrimitives";
-import { Badge, Button, Icon, IconButton } from "../ui";
+import { Badge, Button, Dialog, Icon, IconButton } from "../ui";
 import { Chevron } from "../Collapsible";
 import { CircularProgress } from "../CircularProgress/CircularProgress";
 import { Markdown } from "../Markdown";
@@ -408,6 +408,10 @@ const GoalSection: React.FC<GoalSectionProps> = ({
   pending,
 }) => {
   const [editingGoal, setEditingGoal] = useState(false);
+  const [editorExpanded, setEditorExpanded] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const editorTrigger = useRef<HTMLButtonElement>(null);
+  const detailsTrigger = useRef<HTMLButtonElement>(null);
   const [creatingGoal, setCreatingGoal] = useState(false);
   const [draft, setDraft] = useState(goal?.content ?? "");
   const [budgetDirty, setBudgetDirty] = useState(false);
@@ -476,6 +480,29 @@ const GoalSection: React.FC<GoalSectionProps> = ({
     if (await onApplyBudget(budgetCommand)) setBudgetDirty(false);
   }, [budgetCommand, onApplyBudget]);
 
+  const goalInput = (
+    <>
+      <label className={styles.goalLabel} htmlFor="task-goal-input">
+        Goal text
+      </label>
+      {goal ? (
+        <Text size="1" color="gray">
+          Saved changes are appended as a goal update, not a replacement.
+        </Text>
+      ) : null}
+      <textarea
+        className={classNames(styles.goalInput, {
+          [styles.goalInputExpanded]: editorExpanded,
+        })}
+        id="task-goal-input"
+        value={draft}
+        disabled={pending}
+        onChange={(event) => setDraft(event.currentTarget.value)}
+        placeholder="Set a goal for this thread"
+      />
+    </>
+  );
+
   return (
     <Collapsible.Root open={expanded} onOpenChange={onExpandedChange}>
       <Flex direction="column" gap="2" className={styles.goalBlock}>
@@ -516,10 +543,30 @@ const GoalSection: React.FC<GoalSectionProps> = ({
 
         <Collapsible.Content>
           <Flex direction="column" gap="3" className={styles.goalBody}>
+            {goal ? (
+              <GoalControls
+                goal={goal}
+                onControl={onControl}
+                pending={pending}
+              />
+            ) : null}
             <Flex direction="column" gap="2">
               {goal && !editingGoal && !creatingGoal ? (
                 <>
-                  <Markdown>{goal.content}</Markdown>
+                  <details open className={styles.disclosure}>
+                    <summary>Goal text</summary>
+                    <div className={styles.readingRegion} tabIndex={0}>
+                      <Markdown>{goal.content}</Markdown>
+                    </div>
+                  </details>
+                  <Button
+                    ref={detailsTrigger}
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setDetailsOpen(true)}
+                  >
+                    Open full goal and plan
+                  </Button>
                   {goal.status === "transferred" && goal.transferred_to ? (
                     <Text size="1" color="gray">
                       Transferred to {goal.transferred_to}
@@ -528,17 +575,15 @@ const GoalSection: React.FC<GoalSectionProps> = ({
                 </>
               ) : (
                 <>
-                  <label className={styles.goalLabel} htmlFor="task-goal-input">
-                    Goal text
-                  </label>
-                  <textarea
-                    className={styles.goalInput}
-                    id="task-goal-input"
-                    value={draft}
-                    disabled={pending}
-                    onChange={(event) => setDraft(event.currentTarget.value)}
-                    placeholder="Set a goal for this thread"
-                  />
+                  {!editorExpanded ? goalInput : null}
+                  <Button
+                    ref={editorTrigger}
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setEditorExpanded(true)}
+                  >
+                    Expand editor
+                  </Button>
                 </>
               )}
               <GoalBudgetEditor
@@ -603,29 +648,91 @@ const GoalSection: React.FC<GoalSectionProps> = ({
             {goal ? (
               <>
                 {goal.plan ? <GoalPlanSection plan={goal.plan} /> : null}
-                <GoalControls
-                  goal={goal}
-                  onControl={onControl}
-                  pending={pending}
-                />
-                <GoalAttempts attempts={goal.attempts} />
-                <GoalEvents events={goal.events} />
+                <details className={styles.disclosure}>
+                  <summary>Verifier attempts · {goal.attempts.length}</summary>
+                  <GoalAttempts attempts={goal.attempts} />
+                </details>
+                <details className={styles.disclosure}>
+                  <summary>Goal events · {goal.events.length}</summary>
+                  <GoalEvents events={goal.events} />
+                </details>
               </>
             ) : null}
           </Flex>
         </Collapsible.Content>
       </Flex>
+      <Dialog open={editorExpanded} onOpenChange={setEditorExpanded}>
+        <Dialog.Content
+          className={styles.detailDialog}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            editorTrigger.current?.focus();
+          }}
+        >
+          <Dialog.Title>{goal ? "Update goal" : "Set a goal"}</Dialog.Title>
+          <Dialog.Description>
+            Work with the same goal draft in a larger editor.
+          </Dialog.Description>
+          <Flex direction="column" gap="2">
+            {editorExpanded ? goalInput : null}
+          </Flex>
+          <Dialog.Footer>
+            <Dialog.Close asChild>
+              <Button size="sm" variant="soft">
+                Return to goal
+              </Button>
+            </Dialog.Close>
+          </Dialog.Footer>
+        </Dialog.Content>
+      </Dialog>
+      <Dialog open={detailsOpen} onOpenChange={setDetailsOpen}>
+        <Dialog.Content
+          className={styles.detailDialog}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            detailsTrigger.current?.focus();
+          }}
+        >
+          <Dialog.Title>Full goal and plan</Dialog.Title>
+          <Dialog.Description>
+            Read the complete goal and its current plan.
+          </Dialog.Description>
+          {goal ? <Markdown>{goal.content}</Markdown> : null}
+          {goal?.plan ? <GoalPlanSection plan={goal.plan} full /> : null}
+          <Dialog.Footer>
+            <Dialog.Close asChild>
+              <Button size="sm" variant="soft">
+                Close
+              </Button>
+            </Dialog.Close>
+          </Dialog.Footer>
+        </Dialog.Content>
+      </Dialog>
     </Collapsible.Root>
   );
 };
 
-export function GoalPlanSection({ plan }: { plan: GoalPlanSnapshot }) {
+export function GoalPlanSection({
+  plan,
+  full = false,
+}: {
+  plan: GoalPlanSnapshot;
+  full?: boolean;
+}) {
   return (
     <section aria-label="Goal plan">
       <Text size="1" weight="medium">
         Plan · v{plan.version}
       </Text>
-      <Markdown>{plan.content}</Markdown>
+      <details open className={styles.disclosure}>
+        <summary>Plan text</summary>
+        <div
+          className={full ? undefined : styles.readingRegion}
+          tabIndex={full ? undefined : 0}
+        >
+          <Markdown>{plan.content}</Markdown>
+        </div>
+      </details>
       {plan.checkpoint ? (
         <Text size="1" color="gray">
           Checkpoint {plan.checkpoint.revision} ·{" "}
@@ -1002,13 +1109,28 @@ const TaskProgressWidgetInstance: React.FC = () => {
 
                   {!isExpanded && hasTasks ? (
                     <>
-                      <Flex gap="1" align="center">
-                        {tasks.map((task) => (
-                          <StatusIcon key={task.id} status={task.status} />
-                        ))}
+                      <Flex
+                        gap="1"
+                        align="center"
+                        className={styles.taskDots}
+                        aria-hidden="true"
+                      >
+                        {tasks.length <= 4
+                          ? tasks.map((task) => (
+                              <StatusIcon key={task.id} status={task.status} />
+                            ))
+                          : null}
                       </Flex>
 
-                      <CircularProgress done={done} total={total} />
+                      <span
+                        className={styles.taskSummary}
+                        aria-label={`${done} of ${total} tasks completed`}
+                      >
+                        <CircularProgress done={done} total={total} />
+                        <Text size="1">
+                          {done}/{total}
+                        </Text>
+                      </span>
 
                       {activeTitle ? (
                         <Text

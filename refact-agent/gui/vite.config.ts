@@ -50,6 +50,12 @@ function makeConfig(library: "browser" | "node") {
         __REFACT_LSP_PORT__: process.env.REFACT_LSP_PORT,
       },
       mode,
+      resolve: {
+        dedupe: [
+          "@radix-ui/react-dismissable-layer",
+          "@radix-ui/react-focus-scope",
+        ],
+      },
       build: {
         emptyOutDir: true,
         outDir: OUT_DIR,
