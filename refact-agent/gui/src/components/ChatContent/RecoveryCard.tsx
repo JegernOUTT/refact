@@ -22,6 +22,11 @@ export function RecoveryDetails({ recovery }: { recovery: RecoveryRecord }) {
       tabIndex={0}
     >
       <div>
+        State: {humanizeIdentifier(recovery.state)}
+        {recovery.terminal_reason &&
+          ` — ${humanizeIdentifier(recovery.terminal_reason)}`}
+      </div>
+      <div>
         {recovery.latest_error.title}: {recovery.latest_error.explanation}
       </div>
       <div className={styles.raw}>{recovery.latest_error.raw_error}</div>
@@ -86,6 +91,10 @@ export function RecoveryCard({
     setStopError(null);
   }, [recovery.run_id]);
   const cooldown = (recovery.retry_not_before_ms ?? 0) > now;
+  const remaining = Math.max(
+    0,
+    recovery.policy.max_retries - recovery.retries_used,
+  );
   const apply = (type: "recovery_retry" | "recovery_retry_now") => {
     const base = {
       run_id: recovery.run_id,
@@ -118,8 +127,14 @@ export function RecoveryCard({
     return (
       <details className={styles.card}>
         <summary>
-          Recovered after {recovery.retries_used} new{" "}
-          {recovery.retries_used === 1 ? "request" : "requests"}
+          Recovered after {recovery.retries_used}{" "}
+          {recovery.manual
+            ? recovery.retries_used === 1
+              ? "new request"
+              : "new requests"
+            : recovery.retries_used === 1
+              ? "automatic retry"
+              : "automatic retries"}
         </summary>
         <RecoveryDetails recovery={recovery} />
       </details>
@@ -131,9 +146,11 @@ export function RecoveryCard({
         <strong>{recovery.latest_error.title}</strong>
         <span className={styles.status}>
           {recovery.state === "waiting"
-            ? `Waiting to retry${
+            ? `Waiting ${
+                cooldown ? "for provider cooldown" : "for retry delay"
+              }${
                 recovery.next_retry_at_ms
-                  ? ` in ${Math.max(
+                  ? ` — retry in ${Math.max(
                       0,
                       Math.ceil((recovery.next_retry_at_ms - now) / 1000),
                     )}s`
@@ -145,22 +162,36 @@ export function RecoveryCard({
       <div className={`${styles.explanation} scrollbarThin`}>
         {recovery.latest_error.explanation}
       </div>
+      {recovery.latest_error.raw_error && (
+        <div className={styles.raw}>
+          Cause: {recovery.latest_error.raw_error.slice(0, 300)}
+        </div>
+      )}
       <div className={styles.metadata}>
         <div>
-          New requests: {recovery.retries_used} / {recovery.policy.max_retries}
+          {recovery.manual ? "Manual new requests" : "Automatic retries"}:{" "}
+          {recovery.retries_used} / {recovery.policy.max_retries} used (
+          {remaining} remaining)
         </div>
+        {!recovery.manual && (
+          <div>
+            The initial model request is separate from automatic retries.
+          </div>
+        )}
         <div>Policy source: {humanizeIdentifier(recovery.policy_source)}</div>
         {active && recovery.deadline_at_ms && (
           <div>
-            Time remaining:{" "}
-            {Math.max(0, Math.ceil((recovery.deadline_at_ms - now) / 1000))}s
+            Maximum recovery time remaining:{" "}
+            {Math.max(0, Math.ceil((recovery.deadline_at_ms - now) / 1000))}s.
+            Recovery may end sooner if retries are exhausted; individual
+            requests have their own timeout.
           </div>
         )}
       </div>
       {recovery.terminal_reason && (
         <div>Reason: {humanizeIdentifier(recovery.terminal_reason)}</div>
       )}
-      {cooldown && active && (
+      {cooldown && recovery.state === "waiting" && (
         <div>
           Provider cooldown until{" "}
           {new Date(recovery.retry_not_before_ms ?? 0).toLocaleTimeString()}
@@ -224,7 +255,7 @@ export function RecoveryCard({
             {recovery.state === "waiting" && (
               <Button
                 size="sm"
-                disabled={cooldown || request.blocked || stopping}
+                disabled={goalHeld || cooldown || request.blocked || stopping}
                 onClick={() => apply("recovery_retry_now")}
               >
                 Retry now

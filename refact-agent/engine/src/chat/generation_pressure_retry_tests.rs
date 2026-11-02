@@ -346,6 +346,141 @@ fn active_record() -> RecoveryRecord {
 }
 
 #[tokio::test]
+async fn runner_lease_blocks_native_regenerate_even_when_runtime_idle() {
+    use super::types::{ChatCommand, CommandRequest, SessionState};
+    let (app, session) = generation_fixture("127.0.0.1:9".parse().unwrap()).await;
+    let abort = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let token = session
+        .lock()
+        .await
+        .claim_runner("held-runner".into(), abort.clone())
+        .unwrap();
+    let history = serde_json::to_value(&session.lock().await.messages).unwrap();
+    let request = CommandRequest {
+        native_approval_guard: None,
+        supervision_guard: None,
+        client_request_id: "leased-regenerate".into(),
+        priority: true,
+        command: ChatCommand::Regenerate {},
+    };
+    let error = super::handlers::handle_v1_chat_command(
+        axum::extract::State(app.clone()),
+        axum::extract::Path("pressure-generation-test".into()),
+        serde_json::to_vec(&request).unwrap().into(),
+    )
+    .await
+    .err()
+    .expect("native regenerate must be refused while runner is held");
+    assert_eq!(error.status_code, hyper::StatusCode::CONFLICT);
+    start_generation(app, session.clone()).await;
+    let mut session = session.lock().await;
+    assert_eq!(session.runtime.state, SessionState::Idle);
+    assert_eq!(serde_json::to_value(&session.messages).unwrap(), history);
+    assert!(session.command_queue.is_empty());
+    assert!(!session.turn_finished());
+    assert!(session.start_stream().is_none());
+    assert!(session.runner_owned_by(Some(&token)));
+    session.release_runner(&token);
+    assert!(session.turn_finished());
+}
+
+#[test]
+fn stale_runner_identity_cannot_release_a_new_lease() {
+    let mut session = ChatSession::new("lease-identity".into());
+    let old = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let token = session.claim_runner("old".into(), old.clone()).unwrap();
+    session.release_runner(&token);
+    let current = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let replacement = session
+        .claim_runner("replacement".into(), current.clone())
+        .unwrap();
+    session.release_runner(&token);
+    assert!(!session.runner_owned_by(Some(&token)));
+    assert!(session.runner_owned_by(Some(&replacement)));
+    assert_eq!(session.runner_lease.as_ref().unwrap().0, replacement);
+}
+
+#[tokio::test]
+#[serial(provider_pressure, coordination_metrics, runtime_settings)]
+async fn zero_send_cooldown_waits_visibly_until_operation_deadline() {
+    use refact_core::recovery::{RecoveryBudget, RecoveryPolicy};
+    let (app, session) = generation_fixture("127.0.0.1:9".parse().unwrap()).await;
+    let budget = Arc::new(RecoveryBudget::new(RecoveryPolicy {
+        total_timeout_ms: 1_000,
+        ..Default::default()
+    }));
+    session.lock().await.recovery_budget = Some(budget.clone());
+    let mut error = super::stream_core::LlmStreamError::from("provider admission".to_string());
+    let until = super::recovery::now_ms() + 900_000;
+    error.admission_refusal = Some(refact_providers::pressure::AdmissionRefusal::CoolingDown {
+        reason: "rate limit".into(),
+        until_ms: until,
+    });
+    let task_session = session.clone();
+    let task =
+        tokio::spawn(
+            async move { super::recovery::handle_failure(&app, &task_session, &error).await },
+        );
+    tokio::time::timeout(SAFETY_TIMEOUT, async {
+        loop {
+            if session
+                .lock()
+                .await
+                .runtime
+                .recovery
+                .as_ref()
+                .is_some_and(|r| r.state == RecoveryState::Waiting)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    {
+        let session = session.lock().await;
+        let record = session.runtime.recovery.as_ref().unwrap();
+        assert_eq!(record.latest_error.category, "ProviderCooldown");
+        assert_eq!(record.retry_not_before_ms, Some(until));
+        assert_eq!(record.retries_used, 0);
+        assert_eq!(budget.sends_used(), 0);
+    }
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(2)).await;
+    assert!(!task.await.unwrap());
+    tokio::time::resume();
+    let session = session.lock().await;
+    let record = session.runtime.recovery.as_ref().unwrap();
+    assert_eq!(record.state, RecoveryState::Exhausted);
+    assert_eq!(
+        record.terminal_reason.as_deref(),
+        Some("deadline_exhausted")
+    );
+    assert_eq!(budget.sends_used(), 0);
+}
+
+#[tokio::test]
+async fn native_mutation_in_flight_blocks_runner_claim_until_guard_drop() {
+    let session = Arc::new(AMutex::new(ChatSession::new("native-mutation".into())));
+    let guard =
+        super::session::NativeMutationGuard::enter_locked(&session, &mut *session.lock().await)
+            .unwrap();
+    let abort = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    assert!(session
+        .lock()
+        .await
+        .claim_runner("too-early".into(), abort.clone())
+        .is_err());
+    drop(guard);
+    assert!(session
+        .lock()
+        .await
+        .claim_runner("after-quiescence".into(), abort)
+        .is_ok());
+}
+
+#[tokio::test]
 async fn populated_recovery_snapshot_load_interrupts_and_redacts() {
     let dir = tempfile::tempdir().unwrap();
     let gcx = crate::global_context::tests::make_test_gcx().await;

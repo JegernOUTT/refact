@@ -58,6 +58,16 @@ pub(super) async fn handle_queue_command(
     session_arc: Arc<AMutex<ChatSession>>,
     request: CommandRequest,
 ) -> QueueCommandOutcome {
+    let _native_mutation = {
+        let mut session = session_arc.lock().await;
+        match super::super::session::NativeMutationGuard::enter_locked(&session_arc, &mut session) {
+            Ok(guard) => guard,
+            Err(error) => {
+                reject_guard(&mut session, &request.client_request_id, error);
+                return QueueCommandOutcome::Continue;
+            }
+        }
+    };
     {
         let mut session = session_arc.lock().await;
         if crate::buddy::companion::is_companion(&session.thread)

@@ -87,12 +87,7 @@ fn reconfigure_applies_new_limits_and_keeps_state() {
         after.consecutive_retryable_failures,
         before.consecutive_retryable_failures
     );
-    assert_eq!(
-        after.retry_after_until_ms,
-        before
-            .retry_after_until_ms
-            .map(|until| until.min(registry.now_ms() + changed.provider_max_retry_after_ms))
-    );
+    assert_eq!(after.retry_after_until_ms, before.retry_after_until_ms);
     uninstall_pressure_registry();
 }
 

@@ -519,7 +519,7 @@ impl Shared {
                     .as_deref()
                     .and_then(|raw| retry_after_delay_ms(raw, now_ms))
                 {
-                    let until_ms = now_ms.saturating_add(delay_ms.min(config.max_retry_after_ms));
+                    let until_ms = now_ms.saturating_add(delay_ms);
                     state.retry_after_until_ms =
                         Some(state.retry_after_until_ms.unwrap_or(0).max(until_ms));
                 }
@@ -639,16 +639,11 @@ impl PressureRegistry {
             .config
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let now_ms = self.shared.env.now_ms();
         let mut buckets = self.shared.buckets();
-        let retry_after_limit = now_ms.saturating_add(config.max_retry_after_ms);
         for state in buckets.values_mut() {
             state.limit = state
                 .limit
                 .clamp(config.min_concurrency, config.max_concurrency);
-            state.retry_after_until_ms = state
-                .retry_after_until_ms
-                .map(|until_ms| until_ms.min(retry_after_limit));
         }
         *current = config;
         Ok(())
@@ -728,7 +723,7 @@ impl PressureRegistry {
             return RetryDecision::Retry {
                 class: report.class,
                 attempt: completed_attempts + 1,
-                delay_ms: delay_ms.min(config.max_retry_after_ms),
+                delay_ms: delay_ms,
                 honoured_retry_after: true,
             };
         }
@@ -1008,6 +1003,31 @@ mod tests {
             retry_after_delay_ms("Wed, 21 Oct 2015 07:28:00 GMT", at_ms + 5_000),
             Some(0)
         );
+    }
+
+    #[test]
+    fn long_retry_after_is_not_shortened_by_backoff_cap() {
+        let (registry, env) = registry(PressureConfig::default());
+        let mut provider = FakeProvider::http_with_retry_after(429, "900", "rate limit reached");
+        drive(&registry, "openai/long", &mut provider);
+        env.advance(899_999);
+        assert!(matches!(registry.try_admit("openai/long", RequestPriority::Interactive),
+            Err(AdmissionRefusal::CoolingDown { until_ms, .. }) if until_ms == NOW + 900_000));
+        env.advance(1);
+        assert!(registry.try_admit("openai/long", RequestPriority::Interactive).is_ok());
+    }
+
+    #[test]
+    fn reconfigure_preserves_provider_retry_after_deadline() {
+        let (registry, env) = registry(PressureConfig::default());
+        let mut provider = FakeProvider::http_with_retry_after(429, "900", "rate limit reached");
+        drive(&registry, "openai/reconfigure", &mut provider);
+        let mut config = PressureConfig::default();
+        config.max_retry_after_ms = 1_000;
+        registry.reconfigure(config).unwrap();
+        env.advance(300_000);
+        assert!(matches!(registry.try_admit("openai/reconfigure", RequestPriority::Interactive),
+            Err(AdmissionRefusal::CoolingDown { until_ms, .. }) if until_ms == NOW + 900_000));
     }
 
     #[test]

@@ -432,7 +432,9 @@ async fn console_oauth_rejection_refreshes_transport_and_retries_default_endpoin
         reqwest::StatusCode::FORBIDDEN,
     ] {
         let app = tests::app_with_privacy_policy(tests::privacy_policy("claude_code")).await;
-        let params = retry_params(Some(console_config()));
+        let mut params = retry_params(Some(console_config()));
+        let budget = Arc::new(refact_core::recovery::RecoveryBudget::new(Default::default()));
+        params.recovery_budget = Some(budget.clone());
         assert!(params.model_rec.auth_token.is_empty());
         let prepared = retry_prepared(&params);
         let responses = [
@@ -463,6 +465,7 @@ async fn console_oauth_rejection_refreshes_transport_and_retries_default_endpoin
                                 .await
                                 .unwrap();
                                 assert_eq!(response.status(), reqwest::StatusCode::OK);
+                                assert_eq!(budget.sends_used(), 2);
                                 REQUEST_HOOK.with(|hook| {
                                     let hook = hook.borrow();
                                     assert_eq!(hook.requests.len(), 2);
@@ -596,6 +599,8 @@ async fn subscription_oauth_rejection_still_retries_bearer_without_cloud_transpo
     });
     let app = tests::app_with_privacy_policy(tests::privacy_policy("claude_code")).await;
     let mut params = retry_params(None);
+    let budget = Arc::new(refact_core::recovery::RecoveryBudget::new(Default::default()));
+    params.recovery_budget = Some(budget.clone());
     params.model_rec.endpoint = format!("http://{address}");
     let mut prepared = retry_prepared(&params);
     set_bearer_authorization_header(&mut prepared.http_parts.headers, "subscription-rejected")
@@ -615,6 +620,7 @@ async fn subscription_oauth_rejection_still_retries_bearer_without_cloud_transpo
                         .await
                         .unwrap();
                 assert_eq!(response.status(), reqwest::StatusCode::OK);
+                assert_eq!(budget.sends_used(), 2);
                 REFRESH_HOOK
                     .with(|hook| assert_eq!(hook.borrow().calls[0].2, "subscription-rejected"));
             },

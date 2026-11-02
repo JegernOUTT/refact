@@ -115,13 +115,7 @@ pub fn retry_not_before_ms(bucket: &str, report: Option<&FailureReport>) -> Opti
     let own = report
         .and_then(|report| report.retry_after.as_deref())
         .and_then(|raw| refact_providers::pressure::retry_after_delay_ms(raw, now_ms))
-        .map(|delay_ms| {
-            let cap_ms = registry
-                .as_ref()
-                .map(|registry| registry.config().max_retry_after_ms)
-                .unwrap_or(PressureConfig::default().max_retry_after_ms);
-            now_ms.saturating_add(delay_ms.min(cap_ms))
-        });
+        .map(|delay_ms| now_ms.saturating_add(delay_ms));
     let shared = registry
         .as_ref()
         .and_then(|registry| registry.snapshot(bucket))
@@ -283,6 +277,37 @@ pub async fn acquire(
     abort_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     abort_notify: Option<std::sync::Arc<tokio::sync::Notify>>,
 ) -> Result<Option<Permit>, String> {
+    acquire_inner(bucket, priority, abort_flag, abort_notify, None)
+        .await
+        .map_err(|error| match error {
+            AcquireError::Aborted(message) => message,
+            AcquireError::Refused(refusal) => format!("Provider admission refused: {refusal:?}"),
+        })
+}
+
+#[derive(Debug)]
+pub enum AcquireError {
+    Aborted(String),
+    Refused(AdmissionRefusal),
+}
+
+pub async fn acquire_for_recovery(
+    bucket: &str,
+    priority: RequestPriority,
+    abort_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    abort_notify: Option<std::sync::Arc<tokio::sync::Notify>>,
+    budget: &std::sync::Arc<refact_core::recovery::RecoveryBudget>,
+) -> Result<Option<Permit>, AcquireError> {
+    acquire_inner(bucket, priority, abort_flag, abort_notify, Some(budget)).await
+}
+
+async fn acquire_inner(
+    bucket: &str,
+    priority: RequestPriority,
+    abort_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    abort_notify: Option<std::sync::Arc<tokio::sync::Notify>>,
+    budget: Option<&std::sync::Arc<refact_core::recovery::RecoveryBudget>>,
+) -> Result<Option<Permit>, AcquireError> {
     let Some(first) = admit(bucket, priority) else {
         return Ok(None);
     };
@@ -290,37 +315,45 @@ pub async fn acquire(
         Ok(permit) => return Ok(Some(permit)),
         Err(refusal) => refusal,
     };
+    if let Some(budget) = budget {
+        budget.start_recovery();
+    }
     let _waiting = CapacityWait::new(bucket);
     let mut backoff_ms = 25u64;
 
     loop {
+        if budget.is_some() && matches!(refusal, AdmissionRefusal::CoolingDown { .. }) {
+            return Err(AcquireError::Refused(refusal));
+        }
         match refusal {
             AdmissionRefusal::CoolingDown { reason, until_ms } => {
                 let registry = pressure_registry().ok_or_else(|| {
-                    "provider pressure registry was removed while waiting".to_string()
+                    AcquireError::Aborted(
+                        "provider pressure registry was removed while waiting".into(),
+                    )
                 })?;
-                let snapshot = registry.snapshot(bucket);
-                if snapshot
-                    .as_ref()
+                if registry
+                    .snapshot(bucket)
                     .is_some_and(|snapshot| snapshot.breaker.is_some())
                 {
-                    return Err(format!(
+                    return Err(AcquireError::Aborted(format!(
                         "provider bucket {bucket} is blocked: {reason} until {until_ms}"
-                    ));
+                    )));
                 }
                 let remaining_ms = until_ms.saturating_sub(registry.now_ms());
                 if remaining_ms > registry.config().max_backoff_ms {
-                    return Err(format!(
+                    return Err(AcquireError::Aborted(format!(
                         "provider bucket {bucket} is cooling down: {reason} until {until_ms} (longer than the {} ms admission wait bound)",
                         registry.config().max_backoff_ms
-                    ));
+                    )));
                 }
                 wait_abortable(
                     Duration::from_millis(remaining_ms.max(25).min(backoff_ms)),
                     abort_flag.clone(),
                     abort_notify.clone(),
                 )
-                .await?;
+                .await
+                .map_err(AcquireError::Aborted)?;
                 backoff_ms = (backoff_ms * 2).min(500);
             }
             AdmissionRefusal::AtCapacity { .. } | AdmissionRefusal::BackgroundReserved { .. } => {
@@ -329,7 +362,8 @@ pub async fn acquire(
                     abort_flag.clone(),
                     abort_notify.clone(),
                 )
-                .await?;
+                .await
+                .map_err(AcquireError::Aborted)?;
                 backoff_ms = (backoff_ms * 2).min(500);
             }
         }
@@ -338,7 +372,7 @@ pub async fn acquire(
             .as_ref()
             .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
         {
-            return Err("Aborted".to_string());
+            return Err(AcquireError::Aborted("Aborted".to_string()));
         }
         let Some(next) = admit_recheck(bucket, priority) else {
             return Ok(None);

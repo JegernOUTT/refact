@@ -67,6 +67,7 @@ import { VirtualizedChatList } from "./VirtualizedChatList";
 import { RecoveryCard, RecoveryDetails } from "./RecoveryCard";
 import recoveryStyles from "./RecoveryCard.module.css";
 import { isRecoveryRecord } from "../../services/refact/chatSubscription";
+import { humanizeIdentifier } from "../../utils/displayNames";
 import { selectRecoveryById } from "../../features/Chat/Thread/selectors";
 import { useCollapsibleState } from "./useCollapsibleState";
 import { useCollapsibleStoreProvider } from "./useCollapsibleStoreProvider";
@@ -488,7 +489,13 @@ export const ChatContent: React.FC<ChatContentProps> = ({
                     className={recoveryStyles.card}
                     key={error.message_id ?? index}
                   >
-                    <summary>Previous recovery</summary>
+                    <summary>
+                      Previous recovery
+                      {isRecoveryRecord(error.extra?.recovery_record) &&
+                        ` — ${humanizeIdentifier(
+                          error.extra.recovery_record.state,
+                        )}`}
+                    </summary>
                     {isRecoveryRecord(error.extra?.recovery_record) ? (
                       <RecoveryDetails recovery={error.extra.recovery_record} />
                     ) : (

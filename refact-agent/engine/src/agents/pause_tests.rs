@@ -119,6 +119,7 @@ async fn control(app: &AppState, caller: &str, agent: &str, action: &str) -> Res
 
 fn config(agent: &str) -> SubchatConfig {
     SubchatConfig {
+        runner_lease_token: None,
         tool_name: "subagent".into(),
         history_source_model: None,
         stateful: true,

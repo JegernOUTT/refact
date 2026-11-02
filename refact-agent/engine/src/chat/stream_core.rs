@@ -138,6 +138,7 @@ pub struct LlmStreamError {
     pub message: String,
     pub partial_output_emitted: bool,
     pub pressure_failure: Option<(String, FailureReport)>,
+    pub admission_refusal: Option<refact_providers::pressure::AdmissionRefusal>,
 }
 
 impl LlmStreamError {
@@ -146,6 +147,7 @@ impl LlmStreamError {
             message: message.into(),
             partial_output_emitted,
             pressure_failure: None,
+            admission_refusal: None,
         }
     }
 
@@ -155,7 +157,19 @@ impl LlmStreamError {
     }
 
     pub fn retry_decision(&self) -> RetryDecision {
+        if self.is_cooldown() {
+            return RetryDecision::Retry {
+                reason: "provider_cooldown",
+            };
+        }
         classify_llm_error_for_retry(&self.message)
+    }
+
+    pub fn is_cooldown(&self) -> bool {
+        matches!(
+            self.admission_refusal,
+            Some(refact_providers::pressure::AdmissionRefusal::CoolingDown { .. })
+        )
     }
 
     pub fn should_retry(&self, attempt: usize, abort: &AtomicBool) -> bool {
@@ -166,6 +180,12 @@ impl LlmStreamError {
     }
 
     pub fn retry_not_before_ms(&self) -> Option<u64> {
+        if let Some(refact_providers::pressure::AdmissionRefusal::CoolingDown {
+            until_ms, ..
+        }) = &self.admission_refusal
+        {
+            return Some(*until_ms);
+        }
         let (bucket, report) = self.pressure_failure.as_ref()?;
         crate::llm::pressure::retry_not_before_ms(bucket, Some(report))
     }
@@ -2622,14 +2642,36 @@ async fn prepare_llm_stream_request(
             .check()
             .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
     }
-    *pressure_permit = crate::llm::pressure::acquire(
-        provider_bucket,
-        params.priority,
-        params.abort_flag.clone(),
-        params.abort_notify.clone(),
-    )
-    .await
-    .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
+    if let Some(budget) = &params.recovery_budget {
+        *pressure_permit = crate::llm::pressure::acquire_for_recovery(
+            provider_bucket,
+            params.priority,
+            params.abort_flag.clone(),
+            params.abort_notify.clone(),
+            budget,
+        )
+        .await
+        .map_err(|error| match error {
+            crate::llm::pressure::AcquireError::Aborted(message) => {
+                LlmStreamError::new(message, false)
+            }
+            crate::llm::pressure::AcquireError::Refused(refusal) => {
+                let mut error =
+                    LlmStreamError::new("Provider cooldown: waiting for provider admission", false);
+                error.admission_refusal = Some(refusal);
+                error
+            }
+        })?;
+    } else {
+        *pressure_permit = crate::llm::pressure::acquire(
+            provider_bucket,
+            params.priority,
+            params.abort_flag.clone(),
+            params.abort_notify.clone(),
+        )
+        .await
+        .map_err(|error| LlmStreamError::new(error, false))?;
+    }
 
     tracing::debug!(
         url = %http_parts.url,
@@ -2694,6 +2736,7 @@ async fn try_openai_codex_websocket<C: StreamCollector>(
             let (connect_timeout, max_attempts) =
                 header_retry_config.unwrap_or_else(|| (stream_idle_timeout(), 1));
             let mut websocket_session = websocket_session;
+            let mut auth_refreshed = false;
             let mut websocket_http_parts = HttpParts {
                 url: http_parts.url.clone(),
                 headers: http_parts.headers.clone(),
@@ -2735,7 +2778,9 @@ async fn try_openai_codex_websocket<C: StreamCollector>(
                         return Ok(Some(LlmStreamOutcome::Choices(results)));
                     }
                     Err((error, returned_session)) => {
-                        if let Some(status) = openai_codex_websocket_auth_rejection_status(&error) {
+                        if let Some(status) = openai_codex_websocket_auth_rejection_status(&error)
+                            .filter(|_| !auth_refreshed)
+                        {
                             match refresh_openai_codex_after_websocket_auth_rejection(
                                 app.clone(),
                                 &client,
@@ -2746,7 +2791,11 @@ async fn try_openai_codex_websocket<C: StreamCollector>(
                             )
                             .await
                             {
-                                Ok(Some(access_token)) if params.recovery_budget.is_none() => {
+                                Ok(Some(access_token)) if !auth_refreshed => {
+                                    auth_refreshed = true;
+                                    if let Some(budget) = &params.recovery_budget {
+                                        budget.start_recovery();
+                                    }
                                     let mut retry_session = returned_session;
                                     clear_openai_codex_websocket_incremental_state(
                                         &mut retry_session,
@@ -2936,7 +2985,6 @@ async fn send_http_stream_request(
                 })
         })
         .transpose()?;
-    let resend_allowed = params.recovery_budget.is_none();
     let mut response = if let Some(config) = cloud_config.as_ref() {
         send_claude_cloud_request(app, params, prepared, config).await
     } else if let Err(error) = reserve_model_send(params.recovery_budget.as_ref()) {
@@ -2987,6 +3035,9 @@ async fn send_http_stream_request(
             reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
         )
     {
+        if let Some(budget) = &params.recovery_budget {
+            budget.start_recovery();
+        }
         if let Some(rejected_value) = command_credential.as_deref() {
             let refreshed = tokio::select! {
                 result = crate::providers::runtime_credential::refresh_after_rejection(&params.model_rec, rejected_value) => result,
@@ -3005,7 +3056,7 @@ async fn send_http_stream_request(
         }
         if let Some(retry_value) = command_credential
             .as_deref()
-            .filter(|_| resend_allowed && rejected_command_credential.is_some())
+            .filter(|_| rejected_command_credential.is_some())
         {
             let mut retry_parts = HttpParts {
                 url: http_parts.url.clone(),
@@ -3013,6 +3064,8 @@ async fn send_http_stream_request(
                 body: http_parts.body.clone(),
             };
             set_bearer_authorization_header(&mut retry_parts.headers, retry_value)
+                .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
+            reserve_model_send(params.recovery_budget.as_ref())
                 .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
             response = if let Some((response_header_timeout, max_attempts)) = header_retry_config {
                 send_llm_http_request_with_header_timeout(
@@ -3055,7 +3108,6 @@ async fn send_http_stream_request(
             };
             if let Some(provider) = refresh_outcome
                 .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?
-                .filter(|_| resend_allowed)
             {
                 if cloud_config.as_ref().is_some_and(is_claude_console_oauth) {
                     if !provider.is_console_oauth() {
@@ -3085,6 +3137,8 @@ async fn send_http_stream_request(
                         body: http_parts.body.clone(),
                     };
                     set_bearer_authorization_header(&mut retry_parts.headers, &new_access_token)
+                        .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
+                    reserve_model_send(params.recovery_budget.as_ref())
                         .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
                     response = if let Some((response_header_timeout, max_attempts)) =
                         header_retry_config
@@ -3143,7 +3197,7 @@ async fn send_http_stream_request(
             }
         };
         match refresh_outcome.map_err(|e| LlmStreamError::new(e, partial_output_emitted))? {
-            Some(new_access_token) if resend_allowed => {
+            Some(new_access_token) => {
                 let mut retry_parts = HttpParts {
                     url: http_parts.url.clone(),
                     headers: http_parts.headers.clone(),
@@ -3151,6 +3205,8 @@ async fn send_http_stream_request(
                 };
                 set_bearer_authorization_header(&mut retry_parts.headers, &new_access_token)
                     .map_err(|e| LlmStreamError::new(e, partial_output_emitted))?;
+                reserve_model_send(params.recovery_budget.as_ref())
+                    .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
                 response =
                     if let Some((response_header_timeout, max_attempts)) = header_retry_config {
                         send_llm_http_request_with_header_timeout(
@@ -3385,15 +3441,26 @@ pub(crate) async fn run_llm_stream_with_prepare_started<C: StreamCollector>(
 ) -> Result<LlmStreamOutcome, LlmStreamError> {
     let bucket = provider_pressure_bucket(&params.model_rec);
     let mut permit = None;
-    let result = run_llm_stream_with_prepare_started_inner(
-        app,
-        params,
-        collector,
-        prepare_started_at,
-        &bucket,
-        &mut permit,
-    )
-    .await;
+    let budget = params.recovery_budget.clone();
+    let mut partial = false;
+    let result = {
+        let mut tracking = PartialOutputCollector {
+            collector,
+            partial_output_emitted: &mut partial,
+            progress_events: Arc::new(AtomicU64::new(0)),
+        };
+        tokio::select! {
+            biased;
+            error = wait_for_recovery_stop(budget) => Err(LlmStreamError::new(error, false)),
+            result = run_llm_stream_with_prepare_started_inner(
+                app, params, &mut tracking, prepare_started_at, &bucket, &mut permit,
+            ) => result,
+        }
+    };
+    let result = result.map_err(|mut error| {
+        error.partial_output_emitted |= partial;
+        error
+    });
     match (permit, result) {
         (Some(permit), Ok(outcome @ LlmStreamOutcome::Choices(_))) => {
             permit.complete(ProviderPressureOutcome::Success);
@@ -4497,6 +4564,7 @@ mod tests {
             message: "LLM error (503 Service Unavailable): overloaded".to_string(),
             partial_output_emitted: true,
             pressure_failure: None,
+            admission_refusal: None,
         };
 
         assert!(matches!(
@@ -4513,6 +4581,7 @@ mod tests {
             message: "LLM error (503 Service Unavailable): overloaded".to_string(),
             partial_output_emitted: false,
             pressure_failure: None,
+            admission_refusal: None,
         };
 
         assert!(matches!(
@@ -4529,6 +4598,7 @@ mod tests {
             message: ABORT_ERROR_MESSAGE.to_string(),
             partial_output_emitted: true,
             pressure_failure: None,
+            admission_refusal: None,
         };
 
         assert!(error.retry_decision().is_user_cancelled());
@@ -4542,6 +4612,7 @@ mod tests {
             message: "LLM stream ended unexpectedly without completion signal".to_string(),
             partial_output_emitted: true,
             pressure_failure: None,
+            admission_refusal: None,
         };
 
         assert!(matches!(
@@ -5984,7 +6055,7 @@ mod tests {
             env_passthrough: Vec::new(),
         });
         let app = app_with_privacy_policy(privacy_policy(provider_id)).await;
-        let budget = controlled_budget(5);
+        let budget = controlled_budget(0);
         let mut collector = ReplayCollector::default();
         let error = run_llm_stream(
             app,
@@ -5993,8 +6064,11 @@ mod tests {
         )
         .await
         .err()
-        .expect("rejected credential must fail");
-        assert!(error.message.contains("401"), "{error}");
+        .expect("exhausted credential resend budget must fail");
+        assert!(
+            error.message.contains("Recovery retries exhausted"),
+            "{error}"
+        );
         assert_eq!(server.hits.load(Ordering::SeqCst), 1);
         assert_eq!(budget.sends_used(), 1);
         crate::providers::credential::invalidate(provider_id);

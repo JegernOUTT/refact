@@ -729,6 +729,7 @@ pub(crate) mod tests {
         app.agent_executions.remember_config(
             &record.agent_id,
             crate::subchat::SubchatConfig {
+                runner_lease_token: None,
                 history_source_model: None,
                 tool_name: "subagent".into(),
                 stateful: true,

@@ -129,8 +129,15 @@ fn include_overview_record(record: &BackgroundAgent) -> bool {
 
 pub async fn records_for_root(app: &AppState, root_chat_id: &str) -> Vec<(BackgroundAgent, usize)> {
     let all = app.agents.list_all().await;
+    records_from_chats(&all, [root_chat_id])
+}
+
+fn records_from_chats<'a>(
+    all: &[BackgroundAgent],
+    chat_ids: impl IntoIterator<Item = &'a str>,
+) -> Vec<(BackgroundAgent, usize)> {
     let mut by_parent: HashMap<&str, Vec<&BackgroundAgent>> = HashMap::new();
-    for record in &all {
+    for record in all {
         by_parent
             .entry(record.parent_chat_id.as_str())
             .or_default()
@@ -143,7 +150,10 @@ pub async fn records_for_root(app: &AppState, root_chat_id: &str) -> Vec<(Backgr
                 .then(a.agent_id.cmp(&b.agent_id))
         });
     }
-    let mut pending = VecDeque::from([(root_chat_id.to_string(), 0usize)]);
+    let mut pending = chat_ids
+        .into_iter()
+        .map(|chat_id| (chat_id.to_string(), 0usize))
+        .collect::<VecDeque<_>>();
     let mut seen_chats = HashSet::new();
     let mut seen_agents = HashSet::new();
     let mut result = Vec::new();
@@ -162,6 +172,24 @@ pub async fn records_for_root(app: &AppState, root_chat_id: &str) -> Vec<(Backgr
         }
     }
     result
+}
+
+async fn records_for_overview(
+    app: &AppState,
+    current_chat_id: &str,
+    root_chat_id: &str,
+) -> Vec<(BackgroundAgent, usize)> {
+    let current_session = app.chat.sessions.read().await.get(current_chat_id).cloned();
+    let current_is_rooted_here = if let Some(session) = current_session {
+        session.lock().await.thread.root_chat_id.as_deref() == Some(root_chat_id)
+    } else {
+        false
+    };
+    let all = app.agents.list_all().await;
+    records_from_chats(
+        &all,
+        std::iter::once(root_chat_id).chain(current_is_rooted_here.then_some(current_chat_id)),
+    )
 }
 
 /// One refusal for every cross-root denial. An agent that does not exist, an
@@ -464,8 +492,8 @@ impl Tool for ToolAgentsOverview {
         tool_call_id: &String,
         _args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (app, _chat_id, root_chat_id, agent_id) = context(&ccx).await;
-        let records = records_for_root(&app, &root_chat_id)
+        let (app, chat_id, root_chat_id, agent_id) = context(&ccx).await;
+        let records = records_for_overview(&app, &chat_id, &root_chat_id)
             .await
             .into_iter()
             .filter(|(record, _)| include_overview_record(record))
@@ -1107,6 +1135,61 @@ mod tests {
             .iter()
             .map(|(key, value)| ((*key).to_string(), value.clone()))
             .collect()
+    }
+
+    #[tokio::test]
+    async fn overview_after_mode_transition_includes_current_chat_branch_only() {
+        let (app, ccx) = test_context("transition-chat", "root", None).await;
+        let mut session = ChatSession::new("transition-chat".into());
+        session.thread.parent_id = Some("earlier-chat".into());
+        session.thread.root_chat_id = Some("root".into());
+        session.thread.link_type = Some("mode_transition".into());
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("transition-chat".into(), Arc::new(AMutex::new(session)));
+        let child = create(&app, "transition-chat", "visible-child").await;
+        let grandchild = create(&app, "visible-child-chat", "visible-grandchild").await;
+        let outsider = create(&app, "unrelated-root", "hidden-outsider").await;
+        app.agents
+            .mark_running(&child.agent_id, "visible-child-chat".to_string())
+            .await
+            .unwrap();
+        app.agents
+            .mark_running(&grandchild.agent_id, "visible-grandchild-chat".to_string())
+            .await
+            .unwrap();
+        let rendered = text(
+            ToolAgentsOverview {
+                config_path: String::new(),
+            }
+            .tool_execute(ccx, &"overview".into(), &HashMap::new())
+            .await
+            .unwrap(),
+        );
+        assert!(rendered.contains("visible-child"), "{rendered}");
+        assert!(rendered.contains("visible-grandchild"), "{rendered}");
+        assert!(!rendered.contains(&outsider.title), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn overview_does_not_seed_an_unrelated_current_chat() {
+        let (app, ccx) = test_context("other-chat", "root", None).await;
+        let mut session = ChatSession::new("other-chat".into());
+        session.thread.root_chat_id = Some("other-root".into());
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("other-chat".into(), Arc::new(AMutex::new(session)));
+        let visible = create(&app, "root", "permitted-child").await;
+        let hidden = create(&app, "other-chat", "private-child").await;
+        let records = records_for_overview(&app, "other-chat", "root").await;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0.agent_id, visible.agent_id);
+        assert_ne!(records[0].0.agent_id, hidden.agent_id);
+        assert_eq!(ccx.lock().await.root_chat_id, "root");
     }
 
     fn receipt_of(result: &(bool, Vec<ContextEnum>)) -> Value {
@@ -2055,6 +2138,7 @@ mod tests {
             .await
             .unwrap();
         let config = crate::subchat::SubchatConfig {
+            runner_lease_token: Some("identity-test-runner".into()),
             history_source_model: None,
             tool_name: "subagent".to_string(),
             stateful: true,
@@ -2082,7 +2166,7 @@ mod tests {
             cache_control: crate::llm::params::CacheControl::Ephemeral,
             parent_tool_call_id: None,
             parent_subchat_tx: None,
-            abort_flag: None,
+            abort_flag: Some(Arc::new(std::sync::atomic::AtomicBool::new(false))),
             soft_abort: false,
             activity_stamp: None,
             background_agent_id: Some(child.agent_id.clone()),
@@ -2092,7 +2176,7 @@ mod tests {
             step_progress: None,
             trace_parent: crate::subchat::TraceParent::rooted("parent", "parent"),
         };
-        crate::subchat::install_stateful_subchat_session(
+        let mut runner_guard = crate::subchat::install_stateful_subchat_session(
             &app,
             "subchat-child-chat",
             &config,
@@ -2100,6 +2184,7 @@ mod tests {
             None,
         )
         .await
+        .unwrap()
         .unwrap();
         assert_eq!(
             crate::coordination::scope::model_caller(&app, "subchat-child-chat", "test/model")
@@ -2119,10 +2204,11 @@ mod tests {
         )
         .await
         .is_err());
+        runner_guard.release().await;
         app.agent_executions
             .remember_scope(&child.agent_id, root.clone());
         let accepted = app.agent_executions.saved_scope(&child.agent_id).unwrap();
-        crate::subchat::install_stateful_subchat_session(
+        let _runner_guard = crate::subchat::install_stateful_subchat_session(
             &app,
             "subchat-child-chat",
             &config,

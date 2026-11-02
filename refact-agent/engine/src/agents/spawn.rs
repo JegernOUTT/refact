@@ -22,7 +22,8 @@ use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{HookPayload, get_project_dir_string, run_observation_hooks};
 use crate::global_context::GlobalContext;
 use crate::subchat::{
-    SubchatConfig, SubchatProgress, SubchatResult, resolve_subchat_config_with_parent,
+    RunnerLeaseGuard, SubchatConfig, SubchatProgress, SubchatResult,
+    resolve_subchat_config_with_parent,
 };
 use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::{
@@ -43,7 +44,7 @@ struct SpawnOwners {
 static SPAWN_OWNERS: std::sync::OnceLock<std::sync::Mutex<SpawnOwners>> =
     std::sync::OnceLock::new();
 
-fn track_spawn_owner(
+pub(crate) fn track_spawn_owner(
     task: impl std::future::Future<Output = ()> + Send + 'static,
     cleanup: bool,
 ) -> Result<(), String> {
@@ -1561,6 +1562,7 @@ async fn prepare_launch_for_parent_run(
     let config_result = if req.config_name == "test_spawn" {
         drop(resolve_config);
         Ok(SubchatConfig {
+            runner_lease_token: None,
             history_source_model: None,
             tool_name: req.config_name.clone(),
             stateful: true,
@@ -2946,6 +2948,7 @@ async fn resume_agent_for_parent_run(
             app.agent_executions
                 .remember_launch_intent(&child_chat_id, task_intent.clone());
             task_intent.dispatched().await;
+            let mut runner_guard = None;
             let validation = async {
                 let current_config = recover_run_config(&app, &parent_chat_id, &agent_id)
                     .await?
@@ -3269,7 +3272,9 @@ async fn resume_agent_for_parent_run(
                 {
                     return Err("Cancelled before resumed session start".into());
                 }
-                install_resumed_session(
+                config.runner_lease_token = Some(Uuid::new_v4().simple().to_string());
+                config.abort_flag = Some(abort.clone());
+                runner_guard = install_resumed_session(
                     &app,
                     &trajectory,
                     &messages,
@@ -3326,7 +3331,9 @@ async fn resume_agent_for_parent_run(
                     if abort.load(Ordering::Acquire) || launch_stopping(&app) {
                         Err("Aborted before resumed execution".into())
                     } else {
-                        run_background_subchat(app.gcx.clone(), messages, config).await
+                        run_background_subchat_with_lease(
+                            app.gcx.clone(), messages, config, runner_guard.take(),
+                        ).await
                     }
                 }
                 Ok(_) => Err("Aborted before resumed execution".into()),
@@ -3489,6 +3496,8 @@ pub(super) fn resume_session_revision(
     session: &crate::chat::types::ChatSession,
 ) -> Result<String, String> {
     if session.closed
+        || session.runner_lease.is_some()
+        || session.native_commands_in_flight.load(Ordering::SeqCst) > 0
         || session.turn_depth > 0
         || session.is_compressing
         || session.draft_message.is_some()
@@ -3516,8 +3525,9 @@ pub(super) async fn install_resumed_session(
     expected_revision: Option<&str>,
     start: bool,
     held_transition: Option<&crate::chat::worktree_lifecycle::AttachmentTransitionGuard>,
-) -> Result<(), String> {
+) -> Result<Option<RunnerLeaseGuard>, String> {
     let chat_id = &trajectory.thread.id;
+    let mut runner_guard = None;
     if let Some(expected) = expected_session {
         let acquired;
         let _transition = match held_transition {
@@ -3567,6 +3577,9 @@ pub(super) async fn install_resumed_session(
         {
             return Err("child session scope changed or resume was cancelled".into());
         }
+        if start {
+            runner_guard = Some(RunnerLeaseGuard::claim(expected, &mut session, config)?);
+        }
         session.work_project_root = Some(source.to_path_buf());
         session.thread.autonomous_no_confirm &= config.autonomous_no_confirm;
         session.thread.auto_approve_editing_tools &= config.auto_approve_editing_tools;
@@ -3574,6 +3587,7 @@ pub(super) async fn install_resumed_session(
         session.thread.worktree = config.worktree.clone();
         if start {
             session.replace_messages(messages.to_vec());
+            session.refresh_runner_history()?;
             session.set_runtime_state(crate::chat::types::SessionState::Generating, None);
         } else {
             session.increment_version();
@@ -3597,9 +3611,7 @@ pub(super) async fn install_resumed_session(
         session.set_goal_ledger(trajectory.goal_ledger.clone());
         session.goal_verification_blocked_until_ms = trajectory.goal_verification_blocked_until_ms;
         session.pending_deliveries = trajectory.pending_deliveries.clone().into();
-        if start {
-            session.set_runtime_state(crate::chat::types::SessionState::Generating, None);
-        } else {
+        if !start {
             session.increment_version();
         }
         let session = Arc::new(AMutex::new(session));
@@ -3608,9 +3620,14 @@ pub(super) async fn install_resumed_session(
         if sessions.contains_key(chat_id) {
             return Err("child session appeared while resume was queued".into());
         }
+        if start {
+            let mut guarded = session.lock().await;
+            runner_guard = Some(RunnerLeaseGuard::claim(&session, &mut guarded, config)?);
+            guarded.set_runtime_state(crate::chat::types::SessionState::Generating, None);
+        }
         sessions.insert(chat_id.clone(), session);
     }
-    Ok(())
+    Ok(runner_guard)
 }
 
 fn reconcile_resume_tool_pairs(
@@ -3985,15 +4002,25 @@ async fn run_background_subchat(
     messages: Vec<ChatMessage>,
     config: SubchatConfig,
 ) -> Result<SubchatResult, String> {
+    run_background_subchat_with_lease(gcx, messages, config, None).await
+}
+
+async fn run_background_subchat_with_lease(
+    gcx: Arc<GlobalContext>,
+    messages: Vec<ChatMessage>,
+    config: SubchatConfig,
+    runner_guard: Option<RunnerLeaseGuard>,
+) -> Result<SubchatResult, String> {
     use futures::FutureExt;
-    std::panic::AssertUnwindSafe(run_background_subchat_inner(gcx, messages, config))
+    std::panic::AssertUnwindSafe(run_background_subchat_inner(gcx, messages, config, runner_guard))
         .catch_unwind().await.unwrap_or_else(|_| Err("child runner panicked; saved completed boundaries remain available for explicit resume".into()))
 }
 
 async fn run_background_subchat_inner(
     gcx: Arc<GlobalContext>,
     messages: Vec<ChatMessage>,
-    config: SubchatConfig,
+    mut config: SubchatConfig,
+    mut runner_guard: Option<RunnerLeaseGuard>,
 ) -> Result<SubchatResult, String> {
     #[cfg(test)]
     {
@@ -4003,14 +4030,20 @@ async fn run_background_subchat_inner(
             .unwrap()
             .clone();
         if let Some(runner) = runner {
-            if config.stateful {
+            if runner_guard.is_none() {
+                config.runner_lease_token = Some(uuid::Uuid::new_v4().simple().to_string());
+                if config.abort_flag.is_none() {
+                    config.abort_flag = Some(Arc::new(AtomicBool::new(false)));
+                }
+            }
+            if config.stateful && runner_guard.is_none() {
                 if let Some(chat_id) = config.chat_id.as_deref() {
                     let app = AppState::from_gcx(gcx.clone()).await;
                     let source = config
                         .background_agent_id
                         .as_deref()
                         .and_then(|agent_id| app.agent_executions.saved_scope(agent_id));
-                    crate::subchat::install_stateful_subchat_session(
+                    runner_guard = crate::subchat::install_stateful_subchat_session(
                         &app,
                         chat_id,
                         &config,
@@ -4020,10 +4053,14 @@ async fn run_background_subchat_inner(
                     .await?;
                 }
             }
-            return runner(gcx, messages, config).await;
+            let result = runner(gcx, messages, config).await;
+            if let Some(guard) = runner_guard.as_mut() {
+                guard.release().await;
+            }
+            return result;
         }
     }
-    crate::subchat::run_subchat(gcx, messages, config).await
+    crate::subchat::run_subchat_with_lease(gcx, messages, config, runner_guard).await
 }
 
 async fn build_messages(

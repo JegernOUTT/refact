@@ -523,6 +523,9 @@ pub async fn handle_v1_chat_command(
     }
     spawn_pending_background_agent_flush(app.clone(), chat_id.clone());
     let mut session = session_arc.lock().await;
+    let _native_mutation =
+        super::session::NativeMutationGuard::enter_locked(&session_arc, &mut session)
+            .map_err(|error| ScratchError::new(StatusCode::CONFLICT, error))?;
 
     if crate::buddy::companion::is_companion(&session.thread)
         && !crate::buddy::companion::command_allowed(&request.command)
@@ -717,6 +720,11 @@ pub async fn handle_v1_chat_command(
             r.run_id == *run_id
                 && r.revision == expected_revision
                 && r.state == refact_core::recovery::RecoveryState::Waiting
+                && (r.manual
+                    || session
+                        .goal
+                        .as_ref()
+                        .is_none_or(|goal| goal.active && goal.status == GoalStatus::Active))
                 && r.retry_not_before_ms.unwrap_or(0) <= super::recovery::now_ms()
         });
         if accepted {
@@ -1176,6 +1184,9 @@ pub async fn handle_v1_chat_cancel_queued(
     let mut session = session_arc.lock().await;
 
     let initial_len = session.command_queue.len();
+    let _native_mutation =
+        super::session::NativeMutationGuard::enter_locked(&session_arc, &mut session)
+            .map_err(|error| ScratchError::new(StatusCode::CONFLICT, error))?;
     session
         .command_queue
         .retain(|r| r.client_request_id != client_request_id);
@@ -1216,6 +1227,9 @@ pub async fn handle_v1_chat_reprioritize_queued(
     };
     let mut session = session_arc.lock().await;
 
+    let _native_mutation =
+        super::session::NativeMutationGuard::enter_locked(&session_arc, &mut session)
+            .map_err(|error| ScratchError::new(StatusCode::CONFLICT, error))?;
     if session.reprioritize_queued_command(&client_request_id, patch.priority) {
         Ok(Response::builder()
             .status(StatusCode::OK)

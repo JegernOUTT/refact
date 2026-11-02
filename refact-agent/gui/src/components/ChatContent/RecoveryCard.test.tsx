@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from "../../utils/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import type { RecoveryRecord } from "../../services/refact/chatSubscription";
 import type { GoalSnapshot } from "../../services/refact/types";
-import { RecoveryCard } from "./RecoveryCard";
+import { RecoveryCard, RecoveryDetails } from "./RecoveryCard";
 
 const mocks = vi.hoisted(() => {
   vi.resetModules();
@@ -78,6 +78,64 @@ const recovery: RecoveryRecord = {
   attempts: [],
 };
 describe("RecoveryCard", () => {
+  it("explains automatic allowance, ceiling, provider cooldown and timeout cause", () => {
+    mocks.goal = null;
+    render(
+      <RecoveryCard
+        chatId="chat"
+        recovery={{
+          ...recovery,
+          retries_used: 1,
+          deadline_at_ms: Date.now() + 572000,
+          next_retry_at_ms: Date.now() + 30000,
+          retry_not_before_ms: Date.now() + 30000,
+          latest_error: {
+            ...recovery.latest_error,
+            raw_error: "Request timed out locally",
+          },
+        }}
+      />,
+    );
+    expect(
+      screen.getByText(/Automatic retries: 1 \/ 2 used \(1 remaining\)/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/initial model request is separate/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Maximum recovery time remaining/),
+    ).toHaveTextContent("individual requests have their own timeout");
+    expect(screen.getByText(/Provider cooldown until/)).toBeInTheDocument();
+    expect(
+      screen.getByText("Cause: Request timed out locally"),
+    ).toBeInTheDocument();
+  });
+  it("shows manual allowance and terminal reason without inactive countdowns", () => {
+    mocks.goal = null;
+    render(
+      <RecoveryCard
+        chatId="chat"
+        recovery={{
+          ...recovery,
+          manual: true,
+          state: "exhausted",
+          retries_used: 2,
+          terminal_reason: "retry_limit_exhausted",
+          deadline_at_ms: Date.now() + 50000,
+          retry_not_before_ms: Date.now() + 30000,
+        }}
+      />,
+    );
+    expect(
+      screen.getByText(/Manual new requests: 2 \/ 2 used \(0 remaining\)/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Reason: Retry limit reached")).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        /Maximum recovery time remaining|Provider cooldown until|Waiting to retry/,
+      ),
+    ).not.toBeInTheDocument();
+  });
   it("keeps the original model until an explicit model choice is made", () => {
     mocks.goal = null;
     mocks.run.mockReset();
@@ -119,6 +177,7 @@ describe("RecoveryCard", () => {
         recovery={{
           ...recovery,
           state: "succeeded",
+          manual: true,
           retries_used: 1,
           latest_error: { ...recovery.latest_error, raw_error: raw },
           attempts: [
@@ -146,12 +205,78 @@ describe("RecoveryCard", () => {
     view.rerender(
       <RecoveryCard
         chatId="chat"
-        recovery={{ ...recovery, state: "succeeded", retries_used: 2 }}
+        recovery={{
+          ...recovery,
+          state: "succeeded",
+          manual: true,
+          retries_used: 2,
+        }}
       />,
     );
     expect(
       screen.getByText("Recovered after 2 new requests"),
     ).toBeInTheDocument();
+  });
+
+  it("labels successful automatic retries truthfully with singular and plural counts", () => {
+    mocks.goal = null;
+    const view = render(
+      <RecoveryCard
+        chatId="chat"
+        recovery={{ ...recovery, state: "succeeded", retries_used: 1 }}
+      />,
+    );
+    expect(
+      screen.getByText("Recovered after 1 automatic retry"),
+    ).toBeInTheDocument();
+    view.rerender(
+      <RecoveryCard
+        chatId="chat"
+        recovery={{ ...recovery, state: "succeeded", retries_used: 2 }}
+      />,
+    );
+    expect(
+      screen.getByText("Recovered after 2 automatic retries"),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps archived state and terminal reason in shared diagnostics without actions", () => {
+    render(
+      <RecoveryDetails
+        recovery={{
+          ...recovery,
+          state: "exhausted",
+          terminal_reason: "retry_limit_exhausted",
+        }}
+      />,
+    );
+    expect(
+      screen.getByText("State: Exhausted — Retry limit reached"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Provider cooldown until/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not show provider cooldown while a request is attempting", () => {
+    mocks.goal = null;
+    render(
+      <RecoveryCard
+        chatId="chat"
+        recovery={{
+          ...recovery,
+          state: "attempting",
+          retry_not_before_ms: Date.now() + 30000,
+        }}
+      />,
+    );
+    expect(
+      screen.queryByText(/Provider cooldown until/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Retry now" }),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps Stop available during waiting and respects mandatory cooldown", () => {
@@ -167,6 +292,30 @@ describe("RecoveryCard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Stop" }));
     expect(mocks.abort).toHaveBeenCalledOnce();
     expect(screen.getByText("Stop requested…")).toBeInTheDocument();
+  });
+  it("requires a held goal to resume before an immediate retry", () => {
+    mocks.goal = { status: "paused" };
+    mocks.run.mockReset();
+    const view = render(<RecoveryCard chatId="chat" recovery={recovery} />);
+    const retry = screen.getByRole("button", { name: "Retry now" });
+    expect(retry).toBeDisabled();
+    fireEvent.click(retry);
+    expect(mocks.run).not.toHaveBeenCalled();
+    mocks.goal = { status: "active" };
+    view.rerender(
+      <RecoveryCard chatId="chat" recovery={{ ...recovery, revision: 4 }} />,
+    );
+    expect(retry).toBeEnabled();
+    fireEvent.click(retry);
+    expect(mocks.run).toHaveBeenCalledWith(
+      {
+        type: "recovery_retry_now",
+        run_id: "run",
+        expected_revision: 4,
+      },
+      expect.any(Function),
+    );
+    mocks.goal = null;
   });
   it("sends an explicitly authorised single retry with revision", () => {
     mocks.goal = null;

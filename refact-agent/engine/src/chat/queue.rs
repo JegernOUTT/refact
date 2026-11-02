@@ -167,6 +167,9 @@ pub(crate) fn prepare_guarded_command(
     session: &mut ChatSession,
     request: &CommandRequest,
 ) -> Result<(), String> {
+    if session.runner_lease.is_some() {
+        return Err("Background runner owns this conversation; use the parent conversation or agent lifecycle controls".into());
+    }
     if let Some(guard) = &request.supervision_guard {
         if request.native_approval_guard.is_some() || request.priority {
             return Err("supervision cannot carry native approval or priority authority".into());
@@ -1658,7 +1661,8 @@ async fn select_next_command(session_arc: &Arc<AMutex<ChatSession>>) -> Option<S
     }
 
     let state = session.runtime.state;
-    let is_busy = state == SessionState::Generating
+    let is_busy = session.runner_lease.is_some()
+        || state == SessionState::Generating
         || state == SessionState::ExecutingTools
         || session.turn_depth > 0
         || session

@@ -2163,6 +2163,9 @@ pub fn start_generation(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     Box::pin(async move {
         let gcx = app.gcx.clone();
+        if session_arc.lock().await.runner_lease.is_some() {
+            return;
+        }
         let preparation = async {
             let board_execution = super::session_runtime::board_execution(&app, &session_arc).await;
             let board_execution = match board_execution {
@@ -2212,7 +2215,7 @@ pub fn start_generation(
                         .set_runtime_state(SessionState::Error, Some(error));
                     return None;
                 }
-                TurnDepthGuard::enter(app.clone(), session_arc.clone()).await
+                TurnDepthGuard::enter(app.clone(), session_arc.clone()).await?
             };
             Some(turn_guard)
         };
@@ -2372,16 +2375,19 @@ struct TurnDepthGuard {
 }
 
 impl TurnDepthGuard {
-    async fn enter(app: AppState, session_arc: Arc<AMutex<ChatSession>>) -> Self {
+    async fn enter(app: AppState, session_arc: Arc<AMutex<ChatSession>>) -> Option<Self> {
         {
             let mut session = session_arc.lock().await;
+            if session.runner_lease.is_some() {
+                return None;
+            }
             session.turn_depth = session.turn_depth.saturating_add(1);
         }
-        Self {
+        Some(Self {
             app,
             session_arc,
             released: false,
-        }
+        })
     }
 
     /// Release synchronously so a following drain observes the finished turn.
@@ -3941,6 +3947,7 @@ mod tests {
             message: message.to_string(),
             partial_output_emitted,
             pressure_failure: None,
+            admission_refusal: None,
         }
     }
 

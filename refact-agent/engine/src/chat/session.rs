@@ -445,6 +445,29 @@ pub(super) fn should_replace_background_agent(
 
 pub type SessionsMap = Arc<ARwLock<HashMap<String, Arc<AMutex<ChatSession>>>>>;
 
+pub(crate) struct NativeMutationGuard(Arc<std::sync::atomic::AtomicUsize>);
+
+impl NativeMutationGuard {
+    pub(crate) fn enter_locked(
+        _session_arc: &Arc<AMutex<ChatSession>>,
+        session: &mut ChatSession,
+    ) -> Result<Self, String> {
+        if session.runner_lease.is_some() {
+            return Err("Background runner owns this conversation; use the parent conversation or agent lifecycle controls".into());
+        }
+        session
+            .native_commands_in_flight
+            .fetch_add(1, Ordering::SeqCst);
+        Ok(Self(session.native_commands_in_flight.clone()))
+    }
+}
+
+impl Drop for NativeMutationGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 pub fn create_sessions_map() -> SessionsMap {
     Arc::new(ARwLock::new(HashMap::new()))
 }
@@ -781,6 +804,9 @@ impl ChatSession {
         let (event_tx, _) = broadcast::channel(limits().event_channel_capacity);
         Self {
             chat_id: chat_id.clone(),
+            runner_lease: None,
+            runner_message_digest: None,
+            native_commands_in_flight: Default::default(),
             derived_privacy_zones: crate::privacy::records::new_derived_privacy_zones(),
             recovery_budget: None,
             recovery_policy_source: refact_core::recovery::RecoveryPolicySource::Global,
@@ -932,6 +958,9 @@ impl ChatSession {
         );
         Self {
             chat_id,
+            runner_lease: None,
+            runner_message_digest: None,
+            native_commands_in_flight: Default::default(),
             derived_privacy_zones: crate::privacy::records::new_derived_privacy_zones(),
             recovery_budget: None,
             recovery_policy_source: refact_core::recovery::RecoveryPolicySource::Global,
@@ -1920,21 +1949,82 @@ impl ChatSession {
             SessionState::Idle | SessionState::Completed | SessionState::WaitingUserInput
         );
         is_idle_like
+            && self.runner_lease.is_none()
+            && self.native_commands_in_flight.load(Ordering::SeqCst) == 0
             && !self.is_pending_wake_up()
             && self.command_queue.is_empty()
             && self.last_activity.elapsed() > session_idle_timeout()
     }
 
     pub fn is_runner_owned_subagent_view(&self) -> bool {
-        self.runtime.state == SessionState::Generating
-            && self.thread.parent_id.is_some()
-            && self.thread.link_type.as_deref().is_some_and(|link_type| {
-                !matches!(link_type, "handoff" | "mode_transition" | "branch")
-            })
+        self.runner_lease.is_some()
+    }
+
+    pub(crate) fn runner_owned_by(&self, token: Option<&str>) -> bool {
+        self.runner_lease
+            .as_ref()
+            .is_some_and(|(owner, _)| token == Some(owner.as_str()))
+    }
+
+    pub(crate) fn refresh_runner_history(&mut self) -> Result<(), String> {
+        use sha2::Digest;
+        let bytes = serde_json::to_vec(&self.messages).map_err(|error| error.to_string())?;
+        self.runner_message_digest = Some(sha2::Sha256::digest(bytes).into());
+        Ok(())
+    }
+
+    pub(crate) fn runner_history_unchanged(&self) -> bool {
+        use sha2::Digest;
+        self.runner_message_digest.is_some_and(|expected| {
+            serde_json::to_vec(&self.messages)
+                .map(|bytes| <[u8; 32]>::from(sha2::Sha256::digest(bytes)) == expected)
+                .unwrap_or(false)
+        })
+    }
+
+    pub(crate) fn claim_runner(
+        &mut self,
+        token: String,
+        abort: Arc<AtomicBool>,
+    ) -> Result<String, String> {
+        if self.runner_lease.is_some()
+            || self.native_commands_in_flight.load(Ordering::SeqCst) > 0
+            || self.turn_depth > 0
+            || matches!(
+                self.runtime.state,
+                SessionState::Generating | SessionState::ExecutingTools
+            )
+        {
+            return Err("Child session already has an execution owner".into());
+        }
+        self.refresh_runner_history()?;
+        self.runner_lease = Some((token.clone(), abort));
+        Ok(token)
+    }
+
+    pub(crate) fn release_runner(&mut self, token: &str) {
+        if self
+            .runner_lease
+            .as_ref()
+            .is_some_and(|(owner, _)| owner == token)
+        {
+            self.runner_lease = None;
+            self.runner_message_digest = None;
+            if self.runtime.state == SessionState::Generating
+                && !self.runtime.paused
+                && self.runtime.pause_reasons.is_empty()
+            {
+                self.set_runtime_state(SessionState::Idle, None);
+            }
+            self.queue_notify.notify_one();
+        }
     }
 
     pub(crate) fn mirror_runner_messages(&mut self, messages: Vec<ChatMessage>) {
         self.messages = messages;
+        if self.runner_lease.is_some() && self.refresh_runner_history().is_err() {
+            self.runner_message_digest = None;
+        }
         self.rebuild_goal_projection_from_messages();
         self.touch();
         let snapshot = self.snapshot();
@@ -2497,7 +2587,8 @@ impl ChatSession {
     /// ended. `SessionState::Idle` alone is not enough: `tools.rs` briefly
     /// returns to `Idle` between steps of the same turn.
     pub fn turn_finished(&self) -> bool {
-        self.turn_depth == 0
+        self.runner_lease.is_none()
+            && self.turn_depth == 0
             && matches!(
                 self.runtime.state,
                 SessionState::Idle
@@ -3829,6 +3920,9 @@ impl ChatSession {
     }
 
     pub fn start_stream(&mut self) -> Option<(String, Arc<AtomicBool>)> {
+        if self.runner_lease.is_some() {
+            return None;
+        }
         if self.yield_to_queued_commands_at_boundary() {
             return None;
         }
@@ -4049,12 +4143,32 @@ impl ChatSession {
     }
 
     pub fn archive_recovery(&mut self) {
-        let Some(record) = self.runtime.recovery.clone() else {
+        let Some(mut record) = self.runtime.recovery.clone() else {
             return;
         };
-        if self.messages.iter().any(|m| {
+        if matches!(
+            record.state,
+            refact_core::recovery::RecoveryState::Waiting
+                | refact_core::recovery::RecoveryState::Attempting
+        ) {
+            record.state = refact_core::recovery::RecoveryState::Cancelled;
+            record.revision = record.revision.saturating_add(1);
+            record.next_retry_at_ms = None;
+            record.terminal_reason = Some("superseded".into());
+        }
+        if let Some(index) = self.messages.iter().position(|m| {
             m.extra.get("recovery_run_id").and_then(|v| v.as_str()) == Some(record.run_id.as_str())
         }) {
+            self.messages[index].extra.insert(
+                "recovery_record".into(),
+                serde_json::to_value(&record).unwrap_or_default(),
+            );
+            self.increment_version();
+            let message = self.messages[index].clone();
+            self.emit(ChatEvent::MessageUpdated {
+                message_id: message.message_id.clone(),
+                message,
+            });
             return;
         }
         let mut message = make_ui_only_error_message(&record.latest_error.title);

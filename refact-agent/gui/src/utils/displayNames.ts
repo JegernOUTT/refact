@@ -24,6 +24,10 @@ const CURATED: Record<string, string | undefined> = {
   budget_exhausted: "Budget exhausted",
   no_progress: "No progress",
   transferred: "Transferred",
+  retry_limit_exhausted: "Retry limit reached",
+  deadline_exhausted: "Recovery time limit reached",
+  superseded: "Superseded by a newer request",
+  interrupted: "Interrupted",
   // goal pursuit / event kinds
   goal_pursuit: "Goal pursuit",
   needs_work: "Needs work",

@@ -471,35 +471,42 @@ async fn running_child_refuses_worktree_rebinding() {
             json!({"worktree_id": "different-worktree"}),
         ),
     ] {
-        let response = command(
-            &fixture.app,
-            &handle.child_chat_id,
-            id,
-            json!({"type": "set_params", "patch": patch}),
+        let error = crate::chat::handle_v1_chat_command(
+            State(fixture.app.clone()),
+            Path(handle.child_chat_id.clone()),
+            serde_json::to_vec(&json!({
+                "client_request_id": id,
+                "type": "set_params",
+                "patch": patch,
+            }))
+            .unwrap()
+            .into(),
         )
-        .await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body: Value =
-            serde_json::from_slice(&hyper::body::to_bytes(response.into_body()).await.unwrap())
-                .unwrap();
-        assert_eq!(
-            body["error"],
-            "Background agent child chats cannot change their worktree"
-        );
+        .await
+        .unwrap_err();
+        assert_eq!(error.status_code, StatusCode::CONFLICT);
+        assert!(error.message.contains("Background runner owns"));
         assert_eq!(
             session.lock().await.thread.worktree.as_ref(),
             Some(&worktree)
         );
     }
-    let response = command(
-        &fixture.app,
-        &handle.child_chat_id,
-        "same-worktree",
-        json!({"type": "set_params", "patch": {"worktree_id": worktree.id, "temperature": 0.25}}),
+    let temperature = session.lock().await.thread.temperature;
+    let error = crate::chat::handle_v1_chat_command(
+        State(fixture.app.clone()),
+        Path(handle.child_chat_id.clone()),
+        serde_json::to_vec(&json!({
+            "client_request_id": "same-worktree",
+            "type": "set_params",
+            "patch": {"worktree_id": worktree.id, "temperature": 0.25},
+        }))
+        .unwrap()
+        .into(),
     )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(session.lock().await.thread.temperature, Some(0.25));
+    .await
+    .unwrap_err();
+    assert_eq!(error.status_code, StatusCode::CONFLICT);
+    assert_eq!(session.lock().await.thread.temperature, temperature);
     release.notify_one();
     assert_eq!(
         await_completion(handle).await.status,

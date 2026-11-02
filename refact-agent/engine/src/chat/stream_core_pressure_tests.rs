@@ -119,6 +119,29 @@ fn install_single_slot_pressure() {
 
 #[tokio::test]
 #[serial_test::serial(provider_pressure, coordination_metrics, runtime_settings)]
+async fn immediate_admission_does_not_start_recovery_deadline() {
+    refact_providers::pressure::uninstall_pressure_registry();
+    install_single_slot_pressure();
+    let budget = Arc::new(refact_core::recovery::RecoveryBudget::new(
+        Default::default(),
+    ));
+    let permit = crate::llm::pressure::acquire_for_recovery(
+        "deadline-start",
+        RequestPriority::Interactive,
+        None,
+        None,
+        &budget,
+    )
+    .await
+    .unwrap();
+    assert_eq!(budget.deadline_remaining(), Duration::MAX);
+    assert_eq!(budget.sends_used(), 0);
+    drop(permit);
+    refact_providers::pressure::uninstall_pressure_registry();
+}
+
+#[tokio::test]
+#[serial_test::serial(provider_pressure, coordination_metrics, runtime_settings)]
 async fn second_stream_reaches_the_server_only_after_the_first_permit_is_released() {
     refact_providers::pressure::uninstall_pressure_registry();
     crate::coordination::metrics::recorder().reset();
@@ -381,18 +404,18 @@ async fn retry_after_longer_than_the_admission_wait_bound_fails_fast_without_sen
     let before = refact_providers::pressure::pressure_registry()
         .unwrap()
         .now_ms();
-    let second_result = super::run_llm_stream(
-        app,
-        stream_params(&model, None),
-        &mut ReplayCollector::default(),
-    )
-    .await;
+    let mut second_params = stream_params(&model, None);
+    second_params.recovery_budget = Some(Arc::new(refact_core::recovery::RecoveryBudget::new(
+        Default::default(),
+    )));
+    let second_result =
+        super::run_llm_stream(app, second_params, &mut ReplayCollector::default()).await;
     let second_error = match second_result {
         Ok(_) => panic!("cooling-down stream unexpectedly succeeded"),
         Err(error) => error,
     };
-    assert!(second_error.message.contains("is cooling down"));
-    assert!(second_error.message.contains("1 ms admission wait bound"));
+    assert!(second_error.is_cooldown());
+    assert_eq!(second_error.retry_not_before_ms(), Some(until));
     assert_eq!(hits.load(Ordering::SeqCst), 1);
     assert!(before < until);
     assert!(

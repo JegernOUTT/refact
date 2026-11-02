@@ -292,6 +292,9 @@ pub(crate) struct PlannerPause {
 }
 
 pub struct ChatSession {
+    pub(crate) native_commands_in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) runner_lease: Option<(String, Arc<AtomicBool>)>,
+    pub(crate) runner_message_digest: Option<[u8; 32]>,
     pub recovery_policy_source: refact_core::recovery::RecoveryPolicySource,
     pub recovery_notify: Arc<Notify>,
     pub recovery_budget: Option<Arc<refact_core::recovery::RecoveryBudget>>,

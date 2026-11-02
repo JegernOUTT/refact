@@ -1947,7 +1947,7 @@ mod tests {
                 .extra_headers
                 .get(crate::llm_http_retry::LLM_HTTP_HEADER_RETRY_TIMEOUT_SECONDS_HEADER)
                 .map(String::as_str),
-            Some("10")
+            Some("120")
         );
         assert_eq!(
             runtime

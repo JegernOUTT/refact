@@ -7,7 +7,7 @@ pub const LLM_HTTP_HEADER_RETRY_TIMEOUT_SECONDS_HEADER: &str =
 pub const LLM_HTTP_HEADER_RETRY_MAX_ATTEMPTS_HEADER: &str =
     "x-refact-internal-llm-http-header-retry-max-attempts";
 
-pub const LLM_HTTP_HEADER_RETRY_TIMEOUT_SECONDS_DEFAULT: u64 = 10;
+pub const LLM_HTTP_HEADER_RETRY_TIMEOUT_SECONDS_DEFAULT: u64 = 120;
 pub const LLM_HTTP_HEADER_RETRY_MAX_ATTEMPTS_DEFAULT: usize = 10;
 
 pub fn insert_llm_http_header_retry_config(

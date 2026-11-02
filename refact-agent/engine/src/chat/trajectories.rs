@@ -17288,6 +17288,9 @@ mod tests {
 
         let (tx, _rx) = broadcast::channel(16);
         let session = ChatSession {
+            runner_lease: None,
+            runner_message_digest: None,
+            native_commands_in_flight: Default::default(),
             recovery_budget: None,
             recovery_notify: Arc::new(tokio::sync::Notify::new()),
             recovery_policy_source: refact_core::recovery::RecoveryPolicySource::Global,
@@ -17464,6 +17467,9 @@ mod tests {
 
         let (tx, _rx) = broadcast::channel(16);
         let mut session = ChatSession {
+            runner_lease: None,
+            runner_message_digest: None,
+            native_commands_in_flight: Default::default(),
             recovery_budget: None,
             recovery_notify: Arc::new(tokio::sync::Notify::new()),
             recovery_policy_source: refact_core::recovery::RecoveryPolicySource::Global,

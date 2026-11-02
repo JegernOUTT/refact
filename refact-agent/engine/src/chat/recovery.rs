@@ -197,11 +197,30 @@ pub async fn handle_failure(
         refact_core::retry_policy::classify_user_error(&error.message),
     );
     let diagnostic = RecoveryError {
-        category: format!("{:?}", info.category),
-        title: info.title.into(),
-        explanation: info.explanation.into(),
-        suggested_action: info.suggested_action.into(),
-        is_retryable: info.is_retryable,
+        category: if error.is_cooldown() {
+            "ProviderCooldown".into()
+        } else {
+            format!("{:?}", info.category)
+        },
+        title: if error.is_cooldown() {
+            "Provider cooldown"
+        } else {
+            info.title
+        }
+        .into(),
+        explanation: if error.is_cooldown() {
+            "The provider is temporarily unavailable and has requested a cooldown."
+        } else {
+            info.explanation
+        }
+        .into(),
+        suggested_action: if error.is_cooldown() {
+            "Wait for the provider cooldown to expire."
+        } else {
+            info.suggested_action
+        }
+        .into(),
+        is_retryable: error.is_cooldown() || info.is_retryable,
         raw_error: super::diagnostics::safe_provider_error_diagnostic(&error.message),
     };
     let (budget, notify, retry_notify, next_at, run_id) = {
@@ -249,20 +268,25 @@ pub async fn handle_failure(
         record.latest_error = diagnostic.clone();
         let no_new_send = record
             .attempts
-            .last()
+            .iter()
+            .rev()
+            .find(|attempt| attempt.outcome != "admission_deferred")
             .is_some_and(|attempt| attempt.retry_number == record.retries_used);
         record.attempts.push(RecoveryAttempt {
             at_ms: now,
             retry_number: record.retries_used,
             error: Some(diagnostic),
-            outcome: "failed".into(),
+            outcome: if error.is_cooldown() {
+                "admission_deferred".into()
+            } else {
+                "failed".into()
+            },
         });
         if record.attempts.len() > 101 {
             record.attempts.remove(0);
         }
         record.retry_not_before_ms = error.retry_not_before_ms();
-        let eligible = !no_new_send
-            && budget.sends_used() > 0
+        let eligible = (error.is_cooldown() || (!no_new_send && budget.sends_used() > 0))
             && (record.manual
                 || (record.policy.mode == RecoveryMode::Transient
                     && error.retry_decision().is_retryable_transient()));
@@ -279,7 +303,14 @@ pub async fn handle_failure(
             .max(record.retry_not_before_ms.unwrap_or(0));
         record.next_retry_at_ms = (record.state == RecoveryState::Waiting).then_some(next);
         if exhausted {
-            record.terminal_reason = Some("budget_exhausted".into());
+            record.terminal_reason = Some(
+                if budget.deadline_remaining().is_zero() {
+                    "deadline_exhausted"
+                } else {
+                    "retry_limit_exhausted"
+                }
+                .into(),
+            );
         }
         let run_id = record.run_id.clone();
         let waiting = record.state == RecoveryState::Waiting;

@@ -366,6 +366,7 @@ async fn run_summary_subchat(
     let trace_parent = TraceParent::rooted(&parent_chat_id, &root_chat_id);
 
     let config = SubchatConfig {
+        runner_lease_token: None,
         history_source_model: None,
         tool_name: "agent_chat_summary".to_string(),
         stateful: false,
