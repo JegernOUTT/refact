@@ -338,9 +338,14 @@ const messages: ChatMessages = [
     role: "assistant",
     content: "Tracking the approved work.",
     usage: {
-      prompt_tokens: 654640,
+      prompt_tokens: params.has("context-warning") ? 793520 : 654640,
       completion_tokens: 83,
-      total_tokens: 654723,
+      total_tokens: params.has("context-warning") ? 793603 : 654723,
+      ...(params.has("paid")
+        ? {
+            metering_usd: { prompt_usd: 120, generated_usd: 3, total_usd: 123 },
+          }
+        : {}),
     },
     tool_calls: [
       {

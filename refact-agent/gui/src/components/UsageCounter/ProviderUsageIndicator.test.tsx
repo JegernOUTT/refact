@@ -94,7 +94,7 @@ function renderIndicator(
 }
 
 describe("ProviderUsageIndicator", () => {
-  it("keeps a long provider name out of the compact trigger while exposing keyboard details", async () => {
+  it("bounds the provider label while exposing its complete keyboard details", async () => {
     const name = "Enterprise provider ".repeat(20);
     render(
       <ProviderUsageIndicatorContent
@@ -106,12 +106,11 @@ describe("ProviderUsageIndicator", () => {
     const trigger = screen.getByRole("button", {
       name: `${name}: Quota unavailable`,
     });
-    expect(trigger).toHaveTextContent("Quota");
-    expect(trigger).not.toHaveTextContent(name);
+    expect(trigger).toHaveTextContent(name.trim());
     trigger.focus();
     fireEvent.click(trigger);
-    expect(await screen.findByText(name.trim())).toBeInTheDocument();
-    expect(screen.getByText("Provider instance")).toBeInTheDocument();
+    expect(await screen.findByText("Provider instance")).toBeInTheDocument();
+    expect(screen.getAllByText(name.trim())).toHaveLength(2);
   });
 
   it("resolves the selected model to its exact configured provider", () => {

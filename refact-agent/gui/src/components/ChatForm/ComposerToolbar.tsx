@@ -1,257 +1,176 @@
 import React, { useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { MoreHorizontal } from "lucide-react";
-import { Button, Popover } from "../ui";
 import styles from "./ComposerToolbar.module.css";
 
 export type ComposerToolbarItem = {
   id: string;
   content: React.ReactNode;
-  width: number;
+  row: "top" | "bottom";
+  priority: number;
+  side?: "left" | "right";
+  pinned?: boolean;
+  hidden?: boolean;
 };
 
 export function ComposerToolbar({
   items,
-  send,
-  onOpenChange,
+  editor,
   menuCount,
 }: {
   items: ComposerToolbarItem[];
-  send: React.ReactNode;
-  onOpenChange: (open: boolean) => void;
+  editor: React.ReactNode;
   menuCount: number;
 }) {
   const root = useRef<HTMLDivElement>(null);
-  const inline = useRef<HTMLDivElement>(null);
-  const sendRef = useRef<HTMLSpanElement>(null);
-  const moreRef = useRef<HTMLButtonElement>(null);
-  const contentRef = useRef<HTMLDivElement>(null);
-  const overflow = useRef<HTMLDivElement | null>(null);
-  const hosts = useRef(new Map<string, HTMLDivElement>());
-  const measuredWidths = useRef(new Map<string, number>());
+  const top = useRef<HTMLDivElement>(null);
+  const bottom = useRef<HTMLDivElement>(null);
+  const hosts = useRef(new Map<string, HTMLSpanElement>());
   const [revision, setRevision] = useState(0);
-  const [open, setOpen] = useState(false);
-  const [visible, setVisible] = useState(0);
-  const pendingFocus = useRef<HTMLElement | null>(null);
-  const openingFocus = useRef<HTMLElement | null>(null);
-  const nestedWasOpen = useRef(false);
-  const nestedTrigger = useRef<HTMLElement | null>(null);
-  const restoringNested = useRef(false);
-  const resizeFrame = useRef<number | null>(null);
+  const frame = useRef<number>();
 
   for (const item of items) {
     if (!hosts.current.has(item.id)) {
-      const host = document.createElement("div");
+      const host = document.createElement("span");
       host.className = styles.item;
       host.dataset.composerControl = item.id;
       hosts.current.set(item.id, host);
     }
   }
 
-  const changeOpen = (next: boolean) => {
-    if (!next && menuCount > (open ? 1 : 0)) return;
-    if (next === open) return;
-    setOpen(next);
-    onOpenChange(next);
-    if (!next && contentRef.current?.contains(document.activeElement))
-      moreRef.current?.focus();
-  };
-
   useLayoutEffect(() => {
-    if (!root.current) return;
-    const observer = new ResizeObserver(() =>
-      setRevision((value) => value + 1),
-    );
-    observer.observe(root.current);
-    if (sendRef.current) observer.observe(sendRef.current);
+    const observer = new ResizeObserver(() => {
+      if (frame.current !== undefined) return;
+      frame.current = requestAnimationFrame(() => {
+        frame.current = undefined;
+        setRevision((value) => value + 1);
+      });
+    });
+    if (root.current) observer.observe(root.current);
     hosts.current.forEach((host) => observer.observe(host));
     return () => {
       observer.disconnect();
-      if (resizeFrame.current !== null)
-        cancelAnimationFrame(resizeFrame.current);
+      if (frame.current !== undefined) cancelAnimationFrame(frame.current);
     };
   }, []);
 
   useLayoutEffect(() => {
-    if (!root.current) return;
-    if (menuCount > (open ? 1 : 0)) {
-      nestedWasOpen.current = true;
-      return;
-    }
-    if (nestedWasOpen.current) {
-      nestedWasOpen.current = false;
-      restoringNested.current = true;
-      resizeFrame.current = requestAnimationFrame(() => {
-        if (
-          document.activeElement === document.body &&
-          nestedTrigger.current?.isConnected
+    const openHosts = new Set(
+      items
+        .filter(
+          (item) =>
+            hosts.current
+              .get(item.id)
+              ?.querySelector(
+                '[aria-haspopup][aria-expanded="true"], [aria-haspopup][data-state="open"]',
+              ),
         )
-          nestedTrigger.current.focus({ preventScroll: true });
-        setRevision((value) => value + 1);
-      });
-      return;
-    }
-    items.forEach((item) => {
-      const host = hosts.current.get(item.id);
-      if (host?.isConnected && host.parentElement === inline.current) {
-        measuredWidths.current.set(item.id, host.getBoundingClientRect().width);
+        .map((item) => item.id),
+    );
+    const rowFor = (item: ComposerToolbarItem) => {
+      const parent = hosts.current.get(item.id)?.parentElement;
+      if (menuCount > 0 && openHosts.has(item.id)) {
+        if (parent === top.current) return "top";
+        if (parent === bottom.current) return "bottom";
       }
-    });
-    const style = getComputedStyle(root.current);
-    const gap = parseFloat(style.columnGap) || 8;
-    const padding =
-      (parseFloat(style.paddingLeft) || 12) +
-      (parseFloat(style.paddingRight) || 12);
-    let available =
-      root.current.clientWidth -
-      padding -
-      Math.max(110, sendRef.current?.getBoundingClientRect().width ?? 0) -
-      Math.max(72, moreRef.current?.getBoundingClientRect().width ?? 0) -
-      gap * 2;
-    let count = 0;
-    for (const item of items) {
-      available -=
-        Math.max(item.width, measuredWidths.current.get(item.id) ?? 0) + gap;
-      if (available < 0) break;
-      count++;
-    }
-    if (!open && count < visible) {
-      const focused = restoringNested.current
-        ? nestedTrigger.current
-        : document.activeElement;
-      if (
-        focused instanceof HTMLElement &&
-        items
-          .slice(count, visible)
-          .some((item) => hosts.current.get(item.id)?.contains(focused))
-      ) {
-        pendingFocus.current = focused;
-        openingFocus.current = focused;
-        setOpen(true);
-        onOpenChange(true);
-      }
-    }
-    if (restoringNested.current && nestedTrigger.current)
-      pendingFocus.current = nestedTrigger.current;
-    restoringNested.current = false;
-    setVisible(count);
-  }, [revision, items, menuCount, open, visible, onOpenChange]);
+      return item.row;
+    };
 
-  useLayoutEffect(() => {
-    items.forEach((item, index) => {
-      const host = hosts.current.get(item.id);
-      if (!host) return;
-      const destination = index < visible ? inline.current : overflow.current;
-      if (destination) {
-        if (host.parentElement !== destination) {
+    for (const [name, row] of [
+      ["top", top.current],
+      ["bottom", bottom.current],
+    ] as const) {
+      if (!row) continue;
+      const controls = items.filter((item) => rowFor(item) === name);
+      for (const [index, item] of controls.entries()) {
+        const host = hosts.current.get(item.id);
+        if (!host) continue;
+        if (row.children[index] !== host) {
           const active = document.activeElement;
-          destination.appendChild(host);
+          row.insertBefore(host, row.children.item(index));
           if (active instanceof HTMLElement && host.contains(active))
             active.focus({ preventScroll: true });
         }
-      } else host.remove();
-    });
-    if (pendingFocus.current?.isConnected && !open) {
-      pendingFocus.current.focus({ preventScroll: true });
-      pendingFocus.current = null;
-    }
-  });
+        host.dataset.side = item.side ?? "left";
+        host.dataset.measuring = "true";
+        host.dataset.compactContext = "false";
+      }
 
-  useLayoutEffect(() => {
-    if (!open) return;
-    const frame = requestAnimationFrame(() => {
-      if (openingFocus.current?.isConnected) {
-        openingFocus.current.focus({ preventScroll: true });
-        openingFocus.current = null;
-        pendingFocus.current = null;
-      } else if (!overflow.current?.contains(document.activeElement))
-        overflow.current
-          ?.querySelector<HTMLElement>(
-            'button:not(:disabled), input:not(:disabled), [tabindex="0"]',
-          )
-          ?.focus();
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [open]);
+      const style = getComputedStyle(row);
+      const gap = parseFloat(style.columnGap) || 0;
+      const capacity =
+        (root.current?.clientWidth ?? 0) -
+        (parseFloat(style.paddingLeft) || 0) -
+        (parseFloat(style.paddingRight) || 0);
+      const widths = new Map(
+        controls.map((item) => [
+          item.id,
+          hosts.current.get(item.id)?.getBoundingClientRect().width ?? 0,
+        ]),
+      );
+      const visible = controls.filter(
+        (item) =>
+          (!item.hidden || openHosts.has(item.id)) &&
+          (widths.get(item.id) ?? 0) > 0,
+      );
+      const visibleIds = new Set(visible.map((item) => item.id));
+      const hidden = new Set(
+        controls
+          .filter((item) => !visibleIds.has(item.id))
+          .map((item) => item.id),
+      );
+      let required =
+        visible.reduce((sum, item) => sum + (widths.get(item.id) ?? 0), 0) +
+        Math.max(0, visible.length - 1) * gap;
+
+      for (const item of [...visible].sort((a, b) => a.priority - b.priority)) {
+        if (required <= capacity) break;
+        if (item.pinned === true || openHosts.has(item.id)) continue;
+        hidden.add(item.id);
+        required -= (widths.get(item.id) ?? 0) + gap;
+      }
+
+      let firstRight = true;
+      for (const item of controls) {
+        const host = hosts.current.get(item.id);
+        if (!host) continue;
+        const hide = hidden.has(item.id);
+        if (hide && host.contains(document.activeElement)) {
+          root.current
+            ?.querySelector<HTMLButtonElement>("[data-composer-expansion]")
+            ?.focus({ preventScroll: true });
+        }
+        host.dataset.hidden = String(hide);
+        host.dataset.menuOpen = String(openHosts.has(item.id));
+        host.dataset.pinned = String(item.pinned === true);
+        host.dataset.compactContext = String(
+          item.id === "context" && item.pinned === true && required > capacity,
+        );
+        host.dataset.firstRight = String(
+          !hide && item.side === "right" && firstRight,
+        );
+        host.dataset.measuring = "false";
+        if (!hide && item.side === "right") firstRight = false;
+      }
+    }
+  }, [items, menuCount, revision]);
 
   return (
-    <div
-      className={styles.toolbar}
-      ref={root}
-      data-testid="composer-toolbar"
-      onFocusCapture={(event) => {
-        const target: EventTarget = event.target;
-        if (
-          target instanceof HTMLElement &&
-          target.matches('[aria-haspopup="dialog"]') &&
-          target !== moreRef.current
-        )
-          nestedTrigger.current = target;
-      }}
-      onPointerDownCapture={(event) => {
-        const target =
-          event.target instanceof Element
-            ? event.target.closest<HTMLElement>('[aria-haspopup="dialog"]')
-            : null;
-        if (target && target !== moreRef.current)
-          nestedTrigger.current = target;
-      }}
-    >
-      <div className={styles.inline} ref={inline} />
-      <Popover open={open} onOpenChange={changeOpen} responsive={false}>
-        <Popover.Trigger asChild>
-          <Button
-            ref={moreRef}
-            type="button"
-            variant="soft"
-            size="sm"
-            leftIcon={MoreHorizontal}
-            aria-label="More composer controls"
-          >
-            More
-          </Button>
-        </Popover.Trigger>
-        <Popover.Content
-          forceMount
-          className={styles.popover}
-          ref={contentRef}
-          side="top"
-          align="end"
-          maxWidth="min(360px, calc(100vw - 24px))"
-          maxHeight="min(480px, 70dvh)"
-          onInteractOutside={(event) => {
-            const target = event.target;
-            if (target instanceof Node && contentRef.current?.contains(target))
-              event.preventDefault();
-          }}
-        >
-          <div
-            className={styles.overflow}
-            ref={(node) => {
-              overflow.current = node;
-              if (node)
-                items.slice(visible).forEach((item) => {
-                  const host = hosts.current.get(item.id);
-                  if (host && host.parentElement !== node)
-                    node.appendChild(host);
-                });
-            }}
-          >
-            <span className={styles.heading}>Composer controls</span>
-          </div>
-          {items.map((item) => {
-            const host = hosts.current.get(item.id);
-            return host ? createPortal(item.content, host, item.id) : null;
-          })}
-        </Popover.Content>
-      </Popover>
-      <span
-        className={styles.send}
-        ref={sendRef}
-        data-composer-no-expand="true"
-      >
-        {send}
-      </span>
+    <div ref={root} className={styles.composer}>
+      <div
+        ref={top}
+        className={styles.toolbar}
+        data-testid="composer-top-toolbar"
+      />
+      {editor}
+      <div
+        ref={bottom}
+        className={styles.toolbar}
+        data-testid="composer-toolbar"
+      />
+      {items.map((item) => {
+        const host = hosts.current.get(item.id);
+        return host ? createPortal(item.content, host, item.id) : null;
+      })}
     </div>
   );
 }

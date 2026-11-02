@@ -15,91 +15,131 @@ function DraftControl() {
   );
 }
 
-function Harness() {
-  const [menus, setMenus] = useState(0);
-  return (
-    <ComposerToolbar
-      menuCount={menus}
-      onOpenChange={(open) => setMenus((count) => count + (open ? 1 : -1))}
-      items={[
-        { id: "model", width: 160, content: <DraftControl /> },
-        {
-          id: "mode",
-          width: 160,
-          content: <button type="button">Mode</button>,
-        },
-        {
-          id: "worktree",
-          width: 120,
-          content: <button type="button">Worktree</button>,
-        },
-      ]}
-      send={<button type="button">Stop</button>}
-    />
-  );
-}
-
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
-test("moves whole controls into accessible More on resize without remounting state", async () => {
-  let width = 1100;
+test("measures individual controls, hides rare-first, restores reverse, and retains state", async () => {
+  let width = 400;
   let measure: () => void = () => undefined;
-  const disconnect = vi.fn();
   vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(
     () => width,
+  );
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
+    function (this: HTMLElement) {
+      return {
+        width: this.dataset.composerControl ? 80 : width,
+        height: 28,
+        x: 0,
+        y: 0,
+        left: 0,
+        right: 80,
+        top: 0,
+        bottom: 28,
+        toJSON: () => ({}),
+      };
+    },
   );
   vi.stubGlobal(
     "ResizeObserver",
     class {
-      constructor(private callback: () => void) {}
-      observe(target: Element) {
-        if (target.getAttribute("data-testid") === "composer-toolbar")
-          measure = this.callback;
+      constructor(callback: () => void) {
+        measure = callback;
       }
-      disconnect = disconnect;
+      observe() {
+        return undefined;
+      }
+      disconnect() {
+        return undefined;
+      }
     },
   );
-  const { user, unmount } = render(<Harness />);
+  const items = [
+    {
+      id: "model",
+      row: "bottom" as const,
+      priority: 2,
+      content: <DraftControl />,
+    },
+    {
+      id: "mode",
+      row: "bottom" as const,
+      priority: 3,
+      content: <button>Mode</button>,
+    },
+    {
+      id: "worktree",
+      row: "bottom" as const,
+      priority: 1,
+      content: <button>Worktree</button>,
+    },
+    {
+      id: "send",
+      row: "bottom" as const,
+      priority: 100,
+      pinned: true,
+      content: <button>Stop</button>,
+    },
+  ];
+  const { user, rerender } = render(
+    <ComposerToolbar
+      items={items}
+      editor={
+        <button aria-controls="editor" data-composer-expansion="true">
+          Expand
+        </button>
+      }
+      menuCount={0}
+    />,
+  );
   const draft = screen.getByRole("textbox", { name: "Scope draft" });
   await user.type(draft, "keep scope");
-  await user.click(screen.getByRole("button", { name: "Stop" }));
-  width = 280;
+  const host = (id: string) =>
+    document.querySelector(`[data-composer-control="${id}"]`);
+  width = 250;
   act(() => measure());
   await waitFor(() =>
-    expect(
-      draft.closest("[data-composer-control]")?.parentElement,
-    ).not.toHaveClass("inline"),
+    expect(host("worktree")).toHaveAttribute("data-hidden", "true"),
   );
-  expect(
-    screen.getByRole("button", { name: "More composer controls" }),
-  ).toHaveAttribute("aria-expanded", "false");
-  expect(screen.getByRole("button", { name: "Stop" })).toBeVisible();
-  await user.click(
-    screen.getByRole("button", { name: "More composer controls" }),
+  expect(host("model")).toHaveAttribute("data-hidden", "false");
+  width = 170;
+  act(() => measure());
+  await waitFor(() =>
+    expect(host("model")).toHaveAttribute("data-hidden", "true"),
+  );
+  expect(host("send")).toHaveAttribute("data-hidden", "false");
+  width = 250;
+  act(() => measure());
+  await waitFor(() =>
+    expect(host("model")).toHaveAttribute("data-hidden", "false"),
+  );
+  expect(host("worktree")).toHaveAttribute("data-hidden", "true");
+  expect(draft).toHaveValue("keep scope");
+  rerender(
+    <ComposerToolbar
+      items={items}
+      editor={<button>Expand</button>}
+      menuCount={1}
+    />,
+  );
+  width = 400;
+  act(() => measure());
+  await waitFor(() =>
+    expect(host("worktree")).toHaveAttribute("data-hidden", "false"),
+  );
+  rerender(
+    <ComposerToolbar
+      items={items}
+      editor={<button>Expand</button>}
+      menuCount={0}
+    />,
+  );
+  await waitFor(() =>
+    expect(host("worktree")).toHaveAttribute("data-hidden", "false"),
   );
   expect(screen.getByRole("textbox", { name: "Scope draft" })).toBe(draft);
-  expect(draft).toHaveValue("keep scope");
-  expect(screen.getByRole("button", { name: "Mode" })).toBeVisible();
-  expect(screen.getByRole("button", { name: "Worktree" })).toBeVisible();
-  await user.keyboard("{Escape}");
-  await waitFor(() =>
-    expect(
-      screen.getByRole("button", { name: "More composer controls" }),
-    ).toHaveAttribute("aria-expanded", "false"),
-  );
   expect(
-    screen.getByRole("button", { name: "More composer controls" }),
-  ).toHaveFocus();
-  width = 1100;
-  act(() => measure());
-  await waitFor(() =>
-    expect(screen.getByRole("textbox", { name: "Scope draft" })).toHaveValue(
-      "keep scope",
-    ),
-  );
-  unmount();
-  expect(disconnect).toHaveBeenCalled();
+    screen.queryByRole("button", { name: /More/ }),
+  ).not.toBeInTheDocument();
 });

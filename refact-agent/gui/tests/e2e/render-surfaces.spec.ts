@@ -9,6 +9,23 @@ async function fitsPage(page: Page) {
   ).toBeLessThanOrEqual(await page.evaluate(() => innerWidth));
 }
 
+async function fitsToolbar(page: Page) {
+  const overflow = await page
+    .getByTestId("composer-toolbar")
+    .evaluate((row) => {
+      const bounds = row.getBoundingClientRect();
+      const padding = parseFloat(getComputedStyle(row).paddingRight);
+      return Array.from(row.children).some((child) => {
+        if (child.getAttribute("data-hidden") === "true") return false;
+        const rect = child.getBoundingClientRect();
+        return (
+          rect.left < bounds.left || rect.right > bounds.right - padding + 1
+        );
+      });
+    });
+  expect(overflow).toBe(false);
+}
+
 async function record(page: Page, name: string) {
   await test
     .info()
@@ -37,26 +54,22 @@ for (const theme of themes) {
           .evaluate((element) => element.getBoundingClientRect().height),
       ).toBeLessThanOrEqual(46);
       await input.focus();
-      const more = page.getByRole("button", {
-        name: "More composer controls",
+      const expand = page.getByRole("button", {
+        name: "Expand composer",
         exact: true,
       });
-      await more.click();
-      await expect(page.getByTestId("worktree-control-trigger")).toBeVisible();
+      await expect(expand).toHaveAttribute("aria-expanded", "false");
+      await expand.click();
+      const collapse = page.getByRole("button", {
+        name: "Collapse composer",
+        exact: true,
+      });
+      await expect(collapse).toHaveAttribute("aria-expanded", "true");
       await expect(
-        page.getByRole("button", { name: /Agent.*86 tools/ }),
-      ).toBeVisible();
-      await expect(
-        page.locator('[data-composer-control="model"] button').first(),
-      ).toBeVisible();
+        page.getByRole("button", { name: "More composer controls" }),
+      ).toHaveCount(0);
       await fitsPage(page);
-      await record(page, "overflow-composer");
-      expect(
-        await page
-          .getByTestId("composer-toolbar")
-          .evaluate((element) => element.getBoundingClientRect().height),
-      ).toBeLessThanOrEqual(46);
-      await page.keyboard.press("Escape");
+      await record(page, "expanded-composer");
       await input.fill(
         "First line of an unsent draft.\nSecond line with the complete acceptance criteria.\nThird line must remain available after blur.",
       );
@@ -258,41 +271,33 @@ test("large goal editor preserves one shared draft across expansion", async ({
   await fitsPage(page);
 });
 
-test("More controls support actual actions and nested selector focus", async ({
+test("individual permissions and nested selector retain state without a More menu", async ({
   page,
 }) => {
-  await page.setViewportSize({ width: 320, height: 900 });
+  await page.setViewportSize({ width: 1600, height: 900 });
   await page.goto("/tests/e2e/render-surfaces.html?view=composer");
-  await page.getByTestId("chat-form-textarea").focus();
-  const more = page.getByRole("button", {
-    name: "More composer controls",
-    exact: true,
-  });
-  await more.click();
+  await page
+    .getByRole("button", { name: "Expand composer", exact: true })
+    .click();
   const approve = page.getByRole("button", {
     name: "Auto-approve file editing tools",
     exact: true,
   });
   await expect(approve).toHaveAttribute("aria-pressed", "false");
   await approve.click();
-  await expect(more).toHaveAttribute("aria-expanded", "true");
   await expect(approve).toHaveAttribute("aria-pressed", "true");
   const mode = page.locator('[data-composer-control="mode"] button').first();
   await mode.click();
   await expect(page.getByText("Discuss code", { exact: true })).toBeVisible();
-  await fitsPage(page);
-  await record(page, "nested-mode-selector");
   await page.keyboard.press("Escape");
-  await expect(more).toHaveAttribute("aria-expanded", "true");
   await expect(mode).toBeFocused();
-  await page.getByTestId("worktree-control-trigger").click();
-  await expect(
-    page.getByText("Worktrees", { exact: true }).first(),
-  ).toBeVisible();
-  await page.keyboard.press("Escape");
-  await expect(more).toHaveAttribute("aria-expanded", "true");
-  await page.keyboard.press("Escape");
-  await expect(more).toBeFocused();
+  await page
+    .getByRole("button", { name: "Collapse composer", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Expand composer", exact: true })
+    .click();
+  await expect(approve).toHaveAttribute("aria-pressed", "true");
 });
 
 test("recovered and failed recovery states preserve labels and original model choice", async ({
@@ -320,50 +325,194 @@ test("recovered and failed recovery states preserve labels and original model ch
   await record(page, "recovery-options");
 });
 
-test("resizing an open scope selector retains its anchor and returns focus", async ({
+test("resizing an open selector preserves its trigger and keeps Stop inside the toolbar", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await page.goto("/tests/e2e/render-surfaces.html?view=composer&busy");
+  await page
+    .getByRole("button", { name: "Expand composer", exact: true })
+    .click();
+  const context = page.locator('[data-composer-control="context"] button');
+  await context.click();
+  await expect(context).toHaveAttribute("aria-expanded", "true");
+  await page.setViewportSize({ width: 240, height: 900 });
+  await expect(context).toBeVisible();
+  await expect(
+    page.locator('button[aria-label="Stop generation"]'),
+  ).toBeInViewport();
+  await fitsToolbar(page);
+  await page.keyboard.press("Escape");
+  await expect(
+    page.locator('[data-composer-control="context"]'),
+  ).toHaveAttribute("data-hidden", "false");
+  await expect(context).toBeFocused();
+  await fitsPage(page);
+});
+
+test("real control widths hide rare actions individually and restore their order", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await page.goto("/tests/e2e/render-surfaces.html?view=composer");
+  await page
+    .getByRole("button", { name: "Expand composer", exact: true })
+    .click();
+  const row = page.getByTestId("composer-toolbar");
+  const policy = [
+    "threadInfo",
+    "sidebar",
+    "wand",
+    "browser",
+    "enrichment",
+    "autoCompact",
+    "mic",
+    "image",
+    "worktree",
+    "model",
+    "mode",
+  ];
+  const candidates = await row.evaluate(
+    (element, priority) =>
+      priority.filter((id) => {
+        const host = element.querySelector(`[data-composer-control="${id}"]`);
+        return host && host.getBoundingClientRect().width > 0;
+      }),
+    policy,
+  );
+  const visibleAt = async (width: number) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+    await fitsToolbar(page);
+    return row.evaluate(
+      (element, ids) =>
+        ids.filter(
+          (id) =>
+            element
+              .querySelector(`[data-composer-control="${id}"]`)
+              ?.getAttribute("data-hidden") === "true",
+        ),
+      candidates,
+    );
+  };
+  let previous: string[] = [];
+  const transitions: Array<{ width: number; hidden: string[] }> = [];
+  for (let width = 1000; width >= 240; width -= 4) {
+    const hidden = await visibleAt(width);
+    expect(hidden).toEqual(candidates.slice(0, hidden.length));
+    if (hidden.length !== previous.length) {
+      expect(hidden.length - previous.length).toBe(1);
+      transitions.push({ width, hidden });
+    }
+    previous = hidden;
+  }
+  expect(transitions.length).toBeGreaterThan(5);
+  for (const { width, hidden } of transitions.reverse())
+    expect(await visibleAt(width)).toEqual(hidden);
+  expect(await visibleAt(1600)).toEqual([]);
+});
+
+test("context warnings keep usage and compression visible with a busy compact draft", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 240, height: 900 });
+  await page.goto(
+    "/tests/e2e/render-surfaces.html?view=composer&context-warning&busy&paid",
+  );
+  await page.getByTestId("chat-form-textarea").fill("Keep this unsent draft.");
+  await expect(
+    page.getByText("Context usage is high", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Context usage details", exact: true }),
+  ).toBeInViewport();
+  await expect(
+    page.getByRole("button", {
+      name: "Compress or rebuild context",
+      exact: true,
+    }),
+  ).toBeInViewport();
+  await expect(
+    page.getByRole("button", { name: "Stop generation", exact: true }),
+  ).toBeInViewport();
+  await fitsToolbar(page);
+  const geometry = await page
+    .locator('[data-composer-control="context"]')
+    .evaluate((host) => {
+      const trigger = host.querySelector("button");
+      if (!trigger) return false;
+      const outer = host.getBoundingClientRect();
+      const inner = trigger.getBoundingClientRect();
+      return (
+        inner.width >= 28 &&
+        inner.left >= outer.left &&
+        inner.right <= outer.right + 1
+      );
+    });
+  expect(geometry).toBe(true);
+});
+
+test("collapse and expansion preserve the same editor, selection and draft", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto("/tests/e2e/render-surfaces.html?view=composer");
-  await page.getByTestId("chat-form-textarea").focus();
-  const mode = page.locator('[data-composer-control="mode"] button').first();
-  await mode.click();
-  await expect(page.getByText("Discuss code", { exact: true })).toBeVisible();
-  await page.setViewportSize({ width: 640, height: 900 });
-  await expect(mode).toBeAttached();
-  await expect(mode).toBeVisible();
-  await page.keyboard.press("Escape");
-  await expect(mode).toBeFocused();
-  await page.setViewportSize({ width: 320, height: 900 });
-  const more = page.getByRole("button", {
-    name: "More composer controls",
-    exact: true,
+  const input = page.getByTestId("chat-form-textarea");
+  await input.fill("first line\nsecond line\nthird line");
+  await input.evaluate((element: HTMLTextAreaElement) => {
+    element.dataset.identity = "original";
+    element.setSelectionRange(3, 8);
   });
-  await expect(more).toHaveAttribute("aria-expanded", "true");
-  await expect(mode).toBeVisible();
+  await page
+    .getByRole("button", { name: "Expand composer", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Collapse composer", exact: true })
+    .click();
+  await expect(input).toHaveAttribute("data-identity", "original");
+  await expect(input).toHaveValue("first line\nsecond line\nthird line");
+  expect(
+    await input.evaluate((element: HTMLTextAreaElement) => [
+      element.selectionStart,
+      element.selectionEnd,
+    ]),
+  ).toEqual([3, 8]);
   await fitsPage(page);
 });
 
-test("resizing a later focused control opens More without stealing focus", async ({
+test("an empty compact top row restores permissions after expansion and widening", async ({
   page,
 }) => {
-  await page.setViewportSize({ width: 1500, height: 900 });
+  await page.setViewportSize({ width: 240, height: 900 });
   await page.goto("/tests/e2e/render-surfaces.html?view=composer");
-  const worktree = page.getByTestId("worktree-control-trigger");
-  await expect(worktree).toBeVisible();
-  await worktree.focus();
-  await page.setViewportSize({ width: 320, height: 900 });
+  await page
+    .getByRole("button", { name: "Expand composer", exact: true })
+    .click();
+  await page.setViewportSize({ width: 1600, height: 900 });
   await expect(
-    page.getByRole("button", { name: "More composer controls", exact: true }),
-  ).toHaveAttribute("aria-expanded", "true");
-  await expect(worktree).toBeFocused();
-  await page.evaluate(
-    () =>
-      new Promise<void>((resolve) =>
-        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
-      ),
-  );
-  await expect(worktree).toBeFocused();
+    page.getByRole("button", {
+      name: "Configure project information",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", {
+      name: "Auto-approve file editing tools",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", {
+      name: "Auto-approve dangerous commands",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await fitsPage(page);
 });
 
 test("composer respects reduced motion", async ({ page }) => {

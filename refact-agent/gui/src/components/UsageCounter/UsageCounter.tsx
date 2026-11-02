@@ -289,11 +289,11 @@ const DefaultHoverTriggerContent: React.FC<{
   const tokenDetailsActiveIndex = tokenDetailsTab === "map" ? 1 : 0;
 
   return (
-    <Flex align="center" gap="3">
+    <Flex align="center" gap="3" className={styles.contextSummary}>
       {showUsd && (
         <HoverCard.Root>
           <HoverCard.Trigger asChild>
-            <Flex align="center" gap="1" style={{ cursor: "default" }}>
+            <Flex align="center" gap="1" className={styles.contextCost}>
               <Text size="1">{formatUsd(totalUsd)}</Text>
             </Flex>
           </HoverCard.Trigger>
@@ -322,7 +322,7 @@ const DefaultHoverTriggerContent: React.FC<{
                 size={18}
                 strokeWidth={2.5}
               />
-              <Text size="1" color="gray">
+              <Text size="1" color="gray" className={styles.contextTokenLabel}>
                 {formatNumberToFixed(currentSessionTokens)}
               </Text>
             </Flex>

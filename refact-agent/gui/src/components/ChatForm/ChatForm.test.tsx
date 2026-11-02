@@ -381,9 +381,7 @@ describe("ChatForm", () => {
       },
     });
 
-    await user.click(
-      screen.getByRole("button", { name: "More composer controls" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Expand composer" }));
     const label = screen.queryByText(/Selected \d* lines/);
     expect(label).not.toBeNull();
     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
@@ -722,9 +720,7 @@ describe("ChatForm", () => {
     const textarea = app.container.querySelector("textarea");
     expect(textarea).not.toBeNull();
     if (!textarea) return;
-    await user.click(
-      screen.getByRole("button", { name: "More composer controls" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Expand composer" }));
     await screen.findByRole("button", { name: "Attach images" });
 
     expect(
@@ -783,7 +779,7 @@ describe("ChatForm", () => {
     ).toHaveLength(0);
   });
 
-  test("composer expands on focus and stays expanded while settings popover is open", async () => {
+  test("only explicit toggle expands and settings popover does not collapse it", async () => {
     const { user, ...app } = render(<App />, {
       preloadedState: {
         chat: chatStateWithThread({ model: "openai/gpt-4o" }),
@@ -797,11 +793,9 @@ describe("ChatForm", () => {
 
     expect(form.className).toContain("chatFormCollapsed");
     await user.click(textarea);
-    expect(form.className).toContain("chatFormExpanded");
+    expect(form.className).toContain("chatFormCollapsed");
 
-    await user.click(
-      screen.getByRole("button", { name: "More composer controls" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Expand composer" }));
     const settingsButton = await screen.findByRole("button", {
       name: /openai\/gpt-4o/,
     });
@@ -828,13 +822,13 @@ describe("ChatForm", () => {
     });
 
     expect(onExpandedChange).toHaveBeenLastCalledWith(false);
-    await user.click(screen.getByTestId("chat-form-textarea"));
+    await user.click(screen.getByRole("button", { name: "Expand composer" }));
     await waitFor(() => {
       expect(onExpandedChange).toHaveBeenLastCalledWith(true);
     });
   });
 
-  test("narrow composer exposes status widgets through More", async () => {
+  test("status widgets remain mounted across explicit expansion", async () => {
     const { user } = render(<App />, {
       preloadedState: {
         chat: chatStateWithThread({ model: "openai/gpt-4o" }),
@@ -848,17 +842,18 @@ describe("ChatForm", () => {
     if (!form) return;
 
     expect(form.className).toContain("chatFormCollapsed");
-    await user.click(
-      screen.getByRole("button", { name: "More composer controls" }),
+    await user.click(screen.getByRole("button", { name: "Expand composer" }));
+    const collapsedStatus = document.querySelector(
+      '[data-composer-control="context"]',
     );
-    const collapsedStatus = screen.getByTestId("composer-collapsed-status");
+    if (!collapsedStatus) throw new Error("Missing context control");
     expect(document.body.contains(collapsedStatus)).toBe(true);
     expect(
       collapsedStatus.querySelector('[class*="usageCounterContainer"]'),
     ).not.toBeNull();
   });
 
-  test("context usage remains reachable through More", async () => {
+  test("context usage opens from its individual control", async () => {
     const { user } = render(<App />, {
       preloadedState: {
         chat: chatStateWithThread({ model: "openai/gpt-4o" }),
@@ -872,10 +867,11 @@ describe("ChatForm", () => {
     if (!form) return;
 
     expect(form.className).toContain("chatFormCollapsed");
-    await user.click(
-      screen.getByRole("button", { name: "More composer controls" }),
+    await user.click(screen.getByRole("button", { name: "Expand composer" }));
+    const collapsedStatus = document.querySelector(
+      '[data-composer-control="context"]',
     );
-    const collapsedStatus = screen.getByTestId("composer-collapsed-status");
+    if (!collapsedStatus) throw new Error("Missing context control");
     const usageWidget = collapsedStatus.querySelector(
       '[class*="usageCounterContainer"] [aria-haspopup]',
     );
@@ -1026,11 +1022,11 @@ describe("ChatForm", () => {
       ),
       "utf8",
     );
-    expect(css).not.toContain("overflow: hidden");
+    const rowRule = css.match(/\.toolbar\s*\{([^}]+)\}/)?.[1];
+    expect(rowRule).toBeDefined();
+    expect(rowRule).not.toContain("overflow: hidden");
     expect(css).toContain("flex-wrap: nowrap");
-    expect(css).toMatch(
-      /\.popover\[data-state="closed"\]\s*\{\s*display: none;/,
-    );
+    expect(css).toContain("visibility: hidden");
     expect(css).not.toContain("@container");
     expect(css).toContain("flex: 0 0 auto");
   });
@@ -1040,6 +1036,7 @@ describe("ChatForm", () => {
     const textarea = screen.getByTestId("chat-form-textarea");
     const draft = "first line\nsecond line\nthird line";
     fireEvent.change(textarea, { target: { value: draft } });
+    await user.click(screen.getByRole("button", { name: "Expand composer" }));
     await waitFor(() =>
       expect(textarea.closest("form")?.className).toContain("chatFormExpanded"),
     );
@@ -1162,9 +1159,7 @@ describe("ChatForm", () => {
       preloadedState: { chat, ...engineConfigState },
     });
 
-    await user.click(
-      screen.getByRole("button", { name: "More composer controls" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Expand composer" }));
     store.dispatch(
       applyChatEvent({
         chat_id: threadId,

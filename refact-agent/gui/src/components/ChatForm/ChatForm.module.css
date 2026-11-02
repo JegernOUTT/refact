@@ -84,35 +84,11 @@
     border-color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
-.expandedComposerContent {
-  display: grid;
-  grid-template-rows: 1fr;
-  opacity: 1;
-  contain: layout paint;
-}
-
-.expandedComposerContentInner {
-  min-height: 0;
-  overflow: hidden;
-  transition: max-height var(--rf-dur-med) var(--rf-ease-standard);
-  will-change: max-height;
-}
-
-.chatFormCollapsed .expandedComposerContent {
-  grid-template-rows: 1fr;
-}
-
-.chatFormCollapsed .expandedComposerContentInner {
-  max-height: calc(2 * var(--rf-line) * var(--rf-text-3) + var(--rf-space-2));
-}
-
-.chatFormExpanded .expandedComposerContentInner {
-  max-height: none;
-  overflow: visible;
-}
-
-.chatFormCollapsed .inputHeader {
-  display: none;
+.expansionButton {
+  position: absolute;
+  top: var(--rf-space-1);
+  right: var(--rf-space-2);
+  z-index: 1;
 }
 
 .chatFormExpanded .inputHeader {
@@ -121,20 +97,18 @@
 }
 
 .chatFormCollapsed .textareaWrapper textarea {
-  min-height: 0;
-  max-height: calc(2 * var(--rf-line) * var(--rf-text-3) + var(--rf-space-2));
-  padding: var(--rf-space-1) var(--chat-input-padding);
+  height: calc(2 * var(--rf-line-3) + var(--rf-space-2));
+  min-height: calc(2 * var(--rf-line-3) + var(--rf-space-2));
+  max-height: calc(2 * var(--rf-line-3) + var(--rf-space-2));
+  padding: var(--rf-space-1) var(--rf-space-6) var(--rf-space-1)
+    var(--chat-input-padding);
   display: block;
-  overflow: hidden;
+  overflow: auto;
   resize: none;
 }
 
 .chatFormCollapsed .textareaWrapper textarea::placeholder {
   opacity: 0.7;
-}
-
-.chatFormCollapsed .textareaWrapper textarea {
-  mask-image: linear-gradient(to bottom, black 70%, transparent 100%);
 }
 
 .inputHeader {
@@ -163,6 +137,7 @@
 .textareaWrapper textarea {
   min-height: 100px;
   padding: var(--chat-input-padding);
+  padding-right: var(--rf-space-6);
   background: transparent;
   border: 0;
   box-shadow: none;
@@ -225,32 +200,13 @@
   justify-content: end;
 }
 
-.topControlsRow {
-  min-width: 0;
-  flex-wrap: wrap;
-}
-
-.toolbarActions {
-  display: flex;
-  min-width: 0;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--rf-space-2);
-}
-
 @media (prefers-reduced-motion: reduce) {
   .chatFormMain,
-  .chatForm__form,
-  .expandedComposerContentInner {
+  .chatForm__form {
     transition: none;
   }
 
   .chatFormExpanded .inputHeader {
     animation: none;
   }
-}
-
-.toolbarActions > span {
-  display: inline-flex;
-  flex: 0 0 auto;
 }

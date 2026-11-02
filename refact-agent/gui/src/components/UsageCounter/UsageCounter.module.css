@@ -38,7 +38,7 @@
 .providerIndicatorTrigger {
   display: inline-flex;
   flex: 0 0 auto;
-  max-width: 88px;
+  max-width: var(--rf-overlay-popover-min);
   cursor: pointer;
   padding: 0;
   color: var(--rf-color-muted);
@@ -103,8 +103,20 @@
 }
 
 .providerCompactLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
   font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+}
+
+.providerIndicatorTrigger > div {
+  min-width: 0;
+}
+
+.providerIndicatorTrigger svg {
+  flex-shrink: 0;
 }
 
 .providerIndicatorTrigger:focus-visible {
@@ -114,4 +126,45 @@
 
 .providerDetailsName {
   overflow-wrap: anywhere;
+}
+
+.contextCost {
+  cursor: default;
+}
+
+.usageCounterBorderless.isWarning,
+.usageCounterBorderless.isOverflown {
+  min-width: 0;
+  max-width: 100%;
+  margin-right: 0;
+}
+
+.isWarning .contextSummary,
+.isOverflown .contextSummary {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.isWarning .providerIndicatorTrigger,
+.isOverflown .providerIndicatorTrigger {
+  min-width: var(--rf-control-h-icon-sm);
+  max-width: 100%;
+  flex-shrink: 1;
+  overflow: hidden;
+}
+
+.isWarning .contextTokenLabel,
+.isOverflown .contextTokenLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.isWarning .providerIndicatorTrigger:focus-visible,
+.isOverflown .providerIndicatorTrigger:focus-visible {
+  outline-offset: calc(var(--rf-focus-ring-w) * -1);
+}
+
+:global([data-compact-context="true"]) .contextCost {
+  display: none;
 }

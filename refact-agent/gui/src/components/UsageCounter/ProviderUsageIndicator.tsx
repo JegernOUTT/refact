@@ -225,9 +225,7 @@ export const ProviderUsageIndicatorContent: React.FC<{
         >
           <Flex align="center" gap="1">
             <CircularUsage pct={percent} />
-            <span className={styles.providerCompactLabel}>
-              {percent == null ? "Quota" : `${Math.round(percent)}%`}
-            </span>
+            <span className={styles.providerCompactLabel}>{displayName}</span>
           </Flex>
         </button>
       </Popover.Trigger>
