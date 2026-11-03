@@ -7,7 +7,10 @@ use tokio::sync::Mutex;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::types::{ChatEvent, ChatSession, SessionState, TrajectoryCommitIntent};
-use crate::chat::worktree_lifecycle::{check_unchanged_attachment, transition_lock};
+use crate::chat::worktree_lifecycle::{
+    check_ordinary_worktree_ancestry, is_ordinary_worktree_lineage, check_unchanged_attachment,
+    transition_lock,
+};
 use crate::tools::tools_description::{
     MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolDesc, ToolSource, ToolSourceType,
 };
@@ -16,17 +19,10 @@ use crate::worktrees::{scope::ExecutionScope, service::WorktreeService};
 pub struct ToolWorktreeCreate;
 
 fn check_caller(context: &AtCommandsContext, session: &ChatSession) -> Result<(), String> {
-    if context.chat_id != context.root_chat_id
+    if !is_ordinary_worktree_lineage(&context.chat_id, &context.root_chat_id, &session.thread)
         || context.subchat_depth != 0
         || context.background_agent_id.is_some()
         || context.task_meta.is_some()
-        || session.thread.task_meta.is_some()
-        || session
-            .thread
-            .root_chat_id
-            .as_deref()
-            .is_some_and(|root| root != context.chat_id)
-        || context.chat_id.starts_with("subchat-")
     {
         return Err("worktree_create is available only to an ordinary root chat, not task or child executions".into());
     }
@@ -116,6 +112,8 @@ impl Tool for ToolWorktreeCreate {
                     .ok_or("Trusted current project is unavailable")?,
             )
         };
+        let root = ccx.lock().await.root_chat_id.clone();
+        check_ordinary_worktree_ancestry(&app, &chat_id, &root, &before).await?;
         let service = WorktreeService::new_async(app.gcx.cache_dir.clone(), source.clone()).await?;
         let (worktree, reused, reattached) = if let Some(worktree) = before.worktree.as_ref() {
             let view = service.get_worktree(&worktree.id).await?;
@@ -395,6 +393,179 @@ mod tests {
         )
         .unwrap();
         assert_eq!(saved["worktree"]["id"], attached.id);
+    }
+
+    #[tokio::test]
+    async fn worktree_create_continuation_creates_reuses_and_recovers() {
+        let (_temp, context, session, service) = fixture().await;
+        context.lock().await.root_chat_id = "original-root".into();
+        {
+            let mut session = session.lock().await;
+            session.thread.root_chat_id = Some("original-root".into());
+            session.thread.parent_id = Some("previous-chat".into());
+            session.thread.link_type = Some("handoff".into());
+        }
+        let app = context.lock().await.app.clone();
+        let mut original = ChatSession::new("original-root".into());
+        original.work_project_root = Some(service.source_workspace_root().to_path_buf());
+        crate::chat::trajectories::try_save_trajectory_with_intent(
+            app.clone(),
+            Arc::new(Mutex::new(original)),
+            TrajectoryCommitIntent::Required,
+        )
+        .await
+        .unwrap();
+        let mut previous = ChatSession::new("previous-chat".into());
+        previous.work_project_root = Some(service.source_workspace_root().to_path_buf());
+        previous.thread.root_chat_id = Some("original-root".into());
+        previous.thread.parent_id = Some("original-root".into());
+        previous.thread.link_type = Some("branch".into());
+        crate::chat::trajectories::try_save_trajectory_with_intent(
+            app.clone(),
+            Arc::new(Mutex::new(previous)),
+            TrajectoryCommitIntent::Required,
+        )
+        .await
+        .unwrap();
+        let sessions = app.chat.sessions.read().await;
+        assert!(!sessions.contains_key("original-root"));
+        assert!(!sessions.contains_key("previous-chat"));
+        drop(sessions);
+        let before = session.lock().await.thread.clone();
+        let mut tool = ToolWorktreeCreate;
+        for expected in ["attached", "already_attached", "reattached"] {
+            let (_, result) = tool
+                .tool_execute(context.clone(), &"continuation".into(), &HashMap::new())
+                .await
+                .expect("ordinary handoff must retain worktree authority");
+            let ContextEnum::ChatMessage(message) = &result[0] else {
+                panic!("tool result missing")
+            };
+            let result: Value = serde_json::from_str(&message.content.content_text_only()).unwrap();
+            assert_eq!(result["status"], expected);
+            let attached = session.lock().await.thread.worktree.clone().unwrap();
+            assert_eq!(
+                context.lock().await.execution_scope_worktree(),
+                Some(attached.clone())
+            );
+            assert_eq!(service.load_registry().await.unwrap().records.len(), 1);
+            let thread = session.lock().await.thread.clone();
+            assert_eq!(thread.root_chat_id, before.root_chat_id);
+            assert_eq!(thread.parent_id, before.parent_id);
+            assert_eq!(thread.link_type, before.link_type);
+            if expected == "already_attached" {
+                let app = context.lock().await.app.clone();
+                let detached = crate::chat::queue::resolve_worktree_setparams_update(
+                    app,
+                    &thread.id,
+                    &thread,
+                    &json!({"worktree": null}),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                session.lock().await.thread.worktree = detached.worktree;
+                context.lock().await.execution_scope = None;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn worktree_create_continuation_refuses_cold_child_ancestor() {
+        let (_temp, context, session, service) = fixture().await;
+        let app = context.lock().await.app.clone();
+        let mut child = ChatSession::new("child-ancestor".into());
+        child.work_project_root = Some(service.source_workspace_root().to_path_buf());
+        child.thread.root_chat_id = Some("original-root".into());
+        child.thread.parent_id = Some("original-root".into());
+        child.thread.link_type = Some("subagent".into());
+        crate::chat::trajectories::try_save_trajectory_with_intent(
+            app.clone(),
+            Arc::new(Mutex::new(child)),
+            TrajectoryCommitIntent::Required,
+        )
+        .await
+        .unwrap();
+        assert!(!app
+            .chat
+            .sessions
+            .read()
+            .await
+            .contains_key("child-ancestor"));
+        assert!(
+            crate::chat::trajectories::find_trajectory_path(app.gcx.clone(), "child-ancestor")
+                .await
+                .is_some()
+        );
+        context.lock().await.root_chat_id = "original-root".into();
+        {
+            let mut session = session.lock().await;
+            session.thread.root_chat_id = Some("original-root".into());
+            session.thread.parent_id = Some("child-ancestor".into());
+            session.thread.link_type = Some("handoff".into());
+        }
+        let error = ToolWorktreeCreate
+            .tool_execute(context.clone(), &"child-handoff".into(), &HashMap::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error, "Worktree continuation ancestry is unavailable or not ordinary; retain WIP and ask the user to reopen the original ordinary chat");
+        assert!(service.load_registry().await.unwrap().records.is_empty());
+        assert!(session.lock().await.thread.worktree.is_none());
+        assert!(context.lock().await.execution_scope.is_none());
+    }
+
+    #[tokio::test]
+    async fn worktree_create_continuation_refuses_incoherent_and_child_callers() {
+        let (_temp, context, session, _service) = fixture().await;
+        let mut context = context.lock().await;
+        let mut session = session.lock().await;
+        context.root_chat_id = "original-root".into();
+        session.thread.root_chat_id = Some("original-root".into());
+        session.thread.parent_id = Some("previous-chat".into());
+        session.thread.link_type = Some("handoff".into());
+        let thread = session.thread.clone();
+        for case in [
+            "mismatched-root",
+            "missing-parent",
+            "unknown-link",
+            "depth",
+            "background",
+            "context-task",
+            "session-task",
+        ] {
+            session.thread = thread.clone();
+            context.root_chat_id = "original-root".into();
+            context.subchat_depth = 0;
+            context.background_agent_id = None;
+            context.task_meta = None;
+            session.closed = false;
+            session.set_runtime_state(SessionState::ExecutingTools, None);
+            session.abort_flag.store(false, Ordering::Relaxed);
+            context.abort_flag = session.abort_flag.clone();
+            let task = crate::chat::types::TaskMeta {
+                task_id: "task".into(),
+                role: "planner".into(),
+                agent_id: None,
+                card_id: None,
+                planner_chat_id: None,
+            };
+            match case {
+                "mismatched-root" => session.thread.root_chat_id = Some("other-root".into()),
+                "missing-parent" => session.thread.parent_id = None,
+                "unknown-link" => session.thread.link_type = Some("subagent".into()),
+                "depth" => context.subchat_depth = 1,
+                "background" => context.background_agent_id = Some("agent".into()),
+                "context-task" => context.task_meta = Some(task),
+                "session-task" => session.thread.task_meta = Some(task),
+                _ => unreachable!(),
+            }
+            let expected = "worktree_create is available only to an ordinary root chat, not task or child executions";
+            assert_eq!(
+                check_caller(&context, &session),
+                Err(expected.into()),
+                "{case}"
+            );
+        }
     }
 
     #[tokio::test]

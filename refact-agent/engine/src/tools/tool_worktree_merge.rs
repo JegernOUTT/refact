@@ -8,7 +8,10 @@ use tokio::sync::Mutex as AMutex;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::types::{ChatEvent, ChatSession, SessionState, TrajectoryCommitIntent};
-use crate::chat::worktree_lifecycle::{check_unchanged_attachment, transition_lock};
+use crate::chat::worktree_lifecycle::{
+    check_ordinary_worktree_ancestry, is_ordinary_worktree_lineage, check_unchanged_attachment,
+    transition_lock,
+};
 use crate::global_context::GlobalContext;
 use crate::tools::tools_description::{
     json_schema_from_params, Tool, ToolDesc, ToolSource, ToolSourceType,
@@ -297,6 +300,112 @@ mod tests {
                 event["type"] == "thread_updated" && event.get("worktree") == Some(&Value::Null);
         }
         assert!(detached, "worktree:null must reach SSE consumers");
+    }
+
+    #[tokio::test]
+    async fn self_merge_continuation_preserves_lineage_and_returns_to_project() {
+        let (_temp, context, session, service) = fixture().await;
+        context.lock().await.root_chat_id = "original-root".into();
+        {
+            let mut session = session.lock().await;
+            session.thread.root_chat_id = Some("original-root".into());
+            session.thread.parent_id = Some("previous-chat".into());
+            session.thread.link_type = Some("branch".into());
+        }
+        let app = context.lock().await.app.clone();
+        app.chat.sessions.write().await.insert(
+            "original-root".into(),
+            Arc::new(AMutex::new(ChatSession::new("original-root".into()))),
+        );
+        let mut previous = ChatSession::new("previous-chat".into());
+        previous.thread.root_chat_id = Some("original-root".into());
+        previous.thread.parent_id = Some("original-root".into());
+        previous.thread.link_type = Some("handoff".into());
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("previous-chat".into(), Arc::new(AMutex::new(previous)));
+        let before = session.lock().await.thread.clone();
+        let worktree = before.worktree.as_ref().unwrap();
+        std::fs::write(worktree.root.join("landed"), "continuation change\n").unwrap();
+        execute(&context, "worktree_merge", merge_args())
+            .await
+            .expect("ordinary branch must retain self-merge authority");
+        assert!(!worktree.root.exists());
+        assert_eq!(
+            std::fs::read_to_string(service.source_workspace_root().join("landed")).unwrap(),
+            "continuation change\n"
+        );
+        assert!(context.lock().await.execution_scope.is_none());
+        let thread = session.lock().await.thread.clone();
+        assert!(thread.worktree.is_none());
+        assert_eq!(thread.root_chat_id, before.root_chat_id);
+        assert_eq!(thread.parent_id, before.parent_id);
+        assert_eq!(thread.link_type, before.link_type);
+    }
+
+    #[tokio::test]
+    async fn continuation_from_persisted_child_refuses_create_and_self_merge() {
+        let (_temp, context, session, service) = fixture().await;
+        let app = context.lock().await.app.clone();
+        let worktree = session.lock().await.thread.worktree.clone().unwrap();
+        let mut child = ChatSession::new("subchat-origin".into());
+        child.work_project_root = Some(service.source_workspace_root().to_path_buf());
+        child.thread.root_chat_id = Some("original-root".into());
+        crate::chat::trajectories::try_save_trajectory_with_intent(
+            app.clone(),
+            Arc::new(AMutex::new(child)),
+            TrajectoryCommitIntent::Required,
+        )
+        .await
+        .unwrap();
+        let mut previous = ChatSession::new("previous-chat".into());
+        previous.thread.root_chat_id = Some("original-root".into());
+        previous.thread.parent_id = Some("subchat-origin".into());
+        previous.thread.link_type = Some("handoff".into());
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("previous-chat".into(), Arc::new(AMutex::new(previous)));
+        context.lock().await.root_chat_id = "original-root".into();
+        {
+            let mut session = session.lock().await;
+            session.thread.root_chat_id = Some("original-root".into());
+            session.thread.parent_id = Some("previous-chat".into());
+            session.thread.link_type = Some("branch".into());
+        }
+        let loaded =
+            crate::chat::trajectories::find_trajectory_path(app.gcx.clone(), "subchat-origin")
+                .await;
+        assert!(
+            loaded.is_some(),
+            "child ancestry must exist on disk, not merely be missing"
+        );
+        let before = service.load_registry().await.unwrap();
+        for name in ["worktree_create", "worktree_merge"] {
+            let args = if name == "worktree_merge" {
+                merge_args()
+            } else {
+                serde_json::json!({})
+            };
+            let error = execute(&context, name, args)
+                .await
+                .err()
+                .expect("child origin must be refused");
+            assert_eq!(error, "Worktree continuation ancestry is unavailable or not ordinary; retain WIP and ask the user to reopen the original ordinary chat");
+            assert!(worktree.root.exists());
+            assert_eq!(service.load_registry().await.unwrap(), before);
+            assert_eq!(
+                session.lock().await.thread.worktree.as_ref(),
+                Some(&worktree)
+            );
+            assert_eq!(
+                context.lock().await.execution_scope_worktree().as_ref(),
+                Some(&worktree)
+            );
+        }
     }
 
     #[tokio::test]
@@ -681,19 +790,10 @@ fn check_self_merge_caller(
     let worktree = context
         .execution_scope_worktree()
         .ok_or("Self merge scope is unavailable")?;
-    if context.chat_id != context.root_chat_id
+    if !is_ordinary_worktree_lineage(&context.chat_id, &context.root_chat_id, &session.thread)
         || context.subchat_depth != 0
         || context.background_agent_id.is_some()
         || context.task_meta.is_some()
-        || session.thread.task_meta.is_some()
-        || session.thread.parent_id.is_some()
-        || session.thread.link_type.is_some()
-        || session
-            .thread
-            .root_chat_id
-            .as_deref()
-            .is_some_and(|root| root != context.chat_id)
-        || context.chat_id.starts_with("subchat-")
         || crate::buddy::supervision_authority::native_edit_scope_for_chat(&context.chat_id)
             .is_some()
         || worktree.kind != "chat"
@@ -947,6 +1047,8 @@ impl Tool for ToolWorktreeMerge {
             None
         };
         if let Some(before) = &before {
+            let root = ccx.lock().await.root_chat_id.clone();
+            check_ordinary_worktree_ancestry(&app, &parent_chat_id, &root, before).await?;
             let worktree = before.worktree.as_ref().ok_or("Self merge scope changed")?;
             let view = service.get_worktree(&worktree_id).await?;
             if view.meta != *worktree

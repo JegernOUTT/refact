@@ -55,6 +55,97 @@ pub(crate) fn try_transition_lock(
         .map_err(|_| "Parent checkout transition in progress; retain source and retry".into())
 }
 
+pub(crate) fn is_ordinary_worktree_lineage(
+    chat_id: &str,
+    root: &str,
+    thread: &ThreadParams,
+) -> bool {
+    if thread.id != chat_id || chat_id.starts_with("subchat-") || thread.task_meta.is_some() {
+        return false;
+    }
+    match (thread.parent_id.as_deref(), thread.link_type.as_deref()) {
+        (None, None) => {
+            root == chat_id && thread.root_chat_id.as_deref().is_none_or(|id| id == root)
+        }
+        (Some(parent), Some("handoff" | "branch" | "mode_transition")) => {
+            !root.is_empty()
+                && root != chat_id
+                && thread.root_chat_id.as_deref() == Some(root)
+                && !parent.is_empty()
+                && parent != chat_id
+        }
+        _ => false,
+    }
+}
+
+pub(crate) async fn check_ordinary_worktree_ancestry(
+    app: &crate::app_state::AppState,
+    chat_id: &str,
+    root: &str,
+    thread: &ThreadParams,
+) -> Result<(), String> {
+    let refusal = "Worktree continuation ancestry is unavailable or not ordinary; retain WIP and ask the user to reopen the original ordinary chat";
+    let mut current = thread.clone();
+    let mut id = chat_id.to_string();
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..64 {
+        if super::trajectories::validate_trajectory_id(&id).is_err()
+            || !seen.insert(id.clone())
+            || !is_ordinary_worktree_lineage(&id, root, &current)
+            || has_managed_task_binding(&current)
+            || crate::tasks::admission::is_tracked(&id).await
+            || app
+                .agents
+                .find_agent_id_by_child_chat_id(&id)
+                .await
+                .is_some()
+            || crate::buddy::supervision_authority::native_edit_scope_for_chat(&id).is_some()
+        {
+            return Err(refusal.into());
+        }
+        let Some(parent) = current.parent_id.clone() else {
+            return Ok(());
+        };
+        super::trajectories::validate_trajectory_id(&parent).map_err(|_| refusal.to_string())?;
+        let live = app.chat.sessions.read().await.get(&parent).cloned();
+        current = if let Some(live) = live {
+            let session = live.lock().await;
+            if session.chat_id != parent {
+                return Err(refusal.into());
+            }
+            session.thread.clone()
+        } else {
+            let path = super::trajectories::find_trajectory_path(app.gcx.clone(), &parent)
+                .await
+                .ok_or(refusal)?;
+            let raw = tokio::fs::read(path)
+                .await
+                .map_err(|_| refusal.to_string())?;
+            #[derive(serde::Deserialize)]
+            struct Lineage {
+                #[serde(rename = "id")]
+                chat_id: String,
+                root_chat_id: Option<String>,
+                parent_id: Option<String>,
+                link_type: Option<String>,
+                task_meta: Option<super::types::TaskMeta>,
+                worktree: Option<crate::worktrees::types::WorktreeMeta>,
+            }
+            let lineage: Lineage = serde_json::from_slice(&raw).map_err(|_| refusal.to_string())?;
+            let mut thread = ThreadParams::default();
+            thread.id = lineage.chat_id;
+            thread.root_chat_id = lineage.root_chat_id;
+            thread.parent_id = lineage.parent_id;
+            thread.link_type = lineage.link_type;
+            thread.task_meta = lineage.task_meta;
+            thread.worktree = lineage.worktree;
+            thread
+        };
+        id = parent;
+    }
+    Err(refusal.into())
+}
+
 pub(crate) fn is_scope_patch(patch: &serde_json::Value) -> bool {
     [
         "worktree_id",
