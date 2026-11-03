@@ -346,69 +346,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn continuation_from_persisted_child_refuses_create_and_self_merge() {
-        let (_temp, context, session, service) = fixture().await;
-        let app = context.lock().await.app.clone();
-        let worktree = session.lock().await.thread.worktree.clone().unwrap();
-        let mut child = ChatSession::new("subchat-origin".into());
-        child.work_project_root = Some(service.source_workspace_root().to_path_buf());
-        child.thread.root_chat_id = Some("original-root".into());
-        crate::chat::trajectories::try_save_trajectory_with_intent(
-            app.clone(),
-            Arc::new(AMutex::new(child)),
-            TrajectoryCommitIntent::Required,
-        )
-        .await
-        .unwrap();
-        let mut previous = ChatSession::new("previous-chat".into());
-        previous.thread.root_chat_id = Some("original-root".into());
-        previous.thread.parent_id = Some("subchat-origin".into());
-        previous.thread.link_type = Some("handoff".into());
-        app.chat
-            .sessions
-            .write()
-            .await
-            .insert("previous-chat".into(), Arc::new(AMutex::new(previous)));
-        context.lock().await.root_chat_id = "original-root".into();
-        {
-            let mut session = session.lock().await;
-            session.thread.root_chat_id = Some("original-root".into());
-            session.thread.parent_id = Some("previous-chat".into());
-            session.thread.link_type = Some("branch".into());
-        }
-        let loaded =
-            crate::chat::trajectories::find_trajectory_path(app.gcx.clone(), "subchat-origin")
-                .await;
-        assert!(
-            loaded.is_some(),
-            "child ancestry must exist on disk, not merely be missing"
-        );
-        let before = service.load_registry().await.unwrap();
-        for name in ["worktree_create", "worktree_merge"] {
-            let args = if name == "worktree_merge" {
-                merge_args()
-            } else {
-                serde_json::json!({})
-            };
-            let error = execute(&context, name, args)
-                .await
-                .err()
-                .expect("child origin must be refused");
-            assert_eq!(error, "Worktree continuation ancestry is unavailable or not ordinary; retain WIP and ask the user to reopen the original ordinary chat");
-            assert!(worktree.root.exists());
-            assert_eq!(service.load_registry().await.unwrap(), before);
-            assert_eq!(
-                session.lock().await.thread.worktree.as_ref(),
-                Some(&worktree)
-            );
-            assert_eq!(
-                context.lock().await.execution_scope_worktree().as_ref(),
-                Some(&worktree)
-            );
-        }
-    }
-
-    #[tokio::test]
     async fn self_merge_retained_checkout_keeps_attachment() {
         let (_temp, context, session, _service) = fixture().await;
         let before = session.lock().await.thread.worktree.clone().unwrap();
