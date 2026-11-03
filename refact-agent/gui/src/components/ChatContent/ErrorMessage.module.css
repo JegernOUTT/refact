@@ -1,23 +1,16 @@
 .errors {
   display: grid;
   min-width: 0;
-  gap: var(--rf-space-3);
+  gap: var(--rf-space-2);
 }
 
-.callout {
-  display: grid;
-  min-width: 0;
-  gap: var(--rf-space-1);
+.heading {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
 }
 
-.message,
-.hint,
-.raw {
+.message {
   white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.hint,
-.raw {
-  color: var(--rf-color-muted);
+  overflow-wrap: anywhere;
 }

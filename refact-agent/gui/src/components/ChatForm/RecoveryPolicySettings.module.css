@@ -1,0 +1,16 @@
+.settings {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+}
+
+.settings label {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+}
+
+.settings p {
+  margin: 0;
+  color: var(--rf-color-muted);
+}

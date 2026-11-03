@@ -12333,6 +12333,72 @@
       "author": "chat:8253eb6d-a475-4724-a113-50393429c506",
       "reviewer": "background_agent:bgagent-6c25e107-def1-4376-85c0-66eeb020b1f6",
       "review_evidence": "Independent source and semantic admission review subchat-f0ed3885-9cb4-4edd-8c9a-8e571d4922f2 approved final source SHA1b79e5d2d8d224c896b444228b781f289372bc61b6b00d3759f22e75accf7394; earlier independent sol/luna discovery and adversarial exchange subchat-08d9b00a-092a-4a09-b200-d5135aca1417 and subchat-f6fbb242-2a52-4ae8-9f2d-dd63fe5c8cd0. Reviewer checked source only; parent executed witnesses."
+    },
+    {
+      "fingerprint": "a20ee96bddac9aa56ea71decc2d8522e66a3811f46da1fbe761612a587f0c33a",
+      "occurrences": 1,
+      "failure_mode": "Actual reqwest send-error wrapper was Unknown and nonretryable, hiding transient transport recovery.",
+      "importance": "Allow narrowly identified transport failure recovery without retrying permanent provider rejection.",
+      "nearest_retained": {
+        "fingerprint": "6a91335d5add50573ff96fdebd263e8dde3d9366cd07cdb395783b35825f407b",
+        "why_insufficient": "Existing provider table has connection/DNS failures but lacks the actual opaque reqwest error sending request wrapper and prefix qualification."
+      },
+      "oracle": "Exact NetworkFailure/transient retry for the actual opaque reqwest wrapper; HTTP400 and malformed prefixed requests remain InvalidRequest/nonretryable; an unmarked quoted wrapper remains Unknown/unknown_error.",
+      "prerequisites": "Four nonempty fixed strings drive shipping classifiers: actual send prefix, permanent400, malformed request, unmarked quotation; no copied classifier/mock algorithm.",
+      "shipping_implementation": "refact_core::retry_policy::{classify_user_error,classify_llm_error_for_retry}",
+      "determinism": "Pure classifiers, no IO/time/network.",
+      "layer": "Core pure policy unit test",
+      "why_cheapest": "No engine/session/provider fixture needed to prove classifier decisions.",
+      "meaningful_cases": 4,
+      "critical": false,
+      "criticality_reason": "Error classification only; no authority or delivery mutation. Executed pre-fix failure nevertheless supplied.",
+      "removed_coverage": "None; four meaningful scenarios in one new physical function.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "retry_policy.rs::classify_user_error_from_lower",
+        "before_fix": {
+          "reference": "Final four-case test with only the added reqwest transport recognition production block removed; .refact/recovery-review/classifier-before.log and classifier-evidence.json",
+          "fingerprint": "d4ce2d68cea3a7015c6dc57898cf89ffe31f046f9ad43fa2b78511046697a6bb"
+        },
+        "intended_diagnostic": "Unknown != NetworkFailure at first exact classification assertion.",
+        "failing": {
+          "command": [
+            "cargo",
+            "test",
+            "--locked",
+            "--profile",
+            "ci-test",
+            "-p",
+            "refact-core",
+            "retry_policy::tests::reqwest_send_failure_is_transport_but_not_provider_rejection",
+            "--",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 101,
+          "evidence": "Parent process exec_5ae1d360-182b-451f-a3a3-93de1fc8f84f: final test failed at Unknown != NetworkFailure; .refact/recovery-review/classifier-before.log."
+        },
+        "passing": {
+          "command": [
+            "cargo",
+            "test",
+            "--locked",
+            "--profile",
+            "ci-test",
+            "-p",
+            "refact-core",
+            "retry_policy::tests::reqwest_send_failure_is_transport_but_not_provider_rejection",
+            "--",
+            "--exact",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "evidence": "Parent process exec_5ae1d360-182b-451f-a3a3-93de1fc8f84f: final four-case test passed after restoring exact production bytes cc319c049ceea12cbd28e035bd1e261ee5d05b90b4bae33ae74f88dbf5cf465d; .refact/recovery-review/classifier-after.log."
+        }
+      },
+      "author": "background_agent:bgagent-e62cdc81-c49e-479e-8348-d56f7bf7d211",
+      "reviewer": "background_agent:bgagent-bbc30840-3911-474c-b6fd-78cc352fcc52",
+      "review_evidence": "Independent claude-sonnet review run3: source traces four exact cases against positive transport recognition and three guards; recomputed mutant SHA and matched candidate evidence/logs; approved semantic admission. Reviewer read logs, did not execute Cargo; parent exec_5ae1d360-182b-451f-a3a3-93de1fc8f84f attests actual exit101/0 executions. Prior hook cancellation finding resolved and source-backed adversarial round completed."
     }
   ],
   "impacts": [
@@ -26099,6 +26165,19 @@
       "author": "chat:8253eb6d-a475-4724-a113-50393429c506",
       "reviewer": "background_agent:bgagent-6c25e107-def1-4376-85c0-66eeb020b1f6",
       "review_evidence": "Independent source and semantic admission review subchat-f0ed3885-9cb4-4edd-8c9a-8e571d4922f2 approved final source SHA1b79e5d2d8d224c896b444228b781f289372bc61b6b00d3759f22e75accf7394; earlier independent sol/luna discovery and adversarial exchange subchat-08d9b00a-092a-4a09-b200-d5135aca1417 and subchat-f6fbb242-2a52-4ae8-9f2d-dd63fe5c8cd0. Reviewer checked source only; parent executed witnesses."
+    },
+    {
+      "path": "refact-agent/engine/crates/refact-core/src/retry_policy.rs",
+      "before_sha256": "d2bbd62ce9aea2474d1482f8cc7ccb6059b41cc8d7a851466bf68f74e9a0e55d",
+      "after_sha256": "cc319c049ceea12cbd28e035bd1e261ee5d05b90b4bae33ae74f88dbf5cf465d",
+      "affected_tests": [
+        "a20ee96bddac9aa56ea71decc2d8522e66a3811f46da1fbe761612a587f0c33a"
+      ],
+      "impact": "The sole production addition classifies the actual opaque reqwest send-error prefix as NetworkFailure after permanent-error precedence, while retaining nonretryable status/invalid-request guards and strict prefix qualification. New four-case test directly covers positive behavior and each added guard. Existing provider precedence tests retained.",
+      "execution_context": "Core pure classifier functions, deterministic in-process strings. Root engine compile/library suite passed; focused final classifier old-behavior exit101 and restored exit0 executed, no live provider requests.",
+      "author": "background_agent:bgagent-e62cdc81-c49e-479e-8348-d56f7bf7d211",
+      "reviewer": "background_agent:bgagent-bbc30840-3911-474c-b6fd-78cc352fcc52",
+      "review_evidence": "Independent reviewer run3 approved the exact production block and final four cases; identified this required support-impact mapping and supplied verified before/after hashes; parent records actual execution via exec_5ae1d360-182b-451f-a3a3-93de1fc8f84f."
     }
   ],
   "classifications": [

@@ -54,6 +54,31 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
         }),
       );
       expect(updated.threads[chatId]?.recovery).toEqual(recovery);
+      const archived = {
+        message_id: "flattened-recovery-error",
+        role: "error" as const,
+        content: "Provider temporarily unavailable",
+        recovery_record: recovery,
+        _ui_only: true,
+      };
+      const withArchive = chatReducer(
+        updated,
+        applyChatEvent({
+          chat_id: chatId,
+          seq: "5",
+          type: "message_added",
+          index: 0,
+          message: archived,
+        }),
+      );
+      expect(
+        withArchive.threads[chatId]?.thread.messages.at(-1)?.extra,
+      ).toMatchObject({
+        recovery_record: recovery,
+        recovery_run_id: "run",
+        recovery_operation_id: "op",
+        _ui_only: true,
+      });
       const stale = chatReducer(
         updated,
         applyChatEvent({

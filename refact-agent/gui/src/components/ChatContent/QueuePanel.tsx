@@ -6,7 +6,10 @@ import { Badge, Icon, IconButton } from "../ui";
 import { QueueRow } from "./QueueRow";
 import { queueStatusText } from "./queuePresentation";
 import { useAppSelector } from "../../hooks/useAppSelector";
-import { selectWaitingInterruptibleById } from "../../features/Chat/Thread/selectors";
+import {
+  selectRecoveryById,
+  selectWaitingInterruptibleById,
+} from "../../features/Chat/Thread/selectors";
 import styles from "./QueuePanel.module.css";
 
 type QueuePanelProps = {
@@ -138,5 +141,21 @@ const ThreadQueuePanel: React.FC<QueuePanelProps & { chatId: string }> = ({
 // switching away and back, while keeping queue preferences scoped to a thread.
 export const QueuePanel: React.FC<QueuePanelProps> = (props) => {
   const chatId = useThreadId();
-  return <ThreadQueuePanel key={chatId} chatId={chatId} {...props} />;
+  const recovery = useAppSelector((state) => selectRecoveryById(state, chatId));
+  const queuedItems =
+    recovery && recovery.state !== "succeeded"
+      ? props.queuedItems.filter(
+          (item) =>
+            item.command_type !== "recovery_retry" &&
+            item.command_type !== "recovery_retry_now",
+        )
+      : props.queuedItems;
+  return (
+    <ThreadQueuePanel
+      key={chatId}
+      chatId={chatId}
+      {...props}
+      queuedItems={queuedItems}
+    />
+  );
 };

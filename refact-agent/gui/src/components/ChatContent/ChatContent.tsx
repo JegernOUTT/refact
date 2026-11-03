@@ -64,11 +64,17 @@ import {
 import { ChatThreadProvider, useThreadId } from "../../features/Chat/Thread";
 import { selectConfig, selectApiKey } from "../../features/Config/configSlice";
 import { VirtualizedChatList } from "./VirtualizedChatList";
-import { RecoveryCard, RecoveryDetails } from "./RecoveryCard";
-import recoveryStyles from "./RecoveryCard.module.css";
-import { isRecoveryRecord } from "../../services/refact/chatSubscription";
-import { humanizeIdentifier } from "../../utils/displayNames";
-import { selectRecoveryById } from "../../features/Chat/Thread/selectors";
+import { RecoveryCard } from "./RecoveryCard";
+import {
+  partitionTranscriptErrors,
+  recoveryRecordFromError,
+  retryableErrorIndex,
+  visibleTranscriptErrors,
+} from "../../services/refact/recoveryPresentation";
+import {
+  selectRecoveryById,
+  selectQueuedItemsById,
+} from "../../features/Chat/Thread/selectors";
 import { useCollapsibleState } from "./useCollapsibleState";
 import { useCollapsibleStoreProvider } from "./useCollapsibleStoreProvider";
 import { CollapsibleStoreProvider } from "./useStoredOpen";
@@ -181,6 +187,36 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   const switching = chatId !== renderChatId;
 
   const messages = useAppSelector((s) => selectMessagesById(s, renderChatId));
+  const queuedItems = useAppSelector((s) =>
+    selectQueuedItemsById(s, renderChatId),
+  );
+  const userSubmissions = useMemo(
+    () => [
+      ...messages.flatMap((message, index) =>
+        message.role === "user"
+          ? [`message:${message.message_id ?? index}`]
+          : [],
+      ),
+      ...queuedItems.flatMap((item) =>
+        item.command_type === "user_message"
+          ? [`queue:${item.client_request_id}`]
+          : [],
+      ),
+    ],
+    [messages, queuedItems],
+  );
+  const seenSubmissions = useRef(new Set(userSubmissions));
+  const [submissionVersion, setSubmissionVersion] = useState(0);
+  useEffect(() => {
+    if (!userSubmissions.some((id) => !seenSubmissions.current.has(id))) return;
+    userSubmissions.forEach((id) => seenSubmissions.current.add(id));
+    setSubmissionVersion((version) => version + 1);
+  }, [userSubmissions]);
+  const submissionKey = `${renderChatId}:${submissionVersion}`;
+  const { episode: episodeErrors, boundary: turnBoundary } = useMemo(
+    () => partitionTranscriptErrors(messages, recovery),
+    [messages, recovery],
+  );
   const isStreaming = useAppSelector((s) =>
     selectIsStreamingById(s, renderChatId),
   );
@@ -406,6 +442,20 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     return displayItems.length > 0 ? displayItems.length - 1 : undefined;
   }, [displayItems]);
 
+  const retryErrorIndex = useMemo(
+    () =>
+      recovery && recovery.state !== "succeeded"
+        ? -1
+        : retryableErrorIndex(
+            displayItems.flatMap((item) =>
+              item.type === "error" ? [item] : [],
+            ),
+            turnBoundary,
+            episodeErrors,
+          ),
+    [recovery, displayItems, turnBoundary, episodeErrors],
+  );
+
   const handleProcessCompletedClick = useCallback((processId: string) => {
     revealProcessOutput(processId);
   }, []);
@@ -417,9 +467,14 @@ export const ChatContent: React.FC<ChatContentProps> = ({
           <UncommittedChangesWarning />
           {recovery && (
             <RecoveryCard
-              key={recovery.run_id}
               chatId={chatId}
               recovery={recovery}
+              errors={episodeErrors}
+              archived={episodeErrors.flatMap((error) => {
+                const record = recoveryRecordFromError(error);
+                return record && record.state !== "succeeded" ? [record] : [];
+              })}
+              submissionKey={submissionKey}
             />
           )}
         </Container>
@@ -456,6 +511,8 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     ),
     [
       recovery,
+      episodeErrors,
+      submissionKey,
       chatId,
       compressionStatusText,
       isStreaming,
@@ -471,47 +528,17 @@ export const ChatContent: React.FC<ChatContentProps> = ({
         case "plain_text":
           return <PlainText>{item.content}</PlainText>;
 
-        case "error": {
-          const archives = item.errors.filter(
-            (error) => error.extra?.recovery_record != null,
-          );
-          const ordinary = item.errors.filter(
-            (error) => error.extra?.recovery_record == null,
-          );
+        case "error":
           return (
-            <>
-              {archives
-                .filter(
-                  (error) => error.extra?.recovery_run_id !== recovery?.run_id,
-                )
-                .map((error, index) => (
-                  <details
-                    className={recoveryStyles.card}
-                    key={error.message_id ?? index}
-                  >
-                    <summary>
-                      Previous recovery
-                      {isRecoveryRecord(error.extra?.recovery_record) &&
-                        ` — ${humanizeIdentifier(
-                          error.extra.recovery_record.state,
-                        )}`}
-                    </summary>
-                    {isRecoveryRecord(error.extra?.recovery_record) ? (
-                      <RecoveryDetails recovery={error.extra.recovery_record} />
-                    ) : (
-                      <ErrorMessageCard errors={[error]} />
-                    )}
-                  </details>
-                ))}
-              {ordinary.length > 0 && (
-                <ErrorMessageCard
-                  errors={ordinary}
-                  onRetryGeneration={onRetryGeneration}
-                />
-              )}
-            </>
+            <ErrorMessageCard
+              errors={visibleTranscriptErrors(item.errors, episodeErrors)}
+              onRetryGeneration={
+                item.messageIndex === retryErrorIndex
+                  ? onRetryGeneration
+                  : undefined
+              }
+            />
           );
-        }
 
         case "assistant":
           return (
@@ -636,7 +663,8 @@ export const ChatContent: React.FC<ChatContentProps> = ({
       collapsibleState,
       renderChatId,
       onRetryGeneration,
-      recovery,
+      episodeErrors,
+      retryErrorIndex,
     ],
   );
 
@@ -654,7 +682,11 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     );
   }
 
-  if (messages.length === 0 && !visibleCompression) {
+  if (
+    messages.length === 0 &&
+    !visibleCompression &&
+    (!recovery || recovery.state === "succeeded")
+  ) {
     return (
       <Flex
         direction="column"

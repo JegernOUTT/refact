@@ -5,8 +5,15 @@ import { useAppSelector } from "../../hooks/useAppSelector";
 import { useChatCommandRequest } from "../../hooks/useChatCommandRequest";
 import type { RecoveryPolicyOverrides } from "../../services/refact/chatSubscription";
 import { useGetCoordinationSettingsQuery } from "../../services/refact/performance";
+import styles from "./RecoveryPolicySettings.module.css";
 
-export function RecoveryPolicySettings({ chatId }: { chatId: string }) {
+export function RecoveryPolicySettings({
+  chatId,
+  embedded = false,
+}: {
+  chatId: string;
+  embedded?: boolean;
+}) {
   const current = useAppSelector(
     (state) => selectThreadById(state, chatId)?.recovery_policy,
   );
@@ -83,9 +90,8 @@ export function RecoveryPolicySettings({ chatId }: { chatId: string }) {
     current?.total_timeout_ms ?? effective?.recovery_total_timeout_ms;
   const hasThreadOverrides =
     current != null && Object.values(current).some((value) => value != null);
-  return (
-    <details>
-      <summary>Thread recovery policy</summary>
+  const content = (
+    <div className={styles.settings}>
       <p>
         Applies to the next run. Blank values inherit project or global
         settings.
@@ -189,6 +195,14 @@ export function RecoveryPolicySettings({ chatId }: { chatId: string }) {
           Check status
         </Button>
       )}
+    </div>
+  );
+  return embedded ? (
+    content
+  ) : (
+    <details>
+      <summary>Thread recovery policy</summary>
+      {content}
     </details>
   );
 }

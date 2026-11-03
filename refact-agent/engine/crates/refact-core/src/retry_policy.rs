@@ -575,6 +575,15 @@ fn classify_user_error_from_lower(lower: &str) -> UserErrorCategory {
         return UserErrorCategory::ToolSchemaInvalid;
     }
 
+    if lower
+        .trim_start()
+        .starts_with("llm request failed: error sending request for url (")
+        && !contains_non_retryable_status(lower)
+        && !contains_any(lower, INVALID_REQUEST_PATTERNS)
+    {
+        return UserErrorCategory::NetworkFailure;
+    }
+
     if contains_any(lower, NETWORK_FAILURE_PATTERNS) || contains_eof(lower) {
         return UserErrorCategory::NetworkFailure;
     }
@@ -1324,6 +1333,40 @@ mod tests {
             "connection aborted must be retryable transient, got {:?}",
             decision
         );
+    }
+
+    #[test]
+    fn reqwest_send_failure_is_transport_but_not_provider_rejection() {
+        let transport = "LLM request failed: error sending request for url (https://provider.example/v1/messages)";
+        assert_eq!(
+            classify_user_error(transport),
+            UserErrorCategory::NetworkFailure
+        );
+        assert_eq!(classify_llm_error_for_retry(transport), retry_transient());
+        for (error, expected) in [
+            (
+                "LLM request failed: error sending request for url (https://provider.example): HTTP 400",
+                UserErrorCategory::InvalidRequest,
+            ),
+            (
+                "LLM request failed: error sending request for url (https://provider.example): malformed request",
+                UserErrorCategory::InvalidRequest,
+            ),
+            (
+                "provider said: llm request failed: error sending request for url (https://x)",
+                UserErrorCategory::Unknown,
+            ),
+        ] {
+            assert_eq!(classify_user_error(error), expected);
+            assert_eq!(
+                classify_llm_error_for_retry(error),
+                if expected == UserErrorCategory::Unknown {
+                    unknown_error()
+                } else {
+                    non_retryable()
+                }
+            );
+        }
     }
 
     #[test]

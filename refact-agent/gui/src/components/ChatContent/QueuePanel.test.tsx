@@ -1,9 +1,15 @@
 vi.hoisted(() => vi.resetModules());
 import { beforeEach, expect, it, vi } from "vitest";
-import { render, screen, fireEvent } from "../../utils/test-utils";
+import {
+  render,
+  screen,
+  fireEvent,
+  createDefaultChatState,
+} from "../../utils/test-utils";
 import { queueStatusText } from "./queuePresentation";
 import { QueuePanel } from "./QueuePanel";
 import { ChatThreadProvider } from "../../features/Chat/Thread/ChatThreadContext";
+import type { RecoveryRecord } from "../../services/refact/chatSubscription";
 vi.mock("./QueueRow", () => ({
   QueueRow: ({
     position,
@@ -92,4 +98,24 @@ it("announces append and when-idle deliveries during an interruptible wait witho
     ),
   ).toBe("2 delivering now");
   expect(queueStatusText(items, false, true)).toBe("6 ready to deliver");
+});
+
+it("leaves recovery commands in the recovery panel while retaining unrelated queued messages", () => {
+  const chat = createDefaultChatState();
+  chat.threads[chat.current_thread_id].recovery = {
+    state: "exhausted",
+  } as RecoveryRecord;
+  const recoveryItem = {
+    ...items[0],
+    command_type: "recovery_retry",
+    client_request_id: "recovery-command",
+  };
+  const { rerender } = render(
+    <QueuePanel queuedItems={[recoveryItem, items[1]]} isBusy={false} />,
+    { preloadedState: { chat } },
+  );
+  expect(screen.getAllByTestId("row")).toHaveLength(1);
+  expect(screen.getByRole("status")).toHaveTextContent("1 ready to deliver");
+  rerender(<QueuePanel queuedItems={[recoveryItem]} isBusy={false} />);
+  expect(screen.queryByText("Delivery queue")).not.toBeInTheDocument();
 });

@@ -13,6 +13,7 @@ import {
 import { v4 as uuidv4 } from "uuid";
 import { getLastThreadParams } from "../../../utils/threadStorage";
 import { MAX_ATTACHED_IMAGES } from "../../../utils/attachmentFiles";
+import { normalizeRecoveryErrorMetadata } from "../../../services/refact/recoveryPresentation";
 import {
   setToolUse,
   setThreadMode,
@@ -215,6 +216,9 @@ const getThreadMode = ({
 };
 
 const normalizeMessage = (msg: ChatMessages[number]): ChatMessages[number] => {
+  if (msg.role === "error") {
+    return normalizeRecoveryErrorMetadata(msg);
+  }
   if (msg.role === "diff" && typeof msg.content === "string") {
     try {
       const parsed: unknown = JSON.parse(msg.content);
