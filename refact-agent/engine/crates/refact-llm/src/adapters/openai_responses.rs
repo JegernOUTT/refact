@@ -393,6 +393,7 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
             | "response.content_part.added"
             | "response.content_part.done"
             | "response.metadata"
+            | "responsesapi.websocket_timing"
             | "keepalive" => {
                 tracing::trace!("{} (redundant/lifecycle, skipping)", event_type);
             }
@@ -1600,6 +1601,50 @@ mod tests {
             LlmStreamDelta::AppendContent { text, .. } => assert_eq!(text, "Hello"),
             _ => panic!("expected AppendContent"),
         }
+    }
+
+    #[test]
+    fn test_responsesapi_websocket_timing_is_silent_but_unknown_events_are_preserved() {
+        let adapter = OpenAiResponsesAdapter;
+        let unknown = json!({
+            "type": "responsesapi.websocket_timing_unknown",
+            "sequence_number": 7,
+            "timing_metrics": {"duration_ms": 12}
+        });
+        let deltas = adapter.parse_stream_chunk(&unknown.to_string()).unwrap();
+
+        match deltas.as_slice() {
+            [LlmStreamDelta::MergeExtra { extra }, LlmStreamDelta::AddServerContentBlock { block }] =>
+            {
+                assert_eq!(
+                    extra,
+                    json!({"unhandled_openai_responses_events": [{
+                        "sequence_number": 7,
+                        "event_type": "responsesapi.websocket_timing_unknown",
+                        "payload": unknown
+                    }]})
+                    .as_object()
+                    .unwrap()
+                );
+                assert_eq!(
+                    block,
+                    &json!({
+                        "type": "unhandled_openai_responses_event",
+                        "event_type": "responsesapi.websocket_timing_unknown",
+                        "payload": unknown
+                    })
+                );
+            }
+            _ => panic!("expected exact unknown-event diagnostic and visible server block"),
+        }
+
+        let timing =
+            r#"{"type":"responsesapi.websocket_timing","timing_metrics":{"duration_ms":12}}"#;
+        let deltas = adapter.parse_stream_chunk(timing).unwrap();
+        assert!(
+            deltas.is_empty(),
+            "websocket timing must emit no deltas: {deltas:?}"
+        );
     }
 
     #[test]

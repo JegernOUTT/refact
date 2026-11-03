@@ -2,6 +2,72 @@
   "version": 1,
   "tests": [
     {
+      "fingerprint": "92e47cfb490d62694571f72d6a60811e90d7083064865e8e83a8c40a77731723",
+      "occurrences": 1,
+      "failure_mode": "Populated responsesapi.websocket_timing telemetry falls through to unknown-event handling and becomes visible server content; an overbroad responsesapi.* suppression would instead hide genuine unknown diagnostics.",
+      "importance": "Keep internal websocket timing out of conversation output without hiding unexpected provider events.",
+      "nearest_retained": {
+        "fingerprint": "2850472e9ba9197c7e519b9047d593bef4a40befeab95b6af3225d0918010999",
+        "why_insufficient": "test_parse_stream_chunk_text_delta verifies recognized text delivery, not timing suppression or exact unknown-event diagnostic preservation. Existing fatal/lifecycle/reasoning tests do not exercise either responsesapi.* event."
+      },
+      "oracle": "Unknown responsesapi.websocket_timing_unknown yields exactly two ordered deltas: MergeExtra with the complete unhandled_openai_responses_events array and AddServerContentBlock with exact type, event_type and original populated payload. Exact responsesapi.websocket_timing with populated timing_metrics yields an empty vector, excluding Done and all visible deltas.",
+      "prerequisites": "Both JSON inputs have explicit event types and nonempty timing_metrics.duration_ms=12; unknown input includes sequence_number=7. Unknown assertions execute before the timing assertion, so the red timing witness also checks fallback preservation.",
+      "shipping_implementation": "OpenAiResponsesAdapter::parse_stream_chunk in refact-agent/engine/crates/refact-llm/src/adapters/openai_responses.rs",
+      "determinism": "Pure in-memory parser calls, fixed JSON, no IO/network/clock/sleeps or mocks.",
+      "layer": "Inline production-parser unit test.",
+      "why_cheapest": "One physical test covers two distinct meaningful scenarios at the shipping event classification seam; no stream transport setup or duplicate integration test needed.",
+      "meaningful_cases": 2,
+      "critical": false,
+      "criticality_reason": "Narrow presentation/diagnostic event classification, not authorization, signatures, durable state, cancellation or connection termination. Independent reviewers A and B accepted ordinary classification after inspecting parser and transport consumers.",
+      "removed_coverage": "None. One new physical definition, two meaningful scenarios; all retained tests unchanged.",
+      "witness": {
+        "kind": "executed",
+        "production_target": "OpenAiResponsesAdapter::parse_stream_chunk exact-event redundant/lifecycle match arm",
+        "before_fix": {
+          "reference": "Trusted base 3597154cf291bb366af78d9ec0b1d7aa6fe7a736 plus final regression only, before adding the exact timing event arm; openai_responses.rs full-file SHA256. Process exec_a9ab2d78-2974-4c20-9c77-5489e112cfcc.",
+          "fingerprint": "3d7b8cadf2de747d2f0ed01b616bf3eaad150933bdeec757521428d1f723f687"
+        },
+        "intended_diagnostic": "openai_responses.rs:1643: websocket timing must emit no deltas; observed MergeExtra(unhandled_openai_responses_events) plus AddServerContentBlock(unhandled_openai_responses_event). Unknown exact-output assertions passed earlier. 0 passed, 1 failed, exit101.",
+        "failing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "cargo",
+            "test",
+            "-p",
+            "refact-llm",
+            "--lib",
+            "test_responsesapi_websocket_timing_is_silent_but_unknown_events_are_preserved",
+            "--profile",
+            "ci-test",
+            "--offline"
+          ],
+          "exit_code": 101,
+          "evidence": "Runtime process exec_a9ab2d78-2974-4c20-9c77-5489e112cfcc transcript, intended assertion panic after successful compile; engine cwd in active inherited worktree."
+        },
+        "passing": {
+          "command": [
+            "env",
+            "RUST_MIN_STACK=16777216",
+            "cargo",
+            "test",
+            "-p",
+            "refact-llm",
+            "--lib",
+            "test_responsesapi_websocket_timing_is_silent_but_unknown_events_are_preserved",
+            "--profile",
+            "ci-test",
+            "--offline"
+          ],
+          "exit_code": 0,
+          "evidence": "Runtime process exec_35daa274-5f22-4fff-8304-496dbcb26ebf: focused 1passed0failed, then same environment cargo test -p refact-llm --lib --profile ci-test --offline:139passed0failed. Final source SHA256 f37f6894a1c8ca038b65767caa79ca09683dbdce8b201bac25faa81b520c431a. rustfmt --edition 2021 --check touched source and git diff --check exit0."
+        }
+      },
+      "author": "background_agent:bgagent-dfb55d3e-5ea2-4efc-958a-017101db42f0",
+      "reviewer": "background_agent:bgagent-82de12e4-01c2-44c8-8a64-4c915fac14e6",
+      "review_evidence": "Independent source review A (claude_code/claude-opus-5-5, generation 1) approved ordinary admission, exact shipping-parser oracles, populated fixtures, distinct unknown near-match control, cheapest layer and two meaningful cases. Independent integration review B (background_agent:bgagent-962e9963-ac96-4eb6-b581-f7a5b2b25c3b, openai_codex/gpt-6.1-sol) traced WS/SSE consumers and attempted to refute A; no blocker found. Parent independently confirmed reviewed source SHA256 f37f6894a1c8ca038b65767caa79ca09683dbdce8b201bac25faa81b520c431a. Reviews were source-only; executed witness evidence is separately attributed to the implementing agent's runtime processes, not independently reproduced by reviewers."
+    },
+    {
       "fingerprint": "d0e5031ae3842ec5dc121168ed3180da65ff9e9a146777abbb01b2823e68a90d",
       "occurrences": 1,
       "failure_mode": "Raw session report position is reused as a filtered snapshot index, causing out-of-range panic or persisting report after executable suffix.",
@@ -12402,6 +12468,49 @@
     }
   ],
   "impacts": [
+    {
+      "path": "refact-agent/engine/crates/refact-llm/src/adapters/openai_responses.rs",
+      "before_sha256": "0e207dc13e558ec6e0d779da5bc135d881615c72d7952d7935e9cfc99d775241",
+      "after_sha256": "f37f6894a1c8ca038b65767caa79ca09683dbdce8b201bac25faa81b520c431a",
+      "affected_tests": [
+        "3dbf98df7d095ff6c954cfb37ba773803692efa66e7cf277471c7cbd8ce934b7",
+        "264030aaaae1e8d3e86b9852f6720529d8d5362959699a1ece5c6e9d8374d6a1",
+        "f6b0d43b2c04e22f6fac352d30d4f2a6d3bbb3716e7352ce95059a59f3ea3f44",
+        "66241fd55c86313b1275c0cac2b552a6bd8f85d7e0d42d2847859ccfbc8be22b",
+        "dd4b3b5c1769807d8d8851d0e0683f639af31273f5b4a32c1b4de93d854a8736",
+        "49042b47b32d4954190488b8f709da93e30865d065d4e6cb6d55da8bc5ddf251",
+        "60087d67abb0278483b28b0f1997d92909f7bb681be557592506d7f468baf2c2",
+        "ea1cf7f179f61982a38a6afe33aa25349b00d6d500a72122f5842574f845e079",
+        "2850472e9ba9197c7e519b9047d593bef4a40befeab95b6af3225d0918010999",
+        "92e47cfb490d62694571f72d6a60811e90d7083064865e8e83a8c40a77731723",
+        "657506fbf1484d1247f1ebdab26c544cd1fdf57b74029f0600956705218c9f0c",
+        "4f4adf0caedf0d572e7693671882159782e3bcaf74530f26d8680365cc929a16",
+        "8ebad518857dc7d854d73ccc742a65082f918422dec53553a7c65e50beda612b",
+        "6ebb31c47711ffa7c46d6998cc9e9dfefe71a81838db7e6c420cf775936ddf2f",
+        "25f7477fc5d2d6fd2a0dec4194f30b201ccd8dd059ded105c37dbce428d8fef1",
+        "81717eb3cce454302697593755d663c2d6b78e949833f39dfcdd9e89ae64c0b8",
+        "ddd39dd947e3b5504b16569f85e50d144c8d54428fe6ea1ef8dba82d6443bb03",
+        "27e4aecca4f7166c6e23b0fa53f802bd71fa1b9297c067e25b776b3a45f9db3b",
+        "ce1f41c6aae577ed3d59f441b2bb545f21f56d20397d37de5b367338cb45f3a0",
+        "d1d355aa0b2ed93d5ddc76a2b59f3256800fcd83b90fda0ff9754ab2d0bdd0bf",
+        "19ef015ead1e57af5518853111457255bf4f2a9f21f0c45ddaa21c019c70326d",
+        "5227bc7f9cf71b3d778a6ec1ec05634957ce2bc2365f1171d071eeb6e72e67a5",
+        "db1d2c0df5c5d7705a691bb6d53b7050c2891e8731362cd8547d994bb1eed229",
+        "bf2d4403520fcf89feccbb5c7bbd280fbcda71f34e2a39f83486f6b6209115f2",
+        "f8bf2214b91dfd73bfad3ce987b7fee178951764141578eaf32cc6ad8088509c",
+        "71c7cb3b96d73f1de7e0e68cc731474ce8cdc2760b3ec47622df4cb98013306c",
+        "d50b59169016cc39790bb955e272c6494e6ae1ba5a14aeb1242eb2f857e398af",
+        "20e5749e7e83cefce5accb7218c8548aa120cc19e88818d16f46dc663d8cb5db",
+        "f21540af5143ae6741174f7ad21edd8917707def9028107f3edb036c1bded991",
+        "0223bf24e6da2b3c19992574ad089d75a614f7a3f4e07b1c36f7aa92c771f5e7",
+        "be1a6b7177d0993aba7773e5bec44cd513077c27dbd6ba2b757392654999dea7"
+      ],
+      "impact": "Only production residue change adds exact responsesapi.websocket_timing to existing redundant/lifecycle no-op arm. All inline tests conservatively mapped; only new regression exercises this event and nearby unknown preservation. Existing fatal errors, unknown catchall, and post-match common extra extraction remain byte-identical. No shared fixtures/helpers changed.",
+      "execution_context": "Same inline module and crate library execution. Before-fix focused witness exits101 at intended no-deltas assertion; corrected focused1/1 and entire refact-llm139/139 pass in ci-test profile with RUST_MIN_STACK=16777216, offline existing cache. No tests removed or moved.",
+      "author": "background_agent:bgagent-dfb55d3e-5ea2-4efc-958a-017101db42f0",
+      "reviewer": "background_agent:bgagent-962e9963-ac96-4eb6-b581-f7a5b2b25c3b",
+      "review_evidence": "Independent review B inspected exact no-op, unchanged catchall/common-extra extraction, stream_core parser consumer, WS idle/error/response tracking and SSE partial-output behavior; approved narrow impact and ordinary two-case admission after adversarial exchange with independent review A. A independently approved parser correctness and test semantics. Parent confirmed final source SHA256 f37f6894a1c8ca038b65767caa79ca09683dbdce8b201bac25faa81b520c431a; retained inline tests and execution context are unchanged. Common extras on a timing frame and live-provider/UI round trips were source-reviewed, not newly exercised by this regression."
+    },
     {
       "path": "refact-agent/engine/src/tools/tool_task_restart_agent.rs",
       "before_sha256": "c9e4a333e62235e6d947320da676f448969837e7e99101109aab98656d8e9206",
