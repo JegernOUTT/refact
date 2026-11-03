@@ -13,11 +13,10 @@ import { useDebounceCallback } from "usehooks-ts";
 
 export function useDraftMessage(
   onQueuedMessageEdit?: (previousValue: string) => void,
-  enabled = true,
 ) {
   const chatId = useThreadId();
   const [value, setValueInternal] = useState<string>(() => {
-    if (chatId && enabled) {
+    if (chatId) {
       return getDraftMessage(chatId);
     }
     return "";
@@ -46,7 +45,6 @@ export function useDraftMessage(
   }, [debouncedSave]);
 
   useEffect(() => {
-    if (!enabled) return;
     if (isInitialMount.current) {
       isInitialMount.current = false;
       return;
@@ -60,10 +58,10 @@ export function useDraftMessage(
       setValueInternal(draft);
       prevChatIdRef.current = chatId;
     }
-  }, [chatId, debouncedSave, enabled]);
+  }, [chatId, debouncedSave]);
 
   useEffect(() => {
-    if (!chatId || !enabled) return;
+    if (!chatId) return;
     const handleQueuedMessageEdit = (event: Event) => {
       const detail = (event as CustomEvent<QueuedMessageEditDetail>).detail;
       if (detail.chatId !== chatId) return;
@@ -84,20 +82,20 @@ export function useDraftMessage(
         QUEUED_MESSAGE_EDIT_EVENT,
         handleQueuedMessageEdit,
       );
-  }, [chatId, debouncedSave, enabled]);
+  }, [chatId, debouncedSave]);
 
   const setValue = useCallback(
     (newValue: string | ((prev: string) => string)) => {
       setValueInternal((prev) => {
         const next = typeof newValue === "function" ? newValue(prev) : newValue;
         valueRef.current = next;
-        if (chatId && enabled) {
+        if (chatId) {
           debouncedSave(chatId, next);
         }
         return next;
       });
     },
-    [chatId, debouncedSave, enabled],
+    [chatId, debouncedSave],
   );
 
   const clearDraft = useCallback(() => {

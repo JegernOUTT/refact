@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { fireEvent, screen } from "@testing-library/react";
+import { act } from "react-dom/test-utils";
 
 import { render, waitFor } from "../../utils/test-utils";
 import * as voiceInput from "../../hooks/useVoiceInput";
@@ -156,9 +157,26 @@ const validRebuiltMessages: ChatMessages = [
   ]),
 ];
 
+function companionMeta(sourceId: string) {
+  return {
+    is_buddy_chat: true,
+    buddy_chat_kind: "companion",
+    workflow_id: null,
+    source_chat_id: sourceId,
+  };
+}
+
 function rebuiltSnapshot(
   chatId: string,
   messages: ChatMessages,
+): ChatEventEnvelope {
+  return rebuiltSnapshotWithMeta(chatId, messages);
+}
+
+function rebuiltSnapshotWithMeta(
+  chatId: string,
+  messages: ChatMessages,
+  buddyMeta?: ReturnType<typeof companionMeta>,
 ): ChatEventEnvelope {
   return {
     chat_id: chatId,
@@ -175,6 +193,7 @@ function rebuiltSnapshot(
       include_project_info: true,
       checkpoints_enabled: true,
       is_title_generated: false,
+      ...(buddyMeta ? { buddy_meta: buddyMeta } : {}),
     },
     runtime: {
       state: "idle",
@@ -219,7 +238,11 @@ const App: React.FC<Partial<ChatFormProps>> = ({ ...props }) => {
 };
 
 describe("ChatForm", () => {
-  test("locked composers reject the voice shortcut while unlocked composers retain it", async () => {
+  beforeEach(() => {
+    server.use(...handlers);
+  });
+
+  test("companion composers reject the voice shortcut while regular composers retain it", async () => {
     const toggleRecording = vi
       .fn<() => Promise<string | null>>()
       .mockResolvedValue(null);
@@ -245,6 +268,16 @@ describe("ChatForm", () => {
         ...engineConfigState,
       },
     });
+    const id = app.store.getState().chat.current_thread_id;
+    const lock = () => {
+      act(() => {
+        app.store.dispatch(
+          applyChatEvent(
+            rebuiltSnapshotWithMeta(id, [], companionMeta("source-a")),
+          ),
+        );
+      });
+    };
     try {
       await waitFor(() =>
         expect(screen.getByLabelText("Send message")).toBeEnabled(),
@@ -257,7 +290,7 @@ describe("ChatForm", () => {
         shiftKey: true,
       });
       expect(toggleRecording).toHaveBeenCalledTimes(1);
-      app.rerender(<App settingsLocked />);
+      lock();
       textarea.focus();
       expect(screen.getByLabelText("Voice input")).toBeDisabled();
       fireEvent.keyDown(textarea, {
@@ -271,7 +304,7 @@ describe("ChatForm", () => {
         isRecording: true,
         isVoiceActive: true,
       });
-      app.rerender(<App settingsLocked />);
+      app.rerender(<App />);
       await waitFor(() =>
         expect(screen.getByLabelText("Voice input")).toBeEnabled(),
       );
@@ -292,111 +325,159 @@ describe("ChatForm", () => {
     }
   });
 
-  test.each([undefined, true])(
-    "only clears images explicitly accepted by a synchronous submitter (%s)",
-    async (accepted) => {
-      const chat = chatStateWithThread({ model: "openai/gpt-4o" });
-      const id = chat.current_thread_id;
-      const image = {
-        name: "retry.png",
-        type: "image/png",
-        content: "data:image/png;base64,aGVsbG8=",
-      };
-      chat.threads[id].attached_images = [image];
-      const onSubmit = vi.fn(() => accepted);
-      const { user, store } = render(<App onSubmit={onSubmit} />, {
-        preloadedState: { chat, ...engineConfigState },
+  test("Buddy chats hide model and mode pickers instead of disabling them", async () => {
+    const width = vi
+      .spyOn(HTMLElement.prototype, "clientWidth", "get")
+      .mockImplementation(() => 4000);
+    const rect = vi
+      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockImplementation(() => new DOMRect(0, 0, 40, 28));
+    const hidden = (
+      container: HTMLElement,
+      id: "model" | "mode",
+    ): string | undefined =>
+      container.querySelector<HTMLElement>(`[data-composer-control="${id}"]`)
+        ?.dataset.hidden;
+    try {
+      const regular = render(<App />, {
+        preloadedState: {
+          chat: chatStateWithThread({ model: "openai/gpt-4o" }),
+          ...engineConfigState,
+        },
       });
       await waitFor(() =>
-        expect(screen.getByLabelText("Send message")).toBeEnabled(),
+        expect(hidden(regular.container, "model")).toBe("false"),
       );
-      await user.click(screen.getByLabelText("Send message"));
-      expect(onSubmit).toHaveBeenCalledTimes(1);
-      expect(store.getState().chat.threads[id]?.attached_images).toEqual(
-        accepted ? [] : [image],
-      );
-    },
-  );
+      expect(hidden(regular.container, "mode")).toBe("false");
+      regular.unmount();
 
-  test("confirmed async sends remove submitted text attachments before the second send", async () => {
-    let confirm: (value: boolean) => void = () => undefined;
-    const onSubmit = vi.fn(
-      () =>
-        new Promise<boolean>((resolve) => {
-          confirm = resolve;
+      const buddy = render(<App />, {
+        preloadedState: {
+          chat: chatStateWithThread({
+            model: "openai/gpt-4o",
+            buddy_meta: companionMeta("source-a"),
+          }),
+          ...engineConfigState,
+        },
+      });
+      await waitFor(() =>
+        expect(hidden(buddy.container, "model")).toBe("true"),
+      );
+      expect(hidden(buddy.container, "mode")).toBe("true");
+    } finally {
+      width.mockRestore();
+      rect.mockRestore();
+    }
+  });
+
+  test("Buddy chats hide permission controls in the expanded composer", async () => {
+    const width = vi
+      .spyOn(HTMLElement.prototype, "clientWidth", "get")
+      .mockImplementation(() => 4000);
+    const rect = vi
+      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockImplementation(() => new DOMRect(0, 0, 40, 28));
+    const editApproval = (container: HTMLElement) =>
+      container.querySelector<HTMLElement>(
+        '[data-composer-control="editApproval"]',
+      )?.dataset.hidden;
+    try {
+      const regular = render(<App />, {
+        preloadedState: {
+          chat: chatStateWithThread({ model: "openai/gpt-4o" }),
+          ...engineConfigState,
+        },
+      });
+      await regular.user.click(
+        await regular.findByRole("button", { name: "Expand composer" }),
+      );
+      await waitFor(() =>
+        expect(editApproval(regular.container)).toBe("false"),
+      );
+      regular.unmount();
+
+      const buddy = render(<App />, {
+        preloadedState: {
+          chat: chatStateWithThread({
+            model: "openai/gpt-4o",
+            buddy_meta: companionMeta("source-a"),
+          }),
+          ...engineConfigState,
+        },
+      });
+      await buddy.user.click(
+        await buddy.findByRole("button", { name: "Expand composer" }),
+      );
+      await waitFor(() => expect(editApproval(buddy.container)).toBe("true"));
+    } finally {
+      width.mockRestore();
+      rect.mockRestore();
+    }
+  });
+
+  test("companion chats block file paste and hide attachment controls", async () => {
+    const { user, ...app } = render(<App />, {
+      preloadedState: {
+        chat: chatStateWithThread({
+          model: "openai/gpt-4o",
+          buddy_meta: companionMeta("source-a"),
         }),
-    );
+        ...engineConfigState,
+      },
+    });
+    const textarea =
+      screen.getByTestId<HTMLTextAreaElement>("chat-form-textarea");
+    await user.click(screen.getByRole("button", { name: "Expand composer" }));
+    expect(
+      app.container
+        .querySelector('[data-composer-control="image"]')
+        ?.getAttribute("data-hidden"),
+    ).not.toBe("false");
+    expect(
+      pasteFile(
+        textarea,
+        new File(["image"], "diagram.png", { type: "image/png" }),
+      ),
+    ).toBe(false);
+    expect(
+      pasteFile(textarea, new File(["notes"], "notes.md", { type: "text/md" })),
+    ).toBe(false);
+    const thread =
+      app.store.getState().chat.threads[
+        app.store.getState().chat.current_thread_id
+      ];
+    expect(thread?.attached_images).toHaveLength(0);
+    expect(thread?.attached_text_files).toHaveLength(0);
+  });
+
+  test("a submit clears submitted text attachments", async () => {
+    const onSubmit = vi.fn();
     const { user, store } = render(<App onSubmit={onSubmit} />, {
       preloadedState: {
         chat: chatStateWithThread({ model: "openai/gpt-4o" }),
         ...engineConfigState,
       },
     });
+    const id = store.getState().chat.current_thread_id;
     const textarea =
       screen.getByTestId<HTMLTextAreaElement>("chat-form-textarea");
     pasteFile(
       textarea,
-      new File(["secret attachment"], "notes.md", { type: "text/markdown" }),
+      new File(["attachment"], "notes.md", { type: "text/markdown" }),
     );
     await waitFor(() =>
       expect(
-        store.getState().chat.threads[store.getState().chat.current_thread_id]
-          ?.attached_text_files,
+        store.getState().chat.threads[id]?.attached_text_files,
       ).toHaveLength(1),
     );
     await user.type(textarea, "first{Enter}");
-    await user.clear(textarea);
-    await user.type(textarea, "newer draft");
-    confirm(true);
+    expect(onSubmit).toHaveBeenCalledTimes(1);
     await waitFor(() =>
       expect(
-        store.getState().chat.threads[store.getState().chat.current_thread_id]
-          ?.attached_text_files,
+        store.getState().chat.threads[id]?.attached_text_files,
       ).toHaveLength(0),
     );
-    expect(textarea).toHaveValue("newer draft");
-    await user.keyboard("{Enter}");
-    expect(onSubmit).toHaveBeenLastCalledWith("newer draft\n", "after_flow");
-  });
-
-  beforeEach(() => {
-    server.use(...handlers);
-  });
-
-  test("confirmation keeps the composer editable without approving or submitting", async () => {
-    const onSubmit = vi.fn();
-    const command = vi.fn();
-    server.use(
-      http.post("*/v1/chats/:id/commands", async ({ request }) => {
-        command(await request.json());
-        return HttpResponse.json({ status: "queued" });
-      }),
-    );
-    const chat = chatStateWithThread({ model: "openai/gpt-4o" });
-    chat.threads[chat.current_thread_id].confirmation = {
-      pause: true,
-      pause_reasons: [
-        {
-          tool_call_id: "shell-1",
-          tool_name: "shell",
-          type: "confirmation",
-          command: "echo hello",
-          rule: "confirm",
-          integr_config_path: null,
-        },
-      ],
-      status: { wasInteracted: false, confirmationStatus: true },
-    };
-    const { user } = render(<App onSubmit={onSubmit} />, {
-      preloadedState: { chat, ...engineConfigState },
-    });
-    expect(screen.getByRole("button", { name: "Confirm" })).toBeEnabled();
-    const textarea = screen.getByTestId("chat-form-textarea");
-    await user.type(textarea, "draft while paused{Enter}");
-    expect(textarea).toHaveValue("draft while paused");
-    expect(screen.getByLabelText("Send message")).toBeDisabled();
-    expect(onSubmit).not.toHaveBeenCalled();
-    expect(command).not.toHaveBeenCalled();
+    expect(screen.getByTestId("chat-form-textarea")).toHaveValue("");
   });
 
   test("when I push enter it should call onSubmit", async () => {

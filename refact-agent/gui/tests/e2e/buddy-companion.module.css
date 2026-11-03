@@ -1,6 +1,19 @@
-.main {
+.shell {
   display: flex;
-  flex-direction: column;
   height: 100dvh;
   min-height: 0;
+}
+
+.main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  min-height: 0;
+  padding: var(--rf-space-4);
+}
+
+.draft {
+  min-height: calc(4 * var(--rf-space-6));
 }

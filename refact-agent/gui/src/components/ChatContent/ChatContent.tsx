@@ -35,6 +35,7 @@ import {
   selectCompressionPhaseById,
   selectCompressionReasonById,
   selectCompressionPulseSeqById,
+  selectIsCompanionChat,
 } from "../../features/Chat/Thread/selectors";
 import {
   createChatWithId,
@@ -238,6 +239,9 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   );
   const threadMode = useAppSelector((s) =>
     selectThreadModeById(s, renderChatId),
+  );
+  const isCompanionChat = useAppSelector((s) =>
+    selectIsCompanionChat(s, renderChatId),
   );
   const threadTitle = useAppSelector((s) =>
     selectThreadTitleById(s, renderChatId),
@@ -558,8 +562,8 @@ export const ChatContent: React.FC<ChatContentProps> = ({
                 serverContentBlocks={item.message.server_content_blocks}
                 citations={item.message.citations}
                 messageId={item.message.message_id}
-                onBranch={handleBranch}
-                onDelete={handleDelete}
+                onBranch={isCompanionChat ? undefined : handleBranch}
+                onDelete={isCompanionChat ? undefined : handleDelete}
                 contextFilesByToolId={item.contextFilesByToolId}
                 diffsByToolId={item.diffsByToolId}
                 usage={item.message.usage}
@@ -572,12 +576,12 @@ export const ChatContent: React.FC<ChatContentProps> = ({
         case "user":
           return (
             <UserInput
-              onRetry={onRetryWrapper}
+              onRetry={isCompanionChat ? undefined : onRetryWrapper}
               messageIndex={item.index}
               messageId={item.message.message_id}
               checkpoints={item.message.checkpoints}
-              onBranch={handleBranch}
-              onDelete={handleDelete}
+              onBranch={isCompanionChat ? undefined : handleBranch}
+              onDelete={isCompanionChat ? undefined : handleDelete}
             >
               {item.message.content}
             </UserInput>
@@ -665,6 +669,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
       onRetryGeneration,
       episodeErrors,
       retryErrorIndex,
+      isCompanionChat,
     ],
   );
 

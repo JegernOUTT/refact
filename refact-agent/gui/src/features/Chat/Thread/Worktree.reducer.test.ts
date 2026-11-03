@@ -213,6 +213,36 @@ describe("Worktree chat thread reducer", () => {
     );
   });
 
+  test("companion threads never push execution params", () => {
+    const buddyMeta = {
+      is_buddy_chat: true,
+      buddy_chat_kind: "companion",
+      workflow_id: null,
+      source_chat_id: "source-chat",
+    } as const;
+    const thread: ChatThread = {
+      id: "chat-companion",
+      messages: [],
+      model: "gpt-4",
+      mode: "agent",
+      tool_use: "agent",
+      new_chat_suggested: { wasSuggested: false },
+      context_tokens_cap: 128000,
+      buddy_meta: buddyMeta,
+    };
+
+    expect(buildThreadParamsPatch(thread, true)).toEqual({});
+    expect(
+      buildThreadParamsPatch(
+        {
+          ...thread,
+          buddy_meta: { ...buddyMeta, buddy_chat_kind: "conversation" },
+        },
+        true,
+      ),
+    ).toHaveProperty("model", "gpt-4");
+  });
+
   test("thread params patch sends auto-compression cap", () => {
     const thread: ChatThread = {
       id: "chat-auto-compression-cap",

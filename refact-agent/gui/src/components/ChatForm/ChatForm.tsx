@@ -1,13 +1,8 @@
 import React, { useCallback, useEffect, useMemo } from "react";
-import { useStore } from "react-redux";
-import type { AppStore } from "../../app/store";
-import {
-  captureSubmittedAttachments,
-  clearSubmittedAttachments,
-} from "./chatSubmission";
 import { useDebounceCallback } from "usehooks-ts";
 
 import { Flex, Text } from "@radix-ui/themes";
+import { IconButton } from "../ui";
 import styles from "./ChatForm.module.css";
 import {
   attachmentFileError,
@@ -103,6 +98,7 @@ import {
   setThreadMode,
   DEFAULT_MODE,
   selectIsBuddyChat,
+  selectIsCompanionChat,
   useThreadId,
   clearChatError,
 } from "../../features/Chat/Thread";
@@ -113,7 +109,6 @@ import { ChatInputTopControls } from "./ChatInputTopControls";
 
 import classNames from "classnames";
 import { Maximize2, Minimize2 } from "lucide-react";
-import { IconButton } from "../ui";
 import { ComposerToolbar } from "./ComposerToolbar";
 type ComposerHelpProps = {
   children: React.ReactNode;
@@ -126,15 +121,7 @@ const ComposerHelp: React.FC<ComposerHelpProps> = ({ children }) => (
 export type SendPolicy = "immediate" | "after_flow";
 
 export type ChatFormProps = {
-  onSubmit:
-    | ((str: string, sendPolicy?: SendPolicy) => void)
-    | ((
-        str: string,
-        sendPolicy?: SendPolicy,
-      ) => boolean | Promise<boolean | undefined>);
-  draft?: { value: string; onChange: (value: string) => void };
-  submissionDisabled?: boolean;
-  settingsLocked?: boolean;
+  onSubmit: (str: string, sendPolicy?: SendPolicy) => void;
   onClose?: () => void;
   className?: string;
   embedded?: boolean;
@@ -147,13 +134,8 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   className,
   embedded = false,
   onExpandedChange,
-  draft,
-  submissionDisabled = false,
-  settingsLocked = false,
 }) => {
   const dispatch = useAppDispatch();
-  const store = useStore.withTypes<AppStore>()();
-  const submitting = React.useRef(false);
   const chatId = useThreadId();
   const isStreaming = useAppSelector((state) =>
     selectIsStreamingById(state, chatId),
@@ -180,9 +162,12 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const contextRebuildMessage = useAppSelector((state) =>
     selectContextRebuildMessageById(state, chatId),
   );
-  const isBuddyChat =
-    useAppSelector((state) => selectIsBuddyChat(state, chatId)) ||
-    settingsLocked;
+  const isBuddyChat = useAppSelector((state) =>
+    selectIsBuddyChat(state, chatId),
+  );
+  const isCompanionChat = useAppSelector((state) =>
+    selectIsCompanionChat(state, chatId),
+  );
   const information = useAppSelector(getInformationMessage);
   const pauseReasonsWithPause = useAppSelector((state) =>
     selectThreadConfirmationById(state, chatId),
@@ -232,7 +217,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   );
 
   const isModeDisabled = useMemo(() => isStreaming, [isStreaming]);
-  const attachedFiles = useAttachedFiles(!draft);
+  const attachedFiles = useAttachedFiles();
   const attachedImages = useAppSelector((state) =>
     selectThreadImagesById(state, chatId),
   );
@@ -271,10 +256,17 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     processAndInsertTextFiles,
     setError,
     textFiles,
+    resetAllTextFiles,
   } = useAttachedImages();
   const handlePastingFile = useCallback(
     (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
-      if (settingsLocked) return;
+      if (isCompanionChat) {
+        const hasFile = Array.from(event.clipboardData.items).some(
+          (item) => item.kind === "file",
+        );
+        if (hasFile) event.preventDefault();
+        return;
+      }
       const imageFiles: File[] = [];
       const textFilesList: File[] = [];
       const items = event.clipboardData.items;
@@ -312,7 +304,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       }
     },
     [
-      settingsLocked,
+      isCompanionChat,
       processAndInsertImages,
       processAndInsertTextFiles,
       isMultimodalitySupportedForCurrentModel,
@@ -334,19 +326,10 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     onToggleCheckbox,
     unCheckAll,
     setLineSelectionInteracted,
-  } = useCheckboxes(!draft);
+  } = useCheckboxes();
 
-  const [storedValue, setStoredValue, isSendImmediately, setIsSendImmediately] =
-    useInputValue(() => unCheckAll(), !draft);
-  const value = draft?.value ?? storedValue;
-  const setValue = useCallback(
-    (next: React.SetStateAction<string>) => {
-      if (draft)
-        draft.onChange(typeof next === "function" ? next(draft.value) : next);
-      else setStoredValue(next);
-    },
-    [draft, setStoredValue],
-  );
+  const [value, setValue, isSendImmediately, setIsSendImmediately] =
+    useInputValue(() => unCheckAll());
 
   const displayedInputValue =
     isVoiceActive && liveTranscript
@@ -354,11 +337,6 @@ export const ChatForm: React.FC<ChatFormProps> = ({
         ? `${value}\n${liveTranscript}`
         : liveTranscript
       : value;
-
-  const valueRef = React.useRef(value);
-  valueRef.current = value;
-  const draftRef = React.useRef(draft);
-  draftRef.current = draft;
 
   const argumentPlaceholdersRef = React.useRef<string[]>([]);
 
@@ -386,11 +364,8 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       const canSubmit =
         (trimmedValue.length > 0 || hasImages || hasTextFiles) &&
         isOnline &&
-        (settingsLocked || !allDisabled) &&
-        !contextRebuildRequired &&
-        !submissionDisabled &&
-        !submitting.current &&
-        !pauseReasonsWithPause.pause;
+        (isCompanionChat || !allDisabled) &&
+        !contextRebuildRequired;
 
       if (canSubmit) {
         const valueWithFiles = attachedFiles.addFilesToInput(trimmedValue);
@@ -403,38 +378,19 @@ export const ChatForm: React.FC<ChatFormProps> = ({
           checkboxes,
         );
         setLineSelectionInteracted(false);
-        const submitted = captureSubmittedAttachments(store, chatId);
-        const cleanup = (accepted: boolean | undefined) => {
-          if (accepted === false) return;
-          clearSubmittedAttachments(store, chatId, {
-            ...submitted,
-            images: accepted === true ? submitted.images : [],
-          });
-          attachedFiles.files.forEach(attachedFiles.removeFile);
-          if (valueRef.current !== inputValue) return;
-          argumentPlaceholdersRef.current = [];
-          if (draftRef.current) draftRef.current.onChange("");
-          else setStoredValue("");
-          setInputResetKey((k) => k + 1);
-          unCheckAll();
-        };
-        const result = onSubmit(valueIncludingChecks, sendPolicy);
-        if (result instanceof Promise) {
-          submitting.current = true;
-          void result
-            .then(cleanup, () => undefined)
-            .finally(() => {
-              submitting.current = false;
-            });
-        } else cleanup(typeof result === "boolean" ? result : undefined);
+        onSubmit(valueIncludingChecks, sendPolicy);
+        argumentPlaceholdersRef.current = [];
+        setValue("");
+        setInputResetKey((k) => k + 1);
+        unCheckAll();
+        attachedFiles.removeAll();
+        resetAllTextFiles();
       }
     },
     [
       value,
       contextRebuildRequired,
-      submissionDisabled,
-      settingsLocked,
-      pauseReasonsWithPause.pause,
+      isCompanionChat,
       allDisabled,
       isOnline,
       attachedImages,
@@ -442,10 +398,9 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       attachedFiles,
       checkboxes,
       setLineSelectionInteracted,
-      store,
-      chatId,
+      resetAllTextFiles,
       onSubmit,
-      setStoredValue,
+      setValue,
       unCheckAll,
     ],
   );
@@ -549,7 +504,6 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     const handleKeyDown = (event: KeyboardEvent) => {
       const active = document.activeElement;
       const root = composerRef.current;
-      if (draft && !root?.contains(active)) return;
       if (
         !root?.contains(active) &&
         active instanceof Element &&
@@ -559,7 +513,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       if (event.ctrlKey && event.shiftKey && event.code === "Space") {
         event.preventDefault();
         if (
-          (!settingsLocked || isVoiceActive) &&
+          (!isCompanionChat || isVoiceActive) &&
           !disableMicrophone &&
           microphoneRef.current
         ) {
@@ -568,6 +522,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       }
 
       if (
+        !isCompanionChat &&
         event.key === "Enter" &&
         !event.ctrlKey &&
         !event.metaKey &&
@@ -585,19 +540,16 @@ export const ChatForm: React.FC<ChatFormProps> = ({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [
-    disableMicrophone,
-    focusComposerInput,
-    draft,
-    settingsLocked,
-    isVoiceActive,
-  ]);
+  }, [disableMicrophone, focusComposerInput, isCompanionChat, isVoiceActive]);
+
+  if (pauseReasonsWithPause.pause) {
+    return (
+      <ToolConfirmation pauseReasons={pauseReasonsWithPause.pause_reasons} />
+    );
+  }
 
   return (
     <div ref={composerRef} className={styles.composerRoot}>
-      {pauseReasonsWithPause.pause && (
-        <ToolConfirmation pauseReasons={pauseReasonsWithPause.pause_reasons} />
-      )}
       {visibleError && (
         <ErrorCallout timeout={3000} onClick={clearVisibleError} preventRetry>
           {visibleError}
@@ -716,7 +668,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                         onHelpClick={handleHelpCommand}
                         commands={commands}
                         requestCommandsCompletion={
-                          settingsLocked ? ignoreCompletion : requestCompletion
+                          isCompanionChat ? ignoreCompletion : requestCompletion
                         }
                         value={displayedInputValue}
                         onChange={handleChange}
@@ -755,13 +707,14 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                         content,
                         row: "top" as const,
                         priority: index === 0 ? 0 : index + 1,
-                        hidden: !isComposerExpanded,
+                        hidden: !isComposerExpanded || isBuddyChat,
                       }),
                     ),
                     {
                       id: "model",
                       row: "bottom",
                       priority: isComposerExpanded ? 9 : 3,
+                      hidden: isBuddyChat,
                       content: (
                         <ChatSettingsDropdown
                           disabled={isBuddyChat}
@@ -773,6 +726,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                       id: "mode",
                       row: "bottom",
                       priority: isComposerExpanded ? 10 : 5,
+                      hidden: isBuddyChat,
                       content: (
                         <ModeSelect
                           selectedMode={threadMode ?? DEFAULT_MODE}
@@ -786,6 +740,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                       id: "worktree",
                       row: "bottom",
                       priority: isComposerExpanded ? 8 : 2,
+                      hidden: isBuddyChat,
                       content: (
                         <WorktreeControl
                           disabled={isBuddyChat}
@@ -829,7 +784,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                       side: "right",
                       pinned: isWarning,
                       priority: isComposerExpanded ? 4 : 1,
-                      hidden: settingsLocked,
+                      hidden: isCompanionChat,
                       content: (
                         <TrajectoryButton
                           disabled={isBuddyChat}
@@ -842,7 +797,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                       row: "bottom",
                       side: "right",
                       priority: 2,
-                      hidden: !isComposerExpanded || settingsLocked,
+                      hidden: !isComposerExpanded || isCompanionChat,
                       content: (
                         <BrowserToggleButton
                           chatId={chatId}
@@ -855,7 +810,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                       row: "bottom",
                       side: "right",
                       priority: 3,
-                      hidden: !isComposerExpanded || settingsLocked,
+                      hidden: !isComposerExpanded || isCompanionChat,
                       content: (
                         <AutoEnrichmentToggleButton
                           disabled={isStreaming || isWaiting}
@@ -867,7 +822,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                       row: "bottom",
                       side: "right",
                       priority: 4,
-                      hidden: !isComposerExpanded || settingsLocked,
+                      hidden: !isComposerExpanded || isCompanionChat,
                       content: (
                         <AutoCompactToggleButton disabled={isStreaming} />
                       ),
@@ -877,7 +832,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                       row: "bottom",
                       side: "right",
                       priority: 1,
-                      hidden: !isComposerExpanded || settingsLocked,
+                      hidden: !isComposerExpanded || isCompanionChat,
                       content: (
                         <WandButton
                           currentText={value}
@@ -907,7 +862,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                       priority: 6,
                       hidden:
                         !isComposerExpanded ||
-                        settingsLocked ||
+                        isCompanionChat ||
                         config.features?.images === false ||
                         !isMultimodalitySupportedForCurrentModel,
                       content: <AttachImagesButton />,
@@ -920,7 +875,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                       pinned: isVoiceActive,
                       hidden:
                         !isVoiceActive &&
-                        (!isComposerExpanded || settingsLocked),
+                        (!isComposerExpanded || isCompanionChat),
                       content: (
                         <MicrophoneButton
                           ref={microphoneRef}
@@ -933,7 +888,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                           onRecordingChange={handleRecordingChange}
                           disabled={
                             !isVoiceActive &&
-                            (disableMicrophone || settingsLocked)
+                            (disableMicrophone || isCompanionChat)
                           }
                         />
                       ),
@@ -943,7 +898,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                       row: "bottom",
                       side: "right",
                       priority: 0,
-                      hidden: !isComposerExpanded || settingsLocked,
+                      hidden: !isComposerExpanded || isCompanionChat,
                       content: (
                         <ThreadInfoButton
                           chatId={chatId}
@@ -960,11 +915,9 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                       content: (
                         <UnifiedSendButton
                           disabled={
-                            submissionDisabled ||
-                            pauseReasonsWithPause.pause ||
                             isVoiceActive ||
                             !isOnline ||
-                            (!settingsLocked && allDisabled) ||
+                            (!isCompanionChat && allDisabled) ||
                             contextRebuildRequired
                           }
                           isStreaming={
@@ -975,18 +928,12 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                             attachedImages.length > 0 ||
                             textFiles.length > 0
                           }
-                          hasMessages={hasMessages}
+                          hasMessages={hasMessages && !isCompanionChat}
                           queuedCount={queuedItems.length}
                           onSend={() => handleSubmit("after_flow")}
                           onSendImmediately={handleSendImmediately}
                           onStop={() => void abort()}
-                          onResend={() => {
-                            if (
-                              !submissionDisabled &&
-                              !pauseReasonsWithPause.pause
-                            )
-                              void regenerate();
-                          }}
+                          onResend={() => void regenerate()}
                         />
                       ),
                     },

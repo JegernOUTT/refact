@@ -1,0 +1,73 @@
+.slot {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+}
+
+.button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--rf-control-h-lg);
+  height: var(--rf-control-h-lg);
+  padding: 0;
+  overflow: hidden;
+  color: var(--rf-color-fg);
+  background: transparent;
+  border: var(--rf-hairline) solid transparent;
+  border-radius: var(--rf-radius-ctl);
+  cursor: pointer;
+}
+
+.button:hover {
+  background: var(--rf-surface-2);
+  border-color: var(--rf-border);
+}
+
+.button:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
+.button[aria-pressed="true"] {
+  background: var(--rf-color-accent-soft);
+  border-color: var(--rf-color-accent);
+}
+
+.avatar {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.badge {
+  position: absolute;
+  top: 0;
+  right: 0;
+  pointer-events: none;
+  padding-inline: var(--rf-space-2xs);
+  white-space: nowrap;
+}
+
+.unreadDot {
+  position: absolute;
+  top: var(--rf-space-1);
+  right: var(--rf-space-1);
+  width: var(--rf-space-2);
+  height: var(--rf-space-2);
+  pointer-events: none;
+  background: var(--rf-color-accent);
+  border: var(--rf-hairline) solid var(--rf-surface-1);
+  border-radius: var(--rf-radius-pill);
+}
+
+.unreadDotBelow {
+  top: auto;
+  bottom: var(--rf-space-1);
+}

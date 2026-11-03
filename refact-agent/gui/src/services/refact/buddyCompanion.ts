@@ -1,5 +1,5 @@
 import { buildApiUrl, type EngineApiConfig } from "./apiUrl";
-import type { PendingQuestionSet, QuestionResponse } from "./types";
+import type { PendingQuestionSet } from "./types";
 
 export type CompanionMeta = {
   chat_id: string;
@@ -36,26 +36,15 @@ export type AttentionSnapshot = {
   busy_chat_ids: string[];
   rows: AttentionRow[];
 };
-export type DecisionReceipt = {
-  target_id: string;
-  accepted: boolean | null;
-  project_root: string;
-  engine_identity: string;
-  chat_id: string;
-  client_request_id: string;
-  request_identity: string;
-  source_version: string;
-  payload_hash: string;
-  status: "queued" | "applied" | "rejected" | "stale" | "unknown";
-  followup:
-    | "not_requested"
-    | "pending"
-    | "dispatched"
-    | "completed"
-    | "unavailable"
-    | "unknown";
-  reason?: string | null;
-};
+export class BuddyRequestError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "BuddyRequestError";
+  }
+}
 export type CompanionConnection = EngineApiConfig & { apiKey?: string | null };
 async function request(
   config: CompanionConnection,
@@ -70,7 +59,8 @@ async function request(
     },
   });
   if (!response.ok)
-    throw new Error(
+    throw new BuddyRequestError(
+      response.status,
       `Buddy request failed (${response.status}): ${await response.text()}`,
     );
   return (await response.json()) as unknown;
@@ -101,71 +91,6 @@ export async function getAttention(
     throw new Error("Invalid Buddy attention response");
   return value;
 }
-export function decideAttention(
-  config: CompanionConnection,
-  snapshot: AttentionSnapshot,
-  row: AttentionRow,
-  accepted: boolean,
-  intentId: string,
-) {
-  return request(
-    config,
-    `/v1/buddy/approvals/${encodeURIComponent(row.chat_id)}/response`,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        project_root: snapshot.project_root,
-        engine_identity: snapshot.engine_identity,
-        source_version: row.source_version,
-        client_request_id: intentId,
-        response: { kind: "tool", tool_call_id: row.tool_call_id, accepted },
-        ...(!accepted ? { refusal_followup: true } : {}),
-      }),
-    },
-  );
-}
-export async function getDecisionReceipt(
-  config: CompanionConnection,
-  project: string,
-  chatId: string,
-  intentId: string,
-) {
-  const value = await request(
-    config,
-    `/v1/buddy/approvals/${encodeURIComponent(
-      chatId,
-    )}/outcomes/${encodeURIComponent(
-      intentId,
-    )}?project_root=${encodeURIComponent(project)}`,
-  );
-  if (!isDecisionReceipt(value)) throw new Error("Invalid decision receipt");
-  return value;
-}
-
-export function answerAttentionQuestion(
-  config: CompanionConnection,
-  project: string,
-  row: AttentionRow,
-  response: QuestionResponse,
-  intentId: string,
-) {
-  return request(
-    config,
-    `/v1/buddy/decisions/questions/${encodeURIComponent(
-      row.chat_id,
-    )}/${encodeURIComponent(row.tool_call_id ?? "")}`,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        project_root: project,
-        asked_at_ms: row.question?.asked_at_ms,
-        client_request_id: intentId,
-        response,
-      }),
-    },
-  );
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -226,34 +151,5 @@ export function isAttentionSnapshot(
         )
       );
     })
-  );
-}
-export function isDecisionReceipt(value: unknown): value is DecisionReceipt {
-  return (
-    isRecord(value) &&
-    strings(value, [
-      "project_root",
-      "engine_identity",
-      "chat_id",
-      "client_request_id",
-      "request_identity",
-      "source_version",
-      "payload_hash",
-      "target_id",
-      "status",
-      "followup",
-    ]) &&
-    (value.accepted === null || typeof value.accepted === "boolean") &&
-    ["queued", "applied", "rejected", "stale", "unknown"].includes(
-      String(value.status),
-    ) &&
-    [
-      "not_requested",
-      "pending",
-      "dispatched",
-      "completed",
-      "unavailable",
-      "unknown",
-    ].includes(String(value.followup))
   );
 }

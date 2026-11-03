@@ -39,6 +39,10 @@
   transform: scaleY(var(--rf-motion-scale-active));
 }
 
+.bottomSlot {
+  margin-top: auto;
+}
+
 .button[aria-pressed="true"] {
   color: var(--rf-color-accent);
   background: var(--rf-color-accent-soft);

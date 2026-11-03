@@ -3,9 +3,12 @@ import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
 
 import { STUB_CAPS_RESPONSE } from "../../__fixtures__/caps";
-import { ChatThreadProvider } from "../../features/Chat/Thread";
+import {
+  ChatThreadProvider,
+  selectThreadTextFilesById,
+} from "../../features/Chat/Thread";
 import { setBackendStatus } from "../../features/Connection";
-import { render } from "../../utils/test-utils";
+import { createDefaultChatState, render } from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
 import { DropzoneProvider } from "./Dropzone";
 
@@ -66,5 +69,58 @@ describe("DropzoneProvider", () => {
       );
     });
     expect(readAsText).not.toHaveBeenCalled();
+  });
+
+  it("keeps Buddy companion chats text-only", async () => {
+    server.use(
+      http.get("*/v1/ping", () => HttpResponse.text("pong")),
+      http.get("*/v1/caps", () => HttpResponse.json(STUB_CAPS_RESPONSE)),
+      http.get("*/v1/chat-modes", () =>
+        HttpResponse.json({ modes: [], errors: [] }),
+      ),
+    );
+    const chat = createDefaultChatState();
+    const chatId = chat.current_thread_id;
+    chat.threads[chatId].thread = {
+      ...chat.threads[chatId].thread,
+      buddy_meta: {
+        is_buddy_chat: true,
+        buddy_chat_kind: "companion",
+        workflow_id: null,
+        source_chat_id: "source-chat",
+      },
+    };
+    const file = new File(["notes"], "notes.txt", { type: "text/plain" });
+    const { container, store } = render(
+      <ChatThreadProvider chatId={chatId}>
+        <DropzoneProvider>
+          <div>Drop files</div>
+        </DropzoneProvider>
+      </ChatThreadProvider>,
+      {
+        preloadedState: {
+          chat,
+          config: { host: "web", themeProps: {}, lspPort: 8001 },
+        },
+      },
+    );
+    store.dispatch(setBackendStatus({ status: "online" }));
+
+    const dropzone = container.querySelector('[role="presentation"]');
+    if (!dropzone) throw new Error("Expected dropzone root");
+    fireEvent.drop(dropzone, {
+      dataTransfer: {
+        files: [file],
+        items: [{ kind: "file", type: file.type, getAsFile: () => file }],
+        types: ["Files"],
+      },
+    });
+
+    await waitFor(() => {
+      expect(store.getState().error.message).toBe(
+        "Buddy accepts text messages only",
+      );
+    });
+    expect(selectThreadTextFilesById(store.getState(), chatId)).toEqual([]);
   });
 });

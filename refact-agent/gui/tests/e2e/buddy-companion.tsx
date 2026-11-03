@@ -1,75 +1,68 @@
+import "../../src/lib/render/web.css";
 import { createRoot } from "react-dom/client";
 import { Provider } from "react-redux";
 import { setUpStore } from "../../src/app/store";
 import { Theme } from "../../src/components/Theme";
-import { FloatingBuddy } from "../../src/features/Buddy/Companion/FloatingBuddy";
-import { createChatWithId } from "../../src/features/Chat/Thread";
+import { AbortControllerProvider } from "../../src/contexts/AbortControllers";
+import { STUB_CAPS_RESPONSE } from "../../src/__fixtures__/caps";
+import { BuddyCompanion } from "../../src/features/Buddy/Companion/BuddyCompanion";
+import {
+  applyChatEvent,
+  createChatWithId,
+} from "../../src/features/Chat/Thread";
 import { registerVisibleChatMount } from "../../src/features/Connection";
 import { push } from "../../src/features/Pages/pagesSlice";
-import type { AttentionSnapshot } from "../../src/services/refact/buddyCompanion";
-import "../../src/lib/render/web.css";
+import { ActivityRail } from "../../src/features/Workspace/ActivityRail/ActivityRail";
+import type {
+  AttentionRow,
+  AttentionSnapshot,
+} from "../../src/services/refact/buddyCompanion";
 import styles from "./buddy-companion.module.css";
 
 const root = document.getElementById("refact-chat");
 if (!root) throw new Error("Buddy fixture root missing");
 const params = new URLSearchParams(location.search);
+const companionId = "buddy-fixture";
+const model = "gpt-4o";
+
+function row(index: number): AttentionRow {
+  return {
+    id: `request-${index}`,
+    kind: index % 2 === 0 ? "question" : "tool_permission",
+    chat_id: `source-${index}`,
+    source_version: "v1",
+    reason:
+      index % 2 === 0
+        ? "The agent asked which test scope to run before continuing with the package verification."
+        : "This command requires your permission before execution in the project workspace.",
+    effect: "execute_pending_tool",
+    actionable: true,
+    literal_command: null,
+    display_command: null,
+    cwd: null,
+    tool_call_id: `tool-${index}`,
+    question: null,
+    parent_chat_id: index === 1 ? "source-parent" : null,
+    run_generation: null,
+    expires_at: null,
+  };
+}
+
+const rowCount = Number(params.get("rows") ?? "4");
 const snapshot: AttentionSnapshot = {
   schema_version: 1,
   project_root: "/fixture/project",
   engine_identity: "fixture-engine",
-  coverage: "loaded_current_project_sessions_and_child_registry",
-  partial: true,
-  busy_chat_ids: ["busy-source"],
-  rows: [
-    {
-      id: "request-b",
-      kind: "tool_permission",
-      chat_id: "source-b",
-      source_version: "v1",
-      reason: "This command requires your permission before execution.",
-      effect: "execute_pending_tool",
-      actionable: true,
-      literal_command: "npm run test -- --run",
-      display_command: "shell npm run test -- --run",
-      cwd: null,
-      tool_call_id: "tool-b",
-      question: null,
-      parent_chat_id: null,
-      run_generation: null,
-      expires_at: null,
-      tool_name: "shell",
-      tool_arguments: {
-        command: "npm run test -- --run",
-        workdir: "/fixture/project",
-      },
-    },
-  ],
+  coverage: "full",
+  partial: false,
+  busy_chat_ids: [],
+  rows: Array.from({ length: rowCount }, (_, index) => row(index + 1)),
 };
-const questionMode = params.get("question") === "1";
-const question = {
-  tool_call_id: "ask-fixture",
-  asked_at_ms: 42,
-  status: "pending" as const,
-  response_protocol_version: 2,
-  questions: [{ id: "scope", type: "free_text" as const, text: "What scope?" }],
-};
-if (questionMode) {
-  snapshot.rows = [
-    {
-      ...snapshot.rows[0],
-      id: "question-fixture",
-      kind: "question",
-      effect: "answer_question",
-      tool_call_id: question.tool_call_id,
-      question,
-      literal_command: null,
-      display_command: null,
-      tool_arguments: null,
-    },
-  ];
-}
+
 const posts: string[] = [];
-Object.assign(window, { fixturePosts: posts });
+const commands: { chatId: string; type: unknown }[] = [];
+Object.assign(window, { fixturePosts: posts, fixtureCommands: commands });
+const nativeFetch = window.fetch.bind(window);
 window.fetch = async (input, init) => {
   const url = new URL(
     typeof input === "string"
@@ -79,50 +72,50 @@ window.fetch = async (input, init) => {
         : input.url,
     location.origin,
   );
-  if (
-    (init?.method ?? (input instanceof Request ? input.method : "GET")) ===
-    "POST"
-  )
-    posts.push(url.pathname);
-  if (url.pathname === "/v1/buddy/attention") return Response.json(snapshot);
-  if (url.pathname === "/v1/buddy/approvals/source-b/response")
-    return Response.json({ queued: true }, { status: 202 });
-  if (url.pathname.includes("/outcomes/"))
-    return Response.json({
-      project_root: snapshot.project_root,
-      engine_identity: snapshot.engine_identity,
-      chat_id: "source-b",
-      client_request_id: url.pathname.split("/").at(-1),
-      request_identity: "request-b",
-      source_version: "v1",
-      payload_hash: "fixture",
-      target_id: "tool-b",
-      accepted: true,
-      status: "queued",
-      followup: "pending",
+  const path = url.pathname;
+  if (!path.startsWith("/v1/")) return nativeFetch(input, init);
+  const method =
+    init?.method ?? (input instanceof Request ? input.method : "GET");
+  if (method === "POST") posts.push(path);
+  const commandPath = /^\/v1\/chats\/([^/]+)\/commands$/.exec(path);
+  if (method === "POST" && commandPath) {
+    const body: unknown =
+      typeof init?.body === "string" ? JSON.parse(init.body) : null;
+    commands.push({
+      chatId: decodeURIComponent(commandPath[1] ?? ""),
+      type:
+        body && typeof body === "object" && "type" in body ? body.type : null,
     });
-  if (questionMode && url.pathname.startsWith("/v1/buddy/companion/"))
+    return Response.json({ accepted: true }, { status: 202 });
+  }
+  if (path === "/v1/ping") return new Response("pong");
+  if (path === "/v1/buddy/attention") return Response.json(snapshot);
+  if (path.startsWith("/v1/buddy/companion/"))
     return Response.json({
-      chat_id: "buddy-fixture",
-      source_chat_id: "source-a",
-      title: "Buddy fixture",
+      chat_id: companionId,
+      source_chat_id: decodeURIComponent(path.split("/").at(-1) ?? ""),
+      title: "Buddy about Investigate failing tests",
       kind: "companion",
-      created_at: "now",
+      created_at: "2026-11-03T00:00:00Z",
     });
-  if (url.pathname.startsWith("/v1/buddy/companion/"))
-    return Response.json(
-      {
-        error:
-          "Fixture intentionally does not run a model. Your draft stays in place.",
-      },
-      { status: 503 },
-    );
-  void init;
+  if (path === "/v1/caps")
+    return Response.json({ ...STUB_CAPS_RESPONSE, chat_default_model: model });
+  if (path === "/v1/chat-modes")
+    return Response.json({ modes: [], errors: [] });
+  if (path === "/v1/at-command-completion")
+    return Response.json({
+      completions: [],
+      replace: [0, 0],
+      is_cmd_executable: false,
+    });
+  if (path === "/v1/at-command-preview") return Response.json({ messages: [] });
+  if (path === "/v1/tools") return Response.json([]);
   return Response.json(
     { error: "No live backend is reachable from this isolated fixture" },
     { status: 503 },
   );
 };
+
 const store = setUpStore({
   config: {
     host: "web",
@@ -141,57 +134,81 @@ store.dispatch(
     openTab: false,
   }),
 );
+for (let index = 1; index <= rowCount; index++) {
+  store.dispatch(
+    createChatWithId({
+      id: `source-${index}`,
+      title: `Verify package changes ${index}`,
+      activate: false,
+      openTab: false,
+    }),
+  );
+}
 store.dispatch(
-  createChatWithId({
-    id: "source-b",
-    title: "Verify package changes",
-    activate: false,
-    openTab: false,
-  }),
-);
-store.dispatch(
-  createChatWithId({
-    id: "buddy-fixture",
-    title: "Buddy fixture",
-    activate: false,
-    openTab: false,
-  }),
-);
-const fixtureChat = structuredClone(store.getState().chat);
-fixtureChat.threads["buddy-fixture"].thread.messages = [
-  {
-    role: "assistant",
-    content: "Buddy shared response",
-    tool_calls: [
+  applyChatEvent({
+    chat_id: companionId,
+    seq: "0",
+    type: "snapshot",
+    thread: {
+      id: companionId,
+      title: "Buddy about Investigate failing tests",
+      model,
+      mode: "no_tools",
+      tool_use: "none",
+      boost_reasoning: false,
+      context_tokens_cap: null,
+      include_project_info: false,
+      checkpoints_enabled: false,
+      is_title_generated: true,
+      buddy_meta: {
+        is_buddy_chat: true,
+        buddy_chat_kind: "companion",
+        workflow_id: null,
+        source_chat_id: "source-a",
+      },
+    },
+    runtime: {
+      state: "idle",
+      paused: false,
+      error: null,
+      queue_size: 0,
+      pause_reasons: [],
+      queued_items: [],
+    },
+    messages: [
+      { role: "user", content: "Why are the tests failing?", message_id: "u1" },
       {
-        id: question.tool_call_id,
-        index: 0,
-        function: { name: "ask_questions", arguments: "{}" },
+        role: "assistant",
+        content:
+          "The source chat is waiting on a shell permission. Once you approve it there, the test run continues.",
+        message_id: "a1",
       },
     ],
-  },
-];
-fixtureChat.threads["buddy-fixture"].thread.pending_questions = [question];
-
-store.dispatch(registerVisibleChatMount({ chatId: "source-a" }));
+    background_agents: [],
+  }),
+);
+if (params.get("source") !== "none")
+  store.dispatch(registerVisibleChatMount({ chatId: "source-a" }));
 store.dispatch(push({ name: "chat" }));
-const fixtureStore = setUpStore({ ...store.getState(), chat: fixtureChat });
+
 createRoot(root).render(
-  <Provider store={questionMode ? fixtureStore : store}>
+  <Provider store={store}>
     <Theme>
-      <main className={styles.main}>
-        <h1>Connected Buddy companion fixture</h1>
-        <p>
-          Source A is visible. Attention is from source B. No live backend or
-          model is used.
-        </p>
-        <label htmlFor="main-draft">Main source draft</label>
-        <textarea
-          id="main-draft"
-          defaultValue="Keep my investigation notes unchanged"
-        />
-        <FloatingBuddy />
-      </main>
+      <AbortControllerProvider>
+        <div className={styles.shell}>
+          <ActivityRail />
+          <main className={styles.main}>
+            <h1>Connected Buddy companion fixture</h1>
+            <label htmlFor="main-draft">Main source draft</label>
+            <textarea
+              id="main-draft"
+              className={styles.draft}
+              defaultValue="Keep my investigation notes unchanged"
+            />
+          </main>
+        </div>
+        <BuddyCompanion />
+      </AbortControllerProvider>
     </Theme>
   </Provider>,
 );

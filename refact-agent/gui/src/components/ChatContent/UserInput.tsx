@@ -17,7 +17,7 @@ export type UserInputProps = {
   messageIndex: number;
   messageId?: string;
   checkpoints?: Checkpoint[];
-  onRetry: (index: number, question: UserMessage["content"]) => void;
+  onRetry?: (index: number, question: UserMessage["content"]) => void;
   onBranch?: (messageId: string) => void;
   onDelete?: (messageId: string) => void;
 };
@@ -61,39 +61,43 @@ const _UserInput: React.FC<UserInputProps> = ({
 
   const handleSubmit = useCallback(
     (value: UserMessage["content"]) => {
-      onRetry(messageIndex, value);
+      onRetry?.(messageIndex, value);
       setShowTextArea(false);
     },
     [messageIndex, onRetry],
   );
 
-  const handleEditClick = useCallback((event: React.MouseEvent) => {
-    // Don't enter edit mode if user clicked on interactive elements
-    const target = event.target as HTMLElement;
-    const tagName = target.tagName.toLowerCase();
+  const handleEditClick = useCallback(
+    (event: React.MouseEvent) => {
+      if (!onRetry) return;
+      // Don't enter edit mode if user clicked on interactive elements
+      const target = event.target as HTMLElement;
+      const tagName = target.tagName.toLowerCase();
 
-    const isInteractiveElement =
-      tagName === "a" ||
-      tagName === "code" ||
-      tagName === "pre" ||
-      tagName === "button";
-    const hasInteractiveParent =
-      target.closest("a") !== null ||
-      target.closest("pre") !== null ||
-      target.closest("button") !== null;
+      const isInteractiveElement =
+        tagName === "a" ||
+        tagName === "code" ||
+        tagName === "pre" ||
+        tagName === "button";
+      const hasInteractiveParent =
+        target.closest("a") !== null ||
+        target.closest("pre") !== null ||
+        target.closest("button") !== null;
 
-    if (isInteractiveElement || hasInteractiveParent) {
-      return;
-    }
+      if (isInteractiveElement || hasInteractiveParent) {
+        return;
+      }
 
-    // Skip if user is selecting text
-    const selection = window.getSelection();
-    if (selection && selection.toString().length > 0) {
-      return;
-    }
+      // Skip if user is selecting text
+      const selection = window.getSelection();
+      if (selection && selection.toString().length > 0) {
+        return;
+      }
 
-    setShowTextArea(true);
-  }, []);
+      setShowTextArea(true);
+    },
+    [onRetry],
+  );
 
   // Extract text content for rendering
   const textContent = useMemo(() => {

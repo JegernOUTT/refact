@@ -15,16 +15,15 @@ import { useAttachedFiles, useCheckboxes } from "./useCheckBoxes";
 import { ideAttachFileToChat } from "../../hooks/useEventBusForApp";
 import { server } from "../../utils/mockServer";
 
-function InputProbe({
-  label,
-  enabled = true,
-}: {
-  label: string;
-  enabled?: boolean;
-}) {
-  const [value, , immediate] = useInputValue(() => undefined, enabled);
-  const files = useAttachedFiles(enabled);
-  const { checkboxes } = useCheckboxes(enabled);
+function InputProbe({ label }: { label: string }) {
+  const [value] = useInputValue(() => undefined);
+  return <div data-testid={label}>{value}</div>;
+}
+
+function ContextProbe({ label }: { label: string }) {
+  const [value, , immediate] = useInputValue(() => undefined);
+  const files = useAttachedFiles();
+  const { checkboxes } = useCheckboxes();
   return (
     <div data-testid={label} data-send={String(immediate)}>
       {JSON.stringify({
@@ -37,13 +36,21 @@ function InputProbe({
 }
 
 describe("useInputValue", () => {
-  it("isolates controlled Buddy input from IDE sends, attachments and selected context", async () => {
+  it("Buddy chats ignore IDE host input, attachments and selected context", async () => {
     const chat = createDefaultChatState();
     const currentId = chat.current_thread_id;
     const runtime = chat.threads[currentId];
     chat.threads.buddy = {
       ...runtime,
-      thread: { ...runtime.thread, id: "buddy", model: "openai/gpt-4o" },
+      thread: {
+        ...runtime.thread,
+        id: "buddy",
+        buddy_meta: {
+          is_buddy_chat: true,
+          buddy_chat_kind: "companion",
+          workflow_id: null,
+        },
+      },
     };
     const command = vi.fn();
     server.use(
@@ -55,10 +62,10 @@ describe("useInputValue", () => {
     const view = render(
       <>
         <ChatThreadProvider chatId={currentId}>
-          <InputProbe label="source" />
+          <ContextProbe label="source" />
         </ChatThreadProvider>
         <ChatThreadProvider chatId="buddy">
-          <InputProbe label="buddy" enabled={false} />
+          <ContextProbe label="buddy" />
         </ChatThreadProvider>
       </>,
       {
@@ -142,7 +149,7 @@ describe("useInputValue", () => {
       );
     });
     expect(document.querySelector('[data-testid="current"]')).toHaveTextContent(
-      JSON.stringify({ value: "", files: [], snippet: false }),
+      "",
     );
   });
 

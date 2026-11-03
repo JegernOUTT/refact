@@ -2,6 +2,8 @@ import React, { createContext, isValidElement, useCallback } from "react";
 import { Image, X } from "lucide-react";
 import { DropzoneInputProps, FileRejection, useDropzone } from "react-dropzone";
 import { useCapsForToolUse } from "../../hooks/useCapsForToolUse";
+import { useAppSelector } from "../../hooks/useAppSelector";
+import { selectIsCompanionChat, useThreadId } from "../../features/Chat/Thread";
 import { useAttachedImages } from "../../hooks/useAttachedImages";
 import { useAttachedFiles } from "../ChatForm/useCheckBoxes";
 import { TruncateLeft } from "../Text";
@@ -29,9 +31,19 @@ export const DropzoneProvider: React.FC<
   const { setError, processAndInsertImages, processAndInsertTextFiles } =
     useAttachedImages();
   const { isMultimodalitySupportedForCurrentModel } = useCapsForToolUse();
+  const chatId = useThreadId();
+  const textOnly = useAppSelector((state) =>
+    selectIsCompanionChat(state, chatId),
+  );
 
   const onDrop = useCallback(
     (acceptedFiles: File[], fileRejections: FileRejection[]): void => {
+      if (textOnly) {
+        if (acceptedFiles.length > 0 || fileRejections.length > 0) {
+          setError("Buddy accepts text messages only");
+        }
+        return;
+      }
       const imageFiles: File[] = [];
       const textFiles: File[] = [];
       const rejectedFileMessages: string[] = [];
@@ -75,6 +87,7 @@ export const DropzoneProvider: React.FC<
       }
     },
     [
+      textOnly,
       processAndInsertImages,
       processAndInsertTextFiles,
       setError,

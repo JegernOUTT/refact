@@ -3,7 +3,10 @@ import { selectSelectedSnippet } from "../../features/Chat/selectedSnippet";
 import { FileInfo, selectActiveFile } from "../../features/Chat/activeFile";
 import { useConfig } from "../../hooks/useConfig";
 import { useAppSelector } from "../../hooks/useAppSelector";
-import { selectMessagesById } from "../../features/Chat/Thread/selectors";
+import {
+  selectIsBuddyChat,
+  selectMessagesById,
+} from "../../features/Chat/Thread/selectors";
 import { createSelector } from "@reduxjs/toolkit";
 import { filename } from "../../utils";
 import { ideAttachFileToChat } from "../../hooks/useEventBusForApp";
@@ -35,7 +38,11 @@ const messageLengthSelector = createSelector(
 
 // TODO: add ide event here.
 
-export function useAttachedFiles(enabled = true) {
+export function useAttachedFiles() {
+  const chatId = useThreadId();
+  const isBuddyChat = useAppSelector((state) =>
+    selectIsBuddyChat(state, chatId),
+  );
   const [files, setFiles] = useState<FileInfo[]>([]);
   const [interacted, setInteracted] = useState<boolean>(false);
   const activeFile = useAppSelector(selectActiveFile);
@@ -80,7 +87,7 @@ export function useAttachedFiles(enabled = true) {
   }, []);
 
   useEffect(() => {
-    if (!enabled) return;
+    if (isBuddyChat) return;
     if (interacted) return;
     if (!activeFile.name) return;
     if (attached) return;
@@ -89,10 +96,10 @@ export function useAttachedFiles(enabled = true) {
       return [activeFile];
     });
     setInteracted(true);
-  }, [activeFile, attached, interacted, snippet.code, enabled]);
+  }, [activeFile, attached, interacted, snippet.code, isBuddyChat]);
 
   useEffect(() => {
-    if (!enabled) return;
+    if (isBuddyChat) return;
     const handleIdeAttachFile = (filePath: string) => {
       const fileInfo: FileInfo = {
         name: filename(filePath),
@@ -120,7 +127,7 @@ export function useAttachedFiles(enabled = true) {
     return () => {
       window.removeEventListener("message", listener);
     };
-  }, [enabled]);
+  }, [isBuddyChat]);
 
   return {
     files,
@@ -136,10 +143,12 @@ export function useAttachedFiles(enabled = true) {
 
 const useAttachSelectedSnippet = (
   interacted: boolean,
-  enabled: boolean,
 ): [Checkbox, () => void] => {
   const { host } = useConfig();
   const chatId = useThreadId();
+  const isBuddyChat = useAppSelector((state) =>
+    selectIsBuddyChat(state, chatId),
+  );
   const snippet = useAppSelector(selectSelectedSnippet);
   const messageLength = useAppSelector((state) =>
     messageLengthSelector(state, chatId),
@@ -160,11 +169,11 @@ const useAttachSelectedSnippet = (
   const [attachedSelectedSnippet, setAttachedSelectedSnippet] =
     useState<Checkbox>({
       name: "selected_lines",
-      checked: enabled && !!snippet.code && messageLength === 0,
+      checked: !isBuddyChat && !!snippet.code && messageLength === 0,
       label: label,
       value: markdown,
-      disabled: !enabled || !snippet.code,
-      hide: !enabled || host === "web" || codeLineCount === 0,
+      disabled: isBuddyChat || !snippet.code,
+      hide: isBuddyChat || host === "web" || codeLineCount === 0,
       info: {
         text: "Adds the currently selected lines as a snippet for analysis or modification. Equivalent to code in triple backticks ``` in the text.",
       },
@@ -178,9 +187,9 @@ const useAttachSelectedSnippet = (
           ...prev,
           label: label,
           value: markdown,
-          disabled: !enabled || !snippet.code,
-          hide: !enabled || host === "web" || codeLineCount === 0,
-          checked: enabled && !!snippet.code && !interacted,
+          disabled: isBuddyChat || !snippet.code,
+          hide: isBuddyChat || host === "web" || codeLineCount === 0,
+          checked: !isBuddyChat && !!snippet.code && !interacted,
           locked: interacted ? prev.locked : false,
         };
       });
@@ -193,7 +202,7 @@ const useAttachSelectedSnippet = (
     interacted,
     attachedSelectedSnippet.checked,
     codeLineCount,
-    enabled,
+    isBuddyChat,
   ]);
 
   const onToggleAttachedSelectedSnippet = useCallback(() => {
@@ -226,12 +235,12 @@ export type Checkboxes = {
   selected_lines: Checkbox;
 };
 
-export const useCheckboxes = (enabled = true) => {
+export const useCheckboxes = () => {
   // creating different states instead of only one being used for checkboxes
   const [lineSelectionInteracted, setLineSelectionInteracted] = useState(false);
 
   const [attachedSelectedSnippet, onToggleAttachedSelectedSnippet] =
-    useAttachSelectedSnippet(lineSelectionInteracted, enabled);
+    useAttachSelectedSnippet(lineSelectionInteracted);
 
   const checkboxes = useMemo(
     () => ({

@@ -54,6 +54,7 @@ function buildThreadParamsPatch(
   thread: ChatThread,
   _isNewChat: boolean,
 ): Record<string, unknown> {
+  if (thread.buddy_meta?.buddy_chat_kind === "companion") return {};
   const patch: Record<string, unknown> = buildThreadScopePatch(thread);
   if (thread.tool_use) patch.tool_use = thread.tool_use;
   if (thread.mode) patch.mode = thread.mode;

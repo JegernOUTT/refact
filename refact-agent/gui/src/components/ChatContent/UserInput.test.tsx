@@ -36,6 +36,19 @@ describe("UserInput", () => {
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
   });
 
+  test("only enters edit mode when retry is available", async () => {
+    const { user, unmount } = renderUserInput("Editable message");
+    await user.click(screen.getByText("Editable message"));
+    expect(screen.getByRole("textbox")).toBeInTheDocument();
+    unmount();
+
+    const readOnly = render(
+      <UserInput messageIndex={0}>Read-only message</UserInput>,
+    );
+    await readOnly.user.click(screen.getByText("Read-only message"));
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+  });
+
   test("does not render an expand toggle for short text", () => {
     renderUserInput("A short user message.");
 

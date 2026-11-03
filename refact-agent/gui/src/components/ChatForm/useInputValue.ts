@@ -6,12 +6,11 @@ import { setInputValue, addInputValue } from "./actions";
 import { debugRefact } from "../../debugConfig";
 import { useDraftMessage } from "../../hooks/useDraftMessage";
 import { sendIdeMessagesToCurrentChat } from "../../features/Chat/Thread/actions";
-import { useThreadId } from "../../features/Chat/Thread";
+import { selectIsBuddyChat, useThreadId } from "../../features/Chat/Thread";
 import { isHostMessage } from "../../utils/isHostMessage";
 
 export function useInputValue(
   uncheckCheckboxes: () => void,
-  enabled = true,
 ): [
   string,
   React.Dispatch<React.SetStateAction<string>>,
@@ -23,6 +22,9 @@ export function useInputValue(
   const dispatch = useAppDispatch();
   const pages = useAppSelector(selectPages);
   const chatId = useThreadId();
+  const isBuddyChat = useAppSelector((state) =>
+    selectIsBuddyChat(state, chatId),
+  );
 
   const setUpIfNotReady = useCallback(() => {
     const lastPage = pages[pages.length - 1];
@@ -41,7 +43,7 @@ export function useInputValue(
     [setUpIfNotReady, uncheckCheckboxes],
   );
 
-  const { value, setValue } = useDraftMessage(handleQueuedMessageEdit, enabled);
+  const { value, setValue } = useDraftMessage(handleQueuedMessageEdit);
 
   const handleEvent = useCallback(
     (event: MessageEvent) => {
@@ -105,11 +107,11 @@ export function useInputValue(
   );
 
   useEffect(() => {
-    if (!enabled) return;
+    if (isBuddyChat) return;
     window.addEventListener("message", handleEvent);
 
     return () => window.removeEventListener("message", handleEvent);
-  }, [handleEvent, enabled]);
+  }, [handleEvent, isBuddyChat]);
 
   return [value, setValue, isSendImmediately, setIsSendImmediately];
 }

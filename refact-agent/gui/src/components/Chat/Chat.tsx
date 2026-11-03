@@ -14,6 +14,7 @@ import {
   selectPreventSendById,
   selectQueuedItemsById,
   selectIsBuddyChat,
+  selectIsCompanionChat,
   useThreadId,
 } from "../../features/Chat/Thread";
 import { DropzoneProvider } from "../Dropzone";
@@ -43,11 +44,6 @@ import { ChatActivityStatus } from "../ChatActivity/ChatActivityStatus";
 import { useBottomDockClearance } from "./useBottomDockClearance";
 
 export type ChatProps = {
-  embedded?: boolean;
-  composer?: Pick<
-    ChatFormProps,
-    "draft" | "submissionDisabled" | "settingsLocked" | "onSubmit"
-  >;
   host: Config["host"];
   tabbed: Config["tabbed"];
   backFromChat: () => void;
@@ -60,8 +56,6 @@ export const Chat: React.FC<ChatProps> = ({
   style,
   unCalledTools,
   maybeSendToSidebar,
-  embedded = false,
-  composer,
 }) => {
   const dispatch = useAppDispatch();
 
@@ -82,6 +76,9 @@ export const Chat: React.FC<ChatProps> = ({
   const isBuddyChat = useAppSelector((state) =>
     selectIsBuddyChat(state, chatId),
   );
+  const isCompanionChat = useAppSelector((state) =>
+    selectIsCompanionChat(state, chatId),
+  );
   const browserOversizeInfo = useAppSelector((state) =>
     selectBrowserContextOversize(state, chatId),
   );
@@ -95,7 +92,7 @@ export const Chat: React.FC<ChatProps> = ({
     panelsForced,
   );
   const showTerminalWorkbench =
-    !embedded &&
+    !isBuddyChat &&
     workspaceAvailability.terminal &&
     (!workspaceAvailability.dock || workspaceDock.open);
 
@@ -177,7 +174,9 @@ export const Chat: React.FC<ChatProps> = ({
             <ChatContent
               onRetry={handleRetry}
               onStopStreaming={handleAbort}
-              onRetryGeneration={handleRetryGeneration}
+              onRetryGeneration={
+                isCompanionChat ? undefined : handleRetryGeneration
+              }
             />
           </Flex>
 
@@ -228,12 +227,11 @@ export const Chat: React.FC<ChatProps> = ({
                   </div>
                 )}
                 <div className={styles.dockGroup}>
-                  <TaskProgressWidget />
+                  {!isCompanionChat && <TaskProgressWidget />}
                   <ChatForm
                     key={chatId}
                     embedded
                     onSubmit={handleSubmit}
-                    {...composer}
                     onClose={maybeSendToSidebar}
                   />
                 </div>

@@ -381,7 +381,6 @@ export function useChatCommandRequest(
     cancelQueuedRequest,
     run,
     isCurrent,
-    hasUnresolvedRequest: () => active.current !== null,
     pending,
     blocked: pending || uncertain,
     uncertain,

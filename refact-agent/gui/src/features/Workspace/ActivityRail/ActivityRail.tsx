@@ -10,6 +10,7 @@ import { skipToken } from "@reduxjs/toolkit/query";
 import { useCallback, useId } from "react";
 
 import { Badge, IconButton, Tooltip } from "../../../components/ui";
+import { BuddyRailButton } from "../../Buddy/Companion/BuddyRailButton";
 import { useAppDispatch, useAppSelector } from "../../../hooks";
 import { useGetGitStatusQuery } from "../../../services/refact/gitRead";
 import {
@@ -167,6 +168,7 @@ export function ActivityRail() {
           </div>
         );
       })}
+      <BuddyRailButton className={styles.bottomSlot} />
     </nav>
   );
 }

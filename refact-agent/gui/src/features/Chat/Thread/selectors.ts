@@ -1818,6 +1818,13 @@ export const selectThreadWorktreeById = (
 export const selectIsBuddyChat = (state: RootState, chatId: string): boolean =>
   !!state.chat.threads[chatId]?.thread.buddy_meta?.is_buddy_chat;
 
+export const selectIsCompanionChat = (
+  state: RootState,
+  chatId: string,
+): boolean =>
+  state.chat.threads[chatId]?.thread.buddy_meta?.buddy_chat_kind ===
+  "companion";
+
 export const selectWaitingInterruptibleById = (
   state: RootState,
   chatId: string,
