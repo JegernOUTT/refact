@@ -779,7 +779,10 @@ pub(crate) mod tests {
         let root = tempfile::tempdir().unwrap();
         let project = ProjectIdentity {
             project_id: "fixture".into(),
-            canonical_root: root.path().to_string_lossy().into_owned(),
+            canonical_root: dunce::canonicalize(root.path())
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
         };
         let worker = refact_buddy_core::operator_types::WorkerIdentity {
             worker_id: "fixture".into(),
@@ -983,7 +986,10 @@ pub(crate) mod tests {
         let root = tempfile::tempdir().unwrap();
         let project = ProjectIdentity {
             project_id: "fixture".into(),
-            canonical_root: root.path().to_string_lossy().into_owned(),
+            canonical_root: dunce::canonicalize(root.path())
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
         };
         let worker = refact_buddy_core::operator_types::WorkerIdentity {
             worker_id: "fixture".into(),

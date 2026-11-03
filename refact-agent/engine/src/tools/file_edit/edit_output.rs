@@ -256,6 +256,11 @@ mod tests {
             message.extra["edit_result"],
             json!({"version":1,"model_content":"FINAL\n1 | final"})
         );
+        let projected = refact_core::edit_results::project_edit_result(&message);
+        assert_eq!(projected.content.content_text_only(), "FINAL\n1 | final");
+        assert_eq!(projected.tool_call_id, "call");
+        assert_eq!(projected.extra["diff_state"], json!("applied"));
+        assert_eq!(message.content, original.content);
     }
 
     #[test]

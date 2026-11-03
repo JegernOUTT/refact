@@ -45,6 +45,7 @@ async fn landing_fixture() -> LandingFixture {
     let root = temp.path().join("repo");
     std::fs::create_dir(&root).unwrap();
     git(&root, &["init", "-b", "main"]);
+    git(&root, &["config", "core.autocrlf", "false"]);
     git(&root, &["config", "user.name", "Fixture"]);
     git(&root, &["config", "user.email", "fixture@example.invalid"]);
     std::fs::write(root.join(".gitignore"), ".refact/\n").unwrap();
