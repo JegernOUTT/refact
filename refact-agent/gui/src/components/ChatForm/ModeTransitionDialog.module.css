@@ -1,19 +1,13 @@
-.dialogContent {
-  transform: translateZ(0);
+.error {
+  margin: 0;
+  padding: var(--rf-space-1) var(--rf-space-2);
+  color: var(--rf-color-danger);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+  overflow-wrap: anywhere;
 }
 
-.callout {
-  margin-top: var(--rf-space-3);
-}
-
-.loadingContainer {
-  padding: var(--rf-space-6);
-}
-
-.spinnerIcon {
-  display: block;
-  transform-box: fill-box;
-  transform-origin: center;
+.spinner {
   animation: modeTransitionSpin var(--rf-dur-slow) linear infinite;
 }
 
@@ -24,8 +18,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .spinnerIcon {
+  .spinner {
     animation: none;
-    transition: none;
   }
 }

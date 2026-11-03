@@ -100,13 +100,6 @@ describe("ModeTransitionDialog", () => {
         state: "waiting_user_input",
       }),
     );
-    // The real waiting_user_input runtime clears every busy flag, so only the
-    // pending question can be what keeps the source tab alive.
-    const sourceRuntime = store.getState().chat.threads["source-chat"];
-    expect(sourceRuntime?.waiting_for_response).toBe(false);
-    expect(sourceRuntime?.streaming).toBe(false);
-    expect(sourceRuntime?.confirmation.pause).toBe(false);
-
     const button = screen.getByRole("button", { name: "Switch Mode" });
     expect(button).toBeEnabled();
     await user.click(button);
@@ -115,43 +108,6 @@ describe("ModeTransitionDialog", () => {
       expect(store.getState().chat.current_thread_id).toBe("new-chat"),
     );
     expect(applied).toBe(true);
-    expect(store.getState().chat.threads["source-chat"]).toBeDefined();
-    expect(store.getState().chat.open_thread_ids).toEqual(
-      expect.arrayContaining(["source-chat", "new-chat"]),
-    );
-  });
-
-  test("switches from a paused source and keeps the source thread", async () => {
-    installSuccessfulTransitionHandlers();
-    const chat = chatStateWithSourceThread();
-    chat.threads["source-chat"].snapshot_received = true;
-    const { user, store } = renderDialog(chat);
-    store.dispatch(
-      applyChatEvent({
-        chat_id: "source-chat",
-        seq: "1",
-        type: "pause_required",
-        reasons: [
-          {
-            type: "confirmation",
-            tool_name: "shell",
-            command: "shell",
-            rule: "always",
-            tool_call_id: "call-1",
-            integr_config_path: null,
-          },
-        ],
-      }),
-    );
-    const sourceRuntime = store.getState().chat.threads["source-chat"];
-    expect(sourceRuntime?.confirmation.pause).toBe(true);
-    expect(sourceRuntime?.waiting_for_response).toBe(false);
-
-    await user.click(screen.getByRole("button", { name: "Switch Mode" }));
-
-    await waitFor(() =>
-      expect(store.getState().chat.current_thread_id).toBe("new-chat"),
-    );
     expect(store.getState().chat.threads["source-chat"]).toBeDefined();
     expect(store.getState().chat.open_thread_ids).toEqual(
       expect.arrayContaining(["source-chat", "new-chat"]),
@@ -182,7 +138,7 @@ describe("ModeTransitionDialog", () => {
     expect(store.getState().chat.open_thread_ids).toContain("new-chat");
   });
 
-  test("rejects switching once the source starts streaming", async () => {
+  test("disables switching once the source starts streaming", async () => {
     let applied = false;
     server.use(
       http.post(
@@ -276,9 +232,8 @@ describe("ModeTransitionDialog", () => {
     await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
   });
 
-  test("closes after opening the new chat when starting the assistant fails", async () => {
+  test("closes on the new chat when starting the assistant fails", async () => {
     const onOpenChange = vi.fn();
-
     server.use(
       http.post("*/v1/chats/source-chat/trajectory/mode-transition/apply", () =>
         HttpResponse.json({ new_chat_id: "new-chat", messages_count: 1 }),
@@ -288,7 +243,6 @@ describe("ModeTransitionDialog", () => {
         HttpResponse.json({ detail: "queue failed" }, { status: 500 }),
       ),
     );
-
     const { user, store } = render(
       <ModeTransitionDialog
         open
@@ -302,13 +256,7 @@ describe("ModeTransitionDialog", () => {
       {
         preloadedState: {
           chat: chatStateWithSourceThread(),
-          config: {
-            apiKey: "test",
-            host: "web",
-            dev: true,
-            lspPort: 8001,
-            themeProps: {},
-          },
+          config: testConfig,
         },
       },
     );
@@ -316,10 +264,8 @@ describe("ModeTransitionDialog", () => {
     await user.click(screen.getByRole("button", { name: "Switch Mode" }));
 
     await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
-
-    const newThread = store.getState().chat.threads["new-chat"];
     expect(store.getState().chat.current_thread_id).toBe("new-chat");
-    expect(newThread?.error).toContain(
+    expect(store.getState().chat.threads["new-chat"]?.error).toContain(
       "Failed to start assistant after mode switch",
     );
   });

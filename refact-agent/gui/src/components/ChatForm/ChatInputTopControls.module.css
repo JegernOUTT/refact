@@ -1,34 +1,21 @@
 .controlsGroup {
   display: flex;
+  min-width: 0;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--rf-space-1);
-  min-width: 0;
 }
 
-.accent > span > svg {
+.accent > svg {
   color: var(--rf-color-accent);
 }
 
-.dangerIcon > span > svg {
-  color: var(--rf-color-danger);
-}
-
-.divider {
-  margin: 0 var(--rf-space-1);
-  color: var(--rf-color-faint);
-  font-size: var(--rf-text-2);
-  user-select: none;
-}
-
-.projectInfoControl {
-  display: inline-flex;
-  flex-shrink: 0;
-}
-
 .selectedLinesGroup {
-  display: flex;
+  display: inline-flex;
+  height: var(--rf-control-h-icon-sm);
   align-items: center;
   gap: var(--rf-space-1);
-  height: var(--rf-control-h-sm);
+  padding-left: var(--rf-space-2);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
 }

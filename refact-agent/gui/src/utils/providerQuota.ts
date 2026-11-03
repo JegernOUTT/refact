@@ -202,11 +202,35 @@ export function formatLimitWindowSeconds(
   return seconds === 1 ? "1 second" : `${seconds} seconds`;
 }
 
+const RESET_UNITS: readonly (readonly [number, string])[] = [
+  [86_400, "d"],
+  [3_600, "h"],
+  [60, "m"],
+];
+
+function formatApproxDuration(seconds: number): string {
+  const parts: string[] = [];
+  let rest = Math.round(seconds);
+  for (const [size, label] of RESET_UNITS) {
+    if (rest >= size) {
+      parts.push(`${Math.floor(rest / size)}${label}`);
+      rest %= size;
+    }
+    if (parts.length === 2) break;
+  }
+  return parts.join(" ");
+}
+
 export function formatResetAfterSeconds(
   seconds: number | null | undefined,
 ): string | null {
-  const duration = formatLimitWindowSeconds(seconds);
-  return duration ? `Resets in ${duration}` : null;
+  const exact = formatLimitWindowSeconds(seconds);
+  if (!exact || typeof seconds !== "number") return null;
+  const duration =
+    seconds < 3_600 || seconds % 60 === 0
+      ? exact
+      : formatApproxDuration(seconds);
+  return `Resets in ${duration}`;
 }
 
 export function formatUsagePercent(value: number): string {

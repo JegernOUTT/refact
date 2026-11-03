@@ -1,12 +1,15 @@
+import { Card, Flex, HoverCard, Text } from "../LongTailPrimitives";
+import { Popover } from "../ui";
 import {
-  Card,
-  Flex,
-  HoverCard,
-  Text,
-  Box,
-  Popover,
-} from "../LongTailPrimitives";
-import { Tabs } from "../ui";
+  ComposerTrigger,
+  KitHeader,
+  KitKeyValue,
+  KitPanel,
+  KitProgress,
+  KitSection,
+  KitTabs,
+  kit,
+} from "../ComposerKit";
 import classNames from "classnames";
 import React, { useMemo, useState } from "react";
 
@@ -59,7 +62,12 @@ const CircularProgress: React.FC<CircularProgressProps> = ({
   const isOverflown = percentage >= 90;
 
   return (
-    <svg width={size} height={size} className={styles.circularProgress}>
+    <svg
+      width={size}
+      height={size}
+      viewBox={`0 0 ${size} ${size}`}
+      className={styles.circularProgress}
+    >
       <circle
         className={styles.circularProgressBg}
         cx={size / 2}
@@ -148,109 +156,94 @@ const InlineHoverTriggerContent: React.FC<{ messageTokens: number }> = ({
   );
 };
 
-const UsdDisplayRow: React.FC<{ label: string; value: number | undefined }> = ({
-  label,
-  value,
-}) => (
-  <Flex align="center" justify="between" width="100%" gap="4">
-    <Text size="1" weight="bold">
-      {label}
-    </Text>
-    <Text size="1">{formatUsd(value)}</Text>
-  </Flex>
-);
+function contextTone(percentage: number): "warning" | "danger" | undefined {
+  if (percentage >= 90) return "danger";
+  if (percentage >= 70) return "warning";
+  return undefined;
+}
 
-const UsdHoverContent: React.FC<{
-  totalUsd: number;
-  promptUsd?: number;
-  generatedUsd?: number;
-  cacheReadUsd?: number;
-  cacheCreationUsd?: number;
-}> = ({
-  totalUsd,
-  promptUsd,
-  generatedUsd,
-  cacheReadUsd,
-  cacheCreationUsd,
-}) => {
-  return (
-    <Flex direction="column" gap="2">
-      <Flex align="center" justify="between" width="100%" gap="4">
-        <Text size="2" weight="bold">
-          Total cost
-        </Text>
-        <Text size="2">{formatUsd(totalUsd)}</Text>
-      </Flex>
-      {promptUsd !== undefined && promptUsd > 0 && (
-        <UsdDisplayRow label="Prompt" value={promptUsd} />
-      )}
-      {generatedUsd !== undefined && generatedUsd > 0 && (
-        <UsdDisplayRow label="Completion" value={generatedUsd} />
-      )}
-      {cacheReadUsd !== undefined && cacheReadUsd > 0 && (
-        <UsdDisplayRow label="Cache read" value={cacheReadUsd} />
-      )}
-      {cacheCreationUsd !== undefined && cacheCreationUsd > 0 && (
-        <UsdDisplayRow label="Cache creation" value={cacheCreationUsd} />
-      )}
-    </Flex>
-  );
-};
-
-const TokensHoverContent: React.FC<{
+const ContextSummary: React.FC<{
   currentSessionTokens: number;
   maxContextTokens: number;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
+  totalUsd?: number;
+  usdPrompt?: number;
+  usdGenerated?: number;
+  usdCacheRead?: number;
+  usdCacheCreation?: number;
 }> = ({
   currentSessionTokens,
   maxContextTokens,
   inputTokens,
   outputTokens,
-  cacheReadTokens,
-  cacheCreationTokens,
+  cacheReadTokens = 0,
+  cacheCreationTokens = 0,
+  totalUsd,
+  usdPrompt,
+  usdGenerated,
+  usdCacheRead,
+  usdCacheCreation,
 }) => {
-  const percentage =
-    maxContextTokens > 0
-      ? Math.round((currentSessionTokens / maxContextTokens) * 100)
-      : 0;
-
+  const usdRows = [
+    ["Prompt", usdPrompt],
+    ["Completion", usdGenerated],
+    ["Cache read", usdCacheRead],
+    ["Cache creation", usdCacheCreation],
+  ] as const;
   return (
-    <Flex direction="column" gap="2">
-      <Flex align="center" justify="between" width="100%" gap="4">
-        <Text size="2" weight="bold">
-          Context usage
-        </Text>
-        <Text size="2">{percentage}%</Text>
-      </Flex>
-      <TokenDisplay label="Current" value={currentSessionTokens} />
-      <TokenDisplay label="Maximum" value={maxContextTokens} />
-      {(inputTokens > 0 || outputTokens > 0) && (
+    <>
+      <KitKeyValue
+        label="Current"
+        value={formatNumberToFixed(currentSessionTokens)}
+      />
+      <KitKeyValue
+        label="Maximum"
+        value={formatNumberToFixed(maxContextTokens)}
+      />
+      {inputTokens > 0 || outputTokens > 0 ? (
         <>
-          <Box my="1" style={{ borderTop: "1px solid var(--rf-border)" }} />
-          <Text size="1" weight="bold" color="gray">
-            Total tokens
-          </Text>
-          {inputTokens > 0 && (
-            <TokenDisplay label="Input" value={inputTokens} />
-          )}
-          {(cacheReadTokens ?? 0) > 0 && (
-            <TokenDisplay label="Cache read" value={cacheReadTokens ?? 0} />
-          )}
-          {(cacheCreationTokens ?? 0) > 0 && (
-            <TokenDisplay
-              label="Cache creation"
-              value={cacheCreationTokens ?? 0}
+          <KitSection>Total tokens</KitSection>
+          {inputTokens > 0 ? (
+            <KitKeyValue
+              label="Input"
+              value={formatNumberToFixed(inputTokens)}
             />
-          )}
-          {outputTokens > 0 && (
-            <TokenDisplay label="Output" value={outputTokens} />
+          ) : null}
+          {cacheReadTokens > 0 ? (
+            <KitKeyValue
+              label="Cache read"
+              value={formatNumberToFixed(cacheReadTokens)}
+            />
+          ) : null}
+          {cacheCreationTokens > 0 ? (
+            <KitKeyValue
+              label="Cache creation"
+              value={formatNumberToFixed(cacheCreationTokens)}
+            />
+          ) : null}
+          {outputTokens > 0 ? (
+            <KitKeyValue
+              label="Output"
+              value={formatNumberToFixed(outputTokens)}
+            />
+          ) : null}
+        </>
+      ) : null}
+      {totalUsd !== undefined && totalUsd > 0 ? (
+        <>
+          <KitSection>Cost</KitSection>
+          <KitKeyValue label="Total" value={formatUsd(totalUsd)} />
+          {usdRows.map(([label, value]) =>
+            value !== undefined && value > 0 ? (
+              <KitKeyValue key={label} label={label} value={formatUsd(value)} />
+            ) : null,
           )}
         </>
-      )}
-    </Flex>
+      ) : null}
+    </>
   );
 };
 
@@ -268,100 +261,63 @@ const DefaultHoverTriggerContent: React.FC<{
   usdCacheCreation?: number;
   tokenMap?: import("../../services/refact/chat").TokenMap | null;
   onOpenChange?: (open: boolean) => void;
-}> = ({
-  currentSessionTokens,
-  maxContextTokens,
-  totalUsd,
-  inputTokens,
-  outputTokens,
-  cacheReadTokens,
-  cacheCreationTokens,
-  usdPrompt,
-  usdGenerated,
-  usdCacheRead,
-  usdCacheCreation,
-  tokenMap,
-  onOpenChange,
-}) => {
-  const hasUsd = totalUsd !== undefined && totalUsd > 0;
-  const showUsd = hasUsd;
-  const [tokenDetailsTab, setTokenDetailsTab] = useState("summary");
-  const tokenDetailsActiveIndex = tokenDetailsTab === "map" ? 1 : 0;
+}> = ({ tokenMap, onOpenChange, ...summary }) => {
+  const [tab, setTab] = useState("summary");
+  const { currentSessionTokens, maxContextTokens } = summary;
+  const percentage =
+    maxContextTokens > 0
+      ? Math.round((currentSessionTokens / maxContextTokens) * 100)
+      : 0;
 
   return (
-    <Flex align="center" gap="3" className={styles.contextSummary}>
-      {showUsd && (
-        <HoverCard.Root>
-          <HoverCard.Trigger asChild>
-            <Flex align="center" gap="1" className={styles.contextCost}>
-              <Text size="1">{formatUsd(totalUsd)}</Text>
-            </Flex>
-          </HoverCard.Trigger>
-          <HoverCard.Content size="1" side="top" align="center">
-            <UsdHoverContent
-              totalUsd={totalUsd}
-              promptUsd={usdPrompt}
-              generatedUsd={usdGenerated}
-              cacheReadUsd={usdCacheRead}
-              cacheCreationUsd={usdCacheCreation}
-            />
-          </HoverCard.Content>
-        </HoverCard.Root>
-      )}
-      <Popover.Root onOpenChange={onOpenChange}>
-        <Popover.Trigger asChild>
-          <button
-            type="button"
-            className={styles.providerIndicatorTrigger}
-            aria-label="Context usage details"
-          >
-            <Flex align="center" gap="1">
-              <CircularProgress
-                value={maxContextTokens > 0 ? currentSessionTokens : 0}
-                max={maxContextTokens > 0 ? maxContextTokens : 1}
-                size={18}
-                strokeWidth={2.5}
-              />
-              <Text size="1" color="gray" className={styles.contextTokenLabel}>
-                {formatNumberToFixed(currentSessionTokens)}
-              </Text>
-            </Flex>
-          </button>
-        </Popover.Trigger>
-        <Popover.Content
-          size="1"
-          side="top"
-          align="center"
-          maxWidth="min(360px, calc(100vw - var(--rf-space-4)))"
-          maxHeight="min(520px, calc(100dvh - var(--rf-space-5)))"
-          className={styles.tokenDetailsPopover}
-        >
-          <Tabs value={tokenDetailsTab} onValueChange={setTokenDetailsTab}>
-            <Tabs.List
-              activeIndex={tokenDetailsActiveIndex}
-              itemCount={2}
-              className={styles.tokenDetailsTabsList}
-            >
-              <Tabs.Trigger value="summary">Summary</Tabs.Trigger>
-              <Tabs.Trigger value="map">Breakdown</Tabs.Trigger>
-            </Tabs.List>
-            <Tabs.Content value="summary">
-              <TokensHoverContent
-                currentSessionTokens={currentSessionTokens}
-                maxContextTokens={maxContextTokens}
-                inputTokens={inputTokens}
-                outputTokens={outputTokens}
-                cacheReadTokens={cacheReadTokens}
-                cacheCreationTokens={cacheCreationTokens}
-              />
-            </Tabs.Content>
-            <Tabs.Content value="map">
-              <TokensMapContent tokenMap={tokenMap} />
-            </Tabs.Content>
-          </Tabs>
-        </Popover.Content>
-      </Popover.Root>
-    </Flex>
+    <Popover responsive={false} onOpenChange={onOpenChange}>
+      <Popover.Trigger asChild>
+        <ComposerTrigger aria-label="Context usage details">
+          <CircularProgress
+            value={maxContextTokens > 0 ? currentSessionTokens : 0}
+            max={maxContextTokens > 0 ? maxContextTokens : 1}
+            size={18}
+            strokeWidth={2.5}
+          />
+          <span className={styles.contextTokenLabel}>
+            {formatNumberToFixed(currentSessionTokens)}
+          </span>
+        </ComposerTrigger>
+      </Popover.Trigger>
+      <Popover.Content
+        className={kit.popover}
+        side="top"
+        align="end"
+        maxWidth="300px"
+        maxHeight="min(520px, calc(100dvh - var(--rf-space-5)))"
+      >
+        <KitPanel>
+          <KitHeader title="Context usage" meta={`${percentage}%`} metaStrong />
+          <KitProgress
+            value={percentage}
+            tone={contextTone(percentage)}
+            label="Context usage"
+          />
+          <KitTabs
+            value={tab}
+            onValueChange={setTab}
+            label="Context details"
+            tabs={[
+              {
+                value: "summary",
+                label: "Summary",
+                content: <ContextSummary {...summary} />,
+              },
+              {
+                value: "map",
+                label: "Breakdown",
+                content: <TokensMapContent tokenMap={tokenMap} />,
+              },
+            ]}
+          />
+        </KitPanel>
+      </Popover.Content>
+    </Popover>
   );
 };
 

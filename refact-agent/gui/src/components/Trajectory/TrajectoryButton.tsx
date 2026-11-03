@@ -1,7 +1,8 @@
 import React, { useState } from "react";
-import { HoverCard, Popover, Text } from "../LongTailPrimitives";
+import { Popover } from "../LongTailPrimitives";
 import { Archive } from "lucide-react";
-import { Button, IconButton } from "../ui";
+import { Button } from "../ui";
+import { ComposerTrigger, KitTooltip } from "../ComposerKit";
 import { TrajectoryPopoverContent } from "./TrajectoryPopover";
 import type { TrajectoryTab } from "../../hooks/useTrajectoryOps";
 
@@ -62,25 +63,17 @@ export const TrajectoryButton: React.FC<TrajectoryButtonProps> = ({
 
   return (
     <Popover.Root open={open} onOpenChange={handleOpenChange}>
-      <HoverCard.Root openDelay={300}>
-        <HoverCard.Trigger asChild>
-          <Popover.Trigger asChild>
-            <IconButton
-              data-testid="trajectory-button"
-              aria-label="Compress or rebuild context"
-              disabled={disabled}
-              icon={Archive}
-              size="sm"
-              variant="ghost"
-            />
-          </Popover.Trigger>
-        </HoverCard.Trigger>
-        <HoverCard.Content size="1" side="bottom">
-          <Text as="p" size="2">
-            Compress or rebuild context
-          </Text>
-        </HoverCard.Content>
-      </HoverCard.Root>
+      <KitTooltip label="Compress or rebuild context">
+        <Popover.Trigger asChild>
+          <ComposerTrigger
+            icon={Archive}
+            iconOnly
+            data-testid="trajectory-button"
+            aria-label="Compress or rebuild context"
+            disabled={disabled}
+          />
+        </Popover.Trigger>
+      </KitTooltip>
       {content}
     </Popover.Root>
   );

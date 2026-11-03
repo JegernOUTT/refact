@@ -60,7 +60,7 @@ const TOTAL_TOKENS = 300;
 const ONE_BLOCK_TOKENS = 100;
 
 const totalText = (tokens: number) =>
-  new RegExp(`Total: ~${tokens.toLocaleString()} tokens`);
+  new RegExp(`Total ~${tokens.toLocaleString()} tokens`);
 
 type Counters = {
   get: number;
@@ -113,19 +113,18 @@ describe("ProjectInformationDialog", () => {
     counters = setUpHandlers();
   });
 
-  test("toggling a file switch is optimistic and issues no preview call", async () => {
+  test("toggling a file is optimistic and issues no preview call", async () => {
     const { user } = renderDialog();
     await waitForFirstPreview();
     const previewsAfterMount = counters.preview;
     expect(previewsAfterMount).toBe(1);
 
-    const fileSwitch = screen.getByRole("switch", { name: "AGENTS.md" });
-    expect(fileSwitch).toHaveAttribute("aria-checked", "true");
+    const fileCheck = screen.getByRole("checkbox", { name: "AGENTS.md" });
+    expect(fileCheck).toBeChecked();
 
-    await user.click(fileSwitch);
+    await user.click(fileCheck);
 
-    // flips immediately, without waiting for any round-trip
-    expect(fileSwitch).toHaveAttribute("aria-checked", "false");
+    expect(fileCheck).not.toBeChecked();
     expect(
       screen.getByText(totalText(TOTAL_TOKENS - ONE_BLOCK_TOKENS)),
     ).toBeInTheDocument();
@@ -159,7 +158,7 @@ describe("ProjectInformationDialog", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(counters.save).toBe(1));
-    expect(await screen.findByText("Configuration saved!")).toBeInTheDocument();
+    expect(await screen.findByText("Configuration saved")).toBeInTheDocument();
 
     await settle();
     expect(counters.get).toBe(1);

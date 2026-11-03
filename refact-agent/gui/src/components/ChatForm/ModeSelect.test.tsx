@@ -1,6 +1,4 @@
 import React from "react";
-import { readFile } from "node:fs/promises";
-import path from "node:path";
 import { describe, expect, test, beforeEach, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { screen, waitFor } from "../../utils/test-utils";
@@ -112,27 +110,10 @@ describe("ModeSelect", () => {
 
     expect(screen.getByText("Autonomous coding mode")).toBeInTheDocument();
     expect(screen.getByText("Quick answers without edits")).toBeInTheDocument();
-    expect(screen.getByText("editing")).toBeInTheDocument();
+    expect(screen.getByText(/editing/)).toBeInTheDocument();
     expect(screen.getAllByText("12 tools").length).toBeGreaterThan(0);
     expect(screen.getByText("Task Planner")).toBeInTheDocument();
-    expect(screen.getByText("Create new mode...")).toBeInTheDocument();
-  });
-
-  test("keeps popover item focus and selection inside the shared content column", async () => {
-    const css = await readFile(
-      path.resolve(__dirname, "ModeSelect.module.css"),
-      "utf8",
-    );
-    const content =
-      css.match(/\.content,\n\.content > div \{[^}]+\}/)?.[0] ?? "";
-    const item = css.match(/\.item,\n\.addModeItem \{[^}]+\}/)?.[0] ?? "";
-
-    expect(content).toContain("min-width: 0;");
-    expect(item).toContain("width: 100%;");
-    expect(item).toContain("border-radius: 0;");
-
-    const selected = css.match(/\.itemSelected \{[^}]+\}/)?.[0] ?? "";
-    expect(selected).toContain("background: var(--rf-surface-2);");
+    expect(screen.getByText("Create mode")).toBeInTheDocument();
   });
 
   test("selecting a mode before chat starts applies mode and thread defaults directly", async () => {
@@ -211,13 +192,13 @@ describe("ModeSelect", () => {
     expect(plannerTransitionCalled).toBe(false);
   });
 
-  test("Create new mode navigates to customization modes page", async () => {
+  test("Create mode navigates to customization modes page", async () => {
     const { user, store } = renderModeSelect(
       <ModeSelect selectedMode="agent" onModeChange={vi.fn()} />,
     );
 
     await user.click(await screen.findByRole("button", { name: /Agent/ }));
-    await user.click(screen.getByText("Create new mode..."));
+    await user.click(screen.getByText("Create mode"));
 
     expect(store.getState().pages.at(-1)).toEqual({
       name: "customization",

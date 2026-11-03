@@ -1,7 +1,16 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Box, Flex, Text } from "@radix-ui/themes";
-import { Check, Copy, Info } from "lucide-react";
-import { Button, IconButton, Popover } from "../ui";
+import { Copy, Info } from "lucide-react";
+import { Popover } from "../ui";
+import {
+  ComposerTrigger,
+  KitDivider,
+  KitHeader,
+  KitKeyValue,
+  KitPanel,
+  KitRow,
+  KitStaticRow,
+  kit,
+} from "../ComposerKit";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import {
   useGetTrajectoryPathQuery,
@@ -12,7 +21,6 @@ import { trajectoryDataToChatThread } from "../../services/refact/trajectories";
 import { copyChatHistoryToClipboard } from "../../utils/copyChatHistoryToClipboard";
 import { useAppSelector } from "../../hooks/useAppSelector";
 import { selectThreadById } from "../../features/Chat/Thread/selectors";
-import styles from "./ThreadInfoButton.module.css";
 
 type ThreadInfoButtonProps = {
   chatId: string | null;
@@ -56,32 +64,6 @@ const useCopyStatus = (): {
   return { copied, trigger };
 };
 
-const CopyInlineButton: React.FC<{
-  value: string | null;
-  ariaLabel: string;
-  testId: string;
-}> = ({ value, ariaLabel, testId }) => {
-  const { copied, trigger } = useCopyStatus();
-  const handleClick = useCallback(
-    (event: React.MouseEvent) => {
-      event.stopPropagation();
-      if (value) trigger(value);
-    },
-    [value, trigger],
-  );
-  return (
-    <IconButton
-      aria-label={ariaLabel}
-      data-testid={testId}
-      disabled={!value}
-      icon={copied ? Check : Copy}
-      onClick={handleClick}
-      size="sm"
-      variant={copied ? "primary" : "ghost"}
-    />
-  );
-};
-
 export const ThreadInfoButton: React.FC<ThreadInfoButtonProps> = ({
   chatId,
   disabled,
@@ -93,6 +75,8 @@ export const ThreadInfoButton: React.FC<ThreadInfoButtonProps> = ({
   );
 
   const isDisabled = disabled === true || !chatId;
+  const idCopy = useCopyStatus();
+  const pathCopy = useCopyStatus();
 
   const handleOpenChange = useCallback(
     (next: boolean) => {
@@ -174,82 +158,55 @@ export const ThreadInfoButton: React.FC<ThreadInfoButtonProps> = ({
   return (
     <Popover open={open && !isDisabled} onOpenChange={handleOpenChange}>
       <Popover.Trigger asChild>
-        <IconButton
+        <ComposerTrigger
+          icon={Info}
+          iconOnly
           aria-label="Thread info"
           data-testid="thread-info-button"
           disabled={isDisabled}
-          icon={Info}
-          size="sm"
-          variant="ghost"
         />
       </Popover.Trigger>
       <Popover.Content
         side="top"
         align="end"
         sideOffset={8}
-        className={styles.popoverContent}
-        data-testid="thread-info-popover"
+        maxWidth="340px"
+        className={kit.popover}
       >
-        <Flex direction="column" gap="3" className={styles.infoStack}>
-          <Flex direction="column" gap="1">
-            <Text size="1" color="gray">
-              Thread id
-            </Text>
-            <Flex align="center" gap="2">
-              <Box className={styles.valueText}>
-                <Text size="1" className={styles.monoText}>
-                  {chatId ?? "—"}
-                </Text>
-              </Box>
-              <CopyInlineButton
-                value={chatId}
-                ariaLabel="Copy thread id"
-                testId="copy-thread-id"
-              />
-            </Flex>
-          </Flex>
-
-          <Flex direction="column" gap="1">
-            <Text size="1" color="gray">
-              Thread JSON path
-            </Text>
-            <Flex align="center" gap="2">
-              <Box className={styles.valueText}>
-                <Text
-                  size="1"
-                  className={styles.monoText}
-                  color={pathError ? "red" : undefined}
-                >
-                  {pathError ??
-                    (isLoadingPath ? "Loading…" : threadPath ?? "—")}
-                </Text>
-              </Box>
-              <CopyInlineButton
-                value={threadPath}
-                ariaLabel="Copy thread JSON path"
-                testId="copy-thread-path"
-              />
-            </Flex>
-          </Flex>
-
-          <Flex direction="column" gap="1">
-            <Button
-              leftIcon={Copy}
-              onClick={handleCopyWholeThread}
-              disabled={copyAllDisabled}
-              data-testid="copy-thread-json"
-              size="sm"
-              variant="soft"
-            >
-              Copy whole thread as JSON
-            </Button>
-            {copyAllError && (
-              <Text size="1" color="red" data-testid="copy-thread-json-error">
-                {copyAllError}
-              </Text>
-            )}
-          </Flex>
-        </Flex>
+        <KitPanel data-testid="thread-info-popover">
+          <KitHeader title="Thread" />
+          <KitKeyValue
+            mono
+            label="Thread id"
+            value={chatId ?? "—"}
+            title={chatId ?? undefined}
+            copyLabel="Copy thread id"
+            copied={idCopy.copied}
+            onCopy={chatId ? () => idCopy.trigger(chatId) : undefined}
+          />
+          <KitKeyValue
+            mono
+            label="JSON path"
+            value={
+              pathError ?? (isLoadingPath ? "Loading…" : threadPath ?? "—")
+            }
+            title={threadPath ?? undefined}
+            tone={pathError ? "danger" : undefined}
+            copyLabel="Copy thread JSON path"
+            copied={pathCopy.copied}
+            onCopy={threadPath ? () => pathCopy.trigger(threadPath) : undefined}
+          />
+          <KitDivider />
+          <KitRow
+            label="Copy thread as JSON"
+            disabled={copyAllDisabled}
+            onClick={handleCopyWholeThread}
+            trailing={<Copy aria-hidden="true" size={13} />}
+          />
+          {copyAllError ? (
+            <KitStaticRow tone="danger" label={copyAllError} />
+          ) : null}
+        </KitPanel>
       </Popover.Content>
     </Popover>
   );

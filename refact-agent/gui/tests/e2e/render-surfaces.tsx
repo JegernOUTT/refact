@@ -127,7 +127,7 @@ const recovery: RecoveryRecord = {
     (_, index) => ({
       at_ms: now + index,
       retry_number: index,
-      outcome: index === 0 ? "failed" : "succeeded",
+      outcome: params.has("history") || index === 0 ? "failed" : "succeeded",
     }),
   ),
 };

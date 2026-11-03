@@ -21,6 +21,7 @@ describe("provider quota formatting", () => {
     expect(formatLimitWindowSeconds(604_800)).toBe("7 days");
     expect(formatLimitWindowSeconds(null)).toBeNull();
     expect(formatResetAfterSeconds(60)).toBe("Resets in 1 minute");
+    expect(formatResetAfterSeconds(560_102)).toBe("Resets in 6d 11h");
   });
 
   it("converts normalized remaining fractions without inventing usage", () => {

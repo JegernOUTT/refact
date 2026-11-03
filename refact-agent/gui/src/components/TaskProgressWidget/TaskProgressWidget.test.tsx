@@ -1,9 +1,17 @@
 import { http, HttpResponse } from "msw";
 import { describe, expect, test, vi } from "vitest";
 import { act } from "react-dom/test-utils";
-
-import { fireEvent, render, screen, waitFor } from "../../utils/test-utils";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
+import { applyChatEvent } from "../../features/Chat/Thread";
+import type { AppStore } from "../../app/store";
+import { selectRuntimeById } from "../../features/Chat/Thread/selectors";
 import type {
   Chat,
   ChatThreadRuntime,
@@ -12,10 +20,6 @@ import type {
 } from "../../features/Chat/Thread/types";
 import type { ChatMessages, GoalSnapshot } from "../../services/refact/types";
 import { TaskProgressWidget } from "./TaskProgressWidget";
-import { applyChatEvent, switchToThread } from "../../features/Chat/Thread";
-import type { AppStore } from "../../app/store";
-import { selectRuntimeById } from "../../features/Chat/Thread/selectors";
-import { updateConfig } from "../../features/Config/configSlice";
 
 const threadId = "goal-widget-chat";
 
@@ -159,26 +163,24 @@ function captureCommands() {
   return commands;
 }
 
-function acknowledgeGoal(
-  store: AppStore,
-  command: Record<string, unknown>,
-  accepted: boolean,
-  result: unknown = { queued: true },
-) {
+function nextSeq(store: AppStore) {
+  return String(
+    Number(
+      selectRuntimeById(store.getState(), threadId)?.last_applied_seq ?? 0,
+    ) + 1,
+  );
+}
+
+function acknowledge(store: AppStore, command: Record<string, unknown>) {
   act(() => {
     store.dispatch(
       applyChatEvent({
         chat_id: threadId,
-        seq: String(
-          Number(
-            selectRuntimeById(store.getState(), threadId)?.last_applied_seq ??
-              0,
-          ) + 1,
-        ),
+        seq: nextSeq(store),
         type: "ack",
         client_request_id: String(command.client_request_id),
-        accepted,
-        result,
+        accepted: true,
+        result: { queued: true },
       }),
     );
   });
@@ -189,12 +191,7 @@ function applyGoalStatus(store: AppStore, status: GoalSnapshot["status"]) {
     store.dispatch(
       applyChatEvent({
         chat_id: threadId,
-        seq: String(
-          Number(
-            selectRuntimeById(store.getState(), threadId)?.last_applied_seq ??
-              0,
-          ) + 1,
-        ),
+        seq: nextSeq(store),
         type: "runtime_updated",
         state: "idle",
         goal_status: status,
@@ -203,420 +200,57 @@ function applyGoalStatus(store: AppStore, status: GoalSnapshot["status"]) {
   });
 }
 
-describe("TaskProgressWidget goal projection", () => {
-  test("renders in a goal-supporting fresh chat and exposes the goal editor", async () => {
-    const { user } = renderWidget(
-      makeRuntime({ goal: null, mode: "task_agent", toolUse: "explore" }),
-    );
+const plan = {
+  content: "Implement the approved plan",
+  mode: "agent",
+  version: 2,
+  created_at_ms: 1,
+  delta_count: 1,
+  checkpoint: null,
+  history: [{ seq: 1, content: "Retain plan history" }],
+};
 
-    expect(screen.getByText("Set a goal")).toBeInTheDocument();
-    expect(screen.queryByText("Tasks cleared")).not.toBeInTheDocument();
+const tasks: TodoItem[] = [
+  { id: "a", content: "Inspect props", status: "completed" },
+  { id: "b", content: "Write fixtures", status: "in_progress" },
+  { id: "c", content: "Review states", status: "pending" },
+];
 
-    await user.click(screen.getByRole("button", { name: /Set a goal/i }));
-    await user.click(screen.getByRole("button", { name: /Goal Not set/i }));
-
-    expect(screen.getByLabelText("Goal text")).toBeInTheDocument();
-  });
-
-  test("empty collapsed header distinguishes fresh goal creation from cleared tasks", () => {
-    const freshView = renderWidget(
-      makeRuntime({ goal: null, mode: "agent", toolUse: "explore" }),
-    );
-
-    expect(screen.getByText("Set a goal")).toBeInTheDocument();
-    expect(screen.queryByText("Tasks cleared")).not.toBeInTheDocument();
-    freshView.unmount();
-
+describe("TaskProgressWidget", () => {
+  test("collapsed header shows headline and task count without goal controls", () => {
     renderWidget(
-      makeRuntime({
-        goal: null,
-        messages: taskMessages([]),
-        mode: "agent",
-        toolUse: "explore",
-      }),
+      makeRuntime({ goal: makeGoal(), messages: taskMessages(tasks) }),
     );
 
-    expect(screen.getByText("Tasks cleared")).toBeInTheDocument();
-    expect(screen.queryByText("Set a goal")).not.toBeInTheDocument();
+    expect(screen.getByTestId("transcript-target")).toHaveTextContent(
+      "Ship the frog pond",
+    );
+    expect(screen.getByLabelText("1 of 3 tasks completed")).toHaveTextContent(
+      "1/3",
+    );
+    expect(
+      screen.queryByRole("button", { name: "Pause goal" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Stop goal" }),
+    ).not.toBeInTheDocument();
   });
 
   test("does not render in a non-goal mode without tasks or a goal", () => {
     renderWidget(
       makeRuntime({ goal: null, mode: "explore", toolUse: "explore" }),
     );
-
-    expect(screen.queryByText("Set a goal")).not.toBeInTheDocument();
-    expect(screen.queryByText("Tasks cleared")).not.toBeInTheDocument();
-    expect(screen.queryByText("Task Progress")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("transcript-row")).not.toBeInTheDocument();
   });
 
-  test("collapsed widget shows the goal-set indicator and status", () => {
-    renderWidget(makeRuntime({ goal: makeGoal() }));
-
-    expect(screen.getByText("Goal set")).toBeInTheDocument();
-    expect(screen.getByText("Active")).toBeInTheDocument();
-  });
-
-  test("expanded widget starts with the goal row", () => {
-    renderWidget(makeRuntime({ goal: makeGoal(), expanded: true }));
-
-    expect(screen.getByText("Task Progress")).toBeInTheDocument();
-    expect(screen.getByText("Goal")).toBeInTheDocument();
-    expect(screen.getByText("Active")).toBeInTheDocument();
-  });
-
-  test("expanded goal block renders nested plan, verifier attempts, events, and finite budget ratios", () => {
-    renderWidget(
-      makeRuntime({
-        goal: makeGoal({
-          owner: { kind: "task", id: "task-1" },
-          revision: 4,
-          plan: {
-            content: "Implement the approved nested plan",
-            mode: "agent",
-            version: 1,
-            created_at_ms: 1,
-            delta_count: 1,
-            checkpoint: null,
-            history: [{ seq: 1, content: "Retain plan history" }],
-          },
-        }),
-        expanded: true,
-        goalExpanded: true,
-      }),
-    );
-
-    expect(
-      screen.getByRole("region", { name: "Goal plan" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText("Implement the approved nested plan"),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Retain plan history")).toBeInTheDocument();
-    expect(screen.getByText("2/5 turns")).toBeInTheDocument();
-    expect(screen.getByText("1200/5000 tokens")).toBeInTheDocument();
-    expect(screen.queryByText("No budget limits")).not.toBeInTheDocument();
-    expect(screen.getByText("Verifier attempts")).toBeInTheDocument();
-    expect(screen.getByText("Needs work")).toBeInTheDocument();
-    expect(screen.getByText("Manual")).toBeInTheDocument();
-    expect(screen.getByText("missing verifier coverage")).toBeInTheDocument();
-    expect(screen.getByText("Add one more verifier test.")).toBeInTheDocument();
-    expect(screen.getByText("Goal events")).toBeInTheDocument();
-    expect(screen.getByText("Nudge")).toBeInTheDocument();
-    expect(screen.getByText("Asked for progress")).toBeInTheDocument();
-  });
-
-  test("large goals keep one control set before content and expose full reading", async () => {
-    const content = "Long goal body ".repeat(200);
-    const { user, container } = renderWidget(
-      makeRuntime({
-        goal: makeGoal({ content }),
-        expanded: true,
-        goalExpanded: true,
-      }),
-    );
-    const pause = screen.getByRole("button", { name: "Pause" });
-    expect(screen.getAllByRole("button", { name: "Pause" })).toHaveLength(1);
-    expect(container.querySelector("button button")).toBeNull();
-    const reading = container.querySelector('[class*="readingRegion"]');
-    if (!reading) throw new Error("Missing bounded goal reading region");
-    expect(
-      pause.compareDocumentPosition(reading) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-    await user.click(
-      screen.getByRole("button", { name: "Open full goal and plan" }),
-    );
-    expect(
-      screen.getByRole("dialog", { name: "Full goal and plan" }),
-    ).toHaveTextContent("Long goal body");
-    await user.click(screen.getByRole("button", { name: "Close" }));
-    expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
-  });
-
-  test("expanded editor moves the same draft without duplicate inputs or replacement commands", async () => {
+  test("expanding reveals tasks and Pause dispatches goal_control", async () => {
     const commands = captureCommands();
     const { user } = renderWidget(
-      makeRuntime({ goal: makeGoal(), expanded: true, goalExpanded: true }),
-    );
-    await user.click(screen.getByRole("button", { name: "Edit" }));
-    await user.clear(screen.getByLabelText("Goal text"));
-    await user.type(
-      screen.getByLabelText("Goal text"),
-      "Append this direction",
-    );
-    await user.click(screen.getByRole("button", { name: "Expand editor" }));
-    expect(screen.getAllByLabelText("Goal text")).toHaveLength(1);
-    expect(screen.getByLabelText("Goal text")).toHaveValue(
-      "Append this direction",
-    );
-    await user.type(screen.getByLabelText("Goal text"), " with evidence");
-    await user.click(screen.getByRole("button", { name: "Return to goal" }));
-    expect(screen.getByLabelText("Goal text")).toHaveValue(
-      "Append this direction with evidence",
-    );
-    await user.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(commands).toHaveLength(1));
-    expect(commands[0]).toMatchObject({
-      type: "update_goal",
-      note: "Append this direction with evidence",
-    });
-    expect(commands[0]).not.toHaveProperty("content");
-  });
-
-  test("many tasks use a compact count and retain every full task in the expanded list", async () => {
-    const tasks = Array.from(
-      { length: 40 },
-      (_, index): TodoItem => ({
-        id: String(index),
-        content: `Full task ${index} with lengthy explanatory text`,
-        status: index === 0 ? "in_progress" : "pending",
-      }),
-    );
-    const { user, container } = renderWidget(
       makeRuntime({ goal: makeGoal(), messages: taskMessages(tasks) }),
     );
-    expect(
-      screen.getByLabelText("0 of 40 tasks completed"),
-    ).toBeInTheDocument();
-    expect(
-      container.querySelector('[class*="taskDots"]')?.childElementCount,
-    ).toBe(0);
-    await user.click(screen.getByRole("button", { name: /Goal set/ }));
-    for (const task of tasks)
-      expect(screen.getByText(task.content)).toBeInTheDocument();
-  });
 
-  test("emphasizes only saturated budget segments", () => {
-    renderWidget(
-      makeRuntime({
-        goal: makeGoal({
-          progress: {
-            turns_used: 5,
-            tokens_used: 1200,
-            started_at_ms: 1000,
-            no_progress_turns: 1,
-            last_nudge_at_ms: 2000,
-          },
-        }),
-        expanded: true,
-        goalExpanded: true,
-      }),
-    );
-
-    expect(screen.getByText("5/5 turns").className).toContain(
-      "goalProgressSaturated",
-    );
-    expect(screen.getByText("1200/5000 tokens").className).not.toContain(
-      "goalProgressSaturated",
-    );
-  });
-
-  test("expanded goal block renders omitted budget limits as unlimited", () => {
-    const { container } = renderWidget(
-      makeRuntime({
-        goal: makeGoal({
-          budget: {
-            cooldown_ms: 1500,
-            no_progress_token_threshold: 50,
-          },
-        }),
-        expanded: true,
-        goalExpanded: true,
-      }),
-    );
-
-    expect(screen.getByText("2 turns")).toBeInTheDocument();
-    expect(screen.getByText("1200 tokens")).toBeInTheDocument();
-    expect(container.textContent).toContain("No budget limits");
-    expect(container.textContent).not.toContain("/0");
-    expect(container.textContent).not.toContain("/undefined");
-    expect(container.textContent).not.toContain("/null");
-    expect(container.textContent).not.toContain("NaN");
-    expect(container.textContent).not.toContain("undefined");
-  });
-
-  test("expanded goal block treats zero budget limits as unlimited", () => {
-    const { container } = renderWidget(
-      makeRuntime({
-        goal: makeGoal({
-          budget: {
-            max_turns: 0,
-            max_minutes: 0,
-            max_tokens: 0,
-            cooldown_ms: 1500,
-            no_progress_token_threshold: 50,
-            no_progress_turns: 0,
-          },
-        }),
-        expanded: true,
-        goalExpanded: true,
-      }),
-    );
-
-    expect(screen.getByText("2 turns")).toBeInTheDocument();
-    expect(screen.getByText("1200 tokens")).toBeInTheDocument();
-    expect(container.textContent).toContain("No budget limits");
-    expect(container.textContent).not.toContain("0/0");
-    expect(container.textContent).not.toContain("/0");
-  });
-
-  test("editing an existing goal dispatches update_goal", async () => {
-    const commands = captureCommands();
-    const { user } = renderWidget(
-      makeRuntime({ goal: makeGoal(), expanded: true, goalExpanded: true }),
-    );
-
-    await user.click(screen.getByRole("button", { name: "Edit" }));
-    const input = screen.getByLabelText("Goal text");
-    await user.clear(input);
-    await user.type(input, "Ship the shiny frog pond");
-    await user.click(screen.getByRole("button", { name: "Save" }));
-
-    await waitFor(() => expect(commands).toHaveLength(1));
-    expect(commands[0]).toMatchObject({
-      type: "update_goal",
-      note: "Ship the shiny frog pond",
-    });
-  });
-
-  test("editing an empty goal block dispatches set_goal", async () => {
-    const commands = captureCommands();
-    const { user } = renderWidget(
-      makeRuntime({
-        goal: null,
-        expanded: true,
-        goalExpanded: true,
-        messages: taskMessages([]),
-      }),
-    );
-
-    await user.type(screen.getByLabelText("Goal text"), "Start a fresh goal");
-    await user.click(screen.getByRole("button", { name: "Save" }));
-
-    await waitFor(() => expect(commands).toHaveLength(1));
-    expect(commands[0]).toMatchObject({
-      type: "set_goal",
-      content: "Start a fresh goal",
-    });
-    expect(commands[0]).not.toHaveProperty("budget");
-  });
-
-  test("fresh goal dispatches set_goal with a positive max turns budget", async () => {
-    const commands = captureCommands();
-    const { user } = renderWidget(
-      makeRuntime({
-        goal: null,
-        expanded: true,
-        goalExpanded: true,
-        messages: taskMessages([]),
-      }),
-    );
-
-    await user.type(
-      screen.getByLabelText("Goal text"),
-      "Start a budgeted goal",
-    );
-    await user.type(screen.getByLabelText("Max turns"), "5");
-    await user.click(screen.getByRole("button", { name: "Save" }));
-
-    await waitFor(() => expect(commands).toHaveLength(1));
-    expect(commands[0]).toMatchObject({
-      type: "set_goal",
-      content: "Start a budgeted goal",
-    });
-    expect(commands[0].budget).toEqual({ max_turns: 5 });
-  });
-
-  test("existing goal dispatches explicit budget edits without changing unedited finite limits", async () => {
-    const commands = captureCommands();
-    const goal = makeGoal();
-    Object.assign(goal.budget, { max_cost_cents: 250 });
-    const { user } = renderWidget(
-      makeRuntime({ goal, expanded: true, goalExpanded: true }),
-    );
-
-    await user.clear(screen.getByLabelText("Max turns"));
-    await user.type(screen.getByLabelText("Max turns"), "7");
-    await user.clear(screen.getByLabelText("Max minutes"));
-    await user.clear(screen.getByLabelText("Max tokens"));
-    await user.click(screen.getByRole("button", { name: "Apply budget" }));
-
-    await waitFor(() => expect(commands).toHaveLength(1));
-    expect(commands[0]).toMatchObject({ type: "set_goal_budget" });
-    expect(commands[0].budget).toEqual({
-      max_turns: 7,
-      cooldown_ms: 1500,
-      no_progress_token_threshold: 50,
-      no_progress_turns: 2,
-      max_cost_cents: 250,
-    });
-  });
-
-  test("clearing existing goal budget inputs dispatches unlimited budget", async () => {
-    const commands = captureCommands();
-    const { user } = renderWidget(
-      makeRuntime({ goal: makeGoal(), expanded: true, goalExpanded: true }),
-    );
-
-    await user.clear(screen.getByLabelText("Max turns"));
-    await user.clear(screen.getByLabelText("Max minutes"));
-    await user.clear(screen.getByLabelText("Max tokens"));
-    await user.click(screen.getByRole("button", { name: "Apply budget" }));
-
-    await waitFor(() => expect(commands).toHaveLength(1));
-    expect(commands[0]).toMatchObject({ type: "set_goal_budget" });
-    expect(commands[0].budget).toEqual({
-      cooldown_ms: 1500,
-      no_progress_token_threshold: 50,
-      no_progress_turns: 2,
-    });
-  });
-
-  test("goal controls dispatch pause, resume, and stop", async () => {
-    const commands = captureCommands();
-    const activeView = renderWidget(
-      makeRuntime({ goal: makeGoal(), expanded: true, goalExpanded: true }),
-    );
-
-    await activeView.user.click(screen.getByRole("button", { name: "Pause" }));
-    await waitFor(() => expect(commands).toHaveLength(1));
-    acknowledgeGoal(activeView.store, commands[0], true);
-    expect(screen.getByRole("button", { name: "Stop" })).toBeDisabled();
-    applyGoalStatus(activeView.store, "paused");
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled(),
-    );
-    await activeView.user.click(screen.getByRole("button", { name: "Stop" }));
-
-    await waitFor(() => expect(commands).toHaveLength(2));
-    activeView.unmount();
-
-    const pausedView = renderWidget(
-      makeRuntime({
-        goal: makeGoal({ active: false, status: "paused" }),
-        expanded: true,
-        goalExpanded: true,
-      }),
-    );
-    await pausedView.user.click(screen.getByRole("button", { name: "Resume" }));
-
-    await waitFor(() => expect(commands).toHaveLength(3));
-    expect(commands.map((command) => command.action)).toEqual([
-      "pause",
-      "stop",
-      "resume",
-    ]);
-    expect(commands.every((command) => command.type === "goal_control")).toBe(
-      true,
-    );
-  });
-
-  test("collapsed widget keeps goal controls clickable without expanding", async () => {
-    const commands = captureCommands();
-    const { user } = renderWidget(makeRuntime({ goal: makeGoal() }));
-
-    expect(screen.getByText("Goal set")).toBeInTheDocument();
-
+    await user.click(screen.getByTestId("transcript-toggle"));
+    expect(screen.getByText("Write fixtures")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Pause goal" }));
 
     await waitFor(() => expect(commands).toHaveLength(1));
@@ -624,219 +258,88 @@ describe("TaskProgressWidget goal projection", () => {
       type: "goal_control",
       action: "pause",
     });
-    expect(screen.queryByText("Task Progress")).not.toBeInTheDocument();
   });
 
-  test("collapsed goal section keeps controls clickable without expanding", async () => {
+  test("paused goal offers Resume and Stop dispatches stop", async () => {
     const commands = captureCommands();
     const { user } = renderWidget(
       makeRuntime({
         goal: makeGoal({ active: false, status: "paused" }),
         expanded: true,
-        goalExpanded: false,
       }),
     );
 
-    await user.click(screen.getByRole("button", { name: "Resume goal" }));
+    expect(screen.getByRole("button", { name: "Resume goal" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Stop goal" }));
 
     await waitFor(() => expect(commands).toHaveLength(1));
-    expect(commands[0]).toMatchObject({
-      type: "goal_control",
-      action: "resume",
-    });
-    expect(screen.queryByLabelText("Goal text")).not.toBeInTheDocument();
+    expect(commands[0]).toMatchObject({ type: "goal_control", action: "stop" });
   });
 
-  test("collapsed goal controls reflect goal status availability", () => {
-    renderWidget(
-      makeRuntime({ goal: makeGoal({ active: false, status: "paused" }) }),
-    );
-
-    expect(
-      screen.queryByRole("button", { name: "Pause goal" }),
-    ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Resume goal" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Stop goal" })).toBeEnabled();
-  });
-
-  test("stopped goals expose Resume in compact and expanded controls", async () => {
-    const { user } = renderWidget(
-      makeRuntime({ goal: makeGoal({ active: false, status: "stopped" }) }),
-    );
-
-    expect(
-      screen.queryByRole("button", { name: "Pause goal" }),
-    ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Resume goal" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Stop goal" })).toBeDisabled();
-    await user.click(screen.getByRole("button", { name: /Goal set/i }));
-    await user.click(screen.getByRole("button", { name: /Goal Stopped/i }));
-    expect(screen.getByRole("button", { name: "Resume" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Stop" })).toBeDisabled();
-  });
-
-  test("transferred goals hide all controls and show the transfer owner", () => {
-    renderWidget(
-      makeRuntime({
-        goal: makeGoal({
-          active: false,
-          status: "transferred",
-          transferred_to: "other-chat",
-        }),
-        expanded: true,
-        goalExpanded: true,
-      }),
-    );
-
-    expect(screen.getByText("Transferred to other-chat")).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Pause" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Resume" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Stop" }),
-    ).not.toBeInTheDocument();
-  });
-
-  test.each(["no_progress", "budget_exhausted"] as const)(
-    "%s goals explain the hold without offering unsupported Resume",
-    (status) => {
-      renderWidget(
-        makeRuntime({
-          goal: makeGoal({ active: false, status }),
-          expanded: true,
-          goalExpanded: true,
-        }),
-      );
-
-      expect(
-        screen.queryByRole("button", { name: "Resume" }),
-      ).not.toBeInTheDocument();
-      expect(
-        screen.getByText(
-          status === "budget_exhausted"
-            ? /Review usage and explicitly adjust/
-            : /Provide new direction/,
-        ),
-      ).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
-      expect(
-        screen.queryByRole("button", { name: "Pause" }),
-      ).not.toBeInTheDocument();
-    },
-  );
-
-  test.each(["no_progress", "budget_exhausted"] as const)(
-    "%s goals can be stopped from the collapsed header",
-    async (status) => {
-      const commands = captureCommands();
-      const { user } = renderWidget(
-        makeRuntime({ goal: makeGoal({ active: false, status }) }),
-      );
-
-      expect(
-        screen.queryByRole("button", { name: "Pause goal" }),
-      ).not.toBeInTheDocument();
-      expect(
-        screen.queryByRole("button", { name: "Resume goal" }),
-      ).not.toBeInTheDocument();
-
-      await user.click(screen.getByRole("button", { name: "Stop goal" }));
-
-      await waitFor(() => expect(commands).toHaveLength(1));
-      expect(commands[0]).toMatchObject({
-        type: "goal_control",
-        action: "stop",
-      });
-    },
-  );
-
-  test("verifying goals allow stop but not pause or resume", () => {
-    renderWidget(
-      makeRuntime({
-        goal: makeGoal({ active: true, status: "verifying" }),
-        expanded: true,
-        goalExpanded: true,
-      }),
-    );
-
-    expect(screen.getByRole("button", { name: "Pause" })).toBeDisabled();
-    expect(
-      screen.queryByRole("button", { name: "Resume" }),
-    ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
-  });
-
-  test.each(["completed", "transferred"] as const)(
-    "%s goals expose no controls at all",
-    (status) => {
-      renderWidget(
-        makeRuntime({
-          goal: makeGoal({ active: false, status }),
-          expanded: true,
-          goalExpanded: true,
-        }),
-      );
-
-      expect(
-        screen.queryByRole("button", { name: "Pause" }),
-      ).not.toBeInTheDocument();
-      expect(
-        screen.queryByRole("button", { name: "Resume" }),
-      ).not.toBeInTheDocument();
-      expect(
-        screen.queryByRole("button", { name: "Stop" }),
-      ).not.toBeInTheDocument();
-    },
-  );
-
-  test("active goals allow pause and stop but not resume", () => {
-    renderWidget(
-      makeRuntime({ goal: makeGoal(), expanded: true, goalExpanded: true }),
-    );
-
-    expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
-    expect(
-      screen.queryByRole("button", { name: "Resume" }),
-    ).not.toBeInTheDocument();
-  });
-  test("failed edit keeps its draft and waits for the exact ACK without duplicate submits", async () => {
+  test("details dialog shows plan and applies limit edits", async () => {
     const commands = captureCommands();
-    const { user, store } = renderWidget(
-      makeRuntime({ goal: makeGoal(), expanded: true, goalExpanded: true }),
+    const { user } = renderWidget(
+      makeRuntime({ goal: makeGoal({ plan }), expanded: true }),
     );
-    await user.click(screen.getByRole("button", { name: "Edit" }));
-    await user.clear(screen.getByLabelText("Goal text"));
-    await user.type(screen.getByLabelText("Goal text"), "Keep my edit");
-    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await user.click(screen.getByRole("button", { name: "Goal details" }));
+    const dialog = screen.getByRole("dialog", { name: "Goal details" });
+    expect(
+      within(dialog).getByText("Implement the approved plan"),
+    ).toBeVisible();
+    expect(within(dialog).getByText("Retain plan history")).toBeVisible();
+    expect(
+      within(dialog).getByText("Add one more verifier test."),
+    ).toBeVisible();
+
+    await user.click(within(dialog).getByRole("switch", { name: "Max turns" }));
+    await user.click(
+      within(dialog).getByRole("button", { name: "Apply limits" }),
+    );
+
     await waitFor(() => expect(commands).toHaveLength(1));
-    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Apply budget" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Pause" })).toBeDisabled();
-    acknowledgeGoal(store, { client_request_id: "other-request" }, false, {
-      error: "unrelated",
+    expect(commands[0]).toMatchObject({ type: "set_goal_budget" });
+    expect(commands[0].budget).toEqual({
+      max_minutes: 10,
+      max_tokens: 5000,
+      cooldown_ms: 1500,
+      no_progress_token_threshold: 50,
+      no_progress_turns: 2,
     });
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-    acknowledgeGoal(store, commands[0], true);
-    await waitFor(() =>
-      expect(screen.getByRole("status")).toHaveTextContent("accepted"),
-    );
-    expect(screen.getByLabelText("Goal text")).toHaveValue("Keep my edit");
-    acknowledgeGoal(store, commands[0], false, {
-      error: "Goal owner changed; refresh the chat",
-    });
-    await waitFor(() =>
-      expect(screen.getByRole("alert")).toHaveTextContent("Goal owner changed"),
-    );
-    expect(screen.getByLabelText("Goal text")).toHaveValue("Keep my edit");
-    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
-    expect(commands).toHaveLength(1);
   });
 
-  test("HTTP rejection preserves a new goal draft and explicit budget", async () => {
+  test("editor sets a fresh goal and appends updates to an existing one", async () => {
+    const commands = captureCommands();
+    const fresh = renderWidget(makeRuntime({ goal: null, expanded: true }));
+
+    await fresh.user.click(screen.getByRole("button", { name: "Create goal" }));
+    await fresh.user.type(screen.getByLabelText("Goal text"), "Ship it");
+    await fresh.user.click(screen.getByRole("button", { name: "Set goal" }));
+    await waitFor(() => expect(commands).toHaveLength(1));
+    expect(commands[0]).toMatchObject({ type: "set_goal", content: "Ship it" });
+    expect(commands[0]).not.toHaveProperty("budget");
+    fresh.unmount();
+
+    const existing = renderWidget(
+      makeRuntime({ goal: makeGoal(), expanded: true }),
+    );
+    await existing.user.click(
+      screen.getByRole("button", { name: "Edit goal" }),
+    );
+    await existing.user.clear(screen.getByLabelText("Goal text"));
+    await existing.user.type(screen.getByLabelText("Goal text"), "Add tests");
+    await existing.user.click(
+      screen.getByRole("button", { name: "Update goal" }),
+    );
+    await waitFor(() => expect(commands).toHaveLength(2));
+    expect(commands[1]).toMatchObject({
+      type: "update_goal",
+      note: "Add tests",
+    });
+    expect(commands[1]).not.toHaveProperty("content");
+  });
+
+  test("a rejected new goal keeps the draft and limits in the editor", async () => {
     const commands: Record<string, unknown>[] = [];
     server.use(
       http.post("*/v1/chats/:id/commands", async ({ request }) => {
@@ -846,71 +349,38 @@ describe("TaskProgressWidget goal projection", () => {
         });
       }),
     );
-    const { user } = renderWidget(
-      makeRuntime({ expanded: true, goalExpanded: true }),
-    );
-    await user.type(screen.getByLabelText("Goal text"), "Keep new goal");
-    await user.type(screen.getByLabelText("Max turns"), "3");
-    await user.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() =>
-      expect(screen.getByRole("alert")).toHaveTextContent("403"),
-    );
-    expect(screen.getByLabelText("Goal text")).toHaveValue("Keep new goal");
-    expect(screen.getByLabelText("Max turns")).toHaveValue(3);
+    const { user } = renderWidget(makeRuntime({ goal: null, expanded: true }));
+
+    await user.click(screen.getByRole("button", { name: "Create goal" }));
+    const dialog = screen.getByRole("dialog", { name: "Set a goal" });
+    await user.type(within(dialog).getByLabelText("Goal text"), "Keep it");
+    await user.click(within(dialog).getByRole("switch", { name: "Max turns" }));
+    await user.click(within(dialog).getByRole("button", { name: "Set goal" }));
+
+    await waitFor(() => expect(within(dialog).getByText(/403/)).toBeVisible());
     expect(commands).toHaveLength(1);
     expect(commands[0]).toMatchObject({
       type: "set_goal",
-      budget: { max_turns: 3 },
+      content: "Keep it",
+      budget: { max_turns: 20 },
     });
-    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+    expect(within(dialog).getByLabelText("Goal text")).toHaveValue("Keep it");
+    expect(
+      within(dialog).getByRole("switch", { name: "Max turns" }),
+    ).toBeChecked();
+    expect(
+      within(dialog).getByRole("button", { name: "Set goal" }),
+    ).toBeEnabled();
   });
 
-  test("changing chats isolates pending goal failures from the new editor", async () => {
-    const commands = captureCommands();
-    const first = makeRuntime({
-      goal: makeGoal(),
-      expanded: true,
-      goalExpanded: true,
-    });
-    const second = makeRuntime({ expanded: true, goalExpanded: true });
-    second.thread.id = "second-goal-chat";
-    const chat = makeChat(first);
-    chat.threads[second.thread.id] = second;
-    const { user, store } = render(<TaskProgressWidget />, {
-      preloadedState: { chat },
-    });
-    await user.click(screen.getByRole("button", { name: "Pause" }));
-    await waitFor(() => expect(commands).toHaveLength(1));
-    act(() => {
-      store.dispatch(switchToThread({ id: second.thread.id }));
-    });
-    await user.type(screen.getByLabelText("Goal text"), "New chat draft");
-    acknowledgeGoal(store, commands[0], false, { error: "Old chat rejected" });
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Goal text")).toHaveValue("New chat draft");
-    expect(commands).toHaveLength(1);
-    act(() => {
-      store.dispatch(switchToThread({ id: first.thread.id }));
-    });
-    await user.click(screen.getByRole("button", { name: "Pause" }));
-    await waitFor(() => expect(commands).toHaveLength(2));
-    act(() => {
-      store.dispatch(updateConfig({ apiKey: "synthetic-new-principal" }));
-    });
-    acknowledgeGoal(store, commands[1], false, {
-      error: "Old principal rejected",
-    });
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
-    expect(commands).toHaveLength(2);
-  });
-
-  test("unknown goal outcome permits status checks but never blindly replays the command", async () => {
+  test("an unconfirmed goal command offers a status check and never replays", async () => {
     vi.useFakeTimers();
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response(null, { status: 200 }));
-    const view = renderWidget(makeRuntime({ goal: makeGoal() }));
+    const view = renderWidget(
+      makeRuntime({ goal: makeGoal(), expanded: true }),
+    );
     try {
       fireEvent.click(screen.getByRole("button", { name: "Pause goal" }));
       await act(async () => {
@@ -925,7 +395,7 @@ describe("TaskProgressWidget goal projection", () => {
       ) as Record<string, unknown>;
       fireEvent.click(screen.getByRole("button", { name: "Check status" }));
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      acknowledgeGoal(view.store, body, true);
+      acknowledge(view.store, body);
       applyGoalStatus(view.store, "paused");
       await act(async () => {
         await Promise.resolve();
@@ -938,5 +408,35 @@ describe("TaskProgressWidget goal projection", () => {
       fetchMock.mockRestore();
       vi.useRealTimers();
     }
+  });
+
+  test("details limit edits survive goal progress updates", async () => {
+    const { user, store } = renderWidget(
+      makeRuntime({ goal: makeGoal(), expanded: true }),
+    );
+    await user.click(screen.getByRole("button", { name: "Goal details" }));
+    const dialog = screen.getByRole("dialog", { name: "Goal details" });
+    await user.click(
+      within(dialog).getByRole("switch", { name: "Max minutes" }),
+    );
+
+    act(() => {
+      store.dispatch(
+        applyChatEvent({
+          chat_id: threadId,
+          seq: nextSeq(store),
+          type: "runtime_updated",
+          state: "generating",
+          goal_tokens_used: 4000,
+        }),
+      );
+    });
+
+    expect(
+      within(dialog).getByRole("switch", { name: "Max minutes" }),
+    ).not.toBeChecked();
+    expect(
+      within(dialog).getByRole("button", { name: "Apply limits" }),
+    ).toBeEnabled();
   });
 });

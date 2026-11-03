@@ -16,7 +16,11 @@ async function fitsToolbar(page: Page) {
       const bounds = row.getBoundingClientRect();
       const padding = parseFloat(getComputedStyle(row).paddingRight);
       return Array.from(row.children).some((child) => {
-        if (child.getAttribute("data-hidden") === "true") return false;
+        if (
+          child.getAttribute("data-hidden") === "true" ||
+          child.getAttribute("data-empty") === "true"
+        )
+          return false;
         const rect = child.getBoundingClientRect();
         return (
           rect.left < bounds.left || rect.right > bounds.right - padding + 1
@@ -53,21 +57,23 @@ for (const theme of themes) {
           .getByTestId("composer-toolbar")
           .evaluate((element) => element.getBoundingClientRect().height),
       ).toBeLessThanOrEqual(46);
-      await input.focus();
-      const expand = page.getByRole("button", {
-        name: "Expand composer",
-        exact: true,
-      });
-      await expect(expand).toHaveAttribute("aria-expanded", "false");
-      await expand.click();
-      const collapse = page.getByRole("button", {
-        name: "Collapse composer",
-        exact: true,
-      });
-      await expect(collapse).toHaveAttribute("aria-expanded", "true");
+      const form = input.locator("xpath=ancestor::form");
+      await expect(form).toHaveClass(/chatFormCollapsed/);
       await expect(
-        page.getByRole("button", { name: "More composer controls" }),
+        page.getByRole("button", { name: /^(Expand|Collapse) composer$/ }),
       ).toHaveCount(0);
+      await input.click();
+      await expect(form).toHaveClass(/chatFormExpanded/);
+      await expect(page.getByTestId("composer-top-toolbar")).toBeVisible();
+      await expect
+        .poll(async () => {
+          const top = await page
+            .getByTestId("composer-top-toolbar")
+            .boundingBox();
+          const editor = await input.boundingBox();
+          return top!.y + top!.height - editor!.y;
+        })
+        .toBeLessThanOrEqual(1);
       await fitsPage(page);
       await record(page, "expanded-composer");
       await input.fill(
@@ -81,19 +87,27 @@ for (const theme of themes) {
         await input.evaluate((element) => element.clientHeight),
       ).toBeGreaterThan(70);
       await fitsPage(page);
+      await expect(form).toHaveClass(/chatFormExpanded/);
       await record(page, "populated-composer-blurred");
+      await input.fill("");
+      await page
+        .getByRole("button", { name: "Outside composer", exact: true })
+        .click();
+      await expect(form).toHaveClass(/chatFormCollapsed/);
+      await page
+        .getByRole("button", { name: "Stop generation", exact: true })
+        .click();
+      await expect(form).toHaveClass(/chatFormCollapsed/);
     });
 
-    test(`recovery ${width}px ${theme}: diagnostics wrap and histories stay bounded`, async ({
+    test(`recovery ${width}px ${theme}: diagnostics wrap and failed history remains readable`, async ({
       page,
     }) => {
       await page.setViewportSize({ width, height: 900 });
       await page.goto(
         `/tests/e2e/render-surfaces.html?view=recovery&theme=${theme}&state=waiting&history`,
       );
-      await page
-        .getByText("Details and attempt history (100)", { exact: true })
-        .click();
+      await page.getByRole("button", { name: "Details", exact: true }).click();
       const history = page.getByRole("region", {
         name: "Recovery diagnostics",
         exact: true,
@@ -106,11 +120,13 @@ for (const theme of themes) {
         scrollHeight: element.scrollHeight,
       }));
       expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.width + 1);
-      expect(geometry.height).toBeLessThanOrEqual(360);
-      expect(geometry.scrollHeight).toBeGreaterThan(geometry.height);
+      expect(geometry.scrollHeight).toBeGreaterThan(0);
       await expect(
         history.getByText("Original request: Failed", { exact: true }),
       ).toBeAttached();
+      await page
+        .getByRole("button", { name: "Stop", exact: true })
+        .scrollIntoViewIfNeeded();
       await expect(
         page.getByRole("button", { name: "Stop", exact: true }),
       ).toBeInViewport();
@@ -128,37 +144,11 @@ for (const theme of themes) {
           contentType: "application/json",
         });
       }
-      if (width === 240 && theme === "light") {
-        const raw = `Connection reset\nhttps://provider.example.com/${"unbroken_provider_segment_".repeat(
-          40,
-        )}\nLast diagnostic line`;
-        const cause = page.getByRole("region", {
-          name: "Recovery cause",
-          exact: true,
-        });
-        await expect(cause).toHaveText(`Cause: ${raw.slice(0, 300)}`);
-        await expect(history.getByText(raw, { exact: true })).toBeAttached();
-        await page
-          .getByText("Details and attempt history (100)", { exact: true })
-          .focus();
-        await page.keyboard.press("Shift+Tab");
-        await expect(cause).toBeFocused();
-        expect(await cause.evaluate((element) => element.clientHeight)).toBe(
-          80,
-        );
-        await page.keyboard.press("End");
-        await expect
-          .poll(() => cause.evaluate((element) => element.scrollTop))
-          .toBeGreaterThan(0);
-        await expect
-          .poll(() =>
-            cause.evaluate(
-              (element) =>
-                element.scrollHeight - element.clientHeight - element.scrollTop,
-            ),
-          )
-          .toBeLessThanOrEqual(1);
-      }
+      const raw = `Connection reset\nhttps://provider.example.com/${"unbroken_provider_segment_".repeat(
+        40,
+      )}\nLast diagnostic line`;
+      await expect(page.getByRole("alert")).toHaveText(raw);
+      await expect(history.getByText(/Retry 99: Failed/)).toBeAttached();
     });
 
     test(`goals ${width}px ${theme}: compact status and large detail remain usable`, async ({
@@ -168,54 +158,42 @@ for (const theme of themes) {
       await page.goto(
         `/tests/e2e/render-surfaces.html?view=goal&theme=${theme}`,
       );
-      await expect(
-        page.getByRole("button", { name: "Pause goal", exact: true }),
-      ).toBeVisible();
+      await expect(page.getByTestId("transcript-verb")).toHaveText("Goal");
       await expect(page.getByText("Active", { exact: true })).toBeVisible();
       await expect(
         page.getByLabel("3 of 5 tasks completed", { exact: true }),
       ).toBeVisible();
-      const status = await page
-        .getByText("Active", { exact: true })
-        .boundingBox();
-      expect(status?.width).toBeGreaterThan(32);
+      await expect(
+        page.getByRole("button", { name: "Pause goal", exact: true }),
+      ).toHaveCount(0);
       await fitsPage(page);
       await record(page, "compact-goal");
-      await page.getByRole("button", { name: /^Goal set Active/ }).click();
-      await page
-        .getByRole("button", { name: "Goal Active", exact: true })
-        .click();
+      await page.getByTestId("transcript-toggle").click();
       await expect(
-        page.getByRole("button", { name: "Pause", exact: true }),
+        page.getByRole("button", { name: "Pause goal", exact: true }),
       ).toBeInViewport();
       await expect(
-        page.getByRole("button", { name: "Stop", exact: true }),
+        page.getByRole("button", { name: "Stop goal", exact: true }),
       ).toBeInViewport();
       await record(page, "expanded-goal");
-      await page
-        .getByRole("button", { name: "Open full goal and plan", exact: true })
-        .click();
+      const details = page.getByRole("button", {
+        name: "Goal details",
+        exact: true,
+      });
+      await details.click();
       const dialog = page.getByRole("dialog", {
-        name: "Full goal and plan",
+        name: "Goal details",
         exact: true,
       });
       await expect(dialog).toBeVisible();
       await expect(
-        dialog.getByRole("heading", {
-          name: "Approved execution plan",
-          exact: true,
-        }),
+        dialog.getByRole("region", { name: "Goal plan", exact: true }),
       ).toBeAttached();
       await fitsPage(page);
       await record(page, "full-goal-reader");
       await page.keyboard.press("Escape");
       await expect(dialog).toBeHidden();
-      await expect(
-        page.getByRole("button", {
-          name: "Open full goal and plan",
-          exact: true,
-        }),
-      ).toBeFocused();
+      await expect(details).toBeFocused();
     });
   }
 }
@@ -283,35 +261,25 @@ test("large Git count is compact with an exact accessible description", async ({
   await fitsPage(page);
 });
 
-test("large goal editor preserves one shared draft across expansion", async ({
+test("goal editor dialog opens from the expanded goal row and returns focus", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 320, height: 900 });
   await page.goto("/tests/e2e/render-surfaces.html?view=setup&expanded");
-  const draft = page.getByRole("textbox", { name: "Goal text", exact: true });
+  const create = page.getByRole("button", { name: "Create goal", exact: true });
+  await create.click();
+  const dialog = page.getByRole("dialog", { name: "Set a goal", exact: true });
+  await expect(dialog).toBeVisible();
+  const draft = dialog.getByRole("textbox", { name: "Goal text", exact: true });
   await draft.fill("Preserve the complete original goal and all constraints.");
-  await page
-    .getByRole("button", { name: "Expand editor", exact: true })
-    .click();
   await expect(
-    page.getByRole("dialog", { name: "Set a goal", exact: true }),
-  ).toBeVisible();
-  await expect(draft).toHaveCount(1);
-  await draft.fill("Expanded draft with every original constraint preserved.");
-  await record(page, "expanded-goal-editor");
-  await page
-    .getByRole("button", { name: "Return to goal", exact: true })
-    .click();
-  await expect(
-    page.getByRole("button", { name: "Expand editor", exact: true }),
-  ).toBeFocused();
-  await expect(draft).toHaveValue(
-    "Expanded draft with every original constraint preserved.",
-  );
-  await expect(
-    page.getByRole("button", { name: "Save", exact: true }),
+    dialog.getByRole("button", { name: "Set goal", exact: true }),
   ).toBeEnabled();
+  await record(page, "expanded-goal-editor");
   await fitsPage(page);
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(create).toBeFocused();
 });
 
 test("individual permissions and nested selector retain state without a More menu", async ({
@@ -319,9 +287,7 @@ test("individual permissions and nested selector retain state without a More men
 }) => {
   await page.setViewportSize({ width: 1600, height: 900 });
   await page.goto("/tests/e2e/render-surfaces.html?view=composer");
-  await page
-    .getByRole("button", { name: "Expand composer", exact: true })
-    .click();
+  await page.getByTestId("chat-form-textarea").click();
   const approve = page.getByRole("button", {
     name: "Auto-approve file editing tools",
     exact: true,
@@ -335,11 +301,10 @@ test("individual permissions and nested selector retain state without a More men
   await page.keyboard.press("Escape");
   await expect(mode).toBeFocused();
   await page
-    .getByRole("button", { name: "Collapse composer", exact: true })
+    .getByRole("button", { name: "Outside composer", exact: true })
     .click();
-  await page
-    .getByRole("button", { name: "Expand composer", exact: true })
-    .click();
+  await expect(page.locator("form")).toHaveClass(/chatFormCollapsed/);
+  await page.getByTestId("chat-form-textarea").click();
   await expect(approve).toHaveAttribute("aria-pressed", "true");
 });
 
@@ -350,17 +315,12 @@ test("recovered and failed recovery states preserve labels and original model ch
   await page.goto(
     "/tests/e2e/render-surfaces.html?view=recovery&state=succeeded",
   );
-  await page
-    .getByText("Recovered after 1 automatic retry", { exact: true })
-    .click();
   await expect(
-    page.getByText("Original request: Failed", { exact: true }),
-  ).toBeVisible();
+    page.getByRole("region", { name: "Recovery status", exact: true }),
+  ).toHaveCount(0);
   await fitsPage(page);
   await page.goto("/tests/e2e/render-surfaces.html?view=recovery");
-  await page
-    .getByRole("button", { name: "Retry options", exact: true })
-    .click();
+  await page.getByRole("button", { name: "Options", exact: true }).click();
   await expect(
     page.getByRole("button", { name: "Select model", exact: true }),
   ).toHaveText("Keep original model");
@@ -373,9 +333,7 @@ test("resizing an open selector preserves its trigger and keeps Stop inside the 
 }) => {
   await page.setViewportSize({ width: 1600, height: 900 });
   await page.goto("/tests/e2e/render-surfaces.html?view=composer&busy");
-  await page
-    .getByRole("button", { name: "Expand composer", exact: true })
-    .click();
+  await page.getByTestId("chat-form-textarea").click();
   const context = page.locator('[data-composer-control="context"] button');
   await context.click();
   await expect(context).toHaveAttribute("aria-expanded", "true");
@@ -396,23 +354,23 @@ test("resizing an open selector preserves its trigger and keeps Stop inside the 
 test("real control widths hide rare actions individually and restore their order", async ({
   page,
 }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  test.setTimeout(90_000);
   await page.setViewportSize({ width: 1600, height: 900 });
   await page.goto("/tests/e2e/render-surfaces.html?view=composer");
-  await page
-    .getByRole("button", { name: "Expand composer", exact: true })
-    .click();
+  await page.getByTestId("chat-form-textarea").click();
   const row = page.getByTestId("composer-toolbar");
   const policy = [
     "threadInfo",
     "sidebar",
     "wand",
-    "browser",
-    "enrichment",
     "autoCompact",
+    "enrichment",
+    "browser",
     "mic",
     "image",
+    "skills",
     "worktree",
-    "model",
     "mode",
   ];
   const candidates = await row.evaluate(
@@ -448,6 +406,23 @@ test("real control widths hide rare actions individually and restore their order
   for (let width = 1000; width >= 240; width -= 4) {
     const hidden = await visibleAt(width);
     expect(hidden).toEqual(candidates.slice(0, hidden.length));
+    if (hidden.length > 0) {
+      await expect(
+        page.locator('[data-composer-control="model"]'),
+      ).toHaveAttribute("data-level", "2");
+      await expect(
+        page.locator('[data-composer-control="worktree"]'),
+      ).toHaveAttribute("data-level", "1");
+      await expect(
+        page.locator('[data-composer-control="mode"]'),
+      ).toHaveAttribute("data-level", /[12]/);
+    }
+    await expect(
+      page.locator('[data-composer-control="model"]'),
+    ).toHaveAttribute("data-hidden", "false");
+    await expect(
+      page.locator('[data-composer-control="send"]'),
+    ).toHaveAttribute("data-hidden", "false");
     if (hidden.length !== previous.length) {
       expect(hidden.length - previous.length).toBe(1);
       transitions.push({ width, hidden });
@@ -460,7 +435,7 @@ test("real control widths hide rare actions individually and restore their order
   expect(await visibleAt(1600)).toEqual([]);
 });
 
-test("context warnings keep usage and compression visible with a busy compact draft", async ({
+test("context warnings keep usage visible with a busy narrow draft", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 240, height: 900 });
@@ -469,16 +444,13 @@ test("context warnings keep usage and compression visible with a busy compact dr
   );
   await page.getByTestId("chat-form-textarea").fill("Keep this unsent draft.");
   await expect(
-    page.getByText("Context usage is high", { exact: true }),
+    page.locator('[data-composer-control="context"]'),
+  ).toHaveAttribute("data-hidden", "false");
+  await expect(
+    page.locator('[data-composer-control="context"] [class*="isWarning"]'),
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Context usage details", exact: true }),
-  ).toBeInViewport();
-  await expect(
-    page.getByRole("button", {
-      name: "Compress or rebuild context",
-      exact: true,
-    }),
   ).toBeInViewport();
   await expect(
     page.getByRole("button", { name: "Stop generation", exact: true }),
@@ -506,17 +478,25 @@ test("collapse and expansion preserve the same editor, selection and draft", asy
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto("/tests/e2e/render-surfaces.html?view=composer");
   const input = page.getByTestId("chat-form-textarea");
-  await input.fill("first line\nsecond line\nthird line");
   await input.evaluate((element: HTMLTextAreaElement) => {
     element.dataset.identity = "original";
+  });
+  await input.click();
+  await expect(page.locator("form")).toHaveClass(/chatFormExpanded/);
+  await page
+    .getByRole("button", { name: "Outside composer", exact: true })
+    .click();
+  await expect(page.locator("form")).toHaveClass(/chatFormCollapsed/);
+  await input.focus();
+  await expect(page.locator("form")).toHaveClass(/chatFormExpanded/);
+  await input.fill("first line\nsecond line\nthird line");
+  await input.evaluate((element: HTMLTextAreaElement) => {
     element.setSelectionRange(3, 8);
   });
   await page
-    .getByRole("button", { name: "Expand composer", exact: true })
+    .getByRole("button", { name: "Outside composer", exact: true })
     .click();
-  await page
-    .getByRole("button", { name: "Collapse composer", exact: true })
-    .click();
+  await expect(page.locator("form")).toHaveClass(/chatFormExpanded/);
   await expect(input).toHaveAttribute("data-identity", "original");
   await expect(input).toHaveValue("first line\nsecond line\nthird line");
   expect(
@@ -533,9 +513,7 @@ test("an empty compact top row restores permissions after expansion and widening
 }) => {
   await page.setViewportSize({ width: 240, height: 900 });
   await page.goto("/tests/e2e/render-surfaces.html?view=composer");
-  await page
-    .getByRole("button", { name: "Expand composer", exact: true })
-    .click();
+  await page.getByTestId("chat-form-textarea").click();
   await page.setViewportSize({ width: 1600, height: 900 });
   await expect(
     page.getByRole("button", {

@@ -1,6 +1,5 @@
 import { useCallback } from "react";
 import { WandSparkles } from "lucide-react";
-import { IconButton, Tooltip } from "../ui";
 import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { useAppSelector } from "../../hooks/useAppSelector";
 import {
@@ -11,6 +10,7 @@ import {
 } from "../../features/Chat/Thread";
 import { usePreviewMemoryEnrichmentMutation } from "../../services/refact/memoryEnrichment";
 import { selectLspPort } from "../../features/Config/configSlice";
+import { ComposerTrigger, KitTooltip } from "../ComposerKit";
 
 type WandButtonProps = {
   currentText: string;
@@ -67,20 +67,21 @@ export const WandButton = ({
     : "Preview related memories & context";
 
   return (
-    <Tooltip>
-      <Tooltip.Trigger asChild>
-        <IconButton
-          aria-label={label}
-          data-testid="wand-button"
-          disabled={disabled || isLoading || !currentText.trim()}
-          icon={WandSparkles}
-          onClick={handleClick}
-          size="sm"
-          variant={hasItems ? "primary" : "ghost"}
-        />
-      </Tooltip.Trigger>
-      <Tooltip.Content side="top">{label}</Tooltip.Content>
-    </Tooltip>
+    <KitTooltip
+      label="Context preview"
+      state={hasItems ? "Ready" : undefined}
+      stateTone={"accent"}
+    >
+      <ComposerTrigger
+        iconOnly
+        aria-label={label}
+        aria-pressed={hasItems}
+        data-testid="wand-button"
+        disabled={disabled || isLoading || !currentText.trim()}
+        icon={WandSparkles}
+        onClick={handleClick}
+      />
+    </KitTooltip>
   );
 };
 

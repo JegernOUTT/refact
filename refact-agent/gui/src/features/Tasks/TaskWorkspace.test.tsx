@@ -3614,8 +3614,8 @@ describe("TaskWorkspace new-chat mode picker", () => {
     expect(
       screen.getByText("Read-only context gathering with quick tools"),
     ).toBeInTheDocument();
-    expect(screen.getByText("coding")).toBeInTheDocument();
-    expect(screen.getByText("read-only")).toBeInTheDocument();
+    expect(screen.getByText(/coding/)).toBeInTheDocument();
+    expect(screen.getByText(/read-only/)).toBeInTheDocument();
     expect(screen.getByText(/57 tools/)).toBeInTheDocument();
 
     // task_planner / task_agent must not appear in the new-chat menu.

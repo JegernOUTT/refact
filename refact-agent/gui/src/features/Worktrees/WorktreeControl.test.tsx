@@ -505,6 +505,33 @@ describe("WorktreeControl", () => {
     expect(deleteCalls).toHaveLength(0);
   });
 
+  test("an attached worktree missing from the inventory keeps its diff, merge and delete actions", async () => {
+    const record = makeWorktreeRecord("wt-unlisted", "refact/chat/unlisted");
+    server.use(
+      http.get("*/v1/worktrees", () => HttpResponse.json(makeWorktreeList([]))),
+    );
+    const { user } = render(<WorktreeControl />, {
+      preloadedState: {
+        chat: makeChatState("chat-1", record.meta),
+        config: configState(),
+      },
+    });
+
+    await user.click(screen.getByTestId("worktree-control-trigger"));
+    expect(
+      await screen.findByText(/Attached checkout is not in this list/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "View worktree diff" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Merge worktree" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Delete or discard worktree" }),
+    ).toBeInTheDocument();
+  });
+
   test("empty, mismatched and failed inventory refreshes never detach an attached checkout", async () => {
     const record = makeWorktreeRecord("wt-retained", "refact/chat/retained");
     const commandCalls: JsonObject[] = [];
@@ -731,50 +758,6 @@ describe("WorktreeControl", () => {
         "No branch",
       );
     });
-  });
-
-  test("menu renders compact actions and disables current-worktree actions on main", async () => {
-    const { user } = renderControl([]);
-
-    await user.click(screen.getByTestId("worktree-control-trigger"));
-
-    const create = await screen.findByRole("button", {
-      name: "Create worktree",
-    });
-    expect(create).toHaveTextContent("Create");
-    expect(create).toHaveAttribute("title", "Create worktree");
-
-    const main = screen.getByRole("button", {
-      name: "Already using main workspace",
-    });
-    expect(main).toHaveTextContent("Main");
-    expect(main).toBeDisabled();
-
-    const open = screen.getByRole("button", {
-      name: "Open worktree in new window",
-    });
-    expect(open).toHaveTextContent("Open");
-    expect(open).toBeDisabled();
-
-    const copy = screen.getByRole("button", { name: "Copy workspace path" });
-    expect(copy).toHaveTextContent("Copy");
-    await waitFor(() => expect(copy).toBeEnabled());
-
-    const diff = screen.getByRole("button", { name: "View worktree diff" });
-    expect(diff).toHaveTextContent("Diff");
-    expect(diff).toBeDisabled();
-
-    const merge = screen.getByRole("button", { name: "Merge worktree" });
-    expect(merge).toHaveTextContent("Merge");
-    expect(merge).toBeDisabled();
-
-    const deleteAction = screen.getByRole("button", {
-      name: "Delete or discard worktree",
-    });
-    expect(deleteAction).toHaveTextContent("Delete");
-    expect(deleteAction).toBeDisabled();
-    expect(screen.getByText("Existing")).toBeInTheDocument();
-    expect(screen.getByText("None yet")).toBeInTheDocument();
   });
 
   test("create modal fields stay constrained to the dialog content column", async () => {

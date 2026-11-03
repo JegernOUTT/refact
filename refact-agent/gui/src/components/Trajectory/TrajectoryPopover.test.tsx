@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
-import { render, screen, waitFor, within } from "../../utils/test-utils";
+import {
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "../../utils/test-utils";
 import {
   server,
   goodCaps,
@@ -54,7 +60,7 @@ describe("TrajectoryPopover LLM compression preview", () => {
     server.use(goodCaps, goodChatModes, goodPing, goodUser);
   });
 
-  it("renders an ineligible preview with null model, window and version", async () => {
+  it("shows ineligible reasons and eligible preview details", async () => {
     const requests = usePreviewResponse({
       eligible: false,
       trajectory_version: null,
@@ -64,28 +70,19 @@ describe("TrajectoryPopover LLM compression preview", () => {
       approximate_source_tokens: 0,
       reason: "No eligible summary model is configured.",
     });
-
-    const popover = await openAndPreview();
-
+    const ineligible = await openAndPreview();
     expect(
-      await within(popover).findByText(
+      await within(ineligible).findByText(
         "No eligible summary model is configured.",
       ),
     ).toBeInTheDocument();
     expect(requests).toEqual([{ options: {} }]);
+    expect(within(ineligible).queryByText("Model")).not.toBeInTheDocument();
     expect(
-      within(popover).getByText("Context rebuild is not currently available"),
-    ).toBeInTheDocument();
-    expect(
-      within(popover).queryByText(/Context window:/),
-    ).not.toBeInTheDocument();
-    expect(within(popover).queryByText(/Model:/)).not.toBeInTheDocument();
-    expect(
-      within(popover).getByRole("button", { name: "Rebuild context" }),
+      within(ineligible).getByRole("button", { name: "Rebuild context" }),
     ).toBeDisabled();
-  });
+    cleanup();
 
-  it("renders an eligible preview with a numeric context window", async () => {
     usePreviewResponse({
       eligible: true,
       trajectory_version: 3,
@@ -95,42 +92,16 @@ describe("TrajectoryPopover LLM compression preview", () => {
       approximate_source_tokens: 1200,
       reason: null,
     });
-
-    const popover = await openAndPreview();
-
+    const eligible = await openAndPreview();
     expect(
-      await within(popover).findByText(/4 messages \(~1,200 tokens\) eligible/),
+      await within(eligible).findByText(
+        /4 messages \(~1,200 tokens\) eligible/,
+      ),
     ).toBeInTheDocument();
+    expect(within(eligible).getByText("openai/gpt-4o")).toBeInTheDocument();
+    expect(within(eligible).getByText("128K")).toBeInTheDocument();
     expect(
-      within(popover).getByText("Model: openai/gpt-4o"),
-    ).toBeInTheDocument();
-    expect(within(popover).getByText(/Context window:/)).toHaveTextContent(
-      "Context window: 128K",
-    );
-    expect(
-      within(popover).getByRole("button", { name: "Rebuild context" }),
-    ).toBeEnabled();
-  });
-
-  it("omits the context window row when the field is missing", async () => {
-    usePreviewResponse({
-      eligible: true,
-      trajectory_version: 1,
-      resolved_model: "openai/gpt-4o",
-      source_messages: 2,
-      approximate_source_tokens: 50,
-    });
-
-    const popover = await openAndPreview();
-
-    expect(
-      await within(popover).findByText(/2 messages \(~50 tokens\) eligible/),
-    ).toBeInTheDocument();
-    expect(
-      within(popover).queryByText(/Context window:/),
-    ).not.toBeInTheDocument();
-    expect(
-      within(popover).getByRole("button", { name: "Rebuild context" }),
+      within(eligible).getByRole("button", { name: "Rebuild context" }),
     ).toBeEnabled();
   });
 });

@@ -1,14 +1,25 @@
-import React, { useCallback, useState, type ReactNode } from "react";
+import React, { useCallback, useState } from "react";
 import {
+  CircleHelp,
   Copy,
   ExternalLink,
-  FileText,
-  GitMerge,
+  GitBranch,
   LogOut,
   Plus,
-  Trash2,
 } from "lucide-react";
 import { Button, Dialog, Popover } from "../../components/ui";
+import {
+  KitButton,
+  KitDivider,
+  KitHeader,
+  KitNote,
+  KitPanel,
+  KitRow,
+  KitSection,
+  KitStaticRow,
+  KitTooltip,
+  kit,
+} from "../../components/ComposerKit";
 import {
   useDeleteWorktreeMutation,
   type MergeWorktreeResponse,
@@ -44,50 +55,6 @@ type WorktreeMenuProps = {
   onOpenInNewWindow: () => void;
   onCopyPath: () => void;
 };
-
-type ActionButtonProps = {
-  label: string;
-  title: string;
-  icon: ReactNode;
-  onClick: () => void;
-  disabled?: boolean;
-  danger?: boolean;
-  primary?: boolean;
-};
-
-function ActionButton({
-  label,
-  title,
-  icon,
-  onClick,
-  disabled = false,
-  danger = false,
-  primary = false,
-}: ActionButtonProps) {
-  const className = [
-    styles.actionButton,
-    primary ? styles.actionPrimary : "",
-    danger && !disabled ? styles.actionDanger : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
-
-  return (
-    <button
-      type="button"
-      className={className}
-      onClick={onClick}
-      disabled={disabled}
-      aria-label={title}
-      title={title}
-    >
-      <span className={styles.actionIcon} aria-hidden="true">
-        {icon}
-      </span>
-      <span className={styles.actionLabel}>{label}</span>
-    </button>
-  );
-}
 
 function compactPath(path: string): string {
   const normalized = path.replace(/[\\/]+$/, "");
@@ -144,12 +111,11 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
   const [localFeedback, setLocalFeedback] = useState<string | null>(null);
   const [deleteWorktree, deleteState] = useDeleteWorktreeMutation();
   const sharedCount = referenceCount(currentWorktree, currentRecord);
-  const worktreeAvailable = Boolean(currentWorktree);
   const scopeChangeDisabled =
     Boolean(scopeChangeBlockedReason) || scopeChangePending === true;
   const hasFeedback =
     (feedback?.length ?? 0) > 0 || (localFeedback?.length ?? 0) > 0;
-  const detachLabel = currentWorktree ? "Detach" : "Main";
+  const detachLabel = currentWorktree ? "Back to main" : "Using main workspace";
   const detachTitle = currentWorktree
     ? "Detach worktree and use main workspace"
     : "Already using main workspace";
@@ -221,186 +187,201 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
     [onDetach],
   );
 
+  const recordActions = (
+    <span className={styles.recordActions}>
+      <KitButton
+        className={styles.recordAction}
+        aria-label="View worktree diff"
+        onClick={() => setDiffOpen(true)}
+      >
+        Diff
+      </KitButton>
+      <KitButton
+        className={styles.recordAction}
+        aria-label="Merge worktree"
+        disabled={scopeChangeDisabled}
+        onClick={() => setMergeOpen(true)}
+      >
+        Merge
+      </KitButton>
+      <KitButton
+        className={styles.recordAction}
+        variant="danger"
+        aria-label="Delete or discard worktree"
+        disabled={scopeChangeDisabled}
+        onClick={() => setDeleteOpen(true)}
+      >
+        Delete
+      </KitButton>
+    </span>
+  );
+
   return (
     <>
       <Popover.Content
-        className={styles.content}
+        className={kit.popover}
         side="top"
         align="start"
         sideOffset={8}
+        maxWidth="min(340px, calc(100vw - 2 * var(--rf-space-3)))"
         scrollable={false}
+        onOpenAutoFocus={(event) => {
+          const content = event.currentTarget;
+          const row =
+            content instanceof HTMLElement
+              ? content.querySelector<HTMLElement>(`.${kit.row}:not(:disabled)`)
+              : null;
+          if (row) {
+            event.preventDefault();
+            row.focus();
+          }
+        }}
       >
-        <div className={styles.menu}>
-          <div className={styles.menuHeader}>
-            <span className={styles.titleText}>Worktrees</span>
-            {currentWorktree && currentRecord && (
-              <WorktreeStatusBadge
-                worktree={currentWorktree}
-                record={currentRecord}
-              />
-            )}
-          </div>
-          <p className={styles.menuHint}>
-            Paths warn/remap; shell uses scoped cwd; shared refs affect all
-            chats.
-          </p>
+        <KitPanel className={styles.menuPanel}>
+          <KitHeader
+            title={
+              <>
+                <GitBranch aria-hidden="true" size={13} />
+                {currentWorktree
+                  ? displayName(currentWorktree)
+                  : "Main workspace"}
+              </>
+            }
+          >
+            <KitTooltip label="Paths warn and remap; shell uses the scoped cwd; shared refs affect all chats.">
+              <button
+                type="button"
+                className={styles.helpButton}
+                aria-label="About worktrees"
+              >
+                <CircleHelp aria-hidden="true" size={13} />
+              </button>
+            </KitTooltip>
+          </KitHeader>
 
-          {scopeChangeBlockedReason && (
-            <p role="status" className={styles.feedbackText}>
-              {scopeChangeBlockedReason}
-            </p>
-          )}
-          {inventoryNotice && (
-            <div className={styles.feedbackStack}>
-              <p role="status" className={styles.feedbackText}>
-                {inventoryNotice}
-              </p>
-              {onRefresh && (
-                <Button
-                  size="sm"
-                  variant="soft"
+          {scopeChangeBlockedReason ? (
+            <div role="status">
+              <KitStaticRow tone="muted" label={scopeChangeBlockedReason} />
+            </div>
+          ) : null}
+          {inventoryNotice ? (
+            <>
+              <div role="status">
+                <KitStaticRow tone="muted" label={inventoryNotice} />
+              </div>
+              {onRefresh ? (
+                <KitRow
+                  label="Refresh worktree list"
                   disabled={isRefreshing}
                   onClick={onRefresh}
-                >
-                  Refresh worktree list
-                </Button>
-              )}
+                />
+              ) : null}
+            </>
+          ) : null}
+          {hasFeedback ? (
+            <div role="status">
+              {feedback ? <KitNote>{feedback}</KitNote> : null}
+              {localFeedback ? <KitNote>{localFeedback}</KitNote> : null}
             </div>
-          )}
-          {hasFeedback && (
-            <div className={styles.feedbackStack}>
-              {feedback && <p className={styles.feedbackText}>{feedback}</p>}
-              {localFeedback && (
-                <p className={styles.feedbackText}>{localFeedback}</p>
-              )}
-            </div>
-          )}
+          ) : null}
 
-          <div className={styles.actionGrid}>
-            <ActionButton
-              label="Create"
-              title="Create worktree"
-              icon={<Plus />}
-              onClick={onCreate}
-              disabled={scopeChangeDisabled}
-              primary
-            />
-            <ActionButton
-              label={detachLabel}
-              title={detachTitle}
-              icon={<LogOut />}
-              onClick={onDetach}
-              disabled={!currentWorktree || scopeChangeDisabled}
-            />
-            <ActionButton
-              label="Open"
-              title="Open worktree in new window"
-              icon={<ExternalLink />}
-              onClick={onOpenInNewWindow}
-              disabled={!currentWorktree}
-            />
-            <ActionButton
-              label="Copy"
-              title="Copy workspace path"
-              icon={<Copy />}
-              onClick={onCopyPath}
-              disabled={!canCopyPath}
-            />
-          </div>
+          <KitRow
+            icon={<Plus aria-hidden="true" />}
+            label="New worktree…"
+            aria-label="Create worktree"
+            onClick={onCreate}
+            disabled={scopeChangeDisabled}
+          />
+          <KitRow
+            icon={<LogOut aria-hidden="true" />}
+            label={detachLabel}
+            aria-label={detachTitle}
+            onClick={onDetach}
+            disabled={!currentWorktree || scopeChangeDisabled}
+          />
+          <KitRow
+            icon={<ExternalLink aria-hidden="true" />}
+            label="Open folder"
+            aria-label="Open worktree in new window"
+            onClick={onOpenInNewWindow}
+            disabled={!currentWorktree}
+          />
+          <KitRow
+            icon={<Copy aria-hidden="true" />}
+            label="Copy path"
+            aria-label="Copy workspace path"
+            onClick={onCopyPath}
+            disabled={!canCopyPath}
+          />
 
-          <div className={styles.separator} />
-
-          <div className={styles.section}>
-            <span className={styles.sectionHeader}>Existing</span>
-            <div className={styles.list}>
-              {isLoading && (
-                <span className={styles.emptyText}>Loading...</span>
-              )}
-              {!isLoading && records.length === 0 && (
-                <span className={styles.emptyText}>None yet</span>
-              )}
-              {records.map((record) => {
-                const selected = currentWorktree?.id === record.meta.id;
-                const title = displayName(record.meta);
-                const usedBy = record.referencing_chat_ids?.length
-                  ? record.referencing_chat_ids.join(", ")
-                  : record.references
-                      .map((reference) => reference.chat_id)
-                      .filter((value): value is string => Boolean(value))
-                      .join(", ");
-                return (
-                  <button
-                    key={record.meta.id}
-                    type="button"
-                    className={`${styles.item} ${
-                      selected ? styles.itemSelected : ""
+          <KitDivider />
+          <KitSection>Existing</KitSection>
+          <div className={styles.recordList}>
+            {currentWorktree &&
+            !records.some((record) => record.meta.id === currentWorktree.id) ? (
+              <div className={styles.recordRow}>
+                <KitStaticRow
+                  icon={<GitBranch aria-hidden="true" />}
+                  label={displayName(currentWorktree)}
+                  strong
+                  sub="Attached · not in this list"
+                />
+                {recordActions}
+              </div>
+            ) : null}
+            {isLoading ? <KitStaticRow tone="muted" label="Loading…" /> : null}
+            {!isLoading && records.length === 0 ? (
+              <KitStaticRow tone="muted" label="None yet" />
+            ) : null}
+            {records.map((record) => {
+              const selected = currentWorktree?.id === record.meta.id;
+              const title = displayName(record.meta);
+              const usedBy = record.referencing_chat_ids?.length
+                ? record.referencing_chat_ids.join(", ")
+                : record.references
+                    .map((reference) => reference.chat_id)
+                    .filter((value): value is string => Boolean(value))
+                    .join(", ");
+              return (
+                <div key={record.meta.id} className={styles.recordRow}>
+                  <KitRow
+                    icon={<GitBranch aria-hidden="true" />}
+                    label={title}
+                    strong={selected}
+                    sub={`${referencesLabel(record)}${
+                      usedBy ? ` · used by ${usedBy}` : ""
                     }`}
+                    badges={
+                      <WorktreeStatusBadge
+                        worktree={record.meta}
+                        record={record}
+                      />
+                    }
                     onClick={() => onSelect(record)}
                     aria-label={`Select worktree ${title}`}
                     aria-current={selected ? "true" : undefined}
                     title={
                       record.meta.kind === "task_agent"
                         ? "Managed by task lifecycle"
-                        : `Use ${title}`
+                        : record.meta.root
                     }
                     disabled={
                       scopeChangeDisabled || record.meta.kind === "task_agent"
                     }
-                  >
-                    <span className={styles.itemTitle}>
-                      <span className={styles.itemHeader}>
-                        <span className={styles.itemName}>{title}</span>
-                        <WorktreeStatusBadge
-                          worktree={record.meta}
-                          record={record}
-                        />
-                      </span>
-                      <span className={styles.path}>{record.meta.root}</span>
-                      <span className={styles.metaText}>
-                        {referencesLabel(record)}
-                        {usedBy ? ` · used by ${usedBy}` : ""}
-                      </span>
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className={styles.separator} />
-
-          <div className={styles.reviewActions}>
-            <ActionButton
-              label="Diff"
-              title="View worktree diff"
-              icon={<FileText />}
-              onClick={() => setDiffOpen(true)}
-              disabled={!worktreeAvailable}
-            />
-            <ActionButton
-              label="Merge"
-              title="Merge worktree"
-              icon={<GitMerge />}
-              onClick={() => setMergeOpen(true)}
-              disabled={!worktreeAvailable || scopeChangeDisabled}
-            />
-            <ActionButton
-              label="Delete"
-              title="Delete or discard worktree"
-              icon={<Trash2 />}
-              onClick={() => setDeleteOpen(true)}
-              disabled={!worktreeAvailable || scopeChangeDisabled}
-              danger={worktreeAvailable}
-            />
+                  />
+                  {selected ? recordActions : null}
+                </div>
+              );
+            })}
           </div>
 
           {sharedCount > 1 ? (
-            <p className={styles.feedbackText}>
+            <KitNote>
               Shared by {sharedCount} references. Delete and discard actions can
               affect other chats.
-            </p>
+            </KitNote>
           ) : null}
-        </div>
+        </KitPanel>
       </Popover.Content>
 
       <WorktreeDiffPanel

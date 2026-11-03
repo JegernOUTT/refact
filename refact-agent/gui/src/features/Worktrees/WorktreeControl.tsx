@@ -11,6 +11,7 @@ import { skipToken } from "@reduxjs/toolkit/query";
 import { GitBranch } from "lucide-react";
 import type { AppStore } from "../../app/store";
 import { Icon, Popover } from "../../components/ui";
+import { ComposerTrigger } from "../../components/ComposerKit";
 import {
   DEFAULT_MODE,
   selectRuntimeById,
@@ -529,12 +530,10 @@ const WorktreeControlInstance: React.FC<
         onOpenChange={handleMenuOpenChange}
       >
         <Popover.Trigger asChild>
-          <button
-            type="button"
+          <ComposerTrigger
+            chevron
             data-testid="worktree-control-trigger"
-            className={`${styles.trigger} ${
-              currentWorktree ? styles.triggerActive : ""
-            }`}
+            className={currentWorktree ? styles.triggerActive : undefined}
             title={triggerLabel}
             aria-label={`Worktree scope: ${triggerLabel}`}
             disabled={scopeDisabled}
@@ -548,7 +547,16 @@ const WorktreeControlInstance: React.FC<
                   className={styles.branchIcon}
                 />
               )}
-              <span className={styles.triggerText}>{label}</span>
+              <span
+                className={styles.triggerText}
+                data-shrink-at={
+                  Boolean(currentWorktree) || Boolean(sourceBranch)
+                    ? "1"
+                    : undefined
+                }
+              >
+                {label}
+              </span>
               {currentWorktree && (
                 <WorktreeStatusBadge
                   worktree={currentWorktree}
@@ -558,7 +566,7 @@ const WorktreeControlInstance: React.FC<
                 />
               )}
             </span>
-          </button>
+          </ComposerTrigger>
         </Popover.Trigger>
         {!scopeDisabled && (
           <WorktreeMenu

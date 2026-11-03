@@ -1,8 +1,6 @@
 import { useCallback } from "react";
-import { Text } from "@radix-ui/themes";
 import { Archive } from "lucide-react";
-import { IconButton } from "../ui";
-import { HoverCard } from "../LongTailPrimitives";
+import { ComposerTrigger, KitTooltip } from "../ComposerKit";
 import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { useAppSelector } from "../../hooks/useAppSelector";
 import {
@@ -40,39 +38,27 @@ export const AutoCompactToggleButton = ({
     ).catch(() => undefined);
   }, [chatId, isEnabled, disabled, config, apiKey, dispatch]);
 
-  const label = isEnabled
-    ? "Auto-compression enabled"
-    : "Auto-compression disabled";
   const actionLabel = isEnabled
     ? "Auto-compression ON — click to disable"
     : "Auto-compression OFF — click to enable";
 
   return (
-    <HoverCard>
-      <HoverCard.Trigger asChild>
-        <IconButton
-          aria-label={actionLabel}
-          aria-pressed={isEnabled}
-          data-testid="auto-compact-toggle"
-          disabled={disabled}
-          icon={Archive}
-          onClick={handleClick}
-          size="sm"
-          variant={isEnabled ? "primary" : "ghost"}
-        />
-      </HoverCard.Trigger>
-      <HoverCard.Content side="top">
-        <Text as="p" size="2">
-          {label}
-        </Text>
-        <Text as="p" size="1" color="gray">
-          When on: summarizes older messages as the chat grows, and runs an
-          emergency compaction if the provider returns a context-length error.
-          When off: both behaviors are disabled and you handle compaction
-          manually.
-        </Text>
-      </HoverCard.Content>
-    </HoverCard>
+    <KitTooltip
+      label="Auto-compression"
+      state={isEnabled ? "On" : "Off"}
+      stateTone={isEnabled ? "accent" : undefined}
+      hint="Summarizes older messages as the chat grows and compacts on context-length errors."
+    >
+      <ComposerTrigger
+        iconOnly
+        aria-label={actionLabel}
+        aria-pressed={isEnabled}
+        data-testid="auto-compact-toggle"
+        disabled={disabled}
+        icon={Archive}
+        onClick={handleClick}
+      />
+    </KitTooltip>
   );
 };
 

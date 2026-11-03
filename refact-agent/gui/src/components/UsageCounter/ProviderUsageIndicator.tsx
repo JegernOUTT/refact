@@ -1,6 +1,17 @@
 import React, { useMemo } from "react";
-import { Flex, Text } from "../LongTailPrimitives";
-import { Popover, ProviderQuota, type ProviderQuotaTone } from "../ui";
+import { Popover } from "../ui";
+import {
+  ComposerTrigger,
+  KitBadge,
+  KitDivider,
+  KitHeader,
+  KitKeyValue,
+  KitNote,
+  KitPanel,
+  KitProgress,
+  KitStaticRow,
+  kit,
+} from "../ComposerKit";
 import {
   type ProviderQuotaFact,
   type ProviderQuotaSnapshot,
@@ -44,6 +55,7 @@ const CircularUsage: React.FC<{ pct?: number }> = ({ pct }) => {
       className={styles.circularProgress}
       height={size}
       width={size}
+      viewBox={`0 0 ${size} ${size}`}
     >
       <circle
         className={styles.circularProgressBg}
@@ -68,12 +80,11 @@ const CircularUsage: React.FC<{ pct?: number }> = ({ pct }) => {
 
 function quotaTone(
   usedPercent: number | null | undefined,
-  fallback: ProviderQuotaTone = "accent",
-): ProviderQuotaTone {
-  if (usedPercent == null) return fallback;
+): "warning" | "danger" | undefined {
+  if (usedPercent == null) return undefined;
   if (usedPercent >= 90) return "danger";
   if (usedPercent >= 70) return "warning";
-  return "accent";
+  return undefined;
 }
 
 function formatAmount(value: number): string {
@@ -95,12 +106,21 @@ function windowValue(window: ProviderQuotaWindow): string {
   return "Not reported";
 }
 
+function sentenceCase(label: string): string {
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
 function windowMeta(window: ProviderQuotaWindow): string | undefined {
   const duration = formatLimitWindowSeconds(window.window_seconds);
+  const resetIn = formatResetAfterSeconds(window.reset_after_seconds);
+  const resetAt = formatResetAt(window.reset_at);
+  const reset =
+    resetIn && resetAt
+      ? `${resetIn} (${resetAt.replace(/^Resets\s+/i, "")})`
+      : resetIn ?? resetAt;
   const meta = formatQuotaMeta([
     duration ? `${duration} window` : null,
-    formatResetAfterSeconds(window.reset_after_seconds),
-    formatResetAt(window.reset_at),
+    reset,
     window.status ?? null,
   ]);
   return meta || undefined;
@@ -133,65 +153,60 @@ type ProviderQuotaIndicatorQuery = {
 
 export const SnapshotRows: React.FC<{ snapshot: ProviderQuotaSnapshot }> = ({
   snapshot,
-}) => {
-  const fallbackTone: ProviderQuotaTone = snapshot.stale ? "warning" : "accent";
-
-  return (
-    <Flex direction="column" gap="2">
-      {snapshot.stale ? (
-        <ProviderQuota
-          label="Quota status"
-          meta="Showing the last reported snapshot"
-          tone="warning"
-          value="Stale"
-        />
-      ) : null}
-      {snapshot.error ? (
-        <ProviderQuota
-          label="Quota error"
-          tone="danger"
-          value={snapshot.error}
-        />
-      ) : null}
-      {!snapshot.available ? (
-        <ProviderQuota
-          label="Quota status"
-          meta={snapshot.error ?? "This provider did not report quota data"}
-          tone={snapshot.error ? "danger" : "muted"}
-          value="Unavailable"
-        />
-      ) : null}
-      {snapshot.windows.map((window) => (
-        <ProviderQuota
-          key={`window:${window.id}`}
-          label={window.label}
-          meta={windowMeta(window)}
-          tone={quotaTone(window.used_percent, fallbackTone)}
-          usedPercent={window.used_percent ?? undefined}
-          value={windowValue(window)}
-        />
-      ))}
-      {snapshot.facts.map((fact) => (
-        <ProviderQuota
-          key={`fact:${fact.id}`}
-          label={fact.label}
-          tone={fallbackTone}
-          value={factValue(fact)}
-        />
-      ))}
-      {snapshot.available &&
-      snapshot.windows.length === 0 &&
-      snapshot.facts.length === 0 ? (
-        <ProviderQuota
-          label="Quota status"
-          tone="muted"
-          value="No quota details reported"
-        />
-      ) : null}
-      <ProviderQuota label="Source" tone="muted" value={snapshot.source} />
-    </Flex>
-  );
-};
+}) => (
+  <>
+    {snapshot.stale ? (
+      <KitKeyValue
+        label="Quota status"
+        value={<KitBadge tone="warning">Stale</KitBadge>}
+      />
+    ) : null}
+    {snapshot.error ? (
+      <KitStaticRow tone="danger" label={snapshot.error} />
+    ) : null}
+    {!snapshot.available ? (
+      <>
+        <KitKeyValue label="Quota status" value="Unavailable" />
+        {snapshot.error ? null : (
+          <KitNote>This provider did not report quota data</KitNote>
+        )}
+      </>
+    ) : null}
+    {snapshot.windows.map((window) => {
+      const meta = windowMeta(window);
+      return (
+        <React.Fragment key={`window:${window.id}`}>
+          <KitKeyValue
+            label={sentenceCase(window.label)}
+            value={windowValue(window)}
+          />
+          {window.used_percent != null ? (
+            <KitProgress
+              value={clampPercent(window.used_percent)}
+              tone={quotaTone(window.used_percent)}
+              label={window.label}
+            />
+          ) : null}
+          {meta ? <KitNote>{meta}</KitNote> : null}
+        </React.Fragment>
+      );
+    })}
+    {snapshot.facts.map((fact) => (
+      <KitKeyValue
+        key={`fact:${fact.id}`}
+        label={sentenceCase(fact.label)}
+        value={factValue(fact)}
+      />
+    ))}
+    {snapshot.available &&
+    snapshot.windows.length === 0 &&
+    snapshot.facts.length === 0 ? (
+      <KitStaticRow tone="muted" label="No quota details reported" />
+    ) : null}
+    <KitDivider />
+    <KitKeyValue label="Source" value={snapshot.source} />
+  </>
+);
 
 export const ProviderUsageIndicatorContent: React.FC<{
   displayName: string;
@@ -218,47 +233,40 @@ export const ProviderUsageIndicatorContent: React.FC<{
   return (
     <Popover responsive={false} onOpenChange={onOpenChange}>
       <Popover.Trigger asChild>
-        <button
-          aria-label={`${displayName}: ${stateLabel}`}
-          className={styles.providerIndicatorTrigger}
-          type="button"
-        >
-          <Flex align="center" gap="1">
-            <CircularUsage pct={percent} />
-            <span className={styles.providerCompactLabel}>{displayName}</span>
-          </Flex>
-        </button>
-      </Popover.Trigger>
-      <Popover.Content align="end" maxHeight="50vh" maxWidth="280px" side="top">
-        <Flex direction="column" gap="2">
-          <Text size="1" weight="bold" className={styles.providerDetailsName}>
+        <ComposerTrigger aria-label={`${displayName}: ${stateLabel}`}>
+          <CircularUsage pct={percent} />
+          <span className={kit.label} data-shrink-at="1">
             {displayName}
-          </Text>
+          </span>
+        </ComposerTrigger>
+      </Popover.Trigger>
+      <Popover.Content
+        className={kit.popover}
+        align="end"
+        maxHeight="50vh"
+        maxWidth="280px"
+        side="top"
+      >
+        <KitPanel>
+          <KitHeader
+            title={displayName}
+            meta={percent != null ? formatUsagePercent(percent) : undefined}
+            metaStrong
+          />
           {quotaQuery.isLoading ? (
-            <ProviderQuota label="Quota status" tone="muted" value="Loading…" />
+            <KitStaticRow tone="muted" label="Loading…" />
           ) : quotaQuery.isError ? (
-            <ProviderQuota
-              label="Quota status"
-              meta="Could not load provider quota"
-              tone="danger"
-              value="Error"
-            />
+            <KitStaticRow tone="danger" label="Could not load provider quota" />
           ) : snapshot ? (
             <SnapshotRows snapshot={snapshot} />
           ) : (
-            <ProviderQuota
-              label="Quota status"
-              meta="The provider returned no snapshot"
+            <KitStaticRow
               tone="muted"
-              value="Unavailable"
+              label="The provider returned no snapshot"
             />
           )}
-          <ProviderQuota
-            label="Provider instance"
-            tone="muted"
-            value={providerName}
-          />
-        </Flex>
+          <KitKeyValue label="Provider instance" value={providerName} />
+        </KitPanel>
       </Popover.Content>
     </Popover>
   );

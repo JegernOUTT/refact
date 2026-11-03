@@ -1,0 +1,7 @@
+.active {
+  color: var(--rf-color-fg);
+}
+
+.active > svg {
+  color: var(--rf-color-accent);
+}

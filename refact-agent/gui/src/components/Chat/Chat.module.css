@@ -56,22 +56,17 @@
   position: relative;
 }
 
-.queueDock {
-  margin-bottom: var(--rf-space-2);
+.dockTerminal {
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
 }
 
-.terminalWorkbench {
-  margin-bottom: var(--rf-space-2);
-  overflow: hidden;
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-glass);
-  box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay));
+.dockRow {
+  padding: var(--rf-space-1) var(--rf-space-1) 0;
 }
 
-/* Single glass block shared by the task progress widget and the composer. */
+/* Single glass surface shared by the terminal, queue, goal and composer. */
 .dockGroup {
+  position: relative;
   overflow: hidden;
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
@@ -85,16 +80,74 @@
   border-color: var(--rf-border-strong);
 }
 
-@media (prefers-reduced-transparency: reduce) {
-  .dockPanel,
-  .terminalWorkbench,
-  .dockGroup {
-    backdrop-filter: none;
+.dockGroup::before {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  left: 0;
+  width: 40%;
+  height: var(--rf-space-2xs);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--rf-color-accent),
+    transparent
+  );
+  content: "";
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-100%);
+  transition: opacity var(--rf-dur-med) var(--rf-ease-standard);
+}
+
+.dockGroup[data-activity]::before {
+  opacity: 1;
+  will-change: transform;
+}
+
+.dockGroup[data-activity="loading"]::before {
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--rf-color-muted),
+    transparent
+  );
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .dockGroup[data-activity]::before {
+    animation: dockSweep var(--rf-motion-shimmer-duration)
+      var(--rf-ease-standard) infinite;
   }
 }
 
-.activity {
-  padding: var(--rf-space-1) var(--rf-space-2);
-  color: var(--rf-color-muted);
-  font-size: var(--rf-text-2);
+@media (prefers-reduced-motion: reduce) {
+  .dockGroup[data-activity]::before {
+    width: 100%;
+    opacity: var(--rf-motion-opacity-soft);
+    transform: none;
+  }
+}
+
+:global(html[data-reduced-motion="on"]) .dockGroup[data-activity]::before {
+  width: 100%;
+  animation: none;
+  opacity: var(--rf-motion-opacity-soft);
+  transform: none;
+}
+
+@keyframes dockSweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .dockPanel,
+  .dockGroup {
+    backdrop-filter: none;
+  }
 }

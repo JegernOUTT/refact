@@ -808,18 +808,16 @@ const NewChatModeButton: React.FC<NewChatModeButtonProps> = ({
           </Text>
         ) : (
           <div className={modeSelectStyles.modeList}>
-            {modes.map((mode, index) => (
-              <React.Fragment key={mode.id}>
-                {index > 0 && <div className={modeSelectStyles.separator} />}
-                <ModeMenuItem
-                  mode={mode}
-                  isSelected={false}
-                  onSelect={() => {
-                    setOpen(false);
-                    onCreate(mode.id);
-                  }}
-                />
-              </React.Fragment>
+            {modes.map((mode) => (
+              <ModeMenuItem
+                key={mode.id}
+                mode={mode}
+                isSelected={false}
+                onSelect={() => {
+                  setOpen(false);
+                  onCreate(mode.id);
+                }}
+              />
             ))}
           </div>
         )}

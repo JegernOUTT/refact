@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   CircleHelp,
   Info,
@@ -23,7 +23,7 @@ import {
 import { ProjectInformationDialog } from "./ProjectInformationDialog";
 import { selectHost } from "../../features/Config/configSlice";
 import { Checkbox } from "../Checkbox";
-import { IconButton, Tooltip } from "../ui";
+import { ComposerTrigger, KitTooltip } from "../ComposerKit";
 import type { Checkbox as CheckboxType } from "./useCheckBoxes";
 import type { useAttachedFiles } from "./useCheckBoxes";
 import styles from "./ChatInputTopControls.module.css";
@@ -33,6 +33,7 @@ export type ChatInputTopControlsProps = {
   onCheckedChange: (name: string, checked: boolean | string) => void;
   attachedFiles: ReturnType<typeof useAttachedFiles>;
   disabled?: boolean;
+  onDialogOpenChange?: (open: boolean) => void;
   renderControls?: (
     controls: Record<string, React.ReactNode>,
     dangerous: boolean,
@@ -44,6 +45,7 @@ export const ChatInputTopControls: React.FC<ChatInputTopControlsProps> = ({
   onCheckedChange,
   attachedFiles,
   disabled,
+  onDialogOpenChange,
   renderControls,
 }) => {
   const isDisabled = disabled ?? false;
@@ -60,6 +62,17 @@ export const ChatInputTopControls: React.FC<ChatInputTopControlsProps> = ({
     selectIncludeProjectInfoById(state, chatId),
   );
   const [dialogOpen, setDialogOpen] = useState(false);
+  const projectInfoTriggerRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!dialogOpen) return;
+    const trigger = projectInfoTriggerRef.current;
+    onDialogOpenChange?.(true);
+    return () => {
+      trigger?.focus({ preventScroll: true });
+      onDialogOpenChange?.(false);
+    };
+  }, [dialogOpen, onDialogOpenChange]);
 
   const handleEditingChange = useCallback(
     (checked: boolean) => {
@@ -85,136 +98,108 @@ export const ChatInputTopControls: React.FC<ChatInputTopControlsProps> = ({
 
   const controls = {
     projectInfo: (
-      <span className={styles.projectInfoControl}>
-        <Tooltip>
-          <Tooltip.Trigger asChild>
-            <IconButton
-              icon={Info}
-              variant="plain"
-              size="sm"
-              type="button"
-              aria-label="Configure project information"
-              disabled={isDisabled}
-              className={includeProjectInfo ? styles.accent : undefined}
-              onClick={() => setDialogOpen(true)}
-            />
-          </Tooltip.Trigger>
-          <Tooltip.Content>
-            Project info: {includeProjectInfo ? "ON" : "OFF"}
-          </Tooltip.Content>
-        </Tooltip>
-      </span>
+      <KitTooltip
+        label="Project info"
+        state={includeProjectInfo ? "On" : "Off"}
+        stateTone={includeProjectInfo ? "accent" : undefined}
+      >
+        <ComposerTrigger
+          ref={projectInfoTriggerRef}
+          iconOnly
+          icon={Info}
+          aria-label="Configure project information"
+          aria-haspopup="dialog"
+          aria-expanded={dialogOpen}
+          disabled={isDisabled}
+          className={includeProjectInfo ? styles.accent : undefined}
+          onClick={() => setDialogOpen(true)}
+        />
+      </KitTooltip>
     ),
     editApproval: (
-      <Tooltip>
-        <Tooltip.Trigger asChild>
-          <IconButton
-            icon={Pencil}
-            variant="plain"
-            size="sm"
-            type="button"
-            aria-label="Auto-approve file editing tools"
-            aria-pressed={autoApproveEditing}
-            disabled={isDisabled || !chatId}
-            className={autoApproveEditing ? styles.accent : undefined}
-            onClick={() => handleEditingChange(!autoApproveEditing)}
-          />
-        </Tooltip.Trigger>
-        <Tooltip.Content>
-          Auto-approve edits: {autoApproveEditing ? "ON" : "OFF"}
-        </Tooltip.Content>
-      </Tooltip>
+      <KitTooltip
+        label="Auto-approve edits"
+        state={autoApproveEditing ? "On" : "Off"}
+        stateTone={autoApproveEditing ? "accent" : undefined}
+      >
+        <ComposerTrigger
+          iconOnly
+          icon={Pencil}
+          aria-label="Auto-approve file editing tools"
+          aria-pressed={autoApproveEditing}
+          disabled={isDisabled || !chatId}
+          onClick={() => handleEditingChange(!autoApproveEditing)}
+        />
+      </KitTooltip>
     ),
     dangerousApproval: (
-      <Tooltip>
-        <Tooltip.Trigger asChild>
-          <IconButton
-            icon={TriangleAlert}
-            variant="plain"
-            size="sm"
-            type="button"
-            aria-label="Auto-approve dangerous commands"
-            aria-pressed={autoApproveDangerous}
-            disabled={isDisabled || !chatId}
-            className={autoApproveDangerous ? styles.dangerIcon : undefined}
-            onClick={() => handleDangerousChange(!autoApproveDangerous)}
-          />
-        </Tooltip.Trigger>
-        <Tooltip.Content>
-          Auto-approve dangerous: {autoApproveDangerous ? "ON" : "OFF"}
-        </Tooltip.Content>
-      </Tooltip>
+      <KitTooltip
+        label="Auto-approve dangerous commands"
+        state={autoApproveDangerous ? "On" : "Off"}
+        stateTone={autoApproveDangerous ? "danger" : undefined}
+      >
+        <ComposerTrigger
+          iconOnly
+          tone="danger"
+          icon={TriangleAlert}
+          aria-label="Auto-approve dangerous commands"
+          aria-pressed={autoApproveDangerous}
+          disabled={isDisabled || !chatId}
+          onClick={() => handleDangerousChange(!autoApproveDangerous)}
+        />
+      </KitTooltip>
     ),
     selectedLines: showSelectedLines && (
-      <>
-        <span className={styles.divider}>|</span>
-        <div className={styles.selectedLinesGroup}>
-          <Checkbox
-            size="1"
-            name={selectedLinesCheckbox.name}
-            checked={selectedLinesCheckbox.checked}
-            disabled={isDisabled || selectedLinesCheckbox.disabled}
-            onCheckedChange={(value) =>
-              onCheckedChange(selectedLinesCheckbox.name, value)
-            }
+      <span className={styles.selectedLinesGroup}>
+        <Checkbox
+          size="1"
+          name={selectedLinesCheckbox.name}
+          checked={selectedLinesCheckbox.checked}
+          disabled={isDisabled || selectedLinesCheckbox.disabled}
+          onCheckedChange={(value) =>
+            onCheckedChange(selectedLinesCheckbox.name, value)
+          }
+        >
+          <span>{selectedLinesCheckbox.label}</span>
+        </Checkbox>
+        <ComposerTrigger
+          iconOnly
+          icon={selectedLinesCheckbox.locked ? Lock : Unlock}
+          aria-label={selectedLinesCheckbox.locked ? "Locked" : "Unlocked"}
+          disabled={isDisabled || selectedLinesCheckbox.disabled}
+          onClick={() =>
+            onCheckedChange(
+              selectedLinesCheckbox.name,
+              !selectedLinesCheckbox.checked,
+            )
+          }
+        />
+        {selectedLinesCheckbox.info && (
+          <KitTooltip
+            label="Selected lines"
+            hint={selectedLinesCheckbox.info.text}
           >
-            <span>{selectedLinesCheckbox.label}</span>
-          </Checkbox>
-          <IconButton
-            icon={selectedLinesCheckbox.locked ? Lock : Unlock}
-            variant="plain"
-            size="sm"
-            type="button"
-            aria-label={selectedLinesCheckbox.locked ? "Locked" : "Unlocked"}
-            disabled={isDisabled || selectedLinesCheckbox.disabled}
-            onClick={() =>
-              onCheckedChange(
-                selectedLinesCheckbox.name,
-                !selectedLinesCheckbox.checked,
-              )
-            }
-          />
-          {selectedLinesCheckbox.info && (
-            <Tooltip>
-              <Tooltip.Trigger asChild>
-                <IconButton
-                  icon={CircleHelp}
-                  variant="plain"
-                  size="sm"
-                  type="button"
-                  aria-label="Selected lines information"
-                  disabled={isDisabled}
-                />
-              </Tooltip.Trigger>
-              <Tooltip.Content maxWidth="240px">
-                {selectedLinesCheckbox.info.text}
-              </Tooltip.Content>
-            </Tooltip>
-          )}
-        </div>
-      </>
+            <ComposerTrigger
+              iconOnly
+              icon={CircleHelp}
+              aria-label="Selected lines information"
+              disabled={isDisabled}
+            />
+          </KitTooltip>
+        )}
+      </span>
     ),
     activeFile: showAttachButton && (
-      <>
-        <span className={styles.divider}>|</span>
-        <Tooltip>
-          <Tooltip.Trigger asChild>
-            <IconButton
-              icon={Plus}
-              variant="plain"
-              size="sm"
-              type="button"
-              aria-label={`Attach ${attachedFiles.activeFile.name}`}
-              disabled={isDisabled || attachedFiles.attached}
-              className={attachedFiles.attached ? styles.accent : undefined}
-              onClick={attachedFiles.addFile}
-            />
-          </Tooltip.Trigger>
-          <Tooltip.Content>
-            Attach: {attachedFiles.activeFile.name}
-          </Tooltip.Content>
-        </Tooltip>
-      </>
+      <KitTooltip label="Attach" state={attachedFiles.activeFile.name}>
+        <ComposerTrigger
+          iconOnly
+          icon={Plus}
+          aria-label={`Attach ${attachedFiles.activeFile.name}`}
+          aria-pressed={attachedFiles.attached}
+          disabled={isDisabled || attachedFiles.attached}
+          onClick={attachedFiles.addFile}
+        />
+      </KitTooltip>
     ),
   };
   return (

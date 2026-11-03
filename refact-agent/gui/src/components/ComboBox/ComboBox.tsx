@@ -5,12 +5,10 @@ import type { TextAreaProps } from "../TextArea/TextArea";
 import { Item } from "./Item";
 import { Portal } from "../Portal";
 import { Popover } from "./Popover";
-import { TruncateLeft } from "../Text";
 import { type DebouncedState } from "usehooks-ts";
 import { CommandCompletionResponse } from "../../services/refact";
 import { useAppSelector } from "../../hooks/useAppSelector";
 import { useEventsBusForIDE } from "../../hooks/useEventBusForIDE";
-import { SlashCommandSuggestion } from "../SlashCommands";
 import { selectSubmitOption } from "../../features/Config/configSlice";
 import {
   nextPlaceholder,
@@ -35,6 +33,17 @@ function isSlashCommandCompletion(
     command.startsWith("/") &&
     commands.completion_details?.[command] !== undefined
   );
+}
+
+function popoverTitle(commands: CommandCompletionResponse, value: string) {
+  const start = Math.max(0, Math.min(commands.replace[0], commands.replace[1]));
+  const before = value.slice(0, start);
+  const line = before.slice(before.lastIndexOf("\n") + 1);
+  const owner = /(?:^|\s)([@/]\w\S*)\s+$/.exec(line);
+  if (owner) return owner[1];
+  if (commands.completions.every((item) => item.startsWith("/")))
+    return "Commands";
+  return "Context";
 }
 
 export type ComboBoxProps = {
@@ -464,23 +473,19 @@ export const ComboBox: React.FC<ComboBoxProps> = ({
             return getAnchorRect(textarea, ["@", "/", " "]);
           }}
           maxWidth={popoverWidth}
+          title={popoverTitle(commands, value)}
+          meta={`${matches.length} ${
+            matches.length === 1 ? "match" : "matches"
+          }`}
         >
-          {matches.map((item, index) => {
-            const detail = commands.completion_details?.[item];
-            return (
-              <Item
-                key={item + "-" + index}
-                value={item}
-                onClick={(e) => onItemClick(item, e)}
-              >
-                {detail ? (
-                  <SlashCommandSuggestion name={item} detail={detail} />
-                ) : (
-                  <TruncateLeft>{item}</TruncateLeft>
-                )}
-              </Item>
-            );
-          })}
+          {matches.map((item, index) => (
+            <Item
+              key={item + "-" + index}
+              value={item}
+              detail={commands.completion_details?.[item]}
+              onClick={(e) => onItemClick(item, e)}
+            />
+          ))}
         </Popover>
       </Portal>
     </>

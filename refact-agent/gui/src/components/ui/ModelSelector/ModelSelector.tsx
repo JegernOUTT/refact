@@ -66,7 +66,7 @@ const badgeTone: Record<
   chat2: "accent",
   default: "accent",
   light: "success",
-  reasoning: "default",
+  reasoning: "muted",
   "task-agent": "accent",
 };
 
@@ -294,6 +294,7 @@ function ModelRow({
                   key={badge}
                   className={styles.badge}
                   tone={badgeTone[badge]}
+                  size="xs"
                 >
                   {badgeLabel[badge]}
                 </Badge>

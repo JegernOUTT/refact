@@ -1,7 +1,3 @@
-.button {
-  color: var(--rf-color-fg);
-}
-
 .chatFormShell {
   margin-top: var(--rf-space-1);
 }
@@ -62,15 +58,11 @@
 .chatFormEmbedded,
 .chatFormEmbedded:hover,
 .chatFormEmbedded:focus-within {
+  border-width: 0;
   border-color: transparent;
   background: transparent;
   box-shadow: none;
   backdrop-filter: none;
-}
-
-.chatFormCompact {
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
 }
 
 .textareaWrapper {
@@ -84,31 +76,62 @@
     border-color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
-.expansionButton {
-  position: absolute;
-  top: var(--rf-space-1);
-  right: var(--rf-space-2);
-  z-index: 1;
-}
-
 .chatFormExpanded .inputHeader {
   animation: composerHeaderFadeIn var(--rf-dur-fast) var(--rf-ease-standard)
     both;
 }
 
 .chatFormCollapsed .textareaWrapper textarea {
-  height: calc(2 * var(--rf-line-3) + var(--rf-space-2));
-  min-height: calc(2 * var(--rf-line-3) + var(--rf-space-2));
-  max-height: calc(2 * var(--rf-line-3) + var(--rf-space-2));
-  padding: var(--rf-space-1) var(--rf-space-6) var(--rf-space-1)
-    var(--chat-input-padding);
+  min-height: calc(var(--rf-line-3) + 2 * var(--rf-space-2));
+  max-height: calc(var(--rf-line-3) + 2 * var(--rf-space-2));
+  padding-block: var(--rf-space-2);
   display: block;
-  overflow: auto;
+  overflow: hidden;
   resize: none;
 }
 
 .chatFormCollapsed .textareaWrapper textarea::placeholder {
   opacity: 0.7;
+}
+
+.inputField {
+  position: relative;
+}
+
+.inputField[data-placeholder-overlay] textarea::placeholder {
+  color: transparent;
+}
+
+.inputField .placeholderOverlay {
+  --rf-shimmer-text-base: var(--rf-color-faint);
+  --rf-shimmer-text-glow: var(--rf-color-fg);
+
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  display: block;
+  overflow: hidden;
+  padding: var(--chat-input-padding);
+  color: var(--rf-color-faint);
+  font: var(--rf-weight-regular) var(--rf-text-3) / var(--rf-line)
+    var(--rf-font-ui);
+  pointer-events: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chatFormCollapsed .inputField .placeholderOverlay {
+  padding-block: var(--rf-space-2);
+  opacity: 0.7;
+}
+
+.placeholderSkeleton {
+  display: block;
+  width: 40%;
+  height: var(--rf-space-2);
+  margin-block: calc((var(--rf-line-3) - var(--rf-space-2)) / 2);
+  border-radius: var(--rf-radius-pill);
 }
 
 .inputHeader {
@@ -119,6 +142,7 @@
   padding-bottom: var(--rf-space-2);
 }
 
+.inputHeader:empty,
 .inputHeader > *:empty {
   display: none;
 }
@@ -135,12 +159,24 @@
 }
 
 .textareaWrapper textarea {
-  min-height: 100px;
+  min-height: calc(3 * var(--rf-line-3) + 2 * var(--chat-input-padding));
   padding: var(--chat-input-padding);
-  padding-right: var(--rf-space-6);
   background: transparent;
   border: 0;
   box-shadow: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .textareaWrapper textarea {
+    transition:
+      min-height var(--rf-dur-med) var(--rf-ease-standard),
+      max-height var(--rf-dur-med) var(--rf-ease-standard),
+      padding var(--rf-dur-med) var(--rf-ease-standard);
+  }
+
+  .inputField .placeholderOverlay {
+    transition: padding var(--rf-dur-med) var(--rf-ease-standard);
+  }
 }
 
 .textareaWrapper textarea:focus,
@@ -154,50 +190,6 @@
   max-height: 50vh;
   max-height: 50dvh;
   mask-image: none;
-}
-
-.file_name_ellipsis_rtl {
-  display: inline;
-  max-width: 100%;
-  overflow: hidden;
-  direction: rtl;
-  line-height: var(--rf-line);
-  text-overflow: ellipsis;
-  vertical-align: middle;
-  white-space: nowrap;
-}
-
-.file_name_ellipsis_ltr {
-  direction: ltr;
-}
-
-.removeFileButton {
-  height: unset;
-  margin: 0;
-  margin-right: var(--rf-space-1);
-  padding: 0;
-  background-color: transparent;
-  font-size: unset;
-  line-height: var(--rf-line);
-  vertical-align: unset;
-}
-
-.checkbox_container {
-  display: flex;
-  gap: var(--rf-space-2);
-  white-space: nowrap;
-}
-
-.controls {
-  overflow: hidden;
-}
-
-.data_list {
-  gap: var(--rf-space-2);
-}
-
-.data_list__value {
-  justify-content: end;
 }
 
 @media (prefers-reduced-motion: reduce) {

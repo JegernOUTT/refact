@@ -1,3 +1,4 @@
+import { TriangleAlert } from "lucide-react";
 import React, {
   useCallback,
   useEffect,
@@ -5,15 +6,20 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { TriangleAlert } from "lucide-react";
+import { FieldText } from "../../components/ui";
 import {
-  Badge,
-  Button,
-  Dialog,
-  FieldSelect,
-  FieldText,
-  Icon,
-} from "../../components/ui";
+  KitBadge,
+  KitButton,
+  KitCheckRow,
+  KitDialog,
+  KitDialogCancel,
+  KitDivider,
+  KitRow,
+  KitSection,
+  KitStaticRow,
+  kit,
+  type KitTone,
+} from "../../components/ComposerKit";
 import { useAppDispatch } from "../../hooks";
 import {
   useMergeWorktreeMutation,
@@ -108,11 +114,28 @@ function resultTone(
   merged: boolean,
   conflicted: boolean,
   hasWarnings: boolean,
-): React.ComponentProps<typeof Badge>["tone"] {
+): KitTone {
   if (conflicted || hasWarnings) return "warning";
   if (merged) return "success";
   return "muted";
 }
+
+const MERGE_STRATEGIES: {
+  value: WorktreeMergeStrategy;
+  label: string;
+  hint: string;
+}[] = [
+  {
+    value: "squash",
+    label: "Squash merge",
+    hint: "Combine all commits into one",
+  },
+  {
+    value: "merge",
+    label: "Regular merge",
+    hint: "Keep the commit history",
+  },
+];
 
 export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
   open,
@@ -274,192 +297,191 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
   const conflicted = result ? hasMergeConflict(result) : false;
   const merged = result ? isMerged(result) : false;
 
+  const isBusy = mergeState.isLoading;
+  const controlsDisabled = isBusy || !canActOnWorktree;
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content className={styles.mergeDialog} maxWidth="900px">
-        <div>
-          <Dialog.Title>Merge worktree</Dialog.Title>
-          <Dialog.Description>
-            Merge {label} into a target branch.
-          </Dialog.Description>
+    <KitDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="Merge worktree"
+      description={`Merge ${label} into a target branch.`}
+      width="560px"
+      closeLabel="Close dialog"
+      footer={
+        <>
+          <KitDialogCancel disabled={isBusy}>Close</KitDialogCancel>
+          <KitButton
+            variant="primary"
+            onClick={() => void handleMerge()}
+            disabled={controlsDisabled}
+            aria-busy={isBusy || undefined}
+          >
+            Merge
+          </KitButton>
+        </>
+      }
+    >
+      <KitSection>Strategy</KitSection>
+      <div
+        role="radiogroup"
+        aria-label="Merge strategy"
+        onKeyDown={(event) => {
+          const step =
+            event.key === "ArrowDown" || event.key === "ArrowRight"
+              ? 1
+              : event.key === "ArrowUp" || event.key === "ArrowLeft"
+                ? -1
+                : 0;
+          if (step === 0 || controlsDisabled) return;
+          event.preventDefault();
+          const index = MERGE_STRATEGIES.findIndex(
+            (option) => option.value === strategy,
+          );
+          const next =
+            MERGE_STRATEGIES[
+              (index + step + MERGE_STRATEGIES.length) % MERGE_STRATEGIES.length
+            ];
+          setStrategy(next.value);
+          event.currentTarget
+            .querySelector<HTMLElement>(`[data-strategy="${next.value}"]`)
+            ?.focus();
+        }}
+      >
+        {MERGE_STRATEGIES.map((option) => (
+          <KitRow
+            key={option.value}
+            role="radio"
+            data-strategy={option.value}
+            aria-checked={strategy === option.value}
+            tabIndex={strategy === option.value ? 0 : -1}
+            label={option.label}
+            hint={option.hint}
+            selected={strategy === option.value}
+            disabled={controlsDisabled}
+            onClick={() => setStrategy(option.value)}
+          />
+        ))}
+      </div>
 
-          <div className={styles.modalFields}>
-            <div className={styles.field}>
-              <span className={styles.labelText}>Strategy</span>
-              <FieldSelect
-                value={strategy}
-                options={[
-                  { value: "squash", label: "Squash merge" },
-                  { value: "merge", label: "Regular merge" },
-                ]}
-                onChange={(value) =>
-                  setStrategy(value as WorktreeMergeStrategy)
-                }
-                disabled={mergeState.isLoading || !canActOnWorktree}
-                aria-label="Merge strategy"
-              />
-            </div>
+      <label className={styles.field}>
+        <span className={kit.section}>Target branch</span>
+        <span className={styles.fieldControl}>
+          <FieldText
+            value={targetBranch}
+            onChange={setTargetBranch}
+            disabled={controlsDisabled}
+          />
+        </span>
+      </label>
 
-            <label className={styles.field} htmlFor="worktree-target-branch">
-              <span className={styles.labelText}>Target branch</span>
-              <FieldText
-                id="worktree-target-branch"
-                value={targetBranch}
-                onChange={setTargetBranch}
-                disabled={mergeState.isLoading || !canActOnWorktree}
-              />
-            </label>
+      <KitDivider />
+      <KitCheckRow
+        label="Delete worktree after merge"
+        hint="Also applies when there is nothing to merge"
+        ariaLabel="Delete worktree after merge or if there is nothing to merge"
+        checked={deleteAfterMerge}
+        onCheckedChange={setDeleteAfterMerge}
+        disabled={controlsDisabled}
+      />
+      <KitCheckRow
+        label="Include uncommitted changes"
+        hint="Auto-commit them first"
+        ariaLabel="Include uncommitted changes by auto-committing first"
+        checked={includeUncommitted}
+        onCheckedChange={setIncludeUncommitted}
+        disabled={controlsDisabled}
+      />
 
-            <div className={styles.checkboxStack}>
-              <label className={styles.checkboxRow}>
-                <input
-                  type="checkbox"
-                  checked={deleteAfterMerge}
-                  onChange={(event) =>
-                    setDeleteAfterMerge(event.currentTarget.checked)
-                  }
-                  disabled={mergeState.isLoading || !canActOnWorktree}
-                />
-                Delete worktree after merge or if there is nothing to merge
-              </label>
-              <label className={styles.checkboxRow}>
-                <input
-                  type="checkbox"
-                  checked={includeUncommitted}
-                  onChange={(event) =>
-                    setIncludeUncommitted(event.currentTarget.checked)
-                  }
-                  disabled={mergeState.isLoading || !canActOnWorktree}
-                />
-                Include uncommitted changes by auto-committing first
-              </label>
-            </div>
+      {error ? (
+        <p className={styles.formError} role="alert">
+          <TriangleAlert aria-hidden="true" />
+          {error}
+        </p>
+      ) : null}
 
-            {/*
-              N-58: merge failures come from the operation as a whole, not from
-              one control, so they stay a form-level slot -- but with role
-              ="alert" and an icon + semibold weight so the state is never
-              signalled by colour alone (N-53 family).
-            */}
-            {error && (
-              <p
-                className={`${styles.errorBox} ${styles.formError}`}
-                role="alert"
-              >
-                <Icon icon={TriangleAlert} size="sm" tone="danger" />
-                {error}
-              </p>
-            )}
-
-            {result && (
-              <div className={styles.resultBox}>
-                <div className={styles.badgeRow}>
-                  <Badge
-                    tone={resultTone(merged, conflicted, warnings.length > 0)}
-                  >
-                    {result.status ?? (merged ? "merged" : "finished")}
-                  </Badge>
-                  {result.strategy && (
-                    <Badge tone="muted">{result.strategy}</Badge>
-                  )}
-                </div>
-                <p
-                  className={`${styles.resultSummary} ${
-                    conflicted || warnings.length > 0
-                      ? styles.resultWarning
-                      : merged
-                        ? styles.resultSuccess
-                        : ""
-                  }`}
+      {result ? (
+        <>
+          <KitDivider />
+          <KitSection>Result</KitSection>
+          <KitStaticRow
+            label={responseSummary(result)}
+            badges={
+              <>
+                <KitBadge
+                  tone={resultTone(merged, conflicted, warnings.length > 0)}
                 >
-                  {responseSummary(result)}
-                </p>
-                {result.source_branch && result.target_branch && (
-                  <p className={styles.metaText}>
-                    {result.source_branch} → {result.target_branch}
-                  </p>
-                )}
-                {result.merge_commit && (
-                  <p className={styles.metaText}>
-                    Merge commit: {result.merge_commit}
-                  </p>
-                )}
-                {result.cleanup && (
-                  <p className={styles.metaText}>
-                    Cleanup: worktree{" "}
-                    {result.cleanup.worktree_deleted ? "deleted" : "kept"},
-                    branch {result.cleanup.branch_deleted ? "deleted" : "kept"},
-                    registry{" "}
-                    {result.cleanup.registry_deleted ? "deleted" : "kept"}
-                  </p>
-                )}
-                {conflicted && (
-                  <div className={styles.conflictBlock}>
-                    <span className={styles.labelText}>Conflicted files</span>
-                    <ul className={styles.conflictList}>
-                      {conflictFiles.length === 0 ? (
-                        <li>No conflicted files were reported.</li>
-                      ) : (
-                        conflictFiles.map((file) => <li key={file}>{file}</li>)
-                      )}
-                    </ul>
-                    <div className={styles.inlineActions}>
-                      <Button
-                        size="sm"
-                        variant="soft"
-                        onClick={() => void handleAskRefact()}
-                        disabled={!onAskRefact || !canActOnWorktree}
-                      >
-                        Ask Refact to resolve conflicts
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="soft"
-                        onClick={() => void handleOpenWorktree()}
-                        disabled={!onOpenWorktree || !canActOnWorktree}
-                      >
-                        Open worktree
-                      </Button>
-                    </div>
-                  </div>
-                )}
-                {actionFeedback && (
-                  <p className={styles.metaText}>{actionFeedback}</p>
-                )}
-                {warnings.length > 0 && (
-                  <div className={styles.warningStack}>
-                    {warnings.map((warning, index) => (
-                      <p
-                        key={`${index}-${warning}`}
-                        className={styles.warningText}
-                      >
-                        {warning}
-                      </p>
-                    ))}
-                  </div>
-                )}
+                  {result.status ?? (merged ? "merged" : "finished")}
+                </KitBadge>
+                {result.strategy ? (
+                  <KitBadge>{result.strategy}</KitBadge>
+                ) : null}
+              </>
+            }
+          />
+          {result.source_branch && result.target_branch ? (
+            <p className={`${styles.metaText} ${styles.resultLine}`}>
+              {result.source_branch} → {result.target_branch}
+            </p>
+          ) : null}
+          {result.merge_commit ? (
+            <p className={`${styles.metaText} ${styles.resultLine}`}>
+              Merge commit: {result.merge_commit}
+            </p>
+          ) : null}
+          {result.cleanup ? (
+            <p className={`${styles.metaText} ${styles.resultLine}`}>
+              Cleanup: worktree{" "}
+              {result.cleanup.worktree_deleted ? "deleted" : "kept"}, branch{" "}
+              {result.cleanup.branch_deleted ? "deleted" : "kept"}, registry{" "}
+              {result.cleanup.registry_deleted ? "deleted" : "kept"}
+            </p>
+          ) : null}
+          {conflicted ? (
+            <>
+              <KitSection>Conflicted files</KitSection>
+              {conflictFiles.length === 0 ? (
+                <KitStaticRow
+                  tone="muted"
+                  label="No conflicted files were reported."
+                />
+              ) : (
+                conflictFiles.map((file) => (
+                  <KitStaticRow key={file} label={file} />
+                ))
+              )}
+              <div className={styles.inlineActions}>
+                <KitButton
+                  onClick={() => void handleAskRefact()}
+                  disabled={!onAskRefact || !canActOnWorktree}
+                >
+                  Ask Refact to resolve conflicts
+                </KitButton>
+                <KitButton
+                  onClick={() => void handleOpenWorktree()}
+                  disabled={!onOpenWorktree || !canActOnWorktree}
+                >
+                  Open worktree
+                </KitButton>
               </div>
-            )}
-          </div>
-
-          <div className={styles.modalActions}>
-            <Dialog.Close asChild>
-              <Button variant="soft" disabled={mergeState.isLoading}>
-                Close
-              </Button>
-            </Dialog.Close>
-            <Button
-              variant="primary"
-              onClick={() => void handleMerge()}
-              disabled={mergeState.isLoading || !canActOnWorktree}
-              loading={mergeState.isLoading}
+            </>
+          ) : null}
+          {actionFeedback ? (
+            <p className={`${styles.metaText} ${styles.resultLine}`}>
+              {actionFeedback}
+            </p>
+          ) : null}
+          {warnings.map((warning, index) => (
+            <p
+              key={`${index}-${warning}`}
+              className={`${styles.warningText} ${styles.resultLine}`}
             >
-              Merge
-            </Button>
-          </div>
-        </div>
-      </Dialog.Content>
-    </Dialog>
+              {warning}
+            </p>
+          ))}
+        </>
+      ) : null}
+    </KitDialog>
   );
 };
 

@@ -1,8 +1,12 @@
 import React, { useCallback, useRef, useState } from "react";
-import { Flex, Text } from "@radix-ui/themes";
 import { LoaderCircle } from "lucide-react";
-import { Badge, Button, Dialog, Icon } from "../ui";
-import { Callout } from "../Callout";
+import {
+  KitButton,
+  KitDialog,
+  KitDialogCancel,
+  KitKeyValue,
+  KitStaticRow,
+} from "../ComposerKit";
 import { useApplyModeTransitionMutation } from "../../services/refact/trajectory";
 import { trajectoriesApi } from "../../services/refact/trajectories";
 import {
@@ -241,91 +245,61 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
     activeTransition?.targetModeTitle ?? targetModeTitle;
   const phaseInfo = phase ? TRANSITION_PHASES[phase] : null;
 
+  const actionLabel = isSelf ? "Restart Mode" : "Switch Mode";
+  const targetLabel = displayTargetModeTitle || displayTargetMode;
+
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
-      <Dialog.Content maxWidth="500px" className={styles.dialogContent}>
-        <Flex
-          direction="column"
-          gap="3"
-          {...dialogNonInteractiveCloseHandlers(() => handleOpenChange(false))}
-        >
-          <Dialog.Title>
-            <Flex align="center" gap="2">
-              <Text>{isSelf ? "Restart Mode" : "Switch Mode"}</Text>
-              {isSelf ? (
-                <Badge tone="success" size="sm">
-                  {displayTargetModeTitle || displayTargetMode}
-                </Badge>
-              ) : (
-                <>
-                  <Badge tone="muted" size="sm">
-                    {displayCurrentModeTitle}
-                  </Badge>
-                  <Text color="gray">→</Text>
-                  <Badge tone="accent" size="sm">
-                    {displayTargetModeTitle || displayTargetMode}
-                  </Badge>
-                </>
-              )}
-            </Flex>
-          </Dialog.Title>
-
-          <Dialog.Description>
-            {isSelf
-              ? "The assistant will analyze your conversation and create a fresh start with preserved context."
-              : "The assistant will analyze your conversation and preserve relevant context for the new mode."}
-          </Dialog.Description>
-
-          {error && (
-            <Callout type="error" preventClose className={styles.callout}>
-              {error}
-            </Callout>
-          )}
-
-          {phaseInfo && (
-            <Flex
-              direction="column"
-              gap="3"
-              className={styles.loadingContainer}
-            >
-              <Flex align="center" justify="center" gap="2">
-                <Icon
-                  icon={LoaderCircle}
-                  size="md"
-                  tone="accent"
-                  className={styles.spinnerIcon}
-                />
-                <Text color="gray" role="status" aria-live="polite">
-                  {phaseInfo.label}
-                </Text>
-              </Flex>
-            </Flex>
-          )}
-
-          <Flex gap="3" mt="4" justify="end">
-            <Dialog.Close asChild>
-              <Button variant="soft" size="md" disabled={isBusy}>
-                Cancel
-              </Button>
-            </Dialog.Close>
-            <Button
-              variant="primary"
-              size="md"
-              onClick={() => void handleApply()}
-              disabled={isBusy || isStreaming}
-            >
-              {isBusy
-                ? isSelf
-                  ? "Restarting..."
-                  : "Switching..."
-                : isSelf
-                  ? "Restart Mode"
-                  : "Switch Mode"}
-            </Button>
-          </Flex>
-        </Flex>
-      </Dialog.Content>
-    </Dialog>
+    <KitDialog
+      open={open}
+      onOpenChange={handleOpenChange}
+      title={actionLabel}
+      description={
+        isSelf
+          ? "The assistant will analyze your conversation and create a fresh start with preserved context."
+          : "The assistant will analyze your conversation and preserve relevant context for the new mode."
+      }
+      width="480px"
+      bodyProps={dialogNonInteractiveCloseHandlers(() =>
+        handleOpenChange(false),
+      )}
+      footer={
+        <>
+          <KitDialogCancel disabled={isBusy} />
+          <KitButton
+            variant="primary"
+            onClick={() => void handleApply()}
+            disabled={isBusy || isStreaming}
+          >
+            {isBusy ? (isSelf ? "Restarting..." : "Switching...") : actionLabel}
+          </KitButton>
+        </>
+      }
+    >
+      {isSelf ? (
+        <KitKeyValue label="Mode" value={targetLabel} />
+      ) : (
+        <>
+          <KitKeyValue label="From" value={displayCurrentModeTitle} />
+          <KitKeyValue label="To" value={targetLabel} />
+        </>
+      )}
+      {error ? (
+        <p className={styles.error} role="alert">
+          {error}
+        </p>
+      ) : null}
+      {phaseInfo ? (
+        <KitStaticRow
+          tone="muted"
+          icon={<LoaderCircle aria-hidden="true" className={styles.spinner} />}
+          label={
+            <span role="status" aria-live="polite">
+              {phaseInfo.label}
+            </span>
+          }
+        />
+      ) : null}
+    </KitDialog>
   );
 };
 

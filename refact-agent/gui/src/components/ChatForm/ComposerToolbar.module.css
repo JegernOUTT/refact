@@ -2,66 +2,88 @@
   min-width: 0;
 }
 
+.topReveal {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+}
+
+.topReveal[data-open="true"] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.topClip {
+  min-height: 0;
+  overflow: hidden;
+}
+
 .toolbar {
+  position: relative;
   display: flex;
   min-width: 0;
   flex-wrap: nowrap;
   align-items: center;
   gap: var(--rf-space-1);
-  padding: var(--rf-space-2) var(--rf-space-3);
-  position: relative;
-}
-
-.toolbar:not(:has(.item:not([data-hidden="true"]))) {
-  display: none;
-}
-
-.toolbar:has(.item[data-measuring="true"]) {
-  display: flex;
+  padding: var(--rf-space-1);
 }
 
 .item {
+  --rf-composer-label-max: none;
+
   display: inline-flex;
   width: max-content;
   flex: 0 0 auto;
   align-items: center;
 }
 
-.item[data-hidden="true"],
-.item[data-measuring="true"] {
+.item[data-hidden="true"] {
+  display: none;
+}
+
+.item[data-empty="true"] {
   position: absolute;
   visibility: hidden;
   pointer-events: none;
 }
 
-.item[data-menu-open="true"] {
-  min-width: 0;
-  max-width: calc(100% - var(--rf-space-6) - var(--rf-space-6));
-  flex-shrink: 1;
-}
-
-.item[data-menu-open="true"] > * {
-  min-width: 0;
-  max-width: 100%;
-}
-
-.item[data-composer-control="context"][data-pinned="true"] {
-  min-width: var(--rf-control-h-icon-sm);
-  flex-shrink: 1;
-  overflow: hidden;
-}
-
-.item[data-composer-control="context"][data-pinned="true"] > * {
-  min-width: 0;
-  max-width: 100%;
-  overflow: hidden;
-}
-
-.item[data-measuring="true"] {
-  max-width: none;
-  flex-shrink: 0;
-}
-
 .item[data-first-right="true"] {
   margin-left: auto;
+}
+
+.item[data-squeeze="true"] {
+  --rf-composer-label-max: 100%;
+
+  min-width: var(--rf-control-h-icon-sm);
+  flex: 0 1 auto;
+  overflow: hidden;
+}
+
+.item[data-squeeze="true"] > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.item [data-show-at] {
+  display: none;
+}
+
+.item[data-level="1"] [data-shrink-at="1"],
+.item[data-level="2"] [data-shrink-at="1"],
+.item[data-level="2"] [data-shrink-at="2"] {
+  display: none;
+}
+
+.item[data-level="1"] [data-show-at="1"],
+.item[data-level="2"] [data-show-at="1"],
+.item[data-level="2"] [data-show-at="2"] {
+  display: inline-flex;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .topReveal {
+    transition:
+      grid-template-rows var(--rf-dur-med) var(--rf-ease-standard),
+      opacity var(--rf-dur-med) var(--rf-ease-standard);
+  }
 }

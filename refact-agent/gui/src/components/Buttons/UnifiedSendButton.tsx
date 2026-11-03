@@ -1,7 +1,8 @@
 import React from "react";
-import { Flex, Badge } from "@radix-ui/themes";
+import type { LucideIcon } from "lucide-react";
 import { Clock, RefreshCcw, Send, Square, Zap } from "lucide-react";
-import { Icon, IconButton, Tooltip } from "../ui";
+import { ComposerTrigger, KitTooltip } from "../ComposerKit";
+import styles from "./UnifiedSendButton.module.css";
 
 type UnifiedSendButtonProps = {
   disabled?: boolean;
@@ -15,21 +16,49 @@ type UnifiedSendButtonProps = {
   onResend: () => void;
 };
 
-const QueuedBadge: React.FC<{ queuedCount: number }> = ({ queuedCount }) => {
-  if (queuedCount <= 0) return null;
-
-  return (
-    <Badge
-      color="amber"
-      size="1"
-      variant="soft"
-      title={`${queuedCount} message(s) queued`}
+const SendShape: React.FC<{
+  label: string;
+  tooltip: string;
+  shortcut?: string;
+  icon: LucideIcon;
+  variant: "primary" | "stop";
+  queuedCount?: number;
+  disabled?: boolean;
+  onActivate: () => void;
+}> = ({
+  label,
+  tooltip,
+  shortcut,
+  icon: IconComponent,
+  variant,
+  queuedCount = 0,
+  disabled,
+  onActivate,
+}) => (
+  <KitTooltip label={tooltip} state={shortcut}>
+    <button
+      type="button"
+      className={styles.send}
+      data-variant={variant}
+      aria-label={label}
+      disabled={disabled}
+      onClick={(event) => {
+        event.preventDefault();
+        onActivate();
+      }}
     >
-      <Icon icon={Clock} size="sm" />
-      {queuedCount}
-    </Badge>
-  );
-};
+      <IconComponent aria-hidden="true" />
+      {queuedCount > 0 ? (
+        <span
+          className={styles.queued}
+          title={`${queuedCount} message(s) queued`}
+        >
+          {queuedCount}
+        </span>
+      ) : null}
+    </button>
+  </KitTooltip>
+);
 
 export const UnifiedSendButton: React.FC<UnifiedSendButtonProps> = ({
   disabled,
@@ -43,131 +72,81 @@ export const UnifiedSendButton: React.FC<UnifiedSendButtonProps> = ({
   onResend,
 }) => {
   if (isStreaming) {
-    if (hasText) {
-      return (
-        <Flex align="center" gap="2">
-          <QueuedBadge queuedCount={queuedCount} />
-          <Tooltip>
-            <Tooltip.Trigger asChild>
-              <IconButton
-                aria-label="Stop generation"
-                icon={Square}
-                onClick={(e) => {
-                  e.preventDefault();
-                  onStop();
-                }}
-                size="sm"
-                variant="danger"
-              />
-            </Tooltip.Trigger>
-            <Tooltip.Content side="top">Stop generation</Tooltip.Content>
-          </Tooltip>
-          <Tooltip>
-            <Tooltip.Trigger asChild>
-              <IconButton
-                aria-label="Send immediately"
-                disabled={disabled}
-                icon={Zap}
-                onClick={(e) => {
-                  e.preventDefault();
-                  onSendImmediately();
-                }}
-                size="sm"
-                variant="primary"
-              />
-            </Tooltip.Trigger>
-            <Tooltip.Content side="top">
-              Send immediately (next turn)
-            </Tooltip.Content>
-          </Tooltip>
-          <Tooltip>
-            <Tooltip.Trigger asChild>
-              <IconButton
+    return (
+      <span className={styles.group}>
+        {hasText ? (
+          <>
+            <KitTooltip label="Queue message" state="after tools complete">
+              <ComposerTrigger
+                iconOnly
                 aria-label="Queue message"
                 disabled={disabled}
                 icon={Clock}
-                onClick={(e) => {
-                  e.preventDefault();
+                onClick={(event) => {
+                  event.preventDefault();
                   onSend();
                 }}
-                size="sm"
-                variant="soft"
               />
-            </Tooltip.Trigger>
-            <Tooltip.Content side="top">
-              Queue message (after tools complete)
-            </Tooltip.Content>
-          </Tooltip>
-        </Flex>
-      );
-    }
-
-    return (
-      <Flex align="center" gap="2">
-        <QueuedBadge queuedCount={queuedCount} />
-        <Tooltip>
-          <Tooltip.Trigger asChild>
-            <IconButton
-              aria-label="Stop generation"
-              icon={Square}
-              onClick={(e) => {
-                e.preventDefault();
-                onStop();
-              }}
-              size="sm"
-              variant="danger"
-            />
-          </Tooltip.Trigger>
-          <Tooltip.Content side="top">Stop generation</Tooltip.Content>
-        </Tooltip>
-      </Flex>
+            </KitTooltip>
+            <KitTooltip label="Send immediately" state="next turn">
+              <ComposerTrigger
+                iconOnly
+                aria-label="Send immediately"
+                disabled={disabled}
+                icon={Zap}
+                onClick={(event) => {
+                  event.preventDefault();
+                  onSendImmediately();
+                }}
+              />
+            </KitTooltip>
+          </>
+        ) : null}
+        <SendShape
+          label="Stop generation"
+          tooltip="Stop generation"
+          icon={Square}
+          variant="stop"
+          queuedCount={queuedCount}
+          onActivate={onStop}
+        />
+      </span>
     );
   }
 
   if (!hasText && hasMessages) {
     return (
-      <Flex align="center" gap="2">
-        <QueuedBadge queuedCount={queuedCount} />
-        <Tooltip>
-          <Tooltip.Trigger asChild>
-            <IconButton
-              aria-label="Resend last messages"
-              disabled={disabled}
-              icon={RefreshCcw}
-              onClick={(e) => {
-                e.preventDefault();
-                onResend();
-              }}
-              size="sm"
-              variant="ghost"
-            />
-          </Tooltip.Trigger>
-          <Tooltip.Content side="top">Resend last messages</Tooltip.Content>
-        </Tooltip>
-      </Flex>
+      <span className={styles.group}>
+        <KitTooltip label="Resend last messages">
+          <ComposerTrigger
+            iconOnly
+            aria-label="Resend last messages"
+            disabled={disabled}
+            icon={RefreshCcw}
+            onClick={(event) => {
+              event.preventDefault();
+              onResend();
+            }}
+          />
+        </KitTooltip>
+        {queuedCount > 0 ? (
+          <span className={styles.queuedInline}>{queuedCount} queued</span>
+        ) : null}
+      </span>
     );
   }
 
   return (
-    <Flex align="center" gap="2">
-      <QueuedBadge queuedCount={queuedCount} />
-      <Tooltip>
-        <Tooltip.Trigger asChild>
-          <IconButton
-            aria-label="Send message"
-            disabled={disabled}
-            icon={Send}
-            onClick={(e) => {
-              e.preventDefault();
-              onSend();
-            }}
-            size="sm"
-            variant="primary"
-          />
-        </Tooltip.Trigger>
-        <Tooltip.Content side="top">Send message</Tooltip.Content>
-      </Tooltip>
-    </Flex>
+    <SendShape
+      label="Send message"
+      tooltip="Send"
+      shortcut="Enter"
+      icon={Send}
+      variant="primary"
+      queuedCount={queuedCount}
+      disabled={disabled}
+      onActivate={onSend}
+    />
   );
 };
 

@@ -1,9 +1,10 @@
 import React, { useCallback, useMemo, useState, useEffect } from "react";
-import { Flex, Text, Separator, Skeleton } from "@radix-ui/themes";
+import { Flex, Text, Skeleton } from "@radix-ui/themes";
 import {
   Brain,
-  ChevronDown,
+  Gauge,
   Images,
+  LifeBuoy,
   MousePointer2,
   Rocket,
   Wrench,
@@ -45,9 +46,19 @@ import {
   ModelSelector as KitModelSelector,
   Popover as KitPopover,
   Slider,
-  Switch,
 } from "../ui";
 import type { ModelOption, ModelSelectorBadge } from "../ui";
+import {
+  ComposerTrigger,
+  KitChevron,
+  KitDivider,
+  KitHeader,
+  KitKeyValue,
+  KitNote,
+  KitRow,
+  KitToggleRow,
+  kit,
+} from "../ComposerKit";
 import styles from "./ChatSettingsDropdown.module.css";
 import { RecoveryPolicySettings } from "./RecoveryPolicySettings";
 
@@ -201,11 +212,18 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
 
   // Model data
   const currentModelName = caps.currentModel || "Select model";
+  const providerSeparator = currentModelName.lastIndexOf("/");
+  const modelProvider =
+    providerSeparator > 0
+      ? currentModelName.slice(0, providerSeparator + 1)
+      : "";
+  const modelShortName = currentModelName.slice(modelProvider.length);
   const [isOpen, setIsOpen] = useState(false);
-  const [areTokenLimitsOpen, setAreTokenLimitsOpen] = useState(false);
+  const [page, setPage] = useState<"main" | "limits" | "recovery">("main");
   const handleOpenChange = useCallback(
     (open: boolean) => {
       setIsOpen(open);
+      if (!open) setPage("main");
       onOpenChange?.(open);
     },
     [onOpenChange],
@@ -400,10 +418,7 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
   if (caps.loading || !areCapsInitialized) {
     return (
       <Skeleton>
-        <div className={styles.trigger}>
-          <Text size="1">Loading...</Text>
-          <Icon icon={ChevronDown} size="sm" tone="muted" />
-        </div>
+        <ComposerTrigger strong chevron disabled label="Loading..." />
       </Skeleton>
     );
   }
@@ -412,443 +427,403 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
   const triggerContent = (
     <Flex align="center" gap="1" className={styles.triggerContent}>
       <Text size="1" className={styles.modelName}>
-        {currentModelName}
+        <span data-shrink-at={modelProvider !== "" ? "1" : undefined}>
+          {currentModelName}
+        </span>
+        {modelProvider !== "" && <span data-show-at="1">{modelShortName}</span>}
       </Text>
       {!compact && maxTokens > 0 && (
         <>
-          <Text size="1" color="gray">
+          <Text size="1" color="gray" data-shrink-at="2">
             ·
           </Text>
-          <Text size="1" color="gray">
+          <Text size="1" color="gray" data-shrink-at="2">
             {formatTokens(maxTokens)}
           </Text>
         </>
       )}
       {!compact && supportsBoostReasoning && isBoostReasoningEnabled && (
         <>
-          <Text size="1" color="gray">
+          <Text size="1" color="gray" data-shrink-at="2">
             ·
           </Text>
-          <Text size="1">
+          <Text size="1" data-shrink-at="2">
             <ReasoningIcon />
           </Text>
         </>
       )}
-      <Icon
-        icon={ChevronDown}
-        className={styles.chevron}
-        size="sm"
-        tone="muted"
-      />
     </Flex>
   );
 
   return (
     <KitPopover open={isOpen} onOpenChange={handleOpenChange}>
       <KitPopover.Trigger asChild>
-        <button
-          className={classNames(
-            styles.trigger,
-            compact && styles.compactTrigger,
-            isStreamingDisabled && styles.disabled,
-          )}
+        <ComposerTrigger
+          strong
+          chevron
+          className={classNames(compact && styles.compactTrigger)}
           disabled={isStreamingDisabled}
-          type="button"
+          title={currentModelName}
         >
           {triggerContent}
-        </button>
+        </ComposerTrigger>
       </KitPopover.Trigger>
 
       <KitPopover.Content
         align="end"
-        className={styles.content}
+        className={classNames(kit.popover, styles.content)}
         maxHeight="min(640px, calc(100dvh - 2 * var(--rf-space-5)))"
-        maxWidth="min(440px, calc(100vw - var(--rf-space-4)))"
+        maxWidth="min(380px, calc(100vw - var(--rf-space-4)))"
         scrollable={false}
         side="top"
         sideOffset={8}
       >
-        <div className={styles.settingsLayout}>
-          <div className={`${styles.section} ${styles.modelSection}`}>
-            <KitModelSelector
-              disabled={isInteractionDisabled}
-              groups={modelSelectorGroups}
-              models={modelSelectorOptions}
-              value={caps.currentModel}
-              variant="inline"
-              onSelect={handleModelSelect}
-            />
-          </div>
-
-          <div className={styles.settingsFooter}>
-            <Separator size="4" />
-
-            {supportsBoostReasoning && (
-              <div className={styles.section}>
-                <div className={styles.settingsRow}>
-                  <div className={styles.reasoningLabel}>
-                    <Text size="1">
-                      <ReasoningIcon />
-                    </Text>
-                    <Text size="1" weight="medium">
-                      Reasoning
-                    </Text>
-                  </div>
-                  <Switch
-                    checked={isBoostReasoningEnabled}
+        {page === "main" ? (
+          <div className={styles.settingsLayout}>
+            <div className={styles.modelSection}>
+              <KitModelSelector
+                disabled={isInteractionDisabled}
+                groups={modelSelectorGroups}
+                models={modelSelectorOptions}
+                value={caps.currentModel}
+                variant="inline"
+                onSelect={handleModelSelect}
+              />
+            </div>
+            <div className={styles.settingsFooter}>
+              <KitDivider />
+              {supportsBoostReasoning && (
+                <>
+                  <KitToggleRow
+                    icon={<ReasoningIcon />}
+                    label="Reasoning"
+                    checked={isBoostReasoningEnabled === true}
                     onCheckedChange={handleThinkingToggle}
                     disabled={thinkingDisabled}
-                    className="rf-pressable"
                   />
-                </div>
-
-                {isStartedChat && (
-                  <div className={styles.reasoningWarning}>
-                    Changing reasoning mid-chat may break prompt caching (if
-                    enabled) and make the next turn much more expensive.
-                  </div>
-                )}
-
-                {isBoostReasoningEnabled && selectedModelDetail && (
-                  <>
-                    {selectedModelDetail.reasoningEffortOptions &&
-                      selectedModelDetail.reasoningEffortOptions.length > 0 && (
-                        <div className={styles.effortRow}>
-                          <Text size="1" color="gray">
-                            Effort
-                          </Text>
-                          <div className={styles.effortOptions}>
-                            {selectedModelDetail.reasoningEffortOptions.map(
-                              (level) => (
-                                <button
-                                  key={level}
-                                  type="button"
-                                  className={`${styles.effortButton} ${
-                                    (threadReasoningEffort ?? "medium") ===
-                                    level
-                                      ? styles.effortButtonActive
-                                      : ""
-                                  }`}
-                                  onClick={() =>
-                                    dispatch(
-                                      setReasoningEffort({
-                                        chatId,
-                                        value: level as ReasoningEffort,
-                                      }),
-                                    )
-                                  }
-                                  disabled={isInteractionDisabled}
-                                >
-                                  <Text size="1">{level}</Text>
-                                </button>
-                              ),
-                            )}
+                  {isStartedChat && (
+                    <KitNote>
+                      Changing reasoning mid-chat may break prompt caching (if
+                      enabled) and make the next turn much more expensive.
+                    </KitNote>
+                  )}
+                  {isBoostReasoningEnabled && selectedModelDetail && (
+                    <>
+                      {selectedModelDetail.reasoningEffortOptions &&
+                        selectedModelDetail.reasoningEffortOptions.length >
+                          0 && (
+                          <div className={styles.effortRow}>
+                            <span className={styles.effortLabel}>Effort</span>
+                            <div
+                              className={kit.segmented}
+                              role="group"
+                              aria-label="Reasoning effort"
+                            >
+                              {selectedModelDetail.reasoningEffortOptions.map(
+                                (level) => (
+                                  <button
+                                    key={level}
+                                    type="button"
+                                    className={kit.segment}
+                                    aria-pressed={
+                                      (threadReasoningEffort ?? "medium") ===
+                                      level
+                                    }
+                                    onClick={() =>
+                                      dispatch(
+                                        setReasoningEffort({
+                                          chatId,
+                                          value: level as ReasoningEffort,
+                                        }),
+                                      )
+                                    }
+                                    disabled={isInteractionDisabled}
+                                  >
+                                    {level}
+                                  </button>
+                                ),
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      {selectedModelDetail.supportsThinkingBudget && (
+                        <div className={styles.budgetSection}>
+                          <KitKeyValue
+                            label="Thinking tokens"
+                            value={displayThinkingBudget ?? 16384}
+                          />
+                          <div className={styles.sliderTrack}>
+                            <span className={styles.sliderBound}>1K</span>
+                            <Slider
+                              min={1024}
+                              max={32768}
+                              step={1024}
+                              value={[displayThinkingBudget ?? 16384]}
+                              onValueChange={(values) =>
+                                setLocalThinkingBudget(values[0])
+                              }
+                              onValueCommit={(values) => {
+                                dispatch(
+                                  setThinkingBudget({
+                                    chatId,
+                                    value: values[0],
+                                  }),
+                                );
+                                setLocalThinkingBudget(null);
+                              }}
+                              disabled={isInteractionDisabled}
+                              aria-label="Thinking tokens"
+                            />
+                            <span className={styles.sliderBound}>32K</span>
                           </div>
                         </div>
                       )}
-                    {selectedModelDetail.supportsThinkingBudget && (
-                      <div className={styles.budgetSection}>
-                        <div className={styles.settingsRow}>
-                          <Text size="1" color="gray">
-                            Thinking tokens
-                          </Text>
-                          <Text size="1" weight="medium">
-                            {displayThinkingBudget ?? 16384}
-                          </Text>
-                        </div>
-                        <div className={styles.sliderTrack}>
-                          <Text size="1" color="gray">
-                            1K
-                          </Text>
-                          <Slider
-                            min={1024}
-                            max={32768}
-                            step={1024}
-                            value={[displayThinkingBudget ?? 16384]}
-                            onValueChange={(values) =>
-                              setLocalThinkingBudget(values[0])
-                            }
-                            onValueCommit={(values) => {
-                              dispatch(
-                                setThinkingBudget({ chatId, value: values[0] }),
-                              );
-                              setLocalThinkingBudget(null);
-                            }}
-                            disabled={isInteractionDisabled}
-                          />
-                          <Text size="1" color="gray">
-                            32K
-                          </Text>
-                        </div>
-                      </div>
-                    )}
-                  </>
-                )}
-              </div>
-            )}
-
-            {selectedModelDetail && (
-              <>
-                {supportsBoostReasoning && <Separator size="4" />}
-                <div className={styles.tokenLimits}>
-                  <button
-                    type="button"
-                    className={styles.tokenLimitsTrigger}
-                    aria-expanded={areTokenLimitsOpen}
-                    onClick={() => setAreTokenLimitsOpen((open) => !open)}
+                    </>
+                  )}
+                </>
+              )}
+              {selectedModelDetail && (
+                <KitRow
+                  icon={<Gauge aria-hidden="true" />}
+                  label="Token limits"
+                  trailing={<KitChevron />}
+                  onClick={() => setPage("limits")}
+                />
+              )}
+              <KitRow
+                icon={<LifeBuoy aria-hidden="true" />}
+                label="Recovery policy"
+                trailing={<KitChevron />}
+                onClick={() => setPage("recovery")}
+              />
+            </div>
+          </div>
+        ) : page === "limits" && selectedModelDetail ? (
+          <div className={styles.subPage}>
+            <KitHeader
+              title="Token limits"
+              onBack={() => setPage("main")}
+              backLabel="Back to models"
+            />
+            <div className={styles.tokenLimitsBody}>
+              <div className={styles.section}>
+                <div className={styles.settingsRow}>
+                  <Text size="1" color="gray">
+                    Model capacity
+                  </Text>
+                  <Text size="1" weight="medium">
+                    {formatTokens(modelContextTokens)}
+                  </Text>
+                </div>
+                <div className={styles.settingsRow}>
+                  <Text
+                    size="1"
+                    color="gray"
+                    weight="medium"
+                    className={styles.sectionHeader}
                   >
-                    <Text size="1" weight="medium">
-                      Token limits
-                    </Text>
-                    <Icon
-                      icon={ChevronDown}
-                      size="sm"
-                      tone="muted"
-                      className={styles.tokenLimitsChevron}
-                    />
-                  </button>
-
-                  {areTokenLimitsOpen && (
-                    <div className={styles.tokenLimitsBody}>
-                      <div className={styles.section}>
-                        <div className={styles.settingsRow}>
-                          <Text size="1" color="gray">
-                            Model capacity
-                          </Text>
-                          <Text size="1" weight="medium">
-                            {formatTokens(modelContextTokens)}
-                          </Text>
-                        </div>
-                        <div className={styles.settingsRow}>
-                          <Text
-                            size="1"
-                            color="gray"
-                            weight="medium"
-                            className={styles.sectionHeader}
-                          >
-                            Request context limit
-                          </Text>
-                          <Text size="1" weight="medium">
-                            {displayContextTokensCap != null &&
-                            displayContextTokensCap > 0
-                              ? displayContextTokensCap
-                              : `${formatTokens(
-                                  modelContextTokens,
-                                )} (model maximum)`}
-                          </Text>
-                        </div>
-                        <Text
-                          size="1"
-                          color="gray"
-                          className={styles.helperText}
-                        >
-                          Optional request limit, bounded by model capacity.
-                          Reset uses the selected model maximum without changing
-                          auto-compression.
-                        </Text>
-                        <div
-                          className={classNames(
-                            styles.sliderContainer,
-                            styles.sliderTrack,
-                            contextTokensCap != null &&
-                              styles.sliderTrackWithReset,
-                          )}
-                        >
-                          <Text size="1" color="gray">
-                            1K
-                          </Text>
-                          <Slider
-                            min={Math.min(
-                              MIN_REQUEST_CONTEXT_TOKENS,
-                              modelContextTokens,
-                            )}
-                            max={modelContextTokens}
-                            step={1}
-                            value={[clampedContextTokensCap]}
-                            onValueChange={(values) =>
-                              setLocalContextTokensCap(values[0])
-                            }
-                            onValueCommit={(values) => {
-                              dispatch(
-                                setContextTokensCap({
-                                  chatId,
-                                  value: values[0],
-                                }),
-                              );
-                              setLocalContextTokensCap(null);
-                            }}
-                            disabled={isStreamingDisabled}
-                            className={styles.slider}
-                            aria-label="Request context limit"
-                          />
-                          <Text size="1" color="gray">
-                            {formatTokens(modelContextTokens)}
-                          </Text>
-                          {contextTokensCap != null && (
-                            <button
-                              type="button"
-                              className={styles.resetButton}
-                              onClick={() => {
-                                dispatch(
-                                  setContextTokensCap({ chatId, value: null }),
-                                );
-                                setLocalContextTokensCap(null);
-                              }}
-                              disabled={isStreamingDisabled}
-                              aria-label="Reset request context limit"
-                            >
-                              <Icon icon={X} size="md" />
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                      <Separator size="4" />
-                      <div className={styles.section}>
-                        <div className={styles.settingsRow}>
-                          <Text
-                            size="1"
-                            color="gray"
-                            weight="medium"
-                            className={styles.sectionHeader}
-                          >
-                            Max output tokens
-                          </Text>
-                          <Text size="1" weight="medium">
-                            {displayMaxTokens ??
-                              `${defaultMaxTokens} (default)`}
-                          </Text>
-                        </div>
-                        <div
-                          className={classNames(
-                            styles.sliderContainer,
-                            styles.sliderTrack,
-                            threadMaxTokens != null &&
-                              styles.sliderTrackWithReset,
-                          )}
-                        >
-                          <Text size="1" color="gray">
-                            1K
-                          </Text>
-                          <Slider
-                            min={MIN_OUTPUT_TOKENS}
-                            max={maxOutputTokens}
-                            step={MIN_OUTPUT_TOKENS}
-                            value={[clampedMaxTokens]}
-                            onValueChange={(values) =>
-                              setLocalMaxTokens(values[0])
-                            }
-                            onValueCommit={(values) => {
-                              dispatch(
-                                setMaxTokens({ chatId, value: values[0] }),
-                              );
-                              setLocalMaxTokens(null);
-                            }}
-                            disabled={isInteractionDisabled}
-                            className={styles.slider}
-                            aria-label="Max output tokens"
-                          />
-                          <Text size="1" color="gray">
-                            {formatTokens(maxOutputTokens)}
-                          </Text>
-                          {threadMaxTokens != null && (
-                            <button
-                              type="button"
-                              className={styles.resetButton}
-                              onClick={handleMaxTokensReset}
-                              disabled={isInteractionDisabled}
-                              aria-label="Reset max tokens"
-                            >
-                              <Icon icon={X} size="md" />
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                      <Separator size="4" />
-                      <div className={styles.section}>
-                        <div className={styles.settingsRow}>
-                          <Text
-                            size="1"
-                            color="gray"
-                            weight="medium"
-                            className={styles.sectionHeader}
-                          >
-                            Auto-compression cap
-                          </Text>
-                          <Text size="1" weight="medium">
-                            {displayAutoCompressionCap ??
-                              `${formatTokens(maxCompressionTokens)} (no cap)`}
-                          </Text>
-                        </div>
-                        <Text
-                          size="1"
-                          color="gray"
-                          className={styles.helperText}
-                        >
-                          New chats and Reset use 90% of the effective
-                          model/request context window (
-                          {formatTokens(defaultCompressionCap)}). Existing caps
-                          are retained; unset means no cap.
-                        </Text>
-                        <div
-                          className={classNames(
-                            styles.sliderContainer,
-                            styles.sliderTrack,
-                            threadAutoCompressionCap !==
-                              defaultCompressionCap &&
-                              styles.sliderTrackWithReset,
-                          )}
-                        >
-                          <Text size="1" color="gray">
-                            {minCompressionTokens < 1000
-                              ? minCompressionTokens
-                              : "1K"}
-                          </Text>
-                          <Slider
-                            min={minCompressionTokens}
-                            max={maxCompressionTokens}
-                            step={MIN_COMPRESSION_TOKENS}
-                            value={[clampedAutoCompressionCap]}
-                            onValueChange={(values) =>
-                              setLocalAutoCompressionCap(values[0])
-                            }
-                            onValueCommit={(values) => {
-                              dispatch(
-                                setAutoCompressionCap({
-                                  chatId,
-                                  value: values[0],
-                                }),
-                              );
-                              setLocalAutoCompressionCap(null);
-                            }}
-                            disabled={isStreamingDisabled}
-                            className={styles.slider}
-                            aria-label="Auto-compression cap"
-                          />
-                          <Text size="1" color="gray">
-                            {formatTokens(maxCompressionTokens)}
-                          </Text>
-                          {threadAutoCompressionCap !==
-                            defaultCompressionCap && (
-                            <button
-                              type="button"
-                              className={styles.resetButton}
-                              onClick={handleAutoCompressionCapReset}
-                              disabled={isStreamingDisabled}
-                              aria-label="Reset auto-compression cap"
-                            >
-                              <Icon icon={X} size="md" />
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    </div>
+                    Request context limit
+                  </Text>
+                  <Text size="1" weight="medium">
+                    {displayContextTokensCap != null &&
+                    displayContextTokensCap > 0
+                      ? displayContextTokensCap
+                      : `${formatTokens(modelContextTokens)} (model maximum)`}
+                  </Text>
+                </div>
+                <Text size="1" color="gray" className={styles.helperText}>
+                  Optional request limit, bounded by model capacity. Reset uses
+                  the selected model maximum without changing auto-compression.
+                </Text>
+                <div
+                  className={classNames(
+                    styles.sliderContainer,
+                    styles.sliderTrack,
+                    contextTokensCap != null && styles.sliderTrackWithReset,
+                  )}
+                >
+                  <Text size="1" color="gray">
+                    1K
+                  </Text>
+                  <Slider
+                    min={Math.min(
+                      MIN_REQUEST_CONTEXT_TOKENS,
+                      modelContextTokens,
+                    )}
+                    max={modelContextTokens}
+                    step={1}
+                    value={[clampedContextTokensCap]}
+                    onValueChange={(values) =>
+                      setLocalContextTokensCap(values[0])
+                    }
+                    onValueCommit={(values) => {
+                      dispatch(
+                        setContextTokensCap({
+                          chatId,
+                          value: values[0],
+                        }),
+                      );
+                      setLocalContextTokensCap(null);
+                    }}
+                    disabled={isStreamingDisabled}
+                    className={styles.slider}
+                    aria-label="Request context limit"
+                  />
+                  <Text size="1" color="gray">
+                    {formatTokens(modelContextTokens)}
+                  </Text>
+                  {contextTokensCap != null && (
+                    <button
+                      type="button"
+                      className={styles.resetButton}
+                      onClick={() => {
+                        dispatch(setContextTokensCap({ chatId, value: null }));
+                        setLocalContextTokensCap(null);
+                      }}
+                      disabled={isStreamingDisabled}
+                      aria-label="Reset request context limit"
+                    >
+                      <Icon icon={X} size="md" />
+                    </button>
                   )}
                 </div>
-              </>
-            )}
+              </div>
+              <KitDivider />
+              <div className={styles.section}>
+                <div className={styles.settingsRow}>
+                  <Text
+                    size="1"
+                    color="gray"
+                    weight="medium"
+                    className={styles.sectionHeader}
+                  >
+                    Max output tokens
+                  </Text>
+                  <Text size="1" weight="medium">
+                    {displayMaxTokens ?? `${defaultMaxTokens} (default)`}
+                  </Text>
+                </div>
+                <div
+                  className={classNames(
+                    styles.sliderContainer,
+                    styles.sliderTrack,
+                    threadMaxTokens != null && styles.sliderTrackWithReset,
+                  )}
+                >
+                  <Text size="1" color="gray">
+                    1K
+                  </Text>
+                  <Slider
+                    min={MIN_OUTPUT_TOKENS}
+                    max={maxOutputTokens}
+                    step={MIN_OUTPUT_TOKENS}
+                    value={[clampedMaxTokens]}
+                    onValueChange={(values) => setLocalMaxTokens(values[0])}
+                    onValueCommit={(values) => {
+                      dispatch(setMaxTokens({ chatId, value: values[0] }));
+                      setLocalMaxTokens(null);
+                    }}
+                    disabled={isInteractionDisabled}
+                    className={styles.slider}
+                    aria-label="Max output tokens"
+                  />
+                  <Text size="1" color="gray">
+                    {formatTokens(maxOutputTokens)}
+                  </Text>
+                  {threadMaxTokens != null && (
+                    <button
+                      type="button"
+                      className={styles.resetButton}
+                      onClick={handleMaxTokensReset}
+                      disabled={isInteractionDisabled}
+                      aria-label="Reset max tokens"
+                    >
+                      <Icon icon={X} size="md" />
+                    </button>
+                  )}
+                </div>
+              </div>
+              <KitDivider />
+              <div className={styles.section}>
+                <div className={styles.settingsRow}>
+                  <Text
+                    size="1"
+                    color="gray"
+                    weight="medium"
+                    className={styles.sectionHeader}
+                  >
+                    Auto-compression cap
+                  </Text>
+                  <Text size="1" weight="medium">
+                    {displayAutoCompressionCap ??
+                      `${formatTokens(maxCompressionTokens)} (no cap)`}
+                  </Text>
+                </div>
+                <Text size="1" color="gray" className={styles.helperText}>
+                  New chats and Reset use 90% of the effective model/request
+                  context window ({formatTokens(defaultCompressionCap)}).
+                  Existing caps are retained; unset means no cap.
+                </Text>
+                <div
+                  className={classNames(
+                    styles.sliderContainer,
+                    styles.sliderTrack,
+                    threadAutoCompressionCap !== defaultCompressionCap &&
+                      styles.sliderTrackWithReset,
+                  )}
+                >
+                  <Text size="1" color="gray">
+                    {minCompressionTokens < 1000 ? minCompressionTokens : "1K"}
+                  </Text>
+                  <Slider
+                    min={minCompressionTokens}
+                    max={maxCompressionTokens}
+                    step={MIN_COMPRESSION_TOKENS}
+                    value={[clampedAutoCompressionCap]}
+                    onValueChange={(values) =>
+                      setLocalAutoCompressionCap(values[0])
+                    }
+                    onValueCommit={(values) => {
+                      dispatch(
+                        setAutoCompressionCap({
+                          chatId,
+                          value: values[0],
+                        }),
+                      );
+                      setLocalAutoCompressionCap(null);
+                    }}
+                    disabled={isStreamingDisabled}
+                    className={styles.slider}
+                    aria-label="Auto-compression cap"
+                  />
+                  <Text size="1" color="gray">
+                    {formatTokens(maxCompressionTokens)}
+                  </Text>
+                  {threadAutoCompressionCap !== defaultCompressionCap && (
+                    <button
+                      type="button"
+                      className={styles.resetButton}
+                      onClick={handleAutoCompressionCapReset}
+                      disabled={isStreamingDisabled}
+                      aria-label="Reset auto-compression cap"
+                    >
+                      <Icon icon={X} size="md" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
           </div>
-        </div>
-        <RecoveryPolicySettings chatId={chatId} />
+        ) : (
+          <div className={styles.subPage}>
+            <KitHeader
+              title="Recovery policy"
+              onBack={() => setPage("main")}
+              backLabel="Back to models"
+            />
+            <RecoveryPolicySettings chatId={chatId} embedded />
+          </div>
+        )}
       </KitPopover.Content>
     </KitPopover>
   );

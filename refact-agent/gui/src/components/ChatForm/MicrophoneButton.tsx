@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import classNames from "classnames";
 import { Mic } from "lucide-react";
-import { IconButton, Tooltip } from "../ui";
+import { ComposerTrigger, KitTooltip } from "../ComposerKit";
 import { useVoiceInput } from "../../hooks/useVoiceInput";
 import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { setError } from "../../features/Errors/errorsSlice";
@@ -76,26 +76,22 @@ export const MicrophoneButton = forwardRef<
   const isActive = isRecording || isFinishing;
 
   return (
-    <Tooltip>
-      <Tooltip.Trigger asChild>
-        <IconButton
-          aria-label="Voice input"
-          className={classNames(
-            isActive && styles.active,
-            isRecording && styles.recording,
-            isFinishing && styles.finishing,
-          )}
-          disabled={!!disabled || isDownloading || isFinishing}
-          icon={Mic}
-          loading={isDownloading}
-          size="sm"
-          type="button"
-          variant="plain"
-          onClick={() => void toggleRecording()}
-        />
-      </Tooltip.Trigger>
-      <Tooltip.Content>Voice input (Ctrl+Shift+Space)</Tooltip.Content>
-    </Tooltip>
+    <KitTooltip label="Voice input" state="Ctrl+Shift+Space">
+      <ComposerTrigger
+        iconOnly
+        aria-label="Voice input"
+        aria-busy={isDownloading || undefined}
+        aria-pressed={isActive}
+        tone="danger"
+        className={classNames(
+          isRecording && styles.recording,
+          isFinishing && styles.finishing,
+        )}
+        disabled={!!disabled || isDownloading || isFinishing}
+        icon={Mic}
+        onClick={() => void toggleRecording()}
+      />
+    </KitTooltip>
   );
 });
 

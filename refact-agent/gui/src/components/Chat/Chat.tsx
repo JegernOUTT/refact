@@ -23,7 +23,6 @@ import { Checkpoints } from "../../features/Checkpoints";
 import { TaskProgressWidget } from "../TaskProgressWidget";
 import { BrowserContextGuard } from "../../features/Browser/BrowserContextGuard";
 import { selectBrowserContextOversize } from "../../features/Browser/browserSlice";
-import { SkillsIndicator } from "../ChatContent/SkillsIndicator";
 import { QueuePanel } from "../ChatContent/QueuePanel";
 import {
   registerVisibleChatMount,
@@ -39,9 +38,8 @@ import {
   selectPanelsForced,
   selectWorkspaceDock,
 } from "../../features/Workspace/workspaceSlice";
-import { selectChatActivityById } from "../../features/Chat/Thread/selectors";
-import { ChatActivityStatus } from "../ChatActivity/ChatActivityStatus";
 import { useBottomDockClearance } from "./useBottomDockClearance";
+import { useComposerActivity } from "../ChatForm/useComposerActivity";
 
 export type ChatProps = {
   host: Config["host"];
@@ -61,9 +59,7 @@ export const Chat: React.FC<ChatProps> = ({
 
   const [isViewingRawJSON, setIsViewingRawJSON] = useState(false);
   const chatId = useThreadId();
-  const activity = useAppSelector((state) =>
-    selectChatActivityById(state, chatId),
-  );
+  const composerActivity = useComposerActivity(chatId);
   const isStreaming = useAppSelector((state) =>
     selectIsStreamingById(state, chatId),
   );
@@ -185,13 +181,6 @@ export const Chat: React.FC<ChatProps> = ({
             direction="column"
             className={styles.bottomDock}
           >
-            <Container>
-              <div className={styles.activity} role="status" aria-live="polite">
-                <ChatActivityStatus activity={activity} />
-              </div>
-              <SkillsIndicator chatId={chatId} />
-            </Container>
-
             {!isBuddyChat && shouldCheckpointsPopupBeShown && <Checkpoints />}
 
             {browserOversizeInfo && (
@@ -213,20 +202,23 @@ export const Chat: React.FC<ChatProps> = ({
 
             <Container>
               <div className={styles.dockColumn}>
-                {showTerminalWorkbench ? (
-                  <div className={styles.terminalWorkbench}>
-                    <TerminalPanel chatId={chatId} />
-                  </div>
-                ) : null}
-                {queuedItems.length > 0 && (
-                  <div className={styles.queueDock}>
-                    <QueuePanel
-                      queuedItems={queuedItems}
-                      isBusy={isStreaming || isWaiting}
-                    />
-                  </div>
-                )}
-                <div className={styles.dockGroup}>
+                <div
+                  className={styles.dockGroup}
+                  data-activity={composerActivity ?? undefined}
+                >
+                  {showTerminalWorkbench ? (
+                    <div className={styles.dockTerminal}>
+                      <TerminalPanel chatId={chatId} />
+                    </div>
+                  ) : null}
+                  {queuedItems.length > 0 && (
+                    <div className={styles.dockRow}>
+                      <QueuePanel
+                        queuedItems={queuedItems}
+                        isBusy={isStreaming || isWaiting}
+                      />
+                    </div>
+                  )}
                   {!isCompanionChat && <TaskProgressWidget />}
                   <ChatForm
                     key={chatId}

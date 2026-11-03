@@ -1,8 +1,12 @@
 import React, { useCallback, useState } from "react";
-import { Flex, Text } from "@radix-ui/themes";
 import { LoaderCircle } from "lucide-react";
-import { Badge, Button, Dialog, Icon } from "../ui";
-import { Callout } from "../Callout";
+import {
+  KitButton,
+  KitDialog,
+  KitDialogCancel,
+  KitKeyValue,
+  KitStaticRow,
+} from "../ComposerKit";
 import {
   createChatWithId,
   requestSseRefresh,
@@ -240,67 +244,50 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
       : "Creating planner...";
 
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
-      <Dialog.Content maxWidth="500px" className={styles.dialogContent}>
-        <Flex
-          direction="column"
-          gap="3"
-          {...dialogNonInteractiveCloseHandlers(() => handleOpenChange(false))}
-        >
-          <Dialog.Title>
-            <Flex align="center" gap="2">
-              <Text>{title}</Text>
-              <Badge tone="accent" size="sm">
-                {humanizeIdentifier("task_planner")}
-              </Badge>
-            </Flex>
-          </Dialog.Title>
-
-          <Dialog.Description>{description}</Dialog.Description>
-
-          {error && (
-            <Callout type="error" preventClose className={styles.callout}>
-              {error}
-            </Callout>
-          )}
-
-          {isLoading && (
-            <Flex
-              align="center"
-              justify="center"
-              gap="2"
-              className={styles.loadingContainer}
-            >
-              <Icon
-                icon={LoaderCircle}
-                size="md"
-                tone="accent"
-                className={styles.spinnerIcon}
-              />
-              <Text color="gray" role="status" aria-live="polite">
-                {loadingLabel}
-              </Text>
-            </Flex>
-          )}
-
-          <Flex gap="3" mt="4" justify="end">
-            <Dialog.Close asChild>
-              <Button variant="soft" size="md" disabled={isLoading}>
-                Cancel
-              </Button>
-            </Dialog.Close>
-            <Button
-              variant="primary"
-              size="md"
-              onClick={() => void handleApply()}
-              disabled={isLoading || isStreaming}
-            >
-              {isLoading ? loadingLabel : buttonLabel}
-            </Button>
-          </Flex>
-        </Flex>
-      </Dialog.Content>
-    </Dialog>
+    <KitDialog
+      open={open}
+      onOpenChange={handleOpenChange}
+      title={title}
+      description={description}
+      width="480px"
+      bodyProps={dialogNonInteractiveCloseHandlers(() =>
+        handleOpenChange(false),
+      )}
+      footer={
+        <>
+          <KitDialogCancel disabled={isLoading} />
+          <KitButton
+            variant="primary"
+            onClick={() => void handleApply()}
+            disabled={isLoading || isStreaming}
+          >
+            {isLoading ? loadingLabel : buttonLabel}
+          </KitButton>
+        </>
+      }
+    >
+      <KitKeyValue label="Mode" value={humanizeIdentifier("task_planner")} />
+      <KitKeyValue
+        label="Context"
+        value={hasMessages ? "Analyzed from this chat" : "Empty"}
+      />
+      {error ? (
+        <p className={styles.error} role="alert">
+          {error}
+        </p>
+      ) : null}
+      {isLoading ? (
+        <KitStaticRow
+          tone="muted"
+          icon={<LoaderCircle aria-hidden="true" className={styles.spinner} />}
+          label={
+            <span role="status" aria-live="polite">
+              {loadingLabel}
+            </span>
+          }
+        />
+      ) : null}
+    </KitDialog>
   );
 };
 

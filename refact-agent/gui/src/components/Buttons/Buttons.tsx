@@ -3,6 +3,7 @@ import { Flex } from "@radix-ui/themes";
 import { LogOut, Puzzle, Send, X } from "lucide-react";
 import classNames from "classnames";
 import { Button, ButtonGroup, IconButton, Tooltip } from "../ui";
+import { ComposerTrigger, KitTooltip } from "../ComposerKit";
 import styles from "./button.module.css";
 
 type KitIconButtonProps = Omit<
@@ -57,21 +58,21 @@ export const AgentIntegrationsButton = forwardRef<
 
 AgentIntegrationsButton.displayName = "AgentIntegrationsButton";
 
-export function BackToSideBarButton(props: PlainButtonProps) {
+export function BackToSideBarButton({
+  disabled,
+  onClick,
+}: Pick<PlainButtonProps, "disabled" | "onClick">) {
   return (
-    <Tooltip>
-      <Tooltip.Trigger asChild>
-        <IconButton
-          {...props}
-          aria-label="Return to sidebar"
-          className={styles.flipIcon}
-          icon={LogOut}
-          size="sm"
-          variant="ghost"
-        />
-      </Tooltip.Trigger>
-      <Tooltip.Content side="top">Return to sidebar</Tooltip.Content>
-    </Tooltip>
+    <KitTooltip label="Return to sidebar">
+      <ComposerTrigger
+        iconOnly
+        aria-label="Return to sidebar"
+        className={styles.flipIcon}
+        disabled={disabled}
+        icon={LogOut}
+        onClick={onClick}
+      />
+    </KitTooltip>
   );
 }
 

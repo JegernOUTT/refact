@@ -1,5 +1,19 @@
-import React, { useCallback, useEffect, useId, useMemo, useState } from "react";
-import { Button, Dialog, FieldError, FieldText } from "../../components/ui";
+import React, {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { FieldError, FieldText } from "../../components/ui";
+import {
+  KitButton,
+  KitDialog,
+  KitDialogCancel,
+  KitRow,
+  kit,
+} from "../../components/ComposerKit";
 import { dialogNonInteractiveCloseHandlers } from "../../utils/dialogPointerClose";
 import styles from "./Worktrees.module.css";
 
@@ -34,6 +48,7 @@ export const CreateWorktreeModal: React.FC<CreateWorktreeModalProps> = ({
   const [baseBranchPickerOpen, setBaseBranchPickerOpen] = useState(false);
   const [baseBranchSearchTouched, setBaseBranchSearchTouched] = useState(false);
   const branchErrorId = useId();
+  const branchInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (open) {
@@ -85,22 +100,38 @@ export const CreateWorktreeModal: React.FC<CreateWorktreeModalProps> = ({
   }, [baseBranch, baseBranchSearchTouched, normalizedBaseOptions]);
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content className={styles.createDialog} maxWidth="420px">
-        <div
-          className={styles.dialogContentWrapper}
-          {...dialogNonInteractiveCloseHandlers(() => onOpenChange(false))}
-        >
-          <Dialog.Title>Create worktree</Dialog.Title>
-          <Dialog.Description>
-            Create a new git worktree and attach it to this chat.
-          </Dialog.Description>
-
-          <div className={styles.modalFields}>
-            <label className={styles.field} htmlFor="worktree-branch-name">
-              <span className={styles.labelText}>Branch name</span>
+    <KitDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="Create worktree"
+      description="Create a new git worktree and attach it to this chat."
+      width="440px"
+      onOpenAutoFocus={(event) => {
+        event.preventDefault();
+        branchInputRef.current?.focus();
+      }}
+      bodyProps={dialogNonInteractiveCloseHandlers(() => onOpenChange(false))}
+      footer={
+        <>
+          <KitDialogCancel disabled={isCreating} />
+          <KitButton
+            variant="primary"
+            onClick={() => void handleCreate()}
+            disabled={!canCreate}
+            aria-busy={isCreating || undefined}
+          >
+            {isCreating ? "Creating..." : "Create"}
+          </KitButton>
+        </>
+      }
+    >
+      <div className={styles.dialogContentWrapper}>
+        <div className={styles.field}>
+          <label className={styles.fieldLabelGroup}>
+            <span className={kit.section}>Branch name</span>
+            <span className={styles.fieldControl}>
               <FieldText
-                id="worktree-branch-name"
+                ref={branchInputRef}
                 value={branchName}
                 placeholder={defaultBranch}
                 onChange={setBranchName}
@@ -108,81 +139,64 @@ export const CreateWorktreeModal: React.FC<CreateWorktreeModalProps> = ({
                 aria-invalid={branchError ? true : undefined}
                 aria-describedby={branchError ? branchErrorId : undefined}
               />
-              {branchError && (
-                <FieldError className={styles.fieldError} id={branchErrorId}>
-                  {branchError}
-                </FieldError>
-              )}
-            </label>
-
-            <div className={styles.field}>
-              <span className={styles.labelText}>Base branch</span>
-              <span className={styles.helpText}>
-                Worktree will be created from this branch.
-              </span>
-              <div className={styles.branchPicker}>
-                <FieldText
-                  aria-label="Base branch"
-                  value={baseBranch}
-                  placeholder="Current branch unavailable"
-                  onFocus={() => {
-                    setBaseBranchSearchTouched(false);
-                    setBaseBranchPickerOpen(true);
-                  }}
-                  onBlur={() => {
-                    window.setTimeout(
-                      () => setBaseBranchPickerOpen(false),
-                      120,
-                    );
-                  }}
-                  onChange={(value) => {
-                    setBaseBranch(value);
-                    setBaseBranchSearchTouched(true);
-                    setBaseBranchPickerOpen(true);
-                  }}
-                  disabled={isCreating}
-                />
-                {baseBranchPickerOpen && filteredBaseOptions.length > 0 && (
-                  <div className={styles.branchOptions} role="listbox">
-                    {filteredBaseOptions.map((branch) => (
-                      <button
-                        key={branch}
-                        type="button"
-                        className={styles.branchOption}
-                        onMouseDown={(event) => event.preventDefault()}
-                        onClick={() => {
-                          setBaseBranch(branch);
-                          setBaseBranchSearchTouched(false);
-                          setBaseBranchPickerOpen(false);
-                        }}
-                      >
-                        {branch}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
+            </span>
+          </label>
+          {branchError && (
+            <div className={styles.fieldControl}>
+              <FieldError className={styles.fieldError} id={branchErrorId}>
+                {branchError}
+              </FieldError>
             </div>
-          </div>
-
-          <div className={styles.modalActions}>
-            <Dialog.Close asChild>
-              <Button variant="soft" disabled={isCreating}>
-                Cancel
-              </Button>
-            </Dialog.Close>
-            <Button
-              variant="primary"
-              onClick={() => void handleCreate()}
-              disabled={!canCreate}
-              loading={isCreating}
-            >
-              {isCreating ? "Creating..." : "Create"}
-            </Button>
-          </div>
+          )}
         </div>
-      </Dialog.Content>
-    </Dialog>
+
+        <div className={styles.field}>
+          <span className={kit.section}>Base branch</span>
+          <div className={styles.fieldControl}>
+            <div className={styles.branchPicker}>
+              <FieldText
+                aria-label="Base branch"
+                value={baseBranch}
+                placeholder="Current branch unavailable"
+                onFocus={() => {
+                  setBaseBranchSearchTouched(false);
+                  setBaseBranchPickerOpen(true);
+                }}
+                onBlur={() => {
+                  window.setTimeout(() => setBaseBranchPickerOpen(false), 120);
+                }}
+                onChange={(value) => {
+                  setBaseBranch(value);
+                  setBaseBranchSearchTouched(true);
+                  setBaseBranchPickerOpen(true);
+                }}
+                disabled={isCreating}
+              />
+            </div>
+            <span className={styles.helpText}>
+              Worktree will be created from this branch.
+            </span>
+          </div>
+          {baseBranchPickerOpen && filteredBaseOptions.length > 0 && (
+            <div className={styles.branchOptions} role="listbox">
+              {filteredBaseOptions.map((branch) => (
+                <KitRow
+                  key={branch}
+                  label={branch}
+                  selected={branch === baseBranch}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => {
+                    setBaseBranch(branch);
+                    setBaseBranchSearchTouched(false);
+                    setBaseBranchPickerOpen(false);
+                  }}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </KitDialog>
   );
 };
 

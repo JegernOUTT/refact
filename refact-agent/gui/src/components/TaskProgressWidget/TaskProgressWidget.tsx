@@ -5,9 +5,19 @@ import React, {
   useRef,
   useState,
 } from "react";
-import * as Collapsible from "@radix-ui/react-collapsible";
-import classNames from "classnames";
-import { Pause, Play, Square, Target, type LucideIcon } from "lucide-react";
+import {
+  Check,
+  Circle,
+  CircleDot,
+  Info,
+  Pause,
+  Pencil,
+  Play,
+  Square,
+  Target,
+  X,
+  type LucideIcon,
+} from "lucide-react";
 
 import { useChatCommandRequest } from "../../hooks/useChatCommandRequest";
 import { selectConfig } from "../../features/Config/configSlice";
@@ -19,13 +29,11 @@ import {
   selectCurrentTasksById,
   selectGoalWithPlanHistoryById,
   selectHasTasksById,
-  selectTaskGoalExpandedById,
   selectTaskProgressById,
   selectTasksEverUsedById,
   selectTaskWidgetExpandedById,
   selectThreadModeById,
   selectThreadToolUseById,
-  setTaskGoalExpanded,
   setTaskWidgetExpanded,
   useThreadId,
 } from "../../features/Chat/Thread";
@@ -38,52 +46,48 @@ import type {
   GoalStatus,
 } from "../../services/refact/types";
 import type { GoalBudgetCommand } from "../../services/refact/chatCommands";
-import { Box, Flex, Separator, Text } from "../LongTailPrimitives";
-import { Badge, Button, Dialog, Icon, IconButton } from "../ui";
-import { Chevron } from "../Collapsible";
-import { CircularProgress } from "../CircularProgress/CircularProgress";
+import { Icon } from "../ui";
 import { Markdown } from "../Markdown";
-import { StatusDot, type StatusDotState } from "../StatusDot";
+import {
+  KitBadge,
+  KitButton,
+  KitDialog,
+  KitDialogCancel,
+  KitDivider,
+  KitIconButton,
+  KitNote,
+  KitSection,
+  KitSliderRow,
+  KitStaticRow,
+  KitToggleRow,
+  KitTooltip,
+  type KitTone,
+} from "../ComposerKit";
 import {
   addBuddyCrashBreadcrumb,
   setBuddyCrashHotSlot,
 } from "../../features/Buddy/reportBuddyFrontendError";
 import { humanizeIdentifier } from "../../utils/displayNames";
+import { TranscriptItem } from "../ChatContent/TranscriptItem/TranscriptItem";
 import styles from "./TaskProgressWidget.module.css";
 
-function getStatusDotState(status: TodoStatus): StatusDotState {
-  switch (status) {
-    case "in_progress":
-      return "in_progress";
-    case "completed":
-      return "completed";
-    case "failed":
-      return "error";
-    case "pending":
-    default:
-      return "idle";
-  }
-}
+const TASK_ICONS: Record<TodoStatus, LucideIcon> = {
+  completed: Check,
+  in_progress: CircleDot,
+  pending: Circle,
+  failed: X,
+};
 
-const STATUS_TOOLTIPS: Record<TodoStatus, string> = {
+const TASK_STATUS_LABELS: Record<TodoStatus, string> = {
   completed: "Completed",
   in_progress: "In progress",
   pending: "Pending",
   failed: "Failed",
 };
 
-const GOAL_BUDGET_INPUT_MIN = 0;
-const GOAL_BUDGET_INPUT_STEP = 1;
+const MAX_HEADER_DOTS = 8;
 
-type GoalBudgetDraft = {
-  maxTurns: string;
-  maxMinutes: string;
-  maxTokens: string;
-};
-
-function goalStatusTone(
-  status: GoalStatus,
-): React.ComponentProps<typeof Badge>["tone"] {
+function goalStatusTone(status: GoalStatus): KitTone {
   switch (status) {
     case "active":
     case "verifying":
@@ -106,111 +110,90 @@ function hasGoalWork(goal: GoalSnapshot | null): boolean {
   return goal !== null && goal.content.trim().length > 0;
 }
 
-function isPositiveGoalLimit(
-  value: number | null | undefined,
-): value is number {
+function isPositiveLimit(value: number | null | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
-function formatGoalUsageValue(value: number): string {
-  return Number.isFinite(value) ? String(value) : "0";
+function formatCount(value: number): string {
+  if (!Number.isFinite(value)) return "0";
+  if (value >= 1_000_000) return `${+(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${+(value / 1_000).toFixed(1)}k`;
+  return String(value);
 }
 
-function formatGoalBudgetPart(
-  used: number,
-  limit: number | null | undefined,
-  label: string,
-): string {
-  const usage = formatGoalUsageValue(used);
-  return isPositiveGoalLimit(limit)
-    ? `${usage}/${limit} ${label}`
-    : `${usage} ${label}`;
-}
+type LimitKey = "max_turns" | "max_minutes" | "max_tokens";
+type LimitDraft = Record<LimitKey, number | null>;
 
-function GoalBudgetProgress({ goal }: { goal: GoalSnapshot }) {
-  const { budget, progress } = goal;
-  const parts = [
-    {
-      text: formatGoalBudgetPart(
-        progress.turns_used,
-        budget.max_turns,
-        "turns",
-      ),
-      saturated:
-        isPositiveGoalLimit(budget.max_turns) &&
-        progress.turns_used >= budget.max_turns,
-    },
-    {
-      text: formatGoalBudgetPart(
-        progress.tokens_used,
-        budget.max_tokens,
-        "tokens",
-      ),
-      saturated:
-        isPositiveGoalLimit(budget.max_tokens) &&
-        progress.tokens_used >= budget.max_tokens,
-    },
-  ];
-  const hasBudgetLimit = [
-    budget.max_turns,
-    budget.max_minutes,
-    budget.max_tokens,
-    budget.no_progress_turns,
-  ].some(isPositiveGoalLimit);
+const LIMIT_KEYS: readonly LimitKey[] = [
+  "max_turns",
+  "max_minutes",
+  "max_tokens",
+];
 
-  return (
-    <>
-      {parts.map((part, index) => (
-        <React.Fragment key={part.text}>
-          {index > 0 ? " · " : null}
-          <span
-            className={
-              part.saturated ? styles.goalProgressSaturated : undefined
-            }
-          >
-            {part.text}
-          </span>
-        </React.Fragment>
-      ))}
-      {!hasBudgetLimit ? " · No budget limits" : null}
-    </>
-  );
-}
+const LIMIT_META: Record<
+  LimitKey,
+  {
+    label: string;
+    hint: string;
+    min: number;
+    max: number;
+    step: number;
+    fallback: number;
+    unit: string;
+  }
+> = {
+  max_turns: {
+    label: "Max turns",
+    hint: "Pause the goal after this many turns",
+    min: 1,
+    max: 100,
+    step: 1,
+    fallback: 20,
+    unit: "turns",
+  },
+  max_minutes: {
+    label: "Max minutes",
+    hint: "Pause the goal after this much wall time",
+    min: 5,
+    max: 480,
+    step: 5,
+    fallback: 60,
+    unit: "min",
+  },
+  max_tokens: {
+    label: "Max tokens",
+    hint: "Pause the goal after spending this many tokens",
+    min: 10_000,
+    max: 2_000_000,
+    step: 10_000,
+    fallback: 200_000,
+    unit: "tokens",
+  },
+};
 
-function goalLimitDraftValue(value: number | null | undefined): string {
-  return isPositiveGoalLimit(value) ? String(value) : "";
-}
-
-function budgetDraftFromGoal(goal: GoalSnapshot | null): GoalBudgetDraft {
+function limitDraftFromGoal(goal: GoalSnapshot | null): LimitDraft {
+  const read = (key: LimitKey) => {
+    const value = goal?.budget[key];
+    return isPositiveLimit(value) ? value : null;
+  };
   return {
-    maxTurns: goalLimitDraftValue(goal?.budget.max_turns),
-    maxMinutes: goalLimitDraftValue(goal?.budget.max_minutes),
-    maxTokens: goalLimitDraftValue(goal?.budget.max_tokens),
+    max_turns: read("max_turns"),
+    max_minutes: read("max_minutes"),
+    max_tokens: read("max_tokens"),
   };
 }
 
-function parseBudgetDraftValue(value: string): number | undefined {
-  const trimmed = value.trim();
-  if (trimmed.length === 0) return undefined;
-  const parsed = Number(trimmed);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
-}
-
-function budgetCommandFromDraft(draft: GoalBudgetDraft): GoalBudgetCommand {
+function budgetCommandFromDraft(draft: LimitDraft): GoalBudgetCommand {
   const budget: GoalBudgetCommand = {};
-  const maxTurns = parseBudgetDraftValue(draft.maxTurns);
-  const maxMinutes = parseBudgetDraftValue(draft.maxMinutes);
-  const maxTokens = parseBudgetDraftValue(draft.maxTokens);
-
-  if (maxTurns !== undefined) budget.max_turns = maxTurns;
-  if (maxMinutes !== undefined) budget.max_minutes = maxMinutes;
-  if (maxTokens !== undefined) budget.max_tokens = maxTokens;
-
+  for (const key of LIMIT_KEYS) {
+    const value = draft[key];
+    if (value !== null && value > 0) budget[key] = value;
+  }
   return budget;
 }
 
-function hasBudgetCommandLimits(budget: GoalBudgetCommand): boolean {
-  return Object.keys(budget).length > 0;
+function sameDraft(a: LimitDraft, b: LimitDraft): boolean {
+  return LIMIT_KEYS.every((key) => a[key] === b[key]);
 }
 
 type GoalControlAction = "pause" | "resume" | "stop";
@@ -228,59 +211,34 @@ const GOAL_RESUMABLE_STATUSES: ReadonlySet<GoalStatus> = new Set<GoalStatus>([
   "stopped",
 ]);
 
-function goalControlAvailability(goal: GoalSnapshot): {
-  canPause: boolean;
-  canResume: boolean;
-  canStop: boolean;
-} {
-  return {
-    canPause: goal.active && goal.status === "active",
-    canResume: GOAL_RESUMABLE_STATUSES.has(goal.status),
-    canStop: GOAL_STOPPABLE_STATUSES.has(goal.status),
-  };
-}
-
 type GoalControlDescriptor = {
   key: GoalControlAction;
   label: string;
   icon: LucideIcon;
-  handler: () => void;
   disabled: boolean;
 };
 
 function goalControlActions(
   goal: GoalSnapshot,
-  onControl: (action: GoalControlAction) => void,
   pending: boolean,
 ): GoalControlDescriptor[] {
-  const { canPause, canResume, canStop } = goalControlAvailability(goal);
+  const canPause = goal.active && goal.status === "active";
+  const canResume = GOAL_RESUMABLE_STATUSES.has(goal.status);
+  const canStop = GOAL_STOPPABLE_STATUSES.has(goal.status);
   if (!canPause && !canResume && !canStop) return [];
 
   const primary: GoalControlDescriptor = canResume
-    ? {
-        key: "resume",
-        label: "Resume",
-        icon: Play,
-        handler: () => onControl("resume"),
-        disabled: pending,
-      }
+    ? { key: "resume", label: "Resume", icon: Play, disabled: pending }
     : {
         key: "pause",
         label: "Pause",
         icon: Pause,
-        handler: () => onControl("pause"),
         disabled: pending || !canPause,
       };
 
   return [
     ...(canPause || canResume || goal.status === "verifying" ? [primary] : []),
-    {
-      key: "stop",
-      label: "Stop",
-      icon: Square,
-      handler: () => onControl("stop"),
-      disabled: pending || !canStop,
-    },
+    { key: "stop", label: "Stop", icon: Square, disabled: pending || !canStop },
   ];
 }
 
@@ -296,657 +254,413 @@ function isGoalSupported(
   );
 }
 
-type StatusIconProps = {
-  status: TodoStatus;
-};
+function plainGoalLines(content: string): string[] {
+  return content
+    .split("\n")
+    .map((part) => part.replace(/^[#>*\-\s]+/, "").trim())
+    .filter((part) => part.length > 0);
+}
 
-const StatusIcon: React.FC<StatusIconProps> = ({ status }) => {
-  const dotState = getStatusDotState(status);
-  return (
-    <StatusDot
-      state={dotState}
-      size="small"
-      tooltipText={STATUS_TOOLTIPS[status]}
+function goalHeadlineOf(content: string): string {
+  return plainGoalLines(content)[0] ?? "Goal";
+}
+
+function goalSummaryOf(content: string): string {
+  return plainGoalLines(content).slice(1).join(" ");
+}
+
+const TaskRow: React.FC<{ task: TodoItem }> = ({ task }) => (
+  <div className={styles.taskRow} data-status={task.status}>
+    <Icon
+      icon={TASK_ICONS[task.status]}
+      size="sm"
+      className={styles.taskIcon}
+      aria-label={TASK_STATUS_LABELS[task.status]}
     />
-  );
-};
-
-type TaskRowProps = {
-  task: TodoItem;
-};
-
-const TaskRow: React.FC<TaskRowProps> = ({ task }) => {
-  const isActive = task.status === "in_progress";
-
-  return (
-    <Flex
-      align="center"
-      gap="2"
-      className={classNames(styles.taskRow, { [styles.active]: isActive })}
-    >
-      <StatusIcon status={task.status} />
-      <Text size="1" className={styles.taskText}>
-        {task.content}
-      </Text>
-    </Flex>
-  );
-};
-
-type GoalIndicatorProps = {
-  goal: GoalSnapshot;
-};
-
-const GoalIndicator: React.FC<GoalIndicatorProps> = ({ goal }) => (
-  <Flex align="center" gap="2" className={styles.goalIndicator}>
-    <Icon icon={Target} size="sm" tone="accent" />
-    <Text size="1" className={styles.goalIndicatorText}>
-      Goal set
-    </Text>
-    <Badge tone={goalStatusTone(goal.status)} size="xs" variant="soft">
-      {humanizeIdentifier(goal.status)}
-    </Badge>
-  </Flex>
+    <span className={styles.taskText}>{task.content}</span>
+  </div>
 );
 
-type GoalControlIconsProps = {
-  goal: GoalSnapshot;
-  onControl: (action: GoalControlAction) => void;
-  pending: boolean;
-  className?: string;
-};
-
-const GoalControlIcons: React.FC<GoalControlIconsProps> = ({
-  goal,
-  onControl,
-  pending,
-  className,
-}) => {
-  const actions = goalControlActions(goal, onControl, pending);
-
-  if (actions.length === 0) return null;
+const GoalUsage: React.FC<{ goal: GoalSnapshot }> = ({ goal }) => {
+  const { budget, progress } = goal;
+  const parts = [
+    {
+      key: "turns",
+      used: progress.turns_used,
+      limit: budget.max_turns,
+      text: (used: string, limit?: string) =>
+        limit ? `${used}/${limit} turns` : `${used} turns`,
+    },
+    {
+      key: "tokens",
+      used: progress.tokens_used,
+      limit: budget.max_tokens,
+      text: (used: string, limit?: string) =>
+        limit ? `${used}/${limit} tokens` : `${used} tokens`,
+    },
+  ];
+  const limits = [
+    budget.max_turns,
+    budget.max_minutes,
+    budget.max_tokens,
+    budget.no_progress_turns,
+  ].filter(isPositiveLimit).length;
 
   return (
-    <Flex
-      align="center"
-      gap="1"
-      className={classNames(styles.goalControlIcons, className)}
-    >
-      {actions.map((action) => (
-        <IconButton
-          key={action.key}
-          aria-label={`${action.label} goal`}
-          icon={action.icon}
-          size="sm"
-          variant={action.key === "stop" ? "danger" : "soft"}
-          disabled={action.disabled}
-          onClick={action.handler}
-        />
-      ))}
-    </Flex>
-  );
-};
-
-type GoalSectionProps = {
-  goal: GoalSnapshot | null;
-  expanded: boolean;
-  onExpandedChange: (open: boolean) => void;
-  onCreate: (content: string, budget?: GoalBudgetCommand) => Promise<boolean>;
-  onUpdateText: (content: string) => Promise<boolean>;
-  onApplyBudget: (budget: GoalBudgetCommand) => Promise<boolean>;
-  onControl: (action: GoalControlAction) => void;
-  pending: boolean;
-};
-
-const GoalSection: React.FC<GoalSectionProps> = ({
-  goal,
-  expanded,
-  onExpandedChange,
-  onCreate,
-  onUpdateText,
-  onApplyBudget,
-  onControl,
-  pending,
-}) => {
-  const [editingGoal, setEditingGoal] = useState(false);
-  const [editorExpanded, setEditorExpanded] = useState(false);
-  const [detailsOpen, setDetailsOpen] = useState(false);
-  const editorTrigger = useRef<HTMLButtonElement>(null);
-  const detailsTrigger = useRef<HTMLButtonElement>(null);
-  const [creatingGoal, setCreatingGoal] = useState(false);
-  const [draft, setDraft] = useState(goal?.content ?? "");
-  const [budgetDirty, setBudgetDirty] = useState(false);
-  const [budgetDraft, setBudgetDraft] = useState<GoalBudgetDraft>(() =>
-    budgetDraftFromGoal(goal),
-  );
-
-  useEffect(() => {
-    if (!editingGoal && !creatingGoal) setDraft(goal?.content ?? "");
-  }, [creatingGoal, editingGoal, goal?.content]);
-
-  const goalMaxTurns = goal?.budget.max_turns;
-  const goalMaxMinutes = goal?.budget.max_minutes;
-  const goalMaxTokens = goal?.budget.max_tokens;
-
-  useEffect(() => {
-    if (budgetDirty) return;
-    setBudgetDraft({
-      maxTurns: goalLimitDraftValue(goalMaxTurns),
-      maxMinutes: goalLimitDraftValue(goalMaxMinutes),
-      maxTokens: goalLimitDraftValue(goalMaxTokens),
-    });
-  }, [budgetDirty, goalMaxMinutes, goalMaxTokens, goalMaxTurns]);
-
-  const trimmedDraft = draft.trim();
-  const hasGoal = goal !== null;
-  const canSave =
-    trimmedDraft.length > 0 && trimmedDraft !== (goal?.content ?? "");
-  const budgetCommand = useMemo(
-    () => budgetCommandFromDraft(budgetDraft),
-    [budgetDraft],
-  );
-
-  const handleSave = useCallback(async () => {
-    if (!canSave || pending) return;
-    if (hasGoal && !creatingGoal) {
-      if (await onUpdateText(trimmedDraft)) setEditingGoal(false);
-      return;
-    }
-    setCreatingGoal(true);
-    const created = await onCreate(
-      trimmedDraft,
-      hasBudgetCommandLimits(budgetCommand) ? budgetCommand : undefined,
-    );
-    if (created) setCreatingGoal(false);
-  }, [
-    budgetCommand,
-    canSave,
-    creatingGoal,
-    hasGoal,
-    onCreate,
-    onUpdateText,
-    pending,
-    trimmedDraft,
-  ]);
-
-  const handleBudgetChange = useCallback(
-    (field: keyof GoalBudgetDraft, value: string) => {
-      setBudgetDirty(true);
-      setBudgetDraft((current) => ({ ...current, [field]: value }));
-    },
-    [],
-  );
-
-  const handleApplyBudget = useCallback(async () => {
-    if (await onApplyBudget(budgetCommand)) setBudgetDirty(false);
-  }, [budgetCommand, onApplyBudget]);
-
-  const goalInput = (
     <>
-      <label className={styles.goalLabel} htmlFor="task-goal-input">
-        Goal text
-      </label>
-      {goal ? (
-        <Text size="1" color="gray">
-          Saved changes are appended as a goal update, not a replacement.
-        </Text>
-      ) : null}
-      <textarea
-        className={classNames(styles.goalInput, {
-          [styles.goalInputExpanded]: editorExpanded,
-        })}
-        id="task-goal-input"
-        value={draft}
-        disabled={pending}
-        onChange={(event) => setDraft(event.currentTarget.value)}
-        placeholder="Set a goal for this thread"
-      />
+      {parts.map((part, index) => {
+        const limited = isPositiveLimit(part.limit);
+        return (
+          <React.Fragment key={part.key}>
+            {index > 0 ? " · " : null}
+            <span
+              data-saturated={
+                limited && part.used >= (part.limit ?? 0) ? "true" : undefined
+              }
+              className={styles.usagePart}
+            >
+              {part.text(
+                formatCount(part.used),
+                limited ? formatCount(part.limit ?? 0) : undefined,
+              )}
+            </span>
+          </React.Fragment>
+        );
+      })}
+      {" · "}
+      {limits === 0
+        ? "No limits"
+        : `${limits} ${limits === 1 ? "limit" : "limits"}`}
     </>
   );
-
-  return (
-    <Collapsible.Root open={expanded} onOpenChange={onExpandedChange}>
-      <Flex direction="column" gap="2" className={styles.goalBlock}>
-        <Flex align="center" className={styles.goalHeaderRow}>
-          <Collapsible.Trigger asChild>
-            <button className={styles.goalHeader} type="button">
-              <Flex align="center" gap="2" className={styles.goalHeaderContent}>
-                <Icon icon={Target} size="sm" tone="accent" />
-                <Text size="1" weight="medium" className={styles.goalTitle}>
-                  Goal
-                </Text>
-                {goal ? (
-                  <Badge
-                    tone={goalStatusTone(goal.status)}
-                    size="xs"
-                    variant="soft"
-                  >
-                    {humanizeIdentifier(goal.status)}
-                  </Badge>
-                ) : (
-                  <Badge tone="muted" size="xs" variant="soft">
-                    Not set
-                  </Badge>
-                )}
-              </Flex>
-              <Chevron open={expanded} />
-            </button>
-          </Collapsible.Trigger>
-          {goal && !expanded ? (
-            <GoalControlIcons
-              goal={goal}
-              onControl={onControl}
-              pending={pending}
-              className={styles.goalHeaderRowControls}
-            />
-          ) : null}
-        </Flex>
-
-        <Collapsible.Content>
-          <Flex direction="column" gap="3" className={styles.goalBody}>
-            {goal ? (
-              <GoalControls
-                goal={goal}
-                onControl={onControl}
-                pending={pending}
-              />
-            ) : null}
-            <Flex direction="column" gap="2">
-              {goal && !editingGoal && !creatingGoal ? (
-                <>
-                  <details open className={styles.disclosure}>
-                    <summary>Goal text</summary>
-                    <div className={styles.readingRegion} tabIndex={0}>
-                      <Markdown>{goal.content}</Markdown>
-                    </div>
-                  </details>
-                  <Button
-                    ref={detailsTrigger}
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => setDetailsOpen(true)}
-                  >
-                    Open full goal and plan
-                  </Button>
-                  {goal.status === "transferred" && goal.transferred_to ? (
-                    <Text size="1" color="gray">
-                      Transferred to {goal.transferred_to}
-                    </Text>
-                  ) : null}
-                </>
-              ) : (
-                <>
-                  {!editorExpanded ? goalInput : null}
-                  <Button
-                    ref={editorTrigger}
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => setEditorExpanded(true)}
-                  >
-                    Expand editor
-                  </Button>
-                </>
-              )}
-              <GoalBudgetEditor
-                draft={budgetDraft}
-                showApply={hasGoal}
-                pending={pending}
-                canApply={
-                  JSON.stringify(budgetCommand) !==
-                  JSON.stringify(
-                    budgetCommandFromDraft(budgetDraftFromGoal(goal)),
-                  )
-                }
-                onApply={() => void handleApplyBudget()}
-                onChange={handleBudgetChange}
-              />
-              <Flex align="center" justify="end" gap="3" wrap="wrap">
-                <Text size="1" color="gray" className={styles.goalProgress}>
-                  {goal ? (
-                    <GoalBudgetProgress goal={goal} />
-                  ) : (
-                    "Save to start tracking a goal"
-                  )}
-                </Text>
-                {goal && !editingGoal && !creatingGoal ? (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={pending}
-                    onClick={() => setEditingGoal(true)}
-                  >
-                    Edit
-                  </Button>
-                ) : (
-                  <>
-                    {goal ? (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={pending}
-                        onClick={() => {
-                          setDraft(goal.content);
-                          setEditingGoal(false);
-                          setCreatingGoal(false);
-                        }}
-                      >
-                        Cancel
-                      </Button>
-                    ) : null}
-                    <Button
-                      size="sm"
-                      variant="primary"
-                      disabled={!canSave || pending}
-                      onClick={() => void handleSave()}
-                    >
-                      Save
-                    </Button>
-                  </>
-                )}
-              </Flex>
-            </Flex>
-
-            {goal ? (
-              <>
-                {goal.plan ? <GoalPlanSection plan={goal.plan} /> : null}
-                <details className={styles.disclosure}>
-                  <summary>Verifier attempts · {goal.attempts.length}</summary>
-                  <GoalAttempts attempts={goal.attempts} />
-                </details>
-                <details className={styles.disclosure}>
-                  <summary>Goal events · {goal.events.length}</summary>
-                  <GoalEvents events={goal.events} />
-                </details>
-              </>
-            ) : null}
-          </Flex>
-        </Collapsible.Content>
-      </Flex>
-      <Dialog open={editorExpanded} onOpenChange={setEditorExpanded}>
-        <Dialog.Content
-          className={styles.detailDialog}
-          onCloseAutoFocus={(event) => {
-            event.preventDefault();
-            editorTrigger.current?.focus();
-          }}
-        >
-          <Dialog.Title>{goal ? "Update goal" : "Set a goal"}</Dialog.Title>
-          <Dialog.Description>
-            Work with the same goal draft in a larger editor.
-          </Dialog.Description>
-          <Flex direction="column" gap="2">
-            {editorExpanded ? goalInput : null}
-          </Flex>
-          <Dialog.Footer>
-            <Dialog.Close asChild>
-              <Button size="sm" variant="soft">
-                Return to goal
-              </Button>
-            </Dialog.Close>
-          </Dialog.Footer>
-        </Dialog.Content>
-      </Dialog>
-      <Dialog open={detailsOpen} onOpenChange={setDetailsOpen}>
-        <Dialog.Content
-          className={styles.detailDialog}
-          onCloseAutoFocus={(event) => {
-            event.preventDefault();
-            detailsTrigger.current?.focus();
-          }}
-        >
-          <Dialog.Title>Full goal and plan</Dialog.Title>
-          <Dialog.Description>
-            Read the complete goal and its current plan.
-          </Dialog.Description>
-          {goal ? <Markdown>{goal.content}</Markdown> : null}
-          {goal?.plan ? <GoalPlanSection plan={goal.plan} full /> : null}
-          <Dialog.Footer>
-            <Dialog.Close asChild>
-              <Button size="sm" variant="soft">
-                Close
-              </Button>
-            </Dialog.Close>
-          </Dialog.Footer>
-        </Dialog.Content>
-      </Dialog>
-    </Collapsible.Root>
-  );
 };
 
-export function GoalPlanSection({
-  plan,
-  full = false,
-}: {
-  plan: GoalPlanSnapshot;
-  full?: boolean;
-}) {
+const LimitRows: React.FC<{
+  draft: LimitDraft;
+  disabled: boolean;
+  onChange: (next: LimitDraft) => void;
+}> = ({ draft, disabled, onChange }) => (
+  <>
+    {LIMIT_KEYS.map((key) => {
+      const meta = LIMIT_META[key];
+      const value = draft[key];
+      return (
+        <React.Fragment key={key}>
+          <KitToggleRow
+            label={meta.label}
+            ariaLabel={meta.label}
+            hint={meta.hint}
+            meta={value === null ? "Unlimited" : undefined}
+            checked={value !== null}
+            disabled={disabled}
+            onCheckedChange={(on) =>
+              onChange({ ...draft, [key]: on ? meta.fallback : null })
+            }
+          />
+          {value !== null ? (
+            <KitSliderRow
+              label="Limit"
+              ariaLabel={`${meta.label} value`}
+              value={value}
+              min={Math.min(meta.min, value)}
+              max={Math.max(meta.max, value)}
+              step={meta.step}
+              editable
+              unit={meta.unit}
+              onValueChange={(next) => onChange({ ...draft, [key]: next })}
+            />
+          ) : null}
+        </React.Fragment>
+      );
+    })}
+  </>
+);
+
+export function GoalPlanSection({ plan }: { plan: GoalPlanSnapshot }) {
   return (
-    <section aria-label="Goal plan">
-      <Text size="1" weight="medium">
-        Plan · v{plan.version}
-      </Text>
-      <details open className={styles.disclosure}>
-        <summary>Plan text</summary>
-        <div
-          className={full ? undefined : styles.readingRegion}
-          tabIndex={full ? undefined : 0}
-        >
-          <Markdown>{plan.content}</Markdown>
-        </div>
-      </details>
+    <section aria-label="Goal plan" className={styles.planSection}>
+      <KitSection>Plan · v{plan.version}</KitSection>
+      <div className={styles.prose}>
+        <Markdown variant="tool">{plan.content}</Markdown>
+      </div>
       {plan.checkpoint ? (
-        <Text size="1" color="gray">
+        <KitNote>
           Checkpoint {plan.checkpoint.revision} ·{" "}
           {plan.checkpoint.folded_deltas} folded updates
-        </Text>
+        </KitNote>
       ) : null}
-      <details>
-        <summary>Plan history · {plan.delta_count} updates</summary>
-        {plan.history?.length ? (
-          plan.history.map((entry) => (
-            <section key={entry.seq} aria-label={`Plan revision ${entry.seq}`}>
-              <Text size="1">Revision {entry.seq}</Text>
-              <Markdown>{entry.content}</Markdown>
-            </section>
-          ))
-        ) : (
-          <Text size="1" color="gray">
-            Earlier updates are retained in conversation history.
-          </Text>
-        )}
-      </details>
+      <KitSection>Plan history · {plan.delta_count} updates</KitSection>
+      {plan.history?.length ? (
+        plan.history.map((entry) => (
+          <section
+            key={entry.seq}
+            aria-label={`Plan revision ${entry.seq}`}
+            className={styles.prose}
+          >
+            <span className={styles.revision}>Revision {entry.seq}</span>
+            <Markdown variant="tool">{entry.content}</Markdown>
+          </section>
+        ))
+      ) : (
+        <KitNote>Earlier updates are retained in conversation history.</KitNote>
+      )}
     </section>
   );
 }
 
-type GoalBudgetEditorProps = {
-  draft: GoalBudgetDraft;
-  showApply: boolean;
-  pending: boolean;
-  onApply: () => void;
-  canApply: boolean;
-  onChange: (field: keyof GoalBudgetDraft, value: string) => void;
-};
-
-const GoalBudgetEditor: React.FC<GoalBudgetEditorProps> = ({
-  draft,
-  showApply,
-  pending,
-  canApply,
-  onApply,
-  onChange,
-}) => (
-  <fieldset className={styles.goalBudgetGroup} disabled={pending}>
-    <legend className={styles.goalBudgetLegend}>
-      Budget limits (optional — leave blank for unlimited)
-    </legend>
-    <div className={styles.goalBudgetGrid}>
-      <label className={styles.goalBudgetField}>
-        <span className={styles.goalBudgetLabel}>Max turns</span>
-        <input
-          className={styles.goalBudgetInput}
-          inputMode="numeric"
-          min={GOAL_BUDGET_INPUT_MIN}
-          step={GOAL_BUDGET_INPUT_STEP}
-          type="number"
-          value={draft.maxTurns}
-          onChange={(event) => onChange("maxTurns", event.currentTarget.value)}
-        />
-      </label>
-      <label className={styles.goalBudgetField}>
-        <span className={styles.goalBudgetLabel}>Max minutes</span>
-        <input
-          className={styles.goalBudgetInput}
-          inputMode="numeric"
-          min={GOAL_BUDGET_INPUT_MIN}
-          step={GOAL_BUDGET_INPUT_STEP}
-          type="number"
-          value={draft.maxMinutes}
-          onChange={(event) =>
-            onChange("maxMinutes", event.currentTarget.value)
+const GoalAttempts: React.FC<{ attempts: GoalAttempt[] }> = ({ attempts }) =>
+  attempts.length === 0 ? (
+    <KitNote>No verifier attempts yet</KitNote>
+  ) : (
+    <>
+      {attempts.map((attempt) => (
+        <KitStaticRow
+          key={`${attempt.at_ms}-${attempt.trigger}`}
+          label={humanizeIdentifier(attempt.trigger)}
+          badges={
+            <KitBadge tone="accent">
+              {humanizeIdentifier(attempt.verdict)}
+            </KitBadge>
+          }
+          hint={
+            <>
+              {attempt.gaps.length > 0 ? (
+                <ul className={styles.gapList}>
+                  {attempt.gaps.map((gap) => (
+                    <li key={gap}>{gap}</li>
+                  ))}
+                </ul>
+              ) : null}
+              <span className={styles.wrapText}>{attempt.verifier_reply}</span>
+            </>
           }
         />
-      </label>
-      <label className={styles.goalBudgetField}>
-        <span className={styles.goalBudgetLabel}>Max tokens</span>
-        <input
-          className={styles.goalBudgetInput}
-          inputMode="numeric"
-          min={GOAL_BUDGET_INPUT_MIN}
-          step={GOAL_BUDGET_INPUT_STEP}
-          type="number"
-          value={draft.maxTokens}
-          onChange={(event) => onChange("maxTokens", event.currentTarget.value)}
-        />
-      </label>
-    </div>
-    {showApply ? (
-      <Flex justify="end" className={styles.goalBudgetActions}>
-        <Button size="sm" variant="soft" onClick={onApply} disabled={!canApply}>
-          Apply budget
-        </Button>
-      </Flex>
-    ) : null}
-  </fieldset>
-);
-
-type GoalControlsProps = {
-  goal: GoalSnapshot;
-  onControl: (action: GoalControlAction) => void;
-  pending: boolean;
-};
-
-const GoalControls: React.FC<GoalControlsProps> = ({
-  goal,
-  onControl,
-  pending,
-}) => {
-  const actions = goalControlActions(goal, onControl, pending);
-
-  if (actions.length === 0) return null;
-
-  return (
-    <Flex align="center" gap="2" wrap="wrap" className={styles.goalControls}>
-      {actions.map((action) => (
-        <Button
-          key={action.key}
-          size="sm"
-          variant={action.key === "stop" ? "danger" : "soft"}
-          leftIcon={action.icon}
-          disabled={action.disabled}
-          onClick={action.handler}
-        >
-          {action.label}
-        </Button>
       ))}
-    </Flex>
+    </>
+  );
+
+const GoalEvents: React.FC<{ events: GoalEvent[] }> = ({ events }) =>
+  events.length === 0 ? (
+    <KitNote>No goal events yet</KitNote>
+  ) : (
+    <>
+      {events.map((event) => (
+        <KitStaticRow
+          key={`${event.at_ms}-${event.kind}-${event.text}`}
+          label={humanizeIdentifier(event.kind)}
+          hint={<span className={styles.wrapText}>{event.text}</span>}
+        />
+      ))}
+    </>
+  );
+
+type GoalEditorDialogProps = {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  goal: GoalSnapshot | null;
+  pending: boolean;
+  error: string | null;
+  onCreate: (content: string, budget?: GoalBudgetCommand) => Promise<boolean>;
+  onUpdateText: (content: string) => Promise<boolean>;
+};
+
+const GoalEditorDialog: React.FC<GoalEditorDialogProps> = ({
+  open,
+  onOpenChange,
+  goal,
+  pending,
+  error,
+  onCreate,
+  onUpdateText,
+}) => {
+  const [draft, setDraft] = useState(goal?.content ?? "");
+  const [limits, setLimits] = useState<LimitDraft>(() =>
+    limitDraftFromGoal(goal),
+  );
+  const goalContent = goal?.content;
+  const wasOpen = useRef(false);
+  useEffect(() => {
+    if (open && !wasOpen.current) {
+      setDraft(goalContent ?? "");
+      setLimits(limitDraftFromGoal(null));
+    }
+    wasOpen.current = open;
+  }, [open, goalContent]);
+
+  const isUpdate = goal !== null;
+  const trimmed = draft.trim();
+  const canSave = trimmed.length > 0 && trimmed !== (goal?.content ?? "");
+
+  const handleSave = async () => {
+    if (!canSave || pending) return;
+    const budget = budgetCommandFromDraft(limits);
+    const ok = isUpdate
+      ? await onUpdateText(trimmed)
+      : await onCreate(
+          trimmed,
+          Object.keys(budget).length > 0 ? budget : undefined,
+        );
+    if (ok) onOpenChange(false);
+  };
+
+  return (
+    <KitDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title={isUpdate ? "Update goal" : "Set a goal"}
+      description={
+        isUpdate
+          ? "Saved changes are appended as a goal update, not a replacement."
+          : "The agent keeps working toward this goal across turns."
+      }
+      footerNote={error ?? undefined}
+      footer={
+        <>
+          <KitDialogCancel />
+          <KitButton
+            variant="primary"
+            disabled={!canSave || pending}
+            onClick={() => void handleSave()}
+          >
+            {isUpdate ? "Update goal" : "Set goal"}
+          </KitButton>
+        </>
+      }
+    >
+      <KitSection>Goal</KitSection>
+      <textarea
+        aria-label="Goal text"
+        className={styles.goalInput}
+        value={draft}
+        disabled={pending}
+        onChange={(event) => setDraft(event.currentTarget.value)}
+        placeholder="Describe what done looks like"
+      />
+      {!isUpdate ? (
+        <>
+          <KitDivider />
+          <KitSection>Limits</KitSection>
+          <LimitRows draft={limits} disabled={pending} onChange={setLimits} />
+        </>
+      ) : null}
+    </KitDialog>
   );
 };
 
-type GoalAttemptsProps = {
-  attempts: GoalAttempt[];
+type GoalDetailsDialogProps = {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  goal: GoalSnapshot;
+  pending: boolean;
+  error: string | null;
+  onApplyBudget: (budget: GoalBudgetCommand) => Promise<boolean>;
 };
 
-const GoalAttempts: React.FC<GoalAttemptsProps> = ({ attempts }) => {
-  if (attempts.length === 0) {
-    return (
-      <Text size="1" color="gray">
-        No verifier attempts yet
-      </Text>
-    );
-  }
-
-  return (
-    <Flex direction="column" gap="2">
-      <Text size="1" weight="medium">
-        Verifier attempts
-      </Text>
-      <Flex direction="column" gap="2" className={styles.attemptList}>
-        {attempts.map((attempt) => (
-          <div
-            className={styles.attemptCard}
-            key={`${attempt.at_ms}-${attempt.trigger}`}
-          >
-            <Flex align="center" gap="2" wrap="wrap">
-              <Badge tone="accent" size="xs" variant="soft">
-                {humanizeIdentifier(attempt.verdict)}
-              </Badge>
-              <Text size="1" color="gray">
-                {humanizeIdentifier(attempt.trigger)}
-              </Text>
-            </Flex>
-            {attempt.gaps.length > 0 ? (
-              <ul className={styles.gapList}>
-                {attempt.gaps.map((gap) => (
-                  <li key={gap}>{gap}</li>
-                ))}
-              </ul>
-            ) : null}
-            <Text as="div" size="1" className={styles.verifierReply}>
-              {attempt.verifier_reply}
-            </Text>
-          </div>
-        ))}
-      </Flex>
-    </Flex>
+const GoalDetailsDialog: React.FC<GoalDetailsDialogProps> = ({
+  open,
+  onOpenChange,
+  goal,
+  pending,
+  error,
+  onApplyBudget,
+}) => {
+  const savedTurns = goal.budget.max_turns;
+  const savedMinutes = goal.budget.max_minutes;
+  const savedTokens = goal.budget.max_tokens;
+  const saved = useMemo<LimitDraft>(
+    () => ({
+      max_turns: isPositiveLimit(savedTurns) ? savedTurns : null,
+      max_minutes: isPositiveLimit(savedMinutes) ? savedMinutes : null,
+      max_tokens: isPositiveLimit(savedTokens) ? savedTokens : null,
+    }),
+    [savedTurns, savedMinutes, savedTokens],
   );
-};
-
-type GoalEventsProps = {
-  events: GoalEvent[];
-};
-
-const GoalEvents: React.FC<GoalEventsProps> = ({ events }) => {
-  if (events.length === 0) {
-    return (
-      <Text size="1" color="gray">
-        No goal events yet
-      </Text>
-    );
-  }
+  const [limits, setLimits] = useState<LimitDraft>(saved);
+  useEffect(() => {
+    if (open) setLimits(saved);
+  }, [open, saved]);
+  const dirty = !sameDraft(limits, saved);
 
   return (
-    <Flex direction="column" gap="2">
-      <Text size="1" weight="medium">
-        Goal events
-      </Text>
-      <div className={styles.eventList}>
-        {events.map((event) => (
-          <div
-            className={styles.eventRow}
-            key={`${event.at_ms}-${event.kind}-${event.text}`}
+    <KitDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="Goal details"
+      description="Plan, limits, verifier attempts and events for this goal."
+      meta={
+        <KitBadge tone={goalStatusTone(goal.status)}>
+          {humanizeIdentifier(goal.status)}
+        </KitBadge>
+      }
+      width="640px"
+      maxHeight="80vh"
+      footerNote={error ?? undefined}
+      footer={
+        <>
+          <KitDialogCancel>Close</KitDialogCancel>
+          <KitButton
+            variant="primary"
+            disabled={!dirty || pending}
+            onClick={() => void onApplyBudget(budgetCommandFromDraft(limits))}
           >
-            <Badge tone="muted" size="xs" variant="soft">
-              {humanizeIdentifier(event.kind)}
-            </Badge>
-            <Text size="1" className={styles.eventText}>
-              {event.text}
-            </Text>
-          </div>
-        ))}
+            Apply limits
+          </KitButton>
+        </>
+      }
+    >
+      <KitSection>Goal · v{goal.version}</KitSection>
+      <div className={`${styles.prose} ${styles.goalProse}`}>
+        <Markdown variant="tool">{goal.content}</Markdown>
       </div>
-    </Flex>
+      {goal.status === "transferred" && goal.transferred_to ? (
+        <KitNote>Transferred to {goal.transferred_to}</KitNote>
+      ) : null}
+      {goal.plan ? <GoalPlanSection plan={goal.plan} /> : null}
+      <KitDivider />
+      <KitSection>Limits</KitSection>
+      <KitStaticRow
+        label="Usage"
+        meta={<GoalUsage goal={goal} />}
+        tone="muted"
+      />
+      <LimitRows draft={limits} disabled={pending} onChange={setLimits} />
+      <KitDivider />
+      <KitSection>Verifier attempts · {goal.attempts.length}</KitSection>
+      <GoalAttempts attempts={goal.attempts} />
+      <KitSection>Events · {goal.events.length}</KitSection>
+      <GoalEvents events={goal.events} />
+    </KitDialog>
   );
 };
+
+type ActionButtonProps = {
+  label: string;
+  state?: string;
+  icon: LucideIcon;
+  disabled?: boolean;
+  danger?: boolean;
+  onClick: () => void;
+};
+
+const ActionButton: React.FC<ActionButtonProps> = ({
+  label,
+  state,
+  icon,
+  disabled,
+  danger,
+  onClick,
+}) => (
+  <KitTooltip label={label} state={state}>
+    <KitIconButton
+      aria-label={label}
+      icon={icon}
+      disabled={disabled}
+      data-tone={danger ? "danger" : undefined}
+      className={styles.action}
+      onClick={onClick}
+    />
+  </KitTooltip>
+);
 
 export const TaskProgressWidget: React.FC = () => {
   const chatId = useThreadId();
@@ -966,6 +680,8 @@ export const TaskProgressWidget: React.FC = () => {
   return <TaskProgressWidgetInstance key={source} />;
 };
 
+const TASK_SECTION_LABELS = { output: "" };
+
 const TaskProgressWidgetInstance: React.FC = () => {
   const dispatch = useAppDispatch();
   const chatId = useThreadId();
@@ -981,9 +697,6 @@ const TaskProgressWidgetInstance: React.FC = () => {
   );
   const isExpanded = useAppSelector((state) =>
     selectTaskWidgetExpandedById(state, chatId),
-  );
-  const goalExpanded = useAppSelector((state) =>
-    selectTaskGoalExpandedById(state, chatId),
   );
   const threadMode = useAppSelector((state) =>
     selectThreadModeById(state, chatId),
@@ -1001,6 +714,9 @@ const TaskProgressWidgetInstance: React.FC = () => {
       JSON.stringify(current?.owner) === JSON.stringify(goal?.owner)
     );
   });
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+
   const hasGoal = hasGoalWork(goal);
   const goalSupported = isGoalSupported(threadMode, threadToolUse);
   const isFreshGoalOpportunity =
@@ -1026,15 +742,6 @@ const TaskProgressWidgetInstance: React.FC = () => {
     (open: boolean) => {
       if (chatId) {
         dispatch(setTaskWidgetExpanded({ id: chatId, expanded: open }));
-      }
-    },
-    [dispatch, chatId],
-  );
-
-  const handleGoalOpenChange = useCallback(
-    (open: boolean) => {
-      if (chatId) {
-        dispatch(setTaskGoalExpanded({ id: chatId, expanded: open }));
       }
     },
     [dispatch, chatId],
@@ -1077,7 +784,7 @@ const TaskProgressWidgetInstance: React.FC = () => {
       (state) => {
         const updated = selectGoalById(state, chatId);
         if (!updated || !sameGoal(updated)) return false;
-        return (["max_turns", "max_minutes", "max_tokens"] as const).every(
+        return LIMIT_KEYS.every(
           (key) => (updated.budget[key] ?? 0) === (nextBudget[key] ?? 0),
         );
       },
@@ -1095,162 +802,184 @@ const TaskProgressWidgetInstance: React.FC = () => {
 
   if (!shouldRender) return null;
 
-  return (
-    <Box className={styles.widget}>
-      <Collapsible.Root open={isExpanded} onOpenChange={handleOpenChange}>
-        <Flex align="center" className={styles.headerRow}>
-          <Collapsible.Trigger asChild>
-            <button className={styles.header} type="button">
-              <Flex align="center" gap="3" className={styles.headerInner}>
-                <Flex align="center" gap="2" className={styles.headerMain}>
-                  {!isExpanded && hasGoal && goal ? (
-                    <GoalIndicator goal={goal} />
-                  ) : null}
+  const activeGoal = hasGoal ? goal : null;
+  const rowVerb = activeGoal
+    ? "Goal"
+    : isFreshGoalOpportunity
+      ? "Set a goal"
+      : isTasksCleared
+        ? "Tasks cleared"
+        : "Tasks";
+  const rowTarget = activeGoal
+    ? goalHeadlineOf(activeGoal.content)
+    : activeTitle ?? undefined;
+  const controls = activeGoal
+    ? goalControlActions(activeGoal, request.blocked)
+    : [];
 
-                  {!isExpanded && hasTasks ? (
-                    <>
-                      <Flex
-                        gap="1"
-                        align="center"
-                        className={styles.taskDots}
-                        aria-hidden="true"
-                      >
-                        {tasks.length <= 4
-                          ? tasks.map((task) => (
-                              <StatusIcon key={task.id} status={task.status} />
-                            ))
-                          : null}
-                      </Flex>
+  const headerMeta =
+    activeGoal !== null || hasTasks ? (
+      <span className={styles.headerMeta}>
+        {activeGoal ? (
+          <span
+            className={styles.statusPill}
+            data-tone={goalStatusTone(activeGoal.status)}
+          >
+            {humanizeIdentifier(activeGoal.status)}
+          </span>
+        ) : null}
+        {hasTasks ? (
+          <span
+            className={styles.taskSummary}
+            aria-label={`${done} of ${total} tasks completed`}
+          >
+            {tasks.length <= MAX_HEADER_DOTS ? (
+              <span className={styles.taskDots} aria-hidden="true">
+                {tasks.map((task) => (
+                  <span
+                    key={task.id}
+                    className={styles.taskDot}
+                    data-status={task.status}
+                  />
+                ))}
+              </span>
+            ) : null}
+            <span>
+              {done}/{total}
+            </span>
+          </span>
+        ) : null}
+      </span>
+    ) : undefined;
 
-                      <span
-                        className={styles.taskSummary}
-                        aria-label={`${done} of ${total} tasks completed`}
-                      >
-                        <CircularProgress done={done} total={total} />
-                        <Text size="1">
-                          {done}/{total}
-                        </Text>
-                      </span>
-
-                      {activeTitle ? (
-                        <Text
-                          size="1"
-                          color="gray"
-                          className={styles.activeHint}
-                        >
-                          {activeTitle}
-                        </Text>
-                      ) : null}
-                    </>
-                  ) : null}
-
-                  {!isExpanded && isFreshGoalOpportunity ? (
-                    <Flex
-                      align="center"
-                      gap="2"
-                      className={styles.goalAffordance}
-                    >
-                      <Icon icon={Target} size="sm" tone="accent" />
-                      <Text
-                        size="1"
-                        weight="medium"
-                        className={styles.goalAffordanceText}
-                      >
-                        Set a goal
-                      </Text>
-                    </Flex>
-                  ) : null}
-
-                  {!isExpanded && isTasksCleared ? (
-                    <Text size="1" color="gray">
-                      Tasks cleared
-                    </Text>
-                  ) : null}
-
-                  {isExpanded ? (
-                    <Text size="1" weight="medium">
-                      Task Progress
-                    </Text>
-                  ) : null}
-                </Flex>
-
-                <Chevron open={isExpanded} />
-              </Flex>
-            </button>
-          </Collapsible.Trigger>
-          {!isExpanded && hasGoal && goal ? (
-            <GoalControlIcons
-              goal={goal}
-              onControl={handleGoalControl}
-              pending={request.blocked}
-              className={styles.headerRowControls}
-            />
+  const goalSummary = activeGoal ? goalSummaryOf(activeGoal.content) : "";
+  const body = (
+    <div className={styles.body}>
+      {activeGoal ? (
+        goalSummary ? (
+          <p className={styles.goalText} title={activeGoal.content}>
+            {goalSummary}
+          </p>
+        ) : null
+      ) : (
+        <KitNote>
+          {goalSupported
+            ? "No goal set. Set one to keep the agent working toward it."
+            : "No goal set."}
+        </KitNote>
+      )}
+      {hasTasks ? (
+        <div className={styles.taskList}>
+          {tasks.map((task) => (
+            <TaskRow key={task.id} task={task} />
+          ))}
+        </div>
+      ) : (
+        <KitNote>No active tasks</KitNote>
+      )}
+      <div className={styles.footer}>
+        <span className={styles.footerMeta}>
+          {activeGoal ? (
+            <GoalUsage goal={activeGoal} />
+          ) : hasTasks ? (
+            `${done}/${total} completed`
           ) : null}
-        </Flex>
+        </span>
+        {activeGoal !== null || goalSupported ? (
+          <ActionButton
+            label={activeGoal ? "Edit goal" : "Create goal"}
+            icon={activeGoal ? Pencil : Target}
+            disabled={request.blocked}
+            onClick={() => setEditorOpen(true)}
+          />
+        ) : null}
+        {activeGoal ? (
+          <ActionButton
+            label="Goal details"
+            state={
+              activeGoal.plan ? `Plan v${activeGoal.plan.version}` : undefined
+            }
+            icon={Info}
+            onClick={() => setDetailsOpen(true)}
+          />
+        ) : null}
+        {controls.map((action) => (
+          <ActionButton
+            key={action.key}
+            label={`${action.label} goal`}
+            icon={action.icon}
+            disabled={action.disabled}
+            danger={action.key === "stop"}
+            onClick={() => handleGoalControl(action.key)}
+          />
+        ))}
+      </div>
+    </div>
+  );
 
-        <Collapsible.Content>
-          <Flex direction="column" gap="3" className={styles.content}>
-            <GoalSection
-              goal={goal}
-              expanded={goalExpanded}
-              onExpandedChange={handleGoalOpenChange}
-              onCreate={handleGoalCreate}
-              onUpdateText={handleGoalTextUpdate}
-              onApplyBudget={handleGoalBudgetApply}
-              onControl={handleGoalControl}
-              pending={request.blocked}
-            />
-
-            {hasTasks ? (
-              <>
-                <div className={styles.taskList}>
-                  {tasks.map((task) => (
-                    <div key={task.id} className={styles.taskRowEnter}>
-                      <TaskRow task={task} />
-                    </div>
-                  ))}
-                </div>
-                <Separator size="4" />
-                <Text size="1" color="gray">
-                  {done}/{total} completed
-                </Text>
-              </>
-            ) : (
-              <Text size="1" color="gray">
-                No active tasks
-              </Text>
-            )}
-          </Flex>
-        </Collapsible.Content>
-      </Collapsible.Root>
+  return (
+    <div className={styles.widget}>
+      <div className={styles.row}>
+        <TranscriptItem
+          icon={<Icon icon={Target} size="sm" tone="accent" />}
+          verb={rowVerb}
+          target={rowTarget}
+          meta={headerMeta}
+          expandable
+          open={isExpanded}
+          onOpenChange={handleOpenChange}
+          sectionLabels={TASK_SECTION_LABELS}
+          panelClassName={styles.panel}
+          output={body}
+        />
+      </div>
       {goal?.status === "budget_exhausted" || goal?.status === "no_progress" ? (
-        <Text as="p" size="1" color="gray" className={styles.goalFeedback}>
+        <p className={styles.feedback}>
           {goal.status === "budget_exhausted"
             ? "Budget exhausted. Review usage and explicitly adjust budget limits to continue."
             : "No progress detected. Provide new direction or review the progress budget before continuing."}
-        </Text>
+        </p>
       ) : null}
       {request.status ? (
-        <Text as="p" size="1" role="status" className={styles.goalFeedback}>
+        <p role="status" className={styles.feedback}>
           {request.status}
-        </Text>
+        </p>
       ) : null}
       {request.error ? (
-        <Text as="p" size="1" role="alert" className={styles.goalError}>
+        <p role="alert" className={styles.error}>
           {request.error}
-        </Text>
+        </p>
       ) : null}
       {request.uncertain ? (
-        <Button
-          size="sm"
-          variant="soft"
-          disabled={request.pending}
-          onClick={() => void request.checkStatus()}
-        >
-          Check status
-        </Button>
+        <div className={styles.feedback}>
+          <KitButton
+            disabled={request.pending}
+            onClick={() => void request.checkStatus()}
+          >
+            Check status
+          </KitButton>
+        </div>
       ) : null}
-    </Box>
+      <GoalEditorDialog
+        open={editorOpen}
+        onOpenChange={setEditorOpen}
+        goal={activeGoal}
+        pending={request.blocked}
+        error={request.error}
+        onCreate={handleGoalCreate}
+        onUpdateText={handleGoalTextUpdate}
+      />
+      {activeGoal ? (
+        <GoalDetailsDialog
+          open={detailsOpen}
+          onOpenChange={setDetailsOpen}
+          goal={activeGoal}
+          pending={request.blocked}
+          error={request.error}
+          onApplyBudget={handleGoalBudgetApply}
+        />
+      ) : null}
+    </div>
   );
 };
 

@@ -7,13 +7,14 @@ import { selectIsCompanionChat, useThreadId } from "../../features/Chat/Thread";
 import { useAttachedImages } from "../../hooks/useAttachedImages";
 import { useAttachedFiles } from "../ChatForm/useCheckBoxes";
 import { TruncateLeft } from "../Text";
-import { Button, Icon, IconButton, Tooltip } from "../ui";
+import { Button, Icon } from "../ui";
 import {
   attachmentFileError,
   isSupportedImageFile,
   isSupportedTextFile,
   MAX_ATTACHMENT_FILE_SIZE,
 } from "../../utils/attachmentFiles";
+import { ComposerTrigger, KitTooltip } from "../ComposerKit";
 import styles from "./Dropzone.module.css";
 
 export const FileUploadContext = createContext<{
@@ -152,21 +153,17 @@ export const AttachImagesButton = () => {
         return (
           <>
             <input {...inputProps} className={styles.hiddenInput} />
-            <Tooltip>
-              <Tooltip.Trigger asChild>
-                <IconButton
-                  aria-label="Attach images"
-                  disabled={inputProps.disabled}
-                  icon={Image}
-                  size="sm"
-                  variant="plain"
-                  onClick={(event) => {
-                    attachFileOnClick(event, open);
-                  }}
-                />
-              </Tooltip.Trigger>
-              <Tooltip.Content>Attach images</Tooltip.Content>
-            </Tooltip>
+            <KitTooltip label="Attach images">
+              <ComposerTrigger
+                iconOnly
+                aria-label="Attach images"
+                disabled={inputProps.disabled}
+                icon={Image}
+                onClick={(event) => {
+                  attachFileOnClick(event, open);
+                }}
+              />
+            </KitTooltip>
           </>
         );
       }}

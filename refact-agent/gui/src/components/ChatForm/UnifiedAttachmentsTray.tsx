@@ -1,5 +1,4 @@
 import React, { useMemo } from "react";
-import { Flex } from "@radix-ui/themes";
 import { AttachmentTile, AttachmentTileProps } from "./AttachmentTile";
 import { useAttachedImages } from "../../hooks/useAttachedImages";
 import { useAttachedFiles } from "./useCheckBoxes";
@@ -175,10 +174,10 @@ export const UnifiedAttachmentsTray: React.FC<UnifiedAttachmentsTrayProps> = ({
   }
 
   return (
-    <Flex wrap="wrap" gap="2" className={styles.tray}>
+    <div className={styles.tray}>
       {items.map((item) => (
         <AttachmentTile key={item.id} {...item} />
       ))}
-    </Flex>
+    </div>
   );
 };

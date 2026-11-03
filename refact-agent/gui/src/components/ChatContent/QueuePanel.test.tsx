@@ -4,6 +4,7 @@ import {
   render,
   screen,
   fireEvent,
+  waitFor,
   createDefaultChatState,
 } from "../../utils/test-utils";
 import { queueStatusText } from "./queuePresentation";
@@ -51,26 +52,29 @@ it("keeps wire order in a four-row scroll container and status live only on text
   rerender(<QueuePanel queuedItems={items} isBusy={false} />);
   expect(screen.getByRole("status")).toHaveTextContent("6 ready to deliver");
 });
-it("remembers collapsed state independently when switching threads and remounting", () => {
+it("remembers collapsed state independently when switching threads and remounting", async () => {
   const view = (id: string) => (
     <ChatThreadProvider chatId={id}>
       <QueuePanel queuedItems={items} isBusy />
     </ChatThreadProvider>
   );
   const { rerender, unmount } = render(view("thread-a"));
-  fireEvent.click(
-    screen.getByRole("button", { name: "Collapse the delivery queue" }),
-  );
-  expect(screen.queryByTestId("queue-list")).toBeNull();
+  const toggle = screen.getByTestId("transcript-toggle");
+  expect(toggle).toHaveTextContent("Queued");
+  expect(toggle).toHaveAttribute("aria-expanded", "true");
+  fireEvent.click(toggle);
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await waitFor(() => expect(screen.queryByTestId("queue-list")).toBeNull());
   rerender(view("thread-b"));
   expect(screen.getByTestId("queue-list")).toBeVisible();
   rerender(view("thread-a"));
   expect(screen.queryByTestId("queue-list")).toBeNull();
   unmount();
   render(view("thread-a"));
-  expect(
-    screen.getByRole("button", { name: /Expand the delivery queue/ }),
-  ).toHaveAttribute("aria-expanded", "false");
+  expect(screen.getByTestId("transcript-toggle")).toHaveAttribute(
+    "aria-expanded",
+    "false",
+  );
 });
 
 it("raises the list cap only while a surviving row is expanded", () => {
@@ -117,5 +121,5 @@ it("leaves recovery commands in the recovery panel while retaining unrelated que
   expect(screen.getAllByTestId("row")).toHaveLength(1);
   expect(screen.getByRole("status")).toHaveTextContent("1 ready to deliver");
   rerender(<QueuePanel queuedItems={[recoveryItem]} isBusy={false} />);
-  expect(screen.queryByText("Delivery queue")).not.toBeInTheDocument();
+  expect(screen.queryByText("Queued")).not.toBeInTheDocument();
 });

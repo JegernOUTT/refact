@@ -1,6 +1,5 @@
 import { useCallback } from "react";
 import { Layers } from "lucide-react";
-import { IconButton, Tooltip } from "../ui";
 import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { useAppSelector } from "../../hooks/useAppSelector";
 import {
@@ -12,6 +11,7 @@ import {
 } from "../../features/Chat/Thread";
 import { updateChatParams } from "../../services/refact/chatCommands";
 import { selectConfig, selectApiKey } from "../../features/Config/configSlice";
+import { ComposerTrigger, KitTooltip } from "../ComposerKit";
 
 type AutoEnrichmentToggleButtonProps = {
   disabled?: boolean;
@@ -51,21 +51,21 @@ export const AutoEnrichmentToggleButton = ({
     : "Auto-enrichment OFF — click to enable";
 
   return (
-    <Tooltip>
-      <Tooltip.Trigger asChild>
-        <IconButton
-          aria-label={label}
-          aria-pressed={isEnabled}
-          data-testid="auto-enrichment-toggle"
-          disabled={disabled}
-          icon={Layers}
-          onClick={handleClick}
-          size="sm"
-          variant={isEnabled ? "primary" : "ghost"}
-        />
-      </Tooltip.Trigger>
-      <Tooltip.Content side="top">{label}</Tooltip.Content>
-    </Tooltip>
+    <KitTooltip
+      label="Auto-enrichment"
+      state={isEnabled ? "On" : "Off"}
+      stateTone={isEnabled ? "accent" : undefined}
+    >
+      <ComposerTrigger
+        iconOnly
+        aria-label={label}
+        aria-pressed={isEnabled}
+        data-testid="auto-enrichment-toggle"
+        disabled={disabled}
+        icon={Layers}
+        onClick={handleClick}
+      />
+    </KitTooltip>
   );
 };
 

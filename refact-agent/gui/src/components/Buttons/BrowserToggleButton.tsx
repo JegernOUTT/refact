@@ -1,6 +1,5 @@
 import { forwardRef, useCallback, useRef, useState } from "react";
 import { Globe } from "lucide-react";
-import { IconButton, Tooltip } from "../ui";
 import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { useAppSelector } from "../../hooks/useAppSelector";
 import {
@@ -19,6 +18,7 @@ import {
   makeSurfaceKey,
   openTab,
 } from "../../features/Workspace";
+import { ComposerTrigger, KitTooltip } from "../ComposerKit";
 
 type BrowserToggleButtonProps = {
   chatId: string;
@@ -131,20 +131,21 @@ export const BrowserToggleButton = forwardRef<
       : "Open browser";
 
   return (
-    <Tooltip>
-      <Tooltip.Trigger asChild>
-        <IconButton
-          aria-label={label}
-          disabled={busy || disabled}
-          icon={Globe}
-          onClick={handleClick}
-          ref={ref}
-          size="sm"
-          variant={isActive ? "primary" : "ghost"}
-        />
-      </Tooltip.Trigger>
-      <Tooltip.Content side="top">{label}</Tooltip.Content>
-    </Tooltip>
+    <KitTooltip
+      label={label}
+      state={isActive ? "On" : undefined}
+      stateTone={"accent"}
+    >
+      <ComposerTrigger
+        iconOnly
+        aria-label={label}
+        aria-pressed={isActive}
+        disabled={busy || disabled}
+        icon={Globe}
+        onClick={handleClick}
+        ref={ref}
+      />
+    </KitTooltip>
   );
 });
 

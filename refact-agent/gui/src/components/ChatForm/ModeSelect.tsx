@@ -5,8 +5,7 @@ import React, {
   useCallback,
   useMemo,
 } from "react";
-import classNames from "classnames";
-import { ChevronDown, Plus, RefreshCcw, Shuffle, Wrench } from "lucide-react";
+import { Bot, Plus } from "lucide-react";
 import {
   useGetChatModesQuery,
   ChatModeInfo,
@@ -17,7 +16,15 @@ import { useAppSelector } from "../../hooks/useAppSelector";
 import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { selectMessagesById, useThreadId } from "../../features/Chat/Thread";
 import { push, selectCurrentPage } from "../../features/Pages/pagesSlice";
-import { Badge, Chip, Icon, Popover, Skeleton } from "../ui";
+import { Icon, Popover, Skeleton } from "../ui";
+import {
+  ComposerTrigger,
+  KitBadge,
+  KitChevron,
+  KitDivider,
+  KitRow,
+  kit,
+} from "../ComposerKit";
 import { ModeTransitionDialog } from "./ModeTransitionDialog";
 import { TaskPlannerDialog } from "./TaskPlannerDialog";
 import styles from "./ModeSelect.module.css";
@@ -172,30 +179,31 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
   }
 
   if (effectiveModes.length === 0) {
-    return (
-      <div className={classNames(styles.trigger, styles.disabled)}>
-        <span className={styles.triggerTitle}>No modes</span>
-      </div>
-    );
+    return <ComposerTrigger disabled label="No modes" />;
   }
 
   const triggerContent = (
     <span className={styles.triggerContent}>
-      <span className={styles.triggerTitle}>{currentTitle}</span>
+      <span data-show-at="2" aria-hidden="true">
+        <Icon icon={Bot} size="sm" tone="muted" />
+      </span>
+      <span className={styles.triggerTitle} data-shrink-at="2">
+        {currentTitle}
+      </span>
       {toolsCount > 0 && (
-        <span className={styles.triggerMeta} aria-hidden="true">
+        <span
+          className={styles.triggerMeta}
+          aria-hidden="true"
+          data-shrink-at="1"
+        >
           ·
         </span>
       )}
       {toolsCount > 0 && (
-        <span className={styles.triggerMeta}>{toolsCount} tools</span>
+        <span className={styles.triggerMeta} data-shrink-at="1">
+          {toolsCount} tools
+        </span>
       )}
-      <Icon
-        icon={ChevronDown}
-        size="sm"
-        tone="muted"
-        className={styles.chevron}
-      />
     </span>
   );
 
@@ -203,13 +211,10 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
     <>
       <Popover open={isOpen} onOpenChange={handlePopoverOpenChange}>
         <Popover.Trigger asChild>
-          <button
-            className={classNames(
-              styles.trigger,
-              isModeDisabled && styles.disabled,
-            )}
+          <ComposerTrigger
+            chevron
             disabled={isModeDisabled}
-            type="button"
+            aria-label={`Mode: ${currentTitle}`}
             title={
               hasMessages
                 ? "Click to switch mode (context will be preserved)"
@@ -217,45 +222,41 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
             }
           >
             {triggerContent}
-          </button>
+          </ComposerTrigger>
         </Popover.Trigger>
 
         <Popover.Content
-          className={styles.content}
+          className={kit.popover}
           side="top"
           align="start"
           sideOffset={8}
-          maxWidth="min(360px, calc(100vw - var(--rf-space-4)))"
+          maxWidth="min(340px, calc(100vw - var(--rf-space-4)))"
           maxHeight="min(420px, calc(100dvh - var(--rf-space-5)))"
+          scrollable={false}
         >
           <div className={styles.modeList} ref={modeListRef}>
-            {effectiveModes.map((mode, index) => {
+            {effectiveModes.map((mode) => {
               const isSelected = effectiveMode === mode.id;
               return (
-                <React.Fragment key={mode.id}>
-                  {index > 0 && <div className={styles.separator} />}
-                  <ModeMenuItem
-                    ref={isSelected ? selectedModeRef : undefined}
-                    mode={mode}
-                    isSelected={isSelected}
-                    onSelect={() => handleModeSelect(mode)}
-                    disabled={false}
-                    showTransitionHint={hasMessages}
-                    isSelfSwitch={hasMessages && isSelected}
-                  />
-                </React.Fragment>
+                <ModeMenuItem
+                  key={mode.id}
+                  ref={isSelected ? selectedModeRef : undefined}
+                  mode={mode}
+                  isSelected={isSelected}
+                  onSelect={() => handleModeSelect(mode)}
+                  showTransitionHint={hasMessages}
+                  isSelfSwitch={hasMessages && isSelected}
+                />
               );
             })}
-            <div className={styles.separator} />
-            <button
-              className={styles.addModeItem}
-              onClick={handleCreateNewMode}
-              type="button"
-            >
-              <Icon icon={Plus} size="sm" tone="accent" />
-              <span>Create new mode...</span>
-            </button>
           </div>
+          <KitDivider />
+          <KitRow
+            icon={<Plus aria-hidden="true" />}
+            label="Create mode"
+            trailing={<KitChevron />}
+            onClick={handleCreateNewMode}
+          />
         </Popover.Content>
       </Popover>
 
@@ -302,60 +303,26 @@ export const ModeMenuItem = React.forwardRef<
     { mode, isSelected, onSelect, disabled, showTransitionHint, isSelfSwitch },
     ref,
   ) => {
+    const tags = mode.ui.tags.slice(0, 2).join(" · ");
     return (
-      <button
+      <KitRow
         ref={ref}
-        className={classNames(
-          styles.item,
-          isSelected && styles.itemSelected,
-          disabled && styles.itemDisabled,
-        )}
-        onClick={onSelect}
-        type="button"
+        label={mode.title}
+        strong
+        sub={mode.description || undefined}
+        hint={tags || undefined}
+        meta={mode.tools_count > 0 ? `${mode.tools_count} tools` : undefined}
+        selected={isSelected}
         disabled={disabled}
-      >
-        <span className={styles.itemHeader}>
-          <span className={styles.itemTitle}>{mode.title}</span>
-          {showTransitionHint && (
-            <Badge tone={isSelfSwitch ? "success" : "warning"}>
-              <span className={styles.badgeContent}>
-                <Icon
-                  icon={isSelfSwitch ? RefreshCcw : Shuffle}
-                  size="sm"
-                  tone={isSelfSwitch ? "success" : "warning"}
-                />
-                {isSelfSwitch ? "restart" : "switch"}
-              </span>
-            </Badge>
-          )}
-        </span>
-
-        {mode.description && (
-          <span className={styles.description}>
-            {mode.description.length > 80
-              ? `${mode.description.slice(0, 80)}...`
-              : mode.description}
-          </span>
-        )}
-
-        <span className={styles.metaRow}>
-          {mode.ui.tags.slice(0, 2).map((tag) => (
-            <Chip key={tag} radius="chip" className={styles.chip}>
-              {tag}
-            </Chip>
-          ))}
-          {mode.tools_count > 0 && (
-            <Chip
-              radius="chip"
-              selected={isSelected}
-              className={styles.chip}
-              icon={<Icon icon={Wrench} size="sm" tone="accent" />}
-            >
-              {mode.tools_count} tools
-            </Chip>
-          )}
-        </span>
-      </button>
+        onClick={onSelect}
+        badges={
+          showTransitionHint ? (
+            <KitBadge tone={isSelfSwitch ? "success" : "warning"}>
+              {isSelfSwitch ? "restart" : "switch"}
+            </KitBadge>
+          ) : null
+        }
+      />
     );
   },
 );

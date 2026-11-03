@@ -149,6 +149,16 @@
   border-color: var(--rf-border-strong);
 }
 
+.iconButton.variant-ghost[aria-pressed="true"],
+.iconButton.variant-ghost[aria-pressed="true"]:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--rf-color-accent-soft);
+}
+
+.iconButton.variant-ghost[aria-pressed="true"] > span {
+  color: var(--rf-color-accent);
+}
+
 .variant-soft {
   background: var(--rf-surface-1);
 }

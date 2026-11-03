@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
 import { http, HttpResponse } from "msw";
-import { render, screen, waitFor, within } from "../../utils/test-utils";
+import { render, screen, waitFor } from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
 import { createDefaultChatState } from "../../utils/test-utils";
 import { applyChatEvent } from "../../features/Chat/Thread/actions";
@@ -59,7 +59,7 @@ describe("TaskPlannerDialog", () => {
     );
   });
 
-  test("shows one content spinner and no button spinner while creating a task", async () => {
+  test("blocks closing while creating a task and closes when done", async () => {
     const taskGate = deferred();
     const onOpenChange = vi.fn();
 
@@ -110,12 +110,6 @@ describe("TaskPlannerDialog", () => {
     expect(await screen.findByRole("status")).toHaveTextContent(
       "Creating task...",
     );
-    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
-    expect(
-      within(
-        screen.getByRole("button", { name: "Creating task..." }),
-      ).queryByRole("status"),
-    ).not.toBeInTheDocument();
 
     onOpenChange.mockClear();
     await user.keyboard("{Escape}");

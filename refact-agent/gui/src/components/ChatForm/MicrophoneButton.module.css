@@ -1,7 +1,3 @@
-.iconButton.active {
-  color: var(--rf-color-danger);
-}
-
 .recording {
   animation: micPulse var(--rf-dur-slow) var(--rf-ease-standard) infinite;
 }

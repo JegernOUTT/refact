@@ -1,7 +1,19 @@
 import React from "react";
-import { Box, Flex, Popover, Text } from "../LongTailPrimitives";
-import { Checkbox } from "../Checkbox";
-import { Button, Tabs } from "../ui";
+import { Popover } from "../LongTailPrimitives";
+import {
+  KitButton,
+  KitCheckRow,
+  KitDivider,
+  KitFooter,
+  KitHeader,
+  KitKeyValue,
+  KitNote,
+  KitPanel,
+  KitSection,
+  KitStaticRow,
+  KitTabs,
+  kit,
+} from "../ComposerKit";
 import {
   useTrajectoryOps,
   type TrajectoryTab,
@@ -10,11 +22,6 @@ import { useCapsForToolUse } from "../../hooks/useCapsForToolUse";
 import { ModelSelector } from "../Chat/ModelSelector";
 import { formatContextWindow } from "../../features/Providers/ProviderForm/ProviderModelsList/utils/groupModelsWithPricing";
 import styles from "./TrajectoryPopover.module.css";
-
-const TAB_OPTIONS = [
-  { value: "compress", label: "Compress in-place" },
-  { value: "llm-compress", label: "LLM compression" },
-];
 
 type TrajectoryPopoverContentProps = {
   onClose: () => void;
@@ -53,10 +60,6 @@ export const TrajectoryPopoverContent: React.FC<
     clearPreviews();
   };
 
-  const activeTabIndex = TAB_OPTIONS.findIndex(
-    (tab) => tab.value === activeTab,
-  );
-
   const handleApplyTransformClick = async () => {
     const success = await handleApplyTransform();
     if (success) {
@@ -71,246 +74,219 @@ export const TrajectoryPopoverContent: React.FC<
     }
   };
 
+  const reduction =
+    transformPreview && transformPreview.stats.before_approx_tokens > 0
+      ? Math.round(
+          ((transformPreview.stats.before_approx_tokens -
+            transformPreview.stats.after_approx_tokens) /
+            transformPreview.stats.before_approx_tokens) *
+            100,
+        )
+      : 0;
+
+  const inPlace = (
+    <>
+      <KitCheckRow
+        label="Drop all context files"
+        checked={transformOptions.drop_all_context === true}
+        onCheckedChange={(enabled) => {
+          updateTransformOption("drop_all_context", enabled);
+          if (enabled) {
+            updateTransformOption("dedup_and_compress_context", false);
+          }
+        }}
+      />
+      <KitCheckRow
+        label="Deduplicate context files"
+        hint="Keeps the latest copy of each file"
+        checked={transformOptions.dedup_and_compress_context === true}
+        disabled={transformOptions.drop_all_context}
+        onCheckedChange={(enabled) =>
+          updateTransformOption("dedup_and_compress_context", enabled)
+        }
+      />
+      <KitCheckRow
+        label="Truncate tool results"
+        checked={transformOptions.compress_non_agentic_tools === true}
+        onCheckedChange={(enabled) =>
+          updateTransformOption("compress_non_agentic_tools", enabled)
+        }
+      />
+      <KitCheckRow
+        label="Drop all memories"
+        checked={transformOptions.drop_all_memories === true}
+        onCheckedChange={(enabled) =>
+          updateTransformOption("drop_all_memories", enabled)
+        }
+      />
+      <KitCheckRow
+        label="Drop project information"
+        checked={transformOptions.drop_project_information === true}
+        onCheckedChange={(enabled) =>
+          updateTransformOption("drop_project_information", enabled)
+        }
+      />
+      <KitCheckRow
+        label="Remove usage and metering details"
+        checked={transformOptions.strip_metering === true}
+        onCheckedChange={(enabled) =>
+          updateTransformOption("strip_metering", enabled)
+        }
+      />
+      {transformPreview ? (
+        <>
+          <KitDivider />
+          <KitKeyValue label="Estimated reduction" value={`~${reduction}%`} />
+          {transformPreview.actions.map((action, index) => (
+            <KitNote key={index}>{action}</KitNote>
+          ))}
+        </>
+      ) : null}
+      <KitDivider />
+      <KitFooter>
+        <KitButton
+          disabled={isStreaming || isPreviewingTransform}
+          onClick={() => {
+            void handlePreviewTransform();
+          }}
+        >
+          {isPreviewingTransform ? "Previewing…" : "Preview"}
+        </KitButton>
+        <KitButton
+          variant="primary"
+          disabled={isStreaming || !transformPreview || isApplyingTransform}
+          onClick={() => {
+            void handleApplyTransformClick();
+          }}
+        >
+          {isApplyingTransform ? "Applying…" : "Apply"}
+        </KitButton>
+      </KitFooter>
+    </>
+  );
+
+  const llmSummary = (
+    <>
+      <KitNote>
+        Rebuilds the active conversation context with an LLM. Original chat
+        messages remain visible in the transcript. The selected provider
+        receives only content allowed by your privacy policy.
+      </KitNote>
+      <KitSection>Summary model</KitSection>
+      {caps.usableModels.length > 0 ? (
+        <div className={styles.modelPicker}>
+          <ModelSelector
+            value={llmCompressOptions.summary_model}
+            defaultValue=""
+            onValueChange={(model) =>
+              updateLlmCompressModel(model || undefined)
+            }
+            allowUnset
+            unsetLabel="Use automatic summary model"
+            showLabel={false}
+            compact={false}
+          />
+        </div>
+      ) : (
+        <KitStaticRow
+          tone="muted"
+          label="Configure an eligible chat model in Providers before using LLM compression."
+        />
+      )}
+      {!llmCompressOptions.summary_model && caps.currentModel ? (
+        <KitNote>Current chat model: {caps.currentModel}</KitNote>
+      ) : null}
+      {llmCompressPreview ? (
+        <>
+          <KitDivider />
+          <KitStaticRow
+            label={
+              llmCompressPreview.eligible
+                ? `${
+                    llmCompressPreview.source_messages
+                  } messages (~${llmCompressPreview.approximate_source_tokens.toLocaleString()} tokens) eligible`
+                : "Context rebuild is not currently available"
+            }
+            strong
+          />
+          {llmCompressPreview.resolved_model ? (
+            <KitKeyValue
+              label="Model"
+              value={llmCompressPreview.resolved_model}
+            />
+          ) : null}
+          {llmCompressPreview.context_window != null ? (
+            <KitKeyValue
+              label="Context window"
+              value={formatContextWindow(llmCompressPreview.context_window)}
+            />
+          ) : null}
+          {llmCompressPreview.reason ? (
+            <KitStaticRow tone="danger" label={llmCompressPreview.reason} />
+          ) : null}
+        </>
+      ) : null}
+      {llmCompressError ? (
+        <div role="alert">
+          <KitStaticRow tone="danger" label={llmCompressError} />
+        </div>
+      ) : null}
+      <KitDivider />
+      <KitFooter>
+        <KitButton
+          disabled={
+            isStreaming ||
+            caps.usableModels.length === 0 ||
+            isPreviewingLlmCompress
+          }
+          onClick={() => {
+            void handlePreviewLlmCompress();
+          }}
+        >
+          {isPreviewingLlmCompress ? "Previewing…" : "Preview"}
+        </KitButton>
+        <KitButton
+          variant="primary"
+          disabled={
+            isStreaming ||
+            !llmCompressPreview?.eligible ||
+            isApplyingLlmCompress
+          }
+          onClick={() => {
+            void handleApplyLlmCompressClick();
+          }}
+        >
+          {isApplyingLlmCompress ? "Rebuilding…" : "Rebuild context"}
+        </KitButton>
+      </KitFooter>
+    </>
+  );
+
   return (
     <Popover.Content
-      side="bottom"
+      side="top"
       align="end"
       sideOffset={8}
-      className={styles.popoverContent}
-      maxWidth="min(360px, calc(100vw - 2 * var(--rf-space-3)))"
+      className={kit.popover}
+      maxWidth="min(340px, calc(100vw - 2 * var(--rf-space-3)))"
       maxHeight="min(520px, calc(100dvh - var(--rf-space-5)))"
     >
-      <Tabs value={activeTab} onValueChange={handleTabChange}>
-        <Tabs.List
-          activeIndex={activeTabIndex < 0 ? 0 : activeTabIndex}
-          itemCount={TAB_OPTIONS.length}
-          className={styles.tabStrip}
-        >
-          {TAB_OPTIONS.map((tab) => (
-            <Tabs.Trigger key={tab.value} value={tab.value}>
-              {tab.label}
-            </Tabs.Trigger>
-          ))}
-        </Tabs.List>
-
-        <Tabs.Content value="compress">
-          <div className={styles.optionsSection}>
-            <Checkbox
-              checked={transformOptions.drop_all_context}
-              onCheckedChange={(checked) => {
-                const enabled = checked === true;
-                updateTransformOption("drop_all_context", enabled);
-                if (enabled) {
-                  updateTransformOption("dedup_and_compress_context", false);
-                }
-              }}
-            >
-              Drop all context files
-            </Checkbox>
-            <div className={styles.nestedOption}>
-              <Checkbox
-                checked={transformOptions.dedup_and_compress_context}
-                disabled={transformOptions.drop_all_context}
-                onCheckedChange={(checked) =>
-                  updateTransformOption(
-                    "dedup_and_compress_context",
-                    checked === true,
-                  )
-                }
-              >
-                Deduplicate context files
-              </Checkbox>
-            </div>
-            <Checkbox
-              checked={transformOptions.compress_non_agentic_tools}
-              onCheckedChange={(checked) =>
-                updateTransformOption(
-                  "compress_non_agentic_tools",
-                  checked === true,
-                )
-              }
-            >
-              Truncate tool results
-            </Checkbox>
-            <Checkbox
-              checked={transformOptions.drop_all_memories}
-              onCheckedChange={(checked) =>
-                updateTransformOption("drop_all_memories", checked === true)
-              }
-            >
-              Drop all memories
-            </Checkbox>
-            <Checkbox
-              checked={transformOptions.drop_project_information}
-              onCheckedChange={(checked) =>
-                updateTransformOption(
-                  "drop_project_information",
-                  checked === true,
-                )
-              }
-            >
-              Drop project information
-            </Checkbox>
-            <Checkbox
-              checked={transformOptions.strip_metering}
-              onCheckedChange={(checked) =>
-                updateTransformOption("strip_metering", checked === true)
-              }
-            >
-              Remove usage and metering details
-            </Checkbox>
-          </div>
-
-          {transformPreview && (
-            <Box className={styles.previewSection}>
-              <Text size="2" weight="medium">
-                ~
-                {transformPreview.stats.before_approx_tokens > 0
-                  ? Math.round(
-                      ((transformPreview.stats.before_approx_tokens -
-                        transformPreview.stats.after_approx_tokens) /
-                        transformPreview.stats.before_approx_tokens) *
-                        100,
-                    )
-                  : 0}
-                % reduction (approximate)
-              </Text>
-              {transformPreview.actions.length > 0 && (
-                <ul className={styles.actionsList}>
-                  {transformPreview.actions.map((action, idx) => (
-                    <li key={idx} className={styles.actionsListItem}>
-                      {action}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </Box>
-          )}
-
-          <Flex className={styles.buttonRow}>
-            <Button
-              variant="soft"
-              size="sm"
-              loading={isPreviewingTransform}
-              disabled={isStreaming}
-              onClick={() => {
-                void handlePreviewTransform();
-              }}
-            >
-              Preview
-            </Button>
-            <Button
-              size="sm"
-              loading={isApplyingTransform}
-              onClick={() => {
-                void handleApplyTransformClick();
-              }}
-              disabled={isStreaming || !transformPreview}
-            >
-              Apply
-            </Button>
-          </Flex>
-        </Tabs.Content>
-
-        <Tabs.Content value="llm-compress">
-          <div className={styles.llmIntro}>
-            <Text size="2">
-              Rebuilds the active conversation context with an LLM. Original
-              chat messages remain visible in the transcript. The selected
-              provider receives only content allowed by your privacy policy.
-            </Text>
-          </div>
-
-          <div className={styles.modelSection}>
-            <Text size="2" weight="medium">
-              Summary model
-            </Text>
-            {caps.usableModels.length > 0 ? (
-              <ModelSelector
-                value={llmCompressOptions.summary_model}
-                defaultValue=""
-                onValueChange={(model) =>
-                  updateLlmCompressModel(model || undefined)
-                }
-                allowUnset
-                unsetLabel="Use automatic summary model"
-                showLabel={false}
-                compact={false}
-              />
-            ) : (
-              <Text size="2" color="gray">
-                Configure an eligible chat model in Providers before using LLM
-                compression.
-              </Text>
-            )}
-            {!llmCompressOptions.summary_model && caps.currentModel && (
-              <Text size="1" color="gray">
-                Current chat model: {caps.currentModel}
-              </Text>
-            )}
-          </div>
-
-          {llmCompressPreview && (
-            <Box className={styles.previewSection}>
-              <Text size="2" weight="medium">
-                {llmCompressPreview.eligible
-                  ? `${
-                      llmCompressPreview.source_messages
-                    } messages (~${llmCompressPreview.approximate_source_tokens.toLocaleString()} tokens) eligible`
-                  : "Context rebuild is not currently available"}
-              </Text>
-              <div className={styles.previewDetails}>
-                {llmCompressPreview.resolved_model && (
-                  <Text size="1" color="gray">
-                    Model: {llmCompressPreview.resolved_model}
-                  </Text>
-                )}
-                {llmCompressPreview.context_window != null && (
-                  <Text size="1" color="gray">
-                    Context window:{" "}
-                    {formatContextWindow(llmCompressPreview.context_window)}
-                  </Text>
-                )}
-              </div>
-              {llmCompressPreview.reason && (
-                <Text size="2" color="red">
-                  {llmCompressPreview.reason}
-                </Text>
-              )}
-            </Box>
-          )}
-
-          {llmCompressError && (
-            <Box className={styles.errorCallout} role="alert">
-              <Text size="2">{llmCompressError}</Text>
-            </Box>
-          )}
-
-          <Flex className={styles.buttonRow}>
-            <Button
-              variant="soft"
-              size="sm"
-              loading={isPreviewingLlmCompress}
-              disabled={isStreaming || caps.usableModels.length === 0}
-              onClick={() => {
-                void handlePreviewLlmCompress();
-              }}
-            >
-              Preview
-            </Button>
-            <Button
-              size="sm"
-              loading={isApplyingLlmCompress}
-              disabled={isStreaming || !llmCompressPreview?.eligible}
-              onClick={() => {
-                void handleApplyLlmCompressClick();
-              }}
-            >
-              Rebuild context
-            </Button>
-          </Flex>
-        </Tabs.Content>
-      </Tabs>
+      <KitPanel>
+        <KitHeader title="Compress context" />
+        <KitTabs
+          value={activeTab}
+          onValueChange={handleTabChange}
+          label="Compression method"
+          tabs={[
+            { value: "compress", label: "In place", content: inPlace },
+            {
+              value: "llm-compress",
+              label: "LLM summary",
+              content: llmSummary,
+            },
+          ]}
+        />
+      </KitPanel>
     </Popover.Content>
   );
 };

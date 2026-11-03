@@ -19,6 +19,7 @@
     calc(100vw - 2 * var(--rf-space-3))
   );
   max-height: var(--rf-combobox-max-height);
+  padding: var(--rf-space-1);
   overflow: hidden;
   color: var(--rf-color-fg);
   background: var(--rf-surface-overlay);
@@ -35,46 +36,25 @@
   outline-offset: var(--rf-space-1);
 }
 
-.popover__scroll {
-  --scrollarea-scrollbar-vertical-margin-right: var(--rf-space-1);
-
-  max-height: var(--rf-combobox-max-height);
-  scrollbar-gutter: stable;
-  scrollbar-width: thin;
-  scrollbar-color: var(--rf-scrollbar-thumb-idle, transparent) transparent;
+.scroll {
+  max-height: calc(
+    var(--rf-combobox-max-height) - var(--rf-transcript-row-h) -
+      var(--rf-space-2) - 2 * var(--rf-hairline)
+  );
 }
 
-.popover__scroll:hover {
-  scrollbar-color: var(--rf-scrollbar-thumb-hover, var(--rf-border-strong))
-    transparent;
-}
-
-.popover__box {
-  display: flex !important;
+.list {
+  display: flex;
   min-width: 0;
-  flex-direction: column !important;
-  gap: var(--rf-space-1);
-  overflow: hidden;
-  /* dense completion list: compact panel pad */
-  padding: var(--rf-panel-pad-compact) !important;
+  flex-direction: column;
 }
 
 .item {
-  display: flex;
-  min-width: 0;
-  min-height: var(--rf-control-h-sm);
-  cursor: default;
-  margin: 0 !important;
-  padding: var(--rf-space-1) var(--rf-space-2) !important;
-  color: var(--rf-color-fg) !important;
-  border-radius: var(--rf-radius-chip) !important;
-  font: var(--rf-weight-medium) var(--rf-text-2) / var(--rf-line)
-    var(--rf-font-ui) !important;
+  cursor: pointer;
 }
 
 .item[data-active-item] {
-  color: var(--rf-color-fg) !important;
-  background-color: var(--rf-color-accent-soft) !important;
+  background: var(--rf-surface-2);
 }
 
 .item:focus-visible {
@@ -82,11 +62,20 @@
   outline-offset: calc(-1 * var(--rf-focus-ring-w));
 }
 
-.combobox__item {
-  display: flex;
+.name {
+  flex: 0 1 auto;
+}
+
+.description {
   min-width: 0;
-  width: 100%;
-  align-items: center !important;
-  flex-direction: row !important;
+  flex: 1 1 0;
   overflow: hidden;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badge {
+  margin-left: auto;
 }

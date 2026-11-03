@@ -5,8 +5,7 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { ScrollArea } from "@radix-ui/themes";
-import { AlertTriangle, CheckCircle2, Eye, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Eye } from "lucide-react";
 import {
   useGetProjectInformationQuery,
   useSaveProjectInformationMutation,
@@ -19,7 +18,19 @@ import {
 import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { dialogNonInteractiveCloseHandlers } from "../../utils/dialogPointerClose";
 import { setIncludeProjectInfo } from "../../features/Chat/Thread/actions";
-import { Badge, Button, Dialog, Icon, IconButton, Slider, Switch } from "../ui";
+import {
+  KitBadge,
+  KitButton,
+  KitCheckRow,
+  KitDialog,
+  KitDialogCancel,
+  KitDivider,
+  KitIconButton,
+  KitSection,
+  KitSliderRow,
+  KitStaticRow,
+  KitToggleRow,
+} from "../ComposerKit";
 import styles from "./ProjectInformationDialog.module.css";
 
 type Props = {
@@ -135,6 +146,15 @@ const sameBlockList = (
   return a.every((block, index) => block === b[index]);
 };
 
+const blockTokensLabel = (block: ProjectInfoBlock): string =>
+  block.original_char_count
+    ? `${charsToTokens(
+        block.original_char_count,
+      ).toLocaleString()} → ${charsToTokens(
+        block.char_count,
+      ).toLocaleString()} tok`
+    : `~${charsToTokens(block.char_count).toLocaleString()} tok`;
+
 type ContentPreviewProps = {
   block: ProjectInfoBlock | null;
   onClose: () => void;
@@ -146,60 +166,28 @@ const ContentPreviewDialog: React.FC<ContentPreviewProps> = ({
 }) => {
   if (!block) return null;
 
-  const isTruncated = block.truncated && block.original_char_count;
-  const originalTokens =
-    isTruncated && block.original_char_count
-      ? charsToTokens(block.original_char_count)
-      : charsToTokens(block.char_count);
-  const truncatedTokens = charsToTokens(block.char_count);
+  const isTruncated = Boolean(block.truncated && block.original_char_count);
 
   return (
-    <Dialog open={!!block} onOpenChange={(open) => !open && onClose()}>
-      <Dialog.Content maxWidth="800px" maxHeight="80vh">
-        <div {...dialogNonInteractiveCloseHandlers(onClose)}>
-          <div className={styles.previewHeader}>
-            <Dialog.Title className={styles.title}>
-              {block.path ?? block.title}
-            </Dialog.Title>
-            <IconButton
-              icon={X}
-              aria-label="Close preview"
-              size="sm"
-              variant="ghost"
-              onClick={onClose}
-            />
-          </div>
-
-          <div className={styles.previewBadges}>
-            <Badge tone="accent" size="sm">
-              {isTruncated
-                ? `${originalTokens.toLocaleString()} → ${truncatedTokens.toLocaleString()} tokens`
-                : `~${truncatedTokens.toLocaleString()} tokens`}
-            </Badge>
-            {isTruncated && (
-              <Badge tone="warning" size="sm">
-                Truncated
-              </Badge>
-            )}
-            <Badge tone="muted" size="sm">
-              {block.section}
-            </Badge>
-          </div>
-
-          <ScrollArea className={styles.previewScroll}>
-            <code className={styles.previewCode}>
-              {block.content || "(empty)"}
-            </code>
-          </ScrollArea>
-
-          <div className={styles.footer}>
-            <Button type="button" variant="soft" size="md" onClick={onClose}>
-              Close
-            </Button>
-          </div>
-        </div>
-      </Dialog.Content>
-    </Dialog>
+    <KitDialog
+      open
+      onOpenChange={(open) => !open && onClose()}
+      title={block.path ?? block.title}
+      meta={
+        <span className={styles.previewMeta}>
+          <KitBadge>{block.section}</KitBadge>
+          {isTruncated ? <KitBadge tone="warning">Truncated</KitBadge> : null}
+          {blockTokensLabel(block)}
+        </span>
+      }
+      closeLabel="Close preview"
+      width="800px"
+      maxHeight="80vh"
+      bodyProps={dialogNonInteractiveCloseHandlers(onClose)}
+      footer={<KitDialogCancel>Close</KitDialogCancel>}
+    >
+      <pre className={styles.previewCode}>{block.content || "(empty)"}</pre>
+    </KitDialog>
   );
 };
 
@@ -217,6 +205,21 @@ type SectionRowProps = {
   onPreviewBlock: (block: ProjectInfoBlock) => void;
 };
 
+const PreviewButton: React.FC<{
+  block: ProjectInfoBlock;
+  onPreview: (block: ProjectInfoBlock) => void;
+}> = ({ block, onPreview }) => (
+  <KitIconButton
+    icon={Eye}
+    aria-label="View content"
+    title="View content"
+    onClick={(event) => {
+      event.preventDefault();
+      onPreview(block);
+    }}
+  />
+);
+
 const SectionRowComponent: React.FC<SectionRowProps> = ({
   sectionKey,
   config,
@@ -227,7 +230,7 @@ const SectionRowComponent: React.FC<SectionRowProps> = ({
   onPreviewBlock,
 }) => {
   const meta = SECTION_META[sectionKey];
-  const enabledBlocks = blocks.filter((b) => b.enabled);
+  const enabledCount = blocks.filter((b) => b.enabled).length;
   const tokens = countTokens(blocks);
 
   const isItemsField = meta.field === "max_items";
@@ -248,119 +251,56 @@ const SectionRowComponent: React.FC<SectionRowProps> = ({
 
   return (
     <div className={styles.section}>
-      <div className={styles.row}>
-        <div className={styles.rowCopy}>
-          <Switch
-            checked={config.enabled}
-            onCheckedChange={(enabled) => onToggle(sectionKey, enabled)}
-            className="rf-pressable"
-            aria-label={meta.label}
-          />
-          <span className={styles.sectionLabel}>{meta.label}</span>
-        </div>
-        <div className={styles.rowControls}>
-          <Badge tone={config.enabled ? "accent" : "muted"} size="xs">
-            ~{tokens.toLocaleString()} tokens
-          </Badge>
-        </div>
-      </div>
-
-      {config.enabled && (
+      <KitToggleRow
+        label={meta.label}
+        ariaLabel={meta.label}
+        meta={config.enabled ? `~${tokens.toLocaleString()} tok` : undefined}
+        checked={config.enabled}
+        onCheckedChange={(enabled) => onToggle(sectionKey, enabled)}
+      />
+      {config.enabled ? (
         <div className={styles.detail}>
-          <div className={styles.row}>
-            <span className={styles.limitLabel}>{fieldLabel}</span>
-            <div className={styles.rowControls}>
-              <Slider
-                value={[currentTokens]}
-                min={meta.minTokens}
-                max={meta.maxTokens}
-                step={meta.stepTokens}
-                onValueChange={([v]) => handleSliderChange(v)}
-                className={styles.limitSlider}
-                aria-label={`${meta.label} ${fieldLabel}`}
-              />
-              <span className={styles.limitValue}>
-                {currentTokens.toLocaleString()}
-              </span>
-            </div>
-          </div>
-
-          {blocks.length > 0 && (
-            <div className={styles.row}>
-              <span className={styles.meta}>
-                {enabledBlocks.length}/{blocks.length} item(s), ~
-                {tokens.toLocaleString()} tokens
-              </span>
-              <div className={styles.rowControls}>
-                {!showFileToggles && blocks.length === 1 && (
-                  <IconButton
-                    icon={Eye}
-                    aria-label="View content"
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => onPreviewBlock(blocks[0])}
-                    title="View content"
-                  />
-                )}
-              </div>
-            </div>
-          )}
-
-          {showFileToggles && (
-            <div className={styles.files}>
-              {blocks.map((block) => (
-                <div
+          <KitSliderRow
+            label={fieldLabel}
+            value={currentTokens}
+            min={meta.minTokens}
+            max={meta.maxTokens}
+            step={meta.stepTokens}
+            ariaLabel={`${meta.label} ${fieldLabel}`}
+            onValueChange={handleSliderChange}
+          />
+          {showFileToggles
+            ? blocks.map((block) => (
+                <KitCheckRow
                   key={block.id}
-                  className={
-                    block.enabled
-                      ? styles.fileRow
-                      : `${styles.fileRow} ${styles.fileRowDisabled}`
+                  label={truncatePath(block.path ?? block.title, 45)}
+                  title={block.path ?? block.title}
+                  ariaLabel={block.path ?? block.title}
+                  meta={blockTokensLabel(block)}
+                  trailing={
+                    <PreviewButton block={block} onPreview={onPreviewBlock} />
                   }
-                >
-                  <div className={styles.fileCopy}>
-                    <Switch
-                      checked={block.enabled}
-                      onCheckedChange={(checked) =>
-                        onFileToggle(sectionKey, block, checked)
-                      }
-                      className="rf-pressable"
-                      aria-label={block.path ?? block.title}
-                    />
-                    <span
-                      className={styles.filePath}
-                      title={block.path ?? block.title}
-                    >
-                      {truncatePath(block.path ?? block.title, 45)}
-                    </span>
-                  </div>
-                  <div className={styles.rowControls}>
-                    <span className={styles.fileTokens}>
-                      {block.original_char_count
-                        ? `${charsToTokens(
-                            block.original_char_count,
-                          ).toLocaleString()}→${charsToTokens(
-                            block.char_count,
-                          ).toLocaleString()}`
-                        : `~${charsToTokens(
-                            block.char_count,
-                          ).toLocaleString()}`}{" "}
-                      tok
-                    </span>
-                    <IconButton
-                      icon={Eye}
-                      aria-label="View content"
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => onPreviewBlock(block)}
-                      title="View content"
-                    />
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
+                  checked={block.enabled}
+                  onCheckedChange={(checked) =>
+                    onFileToggle(sectionKey, block, checked)
+                  }
+                />
+              ))
+            : null}
+          {!showFileToggles && blocks.length > 0 ? (
+            <KitStaticRow
+              tone="muted"
+              label={`${enabledCount}/${blocks.length} item(s)`}
+              meta={`~${tokens.toLocaleString()} tok`}
+              trailing={
+                blocks.length === 1 ? (
+                  <PreviewButton block={blocks[0]} onPreview={onPreviewBlock} />
+                ) : undefined
+              }
+            />
+          ) : null}
         </div>
-      )}
+      ) : null}
     </div>
   );
 };
@@ -597,131 +537,108 @@ export const ProjectInformationDialog: React.FC<Props> = ({
     setFileOverlay({});
   }, []);
 
-  if (isLoading) {
-    return (
-      <Dialog open={open} onOpenChange={onOpenChange}>
-        <Dialog.Content maxWidth="600px">
-          <div
-            {...dialogNonInteractiveCloseHandlers(() => onOpenChange(false))}
-          >
-            <Dialog.Title className={styles.title}>
-              Project Information
-            </Dialog.Title>
-            <div className={styles.loading}>Loading...</div>
-          </div>
-        </Dialog.Content>
-      </Dialog>
-    );
-  }
-
   const warnings = previewData?.warnings ?? [];
+  const closeOnBackground = dialogNonInteractiveCloseHandlers(() =>
+    onOpenChange(false),
+  );
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content maxWidth="600px">
-        <div {...dialogNonInteractiveCloseHandlers(() => onOpenChange(false))}>
-          <div className={styles.root}>
-            <Dialog.Title className={styles.title}>
-              Project Information
-            </Dialog.Title>
-            <Dialog.Description className={styles.description}>
-              Configure what project information is included in chat context.
-              Token counts are approximate (~4 chars/token).
-            </Dialog.Description>
-
-            {saveError && (
-              <div className={`${styles.notice} ${styles.noticeError}`}>
-                <Icon icon={AlertTriangle} size="sm" tone="danger" />
-                <span className={styles.noticeText}>{saveError}</span>
-              </div>
-            )}
-
-            {saveSuccess && (
-              <div className={`${styles.notice} ${styles.noticeSuccess}`}>
-                <Icon icon={CheckCircle2} size="sm" tone="success" />
-                <span className={styles.noticeText}>Configuration saved!</span>
-              </div>
-            )}
-
-            <div className={styles.masterRow}>
-              <div className={styles.masterCopy}>
-                <Switch
-                  checked={localConfig.enabled}
-                  onCheckedChange={handleMasterToggle}
-                  className="rf-pressable"
-                  aria-label="Include project information"
-                />
-                <span className={styles.masterLabel}>
-                  Include project information
-                </span>
-              </div>
-              <div className={styles.masterControls}>
-                <Badge tone="accent" size="sm">
-                  Total: ~{totalTokens.toLocaleString()} tokens
-                  {isPreviewing && " (updating...)"}
-                </Badge>
-              </div>
-            </div>
-
-            <ScrollArea className={styles.body}>
-              <div className={styles.sections}>
-                {SECTION_KEYS.map((sectionKey) => (
-                  <SectionRow
-                    key={sectionKey}
-                    sectionKey={sectionKey}
-                    config={localConfig.sections[sectionKey]}
-                    blocks={blocksBySection[sectionKey]}
-                    onToggle={handleSectionToggle}
-                    onLimitChange={handleLimitChange}
-                    onFileToggle={handleFileToggle}
-                    onPreviewBlock={setPreviewBlock}
-                  />
-                ))}
-              </div>
-            </ScrollArea>
-
-            {warnings.length > 0 && (
-              <div className={`${styles.notice} ${styles.noticeWarning}`}>
-                <Icon icon={AlertTriangle} size="sm" tone="warning" />
-                <span className={styles.noticeText}>
-                  {warnings.length} warning(s): {warnings[0]}
-                  {warnings.length > 1 && ` (+${warnings.length - 1} more)`}
-                </span>
-              </div>
-            )}
-
-            <div className={styles.footer}>
-              <Button
-                type="button"
-                variant="soft"
-                size="md"
-                onClick={handleReset}
-              >
-                Reset to Defaults
-              </Button>
-              <Dialog.Close asChild>
-                <Button type="button" variant="soft" size="md">
-                  Cancel
-                </Button>
-              </Dialog.Close>
-              <Button
-                type="button"
-                variant="primary"
-                size="md"
-                onClick={() => void handleSave()}
-                disabled={isSaving}
-              >
-                {isSaving ? "Saving..." : "Save"}
-              </Button>
-            </div>
-          </div>
-
+    <KitDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="Project information"
+      description="Choose what project context goes into this chat. Token counts are approximate (~4 chars/token)."
+      meta={
+        isLoading ? undefined : (
+          <span
+            className={styles.total}
+            data-busy={isPreviewing ? "true" : undefined}
+          >
+            Total ~{totalTokens.toLocaleString()} tokens
+          </span>
+        )
+      }
+      width="560px"
+      bodyProps={closeOnBackground}
+      footerStart={
+        isLoading ? undefined : (
+          <KitButton variant="ghost" onClick={handleReset}>
+            Reset to defaults
+          </KitButton>
+        )
+      }
+      footerNote={
+        saveSuccess ? (
+          <span className={styles.saved}>
+            <CheckCircle2 aria-hidden="true" />
+            Configuration saved
+          </span>
+        ) : undefined
+      }
+      footer={
+        isLoading ? undefined : (
+          <>
+            <KitDialogCancel />
+            <KitButton
+              variant="primary"
+              onClick={() => void handleSave()}
+              disabled={isSaving}
+            >
+              {isSaving ? "Saving…" : "Save"}
+            </KitButton>
+          </>
+        )
+      }
+    >
+      {isLoading ? (
+        <KitStaticRow tone="muted" label="Loading…" />
+      ) : (
+        <>
+          {saveError ? (
+            <KitStaticRow
+              tone="danger"
+              icon={<AlertTriangle aria-hidden="true" />}
+              label={saveError}
+            />
+          ) : null}
+          <KitToggleRow
+            label="Include project information"
+            ariaLabel="Include project information"
+            hint="Turn off to send chats without any project context"
+            checked={localConfig.enabled}
+            onCheckedChange={handleMasterToggle}
+          />
+          <KitDivider />
+          <KitSection>Sections</KitSection>
+          {SECTION_KEYS.map((sectionKey) => (
+            <SectionRow
+              key={sectionKey}
+              sectionKey={sectionKey}
+              config={localConfig.sections[sectionKey]}
+              blocks={blocksBySection[sectionKey]}
+              onToggle={handleSectionToggle}
+              onLimitChange={handleLimitChange}
+              onFileToggle={handleFileToggle}
+              onPreviewBlock={setPreviewBlock}
+            />
+          ))}
+          {warnings.length > 0 ? (
+            <KitStaticRow
+              tone="muted"
+              icon={
+                <AlertTriangle aria-hidden="true" className={styles.warn} />
+              }
+              label={`${warnings.length} warning(s): ${warnings[0]}${
+                warnings.length > 1 ? ` (+${warnings.length - 1} more)` : ""
+              }`}
+            />
+          ) : null}
           <ContentPreviewDialog
             block={previewBlock}
             onClose={() => setPreviewBlock(null)}
           />
-        </div>
-      </Dialog.Content>
-    </Dialog>
+        </>
+      )}
+    </KitDialog>
   );
 };

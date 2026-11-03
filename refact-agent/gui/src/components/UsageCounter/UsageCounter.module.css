@@ -38,7 +38,7 @@
 .providerIndicatorTrigger {
   display: inline-flex;
   flex: 0 0 auto;
-  max-width: var(--rf-overlay-popover-min);
+  max-width: var(--rf-composer-label-max, var(--rf-overlay-popover-min));
   cursor: pointer;
   padding: 0;
   color: var(--rf-color-muted);
@@ -62,25 +62,26 @@
 
 .circularProgressBg {
   fill: none;
-  stroke: var(--rf-surface-3);
+  stroke: var(--rf-border-strong);
+}
+
+.circularProgressFill,
+.circularProgressFillWarning,
+.circularProgressFillOverflown {
+  fill: none;
+  transition: stroke-dashoffset var(--rf-dur-med) var(--rf-ease-standard);
 }
 
 .circularProgressFill {
-  fill: none;
   stroke: var(--rf-color-accent);
-  transition: stroke-dashoffset 0.3s ease;
 }
 
 .circularProgressFillWarning {
-  fill: none;
   stroke: var(--rf-color-warning);
-  transition: stroke-dashoffset 0.3s ease;
 }
 
 .circularProgressFillOverflown {
-  fill: none;
   stroke: var(--rf-color-danger);
-  transition: stroke-dashoffset 0.3s ease;
 }
 
 .usageCounterContainerInline {

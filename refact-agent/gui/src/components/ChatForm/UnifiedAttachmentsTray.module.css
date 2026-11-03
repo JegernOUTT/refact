@@ -1,4 +1,5 @@
 .tray {
-  padding: 0;
-  margin-bottom: var(--rf-space-2);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rf-space-1);
 }

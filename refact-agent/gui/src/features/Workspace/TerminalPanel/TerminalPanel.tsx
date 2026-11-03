@@ -1,14 +1,7 @@
 import "@xterm/xterm/css/xterm.css";
 
 import classNames from "classnames";
-import {
-  ChevronDown,
-  ChevronUp,
-  Plus,
-  Search,
-  SquareTerminal,
-  X,
-} from "lucide-react";
+import { ChevronDown, Plus, Search, SquareTerminal, X } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -614,7 +607,8 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
             onClick={() => void handleNewSession()}
           />
           <IconButton
-            icon={workbenchOpen ? ChevronDown : ChevronUp}
+            className={styles.chevron}
+            icon={ChevronDown}
             aria-label={
               workbenchOpen
                 ? "Collapse terminal workbench"
