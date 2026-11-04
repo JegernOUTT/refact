@@ -314,6 +314,124 @@ pub struct TrajectoryIndex {
     // Read provenance is process-local: never recursively serialize old snapshots.
     #[serde(skip)]
     baseline: Option<Arc<TrajectoryIndex>>,
+    #[serde(skip)]
+    needs_compaction: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkReferenceState {
+    Unresolved,
+    SourceBound,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkReference {
+    pub version: u32,
+    pub state: WorkReferenceState,
+    pub source_sha256: Option<[u8; 32]>,
+    pub revision: u64,
+}
+
+// Extensions must never make the surrounding legacy index unreadable.
+fn deserialize_work_reference<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<WorkReference>, D::Error> {
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.map(|value| {
+        serde_json::from_value(value).unwrap_or(WorkReference {
+            version: 0,
+            state: WorkReferenceState::Unknown,
+            source_sha256: None,
+            revision: 0,
+        })
+    }))
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CompactWorkMetadata {
+    pub records: [(); 0],
+    pub provenance_complete: bool,
+    pub source_revision: u64,
+    pub measured_tokens: Option<u64>,
+    #[serde(skip)]
+    needs_compaction: bool,
+}
+
+fn inline_records_present<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    struct Records;
+    impl<'de> serde::de::Visitor<'de> for Records {
+        type Value = bool;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("an array of legacy records")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut sequence: A,
+        ) -> Result<bool, A::Error> {
+            let mut present = false;
+            while sequence.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                present = true;
+            }
+            Ok(present)
+        }
+    }
+    deserializer.deserialize_seq(Records)
+}
+
+impl<'de> Deserialize<'de> for CompactWorkMetadata {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            #[serde(deserialize_with = "inline_records_present")]
+            records: bool,
+            provenance_complete: bool,
+            source_revision: u64,
+            measured_tokens: Option<u64>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        let needs_compaction = wire.provenance_complete || wire.records;
+        Ok(Self {
+            records: [],
+            provenance_complete: false,
+            source_revision: wire.source_revision,
+            measured_tokens: wire.measured_tokens,
+            needs_compaction,
+        })
+    }
+}
+
+impl TrajectoryIndexEntry {
+    fn compact_work(&mut self) -> bool {
+        if self.work.is_none() {
+            self.work = Some(CompactWorkMetadata {
+                records: [],
+                provenance_complete: false,
+                source_revision: 0,
+                measured_tokens: None,
+                needs_compaction: true,
+            });
+        }
+        let migrated = self.work.as_ref().is_some_and(|w| w.needs_compaction);
+        if migrated {
+            self.work_ref = Some(WorkReference {
+                version: 1,
+                state: WorkReferenceState::Unresolved,
+                source_sha256: None,
+                revision: self.work.as_ref().map_or(0, |w| w.source_revision),
+            });
+        }
+        migrated
+    }
+}
+
+pub(crate) fn source_sha256(bytes: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -327,7 +445,10 @@ pub struct TrajectoryIndexSkippedFile {
 pub struct TrajectoryIndexEntry {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub work: Option<crate::coordination::history::WorkIndexMetadata>,
+    pub work: Option<CompactWorkMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_work_reference")]
+    pub work_ref: Option<WorkReference>,
     pub file_name: String,
     #[serde(default)]
     pub source: TrajectoryIndexSource,
@@ -506,7 +627,12 @@ fn journal_payload_checksum(payload: &TrajectoryIndexJournalPayload) -> Result<u
     Ok(crc32(&bytes))
 }
 
-fn encode_journal_record(payload: TrajectoryIndexJournalPayload) -> Result<Vec<u8>, String> {
+fn encode_journal_record(mut payload: TrajectoryIndexJournalPayload) -> Result<Vec<u8>, String> {
+    // Old readers checksum their reserialized typed payload, dropping unknown fields.
+    // Keep journal entries byte-compatible; replay lazily resolves absent references.
+    for entry in &mut payload.upserts {
+        entry.work_ref = None;
+    }
     let checksum = journal_payload_checksum(&payload)?;
     let record = TrajectoryIndexJournalRecord {
         schema: TRAJECTORY_INDEX_JOURNAL_SCHEMA_VERSION,
@@ -537,16 +663,61 @@ fn scan_trajectory_index_journal(bytes: &[u8]) -> Result<JournalScan, String> {
         if line.iter().all(|byte| byte.is_ascii_whitespace()) {
             continue;
         }
-        let record: TrajectoryIndexJournalRecord = serde_json::from_slice(line)
+        // Preserve old inline work until checksum validation, without parsing the line twice.
+        #[derive(Serialize, Deserialize)]
+        struct WirePayload {
+            seq: u64,
+            writer_id: String,
+            ts_ms: i64,
+            #[serde(default)]
+            updated_at: String,
+            #[serde(default)]
+            upserts: Vec<serde_json::Value>,
+            #[serde(default)]
+            removes: Vec<String>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            skipped: Option<Vec<TrajectoryIndexSkippedFile>>,
+        }
+        #[derive(Deserialize)]
+        struct WireRecord {
+            #[serde(default = "default_journal_schema_version")]
+            schema: u32,
+            #[serde(flatten)]
+            payload: WirePayload,
+            checksum: u32,
+        }
+        let wire: WireRecord = serde_json::from_slice(line)
             .map_err(|error| format!("Corrupt trajectory index journal line: {error}"))?;
-        if record.schema != TRAJECTORY_INDEX_JOURNAL_SCHEMA_VERSION {
+        if wire.schema != TRAJECTORY_INDEX_JOURNAL_SCHEMA_VERSION {
             return Err(format!(
                 "Unsupported trajectory index journal schema version {}",
-                record.schema
+                wire.schema
             ));
         }
-        if journal_payload_checksum(&record.payload)? != record.checksum {
+        if crc32(&serde_json::to_vec(&wire.payload).map_err(|e| e.to_string())?) != wire.checksum {
             return Err("Trajectory index journal checksum mismatch".to_string());
+        }
+        let mut record = TrajectoryIndexJournalRecord {
+            schema: wire.schema,
+            checksum: wire.checksum,
+            payload: TrajectoryIndexJournalPayload {
+                seq: wire.payload.seq,
+                writer_id: wire.payload.writer_id,
+                ts_ms: wire.payload.ts_ms,
+                updated_at: wire.payload.updated_at,
+                upserts: wire
+                    .payload
+                    .upserts
+                    .into_iter()
+                    .map(serde_json::from_value)
+                    .collect::<Result<_, _>>()
+                    .map_err(|e| format!("Invalid journal entry: {e}"))?,
+                removes: wire.payload.removes,
+                skipped: wire.payload.skipped,
+            },
+        };
+        for entry in &mut record.payload.upserts {
+            entry.compact_work();
         }
         records.push(record.payload);
     }
@@ -564,6 +735,10 @@ fn apply_journal_payload_to_index(
             .retain(|entry| !removed.contains(entry.id.as_str()));
     }
     for entry in &payload.upserts {
+        index.needs_compaction |= entry
+            .work
+            .as_ref()
+            .is_some_and(|work| work.needs_compaction);
         index.entries.retain(|existing| existing.id != entry.id);
         index
             .skipped_files
@@ -652,6 +827,7 @@ fn read_persisted_trajectory_index_locked_sync(
         skipped_files: Vec::new(),
         applied_seq: 0,
         baseline: None,
+        needs_compaction: false,
     });
     let scan = scan_trajectory_index_journal(&journal_bytes)?;
     let watermark = index.applied_seq;
@@ -2164,6 +2340,7 @@ fn load_trajectory_index_for_coordinator_locked_sync(
                 skipped_files,
                 applied_seq: 0,
                 baseline: None,
+                needs_compaction: false,
             };
             let generation = directory_generation_sync(dir, index_file_names(&index))?;
             Ok(CoordinatorLoadResult {
@@ -2189,13 +2366,16 @@ fn read_trajectory_index_sync(dir: &Path) -> Result<Option<TrajectoryIndex>, Str
             ))
         }
     };
-    let index = serde_json::from_str::<TrajectoryIndex>(&content)
+    let mut index = serde_json::from_str::<TrajectoryIndex>(&content)
         .map_err(|error| format!("Failed to parse trajectory index {:?}: {error}", path))?;
     if index.schema_version != TRAJECTORY_INDEX_SCHEMA_VERSION {
         return Err(format!(
             "Unsupported trajectory index schema version {} in {:?}",
             index.schema_version, path
         ));
+    }
+    for entry in &mut index.entries {
+        index.needs_compaction |= entry.compact_work();
     }
     Ok(Some(index))
 }
@@ -2323,6 +2503,7 @@ fn reconcile_trajectory_index_sync(
             skipped_files,
             applied_seq: index.applied_seq,
             baseline: None,
+            needs_compaction: index.needs_compaction,
         },
         changed,
     ))
@@ -2577,6 +2758,13 @@ fn checkpoint_index_sync(
 ) -> Result<TrajectoryIndexFlushOutcome, String> {
     let mut index = synced.index;
     index.applied_seq = synced.cursor.last_seq;
+    for entry in &mut index.entries {
+        entry.compact_work();
+        if let Some(work) = &mut entry.work {
+            work.needs_compaction = false;
+        }
+    }
+    index.needs_compaction = false;
     let item_count = index.entries.len() as u64;
     let write_result = write_trajectory_index_atomic_sync(dir, &index)
         .and_then(|_| truncate_trajectory_index_journal_sync(dir));
@@ -2626,7 +2814,13 @@ fn flush_trajectory_index_mutations_sync(
         )?;
         let mut cursor = synced.cursor;
         let checkpoint_present = synced.checkpoint_present;
-        let rebuilt = synced.rebuilt;
+        let rebuilt = synced.rebuilt
+            || synced.index.needs_compaction
+            || synced
+                .index
+                .entries
+                .iter()
+                .any(|e| e.work.as_ref().is_some_and(|w| w.needs_compaction));
         let baseline_entries = synced.index.entries.clone();
         let baseline_skipped = synced.index.skipped_files.clone();
         let mut index = synced.index;
@@ -2875,8 +3069,20 @@ pub fn entry_from_trajectory_value(
     path: &Path,
     value: &serde_json::Value,
     source_hint: Option<TrajectorySourceIdentity>,
+    source_hash: Option<[u8; 32]>,
 ) -> Result<TrajectoryIndexEntry, String> {
-    let data = serde_json::from_value::<TrajectoryData>(value.clone())
+    entry_from_owned_trajectory_value(dir, path, value.clone(), source_hint, source_hash)
+}
+
+pub(crate) fn entry_from_owned_trajectory_value(
+    dir: &Path,
+    path: &Path,
+    value: serde_json::Value,
+    source_hint: Option<TrajectorySourceIdentity>,
+    source_hash: Option<[u8; 32]>,
+) -> Result<TrajectoryIndexEntry, String> {
+    let source = source_from_hint_or_value(&value, source_hint);
+    let data = serde_json::from_value::<TrajectoryData>(value)
         .map_err(|e| format!("Failed to parse trajectory {:?}: {e}", path))?;
     if data.id.is_empty() || data.created_at.is_empty() {
         return Err(format!(
@@ -2915,7 +3121,6 @@ pub fn entry_from_trajectory_value(
     let (tasks_total, tasks_done, tasks_failed) =
         calculate_task_progress_from_messages(&data.messages);
     let token_totals = calculate_token_totals_from_messages(&data.messages);
-    let source = source_from_hint_or_value(value, source_hint);
     let parent_id = data
         .extra
         .get("parent_id")
@@ -2954,15 +3159,36 @@ pub fn entry_from_trajectory_value(
     };
 
     Ok(TrajectoryIndexEntry {
-        work: Some(
-            crate::coordination::history::WorkIndexMetadata::from_values(
-                &data.messages,
-                data.extra
-                    .get("version")
-                    .and_then(|value| value.as_u64())
-                    .unwrap_or(0),
-            ),
-        ),
+        work: Some(CompactWorkMetadata {
+            records: [],
+            provenance_complete: false,
+            source_revision: data
+                .extra
+                .get("version")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            measured_tokens: data
+                .messages
+                .iter()
+                .filter_map(|message| message.get("usage"))
+                .filter_map(|usage| usage.get("total_tokens").and_then(|value| value.as_u64()))
+                .reduce(u64::saturating_add),
+            needs_compaction: false,
+        }),
+        work_ref: Some(WorkReference {
+            version: 1,
+            state: if source_hash.is_some() {
+                WorkReferenceState::SourceBound
+            } else {
+                WorkReferenceState::Unresolved
+            },
+            source_sha256: source_hash,
+            revision: data
+                .extra
+                .get("version")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+        }),
         id: data.id,
         file_name,
         source: TrajectoryIndexSource::from(&source),
@@ -3288,6 +3514,7 @@ pub async fn upsert_trajectory_index_entry(
                 skipped_files,
                 applied_seq: 0,
                 baseline: None,
+                needs_compaction: false,
             }
         }
     };
@@ -3319,10 +3546,32 @@ pub async fn upsert_trajectory_index_entry_from_owned_value_with_rollout(
     value: serde_json::Value,
     source_hint: Option<TrajectorySourceIdentity>,
 ) -> Result<(), String> {
+    // This caller supplies an in-memory value, not the exact committed bytes.
+    // Do not bind metadata A to a racing on-disk hash B.
+    let source_hash = None;
+    upsert_trajectory_index_entry_from_committed_value(
+        coordinator,
+        dir,
+        path,
+        value,
+        source_hint,
+        source_hash,
+    )
+    .await
+}
+
+pub async fn upsert_trajectory_index_entry_from_committed_value(
+    coordinator: &TrajectoryIndexCoordinator,
+    dir: &Path,
+    path: &Path,
+    value: serde_json::Value,
+    source_hint: Option<TrajectorySourceIdentity>,
+    source_hash: Option<[u8; 32]>,
+) -> Result<(), String> {
     let dir_owned = dir.to_path_buf();
     let path_owned = path.to_path_buf();
     let entry = tokio::task::spawn_blocking(move || {
-        entry_from_trajectory_value(&dir_owned, &path_owned, &value, source_hint)
+        entry_from_owned_trajectory_value(&dir_owned, &path_owned, value, source_hint, source_hash)
     })
     .await
     .map_err(|e| format!("Trajectory index entry task failed for {:?}: {e}", path))??;
@@ -3335,7 +3584,7 @@ pub async fn upsert_trajectory_index_entry_from_value(
     value: &serde_json::Value,
     source_hint: Option<TrajectorySourceIdentity>,
 ) -> Result<(), String> {
-    let entry = entry_from_trajectory_value(dir, path, value, source_hint)?;
+    let entry = entry_from_trajectory_value(dir, path, value, source_hint, None)?;
     upsert_trajectory_index_entry(dir, entry).await
 }
 
@@ -3348,7 +3597,7 @@ pub async fn upsert_trajectory_index_entry_from_owned_value(
     let dir_owned = dir.to_path_buf();
     let path_owned = path.to_path_buf();
     let entry = tokio::task::spawn_blocking(move || {
-        entry_from_trajectory_value(&dir_owned, &path_owned, &value, source_hint)
+        entry_from_trajectory_value(&dir_owned, &path_owned, &value, source_hint, None)
     })
     .await
     .map_err(|e| format!("Trajectory index entry task failed for {:?}: {e}", path))??;
@@ -3595,7 +3844,13 @@ fn read_and_index_single_trajectory_sync(
     {
         return SingleTrajectoryIndexResult::Skipped;
     }
-    match entry_from_trajectory_value(dir, path, &value, source_hint) {
+    match entry_from_trajectory_value(
+        dir,
+        path,
+        &value,
+        source_hint,
+        Some(source_sha256(content.as_bytes())),
+    ) {
         Ok(entry) => SingleTrajectoryIndexResult::Indexed(entry),
         Err(error) => {
             tracing::debug!("Skipping non-indexable trajectory {:?}: {}", path, error);
@@ -3767,7 +4022,14 @@ async fn read_and_index_single_trajectory(
         {
             return Err(());
         }
-        entry_from_trajectory_value(&dir, &path, &value, source_hint).map_err(|e| {
+        entry_from_trajectory_value(
+            &dir,
+            &path,
+            &value,
+            source_hint,
+            Some(source_sha256(content.as_bytes())),
+        )
+        .map_err(|e| {
             tracing::debug!("Skipping non-indexable trajectory {:?}: {}", path, e);
         })
     })
@@ -3869,6 +4131,7 @@ async fn rebuild_trajectory_index_from_disk_inner(
         skipped_files,
         applied_seq: 0,
         baseline,
+        needs_compaction: false,
     };
     write_trajectory_index_atomic_owned(dir, index).await?;
     Ok(entries)
@@ -4011,6 +4274,7 @@ async fn list_trajectory_entries_from_index_or_rebuild_with_counter_scope(
             skipped_files: new_skipped,
             applied_seq: 0,
             baseline,
+            needs_compaction: false,
         };
         write_trajectory_index_atomic_owned(dir, index.clone()).await?;
         index
@@ -4025,6 +4289,7 @@ async fn list_trajectory_entries_from_index_or_rebuild_with_counter_scope(
             skipped_files: new_skipped,
             applied_seq: existing.applied_seq,
             baseline: None,
+            needs_compaction: false,
         }
     };
     cache_legacy_trajectory_index(dir, index).await;
@@ -4274,6 +4539,194 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn new_journal_is_verifiable_by_old_typed_reader() {
+        // Frozen a18db4d6f contract; 51d71d76e has identical relevant structs
+        // and CRC32 implementation. Unknown entry fields are dropped by serde.
+        #[derive(Serialize, Deserialize)]
+        struct OldEntry {
+            pub id: String,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub work: Option<crate::coordination::history::WorkIndexMetadata>,
+            pub file_name: String,
+            #[serde(default)]
+            pub source: TrajectoryIndexSource,
+            pub created_at: String,
+            pub updated_at: String,
+            pub title: String,
+            pub model: String,
+            pub mode: String,
+            pub message_count: usize,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub parent_id: Option<String>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub link_type: Option<String>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub root_chat_id: Option<String>,
+            #[serde(default)]
+            pub is_title_generated: bool,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub worktree: Option<WorktreeMeta>,
+            #[serde(default)]
+            pub total_lines_added: i64,
+            #[serde(default)]
+            pub total_lines_removed: i64,
+            #[serde(default)]
+            pub tasks_total: i32,
+            #[serde(default)]
+            pub tasks_done: i32,
+            #[serde(default)]
+            pub tasks_failed: i32,
+            #[serde(default)]
+            pub total_prompt_tokens: u64,
+            #[serde(default)]
+            pub total_completion_tokens: u64,
+            #[serde(default)]
+            pub total_tokens: u64,
+            #[serde(default)]
+            pub total_cache_read_tokens: u64,
+            #[serde(default)]
+            pub total_cache_creation_tokens: u64,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub total_cost_usd: Option<f64>,
+            #[serde(default)]
+            pub displayable_chat: bool,
+            #[serde(default)]
+            pub waiting_for_card_ids: Vec<String>,
+            #[serde(default)]
+            pub file_len: u64,
+            #[serde(default)]
+            pub file_modified_unix_ms: i64,
+        }
+        #[derive(Serialize, Deserialize)]
+        struct OldPayload {
+            seq: u64,
+            writer_id: String,
+            ts_ms: i64,
+            #[serde(default)]
+            updated_at: String,
+            #[serde(default)]
+            upserts: Vec<OldEntry>,
+            #[serde(default)]
+            removes: Vec<String>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            skipped: Option<Vec<TrajectoryIndexSkippedFile>>,
+        }
+        #[derive(Serialize, Deserialize)]
+        struct OldRecord {
+            #[serde(default = "default_journal_schema_version")]
+            schema: u32,
+            #[serde(flatten)]
+            payload: OldPayload,
+            checksum: u32,
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let path = write_trajectory(temp.path(), "compat", "Compatible", "agent").await;
+        let entry = entry_for_path(temp.path(), &path).await;
+        assert!(entry.work_ref.is_some());
+        let bytes = encode_journal_record(TrajectoryIndexJournalPayload {
+            seq: 1,
+            writer_id: "new".into(),
+            ts_ms: 1,
+            updated_at: "now".into(),
+            upserts: vec![entry],
+            removes: vec![],
+            skipped: None,
+        })
+        .unwrap();
+        let old: OldRecord = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            crc32(&serde_json::to_vec(&old.payload).unwrap()),
+            old.checksum,
+            "old typed journal reader must verify the new writer checksum"
+        );
+        assert!(
+            !old.payload.upserts[0]
+                .work
+                .as_ref()
+                .unwrap()
+                .provenance_complete
+        );
+        let replay = scan_trajectory_index_journal(&bytes).unwrap();
+        assert!(
+            replay.records[0].upserts[0].work_ref.is_none(),
+            "journal replay without a reference must remain unresolved"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_inline_journal_replay_cannot_resurrect_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let path = write_trajectory(dir, "journal", "Journal secret", "agent").await;
+        let mut entry = serde_json::to_value(entry_for_path(dir, &path).await).unwrap();
+        entry["work"] = json!({"records":[{"path":"/guarded/journal", "zone":"guarded", "attribution":"observed"}], "provenance_complete":true, "source_revision":8, "measured_tokens":12});
+        entry.as_object_mut().unwrap().remove("work_ref");
+        let payload = json!({"seq":1,"writer_id":"old","ts_ms":1,"updated_at":"now","upserts":[entry],"removes":[]});
+        let checksum = crc32(&serde_json::to_vec(&payload).unwrap());
+        let mut record = json!({"schema":1});
+        record
+            .as_object_mut()
+            .unwrap()
+            .extend(payload.as_object().unwrap().clone());
+        record["checksum"] = json!(checksum);
+        let mut bytes = serde_json::to_vec(&record).unwrap();
+        bytes.push(b'\n');
+        let scan = scan_trajectory_index_journal(&bytes).unwrap();
+        assert_eq!(scan.records.len(), 1);
+        let mut index = TrajectoryIndex::default();
+        replay_journal_records(&mut index, &scan.records, 0);
+        assert_eq!(index.entries[0].id, "journal");
+        assert!(!index.entries[0].work.as_ref().unwrap().provenance_complete);
+        assert_eq!(
+            index.entries[0].work_ref.as_ref().unwrap().state,
+            WorkReferenceState::Unresolved
+        );
+        assert!(index.entries[0].work.as_ref().unwrap().needs_compaction);
+    }
+
+    #[tokio::test]
+    async fn compacting_write_preserves_unchanged_legacy_sibling_and_truncates_journal() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let path = write_trajectory(dir, "sibling", "Private sibling", "agent").await;
+        let entry = entry_for_path(dir, &path).await;
+        let mut wire = serde_json::to_value(&entry).unwrap();
+        wire["work"] = json!({"records":[{"path":"/guarded/secret", "zone":"guarded", "attribution":"declared"}], "provenance_complete":true, "source_revision":7, "measured_tokens":42});
+        wire.as_object_mut().unwrap().remove("work_ref");
+        let checkpoint = json!({"schema_version":1,"entries":[wire],"applied_seq":0});
+        std::fs::write(
+            trajectory_index_path(dir),
+            serde_json::to_vec(&checkpoint).unwrap(),
+        )
+        .unwrap();
+        let coordinator = TrajectoryIndexCoordinator::default();
+        let loaded = coordinator.snapshot(dir, None).await.unwrap();
+        assert_eq!(loaded.entries.len(), 1);
+        assert!(loaded.entries[0].work.as_ref().unwrap().records.is_empty());
+        let path = write_trajectory(dir, "new", "New", "agent").await;
+        coordinator
+            .upsert(dir, entry_for_path(dir, &path).await)
+            .await
+            .unwrap();
+        coordinator.flush_all().await.unwrap();
+        let disk: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(trajectory_index_path(dir)).unwrap()).unwrap();
+        let entries = disk["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        let sibling = entries.iter().find(|e| e["id"] == "sibling").unwrap();
+        assert_eq!(sibling["work"]["records"], json!([]));
+        assert_eq!(sibling["work"]["provenance_complete"], false);
+        assert_eq!(sibling["work_ref"]["state"], "unresolved");
+        assert_eq!(sibling["work"]["measured_tokens"], 42);
+        assert_eq!(
+            std::fs::metadata(trajectory_index_journal_path(dir))
+                .map(|m| m.len())
+                .unwrap_or(0),
+            0
+        );
+    }
+
+    #[tokio::test]
     async fn displayable_filter_marks_task_buddy_and_child_links_non_displayable() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("trajectories");
@@ -4305,14 +4758,14 @@ mod tests {
             fs::write(&path, serde_json::to_string(&value).unwrap())
                 .await
                 .unwrap();
-            let entry = entry_from_trajectory_value(&dir, &path, &value, None).unwrap();
+            let entry = entry_from_trajectory_value(&dir, &path, &value, None, None).unwrap();
             assert!(!entry.displayable_chat, "{id} should be hidden");
         }
     }
 
     async fn entry_for_path(dir: &Path, path: &Path) -> TrajectoryIndexEntry {
         let value = serde_json::from_str(&fs::read_to_string(path).await.unwrap()).unwrap();
-        entry_from_trajectory_value(dir, path, &value, None).unwrap()
+        entry_from_trajectory_value(dir, path, &value, None, None).unwrap()
     }
 
     #[tokio::test]

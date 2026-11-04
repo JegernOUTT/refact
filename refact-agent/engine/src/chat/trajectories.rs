@@ -95,6 +95,7 @@ async fn atomic_write_json_with_tmp_path(
         Ok(TrajectoryPrettyWrite {
             byte_len: json.len() as u64,
             content_hash: md5::compute(&json).0,
+            source_sha256: trajectory_index::source_sha256(json.as_bytes()),
         })
     }
     .await;
@@ -104,11 +105,13 @@ async fn atomic_write_json_with_tmp_path(
 struct TrajectoryPrettyWrite {
     byte_len: u64,
     content_hash: [u8; 16],
+    source_sha256: [u8; 32],
 }
 
 struct TrajectoryPrettyWriter {
     inner: std::io::BufWriter<std::fs::File>,
     context: md5::Context,
+    sha256: sha2::Sha256,
     byte_len: u64,
 }
 
@@ -116,6 +119,7 @@ impl std::io::Write for TrajectoryPrettyWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let written = self.inner.write(buf)?;
         self.context.consume(&buf[..written]);
+        sha2::Digest::update(&mut self.sha256, &buf[..written]);
         self.byte_len += written as u64;
         Ok(written)
     }
@@ -134,6 +138,7 @@ impl TrajectoryPrettyWriter {
         Ok(TrajectoryPrettyWrite {
             byte_len: self.byte_len,
             content_hash: self.context.compute().0,
+            source_sha256: sha2::Digest::finalize(self.sha256).into(),
         })
     }
 }
@@ -150,6 +155,7 @@ fn write_pretty_json_to_tmp_file(
     let mut writer = TrajectoryPrettyWriter {
         inner: std::io::BufWriter::new(file),
         context: md5::Context::new(),
+        sha256: <sha2::Sha256 as sha2::Digest>::new(),
         byte_len: 0,
     };
     serde_json::to_writer_pretty(&mut writer, value)
@@ -5028,7 +5034,7 @@ async fn persist_trajectory_snapshot_file(
     mut trajectory: serde_json::Value,
     message_count: usize,
     mut serialize_span: perf_diagnostics::PerfSpan,
-) -> Result<(PathBuf, String, serde_json::Value), String> {
+) -> Result<(PathBuf, String, serde_json::Value, [u8; 32]), String> {
     let bound_task = crate::tasks::storage::bound_task_matches(
         snapshot
             .task_meta
@@ -5162,6 +5168,11 @@ async fn persist_trajectory_snapshot_file(
         Some(&snapshot.chat_id),
         Some(&file_path),
     );
+    let source_sha256 = write_result
+        .as_ref()
+        .map_err(Clone::clone)?
+        .source_sha256
+        .clone();
     let atomic_write_result = if bound_task {
         let task_meta = snapshot
             .task_meta
@@ -5225,7 +5236,7 @@ async fn persist_trajectory_snapshot_file(
         "Saved trajectory for chat {} ({} messages) to {:?}",
         snapshot.chat_id, message_count, file_path
     );
-    Ok((file_path, updated_at, trajectory))
+    Ok((file_path, updated_at, trajectory, source_sha256))
 }
 
 async fn publish_trajectory_snapshot_updates(
@@ -5235,6 +5246,7 @@ async fn publish_trajectory_snapshot_updates(
     source: &TrajectorySourceIdentity,
     file_path: &Path,
     trajectory: serde_json::Value,
+    source_sha256: [u8; 32],
     message_count: usize,
     metrics: Option<TrajectoryMetrics>,
     background_messages_json: Option<Vec<serde_json::Value>>,
@@ -5250,12 +5262,13 @@ async fn publish_trajectory_snapshot_updates(
             } else {
                 Some(TrajectorySourceIdentity::Normal)
             };
-            trajectory_index::upsert_trajectory_index_entry_from_owned_value_with_rollout(
+            trajectory_index::upsert_trajectory_index_entry_from_committed_value(
                 &app.chat.trajectory_index_coordinator,
                 &dir,
                 file_path,
                 trajectory,
                 source_hint,
+                Some(source_sha256),
             )
             .await?;
         }
@@ -5442,7 +5455,7 @@ async fn save_trajectory_snapshot_inner(
     } else {
         TrajectorySourceIdentity::Normal
     };
-    let (file_path, updated_at, trajectory) = persist_trajectory_snapshot_file(
+    let (file_path, updated_at, trajectory, source_sha256) = persist_trajectory_snapshot_file(
         gcx.clone(),
         &snapshot,
         write_cache.as_ref(),
@@ -5460,6 +5473,7 @@ async fn save_trajectory_snapshot_inner(
         &source,
         &file_path,
         trajectory,
+        source_sha256,
         message_count,
         metrics,
         background_messages_json,
@@ -6770,6 +6784,7 @@ async fn refresh_trajectory_index_entry_for_path(
     let content = fs::read_to_string(path)
         .await
         .map_err(|e| format!("Failed to read trajectory for index refresh: {}", e))?;
+    let source_hash = trajectory_index::source_sha256(content.as_bytes());
     let parse_path = path.to_path_buf();
     let value = tokio::task::spawn_blocking(move || {
         serde_json::from_str::<serde_json::Value>(&content).map_err(|e| {
@@ -6782,12 +6797,13 @@ async fn refresh_trajectory_index_entry_for_path(
     })
     .await
     .map_err(|e| format!("Trajectory index refresh parse task failed: {}", e))??;
-    trajectory_index::upsert_trajectory_index_entry_from_owned_value_with_rollout(
+    trajectory_index::upsert_trajectory_index_entry_from_committed_value(
         &app.chat.trajectory_index_coordinator,
         dir,
         path,
         value,
         source_hint,
+        Some(source_hash),
     )
     .await
 }

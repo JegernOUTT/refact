@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::app_state::AppState;
-use super::catalog::{build_catalog, WorkCatalog};
+use super::catalog::{build_catalog_for_destination, WorkCatalog};
 use super::error::{WorkError, WorkFailureCause};
 use super::paging::ViewBinding;
 use super::privacy_guard;
@@ -81,14 +81,23 @@ pub async fn visible_projection(
         .source_root
         .to_str()
         .ok_or_else(WorkError::scope_denied)?;
-    let mut catalog = build_catalog(app, Some(source)).await.map_err(|_| {
-        if caller.model.is_some() {
-            WorkError::unavailable()
-        } else {
-            WorkError::projection_failure(WorkFailureCause::ScopedSourceUnavailable)
-        }
-    })?;
+    let mut catalog = build_catalog_for_destination(app, Some(source), caller.model.is_some())
+        .await
+        .map_err(|_| {
+            if caller.model.is_some() {
+                WorkError::unavailable()
+            } else {
+                WorkError::projection_failure(WorkFailureCause::ScopedSourceUnavailable)
+            }
+        })?;
     if let Some(model) = &caller.model {
+        if catalog
+            .degraded
+            .iter()
+            .any(|reason| reason == "historical index unavailable")
+        {
+            return Err(WorkError::unavailable());
+        }
         catalog.retain_visible(privacy_guard::clear_rows(
             &app.gcx,
             catalog.all_rows(),

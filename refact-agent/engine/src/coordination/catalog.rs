@@ -276,6 +276,14 @@ pub async fn build_catalog(
     app: &AppState,
     source_workspace_root: Option<&str>,
 ) -> Result<WorkCatalog, String> {
+    build_catalog_for_destination(app, source_workspace_root, false).await
+}
+
+pub(super) async fn build_catalog_for_destination(
+    app: &AppState,
+    source_workspace_root: Option<&str>,
+    resolve_history: bool,
+) -> Result<WorkCatalog, String> {
     let source_root =
         roots::resolve_source_workspace_root(app.gcx.clone(), source_workspace_root).await?;
     let roots = roots::load_project_roots(app.gcx.clone(), source_root).await;
@@ -283,7 +291,7 @@ pub async fn build_catalog(
 
     let mut rows: BTreeMap<String, WorkRow> = BTreeMap::new();
 
-    for row in super::history::indexed_rows(app, &roots, &mut degraded).await {
+    for row in super::history::indexed_rows(app, &roots, &mut degraded, resolve_history).await {
         rows.insert(row.key.to_string(), row);
     }
     let (board_rows, boards_unavailable) = app.work_boards.rows(&roots.source_workspace_root).await;
