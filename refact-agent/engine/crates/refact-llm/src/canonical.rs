@@ -135,6 +135,7 @@ impl Default for CanonicalToolChoice {
 
 #[derive(Debug, Clone)]
 pub enum LlmStreamDelta {
+    Activity,
     AppendContent {
         text: String,
         /// Content block index for per-block content tracking (Anthropic interleaved output).

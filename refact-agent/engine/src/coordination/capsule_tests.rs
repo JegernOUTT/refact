@@ -65,6 +65,7 @@ async fn fixture() -> (AppState, tempfile::TempDir, Arc<Mutex<ChatSession>>) {
     (app, dir, caller)
 }
 
+#[serial_test::serial(runtime_settings)]
 #[tokio::test]
 async fn generation_appends_one_capsule_without_rewriting_existing_messages() {
     let (app, _dir, caller) = fixture().await;
@@ -90,6 +91,7 @@ async fn generation_appends_one_capsule_without_rewriting_existing_messages() {
     assert!(capsule.contains("checkout"));
 }
 
+#[serial_test::serial(runtime_settings)]
 #[tokio::test]
 async fn reloaded_session_reuses_capsule_marker_and_removed_capsule_can_be_regenerated() {
     let (app, dir, caller) = fixture().await;
@@ -122,6 +124,7 @@ async fn reloaded_session_reuses_capsule_marker_and_removed_capsule_can_be_regen
     assert_eq!(caller.lock().await.messages.len(), before);
 }
 
+#[serial_test::serial(runtime_settings)]
 #[tokio::test]
 async fn many_rows_shrink_to_total_message_budget_and_supply_a_recoverable_inventory_cursor() {
     let (app, dir, _caller) = fixture().await;
@@ -173,6 +176,7 @@ async fn many_rows_shrink_to_total_message_budget_and_supply_a_recoverable_inven
     assert!(!super::capsule::still_cleared(&app, &message));
 }
 
+#[serial_test::serial(runtime_settings)]
 #[tokio::test]
 async fn cached_tokenizer_branch_keeps_the_complete_capsule_within_budget() {
     let (app, dir, _caller) = fixture().await;
@@ -225,6 +229,7 @@ async fn cached_tokenizer_branch_keeps_the_complete_capsule_within_budget() {
     );
 }
 
+#[serial_test::serial(runtime_settings)]
 #[tokio::test]
 async fn escaped_peer_titles_remain_bounded_after_provider_xml_rendering() {
     let (app, dir, _caller) = fixture().await;
@@ -258,6 +263,7 @@ async fn escaped_peer_titles_remain_bounded_after_provider_xml_rendering() {
         .contains("work_overview(cursor="));
 }
 
+#[serial_test::serial(runtime_settings)]
 #[tokio::test]
 async fn provider_event_rendering_keeps_prior_capsule_prefix_and_hides_private_marker_metadata() {
     let (app, _dir, caller) = fixture().await;
@@ -279,6 +285,7 @@ async fn provider_event_rendering_keeps_prior_capsule_prefix_and_hides_private_m
     assert!(!current.contains(CAPSULE_MARKER_KEY));
 }
 
+#[serial_test::serial(runtime_settings)]
 #[tokio::test]
 async fn model_policy_changes_force_recheck_inside_debounce_and_never_disclose_denied_peer() {
     let (app, dir, caller) = fixture().await;

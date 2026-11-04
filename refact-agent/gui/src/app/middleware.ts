@@ -1858,7 +1858,10 @@ startListening({
     if (isForeground) {
       listenerApi.dispatch(requestSseRefresh({ chatId: new_chat_id }));
 
-      if (taskMeta?.role === "planner" && taskMeta.task_id) {
+      if (
+        (taskMeta?.role === "planner" || taskMeta?.role === "linked") &&
+        taskMeta.task_id
+      ) {
         const taskId = taskMeta.task_id;
         const now = new Date().toISOString();
         const taskListResult =

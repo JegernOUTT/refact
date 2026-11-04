@@ -2367,7 +2367,7 @@ mod tests {
                 tool_calls: Some(vec![ChatToolCall {
                     id: "call_1".to_string(),
                     tool_type: "function".to_string(),
-                    extra_content: None,
+                    extra_content: Some(json!({"_refact_output_limit_truncated": true})),
                     started_at_ms: None,
                     completed_at_ms: None,
                     function: ChatToolFunction {
@@ -2396,7 +2396,7 @@ mod tests {
                 tool_calls: Some(vec![ChatToolCall {
                     id: "call_2".to_string(),
                     tool_type: "function".to_string(),
-                    extra_content: None,
+                    extra_content: Some(json!({"_refact_output_limit_truncated": true})),
                     started_at_ms: None,
                     completed_at_ms: None,
                     function: ChatToolFunction {
@@ -2412,6 +2412,9 @@ mod tests {
         let (_, msgs) = convert_to_anthropic(&messages, None);
 
         assert_eq!(msgs.len(), 4);
+        assert!(!serde_json::to_string(&msgs)
+            .unwrap()
+            .contains("_refact_output_limit_truncated"));
         assert_eq!(msgs[0]["role"], "user");
         assert_eq!(msgs[1]["role"], "assistant");
         assert_eq!(msgs[2]["role"], "user");

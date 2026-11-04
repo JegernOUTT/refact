@@ -214,6 +214,13 @@ async fn reconcile_loaded_card_pause(app: &AppState, session_arc: &Arc<AMutex<Ch
     }
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    static EXECUTION_SNAPSHOT_GATE: (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
+    static OPERATION_WAIT_GATE: (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
+    static EXECUTION_FENCE_RETRY_GATE: (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
+}
+
 pub(crate) async fn board_execution(
     app: &AppState,
     session_arc: &Arc<AMutex<ChatSession>>,
@@ -221,9 +228,76 @@ pub(crate) async fn board_execution(
     Option<Arc<crate::agents::execution::RunExecution>>,
     crate::tasks::admission::ExecutionUnavailable,
 > {
-    use crate::tasks::admission::{current_execution, ExecutionUnavailable};
+    let result = board_execution_inner(app, session_arc).await;
+    if let Err(reason) = result {
+        if reason.persistent() {
+            let meta = session_arc.lock().await.thread.task_meta.clone();
+            let board = if let Some(meta) = &meta {
+                crate::tasks::storage::load_board(app.gcx.clone(), &meta.task_id)
+                    .await
+                    .ok()
+            } else {
+                None
+            };
+            let owner = board.as_ref().and_then(|board| board.owner_chat_id.clone());
+            let (expected, actual) = match reason {
+                crate::tasks::admission::ExecutionUnavailable::StaleBinding(
+                    crate::tasks::admission::StaleReason::PlannerNotInCustody,
+                ) => (
+                    meta.as_ref().and_then(|meta| meta.planner_chat_id.clone()),
+                    owner.clone(),
+                ),
+                crate::tasks::admission::ExecutionUnavailable::StaleBinding(
+                    crate::tasks::admission::StaleReason::ClaimHeldByOther,
+                ) => (
+                    Some(session_arc.lock().await.chat_id.clone()),
+                    board
+                        .as_ref()
+                        .and_then(|board| {
+                            meta.as_ref()
+                                .and_then(|meta| meta.card_id.as_deref())
+                                .and_then(|id| board.card_claim(id))
+                        })
+                        .map(|claim| claim.claimant_chat_id.clone()),
+                ),
+                _ => (None, None),
+            };
+            let condition = reason.condition();
+            tracing::warn!(target: "board_execution", condition, ?expected, ?actual, "stale board binding");
+            session_arc.lock().await.runtime.interruption =
+                Some(refact_chat_api::BoardInterruption {
+                    condition,
+                    expected,
+                    actual,
+                    owner_chat_id: owner,
+                    at: chrono::Utc::now().to_rfc3339(),
+                });
+        }
+    }
+    if result.is_ok() {
+        let mut session = session_arc.lock().await;
+        if session.runtime.interruption.take().is_some()
+            && session.runtime.state == SessionState::Interrupted
+            && !session.runtime.paused
+            && session.runtime.pause_reasons.is_empty()
+            && !session.planner_paused()
+        {
+            session.set_runtime_state(SessionState::Idle, None);
+        }
+    }
+    result
+}
 
-    let (chat_id, thread, source, closed, restored_pending_tools) = {
+async fn board_execution_inner(
+    app: &AppState,
+    session_arc: &Arc<AMutex<ChatSession>>,
+) -> Result<
+    Option<Arc<crate::agents::execution::RunExecution>>,
+    crate::tasks::admission::ExecutionUnavailable,
+> {
+    use crate::tasks::admission::{current_execution, ExecutionUnavailable, StaleReason};
+
+    let (chat_id, thread, source, closed, restored_pending_tools, abort) = {
         let session = session_arc.lock().await;
         (
             session.chat_id.clone(),
@@ -231,6 +305,7 @@ pub(crate) async fn board_execution(
             crate::coordination::scope::session_source_root(&session),
             session.closed,
             session.board_restored_pending_tools,
+            session.abort_flag.clone(),
         )
     };
     let Some(meta) = thread
@@ -241,6 +316,8 @@ pub(crate) async fn board_execution(
         return Ok(None);
     };
     if let Some(agent_id) = app.agents.find_agent_id_by_child_chat_id(&chat_id).await {
+        let session = session_arc.lock().await;
+        let thread = &session.thread;
         if app
             .agent_executions
             .saved_config(&agent_id)
@@ -254,107 +331,214 @@ pub(crate) async fn board_execution(
         {
             return Ok(None);
         }
-        return Err(ExecutionUnavailable::StaleBinding);
+        return Err(ExecutionUnavailable::StaleBinding(
+            crate::tasks::admission::StaleReason::RunnerConfigMismatch,
+        ));
     }
-    let execution = current_execution(app, &chat_id)?;
+    let execution = current_execution(app, &chat_id).map_err(|reason| {
+        if reason == ExecutionUnavailable::Cancelled
+            && (abort.load(Ordering::SeqCst) || app.runtime.shutdown_flag.load(Ordering::Relaxed))
+        {
+            tracing::debug!(chat_id = %chat_id, "Local abort/shutdown interrupted execution admission");
+            ExecutionUnavailable::Held
+        } else {
+            reason
+        }
+    })?;
     if restored_pending_tools {
         return Err(ExecutionUnavailable::PendingToolReconciliation);
     }
-    let validate = async {
-        if closed || meta.task_id.is_empty() {
-            return Err(ExecutionUnavailable::StaleBinding);
+    #[cfg(test)]
+    if let Ok((entered, resume)) = EXECUTION_SNAPSHOT_GATE.try_with(Clone::clone) {
+        entered.notify_one();
+        resume.notified().await;
+    }
+    let mut attempt = 0;
+    loop {
+        if abort.load(Ordering::SeqCst) || app.runtime.shutdown_flag.load(Ordering::Relaxed) {
+            return Err(ExecutionUnavailable::Held);
         }
-        let source = source.as_ref().ok_or(ExecutionUnavailable::StaleBinding)?;
-        let source = crate::coordination::roots::resolve_source_workspace_root(
-            app.gcx.clone(),
-            source.to_str(),
-        )
-        .await
-        .map_err(|_| ExecutionUnavailable::StaleBinding)?;
-        let (dir, guard) = crate::tasks::storage::locked_task_dir(app.gcx.clone(), &meta.task_id)
+        let validate = async {
+            if closed || meta.task_id.is_empty() {
+                return Err(ExecutionUnavailable::StaleBinding(
+                    crate::tasks::admission::StaleReason::SessionClosed,
+                ));
+            }
+            let source = source.as_ref().ok_or(ExecutionUnavailable::StaleBinding(
+                crate::tasks::admission::StaleReason::SourceRootMissing,
+            ))?;
+            let source = crate::coordination::roots::resolve_source_workspace_root(
+                app.gcx.clone(),
+                source.to_str(),
+            )
             .await
-            .map_err(|_| ExecutionUnavailable::StaleBinding)?;
-        let belongs = [
-            source.join(".refact/tasks").join(&meta.task_id),
-            app.gcx.config_dir.join("tasks").join(&meta.task_id),
-        ]
-        .iter()
-        .any(|path| dunce::canonicalize(path).ok().as_ref() == Some(&dir));
-        if !belongs {
-            return Err(ExecutionUnavailable::StaleBinding);
-        }
-        let board =
-            crate::tasks::storage::load_board_locked(app.gcx.clone(), &meta.task_id, &guard)
-                .await
-                .map_err(|_| ExecutionUnavailable::StaleBinding)?;
-        let planner = meta
-            .planner_chat_id
-            .as_deref()
-            .filter(|id| !id.is_empty())
-            .ok_or(ExecutionUnavailable::StaleBinding)?;
-        if board.owner_chat_id.as_deref() != Some(planner) {
-            return Err(ExecutionUnavailable::StaleBinding);
-        }
-        let card = meta
-            .card_id
-            .as_deref()
-            .and_then(|id| board.get_card(id))
-            .filter(|card| card.column == "doing")
-            .ok_or(ExecutionUnavailable::StaleBinding)?;
-        let agent = meta
-            .agent_id
-            .as_deref()
-            .filter(|id| !id.is_empty())
-            .ok_or(ExecutionUnavailable::StaleBinding)?;
-        let bound = if let Some(variants) = &card.ab_variants {
-            variants.winner.is_none()
-                && [&variants.a, &variants.b].iter().any(|variant| {
-                    variant.chat_id == chat_id
-                        && variant.agent_id == agent
-                        && variant.finish.is_none()
-                })
-        } else if !card.team_members.is_empty() {
-            card.team_members
-                .iter()
-                .any(|member| member.agent_chat_id.as_deref() == Some(chat_id.as_str()))
-        } else {
-            card.agent_chat_id.as_deref() == Some(chat_id.as_str())
-                && card.assignee.as_deref() == Some(agent)
-        };
-        if !bound
-            || (card.ab_variants.is_none()
+            .map_err(|_| {
+                ExecutionUnavailable::StaleBinding(
+                    crate::tasks::admission::StaleReason::SourceRootUnresolved,
+                )
+            })?;
+            let (dir, guard) =
+                crate::tasks::storage::locked_task_dir(app.gcx.clone(), &meta.task_id)
+                    .await
+                    .map_err(|_| {
+                        ExecutionUnavailable::StaleBinding(
+                            crate::tasks::admission::StaleReason::TaskDirUnavailable,
+                        )
+                    })?;
+            let belongs = [
+                source.join(".refact/tasks").join(&meta.task_id),
+                app.gcx.config_dir.join("tasks").join(&meta.task_id),
+            ]
+            .iter()
+            .any(|path| dunce::canonicalize(path).ok().as_ref() == Some(&dir));
+            if !belongs {
+                return Err(ExecutionUnavailable::StaleBinding(
+                    crate::tasks::admission::StaleReason::TaskDirForeign,
+                ));
+            }
+            let board =
+                crate::tasks::storage::load_board_locked(app.gcx.clone(), &meta.task_id, &guard)
+                    .await
+                    .map_err(|_| {
+                        ExecutionUnavailable::StaleBinding(
+                            crate::tasks::admission::StaleReason::BoardUnreadable,
+                        )
+                    })?;
+            let planner = meta
+                .planner_chat_id
+                .as_deref()
+                .filter(|id| !id.is_empty())
+                .ok_or(ExecutionUnavailable::StaleBinding(
+                    crate::tasks::admission::StaleReason::PlannerUnbound,
+                ))?;
+            if !board.planner_binding_is_current(planner) {
+                return Err(ExecutionUnavailable::StaleBinding(
+                    crate::tasks::admission::StaleReason::PlannerNotInCustody,
+                ));
+            }
+            let card = meta
+                .card_id
+                .as_deref()
+                .and_then(|id| board.get_card(id))
+                .filter(|card| card.column == "doing")
+                .ok_or(ExecutionUnavailable::StaleBinding(
+                    crate::tasks::admission::StaleReason::CardNotDoing,
+                ))?;
+            let agent = meta.agent_id.as_deref().filter(|id| !id.is_empty()).ok_or(
+                ExecutionUnavailable::StaleBinding(
+                    crate::tasks::admission::StaleReason::AgentUnbound,
+                ),
+            )?;
+            let bound = if let Some(variants) = &card.ab_variants {
+                variants.winner.is_none()
+                    && [&variants.a, &variants.b].iter().any(|variant| {
+                        variant.chat_id == chat_id
+                            && variant.agent_id == agent
+                            && variant.finish.is_none()
+                    })
+            } else if !card.team_members.is_empty() {
+                card.team_members
+                    .iter()
+                    .any(|member| member.agent_chat_id.as_deref() == Some(chat_id.as_str()))
+            } else {
+                card.agent_chat_id.as_deref() == Some(chat_id.as_str())
+                    && card.assignee.as_deref() == Some(agent)
+            };
+            if !bound {
+                return Err(ExecutionUnavailable::StaleBinding(
+                    StaleReason::CardBindingMismatch,
+                ));
+            }
+            if card.ab_variants.is_none()
                 && card.team_members.is_empty()
                 && board
                     .card_claim(&card.id)
-                    .is_some_and(|claim| claim.claimant_chat_id != chat_id))
-        {
-            return Err(ExecutionUnavailable::StaleBinding);
+                    .is_some_and(|claim| claim.claimant_chat_id != chat_id)
+            {
+                return Err(ExecutionUnavailable::StaleBinding(
+                    crate::tasks::admission::StaleReason::ClaimHeldByOther,
+                ));
+            }
+            Ok((board, guard))
         }
-        drop(guard);
-        Ok(())
+        .await;
+        let (board, guard) = validate?;
+        let registered = app.chat.sessions.read().await.get(&chat_id).cloned();
+        if !registered
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, session_arc))
+        {
+            return Err(ExecutionUnavailable::StaleBinding(
+                crate::tasks::admission::StaleReason::SessionReplaced,
+            ));
+        }
+        let session = match session_arc.try_lock() {
+            Ok(session) => session,
+            Err(_) => {
+                drop(guard);
+                if attempt == 7 {
+                    return Err(ExecutionUnavailable::Held);
+                }
+                #[cfg(test)]
+                if let Ok((entered, resume)) = EXECUTION_FENCE_RETRY_GATE.try_with(Clone::clone) {
+                    entered.notify_one();
+                    resume.notified().await;
+                    attempt += 1;
+                    continue;
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_millis((5u64 << attempt).min(320))) => {},
+                    _ = crate::background_tasks::wait_for_shutdown(app.gcx.clone()) => return Err(ExecutionUnavailable::Held),
+                }
+                attempt += 1;
+                continue;
+            }
+        };
+        if session.closed
+            || session.chat_id != chat_id
+            || !session
+                .thread
+                .task_meta
+                .as_ref()
+                .is_some_and(|current| custody_equivalent_meta(&board, &meta, current))
+            || crate::coordination::scope::session_source_root(&session) != source
+        {
+            return Err(ExecutionUnavailable::StaleBinding(
+                crate::tasks::admission::StaleReason::SessionIdentityDrift,
+            ));
+        }
+        let current = current_execution(app, &chat_id).map_err(|reason| {
+            if reason == ExecutionUnavailable::Cancelled
+                && (abort.load(Ordering::SeqCst)
+                    || app.runtime.shutdown_flag.load(Ordering::Relaxed))
+            {
+                tracing::debug!(chat_id = %chat_id, "Local abort/shutdown interrupted execution fence");
+                ExecutionUnavailable::Held
+            } else {
+                reason
+            }
+        })?;
+        if !Arc::ptr_eq(&execution, &current) {
+            return Err(ExecutionUnavailable::StaleBinding(
+                crate::tasks::admission::StaleReason::ExecutionReplaced,
+            ));
+        }
+        return Ok(Some(execution));
     }
-    .await;
-    validate?;
-    let registered = app.chat.sessions.read().await.get(&chat_id).cloned();
-    if !registered
-        .as_ref()
-        .is_some_and(|current| Arc::ptr_eq(current, session_arc))
-    {
-        return Err(ExecutionUnavailable::StaleBinding);
-    }
-    let session = session_arc.lock().await;
-    if session.closed
-        || session.chat_id != chat_id
-        || session.thread.task_meta.as_ref() != Some(&meta)
-        || crate::coordination::scope::session_source_root(&session) != source
-    {
-        return Err(ExecutionUnavailable::StaleBinding);
-    }
-    let current = current_execution(app, &chat_id)?;
-    if !Arc::ptr_eq(&execution, &current) {
-        return Err(ExecutionUnavailable::StaleBinding);
-    }
-    Ok(Some(execution))
+}
+
+fn custody_equivalent_meta(
+    board: &crate::tasks::types::TaskBoard,
+    before: &TaskMeta,
+    current: &TaskMeta,
+) -> bool {
+    let mut projected = current.clone();
+    projected.planner_chat_id = before.planner_chat_id.clone();
+    projected == *before
+        && current
+            .planner_chat_id
+            .as_deref()
+            .is_some_and(|planner| board.planner_binding_is_current(planner))
 }
 
 pub(crate) fn interrupt_board_execution(
@@ -364,24 +548,66 @@ pub(crate) fn interrupt_board_execution(
     if reason == crate::tasks::admission::ExecutionUnavailable::Held {
         return;
     }
-    let state = if session.runtime.paused || !session.runtime.pause_reasons.is_empty() {
+    if !reason.persistent() {
+        session.stream_started_at = None;
+        let state = if session.runtime.paused
+            || !session.runtime.pause_reasons.is_empty()
+            || session.planner_paused()
+        {
+            SessionState::Paused
+        } else {
+            SessionState::WaitingUserInput
+        };
+        session.set_runtime_state(state, Some(reason.recovery_message()));
+        return;
+    }
+    let state = if session.planner_paused()
+        || session.runtime.paused
+        || !session.runtime.pause_reasons.is_empty()
+    {
         SessionState::Paused
     } else {
-        SessionState::WaitingUserInput
+        SessionState::Interrupted
     };
+    if session
+        .runtime
+        .interruption
+        .as_ref()
+        .map(|value| value.condition.as_str())
+        != Some(reason.condition().as_str())
+    {
+        session.runtime.interruption = Some(refact_chat_api::BoardInterruption {
+            condition: reason.condition(),
+            expected: None,
+            actual: None,
+            owner_chat_id: session
+                .thread
+                .task_meta
+                .as_ref()
+                .and_then(|meta| meta.planner_chat_id.clone()),
+            at: chrono::Utc::now().to_rfc3339(),
+        });
+    }
     session.stream_started_at = None;
-    session.set_runtime_state(state, Some(reason.recovery_message()));
+    let mut message = reason.recovery_message();
+    if let Some(detail) = &session.runtime.interruption {
+        if detail.expected.is_some() || detail.actual.is_some() {
+            message = message.replacen(
+                ". No model",
+                &format!(
+                    " expected={} actual={}. No model",
+                    detail.expected.as_deref().unwrap_or("none"),
+                    detail.actual.as_deref().unwrap_or("none")
+                ),
+                1,
+            );
+        }
+    }
+    session.set_runtime_state(state, Some(message));
 }
 
 pub(crate) fn board_execution_interrupted(session: &ChatSession) -> bool {
-    matches!(
-        session.runtime.state,
-        SessionState::Paused | SessionState::WaitingUserInput
-    ) && session
-        .runtime
-        .error
-        .as_deref()
-        .is_some_and(|error| error.starts_with("Interrupted: "))
+    session.runtime.interruption.is_some()
 }
 
 pub(crate) struct BoardOperation {
@@ -425,17 +651,22 @@ async fn begin_board_operation_inner(
         tokio::pin!(acquisition);
         let operation = loop {
             if abort.load(Ordering::SeqCst) || app.runtime.shutdown_flag.load(Ordering::Relaxed) {
-                return Err(ExecutionUnavailable::Cancelled);
+                return Err(ExecutionUnavailable::Held);
             }
             tokio::select! {
-                result = &mut acquisition => break result.map_err(|_| ExecutionUnavailable::Cancelled)?,
+                result = &mut acquisition => break result.map_err(|_| if abort.load(Ordering::SeqCst) || app.runtime.shutdown_flag.load(Ordering::Relaxed) { tracing::debug!("Local abort/shutdown interrupted operation permit wait"); ExecutionUnavailable::Held } else { ExecutionUnavailable::Cancelled })?,
                 _ = tokio::time::sleep(refact_work_core::coordination_settings().lock_poll_interval()) => {}
+            }
+            #[cfg(test)]
+            if let Ok((entered, resume)) = OPERATION_WAIT_GATE.try_with(Clone::clone) {
+                entered.notify_one();
+                resume.notified().await;
             }
         };
         let current = board_execution(app, session_arc).await?
-            .ok_or(ExecutionUnavailable::StaleBinding)?;
+            .ok_or(ExecutionUnavailable::StaleBinding(crate::tasks::admission::StaleReason::ExecutionReplaced))?;
         if !Arc::ptr_eq(&execution, &current) {
-            return Err(ExecutionUnavailable::StaleBinding);
+            return Err(ExecutionUnavailable::StaleBinding(crate::tasks::admission::StaleReason::ExecutionReplaced));
         }
         Ok(Some(BoardOperation { execution: execution.clone(), _operation: operation }))
     }.await;
@@ -634,9 +865,27 @@ pub async fn get_or_create_session_with_trajectory(
     if inserted {
         reconcile_loaded_card_pause(&app, &session_arc).await;
         if !is_new {
+            let task_id = session_arc
+                .lock()
+                .await
+                .thread
+                .task_meta
+                .as_ref()
+                .map(|meta| meta.task_id.clone());
+            if let Some(task_id) = task_id {
+                let _ = crate::tasks::custody::rebind_task_agents(app.gcx.clone(), &task_id).await;
+            }
             if let Err(reason) = board_execution(&app, &session_arc).await {
                 interrupt_board_execution(&mut *session_arc.lock().await, reason);
                 return session_arc;
+            }
+            let mut session = session_arc.lock().await;
+            if session.runtime.interruption.take().is_some()
+                && !session.runtime.paused
+                && session.runtime.pause_reasons.is_empty()
+                && !session.planner_paused()
+            {
+                session.set_runtime_state(SessionState::Idle, None);
             }
         }
     }
@@ -999,6 +1248,213 @@ mod tests {
         ChatSession::new("test-chat".to_string())
     }
 
+    #[tokio::test]
+    async fn transfer_during_board_execution_keeps_active_attempt_admitted() {
+        let (temp, app, task, chat, session, _) =
+            crate::chat::task_agent_monitor::tests::setup_monitor_case(
+                "doing",
+                SessionState::Generating,
+                std::time::Duration::ZERO,
+                vec![],
+            )
+            .await;
+        session.lock().await.work_project_root = Some(temp.path().to_path_buf());
+        let mut config = crate::subchat::test_support::minimal_config(&chat, "planner-test");
+        config.task_meta = session.lock().await.thread.task_meta.clone();
+        app.agent_executions.remember_config("agent-1", config);
+        crate::tasks::storage::update_board_atomic(app.gcx.clone(), &task, |board| {
+            board.transfer_owner("planner-test", 1);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        crate::tasks::admission::reserve(&app, &chat, "test", "planner-test", 0)
+            .await
+            .unwrap();
+        crate::tasks::admission::wait_for_permit(&chat)
+            .await
+            .unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let pending_app = app.clone();
+        let pending_session = session.clone();
+        let gate = (entered.clone(), resume.clone());
+        let pending = tokio::spawn(EXECUTION_SNAPSHOT_GATE.scope(gate, async move {
+            board_execution(&pending_app, &pending_session).await
+        }));
+        entered.notified().await;
+        crate::tasks::storage::update_board_atomic(app.gcx.clone(), &task, |board| {
+            board.transfer_owner("successor", 2);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::tasks::custody::rebind_task_agents(app.gcx.clone(), &task)
+                .await
+                .unwrap(),
+            1
+        );
+        resume.notify_one();
+        assert!(pending.await.unwrap().unwrap().is_some());
+        let live = session.lock().await;
+        assert_eq!(live.runtime.state, SessionState::Generating);
+        assert!(live.runtime.interruption.is_none());
+        drop(live);
+        for release_after_retry in [true, false] {
+            let before = serde_json::to_value(
+                crate::tasks::storage::load_board(app.gcx.clone(), &task)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            let snapshot = Arc::new(tokio::sync::Notify::new());
+            let start_fence = Arc::new(tokio::sync::Notify::new());
+            let retry = Arc::new(tokio::sync::Notify::new());
+            let resume_retry = Arc::new(tokio::sync::Notify::new());
+            let pending_app = app.clone();
+            let pending_session = session.clone();
+            let pending = tokio::spawn(
+                EXECUTION_SNAPSHOT_GATE.scope(
+                    (snapshot.clone(), start_fence.clone()),
+                    EXECUTION_FENCE_RETRY_GATE
+                        .scope((retry.clone(), resume_retry.clone()), async move {
+                            board_execution(&pending_app, &pending_session).await
+                        }),
+                ),
+            );
+            snapshot.notified().await;
+            let holder = session.lock().await;
+            start_fence.notify_one();
+            retry.notified().await;
+            if release_after_retry {
+                drop(holder);
+                resume_retry.notify_one();
+                assert!(pending.await.unwrap().unwrap().is_some());
+            } else {
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    for _ in 0..6 {
+                        resume_retry.notify_one();
+                        retry.notified().await;
+                    }
+                    resume_retry.notify_one();
+                    assert!(matches!(
+                        pending.await.unwrap(),
+                        Err(crate::tasks::admission::ExecutionUnavailable::Held)
+                    ));
+                })
+                .await
+                .expect("execution fence retries must remain bounded");
+                drop(holder);
+            }
+            assert!(session.lock().await.runtime.interruption.is_none());
+            assert_eq!(
+                serde_json::to_value(
+                    crate::tasks::storage::load_board(app.gcx.clone(), &task)
+                        .await
+                        .unwrap()
+                )
+                .unwrap(),
+                before
+            );
+        }
+        let execution = crate::tasks::admission::current_execution(&app, &chat).unwrap();
+        let wait = execution.begin_wait();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let abort = session.lock().await.abort_flag.clone();
+        let pending_app = app.clone();
+        let pending_session = session.clone();
+        let pending = tokio::spawn(OPERATION_WAIT_GATE.scope(
+            (entered.clone(), resume.clone()),
+            async move {
+                begin_board_operation(&pending_app, &pending_session)
+                    .await
+                    .map(|operation| operation.is_some())
+            },
+        ));
+        entered.notified().await;
+        abort.store(true, Ordering::SeqCst);
+        resume.notify_one();
+        assert!(matches!(
+            pending.await.unwrap(),
+            Err(crate::tasks::admission::ExecutionUnavailable::Held)
+        ));
+        assert!(session.lock().await.runtime.interruption.is_none());
+        drop(wait);
+        abort.store(false, Ordering::SeqCst);
+        assert!(crate::tasks::admission::ExecutionUnavailable::Cancelled.persistent());
+        crate::tasks::admission::end(&chat).await;
+    }
+
+    #[test]
+    fn transient_admission_does_not_install_interruption() {
+        use crate::tasks::admission::{ExecutionUnavailable, StaleReason};
+        for reason in [
+            ExecutionUnavailable::Queued,
+            ExecutionUnavailable::Acquiring,
+            ExecutionUnavailable::StaleBinding(StaleReason::TaskDirUnavailable),
+            ExecutionUnavailable::StaleBinding(StaleReason::BoardUnreadable),
+        ] {
+            let mut session = make_session();
+            interrupt_board_execution(&mut session, reason);
+            assert!(session.runtime.interruption.is_none(), "{reason:?}");
+            assert_eq!(session.runtime.state, SessionState::WaitingUserInput);
+        }
+    }
+
+    #[test]
+    fn custody_successor_only_is_accepted_at_final_execution_fence() {
+        let mut board = crate::tasks::types::TaskBoard::default();
+        board.transfer_owner("before", 1);
+        let before = TaskMeta {
+            task_id: "task".into(),
+            role: "agents".into(),
+            agent_id: Some("agent".into()),
+            card_id: Some("card".into()),
+            planner_chat_id: Some("before".into()),
+        };
+        board.transfer_owner("after", 2);
+        let mut after = before.clone();
+        after.planner_chat_id = Some("after".into());
+        assert!(custody_equivalent_meta(&board, &before, &after));
+        after.agent_id = Some("foreign".into());
+        assert!(!custody_equivalent_meta(&board, &before, &after));
+        after = before.clone();
+        after.planner_chat_id = Some("foreign".into());
+        assert!(!custody_equivalent_meta(&board, &before, &after));
+    }
+
+    #[test]
+    fn interruption_is_distinct_and_preserves_pause_reasons() {
+        use crate::tasks::admission::{ExecutionUnavailable, StaleReason};
+        let mut session = make_session();
+        interrupt_board_execution(
+            &mut session,
+            ExecutionUnavailable::StaleBinding(StaleReason::TaskDirForeign),
+        );
+        assert_eq!(session.runtime.state, SessionState::Interrupted);
+        assert_eq!(
+            session.runtime.interruption.as_ref().unwrap().condition,
+            "stale_board_attempt/task_dir_foreign"
+        );
+        assert!(board_execution_interrupted(&session));
+        session.runtime.paused = true;
+        session.runtime.pause_reasons.push(PauseReason {
+            reason_type: "confirmation".into(),
+            tool_name: "shell".into(),
+            command: "true".into(),
+            rule: "ask".into(),
+            tool_call_id: "pending".into(),
+            integr_config_path: None,
+        });
+        interrupt_board_execution(&mut session, ExecutionUnavailable::Missing);
+        assert_eq!(session.runtime.state, SessionState::Paused);
+        assert_eq!(session.runtime.pause_reasons.len(), 1);
+        assert_eq!(session.runtime.pause_reasons[0].tool_call_id, "pending");
+        assert!(board_execution_interrupted(&session));
+    }
+
     async fn test_app_with_workspace(
         workspace: &std::path::Path,
     ) -> (crate::app_state::AppState, tempfile::TempDir) {
@@ -1121,7 +1577,7 @@ mod tests {
             let session = session_arc.lock().await;
             payload_roles_carrying_privacy(&session.messages)
         };
-        assert_eq!(loaded_roles, vec!["user", "user"]);
+        assert_eq!(loaded_roles, vec!["user"]);
 
         let rewritten = serde_json::from_str::<serde_json::Value>(
             &tokio::fs::read_to_string(&path).await.unwrap(),
@@ -1131,10 +1587,7 @@ mod tests {
             rewritten["messages"].as_array().unwrap(),
         )
         .unwrap();
-        assert_eq!(
-            payload_roles_carrying_privacy(&stored),
-            vec!["user", "user"]
-        );
+        assert_eq!(payload_roles_carrying_privacy(&stored), vec!["user"]);
     }
 
     #[tokio::test]
@@ -1165,7 +1618,7 @@ mod tests {
             let session = session_arc.lock().await;
             payload_roles_carrying_privacy(&session.messages)
         };
-        assert_eq!(loaded_roles, vec!["user", "user"]);
+        assert_eq!(loaded_roles, vec!["user"]);
 
         let rewritten = serde_json::from_str::<serde_json::Value>(
             &tokio::fs::read_to_string(&path).await.unwrap(),
@@ -1176,10 +1629,7 @@ mod tests {
             rewritten["messages"].as_array().unwrap(),
         )
         .unwrap();
-        assert_eq!(
-            payload_roles_carrying_privacy(&stored),
-            vec!["user", "user"]
-        );
+        assert_eq!(payload_roles_carrying_privacy(&stored), vec!["user"]);
     }
 
     #[tokio::test]

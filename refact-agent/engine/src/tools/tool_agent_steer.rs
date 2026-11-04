@@ -98,6 +98,7 @@ fn state_label(state: SessionState) -> String {
         SessionState::WaitingUserInput => "⏳ Waiting for user input".to_string(),
         SessionState::Completed => "✅ Completed".to_string(),
         SessionState::Error => "❌ Error".to_string(),
+        SessionState::Interrupted => "🔴 Interrupted — restart from planner".to_string(),
     }
 }
 

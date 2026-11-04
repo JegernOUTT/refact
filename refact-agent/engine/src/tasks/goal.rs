@@ -474,32 +474,118 @@ pub async fn hydrate_session_task_goal(
     gcx: Arc<GlobalContext>,
     session_arc: &Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
 ) -> Result<(), String> {
-    let reconcile = session_arc.lock().await.task_goal_partial_write.is_some();
-    if reconcile {
-        commit_session_task_goal(gcx.clone(), session_arc).await?;
-    }
-    let Some(epoch) = TaskGoalSessionEpoch::capture(&gcx, session_arc).await? else {
-        return Ok(());
-    };
-    loop {
-        match hydrate_session_task_goal_once(gcx.clone(), &epoch).await {
-            Err(error) if error == SESSION_BUSY => wait_for_session(session_arc).await,
-            Ok(true) => return commit_session_task_goal(gcx.clone(), session_arc).await,
-            result => return result.map(|_| ()),
+    hydrate_session_task_goal_for_pursuit(gcx, session_arc)
+        .await
+        .map(|_| ())
+}
+
+pub async fn hydrate_session_task_goal_for_pursuit(
+    gcx: Arc<GlobalContext>,
+    session_arc: &Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
+) -> Result<bool, String> {
+    hydrate_session_task_goal_authorized(gcx, session_arc, false).await
+}
+
+pub async fn hydrate_session_task_goal_for_mutation(
+    gcx: Arc<GlobalContext>,
+    session_arc: &Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
+) -> Result<(), String> {
+    hydrate_session_task_goal_authorized(gcx, session_arc, true)
+        .await
+        .map(|_| ())
+}
+
+enum Hydration {
+    Ready,
+    ReadOnly(String),
+    Persist,
+}
+
+async fn hydrate_session_task_goal_authorized(
+    gcx: Arc<GlobalContext>,
+    session_arc: &Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
+    strict: bool,
+) -> Result<bool, String> {
+    let mut repairs = 0;
+    let mut retries = 0u32;
+    'capture: loop {
+        let captured = TaskGoalSessionEpoch::capture(&gcx, session_arc).await;
+        let captured = match captured {
+            Err(error) if error.ends_with("; retry") && retries < 3 => {
+                retries += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(10 * (1 << retries))).await;
+                continue;
+            }
+            result => result?,
+        };
+        let Some(epoch) = captured else {
+            return Ok(true);
+        };
+        let result = loop {
+            match hydrate_session_task_goal_once(gcx.clone(), &epoch).await {
+                Err(error) if error == SESSION_BUSY => wait_for_session(session_arc).await,
+                Err(error) if error.ends_with("; retry") && retries < 3 => {
+                    retries += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(10 * (1 << retries))).await;
+                    continue 'capture;
+                }
+                result => break result?,
+            }
+        };
+        match result {
+            Hydration::Ready => return Ok(true),
+            Hydration::ReadOnly(error) => return if strict { Err(error) } else { Ok(false) },
+            Hydration::Persist => {
+                if repairs == 2 {
+                    return Err("Task goal hold changed repeatedly during hydration; hold retained. Inspect the current task goal and reconcile the pending hold before resuming.".into());
+                }
+                if let Err(error) = commit_session_task_goal(gcx.clone(), session_arc).await {
+                    let board =
+                        super::storage::load_board(gcx.clone(), &epoch.task_meta.task_id).await?;
+                    if let Some(owner) = board
+                        .owner_chat_id
+                        .as_deref()
+                        .filter(|owner| *owner != epoch.chat_id)
+                    {
+                        return if strict {
+                            Err(planner_owner_error(owner))
+                        } else {
+                            Ok(false)
+                        };
+                    }
+                    return Err(format!("Task goal hold/pending write could not be persisted: {error}. Local state retained; retry, or create a new task planner chat to adopt canonical state."));
+                }
+                repairs += 1;
+            }
         }
     }
+}
+
+fn planner_owner_error(owner: &str) -> String {
+    format!("This chat no longer owns the task board; the current planner chat is {owner}. Continue there or transfer ownership.")
 }
 
 async fn hydrate_session_task_goal_once(
     gcx: Arc<GlobalContext>,
     epoch: &TaskGoalSessionEpoch,
-) -> Result<bool, String> {
+) -> Result<Hydration, String> {
     let task_id = &epoch.task_meta.task_id;
     let (_, guard) = super::storage::locked_task_dir(gcx.clone(), task_id).await?;
-    super::storage::load_board_locked(gcx.clone(), task_id, &guard)
-        .await?
-        .require_owner(&epoch.chat_id)?;
+    let board = super::storage::load_board_locked(gcx.clone(), task_id, &guard).await?;
+    if board
+        .owner_chat_id
+        .as_deref()
+        .is_some_and(|owner| owner != epoch.chat_id)
+    {
+        return Ok(Hydration::ReadOnly(planner_owner_error(
+            board.owner_chat_id.as_deref().unwrap(),
+        )));
+    }
+    board.require_owner(&epoch.chat_id)?;
     epoch.validate_task_domain(&gcx, &guard).await?;
+    if epoch.partial_write.is_some() {
+        return Ok(Hydration::Persist);
+    }
     let record = resolve_task_goal_locked(gcx.clone(), task_id, &guard).await?;
     super::storage::load_board_locked(gcx.clone(), task_id, &guard)
         .await?
@@ -518,7 +604,7 @@ async fn hydrate_session_task_goal_once(
             session.set_goal_ledger(ledger);
             session.mark_persisted_runtime_changed();
             session.emit_goal_status();
-            return Ok(true);
+            return Ok(Hydration::Persist);
         }
     }
     if let Some(record) = record {
@@ -528,12 +614,133 @@ async fn hydrate_session_task_goal_once(
                 goal.status,
                 refact_chat_api::GoalStatus::Active | refact_chat_api::GoalStatus::Verifying
             ) && snapshot.as_ref().is_some_and(|canonical| {
-                canonical.status != goal.status || (!goal.active && canonical.active)
+                canonical.status != goal.status
+                    || (!goal.active && canonical.active)
+                    || (goal.status == refact_chat_api::GoalStatus::Stopped
+                        && canonical.stop_reason != goal.stop_reason)
+                    || canonical.snoozed_until_ms != goal.snoozed_until_ms
             })
         }) {
-            return Err(
-                "Task goal hydration would replace a held session goal; retry persistence".into(),
-            );
+            let held = session.goal.as_ref().unwrap().clone();
+            let projection = session.try_accepted_control_projection()?;
+            let mut projected =
+                crate::chat::goal_snapshot_from_messages(&projection.messages, Some(&held))
+                    .ok_or("Task goal hold lost its installed goal")?;
+            if let Some(state) = refact_chat_api::reduce_goal_ledger(&projection.goal_ledger) {
+                state.apply_to_snapshot(&mut projected);
+            }
+            let baseline = session
+                .task_goal_messages
+                .as_ref()
+                .unwrap_or(&projection.messages);
+            let mut local_content = held.clone();
+            local_content.owner = projected.owner.clone();
+            local_content.revision = projected.revision;
+            local_content.active = projected.active;
+            local_content.status = projected.status;
+            local_content.stop_reason = projected.stop_reason.clone();
+            local_content.snoozed_until_ms = projected.snoozed_until_ms;
+            local_content.events = projected.events.clone();
+            let local_content_matches = serde_json::to_value(&local_content)
+                .map_err(|error| error.to_string())?
+                == serde_json::to_value(&projected).map_err(|error| error.to_string())?;
+            // No rebase is needed when these accepted controls still own the
+            // canonical revision. Persist them with the hold instead of losing
+            // an accepted content/ledger update while adopting canonical state.
+            if held.revision == record.revision
+                && held.owner
+                    == Some(GoalOwner::Task {
+                        id: task_id.clone(),
+                    })
+                && local_content_matches
+            {
+                return Ok(Hydration::Persist);
+            }
+            // task_goal_messages includes newly accepted local controls, not
+            // just the last persisted baseline. An advanced canonical revision
+            // may extend that baseline, but must not replace a divergent local
+            // outcome or plan. Pursuit events and delivery stamps are not content.
+            let content_controls =
+                |messages: &[ChatMessage]| -> Result<Vec<serde_json::Value>, String> {
+                    messages
+                        .iter()
+                        .filter(|message| {
+                            control_message(message)
+                                && !(message.role == "event"
+                                    && message.extra["event"]["subkind"].as_str()
+                                        == Some("goal_pursuit"))
+                        })
+                        .map(|message| {
+                            let mut message = message.clone();
+                            message.extra.remove("delivery");
+                            serde_json::to_value(message).map_err(|error| error.to_string())
+                        })
+                        .collect()
+                };
+            let baseline_content = content_controls(baseline)?;
+            let canonical_content = content_controls(&record.messages)?;
+            let common = projection
+                .goal_ledger
+                .iter()
+                .zip(&record.ledger)
+                .take_while(|(local, canonical)| local == canonical)
+                .count();
+            let hold_only = projection.goal_ledger[common..].iter().all(|entry| {
+                matches!(
+                    &entry.op,
+                    refact_chat_api::GoalLedgerOp::StatusChanged {
+                        to: refact_chat_api::GoalStatus::Paused
+                            | refact_chat_api::GoalStatus::Stopped
+                            | refact_chat_api::GoalStatus::BudgetExhausted
+                            | refact_chat_api::GoalStatus::NoProgress,
+                        ..
+                    } | refact_chat_api::GoalLedgerOp::SnoozeSet { .. }
+                )
+            });
+            let messages_hold_only = projection.messages.len() >= baseline.len()
+                && serde_json::to_value(baseline).map_err(|error| error.to_string())?
+                    == serde_json::to_value(&projection.messages[..baseline.len()])
+                        .map_err(|error| error.to_string())?
+                && projection.messages[baseline.len()..].iter().all(|message| {
+                    let event = message
+                        .extra
+                        .get("event")
+                        .unwrap_or(&serde_json::Value::Null);
+                    informational_pursuit_message(message)
+                        || (message.role == "event"
+                            && event["subkind"].as_str() == Some("goal_pursuit")
+                            && matches!(
+                                (event["source"].as_str(), event["payload"]["kind"].as_str()),
+                                (Some("tool.goal_pursuit"), Some("paused" | "snoozed"))
+                                    | (
+                                        Some("chat.command.goal_control" | "chat.session"),
+                                        Some("stopped")
+                                    )
+                            ))
+                });
+            if !messages_hold_only
+                || !hold_only
+                || !canonical_content.starts_with(&baseline_content)
+                || !local_content_matches
+            {
+                return Err("Task goal hold conflicts with local goal content. Local hold retained; create a new task planner chat to transfer ownership and adopt canonical state.".into());
+            }
+            projected = snapshot
+                .clone()
+                .ok_or("Task goal hold lost canonical goal")?;
+            session.set_goal_projection(Some(projected.clone()));
+            session.set_goal_ledger(record.ledger);
+            session.task_goal_messages = Some(record.messages);
+            if projected.status != held.status || projected.stop_reason != held.stop_reason {
+                session.goal_set_status_reason(
+                    held.status,
+                    held.stop_reason.as_deref().unwrap_or("session hold"),
+                );
+            }
+            if projected.snoozed_until_ms != held.snoozed_until_ms {
+                session.goal_set_snooze(held.snoozed_until_ms);
+            }
+            return Ok(Hydration::Persist);
         }
         recover_replayed_controls(&mut session, &record.messages)?;
         if session.task_goal_messages.is_some()
@@ -545,7 +752,7 @@ async fn hydrate_session_task_goal_once(
                         })
             })
         {
-            return Ok(false);
+            return Ok(Hydration::Ready);
         }
         session.set_goal_projection(snapshot);
         session.set_goal_ledger(record.ledger);
@@ -558,7 +765,7 @@ async fn hydrate_session_task_goal_once(
         });
         goal.revision = 0;
     }
-    Ok(false)
+    Ok(Hydration::Ready)
 }
 
 fn recover_contention_hold(
@@ -572,9 +779,7 @@ fn recover_contention_hold(
     let Some(canonical) = record.snapshot(task_id) else {
         return Ok(None);
     };
-    if goal.active
-        || goal.status != refact_chat_api::GoalStatus::Paused
-        || goal.stop_reason.as_deref() != Some(SESSION_BUSY)
+    if goal.status != refact_chat_api::GoalStatus::Paused
         || !canonical.active
         || !matches!(
             canonical.status,
@@ -612,16 +817,33 @@ fn recover_contention_hold(
         op: refact_chat_api::GoalLedgerOp::StatusChanged {
             from: canonical.status,
             to: refact_chat_api::GoalStatus::Paused,
-            reason: SESSION_BUSY.into(),
+            reason: goal
+                .stop_reason
+                .clone()
+                .unwrap_or_else(|| "session hold".into()),
         },
     });
     Ok(Some(ledger))
 }
 
+fn informational_pursuit_message(message: &ChatMessage) -> bool {
+    let event = message
+        .extra
+        .get("event")
+        .unwrap_or(&serde_json::Value::Null);
+    message.role == "event"
+        && event["subkind"].as_str() == Some("goal_pursuit")
+        && event["source"].as_str() == Some("chat.goal_monitor")
+        && matches!(
+            event["payload"]["kind"].as_str(),
+            Some("pursuit_quiescent" | "budget_exhausted" | "no_progress")
+        )
+}
+
 pub(crate) struct TaskGoalPartialWrite {
     session: std::sync::Weak<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
     incarnation: std::sync::Weak<std::sync::atomic::AtomicBool>,
-    identity: serde_json::Value,
+    identity: AuthorityIdentity,
     registered: bool,
     previous_revision: u64,
     previous_goal: Option<GoalSnapshot>,
@@ -695,9 +917,16 @@ impl TaskGoalPartialWrite {
         {
             return Ok(self.record.revision);
         }
+        let informational_suffix = proposed.messages.len() >= self.record.messages.len()
+            && serde_json::to_value(&proposed.messages[..self.record.messages.len()])
+                .map_err(|error| error.to_string())?
+                == serde_json::to_value(&self.record.messages)
+                    .map_err(|error| error.to_string())?
+            && proposed.messages[self.record.messages.len()..]
+                .iter()
+                .all(informational_pursuit_message);
         if proposed.ledger == self.record.ledger
-            && serde_json::to_value(&proposed.messages).map_err(|error| error.to_string())?
-                == serde_json::to_value(&self.record.messages).map_err(|error| error.to_string())?
+            && informational_suffix
             && epoch.goal.as_ref().is_some_and(|goal| {
                 matches!(
                     goal.status,
@@ -715,8 +944,15 @@ impl TaskGoalPartialWrite {
             let accepted =
                 crate::chat::goal_snapshot_from_messages(&proposed.messages, Some(prior))
                     .ok_or("Task goal partial write accepted goal unavailable")?;
-            if serde_json::to_value(Some(accepted)).map_err(|error| error.to_string())?
-                != serde_json::to_value(&epoch.goal).map_err(|error| error.to_string())?
+            let current =
+                crate::chat::goal_snapshot_from_messages(&proposed.messages, epoch.goal.as_ref());
+            // Rebuilding prefers the base message's budget, so it cannot
+            // detect a changed live budget by comparing rebuilt snapshots alone.
+            if serde_json::to_value(epoch.goal.as_ref().map(|goal| &goal.budget))
+                .map_err(|error| error.to_string())?
+                != serde_json::to_value(Some(&prior.budget)).map_err(|error| error.to_string())?
+                || serde_json::to_value(Some(accepted)).map_err(|error| error.to_string())?
+                    != serde_json::to_value(current).map_err(|error| error.to_string())?
             {
                 return Err(
                     "Task goal partial write goal/budget superseded; inspect before retry".into(),
@@ -735,25 +971,26 @@ impl TaskGoalPartialWrite {
                         .extra
                         .get("event")
                         .unwrap_or(&serde_json::Value::Null);
-                    message.role != "event"
-                        || event["subkind"].as_str() != Some("goal_pursuit")
-                        || !matches!(
-                            (
-                                event["source"].as_str(),
-                                event["payload"]["kind"].as_str(),
-                                event["payload"]["trigger"].as_str()
-                            ),
-                            (
-                                Some("chat.command.goal_control"),
-                                Some("stopped"),
-                                Some("goal_control")
-                            ) | (Some("chat.session"), Some("stopped"), Some("manual_abort"))
-                                | (
-                                    Some("tool.goal_pursuit"),
-                                    Some("paused" | "snoozed"),
-                                    Some("pause")
-                                )
-                        )
+                    !informational_pursuit_message(message)
+                        && (message.role != "event"
+                            || event["subkind"].as_str() != Some("goal_pursuit")
+                            || !matches!(
+                                (
+                                    event["source"].as_str(),
+                                    event["payload"]["kind"].as_str(),
+                                    event["payload"]["trigger"].as_str()
+                                ),
+                                (
+                                    Some("chat.command.goal_control"),
+                                    Some("stopped"),
+                                    Some("goal_control")
+                                ) | (Some("chat.session"), Some("stopped"), Some("manual_abort"))
+                                    | (
+                                        Some("tool.goal_pursuit"),
+                                        Some("paused" | "snoozed"),
+                                        Some("pause")
+                                    )
+                            ))
                 })
             || !proposed.ledger.starts_with(&self.record.ledger)
         {
@@ -827,13 +1064,22 @@ impl TaskGoalPartialWrite {
             .previous_goal
             .clone()
             .ok_or("Task goal partial write prior goal unavailable")?;
+        if serde_json::to_value(&prior.budget).map_err(|error| error.to_string())?
+            != serde_json::to_value(&goal.budget).map_err(|error| error.to_string())?
+        {
+            return Err(
+                "Task goal partial write goal/budget superseded; inspect before retry".into(),
+            );
+        }
         prior.status = goal.status;
         prior.stop_reason = goal.stop_reason.clone();
         prior.snoozed_until_ms = goal.snoozed_until_ms;
         let prior = crate::chat::goal_snapshot_from_messages(&proposed.messages, Some(&prior))
             .ok_or("Task goal partial write accepted goal unavailable")?;
+        let current = crate::chat::goal_snapshot_from_messages(&proposed.messages, Some(goal))
+            .ok_or("Task goal partial write current goal unavailable")?;
         if serde_json::to_value(prior).map_err(|error| error.to_string())?
-            != serde_json::to_value(goal).map_err(|error| error.to_string())?
+            != serde_json::to_value(current).map_err(|error| error.to_string())?
         {
             return Err(
                 "Task goal partial write goal/budget superseded; inspect before retry".into(),
@@ -843,19 +1089,39 @@ impl TaskGoalPartialWrite {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct AuthorityIdentity {
+    chat_id: String,
+    task_meta: Option<refact_chat_api::TaskMeta>,
+    source_root: Option<std::path::PathBuf>,
+    closed: bool,
+    closed_flag: bool,
+    restore_pending: bool,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+struct GoalControlFence {
+    goal: serde_json::Value,
+    ledger: Vec<GoalLedgerEntry>,
+    verification_generation: u64,
+    pause_revision: u64,
+    pause: serde_json::Value,
+    controls: Vec<serde_json::Value>,
+}
+
 struct TaskGoalSessionEpoch {
     session: Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
     incarnation: std::sync::Weak<std::sync::atomic::AtomicBool>,
     registered: bool,
     chat_id: String,
     task_meta: refact_chat_api::TaskMeta,
-    identity: serde_json::Value,
+    identity: AuthorityIdentity,
     goal: Option<GoalSnapshot>,
     source_root: Option<std::path::PathBuf>,
     verification_generation: u64,
     partial_write: Option<Arc<TaskGoalPartialWrite>>,
     operation: std::sync::OnceLock<Arc<TaskGoalPartialWrite>>,
-    state: serde_json::Value,
+    state: GoalControlFence,
 }
 
 impl TaskGoalSessionEpoch {
@@ -863,40 +1129,62 @@ impl TaskGoalSessionEpoch {
         self.operation.get().or(self.partial_write.as_ref())
     }
 
-    fn identity(session: &crate::chat::types::ChatSession) -> Result<serde_json::Value, String> {
-        serde_json::to_value((
-            &session.chat_id,
-            &session.thread,
-            &session.work_project_root,
-            &session.created_at,
-            session.closed,
-            session
+    fn identity(session: &crate::chat::types::ChatSession) -> Result<AuthorityIdentity, String> {
+        Ok(AuthorityIdentity {
+            chat_id: session.chat_id.clone(),
+            task_meta: session.thread.task_meta.clone(),
+            source_root: crate::coordination::scope::session_source_root(session),
+            closed: session.closed,
+            closed_flag: session
                 .closed_flag
                 .load(std::sync::atomic::Ordering::Relaxed),
-            session.board_restored_pending_tools,
-        ))
-        .map_err(|error| error.to_string())
+            restore_pending: session.board_restored_pending_tools,
+        })
     }
 
-    fn state(session: &crate::chat::types::ChatSession) -> Result<serde_json::Value, String> {
-        serde_json::to_value((
-            session.trajectory_version,
-            session.goal_verification_generation,
-            session.planner_pause_revision,
-            session
-                .planner_pause
-                .as_ref()
-                .map(|pause| (&pause.since, &pause.by)),
-            &session.thread,
-            &session.work_project_root,
-            &session.goal,
-            &session.goal_ledger,
-            &session.messages,
-            &session.task_goal_messages,
-            &session.post_tool_side_effects,
-            &session.pending_deliveries,
-        ))
-        .map_err(|error| error.to_string())
+    fn state(session: &crate::chat::types::ChatSession) -> Result<GoalControlFence, String> {
+        let projection = match session.try_accepted_control_projection() {
+            Ok(projection) => projection,
+            Err(error) => {
+                let mut recovered = crate::chat::types::ChatSession::new(session.chat_id.clone());
+                recovered.messages = session.messages.clone();
+                let controls = session
+                    .task_goal_messages
+                    .as_deref()
+                    .unwrap_or(&session.messages);
+                if !recover_replayed_controls(&mut recovered, controls)? {
+                    return Err(error);
+                }
+                recovered.task_goal_messages = session.task_goal_messages.clone();
+                recovered.post_tool_side_effects = session.post_tool_side_effects.clone();
+                recovered.pending_deliveries = session.pending_deliveries.clone();
+                recovered.try_accepted_control_projection()?
+            }
+        };
+        let controls = projection
+            .messages
+            .iter()
+            .filter(|m| control_message(m))
+            .map(|message| {
+                let mut message = message.clone();
+                message.extra.remove("delivery");
+                serde_json::to_value(message).map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(GoalControlFence {
+            goal: serde_json::to_value(&session.goal).map_err(|error| error.to_string())?,
+            ledger: session.goal_ledger.clone(),
+            verification_generation: session.goal_verification_generation,
+            pause_revision: session.planner_pause_revision,
+            pause: serde_json::to_value(
+                session
+                    .planner_pause
+                    .as_ref()
+                    .map(|pause| (&pause.since, &pause.by)),
+            )
+            .map_err(|error| error.to_string())?,
+            controls,
+        })
     }
 
     async fn capture(
@@ -986,10 +1274,7 @@ impl TaskGoalSessionEpoch {
     fn lock_current(
         &self,
     ) -> Result<tokio::sync::MutexGuard<'_, crate::chat::types::ChatSession>, String> {
-        let session = self
-            .session
-            .try_lock()
-            .map_err(|_| SESSION_BUSY)?;
+        let session = self.session.try_lock().map_err(|_| SESSION_BUSY)?;
         if session.chat_id != self.chat_id
             || session.thread.task_meta.as_ref() != Some(&self.task_meta)
             || Self::identity(&session)? != self.identity
@@ -1254,6 +1539,9 @@ async fn commit_session_task_goal_once(
                     "{error}; held session goal retained without rollback"
                 ));
             }
+            if let Err(reload_error) = &authoritative {
+                return Err(format!("{error}; canonical goal reload failed: {reload_error}; local controls retained"));
+            }
             session
                 .post_tool_side_effects
                 .retain(|message| !control_message(message));
@@ -1283,11 +1571,6 @@ async fn commit_session_task_goal_once(
                     format!("{error}; canonical goal reload failed: {reload_error}")
                 }
             };
-            if let Some(goal) = session.goal.as_mut() {
-                goal.active = false;
-                goal.status = refact_chat_api::GoalStatus::Paused;
-                goal.stop_reason = Some(error.clone());
-            }
             session.command_queue.retain(|request| {
                 !matches!(&request.command, refact_chat_api::ChatCommand::Regenerate {})
                     && !matches!(&request.command, refact_chat_api::ChatCommand::GoalControl { action }
@@ -1304,15 +1587,16 @@ pub async fn preflight_planner_transition(
     gcx: Arc<GlobalContext>,
     task_id: &str,
     source_chat_id: &str,
+    destination_chat_id: &str,
     source_goal: Option<&GoalSnapshot>,
 ) -> Result<Option<TaskGoalRecord>, String> {
     let board = super::storage::load_board(gcx.clone(), task_id).await?;
     if board
         .owner_chat_id
         .as_deref()
-        .is_some_and(|owner| owner != source_chat_id)
+        .is_some_and(|owner| owner != source_chat_id && owner != destination_chat_id)
     {
-        return Err("Task planner is controlled by another chat".into());
+        return board.require_owner(source_chat_id).map(|_| None);
     }
     let canonical = resolve_task_goal(gcx, task_id).await?;
     let same_goal =
@@ -1337,20 +1621,31 @@ pub async fn move_planner_controller(
     let expected_owner = super::storage::load_board(gcx.clone(), task_id)
         .await?
         .owner_chat_id;
+    if expected_owner.as_deref() == Some(chat_id) {
+        if let Err(error) = super::custody::rebind_task_agents(gcx, task_id).await {
+            tracing::warn!(%error, "committed planner custody reconciliation deferred");
+        }
+        return Ok(());
+    }
     if expected_owner
         .as_deref()
         .is_some_and(|owner| owner != source_chat_id)
     {
-        return Err("Task planner is controlled by another chat".into());
+        return Err(format!("This chat no longer owns task board {task_id}; the current planner chat is {}. Continue there or transfer ownership.", expected_owner.as_deref().unwrap()));
     }
-    super::storage::update_board_atomic(gcx, task_id, |board| {
+    super::storage::update_board_atomic(gcx.clone(), task_id, |board| {
         if board.owner_chat_id != expected_owner {
             return Err("Task planner owner changed during transfer".into());
         }
-        board.owner_chat_id = Some(chat_id.into());
+        board
+            .try_transfer_owner(chat_id, chrono::Utc::now().timestamp_millis().max(0) as u64)
+            .map_err(|error| error.to_string())?;
         Ok(())
     })
     .await?;
+    if let Err(error) = super::custody::rebind_task_agents(gcx, task_id).await {
+        tracing::warn!(%error, "committed planner custody reconciliation deferred");
+    }
     Ok(())
 }
 
@@ -1418,6 +1713,60 @@ mod tests {
     };
     use tokio::sync::Mutex;
 
+    #[tokio::test]
+    async fn committed_handoff_survives_rebind_failure_and_preflight_retry() {
+        let (_temp, app, task, _, _, _) =
+            crate::chat::task_agent_monitor::tests::setup_monitor_case(
+                "doing",
+                crate::chat::types::SessionState::Idle,
+                std::time::Duration::ZERO,
+                vec![],
+            )
+            .await;
+        super::super::storage::update_board_atomic(app.gcx.clone(), &task, |board| {
+            board.transfer_owner("planner-test", 1);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        super::super::custody::REBIND_FAILURE
+            .scope(true, async {
+                move_planner_controller(app.gcx.clone(), &task, "planner-test", "destination")
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    super::super::storage::load_board(app.gcx.clone(), &task)
+                        .await
+                        .unwrap()
+                        .owner_chat_id
+                        .as_deref(),
+                    Some("destination")
+                );
+                preflight_planner_transition(
+                    app.gcx.clone(),
+                    &task,
+                    "planner-test",
+                    "destination",
+                    None,
+                )
+                .await
+                .unwrap();
+                move_planner_controller(app.gcx.clone(), &task, "planner-test", "destination")
+                    .await
+                    .unwrap();
+                assert!(preflight_planner_transition(
+                    app.gcx.clone(),
+                    &task,
+                    "planner-test",
+                    "third-party",
+                    None
+                )
+                .await
+                .is_err());
+            })
+            .await;
+    }
+
     fn replayed_session(chat_id: &str) -> (ChatSession, Vec<ChatMessage>) {
         let mut goal = crate::chat::internal_roles::goal(
             "task_planner",
@@ -1467,6 +1816,395 @@ mod tests {
         .await
         .unwrap();
         (temp, AppState::from_gcx(gcx).await, task.id, chat_id)
+    }
+
+    #[tokio::test]
+    async fn partial_write_reconciles_quiescent_event_without_a_hold() {
+        let (temp, app, task_id, chat_id) = task_fixture().await;
+        let mut session = ChatSession::new(chat_id.clone());
+        session.thread.task_meta = Some(TaskMeta {
+            task_id: task_id.clone(),
+            role: "planner".into(),
+            planner_chat_id: Some(chat_id.clone()),
+            ..Default::default()
+        });
+        session.work_project_root = Some(dunce::canonicalize(temp.path()).unwrap());
+        session.install_goal(
+            "task_planner",
+            "retain approved work",
+            true,
+            Default::default(),
+        );
+        session.ensure_goal_ledger_installed();
+        let session = Arc::new(Mutex::new(session));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.clone(), session.clone());
+        commit_session_task_goal(app.gcx.clone(), &session)
+            .await
+            .unwrap();
+        let prior = resolve_task_goal(app.gcx.clone(), &task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut own = prior.clone();
+        own.revision += 1;
+        let epoch = TaskGoalSessionEpoch::capture(&app.gcx, &session)
+            .await
+            .unwrap()
+            .unwrap();
+        let (_, guard) = super::super::storage::locked_task_dir(app.gcx.clone(), &task_id)
+            .await
+            .unwrap();
+        let partial = epoch
+            .begin_write(&app.gcx, &guard, prior.revision, &own)
+            .await
+            .unwrap();
+        write_record(&guard.dir().join("goal.json"), &own)
+            .await
+            .unwrap();
+        partial.outcome.set(Ok(())).unwrap();
+        drop(guard);
+        let mut pending = session.lock().await;
+        pending.draft_message = Some(ChatMessage::new("assistant".into(), "draft".into()));
+        let events_before = pending.goal.as_ref().unwrap().events.len();
+        pending.enqueue_delivery(crate::chat::types::PendingDelivery::new(
+            vec![crate::chat::internal_roles::event(
+                crate::chat::internal_roles::EventSubkind::GoalPursuit,
+                "chat.goal_monitor",
+                serde_json::json!({"kind":"pursuit_quiescent", "trigger":"monitor", "at_ms":44}),
+                "Goal pursuit paused: agent idle with no progress; will resume on your next message.",
+            )],
+            crate::chat::types::PushMode::Append,
+            "chat.goal_monitor",
+            false,
+        )).unwrap();
+        assert_eq!(pending.pending_deliveries.len(), 1);
+        assert_eq!(pending.goal.as_ref().unwrap().events.len(), events_before);
+        drop(pending);
+        hydrate_session_task_goal(app.gcx.clone(), &session)
+            .await
+            .unwrap();
+        let reconciled = resolve_task_goal(app.gcx.clone(), &task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reconciled.revision, own.revision + 1);
+        assert_eq!(reconciled.ledger, own.ledger);
+        assert_eq!(reconciled.messages.len(), own.messages.len() + 1);
+        assert_eq!(
+            reconciled.messages.last().unwrap().extra["event"]["payload"]["kind"],
+            "pursuit_quiescent"
+        );
+        assert_eq!(
+            reconciled.snapshot(&task_id).unwrap().status,
+            GoalStatus::Active
+        );
+        assert!(session.lock().await.task_goal_partial_write.is_none());
+        assert!(
+            crate::chat::linearize::apply_summarization_linearize(reconciled.messages)
+                .unwrap()
+                .iter()
+                .all(|message| message.extra.get("event").is_none())
+        );
+    }
+
+    #[tokio::test]
+    async fn nonowner_hydration_retains_partial_write_and_skips_pursuit() {
+        let (temp, app, task_id, chat_id) = task_fixture().await;
+        let mut session = ChatSession::new(chat_id.clone());
+        session.thread.task_meta = Some(TaskMeta {
+            task_id: task_id.clone(),
+            role: "planner".into(),
+            planner_chat_id: Some(chat_id.clone()),
+            ..Default::default()
+        });
+        session.work_project_root = Some(dunce::canonicalize(temp.path()).unwrap());
+        session.install_goal(
+            "task_planner",
+            "retain approved work",
+            true,
+            Default::default(),
+        );
+        session.ensure_goal_ledger_installed();
+        let session = Arc::new(Mutex::new(session));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.clone(), session.clone());
+        commit_session_task_goal(app.gcx.clone(), &session)
+            .await
+            .unwrap();
+        let canonical = resolve_task_goal(app.gcx.clone(), &task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let epoch = TaskGoalSessionEpoch::capture(&app.gcx, &session)
+            .await
+            .unwrap()
+            .unwrap();
+        let (_, guard) = super::super::storage::locked_task_dir(app.gcx.clone(), &task_id)
+            .await
+            .unwrap();
+        let partial = epoch
+            .begin_write(&app.gcx, &guard, canonical.revision, &canonical)
+            .await
+            .unwrap();
+        assert!(partial.outcome.get().is_none());
+        drop(guard);
+        super::super::storage::update_board_atomic(app.gcx.clone(), &task_id, |board| {
+            board.owner_chat_id = Some("new-planner".into());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let before = TaskGoalSessionEpoch::state(&*session.lock().await).unwrap();
+        hydrate_session_task_goal(app.gcx.clone(), &session)
+            .await
+            .unwrap();
+        assert!(
+            !hydrate_session_task_goal_for_pursuit(app.gcx.clone(), &session)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !crate::chat::goal_monitor::handle_goal_turn_end(app.clone(), session.clone()).await
+        );
+        assert!(matches!(
+            crate::chat::goal_verifier::verify_goal_before_completion(
+                app.clone(),
+                session.clone(),
+                "turn_end"
+            )
+            .await,
+            crate::chat::goal_verifier::GoalCompletionGateOutcome::Passthrough
+        ));
+        let error = hydrate_session_task_goal_for_mutation(app.gcx.clone(), &session)
+            .await
+            .unwrap_err();
+        assert_eq!(error, "This chat no longer owns the task board; the current planner chat is new-planner. Continue there or transfer ownership.");
+        let held = session.lock().await;
+        assert_eq!(TaskGoalSessionEpoch::state(&held).unwrap(), before);
+        assert!(Arc::ptr_eq(
+            held.task_goal_partial_write.as_ref().unwrap(),
+            &partial
+        ));
+        drop(held);
+        assert_eq!(
+            serde_json::to_value(
+                resolve_task_goal(app.gcx.clone(), &task_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            )
+            .unwrap(),
+            serde_json::to_value(canonical).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn held_goal_hydration_rebases_after_owner_returns() {
+        let (temp, app, task_id, chat_id) = task_fixture().await;
+        let mut session = ChatSession::new(chat_id.clone());
+        session.thread.task_meta = Some(TaskMeta {
+            task_id: task_id.clone(),
+            role: "planner".into(),
+            planner_chat_id: Some(chat_id.clone()),
+            ..Default::default()
+        });
+        session.work_project_root = Some(dunce::canonicalize(temp.path()).unwrap());
+        session.install_goal(
+            "task_planner",
+            "retain approved work",
+            true,
+            Default::default(),
+        );
+        session.ensure_goal_ledger_installed();
+        let session = Arc::new(Mutex::new(session));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.clone(), session.clone());
+        commit_session_task_goal(app.gcx.clone(), &session)
+            .await
+            .unwrap();
+        let canonical = resolve_task_goal(app.gcx.clone(), &task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(session
+            .lock()
+            .await
+            .goal_set_status_reason(GoalStatus::Paused, "user pause"));
+        super::super::storage::update_board_atomic(app.gcx.clone(), &task_id, |board| {
+            board.owner_chat_id = Some("other-planner".into());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(
+            !hydrate_session_task_goal_for_pursuit(app.gcx.clone(), &session)
+                .await
+                .unwrap()
+        );
+        let mut messages = canonical.messages.clone();
+        messages.push(crate::chat::internal_roles::goal_delta(
+            "task_planner",
+            serde_json::json!({"seq":1}),
+            "new canonical outcome",
+        ));
+        let newer = commit_task_goal(
+            app.gcx.clone(),
+            &task_id,
+            "other-planner",
+            canonical.revision,
+            messages,
+            canonical.ledger,
+        )
+        .await
+        .unwrap();
+        assert!(newer.revision > canonical.revision);
+        super::super::storage::update_board_atomic(app.gcx.clone(), &task_id, |board| {
+            board.owner_chat_id = Some(chat_id.clone());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(
+            hydrate_session_task_goal_for_pursuit(app.gcx.clone(), &session)
+                .await
+                .unwrap()
+        );
+        let rebased = resolve_task_goal(app.gcx.clone(), &task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rebased.revision, newer.revision + 1);
+        assert_eq!(
+            serde_json::to_value(&rebased.messages).unwrap(),
+            serde_json::to_value(&newer.messages).unwrap()
+        );
+        assert!(rebased.ledger.starts_with(&newer.ledger));
+        assert_eq!(
+            rebased.snapshot(&task_id).unwrap().status,
+            GoalStatus::Paused
+        );
+        assert_eq!(
+            session.lock().await.goal.as_ref().unwrap().revision,
+            rebased.revision
+        );
+        {
+            let mut local = session.lock().await;
+            let goal = local.goal.as_mut().unwrap();
+            goal.owner = Some(GoalOwner::Chat {
+                id: chat_id.clone(),
+            });
+            goal.revision = rebased.revision + 100;
+            local.goal_set_status_reason(GoalStatus::Stopped, "user stop");
+        }
+        assert!(
+            hydrate_session_task_goal_for_pursuit(app.gcx.clone(), &session)
+                .await
+                .unwrap()
+        );
+        let stopped = resolve_task_goal(app.gcx.clone(), &task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stopped.revision, rebased.revision + 1);
+        assert_eq!(
+            stopped.snapshot(&task_id).unwrap().status,
+            GoalStatus::Stopped
+        );
+        assert_eq!(
+            stopped.snapshot(&task_id).unwrap().stop_reason.as_deref(),
+            Some("user stop")
+        );
+    }
+
+    #[tokio::test]
+    async fn held_goal_hydration_refuses_local_content_conflict() {
+        let (temp, app, task_id, chat_id) = task_fixture().await;
+        let mut session = ChatSession::new(chat_id.clone());
+        session.thread.task_meta = Some(TaskMeta {
+            task_id: task_id.clone(),
+            role: "planner".into(),
+            planner_chat_id: Some(chat_id.clone()),
+            ..Default::default()
+        });
+        session.work_project_root = Some(dunce::canonicalize(temp.path()).unwrap());
+        session.install_goal(
+            "task_planner",
+            "retain approved work",
+            true,
+            Default::default(),
+        );
+        session.ensure_goal_ledger_installed();
+        let session = Arc::new(Mutex::new(session));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.clone(), session.clone());
+        commit_session_task_goal(app.gcx.clone(), &session)
+            .await
+            .unwrap();
+        let canonical = resolve_task_goal(app.gcx.clone(), &task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(session
+            .lock()
+            .await
+            .goal_set_status_reason(GoalStatus::Paused, "user pause"));
+        session
+            .lock()
+            .await
+            .add_message(crate::chat::internal_roles::goal_delta(
+                "task_planner",
+                serde_json::json!({"seq":1}),
+                "unpersisted local outcome",
+            ));
+        let mut messages = canonical.messages.clone();
+        messages.push(crate::chat::internal_roles::goal_delta(
+            "task_planner",
+            serde_json::json!({"seq":1}),
+            "new canonical outcome",
+        ));
+        let newer = commit_task_goal(
+            app.gcx.clone(),
+            &task_id,
+            &chat_id,
+            canonical.revision,
+            messages,
+            canonical.ledger,
+        )
+        .await
+        .unwrap();
+        assert!(newer.revision > canonical.revision);
+        let before = TaskGoalSessionEpoch::state(&*session.lock().await).unwrap();
+        let error = hydrate_session_task_goal(app.gcx.clone(), &session)
+            .await
+            .unwrap_err();
+        assert_eq!(error, "Task goal hold conflicts with local goal content. Local hold retained; create a new task planner chat to transfer ownership and adopt canonical state.");
+        assert_eq!(
+            TaskGoalSessionEpoch::state(&*session.lock().await).unwrap(),
+            before
+        );
+        assert_eq!(
+            serde_json::to_value(
+                resolve_task_goal(app.gcx.clone(), &task_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            )
+            .unwrap(),
+            serde_json::to_value(newer).unwrap()
+        );
     }
 
     #[tokio::test]
@@ -1529,9 +2267,23 @@ mod tests {
         held.add_message(ChatMessage::new("user".into(), "new accepted input".into()));
         let state = TaskGoalSessionEpoch::state(&held).unwrap();
         drop(held);
-        assert_eq!(hydration.await.unwrap_err(), "Task goal session changed while awaiting persistence; retry");
+        hydration.await.unwrap();
         assert_eq!(TaskGoalSessionEpoch::state(&*session.lock().await).unwrap(), state);
+        assert_eq!(session.lock().await.messages.last().unwrap().content.content_text_only(), "new accepted input");
         assert_eq!(resolve_task_goal(app.gcx.clone(), &task_id).await.unwrap().unwrap().revision, before.revision);
+
+        let (_, board) = super::super::storage::locked_task_dir(app.gcx.clone(), &task_id).await.unwrap();
+        let waiting = Arc::new(tokio::sync::Notify::new());
+        let mut hydration = Box::pin(super::super::storage::TASK_BOARD_LOCK_WAIT.scope(
+            waiting.clone(), hydrate_session_task_goal(app.gcx.clone(), &session)));
+        tokio::select! {
+            result = &mut hydration => panic!("hydration returned before retry setup: {result:?}"),
+            _ = waiting.notified() => {}
+        }
+        session.lock().await.goal_verification_generation += 1;
+        drop(board);
+        hydration.await.unwrap();
+        assert_eq!(session.lock().await.goal.as_ref().unwrap().revision, before.revision);
         }).await.expect("task goal recovery regression timed out");
     }
 
@@ -1564,7 +2316,7 @@ mod tests {
                 result = &mut writer => panic!("write returned before durable pending barrier: {result:?}"),
                 _ = pending.notified() => {}
             }
-            let held = session.lock().await;
+            let mut held = session.lock().await;
             resume.notify_one();
             tokio::select! {
                 result = &mut writer => panic!("post-write contention must wait: {result:?}"),
@@ -1574,6 +2326,11 @@ mod tests {
             let own = resolve_task_goal(app.gcx.clone(), &task_id).await.unwrap().unwrap();
             assert_eq!(own.revision, before.revision + 1);
             assert_eq!(held.goal.as_ref().unwrap().revision, before.revision);
+            held.thread.model = "concurrent/model-selection".into();
+            held.trajectory_version += 1;
+            held.pending_deliveries.push_back(crate::chat::types::PendingDelivery::new(
+                vec![ChatMessage::new("user".into(), "unrelated delivery".into())],
+                crate::chat::types::PushMode::Append, "test", false));
             let canonical = if competing {
                 let mut messages = own.messages.clone();
                 messages.push(crate::chat::internal_roles::goal_delta(
@@ -1593,11 +2350,133 @@ mod tests {
                 let held = session.lock().await;
                 assert_eq!(held.goal.as_ref().unwrap().revision, own.revision);
                 assert!(held.task_goal_partial_write.is_none());
+                assert_eq!(held.thread.model, "concurrent/model-selection");
+                assert_eq!(held.pending_deliveries.back().unwrap().messages[0].content.content_text_only(), "unrelated delivery");
             }
             let after = resolve_task_goal(app.gcx.clone(), &task_id).await.unwrap().unwrap();
             assert_eq!(serde_json::to_value(after).unwrap(), serde_json::to_value(canonical).unwrap());
         }
         }).await.expect("task goal recovery regression timed out");
+    }
+
+    #[tokio::test]
+    async fn goal_fence_tracks_control_payload_not_delivery_transport() {
+        let (temp, app, task_id, chat_id) = task_fixture().await;
+        let mut local = ChatSession::new(chat_id.clone());
+        local.thread.task_meta = Some(TaskMeta {
+            task_id,
+            role: "planner".into(),
+            planner_chat_id: Some(chat_id.clone()),
+            ..Default::default()
+        });
+        local.work_project_root = Some(dunce::canonicalize(temp.path()).unwrap());
+        local.install_goal("task_planner", "approved", true, Default::default());
+        let delta = crate::chat::internal_roles::goal_delta(
+            "test",
+            serde_json::json!({"seq":1}),
+            "accepted correction",
+        );
+        local
+            .pending_deliveries
+            .push_back(crate::chat::types::PendingDelivery::new(
+                vec![delta],
+                crate::chat::types::PushMode::Append,
+                "test",
+                false,
+            ));
+        let session = Arc::new(Mutex::new(local));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id, session.clone());
+        let epoch = TaskGoalSessionEpoch::capture(&app.gcx, &session)
+            .await
+            .unwrap()
+            .unwrap();
+        {
+            let mut local = session.lock().await;
+            let mut delta = local
+                .pending_deliveries
+                .pop_front()
+                .unwrap()
+                .messages
+                .remove(0);
+            delta
+                .extra
+                .insert("delivery".into(), serde_json::json!({"source":"test"}));
+            local.messages.push(delta);
+        }
+        epoch.validate(&app.gcx).await.unwrap();
+        session.lock().await.messages.last_mut().unwrap().content =
+            crate::call_validation::ChatContent::SimpleText("changed same-ID correction".into());
+        assert_eq!(
+            epoch.validate(&app.gcx).await.unwrap_err(),
+            "Task goal session changed while awaiting persistence; retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_commit_restores_canonical_without_creating_pause() {
+        let (temp, app, task_id, chat_id) = task_fixture().await;
+        let mut local = ChatSession::new(chat_id.clone());
+        local.thread.task_meta = Some(TaskMeta {
+            task_id: task_id.clone(),
+            role: "planner".into(),
+            planner_chat_id: Some(chat_id.clone()),
+            ..Default::default()
+        });
+        local.work_project_root = Some(dunce::canonicalize(temp.path()).unwrap());
+        local.install_goal("task_planner", "approved", true, Default::default());
+        let session = Arc::new(Mutex::new(local));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.clone(), session.clone());
+        commit_session_task_goal(app.gcx.clone(), &session)
+            .await
+            .unwrap();
+        let prior = resolve_task_goal(app.gcx.clone(), &task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut controls = prior.messages.clone();
+        controls.push(crate::chat::internal_roles::goal_delta(
+            "test",
+            serde_json::json!({"seq":1}),
+            "canonical correction",
+        ));
+        let canonical = commit_task_goal(
+            app.gcx.clone(),
+            &task_id,
+            &chat_id,
+            prior.revision,
+            controls,
+            prior.ledger,
+        )
+        .await
+        .unwrap();
+        session
+            .lock()
+            .await
+            .add_message(crate::chat::internal_roles::goal_delta(
+                "test",
+                serde_json::json!({"seq":1}),
+                "stale local correction",
+            ));
+        assert!(commit_session_task_goal(app.gcx.clone(), &session)
+            .await
+            .unwrap_err()
+            .contains("revision conflict"));
+        let local = session.lock().await;
+        assert_eq!(
+            serde_json::to_value(&local.goal).unwrap(),
+            serde_json::to_value(canonical.snapshot(&task_id)).unwrap()
+        );
+        assert!(local.goal.as_ref().unwrap().active);
+        assert_eq!(local.goal.as_ref().unwrap().status, GoalStatus::Active);
+        assert_eq!(local.goal.as_ref().unwrap().stop_reason, None);
     }
 
     #[tokio::test]
@@ -1911,6 +2790,7 @@ mod tests {
                     "user".into(),
                     "new conversation while own write is pending".into(),
                 ));
+                session.goal_verification_generation += 1;
                 assert!(session.trajectory_version > version);
                 session
                     .command_queue
@@ -1949,6 +2829,7 @@ mod tests {
                     .unwrap_err(),
                 format!("Task goal revision {} persisted; session projection not applied: Task goal session changed while awaiting persistence; retry", prior.revision + 1)
             );
+            restored.lock().await.goal_verification_generation -= 1;
             let bytes = tokio::fs::read(&goal_path).await.unwrap();
             let own: TaskGoalRecord = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(own.revision, prior.revision + 1);
@@ -2192,14 +3073,9 @@ mod tests {
             .scope(
                 chat_id.clone(),
                 binding.scope(async {
-                    assert!(hydrate_session_task_goal(app.gcx.clone(), &restored)
+                    hydrate_session_task_goal(app.gcx.clone(), &restored)
                         .await
-                        .unwrap_err()
-                        .contains("held session goal"));
-                    assert_eq!(
-                        TaskGoalSessionEpoch::state(&*restored.lock().await).unwrap(),
-                        held
-                    );
+                        .unwrap();
                     commit_session_task_goal(app.gcx.clone(), &restored)
                         .await
                         .unwrap();
@@ -2285,6 +3161,12 @@ mod tests {
                 serde_json::json!({"kind":"paused", "trigger":"pause", "at_ms":43}),
                 "Goal pursuit paused. Latest user hold.",
             ));
+            session.add_message(crate::chat::internal_roles::event(
+                crate::chat::internal_roles::EventSubkind::GoalPursuit,
+                "chat.goal_monitor",
+                serde_json::json!({"kind":"pursuit_quiescent", "trigger":"monitor", "at_ms":44}),
+                "Goal pursuit paused: agent idle with no progress; will resume on your next message.",
+            ));
             assert!(session
                 .task_goal_partial_write
                 .as_ref()
@@ -2358,7 +3240,7 @@ mod tests {
             serde_json::to_value(&reconciled.messages[..partial.messages.len()]).unwrap(),
             serde_json::to_value(&partial.messages).unwrap()
         );
-        assert_eq!(reconciled.messages.len(), partial.messages.len() + 1);
+        assert_eq!(reconciled.messages.len(), partial.messages.len() + 2);
         assert!(reconciled.ledger.starts_with(&partial.ledger));
         {
             let session = restored.lock().await;
@@ -2539,7 +3421,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replay_recovery_refuses_nonowner_and_foreign_duplicate_without_mutation() {
+    async fn replay_recovery_keeps_nonowner_readable_and_refuses_foreign_duplicate() {
         let (temp, app, task_id, owner) = task_fixture().await;
         let binding = super::super::storage::TaskDirectoryBinding::capture(
             app.gcx.clone(),
@@ -2687,11 +3569,10 @@ mod tests {
             .unwrap();
         let goal_bytes = tokio::fs::read(dir.join("goal.json")).await.unwrap();
         let board_bytes = tokio::fs::read(dir.join("board.yaml")).await.unwrap();
-        assert!(binding
+        binding
             .scope(hydrate_session_task_goal(app.gcx.clone(), &session))
             .await
-            .unwrap_err()
-            .contains("owning planner"));
+            .unwrap();
         assert_eq!(
             tokio::fs::read(dir.join("goal.json")).await.unwrap(),
             goal_bytes

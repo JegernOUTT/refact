@@ -56,6 +56,7 @@ fn card() -> BoardCard {
 
 fn verifier_report(passed: bool) -> VerifierReport {
     VerifierReport {
+        notes: Vec::new(),
         passed,
         command_results: vec![VerificationResult {
             command: "cargo test".to_string(),

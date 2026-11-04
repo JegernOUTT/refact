@@ -79,6 +79,7 @@ pub(crate) enum AgentStateKind {
     Queued,
     Parked,
     Stuck,
+    Interrupted,
     Failed,
     Done,
     Paused,
@@ -127,6 +128,7 @@ impl AgentStatusQuery {
                 AgentStateKind::Queued,
                 AgentStateKind::Parked,
                 AgentStateKind::Stuck,
+                AgentStateKind::Interrupted,
                 AgentStateKind::Failed,
                 AgentStateKind::Paused,
             ]))
@@ -334,6 +336,9 @@ fn parse_status_filter(values: &[String]) -> Result<Option<HashSet<AgentStateKin
             "done" => {
                 result.insert(AgentStateKind::Done);
             }
+            "interrupted" => {
+                result.insert(AgentStateKind::Interrupted);
+            }
             "paused" => {
                 result.insert(AgentStateKind::Paused);
             }
@@ -392,8 +397,30 @@ pub(crate) async fn get_agent_statuses(
     chat_facade: Arc<dyn ChatSessionFacade>,
     task_id: &str,
 ) -> Result<Vec<AgentStatus>, String> {
-    let board = storage::load_board(gcx, task_id).await?;
-    statuses_from_board(&board, chat_facade).await
+    let board = storage::load_board(gcx.clone(), task_id).await?;
+    let mut statuses = statuses_from_board(&board, chat_facade).await?;
+    let app = crate::app_state::AppState::from_gcx(gcx).await;
+    for status in &mut statuses {
+        if let Some(session) = app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get(&status.agent_chat_id)
+            .cloned()
+        {
+            let session = session.lock().await;
+            if let Some(interruption) = &session.runtime.interruption {
+                status.session_state = Some(SessionState::Interrupted);
+                status.last_status_update = Some(format!(
+                    "Interrupted: {}; owner_chat_id={}",
+                    interruption.condition,
+                    interruption.owner_chat_id.as_deref().unwrap_or("unknown")
+                ));
+            }
+        }
+    }
+    Ok(statuses)
 }
 
 async fn statuses_from_board(
@@ -599,6 +626,9 @@ pub(crate) fn classify_agent_status(status: &AgentStatus, now: DateTime<Utc>) ->
         "done" => AgentStateKind::Done,
         "failed" | "regressed" => AgentStateKind::Failed,
         "doing" => {
+            if status.session_state == Some(SessionState::Interrupted) {
+                return AgentStateKind::Interrupted;
+            }
             if matches!(status.session_state, Some(SessionState::Error)) {
                 return AgentStateKind::Stuck;
             }
@@ -612,7 +642,7 @@ pub(crate) fn classify_agent_status(status: &AgentStatus, now: DateTime<Utc>) ->
             }
             match crate::tasks::admission::execution_state(&status.agent_chat_id) {
                 Some(crate::agents::execution::ExecutionState::Acquiring) => {
-                    return AgentStateKind::Queued
+                    return AgentStateKind::Queued;
                 }
                 Some(
                     crate::agents::execution::ExecutionState::Parked
@@ -694,6 +724,7 @@ pub(crate) fn waitable_agent_statuses<'a>(
 fn format_agent_status_detail_at(status: &AgentStatus, now: DateTime<Utc>) -> String {
     let kind = classify_agent_status(status, now);
     let (state_emoji, state_text) = match kind {
+        AgentStateKind::Interrupted => ("🔴", "Interrupted — restart from owning planner"),
         AgentStateKind::Done => ("✅", "Completed"),
         AgentStateKind::Failed => ("❌", "Failed"),
         AgentStateKind::Stuck => ("🔴", "Stuck / needs attention"),
@@ -923,6 +954,7 @@ fn last_activity_sort_key(status: &AgentStatus) -> i64 {
 
 fn status_rank(kind: AgentStateKind) -> u8 {
     match kind {
+        AgentStateKind::Interrupted => 0,
         AgentStateKind::Stuck => 0,
         AgentStateKind::Failed => 1,
         AgentStateKind::Paused => 2,
@@ -962,6 +994,7 @@ impl AgentAlerts {
                 alerts.needing_attention += 1;
             }
             match classify_agent_status(status, now) {
+                AgentStateKind::Interrupted => alerts.needing_attention += 1,
                 AgentStateKind::Stuck => alerts.stuck += 1,
                 AgentStateKind::Failed => alerts.failed += 1,
                 AgentStateKind::Paused => alerts.paused += 1,
@@ -1004,6 +1037,7 @@ fn format_summary(statuses: &[&AgentStatus], now: DateTime<Utc>) -> String {
     let mut stuck = 0;
     let mut failed = 0;
     let mut done = 0;
+    let mut interrupted = 0;
     let mut paused = 0;
     let mut queued = 0;
     let mut parked = 0;
@@ -1011,6 +1045,7 @@ fn format_summary(statuses: &[&AgentStatus], now: DateTime<Utc>) -> String {
 
     for status in statuses {
         match classify_agent_status(status, now) {
+            AgentStateKind::Interrupted => interrupted += 1,
             AgentStateKind::Running => running += 1,
             AgentStateKind::Stuck => stuck += 1,
             AgentStateKind::Failed => failed += 1,
@@ -1033,8 +1068,17 @@ fn format_summary(statuses: &[&AgentStatus], now: DateTime<Utc>) -> String {
         .join(", ");
 
     let mut result = format!(
-        "Total: {} | Running: {} | Stuck: {} | Failed: {} | Done: {} | Paused: {} | Queued: {} | Parked: {}\nBy priority: {}\n",
-        statuses.len(), running, stuck, failed, done, paused, queued, parked, priority_text
+        "Total: {} | Running: {} | Stuck: {} | Failed: {} | Done: {} | Paused: {} | Queued: {} | Parked: {} | Interrupted: {}\nBy priority: {}\n",
+        statuses.len(),
+        running,
+        stuck,
+        failed,
+        done,
+        paused,
+        queued,
+        parked,
+        interrupted,
+        priority_text
     );
     for status in statuses {
         if classify_agent_status(status, now) == AgentStateKind::Paused
@@ -1122,6 +1166,12 @@ fn format_compact_line(status: &AgentStatus, now: DateTime<Utc>) -> String {
     let last_tool = status.last_tool_name.as_deref().unwrap_or("?");
 
     let mut line = match kind {
+        AgentStateKind::Interrupted => format!(
+            "{} 🔴 {} | INTERRUPTED | restart_agent(card_id=\"{}\", mode=\"resume\")",
+            priority,
+            status.status_id(),
+            status.card_id
+        ),
         AgentStateKind::Queued => format!(
             "{:<2} ⏳  {:<5} {:<22} | queued | waiting for capacity",
             priority,
@@ -1701,6 +1751,23 @@ mod tests {
         status.started_at = None;
         status.last_activity_at = None;
         assert_eq!(classify_agent_status(&status, now()), AgentStateKind::Stuck);
+    }
+
+    #[test]
+    fn interrupted_agent_needs_restart_not_approval_or_wait() {
+        let status = status(
+            "T-INTERRUPTED",
+            "P1",
+            "doing",
+            Some(SessionState::Interrupted),
+            0,
+        );
+        assert_eq!(
+            classify_agent_status(&status, now()),
+            AgentStateKind::Interrupted
+        );
+        assert!(!waitable_agent_status_at(&status, now()));
+        assert!(format_compact_line(&status, now()).contains("INTERRUPTED"));
     }
 
     #[test]

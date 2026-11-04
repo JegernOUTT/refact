@@ -105,9 +105,15 @@ async fn ensure_task_for_planner_handoff(
     current_root_chat_id: Option<&str>,
 ) -> Result<Option<refact_chat_api::TaskMeta>, String> {
     if canonical_mode != "task_planner" {
-        return Ok(existing_task_meta);
+        return Ok(crate::chat::trajectories::transitioned_task_meta(
+            existing_task_meta,
+            canonical_mode,
+        ));
     }
     if let Some(task_meta) = existing_task_meta {
+        if task_meta.role == "linked" {
+            return Err("A linked task chat cannot become the owning planner; create a new planner chat explicitly".to_string());
+        }
         if task_meta.role == "planner" {
             let planner_chat_id = resolve_task_planner_controller_chat_id(
                 gcx.clone(),
@@ -317,6 +323,7 @@ pub(crate) async fn persist_transition(
         gcx.clone(),
         &meta.task_id,
         &source.chat_id,
+        &snapshot.chat_id,
         source.goal.as_ref(),
     )
     .await?;
@@ -701,6 +708,12 @@ async fn finalize_handoff_inner(
         SessionState::WaitingIde => {
             return Err("Cannot handoff while waiting for IDE response. Cancel the IDE wait or wait for it to complete.".to_string());
         }
+        SessionState::Interrupted => {
+            return Err(
+                "Cannot handoff an interrupted execution; restart from its owning planner."
+                    .to_string(),
+            );
+        }
         SessionState::Error => {
             return Err(
                 "Cannot handoff from an error state. Acknowledge the error first.".to_string(),
@@ -802,6 +815,7 @@ async fn finalize_handoff_inner(
             crate::tasks::goal::preflight_planner_transition(
                 gcx.clone(),
                 &meta.task_id,
+                &chat_id,
                 &chat_id,
                 source_goal.as_ref(),
             )
@@ -1129,5 +1143,49 @@ mod deferred_tests {
             .tool_execute(ccx, &"handoff".into(), &args)
             .await
             .is_err());
+    }
+}
+
+#[cfg(test)]
+mod task_link_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn handoff_task_link_demotes_planner_and_refuses_promotion() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            dir.path().join("config"),
+        )
+        .await;
+        let planner = refact_chat_api::TaskMeta {
+            task_id: "task-link".into(),
+            role: "planner".into(),
+            planner_chat_id: Some("owning-planner".into()),
+            ..Default::default()
+        };
+        let linked = ensure_task_for_planner_handoff(
+            gcx.clone(),
+            "solo",
+            Some(planner.clone()),
+            "owning-planner",
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(linked.role, "linked");
+        assert_eq!(linked.task_id, planner.task_id);
+        assert_eq!(linked.planner_chat_id, planner.planner_chat_id);
+        let error = ensure_task_for_planner_handoff(
+            gcx,
+            "task_planner",
+            Some(linked),
+            "linked-chat",
+            Some("owning-planner"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "A linked task chat cannot become the owning planner; create a new planner chat explicitly");
     }
 }

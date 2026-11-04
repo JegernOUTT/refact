@@ -47,6 +47,7 @@ export type ChatHistoryItem = Omit<ChatThread, "new_chat_suggested"> & {
     | "paused"
     | "waiting_ide"
     | "waiting_user_input"
+    | "interrupted"
     | "completed"
     | "error";
   message_count?: number;

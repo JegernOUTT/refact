@@ -331,6 +331,7 @@ export const updateChatRuntimeFromSessionState = createAction<{
     | "paused"
     | "waiting_ide"
     | "waiting_user_input"
+    | "interrupted"
     | "completed"
     | "error";
   error?: string;

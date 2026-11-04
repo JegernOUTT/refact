@@ -1244,6 +1244,18 @@ pub(crate) async fn resume_card(
         )
     })?;
 
+    if let Some(interruption) = planner
+        .chat_facade
+        .session_interruption(&agent_chat_id)
+        .await?
+    {
+        let output = format!(
+            "Interrupted ({}); use restart_agent(card_id=\"{}\", mode=\"resume\"). reached_agent=false; pause and approvals retained.",
+            interruption.condition, card_id
+        );
+        return Ok((false, vec![tool_message(tool_call_id, output)]));
+    }
+
     let card_id_for_update = card_id.clone();
     let agent_chat_id_for_update = agent_chat_id.clone();
     storage::update_board_atomic(planner.gcx.clone(), &planner.task_id, move |board| {

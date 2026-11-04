@@ -2786,7 +2786,7 @@ async fn resume_agent_for_parent_run(
     if authority_migrated {
         messages.push(event(
             EventSubkind::SystemNotice,
-            "agents.authority_migrated",
+            crate::agents::push::NOTICE_AUTHORITY_MIGRATED,
             serde_json::json!({"agent_id": agent_id, "run_generation": generation, "tools": config.tools}),
             "This child was accepted before concrete tool authority existed. Its open tool policy was replaced by the parent's current concrete ceiling for this resume; the accepted launch bytes are unchanged.",
         ));
@@ -3425,15 +3425,15 @@ pub(crate) fn continuation_notice(
     use crate::agents::types::BgAgentStatus;
     match previous {
         BgAgentStatus::Completed => (
-            "agents.continued_turn",
+            crate::agents::push::NOTICE_CONTINUED_TURN,
             "The parent asked this already-completed child for another turn. The earlier completion stands and is preserved in the record; nothing about it is rewritten. Preserved tool results are historical and must not be replayed.",
         ),
         BgAgentStatus::Closed => (
-            "agents.resume",
+            crate::agents::push::NOTICE_RESUME,
             "The parent reopened this child after deliberately closing it. Its history, goal and plan are unchanged; preserved tool results are historical, and incomplete tool outcomes must be inspected, not replayed automatically.",
         ),
         _ => (
-            "agents.resume",
+            crate::agents::push::NOTICE_RESUME,
             "The parent explicitly resumed this same child. Preserved tool results are historical; incomplete tool outcomes must be inspected, not replayed automatically.",
         ),
     }
@@ -4019,9 +4019,11 @@ async fn run_background_subchat_with_lease(
 async fn run_background_subchat_inner(
     gcx: Arc<GlobalContext>,
     messages: Vec<ChatMessage>,
-    mut config: SubchatConfig,
-    mut runner_guard: Option<RunnerLeaseGuard>,
+    config: SubchatConfig,
+    runner_guard: Option<RunnerLeaseGuard>,
 ) -> Result<SubchatResult, String> {
+    #[cfg(test)]
+    let (mut config, mut runner_guard) = (config, runner_guard);
     #[cfg(test)]
     {
         let runner = TEST_RUNNER
@@ -4076,7 +4078,7 @@ async fn build_messages(
             ChatMessage::new("system".to_string(), "test system".to_string()),
             event(
                 EventSubkind::SystemNotice,
-                "agents.spawn",
+                crate::agents::push::NOTICE_SPAWN,
                 serde_json::json!({
                     "config_name": config_name,
                     "test": true,
@@ -4108,7 +4110,7 @@ async fn build_messages(
         },
         event(
             EventSubkind::SystemNotice,
-            "agents.spawn",
+            crate::agents::push::NOTICE_SPAWN,
             serde_json::json!({
                 "config_name": config_name,
             }),
@@ -4540,12 +4542,12 @@ pub(crate) async fn push_sibling_notice(
             PendingDelivery::new(
                 vec![event(
                     EventSubkind::SystemNotice,
-                    "agents.sibling",
+                    crate::agents::push::NOTICE_SIBLING,
                     serde_json::json!({"from": agent_id}),
                     text.clone(),
                 )],
                 PushMode::Append,
-                "agents.sibling".to_string(),
+                crate::agents::push::NOTICE_SIBLING.to_string(),
                 true,
             ),
         )

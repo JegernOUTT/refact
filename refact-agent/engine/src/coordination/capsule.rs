@@ -190,12 +190,25 @@ pub async fn prepare_work_context(
         .all_rows()
         .into_iter()
         .find(|row| row.chat_id.as_deref() == Some(chat_id));
+    let mut lineage = std::collections::HashSet::from([chat_id.to_string()]);
+    let mut ancestor = chat_id.to_string();
+    for _ in 0..128 {
+        let Some(Some(parent)) =
+            crate::chat::trajectories::find_trajectory_parent_id(app.gcx.clone(), &ancestor).await
+        else {
+            break;
+        };
+        if !lineage.insert(parent.clone()) {
+            break;
+        }
+        ancestor = parent;
+    }
     let observed_at = now_ms();
     let recent = observed_at.saturating_sub(settings.recent_window_secs.saturating_mul(1000));
     let visible_rows = catalog
         .sorted_rows()
         .into_iter()
-        .filter(|row| row.chat_id.as_deref() != Some(chat_id))
+        .filter(|row| row.chat_id.as_ref().is_none_or(|id| !lineage.contains(id)))
         .filter(|row| !row.state.is_terminal() || row.updated_at_ms >= recent)
         .collect::<Vec<_>>();
     let policy_key = format!(

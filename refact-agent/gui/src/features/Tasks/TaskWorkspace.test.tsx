@@ -11,6 +11,7 @@ import {
   within,
 } from "../../utils/test-utils";
 import { PlannerItem, TaskWorkspace } from "./TaskWorkspace";
+import { taskChatKindLabel } from "./linkedChat";
 import {
   isActionableWorktree,
   resolveCardWorktree,
@@ -1197,6 +1198,27 @@ describe("PlannerItem waiting chips", () => {
     );
 
     expect(screen.queryByText("task_planner")).not.toBeInTheDocument();
+    expect(screen.queryByText("Linked chat")).not.toBeInTheDocument();
+  });
+
+  it("labels linked chats distinctly from planners", () => {
+    const planner = { ...makePlanner(), mode: "agent" };
+
+    render(
+      <PlannerItem
+        planner={planner}
+        isSelected={false}
+        onSelect={vi.fn()}
+        onRemove={vi.fn()}
+      />,
+      { preloadedState: makePreloadedState("idle") },
+    );
+
+    expect(screen.getByText("Linked chat")).toBeInTheDocument();
+    expect(taskChatKindLabel("agent")).toBe("Linked chat");
+    expect(taskChatKindLabel("task_planner")).toBe("Planner");
+    expect(taskChatKindLabel("TASK_PLANNER")).toBe("Planner");
+    expect(taskChatKindLabel("task_planner", "linked")).toBe("Linked chat");
   });
 });
 

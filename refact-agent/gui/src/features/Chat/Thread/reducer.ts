@@ -1616,6 +1616,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
           recovery: event.runtime.recovery ?? null,
           session_state: snapshotState,
           waiting_interruptible: event.runtime.waiting_interruptible === true,
+          interruption: event.runtime.interruption ?? null,
           streaming: snapshotStreaming,
           waiting_for_response: snapshotWaiting,
           prevent_send: false,
@@ -2189,12 +2190,14 @@ export const chatReducer = createReducer(initialState, (builder) => {
         const newState = event.state;
         rt.session_state = newState;
         rt.waiting_interruptible = event.waiting_interruptible === true;
+        rt.interruption = event.interruption ?? null;
 
         // Update streaming/waiting flags based on state
         switch (newState) {
           case "idle":
           case "completed":
           case "waiting_user_input":
+          case "interrupted":
           case "error":
             rt.streaming = false;
             rt.waiting_for_response = false;
@@ -2216,7 +2219,11 @@ export const chatReducer = createReducer(initialState, (builder) => {
         }
 
         // Update error state
-        if (newState === "error" && event.error) {
+        if (
+          event.error &&
+          newState !== "generating" &&
+          newState !== "executing_tools"
+        ) {
           rt.error = event.error;
         } else if (newState !== "error") {
           rt.error = null;
@@ -2230,7 +2237,8 @@ export const chatReducer = createReducer(initialState, (builder) => {
           newState === "idle" ||
           newState === "completed" ||
           newState === "error" ||
-          newState === "waiting_user_input"
+          newState === "waiting_user_input" ||
+          newState === "interrupted"
         ) {
           rt.is_compressing = false;
         }
@@ -2251,7 +2259,8 @@ export const chatReducer = createReducer(initialState, (builder) => {
           newState === "idle" ||
           newState === "completed" ||
           newState === "error" ||
-          newState === "waiting_user_input"
+          newState === "waiting_user_input" ||
+          newState === "interrupted"
         ) {
           rt.compression_phase = undefined;
           rt.compression_reason = undefined;

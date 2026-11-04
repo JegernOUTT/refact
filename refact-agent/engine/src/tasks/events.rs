@@ -21,6 +21,7 @@ async fn enrich_task_meta_with_session_state(gcx: Arc<GlobalContext>, meta: &mut
     };
 
     let mut has_paused = false;
+    let mut has_interrupted = false;
     let mut has_waiting_ide = false;
     let mut has_waiting_user_input = false;
     let mut has_generating = false;
@@ -37,6 +38,7 @@ async fn enrich_task_meta_with_session_state(gcx: Arc<GlobalContext>, meta: &mut
         }
         match session.runtime.state {
             crate::chat::types::SessionState::Paused => has_paused = true,
+            crate::chat::types::SessionState::Interrupted => has_interrupted = true,
             crate::chat::types::SessionState::WaitingIde => has_waiting_ide = true,
             crate::chat::types::SessionState::WaitingUserInput => has_waiting_user_input = true,
             crate::chat::types::SessionState::Generating => has_generating = true,
@@ -49,6 +51,8 @@ async fn enrich_task_meta_with_session_state(gcx: Arc<GlobalContext>, meta: &mut
 
     meta.planner_session_state = if has_paused {
         Some(crate::chat::types::SessionState::Paused.to_string())
+    } else if has_interrupted {
+        Some(crate::chat::types::SessionState::Interrupted.to_string())
     } else if has_waiting_ide {
         Some(crate::chat::types::SessionState::WaitingIde.to_string())
     } else if has_waiting_user_input {

@@ -769,7 +769,7 @@ describe("useInternalNavigation metadata lifecycle", () => {
     shared.unsubscribe();
   });
 
-  it.each(["planner", "agents"])(
+  it.each(["planner", "agents", "linked"])(
     "resolves %s task context using metadata without messages",
     async (role) => {
       const calls: string[] = [];
@@ -809,7 +809,7 @@ describe("useInternalNavigation metadata lifecycle", () => {
         }),
         http.get("*/v1/tasks/task-1/trajectories/planner", () => {
           calls.push("planner");
-          return HttpResponse.json(role === "planner" ? [{ id: "child" }] : []);
+          return HttpResponse.json(role !== "agents" ? [{ id: "child" }] : []);
         }),
       );
       const { store, result } = setup();

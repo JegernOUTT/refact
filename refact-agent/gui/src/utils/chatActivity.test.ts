@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ChatThreadRuntime } from "../features/Chat/Thread/types";
 import type { ChatMessage, ToolCall } from "../services/refact/types";
-import { activityFromSessionState, getChatActivity } from "./chatActivity";
+import {
+  activityFromSessionState,
+  CHAT_ACTIVITY,
+  getChatActivity,
+} from "./chatActivity";
 import {
   selectChatActivityById,
   selectTabsDisplayData,
@@ -42,7 +46,8 @@ describe("chat activity", () => {
     ["generating", "working"],
     ["executing_tools", "running_tools"],
     ["waiting_user_input", "waiting_user"],
-    ["waiting_ide", "needs_attention"],
+    ["waiting_ide", "waiting_ide"],
+    ["interrupted", "interrupted"],
     ["paused", "paused"],
     ["completed", "completed"],
     ["error", "error"],
@@ -104,6 +109,36 @@ describe("chat activity", () => {
     const rt = runtime(messages);
     rt.confirmation.pause = true;
     expect(getChatActivity(rt)).toBe("paused");
+  });
+  it("labels board interruptions as recoverable in the planner, never as a question", () => {
+    expect(CHAT_ACTIVITY.interrupted.label).toBe(
+      "Interrupted — recover in planner",
+    );
+    const rt = runtime([], "interrupted");
+    rt.thread.pending_questions = [{ status: "pending" }] as NonNullable<
+      typeof rt.thread.pending_questions
+    >;
+    expect(getChatActivity(rt)).toBe("interrupted");
+    expect(CHAT_ACTIVITY[getChatActivity(rt)].label).not.toBe(
+      CHAT_ACTIVITY.waiting_user.label,
+    );
+    const paused = runtime([], "paused");
+    paused.interruption = { condition: "stale_board_attempt" };
+    expect(getChatActivity(paused)).toBe("interrupted");
+    paused.confirmation.pause = true;
+    paused.confirmation.pause_reasons = [
+      {},
+    ] as typeof paused.confirmation.pause_reasons;
+    expect(getChatActivity(paused)).toBe("needs_approval");
+  });
+  it("shows an engine error instead of Idle and names the IDE wait", () => {
+    const rt = runtime([], "idle");
+    rt.error = "Interrupted: stale_board_attempt";
+    expect(getChatActivity(rt)).toBe("error");
+    rt.error = null;
+    expect(getChatActivity(rt)).toBe("idle");
+    expect(getChatActivity(runtime([], "waiting_ide"))).toBe("waiting_ide");
+    expect(CHAT_ACTIVITY.waiting_ide.label).toBe("Waiting for IDE");
   });
   it("does not infer parent blocking from background agents or launched processes", () => {
     expect(getChatActivity(runtime([], "idle"))).toBe("idle");

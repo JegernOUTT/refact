@@ -1673,6 +1673,29 @@ impl BackgroundAgentRegistry {
         self.records.read().await.by_child.get(chat_id).cloned()
     }
 
+    pub async fn rebind_parent(
+        &self,
+        child_chat_id: &str,
+        expected_parent: &str,
+        new_parent: &str,
+    ) -> Result<(), String> {
+        let Some(agent_id) = self.find_agent_id_by_child_chat_id(child_chat_id).await else {
+            return Ok(());
+        };
+        self.update_record(&agent_id, |record, _| {
+            if record.child_chat_id.as_deref() != Some(child_chat_id)
+                || record.parent_chat_id != expected_parent
+            {
+                return Err("Agent parent changed during custody transfer".into());
+            }
+            record.parent_chat_id = new_parent.to_string();
+            record.parent_root_chat_id = Some(new_parent.to_string());
+            Ok(())
+        })
+        .await
+        .map(|_| ())
+    }
+
     pub async fn child_chat_status(&self, chat_id: &str) -> Option<(String, BgAgentStatus, u64)> {
         let records = self.records.read().await;
         let agent_id = records.by_child.get(chat_id)?;

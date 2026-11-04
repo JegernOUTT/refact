@@ -277,6 +277,7 @@ fn format_session_state(state: Option<SessionState>, card_column: &str) -> Strin
         Some(SessionState::WaitingUserInput) => "⏳ waiting for user input".to_string(),
         Some(SessionState::Completed) => "✅ completed".to_string(),
         Some(SessionState::Error) => "❌ error".to_string(),
+        Some(SessionState::Interrupted) => "🔴 interrupted — restart from planner".to_string(),
         None => format!("❓ last known: {}", card_column),
     }
 }

@@ -315,6 +315,16 @@ fn no_material_progress(
     activity: &RunActivity,
     thresholds: ProgressThresholds,
 ) -> Option<NoProgressSignal> {
+    if activity.turns.last().is_some_and(|turn| {
+        turn.tool_calls.iter().any(|call| {
+            matches!(
+                call.name.as_str(),
+                "process_read" | "process_write_stdin" | "wait"
+            ) && call.result.is_none()
+        })
+    }) {
+        return None;
+    }
     let start = activity.turns.len().saturating_sub(thresholds.window_turns);
     let turns = &activity.turns[start..];
     if let Some(repeats) = repeated_tool_call(turns, thresholds.repeat_threshold) {
@@ -396,6 +406,17 @@ pub fn turns_from_messages(messages: &[ChatMessage], window_turns: usize) -> Vec
             }
             "tool" => {
                 if let Some((turn_index, call_index)) = pending.remove(&message.tool_call_id) {
+                    let name = turns[turn_index].tool_calls[call_index].name.as_str();
+                    let running = matches!(name, "process_read" | "process_write_stdin" | "wait")
+                        && message
+                            .extra
+                            .get("exec")
+                            .and_then(|exec| exec.get("status"))
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|status| matches!(status, "starting" | "running"));
+                    if running {
+                        continue;
+                    }
                     turns[turn_index].tool_calls[call_index].result = Some(
                         crate::file_activity::digest_of(&message.content.content_text_only()),
                     );
@@ -552,6 +573,40 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn live_process_polls_are_not_repeated_work_but_terminal_polls_are() {
+        let mut messages = Vec::new();
+        for id in ["poll-1", "poll-2", "poll-3"] {
+            messages.push(assistant(
+                "",
+                vec![(id, "process_read", "{\"process_id\":\"exec_1\"}")],
+            ));
+            let mut message = ChatMessage::new("tool".into(), "no new output".into());
+            message.tool_call_id = id.into();
+            message
+                .extra
+                .insert("exec".into(), serde_json::json!({"status":"running"}));
+            messages.push(message);
+        }
+        let mut activity = RunActivity {
+            turns: turns_from_messages(&messages, 24),
+            session_state: SessionState::ExecutingTools,
+            turns_since_evidence_changed: Some(10),
+            ..Default::default()
+        };
+        assert!(!classify(&activity, thresholds()).is_no_progress_verdict());
+        for message in messages.iter_mut().filter(|message| message.role == "tool") {
+            message
+                .extra
+                .insert("exec".into(), serde_json::json!({"status":"exited"}));
+        }
+        activity.turns = turns_from_messages(&messages, 24);
+        assert_eq!(
+            classify(&activity, thresholds()),
+            ActivityClass::NoMaterialProgress(NoProgressSignal::RepeatedToolCall { repeats: 3 })
+        );
     }
 
     #[test]

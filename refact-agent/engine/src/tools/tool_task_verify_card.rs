@@ -222,8 +222,10 @@ mod tests {
             .is_empty());
     }
 
+    // Verifier snapshots fingerprint global runtime settings; coordinate with settings writers.
     #[cfg(unix)]
     #[tokio::test]
+    #[serial_test::serial(runtime_settings)]
     async fn planner_edit_after_dispatch_is_used_by_task_verify_card() {
         use crate::tasks::assignment::{save_assignment, Assignment};
         use crate::tasks::types::{
@@ -342,8 +344,10 @@ mod tests {
                 && !result.command.contains("agent-proposed")));
     }
 
+    // Keep the configuration fingerprint stable throughout command execution and report storage.
     #[cfg(unix)]
     #[tokio::test]
+    #[serial_test::serial(runtime_settings)]
     async fn structural_deliverable_failure_remains_unforceable_after_commands_pass() {
         use crate::tasks::assignment::{save_assignment, Assignment};
         use crate::tasks::types::{BoardCard, VerifierReportClassification};

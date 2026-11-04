@@ -9,6 +9,7 @@ export type SessionState =
   | "paused"
   | "waiting_ide"
   | "waiting_user_input"
+  | "interrupted"
   | "completed"
   | "error";
 
@@ -24,7 +25,11 @@ export function getTaskStatusDotState(task: TaskMeta): StatusDotState {
   if (plannerState === "generating" || plannerState === "executing_tools") {
     return "in_progress";
   }
-  if (plannerState === "paused" || plannerState === "waiting_ide") {
+  if (
+    plannerState === "paused" ||
+    plannerState === "waiting_ide" ||
+    plannerState === "interrupted"
+  ) {
     return "needs_attention";
   }
   if (plannerState === "error" || task.status === "abandoned") {

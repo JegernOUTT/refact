@@ -1830,6 +1830,23 @@ export const selectWaitingInterruptibleById = (
   chatId: string,
 ): boolean => state.chat.threads[chatId]?.waiting_interruptible ?? false;
 
+export const selectInterruptionById = (state: RootState, chatId: string) =>
+  state.chat.threads[chatId]?.interruption ?? null;
+
+export const selectIsInterruptedById = (
+  state: RootState,
+  chatId: string,
+): boolean => {
+  const rt = state.chat.threads[chatId];
+  return rt?.session_state === "interrupted" || Boolean(rt?.interruption);
+};
+
+export const selectSessionStateById = (state: RootState, chatId: string) =>
+  state.chat.threads[chatId]?.session_state ?? null;
+
+export const selectTaskMetaById = (state: RootState, chatId: string) =>
+  state.chat.threads[chatId]?.thread.task_meta ?? null;
+
 export const selectChatActivityById = (
   state: RootState,
   chatId: string,

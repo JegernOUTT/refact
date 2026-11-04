@@ -1,3 +1,18 @@
+pub(crate) const NOTICE_COMPLETION: &str = "agents.completion";
+pub(crate) const NOTICE_PROGRESS: &str = "agents.progress";
+pub(crate) const NOTICE_NOTICE: &str = "agents.notice";
+pub(crate) const NOTICE_SPAWN: &str = "agents.spawn";
+pub(crate) const NOTICE_SIBLING: &str = "agents.sibling";
+pub(crate) const NOTICE_ERROR: &str = "agents.error";
+pub(crate) const NOTICE_APPROVAL: &str = "agents.approval";
+pub(crate) const NOTICE_AUTHORITY_MIGRATED: &str = "agents.authority_migrated";
+pub(crate) const NOTICE_CONTINUED_TURN: &str = "agents.continued_turn";
+pub(crate) const NOTICE_RESUME: &str = "agents.resume";
+pub(crate) const NOTICE_MESSAGE: &str = "agents.message";
+pub(crate) const NOTICE_INBOX: &str = "agents.inbox";
+pub(crate) const NOTICE_NATIVE_NOTE: &str = "agents.native_note";
+pub(crate) const NOTICE_CAP_STOP: &str = "agents.cap_stop";
+
 use chrono::{TimeDelta, Utc};
 use refact_chat_api::{
     CriterionVerdict, DeliverableStatus, SubGoalOutcome, SubGoalOwner, SubGoalReport, VerdictSource,
@@ -228,7 +243,7 @@ fn build_completion_delivery(record: &BackgroundAgent) -> PendingDelivery {
         ),
         vec![build_completion_event(record)],
         record.completion_push,
-        "agents.completion",
+        NOTICE_COMPLETION,
         true,
     )
 }
@@ -246,23 +261,50 @@ pub async fn push_notice_to_chat_with_mode(
     push: PushMode,
     ttl_secs: Option<u64>,
 ) -> Result<(String, DeliveryOutcome), String> {
+    push_notice_to_chat_with_receipt(app, chat_id, text, push, ttl_secs)
+        .await
+        .map(|receipt| (receipt.delivery_id, receipt.outcome))
+}
+
+/// Detailed counterpart retaining persistence warnings after transport acceptance.
+pub async fn push_notice_to_chat_with_receipt(
+    app: AppState,
+    chat_id: &str,
+    text: String,
+    push: PushMode,
+    ttl_secs: Option<u64>,
+) -> Result<crate::chat::delivery::DeliveryReceipt, String> {
+    push_notice_to_chat_with_receipt_kind(app, chat_id, text, push, ttl_secs, false).await
+}
+
+pub(crate) async fn push_notice_to_chat_with_receipt_kind(
+    app: AppState,
+    chat_id: &str,
+    text: String,
+    push: PushMode,
+    ttl_secs: Option<u64>,
+    informational: bool,
+) -> Result<crate::chat::delivery::DeliveryReceipt, String> {
+    let source = if informational {
+        NOTICE_PROGRESS
+    } else {
+        NOTICE_NOTICE
+    };
     let mut delivery = PendingDelivery::new(
         vec![event(
             EventSubkind::SystemNotice,
-            "agents.notice",
+            source,
             serde_json::json!({}),
             text,
         )],
         push,
-        "agents.notice".to_string(),
+        source.to_string(),
         true,
     );
     if let Some(ttl_secs) = ttl_secs {
         delivery.set_ttl_secs(ttl_secs);
     }
-    let id = delivery.id.clone();
-    let outcome = crate::chat::delivery::deliver_to_chat(app, chat_id, delivery).await?;
-    Ok((id, outcome))
+    crate::chat::delivery::deliver_to_chat_with_receipt(app, chat_id, delivery).await
 }
 
 pub async fn flush_pending_pushes_for_parent(
@@ -317,7 +359,7 @@ fn build_completion_event(record: &BackgroundAgent) -> refact_core::chat_types::
         .map(|text| cap_text_chars(text, MAX_EVENT_CONFLICT_SUMMARY_CHARS));
     let mut message = event(
         EventSubkind::SystemNotice,
-        "agents.spawn",
+        NOTICE_SPAWN,
         serde_json::json!({
             "agent_id": record.agent_id,
             "run_generation": record.run_generation,

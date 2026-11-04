@@ -187,6 +187,15 @@
   overflow-y: auto;
 }
 
+.serverBlocksDetails {
+  margin-top: var(--rf-space-2);
+  color: var(--rf-color-muted);
+}
+
+.serverBlocksDetails > summary {
+  cursor: pointer;
+}
+
 .serverBlocksRaw {
   max-height: 200px;
   color: var(--rf-color-muted);

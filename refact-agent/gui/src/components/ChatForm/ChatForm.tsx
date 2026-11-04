@@ -99,12 +99,13 @@ import {
   selectIsBuddyChat,
   selectIsCompanionChat,
   useThreadId,
-  clearChatError,
+  selectIsInterruptedById,
 } from "../../features/Chat/Thread";
 import { useReportErrorMutation } from "../../services/refact/buddy";
 
 import { useUsageCounter } from "../UsageCounter/useUsageCounter";
 import { ChatInputTopControls } from "./ChatInputTopControls";
+import { InterruptionBanner } from "./InterruptionBanner";
 
 import classNames from "classnames";
 import { useComposerActivity } from "./useComposerActivity";
@@ -158,6 +159,18 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const chatError = useAppSelector((state) =>
     selectChatErrorById(state, chatId),
   );
+  const lastAppliedSeq = useAppSelector(
+    (state) => state.chat.threads[chatId]?.last_applied_seq,
+  );
+  const [hiddenChatError, setHiddenChatError] = React.useState<{
+    chatId: string;
+    error: string | null;
+    seq: string | undefined;
+  } | null>(null);
+  const chatErrorHidden =
+    hiddenChatError?.chatId === chatId &&
+    hiddenChatError.error === chatError &&
+    hiddenChatError.seq === lastAppliedSeq;
   const contextRebuildRequired = useAppSelector((state) =>
     selectContextRebuildRequiredById(state, chatId),
   );
@@ -173,6 +186,9 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const information = useAppSelector(getInformationMessage);
   const pauseReasonsWithPause = useAppSelector((state) =>
     selectThreadConfirmationById(state, chatId),
+  );
+  const isInterrupted = useAppSelector((state) =>
+    selectIsInterruptedById(state, chatId),
   );
   const [reportError] = useReportErrorMutation();
   useEffect(() => {
@@ -318,14 +334,17 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     ],
   );
 
-  const visibleError = chatError ?? globalError;
+  const visibleError =
+    (isInterrupted || chatErrorHidden ? null : chatError) ?? globalError;
+  const showsChatError =
+    Boolean(chatError) && !isInterrupted && !chatErrorHidden;
   const clearVisibleError = useCallback(() => {
-    if (chatError) {
-      dispatch(clearChatError({ id: chatId }));
+    if (showsChatError) {
+      setHiddenChatError({ chatId, error: chatError, seq: lastAppliedSeq });
     } else {
       dispatch(clearError());
     }
-  }, [chatError, chatId, dispatch]);
+  }, [showsChatError, chatId, chatError, lastAppliedSeq, dispatch]);
 
   const {
     checkboxes,
@@ -617,6 +636,17 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [disableMicrophone, focusComposerInput, isCompanionChat, isVoiceActive]);
 
+  const focusDangerousApprovalControl = useCallback(() => {
+    setFocusWithin(true);
+    window.requestAnimationFrame(() => {
+      composerRef.current
+        ?.querySelector<HTMLButtonElement>(
+          'button[aria-label="Auto-approve dangerous commands"]',
+        )
+        ?.focus();
+    });
+  }, []);
+
   if (pauseReasonsWithPause.pause) {
     return (
       <ToolConfirmation pauseReasons={pauseReasonsWithPause.pause_reasons} />
@@ -625,13 +655,16 @@ export const ChatForm: React.FC<ChatFormProps> = ({
 
   const placeholder = isVoiceActive
     ? "Listening..."
-    : commands.completions.length > 0
-      ? ""
-      : activity === "working"
-        ? "Agent is working… type to queue a message"
-        : "Type @ or / for commands";
+    : isInterrupted
+      ? "This chat will not resume; restart it from the owning planner"
+      : commands.completions.length > 0
+        ? ""
+        : activity === "working"
+          ? "Agent is working… type to queue a message"
+          : "Type @ or / for commands";
   const placeholderOverlay =
     !isVoiceActive &&
+    !isInterrupted &&
     displayedInputValue.length === 0 &&
     commands.completions.length === 0
       ? activity
@@ -639,8 +672,18 @@ export const ChatForm: React.FC<ChatFormProps> = ({
 
   return (
     <div ref={composerRef} className={styles.composerRoot}>
+      <InterruptionBanner chatId={chatId} />
       {visibleError && (
-        <ErrorCallout timeout={3000} onClick={clearVisibleError} preventRetry>
+        <ErrorCallout
+          timeout={showsChatError ? null : 3000}
+          onClick={clearVisibleError}
+          preventRetry
+          dismissLabel={
+            showsChatError
+              ? "Hide — reappears on the next runtime update"
+              : undefined
+          }
+        >
           {visibleError}
         </ErrorCallout>
       )}
@@ -701,333 +744,357 @@ export const ChatForm: React.FC<ChatFormProps> = ({
             disabled={isBuddyChat}
             onDialogOpenChange={handleComposerMenuOpenChange}
             renderControls={(permissions, dangerous) => (
-              <ComposerToolbar
-                expanded={isComposerExpanded}
-                menuCount={openComposerMenus}
-                editor={
-                  <div ref={editorRef} className={styles.textareaWrapper}>
-                    <div className={styles.inputHeader}>
-                      <UnifiedAttachmentsTray
-                        attachedFiles={attachedFiles}
-                        previewFiles={previewFiles}
-                        manualPreviewItems={manualPreviewItems}
-                        onRemoveManualPreviewItem={
-                          chatId
-                            ? (index) =>
-                                dispatch(
-                                  removeManualPreviewItem({ chatId, index }),
-                                )
-                            : undefined
-                        }
-                        onOpenFile={queryPathThenOpenFile}
-                      />
-                    </div>
-
-                    <div
-                      className={styles.inputField}
-                      data-placeholder-overlay={
-                        placeholderOverlay ? "true" : undefined
-                      }
+              <>
+                {dangerous && (
+                  <div
+                    role="status"
+                    className={styles.dangerNotice}
+                    data-composer-no-expand="true"
+                  >
+                    Dangerous commands auto-approved for this chat.{" "}
+                    <button
+                      type="button"
+                      className={styles.inlineLink}
+                      onClick={focusDangerousApprovalControl}
                     >
-                      <ComboBox
-                        key={inputResetKey}
-                        onHelpClick={handleHelpCommand}
-                        commands={commands}
-                        requestCommandsCompletion={
-                          isCompanionChat ? ignoreCompletion : requestCompletion
-                        }
-                        value={displayedInputValue}
-                        onChange={handleChange}
-                        onSubmit={(event) => {
-                          handleEnter(event);
-                        }}
-                        onArgumentPlaceholdersChange={(placeholders) => {
-                          argumentPlaceholdersRef.current = placeholders;
-                        }}
-                        placeholder={placeholder}
-                        render={(props) => (
-                          <TextAreaWithChips
-                            data-testid="chat-form-textarea"
-                            required={true}
-                            {...props}
-                            host={host}
-                            onOpenFile={queryPathThenOpenFile}
-                            autoFocus={autoFocus}
-                            readOnly={isVoiceActive}
-                            onPaste={handlePastingFile}
-                          />
-                        )}
-                      />
-                      {placeholderOverlay === "working" ? (
-                        <span
-                          aria-hidden="true"
-                          className={classNames(
-                            styles.placeholderOverlay,
-                            "rf-text-shimmer",
-                          )}
-                        >
-                          {placeholder}
-                        </span>
-                      ) : null}
-                      {placeholderOverlay === "loading" ? (
-                        <span
-                          aria-hidden="true"
-                          className={styles.placeholderOverlay}
-                          data-testid="composer-loading"
-                        >
-                          <span
-                            className={classNames(
-                              styles.placeholderSkeleton,
-                              "rf-shimmer",
-                            )}
-                          />
-                        </span>
-                      ) : null}
-                    </div>
+                      Change permission
+                    </button>
                   </div>
-                }
-                items={[
-                  ...Object.entries(permissions).map(([id, content]) => {
-                    const pinnedDanger =
-                      id === "dangerousApproval" && dangerous;
-                    return {
-                      id,
-                      content,
-                      row: isComposerExpanded
-                        ? ("top" as const)
-                        : ("bottom" as const),
-                      side: isComposerExpanded
-                        ? ("left" as const)
-                        : ("right" as const),
-                      pinned: pinnedDanger,
+                )}
+                <ComposerToolbar
+                  expanded={isComposerExpanded}
+                  menuCount={openComposerMenus}
+                  editor={
+                    <div ref={editorRef} className={styles.textareaWrapper}>
+                      <div className={styles.inputHeader}>
+                        <UnifiedAttachmentsTray
+                          attachedFiles={attachedFiles}
+                          previewFiles={previewFiles}
+                          manualPreviewItems={manualPreviewItems}
+                          onRemoveManualPreviewItem={
+                            chatId
+                              ? (index) =>
+                                  dispatch(
+                                    removeManualPreviewItem({ chatId, index }),
+                                  )
+                              : undefined
+                          }
+                          onOpenFile={queryPathThenOpenFile}
+                        />
+                      </div>
+
+                      <div
+                        className={styles.inputField}
+                        data-placeholder-overlay={
+                          placeholderOverlay ? "true" : undefined
+                        }
+                      >
+                        <ComboBox
+                          key={inputResetKey}
+                          onHelpClick={handleHelpCommand}
+                          commands={commands}
+                          requestCommandsCompletion={
+                            isCompanionChat
+                              ? ignoreCompletion
+                              : requestCompletion
+                          }
+                          value={displayedInputValue}
+                          onChange={handleChange}
+                          onSubmit={(event) => {
+                            handleEnter(event);
+                          }}
+                          onArgumentPlaceholdersChange={(placeholders) => {
+                            argumentPlaceholdersRef.current = placeholders;
+                          }}
+                          placeholder={placeholder}
+                          render={(props) => (
+                            <TextAreaWithChips
+                              data-testid="chat-form-textarea"
+                              required={true}
+                              {...props}
+                              host={host}
+                              onOpenFile={queryPathThenOpenFile}
+                              autoFocus={autoFocus}
+                              readOnly={isVoiceActive}
+                              onPaste={handlePastingFile}
+                            />
+                          )}
+                        />
+                        {placeholderOverlay === "working" ? (
+                          <span
+                            aria-hidden="true"
+                            className={classNames(
+                              styles.placeholderOverlay,
+                              "rf-text-shimmer",
+                            )}
+                          >
+                            {placeholder}
+                          </span>
+                        ) : null}
+                        {placeholderOverlay === "loading" ? (
+                          <span
+                            aria-hidden="true"
+                            className={styles.placeholderOverlay}
+                            data-testid="composer-loading"
+                          >
+                            <span
+                              className={classNames(
+                                styles.placeholderSkeleton,
+                                "rf-shimmer",
+                              )}
+                            />
+                          </span>
+                        ) : null}
+                      </div>
+                    </div>
+                  }
+                  items={[
+                    ...Object.entries(permissions).map(([id, content]) => {
+                      const pinnedDanger =
+                        id === "dangerousApproval" && dangerous;
+                      return {
+                        id,
+                        content,
+                        row: isComposerExpanded
+                          ? ("top" as const)
+                          : ("bottom" as const),
+                        side: isComposerExpanded
+                          ? ("left" as const)
+                          : ("right" as const),
+                        pinned: pinnedDanger,
+                        hidden:
+                          isBuddyChat || (!isComposerExpanded && !pinnedDanger),
+                      };
+                    }),
+                    {
+                      id: "model",
+                      row: "bottom",
+                      squeezable: true,
+                      hidden: isBuddyChat,
+                      content: (
+                        <ChatSettingsDropdown
+                          disabled={isBuddyChat}
+                          onOpenChange={handleComposerMenuOpenChange}
+                        />
+                      ),
+                    },
+                    {
+                      id: "mode",
+                      row: "bottom",
+                      hidden: isBuddyChat,
+                      content: (
+                        <ModeSelect
+                          selectedMode={threadMode ?? DEFAULT_MODE}
+                          onModeChange={onSetMode}
+                          disabled={isBuddyChat || isModeDisabled}
+                          onOpenChange={handleComposerMenuOpenChange}
+                        />
+                      ),
+                    },
+                    {
+                      id: "worktree",
+                      row: "bottom",
+                      hidden: isBuddyChat,
+                      content: (
+                        <WorktreeControl
+                          disabled={isBuddyChat}
+                          onOpenChange={handleComposerMenuOpenChange}
+                        />
+                      ),
+                    },
+                    {
+                      id: "skills",
+                      row: "bottom",
+                      side: "right",
+                      pinned: activeSkill !== null,
                       hidden:
-                        isBuddyChat || (!isComposerExpanded && !pinnedDanger),
-                    };
-                  }),
-                  {
-                    id: "model",
-                    row: "bottom",
-                    squeezable: true,
-                    hidden: isBuddyChat,
-                    content: (
-                      <ChatSettingsDropdown
-                        disabled={isBuddyChat}
-                        onOpenChange={handleComposerMenuOpenChange}
-                      />
-                    ),
-                  },
-                  {
-                    id: "mode",
-                    row: "bottom",
-                    hidden: isBuddyChat,
-                    content: (
-                      <ModeSelect
-                        selectedMode={threadMode ?? DEFAULT_MODE}
-                        onModeChange={onSetMode}
-                        disabled={isBuddyChat || isModeDisabled}
-                        onOpenChange={handleComposerMenuOpenChange}
-                      />
-                    ),
-                  },
-                  {
-                    id: "worktree",
-                    row: "bottom",
-                    hidden: isBuddyChat,
-                    content: (
-                      <WorktreeControl
-                        disabled={isBuddyChat}
-                        onOpenChange={handleComposerMenuOpenChange}
-                      />
-                    ),
-                  },
-                  {
-                    id: "skills",
-                    row: "bottom",
-                    side: "right",
-                    pinned: activeSkill !== null,
-                    hidden:
-                      isCompanionChat ||
-                      (!isComposerExpanded && activeSkill === null),
-                    content: (
-                      <ComposerSkillsControl
-                        chatId={chatId}
-                        disabled={isBuddyChat}
-                        onOpenChange={handleComposerMenuOpenChange}
-                      />
-                    ),
-                  },
-                  {
-                    id: "streaming",
-                    row: isComposerExpanded ? "top" : "bottom",
-                    side: "right",
-                    content: <StreamingTokenCounter />,
-                  },
-                  {
-                    id: "quota",
-                    row: isComposerExpanded ? "top" : "bottom",
-                    side: "right",
-                    content: (
-                      <ProviderUsageIndicator
-                        onOpenChange={handleComposerMenuOpenChange}
-                      />
-                    ),
-                  },
-                  {
-                    id: "context",
-                    row: isComposerExpanded ? "top" : "bottom",
-                    side: "right",
-                    pinned: isWarning,
-                    content: (
-                      <UsageCounter
-                        onOpenChange={handleComposerMenuOpenChange}
-                      />
-                    ),
-                  },
-                  {
-                    id: "trajectory",
-                    row: "top",
-                    side: "right",
-                    hidden: !isComposerExpanded || isCompanionChat,
-                    content: (
-                      <TrajectoryButton
-                        disabled={isBuddyChat}
-                        onOpenChange={handleComposerMenuOpenChange}
-                      />
-                    ),
-                  },
-                  {
-                    id: "browser",
-                    row: "bottom",
-                    side: "right",
-                    hidden: !isComposerExpanded || isCompanionChat,
-                    content: (
-                      <BrowserToggleButton
-                        chatId={chatId}
-                        disabled={isBuddyChat}
-                      />
-                    ),
-                  },
-                  {
-                    id: "enrichment",
-                    row: "bottom",
-                    side: "right",
-                    hidden: !isComposerExpanded || isCompanionChat,
-                    content: (
-                      <AutoEnrichmentToggleButton
-                        disabled={isStreaming || isWaiting}
-                      />
-                    ),
-                  },
-                  {
-                    id: "autoCompact",
-                    row: "bottom",
-                    side: "right",
-                    hidden: !isComposerExpanded || isCompanionChat,
-                    content: <AutoCompactToggleButton disabled={isStreaming} />,
-                  },
-                  {
-                    id: "wand",
-                    row: "bottom",
-                    side: "right",
-                    hidden: !isComposerExpanded || isCompanionChat,
-                    content: (
-                      <WandButton
-                        currentText={value}
-                        disabled={isStreaming || isWaiting}
-                        onUpdateText={handleChange}
-                      />
-                    ),
-                  },
-                  {
-                    id: "image",
-                    row: "bottom",
-                    side: "right",
-                    hidden:
-                      !isComposerExpanded ||
-                      isCompanionChat ||
-                      config.features?.images === false ||
-                      !isMultimodalitySupportedForCurrentModel,
-                    content: <AttachImagesButton />,
-                  },
-                  {
-                    id: "mic",
-                    row: "bottom",
-                    side: "right",
-                    pinned: isVoiceActive,
-                    hidden:
-                      !isVoiceActive &&
-                      (!isComposerExpanded || isCompanionChat),
-                    content: (
-                      <MicrophoneButton
-                        ref={microphoneRef}
-                        onTranscript={(text) =>
-                          setValue((prev) =>
-                            prev.trim() ? `${prev}\n${text}` : text,
-                          )
-                        }
-                        onLiveTranscript={handleLiveTranscript}
-                        onRecordingChange={handleRecordingChange}
-                        disabled={
-                          !isVoiceActive &&
-                          (disableMicrophone || isCompanionChat)
-                        }
-                      />
-                    ),
-                  },
-                  {
-                    id: "threadInfo",
-                    row: "bottom",
-                    side: "right",
-                    hidden: !isComposerExpanded || isCompanionChat,
-                    content: (
-                      <ThreadInfoButton
-                        chatId={chatId}
-                        onOpenChange={handleComposerMenuOpenChange}
-                      />
-                    ),
-                  },
-                  {
-                    id: "sidebar",
-                    row: "bottom",
-                    side: "right",
-                    hidden: !isComposerExpanded || !onClose,
-                    content: (
-                      <BackToSideBarButton
-                        disabled={isStreaming}
-                        onClick={onClose}
-                      />
-                    ),
-                  },
-                  {
-                    id: "send",
-                    row: "bottom",
-                    side: "right",
-                    pinned: true,
-                    content: (
-                      <UnifiedSendButton
-                        disabled={
-                          isVoiceActive ||
-                          !isOnline ||
-                          (!isCompanionChat && allDisabled) ||
-                          contextRebuildRequired
-                        }
-                        isStreaming={isStreaming || isWaiting || recoveryActive}
-                        hasText={
-                          value.trim().length > 0 ||
-                          attachedImages.length > 0 ||
-                          textFiles.length > 0
-                        }
-                        hasMessages={hasMessages && !isCompanionChat}
-                        queuedCount={queuedItems.length}
-                        onSend={() => handleSubmit("after_flow")}
-                        onSendImmediately={handleSendImmediately}
-                        onStop={() => void abort()}
-                        onResend={() => void regenerate()}
-                      />
-                    ),
-                  },
-                ]}
-              />
+                        isCompanionChat ||
+                        (!isComposerExpanded && activeSkill === null),
+                      content: (
+                        <ComposerSkillsControl
+                          chatId={chatId}
+                          disabled={isBuddyChat}
+                          onOpenChange={handleComposerMenuOpenChange}
+                        />
+                      ),
+                    },
+                    {
+                      id: "streaming",
+                      row: isComposerExpanded ? "top" : "bottom",
+                      side: "right",
+                      content: <StreamingTokenCounter />,
+                    },
+                    {
+                      id: "quota",
+                      row: isComposerExpanded ? "top" : "bottom",
+                      side: "right",
+                      content: (
+                        <ProviderUsageIndicator
+                          onOpenChange={handleComposerMenuOpenChange}
+                        />
+                      ),
+                    },
+                    {
+                      id: "context",
+                      row: isComposerExpanded ? "top" : "bottom",
+                      side: "right",
+                      pinned: isWarning,
+                      content: (
+                        <UsageCounter
+                          onOpenChange={handleComposerMenuOpenChange}
+                        />
+                      ),
+                    },
+                    {
+                      id: "trajectory",
+                      row: "top",
+                      side: "right",
+                      hidden: !isComposerExpanded || isCompanionChat,
+                      content: (
+                        <TrajectoryButton
+                          disabled={isBuddyChat}
+                          onOpenChange={handleComposerMenuOpenChange}
+                        />
+                      ),
+                    },
+                    {
+                      id: "browser",
+                      row: "bottom",
+                      side: "right",
+                      hidden: !isComposerExpanded || isCompanionChat,
+                      content: (
+                        <BrowserToggleButton
+                          chatId={chatId}
+                          disabled={isBuddyChat}
+                        />
+                      ),
+                    },
+                    {
+                      id: "enrichment",
+                      row: "bottom",
+                      side: "right",
+                      hidden: !isComposerExpanded || isCompanionChat,
+                      content: (
+                        <AutoEnrichmentToggleButton
+                          disabled={isStreaming || isWaiting}
+                        />
+                      ),
+                    },
+                    {
+                      id: "autoCompact",
+                      row: "bottom",
+                      side: "right",
+                      hidden: !isComposerExpanded || isCompanionChat,
+                      content: (
+                        <AutoCompactToggleButton disabled={isStreaming} />
+                      ),
+                    },
+                    {
+                      id: "wand",
+                      row: "bottom",
+                      side: "right",
+                      hidden: !isComposerExpanded || isCompanionChat,
+                      content: (
+                        <WandButton
+                          currentText={value}
+                          disabled={isStreaming || isWaiting}
+                          onUpdateText={handleChange}
+                        />
+                      ),
+                    },
+                    {
+                      id: "image",
+                      row: "bottom",
+                      side: "right",
+                      hidden:
+                        !isComposerExpanded ||
+                        isCompanionChat ||
+                        config.features?.images === false ||
+                        !isMultimodalitySupportedForCurrentModel,
+                      content: <AttachImagesButton />,
+                    },
+                    {
+                      id: "mic",
+                      row: "bottom",
+                      side: "right",
+                      pinned: isVoiceActive,
+                      hidden:
+                        !isVoiceActive &&
+                        (!isComposerExpanded || isCompanionChat),
+                      content: (
+                        <MicrophoneButton
+                          ref={microphoneRef}
+                          onTranscript={(text) =>
+                            setValue((prev) =>
+                              prev.trim() ? `${prev}\n${text}` : text,
+                            )
+                          }
+                          onLiveTranscript={handleLiveTranscript}
+                          onRecordingChange={handleRecordingChange}
+                          disabled={
+                            !isVoiceActive &&
+                            (disableMicrophone || isCompanionChat)
+                          }
+                        />
+                      ),
+                    },
+                    {
+                      id: "threadInfo",
+                      row: "bottom",
+                      side: "right",
+                      hidden: !isComposerExpanded || isCompanionChat,
+                      content: (
+                        <ThreadInfoButton
+                          chatId={chatId}
+                          onOpenChange={handleComposerMenuOpenChange}
+                        />
+                      ),
+                    },
+                    {
+                      id: "sidebar",
+                      row: "bottom",
+                      side: "right",
+                      hidden: !isComposerExpanded || !onClose,
+                      content: (
+                        <BackToSideBarButton
+                          disabled={isStreaming}
+                          onClick={onClose}
+                        />
+                      ),
+                    },
+                    {
+                      id: "send",
+                      row: "bottom",
+                      side: "right",
+                      pinned: true,
+                      content: (
+                        <UnifiedSendButton
+                          disabled={
+                            isVoiceActive ||
+                            !isOnline ||
+                            (!isCompanionChat && allDisabled) ||
+                            contextRebuildRequired
+                          }
+                          isStreaming={
+                            isStreaming || isWaiting || recoveryActive
+                          }
+                          hasText={
+                            value.trim().length > 0 ||
+                            attachedImages.length > 0 ||
+                            textFiles.length > 0
+                          }
+                          hasMessages={hasMessages && !isCompanionChat}
+                          queuedCount={queuedItems.length}
+                          onSend={() => handleSubmit("after_flow")}
+                          onSendImmediately={handleSendImmediately}
+                          onStop={() => void abort()}
+                          onResend={() => void regenerate()}
+                        />
+                      ),
+                    },
+                  ]}
+                />
+              </>
             )}
           />
         </Form>

@@ -92,13 +92,15 @@ pub fn output_mini_postprocessing(filter: &OutputFilter, output: &str) -> String
         if let Ok(re) = Regex::new(&filter.grep) {
             for (i, line) in lines.iter().enumerate() {
                 if re.is_match(line) {
-                    ratings[i] = 1.0;
+                    // A requested match must survive before its surrounding context
+                    // consumes the output budget.
+                    ratings[i] = 2.0;
                     for j in 1..=filter.grep_context_lines {
                         if i >= j {
-                            ratings[i - j] = 1.0;
+                            ratings[i - j] = ratings[i - j].max(1.0);
                         }
                         if i + j < lines.len() {
-                            ratings[i + j] = 1.0;
+                            ratings[i + j] = ratings[i + j].max(1.0);
                         }
                     }
                 }
@@ -119,20 +121,46 @@ pub fn output_mini_postprocessing(filter: &OutputFilter, output: &str) -> String
         None
     };
 
+    let byte_limit = filter
+        .limit_tokens
+        .map(|tokens| tokens.saturating_mul(4))
+        .unwrap_or(usize::MAX)
+        .min(filter.limit_chars);
+    let has_matches = ratings.iter().any(|rating| *rating >= 2.0);
+    let mut selected_lengths = vec![0; lines.len()];
     let mut current_lines = 0;
     let mut current_chars = 0;
 
     for &index in &line_indices {
-        if current_lines >= filter.limit_lines || current_chars >= filter.limit_chars {
+        if current_lines >= filter.limit_lines || current_chars >= byte_limit {
             break;
         }
         let dominated = remove_re
             .as_ref()
             .map_or(false, |re| re.is_match(lines[index]));
         if !dominated && ratings[index] > 0.0 {
+            // Do not spend the remaining budget on a partial context line:
+            // rendering it before a later match could push that match out again.
+            // Keep clipping for the highest-priority line, including single-line output.
+            if has_matches
+                && ratings[index] < 2.0
+                && current_chars
+                    .saturating_add(lines[index].len())
+                    .saturating_add(1)
+                    > byte_limit / 2
+            {
+                continue;
+            }
             approve[index] = true;
             current_lines += 1;
-            current_chars += lines[index].len();
+            let mut end = lines[index]
+                .len()
+                .min(byte_limit.saturating_sub(current_chars));
+            while !lines[index].is_char_boundary(end) {
+                end -= 1;
+            }
+            selected_lengths[index] = end;
+            current_chars += end.saturating_add(1);
         }
     }
 
@@ -146,7 +174,7 @@ pub fn output_mini_postprocessing(filter: &OutputFilter, output: &str) -> String
                 total_skipped += skipped_lines;
                 skipped_lines = 0;
             }
-            result.push_str(line);
+            result.push_str(&line[..selected_lengths[i]]);
             result.push('\n');
         } else {
             skipped_lines += 1;
@@ -158,7 +186,10 @@ pub fn output_mini_postprocessing(filter: &OutputFilter, output: &str) -> String
     }
     if total_skipped > 0 {
         let filter_desc = if !filter.grep.is_empty() {
-            format!("grep: '{}'", &filter.grep[..filter.grep.len().min(30)])
+            format!(
+                "grep: '{}'",
+                filter.grep.chars().take(30).collect::<String>()
+            )
         } else {
             format!("keep: {}", filter.valuable_top_or_bottom)
         };
@@ -167,12 +198,62 @@ pub fn output_mini_postprocessing(filter: &OutputFilter, output: &str) -> String
             total_skipped, filter.limit_lines, filter_desc
         ));
     }
+    if result.len() > byte_limit
+        || lines
+            .iter()
+            .enumerate()
+            .any(|(i, line)| approve[i] && selected_lengths[i] < line.len())
+    {
+        let marker = "\n[truncated]\n";
+        let mut end = result.len().min(byte_limit.saturating_sub(marker.len()));
+        while !result.is_char_boundary(end) {
+            end -= 1;
+        }
+        result.truncate(end);
+        if marker.len() <= byte_limit {
+            result.push_str(marker);
+        }
+    }
     result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn single_long_line_respects_character_and_token_budgets() {
+        let output = "界".repeat(42_000);
+        let mut filter = OutputFilter {
+            limit_lines: 40,
+            limit_chars: 100,
+            limit_tokens: None,
+            skip: false,
+            ..Default::default()
+        };
+        let result = output_mini_postprocessing(&filter, &output);
+        assert!(result.len() <= 100);
+        assert!(result.ends_with("[truncated]\n"));
+        filter.limit_chars = 1000;
+        filter.limit_tokens = Some(50);
+        let result = output_mini_postprocessing(&filter, &output);
+        assert!(result.len() > 50);
+        assert!(result.len() <= 200);
+        assert!(result.ends_with("[truncated]\n"));
+    }
+
+    #[test]
+    fn explicit_line_limit_retains_four_character_token_allowance() {
+        let filter = parse_output_filter_args(
+            &HashMap::from([("output_limit".into(), Value::from("40"))]),
+            &OutputFilter::default(),
+        );
+        let output = "x".repeat(6000);
+        assert_eq!(
+            output_mini_postprocessing(&filter, &output),
+            format!("{output}\n")
+        );
+    }
 
     #[test]
     fn test_cmdline_output_filter() {

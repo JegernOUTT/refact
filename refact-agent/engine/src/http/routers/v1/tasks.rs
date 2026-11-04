@@ -881,11 +881,25 @@ pub async fn handle_create_planner_chat(
                 "Task planner owner changed during transfer; refresh before continuing".into(),
             );
         }
-        board.owner_chat_id = Some(chat_id.clone());
+        board
+            .try_transfer_owner(
+                &chat_id,
+                chrono::Utc::now().timestamp_millis().max(0) as u64,
+            )
+            .map_err(|error| error.to_string())?;
         Ok(())
     })
     .await
     .map_err(|error| (StatusCode::CONFLICT, error))?;
+    let rebind_gcx = gcx.clone();
+    let rebind_task = task_id.clone();
+    tokio::spawn(async move {
+        if let Err(error) =
+            crate::tasks::custody::rebind_task_agents(rebind_gcx, &rebind_task).await
+        {
+            tracing::warn!(%error, "planner custody reconciliation deferred");
+        }
+    });
     crate::tasks::goal::attach_planner_goal(gcx, &task_id, &chat_id, Vec::new(), Vec::new())
         .await
         .map_err(|error| (StatusCode::CONFLICT, error))?;
@@ -1119,8 +1133,21 @@ pub async fn handle_delete_planner_chat(
     let canon_file = tokio::fs::canonicalize(&file_path)
         .await
         .map_err(|e| delete_error(StatusCode::NOT_FOUND, e.to_string()))?;
+    let linked_dir = storage::get_task_trajectory_dir(&task_dir, "linked", None);
+    let canon_linked_dir = tokio::fs::canonicalize(&linked_dir)
+        .await
+        .ok()
+        .filter(|dir| {
+            canon_dir
+                .parent()
+                .is_some_and(|parent| *dir == parent.join("linked"))
+        });
+    let belongs_to_task = canon_file.parent() == Some(canon_dir.as_path())
+        || canon_linked_dir
+            .as_deref()
+            .is_some_and(|dir| canon_file.parent() == Some(dir));
 
-    if !canon_file.starts_with(&canon_dir) || canon_file.parent() != Some(canon_dir.as_path()) {
+    if !belongs_to_task {
         return Err(delete_error(
             StatusCode::FORBIDDEN,
             "Planner chat does not belong to this task",

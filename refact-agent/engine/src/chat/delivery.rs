@@ -24,7 +24,7 @@ use tokio::sync::Mutex as AMutex;
 
 use crate::app_state::AppState;
 use crate::chat::queue::process_command_queue;
-use crate::chat::trajectories::{maybe_save_trajectory_with_intent, try_save_trajectory_with_intent};
+use crate::chat::trajectories::try_save_trajectory_with_intent;
 use crate::chat::types::{
     ChatSession, DeliveryOutcome, DeliveryStatus, PendingDelivery, PushMode, SessionState,
     TrajectoryCommitIntent,
@@ -33,6 +33,7 @@ use crate::coordination::outbox;
 
 #[cfg(test)]
 tokio::task_local! {
+    pub(crate) static BEFORE_DELIVERY_SAVE: (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
     pub(crate) static BEFORE_REPLY_ACCEPT: (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
 }
 
@@ -41,11 +42,38 @@ tokio::task_local! {
 /// Restores the target session from its trajectory when needed and rejects
 /// closed or unavailable chats honestly instead of silently dropping messages.
 /// A background-agent runner that owns this chat gets the delivery first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrajectoryPersistence {
+    Committed,
+    Pending,
+    Unknown,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DeliveryReceipt {
+    pub outcome: DeliveryOutcome,
+    pub delivery_id: String,
+    pub trajectory_persistence: TrajectoryPersistence,
+    pub outbox_durable: bool,
+    pub note: Option<String>,
+}
+
 pub async fn deliver_to_chat(
     app: AppState,
     chat_id: &str,
     delivery: PendingDelivery,
 ) -> Result<DeliveryOutcome, String> {
+    deliver_to_chat_with_receipt(app, chat_id, delivery)
+        .await
+        .map(|receipt| receipt.outcome)
+}
+
+pub async fn deliver_to_chat_with_receipt(
+    app: AppState,
+    chat_id: &str,
+    delivery: PendingDelivery,
+) -> Result<DeliveryReceipt, String> {
     if delivery.messages.is_empty() {
         return Err("delivery must contain at least one message".to_string());
     }
@@ -67,12 +95,19 @@ pub async fn deliver_to_chat(
         if let Some(result) =
             crate::agents::delivery::route_to_runner(&app, chat_id, delivery.clone()).await
         {
-            return result;
+            return result.map(|outcome| DeliveryReceipt {
+                outcome,
+                delivery_id: delivery.id.clone(),
+                trajectory_persistence: TrajectoryPersistence::Unknown,
+                outbox_durable: false,
+                note: None,
+            });
         }
     }
 
     let sessions = app.chat.sessions.clone();
-    if let Some(session) = sessions.read().await.get(chat_id).cloned() {
+    let existing_session = { sessions.read().await.get(chat_id).cloned() };
+    if let Some(session) = existing_session {
         if session.lock().await.closed {
             return Err(format!("chat '{chat_id}' is closed"));
         }
@@ -95,7 +130,7 @@ pub async fn deliver_to_chat(
     // delivery: the outbox drops out, the loss is reported, and the rest of the
     // path is the in-memory one that ran before the outbox existed.
     let source_root = crate::coordination::scope::session_source_root(&*session_arc.lock().await);
-    let project = outbox::project_key_for_root(&app, source_root).await;
+    let project = outbox::project_key_for_root(&app, source_root.clone()).await;
     let delivery_id = delivery.id.clone();
     let causal_event = crate::coordination::causal::delivery_event(chat_id, &delivery);
     let outbox = match outbox::outbox_for(&app, project).await {
@@ -105,7 +140,10 @@ pub async fn deliver_to_chat(
 
     let sealed = delivery.wake && crate::agents::seal::is_sealed(&app, chat_id).await;
     let enqueue = |session: &mut ChatSession, delivery: PendingDelivery| {
-        let wake = delivery.wake && !sealed;
+        let wake = delivery.wake
+            && !sealed
+            && session.runtime.interruption.is_none()
+            && session.runtime.state != SessionState::Interrupted;
         let accepted = if session.closed {
             Err(format!("chat '{chat_id}' is closed"))
         } else if sealed {
@@ -187,17 +225,29 @@ pub async fn deliver_to_chat(
             return Err(error);
         }
     };
-    record_outbox_status(outbox.as_ref(), &delivery_id, status).await;
     // Causality is recorded after the delivery is already accepted, so a
     // recorder that cannot write costs the trace, never the message.
     crate::coordination::causal::record(&app, causal_event).await;
 
-    try_save_trajectory_with_intent(
+    let save = schedule_delivery_save(
         app.clone(),
         session_arc.clone(),
-        TrajectoryCommitIntent::Required,
+        source_root,
+        vec![(delivery_id.clone(), status)],
+        if planner_reply {
+            vec![delivery_id.clone()]
+        } else {
+            vec![]
+        },
     )
-    .await?;
+    .await;
+    let persistence = match tokio::time::timeout(std::time::Duration::from_secs(2), save).await {
+        Ok(Ok(true)) => TrajectoryPersistence::Committed,
+        _ => {
+            tracing::warn!(%delivery_id, "accepted delivery persist pending; do not resend");
+            TrajectoryPersistence::Pending
+        }
+    };
 
     if should_start_processor {
         // Coalesce wakes: at most one non-interrupting processor restart.
@@ -214,7 +264,14 @@ pub async fn deliver_to_chat(
         queue_notify.notify_one();
     }
 
-    Ok(outcome)
+    Ok(DeliveryReceipt {
+        outcome,
+        delivery_id,
+        trajectory_persistence: persistence,
+        outbox_durable: outbox.is_some(),
+        note: (persistence == TrajectoryPersistence::Pending)
+            .then(|| "Persistence pending; do not resend".into()),
+    })
 }
 
 /// Update a still-pending delivery. Runner-owned deliveries are routed to the
@@ -252,6 +309,154 @@ pub async fn update_pending_delivery_in_chat(
     }
     try_save_trajectory_with_intent(app, session_arc, TrajectoryCommitIntent::Required).await?;
     Ok(())
+}
+
+struct SaveFinalizer {
+    source_root: Option<std::path::PathBuf>,
+    statuses: Vec<(String, DeliveryStatus)>,
+    replies: Vec<String>,
+    reply_permit: Option<crate::tools::tool_agent_planner_qna::ReplyDispatchPermit>,
+    receipt: tokio::sync::oneshot::Sender<bool>,
+}
+
+type PendingSaves = std::collections::HashMap<uuid::Uuid, Vec<SaveFinalizer>>;
+
+fn pending_saves() -> &'static std::sync::Mutex<PendingSaves> {
+    static SAVES: std::sync::OnceLock<std::sync::Mutex<PendingSaves>> = std::sync::OnceLock::new();
+    SAVES.get_or_init(Default::default)
+}
+
+async fn schedule_delivery_save(
+    app: AppState,
+    session: Arc<AMutex<ChatSession>>,
+    source_root: Option<std::path::PathBuf>,
+    statuses: Vec<(String, DeliveryStatus)>,
+    replies: Vec<String>,
+) -> tokio::sync::oneshot::Receiver<bool> {
+    let (receipt, receiver) = tokio::sync::oneshot::channel();
+    let key = session.lock().await.delivery_save_id;
+    let session = Arc::downgrade(&session);
+    let start = {
+        let mut saves = pending_saves().lock().unwrap_or_else(|e| e.into_inner());
+        let start = !saves.contains_key(&key);
+        saves.entry(key).or_default().push(SaveFinalizer {
+            source_root,
+            statuses,
+            replies,
+            reply_permit: crate::tools::tool_agent_planner_qna::reply_dispatch_permit(),
+            receipt,
+        });
+        start
+    };
+    if start {
+        #[cfg(test)]
+        let barrier = BEFORE_DELIVERY_SAVE.try_with(Clone::clone).ok();
+        let worker = async move {
+            #[cfg(test)]
+            if let Some(barrier) = barrier {
+                barrier.0.notify_one();
+                barrier.1.notified().await;
+            }
+            let mut batch = Vec::new();
+            let mut failures = 0;
+            loop {
+                {
+                    let mut saves = pending_saves().lock().unwrap_or_else(|e| e.into_inner());
+                    batch.extend(saves.get_mut(&key).unwrap().drain(..));
+                }
+                if app.runtime.shutdown_flag.load(Ordering::Acquire) {
+                    finish_failed_delivery_saves(key, &mut batch, "shutdown");
+                    break;
+                }
+                let Some(strong_session) = session.upgrade() else {
+                    finish_failed_delivery_saves(key, &mut batch, "session dropped");
+                    break;
+                };
+                let committed = matches!(
+                    try_save_trajectory_with_intent(
+                        app.clone(),
+                        strong_session.clone(),
+                        TrajectoryCommitIntent::Required,
+                    )
+                    .await,
+                    Ok(true)
+                );
+                if committed {
+                    let chat_id = strong_session.lock().await.chat_id.clone();
+                    for finalizer in batch.drain(..) {
+                        record_drained_statuses(&app, finalizer.source_root, finalizer.statuses)
+                            .await;
+                        for id in finalizer.replies {
+                            if let Err(error) =
+                                crate::tools::tool_agent_planner_qna::acknowledge_reply_with_permit(
+                                    finalizer.reply_permit.clone(),
+                                    app.gcx.clone(),
+                                    &chat_id,
+                                    &id,
+                                )
+                                .await
+                            {
+                                tracing::warn!(delivery_id = %id, %error, "accepted reply acknowledgement persist pending");
+                            }
+                        }
+                        let _ = finalizer.receipt.send(true);
+                    }
+                    failures = 0;
+                } else {
+                    failures += 1;
+                }
+                drop(strong_session);
+                if failures >= 4 {
+                    finish_failed_delivery_saves(key, &mut batch, "retry exhausted");
+                    break;
+                }
+                {
+                    let mut saves = pending_saves().lock().unwrap_or_else(|e| e.into_inner());
+                    if batch.is_empty() && saves.get(&key).unwrap().is_empty() {
+                        saves.remove(&key);
+                        break;
+                    }
+                }
+                if !committed {
+                    tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(1 << (failures - 1))) => {},
+                        _ = crate::background_tasks::wait_for_shutdown(app.gcx.clone()) => {
+                            finish_failed_delivery_saves(key, &mut batch, "shutdown");
+                            break;
+                        }
+                    }
+                }
+            }
+        };
+        if let Err(error) = crate::agents::spawn::track_spawn_owner(worker, true) {
+            finish_failed_delivery_saves(key, &mut Vec::new(), &error);
+        }
+    }
+    receiver
+}
+
+fn finish_failed_delivery_saves(key: uuid::Uuid, batch: &mut Vec<SaveFinalizer>, reason: &str) {
+    if let Some(pending) = pending_saves()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&key)
+    {
+        batch.extend(pending);
+    }
+    let ids = batch
+        .iter()
+        .flat_map(|entry| {
+            entry
+                .statuses
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .chain(entry.replies.iter().map(String::as_str))
+        })
+        .collect::<Vec<_>>();
+    tracing::warn!(session_id = %key, delivery_ids = ?ids, %reason, "delivery persistence outcome unknown; do not resend");
+    for finalizer in batch.drain(..) {
+        let _ = finalizer.receipt.send(false);
+    }
 }
 
 async fn record_outbox_status(
@@ -322,7 +527,9 @@ pub(crate) fn collect_boundary_deliveries(session: &mut ChatSession) -> Delivery
         .collect();
     DeliveryDrainBatch {
         delivered: !delivered_ids.is_empty(),
-        wake,
+        wake: wake
+            && session.runtime.interruption.is_none()
+            && session.runtime.state != SessionState::Interrupted,
         processor_running: session.queue_processor_running.clone(),
         queue_notify: session.queue_notify.clone(),
         source_root: crate::coordination::scope::session_source_root(session),
@@ -347,14 +554,15 @@ pub(crate) async fn finalize_boundary_deliveries(
         return false;
     }
 
-    record_drained_statuses(&app, source_root, statuses).await;
-
-    maybe_save_trajectory_with_intent(
+    let save = schedule_delivery_save(
         app.clone(),
         session_arc.clone(),
-        TrajectoryCommitIntent::Required,
+        source_root,
+        statuses,
+        vec![],
     )
     .await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), save).await;
 
     if wake {
         let idle = {
@@ -380,6 +588,74 @@ mod tests {
     use crate::app_state::EngineChatSessionFacade;
     use refact_runtime_api::ChatSessionFacade;
     use crate::call_validation::ChatMessage;
+
+    struct LegacyFacade(std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl ChatSessionFacade for LegacyFacade {
+        async fn session_snapshot(
+            &self,
+            _: &str,
+        ) -> Result<refact_runtime_api::ChatSessionSnapshot, String> {
+            unimplemented!()
+        }
+        async fn update_session(
+            &self,
+            _: &str,
+            _: refact_runtime_api::ChatSessionUpdate,
+        ) -> Result<(), String> {
+            unimplemented!()
+        }
+        async fn create_session(
+            &self,
+            _: refact_runtime_api::CreateSessionRequest,
+        ) -> Result<(), String> {
+            unimplemented!()
+        }
+        async fn push_command(
+            &self,
+            _: &str,
+            _: crate::chat::types::ChatCommand,
+        ) -> Result<(), String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn session_state(&self, _: &str) -> Result<Option<SessionState>, String> {
+            Ok(None)
+        }
+        async fn maybe_save_session(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn save_trajectory_snapshot(
+            &self,
+            _: refact_chat_history::trajectory_snapshot::TrajectorySnapshot,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_runtime_refuses_receipt_without_delivering_then_allows_explicit_fallback() {
+        let facade = LegacyFacade(Default::default());
+        let delivery = PendingDelivery::with_id(
+            "legacy",
+            vec![ChatMessage::new("user".into(), "message".into())],
+            PushMode::Append,
+            "test",
+            false,
+        );
+        let error = facade
+            .deliver_messages_with_receipt("legacy", delivery.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error, "deliver_messages_with_receipt is unsupported by this runtime; use deliver_messages without receipt guarantees");
+        assert_eq!(facade.0.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            facade.deliver_messages("legacy", delivery).await.unwrap(),
+            DeliveryOutcome::Queued
+        );
+        assert_eq!(facade.0.load(Ordering::SeqCst), 1);
+    }
 
     #[tokio::test]
     async fn delivery_failed_save_and_duplicate_retry_remain_unacknowledged() {
@@ -423,12 +699,33 @@ mod tests {
                 "test",
                 false,
             );
-            assert!(deliver_to_chat(app.clone(), id, delivery.clone())
+            let accepted = deliver_to_chat_with_receipt(app.clone(), id, delivery.clone())
                 .await
-                .is_err());
-            assert!(deliver_to_chat(app.clone(), id, delivery.clone())
+                .unwrap();
+            assert_eq!(
+                accepted.outcome,
+                if queued {
+                    DeliveryOutcome::Queued
+                } else {
+                    DeliveryOutcome::Delivered
+                }
+            );
+            assert_eq!(
+                accepted.trajectory_persistence,
+                TrajectoryPersistence::Pending
+            );
+            assert_eq!(
+                accepted.note.as_deref(),
+                Some("Persistence pending; do not resend")
+            );
+            let duplicate = deliver_to_chat_with_receipt(app.clone(), id, delivery.clone())
                 .await
-                .is_err());
+                .unwrap();
+            assert_eq!(duplicate.outcome, DeliveryOutcome::Duplicate);
+            assert_eq!(
+                duplicate.trajectory_persistence,
+                TrajectoryPersistence::Pending
+            );
             {
                 let session = session.lock().await;
                 assert_eq!(session.pending_deliveries.len(), usize::from(queued));
@@ -440,6 +737,13 @@ mod tests {
                 deliver_to_chat(app.clone(), id, delivery).await.unwrap(),
                 DeliveryOutcome::Duplicate
             );
+            assert!(tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                schedule_delivery_save(app.clone(), session.clone(), None, vec![], vec![]).await
+            )
+            .await
+            .unwrap()
+            .unwrap());
             let saved = crate::chat::trajectories::load_trajectory_for_chat(app.gcx.clone(), id)
                 .await
                 .unwrap();
@@ -447,6 +751,151 @@ mod tests {
             assert_eq!(saved.messages.len(), usize::from(!queued));
             assert!(!session.lock().await.trajectory_dirty);
         }
+    }
+
+    #[tokio::test]
+    async fn late_delivery_commit_settles_outbox_after_receipt_timeout() {
+        let workspace = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            workspace.path().join("cache"),
+            config.path().to_path_buf(),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        let app = AppState::from_gcx(gcx).await;
+        let session = Arc::new(AMutex::new(ChatSession::new("late-commit".into())));
+        let delivery = PendingDelivery::with_id(
+            "late",
+            vec![ChatMessage::new("user".into(), "retained".into())],
+            PushMode::Append,
+            "test",
+            false,
+        );
+        let project = outbox::project_key_for_root(&app, None).await;
+        let outbox = outbox::outbox_for(&app, project).await.unwrap();
+        assert!(outbox.accept_for_dispatch("late-commit", &delivery).await);
+        assert_eq!(
+            session.lock().await.enqueue_delivery(delivery).unwrap(),
+            DeliveryOutcome::Delivered
+        );
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut receipt = BEFORE_DELIVERY_SAVE
+            .scope((entered.clone(), release.clone()), async {
+                schedule_delivery_save(
+                    app.clone(),
+                    session.clone(),
+                    None,
+                    vec![("late".into(), DeliveryStatus::Delivered)],
+                    vec![],
+                )
+                .await
+            })
+            .await;
+        entered.notified().await;
+        let coalesced =
+            schedule_delivery_save(app.clone(), session.clone(), None, vec![], vec![]).await;
+        let session_id = session.lock().await.delivery_save_id;
+        assert_eq!(
+            pending_saves()
+                .lock()
+                .unwrap()
+                .get(&session_id)
+                .unwrap()
+                .len(),
+            2
+        );
+        tokio::time::pause();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), &mut receipt)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            outbox.status_of("late").await.unwrap(),
+            Some(refact_work_core::DeliveryState::InFlight)
+        );
+        release.notify_one();
+        assert!(receipt.await.unwrap());
+        assert!(coalesced.await.unwrap());
+        assert_eq!(
+            outbox.status_of("late").await.unwrap(),
+            Some(refact_work_core::DeliveryState::Delivered)
+        );
+        assert_eq!(session.lock().await.messages.len(), 1);
+        let transient = Arc::new(AMutex::new(ChatSession::new("dropped-save".into())));
+        let session_id = transient.lock().await.delivery_save_id;
+        let weak = Arc::downgrade(&transient);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let receipt = BEFORE_DELIVERY_SAVE
+            .scope((entered.clone(), release.clone()), async {
+                schedule_delivery_save(
+                    app.clone(),
+                    transient.clone(),
+                    None,
+                    vec![("dropped-delivery".into(), DeliveryStatus::Delivered)],
+                    vec![],
+                )
+                .await
+            })
+            .await;
+        entered.notified().await;
+        drop(transient);
+        assert!(weak.upgrade().is_none());
+        release.notify_one();
+        assert!(!receipt.await.unwrap());
+        assert!(!pending_saves().lock().unwrap().contains_key(&session_id));
+        let error = crate::tools::tool_agent_planner_qna::acknowledge_reply_with_permit(
+            None,
+            app.gcx.clone(),
+            "late-commit",
+            "late",
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("reply dispatch permit missing"));
+    }
+
+    #[tokio::test]
+    async fn interrupted_delivery_does_not_wake_processor() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let workspace = tempfile::tempdir().unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        let app = AppState::from_gcx(gcx).await;
+        let session = Arc::new(AMutex::new(ChatSession::new("interrupted-delivery".into())));
+        crate::chat::session_runtime::interrupt_board_execution(
+            &mut *session.lock().await,
+            crate::tasks::admission::ExecutionUnavailable::Missing,
+        );
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("interrupted-delivery".into(), session.clone());
+        let receipt = deliver_to_chat_with_receipt(
+            app,
+            "interrupted-delivery",
+            PendingDelivery::with_id(
+                "interrupted-message",
+                vec![ChatMessage::new("user".into(), "steer".into())],
+                PushMode::Append,
+                "test",
+                true,
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            receipt.outcome,
+            DeliveryOutcome::Delivered | DeliveryOutcome::Queued
+        ));
+        let session = session.lock().await;
+        assert_eq!(session.runtime.state, SessionState::Interrupted);
+        assert!(!session.queue_processor_running.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

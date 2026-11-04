@@ -8,6 +8,7 @@ import { normalizeToolName } from "../../utils/toolNameAliases";
 import { Icon } from "../ui";
 import styles from "./ToolCard/OpenAIResponsesTool.module.css";
 import chatStyles from "./ChatContent.module.css";
+import { summarizeServerBlocks } from "./serverBlockSummary";
 type ServerToolUse = {
   type: "server_tool_use";
   id: string;
@@ -185,13 +186,14 @@ export const ServerContentBlocks: React.FC<ServerContentBlocksProps> = ({
         <WebSearchBlock key={group.toolUse.id} group={group} />
       ))}
       {ungrouped.length > 0 && (
-        <Box mt="2">
-          <Text size="1">Server blocks ({ungrouped.length})</Text>
-
+        <details className={chatStyles.serverBlocksDetails}>
+          <summary>
+            <Text size="1">{summarizeServerBlocks(ungrouped)}</Text>
+          </summary>
           <pre className={`scrollX ${chatStyles.serverBlocksRaw}`}>
             {JSON.stringify(ungrouped, null, 2)}
           </pre>
-        </Box>
+        </details>
       )}
     </Box>
   );

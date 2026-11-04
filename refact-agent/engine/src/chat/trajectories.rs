@@ -1518,7 +1518,7 @@ pub(crate) async fn list_task_trajectory_dirs(gcx: &Arc<GlobalContext>) -> Vec<P
             if !is_real_dir(&task_dir).await {
                 continue;
             }
-            for role in ["planner", "agents", "subchats"] {
+            for role in ["planner", "linked", "agents", "subchats"] {
                 collect_existing_dirs(task_dir.join("trajectories").join(role), &mut dirs).await;
             }
         }
@@ -2633,9 +2633,21 @@ fn preserve_existing_trajectory_metadata(
     }
 }
 
+pub(crate) fn transitioned_task_meta(
+    source: Option<crate::chat::types::TaskMeta>,
+    target_mode: &str,
+) -> Option<crate::chat::types::TaskMeta> {
+    source.map(|mut meta| {
+        if meta.role == "planner" && target_mode != "task_planner" {
+            meta.role = "linked".to_string();
+        }
+        meta
+    })
+}
+
 fn validate_task_trajectory_role(role: &str) -> Result<(), String> {
     match role {
-        "planner" | "agents" | "subchats" => Ok(()),
+        "planner" | "linked" | "agents" | "subchats" => Ok(()),
         _ => Err(format!("Invalid task trajectory role: {role}")),
     }
 }
@@ -3141,6 +3153,39 @@ pub(crate) fn trajectory_path_stem_matches_id(path: &Path, id: &str) -> bool {
     false
 }
 
+pub(crate) async fn normalize_legacy_planner_copy(
+    gcx: Arc<GlobalContext>,
+    chat_id: &str,
+    mode: &str,
+    link_type: Option<&str>,
+    task_meta: &mut Option<TaskMeta>,
+) {
+    let Some(meta) = task_meta.as_mut().filter(|meta| meta.role == "planner") else {
+        return;
+    };
+    if !matches!(link_type, Some("mode_transition" | "handoff"))
+        || mode.trim().is_empty()
+        || crate::yaml_configs::customization_registry::map_legacy_mode_to_id(mode)
+            == "task_planner"
+    {
+        return;
+    }
+    let Ok(board) = crate::tasks::storage::load_board_unlocked(gcx, &meta.task_id).await else {
+        return;
+    };
+    if board
+        .owner_chat_id
+        .as_deref()
+        .is_some_and(|owner| !owner.is_empty() && owner != chat_id)
+        && !board
+            .reviewer_chat_ids
+            .iter()
+            .any(|reviewer| reviewer == chat_id)
+    {
+        meta.role = "linked".into();
+    }
+}
+
 async fn load_trajectory_candidate(
     gcx: Arc<GlobalContext>,
     chat_id: &str,
@@ -3270,9 +3315,19 @@ async fn load_trajectory_candidate(
     })
     .ok()??;
 
-    let task_meta: Option<super::types::TaskMeta> = t
+    let mut task_meta: Option<super::types::TaskMeta> = t
         .get("task_meta")
         .and_then(|v| serde_json::from_value(v.clone()).ok());
+    normalize_legacy_planner_copy(
+        gcx.clone(),
+        chat_id,
+        t.get("mode")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default(),
+        t.get("link_type").and_then(|value| value.as_str()),
+        &mut task_meta,
+    )
+    .await;
 
     let worktree = if let Some(candidate) = t.get("worktree").and_then(parse_worktree_meta) {
         validate_loaded_worktree_strict(app.clone(), chat_id, candidate).await
@@ -3539,6 +3594,79 @@ pub async fn load_trajectory_for_chat(
     load_trajectory_candidate(gcx, chat_id, candidate).await
 }
 
+pub(crate) async fn rebind_persisted_task_agent(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    chat_id: &str,
+) -> Result<bool, String> {
+    let path = find_trajectory_path(gcx.clone(), chat_id)
+        .await
+        .ok_or("Agent trajectory unavailable")?;
+    let (_, guard) = crate::tasks::storage::locked_task_dir(gcx.clone(), task_id).await?;
+    let board = crate::tasks::storage::load_board_locked(gcx.clone(), task_id, &guard).await?;
+    let Some(owner) = board.owner_chat_id.as_deref() else {
+        return Ok(false);
+    };
+    super::trajectory_archive::with_trajectory_mutation_lock(async {
+        if gcx.chat_sessions.read().await.contains_key(chat_id) {
+            return Ok(false);
+        }
+        crate::tasks::storage::require_regular_task_file(&path).await?;
+        let body = fs::read_to_string(&path)
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut value: serde_json::Value =
+            serde_json::from_str(&body).map_err(|error| error.to_string())?;
+        let meta = value.get("task_meta").ok_or("Agent task binding missing")?;
+        let bound = meta
+            .get("planner_chat_id")
+            .and_then(|value| value.as_str())
+            .ok_or("Agent planner missing")?
+            .to_string();
+        let card_id = meta
+            .get("card_id")
+            .and_then(|value| value.as_str())
+            .ok_or("Agent card missing")?;
+        if value["id"] != chat_id
+            || meta["task_id"] != task_id
+            || meta["role"] != "agents"
+            || bound == owner
+            || !board.planner_binding_is_current(&bound)
+        {
+            return Ok(false);
+        }
+        let Some(card) = board
+            .get_card(card_id)
+            .filter(|card| card.column == "doing")
+        else {
+            return Ok(false);
+        };
+        if card.agent_chat_id.as_deref() != Some(chat_id)
+            && !card
+                .team_members
+                .iter()
+                .any(|member| member.agent_chat_id.as_deref() == Some(chat_id))
+            && !card.ab_variants.as_ref().is_some_and(|variants| {
+                [&variants.a, &variants.b]
+                    .iter()
+                    .any(|variant| variant.chat_id == chat_id && variant.finish.is_none())
+            })
+        {
+            return Ok(false);
+        }
+        value["task_meta"]["planner_chat_id"] = json!(owner);
+        value["parent_id"] = json!(owner);
+        value["root_chat_id"] = json!(owner);
+        let body = serde_json::to_vec_pretty(&value).map_err(|error| error.to_string())?;
+        crate::file_activity::write_temp_then_rename(&path, &body, None).await?;
+        crate::file_activity::sync_dir(path.parent().ok_or("Agent trajectory parent missing")?)
+            .await?;
+        gcx.agents.rebind_parent(chat_id, &bound, owner).await?;
+        Ok(true)
+    })
+    .await
+}
+
 pub fn validate_trajectory_label(label: &str) -> Result<String, String> {
     let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
     if label.is_empty() {
@@ -3594,10 +3722,23 @@ pub(crate) async fn chat_id_is_planner_for_task(
         sessions.get(chat_id).cloned()
     };
     if let Some(session_arc) = session_arc {
-        let session = session_arc.lock().await;
-        if task_meta_is_planner_for_task(session.thread.task_meta.as_ref(), task_id) {
-            return true;
-        }
+        let (mut task_meta, mode, link_type) = {
+            let session = session_arc.lock().await;
+            (
+                session.thread.task_meta.clone(),
+                session.thread.mode.clone(),
+                session.thread.link_type.clone(),
+            )
+        };
+        normalize_legacy_planner_copy(
+            gcx.clone(),
+            chat_id,
+            &mode,
+            link_type.as_deref(),
+            &mut task_meta,
+        )
+        .await;
+        return task_meta_is_planner_for_task(task_meta.as_ref(), task_id);
     }
 
     load_trajectory_for_chat(gcx, chat_id)
@@ -6920,7 +7061,7 @@ fn task_trajectory_context_from_path(
             continue;
         }
         let role = parts[2].as_str();
-        if role != "planner" && role != "agents" && role != "subchats" {
+        if role != "planner" && role != "linked" && role != "agents" && role != "subchats" {
             continue;
         }
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -12620,7 +12761,7 @@ mod tests {
     #[tokio::test]
     async fn paginated_list_displayable_only_filters_task_and_subagent_trajectories() {
         let dir = tempfile::tempdir().unwrap();
-        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
         let root = dir.path().join(".refact");
 
         write_trajectory_file(
@@ -12709,6 +12850,127 @@ mod tests {
         .await
         .unwrap();
 
+        let task_dir = root.join("tasks").join("task-list");
+        let task_record = serde_json::from_value(json!({
+            "id":"task-list", "name":"legacy planner copies", "status":"active",
+            "created_at":"2024-01-01T00:00:00Z", "updated_at":"2024-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        crate::tasks::storage::save_task_meta(gcx.clone(), "task-list", &task_record)
+            .await
+            .unwrap();
+        let board =
+            serde_json::from_value(json!({"owner_chat_id":"planner-chat", "cards":[]})).unwrap();
+        crate::tasks::storage::save_board(gcx.clone(), "task-list", &board)
+            .await
+            .unwrap();
+        review["mode"] = json!("solo");
+        tokio::fs::write(&review_path, serde_json::to_string(&review).unwrap())
+            .await
+            .unwrap();
+        let linked = load_trajectory_for_chat(gcx.clone(), "review-chat")
+            .await
+            .unwrap();
+        assert_eq!(linked.thread.task_meta.as_ref().unwrap().role, "linked");
+        assert!(!chat_id_is_planner_for_task(gcx.clone(), "review-chat", "task-list").await);
+        let mut reviewer_board = board.clone();
+        reviewer_board.reviewer_chat_ids.push("review-chat".into());
+        crate::tasks::storage::save_board(gcx.clone(), "task-list", &reviewer_board)
+            .await
+            .unwrap();
+        let reviewer = load_trajectory_for_chat(gcx.clone(), "review-chat")
+            .await
+            .unwrap();
+        assert_eq!(reviewer.thread.task_meta.as_ref().unwrap().role, "planner");
+        crate::tasks::storage::save_board(gcx.clone(), "task-list", &board)
+            .await
+            .unwrap();
+        review["link_type"] = json!("handoff");
+        tokio::fs::write(&review_path, serde_json::to_string(&review).unwrap())
+            .await
+            .unwrap();
+        let handoff = load_trajectory_for_chat(gcx.clone(), "review-chat")
+            .await
+            .unwrap();
+        assert_eq!(handoff.thread.task_meta.as_ref().unwrap().role, "linked");
+        crate::tasks::storage::save_board(gcx.clone(), "task-list", &reviewer_board)
+            .await
+            .unwrap();
+        let handoff_reviewer = load_trajectory_for_chat(gcx.clone(), "review-chat")
+            .await
+            .unwrap();
+        assert_eq!(
+            handoff_reviewer.thread.task_meta.as_ref().unwrap().role,
+            "planner"
+        );
+        crate::tasks::storage::save_board(gcx.clone(), "task-list", &board)
+            .await
+            .unwrap();
+        review.as_object_mut().unwrap().remove("link_type");
+        tokio::fs::write(&review_path, serde_json::to_string(&review).unwrap())
+            .await
+            .unwrap();
+        let custom = load_trajectory_for_chat(gcx.clone(), "review-chat")
+            .await
+            .unwrap();
+        assert_eq!(custom.thread.task_meta.as_ref().unwrap().role, "planner");
+        review["link_type"] = json!("mode_transition");
+        tokio::fs::write(&review_path, serde_json::to_string(&review).unwrap())
+            .await
+            .unwrap();
+        let owner = load_trajectory_for_chat(gcx.clone(), "planner-chat")
+            .await
+            .unwrap();
+        assert_eq!(owner.thread.task_meta.as_ref().unwrap().role, "planner");
+        planner["mode"] = json!("solo");
+        tokio::fs::write(&planner_path, serde_json::to_string(&planner).unwrap())
+            .await
+            .unwrap();
+        let solo_owner = load_trajectory_for_chat(gcx.clone(), "planner-chat")
+            .await
+            .unwrap();
+        assert_eq!(
+            solo_owner.thread.task_meta.as_ref().unwrap().role,
+            "planner"
+        );
+        assert!(chat_id_is_planner_for_task(gcx.clone(), "planner-chat", "task-list").await);
+        planner["mode"] = json!("task_planner");
+        tokio::fs::write(&planner_path, serde_json::to_string(&planner).unwrap())
+            .await
+            .unwrap();
+        let linked_path = task_dir
+            .join("trajectories")
+            .join("linked")
+            .join("review-chat.json");
+        tokio::fs::create_dir_all(linked_path.parent().unwrap())
+            .await
+            .unwrap();
+        let mut linked_copy = review.clone();
+        linked_copy["task_meta"]["role"] = json!("linked");
+        tokio::fs::write(&linked_path, serde_json::to_string(&linked_copy).unwrap())
+            .await
+            .unwrap();
+        let all = list_trajectories_page(app.clone(), 20, None, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            all.items
+                .iter()
+                .filter(|item| item.id == "review-chat")
+                .count(),
+            1
+        );
+        tokio::fs::write(task_dir.join("board.yaml"), "not: [valid")
+            .await
+            .unwrap();
+        tokio::fs::remove_file(&linked_path).await.unwrap();
+        let unreadable = load_trajectory_for_chat(gcx.clone(), "review-chat")
+            .await
+            .unwrap();
+        assert_eq!(
+            unreadable.thread.task_meta.as_ref().unwrap().role,
+            "planner"
+        );
         let page = list_trajectories_page(app, 10, None, true).await.unwrap();
         let ids: std::collections::HashSet<_> =
             page.items.iter().map(|item| item.id.as_str()).collect();
@@ -17288,6 +17550,7 @@ mod tests {
 
         let (tx, _rx) = broadcast::channel(16);
         let session = ChatSession {
+            delivery_save_id: uuid::Uuid::new_v4(),
             runner_lease: None,
             runner_message_digest: None,
             native_commands_in_flight: Default::default(),
@@ -17467,6 +17730,7 @@ mod tests {
 
         let (tx, _rx) = broadcast::channel(16);
         let mut session = ChatSession {
+            delivery_save_id: uuid::Uuid::new_v4(),
             runner_lease: None,
             runner_message_digest: None,
             native_commands_in_flight: Default::default(),

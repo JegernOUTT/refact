@@ -706,6 +706,17 @@ pub async fn reconstruct_context(
     let carried =
         crate::privacy::records::records_to_carry(request.messages).map_err(|e| e.to_string())?;
     attach_reconstruction_records(&mut messages, &carried, &reread_records);
+    if let Some(summary) = messages
+        .iter_mut()
+        .find(|message| message.extra.contains_key("reconstruction_summary"))
+    {
+        summary.extra.insert("reconstruction_summary".into(), serde_json::json!({
+            "generated_at": chrono::Utc::now().to_rfc3339(),
+            "source_first_message_id": request.messages.first().map(|message| &message.message_id),
+            "source_last_message_id": request.messages.last().map(|message| &message.message_id),
+            "source_message_count": request.messages.len(),
+        }));
+    }
     check_cancelled(&request)?;
     Ok(ReconstructionOutcome {
         messages,
@@ -723,6 +734,7 @@ fn attach_reconstruction_records(
     carried: &[refact_privacy::FileRecord],
     reread_records: &std::collections::HashMap<String, refact_privacy::FileRecord>,
 ) {
+    let mut carried_once = false;
     for message in messages.iter_mut() {
         if !message.message_id.is_empty() {
             continue;
@@ -733,7 +745,13 @@ fn attach_reconstruction_records(
                 .iter()
                 .filter_map(|file| reread_records.get(&file.file_name).cloned())
                 .collect::<Vec<_>>(),
-            _ if message.role == "user" => carried.to_vec(),
+            _ if message.role == "user" && !carried_once => {
+                carried_once = true;
+                message
+                    .extra
+                    .insert("reconstruction_summary".into(), serde_json::json!({}));
+                carried.to_vec()
+            }
             _ => Vec::new(),
         };
         crate::privacy::records::merge_records(message, records);
@@ -1063,7 +1081,7 @@ mod tests {
     }
 
     #[test]
-    fn attach_reconstruction_records_stamps_union_once_per_derived_user_message() {
+    fn attach_reconstruction_records_stamps_union_once_per_reconstruction() {
         let secret = guarded_record("secret.rs", "secrets");
         let another = guarded_record("another.rs", "secrets");
         let other = guarded_record("other.rs", "secrets");
@@ -1083,7 +1101,7 @@ mod tests {
 
         assert_eq!(message_records(&messages[0]), vec![reread.clone()]);
         assert_eq!(message_records(&messages[1]), carried);
-        assert_eq!(message_records(&messages[2]), carried);
+        assert!(message_records(&messages[2]).is_empty());
         assert!(messages[3].extra.get("privacy").is_none());
         assert_eq!(message_records(&messages[4]), vec![other.clone()]);
         assert!(messages.iter().all(|m| !m.message_id.is_empty()));
@@ -1092,7 +1110,7 @@ mod tests {
                 .iter()
                 .filter(|m| message_records(m) == carried)
                 .count(),
-            2
+            1
         );
         let attached = refact_privacy::records_from_messages(&messages)
             .unwrap()
@@ -1102,32 +1120,6 @@ mod tests {
         for record in [secret, another, reread, other] {
             assert!(attached.contains(&record), "{record:?} must survive");
         }
-    }
-
-    #[test]
-    fn attach_reconstruction_records_bounds_copies_by_derived_user_messages() {
-        let carried = (0..16_000)
-            .map(|index| guarded_record(&format!("src/file_{index}.rs"), "secrets"))
-            .collect::<Vec<_>>();
-        let reread = guarded_record("src/a.rs", "secrets");
-        let reread_records =
-            std::collections::HashMap::from([("src/a.rs".to_string(), reread.clone())]);
-        let mut messages = vec![
-            context_file_message("src/a.rs"),
-            ChatMessage::new("user".to_string(), "narrative".to_string()),
-            ChatMessage::new("user".to_string(), "continuation".to_string()),
-        ];
-        messages.extend(
-            (0..35).map(|index| cloned_control(&format!("evt-{index}"), "event", carried.clone())),
-        );
-
-        attach_reconstruction_records(&mut messages, &carried, &reread_records);
-
-        let total_records = messages
-            .iter()
-            .map(|message| message_records(message).len())
-            .sum::<usize>();
-        assert_eq!(total_records, 2 * carried.len() + 1);
     }
 
     #[test]

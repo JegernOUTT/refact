@@ -685,11 +685,13 @@ pub(crate) fn record_is_persistable(record: &FileRecord) -> bool {
 }
 
 pub fn merge_records(message: &mut ChatMessage, records: impl IntoIterator<Item = FileRecord>) {
-    let mut privacy = message
-        .extra
-        .remove("privacy")
-        .and_then(|value| serde_json::from_value::<PrivacyRecord>(value).ok())
-        .unwrap_or_default();
+    let mut privacy = match message.extra.get("privacy") {
+        Some(value) => match serde_json::from_value::<PrivacyRecord>(value.clone()) {
+            Ok(privacy) => privacy,
+            Err(_) => return,
+        },
+        None => PrivacyRecord::default(),
+    };
     let mut seen = privacy.files.iter().cloned().collect::<HashSet<_>>();
     for record in records {
         if !record_is_persistable(&record) {
@@ -744,22 +746,25 @@ fn message_records(message: &ChatMessage) -> Option<Vec<FileRecord>> {
         .map(|privacy| privacy.files)
 }
 
-/// Drops records from non-`user` reconstructed messages that the derived `user` messages
-/// already carry; destination clearance audits the message set, so nothing is lost.
+/// Drops duplicate records covered by the first reconstructed user carrier.
 pub fn compact_reconstruction_privacy(messages: &mut [ChatMessage]) -> bool {
     let Ok(audited) = refact_privacy::records_from_messages(messages) else {
         return false;
     };
+    let carrier = messages.iter().position(|message| message.role == "user");
     let carried = audited
         .into_iter()
-        .filter(|(index, _)| messages[*index].role == "user")
+        .filter(|(index, _)| Some(*index) == carrier)
         .map(|(_, record)| record)
         .collect::<HashSet<_>>();
     if carried.is_empty() {
         return false;
     }
     let mut changed = false;
-    for message in messages.iter_mut().filter(|message| message.role != "user") {
+    for (index, message) in messages.iter_mut().enumerate() {
+        if Some(index) == carrier {
+            continue;
+        }
         let Some(records) = message_records(message) else {
             continue;
         };
@@ -808,14 +813,15 @@ pub fn compact_stored_reconstruction_privacy(messages: &mut [ChatMessage]) -> bo
         if !compact_reconstruction_privacy(&mut nested) {
             continue;
         }
-        match serde_json::to_value(nested) {
-            Ok(value) => {
-                *payload = value;
-                changed = true;
+        if let Some(originals) = payload.as_array_mut() {
+            for (original, compacted) in originals.iter_mut().zip(nested) {
+                if !compacted.extra.contains_key("privacy") {
+                    if let Some(object) = original.as_object_mut() {
+                        object.remove("privacy");
+                    }
+                }
             }
-            Err(error) => {
-                tracing::warn!("skipping reconstruction payload privacy repair: {error}");
-            }
+            changed = true;
         }
     }
     changed
@@ -1773,6 +1779,16 @@ mod tests {
     }
 
     #[test]
+    fn malformed_or_future_privacy_is_not_erased_by_merge() {
+        let mut message = tool_message("guarded output");
+        let future = serde_json::json!({"files": [], "future_obligation": "restricted"});
+        message.extra.insert("privacy".into(), future.clone());
+        merge_records(&mut message, [guarded_record("another.env")]);
+        assert_eq!(message.extra["privacy"], future);
+        assert!(records_to_carry(&[message]).is_err());
+    }
+
+    #[test]
     fn merge_message_records_unions_source_records() {
         let first = FileRecord {
             path: "a.rs".to_string(),
@@ -1996,8 +2012,8 @@ mod tests {
         for message in &active.messages {
             assert_eq!(
                 message.extra.contains_key("privacy"),
-                message.role == "user",
-                "only derived user messages keep the reconstruction union"
+                message.message_id == "p-user" || message.message_id == "tail",
+                "only the first reconstruction carrier and tail keep provenance"
             );
         }
         assert_eq!(record_identity(&active.messages), before);

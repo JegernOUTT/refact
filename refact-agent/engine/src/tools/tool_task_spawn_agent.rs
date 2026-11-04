@@ -275,14 +275,17 @@ impl AcceptedAgentSource {
         Ok(self)
     }
 
-    pub(crate) async fn reconcile(&self, gcx: Arc<GlobalContext>, restore: bool, error: &str) {
+    pub(crate) async fn reconcile(
+        &self,
+        gcx: Arc<GlobalContext>,
+        restore: bool,
+        error: &str,
+    ) -> Result<(), String> {
         let result = match &self.attempt {
             Some(attempt) => attempt.reconcile(gcx, restore, error).await,
             None => Err("Accepted task attempt unavailable".into()),
         };
-        if let Err(binding_error) = result {
-            tracing::warn!(%binding_error, "Task claim retained; reconciliation required");
-        }
+        result
     }
 
     pub(crate) async fn validate_task(
@@ -1195,8 +1198,13 @@ pub(crate) async fn rollback_retain(
     guard_chat_id: &str,
     error_msg: &str,
 ) {
-    let _ = (task_id, card_id, guard_chat_id);
-    source.reconcile(gcx, false, error_msg).await;
+    if let Err(error) = source.task_binding(task_id) {
+        tracing::warn!(%error, %card_id, %guard_chat_id, "Rollback binding refused");
+        return;
+    }
+    if let Err(error) = source.reconcile(gcx, false, error_msg).await {
+        tracing::warn!(%error, %card_id, %guard_chat_id, "Rollback retained for monitor reconciliation");
+    }
 }
 
 pub(crate) fn build_agent_thread_params(
@@ -1765,10 +1773,12 @@ async fn persist_spawn(prepared: PreparedSpawn) -> Result<PersistedSpawn, String
                     .await
                     .unwrap_or_else(|_| Err("board agent setup panicked".into()));
                 if let Err(error) = result {
+                    if let Err(reconcile) = cleanup_source.reconcile(gcx.clone(), false, &error).await {
+                        tracing::warn!(%task_id, %card_id, chat_id = %agent_chat_id, %reconcile, "board agent setup reconciliation deferred");
+                    }
                     if let Some(accepted) = accepted.take() {
                         let _ = accepted.send(Err(error.clone()));
                     }
-                    cleanup_source.reconcile(gcx.clone(), false, &error).await;
                     crate::tasks::admission::end(&agent_chat_id).await;
                     tracing::warn!("Board agent setup failed: {error}");
                 }

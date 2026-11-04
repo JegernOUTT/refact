@@ -95,6 +95,7 @@ export type ErrorCalloutViewProps = Omit<CalloutProps, "type"> & {
    */
   isAuthError?: boolean;
   preventRetry?: boolean;
+  dismissLabel?: string;
 };
 
 export const ErrorCalloutView: React.FC<ErrorCalloutViewProps> = ({
@@ -105,6 +106,7 @@ export const ErrorCalloutView: React.FC<ErrorCalloutViewProps> = ({
   preventClose = false,
   className,
   isAuthError = false,
+  dismissLabel,
   ...props
 }) => {
   return (
@@ -119,7 +121,7 @@ export const ErrorCalloutView: React.FC<ErrorCalloutViewProps> = ({
       Error: {children}
       {!isAuthError && (
         <Text size="1" as="span" className={styles.retryText}>
-          {preventRetry ? "Click to close" : "Click to retry"}
+          {dismissLabel ?? (preventRetry ? "Click to close" : "Click to retry")}
         </Text>
       )}
       {isAuthError && (

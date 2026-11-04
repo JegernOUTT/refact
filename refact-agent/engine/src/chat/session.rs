@@ -72,6 +72,7 @@ fn is_terminal_runtime_state(state: SessionState) -> bool {
         state,
         SessionState::Idle
             | SessionState::Completed
+            | SessionState::Interrupted
             | SessionState::Error
             | SessionState::WaitingUserInput
     )
@@ -803,6 +804,7 @@ impl ChatSession {
     pub fn new(chat_id: String) -> Self {
         let (event_tx, _) = broadcast::channel(limits().event_channel_capacity);
         Self {
+            delivery_save_id: Uuid::new_v4(),
             chat_id: chat_id.clone(),
             runner_lease: None,
             runner_message_digest: None,
@@ -957,6 +959,7 @@ impl ChatSession {
             &crate::file_activity::settings(),
         );
         Self {
+            delivery_save_id: Uuid::new_v4(),
             chat_id,
             runner_lease: None,
             runner_message_digest: None,
@@ -1203,62 +1206,9 @@ impl ChatSession {
             return false;
         };
         goal.goal_record_nudge(at_ms);
-        let tail_is_nudge = matches!(
-            self.goal_ledger.last().map(|entry| &entry.op),
-            Some(GoalLedgerOp::NudgeRecorded)
-        );
-        if tail_is_nudge {
-            if let Some(entry) = self.goal_ledger.last_mut() {
-                entry.at_ms = at_ms;
-            }
-        } else {
-            self.goal_ledger_append_at(GoalLedgerOp::NudgeRecorded, at_ms);
-        }
+        self.goal_ledger_append_at(GoalLedgerOp::NudgeRecorded, at_ms);
         self.mark_persisted_runtime_changed();
         self.emit_goal_status();
-        true
-    }
-
-    pub(crate) fn coalesce_tail_goal_nudge_event(&mut self, at_ms: u64) -> bool {
-        let is_tail_nudge = self.messages.last().is_some_and(|message| {
-            goal_event_subkind(message) == Some("goal_pursuit")
-                && message
-                    .extra
-                    .get("event")
-                    .and_then(|event| event.get("payload"))
-                    .and_then(|payload| payload.get("kind"))
-                    .and_then(|value| value.as_str())
-                    == Some("nudge")
-        });
-        if !is_tail_nudge {
-            return false;
-        }
-        let message = {
-            let Some(last) = self.messages.last_mut() else {
-                return false;
-            };
-            let Some(payload) = last
-                .extra
-                .get_mut("event")
-                .and_then(|event| event.get_mut("payload"))
-                .and_then(|payload| payload.as_object_mut())
-            else {
-                return false;
-            };
-            let count = payload
-                .get("count")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(1);
-            payload.insert("count".to_string(), json!(count + 1));
-            payload.insert("last_at_ms".to_string(), json!(at_ms));
-            last.clone()
-        };
-        self.emit(ChatEvent::MessageUpdated {
-            message_id: message.message_id.clone(),
-            message,
-        });
-        self.increment_version();
-        self.touch();
         true
     }
 
@@ -1485,11 +1435,18 @@ impl ChatSession {
     pub(crate) fn record_sub_goal_report(
         &mut self,
         node_id: &str,
-        report: refact_chat_api::SubGoalReport,
+        mut report: refact_chat_api::SubGoalReport,
     ) -> bool {
         if self.sub_goal_graph().node(node_id).is_none() {
             return false;
         }
+        if self.goal_ledger.iter().any(|entry| {
+            matches!(&entry.op, GoalLedgerOp::SubGoalReported { node_id: recorded_node, report: recorded }
+                if recorded_node == node_id && recorded.reported_at_ms == report.reported_at_ms)
+        }) {
+            return false;
+        }
+        report.result_summary = report.result_summary.chars().take(2_000).collect();
         self.goal_ledger_append(GoalLedgerOp::SubGoalReported {
             node_id: node_id.to_string(),
             report,
@@ -1789,6 +1746,7 @@ impl ChatSession {
         compression_reason: Option<CompressionReason>,
     ) -> ChatEvent {
         ChatEvent::RuntimeUpdated {
+            interruption: self.runtime.interruption.clone(),
             waiting_interruptible: self.runtime.waiting_interruptible,
             goal_active: self.goal_active,
             goal_status: self.goal_status,
@@ -1918,6 +1876,10 @@ impl ChatSession {
     }
 
     fn mark_stream_delta(&mut self) {
+        self.mark_stream_activity();
+    }
+
+    pub fn mark_stream_activity(&mut self) {
         let now = Instant::now();
         self.last_stream_delta_at = Some(now);
         self.last_activity = now;
@@ -1957,7 +1919,27 @@ impl ChatSession {
     }
 
     pub fn is_runner_owned_subagent_view(&self) -> bool {
+        self.has_runner_lease()
+    }
+
+    pub(crate) fn has_runner_lease(&self) -> bool {
         self.runner_lease.is_some()
+    }
+
+    pub(crate) fn apply_custody_rebind(
+        &mut self,
+        new_meta: TaskMeta,
+        parent: Option<String>,
+        root: Option<String>,
+    ) {
+        let history_valid = self.has_runner_lease() && self.runner_history_unchanged();
+        self.thread.task_meta = Some(new_meta);
+        self.thread.parent_id = parent;
+        self.thread.root_chat_id = root;
+        self.increment_version();
+        if history_valid && self.refresh_runner_history().is_err() {
+            self.runner_message_digest = None;
+        }
     }
 
     pub(crate) fn runner_owned_by(&self, token: Option<&str>) -> bool {
@@ -1966,18 +1948,30 @@ impl ChatSession {
             .is_some_and(|(owner, _)| token == Some(owner.as_str()))
     }
 
-    pub(crate) fn refresh_runner_history(&mut self) -> Result<(), String> {
+    fn runner_history_digest(&self) -> Result<[u8; 32], String> {
         use sha2::Digest;
-        let bytes = serde_json::to_vec(&self.messages).map_err(|error| error.to_string())?;
-        self.runner_message_digest = Some(sha2::Sha256::digest(bytes).into());
+        let mut messages = self.messages.clone();
+        for call in messages
+            .iter_mut()
+            .filter_map(|message| message.tool_calls.as_mut())
+            .flatten()
+        {
+            call.started_at_ms = None;
+            call.completed_at_ms = None;
+        }
+        let bytes = serde_json::to_vec(&messages).map_err(|error| error.to_string())?;
+        Ok(sha2::Sha256::digest(bytes).into())
+    }
+
+    pub(crate) fn refresh_runner_history(&mut self) -> Result<(), String> {
+        self.runner_message_digest = Some(self.runner_history_digest()?);
         Ok(())
     }
 
     pub(crate) fn runner_history_unchanged(&self) -> bool {
-        use sha2::Digest;
         self.runner_message_digest.is_some_and(|expected| {
-            serde_json::to_vec(&self.messages)
-                .map(|bytes| <[u8; 32]>::from(sha2::Sha256::digest(bytes)) == expected)
+            self.runner_history_digest()
+                .map(|digest| digest == expected)
                 .unwrap_or(false)
         })
     }
@@ -1987,7 +1981,8 @@ impl ChatSession {
         token: String,
         abort: Arc<AtomicBool>,
     ) -> Result<String, String> {
-        if self.runner_lease.is_some()
+        if self.runtime.interruption.is_some()
+            || self.runner_lease.is_some()
             || self.native_commands_in_flight.load(Ordering::SeqCst) > 0
             || self.turn_depth > 0
             || matches!(
@@ -2020,7 +2015,30 @@ impl ChatSession {
         }
     }
 
-    pub(crate) fn mirror_runner_messages(&mut self, messages: Vec<ChatMessage>) {
+    pub(crate) fn mirror_runner_messages(&mut self, mut messages: Vec<ChatMessage>) {
+        for message in &mut messages {
+            if message.message_id.is_empty() {
+                continue;
+            }
+            let Some(current) = self
+                .messages
+                .iter()
+                .find(|current| current.message_id == message.message_id)
+            else {
+                continue;
+            };
+            for call in message.tool_calls.iter_mut().flatten() {
+                if let Some(current_call) = current
+                    .tool_calls
+                    .iter()
+                    .flatten()
+                    .find(|current_call| current_call.id == call.id)
+                {
+                    call.started_at_ms = current_call.started_at_ms.or(call.started_at_ms);
+                    call.completed_at_ms = current_call.completed_at_ms.or(call.completed_at_ms);
+                }
+            }
+        }
         self.messages = messages;
         if self.runner_lease.is_some() && self.refresh_runner_history().is_err() {
             self.runner_message_digest = None;
@@ -2041,6 +2059,7 @@ impl ChatSession {
         self.clear_stream_and_confirmation_timestamps();
         self.release_turn_only_state();
         self.closed = true;
+        self.runtime.interruption = None;
         self.closed_flag.store(true, Ordering::Relaxed);
         for handle in self.post_turn_task_handles.drain(..) {
             handle.abort();
@@ -2593,6 +2612,7 @@ impl ChatSession {
                 self.runtime.state,
                 SessionState::Idle
                     | SessionState::Completed
+                    | SessionState::Interrupted
                     | SessionState::Error
                     | SessionState::WaitingUserInput
             )
@@ -2625,7 +2645,15 @@ impl ChatSession {
                     .iter()
                     .chain(self.runner_pending_deliveries.iter())
                     .any(|delivery| {
-                        delivery.push != PushMode::Preempt && delivery.after_tool_call_id.is_none()
+                        delivery.push != PushMode::Preempt
+                            && delivery.after_tool_call_id.is_none()
+                            && !(delivery.push == PushMode::Append
+                                && matches!(
+                                    delivery.source.as_str(),
+                                    crate::agents::push::NOTICE_PROGRESS
+                                        | crate::agents::push::NOTICE_SPAWN
+                                        | crate::agents::push::NOTICE_SIBLING
+                                ))
                     }))
         {
             self.wait_delivery_boundary = true;
@@ -2702,7 +2730,10 @@ impl ChatSession {
     }
 
     fn delivery_envelope_boundary_open(&self, delivery: &PendingDelivery) -> bool {
-        if self.planner_paused() || self.planner_pause_pending_tools {
+        if self.runtime.interruption.is_some()
+            || self.planner_paused()
+            || self.planner_pause_pending_tools
+        {
             return false;
         }
         let kinds: HashSet<_> = delivery
@@ -3608,7 +3639,10 @@ impl ChatSession {
         self.runtime.queue_size = self.runtime.queued_items.len();
         if matches!(
             state,
-            SessionState::Completed | SessionState::Error | SessionState::WaitingUserInput
+            SessionState::Completed
+                | SessionState::Interrupted
+                | SessionState::Error
+                | SessionState::WaitingUserInput
         ) && self.post_tool_side_effects.is_empty()
         {
             self.release_turn_only_state();
@@ -3680,6 +3714,7 @@ impl ChatSession {
                 SessionState::WaitingIde => "waiting_ide",
                 SessionState::WaitingUserInput => "waiting_user_input",
                 SessionState::Completed => "completed",
+                SessionState::Interrupted => "interrupted",
                 SessionState::Error => "error",
             };
             let effective_root = self
@@ -3920,7 +3955,7 @@ impl ChatSession {
     }
 
     pub fn start_stream(&mut self) -> Option<(String, Arc<AtomicBool>)> {
-        if self.runner_lease.is_some() {
+        if self.runtime.interruption.is_some() || self.runner_lease.is_some() {
             return None;
         }
         if self.yield_to_queued_commands_at_boundary() {
@@ -5687,6 +5722,150 @@ mod tests {
     }
 
     #[test]
+    fn child_progress_is_absorbed_but_questions_and_completion_wake_wait() {
+        let mut session = make_session();
+        session.turn_depth = 1;
+        session.start_stream().unwrap();
+        session.emit_stream_delta(vec![DeltaOp::SetToolCalls {
+            tool_calls: vec![json!({"id":"wait-child","type":"function","function":{"name":"wait","arguments":"{}"}})],
+        }]);
+        session
+            .finish_stream_with_next_state(Some("tool_calls".into()), SessionState::ExecutingTools);
+        session.begin_interruptible_wait();
+        let mut notice = delivery_fixture("child-notice", PushMode::Append);
+        notice.source = crate::agents::push::NOTICE_PROGRESS.into();
+        assert_eq!(
+            session.enqueue_delivery(notice).unwrap(),
+            DeliveryOutcome::Queued
+        );
+        assert!(!session.wait_interrupt_flag.load(Ordering::SeqCst));
+        assert!(!session.abort_flag.load(Ordering::SeqCst));
+        assert_eq!(session.pending_deliveries.len(), 1);
+        for source in [
+            crate::agents::push::NOTICE_NOTICE,
+            crate::agents::push::NOTICE_COMPLETION,
+            crate::agents::push::NOTICE_ERROR,
+        ] {
+            let mut actionable = delivery_fixture(source, PushMode::Append);
+            actionable.source = source.into();
+            session.wait_interrupt_flag.store(false, Ordering::SeqCst);
+            assert_eq!(
+                session.enqueue_delivery(actionable).unwrap(),
+                DeliveryOutcome::Queued
+            );
+            assert!(
+                session.wait_interrupt_flag.load(Ordering::SeqCst),
+                "{source}"
+            );
+            session
+                .pending_deliveries
+                .retain(|delivery| delivery.id != source);
+        }
+        let mut preempt = delivery_fixture("child-preempt", PushMode::Preempt);
+        preempt.source = crate::agents::push::NOTICE_NOTICE.into();
+        assert_eq!(
+            session.enqueue_delivery(preempt).unwrap(),
+            DeliveryOutcome::Delivered
+        );
+        assert!(session.abort_flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn custody_rebind_preserves_runner_fence_without_laundering_history() {
+        let mut session = make_session();
+        session.add_message(ChatMessage::new("user".into(), "retained".into()));
+        session
+            .claim_runner("runner".into(), Arc::new(AtomicBool::new(false)))
+            .unwrap();
+        let meta = TaskMeta {
+            task_id: "task".into(),
+            role: "agents".into(),
+            planner_chat_id: Some("new".into()),
+            ..Default::default()
+        };
+        let version = session.trajectory_version;
+        session.apply_custody_rebind(meta.clone(), Some("new".into()), Some("new".into()));
+        assert!(session.trajectory_version > version);
+        assert!(session.runner_history_unchanged());
+        assert!(session.runner_owned_by(Some("runner")));
+        session.messages[0].content = ChatContent::SimpleText("foreign".into());
+        session.apply_custody_rebind(meta, Some("next".into()), Some("next".into()));
+        assert!(!session.runner_history_unchanged());
+    }
+
+    #[test]
+    fn interrupted_marker_blocks_delivery_and_stream_even_while_paused() {
+        for state in [SessionState::Interrupted, SessionState::Paused] {
+            let mut session = make_session();
+            session.runtime.interruption = Some(refact_chat_api::BoardInterruption {
+                condition: "stale_board_attempt/execution_replaced".into(),
+                expected: Some("old".into()),
+                actual: Some("new".into()),
+                owner_chat_id: Some("planner".into()),
+                at: "2026-01-01T00:00:00Z".into(),
+            });
+            session.set_runtime_state(state, None);
+            assert_eq!(
+                session
+                    .enqueue_delivery(delivery_fixture("wake", PushMode::Preempt))
+                    .unwrap(),
+                DeliveryOutcome::Queued
+            );
+            assert!(session.drain_pending_deliveries().0.is_empty());
+            assert!(session.messages.is_empty());
+            assert!(session.start_stream().is_none());
+            assert!(session
+                .claim_runner("runner".into(), Arc::new(AtomicBool::new(false)))
+                .is_err());
+            assert_eq!(session.runtime.state, state);
+            assert!(session.runtime.interruption.is_some());
+        }
+    }
+
+    #[test]
+    fn runner_timing_is_telemetry_not_history_authority() {
+        let mut session = make_session();
+        session.start_stream().unwrap();
+        session.emit_stream_delta(vec![DeltaOp::SetToolCalls {
+            tool_calls: vec![
+                json!({"id":"call","type":"function","function":{"name":"cat","arguments":"{}"}}),
+            ],
+        }]);
+        session.finish_stream_with_next_state(Some("tool_calls".into()), SessionState::Idle);
+        session
+            .claim_runner("runner".into(), Arc::new(AtomicBool::new(false)))
+            .unwrap();
+        assert!(session.stamp_tool_call_timing("call", Some(10), None));
+        assert!(session.stamp_tool_call_timing("call", None, Some(20)));
+        assert!(session.runner_history_unchanged());
+        assert!(session.runner_owned_by(Some("runner")));
+        assert!(!session.runner_owned_by(Some("stale")));
+        session.messages[0].tool_calls.as_mut().unwrap()[0]
+            .function
+            .arguments = "foreign".into();
+        session.messages[0].tool_calls.as_mut().unwrap()[0].completed_at_ms = None;
+        assert!(!session.runner_history_unchanged());
+        assert!(session.stamp_tool_call_timing("call", None, Some(40)));
+        assert!(!session.runner_history_unchanged());
+        session.messages[0].tool_calls.as_mut().unwrap()[0]
+            .function
+            .arguments = "{}".into();
+        assert!(session.runner_history_unchanged());
+        session.messages[0].content = ChatContent::SimpleText("foreign text".into());
+        session.messages[0].tool_calls.as_mut().unwrap()[0].completed_at_ms = None;
+        assert!(session.stamp_tool_call_timing("call", None, Some(50)));
+        assert!(!session.runner_history_unchanged());
+        session.messages[0].message_id.clear();
+        let mut incoming = session.messages.clone();
+        incoming[0].tool_calls.as_mut().unwrap()[0].started_at_ms = None;
+        incoming[0].tool_calls.as_mut().unwrap()[0].completed_at_ms = None;
+        session.mirror_runner_messages(incoming);
+        let call = &session.messages[0].tool_calls.as_ref().unwrap()[0];
+        assert_eq!(call.started_at_ms, None);
+        assert_eq!(call.completed_at_ms, None);
+    }
+
+    #[test]
     fn delivery_append_waits_for_stream_and_all_tool_results() {
         let mut session = make_session();
         session.start_stream().unwrap();
@@ -6887,6 +7066,35 @@ mod tests {
             let mut gates = crate::chat::evidence::GateOutcome::default();
             crate::chat::goal_verifier::merge_sub_goal_gates(&mut gates, &rollup);
             assert!(gates.judge_allowed());
+        }
+
+        #[test]
+        fn repeated_sub_goal_report_keeps_ledger_and_bounded_summary() {
+            let mut session = make_session();
+            install(&mut session);
+            session
+                .declare_sub_goals(refact_chat_api::SubGoalDeclaration {
+                    nodes: vec![lane("lint", &["c1"])],
+                    edges: vec![],
+                })
+                .unwrap();
+            let report = refact_chat_api::SubGoalReport {
+                reported_at_ms: 10,
+                result_summary: "界".repeat(3_000),
+                ..Default::default()
+            };
+            assert!(session.record_sub_goal_report("lint", report.clone()));
+            let prefix = serde_json::to_value(&session.goal_ledger).unwrap();
+            let version = session.trajectory_version;
+            assert!(!session.record_sub_goal_report("lint", report));
+            assert_eq!(serde_json::to_value(&session.goal_ledger).unwrap(), prefix);
+            assert_eq!(session.trajectory_version, version);
+            let GoalLedgerOp::SubGoalReported { report, .. } =
+                &session.goal_ledger.last().unwrap().op
+            else {
+                panic!("expected report");
+            };
+            assert_eq!(report.result_summary, "界".repeat(2_000));
         }
 
         #[test]

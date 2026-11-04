@@ -102,6 +102,7 @@ async fn accepted_identity(
     checkout: bool,
     purpose: ValidationPurpose<'_>,
 ) -> Result<Value, String> {
+    refuse_nested_task_command(ccx, meta).await?;
     if let ValidationPurpose::Pending(proof) = purpose {
         proof.check(ccx).await?;
     }
@@ -397,10 +398,41 @@ fn input_binding(
     ))
 }
 
+const NESTED_REFUSED: &str = "Nested subagent command execution is not supported for this task checkout. Ask the owning card agent to run this command; no command was started.";
+
+async fn refuse_nested_task_command(
+    ccx: &Arc<Mutex<AtCommandsContext>>,
+    meta: &WorktreeMeta,
+) -> Result<(), String> {
+    let (app, chat, background, depth) = {
+        let context = ccx.lock().await;
+        (
+            context.app.clone(),
+            context.chat_id.clone(),
+            context.background_agent_id.clone(),
+            context.subchat_depth,
+        )
+    };
+    if meta.enforce
+        && meta.kind == "task_agent"
+        && (background.is_some()
+            || depth != 0
+            || app
+                .agents
+                .find_agent_id_by_child_chat_id(&chat)
+                .await
+                .is_some())
+    {
+        return Err(NESTED_REFUSED.into());
+    }
+    Ok(())
+}
+
 pub(crate) async fn ensure_managed_task_execution(
     ccx: &Arc<Mutex<AtCommandsContext>>,
     meta: &WorktreeMeta,
 ) -> Result<(), String> {
+    refuse_nested_task_command(ccx, meta).await?;
     let (app, chat, task) = {
         let context = ccx.lock().await;
         if context
@@ -502,6 +534,7 @@ async fn prepare_with_purpose(
             .map(|scope| scope.worktree().clone())
     };
     let Some(meta) = meta else { return Ok(None) };
+    refuse_nested_task_command(ccx, &meta).await?;
     if request
         .cwd
         .as_ref()

@@ -87,6 +87,8 @@ pub(super) fn row_from_entry(entry: &TrajectoryIndexEntry, roots: &ProjectRoots)
         } => (
             if role == "planner" {
                 WorkKindTag::TaskPlanner
+            } else if role == "linked" {
+                WorkKindTag::Chat
             } else {
                 WorkKindTag::BoardAgent
             },

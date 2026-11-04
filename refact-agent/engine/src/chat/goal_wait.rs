@@ -114,7 +114,8 @@ pub async fn settle_goal_wait(
         return false;
     };
     if let Err(error) =
-        crate::tasks::goal::hydrate_session_task_goal(app.gcx.clone(), &session_arc).await
+        crate::tasks::goal::hydrate_session_task_goal_for_mutation(app.gcx.clone(), &session_arc)
+            .await
     {
         tracing::warn!(%chat_id, %error, "goal wait owner unavailable");
         return false;

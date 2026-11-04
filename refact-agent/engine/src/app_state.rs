@@ -262,6 +262,37 @@ impl ChatSessionFacade for EngineChatSessionFacade {
         .await
     }
 
+    async fn deliver_messages_with_receipt(
+        &self,
+        chat_id: &str,
+        delivery: refact_core::chat_types::PendingDelivery,
+    ) -> Result<refact_runtime_api::DeliveryReceipt, String> {
+        let receipt = chat::delivery::deliver_to_chat_with_receipt(
+            AppState::from_gcx(self.gcx.clone()).await,
+            chat_id,
+            delivery,
+        )
+        .await?;
+        let trajectory_persistence = match receipt.trajectory_persistence {
+            chat::delivery::TrajectoryPersistence::Committed => {
+                refact_runtime_api::TrajectoryPersistence::Committed
+            }
+            chat::delivery::TrajectoryPersistence::Pending => {
+                refact_runtime_api::TrajectoryPersistence::Pending
+            }
+            chat::delivery::TrajectoryPersistence::Unknown => {
+                refact_runtime_api::TrajectoryPersistence::Unknown
+            }
+        };
+        Ok(refact_runtime_api::DeliveryReceipt {
+            outcome: receipt.outcome,
+            delivery_id: receipt.delivery_id,
+            trajectory_persistence,
+            outbox_durable: receipt.outbox_durable,
+            note: receipt.note,
+        })
+    }
+
     async fn update_pending_delivery(
         &self,
         chat_id: &str,
@@ -387,6 +418,20 @@ impl ChatSessionFacade for EngineChatSessionFacade {
         crate::buddy::supervision_authority::validate_chat_command(&guard, chat_id, &command)?;
         self.enqueue_guarded_command(chat_id, command, false, Some(guard), None)
             .await
+    }
+
+    async fn session_interruption(
+        &self,
+        chat_id: &str,
+    ) -> Result<Option<refact_chat_api::BoardInterruption>, String> {
+        let session_arc = {
+            let sessions = self.gcx.chat_sessions.read().await;
+            sessions.get(chat_id).cloned()
+        };
+        match session_arc {
+            Some(session_arc) => Ok(session_arc.lock().await.runtime.interruption.clone()),
+            None => Ok(None),
+        }
     }
 
     async fn session_state(

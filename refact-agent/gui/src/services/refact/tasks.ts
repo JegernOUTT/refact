@@ -23,6 +23,7 @@ export interface TaskMeta {
     | "paused"
     | "waiting_ide"
     | "waiting_user_input"
+    | "interrupted"
     | "completed"
     | "error";
 }
@@ -106,6 +107,7 @@ export interface CardVerifierReport {
   passed?: boolean;
   command_results?: CardVerificationResult[];
   concerns?: string[];
+  notes?: string[];
   recommendation?: string;
   classification?:
     | "unknown"
@@ -196,6 +198,7 @@ function isVerifierReport(value: unknown): value is CardVerifierReport {
       (field) => Array.isArray(field) && field.every(isVerificationResult),
     ) &&
     optionalField(value, "concerns", isStringArray) &&
+    optionalField(value, "notes", isStringArray) &&
     optionalField(
       value,
       "recommendation",

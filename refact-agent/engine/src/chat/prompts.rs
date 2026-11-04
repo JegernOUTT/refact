@@ -103,6 +103,9 @@ async fn task_brief_for_plan_template(
     let Some(meta) = task_meta else {
         return String::new();
     };
+    if meta.role == "linked" {
+        return String::new();
+    }
     if meta.role == "planner" {
         return "The task goal owns the plan. Read get_goal and update goal.plan; task documents are reference artifacts, not a second planning authority.".into();
     }
@@ -1736,6 +1739,9 @@ async fn build_task_context_injection_plan(
     task_id: &str,
     task_meta: Option<&crate::chat::types::TaskMeta>,
 ) -> Result<Option<TaskContextInjectionPlan>, String> {
+    if task_meta.is_some_and(|meta| meta.role == "linked") {
+        return Ok(None);
+    }
     let access =
         crate::tools::tool_task_memory::memory_access_context(app.gcx.clone(), task_meta, task_id)
             .await;

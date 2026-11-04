@@ -99,7 +99,8 @@ impl Tool for ToolSetGoal {
         }
         .ok_or_else(|| format!("chat session `{chat_id}` not found"))?;
 
-        crate::tasks::goal::hydrate_session_task_goal(gcx.clone(), &session_arc).await?;
+        crate::tasks::goal::hydrate_session_task_goal_for_mutation(gcx.clone(), &session_arc)
+            .await?;
         let report = {
             let mut session = session_arc.lock().await;
             if current_goal_including_queued(&session)?.is_some() {

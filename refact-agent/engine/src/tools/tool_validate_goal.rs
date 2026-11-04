@@ -79,6 +79,8 @@ impl Tool for ToolValidateGoal {
         if crate::agents::seal::is_sealed(&app, &chat_id).await {
             return Err("sealed chat cannot validate a goal".to_string());
         }
+        crate::tasks::goal::hydrate_session_task_goal_for_mutation(gcx.clone(), &session_arc)
+            .await?;
         let (begin, fork) = {
             let mut session = session_arc.lock().await;
             let begin = begin_validate_goal(&mut session);

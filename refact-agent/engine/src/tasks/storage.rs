@@ -65,6 +65,8 @@ pub(crate) struct CardStateCache {
     tasks: std::sync::Mutex<
         std::collections::HashMap<PathBuf, Arc<tokio::sync::Mutex<CachedCardStates>>>,
     >,
+    parsed:
+        std::sync::Mutex<std::collections::HashMap<PathBuf, (String, TaskBoard, BoardProvenance)>>,
     #[cfg(test)]
     parses: std::sync::atomic::AtomicUsize,
 }
@@ -187,6 +189,48 @@ struct PlannerProof {
     origin: PlannerOrigin,
 }
 
+#[derive(Debug)]
+enum PlannerProofError {
+    Busy,
+    Rejected(String),
+}
+
+impl From<String> for PlannerProofError {
+    fn from(error: String) -> Self {
+        Self::Rejected(error)
+    }
+}
+
+impl From<&str> for PlannerProofError {
+    fn from(error: &str) -> Self {
+        Self::Rejected(error.to_string())
+    }
+}
+
+impl From<PlannerProofError> for String {
+    fn from(error: PlannerProofError) -> Self {
+        match error {
+            PlannerProofError::Busy => {
+                static BUSY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+                BUSY.get_or_init(|| {
+                    WorkError::new(
+                        "planner_busy",
+                        "Planner identity is busy; claim retained for retry",
+                        true,
+                    )
+                    .to_string()
+                })
+                .clone()
+            }
+            PlannerProofError::Rejected(error) => error,
+        }
+    }
+}
+
+pub(crate) fn planner_proof_busy(error: &str) -> bool {
+    error == String::from(PlannerProofError::Busy)
+}
+
 #[derive(Clone)]
 enum PlannerOrigin {
     Live {
@@ -199,20 +243,45 @@ enum PlannerOrigin {
     },
 }
 
+async fn retry_planner_busy<T, F, Fut>(mut operation: F) -> Result<T, PlannerProofError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, PlannerProofError>>,
+{
+    let mut retry = 0;
+    loop {
+        match operation().await {
+            Err(PlannerProofError::Busy) if retry < 4 => {
+                tokio::time::sleep(std::time::Duration::from_millis(25 << retry)).await;
+                retry += 1;
+            }
+            result => return result,
+        }
+    }
+}
+
 impl PlannerProof {
     async fn capture(
         gcx: Arc<GlobalContext>,
         task_id: &str,
         principal: &str,
     ) -> Result<Self, String> {
+        retry_planner_busy(|| Self::capture_once(gcx.clone(), task_id, principal))
+            .await
+            .map_err(String::from)
+    }
+
+    async fn capture_once(
+        gcx: Arc<GlobalContext>,
+        task_id: &str,
+        principal: &str,
+    ) -> Result<Self, PlannerProofError> {
         if crate::file_activity::current_actor().is_some_and(|actor| actor != principal) {
             return Err("Task principal does not match the authenticated caller".into());
         }
         let live = gcx.chat_sessions.read().await.get(principal).cloned();
         if let Some(live) = live {
-            let session = live
-                .try_lock()
-                .map_err(|_| "Task planner identity is busy; retry")?;
+            let session = live.try_lock().map_err(|_| PlannerProofError::Busy)?;
             if session.chat_id != principal
                 || !session
                     .thread
@@ -230,7 +299,24 @@ impl PlannerProof {
                 id: session.thread.model.clone(),
                 ..Default::default()
             };
+            let mut normalized_meta = session.thread.task_meta.clone();
+            let mode = session.thread.mode.clone();
+            let link_type = session.thread.link_type.clone();
             drop(session);
+            crate::chat::trajectories::normalize_legacy_planner_copy(
+                gcx.clone(),
+                principal,
+                &mode,
+                link_type.as_deref(),
+                &mut normalized_meta,
+            )
+            .await;
+            if !normalized_meta
+                .as_ref()
+                .is_some_and(|meta| meta.role == "planner")
+            {
+                return Err("Task principal is a nonauthoritative legacy planner copy".into());
+            }
             let source_root = crate::coordination::roots::resolve_source_workspace_root(
                 gcx.clone(),
                 source.to_str(),
@@ -320,7 +406,7 @@ impl PlannerProof {
         gcx: &Arc<GlobalContext>,
         task_id: &str,
         task_dir: &Path,
-    ) -> Result<crate::caps::BaseModelRecord, String> {
+    ) -> Result<crate::caps::BaseModelRecord, PlannerProofError> {
         let live = gcx.chat_sessions.read().await.get(&self.principal).cloned();
         match (&self.origin, live) {
             (
@@ -330,9 +416,7 @@ impl PlannerProof {
                 },
                 Some(current),
             ) if Arc::ptr_eq(accepted, &current) => {
-                let session = current
-                    .try_lock()
-                    .map_err(|_| "Task planner identity is busy; retry")?;
+                let session = current.try_lock().map_err(|_| PlannerProofError::Busy)?;
                 if session.chat_id != self.principal
                     || !session
                         .thread
@@ -445,6 +529,49 @@ tokio::task_local! {
 }
 
 impl TaskDirectoryBinding {
+    pub(crate) async fn acknowledge_custody_reply<F, T>(
+        &self,
+        gcx: Arc<GlobalContext>,
+        planner: &str,
+        updater: F,
+    ) -> Result<T, String>
+    where
+        F: FnOnce(&mut TaskBoard) -> Result<T, String>,
+    {
+        self.validate_identity()?;
+        let mut binding = self.clone();
+        let board = read_board_from_dir(&gcx, &binding.task_dir).await?;
+        if !board.planner_binding_is_current(planner) {
+            return Err("Reply planner is no longer in board custody".into());
+        }
+        binding.owner = board.owner_chat_id;
+        let access = BoundTaskAccess {
+            binding,
+            reconciliation: true,
+        };
+        BOUND_TASK
+            .scope(
+                access,
+                update_board_atomic_with_reviewer(
+                    gcx,
+                    &self.task_id,
+                    BoardWriter::BoundPlanner(
+                        crate::file_activity::current_actor().unwrap_or_else(|| planner.into()),
+                    ),
+                    |board, _| {
+                        if board.planner_binding_is_current(planner) {
+                            Ok(())
+                        } else {
+                            Err("Reply planner custody changed".into())
+                        }
+                    },
+                    |board, _| updater(board),
+                ),
+            )
+            .await
+            .map(|(_, value)| value)
+    }
+
     pub(crate) async fn capture(
         gcx: Arc<GlobalContext>,
         source_root: &Path,
@@ -615,6 +742,7 @@ impl AcceptedTaskAttempt {
         restore_original: bool,
         error: &str,
     ) -> Result<(), String> {
+        let busy = planner_proof_busy(error);
         let access = BoundTaskAccess {
             binding: self.binding.clone(),
             reconciliation: true,
@@ -630,6 +758,31 @@ impl AcceptedTaskAttempt {
                         .ok_or("Accepted task card was removed; reconciliation required")?;
                     if card.column != "doing" {
                         return Err("Accepted task claim is no longer current".into());
+                    }
+                    if busy {
+                        let matches = if let Some(key) = self.variant {
+                            card.ab_variants.as_ref().filter(|variants| variants.winner.is_none())
+                                .and_then(|variants| variants.variant(key))
+                                .is_some_and(|variant| variant.chat_id == self.attempt.chat_id()
+                                    && variant.agent_id == self.agent_id && variant.finish.is_none())
+                        } else {
+                            card.agent_chat_id.as_deref() == Some(self.attempt.chat_id())
+                                && card.assignee.as_deref() == Some(self.agent_id.as_str())
+                        };
+                        if !matches {
+                            return Err("Accepted task claim was replaced".into());
+                        }
+                        card.attention = Some(super::types::CardAttention {
+                            kind: "no_session".into(),
+                            reason: "Planner busy during agent setup; inspect and restart from the owning planner".into(),
+                            since: Utc::now().to_rfc3339(),
+                            count: 1,
+                        });
+                        card.status_updates.push(super::types::StatusUpdate {
+                            timestamp: Utc::now().to_rfc3339(),
+                            message: "Planner busy during setup; claim and checkout retained. Inspect and restart_agent from the owning planner.".into(),
+                        });
+                        return Ok(());
                     }
                     if let Some(key) = self.variant {
                         let variant = card.ab_variants.as_mut()
@@ -1019,6 +1172,14 @@ pub async fn load_board(gcx: Arc<GlobalContext>, task_id: &str) -> Result<TaskBo
     read_board_from_dir(&gcx, &task_dir).await
 }
 
+pub(crate) async fn load_board_unlocked(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+) -> Result<TaskBoard, String> {
+    let task_dir = find_task_dir(gcx.clone(), task_id).await?;
+    read_board_from_dir(&gcx, &task_dir).await
+}
+
 pub(crate) async fn load_board_locked(
     gcx: Arc<GlobalContext>,
     task_id: &str,
@@ -1050,6 +1211,18 @@ async fn read_board_with_provenance(
     let content = fs::read_to_string(&board_path)
         .await
         .map_err(|e| e.to_string())?;
+    let key = dunce::canonicalize(&board_path).map_err(|error| error.to_string())?;
+    let digest = crate::file_activity::digest_of(&content);
+    if let Some((_, board, provenance)) = gcx
+        .task_card_states
+        .parsed
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&key)
+        .filter(|(cached, _, _)| cached == &digest)
+    {
+        return Ok((board.clone(), provenance.clone()));
+    }
     #[cfg(test)]
     gcx.task_card_states
         .parses
@@ -1057,11 +1230,20 @@ async fn read_board_with_provenance(
     #[cfg(not(test))]
     let _ = gcx;
     let value: serde_yaml::Value = serde_yaml::from_str(&content).map_err(|e| e.to_string())?;
-    let board = serde_yaml::from_value(value.clone()).map_err(|e| e.to_string())?;
-    let provenance = value
+    let board: TaskBoard = serde_yaml::from_value(value.clone()).map_err(|e| e.to_string())?;
+    let provenance: BoardProvenance = value
         .get("work_provenance")
         .and_then(|value| serde_yaml::from_value(value.clone()).ok())
         .unwrap_or_default();
+    let mut parsed = gcx
+        .task_card_states
+        .parsed
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if parsed.len() >= 16 {
+        parsed.clear();
+    }
+    parsed.insert(key, (digest, board.clone(), provenance.clone()));
     Ok((board, provenance))
 }
 
@@ -1109,6 +1291,15 @@ pub(crate) async fn locked_task_dir(
     gcx: Arc<GlobalContext>,
     task_id: &str,
 ) -> Result<(PathBuf, BoardLockGuard), String> {
+    retry_planner_busy(|| locked_task_dir_once(gcx.clone(), task_id))
+        .await
+        .map_err(String::from)
+}
+
+async fn locked_task_dir_once(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+) -> Result<(PathBuf, BoardLockGuard), PlannerProofError> {
     let task_dir = find_task_dir(gcx.clone(), task_id).await?;
     let canonical_before = dunce::canonicalize(&task_dir).map_err(|e| e.to_string())?;
     let identity = std::fs::metadata(&canonical_before).map_err(|e| e.to_string())?;
@@ -1143,7 +1334,7 @@ async fn validate_locked_task_dir(
     gcx: Arc<GlobalContext>,
     task_id: &str,
     guard: &BoardLockGuard,
-) -> Result<(), String> {
+) -> Result<(), PlannerProofError> {
     if !guard.guards(BOARD_LOCK_FILE) {
         return Err("Task validation requires its board lock".into());
     }
@@ -1856,6 +2047,28 @@ where
         }
     }
     let result = updater(&mut board, settings.board_allow_self_review)?;
+    let reopened = existing
+        .cards
+        .iter()
+        .filter(|old| {
+            old.column == "failed"
+                && board
+                    .get_card(&old.id)
+                    .is_some_and(|new| new.column == "planned")
+        })
+        .map(|card| card.id.clone())
+        .collect::<Vec<_>>();
+    for card_id in reopened {
+        board.card_claims.remove(&card_id);
+        if let Some(card) = board.get_card_mut(&card_id) {
+            card.assignee = None;
+            card.agent_chat_id = None;
+            card.started_at = None;
+            card.completed_at = None;
+            card.ab_variants = None;
+            card.team_members.clear();
+        }
+    }
     if board.card_attempt_generations != existing.card_attempt_generations
         || (!matches!(&writer, BoardWriter::BoundPlanner(_))
             && board.planner_replies != existing.planner_replies)
@@ -2584,23 +2797,35 @@ pub async fn list_task_trajectories_for(
     caller: crate::chat::trajectory_index::TrajectoryIndexListingCaller,
 ) -> Result<Vec<TrajectoryInfo>, String> {
     let task_dir = find_task_dir(gcx.clone(), task_id).await?;
-    let traj_dir = get_task_trajectory_dir(&task_dir, role, agent_id);
-
-    if !traj_dir.exists() {
-        return Ok(vec![]);
+    let mut trajectory_dirs = vec![get_task_trajectory_dir(&task_dir, role, agent_id)];
+    if role == "planner"
+        && agent_id.is_none()
+        && caller == crate::chat::trajectory_index::TrajectoryIndexListingCaller::TaskTrajectoryApi
+    {
+        trajectory_dirs.push(get_task_trajectory_dir(&task_dir, "linked", None));
     }
 
     let coordinator = AppState::from_gcx(gcx.clone())
         .await
         .chat
         .trajectory_index_coordinator;
-    let entries = crate::chat::trajectory_index::list_trajectory_entries_with_rollout_shared_for(
-        &coordinator,
-        &traj_dir,
-        None,
-        caller,
-    )
-    .await?;
+    let mut entries = Vec::new();
+    for traj_dir in trajectory_dirs {
+        if !traj_dir.exists() {
+            continue;
+        }
+        entries.extend(
+            crate::chat::trajectory_index::list_trajectory_entries_with_rollout_shared_for(
+                &coordinator,
+                &traj_dir,
+                None,
+                caller,
+            )
+            .await?
+            .iter()
+            .cloned(),
+        );
+    }
     let mut trajectories: Vec<TrajectoryInfo> = entries
         .iter()
         .filter(|entry| {
@@ -2660,6 +2885,179 @@ pub fn infer_task_id_from_chat_id(chat_id: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn reply_ack_binding_follows_custody_without_granting_old_owner_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let task = "reply-ack-custody";
+        let gcx = task_with_cards(temp.path(), task, vec![]).await;
+        update_board_atomic(gcx.clone(), task, |board| {
+            board.transfer_owner("old", 1);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let binding = TaskDirectoryBinding::capture(gcx.clone(), temp.path(), task)
+            .await
+            .unwrap();
+        update_board_atomic(gcx.clone(), task, |board| {
+            board.transfer_owner("new", 2);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        binding
+            .acknowledge_custody_reply(gcx.clone(), "old", |board| {
+                board.planner_replies.entry("card".into()).or_default();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let board = load_board(gcx.clone(), task).await.unwrap();
+        assert!(board.planner_replies.contains_key("card"));
+        assert!(board.require_owner("old").is_err());
+        assert!(binding
+            .acknowledge_custody_reply(gcx, "foreign", |_| Ok(()))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn busy_setup_reconciliation_retains_claim_with_durable_attention() {
+        let temp = tempfile::tempdir().unwrap();
+        let task = "busy-setup-attention";
+        let gcx = task_with_cards(
+            temp.path(),
+            task,
+            vec![claimable_card("T-1", vec![], "planned")],
+        )
+        .await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+        let chat = format!("busy-{}", Uuid::new_v4());
+        super::super::admission::reserve(&app, &chat, "project", "planner", 0)
+            .await
+            .unwrap();
+        let binding = TaskDirectoryBinding::capture(gcx.clone(), temp.path(), task)
+            .await
+            .unwrap();
+        let original = load_board(gcx.clone(), task).await.unwrap().cards[0].clone();
+        let receipt = AcceptedTaskAttempt::new(
+            &binding,
+            &original,
+            "agent",
+            super::super::admission::current_attempt(&chat).unwrap(),
+            None,
+        );
+        update_board_atomic(gcx.clone(), task, |board| {
+            let card = &mut board.cards[0];
+            card.column = "doing".into();
+            card.assignee = Some("agent".into());
+            card.agent_chat_id = Some(chat.clone());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        receipt
+            .reconcile(gcx.clone(), false, &String::from(PlannerProofError::Busy))
+            .await
+            .unwrap();
+        super::super::admission::end(&chat).await;
+        let board = load_board(gcx, task).await.unwrap();
+        assert_eq!(board.cards[0].column, "doing");
+        assert_eq!(board.cards[0].agent_chat_id.as_deref(), Some(chat.as_str()));
+        assert_eq!(
+            board.cards[0].attention.as_ref().unwrap().kind,
+            "no_session"
+        );
+        assert!(board.cards[0].completed_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn live_planner_lock_contention_is_typed_retryable() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let session = Arc::new(tokio::sync::Mutex::new(
+            crate::chat::types::ChatSession::new("busy-planner".into()),
+        ));
+        gcx.chat_sessions
+            .write()
+            .await
+            .insert("busy-planner".into(), session.clone());
+        let _held = session.lock().await;
+        let error = match PlannerProof::capture_once(gcx, "task", "busy-planner").await {
+            Err(error) => error,
+            Ok(_) => panic!("locked live identity must not fall back to persisted proof"),
+        };
+        assert!(matches!(&error, PlannerProofError::Busy));
+        let encoded = String::from(error);
+        assert!(planner_proof_busy(&encoded));
+        let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(value["retryable"], true);
+    }
+
+    #[tokio::test]
+    async fn reopening_failed_card_releases_spawn_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let task_id = "reopen-failed";
+        let mut card = claimable_card("T-1", vec![], "failed");
+        card.assignee = Some("old-agent".into());
+        card.agent_chat_id = Some("old-chat".into());
+        let gcx = task_with_cards(temp.path(), task_id, vec![card]).await;
+        update_board_atomic(gcx.clone(), task_id, |board| {
+            board.card_claims.insert(
+                "T-1".into(),
+                CardClaim {
+                    claimant_chat_id: "old-chat".into(),
+                    idempotency_key: "old-key".into(),
+                    claimed_at: "old".into(),
+                },
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let (board, ()) = update_board_atomic(gcx.clone(), task_id, |board| {
+            board.get_card_mut("T-1").unwrap().column = "planned".into();
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(board.card_claim("T-1").is_none());
+        assert_eq!(board.get_card("T-1").unwrap().agent_chat_id, None);
+        claim_card(gcx, task_id, "T-1", "new-chat", "new-key")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn parsed_board_cache_rechecks_external_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = task_with_board(temp.path(), "cache-board").await;
+        let dir = find_task_dir(gcx.clone(), "cache-board").await.unwrap();
+        let original = load_board(gcx.clone(), "cache-board").await.unwrap();
+        let before = gcx.task_card_states.parse_count();
+        assert_eq!(
+            load_board(gcx.clone(), "cache-board").await.unwrap().rev,
+            original.rev
+        );
+        assert_eq!(gcx.task_card_states.parse_count(), before);
+        let mut replacement = original;
+        replacement.transfer_owner("external", 1);
+        fs::write(
+            dir.join("board.yaml"),
+            serde_yaml::to_string(&replacement).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            load_board(gcx.clone(), "cache-board")
+                .await
+                .unwrap()
+                .owner_chat_id
+                .as_deref(),
+            Some("external")
+        );
+        assert_eq!(gcx.task_card_states.parse_count(), before + 1);
+    }
+
     #[test]
     fn subprocess_board_claim() {
         let Ok(root) = std::env::var("REFACT_TEST_BOARD_RACE_ROOT") else {

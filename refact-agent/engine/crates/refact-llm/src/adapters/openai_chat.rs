@@ -618,7 +618,13 @@ fn convert_messages_to_openai(
                         }
                     });
                     if let Some(extra) = &tc.extra_content {
-                        call["extra_content"] = extra.clone();
+                        let mut extra = extra.clone();
+                        if let Some(object) = extra.as_object_mut() {
+                            object.remove("_refact_output_limit_truncated");
+                        }
+                        if !extra.as_object().is_some_and(|object| object.is_empty()) {
+                            call["extra_content"] = extra;
+                        }
                     }
                     call
                 })
@@ -1418,7 +1424,7 @@ mod tests {
                         id: "srvtoolu_123".to_string(), // Server-executed
                         index: Some(0),
                         tool_type: "function".to_string(),
-                        extra_content: None,
+                        extra_content: Some(json!({"_refact_output_limit_truncated": true})),
                         started_at_ms: None,
                         completed_at_ms: None,
                         function: ChatToolFunction {
@@ -1430,7 +1436,7 @@ mod tests {
                         id: "call_456".to_string(), // Regular tool call
                         index: Some(1),
                         tool_type: "function".to_string(),
-                        extra_content: None,
+                        extra_content: Some(json!({"_refact_output_limit_truncated": true})),
                         started_at_ms: None,
                         completed_at_ms: None,
                         function: ChatToolFunction {
@@ -1469,6 +1475,9 @@ mod tests {
         let tool_calls = assistant["tool_calls"].as_array().unwrap();
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0]["id"], "call_456");
+        assert!(!serde_json::to_string(&converted)
+            .unwrap()
+            .contains("_refact_output_limit_truncated"));
 
         // Only regular tool result should be present
         let tool_result = &converted[2];

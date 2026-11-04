@@ -210,8 +210,7 @@ pub(crate) async fn resolve(
         &selector,
         raw_cwd,
     )
-    .await
-    .map_err(|_| REFUSED.to_string())?;
+    .await?;
     ensure_not_cancelled(ccx).await?;
     Ok(Some(candidate))
 }
@@ -432,6 +431,11 @@ impl ValidatedCommandCheckout {
     }
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static BEFORE_BOARD_RECHECK: std::cell::RefCell<Option<Box<dyn FnOnce() + Send>>>;
+}
+
 pub(crate) async fn resolve_registered_task_card(
     app: &AppState,
     authority: &TaskCardAuthority,
@@ -443,9 +447,14 @@ pub(crate) async fn resolve_registered_task_card(
     let chat_id = authority.owner.as_str();
     let source = authority.source.clone();
     let (board, board_fingerprint) = read_board(&source, &expected_meta.task_id).await?;
-    board.require_owner(chat_id).map_err(|_| REFUSED)?;
+    board.require_owner(chat_id).map_err(|error| {
+        format!(
+            "{error}; owning planner chat: {}. Open that planner chat to operate on this checkout",
+            board.owner_chat_id.as_deref().unwrap_or("unclaimed")
+        )
+    })?;
     let card = board.get_card(&selector.card_id).ok_or(REFUSED)?;
-    if board.rev != selector.expected_board_rev
+    if (authority.verifier.is_none() && board.rev != selector.expected_board_rev)
         || card.column != "done"
         || card.paused_at.is_some()
         || (card.ab_variants.is_some()
@@ -470,6 +479,9 @@ pub(crate) async fn resolve_registered_task_card(
         .get_worktree(&selector.expected_worktree_id)
         .await
         .map_err(|_| REFUSED)?;
+    if view.status.head_commit.as_deref() != Some(selector.expected_head.as_str()) {
+        return Err(format!("Checkout {} at {} changed: expected HEAD {}, actual {}; request a fresh checkout target", selector.expected_worktree_id, view.meta.root.display(), selector.expected_head, view.status.head_commit.as_deref().unwrap_or("unavailable")));
+    }
     let meta = &view.meta;
     let root = canonical_dir(&meta.root).await?;
     if root != meta.root {
@@ -518,10 +530,40 @@ pub(crate) async fn resolve_registered_task_card(
     {
         return Err(REFUSED.into());
     }
+    #[cfg(test)]
+    let _ = BEFORE_BOARD_RECHECK.try_with(|hook| {
+        if let Some(change) = hook.borrow_mut().take() {
+            change();
+        }
+    });
     let (current_board, current_fingerprint) = read_board(&source, &expected_meta.task_id).await?;
-    current_board.require_owner(chat_id).map_err(|_| REFUSED)?;
-    if current_fingerprint != board_fingerprint {
-        return Err(REFUSED.into());
+    current_board.require_owner(chat_id).map_err(|error| {
+        format!(
+            "{error}; owning planner chat: {}. Open that planner chat to operate on this checkout",
+            current_board
+                .owner_chat_id
+                .as_deref()
+                .unwrap_or("unclaimed")
+        )
+    })?;
+    let unchanged = if let Some(expected) = authority.verifier.as_ref() {
+        current_board
+            .get_card(&selector.card_id)
+            .is_some_and(|current| {
+                expected.matches_board_card(current_board.rev, current)
+                    && board.review_policy == current_board.review_policy
+            })
+    } else {
+        current_fingerprint == board_fingerprint
+    };
+    if !unchanged {
+        return Err(format!(
+            "{REFUSED}; card {} checkout {} expected head {} and cwd {}",
+            selector.card_id,
+            selector.expected_worktree_id,
+            selector.expected_head,
+            selector.expected_cwd
+        ));
     }
     Ok(ValidatedCommandCheckout {
         task_id: expected_meta.task_id.clone(),

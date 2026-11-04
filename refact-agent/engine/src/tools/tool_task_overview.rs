@@ -227,7 +227,7 @@ fn render_agent_health(statuses: &[AgentStatus], now: DateTime<Utc>) -> String {
                     ));
                 }
             }
-            AgentStateKind::Stuck => stuck += 1,
+            AgentStateKind::Stuck | AgentStateKind::Interrupted => stuck += 1,
             AgentStateKind::Failed => failed += 1,
             AgentStateKind::Done => {
                 if status

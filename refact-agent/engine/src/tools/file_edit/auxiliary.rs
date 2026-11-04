@@ -1706,7 +1706,7 @@ mod tests {
             )
             .await
             .unwrap();
-            assert!(summary.contains("absolute path was used"));
+            assert!(!summary.contains("absolute path was used"));
             assert_eq!(
                 fs::read_to_string(f.root.join("src/absolute.txt")).unwrap(),
                 "absolute\n"
@@ -1803,7 +1803,7 @@ mod tests {
             )
             .await
             .unwrap();
-            assert!(result
+            assert!(!result
                 .warnings
                 .join("\n")
                 .contains("absolute path was used"));

@@ -358,8 +358,9 @@ export function useInternalNavigation({
             (local.owner && latest.board.owner_chat_id !== target.id) ||
             (taskMeta &&
               (taskMeta.task_id !== latest.task.id ||
-                taskMeta.role !==
-                  (resolved.kind === "planner" ? "planner" : "agents") ||
+                (resolved.kind === "planner"
+                  ? taskMeta.role !== "planner" && taskMeta.role !== "linked"
+                  : taskMeta.role !== "agents") ||
                 (resolved.kind === "agent" &&
                   taskMeta.card_id !== resolved.cardId)))
           )
@@ -374,7 +375,10 @@ export function useInternalNavigation({
           taskMeta = {
             ...taskMeta,
             task_id: latest.task.id,
-            role: resolved.kind === "planner" ? "planner" : "agents",
+            role:
+              resolved.kind === "planner"
+                ? taskMeta?.role ?? "planner"
+                : "agents",
             ...(resolved.kind === "agent" ? { card_id: resolved.cardId } : {}),
           };
         } else if (taskId) {
@@ -423,10 +427,16 @@ export function useInternalNavigation({
             };
           } else if (
             resolved.kind === "planner" &&
-            (!taskMeta || taskMeta.role === "planner")
+            (!taskMeta ||
+              taskMeta.role === "planner" ||
+              taskMeta.role === "linked")
           ) {
             activeChat = { type: "planner", chatId: target.id };
-            taskMeta = { ...taskMeta, task_id: taskId, role: "planner" };
+            taskMeta = {
+              ...taskMeta,
+              task_id: taskId,
+              role: taskMeta?.role ?? "planner",
+            };
           } else if (taskMeta)
             throw new Error(
               "This chat is not a current planner or agent for the referenced task card.",

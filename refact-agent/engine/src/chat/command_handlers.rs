@@ -126,7 +126,7 @@ pub(super) async fn handle_queue_command(
             | ChatCommand::SetGoalBudget { .. }
             | ChatCommand::GoalControl { .. }
     ) {
-        if let Err(error) = crate::tasks::goal::hydrate_session_task_goal(
+        if let Err(error) = crate::tasks::goal::hydrate_session_task_goal_for_mutation(
             context.app.gcx.clone(),
             &context.session_arc,
         )

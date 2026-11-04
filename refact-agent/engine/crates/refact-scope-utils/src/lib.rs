@@ -81,12 +81,6 @@ pub fn scoped_path_warnings(scoped: &ScopedPath, scope: &ExecutionScope) -> Vec<
             scope.effective_root().display(),
             scoped.path.display()
         ));
-    } else if scoped.used_absolute_path {
-        warnings.push(format!(
-            "⚠️ Worktree scope: absolute path was used in a worktree-scoped chat and resolved under active worktree '{}': '{}'",
-            scope.effective_root().display(),
-            scoped.path.display()
-        ));
     }
     warnings
 }
@@ -255,13 +249,9 @@ mod tests {
                 outside.display()
             )]
         );
-        assert_eq!(
-            scoped_path_warnings(&scoped_path(worktree.clone(), true, None, false), &f.scope),
-            vec![format!(
-                "⚠️ Worktree scope: absolute path was used in a worktree-scoped chat and resolved under active worktree '{}': '{}'",
-                f.scope.effective_root().display(),
-                worktree.display()
-            )]
+        assert!(
+            scoped_path_warnings(&scoped_path(worktree.clone(), true, None, false), &f.scope)
+                .is_empty()
         );
         assert!(
             scoped_path_warnings(&scoped_path(worktree, false, None, false), &f.scope).is_empty()

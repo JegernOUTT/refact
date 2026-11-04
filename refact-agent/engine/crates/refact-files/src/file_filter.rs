@@ -131,7 +131,16 @@ fn is_generated_index_relative_path(path: &Path) -> bool {
 fn is_generated_index_suffix(parts: &[&str]) -> bool {
     matches!(parts, ["trajectories", "index.json"])
         || matches!(parts, ["tasks", "index.json"])
-        || matches!(parts, ["tasks", _, "trajectories", "planner", "index.json"])
+        || matches!(
+            parts,
+            [
+                "tasks",
+                _,
+                "trajectories",
+                "planner" | "linked",
+                "index.json"
+            ]
+        )
         || matches!(parts, ["tasks", _, "trajectories", "agents", "index.json"])
         || matches!(
             parts,
@@ -247,6 +256,7 @@ mod tests {
             "/repo/.refact/trajectories/index.json",
             "/repo/.refact/tasks/index.json",
             "/repo/.refact/tasks/task-1/trajectories/planner/index.json",
+            "/repo/.refact/tasks/task-1/trajectories/linked/index.json",
             "/repo/.refact/tasks/task-1/trajectories/agents/index.json",
             "/repo/.refact/tasks/task-1/trajectories/agents/agent-1/index.json",
         ] {

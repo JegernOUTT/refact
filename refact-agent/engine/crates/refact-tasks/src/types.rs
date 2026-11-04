@@ -31,6 +31,10 @@ pub struct TaskMeta {
     pub planner_session_state: Option<String>,
 }
 
+fn owner_epoch_is_zero(epoch: &u64) -> bool {
+    *epoch == 0
+}
+
 fn default_schema_version() -> u32 {
     1
 }
@@ -68,6 +72,10 @@ pub struct TaskBoard {
     pub cards: Vec<BoardCard>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_chat_id: Option<String>,
+    #[serde(default, skip_serializing_if = "owner_epoch_is_zero")]
+    pub owner_epoch: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owner_custody: Vec<OwnerCustody>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviewer_chat_ids: Vec<String>,
     #[serde(default)]
@@ -93,6 +101,14 @@ pub struct PlannerReplyAttempt {
     pub chat_id: Option<String>,
     pub started_at: Option<String>,
     pub generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnerCustody {
+    pub epoch: u64,
+    pub from: Option<String>,
+    pub to: String,
+    pub at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -665,6 +681,8 @@ impl Default for TaskBoard {
             columns: default_columns(),
             cards: vec![],
             owner_chat_id: None,
+            owner_epoch: 0,
+            owner_custody: Vec::new(),
             reviewer_chat_ids: Vec::new(),
             review_policy: BoardReviewPolicy::default(),
             review_attestations: std::collections::BTreeMap::new(),
@@ -730,6 +748,8 @@ pub struct VerifierReport {
     pub passed: bool,
     pub command_results: Vec<VerificationResult>,
     pub concerns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
     pub recommendation: String,
     pub classification: VerifierReportClassification,
 }
@@ -1149,7 +1169,85 @@ pub struct TrajectoryInfo {
     pub waiting_for_card_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustodyError {
+    EpochExhausted,
+}
+
+impl std::fmt::Display for CustodyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EpochExhausted => f.write_str("owner epoch exhausted"),
+        }
+    }
+}
+
+impl std::error::Error for CustodyError {}
+
 impl TaskBoard {
+    pub fn transfer_owner(&mut self, new_owner: &str, at_ms: u64) {
+        let _ = self.try_transfer_owner(new_owner, at_ms);
+    }
+
+    pub fn try_transfer_owner(&mut self, new_owner: &str, at_ms: u64) -> Result<(), CustodyError> {
+        if new_owner.trim().is_empty() || self.owner_chat_id.as_deref() == Some(new_owner) {
+            return Ok(());
+        }
+        let epoch = self
+            .owner_epoch
+            .checked_add(1)
+            .ok_or(CustodyError::EpochExhausted)?;
+        let at_ms = if at_ms == 0 {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .min(u64::MAX as u128) as u64
+        } else {
+            at_ms
+        };
+        self.owner_custody.push(OwnerCustody {
+            epoch,
+            from: self.owner_chat_id.clone(),
+            to: new_owner.to_string(),
+            at_ms,
+        });
+        if self.owner_custody.len() > 32 {
+            self.owner_custody.drain(..self.owner_custody.len() - 32);
+        }
+        self.owner_epoch = epoch;
+        self.owner_chat_id = Some(new_owner.to_string());
+        Ok(())
+    }
+
+    pub fn planner_binding_is_current(&self, planner_chat_id: &str) -> bool {
+        let Some(owner) = self.owner_chat_id.as_deref() else {
+            return false;
+        };
+        if planner_chat_id == owner {
+            return true;
+        }
+        let mut successor = owner;
+        let mut epoch = self.owner_epoch;
+        for record in self.owner_custody.iter().rev() {
+            if record.epoch != epoch || record.to != successor {
+                return false;
+            }
+            let Some(previous) = record.from.as_deref() else {
+                return false;
+            };
+            if previous == planner_chat_id {
+                return true;
+            }
+            successor = previous;
+            let Some(previous_epoch) = epoch.checked_sub(1) else {
+                return false;
+            };
+            epoch = previous_epoch;
+        }
+        false
+    }
+
     pub fn validate_dependencies(&self) -> Result<(), String> {
         let mut by_id = std::collections::HashMap::new();
         for (index, card) in self.cards.iter().enumerate() {
@@ -1508,10 +1606,9 @@ impl TaskBoard {
 
     pub fn authorize_owner(&mut self, chat_id: &str) -> Result<(), String> {
         match self.owner_chat_id.as_deref() {
-            None => {
-                self.owner_chat_id = Some(chat_id.to_string());
-                Ok(())
-            }
+            None => self
+                .try_transfer_owner(chat_id, 0)
+                .map_err(|error| error.to_string()),
             Some(owner) if owner == chat_id => Ok(()),
             Some(_) => Err("task board mutation requires the owning planner chat".to_string()),
         }
@@ -1870,6 +1967,34 @@ impl TaskBoard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custody_chain_accepts_predecessor_but_not_a_gap_or_evicted_owner() {
+        let mut board = TaskBoard::default();
+        board.authorize_owner("a").unwrap();
+        assert!(board.owner_custody[0].at_ms > 0);
+        board.transfer_owner("b", 1);
+        board.transfer_owner("c", 2);
+        assert!(board.planner_binding_is_current("a"));
+        assert_eq!(board.owner_epoch, 3);
+        assert_eq!(board.owner_custody.len(), 3);
+        board.owner_custody[2].from = Some("foreign".into());
+        assert!(!board.planner_binding_is_current("a"));
+        board.owner_custody[2].from = Some("b".into());
+        for index in 0..32 {
+            board.transfer_owner(&format!("next-{index}"), index);
+        }
+        assert_eq!(board.owner_custody.len(), 32);
+        assert!(!board.planner_binding_is_current("a"));
+        board.owner_epoch = u64::MAX;
+        let before = serde_json::to_value(&board).unwrap();
+        assert_eq!(
+            board.try_transfer_owner("overflow", 1),
+            Err(CustodyError::EpochExhausted)
+        );
+        board.transfer_owner("overflow", 1);
+        assert_eq!(serde_json::to_value(&board).unwrap(), before);
+    }
 
     fn card(id: &str, title: &str, column: &str, depends_on: Vec<&str>) -> BoardCard {
         BoardCard {

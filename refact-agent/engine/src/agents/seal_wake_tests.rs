@@ -265,6 +265,7 @@ async fn verifier_gaps_do_not_rearm_sealed_chat() {
         .is_err());
     no_wake(&session, before).await;
     let report = crate::tasks::types::VerifierReport {
+        notes: Vec::new(),
         passed: false,
         command_results: vec![],
         concerns: vec!["tests missing".into()],

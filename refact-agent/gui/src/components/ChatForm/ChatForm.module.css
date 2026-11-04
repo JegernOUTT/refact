@@ -192,6 +192,28 @@
   mask-image: none;
 }
 
+.dangerNotice {
+  padding: 0 var(--rf-space-3) var(--rf-space-1);
+  color: var(--rf-color-danger);
+  font-family: var(--rf-font-ui);
+  font-size: var(--rf-text-1);
+}
+
+.inlineLink {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.inlineLink:focus-visible {
+  outline: var(--rf-hairline) solid var(--rf-color-accent);
+  outline-offset: var(--rf-hairline);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .chatFormMain,
   .chatForm__form {

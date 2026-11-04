@@ -10,6 +10,7 @@ pub enum SessionState {
     Paused,
     WaitingIde,
     WaitingUserInput,
+    Interrupted,
     Completed,
     Error,
 }
@@ -30,6 +31,7 @@ impl SessionState {
             SessionState::Paused => "paused",
             SessionState::WaitingIde => "waiting for IDE",
             SessionState::WaitingUserInput => "waiting input",
+            SessionState::Interrupted => "interrupted — recover in planner",
             SessionState::Completed => "completed",
             SessionState::Error => "error",
         }

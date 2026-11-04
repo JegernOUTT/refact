@@ -87,7 +87,7 @@ pub(crate) async fn control_goal(
         .transpose()?;
     let gcx = ccx.lock().await.app.gcx.clone();
     let session_arc = session_for_chat(ccx).await?;
-    crate::tasks::goal::hydrate_session_task_goal(gcx.clone(), &session_arc).await?;
+    crate::tasks::goal::hydrate_session_task_goal_for_mutation(gcx.clone(), &session_arc).await?;
     let mut session = session_arc.lock().await;
     require_pursuable_goal(&session)?;
     if resume

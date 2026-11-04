@@ -481,12 +481,16 @@ impl RuntimeVerifierActor {
         {
             return Err(stale());
         }
-        if crate::chat::verifier_diff::git_head_commit(&self.worktree.root)
-            .await
-            .as_deref()
-            != Some(self.scheduled_head.as_str())
-        {
-            return Err(stale());
+        let current_head = crate::chat::verifier_diff::git_head_commit(&self.worktree.root).await;
+        if current_head.as_deref() != Some(self.scheduled_head.as_str()) {
+            return Err(format!(
+                "{}; checkout {} at {} expected HEAD {}, actual {}",
+                stale(),
+                self.worktree.id,
+                self.worktree.root.display(),
+                self.scheduled_head,
+                current_head.as_deref().unwrap_or("unavailable")
+            ));
         }
         Ok(())
     }
@@ -1238,6 +1242,7 @@ async fn settle_verifier_failure(
         .any(|result| result.outcome == VerificationOutcome::CommandFailed);
     let report = VerifierReport {
         passed: false,
+        notes: Vec::new(),
         command_results,
         concerns: vec![format!(
             "Verification infrastructure unavailable; human review required: {error}"
@@ -1441,6 +1446,7 @@ async fn verify_card_inner(
         );
     }
 
+    let mut notes = Vec::new();
     let (review_unavailable, review_has_concerns, review_error) = if gates.judge_allowed() {
         runner.revalidate().await?;
         let meta = runner.candidate.metadata();
@@ -1493,13 +1499,16 @@ async fn verify_card_inner(
             run_verifier_review(gcx.clone(), prompt, card.agent_chat_id.as_deref(), records).await;
         let review_unavailable = review.is_err();
         let review_error = review.as_ref().err().cloned();
-        let model_concerns = review.unwrap_or_else(|error| {
-            vec![if verifier_model_unavailable(Some(&error)) {
+        let findings = review.unwrap_or_else(|error| ReviewFindings {
+            concerns: vec![if verifier_model_unavailable(Some(&error)) {
                 format!("Verifier model unavailable; infrastructure unavailable: {error}")
             } else {
                 format!("Verifier review subchat unavailable; human review recommended: {error}")
-            }]
+            }],
+            informational: Vec::new(),
         });
+        notes.extend(findings.informational);
+        let model_concerns = findings.concerns;
         let review_has_concerns = !review_unavailable && !model_concerns.is_empty();
         concerns.extend(model_concerns.into_iter().map(|concern| {
             if review_unavailable {
@@ -1534,6 +1543,7 @@ async fn verify_card_inner(
         passed,
         command_results,
         concerns,
+        notes,
         recommendation,
         classification,
     };
@@ -1710,6 +1720,7 @@ pub(crate) fn unavailable_verifier_report(error: String) -> VerifierReport {
     VerifierReport {
         passed: false,
         command_results: Vec::new(),
+        notes: Vec::new(),
         concerns: vec![if model_unavailable {
             format!("Verifier model unavailable; infrastructure unavailable: {error}")
         } else {
@@ -2075,7 +2086,7 @@ async fn run_verification_argv_scoped(
 
 fn verifier_prompt(card: &BoardCard, commands: &[VerificationResult], diff: &str) -> String {
     format!(
-        "Review this completed task card. Return concise ADVISORY concerns only. Deterministic gates already passed; your opinion cannot establish a verification failure. Only requirements written in the card apply; do not invent checks. For an acceptance check without verifier evidence, say 'not run: <reason>'. Negative-control steps are informational and are not executed by the verifier. If the changed files look safe and commands passed, answer exactly PASS.\n\nCard: {} - {}\n\nInstructions:\n{}\n\nFinal report:\n{}\n\nCommand results:\n{}\n\nChanged files:\n{}",
+        "Review this completed task card. Return concise ADVISORY concerns only. Deterministic gates already passed; your opinion cannot establish a verification failure. Only requirements written in the card apply; do not invent checks. For informational observations without verifier evidence, use a separate line prefixed 'not run: <reason>'. Negative-control steps are informational and are not executed by the verifier. If the changed files look safe and commands passed, answer exactly PASS.\n\nCard: {} - {}\n\nInstructions:\n{}\n\nFinal report:\n{}\n\nCommand results:\n{}\n\nChanged files:\n{}",
         card.id,
         card.title,
         card.instructions,
@@ -2090,7 +2101,7 @@ async fn run_verifier_review(
     prompt: String,
     parent_chat_id: Option<&str>,
     records: Vec<refact_privacy::FileRecord>,
-) -> Result<Vec<String>, String> {
+) -> Result<ReviewFindings, String> {
     let model = resolve_verifier_model(gcx.clone()).await?;
     let config = crate::subchat::SubchatConfig {
         runner_lease_token: None,
@@ -2170,17 +2181,29 @@ async fn resolve_verifier_model(gcx: Arc<GlobalContext>) -> Result<String, Strin
     Err("no light/default model configured for verifier".to_string())
 }
 
-fn parse_review_concerns(answer: &str) -> Vec<String> {
-    let trimmed = answer.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("pass") {
-        return Vec::new();
-    }
-    trimmed
+#[derive(Default)]
+struct ReviewFindings {
+    concerns: Vec<String>,
+    informational: Vec<String>,
+}
+
+fn parse_review_concerns(answer: &str) -> ReviewFindings {
+    let mut findings = ReviewFindings::default();
+    for line in answer
         .lines()
         .map(|line| line.trim().trim_start_matches(['-', '*', ' ']).trim())
         .filter(|line| !line.is_empty() && !line.eq_ignore_ascii_case("pass"))
-        .map(str::to_string)
-        .collect()
+    {
+        if line
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("not run:"))
+        {
+            findings.informational.push(line.to_string());
+        } else {
+            findings.concerns.push(line.to_string());
+        }
+    }
+    findings
 }
 
 fn tail_chars(text: &str, max_chars: usize) -> String {
@@ -2361,6 +2384,7 @@ pub(crate) mod tests {
     fn verifier_report(passed: bool) -> VerifierReport {
         VerifierReport {
             passed,
+            notes: Vec::new(),
             command_results: vec![VerificationResult {
                 command: "cargo test verifier".to_string(),
                 exit_code: Some(if passed { 0 } else { 1 }),
@@ -2468,6 +2492,33 @@ pub(crate) mod tests {
             },
         )
         .is_empty());
+    }
+
+    #[test]
+    fn informational_review_preserves_notes_without_overriding_gates() {
+        let findings = parse_review_concerns("- NoT RuN: negative control is informational");
+        assert_eq!(
+            findings.informational,
+            vec!["NoT RuN: negative control is informational"]
+        );
+        assert!(findings.concerns.is_empty());
+        let passed = gate_outcome_for_verdicts(&[(true, EvidenceVerdict::Passed)]);
+        assert_eq!(
+            classify_verifier_report(&passed, false, !findings.concerns.is_empty()),
+            VerifierReportClassification::Passed
+        );
+        let mixed =
+            parse_review_concerns("not run: optional check\ntest was not run, therefore insecure");
+        assert_eq!(mixed.concerns, vec!["test was not run, therefore insecure"]);
+        assert_eq!(
+            classify_verifier_report(&passed, false, !mixed.concerns.is_empty()),
+            VerifierReportClassification::HumanReview
+        );
+        let missing = gate_outcome_for_verdicts(&[(true, EvidenceVerdict::NotRun)]);
+        assert_eq!(
+            classify_verifier_report(&missing, false, !findings.concerns.is_empty()),
+            VerifierReportClassification::Unavailable
+        );
     }
 
     #[test]
@@ -2906,6 +2957,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(runtime_settings)]
     async fn agent_finish_spawns_verifier_through_helper() {
         let temp = tempfile::tempdir().unwrap();
         init_repo(temp.path());
@@ -2958,6 +3010,23 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(candidate.metadata(), &actor.worktree);
+        let board_path = temp.path().join(".refact/tasks/task-1/board.yaml");
+        let raced = command_checkout::BEFORE_BOARD_RECHECK
+            .scope(
+                std::cell::RefCell::new(Some(Box::new(move || {
+                    let mut board: TaskBoard =
+                        serde_yaml::from_slice(&fs::read(&board_path).unwrap()).unwrap();
+                    board.rev += 1;
+                    let mut other = board.cards[0].clone();
+                    other.id = "unrelated".into();
+                    board.cards.push(other);
+                    fs::write(board_path, serde_yaml::to_string(&board).unwrap()).unwrap();
+                }) as Box<dyn FnOnce() + Send>)),
+                command_checkout::resolve_finished_verifier(&app, &actor),
+            )
+            .await
+            .unwrap();
+        assert!(candidate.same_candidate(&raced));
         schedule_card_verifier_after_finish(
             gcx.clone(),
             "task-1".into(),

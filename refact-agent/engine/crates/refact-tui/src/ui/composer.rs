@@ -202,6 +202,7 @@ fn composer_status(app: &App) -> Option<String> {
     match app.session_state() {
         _ if app.composer_history_search().is_some() => Some(history_search_title(app)),
         _ if app.ctrl_c_quit_armed().is_some() => Some("Ctrl-C again to exit".to_string()),
+        SessionState::Interrupted => Some("interrupted — restart from owning planner".to_string()),
         SessionState::Generating => Some("generating · Enter queues · Esc cancels".to_string()),
         SessionState::ExecutingTools => {
             Some("running tools · Enter queues · Esc cancels".to_string())

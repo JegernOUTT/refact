@@ -157,15 +157,20 @@ pub(super) fn render(
             .iter()
             .filter(|record| !seen.contains(*record))
             .collect();
-        let bytes = additions.iter().fold(0usize, |bytes, record| {
-            bytes
-                .saturating_add(record.path.len())
-                .saturating_add(record.zone.len())
-        });
-        if records.len().saturating_add(additions.len()) > settings.max_work_provenance_records
-            || record_bytes.saturating_add(bytes) > settings.max_work_provenance_bytes
+        let bytes = additions.iter().try_fold(0usize, |bytes, record| {
+            serde_json::to_vec(record)
+                .ok()
+                .map(|record| bytes.saturating_add(record.len() + 1))
+        })?;
+        if records.len().saturating_add(additions.len())
+            > settings.max_work_provenance_records.min(256)
+            || record_bytes.saturating_add(bytes)
+                > settings
+                    .max_work_provenance_bytes
+                    .min(64 * 1024)
+                    .saturating_sub(64)
         {
-            break;
+            continue;
         }
         record_bytes = record_bytes.saturating_add(bytes);
         for record in additions {
@@ -179,7 +184,10 @@ pub(super) fn render(
         body.push_str("No other work observed in this engine/scope.\n");
     }
     if shown < rows.len() {
-        body.push_str(&format!("{} permitted rows omitted.\n", rows.len() - shown));
+        body.push_str(&format!(
+            "{} rows hidden by context/provenance limits.\n",
+            rows.len() - shown
+        ));
     }
     body.push_str(footer);
     super::metrics::record_context_payload("work_capsule", body.len() as i64);
@@ -298,7 +306,31 @@ mod tests {
             assert!(rendered_rows(&rendered).is_empty());
             assert!(rendered.records.is_empty());
             assert_eq!(rendered.omitted, 1);
+            assert!(rendered.body.contains("1 rows hidden"));
+            assert!(!rendered.body.contains("No other work"));
         }
+        row.source_records = (0..3417)
+            .map(|index| FileRecord {
+                path: format!("src/{index}.rs"),
+                zone: "normal".into(),
+                attribution: refact_privacy::Attribution::Declared,
+            })
+            .collect();
+        let bounded = render(
+            "project",
+            &[row],
+            &Default::default(),
+            &caller,
+            &CoordinationSettings {
+                capsule_token_budget: 20_000,
+                ..Default::default()
+            },
+            42,
+            &str::len,
+        )
+        .unwrap();
+        assert!(bounded.records.is_empty());
+        assert!(bounded.body.contains("1 rows hidden"));
     }
 
     #[test]

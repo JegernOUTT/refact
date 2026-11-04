@@ -166,6 +166,7 @@ pub enum SessionState {
     Paused,
     WaitingIde,
     WaitingUserInput,
+    Interrupted,
     Completed,
     Error,
 }
@@ -185,6 +186,7 @@ impl std::fmt::Display for SessionState {
             SessionState::Paused => write!(f, "paused"),
             SessionState::WaitingIde => write!(f, "waiting_ide"),
             SessionState::WaitingUserInput => write!(f, "waiting_user_input"),
+            SessionState::Interrupted => write!(f, "interrupted"),
             SessionState::Completed => write!(f, "completed"),
             SessionState::Error => write!(f, "error"),
         }
@@ -840,8 +842,19 @@ fn delivery_event_descriptor(delivery: &PendingDelivery) -> Option<serde_json::V
         })
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BoardInterruption {
+    pub condition: String,
+    pub expected: Option<String>,
+    pub actual: Option<String>,
+    pub owner_chat_id: Option<String>,
+    pub at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interruption: Option<BoardInterruption>,
     #[serde(default)]
     pub recovery: Option<RecoveryRecord>,
     #[serde(default)]
@@ -881,6 +894,7 @@ pub struct RuntimeState {
 impl Default for RuntimeState {
     fn default() -> Self {
         Self {
+            interruption: None,
             recovery: None,
             state: SessionState::Idle,
             paused: false,
@@ -1071,6 +1085,8 @@ pub enum ChatEvent {
         attached_files: Vec<String>,
     },
     RuntimeUpdated {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        interruption: Option<BoardInterruption>,
         #[serde(default)]
         waiting_interruptible: bool,
         state: SessionState,
@@ -2444,6 +2460,7 @@ mod tests {
     #[test]
     fn test_runtime_updated_serde() {
         let event = ChatEvent::RuntimeUpdated {
+            interruption: None,
             waiting_interruptible: false,
             state: SessionState::Completed,
             error: None,
@@ -2463,6 +2480,7 @@ mod tests {
         assert_eq!(json["is_compressing"], false);
 
         let event_with_error = ChatEvent::RuntimeUpdated {
+            interruption: None,
             waiting_interruptible: false,
             state: SessionState::Error,
             error: Some("test error".into()),
@@ -2511,7 +2529,9 @@ mod tests {
                 compression_phase,
                 compression_reason,
                 waiting_interruptible,
+                interruption,
             } => {
+                assert!(interruption.is_none());
                 assert!(!waiting_interruptible);
                 assert_eq!(state, SessionState::Completed);
                 assert_eq!(error, None);

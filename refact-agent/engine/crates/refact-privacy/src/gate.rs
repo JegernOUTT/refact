@@ -107,6 +107,12 @@ pub fn records_from_messages(
         if shell_output_decision_applied(message) {
             continue;
         }
+        if message.extra.contains_key("privacy_ref") {
+            return Err(PrivacyAuditError {
+                message_index,
+                message: format!("message {message_index} requires scoped provenance resolution"),
+            });
+        }
         let Some(value) = message.extra.get("privacy") else {
             continue;
         };

@@ -601,6 +601,12 @@ impl App {
     }
 
     fn submit_composer(&mut self) -> Option<AppAction> {
+        if self.session_state == SessionState::Interrupted {
+            self.add_notice(
+                "Interrupted — restart this card from its owning planner; this chat cannot resume",
+            );
+            return None;
+        }
         if self.current_project.is_none() {
             return None;
         }

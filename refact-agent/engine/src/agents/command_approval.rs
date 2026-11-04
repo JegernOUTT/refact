@@ -178,6 +178,22 @@ pub(crate) async fn validate_pending(
     call: &ChatToolCall,
     pending: &refact_work_core::PendingApproval,
 ) -> Result<Option<ExecutionApproval>, String> {
+    let managed_meta = ccx
+        .lock()
+        .await
+        .execution_scope
+        .as_ref()
+        .filter(|scope| scope.is_enforced() && scope.worktree().kind == "task_agent")
+        .map(|scope| scope.worktree().clone());
+    if let Some(meta) = managed_meta {
+        let nested = {
+            let context = ccx.lock().await;
+            context.background_agent_id.is_some() || context.subchat_depth != 0
+        };
+        if nested {
+            crate::exec::command_policy::ensure_managed_task_execution(ccx, &meta).await?;
+        }
+    }
     let reason = pending
         .execution
         .as_ref()

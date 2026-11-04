@@ -182,6 +182,12 @@ export function CardEvidencePanel({
             ) : (
               <p>No concerns recorded.</p>
             )}
+            {verifier.notes?.length ? (
+              <div className={styles.stack}>
+                <span>Notes (informational, not concerns):</span>
+                <pre className={styles.text}>{verifier.notes.join("\n")}</pre>
+              </div>
+            ) : null}
             {verifier.recommendation && (
               <pre className={styles.text}>{verifier.recommendation}</pre>
             )}

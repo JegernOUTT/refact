@@ -297,7 +297,7 @@ fn render_no_messages(card_id: &str) -> String {
     )
 }
 
-fn tool_message(tool_call_id: &String, content: String) -> (bool, Vec<ContextEnum>) {
+fn tool_message(tool_call_id: &String, content: String, failed: bool) -> (bool, Vec<ContextEnum>) {
     (
         false,
         vec![ContextEnum::ChatMessage(ChatMessage {
@@ -305,9 +305,33 @@ fn tool_message(tool_call_id: &String, content: String) -> (bool, Vec<ContextEnu
             content: ChatContent::SimpleText(content),
             tool_calls: None,
             tool_call_id: tool_call_id.clone(),
+            tool_failed: Some(failed),
             ..Default::default()
         })],
     )
+}
+
+fn summary_result_message(
+    tool_call_id: &String,
+    card_id: &str,
+    result: Result<String, String>,
+) -> (bool, Vec<ContextEnum>) {
+    match result {
+        Ok(raw) => tool_message(
+            tool_call_id,
+            render_summary_response(card_id, &raw),
+            raw.trim().is_empty(),
+        ),
+        Err(error) => tool_message(tool_call_id, render_unavailable(card_id, &error), true),
+    }
+}
+
+async fn with_summary_timeout<T>(
+    future: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    tokio::time::timeout(Duration::from_secs(SUMMARY_TIMEOUT_SECS), future)
+        .await
+        .map_err(|_| format!("timed out after {}s", SUMMARY_TIMEOUT_SECS))?
 }
 
 async fn load_agent_messages(
@@ -408,12 +432,7 @@ async fn run_summary_subchat(
     let mut messages = vec![ChatMessage::new("user".to_string(), prompt)];
     crate::privacy::records::carry_records_into(&mut messages[0], source_messages)
         .map_err(|error| error.to_string())?;
-    let result = tokio::time::timeout(
-        Duration::from_secs(SUMMARY_TIMEOUT_SECS),
-        run_subchat(gcx, messages, config),
-    )
-    .await
-    .map_err(|_| format!("timed out after {}s", SUMMARY_TIMEOUT_SECS))??;
+    let result = with_summary_timeout(run_subchat(gcx, messages, config)).await?;
 
     result
         .messages
@@ -491,30 +510,22 @@ impl Tool for ToolAgentChatSummary {
                 return Ok(tool_message(
                     tool_call_id,
                     render_unavailable(&card_id, &error),
+                    true,
                 ))
             }
         };
         if messages.is_empty() {
-            return Ok(tool_message(tool_call_id, render_no_messages(&card_id)));
+            return Ok(tool_message(
+                tool_call_id,
+                render_no_messages(&card_id),
+                false,
+            ));
         }
 
         let transcript = linearize_transcript(&messages);
         let prompt = build_summary_prompt(focus.as_deref(), &transcript);
-        let raw_summary =
-            match run_summary_subchat(ccx, prompt, &messages, tool_call_id.clone()).await {
-                Ok(summary) => summary,
-                Err(error) => {
-                    return Ok(tool_message(
-                        tool_call_id,
-                        render_unavailable(&card_id, &error),
-                    ))
-                }
-            };
-
-        Ok(tool_message(
-            tool_call_id,
-            render_summary_response(&card_id, &raw_summary),
-        ))
+        let result = run_summary_subchat(ccx, prompt, &messages, tool_call_id.clone()).await;
+        Ok(summary_result_message(tool_call_id, &card_id, result))
     }
 
     fn tool_depends_on(&self) -> Vec<String> {
@@ -700,6 +711,29 @@ mod tests {
             )
             .await,
         ))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn summary_timeout_is_failed_and_retains_unavailable_output() {
+        let future = with_summary_timeout(std::future::pending::<Result<String, String>>());
+        tokio::pin!(future);
+        assert!(futures::poll!(&mut future).is_pending());
+        tokio::time::advance(Duration::from_secs(SUMMARY_TIMEOUT_SECS)).await;
+        let (_, messages) = summary_result_message(&"summary-call".into(), "T-29", future.await);
+        let ContextEnum::ChatMessage(message) = &messages[0] else {
+            panic!("missing tool result")
+        };
+        assert_eq!(message.tool_call_id, "summary-call");
+        assert_eq!(message.tool_failed, Some(true));
+        assert_eq!(
+            message.content.content_text_only(),
+            "# Agent Chat Summary: T-29\n\nSummary unavailable: timed out after 30s"
+        );
+        let (_, no_messages) = tool_message(&"empty".into(), render_no_messages("T-29"), false);
+        let ContextEnum::ChatMessage(message) = &no_messages[0] else {
+            panic!("missing tool result")
+        };
+        assert_eq!(message.tool_failed, Some(false));
     }
 
     #[tokio::test]

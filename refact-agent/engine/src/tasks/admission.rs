@@ -488,29 +488,109 @@ pub fn execution_state(agent_chat_id: &str) -> Option<crate::agents::execution::
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StaleReason {
+    RunnerConfigMismatch,
+    SessionClosed,
+    SourceRootMissing,
+    SourceRootUnresolved,
+    TaskDirUnavailable,
+    TaskDirForeign,
+    BoardUnreadable,
+    PlannerUnbound,
+    PlannerNotInCustody,
+    CardNotDoing,
+    AgentUnbound,
+    CardBindingMismatch,
+    ClaimHeldByOther,
+    SessionReplaced,
+    SessionIdentityDrift,
+    ExecutionReplaced,
+}
+
+impl StaleReason {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::RunnerConfigMismatch => "runner_config_mismatch",
+            Self::SessionClosed => "session_closed",
+            Self::SourceRootMissing => "source_root_missing",
+            Self::SourceRootUnresolved => "source_root_unresolved",
+            Self::TaskDirUnavailable => "task_dir_unavailable",
+            Self::TaskDirForeign => "task_dir_foreign",
+            Self::BoardUnreadable => "board_unreadable",
+            Self::PlannerUnbound => "planner_unbound",
+            Self::PlannerNotInCustody => "planner_not_in_custody",
+            Self::CardNotDoing => "card_not_doing",
+            Self::AgentUnbound => "agent_unbound",
+            Self::CardBindingMismatch => "card_binding_mismatch",
+            Self::ClaimHeldByOther => "claim_held_by_other",
+            Self::SessionReplaced => "session_replaced",
+            Self::SessionIdentityDrift => "session_identity_drift",
+            Self::ExecutionReplaced => "execution_replaced",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExecutionUnavailable {
     Missing,
     Queued,
     Acquiring,
     Cancelled,
-    StaleBinding,
+    StaleBinding(StaleReason),
     PendingToolReconciliation,
     Held,
 }
 
 impl ExecutionUnavailable {
+    pub(crate) fn persistent(self) -> bool {
+        match self {
+            Self::StaleBinding(StaleReason::TaskDirUnavailable | StaleReason::BoardUnreadable) => {
+                false
+            }
+            Self::StaleBinding(_)
+            | Self::Missing
+            | Self::Cancelled
+            | Self::PendingToolReconciliation => true,
+            Self::Queued | Self::Acquiring | Self::Held => false,
+        }
+    }
+
+    pub(crate) fn condition(self) -> String {
+        match self {
+            Self::Missing => "needs_fresh_admission".into(),
+            Self::Queued => "admission_queued".into(),
+            Self::Acquiring => "admission_acquiring".into(),
+            Self::Cancelled => "admission_cancelled".into(),
+            Self::StaleBinding(reason) => format!("stale_board_attempt/{}", reason.as_str()),
+            Self::PendingToolReconciliation => "needs_explicit_tool_reconciliation".into(),
+            Self::Held => "execution_held".into(),
+        }
+    }
+
+    fn stale_recovery_message(self, reason: StaleReason) -> String {
+        let base = Self::Missing.recovery_message();
+        base.replacen(
+            "needs_fresh_admission",
+            &format!("stale_board_attempt/{}", reason.as_str()),
+            1,
+        )
+    }
+
     pub(crate) fn recovery_message(self) -> String {
         let condition = match self {
             Self::Missing => "needs_fresh_admission",
             Self::Queued => "admission_queued",
             Self::Acquiring => "admission_acquiring",
             Self::Cancelled => "admission_cancelled",
-            Self::StaleBinding => "stale_board_attempt",
+            Self::StaleBinding(reason) => return self.stale_recovery_message(reason),
             Self::PendingToolReconciliation => "needs_explicit_tool_reconciliation",
             Self::Held => "execution_held",
         };
-        format!("Interrupted: {condition}. No model or tool operation was started. In the owning task planner, inspect check_agents(format=\"detail\") and the current card, then explicitly call restart_agent(card_id=\"<current card id>\", mode=\"resume\"). This creates a NEW agent/chat on the SAME card and retained checkout through scheduler admission; it does not continue this chat. Use force=true only to stop an actually live owned attempt. Pauses, denied approvals and unknown tool outcomes must be resolved by their authorized controls first; restart does not clear them or replay pending tools. Opening this chat or approving an old request does not resume it. Retain the checkout and WIP.")
+        format!(
+            "Interrupted: {condition}. No model or tool operation was started. In the owning task planner, inspect check_agents(format=\"detail\") and the current card, then explicitly call restart_agent(card_id=\"<current card id>\", mode=\"resume\"). This creates a NEW agent/chat on the SAME card and retained checkout through scheduler admission; it does not continue this chat. Use force=true only to stop an actually live owned attempt. Pauses, denied approvals and unknown tool outcomes must be resolved by their authorized controls first; restart does not clear them or replay pending tools. Opening this chat or approving an old request does not resume it. Retain the checkout and WIP."
+        )
     }
 }
 
@@ -540,7 +620,9 @@ pub(crate) fn current_execution(
         .get(chat_id)
         .ok_or(ExecutionUnavailable::Missing)?;
     if !Arc::ptr_eq(execution, &registered) {
-        return Err(ExecutionUnavailable::StaleBinding);
+        return Err(ExecutionUnavailable::StaleBinding(
+            StaleReason::ExecutionReplaced,
+        ));
     }
     Ok(execution.clone())
 }

@@ -584,6 +584,14 @@ fn classify_user_error_from_lower(lower: &str) -> UserErrorCategory {
         return UserErrorCategory::NetworkFailure;
     }
 
+    if lower.trim_start().starts_with("task goal ")
+        && lower.trim_end().ends_with("; retry")
+        && !contains_non_retryable_status(lower)
+        && !contains_any(lower, INVALID_REQUEST_PATTERNS)
+    {
+        return UserErrorCategory::ProviderTransient;
+    }
+
     if contains_any(lower, NETWORK_FAILURE_PATTERNS) || contains_eof(lower) {
         return UserErrorCategory::NetworkFailure;
     }
@@ -1367,6 +1375,27 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn task_goal_fence_retry_is_transient_but_not_an_authority_refusal() {
+        for error in [
+            "Task goal session is busy; retry",
+            "Task goal session changed while awaiting persistence; retry",
+        ] {
+            assert_eq!(
+                classify_user_error(error),
+                UserErrorCategory::ProviderTransient
+            );
+            assert_eq!(classify_llm_error_for_retry(error), retry_transient());
+        }
+        let error = "Task goal owner mismatch";
+        assert_eq!(classify_user_error(error), UserErrorCategory::Unknown);
+        assert_eq!(classify_llm_error_for_retry(error), unknown_error());
+        assert_eq!(
+            classify_llm_error_for_retry("provider said: Task goal session is busy; retry"),
+            unknown_error()
+        );
     }
 
     #[test]

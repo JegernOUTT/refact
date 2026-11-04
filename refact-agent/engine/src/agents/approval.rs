@@ -219,7 +219,7 @@ pub async fn request(
         format!("Use agent_approval with request_id {request_id} and action approve or reject.")
     };
     let mut notice = crate::chat::internal_roles::event(
-        crate::chat::internal_roles::EventSubkind::SystemNotice, "agents.approval",
+        crate::chat::internal_roles::EventSubkind::SystemNotice, crate::agents::push::NOTICE_APPROVAL,
         serde_json::json!({"agent_id":agent_id,"request_id":request_id,"tool_call_id":call.id}),
         format!("Child {} needs command approval (request {}): {} {}\nExecution binding: {}\nReason: {}\n{}", target.title, request_id, pending.tool_name, pending.args, serde_json::to_string(&pending.execution).map_err(|_| "approval binding serialization failed")?, reason, instructions),
     );
@@ -294,7 +294,7 @@ pub async fn request(
         refact_core::chat_types::PendingDelivery::new(
             vec![notice],
             refact_core::chat_types::PushMode::Append,
-            "agents.approval".to_string(),
+            crate::agents::push::NOTICE_APPROVAL.to_string(),
             !escalate,
         ),
     )

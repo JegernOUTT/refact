@@ -17,6 +17,9 @@ mod context_rebuild_recovery_tests;
 pub mod delivery;
 pub mod diagnostics;
 mod generation;
+pub(crate) use generation::{
+    length_stop_continue_instruction, normalize_stop_reason, LengthStopKind, NormalizedStopReason,
+};
 #[cfg(test)]
 mod generation_pressure_retry_tests;
 #[cfg(test)]

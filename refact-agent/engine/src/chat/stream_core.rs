@@ -738,6 +738,7 @@ pub struct ChoiceFinal {
 }
 
 pub trait StreamCollector: Send {
+    fn on_activity(&mut self) {}
     fn on_delta_ops(&mut self, choice_idx: usize, ops: Vec<DeltaOp>);
     fn on_usage(&mut self, usage: &ChatUsage);
     fn on_finish(&mut self, choice_idx: usize, finish_reason: Option<String>);
@@ -752,6 +753,7 @@ enum CollectorReplayEvent {
 #[derive(Default)]
 struct ReplayCollector {
     events: Vec<CollectorReplayEvent>,
+    activity: Option<Arc<AtomicBool>>,
 }
 
 impl ReplayCollector {
@@ -773,6 +775,12 @@ impl ReplayCollector {
 }
 
 impl StreamCollector for ReplayCollector {
+    fn on_activity(&mut self) {
+        if let Some(activity) = &self.activity {
+            activity.store(true, Ordering::SeqCst);
+        }
+    }
+
     fn on_delta_ops(&mut self, choice_idx: usize, ops: Vec<DeltaOp>) {
         self.events
             .push(CollectorReplayEvent::DeltaOps(choice_idx, ops));
@@ -795,6 +803,10 @@ struct PartialOutputCollector<'a, C: StreamCollector> {
 }
 
 impl<C: StreamCollector> StreamCollector for PartialOutputCollector<'_, C> {
+    fn on_activity(&mut self) {
+        self.collector.on_activity();
+    }
+
     fn on_delta_ops(&mut self, choice_idx: usize, ops: Vec<DeltaOp>) {
         if !ops.is_empty() {
             *self.partial_output_emitted = true;
@@ -1199,6 +1211,7 @@ fn process_stream_event_data<C: StreamCollector>(
 
     for delta in deltas {
         match delta {
+            LlmStreamDelta::Activity => collector.on_activity(),
             LlmStreamDelta::AppendContent { text, block_index } => {
                 route_append_content_without_function_calls(acc, &mut ops, text, block_index);
             }
@@ -1342,10 +1355,32 @@ fn process_stream_event_data<C: StreamCollector>(
     }
 
     if !ops.is_empty() {
+        if ops.iter().any(|op| {
+            matches!(op,
+            DeltaOp::AppendContent { text } | DeltaOp::AppendReasoning { text }
+                | DeltaOp::SetReasoning { text } if !text.is_empty())
+                || matches!(op, DeltaOp::SetToolCalls { tool_calls } if !tool_calls.is_empty())
+        }) {
+            collector.on_activity();
+        }
         collector.on_delta_ops(0, ops);
     }
 
     Ok(stream_done)
+}
+
+#[cfg(test)]
+pub(crate) fn process_activity_fixture<C: StreamCollector>(data: &str, collector: &mut C) {
+    let mut accumulators = vec![ChoiceAccumulator::default()];
+    process_stream_event_data(
+        get_adapter(WireFormat::OpenaiResponses),
+        "",
+        data,
+        &mut accumulators,
+        collector,
+        true,
+    )
+    .unwrap();
 }
 
 const MAX_NDJSON_LINE_BYTES: usize = 8 * 1024 * 1024;
@@ -2159,7 +2194,7 @@ async fn refresh_openai_codex_after_websocket_auth_rejection(
     }
 }
 
-async fn run_llm_websocket_request_with_retry(
+async fn run_llm_websocket_request_with_retry<C: StreamCollector>(
     wire_format: WireFormat,
     websocket_endpoint: String,
     http_parts: HttpParts,
@@ -2170,13 +2205,15 @@ async fn run_llm_websocket_request_with_retry(
     max_attempts: usize,
     session: OpenAICodexWebSocketSession,
     recovery_budget: Option<Arc<refact_core::recovery::RecoveryBudget>>,
+    collector: &mut C,
 ) -> OpenAICodexWebSocketThreadResult {
     let max_attempts = std::cmp::max(1, max_attempts);
     let mut session = session;
     let mut last_error = String::new();
 
     for attempt in 0..max_attempts {
-        let result = run_llm_websocket_request_on_large_stack(
+        let activity = Arc::new(AtomicBool::new(false));
+        let request = run_llm_websocket_request_on_large_stack(
             wire_format,
             websocket_endpoint.clone(),
             HttpParts {
@@ -2190,8 +2227,20 @@ async fn run_llm_websocket_request_with_retry(
             connect_timeout,
             session,
             recovery_budget.clone(),
-        )
-        .await;
+            activity.clone(),
+        );
+        tokio::pin!(request);
+        let mut activity_tick = tokio::time::interval(Duration::from_millis(100));
+        let result = loop {
+            tokio::select! {
+                result = &mut request => break result,
+                _ = activity_tick.tick() => {
+                    if activity.swap(false, Ordering::SeqCst) && !abort_requested(abort_flag.as_ref()) {
+                        collector.on_activity();
+                    }
+                }
+            }
+        };
 
         match result {
             Ok((results, replay_collector, returned_session)) => {
@@ -2256,6 +2305,7 @@ async fn run_llm_websocket_request_on_large_stack(
     connect_timeout: Duration,
     mut session: OpenAICodexWebSocketSession,
     recovery_budget: Option<Arc<refact_core::recovery::RecoveryBudget>>,
+    activity: Arc<AtomicBool>,
 ) -> OpenAICodexWebSocketThreadResult {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let spawn_result = std::thread::Builder::new()
@@ -2268,7 +2318,10 @@ async fn run_llm_websocket_request_on_large_stack(
             {
                 Ok(runtime) => {
                     let adapter = get_adapter(wire_format);
-                    let mut replay_collector = ReplayCollector::default();
+                    let mut replay_collector = ReplayCollector {
+                        activity: Some(activity),
+                        ..Default::default()
+                    };
                     let outcome = runtime.block_on(async {
                         let outcome = {
                             let request = run_llm_websocket_request(
@@ -2758,6 +2811,7 @@ async fn try_openai_codex_websocket<C: StreamCollector>(
                     max_attempts,
                     websocket_session,
                     params.recovery_budget.clone(),
+                    collector,
                 )
                 .await
                 {
@@ -3642,6 +3696,52 @@ fn strip_mcp_prefix_from_tool_call(tc: &mut serde_json::Value) {
     }
 }
 
+pub(crate) const TRUNCATED_TOOL_ARGUMENTS_ERROR: &str = "Tool call arguments were cut off at the output token limit; nothing was executed. Retry with smaller calls (split large content).";
+const TRUNCATED_TOOL_MARKER: &str = "_refact_output_limit_truncated";
+
+pub(crate) fn truncated_tool_arguments(call: &crate::call_validation::ChatToolCall) -> bool {
+    call.extra_content
+        .as_ref()
+        .and_then(|extra| extra.get(TRUNCATED_TOOL_MARKER))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+}
+
+pub(crate) fn normalize_tool_call_with_finish(
+    tc: &serde_json::Value,
+    finish_reason: Option<&str>,
+) -> Option<crate::call_validation::ChatToolCall> {
+    let mut call = normalize_tool_call(tc)?;
+    if finish_reason.and_then(super::generation::normalize_stop_reason)
+        == Some(super::generation::NormalizedStopReason::ProviderLengthStop)
+    {
+        let complete = match tc
+            .get("function")
+            .and_then(|function| function.get("arguments"))
+        {
+            Some(serde_json::Value::Object(_)) => true,
+            Some(serde_json::Value::String(arguments)) => {
+                serde_json::from_str::<serde_json::Value>(arguments)
+                    .is_ok_and(|value| value.is_object())
+            }
+            _ => false,
+        };
+        if !complete {
+            call.function.arguments = "{}".into();
+            let mut extra = call
+                .extra_content
+                .take()
+                .unwrap_or_else(|| serde_json::json!({}));
+            if !extra.is_object() {
+                extra = serde_json::json!({});
+            }
+            extra[TRUNCATED_TOOL_MARKER] = serde_json::json!(true);
+            call.extra_content = Some(extra);
+        }
+    }
+    Some(call)
+}
+
 pub fn normalize_tool_call(tc: &serde_json::Value) -> Option<crate::call_validation::ChatToolCall> {
     let function = tc.get("function")?;
     let name = function
@@ -3778,6 +3878,49 @@ mod tests {
     };
     use refact_privacy::{Attribution, FileRecord, PolicyLoad, PrivacyPolicy, PrivacyRecord};
     use refact_privacy::{ShellBehavior, SubagentPolicy, Zone};
+
+    #[test]
+    fn activity_crosses_partial_collector_but_is_never_replayed_as_fresh_progress() {
+        let activity = Arc::new(AtomicBool::new(false));
+        let mut replay = ReplayCollector {
+            activity: Some(activity.clone()),
+            ..Default::default()
+        };
+        let mut partial = false;
+        let progress = Arc::new(AtomicU64::new(0));
+        {
+            let mut collector = PartialOutputCollector {
+                collector: &mut replay,
+                partial_output_emitted: &mut partial,
+                progress_events: progress.clone(),
+            };
+            process_activity_fixture(
+                r#"{"type":"response.reasoning.delta","delta":"PRIVATE"}"#,
+                &mut collector,
+            );
+        }
+        assert!(activity.swap(false, Ordering::SeqCst));
+        assert!(!partial);
+        assert_eq!(progress.load(Ordering::SeqCst), 0);
+        assert!(replay.events.is_empty());
+        let replay_activity = Arc::new(AtomicBool::new(false));
+        let mut recipient = ReplayCollector {
+            activity: Some(replay_activity.clone()),
+            ..Default::default()
+        };
+        replay.replay(&mut recipient);
+        assert!(!replay_activity.load(Ordering::SeqCst));
+        for chunk in [
+            r#"{"type":"response.reasoning.delta","delta":""}"#,
+            r#"{"type":"response.reasoning.delta","delta":42}"#,
+        ] {
+            process_activity_fixture(chunk, &mut recipient);
+            assert!(!replay_activity.load(Ordering::SeqCst));
+        }
+        process_activity_fixture(r#"{"type":"keepalive"}"#, &mut recipient);
+        assert!(replay_activity.load(Ordering::SeqCst));
+        assert!(recipient.events.is_empty());
+    }
 
     pub(super) fn privacy_policy(allowed_provider: &str) -> PrivacyPolicy {
         PrivacyPolicy {

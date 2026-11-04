@@ -1030,6 +1030,73 @@ mod tests {
 
     #[serial(trajectory_perf)]
     #[tokio::test]
+    async fn invalid_arguments_fail_tool_step_without_policy_denial_or_execution() {
+        let mut malformed = deterministic_tool_call("malformed", "alpha");
+        malformed.function.arguments = "{".into();
+        let missing_command = deterministic_tool_call("missing", "shell");
+        let raw = serde_json::json!({"id":"truncated-shell","type":"function","function":{"name":"shell","arguments":"{\"command\":\"cat <<EOF"}});
+        let truncated =
+            super::super::stream_core::normalize_tool_call_with_finish(&raw, Some("max_tokens"))
+                .unwrap();
+        assert!(super::super::stream_core::truncated_tool_arguments(
+            &truncated
+        ));
+        assert_eq!(truncated.function.arguments, "{}");
+        let valid_raw = serde_json::json!({"id":"valid","type":"function","function":{"name":"shell","arguments":"{\"command\":\"true\"}"}});
+        let valid = super::super::stream_core::normalize_tool_call_with_finish(
+            &valid_raw,
+            Some("max_tokens"),
+        )
+        .unwrap();
+        assert!(!super::super::stream_core::truncated_tool_arguments(&valid));
+        assert_eq!(valid.function.arguments, "{\"command\":\"true\"}");
+        let ordinary =
+            super::super::stream_core::normalize_tool_call_with_finish(&raw, Some("stop")).unwrap();
+        assert!(!super::super::stream_core::truncated_tool_arguments(
+            &ordinary
+        ));
+        assert_eq!(ordinary.function.arguments, "{\"command\":\"cat <<EOF");
+        let (_, sink, session) = process_deterministic_tool_turn(
+            DeterministicToolRegistry {
+                confirmation_result: MatchConfirmDenyResult::PASS,
+                runtime_failure: false,
+            },
+            vec![malformed, missing_command, truncated],
+        )
+        .await;
+        let session = session.lock().await;
+        for id in ["malformed", "missing"] {
+            let message = session
+                .messages
+                .iter()
+                .find(|message| message.role == "tool" && message.tool_call_id == id)
+                .unwrap();
+            assert_eq!(message.tool_failed, Some(true));
+            assert_eq!(message.extra["error_kind"], "invalid_arguments");
+            assert!(message
+                .content
+                .content_text_only()
+                .starts_with("Invalid arguments for "));
+        }
+        let truncated_result = session
+            .messages
+            .iter()
+            .find(|message| message.role == "tool" && message.tool_call_id == "truncated-shell")
+            .unwrap();
+        assert_eq!(truncated_result.tool_failed, Some(true));
+        assert!(truncated_result
+            .content
+            .content_text_only()
+            .contains(super::super::stream_core::TRUNCATED_TOOL_ARGUMENTS_ERROR));
+        assert!(session.runtime.pause_reasons.is_empty());
+        assert!(sink
+            .events()
+            .iter()
+            .all(|event| event.component != PerfComponent::ToolRuntime.as_str()));
+    }
+
+    #[serial(trajectory_perf)]
+    #[tokio::test]
     async fn same_turn_tool_diagnostics_cover_stages_without_confirmation_wait() {
         let (outcome, sink, _) = process_deterministic_tool_turn(
             DeterministicToolRegistry {
@@ -2123,7 +2190,24 @@ pub async fn process_tool_calls_once(
             let tool_message = ChatMessage {
                 message_id: Uuid::new_v4().to_string(),
                 role: "tool".to_string(),
-                content: ChatContent::SimpleText(format!("Denied by policy: {}", denial.rule)),
+                content: ChatContent::SimpleText(match denial.reason_type.as_str() {
+                    "invalid_arguments" => format!(
+                        "Invalid arguments for {}: {}; tool was not run",
+                        denial.tool_name, denial.rule
+                    ),
+                    "preflight_unavailable" => {
+                        format!("Preflight check failed: {}; tool was not run", denial.rule)
+                    }
+                    _ => format!("Denied by policy: {}", denial.rule),
+                }),
+                extra: serde_json::Map::from_iter([(
+                    "error_kind".into(),
+                    serde_json::json!(match denial.reason_type.as_str() {
+                        "invalid_arguments" => "invalid_arguments",
+                        "preflight_unavailable" => "preflight_unavailable",
+                        _ => "policy_denied",
+                    }),
+                )]),
                 tool_call_id: denial.tool_call_id.clone(),
                 tool_failed: Some(true),
                 ..Default::default()
@@ -2668,6 +2752,17 @@ async fn check_tools_confirmation_with_pool(
     );
 
     for tool_call in tool_calls {
+        if super::stream_core::truncated_tool_arguments(tool_call) {
+            denials.push(PauseReason {
+                reason_type: "invalid_arguments".into(),
+                tool_call_id: tool_call.id.clone(),
+                tool_name: tool_call.function.name.clone(),
+                command: String::new(),
+                rule: super::stream_core::TRUNCATED_TOOL_ARGUMENTS_ERROR.into(),
+                integr_config_path: None,
+            });
+            continue;
+        }
         let child_allowed = ccx
             .lock()
             .await
@@ -2714,7 +2809,7 @@ async fn check_tools_confirmation_with_pool(
             Ok(a) => serde_json::Map::from_iter(a.into_iter()),
             Err(e) => {
                 denials.push(PauseReason {
-                    reason_type: "denial".to_string(),
+                    reason_type: "invalid_arguments".to_string(),
                     tool_name: tool_call.function.name.clone(),
                     command: tool_call.function.name.clone(),
                     rule: format!("Failed to parse arguments: {}", e),
@@ -2726,9 +2821,25 @@ async fn check_tools_confirmation_with_pool(
         };
 
         if matches!(tool_call.function.name.as_str(), "shell" | "process_start") {
+            let invalid = ["command", "description"].into_iter().find(|key| {
+                args.get(*key)
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(|value| value.trim().is_empty())
+            });
+            if let Some(key) = invalid {
+                denials.push(PauseReason {
+                    reason_type: "invalid_arguments".into(),
+                    tool_name: tool_call.function.name.clone(),
+                    command: tool_call.function.name.clone(),
+                    rule: format!("Missing or invalid '{key}'"),
+                    tool_call_id: tool_call.id.clone(),
+                    integr_config_path: None,
+                });
+                continue;
+            }
             if let Err(error) = escalation_from_args(&args.clone().into_iter().collect()) {
                 denials.push(PauseReason {
-                    reason_type: "denial".to_string(),
+                    reason_type: "invalid_arguments".to_string(),
                     tool_name: tool_call.function.name.clone(),
                     command: tool_call.function.name.clone(),
                     rule: error,
@@ -2846,7 +2957,7 @@ async fn check_tools_confirmation_with_pool(
             }
             Err(e) => {
                 denials.push(PauseReason {
-                    reason_type: "denial".to_string(),
+                    reason_type: "preflight_unavailable".to_string(),
                     tool_name: tool_call.function.name.clone(),
                     command: tool_call.function.name.clone(),
                     rule: format!("confirmation check failed: {}", e),
@@ -3103,6 +3214,24 @@ async fn execute_single_tool(
                 tool_call_id: tool_call.id.clone(),
                 tool_failed: Some(true),
                 content: ChatContent::SimpleText("Tool is outside accepted child authority".into()),
+                ..Default::default()
+            }],
+            Vec::new(),
+        );
+    }
+
+    if super::stream_core::truncated_tool_arguments(&tool_call) {
+        return (
+            idx,
+            true,
+            vec![ChatMessage {
+                message_id: Uuid::new_v4().to_string(),
+                role: "tool".into(),
+                tool_call_id: tool_call.id.clone(),
+                tool_failed: Some(true),
+                content: ChatContent::SimpleText(
+                    super::stream_core::TRUNCATED_TOOL_ARGUMENTS_ERROR.into(),
+                ),
                 ..Default::default()
             }],
             Vec::new(),
@@ -3412,6 +3541,9 @@ async fn current_runner_execution(
         match super::session_runtime::board_execution(app, &session).await {
             Ok(Some(execution)) => return Ok(Some(execution)),
             Ok(None) => {}
+            Err(crate::tasks::admission::ExecutionUnavailable::Held) => {
+                return Err("session busy; retry the tool call".into());
+            }
             Err(reason) => {
                 super::session_runtime::interrupt_board_execution(
                     &mut *session.lock().await,

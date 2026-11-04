@@ -22,6 +22,24 @@ pub use refact_buddy_core::operator_events::OperatorSignal as RuntimeOperatorSig
 pub use refact_buddy_core::user_action::UserAction as RuntimeUserAction;
 pub use refact_chat_history::trajectory_snapshot::TrajectorySnapshot as RuntimeTrajectorySnapshot;
 
+/// Trajectory persistence is separate from transport acceptance and outbox durability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrajectoryPersistence {
+    Committed,
+    Pending,
+    Unknown,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DeliveryReceipt {
+    pub outcome: DeliveryOutcome,
+    pub delivery_id: String,
+    pub trajectory_persistence: TrajectoryPersistence,
+    pub outbox_durable: bool,
+    pub note: Option<String>,
+}
+
 #[async_trait]
 pub trait ActivitySink: Send + Sync {
     async fn record_user_action(&self, action: UserAction);
@@ -336,6 +354,14 @@ pub trait ChatSessionFacade: Send + Sync {
             .await?;
         Ok(DeliveryOutcome::Queued)
     }
+    /// Detailed delivery result. Unsupported runtimes must not fabricate receipts.
+    async fn deliver_messages_with_receipt(
+        &self,
+        _chat_id: &str,
+        _delivery: PendingDelivery,
+    ) -> Result<DeliveryReceipt, String> {
+        Err("deliver_messages_with_receipt is unsupported by this runtime; use deliver_messages without receipt guarantees".into())
+    }
     /// Reprioritize or cancel a pending delivery. Default implementation routes
     /// through the command queue.
     async fn update_pending_delivery(
@@ -356,6 +382,13 @@ pub trait ChatSessionFacade: Send + Sync {
         .await
     }
     async fn session_state(&self, chat_id: &str) -> Result<Option<SessionState>, String>;
+    /// Probe interruption separately so paused sessions retain their restart requirement.
+    async fn session_interruption(
+        &self,
+        _chat_id: &str,
+    ) -> Result<Option<refact_chat_api::BoardInterruption>, String> {
+        Ok(None)
+    }
     async fn maybe_save_session(&self, chat_id: &str) -> Result<(), String>;
     async fn save_trajectory_snapshot(&self, snapshot: TrajectorySnapshot) -> Result<(), String>;
 }

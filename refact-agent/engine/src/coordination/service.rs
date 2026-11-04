@@ -764,9 +764,17 @@ pub fn attach_provenance(
         .map(PathBuf::from);
     let roots = crate::privacy::records::declared_file_records(&app.gcx, paths)
         .map_err(|_| WorkError::policy_unavailable())?;
-    crate::privacy::records::merge_records(
-        message,
-        records.chain(roots).chain(page.source_records.clone()),
-    );
+    let mut seen = HashSet::new();
+    let records: Vec<_> = records
+        .chain(roots)
+        .chain(page.source_records.clone())
+        .filter(|record| seen.insert(record.clone()))
+        .collect();
+    if records.len() > 256 || super::bounds::serialized_size(&records, 64 * 1024 - 64).is_none() {
+        return Err(WorkError::projection_failure(
+            WorkFailureCause::SnapshotEncodingUnavailable,
+        ));
+    }
+    crate::privacy::records::merge_records(message, records);
     Ok(())
 }

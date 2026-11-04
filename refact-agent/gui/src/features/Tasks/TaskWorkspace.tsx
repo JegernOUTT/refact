@@ -106,6 +106,7 @@ import { CardEditorDialog } from "./CardEditorDialog";
 import { CardEvidencePanel } from "./CardEvidencePanel";
 import { CardWorkflowRequests } from "./CardWorkflowRequests";
 import type { CardEditTarget } from "./cardForm";
+import { isLinkedTaskChat, taskChatKindLabel } from "./linkedChat";
 import {
   isActionableWorktree,
   resolveCardWorktree,
@@ -245,7 +246,8 @@ export const PlannerItem: React.FC<PlannerItemProps> = ({
   const sessionState = runtime?.session_state ?? planner.sessionState;
   const statusDot = getStatusFromSessionState(sessionState);
   const mode = planner.mode ?? thread?.mode;
-  const showModeBadge = Boolean(mode) && mode !== "task_planner";
+  const isLinked = isLinkedTaskChat(mode, thread?.task_meta?.role);
+  const showModeBadge = isLinked && Boolean(mode);
   const isWaiting = sessionState === "waiting_user_input";
   const waitingCards = planner.waitingForCardIds ?? [];
   const showWaitingChips = isWaiting && waitingCards.length > 0;
@@ -279,6 +281,15 @@ export const PlannerItem: React.FC<PlannerItemProps> = ({
       </div>
       <Box className={styles.panelItemContent}>
         <div className={styles.panelItemTitleRow}>
+          {isLinked && (
+            <Badge
+              tone="accent"
+              className={styles.agentItemBadge}
+              title="Chat linked to this task; it is not the task planner"
+            >
+              Linked chat
+            </Badge>
+          )}
           {showModeBadge && (
             <Badge tone="muted" className={styles.agentItemBadge}>
               {mode}
@@ -1434,7 +1445,12 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
           mode: traj.mode ?? "TASK_PLANNER",
           taskMeta: {
             task_id: taskId,
-            role: "planner",
+            role:
+              traj.mode &&
+              traj.mode !== "task_planner" &&
+              traj.mode !== "TASK_PLANNER"
+                ? "linked"
+                : "planner",
             planner_chat_id: traj.id,
           },
         }),
@@ -2122,7 +2138,9 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
   const chatLabel = !activeChat
     ? "No chat selected"
     : activeChat.type === "planner"
-      ? "Planner"
+      ? taskChatKindLabel(
+          plannerChats.find((p) => p.id === activeChat.chatId)?.mode,
+        )
       : formatAgentChatTitle(
           activeChat.cardId,
           board.cards.find((c) => c.id === activeChat.cardId)?.title ?? "",

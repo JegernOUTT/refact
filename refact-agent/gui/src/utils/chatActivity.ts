@@ -25,6 +25,8 @@ export type ChatActivity =
   | "running_command"
   | "waiting_user"
   | "needs_attention"
+  | "waiting_ide"
+  | "interrupted"
   | "paused"
   | "completed"
   | "error";
@@ -85,6 +87,18 @@ export const CHAT_ACTIVITY = {
     icon: CircleAlert,
     status: "needs_attention",
   },
+  waiting_ide: {
+    label: "Waiting for IDE",
+    tone: "accent",
+    icon: Clock,
+    status: "in_progress",
+  },
+  interrupted: {
+    label: "Interrupted — recover in planner",
+    tone: "danger",
+    icon: CircleAlert,
+    status: "needs_attention",
+  },
   paused: {
     label: "Paused",
     tone: "warning",
@@ -109,7 +123,9 @@ export function activityFromSessionState(state?: string | null): ChatActivity {
     case "waiting_user_input":
       return "waiting_user";
     case "waiting_ide":
-      return "needs_attention";
+      return "waiting_ide";
+    case "interrupted":
+      return "interrupted";
     case "paused":
       return "paused";
     case "completed":
@@ -204,6 +220,13 @@ export function getChatActivity(
   if (!runtime) return activityFromSessionState(fallbackState);
   const state = runtime.session_state;
   const coarse = activityFromSessionState(state);
+  if (state === "interrupted" || runtime.interruption) {
+    return runtime.confirmation.pause &&
+      runtime.confirmation.pause_reasons.length
+      ? "needs_approval"
+      : "interrupted";
+  }
+  if (coarse === "idle" && runtime.error) return "error";
   if (state && ["idle", "completed", "error"].includes(coarse)) return coarse;
   if (!state && runtime.error) return "error";
   if (runtime.confirmation.pause) {

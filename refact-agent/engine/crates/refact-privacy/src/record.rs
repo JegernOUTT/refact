@@ -16,6 +16,7 @@ pub struct FileRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
 pub struct PrivacyRecord {
     pub files: Vec<FileRecord>,
 }

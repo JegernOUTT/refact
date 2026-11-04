@@ -1253,7 +1253,7 @@ const MAX_LENGTH_STOP_RECOVERY_ATTEMPTS: usize = 2;
 const LENGTH_STOP_BOOSTED_MAX_NEW_TOKENS: usize = 16_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LengthStopKind {
+pub(crate) enum LengthStopKind {
     EmptyOutput,
     PartialOutput,
 }
@@ -1289,10 +1289,10 @@ fn length_stop_recovery_attempts(messages: &[ChatMessage]) -> usize {
         .count()
 }
 
-fn length_stop_continue_instruction(kind: LengthStopKind) -> ChatMessage {
+pub(crate) fn length_stop_continue_instruction(kind: LengthStopKind) -> ChatMessage {
     let text = match kind {
         LengthStopKind::EmptyOutput => {
-            " The previous response was cut off by the output token limit before any visible output was produced. Respond again, keep internal reasoning brief, and produce the answer directly."
+            " The previous response was cut off by the output token limit before any visible text or complete tool call was produced. Respond again, keep internal reasoning brief, and produce the answer directly. If a tool payload is large, split it into several smaller calls."
         }
         LengthStopKind::PartialOutput => {
             " The previous message was cut off by the output token limit. Continue exactly where it stopped; do not repeat content that was already produced."
@@ -2032,22 +2032,12 @@ async fn handle_tool_step_outcome(
             if should_continue {
                 return GenerationLoopControl::Continue;
             }
-            if match maybe_record_goal_pursuit_progress(app, session_arc.clone()).await {
-                Ok(changed) => changed,
-                Err(error) => {
-                    session_arc
-                        .lock()
-                        .await
-                        .set_runtime_state(SessionState::Error, Some(error));
-                    return GenerationLoopControl::Stop;
-                }
-            } {
-                maybe_save_trajectory_with_intent(
-                    app.clone(),
-                    session_arc.clone(),
-                    TrajectoryCommitIntent::Checkpoint,
-                )
-                .await;
+            if let Err(error) = maybe_record_goal_pursuit_progress(app, session_arc.clone()).await {
+                session_arc
+                    .lock()
+                    .await
+                    .set_runtime_state(SessionState::Error, Some(error));
+                return GenerationLoopControl::Stop;
             }
             if handle_goal_turn_end(app.clone(), session_arc.clone()).await {
                 return GenerationLoopControl::Stop;
@@ -2555,33 +2545,19 @@ pub async fn run_llm_generation(
     );
 
     let (messages, existing_frozen_prefix) = {
-        let session = session_arc.lock().await;
+        let mut session = session_arc.lock().await;
         let mut messages = refact_core::active_context::active_context(&session.messages)
             .map_err(|error| error.to_string())?
             .messages;
         if session.task_goal_messages.is_some() {
-            let mut controls = session.try_accepted_control_projection()?.messages;
-            messages.retain(|message| {
-                !matches!(message.role.as_str(), "goal" | "plan")
-                    && !matches!(
-                        message
-                            .extra
-                            .get("event")
-                            .and_then(|event| event.get("subkind"))
-                            .and_then(|kind| kind.as_str()),
-                        Some("goal_delta" | "plan_delta")
-                    )
-            });
-            controls.retain(|control| {
-                !messages.iter().any(|message| {
-                    !control.message_id.is_empty() && message.message_id == control.message_id
-                })
-            });
-            let at = messages
-                .iter()
-                .take_while(|message| message.role == "system")
-                .count();
-            messages.splice(at..at, controls);
+            let controls = session.try_accepted_control_projection()?.messages;
+            let before = messages.len();
+            super::linearize::append_task_goal_context(&mut messages, controls);
+            for control in messages[before..].iter().cloned() {
+                session.messages.push(control);
+                session.increment_version();
+                session.touch();
+            }
         }
         (messages, session.thread.frozen_request_prefix.clone())
     };
@@ -2773,6 +2749,7 @@ pub enum GenerationResult {
 }
 
 enum StreamCollectorEventPayload {
+    Activity,
     DeltaOps(Vec<DeltaOp>),
     Usage(ChatUsage),
 }
@@ -2781,9 +2758,16 @@ struct SessionCollector {
     tx: tokio::sync::mpsc::Sender<StreamCollectorEventPayload>,
     overflow_usage: Arc<std::sync::Mutex<Option<ChatUsage>>>,
     overflow_ops: Arc<std::sync::Mutex<Vec<DeltaOp>>>,
+    activity_pending: Arc<AtomicBool>,
 }
 
 impl StreamCollector for SessionCollector {
+    fn on_activity(&mut self) {
+        if !self.activity_pending.swap(true, Ordering::SeqCst) {
+            let _ = self.tx.try_send(StreamCollectorEventPayload::Activity);
+        }
+    }
+
     fn on_delta_ops(&mut self, _choice_idx: usize, ops: Vec<DeltaOp>) {
         match self.tx.try_send(StreamCollectorEventPayload::DeltaOps(ops)) {
             Ok(()) => {}
@@ -2821,6 +2805,7 @@ fn spawn_stream_delta_emitter(
     mut rx: tokio::sync::mpsc::Receiver<StreamCollectorEventPayload>,
     overflow_ops: Arc<std::sync::Mutex<Vec<DeltaOp>>>,
     overflow_usage: Arc<std::sync::Mutex<Option<ChatUsage>>>,
+    activity_pending: Arc<AtomicBool>,
     session_arc_emitter: Arc<AMutex<ChatSession>>,
     first_content_started_at: Option<Instant>,
     emitter_chat_id: String,
@@ -2834,6 +2819,7 @@ fn spawn_stream_delta_emitter(
         ) {
             for event in events.drain(..) {
                 match event {
+                    StreamCollectorEventPayload::Activity => {}
                     StreamCollectorEventPayload::DeltaOps(ops) => {
                         batched_ops.extend(ops);
                     }
@@ -2849,6 +2835,7 @@ fn spawn_stream_delta_emitter(
 
         while let Some(first_event) = rx.recv().await {
             let flush_immediately = match &first_event {
+                StreamCollectorEventPayload::Activity => true,
                 StreamCollectorEventPayload::Usage(_) => true,
                 StreamCollectorEventPayload::DeltaOps(ops) => {
                     !first_visible_delta_emitted && delta_ops_contain_visible_content(ops)
@@ -2863,6 +2850,7 @@ fn spawn_stream_delta_emitter(
                     match tokio::time::timeout_at(deadline, rx.recv()).await {
                         Ok(Some(event)) => {
                             let must_flush = match &event {
+                                StreamCollectorEventPayload::Activity => true,
                                 StreamCollectorEventPayload::Usage(_) => true,
                                 StreamCollectorEventPayload::DeltaOps(ops) => {
                                     (!first_visible_delta_emitted
@@ -2909,6 +2897,9 @@ fn spawn_stream_delta_emitter(
             {
                 return;
             }
+            if activity_pending.swap(false, Ordering::SeqCst) {
+                session.mark_stream_activity();
+            }
             if !batched_ops.is_empty() {
                 for ops in batched_ops {
                     let carries_content = delta_ops_contain_assistant_content(&ops);
@@ -2952,7 +2943,8 @@ fn spawn_stream_delta_emitter(
             }
         }
 
-        if !final_ops.is_empty() || final_usage.is_some() {
+        if !final_ops.is_empty() || final_usage.is_some() || activity_pending.load(Ordering::SeqCst)
+        {
             let final_ops = batch_stream_delta_ops(final_ops);
 
             let mut session = session_arc_emitter.lock().await;
@@ -2965,6 +2957,9 @@ fn spawn_stream_delta_emitter(
                     != expected_message_id.as_ref()
             {
                 return;
+            }
+            if activity_pending.swap(false, Ordering::SeqCst) {
+                session.mark_stream_activity();
             }
             if !final_ops.is_empty() {
                 for ops in final_ops {
@@ -3010,6 +3005,13 @@ enum StreamAttemptOutcome {
     Completed(StreamAttemptResult),
 }
 
+fn fence_contention_retry_delay(retries: usize) -> Option<std::time::Duration> {
+    (retries < 3).then(|| std::time::Duration::from_secs(1 << retries))
+}
+
+#[cfg(test)]
+tokio::task_local! { static FORCE_FENCE_HELD: bool; }
+
 async fn run_stream_attempt(
     app: &AppState,
     session_arc: &Arc<AMutex<ChatSession>>,
@@ -3022,14 +3024,72 @@ async fn run_stream_attempt(
     task_role: Option<&str>,
     expected_board_execution: Option<&Arc<crate::agents::execution::RunExecution>>,
 ) -> StreamAttemptOutcome {
-    let current = match super::session_runtime::board_execution(app, session_arc).await {
-        Ok(current) => current,
-        Err(reason) => {
-            super::session_runtime::interrupt_board_execution(
-                &mut *session_arc.lock().await,
-                reason,
-            );
-            return StreamAttemptOutcome::Paused;
+    let mut contention_retries = 0;
+    let current = loop {
+        let admission = async {
+            #[cfg(test)]
+            if FORCE_FENCE_HELD.try_with(|_| ()).is_ok() {
+                return Err(crate::tasks::admission::ExecutionUnavailable::Held);
+            }
+            super::session_runtime::board_execution(app, session_arc).await
+        }
+        .await;
+        match admission {
+            Ok(current) => break current,
+            Err(crate::tasks::admission::ExecutionUnavailable::Held) => {
+                let Some(delay) = fence_contention_retry_delay(contention_retries) else {
+                    let mut session = session_arc.lock().await;
+                    let reason = "Session busy after execution-fence retries; retry generation when other session work finishes.";
+                    session.add_message(make_ui_only_error_message(reason));
+                    session.set_runtime_state(SessionState::Paused, Some(reason.to_string()));
+                    let meta = session
+                        .thread
+                        .task_meta
+                        .clone()
+                        .filter(|meta| meta.role == "agents");
+                    drop(session);
+                    if let Some(meta) = meta {
+                        if let Err(error) =
+                            super::task_agent_monitor::record_paused_agent_attention(
+                                app.clone(),
+                                &meta,
+                                chat_id,
+                            )
+                            .await
+                        {
+                            warn!("Could not record paused agent attention: {}", error);
+                        }
+                    }
+                    return StreamAttemptOutcome::Paused;
+                };
+                contention_retries += 1;
+                let deadline = tokio::time::Instant::now() + delay;
+                loop {
+                    if abort_flag.load(Ordering::Relaxed)
+                        || app.runtime.shutdown_flag.load(Ordering::Relaxed)
+                    {
+                        let reason = "Execution-fence retry stopped by abort or shutdown; resume generation when ready.";
+                        let mut session = session_arc.lock().await;
+                        session.add_message(make_ui_only_error_message(reason));
+                        session.set_runtime_state(SessionState::Paused, Some(reason.to_string()));
+                        return StreamAttemptOutcome::Paused;
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    tokio::select! {
+                        _ = abort_notify.notified() => {},
+                        _ = tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + std::time::Duration::from_millis(100))) => {},
+                    }
+                }
+            }
+            Err(reason) => {
+                super::session_runtime::interrupt_board_execution(
+                    &mut *session_arc.lock().await,
+                    reason,
+                );
+                return StreamAttemptOutcome::Paused;
+            }
         }
     };
     if !match (expected_board_execution, current.as_ref()) {
@@ -3041,7 +3101,9 @@ async fn run_stream_attempt(
     } {
         super::session_runtime::interrupt_board_execution(
             &mut *session_arc.lock().await,
-            crate::tasks::admission::ExecutionUnavailable::StaleBinding,
+            crate::tasks::admission::ExecutionUnavailable::StaleBinding(
+                crate::tasks::admission::StaleReason::ExecutionReplaced,
+            ),
         );
         return StreamAttemptOutcome::Paused;
     }
@@ -3078,11 +3140,13 @@ async fn run_stream_attempt(
         tokio::sync::mpsc::channel::<StreamCollectorEventPayload>(EMITTER_QUEUE_CAPACITY);
     let overflow_usage = Arc::new(std::sync::Mutex::new(None::<ChatUsage>));
     let overflow_ops = Arc::new(std::sync::Mutex::new(Vec::<DeltaOp>::new()));
+    let activity_pending = Arc::new(AtomicBool::new(false));
 
     let mut collector = SessionCollector {
         tx,
         overflow_usage: overflow_usage.clone(),
         overflow_ops: overflow_ops.clone(),
+        activity_pending: activity_pending.clone(),
     };
 
     let session_arc_emitter = session_arc.clone();
@@ -3092,6 +3156,7 @@ async fn run_stream_attempt(
         rx,
         overflow_ops.clone(),
         overflow_usage.clone(),
+        activity_pending,
         session_arc_emitter,
         first_content_started_at,
         emitter_chat_id,
@@ -3220,7 +3285,12 @@ fn recover_stream_tool_calls(
         let parsed: Vec<_> = result
             .tool_calls_raw
             .iter()
-            .filter_map(|tc| normalize_tool_call(tc))
+            .filter_map(|tc| {
+                super::stream_core::normalize_tool_call_with_finish(
+                    tc,
+                    result.finish_reason.as_deref(),
+                )
+            })
             .collect();
         if parsed.is_empty() {
             let has_content = !result.content.trim().is_empty()
@@ -3282,7 +3352,7 @@ async fn complete_stream_generation(
     model_rec: &crate::caps::ChatModelRecord,
     result: ChoiceFinal,
     pending_success_event: LlmCallEvent,
-) {
+) -> bool {
     let (model_id, usage_for_pricing) = {
         let session = session_arc.lock().await;
         (model_rec.base.id.clone(), session.draft_usage.clone())
@@ -3310,7 +3380,10 @@ async fn complete_stream_generation(
             .as_ref()
             .is_some_and(|budget| budget.check().is_err())
     {
-        return;
+        return false;
+    }
+    if session.draft_message.is_none() {
+        return false;
     }
     if let Some(ref mut draft) = session.draft_message {
         draft.content = ChatContent::SimpleText(result.content);
@@ -3323,7 +3396,12 @@ async fn complete_stream_generation(
             let parsed: Vec<_> = result
                 .tool_calls_raw
                 .iter()
-                .filter_map(|tc| normalize_tool_call(tc))
+                .filter_map(|tc| {
+                    super::stream_core::normalize_tool_call_with_finish(
+                        tc,
+                        result.finish_reason.as_deref(),
+                    )
+                })
                 .collect();
             info!("Successfully parsed {} tool calls", parsed.len());
             if !parsed.is_empty() {
@@ -3379,6 +3457,7 @@ async fn complete_stream_generation(
         SessionState::Idle
     };
     session.finish_stream_with_next_state(result.finish_reason, next_state);
+    true
 }
 
 async fn finish_stream_attempt(
@@ -3481,6 +3560,8 @@ async fn finish_stream_attempt(
         session.draft_usage = Some(usage);
     }
 
+    recover_stream_tool_calls(&mut result, &llm_request.tools)?;
+
     if is_result_empty(&result) {
         let draft_usage = {
             let session = session_arc.lock().await;
@@ -3564,8 +3645,6 @@ async fn finish_stream_attempt(
             .into());
         }
     }
-
-    recover_stream_tool_calls(&mut result, &llm_request.tools)?;
 
     if !result.tool_calls_raw.is_empty()
         && crate::buddy::companion::is_companion(&session_arc.lock().await.thread)
@@ -3720,44 +3799,57 @@ async fn run_streaming_generation(
         }
     };
 
-    complete_stream_generation(&app, &session_arc, model_rec, result, pending_success_event).await;
-
-    Ok(GenerationResult::Completed)
+    if complete_stream_generation(&app, &session_arc, model_rec, result, pending_success_event)
+        .await
+    {
+        Ok(GenerationResult::Completed)
+    } else {
+        Ok(GenerationResult::PausedForUserDecision)
+    }
 }
 
 fn is_result_empty(result: &ChoiceFinal) -> bool {
-    result.content.trim().is_empty()
-        && result.tool_calls_raw.is_empty()
-        && result.reasoning.trim().is_empty()
-        && result.thinking_blocks.is_empty()
-        && result.citations.is_empty()
-        && result.server_content_blocks.is_empty()
+    length_like_finish_reason(result.finish_reason.as_deref())
+        != Some(NormalizedStopReason::ProviderLengthStop)
+        && result.content.trim().is_empty()
+        && !result
+            .tool_calls_raw
+            .iter()
+            .any(|call| normalize_tool_call(call).is_some())
+        && !result
+            .server_content_blocks
+            .iter()
+            .any(|block| is_standalone_artifact(block) || is_server_tool_content(block))
 }
 
-fn event_payload_bool(message: &ChatMessage, subkind: &str, key: &str) -> bool {
-    message.role == crate::chat::internal_roles::EVENT_ROLE
-        && message
-            .extra
-            .get("event")
-            .and_then(|event| event.get("subkind"))
+fn is_server_tool_content(block: &serde_json::Value) -> bool {
+    matches!(
+        block.get("type").and_then(|value| value.as_str()),
+        Some(
+            "server_tool_use"
+                | "web_search_tool_result"
+                | "web_fetch_tool_result"
+                | "code_execution_tool_result"
+                | "bash_code_execution_tool_result"
+                | "text_editor_code_execution_tool_result"
+        )
+    )
+}
+
+fn is_standalone_artifact(block: &serde_json::Value) -> bool {
+    let nonblank = |value: Option<&serde_json::Value>| {
+        value
             .and_then(|value| value.as_str())
-            == Some(subkind)
-        && message
-            .extra
-            .get("event")
-            .and_then(|event| event.get("payload"))
-            .and_then(|payload| payload.get(key))
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false)
-}
-
-fn assistant_goal_pursuit_accounting_enabled(message: &ChatMessage) -> bool {
-    message
-        .extra
-        .get("goal_pursuit")
-        .and_then(|value| value.get("account_progress"))
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    match block.get("type").and_then(|value| value.as_str()) {
+        Some("image_generation_call") => {
+            block["payload"]["status"] == "completed" && nonblank(block["payload"].get("result"))
+        }
+        Some("audio") => nonblank(block["payload"].get("data")),
+        Some("google_cloud_code_inline_data") => nonblank(block.get("data")),
+        _ => false,
+    }
 }
 
 fn latest_goal_pursuit_usage(session: &ChatSession) -> Option<ChatUsage> {
@@ -3765,35 +3857,83 @@ fn latest_goal_pursuit_usage(session: &ChatSession) -> Option<ChatUsage> {
     if !goal.active || goal.status != GoalStatus::Active {
         return None;
     }
-    let assistant_index = session
+    let assistant = session
         .messages
         .iter()
-        .rposition(|message| message.role == "assistant")?;
-    let assistant = &session.messages[assistant_index];
-    let marked_on_assistant = assistant_goal_pursuit_accounting_enabled(assistant);
-    let marked_before_assistant = session.messages[..assistant_index]
-        .iter()
-        .rev()
-        .take_while(|message| message.role != "assistant")
-        .any(|message| event_payload_bool(message, "goal_pursuit", "account_progress"));
-    if marked_on_assistant || marked_before_assistant {
-        assistant.usage.clone()
-    } else {
-        None
+        .rfind(|message| message.role == "assistant")?;
+    if assistant
+        .extra
+        .get("goal_turn_accounted")
+        .and_then(|value| value.as_bool())
+        == Some(true)
+        || assistant
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty())
+    {
+        return None;
     }
+    let mut total = ChatUsage::default();
+    for message in session.messages.iter().rev() {
+        if message
+            .extra
+            .get("goal_turn_accounted")
+            .and_then(|value| value.as_bool())
+            == Some(true)
+        {
+            break;
+        }
+        if message.role != "assistant" {
+            continue;
+        }
+        if let Some(usage) = &message.usage {
+            total.prompt_tokens = total.prompt_tokens.saturating_add(usage.prompt_tokens);
+            total.completion_tokens = total
+                .completion_tokens
+                .saturating_add(usage.completion_tokens);
+            total.total_tokens = total.total_tokens.saturating_add(usage.total_tokens);
+            if let Some(metering) = &usage.metering_usd {
+                total
+                    .metering_usd
+                    .get_or_insert_with(Default::default)
+                    .total_usd += metering.total_usd;
+            }
+        }
+    }
+    Some(total)
+}
+
+fn record_completed_goal_turn(session: &mut ChatSession) -> bool {
+    let Some(usage) = latest_goal_pursuit_usage(session) else {
+        return false;
+    };
+    if !session.goal_record_progress_from_usage(&usage) {
+        return false;
+    }
+    if let Some(assistant) = session
+        .messages
+        .iter_mut()
+        .rfind(|message| message.role == "assistant")
+    {
+        assistant
+            .extra
+            .insert("goal_turn_accounted".into(), serde_json::json!(true));
+    }
+    true
 }
 
 async fn maybe_record_goal_pursuit_progress(
     app: &AppState,
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> Result<bool, String> {
-    crate::tasks::goal::hydrate_session_task_goal(app.gcx.clone(), &session_arc).await?;
+    if !crate::tasks::goal::hydrate_session_task_goal_for_pursuit(app.gcx.clone(), &session_arc)
+        .await?
+    {
+        return Ok(false);
+    }
     let changed = {
         let mut session = session_arc.lock().await;
-        let Some(usage) = latest_goal_pursuit_usage(&session) else {
-            return Ok(false);
-        };
-        session.goal_record_progress_from_usage(&usage)
+        record_completed_goal_turn(&mut session)
     };
     if changed {
         crate::tasks::goal::commit_session_task_goal(app.gcx.clone(), &session_arc).await?;
@@ -3830,6 +3970,431 @@ fn maybe_downgrade_bogus_tool_calls_finish_reason(result: &mut ChoiceFinal, stag
 mod tests {
     use super::*;
     use crate::call_validation::{ChatToolCall, ChatToolFunction};
+
+    #[tokio::test(start_paused = true)]
+    async fn execution_fence_contention_has_bounded_retry_schedule() {
+        assert_eq!(
+            fence_contention_retry_delay(0),
+            Some(std::time::Duration::from_secs(1))
+        );
+        assert_eq!(
+            fence_contention_retry_delay(1),
+            Some(std::time::Duration::from_secs(2))
+        );
+        assert_eq!(
+            fence_contention_retry_delay(2),
+            Some(std::time::Duration::from_secs(4))
+        );
+        assert_eq!(fence_contention_retry_delay(3), None);
+        for (cancelled, replaced, claimed_elsewhere) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            let (_temp, app, task_id, chat_id, session, _planner) =
+                super::super::task_agent_monitor::tests::setup_monitor_case(
+                    "doing",
+                    SessionState::Generating,
+                    std::time::Duration::ZERO,
+                    vec![],
+                )
+                .await;
+            if replaced {
+                crate::tasks::storage::update_board_atomic(app.gcx.clone(), &task_id, |board| {
+                    board.get_card_mut("T-1").unwrap().agent_chat_id =
+                        Some("replacement-chat".into());
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            }
+            if claimed_elsewhere {
+                crate::tasks::storage::update_board_atomic(app.gcx.clone(), &task_id, |board| {
+                    board.card_claims.insert(
+                        "T-1".into(),
+                        crate::tasks::types::CardClaim {
+                            claimant_chat_id: "replacement-chat".into(),
+                            idempotency_key: "replacement-claim".into(),
+                            claimed_at: chrono::Utc::now().to_rfc3339(),
+                        },
+                    );
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            }
+            let (abort, notify) = {
+                let live = session.lock().await;
+                (live.abort_flag.clone(), live.abort_notify.clone())
+            };
+            abort.store(cancelled, Ordering::Relaxed);
+            let model = crate::caps::ChatModelRecord::default();
+            let outcome = FORCE_FENCE_HELD
+                .scope(
+                    true,
+                    run_stream_attempt(
+                        &app,
+                        &session,
+                        &LlmRequest::new("provider/model".into(), vec![]),
+                        &model,
+                        &abort,
+                        &notify,
+                        None,
+                        &chat_id,
+                        Some("agents"),
+                        None,
+                    ),
+                )
+                .await;
+            assert!(matches!(outcome, StreamAttemptOutcome::Paused));
+            let live = session.lock().await;
+            assert_eq!(live.runtime.state, SessionState::Paused);
+            assert!(!super::super::task_agent_monitor::session_is_failure(&live));
+            assert!(live.runtime.interruption.is_none());
+            assert!(live.runtime.error.is_some());
+            assert!(live.messages.iter().any(|message| message
+                .content
+                .content_text_only()
+                .contains(if cancelled {
+                    "abort or shutdown"
+                } else {
+                    "Session busy"
+                })));
+            drop(live);
+            super::super::task_agent_monitor::check_for_stuck_agents(app.clone())
+                .await
+                .unwrap();
+            let board = crate::tasks::storage::load_board(app.gcx.clone(), &task_id)
+                .await
+                .unwrap();
+            let card = board.get_card("T-1").unwrap();
+            assert_eq!(card.column, "doing");
+            if !cancelled && !replaced && !claimed_elsewhere {
+                let attention = card
+                    .attention
+                    .as_ref()
+                    .expect("busy agent must escalate to the board");
+                assert_eq!(attention.kind, "no_session");
+                assert_eq!(attention.count, 1);
+                assert!(attention.reason.contains("resume the agent"));
+                assert_eq!(
+                    card.status_updates
+                        .iter()
+                        .filter(|update| update.message.contains("agent paused:"))
+                        .count(),
+                    1
+                );
+            } else {
+                assert!(card.attention.is_none());
+            }
+            let live = session.lock().await;
+            if !cancelled {
+                assert!(live
+                    .messages
+                    .iter()
+                    .any(|message| message.content.content_text_only().contains("Session busy")));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn nonactionable_stream_completions_retry_then_fail() {
+        let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let session = Arc::new(AMutex::new(ChatSession::new("empty-completion".into())));
+        let request = LlmRequest::new("provider/model".into(), vec![]);
+        let fixtures = [
+            ChoiceFinal {
+                server_content_blocks: vec![json!({"type":"unhandled_openai_responses_event"})],
+                ..Default::default()
+            },
+            ChoiceFinal {
+                thinking_blocks: vec![json!({"type":"reasoning","encrypted_content":"opaque"})],
+                ..Default::default()
+            },
+        ];
+        for fixture in fixtures {
+            for attempt in [1, 2] {
+                let result = finish_stream_attempt(
+                    &app,
+                    &session,
+                    &request,
+                    "empty-completion",
+                    &None,
+                    "agent",
+                    &None,
+                    &None,
+                    &None,
+                    &None,
+                    attempt,
+                    2,
+                    true,
+                    &None,
+                    0,
+                    String::new(),
+                    String::new(),
+                    Ok(vec![fixture.clone()]),
+                )
+                .await;
+                if attempt == 1 {
+                    assert!(matches!(result, Ok(AttemptResult::Retry)));
+                } else {
+                    assert!(result
+                        .err()
+                        .unwrap()
+                        .message
+                        .starts_with("Empty assistant response"));
+                }
+                assert!(session.lock().await.messages.is_empty());
+            }
+        }
+        assert!(!is_result_empty(&ChoiceFinal {
+            content: "refusal or answer".into(),
+            ..Default::default()
+        }));
+        assert!(!is_result_empty(&ChoiceFinal {
+            tool_calls_raw: vec![json!({"id":"call","function":{"name":"cat","arguments":"{}"}})],
+            ..Default::default()
+        }));
+        assert!(is_result_empty(&ChoiceFinal {
+            tool_calls_raw: vec![json!({"bad":"call"})],
+            ..Default::default()
+        }));
+        assert!(!is_result_empty(&ChoiceFinal {
+            server_content_blocks: vec![
+                json!({"type":"image_generation_call","payload":{"status":"completed","result":"image-bytes"}})
+            ],
+            ..Default::default()
+        }));
+        assert!(is_result_empty(&ChoiceFinal {
+            server_content_blocks: vec![
+                json!({"type":"image_generation_call","payload":{"status":"in_progress"}})
+            ],
+            ..Default::default()
+        }));
+    }
+
+    #[tokio::test]
+    async fn reasoning_length_stop_and_server_results_are_not_empty_retries() {
+        let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let session = Arc::new(AMutex::new(ChatSession::new("nonempty".into())));
+        for fixture in [
+            ChoiceFinal {
+                finish_reason: Some("length".into()),
+                reasoning: "still thinking".into(),
+                ..Default::default()
+            },
+            ChoiceFinal {
+                server_content_blocks: vec![
+                    json!({"type":"server_tool_use","id":"search"}),
+                    json!({"type":"web_search_tool_result","tool_use_id":"search","content":[]}),
+                ],
+                ..Default::default()
+            },
+        ] {
+            let result = finish_stream_attempt(
+                &app,
+                &session,
+                &LlmRequest::new("provider/model".into(), vec![]),
+                "nonempty",
+                &None,
+                "agent",
+                &None,
+                &None,
+                &None,
+                &None,
+                1,
+                1,
+                false,
+                &None,
+                0,
+                String::new(),
+                String::new(),
+                Ok(vec![fixture]),
+            )
+            .await;
+            assert!(matches!(result, Ok(AttemptResult::Success(_, _))));
+        }
+    }
+
+    #[tokio::test]
+    async fn goal_turn_accounting_consumer_aggregates_tools_and_deduplicates_recovery() {
+        let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let mut session = ChatSession::new("accounting".into());
+        session.install_goal(
+            "agent",
+            "ship",
+            true,
+            refact_chat_api::GoalBudget::default(),
+        );
+        session.goal.as_mut().unwrap().snoozed_until_ms = Some(u64::MAX);
+        let context = GenerationAttemptContext {
+            thread: session.thread.clone(),
+            chat_id: session.chat_id.clone(),
+            chat_label: "accounting".into(),
+            abort_flag: session.abort_flag.clone(),
+        };
+        let session = Arc::new(AMutex::new(session));
+        for turn in 1..=2 {
+            for step in 0..2 {
+                {
+                    let mut locked = session.lock().await;
+                    let call_id = format!("call-{turn}-{step}");
+                    let mut assistant = make_assistant_with_tool_call(&call_id, "cat");
+                    assistant.usage = Some(ChatUsage {
+                        total_tokens: 100,
+                        completion_tokens: 10,
+                        ..Default::default()
+                    });
+                    locked.messages.push(assistant);
+                    locked.messages.push(make_tool_msg(&call_id, "result"));
+                    if step == 0 {
+                        locked
+                            .messages
+                            .push(ChatMessage::new("goal".into(), "anchored control".into()));
+                    }
+                }
+                handle_tool_step_outcome(
+                    &app,
+                    &session,
+                    &context,
+                    ToolStepOutcome::Continue,
+                    None,
+                    Default::default(),
+                )
+                .await;
+                assert_eq!(
+                    session
+                        .lock()
+                        .await
+                        .goal
+                        .as_ref()
+                        .unwrap()
+                        .progress
+                        .turns_used,
+                    turn - 1
+                );
+            }
+            session
+                .lock()
+                .await
+                .messages
+                .push(make_assistant_msg("done"));
+            handle_tool_step_outcome(
+                &app,
+                &session,
+                &context,
+                ToolStepOutcome::NoToolCalls,
+                None,
+                Default::default(),
+            )
+            .await;
+            {
+                let locked = session.lock().await;
+                assert_eq!(locked.goal.as_ref().unwrap().progress.turns_used, turn);
+                assert_eq!(
+                    locked.goal.as_ref().unwrap().progress.tokens_used,
+                    u64::from(turn) * 200
+                );
+                assert_eq!(
+                    locked
+                        .goal_ledger
+                        .iter()
+                        .filter(|entry| matches!(
+                            entry.op,
+                            refact_chat_api::GoalLedgerOp::ProgressRecorded { .. }
+                        ))
+                        .count(),
+                    turn as usize
+                );
+            }
+            let restored = {
+                let locked = session.lock().await;
+                let mut restored = ChatSession::new("accounting-restored".into());
+                restored.messages =
+                    serde_json::from_value(serde_json::to_value(&locked.messages).unwrap())
+                        .unwrap();
+                restored.goal = locked.goal.clone();
+                restored.goal_ledger = locked.goal_ledger.clone();
+                Arc::new(AMutex::new(restored))
+            };
+            assert!(!maybe_record_goal_pursuit_progress(&app, restored)
+                .await
+                .unwrap());
+            assert!(!maybe_record_goal_pursuit_progress(&app, session.clone())
+                .await
+                .unwrap());
+            assert_eq!(
+                session
+                    .lock()
+                    .await
+                    .goal
+                    .as_ref()
+                    .unwrap()
+                    .progress
+                    .turns_used,
+                turn
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn private_reasoning_activity_reaches_session_without_display_or_stale_attempts() {
+        for (stale, saturated) in [(false, false), (true, false), (false, true)] {
+            let mut session = ChatSession::new("activity".into());
+            session.start_stream().unwrap();
+            session.last_stream_delta_at = None;
+            let expected = session.draft_message.as_ref().map(|m| m.message_id.clone());
+            let before = serde_json::to_value(&session.draft_message).unwrap();
+            let version = session.trajectory_version;
+            if stale {
+                session.draft_message.as_mut().unwrap().message_id = "replacement".into();
+            }
+            let session = Arc::new(AMutex::new(session));
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            let ops = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let usage = Arc::new(std::sync::Mutex::new(None));
+            let activity = Arc::new(AtomicBool::new(false));
+            let mut collector = SessionCollector {
+                tx,
+                overflow_ops: ops.clone(),
+                overflow_usage: usage.clone(),
+                activity_pending: activity.clone(),
+            };
+            if saturated {
+                collector.on_usage(&ChatUsage::default());
+            }
+            super::super::stream_core::process_activity_fixture(
+                r#"{"type":"response.reasoning.delta","delta":"PRIVATE_SENTINEL"}"#,
+                &mut collector,
+            );
+            drop(collector);
+            spawn_stream_delta_emitter(
+                rx,
+                ops,
+                usage,
+                activity,
+                session.clone(),
+                None,
+                "activity".into(),
+                expected,
+            )
+            .await
+            .unwrap();
+            let session = session.lock().await;
+            assert_eq!(session.last_stream_delta_at.is_some(), !stale);
+            assert_eq!(session.trajectory_version, version);
+            if !stale {
+                assert_eq!(
+                    serde_json::to_value(&session.draft_message).unwrap(),
+                    before
+                );
+            }
+            assert!(!serde_json::to_string(&session.messages)
+                .unwrap()
+                .contains("PRIVATE_SENTINEL"));
+        }
+    }
 
     fn make_user_msg(content: &str) -> ChatMessage {
         ChatMessage {

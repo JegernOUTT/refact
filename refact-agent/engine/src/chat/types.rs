@@ -292,6 +292,7 @@ pub(crate) struct PlannerPause {
 }
 
 pub struct ChatSession {
+    pub(crate) delivery_save_id: uuid::Uuid,
     pub(crate) native_commands_in_flight: Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) runner_lease: Option<(String, Arc<AtomicBool>)>,
     pub(crate) runner_message_digest: Option<[u8; 32]>,

@@ -718,6 +718,29 @@ impl ExecutionRegistry {
             .cloned()
     }
 
+    pub fn rebind_config(
+        &self,
+        agent_id: &str,
+        old_meta: &crate::chat::types::TaskMeta,
+        new_meta: crate::chat::types::TaskMeta,
+        parent: Option<String>,
+        root: Option<String>,
+    ) -> bool {
+        let mut configs = self.configs.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(config) = configs.get_mut(agent_id) else {
+            return true;
+        };
+        if config.task_meta.as_ref() != Some(old_meta) {
+            return false;
+        }
+        config.task_meta = Some(new_meta);
+        config.parent_id = parent.clone();
+        config.root_chat_id = root.clone();
+        config.trace_parent =
+            crate::subchat::TraceParent::from_parts(parent.as_deref(), root.as_deref());
+        true
+    }
+
     pub fn forget_config(&self, agent_id: &str) {
         self.configs
             .lock()

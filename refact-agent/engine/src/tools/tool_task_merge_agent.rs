@@ -502,6 +502,14 @@ fn ensure_legacy_agent_worktree_checkout(
         "Agent worktree",
         agent_branch,
     )
+    .map_err(|error| {
+        format!(
+            "Agent checkout '{}' expected branch '{}': {}",
+            agent_worktree_root.display(),
+            agent_branch,
+            error
+        )
+    })
 }
 
 fn reference_matches_card(
@@ -2412,6 +2420,7 @@ mod worktree_merge_tool_tests {
             final_report: Some("done".to_string()),
             final_report_structured: None,
             verifier_report: Some(VerifierReport {
+                notes: Vec::new(),
                 passed: true,
                 concerns: Vec::new(),
                 recommendation: "merge".into(),
@@ -2451,6 +2460,7 @@ mod worktree_merge_tool_tests {
 
     fn launch_failure_verifier_report() -> VerifierReport {
         VerifierReport {
+            notes: Vec::new(),
             passed: false,
             concerns: vec![
                 "Verifier failed to launch; human review recommended: no verifier model"
@@ -2560,6 +2570,7 @@ mod worktree_merge_tool_tests {
     fn merge_agent_refuses_when_verifier_failed_without_force() {
         let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
         card.verifier_report = Some(VerifierReport {
+            notes: Vec::new(),
             passed: false,
             concerns: vec!["cargo test failed".to_string()],
             recommendation: "fix-needed".to_string(),
@@ -2577,6 +2588,7 @@ mod worktree_merge_tool_tests {
     fn merge_agent_force_cannot_bypass_genuine_failure() {
         let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
         card.verifier_report = Some(VerifierReport {
+            notes: Vec::new(),
             passed: false,
             concerns: vec!["cargo test failed".to_string()],
             recommendation: "fix-needed".to_string(),
@@ -2594,6 +2606,7 @@ mod worktree_merge_tool_tests {
 
         let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
         card.verifier_report = Some(VerifierReport {
+            notes: Vec::new(),
             passed: true,
             classification: VerifierReportClassification::Passed,
             command_results: vec![VerificationResult {
@@ -2615,6 +2628,7 @@ mod worktree_merge_tool_tests {
 
         let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
         card.verifier_report = Some(VerifierReport {
+            notes: Vec::new(),
             passed: true,
             classification: VerifierReportClassification::Unknown,
             command_results: vec![VerificationResult {
@@ -2647,6 +2661,7 @@ mod worktree_merge_tool_tests {
         assert!(ensure_verifier_allows_merge(&card, true).unwrap().is_some());
 
         card.verifier_report = Some(VerifierReport {
+            notes: Vec::new(),
             passed: false,
             recommendation: "human-review".to_string(),
             concerns: vec!["unknown legacy failure".to_string()],
@@ -2675,6 +2690,7 @@ mod worktree_merge_tool_tests {
 
         let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
         card.verifier_report = Some(VerifierReport {
+            notes: Vec::new(),
             passed: false,
             recommendation: "human-review".to_string(),
             classification: VerifierReportClassification::HumanReview,
@@ -2696,6 +2712,7 @@ mod worktree_merge_tool_tests {
         use crate::tasks::types::{VerificationResult, VerifierReportClassification};
 
         VerifierReport {
+            notes: Vec::new(),
             passed: false,
             concerns: vec!["Verification command failed: cargo test".to_string()],
             recommendation: "human-review".to_string(),
@@ -2740,6 +2757,7 @@ mod worktree_merge_tool_tests {
             .unwrap()
             .contains("no verifier report"));
         card.verifier_report = Some(VerifierReport {
+            notes: Vec::new(),
             passed: true,
             concerns: Vec::new(),
             recommendation: "merge".to_string(),

@@ -26,6 +26,7 @@ export type TrajectoryMeta = {
     | "paused"
     | "waiting_ide"
     | "waiting_user_input"
+    | "interrupted"
     | "completed"
     | "error";
   root_chat_id?: string;
@@ -81,6 +82,7 @@ export type TrajectoryEvent = {
     | "paused"
     | "waiting_ide"
     | "waiting_user_input"
+    | "interrupted"
     | "completed"
     | "error";
   error?: string;

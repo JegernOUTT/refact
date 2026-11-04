@@ -730,6 +730,18 @@ mod tests {
             Some(DeliveryState::Failed),
             "a refused delivery has a known outcome and is never left dispatched"
         );
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if outbox.status_of("queued").await.unwrap() == Some(DeliveryState::Pending)
+                    && outbox.status_of("landed").await.unwrap() == Some(DeliveryState::Delivered)
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("delivery save finalizers must settle after a pending receipt");
         assert_eq!(
             outbox.status_of("queued").await.unwrap(),
             Some(DeliveryState::Pending),

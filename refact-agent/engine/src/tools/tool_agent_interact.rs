@@ -594,17 +594,23 @@ impl Tool for ToolAgentMessage {
             } else {
                 (format!("[subagent note] agent {agent_id}: {text}"), None)
             };
-            let (delivery_id, outcome) = crate::agents::push::push_notice_to_chat_with_mode(
+            let receipt = crate::agents::push::push_notice_to_chat_with_receipt_kind(
                 app,
                 &parent_notice_chat_id,
                 notice,
                 push,
                 Some(ttl_secs),
+                !expects_reply,
             )
             .await?;
+            let outcome = receipt.outcome;
             let mut text = delivery_outcome_text("parent", outcome);
             if let Some(question_id) = &question_id {
                 text.push_str(&format!(" Tracked question: {question_id}."));
+            }
+            if let Some(note) = &receipt.note {
+                text.push(' ');
+                text.push_str(note);
             }
             let mut result = output(tool_call_id, text);
             if let Some(ContextEnum::ChatMessage(message)) = result.1.first_mut() {
@@ -612,8 +618,11 @@ impl Tool for ToolAgentMessage {
                     "delivery_receipt".into(),
                     json!({
                         "kind": "agent_message",
-                        "delivery_id": delivery_id,
+                        "delivery_id": receipt.delivery_id,
                         "outcome": outcome,
+                        "trajectory_persistence": receipt.trajectory_persistence,
+                        "outbox_durable": receipt.outbox_durable,
+                        "note": receipt.note,
                         "question_id": question_id,
                         "accepted": matches!(
                             outcome,
@@ -663,12 +672,12 @@ impl Tool for ToolAgentMessage {
         let mut delivery = PendingDelivery::new(
             vec![crate::chat::internal_roles::event(
                 crate::chat::internal_roles::EventSubkind::SystemNotice,
-                "agents.message",
+                crate::agents::push::NOTICE_MESSAGE,
                 json!({"from": from}),
                 format!("[message from {from}]\n{message_text}"),
             )],
             push,
-            "agents.message".to_string(),
+            crate::agents::push::NOTICE_MESSAGE.to_string(),
             // Peer mail is informational: it never wakes another root's agent.
             peer_mail.is_none(),
         );
@@ -1309,12 +1318,12 @@ mod tests {
             delivery_id.clone(),
             vec![crate::chat::internal_roles::event(
                 crate::chat::internal_roles::EventSubkind::SystemNotice,
-                "agents.message",
+                crate::agents::push::NOTICE_MESSAGE,
                 json!({}),
                 "replay".to_string(),
             )],
             PushMode::Append,
-            "agents.message".to_string(),
+            crate::agents::push::NOTICE_MESSAGE.to_string(),
             true,
         );
         replay.set_ttl_secs(60);
@@ -1448,7 +1457,7 @@ mod tests {
                 "guarded-delivery",
                 vec![guarded_message],
                 PushMode::Append,
-                "agents.message".to_string(),
+                crate::agents::push::NOTICE_MESSAGE.to_string(),
                 false,
             ),
         )
@@ -1532,7 +1541,7 @@ mod tests {
                 id,
                 vec![ChatMessage::new("user".into(), format!("{id} note"))],
                 PushMode::Append,
-                "agents.message",
+                crate::agents::push::NOTICE_MESSAGE,
                 false,
             )
         };

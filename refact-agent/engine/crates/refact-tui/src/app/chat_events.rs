@@ -540,6 +540,22 @@ impl App {
 
     pub(super) fn apply_runtime_state(&mut self, raw: &Value) -> bool {
         if raw
+            .get("interruption")
+            .is_some_and(|value| !value.is_null())
+            && raw.get("state").and_then(Value::as_str) == Some("paused")
+        {
+            self.set_session_state(SessionState::Paused);
+            self.add_notice(
+                "Paused and interrupted — resolve approvals, then recover in the owning planner",
+            );
+            return false;
+        }
+        if raw.get("state").and_then(Value::as_str) == Some("interrupted") {
+            self.set_session_state(SessionState::Interrupted);
+            self.add_notice("Interrupted — recover in the owning planner with restart_agent(card_id=..., mode=\"resume\")");
+            return false;
+        }
+        if raw
             .get("error")
             .and_then(Value::as_str)
             .is_some_and(|error| !error.is_empty())
@@ -558,6 +574,7 @@ impl App {
             "paused" => SessionState::Paused,
             "waiting_ide" => SessionState::WaitingIde,
             "waiting_user_input" => SessionState::WaitingUserInput,
+            "interrupted" => SessionState::Interrupted,
             "completed" => SessionState::Completed,
             "error" => SessionState::Error,
             _ => {

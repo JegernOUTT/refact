@@ -136,7 +136,7 @@ pub(super) async fn show_waiting(
         .await
         .add_message(crate::chat::internal_roles::event(
             crate::chat::internal_roles::EventSubkind::SystemNotice,
-            "agents.approval",
+            crate::agents::push::NOTICE_APPROVAL,
             serde_json::json!({"waiting_for": if escalated { "user" } else { &target.parent_id }}),
             text,
         ));
@@ -298,7 +298,7 @@ pub(crate) async fn answer_from_user(
         };
         let notice = crate::chat::internal_roles::event(
             crate::chat::internal_roles::EventSubkind::SystemNotice,
-            "agents.approval",
+            crate::agents::push::NOTICE_APPROVAL,
             serde_json::json!({"request_id":id,"response":response,"permission_granted":false}),
             format!("User responded without granting command permission. Their response follows; decide how to proceed without running the unapproved command: {}", serde_json::to_string(&response).map_err(|error| error.to_string())?),
         );
@@ -361,7 +361,7 @@ pub(crate) async fn answer_from_user(
             }
             session.add_message(crate::chat::internal_roles::event(
                 crate::chat::internal_roles::EventSubkind::SystemNotice,
-                "agents.approval",
+                crate::agents::push::NOTICE_APPROVAL,
                 serde_json::json!({"request_id": id, "state": "withdrawn", "reason": reason}),
                 refusal,
             ));

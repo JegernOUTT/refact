@@ -216,6 +216,13 @@ impl Tool for ToolShell {
             .execution
             .output_limit_lines
             .saturating_mul(200);
+        if let Some(meta) = execution_scope
+            .as_ref()
+            .filter(|scope| scope.is_enforced() && scope.worktree().kind == "task_agent")
+            .map(|scope| scope.worktree().clone())
+        {
+            crate::exec::command_policy::ensure_managed_task_execution(&ccx, &meta).await?;
+        }
         let checkout = command_checkout::resolve(&ccx, args).await?;
         let parsed = parse_args_with_filter(
             gcx.clone(),
@@ -545,6 +552,13 @@ impl Tool for ToolShell {
             let cgcx = ccx.lock().await;
             (cgcx.app.gcx.clone(), cgcx.execution_scope.clone())
         };
+        if let Some(meta) = execution_scope
+            .as_ref()
+            .filter(|scope| scope.is_enforced() && scope.worktree().kind == "task_agent")
+            .map(|scope| scope.worktree().clone())
+        {
+            crate::exec::command_policy::ensure_managed_task_execution(&ccx, &meta).await?;
+        }
         let checkout = command_checkout::resolve(&ccx, args).await?;
         let parsed = parse_args_with_filter(
             gcx,
@@ -810,7 +824,7 @@ fn append_status_line(
         ExecStatus::Exited { exit_code } => out.push_str(&format!(
             "The command was running {:.3}s, finished with exit code {}\n",
             duration.as_secs_f64(),
-            exit_code.unwrap_or_default()
+            exit_code.map(|code| code.to_string()).unwrap_or_else(|| "unknown".into())
         )),
         ExecStatus::SandboxLauncherFailed { exit_code } => out.push_str(&format!(
             "⚠️ The sandbox launcher failed before the command ran (exit code {exit_code}).\n"
@@ -871,7 +885,8 @@ fn tool_failed_for_status(status: &ExecStatus) -> Option<bool> {
         | ExecStatus::Failed { .. }
         | ExecStatus::Killed
         | ExecStatus::TimedOut => Some(true),
-        ExecStatus::Starting | ExecStatus::Running | ExecStatus::Exited { .. } => None,
+        ExecStatus::Exited { exit_code } => Some(*exit_code != Some(0)),
+        ExecStatus::Starting | ExecStatus::Running => None,
     }
 }
 
@@ -1421,6 +1436,19 @@ mod tests {
     }
 
     #[test]
+    fn unknown_exit_is_failed_without_claiming_exit_zero() {
+        let status = ExecStatus::Exited { exit_code: None };
+        let mut output = "retained output\n".to_string();
+        append_status_line(&mut output, &status, Duration::from_secs(1), 10);
+        assert_eq!(tool_failed_for_status(&status), Some(true));
+        assert_eq!(exec_status_label(&status), "exited");
+        assert_eq!(
+            output,
+            "retained output\nThe command was running 1.000s, finished with exit code unknown\n"
+        );
+    }
+
+    #[test]
     fn typed_launcher_failure_is_primary_sandbox_signal() {
         let mut output = String::new();
 
@@ -1451,7 +1479,7 @@ mod tests {
         assert_eq!(exec["short_description"], "Run hello");
         assert_eq!(exec["tty"], false);
         assert!(exec["process_id"].as_str().unwrap().starts_with("exec_"));
-        assert!(message.tool_failed.is_none());
+        assert_eq!(message.tool_failed, Some(false));
     }
 
     #[tokio::test]
@@ -1611,7 +1639,7 @@ mod tests {
         assert!(!text(&message).contains("STDERR"));
         assert_eq!(exec(&message)["tty"], true);
         assert_eq!(exec(&message)["status"], "exited");
-        assert!(message.tool_failed.is_none());
+        assert_eq!(message.tool_failed, Some(false));
     }
 
     #[tokio::test]
@@ -1641,7 +1669,7 @@ mod tests {
         assert!(body.contains("exit code 7"));
         assert_eq!(exec(&message)["status"], "exited");
         assert_eq!(exec(&message)["exit_code"], 7);
-        assert!(message.tool_failed.is_none());
+        assert_eq!(message.tool_failed, Some(true));
     }
 
     #[tokio::test]

@@ -170,6 +170,19 @@ pub(crate) fn prepare_guarded_command(
     if session.runner_lease.is_some() {
         return Err("Background runner owns this conversation; use the parent conversation or agent lifecycle controls".into());
     }
+    if session.runtime.interruption.is_some()
+        && matches!(
+            request.command,
+            ChatCommand::Regenerate { .. }
+                | ChatCommand::UserMessage { .. }
+                | ChatCommand::RetryFromIndex { .. }
+        )
+    {
+        return Err(
+            "Execution interrupted; recover in the owning planner with restart_agent(card, resume)"
+                .into(),
+        );
+    }
     if let Some(guard) = &request.supervision_guard {
         if request.native_approval_guard.is_some() || request.priority {
             return Err("supervision cannot carry native approval or priority authority".into());
@@ -1677,7 +1690,7 @@ async fn select_next_command(session_arc: &Arc<AMutex<ChatSession>>) -> Option<S
             .empty_locks
             .fetch_add(1, Ordering::Relaxed);
         (None, Some(waiter))
-    } else if session.planner_paused() {
+    } else if session.runtime.interruption.is_some() || session.planner_paused() {
         let command = session
             .command_queue
             .iter()
@@ -3156,7 +3169,11 @@ mod tests {
         .await;
         {
             let session = restored.lock().await;
-            assert_eq!(session.runtime.state, SessionState::WaitingUserInput);
+            assert_eq!(session.runtime.state, SessionState::Interrupted);
+            assert_eq!(
+                session.runtime.interruption.as_ref().unwrap().condition,
+                "needs_fresh_admission"
+            );
             assert!(session
                 .runtime
                 .error

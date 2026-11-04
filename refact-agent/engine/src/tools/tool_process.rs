@@ -3235,7 +3235,7 @@ mod tests {
             std::fs::write(path, serde_yaml::to_string(&board).unwrap()).unwrap();
         }
 
-        async fn assert_refused(&self, args: HashMap<String, Value>) {
+        async fn assert_refused(&self, args: HashMap<String, Value>, expected: &str) {
             let mut tool = ToolProcessStart {
                 config_path: String::new(),
             };
@@ -3243,7 +3243,7 @@ mod tests {
                 .tool_execute(self.ccx.clone(), &"denied".into(), &args)
                 .await
                 .unwrap_err();
-            assert_eq!(error, "command checkout is unavailable, unauthorized or changed; request a fresh checkout target");
+            assert_eq!(error, expected);
             assert!(self
                 .app
                 .runtime
@@ -3257,6 +3257,7 @@ mod tests {
             &self,
             args: HashMap<String, Value>,
             change: impl FnOnce() + Send + 'static,
+            expected: &str,
         ) {
             let (request, candidate, _) = approval_request(&self.ccx, &args).await.unwrap();
             let candidate = candidate.unwrap();
@@ -3277,7 +3278,7 @@ mod tests {
                         change();
                         changed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }))),
-                    self.assert_refused(args),
+                    self.assert_refused(args, expected),
                 )
                 .await;
             assert_eq!(reached.load(std::sync::atomic::Ordering::Relaxed), 1);
@@ -4285,6 +4286,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owning_card_command_allowed_but_nested_id_depth_and_registry_refuse() {
+        let fixture = CheckoutFixture::new().await;
+        let attempt = fixture.retained_attempt().await;
+        let mut args = fixture.command_args();
+        args.remove("checkout");
+        args.insert("workdir".into(), json!(fixture.root.join("child")));
+        {
+            let context = attempt.ccx.lock().await;
+            assert!(context.background_agent_id.is_none());
+            assert_eq!(context.subchat_depth, 0);
+        }
+        let (mut request, checkout, cache) = approval_request(&attempt.ccx, &args).await.unwrap();
+        assert!(checkout.is_none());
+        assert!(cache.is_some());
+        crate::agents::command_approval::enforce(
+            &attempt.ccx,
+            "owner",
+            "process_start",
+            &args,
+            &mut request,
+            None,
+            cache.as_ref(),
+        )
+        .await
+        .unwrap();
+        for signal in 0..3 {
+            {
+                let mut context = attempt.ccx.lock().await;
+                context.background_agent_id = (signal == 0).then(|| "nested".into());
+                context.subchat_depth = if signal == 1 { 1 } else { 0 };
+            }
+            if signal == 2 {
+                let (record, _, _) = fixture
+                    .app
+                    .agents
+                    .create(crate::agents::types::CreateAgentRequest {
+                        parent_chat_id: "owner".into(),
+                        parent_root_chat_id: Some("planner".into()),
+                        parent_tool_call_id: None,
+                        kind: crate::agents::types::BgAgentKind::Subagent,
+                        config_name: "test".into(),
+                        title: "nested".into(),
+                        prompt: "test".into(),
+                        target_files: vec![],
+                        model: "model".into(),
+                        model_type: None,
+                        goal_summary: None,
+                        plan_present: false,
+                        worktree_id: None,
+                        worktree_branch: None,
+                    })
+                    .await
+                    .unwrap();
+                let chat = attempt.ccx.lock().await.chat_id.clone();
+                fixture
+                    .app
+                    .agents
+                    .mark_running(&record.agent_id, chat)
+                    .await
+                    .unwrap();
+            }
+            let error = approval_request(&attempt.ccx, &args).await.err().unwrap();
+            assert_eq!(error, "Nested subagent command execution is not supported for this task checkout. Ask the owning card agent to run this command; no command was started.");
+            let error = crate::agents::command_approval::enforce(
+                &attempt.ccx,
+                "nested",
+                "process_start",
+                &args,
+                &mut request,
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error, "Nested subagent command execution is not supported for this task checkout. Ask the owning card agent to run this command; no command was started.");
+        }
+        assert!(fixture
+            .app
+            .runtime
+            .exec_registry
+            .list(Default::default())
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn command_checkout_registry_change_at_process_spawn_refuses() {
         let fixture = CheckoutFixture::new().await;
         let args = fixture.command_args();
@@ -4305,7 +4392,7 @@ mod tests {
                 assert!(registry.records.iter().any(|record| record.meta.id == id));
                 registry.records.retain(|record| record.meta.id != id);
                 std::fs::write(path, serde_json::to_vec(&registry).unwrap()).unwrap();
-            })
+            }, "command checkout is unavailable, unauthorized or changed; request a fresh checkout target")
             .await;
     }
 
@@ -4327,7 +4414,7 @@ mod tests {
                     serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
                 board.rev += 1;
                 std::fs::write(path, serde_yaml::to_string(&board).unwrap()).unwrap();
-            })
+            }, "command checkout is unavailable, unauthorized or changed; request a fresh checkout target")
             .await;
     }
 
@@ -4339,7 +4426,7 @@ mod tests {
         fixture
             .change_board(|board| board.owner_chat_id = Some("peer".into()))
             .await;
-        fixture.assert_refused(args).await;
+        fixture.assert_refused(args, "task board mutation requires the owning planner chat; owning planner chat: peer. Open that planner chat to operate on this checkout").await;
     }
 
     #[tokio::test]
@@ -4348,21 +4435,26 @@ mod tests {
         fixture
             .change_board(|board| board.cards[0].agent_chat_id = Some("new-attempt".into()))
             .await;
-        fixture.assert_refused(fixture.command_args()).await;
+        fixture.assert_refused(fixture.command_args(), "command checkout is unavailable, unauthorized or changed; request a fresh checkout target").await;
     }
 
     #[tokio::test]
     async fn command_checkout_head_change_after_preparation_has_no_spawn() {
         let fixture = CheckoutFixture::new().await;
         let args = fixture.command_args();
-        let root = fixture.root.clone();
-        fixture
-            .assert_refused_before_spawn(args, move || {
-                std::fs::write(root.join("file"), "changed").unwrap();
-                crate::worktrees::git::run_git(&root, &["add", "file"]).unwrap();
-                crate::worktrees::git::run_git(&root, &["commit", "-m", "new-head"]).unwrap();
-            })
-            .await;
+        approval_request(&fixture.ccx, &args).await.unwrap();
+        std::fs::write(fixture.root.join("file"), "changed").unwrap();
+        crate::worktrees::git::run_git(&fixture.root, &["add", "file"]).unwrap();
+        crate::worktrees::git::run_git(&fixture.root, &["commit", "-m", "new-head"]).unwrap();
+        let actual = crate::worktrees::git::run_git(&fixture.root, &["rev-parse", "HEAD"]).unwrap();
+        let expected = format!(
+            "Checkout {} at {} changed: expected HEAD {}, actual {}; request a fresh checkout target",
+            fixture.selector["expected_worktree_id"].as_str().unwrap(),
+            fixture.root.display(),
+            fixture.selector["expected_head"].as_str().unwrap(),
+            actual.trim(),
+        );
+        fixture.assert_refused(args, &expected).await;
     }
 
     #[tokio::test]
@@ -4370,7 +4462,7 @@ mod tests {
         let fixture = CheckoutFixture::new().await;
         let mut args = fixture.command_args();
         args.get_mut("checkout").unwrap()["expected_worktree_id"] = json!("different-worktree");
-        fixture.assert_refused(args).await;
+        fixture.assert_refused(args, "command checkout is unavailable, unauthorized or changed; request a fresh checkout target").await;
     }
 
     #[tokio::test]
@@ -4427,14 +4519,14 @@ mod tests {
         assert_eq!(error["retryable"], false);
         assert!(!error["request_id"].as_str().unwrap().is_empty());
         assert_eq!(error.as_object().unwrap().len(), 4);
-        fixture.assert_refused(fixture.command_args()).await;
+        fixture.assert_refused(fixture.command_args(), "task board mutation requires the owning planner chat; owning planner chat: planner. Open that planner chat to operate on this checkout").await;
     }
 
     #[tokio::test]
     async fn command_checkout_foreign_bound_task_has_no_spawn() {
         let fixture = CheckoutFixture::new().await;
         fixture.ccx.lock().await.task_meta.as_mut().unwrap().task_id = "foreign-task".into();
-        fixture.assert_refused(fixture.command_args()).await;
+        fixture.assert_refused(fixture.command_args(), "command checkout is unavailable, unauthorized or changed; request a fresh checkout target").await;
     }
 
     #[tokio::test]
@@ -4450,7 +4542,7 @@ mod tests {
             .cloned()
             .unwrap();
         session.lock().await.runtime.state = refact_runtime_api::SessionState::Generating;
-        fixture.assert_refused(fixture.command_args()).await;
+        fixture.assert_refused(fixture.command_args(), "command checkout is unavailable, unauthorized or changed; request a fresh checkout target").await;
     }
 
     #[tokio::test]
@@ -4487,10 +4579,10 @@ mod tests {
         let fixture = CheckoutFixture::new().await;
         let mut args = fixture.command_args();
         args.insert("workdir".into(), json!(fixture.source));
-        fixture.assert_refused(args).await;
+        fixture.assert_refused(args, "command checkout is unavailable, unauthorized or changed; request a fresh checkout target").await;
         let mut traversal = fixture.command_args();
         traversal.insert("workdir".into(), json!("child/.."));
-        fixture.assert_refused(traversal).await;
+        fixture.assert_refused(traversal, "command checkout is unavailable, unauthorized or changed; request a fresh checkout target").await;
     }
 
     #[cfg(unix)]
@@ -4507,7 +4599,7 @@ mod tests {
             .assert_refused_before_spawn(args, move || {
                 std::fs::remove_file(&alias).unwrap();
                 std::os::unix::fs::symlink(&source, &alias).unwrap();
-            })
+            }, "command checkout is unavailable, unauthorized or changed; request a fresh checkout target")
             .await;
     }
 
@@ -4522,7 +4614,7 @@ mod tests {
             .await
             .abort_flag
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        fixture.assert_refused(args).await;
+        fixture.assert_refused(args, "command checkout is unavailable, unauthorized or changed; request a fresh checkout target").await;
     }
 
     #[tokio::test]

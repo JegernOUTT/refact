@@ -76,7 +76,8 @@ impl Tool for ToolUpdateGoal {
         }
         .ok_or_else(|| format!("chat session `{chat_id}` not found"))?;
 
-        crate::tasks::goal::hydrate_session_task_goal(gcx.clone(), &session_arc).await?;
+        crate::tasks::goal::hydrate_session_task_goal_for_mutation(gcx.clone(), &session_arc)
+            .await?;
         let (seq, result_truncation, advisory) = {
             let mut session = session_arc.lock().await;
             let messages = goal_role::prepare_goal_update(

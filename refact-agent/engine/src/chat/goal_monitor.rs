@@ -15,7 +15,7 @@ use crate::chat::types::*;
 
 pub const GOAL_MONITOR_INTERVAL: Duration = Duration::from_secs(30);
 const GOAL_MONITOR_STALL_GRACE: Duration = Duration::from_secs(30);
-const GOAL_MONITOR_NO_TOKEN_GRACE: Duration = Duration::from_secs(30);
+const GOAL_MONITOR_DIAGNOSTIC_GRACE: Duration = Duration::from_secs(180);
 const GOAL_MONITOR_SOURCE: &str = "chat.goal_monitor";
 /// After this many consecutive no-progress nudges an active goal whose no-progress
 /// budget is unlimited stops being nudged (goes quiescent) and resumes on the next
@@ -42,7 +42,6 @@ pub enum GoalNudgeReason {
     Idle,
     Error,
     Completed,
-    GeneratingNoTokens,
     TurnEnd,
 }
 
@@ -52,7 +51,6 @@ impl GoalNudgeReason {
             GoalNudgeReason::Idle => "idle",
             GoalNudgeReason::Error => "error",
             GoalNudgeReason::Completed => "completed",
-            GoalNudgeReason::GeneratingNoTokens => "generating_no_tokens",
             GoalNudgeReason::TurnEnd => "turn_end",
         }
     }
@@ -78,6 +76,8 @@ pub enum GoalNudgeSkip {
     Quiescent,
     Sealed,
     OwnerUnavailable,
+    ReadOnlyHistory,
+    InvalidContext,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,7 +123,7 @@ impl Default for GoalNudgeConfig {
     fn default() -> Self {
         Self {
             stall_grace: GOAL_MONITOR_STALL_GRACE,
-            no_token_grace: GOAL_MONITOR_NO_TOKEN_GRACE,
+            no_token_grace: GOAL_MONITOR_DIAGNOSTIC_GRACE,
         }
     }
 }
@@ -178,6 +178,9 @@ pub async fn handle_goal_turn_end(app: AppState, session_arc: Arc<AMutex<ChatSes
         GoalNudgeTrigger::InlineTurnEnd,
     )
     .await;
+    if outcome == GoalNudgeOutcome::Skipped(GoalNudgeSkip::ReadOnlyHistory) {
+        return false;
+    }
     if matches!(
         outcome,
         GoalNudgeOutcome::Skipped(GoalNudgeSkip::Sealed | GoalNudgeSkip::OwnerUnavailable)
@@ -189,7 +192,8 @@ pub async fn handle_goal_turn_end(app: AppState, session_arc: Arc<AMutex<ChatSes
     }
 
     if let Err(error) =
-        crate::tasks::goal::hydrate_session_task_goal(app.gcx.clone(), &session_arc).await
+        crate::tasks::goal::hydrate_session_task_goal_for_mutation(app.gcx.clone(), &session_arc)
+            .await
     {
         tracing::warn!(%error, "goal turn end owner unavailable");
         return true;
@@ -231,18 +235,28 @@ pub async fn dispatch_goal_nudge(
     session_arc: Arc<AMutex<ChatSession>>,
     trigger: GoalNudgeTrigger,
 ) -> GoalNudgeOutcome {
-    let chat_id = session_arc.lock().await.chat_id.clone();
+    let chat_id = {
+        let session = session_arc.lock().await;
+        if session.has_runner_lease() {
+            return GoalNudgeOutcome::Skipped(GoalNudgeSkip::Busy);
+        }
+        session.chat_id.clone()
+    };
     if crate::agents::seal::is_sealed(&app, &chat_id).await {
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::Sealed);
     }
     if app.agents.child_chat_paused(&chat_id).await {
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::IntentionallyWaiting);
     }
-    if let Err(error) =
-        crate::tasks::goal::hydrate_session_task_goal(app.gcx.clone(), &session_arc).await
+    match crate::tasks::goal::hydrate_session_task_goal_for_pursuit(app.gcx.clone(), &session_arc)
+        .await
     {
-        tracing::warn!(%chat_id, %error, "goal nudge owner unavailable");
-        return GoalNudgeOutcome::Skipped(GoalNudgeSkip::OwnerUnavailable);
+        Ok(true) => {}
+        Ok(false) => return GoalNudgeOutcome::Skipped(GoalNudgeSkip::ReadOnlyHistory),
+        Err(error) => {
+            tracing::warn!(%chat_id, %error, "goal nudge owner unavailable");
+            return GoalNudgeOutcome::Skipped(GoalNudgeSkip::OwnerUnavailable);
+        }
     }
     let now_ms = epoch_ms_now();
     let (outcome, processor_flag) = {
@@ -317,6 +331,9 @@ pub fn try_apply_goal_nudge(
     if session.closed {
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::Closed);
     }
+    if session.has_runner_lease() {
+        return GoalNudgeOutcome::Skipped(GoalNudgeSkip::Busy);
+    }
 
     let Some(goal) = session.goal.as_ref() else {
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::NoGoal);
@@ -384,15 +401,16 @@ pub fn try_apply_goal_nudge(
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::Quiescent);
     }
 
-    let context = session.goal.as_ref().map(nudge_context).unwrap_or_default();
-    let push = if reason == GoalNudgeReason::GeneratingNoTokens {
-        PushMode::Preempt
-    } else {
-        PushMode::Append
+    let context = match nudge_context(session) {
+        Ok(context) => context,
+        Err(error) => {
+            tracing::warn!(%error, "Goal nudge blocked by invalid control context");
+            return GoalNudgeOutcome::Skipped(GoalNudgeSkip::InvalidContext);
+        }
     };
     let delivery = PendingDelivery::new(
         vec![goal_nudge_event(trigger, reason, now_ms, &context)],
-        push,
+        PushMode::Append,
         GOAL_MONITOR_SOURCE,
         true,
     );
@@ -403,13 +421,7 @@ pub fn try_apply_goal_nudge(
         Ok(_) => {}
         Err(_) => return GoalNudgeOutcome::Skipped(GoalNudgeSkip::QueueRejected),
     }
-    if matches!(
-        reason,
-        GoalNudgeReason::Error | GoalNudgeReason::GeneratingNoTokens
-    ) {
-        // An error or a generation with no tokens never records usage-based
-        // progress, so nothing else advances no_progress_turns. Count the nudge
-        // itself so exponential backoff and quiescence still engage.
+    if reason == GoalNudgeReason::Error {
         session.goal_note_no_progress_turn();
     }
     session.goal_record_nudge(now_ms);
@@ -457,7 +469,10 @@ fn busy_without_stall(
         GoalNudgeTrigger::InlineTurnEnd => session.runtime.state != SessionState::Idle,
         GoalNudgeTrigger::Monitor => match session.runtime.state {
             SessionState::Generating => {
-                generating_quiet_for(session, now, config.no_token_grace).is_none()
+                if generating_quiet_for(session, now, config.no_token_grace).is_some() {
+                    tracing::debug!(chat_id = %session.chat_id, "Goal monitor: stream silence; request watchdog owns recovery");
+                }
+                true
             }
             SessionState::ExecutingTools => true,
             _ => false,
@@ -490,8 +505,6 @@ fn nudge_reason(
             SessionState::Completed if session.last_activity + config.stall_grace <= now => {
                 Some(GoalNudgeReason::Completed)
             }
-            SessionState::Generating => generating_quiet_for(session, now, config.no_token_grace)
-                .map(|_| GoalNudgeReason::GeneratingNoTokens),
             _ => None,
         },
     }
@@ -537,33 +550,91 @@ fn goal_nudge_event(
     )
 }
 
-fn nudge_context(goal: &GoalSnapshot) -> String {
-    let mut lines = Vec::new();
-    let goal_text = goal.content.trim();
-    if !goal_text.is_empty() {
-        let mut short: String = goal_text.chars().take(400).collect();
-        if goal_text.chars().count() > 400 {
-            short.push('…');
-        }
-        lines.push(format!("Goal: {short}"));
+fn bounded_excerpt(text: &str, limit: usize) -> String {
+    let mut chars = text.trim().chars();
+    let mut out: String = chars.by_ref().take(limit).collect();
+    if chars.next().is_some() && limit > 0 {
+        out.pop();
+        out.push('…');
     }
+    out
+}
+
+fn nudge_context(session: &ChatSession) -> Result<String, String> {
+    let projection = session.try_accepted_control_projection()?;
+    let goal = session.goal.as_ref().ok_or("goal unavailable")?;
+    let base = refact_chat_api::goal_role::current_base_goal(&projection)
+        .ok_or("installed goal control unavailable")?;
+    let start = projection
+        .messages
+        .iter()
+        .position(|m| std::ptr::eq(m, base))
+        .unwrap();
+    let mut lines = Vec::new();
+    let latest_goal = refact_chat_api::goal_role::goal_delta_events(&projection)
+        .into_iter()
+        .rev()
+        .map(|m| m.content.content_text_only())
+        .find(|text| !text.trim().is_empty());
+    let (label, text) = match latest_goal {
+        Some(text) => ("Latest goal update", text),
+        None => ("Goal", base.content.content_text_only()),
+    };
+    lines.push(format!("{label}: {}", bounded_excerpt(&text, 500)));
+    let mut plan = base.extra["goal"]["plan"]["content"]
+        .as_str()
+        .map(str::to_owned);
+    let mut plan_label = "Plan";
+    for message in projection.messages.iter().skip(start + 1) {
+        let event = message
+            .extra
+            .get("event")
+            .unwrap_or(&serde_json::Value::Null);
+        let payload = &event["payload"];
+        if payload["goal_id"]
+            .as_str()
+            .is_some_and(|id| id != base.message_id)
+            || !(refact_chat_api::goal_role::is_plan_delta(message)
+                || event["subkind"].as_str() == Some("plan_delta"))
+        {
+            continue;
+        }
+        let text = payload["plan"]["content"]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| message.content.content_text_only());
+        if !text.trim().is_empty() {
+            plan_label = if payload.get("plan").is_some() {
+                "Plan"
+            } else {
+                "Latest plan update"
+            };
+            plan = Some(text);
+        }
+    }
+    if let Some(plan) = plan {
+        lines.push(format!("{plan_label}: {}", bounded_excerpt(&plan, 500)));
+    }
+    lines.push(
+        "Latest accepted changes; consult the installed goal/plan for full constraints.".into(),
+    );
     if let Some(gaps) = goal
         .attempts
         .last()
         .filter(|attempt| attempt.verdict != "met" && !attempt.gaps.is_empty())
         .map(|attempt| attempt.gaps.join("; "))
     {
-        lines.push(format!("Remaining gaps: {gaps}"));
+        lines.push(format!("Remaining gaps: {}", bounded_excerpt(&gaps, 300)));
     }
     let turns = match goal.budget.max_turns.filter(|limit| *limit > 0) {
         Some(limit) => format!("{}/{}", goal.progress.turns_used, limit),
         None => goal.progress.turns_used.to_string(),
     };
-    lines.push(format!(
+    lines.push(bounded_excerpt(&format!(
         "Progress: turns {}, no-progress turns {}. If nothing remains, call validate_goal or finish; use wait for running work, or pause with target {{kind: \"goal\"}} and an optional until_ms deadline to suspend pursuit.",
         turns, goal.progress.no_progress_turns
-    ));
-    lines.join("\n")
+    ), 220));
+    Ok(bounded_excerpt(&lines.join("\n"), 1600))
 }
 
 fn goal_is_quiescent(session: &ChatSession) -> bool {
@@ -603,7 +674,11 @@ pub fn mark_goal_blocked_on_context_limit(session: &mut ChatSession) -> bool {
     {
         session.goal_set_status_reason(GoalStatus::NoProgress, "context_limit");
     }
-    record_quiescent_event_if_needed(session, GoalNudgeTrigger::Monitor, now_ms);
+    if has_finite_limit {
+        record_terminal_goal_event_if_needed(session, GoalNudgeTrigger::Monitor, now_ms);
+    } else {
+        record_quiescent_event_if_needed(session, GoalNudgeTrigger::Monitor, now_ms);
+    }
     session.mark_persisted_runtime_changed();
     session.emit_goal_status();
     true
@@ -668,7 +743,7 @@ fn goal_quiescent_event(
             "trigger": trigger.as_str(),
             "at_ms": at_ms,
         }),
-        "Goal pursuit paused: agent idle with no progress; will resume on your next message."
+        "Automatic goal reminders are quiet after repeated no-progress attempts or a context limit. The goal status is unchanged; a new user message can reset the reminder throttle."
             .to_string(),
     )
 }
@@ -1001,7 +1076,7 @@ mod tests {
         generating.last_activity = now - Duration::from_secs(10);
         assert_eq!(
             apply_monitor(&mut generating, 10_000, now),
-            GoalNudgeOutcome::Nudged(GoalNudgeReason::GeneratingNoTokens)
+            GoalNudgeOutcome::Skipped(GoalNudgeSkip::Busy)
         );
     }
 
@@ -1041,6 +1116,32 @@ mod tests {
         );
         assert!(quiescent_seen, "error loop must reach quiescence");
         assert!(goal_is_quiescent(&session));
+        assert_eq!(session.goal.as_ref().unwrap().status, GoalStatus::Active);
+        let notice = session
+            .messages
+            .iter()
+            .chain(
+                session
+                    .pending_deliveries
+                    .iter()
+                    .flat_map(|d| d.messages.iter()),
+            )
+            .find(|m| goal_pursuit_kind(m) == Some("pursuit_quiescent"))
+            .unwrap();
+        assert!(notice
+            .content
+            .content_text_only()
+            .contains("goal status is unchanged"));
+        assert!(!notice
+            .content
+            .content_text_only()
+            .contains("pursuit paused"));
+        assert!(session.delivery_wake_sources.is_empty());
+        assert!(!record_quiescent_event_if_needed(
+            &mut session,
+            GoalNudgeTrigger::Monitor,
+            now_ms
+        ));
     }
 
     #[test]
@@ -1120,6 +1221,38 @@ mod tests {
             })
             .count();
         assert_eq!(nudge_events, 1);
+        let prefix = session.goal_ledger.clone();
+        session.delivery_wake_sources.clear();
+        session.last_activity = now - Duration::from_secs(10);
+        assert_eq!(
+            apply_monitor(&mut session, 30_000, now),
+            GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
+        );
+        assert!(session.goal_ledger.starts_with(&prefix));
+        let nudges: Vec<_> = session
+            .goal_ledger
+            .iter()
+            .filter(|entry| matches!(entry.op, refact_chat_api::GoalLedgerOp::NudgeRecorded))
+            .collect();
+        assert_eq!(nudges.len(), 2);
+        assert_eq!(nudges[0].at_ms, 10_000);
+        assert_eq!(nudges[1].at_ms, 30_000);
+        assert!(nudges[1].seq > nudges[0].seq);
+        assert_eq!(nudge_event_count(&session), 2);
+        assert_eq!(
+            refact_chat_api::reduce_goal_ledger(&session.goal_ledger)
+                .unwrap()
+                .progress
+                .last_nudge_at_ms,
+            30_000
+        );
+        let ledger = session.goal_ledger.clone();
+        assert_eq!(
+            apply_monitor(&mut session, 30_001, now),
+            GoalNudgeOutcome::Skipped(GoalNudgeSkip::Cooldown)
+        );
+        assert_eq!(session.goal_ledger, ledger);
+        assert_eq!(nudge_event_count(&session), 2);
     }
 
     #[test]
@@ -1237,6 +1370,24 @@ mod tests {
     #[test]
     fn goal_monitor_nudge_content_carries_goal_context() {
         let (mut session, now) = old_idle_session();
+        session.messages[0].content = ChatContent::SimpleText("obsolete scope ".repeat(80));
+        let base_id = session.messages[0].message_id.clone();
+        session.add_message(internal_roles::goal_delta(
+            "test",
+            json!({"goal_id":base_id,"seq":1}),
+            "latest corrected outcome",
+        ));
+        session.add_message(internal_roles::goal_delta(
+            "test",
+            json!({"goal_id":base_id,"target":"plan","seq":1}),
+            "latest corrected plan",
+        ));
+        session.add_message(internal_roles::goal_delta(
+            "test",
+            json!({"goal_id":"superseded","target":"plan","seq":2}),
+            "superseded plan note",
+        ));
+        session.last_activity = now - Duration::from_secs(10);
         session.goal.as_mut().unwrap().attempts.push(GoalAttempt {
             at_ms: 1,
             trigger: "finish".to_string(),
@@ -1252,7 +1403,11 @@ mod tests {
         );
 
         let content = session.messages.last().unwrap().content.content_text_only();
-        assert!(content.contains("Goal: ship the thing"));
+        assert!(content.contains("Latest goal update: latest corrected outcome"));
+        assert!(content.contains("Latest plan update: latest corrected plan"));
+        assert!(!content.contains("obsolete scope"));
+        assert!(!content.contains("superseded plan note"));
+        assert!(content.chars().count() <= 1700);
         assert!(content.contains("Remaining gaps: docs missing"));
         assert!(content.contains("pause with target"));
     }
@@ -1336,27 +1491,49 @@ mod tests {
     }
 
     #[test]
-    fn goal_monitor_no_token_stall_interrupts_running_generation() {
+    fn goal_monitor_no_token_stall_preserves_running_generation() {
         let mut session = active_goal_session();
         let now = Instant::now();
         session.start_stream();
         session.last_activity = now - Duration::from_secs(10);
+        session.last_stream_delta_at = Some(now - Duration::from_secs(10));
         session
             .queue_processor_running
             .store(true, Ordering::SeqCst);
 
         assert_eq!(
             apply_monitor(&mut session, 10_000, now),
-            GoalNudgeOutcome::Nudged(GoalNudgeReason::GeneratingNoTokens)
+            GoalNudgeOutcome::Skipped(GoalNudgeSkip::Busy)
         );
-        assert!(session.abort_flag.load(Ordering::SeqCst));
-        assert!(session.user_interrupt_flag.load(Ordering::SeqCst));
-        assert_eq!(session.runtime.state, SessionState::Idle);
-        assert!(session.draft_message.is_none());
-        assert!(!session.delivery_wake_sources.is_empty());
-        assert!(session.messages.iter().any(|message| message
+        assert!(!session.abort_flag.load(Ordering::SeqCst));
+        assert!(!session.user_interrupt_flag.load(Ordering::SeqCst));
+        assert_eq!(session.runtime.state, SessionState::Generating);
+        assert!(session.delivery_wake_sources.is_empty());
+        assert_eq!(session.goal.as_ref().unwrap().progress.no_progress_turns, 0);
+        assert!(!session.messages.iter().any(|message| message
             .extra
             .get("event")
             .is_some_and(|event| event["subkind"] == "cancellation_note")));
+    }
+
+    #[test]
+    fn goal_monitor_skips_runner_owned_idle_session() {
+        let (mut session, now) = old_idle_session();
+        let token = session
+            .claim_runner(
+                "goal-runner".into(),
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            )
+            .unwrap();
+        assert!(session.has_runner_lease());
+        let ledger = session.goal_ledger.clone();
+        assert_eq!(
+            apply_monitor(&mut session, 10_000, now),
+            GoalNudgeOutcome::Skipped(GoalNudgeSkip::Busy)
+        );
+        assert!(session.pending_deliveries.is_empty());
+        assert!(session.delivery_wake_sources.is_empty());
+        assert_eq!(session.goal_ledger, ledger);
+        session.release_runner(&token);
     }
 }

@@ -2,6 +2,7 @@ pub mod admission;
 pub mod assignment;
 pub mod board_lock;
 pub mod comments;
+pub(crate) mod custody;
 pub mod events;
 pub mod goal;
 pub mod index;

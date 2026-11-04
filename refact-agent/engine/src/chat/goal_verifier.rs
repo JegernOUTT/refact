@@ -170,11 +170,15 @@ pub async fn verify_goal_before_completion(
     session_arc: Arc<AMutex<ChatSession>>,
     trigger: &str,
 ) -> GoalCompletionGateOutcome {
-    if let Err(error) =
-        crate::tasks::goal::hydrate_session_task_goal(app.gcx.clone(), &session_arc).await
+    match crate::tasks::goal::hydrate_session_task_goal_for_pursuit(app.gcx.clone(), &session_arc)
+        .await
     {
-        tracing::warn!(%error, "Task goal verification hydration refused");
-        return GoalCompletionGateOutcome::VerificationUnavailable;
+        Ok(true) => {}
+        Ok(false) => return GoalCompletionGateOutcome::Passthrough,
+        Err(error) => {
+            tracing::warn!(%error, "Task goal verification hydration refused");
+            return GoalCompletionGateOutcome::VerificationUnavailable;
+        }
     }
     let chat_id = session_arc.lock().await.chat_id.clone();
     if crate::agents::seal::is_sealed(&app, &chat_id).await {
@@ -1058,17 +1062,28 @@ pub async fn apply_goal_verdict_for_chat(
         crate::buddy::supervision_proof::discard_pending(&chat_id, &reply.verifier_reply);
         return GoalVerificationApplyOutcome::Sealed;
     }
-    if crate::tasks::goal::hydrate_session_task_goal(app.gcx.clone(), session_arc)
+    match crate::tasks::goal::hydrate_session_task_goal_for_pursuit(app.gcx.clone(), session_arc)
         .await
-        .is_err()
     {
-        crate::buddy::supervision_proof::discard_pending(&chat_id, &reply.verifier_reply);
-        let mut session = session_arc.lock().await;
-        if session.goal_status == Some(GoalStatus::Verifying) {
-            session.goal_set_status_reason(GoalStatus::Paused, "goal owner unavailable");
-            session.purge_goal_generated_wakes();
+        Ok(true) => {}
+        Ok(false) => {
+            crate::buddy::supervision_proof::discard_pending(&chat_id, &reply.verifier_reply);
+            let mut session = session_arc.lock().await;
+            if session.goal_status == Some(GoalStatus::Verifying) {
+                session.goal_set_status_reason(GoalStatus::Paused, "read-only history");
+                session.purge_goal_generated_wakes();
+            }
+            return GoalVerificationApplyOutcome::Superseded;
         }
-        return GoalVerificationApplyOutcome::Superseded;
+        Err(_) => {
+            crate::buddy::supervision_proof::discard_pending(&chat_id, &reply.verifier_reply);
+            let mut session = session_arc.lock().await;
+            if session.goal_status == Some(GoalStatus::Verifying) {
+                session.goal_set_status_reason(GoalStatus::Paused, "goal owner unavailable");
+                session.purge_goal_generated_wakes();
+            }
+            return GoalVerificationApplyOutcome::Superseded;
+        }
     }
     let outcome = {
         let mut session = session_arc.lock().await;

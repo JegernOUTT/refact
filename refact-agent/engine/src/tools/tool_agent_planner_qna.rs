@@ -217,6 +217,41 @@ fn validate_reply_envelope(
     question_id: &str,
 ) -> Result<(), String> {
     let envelope = &receipt.envelope;
+    if receipt.version == 2 {
+        let valid_hash =
+            |hash: &str| hash.len() == 32 && hash.bytes().all(|byte| byte.is_ascii_hexdigit());
+        if receipt.task_id != task_id
+            || receipt.card_id != card_id
+            || receipt.question_id != question_id
+            || !is_question_id(question_id)
+            || receipt.planner_chat_id.is_empty()
+            || receipt.answer.is_empty()
+            || Uuid::parse_str(&receipt.action_id).is_err()
+            || Uuid::parse_str(&receipt.reservation).is_err()
+            || chrono::DateTime::parse_from_rfc3339(&receipt.answered_at).is_err()
+            || !valid_hash(&receipt.envelope_hash)
+            || !valid_hash(&receipt.answer_input_hash)
+            || receipt.attempt.chat_id.as_deref().is_none_or(str::is_empty)
+            || receipt
+                .attempt
+                .assignee
+                .as_deref()
+                .is_none_or(str::is_empty)
+            || receipt.state != ReplyDeliveryState::Delivered
+            || receipt
+                .outcome
+                .strip_prefix("persisted_ack:")
+                .is_none_or(|at| chrono::DateTime::parse_from_rfc3339(at).is_err())
+            || !envelope.messages.is_empty()
+            || envelope.id != reply_delivery_id(task_id, card_id, question_id, &receipt.attempt)?
+            || envelope.source != "planner_reply_tombstone"
+            || envelope.thread_patch.is_some()
+            || envelope.peer_mail.is_some()
+        {
+            return Err("Invalid terminal reply receipt; nothing may be replayed".into());
+        }
+        return Ok(());
+    }
     let expected = planner_delivery::planner_user_message(format!(
         "[Planner REPLY to {question_id}] {}",
         receipt.answer
@@ -284,8 +319,113 @@ fn validate_reply_envelope(
     Ok(())
 }
 
+pub(crate) async fn acknowledge_reply_persisted(
+    gcx: Arc<GlobalContext>,
+    chat_id: &str,
+    delivery_id: &str,
+) -> Result<(), String> {
+    let permit = match REPLY_DISPATCH.try_with(Clone::clone) {
+        Ok(permit) if permit.receipt.envelope.id == delivery_id => permit,
+        _ => return Ok(()),
+    };
+    let expected = &permit.receipt;
+    if expected.version != 1 || expected.envelope.messages.len() != 1 {
+        return Ok(());
+    }
+    let loaded = crate::chat::trajectories::load_trajectory_for_chat(gcx.clone(), chat_id)
+        .await
+        .ok_or("Reply recipient acknowledgement is not durable")?;
+    if expected.attempt.chat_id.as_deref() != Some(chat_id)
+        || loaded.thread.task_meta.as_ref().is_none_or(|meta| {
+            meta.task_id != expected.task_id
+                || meta.card_id.as_deref() != Some(expected.card_id.as_str())
+                || meta.agent_id != expected.attempt.assignee
+                || meta.role != "agents"
+        })
+        || !loaded.messages.iter().any(|message| {
+            refact_core::chat_types::delivery_id_of_message(message) == Some(delivery_id)
+                && serde_json::to_value(&message.content).ok()
+                    == serde_json::to_value(&expected.envelope.messages[0].content).ok()
+                && message.extra.get("privacy")
+                    == expected.envelope.messages[0].extra.get("privacy")
+        })
+    {
+        return Err("Reply durable acknowledgement identity does not match".into());
+    }
+    permit
+        .binding
+        .acknowledge_custody_reply(gcx.clone(), &expected.planner_chat_id, |board| {
+            let mut current = reply_receipt(board, &expected.card_id, &expected.question_id)?
+                .ok_or("Reply receipt missing")?;
+            if current.version == 2 {
+                return Ok(());
+            }
+            if current.reservation != expected.reservation
+                || current.envelope_hash != expected.envelope_hash
+                || current.attempt != expected.attempt
+            {
+                return Err("Reply acknowledgement reservation changed".into());
+            }
+            current.version = 2;
+            current.state = ReplyDeliveryState::Delivered;
+            current.outcome = format!("persisted_ack:{}", Utc::now().to_rfc3339());
+            current.envelope.messages.clear();
+            current.envelope.source = "planner_reply_tombstone".into();
+            store_reply_receipt(board, &expected.card_id, &expected.question_id, &current)
+        })
+        .await
+        .map(|_| ())
+}
+
+async fn compact_durable_reply_receipts(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    planner_chat_id: &str,
+) {
+    let Ok(binding) = storage::bound_planner_binding(gcx.clone(), task_id, planner_chat_id).await
+    else {
+        return;
+    };
+    let Ok(board) = storage::load_board(gcx.clone(), task_id).await else {
+        return;
+    };
+    let mut receipts = Vec::new();
+    for (card, rows) in &board.planner_replies {
+        for question in rows.keys() {
+            if receipts.len() >= 32 {
+                break;
+            }
+            if let Ok(Some(receipt)) = reply_receipt(&board, card, question) {
+                if receipt.version == 1
+                    && receipt.state == ReplyDeliveryState::Delivered
+                    && board.planner_binding_is_current(&receipt.planner_chat_id)
+                {
+                    receipts.push(receipt);
+                }
+            }
+        }
+    }
+    for receipt in receipts {
+        let Some(chat_id) = receipt.attempt.chat_id.clone() else {
+            continue;
+        };
+        let delivery_id = receipt.envelope.id.clone();
+        let permit = ReplyDispatchPermit {
+            binding: binding.clone(),
+            receipt,
+            refusal: Arc::new(std::sync::Mutex::new(None)),
+        };
+        let _ = REPLY_DISPATCH
+            .scope(
+                permit,
+                acknowledge_reply_persisted(gcx.clone(), &chat_id, &delivery_id),
+            )
+            .await;
+    }
+}
+
 #[derive(Clone)]
-struct ReplyDispatchPermit {
+pub(crate) struct ReplyDispatchPermit {
     binding: storage::TaskDirectoryBinding,
     receipt: ReplyReceipt,
     refusal: Arc<std::sync::Mutex<Option<String>>>,
@@ -293,6 +433,29 @@ struct ReplyDispatchPermit {
 
 tokio::task_local! {
     static REPLY_DISPATCH: ReplyDispatchPermit;
+}
+
+pub(crate) fn reply_dispatch_permit() -> Option<ReplyDispatchPermit> {
+    REPLY_DISPATCH.try_with(Clone::clone).ok()
+}
+
+pub(crate) async fn acknowledge_reply_with_permit(
+    permit: Option<ReplyDispatchPermit>,
+    gcx: Arc<GlobalContext>,
+    chat_id: &str,
+    delivery_id: &str,
+) -> Result<(), String> {
+    match permit {
+        Some(permit) => {
+            REPLY_DISPATCH
+                .scope(
+                    permit,
+                    acknowledge_reply_persisted(gcx, chat_id, delivery_id),
+                )
+                .await
+        }
+        None => Err("reply dispatch permit missing for persisted planner reply".into()),
+    }
 }
 
 pub(crate) fn is_planner_reply_delivery(delivery: &PendingDelivery) -> bool {
@@ -923,7 +1086,7 @@ impl Tool for ToolAgentAskPlanner {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, task_id, card_id, planner_chat_id) = agent_scope(&ccx).await?;
+        let (gcx, task_id, card_id, _) = agent_scope(&ccx).await?;
         let question_limit = crate::runtime_settings::current().planner_qna_question_limit;
         let (question, question_notice) = truncate_chars_with_notice(
             &required_string(args, "question")?,
@@ -1000,6 +1163,10 @@ impl Tool for ToolAgentAskPlanner {
         }
 
         let wake_note = if urgency == QuestionUrgency::Block {
+            let planner_chat_id = storage::load_board(gcx.clone(), &task_id)
+                .await
+                .ok()
+                .and_then(|board| crate::tasks::custody::current_planner_chat_id(&board));
             match planner_chat_id {
                 Some(planner_chat_id) => {
                     let app = ccx.lock().await.app.clone();
@@ -1124,6 +1291,7 @@ impl Tool for ToolPlannerReply {
         let _authenticated =
             storage::bound_planner_binding(gcx.clone(), &task_id, &planner_chat_id).await?;
 
+        compact_durable_reply_receipts(gcx.clone(), &task_id, &planner_chat_id).await;
         let initial_board = storage::load_board(gcx.clone(), &task_id).await?;
         if let Some(card) = initial_board.get_card(&card_id) {
             if card.column != "doing"
@@ -1346,6 +1514,9 @@ impl Tool for ToolPlannerReply {
                     DeliveryOutcome::Delivered => ReplyDeliveryState::Delivered,
                     _ => ReplyDeliveryState::Failed,
                 },
+                planner_delivery::DeliveryReport::QueuedWhileInterrupted { .. } => {
+                    ReplyDeliveryState::Accepted
+                }
                 planner_delivery::DeliveryReport::Unknown { .. } => ReplyDeliveryState::Unknown,
                 planner_delivery::DeliveryReport::NoLiveSession
                 | planner_delivery::DeliveryReport::Skipped { .. }
@@ -1367,6 +1538,10 @@ impl Tool for ToolPlannerReply {
                         .ok_or("Reply card no longer exists")?;
                     let current = reply_receipt(board, &card_id, &question_id)?
                         .ok_or("Reply receipt missing")?;
+                    if current.version == 2 {
+                        receipt = current;
+                        return Ok(());
+                    }
                     if current.reservation != reservation
                         || current.attempt != reply_attempt(board, card)
                     {
@@ -1956,10 +2131,7 @@ mod tests {
 
         let board = storage::load_board(gcx, "task-1").await.unwrap();
         let card = board.get_card("T-40").unwrap();
-        // Two [ASK:...] updates plus a [NOTIFY-FAILED:...] trace: the fixture's
-        // planner_chat_id ("planner-chat") is not a known planner trajectory, so
-        // the blocking wake-up records its failure durably on the card.
-        assert_eq!(card.status_updates.len(), 3);
+        assert_eq!(card.status_updates.len(), 2);
         assert!(card.status_updates[0].message.starts_with("[ASK:"));
         assert!(card.status_updates[0]
             .message
@@ -1967,11 +2139,8 @@ mod tests {
         assert!(card.status_updates[1]
             .message
             .ends_with(":block] agent flagged for planner attention"));
-        assert!(card.status_updates[2]
-            .message
-            .starts_with("[NOTIFY-FAILED:blocking_question]"));
         assert!(output.contains("question_id"));
-        assert!(output.contains("Planner wake-up failed"));
+        assert!(output.contains("No planner_chat_id"));
     }
 
     #[tokio::test]
@@ -2094,7 +2263,13 @@ mod tests {
             assert!(duplicate.contains("duplicate answer not delivered"));
             let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
             let final_receipt = reply_receipt(&board, "T-1", "1234abcd").unwrap().unwrap();
-            assert_eq!(final_receipt.envelope, first.envelope);
+            if final_receipt.version == 2 {
+                assert_eq!(expected, PushMode::Preempt);
+                assert!(final_receipt.envelope.messages.is_empty());
+                assert_eq!(final_receipt.envelope_hash, first.envelope_hash);
+            } else {
+                assert_eq!(final_receipt.envelope, first.envelope);
+            }
             assert_eq!(
                 final_receipt.state,
                 if expected == PushMode::Preempt {
@@ -2103,13 +2278,13 @@ mod tests {
                     ReplyDeliveryState::Accepted
                 }
             );
-            let session = session.lock().await;
-            let logical_messages = session
+            let recipient = session.lock().await;
+            let logical_messages = recipient
                 .pending_deliveries
                 .iter()
                 .filter(|d| d.id == first.envelope.id)
                 .count()
-                + session
+                + recipient
                     .messages
                     .iter()
                     .filter(|m| {
@@ -2117,7 +2292,7 @@ mod tests {
                     })
                     .count();
             assert_eq!(logical_messages, 1);
-            drop(session);
+            drop(recipient);
             assert_eq!(
                 board
                     .get_card("T-1")
@@ -2128,6 +2303,82 @@ mod tests {
                     .count(),
                 1
             );
+            let mut acknowledged = final_receipt.clone();
+            acknowledged.version = 1;
+            acknowledged.envelope = first.envelope.clone();
+            {
+                let mut recipient = session.lock().await;
+                recipient.work_project_root = Some(temp.path().to_path_buf());
+                recipient.pending_deliveries.clear();
+                recipient.messages.clear();
+                recipient.draft_message = None;
+                for message in acknowledged.envelope.stamp_messages() {
+                    recipient.add_message(message);
+                }
+            }
+            assert!(crate::chat::trajectories::try_save_trajectory(
+                AppState::from_gcx(gcx.clone()).await,
+                session.clone(),
+            )
+            .await
+            .unwrap());
+            let durable =
+                crate::chat::trajectories::load_trajectory_for_chat(gcx.clone(), "agent-chat-T-1")
+                    .await
+                    .unwrap();
+            let message = durable
+                .messages
+                .iter()
+                .find(|message| {
+                    refact_core::chat_types::delivery_id_of_message(message)
+                        == Some(acknowledged.envelope.id.as_str())
+                })
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(&message.content).unwrap(),
+                serde_json::to_value(&acknowledged.envelope.messages[0].content).unwrap()
+            );
+            assert_eq!(
+                message.extra.get("privacy"),
+                acknowledged.envelope.messages[0].extra.get("privacy")
+            );
+            let permit = ReplyDispatchPermit {
+                binding: storage::bound_planner_binding(gcx.clone(), "task-1", "planner-chat")
+                    .await
+                    .unwrap(),
+                receipt: acknowledged.clone(),
+                refusal: Arc::new(std::sync::Mutex::new(None)),
+            };
+            acknowledge_reply_with_permit(
+                Some(permit.clone()),
+                gcx.clone(),
+                "agent-chat-T-1",
+                &acknowledged.envelope.id,
+            )
+            .await
+            .unwrap();
+            let terminal = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+            let compact = reply_receipt(&terminal, "T-1", "1234abcd")
+                .unwrap()
+                .unwrap();
+            assert_eq!(compact.version, 2);
+            assert_eq!(compact.state, ReplyDeliveryState::Delivered);
+            assert!(compact.envelope.messages.is_empty());
+            assert_eq!(compact.envelope.source, "planner_reply_tombstone");
+            assert_eq!(compact.answer, acknowledged.answer);
+            assert_eq!(compact.envelope_hash, acknowledged.envelope_hash);
+            assert_eq!(compact.attempt, acknowledged.attempt);
+            assert_eq!(compact.reservation, acknowledged.reservation);
+            acknowledge_reply_with_permit(
+                Some(permit),
+                gcx.clone(),
+                "agent-chat-T-1",
+                &acknowledged.envelope.id,
+            )
+            .await
+            .unwrap();
+            let repeated = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+            assert_eq!(repeated.planner_replies, terminal.planner_replies);
         }
     }
 
@@ -2410,6 +2661,27 @@ mod tests {
                 .unwrap(),
         );
         assert!(output.contains("Reply message delivered"));
+        let terminal_board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        let terminal = reply_receipt(&terminal_board, "T-1", "1234abcd")
+            .unwrap()
+            .unwrap();
+        assert_eq!(terminal.version, 2);
+        assert!(terminal.envelope.messages.is_empty());
+        assert!(canonical_reply_ids(&terminal_board, "T-1").contains("1234abcd"));
+        let duplicate = output_text(
+            ToolPlannerReply::new()
+                .tool_execute(ccx.clone(), &"duplicate".into(), &arguments)
+                .await
+                .unwrap(),
+        );
+        assert!(duplicate.contains("duplicate answer not delivered"));
+        let mut conflicting = arguments.clone();
+        conflicting.insert("answer".into(), json!("Different"));
+        assert!(ToolPlannerReply::new()
+            .tool_execute(ccx.clone(), &"conflict".into(), &conflicting)
+            .await
+            .unwrap_err()
+            .contains("different answer"));
         {
             let agent = agent.lock().await;
             assert!(agent.pending_deliveries.is_empty());

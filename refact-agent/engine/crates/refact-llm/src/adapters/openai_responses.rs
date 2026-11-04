@@ -305,7 +305,13 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
 
             // Raw reasoning content is not safe for end-user display.
             "response.reasoning.delta" | "response.reasoning_text.delta" => {
-                tracing::trace!("{} (raw reasoning, skipping display)", event_type);
+                if json
+                    .get("delta")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| !text.is_empty())
+                {
+                    deltas.push(LlmStreamDelta::Activity);
+                }
             }
 
             // Summary deltas keep standard Responses streams live. Sequential-cutoff may only
@@ -393,10 +399,10 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
             | "response.content_part.added"
             | "response.content_part.done"
             | "response.metadata"
-            | "responsesapi.websocket_timing"
-            | "keepalive" => {
+            | "responsesapi.websocket_timing" => {
                 tracing::trace!("{} (redundant/lifecycle, skipping)", event_type);
             }
+            "keepalive" => deltas.push(LlmStreamDelta::Activity),
 
             // ── Text annotations (citations in output text) ──
             "response.output_text.annotation.added" => {
@@ -665,7 +671,7 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
             _ => {
                 // Unknown codex.* events are server-side telemetry/metadata by contract:
                 // keep them in extra for diagnostics but never render a server block.
-                if event_type.starts_with("codex.") {
+                if event_type.starts_with("codex.") || event_type.starts_with("responsesapi.") {
                     tracing::info!("Codex metadata event (absorbed): {}", event_type);
                     let mut extra = serde_json::Map::new();
                     extra.insert(
@@ -1613,30 +1619,19 @@ mod tests {
         });
         let deltas = adapter.parse_stream_chunk(&unknown.to_string()).unwrap();
 
-        match deltas.as_slice() {
-            [LlmStreamDelta::MergeExtra { extra }, LlmStreamDelta::AddServerContentBlock { block }] =>
-            {
-                assert_eq!(
-                    extra,
-                    json!({"unhandled_openai_responses_events": [{
-                        "sequence_number": 7,
-                        "event_type": "responsesapi.websocket_timing_unknown",
-                        "payload": unknown
-                    }]})
-                    .as_object()
-                    .unwrap()
-                );
-                assert_eq!(
-                    block,
-                    &json!({
-                        "type": "unhandled_openai_responses_event",
-                        "event_type": "responsesapi.websocket_timing_unknown",
-                        "payload": unknown
-                    })
-                );
-            }
-            _ => panic!("expected exact unknown-event diagnostic and visible server block"),
-        }
+        assert!(
+            matches!(deltas.as_slice(), [LlmStreamDelta::MergeExtra { extra }]
+            if extra["codex_metadata_events"][0]["payload"] == unknown)
+        );
+        let unknown = r#"{"type":"response.future_event","payload":"diagnostic"}"#;
+        let deltas = adapter.parse_stream_chunk(unknown).unwrap();
+        assert!(matches!(
+            deltas.as_slice(),
+            [
+                LlmStreamDelta::MergeExtra { .. },
+                LlmStreamDelta::AddServerContentBlock { .. }
+            ]
+        ));
 
         let timing =
             r#"{"type":"responsesapi.websocket_timing","timing_metrics":{"duration_ms":12}}"#;
@@ -2024,7 +2019,8 @@ mod tests {
 
             let deltas = adapter.parse_stream_chunk(&chunk.to_string()).unwrap();
 
-            assert!(deltas.is_empty(), "{event_type} must not be displayed");
+            assert!(matches!(deltas.as_slice(), [LlmStreamDelta::Activity]));
+            assert!(!format!("{deltas:?}").contains("Let me reason"));
         }
     }
 

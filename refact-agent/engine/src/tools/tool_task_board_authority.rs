@@ -154,7 +154,7 @@ impl Tool for ToolTaskBoardAuthority {
         let actor_for_update = actor.clone();
         let target_for_update = target.clone();
         let action_for_update = action.clone();
-        let (board, changed) = storage::update_board_atomic(gcx, &task_id, move |board| {
+        let (board, changed) = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
             match action_for_update.as_str() {
                 "claim_owner" => board.authorize_owner(&actor_for_update)?,
                 "add_reviewer" => {
@@ -177,7 +177,12 @@ impl Tool for ToolTaskBoardAuthority {
                     board.require_owner(&actor_for_update)?;
                     let target = target_for_update.as_ref().expect("target validated");
                     board.remove_reviewer(target);
-                    board.owner_chat_id = Some(target.clone());
+                    board
+                        .try_transfer_owner(
+                            target,
+                            chrono::Utc::now().timestamp_millis().max(0) as u64,
+                        )
+                        .map_err(|error| error.to_string())?;
                     board.clear_verifier_reports();
                 }
                 "set_review_policy" => {
@@ -190,6 +195,14 @@ impl Tool for ToolTaskBoardAuthority {
             Ok(true)
         })
         .await?;
+        if action == "transfer_owner" {
+            let task = task_id.clone();
+            tokio::spawn(async move {
+                if let Err(error) = crate::tasks::custody::rebind_task_agents(gcx, &task).await {
+                    tracing::warn!(%error, "planner custody reconciliation deferred");
+                }
+            });
+        }
         let receipt = json!({
             "type": "task_board_authority",
             "action": action,

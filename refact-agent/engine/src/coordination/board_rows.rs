@@ -31,7 +31,15 @@ impl BoardProvenance {
 }
 
 pub(crate) fn board_digest(board: &TaskBoard) -> Option<String> {
-    serde_json::to_string(board)
+    if board.owner_epoch == 0 && board.owner_custody.is_empty() {
+        return serde_json::to_string(board)
+            .ok()
+            .map(|body| crate::file_activity::digest_of(&body));
+    }
+    let mut projection = board.clone();
+    projection.owner_epoch = 0;
+    projection.owner_custody.clear();
+    serde_json::to_string(&projection)
         .ok()
         .map(|body| crate::file_activity::digest_of(&body))
 }
@@ -352,6 +360,32 @@ pub(super) mod tests {
 
     #[test]
     fn unknown_writers_and_modified_disclosure_never_inherit_clearance() {
+        let legacy_json = r#"{"schema_version":1,"rev":0,"columns":[],"cards":[],"owner_chat_id":"owner","review_policy":"owner_allowed"}"#;
+        let legacy_board: TaskBoard = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(serde_json::to_string(&legacy_board).unwrap(), legacy_json);
+        assert_eq!(
+            board_digest(&legacy_board),
+            Some(crate::file_activity::digest_of(legacy_json))
+        );
+        let default_json = serde_json::to_value(TaskBoard::default()).unwrap();
+        assert!(default_json.get("owner_epoch").is_none());
+        assert!(default_json.get("owner_custody").is_none());
+        let mut transferred = legacy_board.clone();
+        transferred.try_transfer_owner("successor", 1).unwrap();
+        let mut legacy_successor = legacy_board.clone();
+        legacy_successor.owner_chat_id = Some("successor".into());
+        assert_eq!(transferred.owner_epoch, 1);
+        assert_eq!(transferred.owner_custody.len(), 1);
+        assert_eq!(board_digest(&transferred), board_digest(&legacy_successor));
+        assert_ne!(board_digest(&legacy_board), board_digest(&transferred));
+        let legacy_provenance = BoardProvenance {
+            digest: crate::file_activity::digest_of(legacy_json),
+            records: vec![],
+            complete: true,
+            authority_version: 1,
+        };
+        assert!(legacy_provenance.valid_for(&legacy_board, &CoordinationSettings::default()));
+        assert!(!legacy_provenance.valid_for(&transferred, &CoordinationSettings::default()));
         let board = board();
         let settings = CoordinationSettings::default();
         let source = write_provenance(&board, None, Some((vec![], true)));

@@ -59,6 +59,7 @@ fn session_state(session: &ChatSession) -> WorkStateTag {
         SessionState::WaitingIde | SessionState::WaitingUserInput => WorkStateTag::WaitingApproval,
         SessionState::Completed => WorkStateTag::Completed,
         SessionState::Error => WorkStateTag::Failed,
+        SessionState::Interrupted => WorkStateTag::Interrupted,
         SessionState::Idle => {
             if session.runtime.queue_size > 0 || !session.command_queue.is_empty() {
                 WorkStateTag::Queued
@@ -87,6 +88,7 @@ fn agent_state(agent: &BackgroundAgent) -> WorkStateTag {
 fn session_kind(session: &ChatSession) -> WorkKindTag {
     match session.thread.task_meta.as_ref() {
         Some(meta) if meta.role.eq_ignore_ascii_case("planner") => WorkKindTag::TaskPlanner,
+        Some(meta) if meta.role == "linked" => WorkKindTag::Chat,
         Some(_) => WorkKindTag::BoardAgent,
         None => WorkKindTag::Chat,
     }
@@ -110,8 +112,10 @@ fn row_from_session(session: &ChatSession, roots: &ProjectRoots, stale: bool) ->
         }
     };
     let state = session_state(session);
-    let attention = matches!(state, WorkStateTag::WaitingApproval | WorkStateTag::Failed)
-        || !session.waiting_for_card_ids.is_empty();
+    let attention = matches!(
+        state,
+        WorkStateTag::WaitingApproval | WorkStateTag::Failed | WorkStateTag::Interrupted
+    ) || !session.waiting_for_card_ids.is_empty();
     let title = if session.thread.title.trim().is_empty() {
         None
     } else {
@@ -177,8 +181,10 @@ fn row_from_agent(agent: &BackgroundAgent, roots: &ProjectRoots) -> WorkRow {
         .iter()
         .filter(|question| question.answer.is_none())
         .count();
-    let attention =
-        matches!(state, WorkStateTag::WaitingApproval | WorkStateTag::Failed) || open_questions > 0;
+    let attention = matches!(
+        state,
+        WorkStateTag::WaitingApproval | WorkStateTag::Failed | WorkStateTag::Interrupted
+    ) || open_questions > 0;
     WorkRow {
         key: WorkKey::background_agent(agent.agent_id.clone()),
         metadata: WorkMetadata {
@@ -473,7 +479,10 @@ pub async fn build_catalog(
             row.metadata.freshness = Freshness::Live;
             row.stale = false;
             row.root_chat_id = Some(ticket.scope.root.to_string());
-            if row.state != WorkStateTag::WaitingApproval {
+            if !matches!(
+                row.state,
+                WorkStateTag::WaitingApproval | WorkStateTag::Interrupted
+            ) {
                 row.state = match ticket.state {
                     refact_work_core::TicketState::Reserved
                     | refact_work_core::TicketState::Pending => WorkStateTag::Queued,
@@ -550,6 +559,44 @@ impl WorkCatalog {
 mod tests {
     use super::*;
     use crate::chat::types::ChatSession;
+
+    #[tokio::test]
+    async fn interrupted_session_is_recoverable_and_requires_attention() {
+        let project =
+            tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![project.path().into()];
+        let roots = roots::load_project_roots(gcx.clone(), project.path().into()).await;
+        let app = AppState::from_gcx(gcx).await;
+        let mut session = ChatSession::new("interrupted".into());
+        session.work_project_root = Some(project.path().into());
+        session.runtime.state = crate::chat::types::SessionState::Interrupted;
+        let row = row_from_session(&session, &roots, false);
+        assert_eq!(row.state, WorkStateTag::Interrupted);
+        assert!(row.attention);
+        app.chat.sessions.write().await.insert(
+            "interrupted".into(),
+            Arc::new(tokio::sync::Mutex::new(session)),
+        );
+        let ticket = app
+            .work_scheduler
+            .reserve(refact_work_core::AdmissionRequest::new(
+                WorkKey::trajectory("interrupted").run(1),
+                refact_work_core::WorkScope::single(roots.project.clone()),
+            ))
+            .unwrap();
+        let permit = ticket.acquire().await.unwrap();
+        let catalog = build_catalog(&app, None).await.unwrap();
+        let row = catalog.find("interrupted").unwrap();
+        assert_eq!(row.state, WorkStateTag::Interrupted);
+        assert!(row.attention);
+        assert!(row.metadata.run.is_some());
+        let _parked = permit.park().unwrap();
+        let catalog = build_catalog(&app, None).await.unwrap();
+        let row = catalog.find("interrupted").unwrap();
+        assert_eq!(row.state, WorkStateTag::Interrupted);
+        assert!(row.attention);
+    }
 
     #[tokio::test]
     async fn unbound_and_foreign_sessions_are_not_adopted_by_selected_project() {

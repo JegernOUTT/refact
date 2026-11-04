@@ -168,12 +168,12 @@ pub async fn handle_v1_background_agents_message(
         PendingDelivery::new(
             vec![crate::chat::internal_roles::event(
                 crate::chat::internal_roles::EventSubkind::SystemNotice,
-                "agents.message",
+                crate::agents::push::NOTICE_MESSAGE,
                 json!({"from": "user"}),
                 format!("[message from user]\n{text}"),
             )],
             request.push,
-            "agents.message".to_string(),
+            crate::agents::push::NOTICE_MESSAGE.to_string(),
             true,
         ),
     )

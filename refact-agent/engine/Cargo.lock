@@ -4945,6 +4945,7 @@ dependencies = [
  "refact-chat-api",
  "refact-chat-history",
  "refact-tool-api",
+ "serde",
  "serde_json",
 ]
 

@@ -19,8 +19,17 @@ export type SessionState =
   | "paused"
   | "waiting_ide"
   | "waiting_user_input"
+  | "interrupted"
   | "completed"
   | "error";
+
+export type BoardInterruption = {
+  condition: string;
+  expected?: string | null;
+  actual?: string | null;
+  owner_chat_id?: string | null;
+  at?: string | null;
+};
 
 export type CompressionPhase =
   | "checking"
@@ -237,6 +246,7 @@ export type RuntimeState = {
   state: SessionState;
   paused: boolean;
   error: string | null;
+  interruption?: BoardInterruption | null;
   queue_size: number;
   goal_active?: boolean;
   goal_status?: GoalStatus | null;
@@ -520,6 +530,7 @@ export type EventEnvelope =
       waiting_interruptible?: boolean;
       state: string;
       error?: string;
+      interruption?: BoardInterruption | null;
       goal_active?: boolean;
       goal_status?: GoalStatus | null;
       goal_turns_used?: number;

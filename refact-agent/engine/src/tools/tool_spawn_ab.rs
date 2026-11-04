@@ -488,8 +488,10 @@ async fn mark_ab_setup_failed(
     chat_id: String,
     error: String,
 ) {
-    let _ = (task_id, card_id, key, chat_id);
-    source.reconcile(gcx, false, &error).await;
+    if let Err(reconcile) = source.reconcile(gcx, false, &error).await {
+        tracing::warn!(%reconcile, %task_id, %card_id, variant = key, %chat_id,
+            "A/B claim retained for owning-planner attention");
+    }
 }
 
 pub(crate) async fn dispatch_ab_variants(

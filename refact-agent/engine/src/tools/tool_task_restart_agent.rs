@@ -18,8 +18,10 @@ use crate::tools::task_tool_helpers::AGENT_ABORT_TIMEOUT;
 use crate::tasks::assignment::{self, Assignment, AssignmentScope};
 use crate::tools::tool_task_spawn_agent::{
     build_agent_thread_params, mark_card_agent_started, prepare_agent_worktree,
-    resolve_agent_model, restore_original_card_if_current_agent, AcceptedAgentSource,
+    resolve_agent_model, AcceptedAgentSource,
 };
+#[cfg(test)]
+use crate::tools::tool_task_spawn_agent::restore_original_card_if_current_agent;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::WorktreeMeta;
@@ -114,13 +116,19 @@ impl RestartRecovery {
                     || session.pending_browser_message.is_some()
                     || matches!(
                         session.runtime.state,
-                        refact_runtime_api::SessionState::Paused
-                            | refact_runtime_api::SessionState::WaitingIde
+                        refact_runtime_api::SessionState::WaitingIde
                     )
-                    || (session.runtime.state
-                        == refact_runtime_api::SessionState::WaitingUserInput
-                        && !session.runtime.error.as_deref().is_some_and(|error| {
-                            error.starts_with("Interrupted: needs_fresh_admission.")
+                    || (matches!(
+                        session.runtime.state,
+                        refact_runtime_api::SessionState::Paused
+                            | refact_runtime_api::SessionState::WaitingUserInput
+                            | refact_runtime_api::SessionState::Interrupted
+                    ) && !session
+                        .runtime
+                        .interruption
+                        .as_ref()
+                        .is_some_and(|interruption| {
+                            interruption.condition == "needs_fresh_admission"
                         })),
                 session.turn_depth > 0
                     || session
@@ -704,18 +712,25 @@ async fn restore_card_after_restart_failure(
     gcx: Arc<GlobalContext>,
     source: &AcceptedAgentSource,
     task_id: &str,
-    mut original_card: BoardCard,
+    original_card: BoardCard,
     guard_chat_id: String,
     status_update: Option<String>,
 ) {
-    let _ = (task_id, &mut original_card, guard_chat_id);
-    source
+    if let Err(error) = source.task_binding(task_id) {
+        tracing::warn!(%error, "Restart rollback binding refused");
+        return;
+    }
+    if let Err(error) = source
         .reconcile(
             gcx,
             true,
             status_update.as_deref().unwrap_or("Restart setup failed"),
         )
-        .await;
+        .await
+    {
+        tracing::warn!(%error, card_id = %original_card.id, %guard_chat_id,
+            "Restart claim retained for owning-planner attention");
+    }
 }
 
 fn mark_card_restarted_fresh(
@@ -1335,7 +1350,10 @@ impl Tool for ToolTaskRestartAgent {
                                     if let Some(accepted) = accepted.take() {
                                         let _ = accepted.send(Err(error.clone()));
                                     }
-                                    source.reconcile(gcx.clone(), true, &error).await;
+                                    if let Err(reconcile) = source.reconcile(gcx.clone(), true, &error).await {
+                                        tracing::warn!(%reconcile, %task_id, %agent_chat_id,
+                                            "Restart claim retained for owning-planner attention");
+                                    }
                                     setup_attempt.end();
                                 }
                                 if source.validate_task(gcx.clone(), &task_id).await.is_ok() {
@@ -2058,8 +2076,15 @@ mod tests {
             },
         );
         assert!(previous.goal_record_progress(137, true));
+        previous.runtime.interruption = Some(refact_chat_api::BoardInterruption {
+            condition: "needs_fresh_admission".into(),
+            expected: None,
+            actual: None,
+            owner_chat_id: Some("planner".into()),
+            at: chrono::Utc::now().to_rfc3339(),
+        });
         previous.set_runtime_state(
-            refact_runtime_api::SessionState::WaitingUserInput,
+            refact_runtime_api::SessionState::Interrupted,
             Some("Interrupted: needs_fresh_admission.".into()),
         );
         let finite_goal = previous.goal.clone().unwrap();

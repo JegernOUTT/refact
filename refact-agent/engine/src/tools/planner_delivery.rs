@@ -121,6 +121,10 @@ pub(crate) enum DeliveryReport {
         outcome: DeliveryOutcome,
         prior_state: Option<SessionState>,
     },
+    QueuedWhileInterrupted {
+        card_id: String,
+        condition: String,
+    },
     NoLiveSession,
     Skipped {
         reason: String,
@@ -163,6 +167,11 @@ impl DeliveryReport {
                 None,
                 prior_state.map(|state| state.to_string()),
             ),
+            DeliveryReport::QueuedWhileInterrupted { condition, .. } => (
+                "queued_interrupted",
+                Some(format!("Interrupted: {condition}; restart_agent required")),
+                Some("interrupted".into()),
+            ),
             DeliveryReport::NoLiveSession => ("no_live_session", None, None),
             DeliveryReport::Skipped { reason } => ("skipped", Some(reason.clone()), None),
             DeliveryReport::Failed { error } => ("failed", Some(error.clone()), None),
@@ -192,6 +201,9 @@ impl DeliveryReport {
                 }
                 DeliveryOutcome::Sealed => "not delivered (the chat is sealed)".to_string(),
             },
+            DeliveryReport::QueuedWhileInterrupted { .. } => {
+                "queued while interrupted — restart_agent required".into()
+            }
             DeliveryReport::NoLiveSession => "not delivered (no live agent session)".to_string(),
             DeliveryReport::Skipped { reason } => format!("not delivered ({})", reason),
             DeliveryReport::Failed { error } => format!("not delivered (failed: {})", error),
@@ -220,15 +232,18 @@ impl DeliveryReport {
                     DeliveryOutcome::Superseded => format!(
                         "{action} message was NOT delivered: a newer message with the same key replaced it."
                     ),
-                    DeliveryOutcome::Sealed => format!(
-                        "{action} message was NOT delivered: the chat is sealed."
-                    ),
+                    DeliveryOutcome::Sealed => {
+                        format!("{action} message was NOT delivered: the chat is sealed.")
+                    }
                     DeliveryOutcome::Queued | DeliveryOutcome::Delivered => format!(
                         "{action} message {}; prior agent state: {state}",
                         self.short_status()
                     ),
                 }
             }
+            DeliveryReport::QueuedWhileInterrupted { card_id, condition } => format!(
+                "{action} message was queued but the agent is INTERRUPTED ({condition}) and will not process it. Use restart_agent(card_id=\"{card_id}\", mode=\"resume\")"
+            ),
             DeliveryReport::NoLiveSession => format!(
                 "{} message was NOT delivered: no live agent session was found.",
                 action
@@ -320,7 +335,7 @@ pub(crate) async fn deliver_to_card_checked(
         Err(error) => {
             return DeliveryReport::Failed {
                 error: format!("could not re-read the board: {}", error),
-            }
+            };
         }
     }
 
@@ -332,7 +347,7 @@ pub(crate) async fn deliver_to_card_checked(
             Err(error) => {
                 return DeliveryReport::Failed {
                     error: format!("could not read the agent session state: {}", error),
-                }
+                };
             }
         }
 
@@ -342,7 +357,7 @@ pub(crate) async fn deliver_to_card_checked(
             Err(error) => {
                 return DeliveryReport::Failed {
                     error: format!("could not re-read the board: {}", error),
-                }
+                };
             }
         }
     } else if let Ok(state) = facade.session_state(&target.chat_id).await {
@@ -352,16 +367,39 @@ pub(crate) async fn deliver_to_card_checked(
     if let Err(reason) = before_send.await {
         return DeliveryReport::Skipped { reason };
     }
+    let mut interruption_condition = "restart required".to_string();
+    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    let session = { app.chat.sessions.read().await.get(&target.chat_id).cloned() };
+    if let Some(session) = session {
+        if let Some(interruption) = &session.lock().await.runtime.interruption {
+            interruption_condition = interruption.condition.clone();
+            prior_state = Some(SessionState::Interrupted);
+        }
+    }
     match card_is_stale(gcx, task_id, target, guard.require_doing).await {
         Ok(Some(reason)) => return DeliveryReport::Skipped { reason },
         Ok(None) => {}
         Err(error) => {
             return DeliveryReport::Failed {
                 error: format!("could not re-read the board before enqueue: {error}"),
-            }
+            };
         }
     }
     match facade.deliver_messages(&target.chat_id, pending).await {
+        Ok(outcome)
+            if prior_state == Some(SessionState::Interrupted)
+                && matches!(
+                    outcome,
+                    DeliveryOutcome::Queued
+                        | DeliveryOutcome::Delivered
+                        | DeliveryOutcome::Duplicate
+                ) =>
+        {
+            DeliveryReport::QueuedWhileInterrupted {
+                condition: interruption_condition,
+                card_id: target.card_id.clone(),
+            }
+        }
         Ok(outcome) => DeliveryReport::Delivered {
             outcome,
             prior_state,
@@ -596,6 +634,27 @@ mod tests {
         assert_eq!(report.receipt()["outcome"], "unknown");
         assert!(!report.reached_agent());
         assert!(report.describe("Reply").contains("Do not blindly replay"));
+    }
+
+    #[tokio::test]
+    async fn interrupted_delivery_is_accepted_but_not_reported_as_reached() {
+        let (_temp, gcx, task_id, target) = delivery_fixture().await;
+        let facade = Arc::new(StateFacade::new(Ok(Some(SessionState::Interrupted))));
+        let report = deliver_to_card(
+            gcx,
+            facade.clone(),
+            &task_id,
+            &target,
+            CardGuard::doing_with_live_session(),
+            single_message_delivery("Steer".into(), PushMode::Append, "test", true),
+        )
+        .await;
+        assert_eq!(facade.queued.lock().unwrap().len(), 1);
+        assert!(!report.reached_agent());
+        assert_eq!(report.receipt()["outcome"], "queued_interrupted");
+        assert!(report
+            .describe("Steer")
+            .contains("restart_agent(card_id=\"T-1\", mode=\"resume\")"));
     }
 
     fn args(items: &[(&str, Value)]) -> HashMap<String, Value> {

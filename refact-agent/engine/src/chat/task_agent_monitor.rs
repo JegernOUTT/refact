@@ -60,6 +60,35 @@ fn task_agent_monitor_notice(payload: serde_json::Value, content: String) -> Cha
     )
 }
 
+async fn current_owner(app: &AppState, task_id: &str) -> Result<String, String> {
+    let board = storage::load_board(app.gcx.clone(), task_id).await?;
+    if let Some(owner) = crate::tasks::custody::current_planner_chat_id(&board) {
+        return Ok(owner);
+    }
+    let sessions = app
+        .chat
+        .sessions
+        .read()
+        .await
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    for session in sessions {
+        let Ok(session) = session.try_lock() else {
+            continue;
+        };
+        if session
+            .thread
+            .task_meta
+            .as_ref()
+            .is_some_and(|meta| meta.task_id == task_id && meta.role == "planner")
+        {
+            return Ok(session.chat_id.clone());
+        }
+    }
+    Err("Task has no locally known owning planner".to_string())
+}
+
 /// A legitimate planner session can come back without `task_meta` when its first
 /// trajectory write raced a restart/eviction, or when the stored `task_meta` JSON
 /// failed to deserialize after a schema change; both load the trajectory fine
@@ -187,11 +216,13 @@ pub(crate) async fn notify_planner_blocking_question(
     app: AppState,
     task_id: &str,
     card_id: &str,
-    planner_chat_id: &str,
+    _planner_chat_id: &str,
     question_id: &str,
     question: &str,
     push: PushMode,
 ) -> Result<DeliveryOutcome, String> {
+    let owner = current_owner(&app, task_id).await?;
+    let planner_chat_id = owner.as_str();
     let notice = task_agent_monitor_notice(
         json!({
             "kind": "blocking_question",
@@ -271,7 +302,41 @@ async fn record_agent_attention(
     task_id: &str,
     card_id: &str,
     expected_agent_id: Option<&str>,
-    planner_chat_id: Option<&str>,
+    _planner_chat_id: Option<&str>,
+    kind: &str,
+    reason: &str,
+) -> Result<(), String> {
+    record_agent_attention_for_claim(app, task_id, card_id, expected_agent_id, None, kind, reason)
+        .await
+}
+
+pub(super) async fn record_paused_agent_attention(
+    app: AppState,
+    meta: &TaskMeta,
+    chat_id: &str,
+) -> Result<(), String> {
+    let (Some(card_id), Some(agent_id)) = (meta.card_id.as_deref(), meta.agent_id.as_deref())
+    else {
+        return Ok(());
+    };
+    record_agent_attention_for_claim(
+        app,
+        &meta.task_id,
+        card_id,
+        Some(agent_id),
+        Some(chat_id),
+        "no_session",
+        "agent paused: session busy after bounded retries; resume the agent",
+    )
+    .await
+}
+
+async fn record_agent_attention_for_claim(
+    app: AppState,
+    task_id: &str,
+    card_id: &str,
+    expected_agent_id: Option<&str>,
+    expected_chat_id: Option<&str>,
     kind: &str,
     reason: &str,
 ) -> Result<(), String> {
@@ -294,19 +359,48 @@ async fn record_agent_attention(
 
     let card_id_owned = card_id.to_string();
     let expected_agent_id_owned = expected_agent_id.map(str::to_string);
+    let expected_chat_id_owned = expected_chat_id.map(str::to_string);
     let reason_owned = reason.to_string();
     let kind_owned = kind.to_string();
     let timestamp = Utc::now().to_rfc3339();
     let (_, attention_update) =
         storage::update_board_atomic(app.gcx.clone(), task_id, move |board| {
+            // The paused attempt must still own the claim when the board is locked.
+            if let Some(chat_id) = expected_chat_id_owned.as_deref() {
+                let current = board.get_card(&card_id_owned).is_some_and(|card| {
+                    if let Some(variants) = &card.ab_variants {
+                        variants.winner.is_none()
+                            && [&variants.a, &variants.b].iter().any(|variant| {
+                                variant.chat_id == chat_id
+                                    && Some(variant.agent_id.as_str())
+                                        == expected_agent_id_owned.as_deref()
+                                    && variant.finish.is_none()
+                            })
+                    } else if !card.team_members.is_empty() {
+                        card.team_members
+                            .iter()
+                            .any(|member| member.agent_chat_id.as_deref() == Some(chat_id))
+                    } else {
+                        card.agent_chat_id.as_deref() == Some(chat_id)
+                            && board
+                                .card_claim(&card_id_owned)
+                                .is_none_or(|claim| claim.claimant_chat_id == chat_id)
+                    }
+                });
+                if !current {
+                    return Ok(None);
+                }
+            }
             let Some(card) = board.get_card_mut(&card_id_owned) else {
                 return Err(format!("Card {} not found", card_id_owned));
             };
             if card.column != "doing"
                 || card.paused_at.is_some()
-                || expected_agent_id_owned
-                    .as_ref()
-                    .is_some_and(|expected| card.assignee.as_ref() != Some(expected))
+                || (expected_chat_id_owned.is_none()
+                    || (card.ab_variants.is_none() && card.team_members.is_empty()))
+                    && expected_agent_id_owned
+                        .as_ref()
+                        .is_some_and(|expected| card.assignee.as_ref() != Some(expected))
             {
                 return Ok(None);
             }
@@ -333,28 +427,7 @@ async fn record_agent_attention(
         return Ok(());
     }
 
-    let planner_chat_id = if let Some(planner_chat_id) = planner_chat_id {
-        Some(planner_chat_id.to_string())
-    } else {
-        storage::list_task_trajectories_for(
-            app.gcx.clone(),
-            task_id,
-            "planner",
-            None,
-            crate::chat::trajectory_index::TrajectoryIndexListingCaller::TaskAgentMonitor,
-        )
-        .await?
-        .into_iter()
-        .max_by(|left, right| left.updated_at.cmp(&right.updated_at))
-        .map(|trajectory| trajectory.id)
-    };
-    let Some(planner_chat_id) = planner_chat_id else {
-        tracing::warn!(
-            "Cannot notify planner about attention for card {}: no planner chat",
-            card_id
-        );
-        return Ok(());
-    };
+    let planner_chat_id = current_owner(&app, task_id).await?;
     let notice = task_agent_monitor_notice(
         json!({
             "kind": "card_attention",
@@ -488,29 +561,6 @@ pub(super) fn agent_failure_attention_kind(failure_kind: AgentFailureKind) -> Op
     }
 }
 
-async fn agent_trajectory_is_recent(app: AppState, task_id: &str, agent_id: &str) -> bool {
-    storage::list_task_trajectories_for(
-        app.gcx.clone(),
-        task_id,
-        "agents",
-        Some(agent_id),
-        crate::chat::trajectory_index::TrajectoryIndexListingCaller::TaskAgentMonitor,
-    )
-    .await
-    .ok()
-    .is_some_and(|trajectories| {
-        trajectories.into_iter().any(|trajectory| {
-            chrono::DateTime::parse_from_rfc3339(&trajectory.updated_at)
-                .ok()
-                .is_some_and(|updated| {
-                    Utc::now().signed_duration_since(updated.with_timezone(&Utc))
-                        < chrono::Duration::from_std(AGENT_STUCK_TIMEOUT)
-                            .unwrap_or_else(|_| chrono::Duration::zero())
-                })
-        })
-    })
-}
-
 fn linked_agent_session_matches(session: &ChatSession, task_id: &str, card: &BoardCard) -> bool {
     let Some(meta) = session.thread.task_meta.as_ref() else {
         return false;
@@ -605,12 +655,14 @@ async fn notify_planner_about_reasoning_token_limit(
     task_id: &str,
     card_id: &str,
     agent_chat_id: &str,
-    planner_chat_id: &str,
+    _planner_chat_id: &str,
     prompt: String,
     finish_reason: &str,
     usage: Option<&ChatUsage>,
     message_id: &str,
 ) -> Result<bool, String> {
+    let owner = current_owner(&app, task_id).await?;
+    let planner_chat_id = owner.as_str();
     let notice = task_agent_monitor_notice(
         json!({
             "kind": "reasoning_token_limit",
@@ -873,21 +925,14 @@ async fn notify_planner_about_stalled_agent(
     task_id: &str,
     card: &BoardCard,
     agent_chat_id: &str,
-    planner_chat_id: Option<&str>,
+    _planner_chat_id: Option<&str>,
     kind: StallKind,
     stalled_for: Duration,
 ) -> Result<bool, String> {
     let card_id = card.id.as_str();
     let short_reason = kind.short_reason();
-
-    let Some(planner_chat_id) = planner_chat_id else {
-        tracing::warn!(
-            "Cannot notify planner about stalled agent for card {} in task {}: no planner_chat_id",
-            card_id,
-            task_id
-        );
-        return Ok(false);
-    };
+    let owner = current_owner(&app, task_id).await?;
+    let planner_chat_id = owner.as_str();
 
     let message = build_stalled_agent_planner_message(
         card_id,
@@ -1319,7 +1364,7 @@ pub(crate) async fn notify_planner_agents_finished(
     task_id: &str,
     board: &crate::tasks::types::TaskBoard,
     all_finished: bool,
-    planner_chat_id: Option<&str>,
+    _planner_chat_id: Option<&str>,
 ) -> Result<(), String> {
     let since = match storage::load_task_meta(app.gcx.clone(), task_id).await {
         Ok(meta) => meta
@@ -1443,63 +1488,7 @@ pub(crate) async fn notify_planner_agents_finished(
 
     let sessions = app.chat.sessions.clone();
 
-    let planner_chat_id = if let Some(id) = planner_chat_id {
-        id.to_string()
-    } else {
-        let agent_session_arcs = {
-            let sessions_guard = sessions.read().await;
-            board
-                .cards
-                .iter()
-                .filter(|card| card.column == "done" || card.column == "failed")
-                .filter_map(|card| card.agent_chat_id.as_deref())
-                .filter_map(|agent_chat_id| sessions_guard.get(agent_chat_id).cloned())
-                .collect::<Vec<_>>()
-        };
-        let mut planner_chat_id = None;
-        for session_arc in agent_session_arcs {
-            let session = session_arc.lock().await;
-            planner_chat_id = session
-                .thread
-                .task_meta
-                .as_ref()
-                .and_then(|meta| meta.planner_chat_id.clone());
-            if planner_chat_id.is_some() {
-                break;
-            }
-        }
-        if planner_chat_id.is_none() {
-            planner_chat_id = storage::list_task_trajectories_for(
-                app.gcx.clone(),
-                task_id,
-                "planner",
-                None,
-                crate::chat::trajectory_index::TrajectoryIndexListingCaller::TaskAgentMonitor,
-            )
-            .await
-            .ok()
-            .and_then(|trajectories| {
-                let prefix = format!("planner-{}-", task_id);
-                trajectories
-                    .into_iter()
-                    .max_by_key(|t| {
-                        (
-                            t.id.strip_prefix(&prefix)
-                                .and_then(|s| s.parse::<u32>().ok())
-                                .unwrap_or(0),
-                            t.updated_at.clone(),
-                        )
-                    })
-                    .map(|t| t.id)
-            });
-        }
-        planner_chat_id.ok_or_else(|| {
-            format!(
-                "Cannot notify task planner for task {}: finished agent has no planner_chat_id",
-                task_id
-            )
-        })?
-    };
+    let planner_chat_id = current_owner(&app, task_id).await?;
     let planner_session =
         get_or_create_session_with_trajectory(app.clone(), &sessions, &planner_chat_id).await;
     ensure_planner_task_meta(
@@ -2065,6 +2054,10 @@ async fn sweep_planner_wake_ups(app: AppState) -> Result<(), String> {
 }
 
 /// Check all active tasks for stuck agents
+pub(crate) fn session_is_failure(session: &super::types::ChatSession) -> bool {
+    session.runtime.state == SessionState::Error
+}
+
 pub(crate) async fn check_for_stuck_agents(app: AppState) -> Result<(), String> {
     let task_metas = storage::list_tasks(app.gcx.clone()).await?;
 
@@ -2075,6 +2068,17 @@ pub(crate) async fn check_for_stuck_agents(app: AppState) -> Result<(), String> 
 
         let task_id = &task_meta.id;
         let board = storage::load_board(app.gcx.clone(), task_id).await?;
+        if let Some(owner) = board.owner_chat_id.as_deref() {
+            let live = app.chat.sessions.read().await.contains_key(owner);
+            if !live
+                && crate::chat::trajectories::load_trajectory_for_chat(app.gcx.clone(), owner)
+                    .await
+                    .is_none()
+            {
+                continue;
+            }
+        }
+        let _ = crate::tasks::custody::rebind_task_agents(app.gcx.clone(), task_id).await;
         let sessions = app.chat.sessions.clone();
 
         for card in &board.cards {
@@ -2147,42 +2151,26 @@ pub(crate) async fn check_for_stuck_agents(app: AppState) -> Result<(), String> 
             };
 
             let Some(session_arc) = session_arc else {
-                if app.agent_executions.get(agent_chat_id).is_some()
-                    || agent_trajectory_is_recent(
-                        app.clone(),
-                        task_id,
-                        card.assignee.as_deref().unwrap_or_default(),
+                let local_owner = if let Some(owner) = board.owner_chat_id.as_deref() {
+                    app.chat.sessions.read().await.contains_key(owner)
+                } else {
+                    false
+                };
+                if local_owner
+                    && !crate::tasks::admission::is_tracked(agent_chat_id).await
+                    && app.agent_executions.get(agent_chat_id).is_none()
+                    && chrono::DateTime::parse_from_rfc3339(last_activity_timestamp).is_ok_and(
+                        |last| {
+                            Utc::now().signed_duration_since(last).num_seconds()
+                                > AGENT_STUCK_TIMEOUT.as_secs() as i64
+                        },
                     )
-                    .await
                 {
-                    continue;
-                }
-                if let Ok(last_time) = chrono::DateTime::parse_from_rfc3339(last_activity_timestamp)
-                {
-                    let elapsed = Utc::now().signed_duration_since(last_time.with_timezone(&Utc));
-                    if elapsed.num_seconds() as u64 > AGENT_STUCK_TIMEOUT.as_secs() {
-                        tracing::warn!(
-                            "Agent for card {} appears stuck (no session, last update {} ago)",
-                            card.id,
-                            humantime::format_duration(Duration::from_secs(
-                                elapsed.num_seconds() as u64
-                            ))
-                        );
-
-                        record_agent_attention(
-                            app.clone(),
-                            task_id,
-                            &card.id,
-                            card.assignee.as_deref(),
-                            None,
-                            "no_session",
-                            &format!(
-                                "Agent appears stuck (no activity for {})",
-                                humantime::format_duration(AGENT_STUCK_TIMEOUT)
-                            ),
-                        )
-                        .await?;
-                    }
+                    record_agent_attention(
+                        app.clone(), task_id, &card.id, card.assignee.as_deref(),
+                        Some(agent_chat_id), "no_session",
+                        "Agent setup has no local session or admission; inspect and restart from the owning planner",
+                    ).await?;
                 }
                 continue;
             };
@@ -2192,8 +2180,27 @@ pub(crate) async fn check_for_stuck_agents(app: AppState) -> Result<(), String> 
                 continue;
             }
 
+            if let Some(interruption) = session.runtime.interruption.as_ref() {
+                let reason = format!(
+                    "Interrupted ({}); restart_agent(card_id=\"{}\", mode=\"resume\")",
+                    interruption.condition, card.id
+                );
+                drop(session);
+                record_agent_attention(
+                    app.clone(),
+                    task_id,
+                    &card.id,
+                    card.assignee.as_deref(),
+                    None,
+                    "interrupted",
+                    &reason,
+                )
+                .await?;
+                continue;
+            }
+
             // Check if session is in Error state
-            if session.runtime.state == SessionState::Error {
+            if session_is_failure(&session) {
                 let error_msg = session
                     .runtime
                     .error
@@ -2297,6 +2304,9 @@ pub(crate) async fn check_for_stuck_agents(app: AppState) -> Result<(), String> 
                 continue;
             }
 
+            if session.runtime.state == SessionState::Paused {
+                continue;
+            }
             drop(session);
             clear_agent_attention(app.clone(), task_id, &card.id, card.assignee.as_deref()).await?;
         }
@@ -2310,6 +2320,61 @@ pub(crate) async fn check_for_stuck_agents(app: AppState) -> Result<(), String> 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn missing_local_agent_session_is_unknown_not_attention() {
+        let (_temp, app, task_id, chat, _agent, planner) = setup_monitor_case(
+            "doing",
+            SessionState::Idle,
+            AGENT_STUCK_TIMEOUT + Duration::from_secs(1),
+            vec![],
+        )
+        .await;
+        storage::update_board_atomic(app.gcx.clone(), &task_id, |board| {
+            let card = board.get_card_mut("T-1").unwrap();
+            card.started_at = Some((Utc::now() - chrono::Duration::hours(1)).to_rfc3339());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(app.chat.sessions.write().await.remove(&chat).is_some());
+        check_for_stuck_agents(app.clone()).await.unwrap();
+        let board = storage::load_board(app.gcx.clone(), &task_id)
+            .await
+            .unwrap();
+        assert!(board.get_card("T-1").unwrap().attention.is_none());
+        assert!(planner.lock().await.pending_deliveries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn orphan_setup_with_local_owner_gets_attention_after_grace() {
+        let (_temp, app, task_id, chat, _agent, _planner) =
+            setup_monitor_case("doing", SessionState::Idle, Duration::from_secs(1), vec![]).await;
+        storage::update_board_atomic(app.gcx.clone(), &task_id, |board| {
+            board.transfer_owner("planner-test", 1);
+            let card = board.get_card_mut("T-1").unwrap();
+            card.started_at = Some((Utc::now() - chrono::Duration::hours(1)).to_rfc3339());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        app.chat.sessions.write().await.remove(&chat).unwrap();
+        check_for_stuck_agents(app.clone()).await.unwrap();
+        let board = storage::load_board(app.gcx.clone(), &task_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            board
+                .get_card("T-1")
+                .unwrap()
+                .attention
+                .as_ref()
+                .unwrap()
+                .kind,
+            "no_session"
+        );
+        assert_eq!(board.get_card("T-1").unwrap().column, "doing");
+    }
     use crate::tasks::types::{
         BoardCard, StatusUpdate, TaskBoard, TaskMeta as StoredTaskMeta, TaskStatus,
     };

@@ -121,6 +121,7 @@ export function chatSessionStateToStatus(
     case "waiting_user_input":
       return "paused";
     case "error":
+    case "interrupted":
       return "failed";
     case "completed":
       return "done";
@@ -135,6 +136,7 @@ export function taskToStatus(task: TaskMeta): StreamStatus {
   const plannerState = task.planner_session_state;
   const agentsActive = numOrNull(task.agents_active) ?? 0;
   if (plannerState === "error") return "failed";
+  if (plannerState === "interrupted") return "failed";
   if (task.status === "abandoned") return "failed";
   if (task.status === "completed") return "done";
   if (task.status === "paused" || plannerState === "paused") return "paused";

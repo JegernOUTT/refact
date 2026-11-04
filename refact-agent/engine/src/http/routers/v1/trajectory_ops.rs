@@ -18,6 +18,7 @@ use crate::agentic::mode_transition::{
 #[cfg(test)]
 use crate::agentic::mode_transition::transfer_goal_ownership;
 use crate::chat::types::SessionState;
+use crate::chat::trajectories::transitioned_task_meta;
 use crate::tools::tool_handoff_to_mode::{persist_transition, transition_goal, transition_report};
 
 struct TransitionReservation {
@@ -699,7 +700,7 @@ pub async fn handle_mode_transition_apply(
         (
             session.messages.clone(),
             session.thread.clone(),
-            session.thread.task_meta.clone(),
+            transitioned_task_meta(session.thread.task_meta.clone(), &target_mode),
             transition_source_goal(&session),
             session.runtime.state.clone(),
             session.trajectory_version,
@@ -925,9 +926,21 @@ pub async fn handle_planner_from_transition(
         transition_completed_input(&messages, &live_tool_call_ids(&*session_arc.lock().await))
             .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    if thread
+        .task_meta
+        .as_ref()
+        .is_some_and(|meta| meta.role == "linked")
+    {
+        return Err(ScratchError::new(
+            StatusCode::CONFLICT,
+            "A linked task chat cannot become the owning planner; create a new planner chat explicitly".to_string(),
+        ));
+    }
+
     crate::tasks::goal::preflight_planner_transition(
         gcx.clone(),
         &task_id,
+        &req.source_chat_id,
         &req.source_chat_id,
         source_goal.as_ref(),
     )
@@ -1087,6 +1100,133 @@ mod tests {
     use super::*;
     use refact_chat_api::{GoalAttempt, GoalBudget, GoalProgress, GoalStatus};
     use serde_json::json;
+
+    #[test]
+    fn planner_mode_transition_retains_task_without_planner_authority() {
+        let planner = crate::chat::types::TaskMeta {
+            task_id: "task-1".into(),
+            role: "planner".into(),
+            planner_chat_id: Some("owning-planner".into()),
+            ..Default::default()
+        };
+        for role in ["agents", "subchats"] {
+            let meta = crate::chat::types::TaskMeta {
+                role: role.into(),
+                ..planner.clone()
+            };
+            assert_eq!(
+                transitioned_task_meta(Some(meta.clone()), "solo"),
+                Some(meta)
+            );
+        }
+        let linked = transitioned_task_meta(Some(planner.clone()), "solo").unwrap();
+        assert_eq!(linked.role, "linked");
+        assert_eq!(linked.task_id, planner.task_id);
+        assert_eq!(linked.planner_chat_id, planner.planner_chat_id);
+        assert_eq!(
+            transitioned_task_meta(Some(planner.clone()), "task_planner"),
+            Some(planner)
+        );
+        assert_eq!(
+            transitioned_task_meta(Some(linked.clone()), "task_planner"),
+            Some(linked)
+        );
+    }
+
+    #[tokio::test]
+    async fn linked_transition_is_persisted_and_listed_without_planner_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            dir.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        let task = crate::tasks::storage::create_task(gcx.clone(), "Linked task")
+            .await
+            .unwrap();
+        let mut snapshot = transition_identity_snapshot("mode_transition");
+        snapshot.mode = "solo".into();
+        snapshot.task_meta = Some(crate::chat::types::TaskMeta {
+            task_id: task.id.clone(),
+            role: "linked".into(),
+            planner_chat_id: Some("owning-planner".into()),
+            ..Default::default()
+        });
+        let chat_id = snapshot.chat_id.clone();
+        let (mut source, _) = source_session_with_active_goal("owning-planner");
+        source.goal.as_mut().unwrap().owner = Some(refact_chat_api::GoalOwner::Task {
+            id: task.id.clone(),
+        });
+        let before =
+            serde_json::to_value((&source.goal, &source.goal_ledger, &source.messages)).unwrap();
+        let transfer = transition_goal(
+            &source.messages,
+            source.goal.as_ref(),
+            &source.chat_id,
+            &chat_id,
+            "solo",
+        )
+        .unwrap();
+        assert!(!transfer.transferred());
+        assert!(transfer.target_goal.is_none());
+        assert!(transfer.target_messages.is_empty());
+        persist_transition(gcx.clone(), &mut source, &snapshot, &transfer)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value((&source.goal, &source.goal_ledger, &source.messages)).unwrap(),
+            before
+        );
+        let task_dir = crate::tasks::storage::find_task_dir(gcx.clone(), &task.id)
+            .await
+            .unwrap();
+        assert!(task_dir
+            .join("trajectories/linked")
+            .join(format!("{chat_id}.json"))
+            .is_file());
+        assert!(!task_dir
+            .join("trajectories/planner")
+            .join(format!("{chat_id}.json"))
+            .exists());
+        let internal = crate::tasks::storage::list_task_trajectories_for(
+            gcx.clone(),
+            &task.id,
+            "planner",
+            None,
+            crate::chat::trajectory_index::TrajectoryIndexListingCaller::TaskPlannerIdAllocation,
+        )
+        .await
+        .unwrap();
+        assert!(
+            internal.is_empty(),
+            "linked history cannot be selected as a planner"
+        );
+        let listed =
+            crate::tasks::storage::list_task_trajectories(gcx.clone(), &task.id, "planner", None)
+                .await
+                .unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![chat_id.as_str()]
+        );
+        let loaded = crate::chat::trajectories::load_trajectory_for_chat(gcx.clone(), &chat_id)
+            .await
+            .unwrap();
+        assert!(loaded.goal.is_none());
+        assert_eq!(loaded.thread.task_meta.as_ref().unwrap().role, "linked");
+        assert!(
+            !crate::chat::trajectories::chat_id_is_planner_for_task(
+                gcx.clone(),
+                &chat_id,
+                &task.id
+            )
+            .await
+        );
+    }
 
     #[tokio::test]
     async fn reservation_preserves_every_nonstreaming_state_and_never_aborts_source() {

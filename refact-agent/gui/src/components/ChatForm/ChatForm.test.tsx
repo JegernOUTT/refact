@@ -1175,7 +1175,7 @@ describe("ChatForm", () => {
     expect(form.className).toContain("chatFormCollapsed");
   });
 
-  test("chat error banner is dismiss-only, shows detail, and clears only the local error", async () => {
+  test("chat error banner hides locally without clearing runtime error and reappears on update", async () => {
     const commandSpy = vi.fn();
     const diagnosticsSpy = vi.fn();
     server.use(
@@ -1200,17 +1200,32 @@ describe("ChatForm", () => {
     });
 
     expect(screen.getByText(detail, { exact: false })).toBeInTheDocument();
-    expect(screen.getByText("Click to close")).toBeInTheDocument();
+    expect(
+      screen.getByText("Hide — reappears on the next runtime update"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Click to close")).not.toBeInTheDocument();
     expect(screen.queryByText("Click to retry")).not.toBeInTheDocument();
 
     await user.click(screen.getByText(/Context rebuild failed/));
 
     await waitFor(() => {
-      expect(app.store.getState().chat.threads[threadId]?.error).toBeNull();
+      expect(app.store.getState().chat.threads[threadId]?.error).toBe(detail);
+      expect(
+        screen.queryByText(detail, { exact: false }),
+      ).not.toBeInTheDocument();
     });
-    expect(
-      screen.queryByText(detail, { exact: false }),
-    ).not.toBeInTheDocument();
+    app.store.dispatch(
+      applyChatEvent({
+        chat_id: threadId,
+        seq: "1",
+        type: "runtime_updated",
+        state: "idle",
+        error: detail,
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByText(detail, { exact: false })).toBeInTheDocument(),
+    );
     expect(commandSpy).not.toHaveBeenCalled();
     const thread = app.store.getState().chat.threads[threadId];
     expect(thread?.streaming).toBe(false);
@@ -1247,6 +1262,79 @@ describe("ChatForm", () => {
       expect(app.store.getState().error.message).toBeNull();
     });
     expect(commandSpy).not.toHaveBeenCalled();
+  });
+
+  test("interrupted chat shows planner recovery actions instead of an answer prompt", async () => {
+    const chat = chatStateWithThread({
+      model: "openai/gpt-4o",
+      is_task_chat: true,
+      task_meta: {
+        task_id: "task-1",
+        role: "agents",
+        card_id: "T-7",
+        planner_chat_id: "planner-old",
+      },
+    });
+    const threadId = chat.current_thread_id;
+    chat.threads[threadId].session_state = "interrupted";
+    chat.threads[threadId].error = "Interrupted: stale_board_attempt";
+    chat.threads[threadId].interruption = {
+      condition: "stale_board_attempt/planner_not_in_custody",
+      expected: "planner-old",
+      actual: "planner-new",
+      owner_chat_id: "planner-new",
+    };
+    const { user } = render(<App />, {
+      preloadedState: { chat, ...engineConfigState },
+    });
+
+    const banner = screen.getByTestId("interruption-banner");
+    expect(banner).toHaveTextContent("Interrupted — recover in planner");
+    expect(banner).toHaveTextContent(
+      "expected planner-old, actual planner-new",
+    );
+    expect(screen.getByTestId("restart-command")).toHaveTextContent(
+      'restart_agent(card_id="T-7", mode="resume")',
+    );
+    expect(
+      screen.getByRole("button", { name: "Open owning planner" }),
+    ).toBeEnabled();
+    expect(
+      screen.queryByText(/Waiting for your answer/),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/Hide — reappears/)).not.toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "Copy restart command" }),
+    );
+    expect(
+      screen.getByRole("button", { name: "Copied restart command" }),
+    ).toBeInTheDocument();
+    await expect(window.navigator.clipboard.readText()).resolves.toBe(
+      'restart_agent(card_id="T-7", mode="resume")',
+    );
+  });
+
+  test("dangerous auto-approval notice names the scope and links to the control", async () => {
+    const chat = chatStateWithThread({
+      model: "openai/gpt-4o",
+      auto_approve_dangerous_commands: true,
+    });
+    const { user } = render(<App />, {
+      preloadedState: { chat, ...engineConfigState },
+    });
+
+    expect(
+      screen.getByText(/Dangerous commands auto-approved for this chat/),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Change permission" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", {
+          name: "Auto-approve dangerous commands",
+        }),
+      ).toHaveFocus(),
+    );
   });
 
   test("auth error banner keeps provider guidance without dismiss or retry labels", () => {
